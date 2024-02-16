@@ -448,7 +448,7 @@ void read_vtp(const std::string& file_name, faceType& face)
   vtk_xml_parser::load_vtp(file_name, face);
 
   if (face.gN.size() == 0) {
-    std::cout << "[WARNING] No node IDs found in the '" << file_name << "' face file.";
+    std::cout << "[WARNING] No node IDs found in the '" << file_name << "' face file." << std::endl;
   }
   //else {
   //  for (int e = 0; e < face.nEl; e++) {
@@ -463,7 +463,7 @@ void read_vtp(const std::string& file_name, faceType& face)
   // Create essential BC array.
   //
   if (face.gE.size() == 0) {
-    std::cout << "[WARNING] No element IDs found in the '" << file_name << "' face file.";
+    std::cout << "[WARNING] No element IDs found in the '" << file_name << "' face file." << std::endl;
   } else {
     face.gnEl = face.nEl;
     face.gebc = Array<int>(face.eNoN+1, face.gnEl);

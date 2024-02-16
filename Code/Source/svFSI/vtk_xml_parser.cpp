@@ -413,7 +413,9 @@ void store_element_ids(vtkSmartPointer<vtkUnstructuredGrid> vtk_ugrid, mshType& 
     throw std::runtime_error("No '" + ELEMENT_IDS_NAME + "' data of type Int32 found in VTK mesh.");
   }
   int num_elem_ids = elem_ids->GetNumberOfTuples();
-  for (int i = 0; i < num_elem_ids; i++) { 
+  //mesh.gE = Vector<int>(num_elem_ids);
+  for (int i = 0; i < num_elem_ids; i++) {
+    //mesh.gE(i) = elem_ids->GetValue(i);
   }
 }
 
@@ -426,7 +428,9 @@ void store_element_ids(vtkSmartPointer<vtkPolyData> vtk_polydata, faceType& face
 {
   auto elem_ids = vtkIntArray::SafeDownCast(vtk_polydata->GetCellData()->GetArray(ELEMENT_IDS_NAME.c_str()));
   if (elem_ids == nullptr) {
-    throw std::runtime_error("No '" + ELEMENT_IDS_NAME + "' data of type Int32 found in VTK mesh.");
+    std::cout << "no element ids " << face.name << std::endl;
+    face.gE = Vector<int>(0);
+    //throw std::runtime_error("No '" + ELEMENT_IDS_NAME + "' data of type Int32 found in VTK mesh.");
     return;
   }
   #ifdef debug_store_element_ids
@@ -494,6 +498,7 @@ void store_nodal_ids(vtkSmartPointer<vtkUnstructuredGrid> vtk_ugrid, mshType& me
   vtkIdType num_nodes = vtk_ugrid->GetNumberOfPoints();
   auto node_ids = vtkIntArray::SafeDownCast(vtk_ugrid->GetPointData()->GetArray(NODE_IDS_NAME.c_str()));
   if (node_ids == nullptr) {
+    mesh.gN = Vector<int>(0);
     return;
   }
   mesh.gN = Vector<int>(num_nodes);
@@ -515,7 +520,8 @@ void store_nodal_ids(vtkSmartPointer<vtkPolyData> vtk_polydata, faceType& face)
   vtkIdType num_nodes = vtk_polydata->GetNumberOfPoints();
   auto node_ids = vtkIntArray::SafeDownCast(vtk_polydata->GetPointData()->GetArray(NODE_IDS_NAME.c_str()));
   if (node_ids == nullptr) {
-    return; 
+    face.gN = Vector<int>(0);
+    return;
   }
   face.gN = Vector<int>(num_nodes);
   for (int i = 0; i < num_nodes; i++) {
@@ -530,6 +536,7 @@ void store_nodal_ids(vtkSmartPointer<vtkPolyData> vtk_polydata, mshType& mesh)
   vtkIdType num_nodes = vtk_polydata->GetNumberOfPoints();
   auto node_ids = vtkIntArray::SafeDownCast(vtk_polydata->GetPointData()->GetArray(NODE_IDS_NAME.c_str()));
   if (node_ids == nullptr) {
+    mesh.gN = Vector<int>(0);
     return;
   }
   mesh.gN = Vector<int>(num_nodes);

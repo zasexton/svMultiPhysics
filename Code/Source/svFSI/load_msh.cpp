@@ -206,6 +206,10 @@ void read_sv(Simulation* simulation, mshType& mesh, const MeshParameters* mesh_p
         mesh.nFa = mesh_param->face_parameters.size();
         mesh.fa.resize(mesh.nFa);
 
+        MeshHashMaps mesh_hash_maps;
+        auto mesh_node_map = mesh_hash_maps.createNodeHashMap(mesh, com_mod.nsd);
+        auto mesh_element_set = mesh_hash_maps.createElementHashMap(mesh);
+
         if (mesh.lFib && (mesh.nFa > 1)) {
             throw std::runtime_error("There are " + std::to_string(mesh.nFa) + " faces defined for the '" +
                                      mesh.name + "' mesh. Only one face is allowed for a 1D fiber-based mesh.");
@@ -240,56 +244,52 @@ void read_sv(Simulation* simulation, mshType& mesh, const MeshParameters* mesh_p
                 auto face_path = face_param->face_file_path();
                 vtk_xml::read_vtp(face_path, face);
 
-                // If node IDs were not read then create them.
+                // If node IDs were not read then create them using hash maps.
                 if (face.gN.size() == 0) {
-                    read_msh_ns::calc_nbc(mesh, face);
-                    // Reset the connectivity with the new node IDs?
+                    std::cout << "Creating face node IDs using hash maps." << std::endl;
+                    // Set face global node IDs
+                    face.gN.resize(face.nNo);
+                    for (int a = 0; a < face.nNo; a++) {
+                        std::ostringstream key;
+                        key << std::scientific << std::setprecision(16);
+                        for (int j = 0; j < com_mod.nsd; j++) {
+                            key << face.x(j, a) << ",";
+                        }
+                        if (mesh_node_map.count(key.str()) == 0) {
+                            throw std::runtime_error("The face node does not exist in the mesh.");
+                        }
+                        face.gN(a) = mesh_node_map.at(key.str());
+                    }
+                    // Set face element IDs
+                    face.gE.resize(face.nEl);
                     for (int e = 0; e < face.nEl; e++) {
+                        std::vector<int> element_nodes;
                         for (int a = 0; a < face.eNoN; a++) {
                             int Ac = face.IEN(a, e);
                             Ac = face.gN(Ac);
                             face.IEN(a, e) = Ac;
+                            element_nodes.push_back(Ac);
+                        }
+                        std::string key = "";
+                        std::sort(element_nodes.begin(), element_nodes.end());
+                        for (int a = 0; a < face.eNoN; a++) {
+                            key += std::to_string(element_nodes[a]) + ",";
+                        }
+                        if (mesh_element_set.count(key) == 0) {
+                            throw std::runtime_error("The face element does not exist in the mesh.");
+                        }
+                        face.gE(e) = mesh_element_set.at(key);
+                    }
+                    face.gnEl = face.nEl;
+                    face.gebc = Array<int>(face.eNoN+1, face.gnEl);
+                    for (int i = 0; i < face.gE.size(); i++) {
+                        face.gebc(0,i) = face.gE(i);
+                        for (int j = 0; j < face.eNoN; j++) {
+                            face.gebc(j+1,i) = face.IEN(j,i);
                         }
                     }
                 }
             }
-        }
-        if (!mesh.lFib) {
-            // Create a hash map for nodes and elements.
-            MeshHashMaps mesh_hash_maps;
-            auto mesh_node_map = mesh_hash_maps.createNodeHashMap(mesh, com_mod.nsd);
-            auto mesh_element_set = mesh_hash_maps.createElementHashMap(mesh);
-
-        for (int i = 0; i < mesh.nFa; i++) {
-            auto &face = mesh.fa[i];
-            if (!mesh.lFib) {
-                // Set face global node IDs
-                for (int a = 0; a < face.nNo; a++) {
-                    std::ostringstream key;
-                    key << std::scientific << std::setprecision(16);
-                    for (int j = 0; j < com_mod.nsd; j++) {
-                        key << face.x(j, a) << ",";
-                    }
-                    face.gN(a) = mesh_node_map[key.str()];
-                }
-                // Set face element IDs
-                for (int e = 0; e < face.nEl; e++) {
-                    std::vector<int> element_nodes;
-                    for (int a = 0; a < face.eNoN; a++) {
-                        int Ac = face.IEN(a, e);
-                        Ac = face.gN(Ac);
-                        face.IEN(a, e) = Ac;
-                        element_nodes.push_back(Ac);
-                    }
-                    std::string key = "";
-                    std::sort(element_nodes.begin(), element_nodes.end());
-                    for (int a = 0; a < face.eNoN; a++) {
-                        key += std::to_string(element_nodes[a]) + ",";
-                    }
-                    face.gE(e) = mesh_element_set[key];
-                }
-            }
-        }
         }
         for (int i = 0; i<mesh.nFa; i++){
             auto &face = mesh.fa[i];
