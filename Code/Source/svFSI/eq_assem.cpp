@@ -48,6 +48,7 @@
 #include "stokes.h"
 #include "sv_struct.h"
 #include "ustruct.h"
+#include "darcy.h"
 
 #include <fsils_api.hpp>
 
@@ -132,6 +133,10 @@ void b_assem_neu_bc(ComMod& com_mod, const faceType& lFa, const Vector<double>& 
 
         case EquationType::phys_heatS:
           heats::b_heats(com_mod, eNoN, w, N, h, lR);
+        break;
+
+        case EquationType::phys_darcy:
+          darcy::b_darcy(com_mod, eNoN, w, N, h, lR);
         break;
 
         case EquationType::phys_heatF:
@@ -437,6 +442,10 @@ void global_eq_assem(ComMod& com_mod, CepMod& cep_mod, const mshType& lM, const 
 
     case EquationType::phys_heatS:
       heats::construct_heats(com_mod, lM, Ag, Yg);
+    break;
+
+    case EquationType::phys_darcy:
+      darcy::construct_darcy(com_mod, lM, Ag, Yg);
     break;
 
     case EquationType::phys_lElas:

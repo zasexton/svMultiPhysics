@@ -289,6 +289,7 @@ void txt(Simulation* simulation, const bool flag)
         case OutputType::outGrp_divV: 
         case OutputType::outGrp_J: 
         case OutputType::outGrp_mises:
+        case OutputType::outGrp_mbfFlx:
           post::all_post(simulation, tmpV, com_mod.Yn, com_mod.Dn, oGrp, iEq);
         break;
 

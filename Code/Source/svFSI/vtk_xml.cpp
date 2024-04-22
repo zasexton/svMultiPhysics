@@ -1129,7 +1129,8 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
           case OutputType::outGrp_hFlx: 
           case OutputType::outGrp_stInv: 
           case OutputType::outGrp_vortex: 
-          case OutputType::outGrp_Visc: 
+          case OutputType::outGrp_Visc:
+          case OutputType::outGrp_mbfFlx:
             post::post(simulation, msh, tmpV, lY, lD, oGrp, iEq);
             for (int a = 0; a < msh.nNo; a++) {
               int Ac = msh.gN(a);

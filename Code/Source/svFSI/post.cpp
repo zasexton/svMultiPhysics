@@ -959,7 +959,7 @@ void post(Simulation* simulation, const mshType& lM, Array<double>& res, const A
       auto N = lM.N.col(g);
       Vector<double> lRes(maxNSD);
 
-      // Vorticity calculation 
+      // Vorticity calculation
       //
       if (outGrp == OutputType::outGrp_vort) {
         for (int a = 0; a < eNoN; a++) {
@@ -989,7 +989,7 @@ void post(Simulation* simulation, const mshType& lM, Array<double>& res, const A
         // lRes(1) = MAXVAL(lRes(1:nsd))
         // lRes(2:maxnsd) = 0.
 
-      //  Energy flux calculation   
+      //  Energy flux calculation
       //
       } else if (outGrp == OutputType::outGrp_eFlx) {
         double rho = eq.dmn[cDmn].prop[PhysicalProperyType::fluid_density];
@@ -1000,7 +1000,7 @@ void post(Simulation* simulation, const mshType& lM, Array<double>& res, const A
         for (int a = 0; a < eNoN; a++) {
           p = p + N(a)*yl(nsd,a);
           for (int i = 0; i < nsd; i++) {
-            u(i) = u(i) + N(a)*yl(i,a);     
+            u(i) = u(i) + N(a)*yl(i,a);
           }
         }
         double unorm = utils::norm(u);
@@ -1009,7 +1009,7 @@ void post(Simulation* simulation, const mshType& lM, Array<double>& res, const A
           lRes(i) = (p + 0.5 * rho * unorm) * u(i);
         }
 
-      // Heat flux calculation   
+      // Heat flux calculation
       //
       } else if (outGrp == OutputType::outGrp_hFlx) {
         double kappa = eq.dmn[cDmn].prop[PhysicalProperyType::conductivity];
@@ -1043,8 +1043,20 @@ void post(Simulation* simulation, const mshType& lM, Array<double>& res, const A
           }
         }
 
-      // Strain tensor invariants calculation   
+      // Strain tensor invariants calculation
       //
+      } else if (outGrp == OutputType::outGrp_mbfFlx) {
+        double kappa = eq.dmn[cDmn].prop[PhysicalProperyType::permeability];
+        int i = eq.s;
+        Vector<double> q(nsd);
+        for (int a = 0; a < eNoN; a++) {
+          for (int j = 0; j < nsd; j++) {
+            q(j) = q(j) + Nx(j, a) * yl(i, a);
+            }
+        }
+        for (int j = 0; j < nsd; j++) {
+          lRes(j) = -kappa * q(j);
+        }
       } else if (outGrp == OutputType::outGrp_stInv) {
         Array<double> ksix(nsd,nsd);
         Vector<double> lRes(maxNSD);

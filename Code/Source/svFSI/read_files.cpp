@@ -1248,7 +1248,7 @@ void read_domain(Simulation* simulation, EquationParameters* eq_params, eqType& 
           break;
 
           case PhysicalProperyType::ctau_C:
-            rtmp = domain_params->continuity_stabilization_coefficient.value(); 
+            rtmp = domain_params->continuity_stabilization_coefficient.value();
           break;
 
           case PhysicalProperyType::ctau_M:
@@ -1278,6 +1278,8 @@ void read_domain(Simulation* simulation, EquationParameters* eq_params, eqType& 
           case PhysicalProperyType::fluid_density:
             if (lEq.phys == EquationType::phys_CMM) {
               rtmp = domain_params->fluid_density.value();
+            } else if (lEq.phys == EquationType::phys_darcy) {
+                rtmp = domain_params->fluid_density.value();
             } else {
               rtmp = domain_params->density.value();
             }
@@ -1305,6 +1307,34 @@ void read_domain(Simulation* simulation, EquationParameters* eq_params, eqType& 
 
           case PhysicalProperyType::source_term:
             rtmp = domain_params->source_term.value();
+          break;
+
+          case PhysicalProperyType::permeability:
+            rtmp = domain_params->permeability.value();
+          break;
+
+          case PhysicalProperyType::porosity:
+            rtmp = domain_params->porosity.value();
+          break;
+
+          case PhysicalProperyType::porosity_pressure:
+            rtmp = domain_params->porosity_pressure.value();
+          break;
+
+          case PhysicalProperyType::media_compressibility:
+            rtmp = domain_params->media_compressibility.value();
+          break;
+
+          case PhysicalProperyType::fluid_compressibility:
+            rtmp = domain_params->fluid_compressibility.value();
+          break;
+
+          case PhysicalProperyType::fluid_viscosity:
+            rtmp = domain_params->fluid_viscosity.value();
+          break;
+
+          case PhysicalProperyType::density_pressure:
+            rtmp = domain_params->density_pressure.value();
           break;
         }
 
