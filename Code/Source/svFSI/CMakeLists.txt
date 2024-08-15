@@ -189,6 +189,7 @@ set(CSRCS
   mat_models.h mat_models.cpp
   mesh.h mesh.cpp
   nn.h nn.cpp
+  odes.h odes.cpp
   output.h output.cpp
   load_msh.h load_msh.cpp
   pic.h pic.cpp
@@ -216,6 +217,8 @@ set(CSRCS
   ChnlMod.h ChnlMod.cpp
   CmMod.h CmMod.cpp
   ComMod.h ComMod.cpp
+  ODESolver.h ODESolver.cpp
+  RungeKutta45.h RungeKutta45.cpp
   Timer.h
 
   SPLIT.c
