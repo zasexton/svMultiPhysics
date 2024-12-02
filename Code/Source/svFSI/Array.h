@@ -42,6 +42,11 @@
 #include <math.h>
 #include <vector>
 
+#ifdef USE_EIGEN
+#include <eigen3/Eigen/Core>
+#include <eigen3/Eigen/Dense>
+#endif
+
 // If set then check Array indexes.
 //
 #ifdef ENABLE_ARRAY_INDEX_CHECKING
@@ -1003,6 +1008,9 @@ class Array
     int size_ = 0;
     bool data_reference_ = false;
     T *data_ = nullptr;
+#ifdef USE_EIGEN
+    Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map_;
+#endif
 };
 
 #endif
