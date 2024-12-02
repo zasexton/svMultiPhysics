@@ -30,7 +30,7 @@ include_directories(${SV_SOURCE_DIR}/ThirdParty/parmetis_svfsi/simvascular_parme
 include_directories(${SV_SOURCE_DIR}/ThirdParty/tetgen/simvascular_tetgen)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/tinyxml/simvascular_tinyxml)
 include_directories(${MPI_C_INCLUDE_PATH})
-
+ADD_DEFINITIONS(-DUSE_EIGEN)
 # Find Trilinos package if requested
 if(SV_USE_TRILINOS)
 
