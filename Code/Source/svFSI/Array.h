@@ -144,13 +144,9 @@ class Array
       }
 
       allocate(rhs.nrows_, rhs.ncols_);
-//#ifdef USE_EIGEN
-//      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> rhs_map(rhs.data_, rhs.nrows_, rhs.ncols_);
-//      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
-//      data_map = rhs_map;
-//#else
+
       memcpy(data_, rhs.data_, size_*sizeof(T));
-//#endif
+
       num_allocated += 1;
       active += 1;
     }
@@ -171,26 +167,19 @@ class Array
         clear();
         allocate(rhs.nrows_, rhs.ncols_);
       }
-//#ifdef USE_EIGEN
-//      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> rhs_map(rhs.data_, rhs.nrows_, rhs.ncols_);
-//      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
-//      data_map = rhs_map;
-//#else
+
       memcpy(data_, rhs.data_, sizeof(T) * size_);
-//#endif
+
       return *this;
     }
 
     Array& operator=(const double value)
     {
-//#ifdef USE_EIGEN
-//      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
-//      data_map = value;
-//#else
+
       for (int i = 0; i < size_; i++) {
         data_[i] = value;
       }
-//#endif
+
       return *this;
     }
 
@@ -398,12 +387,7 @@ class Array
       #ifdef Array_check_enabled
       check_index(row, col);
       #endif
-//#ifdef USE_EIGEN
-//      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
-//      return data_map(row, col);
-//#else
       return data_[row + col*nrows_];
-//#endif
     }
 
     T& operator()(const int row, const int col)
@@ -411,12 +395,7 @@ class Array
       #ifdef Array_check_enabled
       check_index(row, col);
       #endif
-//#ifdef USE_EIGEN
-//      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
-//      return data_map(row, col);
-//#else
       return data_[row + col*nrows_];
-//#endif
     }
 
     /// @brief Get a column from the array as a Vector.
@@ -1025,17 +1004,17 @@ class Array
     friend Array<T> abs(const Array& rhs)
     {
       Array<T> result(rhs.nrows_, rhs.ncols_);
-//#ifdef USE_EIGEN
-//      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_rhs(rhs.data_, rhs.nrows_, rhs.ncols_);
-//      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
-//      map_result = map_rhs.cwiseAbs();
-//#else
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_rhs(rhs.data_, rhs.nrows_, rhs.ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
+      map_result = map_rhs.cwiseAbs();
+#else
       for (int j = 0; j < rhs.ncols_; j++) {
         for (int i = 0; i < rhs.nrows_; i++) {
           result(i,j) = fabs(rhs.data_[i + j*rhs.nrows_]);
         }
       }
-//#endif
+#endif
       return result;
     }
 
@@ -1062,17 +1041,17 @@ class Array
     friend Array<T> sqrt(const Array& arg)
     {
       Array<T> result(arg.nrows_, arg.ncols_);
-//#ifdef USE_EIGEN
-//      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_arg(arg.data_, arg.nrows_, arg.ncols_);
-//      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
-//      map_result = map_arg.cwiseSqrt();
-//#else
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_arg(arg.data_, arg.nrows_, arg.ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
+      map_result = map_arg.cwiseSqrt();
+#else
       for (int j = 0; j < arg.ncols_; j++) {
         for (int i = 0; i < arg.nrows_; i++) {
           result(i,j) = sqrt(arg.data_[i + j*arg.nrows_]);
         }
       }
-//#endif
+#endif
       return result;
     }
 
@@ -1084,14 +1063,14 @@ class Array
       check_index(row, 0);
       #endif
       T sum {};
-//#ifdef USE_EIGEN
-//      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
-//      sum = data_map.row(row).sum();
-//#else
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      sum = data_map.row(row).sum();
+#else
       for (int col = 0; col < ncols_; col++) {
         sum += data_[row + col*nrows_];
       }
-//#endif
+#endif
       return sum;
     }
 
