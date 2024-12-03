@@ -79,10 +79,6 @@ class Array
       data_ = nullptr;
       num_allocated += 1;
       active += 1;
-#ifdef USE_EIGEN
-      // No need to initialize data_map_ here since data_ is nullptr
-      data_map_ = nullptr;
-#endif
     };
 
     Array(const int num_rows, const int num_cols)
@@ -107,9 +103,6 @@ class Array
       ncols_ = num_cols;
       size_ = nrows_ * ncols_;
       data_ = data;
-#ifdef USE_EIGEN
-       data_map_ = std::make_unique<Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>>>(data_, num_rows, num_cols);
-#endif
     }
 
     Array(std::initializer_list<std::initializer_list<T>> lst)
@@ -151,9 +144,13 @@ class Array
       }
 
       allocate(rhs.nrows_, rhs.ncols_);
-
+//#ifdef USE_EIGEN
+//      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> rhs_map(rhs.data_, rhs.nrows_, rhs.ncols_);
+//      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+//      data_map = rhs_map;
+//#else
       memcpy(data_, rhs.data_, size_*sizeof(T));
-
+//#endif
       num_allocated += 1;
       active += 1;
     }
@@ -173,18 +170,27 @@ class Array
       if ((nrows_ != rhs.nrows_) || (ncols_ != rhs.ncols_)) {     
         clear();
         allocate(rhs.nrows_, rhs.ncols_);
-      } 
-
+      }
+//#ifdef USE_EIGEN
+//      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> rhs_map(rhs.data_, rhs.nrows_, rhs.ncols_);
+//      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+//      data_map = rhs_map;
+//#else
       memcpy(data_, rhs.data_, sizeof(T) * size_);
-
+//#endif
       return *this;
     }
 
     Array& operator=(const double value)
     {
+//#ifdef USE_EIGEN
+//      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+//      data_map = value;
+//#else
       for (int i = 0; i < size_; i++) {
         data_[i] = value;
       }
+//#endif
       return *this;
     }
 
@@ -239,9 +245,6 @@ class Array
       size_ = 0;
       data_ = nullptr;
 
-#ifdef USE_EIGEN
-      data_map_.reset(); // Reset the unique_ptr to release the Eigen::Map
-#endif
     }
 
     int ncols() const
@@ -299,9 +302,6 @@ class Array
         memory_returned += sizeof(T) * size_;;
         #endif
 
-#ifdef USE_EIGEN
-        data_map_.reset();
-#endif
       }
 
       allocate(num_rows, num_cols);
@@ -380,11 +380,7 @@ class Array
       if (i >= size_) {
         throw std::runtime_error("[Array(i)] Index " + std::to_string(i) + " is out of bounds.");
       }
-#ifdef USE_EIGEN
-      return data_map_->data()[i];
-#else
       return data_[i];
-#endif
     }
 
     T& operator()(const int i)
@@ -392,11 +388,7 @@ class Array
       if (i >= size_) {
         throw std::runtime_error("[Array(i)] Index " + std::to_string(i) + " is out of bounds.");
       }
-#ifdef USE_EIGEN
-      return data_map_->data()[i];
-#else
       return data_[i];
-#endif
     }
 
     /// @brief (i,j) operators
@@ -406,7 +398,12 @@ class Array
       #ifdef Array_check_enabled
       check_index(row, col);
       #endif
+//#ifdef USE_EIGEN
+//      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+//      return data_map(row, col);
+//#else
       return data_[row + col*nrows_];
+//#endif
     }
 
     T& operator()(const int row, const int col)
@@ -414,7 +411,12 @@ class Array
       #ifdef Array_check_enabled
       check_index(row, col);
       #endif
+//#ifdef USE_EIGEN
+//      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+//      return data_map(row, col);
+//#else
       return data_[row + col*nrows_];
+//#endif
     }
 
     /// @brief Get a column from the array as a Vector.
@@ -668,22 +670,32 @@ class Array
     T max() const
     {
       T max_v = data_[0];
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      max_v = data_map.maxCoeff();
+#else
       for (int i = 1; i < size_; i++) {
         if (data_[i] > max_v) {
           max_v = data_[i];
         }
       }
+#endif
       return max_v;
     }
 
     T min() const
     {
       T min_v = data_[0];
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      min_v = data_map.minCoeff();
+#else
       for (int i = 1; i < size_; i++) {
         if (data_[i] < min_v) {
           min_v = data_[i];
         }
       }
+#endif
       return min_v;
     }
 
@@ -695,11 +707,18 @@ class Array
         throw std::runtime_error("[Array addition] Arrays have diffent shapes. ");
       }
       Array<T> result(nrows_, ncols_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> array_map(array.data_, array.nrows_, array.ncols_);
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> result_map(result.data_, result.nrows_, result.ncols_);
+      result_map = data_map + array_map;
+#else
       for (int j = 0; j < ncols_; j++) {
         for (int i = 0; i < nrows_; i++) {
           result(i, j) = data_[i + j*nrows_] + array(i,j);
         }
       }
+#endif
       return result;
     }
 
@@ -711,11 +730,18 @@ class Array
         throw std::runtime_error("[Array subtraction]  Arrays have diffent shapes. ");
       }
       Array<T> result(nrows_, ncols_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> array_map(array.data_, array.nrows_, array.ncols_);
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> result_map(result.data_, result.nrows_, result.ncols_);
+      result_map = data_map - array_map;
+#else
       for (int j = 0; j < ncols_; j++) {
         for (int i = 0; i < nrows_; i++) {
           result(i, j) = data_[i + j*nrows_] - array(i,j);
         }
       }
+#endif
       return result;
     }
 
@@ -729,13 +755,18 @@ class Array
       }
 
       Array<T> result(nrows_, ncols_);
-
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> array_map(array.data_, array.nrows_, array.ncols_);
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> result_map(result.data_, result.nrows_, result.ncols_);
+      result_map = data_map * array_map;
+#else
       for (int j = 0; j < ncols_; j++) {
         for (int i = 0; i < nrows_; i++) {
           result(i, j) = (*this)(i,j) * array(i,j);
         }
       }
-
+#endif
       return result;
     }
 
@@ -748,12 +779,18 @@ class Array
       if ((nrows_ != array.nrows_) || (ncols_ != array.ncols_)) {
         throw std::runtime_error("[Array divide] Arrays number of columns or number of rows are not equal.");
       }
-
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> array_map(array.data_, array.nrows_, array.ncols_);
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> result_map(result.data_, result.nrows_, result.ncols_);
+      result_map = data_map / array_map;
+#else
       for (int j = 0; j < ncols_; j++) {
         for (int i = 0; i < nrows_; i++) {
           result(i, j) = (*this)(i,j) / array(i,j);
         }
       }
+#endif
       return result;
     }
 
@@ -761,11 +798,17 @@ class Array
     //
     Array<T> operator+=(const Array<T>& array) const
     {
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> array_map(array.data_, array.nrows_, array.ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      data_map += array_map;
+#else
       for (int j = 0; j < ncols_; j++) {
         for (int i = 0; i < nrows_; i++) {
           data_[i + j*nrows_] += array(i,j);
         }
       }
+#endif
       return *this;
     }
 
@@ -773,11 +816,17 @@ class Array
     //
     Array<T> operator-=(const Array<T>& array) const
     {
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> array_map(array.data_, array.nrows_, array.ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      data_map -= array_map;
+#else
       for (int j = 0; j < ncols_; j++) {
         for (int i = 0; i < nrows_; i++) {
           data_[i + j*nrows_] -= array(i,j);
         }
       }
+#endif
       return *this;
     }
 
@@ -785,11 +834,17 @@ class Array
     //
     Array<T> operator*=(const Array<T>& array) const
     {
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> array_map(array.data_, array.nrows_, array.ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      data_map *= array_map;
+#else
       for (int j = 0; j < ncols_; j++) {
         for (int i = 0; i < nrows_; i++) {
           data_[i + j*nrows_] *= array(i,j);
         }
       }
+#endif
       return *this;
     }
 
@@ -798,22 +853,34 @@ class Array
     Array<T> operator*(const T value) const
     {
       Array<T> result(nrows_, ncols_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
+      map_result = value * data_map;
+#else
       for (int j = 0; j < ncols_; j++) {
         for (int i = 0; i < nrows_; i++) {
           result(i,j) = value * data_[i + j*nrows_];
         }
       }
+#endif
       return result;
     }
 
     friend const Array<T> operator*(const T value, const Array& rhs)
     {
       Array<T> result(rhs.nrows_, rhs.ncols_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_rhs(rhs.data_, rhs.nrows_, rhs.ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
+      map_result = value * map_rhs;
+#else
       for (int j = 0; j < rhs.ncols_; j++) {
         for (int i = 0; i < rhs.nrows_; i++) {
           result(i,j) = value * rhs.data_[i + j*rhs.nrows_];
         }
       }
+#endif
       return result;
     }
 
@@ -826,11 +893,17 @@ class Array
         throw std::runtime_error(+"Array Divide by zero.");
       }
       Array<T> result(nrows_, ncols_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
+      map_result = data_map * value;
+#else
       for (int j = 0; j < ncols_; j++) {
         for (int i = 0; i < nrows_; i++) {
           result(i,j) = data_[i + j*nrows_] / value;
         }
       }
+#endif
       return result;
     }
 
@@ -840,11 +913,17 @@ class Array
     friend const Array<T> operator / (const T value, const Array& rhs)
     {
       Array<T> result(rhs.nrows_, rhs.ncols_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_rhs(rhs.data_, rhs.nrows_, rhs.ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
+      map_result = value / map_rhs;
+#else
       for (int j = 0; j < rhs.ncols_; j++) {
         for (int i = 0; i < rhs.nrows_; i++) {
           result(i,j) = value / rhs.data_[i + j*rhs.nrows_];
         }
       }
+#endif
       return result;
     }
 
@@ -853,12 +932,18 @@ class Array
     //
     Array<T> operator-(const T value) const
     { 
-      Array<T> result(nrows_, ncols_); 
+      Array<T> result(nrows_, ncols_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
+      map_result = data_map - value;
+#else
       for (int j = 0; j < ncols_; j++) {
         for (int i = 0; i < nrows_; i++) { 
           result(i,j) = data_[i + j*nrows_] - value;
         }
       }
+#endif
       return result;
     }
 
@@ -866,11 +951,16 @@ class Array
     //
     Array<T> operator+=(const T value) const
     {
+#ifdef USE_EIGEN
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      data_map += value;
+#else
       for (int j = 0; j < ncols_; j++) {
         for (int i = 0; i < nrows_; i++) {
           data_[i + j*nrows_] += value;
         }
       }
+#endif
       return *this;
     }
 
@@ -879,11 +969,17 @@ class Array
     Array<T> operator-() const 
     {
       Array<T> result(nrows_, ncols_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
+      map_result = -data_map;
+#else
       for (int j = 0; j < ncols_; j++) {
         for (int i = 0; i < nrows_; i++) {
           result(i,j) = -(data_[i + j*nrows_]);
         }
       }
+#endif
       return result;
     }
 
@@ -891,11 +987,16 @@ class Array
     //
     Array<T> operator-=(const T value) const
     {
+#ifdef USE_EIGEN
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      data_map -= value;
+#else
       for (int j = 0; j < ncols_; j++) {
         for (int i = 0; i < nrows_; i++) {
           data_[i + j*nrows_] -= value;
         }
       }
+#endif
       return *this;
     }
 
@@ -905,11 +1006,17 @@ class Array
     friend const Array<T> operator-(const T value, const Array& rhs)
     { 
       Array<T> result(rhs.nrows_, rhs.ncols_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_rhs(rhs.data_, rhs.nrows_, rhs.ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
+      map_result = value - map_rhs;
+#else
       for (int j = 0; j < rhs.ncols_; j++) {
         for (int i = 0; i < rhs.nrows_; i++) { 
           result(i,j) = value - rhs.data_[i + j*rhs.nrows_];
         }
       }
+#endif
       return result;
     }
 
@@ -918,11 +1025,17 @@ class Array
     friend Array<T> abs(const Array& rhs)
     {
       Array<T> result(rhs.nrows_, rhs.ncols_);
+//#ifdef USE_EIGEN
+//      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_rhs(rhs.data_, rhs.nrows_, rhs.ncols_);
+//      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
+//      map_result = map_rhs.cwiseAbs();
+//#else
       for (int j = 0; j < rhs.ncols_; j++) {
         for (int i = 0; i < rhs.nrows_; i++) {
           result(i,j) = fabs(rhs.data_[i + j*rhs.nrows_]);
         }
       }
+//#endif
       return result;
     }
 
@@ -931,11 +1044,16 @@ class Array
     friend T max(const Array& arg) 
     {
       T max_v = arg.data_[0];
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_arg(arg.data_, arg.nrows_, arg.ncols_);
+      max_v = map_arg.maxCoeff();
+#else
       for (int i = 1; i < arg.size_; i++) {
         if (arg.data_[i] > max_v) {
           max_v = arg.data_[i];
         }
       }
+#endif
       return max_v;
     }
 
@@ -944,11 +1062,17 @@ class Array
     friend Array<T> sqrt(const Array& arg)
     {
       Array<T> result(arg.nrows_, arg.ncols_);
+//#ifdef USE_EIGEN
+//      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_arg(arg.data_, arg.nrows_, arg.ncols_);
+//      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
+//      map_result = map_arg.cwiseSqrt();
+//#else
       for (int j = 0; j < arg.ncols_; j++) {
         for (int i = 0; i < arg.nrows_; i++) {
           result(i,j) = sqrt(arg.data_[i + j*arg.nrows_]);
         }
       }
+//#endif
       return result;
     }
 
@@ -960,9 +1084,14 @@ class Array
       check_index(row, 0);
       #endif
       T sum {};
+//#ifdef USE_EIGEN
+//      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+//      sum = data_map.row(row).sum();
+//#else
       for (int col = 0; col < ncols_; col++) {
         sum += data_[row + col*nrows_];
       }
+//#endif
       return sum;
     }
 
@@ -993,9 +1122,6 @@ class Array
         memset(data_, 0, sizeof(T)*size_);
       }
 
-#ifdef USE_EIGEN
-      data_map_ = std::make_unique<Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>>>(data_, nrows_, ncols_);
-#endif
     }
 
     /// @brief Get a value from data_[].
@@ -1037,9 +1163,6 @@ class Array
     int size_ = 0;
     bool data_reference_ = false;
     T *data_ = nullptr;
-#ifdef USE_EIGEN
-    std::unique_ptr<Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>>> data_map_;
-#endif
 };
 
 #endif
