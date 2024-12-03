@@ -41,7 +41,7 @@
 #include <iostream>
 #include <math.h>
 #include <vector>
-
+#include <memory>
 #ifdef USE_EIGEN
 #include <eigen3/Eigen/Core>
 #include <eigen3/Eigen/Dense>
@@ -70,7 +70,7 @@ class Array
     static void stats(const std::string& prefix="");
     static bool write_enabled;
 
-    Array() 
+    Array()
     {
       id += 1;
       nrows_ = 0;
@@ -79,6 +79,10 @@ class Array
       data_ = nullptr;
       num_allocated += 1;
       active += 1;
+#ifdef USE_EIGEN
+      // No need to initialize data_map_ here since data_ is nullptr
+      data_map_ = nullptr;
+#endif
     };
 
     Array(const int num_rows, const int num_cols)
@@ -103,6 +107,9 @@ class Array
       ncols_ = num_cols;
       size_ = nrows_ * ncols_;
       data_ = data;
+#ifdef USE_EIGEN
+       data_map_ = std::make_unique<Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>>>(data_, num_rows, num_cols);
+#endif
     }
 
     Array(std::initializer_list<std::initializer_list<T>> lst)
@@ -146,6 +153,7 @@ class Array
       allocate(rhs.nrows_, rhs.ncols_);
 
       memcpy(data_, rhs.data_, size_*sizeof(T));
+
       num_allocated += 1;
       active += 1;
     }
@@ -168,6 +176,7 @@ class Array
       } 
 
       memcpy(data_, rhs.data_, sizeof(T) * size_);
+
       return *this;
     }
 
@@ -229,6 +238,10 @@ class Array
       ncols_ = 0;
       size_ = 0;
       data_ = nullptr;
+
+#ifdef USE_EIGEN
+      data_map_.reset(); // Reset the unique_ptr to release the Eigen::Map
+#endif
     }
 
     int ncols() const
@@ -285,6 +298,10 @@ class Array
         memory_in_use -= sizeof(T) * size_;;
         memory_returned += sizeof(T) * size_;;
         #endif
+
+#ifdef USE_EIGEN
+        data_map_.reset();
+#endif
       }
 
       allocate(num_rows, num_cols);
@@ -363,7 +380,11 @@ class Array
       if (i >= size_) {
         throw std::runtime_error("[Array(i)] Index " + std::to_string(i) + " is out of bounds.");
       }
+#ifdef USE_EIGEN
+      return data_map_->data()[i];
+#else
       return data_[i];
+#endif
     }
 
     T& operator()(const int i)
@@ -371,7 +392,11 @@ class Array
       if (i >= size_) {
         throw std::runtime_error("[Array(i)] Index " + std::to_string(i) + " is out of bounds.");
       }
+#ifdef USE_EIGEN
+      return data_map_->data()[i];
+#else
       return data_[i];
+#endif
     }
 
     /// @brief (i,j) operators
@@ -967,6 +992,10 @@ class Array
         data_ = new T [size_];
         memset(data_, 0, sizeof(T)*size_);
       }
+
+#ifdef USE_EIGEN
+      data_map_ = std::make_unique<Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>>>(data_, nrows_, ncols_);
+#endif
     }
 
     /// @brief Get a value from data_[].
@@ -1009,7 +1038,7 @@ class Array
     bool data_reference_ = false;
     T *data_ = nullptr;
 #ifdef USE_EIGEN
-    Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map_;
+    std::unique_ptr<Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>>> data_map_;
 #endif
 };
 
