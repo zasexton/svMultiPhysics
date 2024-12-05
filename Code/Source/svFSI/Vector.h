@@ -43,6 +43,11 @@ std::string build_file_prefix(const std::string& label);
 #define Vector_check_enabled
 #endif
 
+#ifdef USE_EIGEN
+#include <eigen3/Eigen/Core>
+#include <eigen3/Eigen/Dense>
+#endif
+
 /// @brief The Vector template class is used for storing int and double data.
 //
 template<typename T>
@@ -361,18 +366,32 @@ class Vector
             std::to_string(size_) +  " != " + std::to_string(vec.size()) + ".");
       }
       Vector<T> result(size_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Vector<T, Eigen::Dynamic>> data_map(data_, size_);
+      Eigen::Map<const Eigen::Vector<T, Eigen::Dynamic>> vec_map(vec.data_, vec.size_);
+      Eigen::Map<Eigen::Vector<T, Eigen::Dynamic>> result_map(result.data_, result.size_);
+      result_map = data_map + vec_map;
+#else
       for (int i = 0; i < size_; i++) {
         result(i) = data_[i] + vec[i];
       }
+#endif
       return result;
     }
 
     Vector<T> operator-(const Vector<T>& x) const
     {
       Vector<T> result(size_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Vector<T, Eigen::Dynamic>> data_map(data_, size_);
+      Eigen::Map<const Eigen::Vector<T, Eigen::Dynamic>> x_map(x.data_, x.size_);
+      Eigen::Map<Eigen::Vector<T, Eigen::Dynamic>> result_map(result.data_, result.size_);
+      result_map = data_map - x_map;
+#else
       for (int i = 0; i < size_; i++) {
         result(i) = data_[i] - x(i);
       }
+#endif
       return result;
     }
 
@@ -381,36 +400,60 @@ class Vector
     Vector<T> operator+(const T value) const
     {
       Vector<T> result(size_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Vector<T, Eigen::Dynamic>> data_map(data_, size_);
+      Eigen::Map<Eigen::Vector<T, Eigen::Dynamic>> result_map(result.data_, result.size_);
+      result_map = data_map.array() + value;
+#else
       for (int i = 0; i < size_; i++) {
         result(i) = data_[i] + value;
       }
+#endif
       return result;
     }
 
     friend const Vector<T> operator+(const T value, const Vector& rhs) 
     {
       Vector<T> result(rhs.size_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Vector<T, Eigen::Dynamic>> rhs_map(rhs.data_, rhs.size_);
+      Eigen::Map<Eigen::Vector<T, Eigen::Dynamic>> result_map(result.data_, result.size_);
+      result_map = rhs_map.array() + value;
+#else
       for (int i = 0; i < rhs.size_; i++) {
         result(i) = rhs.data_[i] + value;
       }
+#endif
       return result;
     }
 
     Vector<T> operator-(const T value) const
     {
       Vector<T> result(size_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Vector<T, Eigen::Dynamic>> data_map(data_, size_);
+      Eigen::Map<Eigen::Vector<T, Eigen::Dynamic>> result_map(result.data_, result.size_);
+      result_map = data_map.array() - value;
+#else
       for (int i = 0; i < size_; i++) {
         result(i) = data_[i] - value;
       }
+#endif
       return result;
     }
 
     friend Vector<T> operator-(T value, const Vector& rhs)
     {
       Vector<T> result(rhs.size_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Vector<T, Eigen::Dynamic>> rhs_map(rhs.data_, rhs.size_);
+      Eigen::Map<Eigen::Vector<T, Eigen::Dynamic>> result_map(result.data_, result.size_);
+      result_map = value - rhs_map.array();
+#else
       for (int i = 0; i < rhs.size_; i++) {
         result(i) = value - rhs.data_[i];
       }
+#endif
       return result;
     }
 
@@ -419,18 +462,30 @@ class Vector
     Vector<T> operator/(const T value) const
     {
       Vector<T> result(size_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Vector<T, Eigen::Dynamic>> data_map(data_, size_);
+      Eigen::Map<Eigen::Vector<T, Eigen::Dynamic>> result_map(result.data_, result.size_);
+      result_map = data_map.array() / value;
+#else
       for (int i = 0; i < size_; i++) {
         result(i) = data_[i] / value;
       }
+#endif
       return result;
     }
 
     friend const Vector<T> operator/(const T value, const Vector& rhs)
     {
       Vector<T> result(rhs.size_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Vector<T, Eigen::Dynamic>> rhs_map(rhs.data_, rhs.size_);
+      Eigen::Map<Eigen::Vector<T, Eigen::Dynamic>> result_map(result.data_, result.size_);
+      result_map = rhs_map.array() / value;
+#else
       for (int i = 0; i < rhs.size_; i++) {
         result(i) = rhs.data_[i] / value;
       }
+#endif
       return result;
     }
 
@@ -439,18 +494,30 @@ class Vector
     Vector<T> operator*(const T value) const
     {
       Vector<T> result(size_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Vector<T, Eigen::Dynamic>> data_map(data_, size_);
+      Eigen::Map<Eigen::Vector<T, Eigen::Dynamic>> result_map(result.data_, result.size_);
+      result_map = value * data_map.array();
+#else
       for (int i = 0; i < size_; i++) {
         result(i) = value * data_[i];
       }
+#endif
       return result;
     }
 
     friend const Vector<T> operator*(const T value, const Vector& rhs)
     {
       Vector<T> result(rhs.size_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Vector<T, Eigen::Dynamic>> rhs_map(rhs.data_, rhs.size_);
+      Eigen::Map<Eigen::Vector<T, Eigen::Dynamic>> result_map(result.data_, result.size_);
+      result_map = value * rhs_map.array();
+#else
       for (int i = 0; i < rhs.size_; i++) {
         result(i) = value * rhs.data_[i];
       }
+#endif
       return result;
     }
 
@@ -459,9 +526,15 @@ class Vector
     Vector<T> operator-() const
     {
       Vector<T> result(size_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Vector<T, Eigen::Dynamic>> data_map(data_, size_);
+      Eigen::Map<Eigen::Vector<T, Eigen::Dynamic>> result_map(result.data_, result.size_);
+      result_map = -data_map.array();
+#else
       for (int i = 0; i < size_; i++) {
         result(i) = -data_[i];
       }
+#endif
       return result;
     }
 
@@ -469,21 +542,35 @@ class Vector
     Vector<T> abs() const
     { 
       Vector<T> result(size_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Vector<T, Eigen::Dynamic>> data_map(data_, size_);
+      Eigen::Map<Eigen::Vector<T, Eigen::Dynamic>> result_map(result.data_, result.size_);
+      result_map = data_map.array().abs();
+#else
       for (int i = 0; i < size_; i++) {
         result(i) = std::abs(data_[i]);
       }
+#endif
       return result;
     }
 
     /// @brief Cross product
     Vector<T> cross(const Vector<T>& v2)
     {
+      if (size_ != 3 || v2.size_ != 3) {
+        throw std::runtime_error("Cross product is only defined for 3D vectors.");
+      }
       Vector<T> result(size_);
-
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Vector3d> data_map(data_);
+      Eigen::Map<const Eigen::Vector3d> v2_map(v2.data_);
+      Eigen::Map<Eigen::Vector3d> result_map(result.data_);
+      result_map = data_map.cross(v2_map);
+#else
       result(0) = (*this)(1)*v2(2) - (*this)(2)*v2(1); 
       result(1) = (*this)(2)*v2(0) - (*this)(0)*v2(2); 
       result(2) = (*this)(0)*v2(1) - (*this)(1)*v2(0); 
-
+#endif
       return result;
     }
 
