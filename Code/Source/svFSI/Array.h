@@ -31,8 +31,8 @@
 #include "Vector.h"
 #include "utils.h"
 
-#ifndef ARRAY_H 
-#define ARRAY_H 
+#ifndef ARRAY_H
+#define ARRAY_H
 
 #include <algorithm>
 #include <array>
@@ -42,7 +42,9 @@
 #include <math.h>
 #include <vector>
 #include <memory>
+#include <cstdlib>
 #ifdef USE_EIGEN
+#define EIGEN_NO_DEBUG
 #include <eigen3/Eigen/Core>
 #include <eigen3/Eigen/Dense>
 #endif
@@ -56,7 +58,7 @@
 /// @brief The Array template class implements a simple interface to 2D arrays.
 //
 template<typename T>
-class Array 
+class Array
 {
   public:
     // Some variables used to monitor Array object allocation.
@@ -87,7 +89,7 @@ class Array
       nrows_ = num_rows;
       ncols_ = num_cols;
 
-      if ((num_rows <= 0) || (num_cols <= 0)) { 
+      if ((num_rows <= 0) || (num_cols <= 0)) {
         return;
       }
 
@@ -139,7 +141,7 @@ class Array
     //
     Array(const Array &rhs)
     {
-      if ((rhs.nrows_ <= 0) || (rhs.ncols_ <= 0)) { 
+      if ((rhs.nrows_ <= 0) || (rhs.ncols_ <= 0)) {
         return;
       }
 
@@ -151,7 +153,7 @@ class Array
       active += 1;
     }
 
-    /// @brief Array assignment 
+    /// @brief Array assignment
     //
     Array& operator=(const Array& rhs)
     {
@@ -159,11 +161,11 @@ class Array
         return *this;
       }
 
-      if ((rhs.nrows_ <= 0) || (rhs.ncols_ <= 0)) { 
+      if ((rhs.nrows_ <= 0) || (rhs.ncols_ <= 0)) {
         return *this;
       }
 
-      if ((nrows_ != rhs.nrows_) || (ncols_ != rhs.ncols_)) {     
+      if ((nrows_ != rhs.nrows_) || (ncols_ != rhs.ncols_)) {
         clear();
         allocate(rhs.nrows_, rhs.ncols_);
       }
@@ -183,7 +185,7 @@ class Array
       return *this;
     }
 
-    ~Array() 
+    ~Array()
     {
       if (data_ != nullptr) {
         #if Array_gather_stats
@@ -192,7 +194,8 @@ class Array
         active -= 1;
         #endif
         if (!data_reference_) {
-          delete [] data_;
+          //delete [] data_;
+          std::free(data_);
         }
         data_ = nullptr;
         size_ = 0;
@@ -213,7 +216,7 @@ class Array
        return out;
     }
 
-    /// @brief Free the array data. 
+    /// @brief Free the array data.
     ///
     /// This is to replicate the Fortran DEALLOCATE().
     //
@@ -223,7 +226,8 @@ class Array
         if (data_reference_) {
           throw std::runtime_error("[Array] Can't clear an Array with reference data.");
         }
-        delete [] data_;
+        //delete [] data_;
+        std::free(data_);
         #if Array_gather_stats
         memory_in_use -= sizeof(T) * size_;;
         memory_returned += sizeof(T) * size_;;
@@ -267,13 +271,13 @@ class Array
 
     /// @brief Resize the array.
     //
-    void resize(const int num_rows, const int num_cols) 
+    void resize(const int num_rows, const int num_cols)
     {
       // [NOTE] This is tfu but need to mimic fortran.
       nrows_ = num_rows;
       ncols_ = num_cols;
 
-      if ((num_rows <= 0) || (num_cols <= 0)) { 
+      if ((num_rows <= 0) || (num_cols <= 0)) {
         return;
       }
 
@@ -281,7 +285,8 @@ class Array
         if (data_reference_) {
           throw std::runtime_error("[Array] Can't resize an Array with reference data.");
         }
-        delete [] data_;
+        //delete [] data_;
+        std::free(data_);
         data_ = nullptr;
         size_ = 0;
         nrows_ = 0;
@@ -313,14 +318,14 @@ class Array
     //
     bool allocated()
     {
-      if ((nrows_ > 0) || (ncols_ > 0)) { 
+      if ((nrows_ > 0) || (ncols_ > 0)) {
         return true;
       }
 
       return false;
     }
 
-    void read(const std::string& file_name) 
+    void read(const std::string& file_name)
     {
       auto fp = fopen(file_name.c_str(), "rb");
       int size;
@@ -434,7 +439,7 @@ class Array
 
     /// @brief Return a pointer to the internal data for the given column.
     //
-    T* col_data(const int col) { 
+    T* col_data(const int col) {
       return &data_[col*nrows_];
     }
 
@@ -449,7 +454,7 @@ class Array
         #ifdef Array_check_enabled
         check_index(0, j);
         #endif
-        values[i] = col(j); 
+        values[i] = col(j);
       }
 
       return values;
@@ -540,13 +545,13 @@ class Array
           values.push_back(value(i,j));
         }
       }
-    
+
       return values;
     }
 
     /// @brief Set column values from a vector of values.
     //
-    void set_col(const int col, const Vector<T>& values, const std::array<int,2>& range={-1,-1}) 
+    void set_col(const int col, const Vector<T>& values, const std::array<int,2>& range={-1,-1})
     {
       #ifdef Array_check_enabled
       check_index(0, col);
@@ -592,7 +597,7 @@ class Array
       }
     }
 
-    /// @brief Set row values from a scalar. 
+    /// @brief Set row values from a scalar.
     //
     void set_row(const int row, const T value) const
     {
@@ -624,17 +629,17 @@ class Array
     /// @brief Set a set of rows using a start and end row index.
     //
     void set_rows(const int start_row, const int end_row, const Array<T>& values) const
-    { 
+    {
       #ifdef Array_check_enabled
       check_index(start_row, 0);
-      check_index(end_row, 0); 
+      check_index(end_row, 0);
       #endif
       int num_rows = end_row - start_row + 1;
 
       if (ncols_ != values.ncols_) {
         throw std::runtime_error("[Array set_rows] Arrays have different column sizes. ");
       }
-      
+
       for (int row = 0; row < num_rows; row++) {
         for (int col = 0; col < ncols_; col++) {
           data_[(row+start_row) + col*nrows_] = values(row,col);;
@@ -773,9 +778,9 @@ class Array
       return result;
     }
 
-    /// @brief Compound add assignment. 
+    /// @brief Compound add assignment.
     //
-    Array<T> operator+=(const Array<T>& array) const
+    Array<T> operator+=(const Array<T>& array)
     {
 #ifdef USE_EIGEN
       Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> array_map(array.data_, array.nrows_, array.ncols_);
@@ -791,9 +796,9 @@ class Array
       return *this;
     }
 
-    /// @brief Compound subtract assignment. 
+    /// @brief Compound subtract assignment.
     //
-    Array<T> operator-=(const Array<T>& array) const
+    Array<T> operator-=(const Array<T>& array)
     {
 #ifdef USE_EIGEN
       Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> array_map(array.data_, array.nrows_, array.ncols_);
@@ -809,9 +814,9 @@ class Array
       return *this;
     }
 
-    /// @brief Compound multiply assignment. 
+    /// @brief Compound multiply assignment.
     //
-    Array<T> operator*=(const Array<T>& array) const
+    Array<T> operator*=(const Array<T>& array)
     {
 #ifdef USE_EIGEN
       Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> array_map(array.data_, array.nrows_, array.ncols_);
@@ -875,7 +880,7 @@ class Array
 #ifdef USE_EIGEN
       Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
       Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
-      map_result = data_map * value;
+      map_result = data_map / value;
 #else
       for (int j = 0; j < ncols_; j++) {
         for (int i = 0; i < nrows_; i++) {
@@ -887,7 +892,7 @@ class Array
     }
 
     /// @brief Divide scalar by array.
-    /// s / A 
+    /// s / A
     //
     friend const Array<T> operator / (const T value, const Array& rhs)
     {
@@ -910,7 +915,7 @@ class Array
     /// A - s
     //
     Array<T> operator-(const T value) const
-    { 
+    {
       Array<T> result(nrows_, ncols_);
 #ifdef USE_EIGEN
       Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
@@ -918,7 +923,7 @@ class Array
       map_result = data_map - value;
 #else
       for (int j = 0; j < ncols_; j++) {
-        for (int i = 0; i < nrows_; i++) { 
+        for (int i = 0; i < nrows_; i++) {
           result(i,j) = data_[i + j*nrows_] - value;
         }
       }
@@ -926,9 +931,28 @@ class Array
       return result;
     }
 
-    /// @brief Compound add assignment. 
+    /// @brief Add assignment.
     //
-    Array<T> operator+=(const T value) const
+    Array<T> operator+(const T value)
+    {
+      Array<T> result(nrows_, ncols_);
+#ifdef USE_EIGEN
+      Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
+      Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_result(result.data_, result.nrows_, result.ncols_);
+      map_result = data_map + value;
+#else
+      for (int j = 0; j < ncols_; j++) {
+        for (int i = 0; i < nrows_; i++) {
+          result(i, j) = data_[i + j*nrows_] + value;
+        }
+      }
+#endif
+      return result;
+    }
+
+    /// @brief Compound add assignment.
+    //
+    Array<T> operator+=(const T value)
     {
 #ifdef USE_EIGEN
       Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
@@ -943,9 +967,9 @@ class Array
       return *this;
     }
 
-    /// @brief negate 
+    /// @brief negate
     //
-    Array<T> operator-() const 
+    Array<T> operator-() const
     {
       Array<T> result(nrows_, ncols_);
 #ifdef USE_EIGEN
@@ -962,9 +986,9 @@ class Array
       return result;
     }
 
-    /// @brief Compound subtract assignment. 
+    /// @brief Compound subtract assignment.
     //
-    Array<T> operator-=(const T value) const
+    Array<T> operator-=(const T value)
     {
 #ifdef USE_EIGEN
       Eigen::Map<Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> data_map(data_, nrows_, ncols_);
@@ -983,7 +1007,7 @@ class Array
     /// s - A
     //
     friend const Array<T> operator-(const T value, const Array& rhs)
-    { 
+    {
       Array<T> result(rhs.nrows_, rhs.ncols_);
 #ifdef USE_EIGEN
       Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>> map_rhs(rhs.data_, rhs.nrows_, rhs.ncols_);
@@ -991,7 +1015,7 @@ class Array
       map_result = value - map_rhs;
 #else
       for (int j = 0; j < rhs.ncols_; j++) {
-        for (int i = 0; i < rhs.nrows_; i++) { 
+        for (int i = 0; i < rhs.nrows_; i++) {
           result(i,j) = value - rhs.data_[i + j*rhs.nrows_];
         }
       }
@@ -1020,7 +1044,7 @@ class Array
 
     /// @brief maximum
     //
-    friend T max(const Array& arg) 
+    friend T max(const Array& arg)
     {
       T max_v = arg.data_[0];
 #ifdef USE_EIGEN
@@ -1074,7 +1098,7 @@ class Array
       return sum;
     }
 
-    T* data() const { 
+    T* data() const {
       return data_;
     }
 
@@ -1092,12 +1116,33 @@ class Array
       memory_in_use += sizeof(T)*size_;
       #endif
 
-      if (data_ != nullptr) { 
+      if (data_ != nullptr) {
         //throw std::runtime_error(+"[Array] Allocating when data is not nullptr.");
       }
 
+      //if (size_ != 0) {
+      //  data_ = new T [size_];
+      //  memset(data_, 0, sizeof(T)*size_);
+      //}
       if (size_ != 0) {
-        data_ = new T [size_];
+        // Choose alignment, for example 32-byte:
+        std::size_t alignment = 32;
+        std::size_t size_in_bytes = size_ * sizeof(T);
+
+        // Check alignment requirements:
+        if (size_in_bytes % alignment != 0) {
+          // If needed, you can round up the size_in_bytes, but generally this
+          // should not be necessary if T is double or float and alignment is a
+          // power of two. For a robust solution, you might handle this gracefully.
+        }
+
+        void* ptr = std::aligned_alloc(alignment, size_in_bytes);
+        if (!ptr) {
+          throw std::bad_alloc();
+        }
+
+        data_ = static_cast<T*>(ptr);
+        // Initialize memory to zero
         memset(data_, 0, sizeof(T)*size_);
       }
 
@@ -1111,7 +1156,7 @@ class Array
     }
 
     void check_index(const int row, const int col) const
-    { 
+    {
       if (show_index_check_message) {
         std::cout << "[Array] **********************************" << std::endl;
         std::cout << "[Array] WARNING: Index checking is enabled " << std::endl;
@@ -1119,7 +1164,7 @@ class Array
         show_index_check_message = false;
       }
 
-      if (data_ == nullptr) { 
+      if (data_ == nullptr) {
         //throw std::runtime_error(+"Accessing null data in Array.");
         return;
       }
@@ -1128,7 +1173,7 @@ class Array
         auto nc_str = std::to_string(ncols_);
         auto dims = nr_str + " x " + nc_str;
         auto index_str = " " + std::to_string(row) + "," + std::to_string(col) + " ";
-        throw std::runtime_error(+"Index (row,col)=" + index_str + " is out of bounds for " + 
+        throw std::runtime_error(+"Index (row,col)=" + index_str + " is out of bounds for " +
             dims + " array.");
       }
     }
