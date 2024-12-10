@@ -351,6 +351,13 @@ class Tensor4
       return result;
     }
 
+    T* data() {
+        return data_;
+    }
+
+    const T* data() const {
+        return data_;
+    }
 };
 
 #endif
