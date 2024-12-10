@@ -22,7 +22,7 @@
 # PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
 # LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 # NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-
+include(CheckCXXCompilerFlag)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
@@ -31,6 +31,12 @@ include_directories(${SV_SOURCE_DIR}/ThirdParty/tetgen/simvascular_tetgen)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/tinyxml/simvascular_tinyxml)
 include_directories(${MPI_C_INCLUDE_PATH})
 ADD_DEFINITIONS(-DUSE_EIGEN)
+check_cxx_compiler_flag("-mavx2" HAVE_FLAG_MAVX2)
+if(HAVE_FLAG_MAVX2)
+  message(STATUS "Compiler supports AVX2")
+  add_compile_options(-mavx2)
+endif()
+
 # Find Trilinos package if requested
 if(SV_USE_TRILINOS)
 
@@ -258,7 +264,7 @@ target_link_libraries(${SV_SVFSI_EXE}
   ${SV_LIB_SVFSILS_NAME}${SV_MPI_NAME_EXT}
   ${VTK_LIBRARIES}
   )
-
+target_compile_options(${SV_SVFSI_EXE} PRIVATE -O3 -march=native)
 # extra MPI libraries only if there are not set to NOT_FOUND or other null
 if(SV_MPI_EXTRA_LIBRARY)
   target_link_libraries(${SV_SVFSI_EXE} ${SV_MPI_EXTRA_LIBRARY})

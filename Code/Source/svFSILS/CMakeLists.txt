@@ -1,9 +1,14 @@
-
+include(CheckCXXCompilerFlag)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 include_directories(${MPI_C_INCLUDE_PATH})
-
+ADD_DEFINITIONS(-DUSE_EIGEN)
+check_cxx_compiler_flag("-mavx2" HAVE_FLAG_MAVX2)
+if(HAVE_FLAG_MAVX2)
+  message(STATUS "Compiler supports AVX2")
+  add_compile_options(-mavx2)
+endif()
 if(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
   set(CMAKE_Fortran_FLAGS "-cpp -pthread")
   set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -std=legacy")
@@ -69,6 +74,7 @@ if(SV_INSTALL_HEADERS)
     DESTINATION ${SV_INSTALL_INCLUDE_DIR}/core COMPONENT CoreHeaders
     )
 endif()
+target_compile_options(${lib} PRIVATE -O3 -march=native)
 if(ENABLE_COVERAGE)
   # set compiler flags
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -coverage")
