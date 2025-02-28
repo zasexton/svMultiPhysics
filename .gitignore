@@ -23,8 +23,15 @@ Documentation/html/
 
 # genBC files
 **/genBC/obj/
-**/genBC_svFSIplus/obj/
+**/genBC_svMultiPhysics/obj/
 genBC.exe
 AllData
 GenBC.int
 InitialData
+
+# svZeroD files
+svZeroD_data
+Q_svZeroD
+P_svZeroD
+# local svZeroD build
+svZeroDSolver
