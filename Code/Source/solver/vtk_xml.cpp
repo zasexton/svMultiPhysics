@@ -583,7 +583,7 @@ void read_vtu(const std::string& file_name, mshType& mesh)
   auto vtk_data = VtkData::create_reader(file_name);
   int num_elems = vtk_data->num_elems(); 
   int np_elem = vtk_data->np_elem(); 
-  int elem_type = vtk_data->elem_type(); 
+  int elem_type = vtk_data->elem_type();
 
   // Set mesh data.
   mesh.nEl = num_elems;
@@ -753,7 +753,7 @@ void read_vtus(Simulation* simulation, Array<double>& lA, Array<double>& lY, Arr
       Array<double> tmpGS;
 
       switch (oGrp) {
-        case OutputNameType::outGrp_A: 
+        case OutputNameType::outGrp_A:
         case OutputNameType::outGrp_Y:
         case OutputNameType::outGrp_D:
           if (l > 1) {
@@ -982,7 +982,7 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
       }
 
       if (oGrp == OutputNameType::outGrp_J || oGrp == OutputNameType::outGrp_mises ||
-          oGrp == OutputNameType::outGrp_I1) { 
+          oGrp == OutputNameType::outGrp_I1) {
         nOute = nOute + 1;
       }
     }
@@ -1134,12 +1134,13 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
             }
           break;
 
-          case OutputNameType::outGrp_vort: 
-          case OutputNameType::outGrp_eFlx: 
-          case OutputNameType::outGrp_hFlx: 
-          case OutputNameType::outGrp_stInv: 
-          case OutputNameType::outGrp_vortex: 
-          case OutputNameType::outGrp_Visc: 
+          case OutputNameType::outGrp_vort:
+          case OutputNameType::outGrp_eFlx:
+          case OutputNameType::outGrp_hFlx:
+          case OutputNameType::outGrp_stInv:
+          case OutputNameType::outGrp_vortex:
+          case OutputNameType::outGrp_Visc:
+          case OutputNameType::outGrp_mbfFlx:
             post::post(simulation, msh, tmpV, lY, lD, oGrp, iEq);
             for (int a = 0; a < msh.nNo; a++) {
               int Ac = msh.gN(a);
@@ -1149,7 +1150,7 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
             }
           break;
 
-          case OutputNameType::outGrp_absV: 
+          case OutputNameType::outGrp_absV:
             for (int a = 0; a < msh.nNo; a++) {
               int Ac = msh.gN(a);
               for (int i = 0; i < l; i++) {

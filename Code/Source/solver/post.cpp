@@ -45,7 +45,7 @@
 namespace post {
 
 void all_post(Simulation* simulation, Array<double>& res, const Array<double>& lY, const Array<double>& lD, 
-    consts::OutputNameType outGrp, const int iEq) 
+    consts::OutputNameType outGrp, const int iEq)
 {
   using namespace consts;
 
@@ -1045,6 +1045,18 @@ void post(Simulation* simulation, const mshType& lM, Array<double>& res, const A
 
       // Strain tensor invariants calculation   
       //
+      } else if (outGrp == OutputNameType::outGrp_mbfFlx) {
+        double kappa = eq.dmn[cDmn].prop[PhysicalProperyType::permeability];
+        int i = eq.s;
+        Vector<double> q(nsd);
+        for (int a = 0; a < eNoN; a++) {
+          for (int j = 0; j < nsd; j++) {
+            q(j) = q(j) + Nx(j, a) * yl(i, a);
+            }
+        }
+        for (int j = 0; j < nsd; j++) {
+          lRes(j) = -kappa * q(j);
+        }
       } else if (outGrp == OutputNameType::outGrp_stInv) {
         Array<double> ksix(nsd,nsd);
         Vector<double> lRes(maxNSD);
@@ -1897,7 +1909,7 @@ void tpost(Simulation* simulation, const mshType& lM, const int m, Array<double>
         break;
 
         case OutputNameType::outGrp_stress:
-        case OutputNameType::outGrp_cauchy: 
+        case OutputNameType::outGrp_cauchy:
         case OutputNameType::outGrp_mises:
           Array<double> sigma(nsd,nsd);
           Array<double> S(nsd,nsd);

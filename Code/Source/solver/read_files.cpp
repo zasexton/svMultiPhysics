@@ -1280,6 +1280,8 @@ void read_domain(Simulation* simulation, EquationParameters* eq_params, eqType& 
           case PhysicalProperyType::fluid_density:
             if (lEq.phys == EquationType::phys_CMM) {
               rtmp = domain_params->fluid_density.value();
+            } else if (lEq.phys == EquationType::phys_darcy) {
+                rtmp = domain_params->fluid_density.value();
             } else {
               rtmp = domain_params->density.value();
             }
@@ -1308,6 +1310,34 @@ void read_domain(Simulation* simulation, EquationParameters* eq_params, eqType& 
           case PhysicalProperyType::inverse_darcy_permeability:
             rtmp = domain_params->inverse_darcy_permeability.value();
           break;
+
+            case PhysicalProperyType::permeability:
+                rtmp = domain_params->permeability.value();
+                break;
+
+            case PhysicalProperyType::porosity:
+                rtmp = domain_params->porosity.value();
+                break;
+
+            case PhysicalProperyType::porosity_pressure:
+                rtmp = domain_params->porosity_pressure.value();
+                break;
+
+            case PhysicalProperyType::media_compressibility:
+                rtmp = domain_params->media_compressibility.value();
+                break;
+
+            case PhysicalProperyType::fluid_compressibility:
+                rtmp = domain_params->fluid_compressibility.value();
+                break;
+
+            case PhysicalProperyType::fluid_viscosity:
+                rtmp = domain_params->fluid_viscosity.value();
+                break;
+
+            case PhysicalProperyType::density_pressure:
+                rtmp = domain_params->density_pressure.value();
+                break;
         }
 
         lEq.dmn[iDmn].prop[prop] = rtmp;
@@ -1339,7 +1369,7 @@ void read_domain(Simulation* simulation, EquationParameters* eq_params, eqType& 
      }
 
      // Set parameters for a fluid viscosity model.
-     if ((lEq.dmn[iDmn].phys == EquationType::phys_struct) ||  
+     if ((lEq.dmn[iDmn].phys == EquationType::phys_struct) ||
          (lEq.dmn[iDmn].phys == EquationType::phys_ustruct)) {
        read_solid_visc_model(simulation, eq_params, domain_params, lEq.dmn[iDmn]);
      }
@@ -2040,16 +2070,16 @@ void read_ls(Simulation* simulation, EquationParameters* eq_params, consts::Solv
   #endif
 
   if (!linear_algebra.defined()) {
-    throw std::runtime_error("[svFSIplus] No <Linear_algebra> section has been defined for equation '" + 
+    throw std::runtime_error("[svFSIplus] No <Linear_algebra> section has been defined for equation '" +
         eq_params->type() + ".");
   }
 
   lEq.linear_algebra_type = LinearAlgebra::name_to_type.at(linear_algebra.type());
   auto prec_type = consts::preconditioner_name_to_type.at(linear_algebra.preconditioner());
   lEq.linear_algebra_preconditioner = consts::preconditioner_name_to_type.at(linear_algebra.preconditioner());
-  lEq.linear_algebra_assembly_type = LinearAlgebra::name_to_type.at(linear_algebra.assembly()); 
+  lEq.linear_algebra_assembly_type = LinearAlgebra::name_to_type.at(linear_algebra.assembly());
 
-  // Check that equation physics is compatible with the LinearAlgebra type. 
+  // Check that equation physics is compatible with the LinearAlgebra type.
   for (auto& domain : lEq.dmn) {
     LinearAlgebra::check_equation_compatibility(domain.phys,  lEq.linear_algebra_type, lEq.linear_algebra_assembly_type);
   }
@@ -2248,7 +2278,7 @@ void read_outputs(Simulation* simulation, EquationParameters* eq_params, eqType&
   for (int iOut = 0; iOut < nOut; iOut++) { 
     auto& output_params = eq_params->outputs[iOut];
     auto output_type_str = output_params->type.value();
-    if (output_type_str == "Alias") { 
+    if (output_type_str == "Alias") {
       continue;
     }
 
@@ -2478,7 +2508,7 @@ void read_temp_spat_values(const ComMod& com_mod, const mshType& msh, const std:
   if ((ndof == 0) || (num_ts == 0) || (num_nodes == 0)) {
     throw std::runtime_error("Error reading the first line of the temporal and spatial values file '" + file_name + "'.");
   }
-  #ifdef debug_read_ts_values_bf 
+  #ifdef debug_read_ts_values_bf
   dmsg << "ndof: " << ndof;
   dmsg << "num_ts: " << num_ts;
   dmsg << "num_nodes: " << num_nodes;
@@ -2611,7 +2641,7 @@ void read_temporal_values(const std::string& file_name, bcType& lBc)
       values.push_back(value);
     }
 
-    if (values.size() != 2) { 
+    if (values.size() != 2) {
       throw std::runtime_error("Error reading values for the temporal values file '" + file_name + "' for line '" + line + "'.");
     }
 
@@ -2886,13 +2916,13 @@ void read_fluid_visc_model(Simulation* simulation, EquationParameters* eq_params
 // Set the solid viscosity material model parameters for the given domain.
 //
 void read_solid_visc_model(Simulation* simulation, EquationParameters* eq_params, DomainParameters* domain_params, dmnType& lDmn)
-{ 
+{
   using namespace consts;
 
   // Get viscosity model.
   //
   SolidViscosityModelType vmodel_type;
-  std::string vmodel_str; 
+  std::string vmodel_str;
 
   if (domain_params->solid_viscosity.model.defined()) {
     vmodel_str = domain_params->solid_viscosity.model.value();
