@@ -440,21 +440,12 @@ void read_vtp(const std::string& file_name, faceType& face)
   using namespace vtk_xml_parser;
 
   if (FILE *file = fopen(file_name.c_str(), "r")) {
-    fclose(file);
+      fclose(file);
   } else {
     throw std::runtime_error("The VTK face file '" + file_name + "' can't be read.");
   }
 
-  // Check if the face mesh needs to be read from a VTP or VTU file.
-  //
-  auto file_ext = file_name.substr(file_name.find_last_of(".") + 1);
-
-  if (file_ext == "vtp") {
-    vtk_xml_parser::load_vtp(file_name, face);
-
-  } else if (file_ext == "vtu") {
-    vtk_xml_parser::load_vtu(file_name, face);
-  }
+  vtk_xml_parser::load_vtp(file_name, face);
 
   if (face.gN.size() == 0) {
     std::cout << "[WARNING] No node IDs found in the '" << file_name << "' face file.";
@@ -560,7 +551,6 @@ void read_vtp_pdata(const std::string& fName, const std::string& kwrd, const int
 //   mesh.eNoN - number of noders per element
 //   mesh.x - node coordinates
 //   mesh.gIEN - element connectivity
-//   mesh.eType - element type
 //
 // Replicates Fortran READVTU subroutine defined in VTKXML.f.
 //
@@ -571,7 +561,7 @@ void read_vtu(const std::string& file_name, mshType& mesh)
   using namespace vtk_xml_parser;
 
   if (FILE *file = fopen(file_name.c_str(), "r")) {
-    fclose(file);
+      fclose(file);
   } else {
     throw std::runtime_error("The VTU mesh file '" + file_name + "' can't be read.");
   }
@@ -583,7 +573,6 @@ void read_vtu(const std::string& file_name, mshType& mesh)
   auto vtk_data = VtkData::create_reader(file_name);
   int num_elems = vtk_data->num_elems(); 
   int np_elem = vtk_data->np_elem(); 
-  int elem_type = vtk_data->elem_type();
 
   // Set mesh data.
   mesh.nEl = num_elems;
@@ -603,6 +592,7 @@ void read_vtu(const std::string& file_name, mshType& mesh)
   }
   #endif
 }
+
 
 //----------
 // read_precomputed_solution_vtu
@@ -673,7 +663,7 @@ void read_vtu_pdata(const std::string& fName, const std::string& kwrd, const int
     throw std::runtime_error("The VTK VTU pressure data file '" + fName + "' can't be read.");
   }
 
-  // Read the vtk file.
+  // Read the vtu file.
   //
   auto vtk_data = VtkData::create_reader(fName);
   int num_elems = vtk_data->num_elems();
@@ -740,7 +730,7 @@ void read_vtus(Simulation* simulation, Array<double>& lA, Array<double>& lY, Arr
     for (int iOut = 0; iOut < eq.nOutput; iOut++) {
       auto& output = eq.output[iOut];
 
-      if (!output.options.spatial) {
+      if (!output.wtn[0]) {
         continue;
       }
 
@@ -753,9 +743,9 @@ void read_vtus(Simulation* simulation, Array<double>& lA, Array<double>& lY, Arr
       Array<double> tmpGS;
 
       switch (oGrp) {
-        case OutputNameType::outGrp_A:
-        case OutputNameType::outGrp_Y:
-        case OutputNameType::outGrp_D:
+        case OutputType::outGrp_A: 
+        case OutputType::outGrp_Y:
+        case OutputType::outGrp_D:
           if (l > 1) {
             tmpGS.resize(maxNSD,nNo);
           } else {
@@ -792,7 +782,7 @@ void read_vtus(Simulation* simulation, Array<double>& lA, Array<double>& lY, Arr
       }
 
       switch (oGrp) {
-        case OutputNameType::outGrp_A:
+        case OutputType::outGrp_A:
           for (int i = 0; i < l; i++) {
             for (int j = 0; j < gtnNo; j++) {
               lA(i+s,j) = tmpGS(i,j);
@@ -800,7 +790,7 @@ void read_vtus(Simulation* simulation, Array<double>& lA, Array<double>& lY, Arr
           }
         break;
 
-        case OutputNameType::outGrp_Y:
+        case OutputType::outGrp_Y:
           for (int i = 0; i < l; i++) {
             for (int j = 0; j < gtnNo; j++) {
               lY(i+s,j) = tmpGS(i,j);
@@ -808,7 +798,7 @@ void read_vtus(Simulation* simulation, Array<double>& lA, Array<double>& lY, Arr
           }
         break;
 
-        case OutputNameType::outGrp_D:
+        case OutputType::outGrp_D:
           for (int i = 0; i < l; i++) {
             for (int j = 0; j < gtnNo; j++) {
               lD(i+s,j) = tmpGS(i,j);
@@ -960,7 +950,7 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
     auto& eq = eqs[iEq];
 
     for (int iOut = 0; iOut < eq.nOutput; iOut++) {
-      if (!eq.output[iOut].options.spatial) {
+      if (!eq.output[iOut].wtn[0]) {
         continue; 
       }
 
@@ -969,7 +959,7 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
       dmsg << "oGrp: " << oGrp;
       #endif
 
-      if (oGrp == OutputNameType::outGrp_fN) {
+      if (oGrp == OutputType::outGrp_fN) {
         nFn = 1;
         for (int iM = 0; iM < nMsh; iM++) {
           nFn = std::max(nFn, meshes[iM].nFn);
@@ -981,8 +971,8 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
         outDof = outDof + eq.output[iOut].l;
       }
 
-      if (oGrp == OutputNameType::outGrp_J || oGrp == OutputNameType::outGrp_mises ||
-          oGrp == OutputNameType::outGrp_I1) {
+      if (oGrp == OutputType::outGrp_J || oGrp == OutputType::outGrp_mises ||
+          oGrp == OutputType::outGrp_I1) { 
         nOute = nOute + 1;
       }
     }
@@ -1048,7 +1038,7 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
       auto& eq = eqs[iEq];
 
       for (int iOut = 0; iOut < eq.nOutput; iOut++) {
-        if (!eq.output[iOut].options.spatial) {
+        if (!eq.output[iOut].wtn[0]) {
           continue;
         }
 
@@ -1066,11 +1056,11 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
         Vector<double> tmpVe;
 
         switch (oGrp) {
-          case OutputNameType::outGrp_NA:
+          case OutputType::outGrp_NA:
             throw std::runtime_error("Undefined output grp in VTK");
           break;
 
-          case OutputNameType::outGrp_A:
+          case OutputType::outGrp_A:
             for (int a = 0; a < msh.nNo; a++) {
               int Ac = msh.gN(a);
               for (int i = 0; i < l; i++) {
@@ -1079,7 +1069,7 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
             }
           break;
 
-          case OutputNameType::outGrp_Y:
+          case OutputType::outGrp_Y:
             if (eq.phys != EquationType::phys_heatF) {
                 for (int a = 0; a < msh.nNo; a++) {
                     int Ac = msh.gN(a);
@@ -1106,7 +1096,7 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
             }
           break;
 
-          case OutputNameType::outGrp_D:
+          case OutputType::outGrp_D:
             #ifdef debug_write_vtus 
             dmsg << "case " << " outGrp_D ";
             dmsg << "is: " << is;
@@ -1123,8 +1113,8 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
             }
           break;
 
-          case OutputNameType::outGrp_WSS:
-          case OutputNameType::outGrp_trac:
+          case OutputType::outGrp_WSS:
+          case OutputType::outGrp_trac:
             post::bpost(simulation, msh, tmpV, lY, lD, oGrp);
 
             for (int a = 0; a < msh.nNo; a++) {
@@ -1134,13 +1124,12 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
             }
           break;
 
-          case OutputNameType::outGrp_vort:
-          case OutputNameType::outGrp_eFlx:
-          case OutputNameType::outGrp_hFlx:
-          case OutputNameType::outGrp_stInv:
-          case OutputNameType::outGrp_vortex:
-          case OutputNameType::outGrp_Visc:
-          case OutputNameType::outGrp_mbfFlx:
+          case OutputType::outGrp_vort: 
+          case OutputType::outGrp_eFlx: 
+          case OutputType::outGrp_hFlx: 
+          case OutputType::outGrp_stInv: 
+          case OutputType::outGrp_vortex: 
+          case OutputType::outGrp_Visc: 
             post::post(simulation, msh, tmpV, lY, lD, oGrp, iEq);
             for (int a = 0; a < msh.nNo; a++) {
               int Ac = msh.gN(a);
@@ -1150,7 +1139,7 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
             }
           break;
 
-          case OutputNameType::outGrp_absV:
+          case OutputType::outGrp_absV: 
             for (int a = 0; a < msh.nNo; a++) {
               int Ac = msh.gN(a);
               for (int i = 0; i < l; i++) {
@@ -1159,7 +1148,7 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
             }
           break;
 
-          case OutputNameType::outGrp_fN:
+          case OutputType::outGrp_fN:
             cOut = cOut - 1;
             tmpV.resize(nFn*nsd,msh.nNo);
             if (msh.nFn != 0) {
@@ -1181,7 +1170,7 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
             tmpV.resize(consts::maxNSD, msh.nNo);
           break;
 
-          case OutputNameType::outGrp_fA:
+          case OutputType::outGrp_fA:
             tmpV.resize(1,msh.nNo);
             if (msh.nFn == 2) {
               post::fib_algn_post(simulation, msh, tmpV, lD, iEq);
@@ -1192,9 +1181,9 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
             tmpV.resize(consts::maxNSD, msh.nNo);
           break;
 
-          case OutputNameType::outGrp_stress:
-          case OutputNameType::outGrp_cauchy:
-          case OutputNameType::outGrp_mises:
+          case OutputType::outGrp_stress:
+          case OutputType::outGrp_cauchy:
+          case OutputType::outGrp_mises:
             #ifdef debug_write_vtus 
             dmsg << "case " << " outGrp_stress";
             #endif
@@ -1225,7 +1214,7 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
               }
             }
 
-            if (oGrp == OutputNameType::outGrp_mises) {
+            if (oGrp == OutputType::outGrp_mises) {
               outNamesE[nOute] = "E_VonMises";
               for (int a = 0; a < msh.nEl; a++) {
                 d[iM].xe(nOute,a) = tmpVe(a);
@@ -1236,11 +1225,11 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
             tmpV.resize(consts::maxNSD,msh.nNo);
           break;
 
-          case OutputNameType::outGrp_J:
-          case OutputNameType::outGrp_F:
-          case OutputNameType::outGrp_strain:
-          case OutputNameType::outGrp_fS:
-          case OutputNameType::outGrp_I1:
+          case OutputType::outGrp_J:
+          case OutputType::outGrp_F:
+          case OutputType::outGrp_strain:
+          case OutputType::outGrp_fS:
+          case OutputType::outGrp_I1:
             #ifdef debug_write_vtus 
             dmsg << "case " << " outGrp_J";
             #endif
@@ -1260,7 +1249,7 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
               }
             }
 
-            if (oGrp == OutputNameType::outGrp_J) {
+            if (oGrp == OutputType::outGrp_J) {
               outNamesE[nOute] = "E_Jacobian";
               for (int a = 0; a < msh.nEl; a++) {
                 d[iM].xe(nOute,a) = tmpVe(a);
@@ -1268,7 +1257,7 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
               nOute = nOute + 1;
             }
 
-            if (oGrp == OutputNameType::outGrp_I1) {
+            if (oGrp == OutputType::outGrp_I1) {
               outNamesE[nOute] = "E_CG_I1";
               nOute = nOute + 1;
               for (int a = 0; a < msh.nEl; a++) {
@@ -1279,7 +1268,7 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
             tmpV.resize(consts::maxNSD,msh.nNo);
           break;
 
-          case OutputNameType::outGrp_divV:
+          case OutputType::outGrp_divV:
             tmpV.resize(l,msh.nNo); 
             post::div_post(simulation, msh, tmpV, lY, lD, iEq);
             for (int a = 0; a < msh.nNo; a++) {

@@ -245,7 +245,6 @@ const std::map<std::string,EquationType> equation_name_to_type = {
     {"heatS", EquationType::phys_heatS},
     {"laplace", EquationType::phys_heatS},
     {"poisson", EquationType::phys_heatS},
-    {"darcy", EquationType::phys_darcy},
 
     {"stokes", EquationType::phys_stokes},
 

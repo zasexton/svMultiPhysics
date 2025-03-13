@@ -34,9 +34,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
-#include <set>
 #include <type_traits>
-#include <variant>
 
 // The enums here replicate the PARAMETERs defined
 // in CONSTS.f.
@@ -60,6 +58,7 @@ int enum_int(T value)
 {
   return static_cast<int>(value);
 }
+
 
 /// Check if a value is set to infinity.
 template<typename T>
@@ -271,9 +270,7 @@ enum class ElementType
   NRB = 115
 };
 
-extern const std::map<ElementType,std::string> element_type_to_string;
 extern const std::map<ElementType,int> element_type_to_elem_nonb;
-extern const std::map<ElementType,int> element_dimension;
 
 // Template for printing ElementType.
 /*
@@ -306,8 +303,7 @@ enum class EquationType
   phys_CMM = 209, 
   phys_CEP = 210,
   phys_ustruct = 211,  // Nonlinear elastodynamics using mixed VMS-stabilized formulation 
-  phys_stokes = 212,
-  phys_darcy = 213
+  phys_stokes = 212
 };
 
 constexpr auto Equation_CMM = EquationType::phys_CMM;
@@ -322,7 +318,6 @@ constexpr auto Equation_shell = EquationType::phys_shell;
 constexpr auto Equation_stokes = EquationType::phys_stokes;
 constexpr auto Equation_struct = EquationType::phys_struct;
 constexpr auto Equation_ustruct = EquationType::phys_ustruct;
-constexpr auto Equation_darcy = EquationType::phys_darcy;
 
 extern const std::map<std::string,EquationType> equation_name_to_type;
 
@@ -335,7 +330,7 @@ enum class MeshGeneratorType
 /// Map for string to MeshGeneratorType. 
 extern const std::map<std::string,MeshGeneratorType> mesh_generator_name_to_type;
 
-enum class OutputNameType
+enum class OutputType 
 {
   outGrp_NA = 500, 
   outGrp_A = 501,
@@ -363,7 +358,6 @@ enum class OutputNameType
   outGrp_fS = 523,
   outGrp_C = 524, 
   outGrp_I1 = 525,
-  outGrp_mbfFlx = 526,
 
   out_velocity = 599,
   out_pressure = 598, 
@@ -392,21 +386,8 @@ enum class OutputNameType
   out_viscosity = 575,
   out_fibStrn = 574,
   out_CGstrain = 573,
-  out_CGInv1 = 572,
-  out_MBF = 571,
-  out_mbfFlux = 570
+  out_CGInv1 = 572
 };
-
-/// @brief Simulation output file types.
-//
-enum class OutputType
-{
-  boundary_integral,
-  spatial,
-  volume_integral
-};
-
-extern const std::map<std::string,OutputType> output_type_name_to_type;
 
 /// @brief Possible physical properties. Current maxNPror is 20.
 //
@@ -415,26 +396,19 @@ enum class PhysicalProperyType
   NA = 0, 
   fluid_density = 1, 
   solid_density = 2, 
-  elasticity_modulus = 3,
-  poisson_ratio = 4,
-  conductivity = 5,
-  f_x = 6,                     // internal force x
-  f_y = 7,                     // internal force y
-  f_z = 8,                     // internal force z
-  backflow_stab = 9,          // stabilization coeff. for backflow divergence
-  source_term = 10,            // external source
-  damping = 11,
-  shell_thickness = 12,
-  ctau_M = 13,                 // stabilization coeffs. for USTRUCT (momentum, continuity)
-  ctau_C = 14,
-  inverse_darcy_permeability = 15,
-  permeability = 16,
-  porosity = 17,
-  porosity_pressure = 18,
-  media_compressibility = 19,
-  fluid_compressibility = 20,
-  fluid_viscosity = 21,
-  density_pressure = 22
+  solid_viscosity = 3, 
+  elasticity_modulus = 4,
+  poisson_ratio = 5, 
+  conductivity = 6, 
+  f_x = 7,                     // internal force x
+  f_y = 8,                     // internal force y
+  f_z = 9,                     // internal force z
+  backflow_stab = 10,          // stabilization coeff. for backflow divergence
+  source_term = 11,            // external source
+  damping = 12,
+  shell_thickness = 13, 
+  ctau_M = 14,                 // stabilization coeffs. for USTRUCT (momentum, continuity)
+  ctau_C = 15
 };
 
 enum class PreconditionerType 
@@ -448,18 +422,13 @@ enum class PreconditionerType
   PREC_TRILINOS_IC = 706,
   PREC_TRILINOS_ICT = 707, 
   PREC_TRILINOS_ML = 708,
-  PREC_RCS = 709,
-  PREC_PETSC_JACOBI = 710,
-  PREC_PETSC_RCS = 711
+  PREC_RCS = 709
 };
 
-extern const std::set<PreconditionerType> fsils_preconditioners;
-extern const std::set<PreconditionerType> petsc_preconditioners;
-extern const std::set<PreconditionerType> trilinos_preconditioners;
-extern const std::map<PreconditionerType, std::string> preconditioner_type_to_name;
-
-/// Map for preconditioner type string to PreconditionerType enum.
-extern const std::map<std::string,PreconditionerType> preconditioner_name_to_type;
+/// Map for preconditioner type string to pair (PreconditionerType enum, bool(true if Trilinos precondition)). 
+using PreconditionerMapType = std::pair<PreconditionerType,bool>;
+//extern const std::map<std::string,PreconditionerType> preconditioner_name_to_type;
+extern const std::map<std::string,PreconditionerMapType> preconditioner_name_to_type;
 
 enum class SolverType
 {
@@ -484,16 +453,6 @@ enum class FluidViscosityModelType
 /// Map for fluid viscosity model string to FluidViscosityModelType. 
 extern const std::map<std::string,FluidViscosityModelType> fluid_viscosity_model_name_to_type;
 
-enum class SolidViscosityModelType
-{
-  viscType_NA = 695,
-  viscType_Newtonian = 694,
-  viscType_Potential = 693
-};
-
-/// Map for solid viscosity model string to SolidViscosityModelType.
-extern const std::map<std::string,SolidViscosityModelType> solid_viscosity_model_name_to_type;
-
 /// Template for printing enum class types as an int.
 template<typename T>
 std::ostream& operator<<(typename std::enable_if<std::is_enum<T>::value, std::ostream>::type& stream, const T& e)
@@ -508,20 +467,6 @@ enum class MechanicalConfigurationType
   old_timestep, // old timestep (n) configuration
   new_timestep // new timestep (n+1) configuration
 };
-
-//-------------------
-// LinearAlgebraType
-//-------------------
-// The type of the numerical linear algebra library.
-//
-enum class LinearAlgebraType {
-  none,
-  fsils,
-  petsc,
-  trilinos
-};
-
-
 };
 
 #endif
