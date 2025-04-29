@@ -1459,6 +1459,13 @@ DomainParameters::DomainParameters()
   set_parameter("Shell_thickness", 0.0, !required, shell_thickness);
   set_parameter("Solid_density", 0.5, !required, solid_density);
   set_parameter("Source_term", 0.0, !required, source_term);
+  set_parameter("Permeability", 0.0, !required, permeability);
+  set_parameter("Porosity", 0.0, !required, porosity);
+  set_parameter("Porosity_pressure", 0.0, !required, porosity_pressure);
+  set_parameter("Media_compressibility", 0.0, !required, media_compressibility);
+  set_parameter("Fluid_compressibility", 0.0, !required, fluid_compressibility);
+  set_parameter("Darcy_fluid_viscosity", 1.0, !required, darcy_fluid_viscosity);
+  set_parameter("Density_pressure", 0.0, !required, density_pressure);
   set_parameter("Time_step_for_integration", 0.0, !required, time_step_for_integration);
 
   set_parameter("Inverse_darcy_permeability", 0.0, !required, inverse_darcy_permeability);

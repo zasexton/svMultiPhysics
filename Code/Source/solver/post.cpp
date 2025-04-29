@@ -1012,37 +1012,51 @@ void post(Simulation* simulation, const mshType& lM, Array<double>& res, const A
       // Heat flux calculation   
       //
       } else if (outGrp == OutputNameType::outGrp_hFlx) {
-        double kappa = eq.dmn[cDmn].prop[PhysicalProperyType::conductivity];
-        int i = eq.s;
+          double kappa = eq.dmn[cDmn].prop[PhysicalProperyType::conductivity];
+          int i = eq.s;
 
-        if (eq.phys == EquationType::phys_heatF) {
-          Vector<double> u(nsd);
-          Vector<double> T(nsd);
+          if (eq.phys == EquationType::phys_heatF) {
+              Vector<double> u(nsd);
+              Vector<double> T(nsd);
+              Vector<double> q(nsd);
+
+              for (int a = 0; a < eNoN; a++) {
+                  for (int j = 0; j < nsd; j++) {
+                      q(j) = q(j) + Nx(j, a) * yl(i, a);
+                      u(j) = u(j) + N(a) * yl(j, a);
+                      T(j) = T(j) + N(a) * yl(i, a);
+                  }
+              }
+              for (int j = 0; j < nsd; j++) {
+                  lRes(j) = u(j) * T(j) - kappa * q(j);
+              }
+
+          } else {
+              Vector<double> q(nsd);
+              for (int a = 0; a < eNoN; a++) {
+                  for (int j = 0; j < nsd; j++) {
+                      q(j) = q(j) + Nx(j, a) * yl(i, a);
+                  }
+              }
+              for (int j = 0; j < nsd; j++) {
+                  lRes(j) = -kappa * q(j);
+              }
+          }
+
+      // MBF Flux calculation
+      //
+      } else if (outGrp == OutputNameType::outGrp_mbfFlx) {
+          double kappa = eq.dmn[cDmn].prop[PhysicalProperyType::permeability];
+          int i = eq.s;
           Vector<double> q(nsd);
-
           for (int a = 0; a < eNoN; a++) {
-            for (int j = 0; j < nsd; j++) {
-              q(j) = q(j) + Nx(j,a)*yl(i,a);
-              u(j) = u(j) + N(a)*yl(j,a);
-              T(j) = T(j) + N(a)*yl(i,a);
-            }
+              for (int j = 0; j < nsd; j++) {
+                  q(j) = q(j) + Nx(j, a) * yl(i, a);
+              }
           }
           for (int j = 0; j < nsd; j++) {
-            lRes(j) = u(j)*T(j) - kappa*q(j);
+              lRes(j) = -kappa * q(j);
           }
-
-        } else {
-          Vector<double> q(nsd);
-          for (int a = 0; a < eNoN; a++) {
-            for (int j = 0; j < nsd; j++) {
-              q(j) = q(j) + Nx(j,a)*yl(i,a);
-            }
-          }
-          for (int j = 0; j < nsd; j++) {
-            lRes(j) = -kappa * q(j);
-          }
-        }
-
       // Strain tensor invariants calculation   
       //
       } else if (outGrp == OutputNameType::outGrp_stInv) {

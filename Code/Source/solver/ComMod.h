@@ -1604,6 +1604,17 @@ class ComMod {
     /// @brief CMM-variable wall properties: 1-thickness, 2-Elasticity modulus
     Array<double>  varWallProps;
 
+    /// @brief Variables for perfusion simulation (Darcy)
+    Vector<double> perfusion_pressure_source;
+    Vector<double> perfusion_pressure_sink;
+    Vector<double> perfusion_beta0;
+    Vector<double> perfusion_beta1;
+    double permeability = 0.0;
+    double porosity = 0.0;
+    double media_compressibility = 0.0;
+    double fluid_compressibility = 0.0;
+    double darcy_fluid_viscosity = 1.0;
+
     //------------------------
     // DERIVED TYPE VARIABLES
     //------------------------

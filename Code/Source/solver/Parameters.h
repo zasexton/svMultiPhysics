@@ -1134,6 +1134,15 @@ class DomainParameters : public ParameterLists
     Parameter<double> shell_thickness;
     Parameter<double> solid_density;
     Parameter<double> source_term;
+
+    Parameter<double> permeability;
+    Parameter<double> porosity;
+    Parameter<double> porosity_pressure;
+    Parameter<double> media_compressibility;
+    Parameter<double> fluid_compressibility;
+    Parameter<double> darcy_fluid_viscosity;
+    Parameter<double> density_pressure;
+
     Parameter<double> time_step_for_integration;
     
     // Inverse of Darcy permeability. Default value of 0.0 for Navier-Stokes and non-zero for Navier-Stokes-Brinkman
@@ -1247,6 +1256,7 @@ class EquationParameters : public ParameterLists
     Parameter<bool> prestress;
 
     Parameter<double> source_term;
+
     Parameter<double> tolerance;
 
     Parameter<std::string> type;

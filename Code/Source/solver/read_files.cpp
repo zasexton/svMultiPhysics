@@ -1308,6 +1308,34 @@ void read_domain(Simulation* simulation, EquationParameters* eq_params, eqType& 
           case PhysicalProperyType::inverse_darcy_permeability:
             rtmp = domain_params->inverse_darcy_permeability.value();
           break;
+
+          case PhysicalProperyType::permeability:
+            rtmp = domain_params->permeability.value();
+          break;
+
+          case PhysicalProperyType::porosity:
+            rtmp = domain_params->porosity.value();
+          break;
+
+          case PhysicalProperyType::porosity_pressure:
+            rtmp = domain_params->porosity_pressure.value();
+          break;
+
+          case PhysicalProperyType::media_compressibility:
+            rtmp = domain_params->media_compressibility.value();
+          break;
+
+          case PhysicalProperyType::fluid_compressibility:
+            rtmp = domain_params->fluid_compressibility.value();
+          break;
+
+          case PhysicalProperyType::darcy_fluid_viscosity:
+            rtmp = domain_params->darcy_fluid_viscosity.value();
+          break;
+
+          case PhysicalProperyType::density_pressure:
+            rtmp = domain_params->density_pressure.value();
+          break;
         }
 
         lEq.dmn[iDmn].prop[prop] = rtmp;
@@ -1333,7 +1361,7 @@ void read_domain(Simulation* simulation, EquationParameters* eq_params, eqType& 
 
      // Set parameters for a fluid viscosity model.
      if ((lEq.dmn[iDmn].phys == EquationType::phys_fluid) ||  
-         (lEq.dmn[iDmn].phys == EquationType::phys_stokes) ||  
+         (lEq.dmn[iDmn].phys == EquationType::phys_stokes) ||
          (lEq.dmn[iDmn].phys == EquationType::phys_CMM && !com_mod.cmmInit)) {
        read_fluid_visc_model(simulation, eq_params, domain_params, lEq.dmn[iDmn]);
      }
