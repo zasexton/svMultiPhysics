@@ -315,7 +315,8 @@ if(ENABLE_UNIT_TEST)
   # add test.cpp for unit test
 
   # remove the main.cpp and add test.cpp
-  set(TEST_SOURCES "../../../tests/unitTests/test.cpp")
+  set(TEST_SOURCES "../../../tests/unitTests/test.cpp"
+                   "../../../tests/unitTests/test_read_files.cpp")
   list(REMOVE_ITEM CSRCS "main.cpp")
   list(APPEND CSRCS ${TEST_SOURCES})
 
