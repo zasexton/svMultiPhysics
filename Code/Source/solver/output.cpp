@@ -172,8 +172,8 @@ void output_result(Simulation* simulation,  std::array<double,3>& timeP, const i
 
   // Print a warning message if the maximum number of nonlinear iterations has been exceeded.
   if (eq.itr > eq.maxItr) {
-    auto msg = "[svFSIplus] WARNING The number of nonlinear iterations (" + std::to_string(eq.itr) + 
-        ") has exceeded the maximum number set by the value of the Add_equation/Max_iterations parameter in the svFSIplus solver input file.";
+    auto msg = "[svMultiPhysics] WARNING: The number of nonlinear iterations (" + std::to_string(eq.itr) + 
+        ") has exceeded the maximum number set by the value of the Add_equation/Max_iterations parameter in the svMultiPhysics solver input file.";
     if (!eq.FSILS.RI.suc) {
       msg += " This may be due to the failure of the linear system solution to converge.";
     }
@@ -319,8 +319,6 @@ void write_restart(Simulation* simulation, std::array<double,3>& timeP)
         } else if (cepEq) {
           restart_file.write((char*)Xion.data(), Xion.msize());
           restart_file.write((char*)cem.Ya.data(), cem.Ya.msize());
-        } else {
-          restart_file.write((char*)Dn.data(), Dn.msize());
         }
       }
 
