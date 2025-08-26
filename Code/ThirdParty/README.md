@@ -18,6 +18,8 @@ tetgen - A mesh generatin application.
 
 tinyxml - A header-only application used to read and write XML files.
 
+exprtk - A header-only application for parsing and evaluating mathematical expressions.
+
 ---------
 IMPORTANT
 ---------

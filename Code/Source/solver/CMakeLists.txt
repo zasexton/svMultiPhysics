@@ -30,6 +30,7 @@ include_directories(${SV_SOURCE_DIR}/ThirdParty/eigen/include)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/parmetis_internal/simvascular_parmetis_internal/ParMETISLib)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/tetgen/simvascular_tetgen)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/tinyxml/simvascular_tinyxml)
+include_directories(${SV_SOURCE_DIR}/ThirdParty/exprtk/simvascular_exprtk)
 include_directories(${MPI_C_INCLUDE_PATH})
 
 # Find Trilinos package if requested
@@ -79,6 +80,30 @@ if(SV_USE_TRILINOS)
     MESSAGE(WARNING "Could not find Trilinos. Compiling svMultiPhysics without Trilinos.")
   ENDIF()
 
+endif()
+
+# Build with the SymEngine library.
+if(SV_USE_SYMENGINE)
+  include(FetchContent)
+  set(FETCHCONTENT_BASE_DIR "${CMAKE_BINARY_DIR}/ThirdParty/symengine")
+  FetchContent_Declare(
+          symengine
+          GIT_REPOSITORY https://github.com/symengine/symengine.git
+          GIT_TAG        v0.12.0
+          GIT_SHALLOW    TRUE
+          GIT_PROGRESS   TRUE
+  )
+  set(FETCHCONTENT_QUIET FALSE)
+  FetchContent_GetProperties(symengine)
+  if(NOT symengine_POPULATED)
+    FetchContent_Populate(symengine)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE) # Set the build type for SymEngine
+    #add_subdirectory(${symengine_SOURCE_DIR} ${symengine_BINARY_DIR})
+  endif()
+  message(STATUS "SymEngine fetched from source.")
+  set(USE_SYMENGINE 1)
+else()
+  set(USE_SYMENGINE 0)
 endif()
 
 # add trilinos flags and defines
@@ -228,6 +253,12 @@ set(CSRCS
   #if(USE_PETSC)
   #   set(CSRCS ${CSRCS} petsc_linear_solver.h petsc_linear_solver.c)
   #endif()
+if(SV_USE_SYMENGINE)
+  set(${CSRCS}
+      odes.h odes.cpp
+      ODESolver.h ODESolver.cpp
+      RungeKutta45.h RungeKutta45.cpp)
+endif()
 
 if(USE_TRILINOS)
   #set(CSRCS ${CSRCS} trilinos_linear_solver.cpp)
@@ -271,6 +302,10 @@ endif()
 
 if(USE_PETSC)
   target_link_libraries(${SV_MULTIPHYSICS_EXE} ${PETSC_LIBRARY_DIRS})
+endif()
+
+if(USE_SYMENGINE)
+  target_link_libraries(${SV_SVFSI_EXE} symengine)
 endif()
 
 # coverage

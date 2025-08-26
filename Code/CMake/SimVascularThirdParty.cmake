@@ -36,5 +36,8 @@ endif()
 # TINYXML
 simvascular_third_party(tinyxml)
 
+# EXPRTK
+simvascular_third_party(exprtk)
+set(EXPRTK_LIBRARY ${SV_LIB_THIRDPARTY_EXPRTK_NAME})
 
 
