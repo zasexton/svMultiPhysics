@@ -205,6 +205,13 @@ void read_bc(Simulation* simulation, EquationParameters* eq_params, eqType& lEq,
   } else if (std::set<std::string>{"Coupled Momentum","CMM"}.count(bc_type)) {
     lBc.bType = utils::ibset(lBc.bType, enum_int(BoundaryConditionType::bType_CMM)); 
 
+  } else if (std::set<std::string>{"RIS0D", "RIS0D"}.count(bc_type)) {
+    lBc.bType = utils::ibset(lBc.bType, enum_int(BoundaryConditionType::bType_Ris0D));
+    auto& com_mod = simulation->com_mod;
+    lBc.bType = utils::ibset(lBc.bType, enum_int(BoundaryConditionType::bType_Neu));
+    com_mod.ris0DFlag = true;
+    lBc.resistance = bc_params->resistance.value();
+
   } else {
     throw std::runtime_error("[read_bc] Unknown boundary condition type '" + bc_type + "'.");
   }
@@ -1928,10 +1935,9 @@ void read_fourier_coeff_values_file(const std::string& file_name, bcType& lBc)
       values.push_back(value);
     }
 
-    int num_vals = values.size();
-    for (int i = 0; i < values.size(); i++) {
-      lBc.gt.r(i,j) = values[i]; 
-      lBc.gt.i(i,j) = values[i+num_vals];
+    for (int i = 0; i < lBc.gt.d; i++) { 
+      lBc.gt.r(i,j) = values[i];
+      lBc.gt.i(i,j) = values[i + lBc.gt.d];
     }
 
     j += 1;
@@ -1997,10 +2003,9 @@ void read_fourier_coeff_values_file(const std::string& file_name, bfType& lBf)
       values.push_back(value);
     }
 
-    int num_vals = values.size();
-    for (int i = 0; i < values.size(); i++) {
-      lBf.bt.r(i,j) = values[i]; 
-      lBf.bt.i(i,j) = values[i+num_vals];
+    for (int i = 0; i < lBf.bt.d; i++) { 
+      lBf.bt.r(i,j) = values[i];
+      lBf.bt.i(i,j) = values[i + lBf.bt.d];
     }
 
     j += 1;
