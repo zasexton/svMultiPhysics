@@ -41,7 +41,7 @@
 namespace heatf {
 
 void b_heatf(ComMod& com_mod, const int eNoN, const double w, const Vector<double>& N, const Vector<double>& y,
-    const double h, const Vector<double>& nV, Array<double>& lR, Array3<double>& lK)
+    const double h, const Vector<double>& nV, Array<double>& lR, Array3<double>& lK, int species_index)
 {
   const int nsd = com_mod.nsd;
   const int cEq = com_mod.cEq;
@@ -49,7 +49,7 @@ void b_heatf(ComMod& com_mod, const int eNoN, const double w, const Vector<doubl
   const double dt = com_mod.dt;
 
   double wl = w * eq.af * eq.gam * dt;
-  double T = y(eq.s);
+  int m = eq.dof;
   double udn = 0.0;
 
   for (int i = 0; i < nsd; i++) {
@@ -57,17 +57,21 @@ void b_heatf(ComMod& com_mod, const int eNoN, const double w, const Vector<doubl
   }
 
   udn = 0.5 * (udn - fabs(udn));
-  double T1  = h - udn*T;
-
-  for (int a = 0; a < eNoN; a++) { 
-    lR(0,a) = lR(0,a) + w*N(a)*T1;
-
-    for (int b = 0; b < eNoN; b++) { 
-      lK(0,a,b) = lK(0,a,b) - wl*N(a)*N(b)*udn;
+  int is_start = (species_index >= 0 ? species_index : 0);
+  int is_end   = (species_index >= 0 ? species_index : m-1);
+  for (int is = is_start; is <= is_end; ++is) {
+    int sidx = eq.s + is;
+    double T = y(sidx);
+    double T1  = h - udn*T;
+    for (int a = 0; a < eNoN; a++) {
+      lR(is,a) = lR(is,a) + w*N(a)*T1;
+      for (int b = 0; b < eNoN; b++) {
+        int blk = is*m + is;
+        lK(blk,a,b) = lK(blk,a,b) - wl*N(a)*N(b)*udn;
+      }
     }
   }
 }
-
 
 void construct_heatf(ComMod& com_mod, const mshType& lM, const Array<double>& Ag, const Array<double>& Yg)
 {
@@ -179,12 +183,12 @@ void heatf_2d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   const int cDmn = com_mod.cDmn;
   auto& dmn = eq.dmn[cDmn];
   const double dt = com_mod.dt;
-  const int i = eq.s;
+  const int m = eq.dof;
 
   double T1 = eq.af * eq.gam * dt;
   double amd = eq.am / T1;
-  double nu = dmn.prop.at(PhysicalProperyType::conductivity);
-  double s = dmn.prop.at(PhysicalProperyType::source_term);
+  double nu_base = dmn.prop.at(PhysicalProperyType::conductivity);
+  double s_base = dmn.prop.at(PhysicalProperyType::source_term);
   double wl = w * T1;
 
   #ifdef debug_heats_2d 
@@ -195,17 +199,35 @@ void heatf_2d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   dmsg << "wl: " << wl;
   #endif
 
-  double Td = -s;
-  Vector<double> Tx(nsd), u(nsd), udNx(eNoN);
+  Vector<double> u(nsd), udNx(eNoN);
+  Vector<double> Tg(m), Td(m), udTx(m);
+  Array<double> Tx(nsd,m);
 
   for (int a = 0; a < eNoN; a++) {
     u(0) = u(0) + N(a)*yl(0,a);
     u(1) = u(1) + N(a)*yl(1,a);
+    for (int is = 0; is < m; ++is) {
+      int sidx = eq.s + is;
+      Td(is) = Td(is) + N(a)*al(sidx,a);
+      Tg(is) = Tg(is) + N(a)*yl(sidx,a);
+      Tx(0,is) = Tx(0,is) + Nx(0,a)*yl(sidx,a);
+      Tx(1,is) = Tx(1,is) + Nx(1,a)*yl(sidx,a);
+    }
+  }
 
-    Td = Td + N(a)*al(i,a);
-
-    Tx(0) = Tx(0) + Nx(0,a)*yl(i,a);
-    Tx(1) = Tx(1) + Nx(1,a)*yl(i,a);
+  // Add reaction term s += R(Tg) -> Td -= R(Tg)
+  Array<double> kr_2d(m,m);
+  kr_2d = 0.0;
+  if (dmn.has_reaction_rhs) {
+    Vector<double> state(m), deriv(m);
+    for (int is = 0; is < m; ++is) state(is) = Tg(is);
+    dmn.reaction_rhs(com_mod.time, state, deriv);
+    for (int is = 0; is < m; ++is) {
+      Td(is) = Td(is) - deriv(is);
+    }
+    if (dmn.has_reaction_jac) {
+      dmn.reaction_jac(com_mod.time, state, kr_2d);
+    }
   }
 
   if (com_mod.mvMsh) {
@@ -218,27 +240,64 @@ void heatf_2d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
 
   double kU = u(0)*u(0)*ksix(0,0) + u(1)*u(0)*ksix(1,0) + u(0)*u(1)*ksix(0,1) + u(1)*u(1)*ksix(1,1);
   double kS = ksix(0,0)*ksix(0,0) + ksix(1,0)*ksix(1,0) + ksix(0,1)*ksix(0,1) + ksix(1,1)*ksix(1,1);
-  double nTx = ksix(0,0)*Tx(0)*Tx(0) + ksix(1,1)*Tx(1)*Tx(1) + (ksix(0,1) + ksix(1,0))*Tx(0)*Tx(1);
-
-  if (utils::is_zero(nTx)) {
-    nTx = std::numeric_limits<double>::epsilon();
+  Vector<double> tauM(m), Tp(m), nu_eff(m);
+  for (int is = 0; is < m; ++is) {
+    double nTx = ksix(0,0)*Tx(0,is)*Tx(0,is) + ksix(1,1)*Tx(1,is)*Tx(1,is) + (ksix(0,1) + ksix(1,0))*Tx(0,is)*Tx(1,is);
+    if (utils::is_zero(nTx)) nTx = std::numeric_limits<double>::epsilon();
+    udTx(is) = u(0)*Tx(0,is) + u(1)*Tx(1,is);
+    double nu = nu_base;
+    double Tpc = fabs(Td(is) + udTx(is));
+    nu = nu + 0.5 * Tpc / sqrt(nTx);
+    tauM(is) = ct(3) / sqrt((ct(0)/(dt*dt)) + ct(1)*kU + ct(2)*nu*nu*kS);
+    Tp(is) = -tauM(is) * (Td(is) + udTx(is));
+    nu_eff(is) = nu;
   }
-
-  double udTx = u(0)*Tx(0) + u(1)*Tx(1);
-  double Tp = fabs(Td + udTx);
-  nu  = nu + 0.5 * Tp / sqrt(nTx);
-  double tauM = ct(3) / sqrt((ct(0)/(dt*dt)) + ct(1)*kU + ct(2)*nu*nu*kS);
-  Tp = -tauM*(Td + udTx);
 
   for (int a = 0; a < eNoN; a++) {
     udNx(a) = u(0)*Nx(0,a) + u(1)*Nx(1,a);
   }
+  // Build base diffusion matrix D (m x m) from domain parameters
+  Array<double> D(m,m);
+  D = 0.0;
+  if (dmn.diffusion_matrix_flat.size() == m*m) {
+    for (int i = 0, k = 0; i < m; ++i) {
+      for (int j = 0; j < m; ++j, ++k) D(i,j) = dmn.diffusion_matrix_flat(k);
+    }
+  } else if (dmn.species_diffusivity.size() == m) {
+    for (int i = 0; i < m; ++i) D(i,i) = dmn.species_diffusivity(i);
+  } else {
+    for (int i = 0; i < m; ++i) D(i,i) = nu_base;
+  }
 
   for (int a = 0; a < eNoN; a++) {
-    lR(0,a) = lR(0,a) + w*(N(a)*(Td + udTx) + (Nx(0,a)*Tx(0) + Nx(1,a)*Tx(1))*nu - udNx(a)*Tp);
+    for (int is = 0; is < m; ++is) {
+      // Diffusion residual: base cross-diffusion + augmented diagonal
+      double diff_res = 0.0;
+      for (int js = 0; js < m; ++js) {
+        diff_res += D(is,js) * (Nx(0,a)*Tx(0,js) + Nx(1,a)*Tx(1,js));
+      }
+      diff_res += (Nx(0,a)*Tx(0,is) + Nx(1,a)*Tx(1,is)) * (nu_eff(is) - nu_base);
 
-    for (int b = 0; b < eNoN; b++) {
-      lK(0,a,b) = lK(0,a,b) + wl*(nu*(Nx(0,a)*Nx(0,b) + Nx(1,a)*Nx(1,b)) + (N(a) + tauM*udNx(a))*(N(b)*amd + udNx(b)));
+      lR(is,a) = lR(is,a) + w*(N(a)*(Td(is) + udTx(is)) + diff_res - udNx(a)*Tp(is));
+      for (int b = 0; b < eNoN; b++) {
+        // Base diffusion blocks
+        for (int js = 0; js < m; ++js) {
+          int ij = is*m + js;
+          lK(ij,a,b) = lK(ij,a,b) + wl * D(is,js) * (Nx(0,a)*Nx(0,b) + Nx(1,a)*Nx(1,b));
+        }
+        // Augmented diagonal diffusion
+        int ii = is*m + is;
+        lK(ii,a,b) = lK(ii,a,b) + wl * (nu_eff(is) - nu_base) * (Nx(0,a)*Nx(0,b) + Nx(1,a)*Nx(1,b));
+        // Time/mass + convection
+        lK(ii,a,b) = lK(ii,a,b) + wl * (N(a) + tauM(is)*udNx(a)) * (N(b)*amd + udNx(b));
+        // Reaction Jacobian full block: off-diagonals included
+        if (dmn.has_reaction_rhs && dmn.has_reaction_jac) {
+          for (int js = 0; js < m; ++js) {
+            int ij = is*m + js;
+            lK(ij,a,b) = lK(ij,a,b) - wl * (N(a) + tauM(is)*udNx(a)) * kr_2d(is,js) * N(b);
+          }
+        }
+      }
     }
   }
 }
@@ -269,12 +328,12 @@ void heatf_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   const int cDmn = com_mod.cDmn;
   auto& dmn = eq.dmn[cDmn];
   const double dt = com_mod.dt;
-  const int i = eq.s;
+  const int m = eq.dof;
 
   double T1 = eq.af * eq.gam * dt;
   double amd = eq.am / T1;
-  double nu = dmn.prop.at(PhysicalProperyType::conductivity);
-  double s = dmn.prop.at(PhysicalProperyType::source_term);
+  double nu_base = dmn.prop.at(PhysicalProperyType::conductivity);
+  double s_base = dmn.prop.at(PhysicalProperyType::source_term);
   double wl = w * T1;
 
   #ifdef debug_heatf_3d 
@@ -288,19 +347,36 @@ void heatf_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   dmsg << "ct: " << ct;
   #endif
 
-  double Td = -s;
-  Vector<double> Tx(nsd), u(nsd), udNx(eNoN);
+  Vector<double> u(nsd), udNx(eNoN);
+  Vector<double> Tg(m), Td(m), udTx(m);
+  Array<double> Tx(nsd,m);
 
   for (int a = 0; a < eNoN; a++) {
     u(0) = u(0) + N(a)*yl(0,a);
     u(1) = u(1) + N(a)*yl(1,a);
     u(2) = u(2) + N(a)*yl(2,a);
 
-    Td = Td + N(a)*al(i,a);
+    for (int is = 0; is < m; ++is) {
+      int sidx = eq.s + is;
+      Td(is) = Td(is) + N(a)*al(sidx,a);
+      Tg(is) = Tg(is) + N(a)*yl(sidx,a);
+      Tx(0,is) = Tx(0,is) + Nx(0,a)*yl(sidx,a);
+      Tx(1,is) = Tx(1,is) + Nx(1,a)*yl(sidx,a);
+      Tx(2,is) = Tx(2,is) + Nx(2,a)*yl(sidx,a);
+    }
+  }
 
-    Tx(0) = Tx(0) + Nx(0,a)*yl(i,a);
-    Tx(1) = Tx(1) + Nx(1,a)*yl(i,a);
-    Tx(2) = Tx(2) + Nx(2,a)*yl(i,a);
+  // Add reaction term s += R(Tg) -> Td -= R(Tg)
+  Array<double> kr_3d(m,m);
+  kr_3d = 0.0;
+  if (dmn.has_reaction_rhs) {
+    Vector<double> state(m), deriv(m);
+    for (int is = 0; is < m; ++is) state(is) = Tg(is);
+    dmn.reaction_rhs(com_mod.time, state, deriv);
+    for (int is = 0; is < m; ++is) Td(is) -= deriv(is);
+    if (dmn.has_reaction_jac) {
+      dmn.reaction_jac(com_mod.time, state, kr_3d);
+    }
   }
 
   if (com_mod.mvMsh) {
@@ -319,9 +395,20 @@ void heatf_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
               ksix(1,1)*ksix(1,1) + ksix(2,1)*ksix(2,1) + ksix(0,2)*ksix(0,2) + ksix(1,2)*ksix(1,2) + 
               ksix(2,2)*ksix(2,2);
 
-  double nTx = ksix(0,0)*Tx(0)*Tx(0) + ksix(1,1)*Tx(1)*Tx(1) + ksix(2,2)*Tx(2)*Tx(2) + 
-               (ksix(0,1) + ksix(1,0))*Tx(0)*Tx(1) + (ksix(0,2) + ksix(2,0))*Tx(0)*Tx(2) + 
-               (ksix(1,2) + ksix(2,1))*Tx(1)*Tx(2);
+  Vector<double> tauM(m), Tp(m), nu_eff(m);
+  for (int is = 0; is < m; ++is) {
+    double nTx = ksix(0,0)*Tx(0,is)*Tx(0,is) + ksix(1,1)*Tx(1,is)*Tx(1,is) + ksix(2,2)*Tx(2,is)*Tx(2,is) +
+                 (ksix(0,1) + ksix(1,0))*Tx(0,is)*Tx(1,is) + (ksix(0,2) + ksix(2,0))*Tx(0,is)*Tx(2,is) +
+                 (ksix(1,2) + ksix(2,1))*Tx(1,is)*Tx(2,is);
+    if (utils::is_zero(nTx)) nTx = std::numeric_limits<double>::epsilon();
+    udTx(is) = u(0)*Tx(0,is) + u(1)*Tx(1,is) + u(2)*Tx(2,is);
+    double nu = nu_base;
+    double Tpc = fabs(Td(is) + udTx(is));
+    nu = nu + 0.5 * Tpc / sqrt(nTx);
+    tauM(is) = ct(3) / sqrt((ct(0)/(dt*dt)) + ct(1)*kU + ct(2)*nu*nu*kS);
+    Tp(is) = -tauM(is) * (Td(is) + udTx(is));
+    nu_eff(is) = nu;
+  }
 
   #ifdef debug_heatf_3d 
   dmsg << "u: " << u;
@@ -345,12 +432,42 @@ void heatf_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
     udNx(a) = u(0)*Nx(0,a) + u(1)*Nx(1,a) + u(2)*Nx(2,a);
   }
 
-  for (int a = 0; a < eNoN; a++) {
-    lR(0,a) = lR(0,a) + w*(N(a)*(Td + udTx) + (Nx(0,a)*Tx(0) + Nx(1,a)*Tx(1) + Nx(2,a)*Tx(2))*nu - udNx(a)*Tp);
+  // Base diffusion matrix D for 3D
+  Array<double> D(m,m);
+  D = 0.0;
+  if (dmn.diffusion_matrix_flat.size() == m*m) {
+    for (int i = 0, k = 0; i < m; ++i) {
+      for (int j = 0; j < m; ++j, ++k) D(i,j) = dmn.diffusion_matrix_flat(k);
+    }
+  } else if (dmn.species_diffusivity.size() == m) {
+    for (int i = 0; i < m; ++i) D(i,i) = dmn.species_diffusivity(i);
+  } else {
+    for (int i = 0; i < m; ++i) D(i,i) = nu_base;
+  }
 
-    for (int b = 0; b < eNoN; b++) {
-      lK(0,a,b) = lK(0,a,b) + wl*(nu*(Nx(0,a)*Nx(0,b) + Nx(1,a)*Nx(1,b) + Nx(2,a)*Nx(2,b)) + 
-                  (N(a) + tauM*udNx(a))*(N(b)*amd + udNx(b)));
+  for (int a = 0; a < eNoN; a++) {
+    for (int is = 0; is < m; ++is) {
+      double diff_res = 0.0;
+      for (int js = 0; js < m; ++js) {
+        diff_res += D(is,js) * (Nx(0,a)*Tx(0,js) + Nx(1,a)*Tx(1,js) + Nx(2,a)*Tx(2,js));
+      }
+      diff_res += (Nx(0,a)*Tx(0,is) + Nx(1,a)*Tx(1,is) + Nx(2,a)*Tx(2,is)) * (nu_eff(is) - nu_base);
+      lR(is,a) = lR(is,a) + w*(N(a)*(Td(is) + udTx(is)) + diff_res - udNx(a)*Tp(is));
+      for (int b = 0; b < eNoN; b++) {
+        for (int js = 0; js < m; ++js) {
+          int ij = is*m + js;
+          lK(ij,a,b) = lK(ij,a,b) + wl * D(is,js) * (Nx(0,a)*Nx(0,b) + Nx(1,a)*Nx(1,b) + Nx(2,a)*Nx(2,b));
+        }
+        int ii = is*m + is;
+        lK(ii,a,b) = lK(ii,a,b) + wl * (nu_eff(is) - nu_base) * (Nx(0,a)*Nx(0,b) + Nx(1,a)*Nx(1,b) + Nx(2,a)*Nx(2,b));
+        lK(ii,a,b) = lK(ii,a,b) + wl * (N(a) + tauM(is)*udNx(a)) * (N(b)*amd + udNx(b));
+        if (dmn.has_reaction_rhs && dmn.has_reaction_jac) {
+          for (int js = 0; js < m; ++js) {
+            int ij = is*m + js;
+            lK(ij,a,b) = lK(ij,a,b) - wl * (N(a) + tauM(is)*udNx(a)) * kr_3d(is,js) * N(b);
+          }
+        }
+      }
     }
   }
 }
