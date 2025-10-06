@@ -415,7 +415,16 @@ void initialize(Simulation* simulation, Vector<double>& timeP)
     //
     // This replaces the Fortran 'SELECT CASE (eq(iEq)%phys)' code.
     //
-    std::tie(eq.dof, eq.sym) = equation_dof_map.at(eq.phys);
+    {
+      auto mapped = equation_dof_map.at(eq.phys);
+      // Respect a preset dof (e.g., multi-species heatF), else use mapped
+      if (eq.phys == EquationType::phys_heatF && eq.dof > 0) {
+        eq.sym = std::get<1>(mapped);
+      } else {
+        eq.dof = std::get<0>(mapped);
+        eq.sym = std::get<1>(mapped);
+      }
+    }
 
     if (std::set<EquationType>{Equation_fluid, Equation_heatF, Equation_heatS, Equation_CEP, Equation_stokes}.count(eq.phys) == 0) {
       dFlag = true;
@@ -869,4 +878,3 @@ void zero_init(Simulation* simulation)
      }
   }
 }
-

@@ -720,6 +720,8 @@ class BoundaryConditionParameters : public ParameterLists
     Parameter<double> value;
     Parameter<bool> weakly_applied;
     Parameter<bool> zero_out_perimeter;
+    // For multi-species transport: apply BC to a specific species index (0-based). -1 applies to all species.
+    Parameter<int> species_index;
 };
 
 /// @brief The OutputParameters class stores parameters for the
@@ -899,6 +901,8 @@ class LinearSolverParameters : public ParameterLists
     //Parameter<std::string> preconditioner;
 
     Parameter<double> tolerance;
+    // Number of transported species (dofs) for heatF equation
+    Parameter<int> number_of_species;
 
     LinearAlgebraParameters linear_algebra;
 };
@@ -1018,6 +1022,10 @@ class DomainParameters : public ParameterLists
 
     Parameter<double> absolute_tolerance;
     VectorParameter<double> anisotropic_conductivity;
+    // Multi-species transport (heatF): per-species diffusion diagonal
+    VectorParameter<double> species_diffusivity;
+    // Multi-species cross-diffusion matrix flattened (row-major), size m*m
+    VectorParameter<double> diffusion_matrix;
     Parameter<double> backflow_stabilization_coefficient;
 
     Parameter<double> conductivity;
@@ -1063,6 +1071,15 @@ class DomainParameters : public ParameterLists
     Parameter<double> solid_viscosity;
     Parameter<double> source_term;
     Parameter<double> time_step_for_integration;
+
+    // Add_ODE sub-element configuration for arbitrary reaction ODEs
+    // attached to scalar advection-diffusion (heatF) equations.
+    bool add_ode_defined_ = false;
+    std::string add_ode_system_;
+    std::string add_ode_constants_;
+    bool add_ode_defined() const { return add_ode_defined_; }
+    const std::string& ode_system_text() const { return add_ode_system_; }
+    const std::string& ode_constants_text() const { return add_ode_constants_; }
 };
 
 /// @brief The RemesherParameters class stores parameters for the 
@@ -1383,4 +1400,3 @@ class Parameters {
 };
 
 #endif
-
