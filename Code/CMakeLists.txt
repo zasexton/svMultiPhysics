@@ -26,22 +26,22 @@
 
 
 #-----------------------------------------------------------------------------
-cmake_minimum_required(VERSION 3.3.0)
+cmake_minimum_required(VERSION 3.5)
 
 if (POLICY CMP0040)
-  cmake_policy(SET CMP0040 OLD)
+  cmake_policy(SET CMP0040 NEW)
 endif()
 if (POLICY CMP0046)
-  cmake_policy(SET CMP0046 OLD)
+  cmake_policy(SET CMP0046 NEW)
 endif()
 if (POLICY CMP0053)
-  cmake_policy(SET CMP0053 OLD)
+  cmake_policy(SET CMP0053 NEW)
 endif()
 if (POLICY CMP0054)
-  cmake_policy(SET CMP0054 OLD)
+  cmake_policy(SET CMP0054 NEW)
 endif()
 if (POLICY CMP0025) # Compiler ID when using clang set to clang not appleclang
-  cmake_policy(SET CMP0025 OLD)
+  cmake_policy(SET CMP0025 NEW)
 endif()
 #-----------------------------------------------------------------------------
 
@@ -114,6 +114,41 @@ include(SimVascularExternals)
 # ThirdParty
 include(SimVascularThirdParty)
 #-----------------------------------------------------------------------------
+
+# Optionally enable SymEngine for ODE infrastructure in svFSI
+if(SV_USE_SYMENGINE)
+  # Allow configuring subprojects requiring older cmake_minimum_required
+  # without fatal policy errors (e.g., symengine)
+  if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+  endif()
+  include(FetchContent)
+  find_package(SymEngine QUIET CONFIG)
+  if(NOT SymEngine_FOUND)
+    message(STATUS "SymEngine not found; attempting to fetch via FetchContent")
+    FetchContent_Declare(
+      symengine
+      GIT_REPOSITORY https://github.com/symengine/symengine.git
+      GIT_TAG v0.11.0
+    )
+    # Work around SymEngine CMakeLists enforcing CMAKE_BUILD_TYPE to Debug/Release
+    set(_sv_saved_build_type "${CMAKE_BUILD_TYPE}")
+    if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+      set(CMAKE_BUILD_TYPE "Release" CACHE STRING "" FORCE)
+    endif()
+    FetchContent_MakeAvailable(symengine)
+    # Restore the original build type after fetching SymEngine
+    set(CMAKE_BUILD_TYPE "${_sv_saved_build_type}" CACHE STRING "" FORCE)
+  endif()
+  if(TARGET symengine)
+    set(SV_SYMENGINE_TARGET symengine CACHE INTERNAL "SymEngine target")
+  elseif(TARGET SymEngine::symengine)
+    set(SV_SYMENGINE_TARGET SymEngine::symengine CACHE INTERNAL "SymEngine target")
+  else()
+    message(WARNING "SV_USE_SYMENGINE=ON but no SymEngine target is available; build may fail if ODE sources are compiled")
+  endif()
+  add_compile_definitions(SV_USE_SYMENGINE)
+endif()
 
 #-----------------------------------------------------------------------------
 # Add GLOBAL_DEFINES to definitions

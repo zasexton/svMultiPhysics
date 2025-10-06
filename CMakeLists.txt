@@ -33,22 +33,22 @@
 #-----------------------------------------------------------------------------
 
 #-----------------------------------------------------------------------------
-cmake_minimum_required(VERSION 2.8.12)
+cmake_minimum_required(VERSION 3.5)
 
 if (POLICY CMP0040)
-  cmake_policy(SET CMP0040 OLD)
+  cmake_policy(SET CMP0040 NEW)
 endif()
 if (POLICY CMP0046)
-  cmake_policy(SET CMP0046 OLD)
+  cmake_policy(SET CMP0046 NEW)
 endif()
 if (POLICY CMP0053)
-  cmake_policy(SET CMP0053 OLD)
+  cmake_policy(SET CMP0053 NEW)
 endif()
 if (POLICY CMP0054)
-  cmake_policy(SET CMP0054 OLD)
+  cmake_policy(SET CMP0054 NEW)
 endif()
 if (POLICY CMP0025) # Compiler ID when using clang set to clang not appleclang
-  cmake_policy(SET CMP0025 OLD)
+  cmake_policy(SET CMP0025 NEW)
 endif()
 #-----------------------------------------------------------------------------
 
@@ -89,6 +89,7 @@ set(ENABLE_COVERAGE OFF CACHE BOOL "Enable code coverage")
 set(ENABLE_ARRAY_INDEX_CHECKING OFF CACHE BOOL "Enable Array index checking")
 set(SV_LOCAL_VTK_PATH "" CACHE STRING "Path to a local build of VTK.")
 set(ENABLE_UNIT_TEST OFF CACHE BOOL "Enable Unit Test by Google Test")
+set(SV_USE_SYMENGINE OFF CACHE BOOL "Enable SymEngine-based ODE infrastructure and fetch SymEngine if needed")
 
 #-----------------------------------------------------------------------------
 # RPATH handling
@@ -151,6 +152,8 @@ ExternalProject_Add(svFSI
     -DENABLE_UNIT_TEST:BOOL=${ENABLE_UNIT_TEST}
     -DENABLE_ARRAY_INDEX_CHECKING:BOOL=${ENABLE_ARRAY_INDEX_CHECKING}
     -DSV_LOCAL_VTK_PATH:STRING=${SV_LOCAL_VTK_PATH}
+    -DCMAKE_POLICY_VERSION_MINIMUM:STRING=3.5
+    -DSV_USE_SYMENGINE:BOOL=${SV_USE_SYMENGINE}
     ${SV_APPLE_CMAKE_ARGS}
     ${SV_ADDITIONAL_CMAKE_ARGS}
     )

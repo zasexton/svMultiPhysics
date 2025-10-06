@@ -29,6 +29,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/parmetis_svfsi/simvascular_parmetis_svfsi/ParMETISLib)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/tetgen/simvascular_tetgen)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/tinyxml/simvascular_tinyxml)
+include_directories(${SV_SOURCE_DIR}/ThirdParty/exprtk)
 include_directories(${MPI_C_INCLUDE_PATH})
 
 # Find Trilinos package if requested
@@ -217,14 +218,21 @@ set(CSRCS
   ChnlMod.h ChnlMod.cpp
   CmMod.h CmMod.cpp
   ComMod.h ComMod.cpp
-  ODESolver.h ODESolver.cpp
-  RungeKutta45.h RungeKutta45.cpp
   Timer.h
 
   SPLIT.c
 
   svZeroD_interface/LPNSolverInterface.h svZeroD_interface/LPNSolverInterface.cpp
 )
+
+# Conditionally include ODE infrastructure sources if SymEngine is enabled
+if(SV_USE_SYMENGINE)
+  set(CSRCS ${CSRCS}
+    odes.h odes.cpp
+    ODESolver.h ODESolver.cpp
+    RungeKutta45.h RungeKutta45.cpp
+  )
+endif()
 
   # Set PETSc interace code.
   #if(USE_PETSC)
@@ -261,6 +269,66 @@ target_link_libraries(${SV_SVFSI_EXE}
   ${SV_LIB_SVFSILS_NAME}${SV_MPI_NAME_EXT}
   ${VTK_LIBRARIES}
   )
+
+# Link SymEngine if enabled and available
+if(SV_USE_SYMENGINE)
+  if(TARGET ${SV_SYMENGINE_TARGET})
+    target_link_libraries(${SV_SVFSI_EXE} ${SV_SYMENGINE_TARGET})
+    # Propagate SymEngine include directories to this target
+    get_target_property(_sv_sym_inc ${SV_SYMENGINE_TARGET} INTERFACE_INCLUDE_DIRECTORIES)
+    if(_sv_sym_inc)
+      target_include_directories(${SV_SVFSI_EXE} PRIVATE ${_sv_sym_inc})
+    elseif(DEFINED symengine_SOURCE_DIR)
+      # Fallback: include headers from the fetched source tree
+      target_include_directories(${SV_SVFSI_EXE} PRIVATE
+        ${symengine_SOURCE_DIR}
+        ${symengine_SOURCE_DIR}/include
+      )
+    endif()
+    if(DEFINED symengine_BINARY_DIR)
+      # Include generated headers (e.g., symengine_config.h) from build tree
+      target_include_directories(${SV_SVFSI_EXE} PRIVATE
+        ${symengine_BINARY_DIR}
+        ${symengine_BINARY_DIR}/include
+      )
+    endif()
+  elseif(TARGET symengine)
+    target_link_libraries(${SV_SVFSI_EXE} symengine)
+    get_target_property(_sv_sym_inc symengine INTERFACE_INCLUDE_DIRECTORIES)
+    if(_sv_sym_inc)
+      target_include_directories(${SV_SVFSI_EXE} PRIVATE ${_sv_sym_inc})
+    elseif(DEFINED symengine_SOURCE_DIR)
+      target_include_directories(${SV_SVFSI_EXE} PRIVATE
+        ${symengine_SOURCE_DIR}
+        ${symengine_SOURCE_DIR}/include
+      )
+    endif()
+    if(DEFINED symengine_BINARY_DIR)
+      target_include_directories(${SV_SVFSI_EXE} PRIVATE
+        ${symengine_BINARY_DIR}
+        ${symengine_BINARY_DIR}/include
+      )
+    endif()
+  elseif(TARGET SymEngine::symengine)
+    target_link_libraries(${SV_SVFSI_EXE} SymEngine::symengine)
+    get_target_property(_sv_sym_inc SymEngine::symengine INTERFACE_INCLUDE_DIRECTORIES)
+    if(_sv_sym_inc)
+      target_include_directories(${SV_SVFSI_EXE} PRIVATE ${_sv_sym_inc})
+    elseif(DEFINED symengine_SOURCE_DIR)
+      target_include_directories(${SV_SVFSI_EXE} PRIVATE
+        ${symengine_SOURCE_DIR}
+        ${symengine_SOURCE_DIR}/include
+      )
+    endif()
+    if(DEFINED symengine_BINARY_DIR)
+      target_include_directories(${SV_SVFSI_EXE} PRIVATE
+        ${symengine_BINARY_DIR}
+        ${symengine_BINARY_DIR}/include
+      )
+    endif()
+  endif()
+  target_compile_definitions(${SV_SVFSI_EXE} PRIVATE SV_USE_SYMENGINE)
+endif()
 
 # extra MPI libraries only if there are not set to NOT_FOUND or other null
 if(SV_MPI_EXTRA_LIBRARY)
@@ -360,4 +428,3 @@ if(ENABLE_UNIT_TEST)
   add_test(NAME all_unit_tests COMMAND run_all_unit_tests)
 
 endif()
-

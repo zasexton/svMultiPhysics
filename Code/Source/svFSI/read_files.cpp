@@ -50,6 +50,10 @@
 #include <math.h>
 #include <sstream>
 #include <vector>
+// ODE system parsing and evaluation for reaction terms
+#if defined(SV_USE_SYMENGINE)
+#include "odes.h"
+#endif
 
 namespace read_files_ns {
 
@@ -212,6 +216,13 @@ void read_bc(Simulation* simulation, EquationParameters* eq_params, eqType& lEq,
   // Allocate traction
   auto& com_mod = simulation->com_mod;
   lBc.h.resize(com_mod.nsd);
+
+  // Assign species index (for multi-species heatF); -1 applies to all
+  if (bc_params->species_index.defined()) {
+    lBc.species_index = bc_params->species_index.value();
+  } else {
+    lBc.species_index = -1;
+  }
 
   // [NOTE] Direction vectors can only have three values.
   //
@@ -1311,6 +1322,61 @@ void read_domain(Simulation* simulation, EquationParameters* eq_params, eqType& 
         lEq.dmn[iDmn].prop[prop] = rtmp;
      }
 
+     // Attach a reaction ODE evaluator if provided via Add_ODE
+     // Only available when SV_USE_SYMENGINE is enabled
+     #if defined(SV_USE_SYMENGINE)
+     if (domain_params->add_ode_defined()) {
+       try {
+         // Parse constants string of the form "a:0.0,b:1.5"
+         std::unordered_map<std::string, double> constant_values;
+         const auto& ctext = domain_params->ode_constants_text();
+         if (!ctext.empty()) {
+           std::stringstream ss(ctext);
+           std::string token;
+           while (std::getline(ss, token, ',')) {
+             auto pos = token.find(':');
+             if (pos != std::string::npos) {
+               std::string key = token.substr(0, pos);
+               std::string val = token.substr(pos+1);
+               // trim spaces
+               key.erase(0, key.find_first_not_of(" \t"));
+               key.erase(key.find_last_not_of(" \t") + 1);
+               val.erase(0, val.find_first_not_of(" \t"));
+               val.erase(val.find_last_not_of(" \t") + 1);
+               try {
+                 constant_values[key] = std::stod(val);
+               } catch (...) {
+                 throw std::runtime_error("invalid constant value for '" + key + "'");
+               }
+             }
+           }
+         }
+
+         symbol_table_t symbol_table;
+         std::unordered_set<std::string> constants;
+         std::unordered_map<std::string, double> state_var_values;
+
+         // Build ODE definitions from the provided system string.
+         auto odes = build_ode_system(domain_params->ode_system_text(), constants, symbol_table,
+                                      state_var_values, constant_values);
+
+         // Create a numeric derivative evaluator; capture symbol table by value.
+         auto deriv = create_derivative_function(odes, symbol_table);
+         lEq.dmn[iDmn].has_reaction_rhs = true;
+         lEq.dmn[iDmn].reaction_rhs = deriv;
+
+         // Build Jacobian evaluator if possible and store it too.
+         auto state_vars = create_state_variable_symbols(state_var_values);
+         auto Jsym = compute_jacobian(odes, state_vars);
+         auto jacfun = create_jacobian_function(odes, Jsym, symbol_table);
+         lEq.dmn[iDmn].has_reaction_jac = true;
+         lEq.dmn[iDmn].reaction_jac = jacfun;
+       } catch (const std::exception& e) {
+         throw std::runtime_error(std::string("[read_domain] Failed to build Add_ODE: ") + e.what());
+       }
+     }
+     #endif
+
      // Set parameters for a cardiac electrophysiology model.
      if (lEq.dmn[iDmn].phys == EquationType::phys_CEP) {
         read_cep_domain(simulation, eq_params, domain_params, lEq.dmn[iDmn]);
@@ -1335,6 +1401,19 @@ void read_domain(Simulation* simulation, EquationParameters* eq_params, eqType& 
          (lEq.dmn[iDmn].phys == EquationType::phys_CMM && !com_mod.cmmInit)) {
        read_visc_model(simulation, eq_params, domain_params, lEq.dmn[iDmn]);
      }
+
+     // Multi-species diffusion parameters: diagonal and cross-diffusion
+     // Copy from DomainParameters if provided
+     if (!domain_params->species_diffusivity.value().empty()) {
+       const auto& sv = domain_params->species_diffusivity.value();
+       lEq.dmn[iDmn].species_diffusivity.resize(sv.size());
+       for (size_t k = 0; k < sv.size(); ++k) lEq.dmn[iDmn].species_diffusivity(static_cast<int>(k)) = sv[k];
+     }
+     if (!domain_params->diffusion_matrix.value().empty()) {
+       const auto& dm = domain_params->diffusion_matrix.value();
+       lEq.dmn[iDmn].diffusion_matrix_flat.resize(dm.size());
+       for (size_t k = 0; k < dm.size(); ++k) lEq.dmn[iDmn].diffusion_matrix_flat(static_cast<int>(k)) = dm[k];
+     }
   }
 }
 
@@ -1354,6 +1433,16 @@ void read_eq(Simulation* simulation, EquationParameters* eq_params, eqType& lEq)
   lEq.minItr = eq_params->min_iterations.value();
   lEq.maxItr = eq_params->max_iterations.value();
   lEq.tol = eq_params->tolerance.value();
+
+  // Override degrees-of-freedom for multi-species scalar transport (heatF)
+  if (lEq.phys == consts::EquationType::phys_heatF) {
+    if (eq_params->number_of_species.defined()) {
+      int m = eq_params->number_of_species.value();
+      if (m > 0) {
+        lEq.dof = m;
+      }
+    }
+  }
 
   // Initialize coupled BC.
   //
@@ -3160,4 +3249,3 @@ void set_equation_properties(Simulation* simulation, EquationParameters* eq_para
 }
 
 };
-
