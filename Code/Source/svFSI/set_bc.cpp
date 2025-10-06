@@ -1446,7 +1446,7 @@ void set_bc_neu_l(ComMod& com_mod, const CmMod& cm_mod, const bcType& lBc, const
     eq_assem::b_neu_folw_p(com_mod, lBc, lFa, hg, Dg);
 
   } else {
-    eq_assem::b_assem_neu_bc(com_mod, lFa, hg, Yg);
+    eq_assem::b_assem_neu_bc(com_mod, lFa, hg, Yg, lBc);
   }
 
   // Now treat Robin BC (stiffness and damping) here
@@ -1882,5 +1882,4 @@ void set_bc_undef_neu_l(ComMod& com_mod, const bcType& lBc, const faceType& lFa)
 }
 
 };
-
 

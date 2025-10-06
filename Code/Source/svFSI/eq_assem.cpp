@@ -55,7 +55,7 @@
 
 namespace eq_assem {
 
-void b_assem_neu_bc(ComMod& com_mod, const faceType& lFa, const Vector<double>& hg, const Array<double>& Yg) 
+void b_assem_neu_bc(ComMod& com_mod, const faceType& lFa, const Vector<double>& hg, const Array<double>& Yg, const bcType& lBc) 
 {
   #define n_debug_b_assem_neu_bc
   #ifdef debug_b_assem_neu_bc
@@ -131,8 +131,8 @@ void b_assem_neu_bc(ComMod& com_mod, const faceType& lFa, const Vector<double>& 
         break;
 
         case EquationType::phys_heatF:
-          heatf::b_heatf(com_mod, eNoN, w, N, y, h, nV, lR, lK);
-        break;
+          heatf::b_heatf(com_mod, eNoN, w, N, y, h, nV, lR, lK, lBc.species_index);
+          break;
 
         case EquationType::phys_lElas:
           l_elas::b_l_elas(com_mod, eNoN, w, N, h, nV, lR);
@@ -388,5 +388,4 @@ void global_eq_assem(ComMod& com_mod, CepMod& cep_mod, const mshType& lM, const 
 }
 
 };
-
 

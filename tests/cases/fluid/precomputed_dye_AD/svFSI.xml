@@ -4,7 +4,7 @@
 <GeneralSimulationParameters>
   <Continue_previous_simulation> 0 </Continue_previous_simulation>
   <Number_of_spatial_dimensions> 3 </Number_of_spatial_dimensions> 
-  <Number_of_time_steps> 1 </Number_of_time_steps> 
+  <Number_of_time_steps> 10 </Number_of_time_steps> 
   <Time_step_size> 0.01 </Time_step_size> 
   <Use_precomputed_solution> true </Use_precomputed_solution>
   <Precomputed_solution_file_path> precomputed_velocity.vtu </Precomputed_solution_file_path>
@@ -81,6 +81,10 @@
       <Value> 1.0 </Value>
    </Add_BC>
 
+   <Add_ODE>
+   	<ODE_system> dx0_dt = -(a*x0)/(b+x0) </ODE_system>
+   	<ODE_constants> a:10.0,b:1.0</ODE_constants>
+   </Add_ODE>
 </Add_equation>
 
 

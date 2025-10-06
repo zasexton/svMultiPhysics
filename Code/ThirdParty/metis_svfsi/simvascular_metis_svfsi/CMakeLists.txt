@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.8)
+cmake_minimum_required(VERSION 3.5)
 project(METIS_SVFSI)
 if (NOT METIS_SVFSI_LIBRARY_NAME)
   set(METIS_SVFSI_LIBRARY_NAME metis_svfsi)
