@@ -52,7 +52,7 @@ ODESolver::ODESolver() {
 /// \param system The ODE system to be solved.
 void ODESolver::set_ode_system(ODESystem system) {
     // [TODO] set the size of the system from the ode_system object
-    this->ode_system = system;
+    this->ode_system = std::move(system);
 }
 
 /// \brief Set the initial condition for the ODE system.
@@ -61,7 +61,7 @@ void ODESolver::set_initial_condition(const Vector<double>& initial_state) {
     //
     this->y0 = initial_state;
     this->y = initial_state;
-    this->ys.push_back(initial_state);
+    this->state_variables.push_back(initial_state);
     this->dydt_old.resize(initial_state.size());
     this->dydt.resize(initial_state.size());
     this->dydt_new.resize(initial_state.size());
@@ -164,13 +164,29 @@ Vector<double> ODESolver::get_state() {
 /// \brief Get the time points of the ODE solution.
 /// \return A vector containing the time points.
 Vector<double> ODESolver::get_times() {
-    return this->time_points;
+    Vector<double> times(this->time_points.size());
+    for (int i = 0; i < times.size(); ++i) {
+        times(i) = this->time_points[static_cast<size_t>(i)];
+    }
+    return times;
 }
 
 /// \brief Get the state variables of the ODE solution.
 /// \return An array containing the state variables.
 Array<double> ODESolver::get_states() {
-    return this->state_variables;
+    if (this->state_variables.size() == 0) {
+        return Array<double>();
+    }
+    int nvar = this->state_variables[0].size();
+    int nstep = static_cast<int>(this->state_variables.size());
+    Array<double> A(nvar, nstep);
+    for (int j = 0; j < nstep; ++j) {
+        const auto& v = this->state_variables[static_cast<size_t>(j)];
+        for (int i = 0; i < nvar; ++i) {
+            A(i,j) = v(i);
+        }
+    }
+    return A;
 }
 
 /// \brief Check the solver's status and parameters.

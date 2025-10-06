@@ -34,7 +34,7 @@
 #include <vector>
 #include <iostream>
 #include <limits>
-#include <stdexecpt>
+#include <stdexcept>
 #include <utility>
 
 #include "Vector.h"
@@ -116,6 +116,7 @@ public:
 protected:
     bool success; ///< Indicates if the solver was successful.
     int status; ///< Status of the solver.
+    ODESystem ode_system; ///< ODE system definition (RHS/Jacobian callbacks, metadata).
     Vector<double> dydt_old; ///< Derivative of the state at the previous time step.
     Vector<double> dydt; ///< Derivative of the state at the current time step.
     Vector<double> dydt_new; ///< Derivative of the state at the next time step.

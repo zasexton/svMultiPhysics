@@ -1,10 +1,10 @@
 #include "RungeKutta45.h"
 
 RungeKutta45::RungeKutta45(ODESystem ode_system) {
-    setODESystem(std::move(ode_system));
+    set_ode_system(std::move(ode_system));
 }
 
-void RungeKutta45::setInitialCondition(const Vector<double>& initial_state) {
+void RungeKutta45::set_initial_condition(const Vector<double>& initial_state) {
     this->y0 = initial_state;
     this->y = initial_state;
     this->state_variables.push_back(initial_state);
@@ -23,7 +23,7 @@ void RungeKutta45::setInitialCondition(const Vector<double>& initial_state) {
     this->scale.resize(this->y.size());
 }
 
-void RungeKutta45::setStepSize(double step_size) {
+void RungeKutta45::set_step_size(double step_size) {
     this->h = step_size;
 }
 

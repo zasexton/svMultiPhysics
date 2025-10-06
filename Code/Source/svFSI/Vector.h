@@ -32,6 +32,7 @@
 #define VECTOR_H 
 
 #include <algorithm>
+#include <cstring>
 #include <float.h>
 #include <iostream>
 #include <string>
@@ -640,4 +641,3 @@ class Vector
 };
 
 #endif
-

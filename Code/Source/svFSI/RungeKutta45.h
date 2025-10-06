@@ -12,10 +12,10 @@
 class RungeKutta45 : public ODESolver {
 public:
     explicit RungeKutta45(ODESystem ode_system);
-    void setInitialCondition(const Vector<double>& initial_state) override;
+    void set_initial_condition(const Vector<double>& initial_state) override;
     bool solve() override;
     bool step() override;
-    void setStepSize(double step_size) override;
+    void set_step_size(double step_size) override;
     //virtual ~RungeKuttaSolver45() {}
 protected:
     int order = 5;
