@@ -1194,6 +1194,9 @@ class EquationParameters : public ParameterLists
     Parameter<std::string> type;
     Parameter<bool> use_taylor_hood_type_basis;
 
+    // Multi-species transport support (heatF): number of species (dofs)
+    Parameter<int> number_of_species;
+
     // Sub-element parameters.
     //
     std::vector<BodyForceParameters*> body_forces;

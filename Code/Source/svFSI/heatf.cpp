@@ -415,18 +415,8 @@ void heatf_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
   dmsg << "Tx: " << Tx;
   dmsg << "kU: " << kU;
   dmsg << "kS: " << kS;
-  dmsg << "nTx: " << nTx<< std::endl;
+  // Per-species nTx is computed inside the loop above.
   #endif
-
-  if (utils::is_zero(nTx)) {
-    nTx = std::numeric_limits<double>::epsilon();
-  }
-
-  double udTx = u(0)*Tx(0) + u(1)*Tx(1) + u(2)*Tx(2);
-  double Tp = fabs(Td + udTx);
-  nu = nu + 0.5 * Tp / sqrt(nTx);
-  double tauM = ct(3) / sqrt((ct(0)/(dt*dt)) + ct(1)*kU + ct(2)*nu*nu*kS);
-  Tp = -tauM*(Td + udTx);
 
   for (int a = 0; a < eNoN; a++) {
     udNx(a) = u(0)*Nx(0,a) + u(1)*Nx(1,a) + u(2)*Nx(2,a);

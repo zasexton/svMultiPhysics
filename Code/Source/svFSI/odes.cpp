@@ -64,23 +64,54 @@ std::vector<ODE> build_ode_system(const std::string& ode_str, std::unordered_set
     std::string line;
     std::unordered_map<std::string, RCP<const Basic>> symbols_map;
     SymEngine::Symbol t("t");
+    // Utility for trimming whitespace (in place)
+    auto trim = [](std::string& s) {
+        s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
+        auto not_space = [](unsigned char ch){ return !std::isspace(ch); };
+        s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+        s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+    };
+
     // Extract state variables and parse ODEs
     while (std::getline(stream, line)) {
+        trim(line);
+        if (line.empty()) continue;                       // skip blank lines
+        if (line[0] == '#') continue;                     // skip comments
+
         std::istringstream line_stream(line);
         std::string name, eq, expr;
-        line_stream >> name >> eq;
+        if (!(line_stream >> name)) continue;             // nothing useful
+        if (!(line_stream >> eq)) continue;               // malformed line
         std::getline(line_stream, expr);
-        expr.erase(0, expr.find_first_not_of(" \t="));  // Remove leading spaces and '='
+        if (expr.empty()) {
+            throw std::runtime_error(std::string("Malformed ODE line (no expression): ") + line);
+        }
+        // Clean expression: trim leading spaces and '=' symbols
+        trim(expr);
+        while (!expr.empty() && (expr[0] == '=')) {
+            expr.erase(0, 1);
+            trim(expr);
+        }
+        if (expr.empty()) {
+            throw std::runtime_error(std::string("Malformed ODE line (empty rhs): ") + line);
+        }
 
-        // Replace all instances of '**' with '^' for compatibility with Exprtk
+        // Replace all instances of '**' with '^' for compatibility with ExprTK
         replaceAll(expr, "**", "^");
-
         // Remove semicolons from the expression
         expr.erase(std::remove(expr.begin(), expr.end(), ';'), expr.end());
 
-        std::string var_name = name.substr(1, name.find("_dt") - 1);  // Extract state variable name
-        state_variables.insert(var_name);
+        // Extract state variable name from pattern: d<var>_dt
+        size_t pos_dt = name.find("_dt");
+        if (name.size() < 4 || pos_dt == std::string::npos || name[0] != 'd' || pos_dt <= 1) {
+            throw std::runtime_error(std::string("Malformed ODE name, expected d<var>_dt: ") + name);
+        }
+        std::string var_name = name.substr(1, pos_dt - 1);
+        if (var_name.empty()) {
+            throw std::runtime_error(std::string("Empty state variable name in ODE: ") + line);
+        }
 
+        state_variables.insert(var_name);
         // Create symbolic variables
         symbols_map[var_name] = SymEngine::symbol(var_name);
 
@@ -157,14 +188,19 @@ std::function<void(const double, const Vector<double>&, Vector<double>&)> create
     }
 
     return [=](const double t, const Vector<double>& state, Vector<double>& derivatives) {
-        // Update state variables in the symbol table
-        for (size_t i = 0; i < state.size(); ++i) {
+        // Update state variables in the symbol table (bounded by available odes and state entries)
+        size_t n = std::min(state.size(), odes.size());
+        for (size_t i = 0; i < n; ++i) {
             symbol_table.get_variable(odes[i].state_variables[0])->ref() = state(i);
         }
 
         // Evaluate derivatives
         for (size_t i = 0; i < odes.size(); ++i) {
             derivatives(i) = expressions[i].value();
+        }
+        // Zero-pad any remaining derivative entries if state is larger than the ODE system
+        for (size_t i = odes.size(); i < derivatives.size(); ++i) {
+            derivatives(i) = 0.0;
         }
     };
 }
@@ -218,79 +254,37 @@ std::function<void(const double, const Vector<double>&, Array<double>&)> create_
     //std::cout << "Size of expressions vector: " << expressions.size() << std::endl;
 
     return [=](const double t, const Vector<double>& state, Array<double>& jacobian_values) {
-        // Verify the state size matches expected size
-        if (state.size() != odes.size()) {
-            std::cerr << "State size does not match the number of ODEs" << std::endl;
-            return;
-        }
+        // Initialize/resize Jacobian to the state dimension; fill with zeros
+        const size_t m = state.size();
+        jacobian_values.resize(m, m);
+        for (size_t i = 0; i < m; ++i) for (size_t j = 0; j < m; ++j) jacobian_values(i,j) = 0.0;
 
-        // Ensure jacobian_values is correctly initialized
-        //jacobian_values.resize(state.size(), std::vector<double>(state.size(), 0.0));
-        jacobian_values.resize(state.size(), state.size());
-        //std::cout << "jacobian_values initialized to size " << state.size() << "x" << state.size() << std::endl;
+        // Use the common dimension between state and ODE system
+        const size_t n = std::min(m, odes.size());
 
-        //std::cout << "Constants:" << std::endl;
-        for (const auto& constant : odes[0].constants) {
-            auto var = symbol_table.get_variable(constant);
-            if (var) {
-                //std::cout << constant << " = " << var->ref() << std::endl;
-            } else {
-                std::cerr << "Constant " << constant << " not found in symbol table" << std::endl;
-                return;
-            }
-        }
-
-        for (size_t k = 0; k < state.size(); ++k) {
+        // Update the symbol table for available state variables
+        for (size_t k = 0; k < n; ++k) {
             auto var = symbol_table.get_variable(odes[k].state_variables[0]);
-            symbol_table.get_variable(odes[k].state_variables[0])->ref() = state(k);
-            if (var) {
-                //var->ref() = state[k];
-                //std::cout << "Updating variable " << odes[k].state_variables[0] << " with value " << state[k] << std::endl;
-            } else {
-                std::cerr << "Variable " << odes[k].state_variables[0] << " not found in symbol table" << std::endl;
-                return;
+            if (!var) {
+                // Missing variable should not abort assembly; skip
+                continue;
             }
-
+            var->ref() = state(k);
         }
-        //std::cout << "Jacobian values:" << std::endl;
-        for (size_t i = 0; i < state.size(); ++i) {
-            for (size_t j = 0; j < state.size(); ++j) {
-                // Update the symbol table with the current state for each evaluation
-                /*
-                for (size_t k = 0; k < state.size(); ++k) {
-                    auto var = symbol_table.get_variable(odes[k].state_variables[0]);
-                    symbol_table.get_variable(odes[k].state_variables[0])->ref() = state[k];
-                    if (var) {
-                        //var->ref() = state[k];
-                        std::cout << "Updating variable " << odes[k].state_variables[0] << " with value " << state[k] << std::endl;
-                    } else {
-                        std::cerr << "Variable " << odes[k].state_variables[0] << " not found in symbol table" << std::endl;
-                        return;
-                    }
-                }
-                */
 
-                size_t idx = i * state.size() + j;
-                if (idx < expressions.size()) {
-                    if (!is_valid(expressions[idx])) {
-                        //std::cerr << "Expression at (" << i << ", " << j << ") is not valid." << std::endl;
-                        continue;
-                    }
+        // Fill the top-left n x n block of the Jacobian with evaluated expressions
+        for (size_t i = 0; i < n; ++i) {
+            for (size_t j = 0; j < n; ++j) {
+                size_t idx = i * odes.size() + j; // expressions are stored row-major for the ODE Jacobian
+                if (idx < expressions.size() && is_valid(expressions[idx])) {
                     try {
-                        double value = expressions[idx].value();
-                        //std::cout << "Evaluated expression at (" << i << ", " << j << "): " << value << std::endl;
-                        jacobian_values(i, j) = value;
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error evaluating expression at (" << i << ", " << j << "): " << e.what() << std::endl;
+                        jacobian_values(i, j) = expressions[idx].value();
+                    } catch (...) {
+                        // Leave entry as zero on evaluation failure
                     }
-                } else {
-                    std::cerr << "Index " << idx << " out of bounds for expressions." << std::endl;
                 }
             }
         }
-
-        // Output the final size of jacobian_values
-        //std::cout << "Jacobian values size: " << jacobian_values.size() << std::endl;
     };
 }
 

@@ -975,9 +975,17 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
         }
         nOut = nOut + nFn;
         outDof = outDof + eq.output[iOut].l * nFn;
-      } else { 
-        nOut = nOut + 1;
-        outDof = outDof + eq.output[iOut].l;
+      } else {
+        // For multi-species scalar transport (heatF), expand the scalar species field
+        // into 'm' separate scalar outputs.
+        if (eq.phys == EquationType::phys_heatF && oGrp == OutputType::outGrp_Y && eq.output[iOut].name != "Velocity") {
+          int m = eq.dof;
+          nOut += m;
+          outDof += m; // each species is a scalar
+        } else {
+          nOut = nOut + 1;
+          outDof = outDof + eq.output[iOut].l;
+        }
       }
 
       if (oGrp == OutputType::outGrp_J || oGrp == OutputType::outGrp_mises ||
@@ -1080,28 +1088,48 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
 
           case OutputType::outGrp_Y:
             if (eq.phys != EquationType::phys_heatF) {
+              for (int a = 0; a < msh.nNo; a++) {
+                int Ac = msh.gN(a);
+                for (int i = 0; i < l; i++) {
+                  d[iM].x(i + is, a) = lY(i + s, Ac);
+                }
+              }
+            } else {
+              if (eq.output[iOut].name == "Velocity") {
                 for (int a = 0; a < msh.nNo; a++) {
+                  int Ac = msh.gN(a);
+                  for (int i = 0; i < l; i++) {
+                    d[iM].x(i + is, a) = lY(i, Ac);
+                  }
+                }
+              } else {
+                // Multi-species scalar transport (heatF): write all species separately
+                // as <Name>_0, <Name>_1, ... fields.
+                int m = eq.dof;
+                if (m > 1) {
+                  // Reuse the output slot to expand into m scalar outputs
+                  cOut = cOut - 1;
+                  std::string baseName = eq.output[iOut].name;
+                  for (int ispec = 0; ispec < m; ++ispec) {
+                    int islot = outS[cOut];
+                    int ie = islot; // scalar field (length 1)
+                    outS[cOut+1] = ie + 1;
+                    outNames[cOut] = baseName + std::string("_") + std::to_string(ispec);
+                    for (int a = 0; a < msh.nNo; a++) {
+                      int Ac = msh.gN(a);
+                      d[iM].x(islot, a) = lY(eq.s + ispec, Ac);
+                    }
+                    cOut = cOut + 1;
+                  }
+                } else {
+                  for (int a = 0; a < msh.nNo; a++) {
                     int Ac = msh.gN(a);
                     for (int i = 0; i < l; i++) {
-                        d[iM].x(i + is, a) = lY(i + s, Ac);
+                      d[iM].x(i + is, a) = lY(i + s, Ac);
                     }
+                  }
                 }
-            } else {
-                if (eq.output[iOut].name == "Velocity") {
-                    for (int a = 0; a < msh.nNo; a++) {
-                        int Ac = msh.gN(a);
-                        for (int i = 0; i < l; i++) {
-                            d[iM].x(i + is, a) = lY(i, Ac);
-                        }
-                    }
-                } else {
-                    for (int a = 0; a < msh.nNo; a++) {
-                        int Ac = msh.gN(a);
-                        for (int i = 0; i < l; i++) {
-                            d[iM].x(i + is, a) = lY(i + s, Ac);
-                        }
-                    }
-                }
+              }
             }
           break;
 
@@ -1507,4 +1535,3 @@ void write_vtus(Simulation* simulation, const Array<double>& lA, const Array<dou
 }
 
 };
-
