@@ -55,6 +55,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <functional>
 
 class LinearAlgebra;
 
@@ -214,6 +215,10 @@ class bcType
 
     // Neu: RCR
     rcrType RCR;
+
+    // For multi-species transport (heatF): apply this BC to a specific species index.
+    // -1 means apply to all species.
+    int species_index = -1;
 };
 
 /// @brief Class storing data for B-Splines.
@@ -440,6 +445,25 @@ class dmnType
 
     // Viscosity model for fluids
     viscModelType visc;
+
+    // Optional reaction term defined by an ODE RHS. When defined, this
+    // function evaluates f(t, y, dydt) where y is a local state vector
+    // (typically of size 1 for a scalar reaction term) and returns the
+    // time derivative in dydt. Used by scalar advection-diffusion as a
+    // source term s += f(y).
+    bool has_reaction_rhs = false;
+    std::function<void(const double, const Vector<double>&, Vector<double>&)> reaction_rhs;
+
+    // Optional Jacobian function for the reaction ODE: fills a local
+    // Jacobian matrix J where J(0,0) = dR/dT for single-scalar systems.
+    bool has_reaction_jac = false;
+    std::function<void(const double, const Vector<double>&, Array<double>&)> reaction_jac;
+
+    // Multi-species transport diffusion parameters
+    // Diagonal per-species diffusion coefficients (size m), optional
+    Vector<double> species_diffusivity;
+    // Full cross-diffusion flattened matrix (row-major size m*m), optional
+    Vector<double> diffusion_matrix_flat;
 };
 
 /// @brief Mesh adjacency (neighboring element for each element)
@@ -1602,4 +1626,3 @@ class ComMod {
 };
 
 #endif
-

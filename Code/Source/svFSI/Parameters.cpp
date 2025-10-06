@@ -400,6 +400,8 @@ BoundaryConditionParameters::BoundaryConditionParameters()
 
   set_parameter("Weakly_applied", false, !required, weakly_applied);
   set_parameter("Zero_out_perimeter", false, !required, zero_out_perimeter);
+  // Multi-species transport: optionally apply BC to specific species (0-based). -1 applies to all.
+  set_parameter("Species_index", -1, !required, species_index);
 }
 
 void BoundaryConditionParameters::print_parameters()
@@ -1256,6 +1258,8 @@ DomainParameters::DomainParameters()
 
   set_parameter("Absolute_tolerance", 1e-6, !required, absolute_tolerance);
   set_parameter("Anisotropic_conductivity", {}, !required, anisotropic_conductivity);
+  set_parameter("Species_diffusivity", {}, !required, species_diffusivity);
+  set_parameter("Diffusion_matrix", {}, !required, diffusion_matrix);
   set_parameter("Backflow_stabilization_coefficient", 0.2, !required, backflow_stabilization_coefficient);
 
   set_parameter("Conductivity", 0.0, !required, conductivity);
@@ -1357,6 +1361,26 @@ void DomainParameters::set_values(tinyxml2::XMLElement* domain_elem)
     } else if (name == ViscosityParameters::xml_element_name_) {
       viscosity.set_values(item);
   
+    } else if (name == std::string("Add_ODE")) {
+      // Parse a reaction ODE sub-element with children:
+      //   <ODE_system> dx0_dt = ... </ODE_system>
+      //   <ODE_constants> a:0.0,b:1.5 </ODE_constants>
+      auto child = item->FirstChildElement();
+      while (child != nullptr) {
+        auto cname = std::string(child->Value());
+        if (cname == std::string("ODE_system")) {
+          if (child->GetText() != nullptr) {
+            add_ode_system_ = child->GetText();
+          }
+        } else if (cname == std::string("ODE_constants")) {
+          if (child->GetText() != nullptr) {
+            add_ode_constants_ = child->GetText();
+          }
+        }
+        child = child->NextSiblingElement();
+      }
+      add_ode_defined_ = (!add_ode_system_.empty());
+
     } else if (item->GetText() != nullptr) {
       auto value = item->GetText();
       try {
@@ -1666,6 +1690,8 @@ EquationParameters::EquationParameters()
 
   set_parameter("Tolerance", 0.5, !required, tolerance);
   set_parameter("Use_taylor_hood_type_basis", false, !required, use_taylor_hood_type_basis);
+  // Multi-species transport support (heatF): number of species (dofs)
+  set_parameter("Number_of_species", 1, !required, number_of_species);
 }
 
 void EquationParameters::print_parameters()
@@ -1770,6 +1796,27 @@ void EquationParameters::set_values(tinyxml2::XMLElement* eq_elem)
 
     } else if (name == ViscosityParameters::xml_element_name_) {
       default_domain->viscosity.set_values(item);
+
+    // Support arbitrary ODE additions under Add_equation as a peer element.
+    } else if (name == std::string("Add_ODE")) {
+      // Parse a reaction ODE sub-element with children:
+      //   <ODE_system> dx0_dt = ... </ODE_system>
+      //   <ODE_constants> a:0.0,b:1.5 </ODE_constants>
+      auto child = item->FirstChildElement();
+      while (child != nullptr) {
+        auto cname = std::string(child->Value());
+        if (cname == std::string("ODE_system")) {
+          if (child->GetText() != nullptr) {
+            default_domain->add_ode_system_ = child->GetText();
+          }
+        } else if (cname == std::string("ODE_constants")) {
+          if (child->GetText() != nullptr) {
+            default_domain->add_ode_constants_ = child->GetText();
+          }
+        }
+        child = child->NextSiblingElement();
+      }
+      default_domain->add_ode_defined_ = (!default_domain->add_ode_system_.empty());
 
     } else if (name == ECGLeadsParameters::xml_element_name_) {
       ecg_leads.set_values(item);
@@ -2382,4 +2429,3 @@ void LinearSolverParameters::set_values(tinyxml2::XMLElement* xml_elem)
   }
 
 }
-
