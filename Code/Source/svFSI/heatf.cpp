@@ -215,6 +215,11 @@ void heatf_2d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
     }
   }
 
+  // Add constant source term s (if any):  Td -= s
+  if (!utils::is_zero(s_base)) {
+    for (int is = 0; is < m; ++is) Td(is) -= s_base;
+  }
+
   // Add reaction term s += R(Tg) -> Td -= R(Tg)
   Array<double> kr_2d(m,m);
   kr_2d = 0.0;
@@ -364,6 +369,11 @@ void heatf_3d(ComMod& com_mod, const int eNoN, const double w, const Vector<doub
       Tx(1,is) = Tx(1,is) + Nx(1,a)*yl(sidx,a);
       Tx(2,is) = Tx(2,is) + Nx(2,a)*yl(sidx,a);
     }
+  }
+
+  // Add constant source term s (if any):  Td -= s
+  if (!utils::is_zero(s_base)) {
+    for (int is = 0; is < m; ++is) Td(is) -= s_base;
   }
 
   // Add reaction term s += R(Tg) -> Td -= R(Tg)

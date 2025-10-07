@@ -1352,23 +1352,22 @@ void read_domain(Simulation* simulation, EquationParameters* eq_params, eqType& 
            }
          }
 
-         symbol_table_t symbol_table;
          std::unordered_set<std::string> constants;
          std::unordered_map<std::string, double> state_var_values;
 
          // Build ODE definitions from the provided system string.
-         auto odes = build_ode_system(domain_params->ode_system_text(), constants, symbol_table,
-                                      state_var_values, constant_values);
+         auto odes = build_ode_system(domain_params->ode_system_text(), constants,
+                                      state_var_values);
 
          // Create a numeric derivative evaluator; capture symbol table by value.
-         auto deriv = create_derivative_function(odes, symbol_table);
+         auto deriv = create_derivative_function(odes, constant_values);
          lEq.dmn[iDmn].has_reaction_rhs = true;
          lEq.dmn[iDmn].reaction_rhs = deriv;
 
          // Build Jacobian evaluator if possible and store it too.
          auto state_vars = create_state_variable_symbols(state_var_values);
          auto Jsym = compute_jacobian(odes, state_vars);
-         auto jacfun = create_jacobian_function(odes, Jsym, symbol_table);
+         auto jacfun = create_jacobian_function(odes, Jsym, constant_values);
          lEq.dmn[iDmn].has_reaction_jac = true;
          lEq.dmn[iDmn].reaction_jac = jacfun;
        } catch (const std::exception& e) {
@@ -1558,6 +1557,33 @@ void read_eq(Simulation* simulation, EquationParameters* eq_params, eqType& lEq)
     lEq.bc[iBc].iFa = iFa;
 
     read_bc(simulation, eq_params, lEq, bc_params, lEq.bc[iBc]);
+  }
+
+  // For multi-species scalar transport (heatF): if Number_of_species is not
+  // explicitly provided, infer species count from BCs and domain diffusion
+  // parameters. This ensures output expansion and indexing are consistent.
+  if (lEq.phys == EquationType::phys_heatF) {
+    bool num_species_explicit = eq_params->number_of_species.defined();
+    if (!num_species_explicit) {
+      int inferred_m = lEq.dof; // default (usually 1)
+      // Infer from BC species_index
+      for (const auto& bc : lEq.bc) {
+        if (bc.species_index >= 0) inferred_m = std::max(inferred_m, bc.species_index + 1);
+      }
+      // Infer from domain diffusion parameters if provided
+      for (const auto& dmn : lEq.dmn) {
+        if (dmn.species_diffusivity.size() > 0) {
+          inferred_m = std::max(inferred_m, dmn.species_diffusivity.size());
+        }
+        if (dmn.diffusion_matrix_flat.size() > 0) {
+          // Expect a square m x m matrix
+          int sz = dmn.diffusion_matrix_flat.size();
+          int m = static_cast<int>(std::round(std::sqrt(static_cast<double>(sz))));
+          if (m * m == sz) inferred_m = std::max(inferred_m, m);
+        }
+      }
+      lEq.dof = inferred_m;
+    }
   }
 
   // Initialize cplBC for RCR-type BC

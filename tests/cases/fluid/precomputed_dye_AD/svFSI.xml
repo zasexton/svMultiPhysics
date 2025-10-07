@@ -78,12 +78,23 @@
    <Add_BC name="lumen_inlet" >
       <Type> Dirichlet </Type>
       <Time_dependence> Steady </Time_dependence>
+      <Species_index> 0 </Species_index>
       <Value> 1.0 </Value>
    </Add_BC>
 
+   <Add_BC name="lumen_inlet">
+      <Type> Dirichlet </Type>
+      <Time_dependence> Steady </Time_dependence>
+      <Species_index> 1 </Species_index>
+      <Value> 0.0 </Value>
+   </Add_BC>
+
    <Add_ODE>
-   	<ODE_system> dx0_dt = -(a*x0)/(b+x0) </ODE_system>
-   	<ODE_constants> a:10.0,b:1.0</ODE_constants>
+   	<ODE_system> 
+        dx0_dt = -k*x0
+        dx1_dt = kx0 
+        </ODE_system>
+   	<ODE_constants> k:0.1</ODE_constants>
    </Add_ODE>
 </Add_equation>
 

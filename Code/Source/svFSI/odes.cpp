@@ -1,4 +1,5 @@
 #include "odes.h"
+#include <algorithm>
 
 void replaceAll(std::string& str, const std::string& from, const std::string& to) {
     if (from.empty())
@@ -54,10 +55,9 @@ void identify_constants(ODE& ode, const std::unordered_set<std::string>& state_v
     }
 }
 
-std::vector<ODE> build_ode_system(const std::string& ode_str, std::unordered_set<std::string>& constants,
-                                  symbol_table_t& symbol_table,
-                                  std::unordered_map<std::string, double>& state_var_values,
-                                  std::unordered_map<std::string, double>& constant_values) {
+std::vector<ODE> build_ode_system(const std::string& ode_str,
+                                  std::unordered_set<std::string>& constants,
+                                  std::unordered_map<std::string, double>& state_var_values) {
     std::vector<ODE> odes;
     std::unordered_set<std::string> state_variables;
     std::istringstream stream(ode_str);
@@ -150,26 +150,9 @@ std::vector<ODE> build_ode_system(const std::string& ode_str, std::unordered_set
         identify_constants(ode, state_variables, constants);
     }
 
-    // Initialize ODE variables with initial values and add them to the symbol table
+    // Initialize ODE variables with initial values
     for (const auto& var_name : state_variables) {
         state_var_values[var_name] = 0.0;  // Initial value can be set later
-        symbol_table.add_variable(var_name, state_var_values[var_name]);
-    }
-
-    for (auto& ode : odes) {
-        for (const auto& var_name : ode.state_variables) {
-            ode.value = state_var_values[var_name];
-        }
-    }
-
-    // Initialize constants with provided values and add them to the symbol table
-    for (const auto& constant : constants) {
-        auto it = constant_values.find(constant);
-        if (it != constant_values.end()) {
-            symbol_table.add_constant(constant, it->second);
-        } else {
-            symbol_table.add_constant(constant, 0.0);  // Default to 0.0 if not provided
-        }
     }
 
     return odes;
@@ -177,31 +160,49 @@ std::vector<ODE> build_ode_system(const std::string& ode_str, std::unordered_set
 
 std::function<void(const double, const Vector<double>&, Vector<double>&)> create_derivative_function(
         std::vector<ODE>& odes,
-        symbol_table_t& symbol_table
+        const std::unordered_map<std::string,double>& constant_values
 ) {
-    std::vector<expression_t> expressions(odes.size());
-    parser_t parser;
+    // Own storage for variables to ensure lifetime matches functor
+    auto var_names = std::vector<std::string>(odes.size());
+    for (size_t i = 0; i < odes.size(); ++i) var_names[i] = odes[i].state_variables[0];
 
-    for (size_t i = 0; i < odes.size(); ++i) {
-        expressions[i].register_symbol_table(symbol_table);
-        parser.compile(odes[i].expression_str, expressions[i]);
+    auto var_values = std::make_shared<std::vector<double>>(odes.size(), 0.0);
+    auto time_value = std::make_shared<double>(0.0);
+
+    // Local symbol table that binds variables to our owned storage
+    auto symtab_ptr = std::make_shared<symbol_table_t>();
+    for (size_t i = 0; i < var_names.size(); ++i) {
+        symtab_ptr->add_variable(var_names[i], (*var_values)[i]);
+    }
+    symtab_ptr->add_variable("t", *time_value);
+    for (const auto& kv : constant_values) {
+        symtab_ptr->add_constant(kv.first, kv.second);
     }
 
-    return [=](const double t, const Vector<double>& state, Vector<double>& derivatives) {
-        // Update state variables in the symbol table (bounded by available odes and state entries)
-        size_t n = std::min(state.size(), odes.size());
-        for (size_t i = 0; i < n; ++i) {
-            symbol_table.get_variable(odes[i].state_variables[0])->ref() = state(i);
+    // Compile expressions against the local symbol table
+    auto expressions = std::make_shared<std::vector<expression_t>>(odes.size());
+    parser_t parser;
+    for (size_t i = 0; i < odes.size(); ++i) {
+        (*expressions)[i].register_symbol_table(*symtab_ptr);
+        if (!parser.compile(odes[i].expression_str, (*expressions)[i])) {
+            // Leave expression as zero if compilation fails
+            // std::cerr << "ExprTK compile error: " << parser.error() << " in expression: " << odes[i].expression_str << std::endl;
         }
+    }
 
-        // Evaluate derivatives
+    return [var_values, time_value, expressions, symtab_ptr, var_names, odes](const double t, const Vector<double>& state, Vector<double>& derivatives) {
+        (void)var_names; // unused but kept for clarity
+        const size_t n = std::min(static_cast<size_t>(state.size()), odes.size());
+
+        // Update time and state variables
+        *time_value = t;
+        for (size_t i = 0; i < n; ++i) (*var_values)[i] = state(i);
+
+        // Evaluate derivatives (zero for out-of-range entries)
         for (size_t i = 0; i < odes.size(); ++i) {
-            derivatives(i) = expressions[i].value();
+            derivatives(i) = (*expressions)[i].value();
         }
-        // Zero-pad any remaining derivative entries if state is larger than the ODE system
-        for (size_t i = odes.size(); i < derivatives.size(); ++i) {
-            derivatives(i) = 0.0;
-        }
+        for (size_t i = odes.size(); i < derivatives.size(); ++i) derivatives(i) = 0.0;
     };
 }
 
@@ -221,39 +222,29 @@ std::vector<std::string> extract_symbolic_expressions(const DenseMatrix& J) {
 std::function<void(const double, const Vector<double>&, Array<double>&)> create_jacobian_function(
         std::vector<ODE>& odes,
         const DenseMatrix& J,
-        symbol_table_t &symbol_table) {
+        const std::unordered_map<std::string,double>& constant_values) {
 
     std::vector<std::string> str_expressions = extract_symbolic_expressions(J);
-    //std::cout << "Extracted expressions:" << std::endl;
-    for (const auto& expr : str_expressions) {
-        std::cout << expr << std::endl;
-    }
-    //std::cout << "Number of variables and constants: " << symbol_table.variable_count() << std::endl;
-    //std::cout << "Get initial values:" << std::endl;
-    for (const auto& var_name : odes[0].state_variables) {
-        //std::cout << var_name << " = " << symbol_table.get_variable(var_name)->ref() << std::endl;
-    }
 
-    std::vector<expression_t> expressions(str_expressions.size());
+    // Local owned storage for variables and time
+    auto var_names = std::vector<std::string>(odes.size());
+    for (size_t i = 0; i < odes.size(); ++i) var_names[i] = odes[i].state_variables[0];
+    auto var_values = std::make_shared<std::vector<double>>(odes.size(), 0.0);
+    auto time_value = std::make_shared<double>(0.0);
+    auto symtab_ptr = std::make_shared<symbol_table_t>();
+    for (size_t i = 0; i < var_names.size(); ++i) symtab_ptr->add_variable(var_names[i], (*var_values)[i]);
+    symtab_ptr->add_variable("t", *time_value);
+    for (const auto& kv : constant_values) symtab_ptr->add_constant(kv.first, kv.second);
+
+    // Compile all Jacobian entry expressions
+    auto expressions = std::make_shared<std::vector<expression_t>>(str_expressions.size());
     parser_t parser;
-
     for (size_t i = 0; i < str_expressions.size(); ++i) {
-        expressions[i].register_symbol_table(symbol_table);
-        if (!parser.compile(str_expressions[i], expressions[i])) {
-            std::cerr << "Error: " << parser.error() << " in expression: " << str_expressions[i] << std::endl;
-            //expressions[i].register_symbol_table(nullptr); // Ensure it is in a safe state
-        } else {
-            //std::cout << "Compiled expression: " << str_expressions[i] << std::endl;
-
-            if (!is_valid(expressions[i])) {
-                std::cerr << "Expression is not valid after compilation: " << str_expressions[i] << std::endl;
-            }
-        }
+        (*expressions)[i].register_symbol_table(*symtab_ptr);
+        parser.compile(str_expressions[i], (*expressions)[i]);
     }
 
-    //std::cout << "Size of expressions vector: " << expressions.size() << std::endl;
-
-    return [=](const double t, const Vector<double>& state, Array<double>& jacobian_values) {
+    return [var_values, time_value, expressions, symtab_ptr, var_names, odes](const double t, const Vector<double>& state, Array<double>& jacobian_values) {
         // Initialize/resize Jacobian to the state dimension; fill with zeros
         const size_t m = state.size();
         jacobian_values.resize(m, m);
@@ -262,27 +253,15 @@ std::function<void(const double, const Vector<double>&, Array<double>&)> create_
         // Use the common dimension between state and ODE system
         const size_t n = std::min(m, odes.size());
 
-        // Update the symbol table for available state variables
-        for (size_t k = 0; k < n; ++k) {
-            auto var = symbol_table.get_variable(odes[k].state_variables[0]);
-            if (!var) {
-                // Missing variable should not abort assembly; skip
-                continue;
-            }
-            var->ref() = state(k);
-        }
+        // Update time and state variables
+        *time_value = t;
+        for (size_t k = 0; k < n; ++k) (*var_values)[k] = state(k);
 
         // Fill the top-left n x n block of the Jacobian with evaluated expressions
         for (size_t i = 0; i < n; ++i) {
             for (size_t j = 0; j < n; ++j) {
                 size_t idx = i * odes.size() + j; // expressions are stored row-major for the ODE Jacobian
-                if (idx < expressions.size() && is_valid(expressions[idx])) {
-                    try {
-                        jacobian_values(i, j) = expressions[idx].value();
-                    } catch (...) {
-                        // Leave entry as zero on evaluation failure
-                    }
-                }
+                if (idx < expressions->size()) jacobian_values(i, j) = (*expressions)[idx].value();
             }
         }
     };

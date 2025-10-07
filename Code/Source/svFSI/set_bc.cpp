@@ -850,6 +850,12 @@ void set_bc_dir(ComMod& com_mod, Array<double>& lA, Array<double>& lY, Array<dou
       if (eq.dof == nsd+1) {
         e = e - 1;
       }
+      // For multi-species scalar transport (heatF), if a specific species index
+      // is provided on the BC, restrict strong Dirichlet to that single species.
+      if (eq.phys == EquationType::phys_heatF && bc.species_index >= 0) {
+        s = eq.s + bc.species_index;
+        e = s;
+      }
       #ifdef set_bc_dir
       dmsg << ">> s: " << s;
       dmsg << ">> e: " << e;
@@ -1047,16 +1053,18 @@ void set_bc_dir_l(ComMod& com_mod, const bcType& lBc, const faceType& lFa, Array
 
       for (int i = 0; i < lA.nrows(); i++) {
         double nV = lFa.nV(i,a);
-        lA(i,a) = dirA * lBc.gx(a) * nV;
-        lY(i,a) = dirY * lBc.gx(a) * nV;
+        double scale = (lBc.gx.size() > 0 ? lBc.gx(a) : 1.0);
+        lA(i,a) = dirA * scale * nV;
+        lY(i,a) = dirY * scale * nV;
       }
     }
 
   } else {
     for (int a = 0; a < lFa.nNo; a++) {
       for (int i = 0; i < lDof; i++) {
-        lA(i,a) = dirA*lBc.gx(a);
-        lY(i,a) = dirY*lBc.gx(a);
+        double scale = (lBc.gx.size() > 0 ? lBc.gx(a) : 1.0);
+        lA(i,a) = dirA*scale;
+        lY(i,a) = dirY*scale;
       }
     }
   }
@@ -1882,4 +1890,3 @@ void set_bc_undef_neu_l(ComMod& com_mod, const bcType& lBc, const faceType& lFa)
 }
 
 };
-

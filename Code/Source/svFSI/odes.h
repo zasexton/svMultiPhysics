@@ -69,21 +69,27 @@ std::vector<RCP<const SymEngine::Symbol>> create_state_variable_symbols(const st
 void identify_constants(ODE& ode, const std::unordered_set<std::string>& state_variables,
                         std::unordered_set<std::string>& constants);
 
-std::vector<ODE> build_ode_system(const std::string& ode_str, std::unordered_set<std::string>& constants,
-                                  symbol_table_t& symbol_table,
-                                  std::unordered_map<std::string, double>& state_var_values,
-                                  std::unordered_map<std::string, double>& constant_values);
+// Parse an ODE system text into a list of ODE entries and collect
+// referenced state variables and constants. Initial values for state
+// variables are returned in state_var_values (initialized to 0.0).
+std::vector<ODE> build_ode_system(const std::string& ode_str,
+                                  std::unordered_set<std::string>& constants,
+                                  std::unordered_map<std::string, double>& state_var_values);
 
+// Create a numeric RHS evaluator: takes time and state and fills derivatives.
+// constant_values supplies named constants used in the ODE expressions.
 std::function<void(const double, const Vector<double>&, Vector<double>&)> create_derivative_function(
         std::vector<ODE>& odes,
-        symbol_table_t& symbol_table);
+        const std::unordered_map<std::string,double>& constant_values);
 
 std::vector<std::string> extract_symbolic_expressions(const DenseMatrix& J);
 
+// Create a numeric Jacobian evaluator from the symbolic matrix J.
+// constant_values supplies named constants used in the ODE expressions.
 std::function<void(const double, const Vector<double>&, Array<double>&)> create_jacobian_function(
         std::vector<ODE>& odes,
         const DenseMatrix& J,
-        symbol_table_t &symbol_table);
+        const std::unordered_map<std::string,double>& constant_values);
 
 void getEigenValues(ODESystem& ode_system);
 
