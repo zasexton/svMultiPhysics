@@ -188,6 +188,7 @@ set(CSRCS
   mat_fun.h mat_fun.cpp
   mat_models.h mat_models.cpp
   mesh.h mesh.cpp
+  Mesh.h Mesh.cpp
   nn.h nn.cpp
   output.h output.cpp
   load_msh.h load_msh.cpp
@@ -372,4 +373,3 @@ if(ENABLE_UNIT_TEST)
   add_test(NAME all_unit_tests COMMAND run_all_unit_tests)
 
 endif()
-
