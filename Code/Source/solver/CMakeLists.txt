@@ -188,13 +188,13 @@ set(CSRCS
   mat_fun.h mat_fun.cpp
   mat_models.h mat_models.cpp
   mesh.h mesh.cpp
-  Mesh.h Mesh.cpp
-  DistributedMesh.h
-  InterfaceMesh.h
-  MeshFieldDescriptor.h
-  MeshObserver.h
-  MeshOrientation.h
-  GeometryCache.h
+  Mesh/Mesh.h Mesh/Mesh.cpp
+  Mesh/DistributedMesh.h
+  Mesh/InterfaceMesh.h
+  Mesh/MeshFieldDescriptor.h
+  Mesh/MeshObserver.h
+  Mesh/MeshOrientation.h
+  Mesh/GeometryCache.h
   nn.h nn.cpp
   output.h output.cpp
   load_msh.h load_msh.cpp
