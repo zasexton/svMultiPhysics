@@ -192,8 +192,13 @@ set(CSRCS
   Mesh/Core/MeshTypes.h
   Mesh/Core/MeshBase.h
   Mesh/Topology/CellShape.h Mesh/Topology/CellShape.cpp
+  Mesh/Topology/MeshTopology.h Mesh/Topology/MeshTopology.cpp
   Mesh/Geometry/MeshGeometry.h Mesh/Geometry/MeshGeometry.cpp
   Mesh/Geometry/MeshQuality.h Mesh/Geometry/MeshQuality.cpp
+  Mesh/Fields/MeshFields.h
+  Mesh/Labels/MeshLabels.h
+  Mesh/Search/MeshSearch.h
+  Mesh/Validation/MeshValidation.h
   Mesh/DistributedMesh.h
   Mesh/InterfaceMesh.h
   Mesh/MeshFieldDescriptor.h
