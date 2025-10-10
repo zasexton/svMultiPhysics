@@ -199,11 +199,13 @@ set(CSRCS
   Mesh/Labels/MeshLabels.h
   Mesh/Search/MeshSearch.h
   Mesh/Validation/MeshValidation.h
+  Mesh/Builders/MeshBuilders.h
   Mesh/DistributedMesh.h
   Mesh/InterfaceMesh.h
   Mesh/MeshFieldDescriptor.h
   Mesh/MeshObserver.h
   Mesh/MeshOrientation.h
+  Mesh/IO/MeshIO.h
   Mesh/IO/VTKReader.h Mesh/IO/VTKReader.cpp
   Mesh/IO/VTKWriter.h Mesh/IO/VTKWriter.cpp
   nn.h nn.cpp
