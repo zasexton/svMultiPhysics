@@ -43,6 +43,9 @@
 #include <utility>
 #include <vector>
 
+#include "MeshObserver.h"
+#include "MeshFieldDescriptor.h"
+
 namespace svmp {
 
 // ------------------------
@@ -86,23 +89,23 @@ inline constexpr size_t bytes_per(FieldScalarType t) noexcept {
 // Cell shape metadata
 // --------------------
 struct CellShape {
-  int vtk_type_id = -1;       // VTK cell type id if applicable
   CellFamily family = CellFamily::Polygon;
   int num_corners = 0;        // number of corner nodes (for poly: >= 3)
   int order = 1;              // geometric/approximation order
   bool is_mixed_order = false;
 };
 
-// Minimal registry for cell shapes, extensible to cover all VTK types
+// Format-agnostic cell shape registry
+// IO modules can register mappings between their format's cell type IDs and CellShape
 class CellShapeRegistry {
 public:
-  static void register_shape(int vtk_id, const CellShape& shape);
-  static bool has(int vtk_id);
-  static CellShape get(int vtk_id);
-  static void register_default_vtk_core(); // Tri3/Quad4/Tet4/Hex8 minimal set
+  static void register_shape(const std::string& format, int type_id, const CellShape& shape);
+  static bool has(const std::string& format, int type_id);
+  static CellShape get(const std::string& format, int type_id);
+  static void clear_format(const std::string& format);
 
 private:
-  static std::unordered_map<int, CellShape>& map_();
+  static std::unordered_map<std::string, std::unordered_map<int, CellShape>>& map_();
 };
 
 // ------------------
@@ -205,6 +208,8 @@ public:
   // Attachment system (fields on entities)
   FieldHandle attach_field(EntityKind kind, const std::string& name, FieldScalarType type,
                            size_t components, size_t custom_bytes_per_component = 0);
+  FieldHandle attach_field_with_descriptor(EntityKind kind, const std::string& name, FieldScalarType type,
+                           const FieldDescriptor& descriptor);
   bool has_field(EntityKind kind, const std::string& name) const;
   void remove_field(const FieldHandle& h);
   void* field_data(const FieldHandle& h);
@@ -235,7 +240,7 @@ public:
   void validate_topology() const; // duplicate nodes, degenerate cells, inverted elements
   void validate_geometry() const; // face orientation consistency, normals
   void report_statistics() const; // mesh quality summary
-  void write_debug_vtk(const std::string& prefix) const;
+  void write_debug(const std::string& prefix, const std::string& format = "vtu") const;
 
   // ---- Global ID management (parallel-friendly but not MPI-dependent)
   index_t global_to_local_cell(gid_t gid) const;
@@ -320,12 +325,7 @@ public:
     return submesh;
   }
 
-  // ---- Advanced geometry & mapping
-  std::array<real_t,3> evaluate_map(index_t cell, const std::array<real_t,3>& xi, Configuration cfg = Configuration::Reference) const;
-  std::array<std::array<real_t,3>,3> jacobian(index_t cell, const std::array<real_t,3>& xi, Configuration cfg = Configuration::Reference) const;
-  real_t detJ(index_t cell, const std::array<real_t,3>& xi, Configuration cfg = Configuration::Reference) const;
-  std::array<std::array<real_t,3>,3> invJ(index_t cell, const std::array<real_t,3>& xi, Configuration cfg = Configuration::Reference) const;
-
+  // ---- Geometry queries
   std::array<real_t,3> face_normal(index_t f, Configuration cfg = Configuration::Reference) const;
   std::array<real_t,3> face_center(index_t f, Configuration cfg = Configuration::Reference) const;
   real_t face_area(index_t f, Configuration cfg = Configuration::Reference) const;
@@ -383,6 +383,10 @@ public:
   // ---- Memory management
   void shrink_to_fit();
   size_t memory_usage_bytes() const;
+
+  // ---- Event system for cache invalidation and observers
+  MeshEventBus& event_bus() { return event_bus_; }
+  const MeshEventBus& event_bus() const { return event_bus_; }
 
   // ---- Builder utilities
   static MeshBase build_cartesian(int nx, int ny, int nz, const BoundingBox& domain);
@@ -516,6 +520,12 @@ private:
   // IO registry
   static std::unordered_map<std::string, LoadFn>& readers_();
   static std::unordered_map<std::string, SaveFn>& writers_();
+
+  // Event bus for observer pattern
+  mutable MeshEventBus event_bus_;
+
+  // Field descriptor storage
+  std::unordered_map<uint32_t, FieldDescriptor> field_descriptors_;
 };
 
 // -------------------------------

@@ -29,6 +29,7 @@
  */
 
 #include "Mesh.h"
+#include "SpatialHashing.h"
 
 #include <algorithm>
 #include <cmath>
@@ -44,65 +45,36 @@ namespace svmp {
 // CellShapeRegistry implementation
 // ========================
 
-std::unordered_map<int, CellShape>& CellShapeRegistry::map_() {
-  static std::unordered_map<int, CellShape> registry;
+std::unordered_map<std::string, std::unordered_map<int, CellShape>>& CellShapeRegistry::map_() {
+  static std::unordered_map<std::string, std::unordered_map<int, CellShape>> registry;
   return registry;
 }
 
-void CellShapeRegistry::register_shape(int vtk_id, const CellShape& shape) {
-  map_()[vtk_id] = shape;
+void CellShapeRegistry::register_shape(const std::string& format, int type_id, const CellShape& shape) {
+  map_()[format][type_id] = shape;
 }
 
-bool CellShapeRegistry::has(int vtk_id) {
-  return map_().find(vtk_id) != map_().end();
+bool CellShapeRegistry::has(const std::string& format, int type_id) {
+  auto it_format = map_().find(format);
+  if (it_format == map_().end()) return false;
+  return it_format->second.find(type_id) != it_format->second.end();
 }
 
-CellShape CellShapeRegistry::get(int vtk_id) {
-  auto it = map_().find(vtk_id);
-  if (it == map_().end()) {
-    throw std::runtime_error("CellShape not registered for VTK type " + std::to_string(vtk_id));
+CellShape CellShapeRegistry::get(const std::string& format, int type_id) {
+  auto it_format = map_().find(format);
+  if (it_format == map_().end()) {
+    throw std::runtime_error("No cell shapes registered for format: " + format);
   }
-  return it->second;
+  auto it_shape = it_format->second.find(type_id);
+  if (it_shape == it_format->second.end()) {
+    throw std::runtime_error("CellShape not registered for format '" + format +
+                            "' type ID " + std::to_string(type_id));
+  }
+  return it_shape->second;
 }
 
-void CellShapeRegistry::register_default_vtk_core() {
-  // Register basic VTK cell types
-  // Lines
-  register_shape(3, {3, CellFamily::Line, 2, 1, false});  // VTK_LINE
-  register_shape(21, {21, CellFamily::Line, 3, 2, false}); // VTK_QUADRATIC_EDGE
-
-  // Triangles
-  register_shape(5, {5, CellFamily::Triangle, 3, 1, false});  // VTK_TRIANGLE
-  register_shape(22, {22, CellFamily::Triangle, 6, 2, false}); // VTK_QUADRATIC_TRIANGLE
-
-  // Quads
-  register_shape(9, {9, CellFamily::Quad, 4, 1, false});  // VTK_QUAD
-  register_shape(23, {23, CellFamily::Quad, 8, 2, false}); // VTK_QUADRATIC_QUAD
-  register_shape(28, {28, CellFamily::Quad, 9, 2, false}); // VTK_BIQUADRATIC_QUAD
-
-  // Tetrahedra
-  register_shape(10, {10, CellFamily::Tetra, 4, 1, false}); // VTK_TETRA
-  register_shape(24, {24, CellFamily::Tetra, 10, 2, false}); // VTK_QUADRATIC_TETRA
-
-  // Hexahedra
-  register_shape(12, {12, CellFamily::Hex, 8, 1, false}); // VTK_HEXAHEDRON
-  register_shape(25, {25, CellFamily::Hex, 20, 2, false}); // VTK_QUADRATIC_HEXAHEDRON
-  register_shape(29, {29, CellFamily::Hex, 27, 2, false}); // VTK_TRIQUADRATIC_HEXAHEDRON
-
-  // Wedges (prisms)
-  register_shape(13, {13, CellFamily::Wedge, 6, 1, false}); // VTK_WEDGE
-  register_shape(26, {26, CellFamily::Wedge, 15, 2, false}); // VTK_QUADRATIC_WEDGE
-  register_shape(32, {32, CellFamily::Wedge, 18, 2, false}); // VTK_BIQUADRATIC_QUADRATIC_WEDGE
-
-  // Pyramids
-  register_shape(14, {14, CellFamily::Pyramid, 5, 1, false}); // VTK_PYRAMID
-  register_shape(27, {27, CellFamily::Pyramid, 13, 2, false}); // VTK_QUADRATIC_PYRAMID
-
-  // Polygons (variable corners)
-  register_shape(7, {7, CellFamily::Polygon, -1, 1, false}); // VTK_POLYGON
-
-  // Polyhedra
-  register_shape(42, {42, CellFamily::Polyhedron, -1, 1, false}); // VTK_POLYHEDRON
+void CellShapeRegistry::clear_format(const std::string& format) {
+  map_().erase(format);
 }
 
 // ========================
@@ -164,23 +136,11 @@ struct MeshBase::SearchAccel {
 
 // ---- Constructors & lifecycle
 MeshBase::MeshBase() : spatial_dim_(0) {
-  // Ensure cell shape registry has default shapes
-  static bool registry_initialized = false;
-  if (!registry_initialized) {
-    CellShapeRegistry::register_default_vtk_core();
-    registry_initialized = true;
-  }
 }
 
 MeshBase::MeshBase(int spatial_dim) : spatial_dim_(spatial_dim) {
   if (spatial_dim < 1 || spatial_dim > 3) {
     throw std::invalid_argument("MeshBase: spatial_dim must be 1, 2, or 3");
-  }
-  // Ensure cell shape registry has default shapes
-  static bool registry_initialized = false;
-  if (!registry_initialized) {
-    CellShapeRegistry::register_default_vtk_core();
-    registry_initialized = true;
   }
 }
 
@@ -362,6 +322,9 @@ void MeshBase::finalize() {
 
   // Clear geometry caches to be rebuilt on demand
   invalidate_caches();
+
+  // Notify observers that topology has been established
+  event_bus_.notify(MeshEvent::TopologyChanged);
 }
 
 // ---- Topology access
@@ -396,11 +359,13 @@ void MeshBase::set_current_coords(const std::vector<real_t>& Xcur) {
   }
   X_cur_ = Xcur;
   invalidate_caches();
+  event_bus_.notify(MeshEvent::GeometryChanged);
 }
 
 void MeshBase::clear_current_coords() {
   X_cur_.clear();
   invalidate_caches();
+  event_bus_.notify(MeshEvent::GeometryChanged);
 }
 
 // ---- Labels & sets
@@ -408,7 +373,11 @@ void MeshBase::set_region_label(index_t cell, label_t label) {
   if (cell < 0 || static_cast<size_t>(cell) >= cell_shape_.size()) {
     throw std::out_of_range("Cell index out of bounds");
   }
+  if (cell_region_id_.size() != cell_shape_.size()) {
+    cell_region_id_.resize(cell_shape_.size(), 0);
+  }
   cell_region_id_[cell] = label;
+  event_bus_.notify(MeshEvent::LabelsChanged);
 }
 
 label_t MeshBase::region_label(index_t cell) const {
@@ -432,7 +401,11 @@ void MeshBase::set_boundary_label(index_t face, label_t label) {
   if (face < 0 || static_cast<size_t>(face) >= face_shape_.size()) {
     throw std::out_of_range("Face index out of bounds");
   }
+  if (face_boundary_id_.size() != face_shape_.size()) {
+    face_boundary_id_.resize(face_shape_.size(), 0);
+  }
   face_boundary_id_[face] = label;
+  event_bus_.notify(MeshEvent::LabelsChanged);
 }
 
 label_t MeshBase::boundary_label(index_t face) const {
@@ -525,6 +498,19 @@ MeshBase::FieldHandle MeshBase::attach_field(EntityKind kind, const std::string&
   handle.name = name;
 
   field_index_[handle.id] = {kind, name};
+
+  event_bus_.notify(MeshEvent::FieldsChanged);
+  return handle;
+}
+
+MeshBase::FieldHandle MeshBase::attach_field_with_descriptor(EntityKind kind, const std::string& name,
+                                                            FieldScalarType type,
+                                                            const FieldDescriptor& descriptor) {
+  // First attach the field using the regular method
+  auto handle = attach_field(kind, name, type, descriptor.components);
+
+  // Store the descriptor
+  field_descriptors_[handle.id] = descriptor;
 
   return handle;
 }
@@ -715,68 +701,44 @@ void MeshBase::validate_basic() const {
 }
 
 void MeshBase::validate_topology() const {
-  // Check for duplicate nodes using spatial hashing for O(N) complexity
+  // Use robust spatial hashing for O(N) complexity validation
   const real_t tol = 1e-10;
-  size_t n_pts = n_nodes();
+  if (n_nodes() == 0) return;
 
-  if (n_pts == 0) return;
+  // Create mesh validator with spatial hashing
+  validation::MeshValidator validator(const_cast<MeshBase&>(*this), tol);
 
-  // Find bounding box
-  auto bbox = bounding_box();
-
-  // Create spatial hash grid
-  const real_t grid_size = tol * 10; // Grid cell size slightly larger than tolerance
-  std::unordered_map<std::string, std::vector<size_t>> spatial_hash;
-
-  // Hash all nodes
-  for (size_t i = 0; i < n_pts; ++i) {
-    // Compute grid indices
-    std::string hash_key;
-    for (int d = 0; d < spatial_dim_; ++d) {
-      int grid_idx = static_cast<int>((X_ref_[i * spatial_dim_ + d] - bbox.min[d]) / grid_size);
-      hash_key += std::to_string(grid_idx) + ",";
-    }
-    spatial_hash[hash_key].push_back(i);
-  }
-
-  // Check for duplicates within each hash bucket and adjacent buckets
-  for (const auto& [key, nodes] : spatial_hash) {
-    // Check within bucket
-    for (size_t i = 0; i < nodes.size(); ++i) {
-      for (size_t j = i + 1; j < nodes.size(); ++j) {
-        size_t n1 = nodes[i];
-        size_t n2 = nodes[j];
-
-        real_t dist_sq = 0;
-        for (int d = 0; d < spatial_dim_; ++d) {
-          real_t diff = X_ref_[n1 * spatial_dim_ + d] - X_ref_[n2 * spatial_dim_ + d];
-          dist_sq += diff * diff;
-        }
-
-        if (dist_sq < tol * tol) {
-          std::cerr << "Warning: Duplicate nodes " << n1 << " and " << n2
-                    << " (distance = " << std::sqrt(dist_sq) << ")" << std::endl;
-        }
-      }
+  // Check for duplicate nodes
+  auto duplicates = validator.find_duplicate_nodes();
+  if (!duplicates.empty()) {
+    for (const auto& [n1, n2] : duplicates) {
+      std::cerr << "Warning: Duplicate nodes " << n1 << " and " << n2
+                << " are within tolerance " << tol << std::endl;
     }
   }
 
-  // Check for degenerate cells
+  // Check for inverted elements
+  auto inverted = validator.find_inverted_elements();
+  for (index_t c : inverted) {
+    std::cerr << "Warning: Cell " << c << " appears to be inverted (negative Jacobian)" << std::endl;
+  }
+
+  // Check for degenerate elements
+  auto degenerate = validator.find_degenerate_elements(tol);
+  for (index_t c : degenerate) {
+    real_t measure = cell_measure(c);
+    std::cerr << "Warning: Cell " << c << " appears to be degenerate (measure = " << measure << ")" << std::endl;
+  }
+
+  // Check for repeated nodes within cells
   for (size_t c = 0; c < n_cells(); ++c) {
     auto [nodes_ptr, n_nodes] = cell_nodes_span(static_cast<index_t>(c));
 
-    // Check for repeated nodes in cell
     std::unordered_set<index_t> unique_nodes;
     for (size_t i = 0; i < n_nodes; ++i) {
       if (!unique_nodes.insert(nodes_ptr[i]).second) {
         std::cerr << "Warning: Cell " << c << " has repeated node " << nodes_ptr[i] << std::endl;
       }
-    }
-
-    // Check for zero volume/area (simplified check)
-    real_t measure = cell_measure(static_cast<index_t>(c));
-    if (std::abs(measure) < tol) {
-      std::cerr << "Warning: Cell " << c << " appears to be degenerate (measure = " << measure << ")" << std::endl;
     }
   }
 }
@@ -800,52 +762,194 @@ void MeshBase::report_statistics() const {
             << bbox.min[0] << ", " << bbox.max[0] << "] x ["
             << bbox.min[1] << ", " << bbox.max[1] << "] x ["
             << bbox.min[2] << ", " << bbox.max[2] << "]" << std::endl;
+
+  // Use comprehensive validation report with spatial hashing
+  validation::MeshValidator validator(const_cast<MeshBase&>(*this), 1e-10);
+  validator.validate_and_report();
 }
 
-void MeshBase::write_debug_vtk(const std::string& prefix) const {
-  // Simple VTK ASCII writer for debugging
-  std::string filename = prefix + ".vtk";
-  std::ofstream file(filename);
+void MeshBase::write_debug(const std::string& prefix, const std::string& format) const {
+  // Format-agnostic debug output - delegates to registered IO writers or uses simple default
 
-  file << "# vtk DataFile Version 3.0\n";
-  file << "MeshBase debug output\n";
-  file << "ASCII\n";
-  file << "DATASET UNSTRUCTURED_GRID\n";
-
-  // Write points
-  size_t n_pts = n_nodes();
-  file << "POINTS " << n_pts << " double\n";
-  for (size_t i = 0; i < n_pts; ++i) {
-    for (int d = 0; d < 3; ++d) {
-      if (d < spatial_dim_) {
-        file << X_ref_[i * spatial_dim_ + d] << " ";
-      } else {
-        file << "0.0 ";
+  // Helper to map CellFamily to VTK type IDs for VTK formats
+  auto cell_family_to_vtk_type = [](CellFamily fam, int order) -> int {
+    // Linear elements (order 1)
+    if (order == 1) {
+      switch (fam) {
+        case CellFamily::Line:      return 3;   // VTK_LINE
+        case CellFamily::Triangle:  return 5;   // VTK_TRIANGLE
+        case CellFamily::Quad:      return 9;   // VTK_QUAD
+        case CellFamily::Tetra:     return 10;  // VTK_TETRA
+        case CellFamily::Hex:       return 12;  // VTK_HEXAHEDRON
+        case CellFamily::Wedge:     return 13;  // VTK_WEDGE
+        case CellFamily::Pyramid:   return 14;  // VTK_PYRAMID
+        case CellFamily::Polygon:   return 7;   // VTK_POLYGON
+        case CellFamily::Polyhedron: return 42; // VTK_POLYHEDRON
       }
     }
-    file << "\n";
-  }
-
-  // Write cells
-  size_t total_conn_size = cell2node_.size() + n_cells();
-  file << "CELLS " << n_cells() << " " << total_conn_size << "\n";
-
-  for (size_t c = 0; c < n_cells(); ++c) {
-    auto [nodes_ptr, n_nodes] = cell_nodes_span(static_cast<index_t>(c));
-    file << n_nodes;
-    for (size_t i = 0; i < n_nodes; ++i) {
-      file << " " << nodes_ptr[i];
+    // Quadratic elements (order 2)
+    else if (order == 2) {
+      switch (fam) {
+        case CellFamily::Line:      return 21;  // VTK_QUADRATIC_EDGE
+        case CellFamily::Triangle:  return 22;  // VTK_QUADRATIC_TRIANGLE
+        case CellFamily::Quad:      return 23;  // VTK_QUADRATIC_QUAD
+        case CellFamily::Tetra:     return 24;  // VTK_QUADRATIC_TETRA
+        case CellFamily::Hex:       return 25;  // VTK_QUADRATIC_HEXAHEDRON
+        case CellFamily::Wedge:     return 26;  // VTK_QUADRATIC_WEDGE
+        case CellFamily::Pyramid:   return 27;  // VTK_QUADRATIC_PYRAMID
+        default: break;
+      }
     }
-    file << "\n";
+    return 7; // Default to polygon if unknown
+  };
+
+  if (format == "vtu" || format == "vtk") {
+    // VTK/VTU ASCII writer with labels and ownership information
+    std::string filename = prefix + "." + format;
+    std::ofstream file(filename);
+
+    file << "# vtk DataFile Version 3.0\n";
+    file << "MeshBase debug output with labels and ownership\n";
+    file << "ASCII\n";
+    file << "DATASET UNSTRUCTURED_GRID\n";
+
+    // Write points
+    size_t n_pts = n_nodes();
+    file << "POINTS " << n_pts << " double\n";
+    for (size_t i = 0; i < n_pts; ++i) {
+      for (int d = 0; d < 3; ++d) {
+        if (d < spatial_dim_) {
+          file << X_ref_[i * spatial_dim_ + d] << " ";
+        } else {
+          file << "0.0 ";
+        }
+      }
+      file << "\n";
+    }
+
+    // Write cells
+    size_t total_conn_size = cell2node_.size() + n_cells();
+    file << "CELLS " << n_cells() << " " << total_conn_size << "\n";
+
+    for (size_t c = 0; c < n_cells(); ++c) {
+      auto [nodes_ptr, n_nodes_cell] = cell_nodes_span(static_cast<index_t>(c));
+      file << n_nodes_cell;
+      for (size_t i = 0; i < n_nodes_cell; ++i) {
+        file << " " << nodes_ptr[i];
+      }
+      file << "\n";
+    }
+
+    // Write cell types
+    file << "CELL_TYPES " << n_cells() << "\n";
+    for (size_t c = 0; c < n_cells(); ++c) {
+      int vtk_type = cell_family_to_vtk_type(cell_shape_[c].family, cell_shape_[c].order);
+      file << vtk_type << "\n";
+    }
+
+  // ===== Enhanced: Cell Data Section =====
+  if (n_cells() > 0) {
+    file << "\nCELL_DATA " << n_cells() << "\n";
+
+    // Write region labels
+    if (!cell_region_id_.empty()) {
+      file << "SCALARS RegionLabel int 1\n";
+      file << "LOOKUP_TABLE default\n";
+      for (size_t c = 0; c < n_cells(); ++c) {
+        file << (c < cell_region_id_.size() ? cell_region_id_[c] : 0) << "\n";
+      }
+    }
+
+    // Write cell ownership (if available)
+    if (!cell_owner_.empty()) {
+      file << "SCALARS Ownership int 1\n";
+      file << "LOOKUP_TABLE ownership_colors\n";
+      for (size_t c = 0; c < n_cells(); ++c) {
+        if (c < cell_owner_.size()) {
+          // Map ownership to integer: Owned=0, Ghost=1, Shared=2
+          file << static_cast<int>(cell_owner_[c]) << "\n";
+        } else {
+          file << "0\n";
+        }
+      }
+    }
+
+    // Write cell quality metrics
+    file << "SCALARS CellQuality double 1\n";
+    file << "LOOKUP_TABLE default\n";
+    for (size_t c = 0; c < n_cells(); ++c) {
+      real_t quality = compute_quality(static_cast<index_t>(c), "aspect_ratio");
+      file << quality << "\n";
+    }
+
+    // Write cell measure (area/volume)
+    file << "SCALARS CellMeasure double 1\n";
+    file << "LOOKUP_TABLE default\n";
+    for (size_t c = 0; c < n_cells(); ++c) {
+      real_t measure = cell_measure(static_cast<index_t>(c));
+      file << measure << "\n";
+    }
   }
 
-  // Write cell types (simplified - would need shape registry)
-  file << "CELL_TYPES " << n_cells() << "\n";
-  for (size_t c = 0; c < n_cells(); ++c) {
-    file << cell_shape_[c].vtk_type_id << "\n";
+  // ===== Enhanced: Point Data Section =====
+  if (n_pts > 0) {
+    file << "\nPOINT_DATA " << n_pts << "\n";
+
+    // Write node ownership (if available)
+    if (!node_owner_.empty()) {
+      file << "SCALARS NodeOwnership int 1\n";
+      file << "LOOKUP_TABLE ownership_colors\n";
+      for (size_t n = 0; n < n_pts; ++n) {
+        if (n < node_owner_.size()) {
+          // Map ownership to integer: Owned=0, Ghost=1, Shared=2
+          file << static_cast<int>(node_owner_[n]) << "\n";
+        } else {
+          file << "0\n";
+        }
+      }
+    }
+
+    // Write node global IDs (if available)
+    if (!node_gid_.empty()) {
+      file << "SCALARS GlobalNodeID int 1\n";
+      file << "LOOKUP_TABLE default\n";
+      for (size_t n = 0; n < n_pts; ++n) {
+        if (n < node_gid_.size()) {
+          file << node_gid_[n] << "\n";
+        } else {
+          file << n << "\n";
+        }
+      }
+    }
   }
 
-  file.close();
+    // ===== Enhanced: Lookup Tables for Ownership =====
+    file << "\nLOOKUP_TABLE ownership_colors 3\n";
+    file << "0.0 1.0 0.0 1.0\n";  // Owned: Green
+    file << "1.0 0.0 0.0 1.0\n";  // Ghost: Red
+    file << "0.0 0.0 1.0 1.0\n";  // Shared: Blue
+
+    file.close();
+
+    std::cout << "Debug mesh file written to: " << filename << std::endl;
+    std::cout << "  Includes: region labels, ownership flags, quality metrics, measures" << std::endl;
+  } else {
+    // For other formats, use the registered writer if available
+    MeshIOOptions opts;
+    opts.format = format;
+    opts.path = prefix + "." + format;
+    opts.kv["debug"] = "true";
+
+    try {
+      save(opts);
+      std::cout << "Debug mesh file written using '" << format << "' format: " << opts.path << std::endl;
+    } catch (const std::exception& e) {
+      std::cerr << "Warning: Unable to write debug file in format '" << format << "': " << e.what() << std::endl;
+      std::cerr << "  Falling back to VTK format." << std::endl;
+      // Fallback to VTK
+      write_debug(prefix, "vtk");
+    }
+  }
 }
 
 // ---- Global ID management (parallel-friendly but not MPI-dependent)
@@ -1211,69 +1315,7 @@ MeshBase MeshBase::extract_submesh_by_boundary(label_t boundary_label) const {
   return submesh;
 }
 
-// ---- Advanced geometry & mapping
-std::array<real_t,3> MeshBase::evaluate_map(index_t cell, const std::array<real_t,3>& xi,
-                                            Configuration cfg) const {
-  // Simple linear interpolation for now
-  // In production would use shape functions based on cell type
-  auto [nodes_ptr, n_nodes] = cell_nodes_span(cell);
-
-  const std::vector<real_t>& coords = (cfg == Configuration::Current && !X_cur_.empty())
-                                      ? X_cur_ : X_ref_;
-
-  // For simplicity, just return the centroid
-  // Real implementation would evaluate shape functions at xi
-  return cell_center(cell, cfg);
-}
-
-std::array<std::array<real_t,3>,3> MeshBase::jacobian(index_t cell, const std::array<real_t,3>& xi,
-                                                       Configuration cfg) const {
-  // Placeholder - would compute actual Jacobian based on cell shape
-  std::array<std::array<real_t,3>,3> J;
-  for (int i = 0; i < 3; ++i) {
-    for (int j = 0; j < 3; ++j) {
-      J[i][j] = (i == j) ? 1.0 : 0.0;
-    }
-  }
-  return J;
-}
-
-real_t MeshBase::detJ(index_t cell, const std::array<real_t,3>& xi, Configuration cfg) const {
-  auto J = jacobian(cell, xi, cfg);
-
-  // 3x3 determinant
-  return J[0][0] * (J[1][1] * J[2][2] - J[1][2] * J[2][1])
-       - J[0][1] * (J[1][0] * J[2][2] - J[1][2] * J[2][0])
-       + J[0][2] * (J[1][0] * J[2][1] - J[1][1] * J[2][0]);
-}
-
-std::array<std::array<real_t,3>,3> MeshBase::invJ(index_t cell, const std::array<real_t,3>& xi,
-                                                   Configuration cfg) const {
-  auto J = jacobian(cell, xi, cfg);
-  real_t det = detJ(cell, xi, cfg);
-
-  if (std::abs(det) < 1e-12) {
-    throw std::runtime_error("Singular Jacobian");
-  }
-
-  // Compute adjugate and divide by determinant
-  std::array<std::array<real_t,3>,3> invJ;
-
-  invJ[0][0] = (J[1][1] * J[2][2] - J[1][2] * J[2][1]) / det;
-  invJ[0][1] = (J[0][2] * J[2][1] - J[0][1] * J[2][2]) / det;
-  invJ[0][2] = (J[0][1] * J[1][2] - J[0][2] * J[1][1]) / det;
-
-  invJ[1][0] = (J[1][2] * J[2][0] - J[1][0] * J[2][2]) / det;
-  invJ[1][1] = (J[0][0] * J[2][2] - J[0][2] * J[2][0]) / det;
-  invJ[1][2] = (J[0][2] * J[1][0] - J[0][0] * J[1][2]) / det;
-
-  invJ[2][0] = (J[1][0] * J[2][1] - J[1][1] * J[2][0]) / det;
-  invJ[2][1] = (J[0][1] * J[2][0] - J[0][0] * J[2][1]) / det;
-  invJ[2][2] = (J[0][0] * J[1][1] - J[0][1] * J[1][0]) / det;
-
-  return invJ;
-}
-
+// ---- Geometry queries
 std::array<real_t,3> MeshBase::face_normal(index_t f, Configuration cfg) const {
   auto [nodes_ptr, n_nodes] = face_nodes_span(f);
 
@@ -1433,8 +1475,8 @@ real_t MeshBase::cell_measure(index_t c, Configuration cfg) const {
   const CellShape& shape = cell_shape_[c];
 
   // Helper lambda to get node coordinates
-  auto get_coords = [&](index_t node_id) -> std::array<real_t,3> {
-    std::array<real_t,3> pt = {{0,0,0}};
+  auto get_coords = [&](index_t node_id) -> std::array<double,3> {
+    std::array<double,3> pt = {{0,0,0}};
     for (int d = 0; d < spatial_dim_; ++d) {
       pt[d] = coords[node_id * spatial_dim_ + d];
     }
@@ -1448,9 +1490,9 @@ real_t MeshBase::cell_measure(index_t c, Configuration cfg) const {
       if (n_nodes >= 2) {
         auto p0 = get_coords(nodes_ptr[0]);
         auto p1 = get_coords(nodes_ptr[1]);
-        real_t len_sq = 0;
+        double len_sq = 0;
         for (int d = 0; d < spatial_dim_; ++d) {
-          real_t diff = p1[d] - p0[d];
+          double diff = p1[d] - p0[d];
           len_sq += diff * diff;
         }
         return std::sqrt(len_sq);
@@ -1509,71 +1551,69 @@ real_t MeshBase::cell_measure(index_t c, Configuration cfg) const {
             (p2[0] - p0[0]) * (p3[1] - p0[1]) -
             (p3[0] - p0[0]) * (p2[1] - p0[1])
           );
-          area1 = a1 + a2;
-
-          // Alternative split: Triangle 1-2-3 + Triangle 1-3-0
-          a1 = 0.5 * std::abs(
-            (p2[0] - p1[0]) * (p3[1] - p1[1]) -
-            (p3[0] - p1[0]) * (p2[1] - p1[1])
-          );
-          a2 = 0.5 * std::abs(
-            (p3[0] - p1[0]) * (p0[1] - p1[1]) -
-            (p0[0] - p1[0]) * (p3[1] - p1[1])
-          );
-          area2 = a1 + a2;
+          return a1 + a2;
         } else {
           // 3D quad - use cross products
-          std::array<real_t,3> v1, v2, cross;
-
-          // First diagonal
+          std::array<real_t,3> e1, e2, e3;
           for (int d = 0; d < 3; ++d) {
-            v1[d] = p1[d] - p0[d];
-            v2[d] = p2[d] - p0[d];
+            e1[d] = p1[d] - p0[d];
+            e2[d] = p2[d] - p0[d];
+            e3[d] = p3[d] - p0[d];
           }
-          cross[0] = v1[1] * v2[2] - v1[2] * v2[1];
-          cross[1] = v1[2] * v2[0] - v1[0] * v2[2];
-          cross[2] = v1[0] * v2[1] - v1[1] * v2[0];
-          real_t a1 = 0.5 * std::sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]);
 
-          for (int d = 0; d < 3; ++d) {
-            v1[d] = p2[d] - p0[d];
-            v2[d] = p3[d] - p0[d];
-          }
-          cross[0] = v1[1] * v2[2] - v1[2] * v2[1];
-          cross[1] = v1[2] * v2[0] - v1[0] * v2[2];
-          cross[2] = v1[0] * v2[1] - v1[1] * v2[0];
-          real_t a2 = 0.5 * std::sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]);
-          area1 = a1 + a2;
+          // Area of triangle 0-1-2
+          std::array<real_t,3> cross1;
+          cross1[0] = e1[1] * e2[2] - e1[2] * e2[1];
+          cross1[1] = e1[2] * e2[0] - e1[0] * e2[2];
+          cross1[2] = e1[0] * e2[1] - e1[1] * e2[0];
+          area1 = 0.5 * std::sqrt(cross1[0]*cross1[0] + cross1[1]*cross1[1] + cross1[2]*cross1[2]);
 
-          // Second diagonal
-          for (int d = 0; d < 3; ++d) {
-            v1[d] = p2[d] - p1[d];
-            v2[d] = p3[d] - p1[d];
-          }
-          cross[0] = v1[1] * v2[2] - v1[2] * v2[1];
-          cross[1] = v1[2] * v2[0] - v1[0] * v2[2];
-          cross[2] = v1[0] * v2[1] - v1[1] * v2[0];
-          a1 = 0.5 * std::sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]);
+          // Area of triangle 0-2-3
+          std::array<real_t,3> cross2;
+          cross2[0] = e2[1] * e3[2] - e2[2] * e3[1];
+          cross2[1] = e2[2] * e3[0] - e2[0] * e3[2];
+          cross2[2] = e2[0] * e3[1] - e2[1] * e3[0];
+          area2 = 0.5 * std::sqrt(cross2[0]*cross2[0] + cross2[1]*cross2[1] + cross2[2]*cross2[2]);
 
-          for (int d = 0; d < 3; ++d) {
-            v1[d] = p3[d] - p1[d];
-            v2[d] = p0[d] - p1[d];
-          }
-          cross[0] = v1[1] * v2[2] - v1[2] * v2[1];
-          cross[1] = v1[2] * v2[0] - v1[0] * v2[2];
-          cross[2] = v1[0] * v2[1] - v1[1] * v2[0];
-          a2 = 0.5 * std::sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]);
-          area2 = a1 + a2;
+          return area1 + area2;
         }
+      }
+      break;
+    }
 
-        // Average of two diagonal splits
-        return 0.5 * (area1 + area2);
+    case CellFamily::Polygon: {
+      // General polygon - simplified triangulation from first vertex
+      if (n_nodes >= 3) {
+        real_t total_area = 0;
+        auto p0 = get_coords(nodes_ptr[0]);
+
+        for (size_t i = 1; i < n_nodes - 1; ++i) {
+          auto p1 = get_coords(nodes_ptr[i]);
+          auto p2 = get_coords(nodes_ptr[i + 1]);
+
+          std::array<real_t,3> e1, e2;
+          for (int d = 0; d < 3; ++d) {
+            e1[d] = p1[d] - p0[d];
+            e2[d] = p2[d] - p0[d];
+          }
+
+          if (spatial_dim_ == 2) {
+            total_area += 0.5 * std::abs(e1[0] * e2[1] - e1[1] * e2[0]);
+          } else {
+            std::array<real_t,3> cross;
+            cross[0] = e1[1] * e2[2] - e1[2] * e2[1];
+            cross[1] = e1[2] * e2[0] - e1[0] * e2[2];
+            cross[2] = e1[0] * e2[1] - e1[1] * e2[0];
+            total_area += 0.5 * std::sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]);
+          }
+        }
+        return total_area;
       }
       break;
     }
 
     case CellFamily::Tetra: {
-      // Tetrahedron volume = |det(v1, v2, v3)| / 6
+      // Tetrahedron volume via scalar triple product
       if (n_nodes >= 4) {
         auto p0 = get_coords(nodes_ptr[0]);
         auto p1 = get_coords(nodes_ptr[1]);
@@ -1588,7 +1628,7 @@ real_t MeshBase::cell_measure(index_t c, Configuration cfg) const {
           v3[d] = p3[d] - p0[d];
         }
 
-        // Scalar triple product
+        // Scalar triple product: v1 . (v2 x v3)
         real_t det = v1[0] * (v2[1] * v3[2] - v2[2] * v3[1])
                    - v1[1] * (v2[0] * v3[2] - v2[2] * v3[0])
                    + v1[2] * (v2[0] * v3[1] - v2[1] * v3[0]);
@@ -1599,69 +1639,77 @@ real_t MeshBase::cell_measure(index_t c, Configuration cfg) const {
     }
 
     case CellFamily::Hex: {
-      // Hexahedron volume - split into 6 tetrahedra
+      // Hexahedron volume - decompose into 5 tetrahedra
       if (n_nodes >= 8) {
-        // For simplicity, use divergence theorem with linear interpolation
-        // Volume = integral of divergence = sum over faces of flux
-        // This is approximate but reasonable for general hex
+        auto p0 = get_coords(nodes_ptr[0]);
+        auto p1 = get_coords(nodes_ptr[1]);
+        auto p2 = get_coords(nodes_ptr[2]);
+        auto p3 = get_coords(nodes_ptr[3]);
+        auto p4 = get_coords(nodes_ptr[4]);
+        auto p5 = get_coords(nodes_ptr[5]);
+        auto p6 = get_coords(nodes_ptr[6]);
+        auto p7 = get_coords(nodes_ptr[7]);
 
-        // Get all 8 corners
-        std::array<std::array<real_t,3>, 8> pts;
-        for (size_t i = 0; i < 8; ++i) {
-          pts[i] = get_coords(nodes_ptr[i]);
-        }
-
-        // Split into 6 tetrahedra sharing center point
-        std::array<real_t,3> center = {{0,0,0}};
-        for (int i = 0; i < 8; ++i) {
-          for (int d = 0; d < 3; ++d) {
-            center[d] += pts[i][d];
+        // Helper for tet volume
+        auto tet_vol = [](const std::array<real_t,3>& a, const std::array<real_t,3>& b,
+                         const std::array<real_t,3>& c, const std::array<real_t,3>& d) -> real_t {
+          std::array<real_t,3> v1, v2, v3;
+          for (int i = 0; i < 3; ++i) {
+            v1[i] = b[i] - a[i];
+            v2[i] = c[i] - a[i];
+            v3[i] = d[i] - a[i];
           }
-        }
-        for (int d = 0; d < 3; ++d) center[d] /= 8.0;
+          real_t det = v1[0] * (v2[1] * v3[2] - v2[2] * v3[1])
+                     - v1[1] * (v2[0] * v3[2] - v2[2] * v3[0])
+                     + v1[2] * (v2[0] * v3[1] - v2[1] * v3[0]);
+          return det / 6.0;
+        };
 
-        real_t total_vol = 0;
+        // Decomposition into 5 tets
+        real_t vol = 0;
+        vol += tet_vol(p0, p1, p2, p5);
+        vol += tet_vol(p0, p2, p7, p5);
+        vol += tet_vol(p0, p2, p3, p7);
+        vol += tet_vol(p0, p5, p7, p4);
+        vol += tet_vol(p2, p7, p5, p6);
 
-        // Face tetrahedra (6 faces, each split into 2 tets)
-        // Bottom face (0-1-2-3)
-        total_vol += tet_volume(pts[0], pts[1], pts[2], center);
-        total_vol += tet_volume(pts[0], pts[2], pts[3], center);
-        // Top face (4-5-6-7)
-        total_vol += tet_volume(pts[4], pts[6], pts[5], center);
-        total_vol += tet_volume(pts[4], pts[7], pts[6], center);
-        // Front face (0-1-5-4)
-        total_vol += tet_volume(pts[0], pts[4], pts[1], center);
-        total_vol += tet_volume(pts[1], pts[4], pts[5], center);
-        // Back face (2-3-7-6)
-        total_vol += tet_volume(pts[2], pts[6], pts[3], center);
-        total_vol += tet_volume(pts[3], pts[6], pts[7], center);
-        // Left face (0-3-7-4)
-        total_vol += tet_volume(pts[0], pts[3], pts[4], center);
-        total_vol += tet_volume(pts[3], pts[7], pts[4], center);
-        // Right face (1-2-6-5)
-        total_vol += tet_volume(pts[1], pts[5], pts[2], center);
-        total_vol += tet_volume(pts[2], pts[5], pts[6], center);
-
-        return total_vol;
+        return std::abs(vol);
       }
       break;
     }
 
     case CellFamily::Wedge: {
-      // Wedge/prism volume - split into 3 tetrahedra
+      // Wedge (prism) volume - decompose into 3 tetrahedra
       if (n_nodes >= 6) {
-        std::array<std::array<real_t,3>, 6> pts;
-        for (size_t i = 0; i < 6; ++i) {
-          pts[i] = get_coords(nodes_ptr[i]);
-        }
+        auto p0 = get_coords(nodes_ptr[0]);
+        auto p1 = get_coords(nodes_ptr[1]);
+        auto p2 = get_coords(nodes_ptr[2]);
+        auto p3 = get_coords(nodes_ptr[3]);
+        auto p4 = get_coords(nodes_ptr[4]);
+        auto p5 = get_coords(nodes_ptr[5]);
 
-        // Split wedge into 3 tets
+        // Helper for tet volume
+        auto tet_vol = [](const std::array<real_t,3>& a, const std::array<real_t,3>& b,
+                         const std::array<real_t,3>& c, const std::array<real_t,3>& d) -> real_t {
+          std::array<real_t,3> v1, v2, v3;
+          for (int i = 0; i < 3; ++i) {
+            v1[i] = b[i] - a[i];
+            v2[i] = c[i] - a[i];
+            v3[i] = d[i] - a[i];
+          }
+          real_t det = v1[0] * (v2[1] * v3[2] - v2[2] * v3[1])
+                     - v1[1] * (v2[0] * v3[2] - v2[2] * v3[0])
+                     + v1[2] * (v2[0] * v3[1] - v2[1] * v3[0]);
+          return det / 6.0;
+        };
+
+        // Decomposition into 3 tets
         real_t vol = 0;
-        vol += tet_volume(pts[0], pts[1], pts[2], pts[3]);
-        vol += tet_volume(pts[1], pts[2], pts[3], pts[4]);
-        vol += tet_volume(pts[2], pts[3], pts[4], pts[5]);
+        vol += tet_vol(p0, p1, p2, p5);
+        vol += tet_vol(p0, p1, p5, p4);
+        vol += tet_vol(p0, p4, p5, p3);
 
-        return vol;
+        return std::abs(vol);
       }
       break;
     }
@@ -1669,40 +1717,41 @@ real_t MeshBase::cell_measure(index_t c, Configuration cfg) const {
     case CellFamily::Pyramid: {
       // Pyramid volume = (1/3) * base_area * height
       if (n_nodes >= 5) {
-        std::array<std::array<real_t,3>, 5> pts;
-        for (size_t i = 0; i < 5; ++i) {
-          pts[i] = get_coords(nodes_ptr[i]);
-        }
+        // Base is quad 0-1-2-3, apex is 4
+        auto p0 = get_coords(nodes_ptr[0]);
+        auto p1 = get_coords(nodes_ptr[1]);
+        auto p2 = get_coords(nodes_ptr[2]);
+        auto p3 = get_coords(nodes_ptr[3]);
+        auto p4 = get_coords(nodes_ptr[4]);
 
-        // Split pyramid into 2 tets
+        // Split base into two triangles and compute volumes
+        auto tet_vol = [](const std::array<real_t,3>& a, const std::array<real_t,3>& b,
+                         const std::array<real_t,3>& c, const std::array<real_t,3>& d) -> real_t {
+          std::array<real_t,3> v1, v2, v3;
+          for (int i = 0; i < 3; ++i) {
+            v1[i] = b[i] - a[i];
+            v2[i] = c[i] - a[i];
+            v3[i] = d[i] - a[i];
+          }
+          real_t det = v1[0] * (v2[1] * v3[2] - v2[2] * v3[1])
+                     - v1[1] * (v2[0] * v3[2] - v2[2] * v3[0])
+                     + v1[2] * (v2[0] * v3[1] - v2[1] * v3[0]);
+          return det / 6.0;
+        };
+
         real_t vol = 0;
-        vol += tet_volume(pts[0], pts[1], pts[2], pts[4]);
-        vol += tet_volume(pts[0], pts[2], pts[3], pts[4]);
+        vol += tet_vol(p0, p1, p2, p4);
+        vol += tet_vol(p0, p2, p3, p4);
 
-        return vol;
+        return std::abs(vol);
       }
       break;
     }
 
-    case CellFamily::Polygon:
     case CellFamily::Polyhedron: {
-      // For general polygons/polyhedra, use bounding box estimate
-      std::array<real_t,3> min_pt = {{1e300, 1e300, 1e300}};
-      std::array<real_t,3> max_pt = {{-1e300, -1e300, -1e300}};
-
-      for (size_t i = 0; i < n_nodes; ++i) {
-        auto pt = get_coords(nodes_ptr[i]);
-        for (int d = 0; d < spatial_dim_; ++d) {
-          min_pt[d] = std::min(min_pt[d], pt[d]);
-          max_pt[d] = std::max(max_pt[d], pt[d]);
-        }
-      }
-
-      real_t measure = 1.0;
-      for (int d = 0; d < spatial_dim_; ++d) {
-        measure *= (max_pt[d] - min_pt[d]);
-      }
-      return measure;
+      // General polyhedron - would need face information
+      // Placeholder for now
+      break;
     }
 
     default:
