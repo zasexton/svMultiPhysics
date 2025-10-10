@@ -194,7 +194,8 @@ set(CSRCS
   Mesh/MeshFieldDescriptor.h
   Mesh/MeshObserver.h
   Mesh/MeshOrientation.h
-  Mesh/GeometryCache.h
+  Mesh/IO/VTKReader.h Mesh/IO/VTKReader.cpp
+  Mesh/IO/VTKWriter.h Mesh/IO/VTKWriter.cpp
   nn.h nn.cpp
   output.h output.cpp
   load_msh.h load_msh.cpp
