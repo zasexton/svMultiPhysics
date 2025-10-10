@@ -1817,9 +1817,9 @@ void MeshBase::clear_search_structure() const {
 
 MeshBase::PointLocateResult MeshBase::locate_point(const std::array<real_t,3>& x,
                                                    Configuration cfg) const {
-  // Build search structure if needed
-  if (!search_accel_) {
-    const_cast<MeshBase*>(this)->build_search_structure();
+  // Build search structure if needed, or rebuild if built for wrong configuration
+  if (!search_accel_ || search_accel_->built_for_config != cfg) {
+    const_cast<MeshBase*>(this)->build_search_structure(cfg);
   }
 
   PointLocateResult result;
