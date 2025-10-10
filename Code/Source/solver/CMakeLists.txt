@@ -189,6 +189,11 @@ set(CSRCS
   mat_models.h mat_models.cpp
   mesh.h mesh.cpp
   Mesh/Mesh.h Mesh/Mesh.cpp
+  Mesh/Core/MeshTypes.h
+  Mesh/Core/MeshBase.h
+  Mesh/Topology/CellShape.h Mesh/Topology/CellShape.cpp
+  Mesh/Geometry/MeshGeometry.h Mesh/Geometry/MeshGeometry.cpp
+  Mesh/Geometry/MeshQuality.h Mesh/Geometry/MeshQuality.cpp
   Mesh/DistributedMesh.h
   Mesh/InterfaceMesh.h
   Mesh/MeshFieldDescriptor.h

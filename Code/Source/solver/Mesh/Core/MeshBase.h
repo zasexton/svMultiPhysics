@@ -1,0 +1,333 @@
+/* Copyright (c) Stanford University, The Regents of the University of California, and others.
+ *
+ * All Rights Reserved.
+ *
+ * See Copyright-SimVascular.txt for additional details.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject
+ * to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+ * IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+ * PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
+ * OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#ifndef SVMP_MESH_BASE_H
+#define SVMP_MESH_BASE_H
+
+#include "MeshTypes.h"
+#include "../Topology/CellShape.h"
+#include "../MeshObserver.h"
+#include "../MeshFieldDescriptor.h"
+
+#include <memory>
+#include <vector>
+#include <unordered_map>
+#include <unordered_set>
+#include <functional>
+#include <utility>
+#include <string>
+
+namespace svmp {
+
+/**
+ * @brief Core mesh container class
+ *
+ * This class provides the fundamental mesh data structure with:
+ * - Topology storage (cells, faces, edges, nodes)
+ * - Coordinate storage (reference and current configurations)
+ * - Field attachment system
+ * - Label and set management
+ * - IO registry
+ *
+ * Specialized functionality is delegated to component classes:
+ * - MeshGeometry: Geometric computations
+ * - MeshQuality: Quality metrics
+ * - MeshTopology: Adjacency and topology operations
+ * - MeshSearch: Point location and search
+ * - MeshFields: Field management
+ * - MeshLabels: Label and set operations
+ */
+class MeshBase {
+public:
+  // ---- Lifecycle ----
+  MeshBase();
+  explicit MeshBase(int spatial_dim);
+  ~MeshBase() = default;
+
+  // ---- Builders ----
+  void clear();
+  void reserve(index_t n_nodes, index_t n_cells, index_t n_faces = 0);
+
+  void build_from_arrays(
+      int spatial_dim,
+      const std::vector<real_t>& X_ref,
+      const std::vector<offset_t>& cell2node_offsets,
+      const std::vector<index_t>& cell2node,
+      const std::vector<CellShape>& cell_shape);
+
+  void set_faces_from_arrays(
+      const std::vector<CellShape>& face_shape,
+      const std::vector<offset_t>& face2node_offsets,
+      const std::vector<index_t>& face2node,
+      const std::vector<std::array<index_t,2>>& face2cell);
+
+  void set_edges_from_arrays(const std::vector<std::array<index_t,2>>& edge2node);
+
+  void finalize();
+
+  // ---- Basic queries ----
+  int dim() const noexcept { return spatial_dim_; }
+  size_t n_nodes() const noexcept { return X_ref_.size() / (spatial_dim_ > 0 ? spatial_dim_ : 1); }
+  size_t n_cells() const noexcept { return cell_shape_.size(); }
+  size_t n_faces() const noexcept { return face_shape_.size(); }
+  size_t n_edges() const noexcept { return edge2node_.size(); }
+
+  // ---- Coordinates ----
+  const std::vector<real_t>& X_ref() const noexcept { return X_ref_; }
+  const std::vector<real_t>& X_cur() const noexcept { return X_cur_; }
+  bool has_current_coords() const noexcept { return !X_cur_.empty(); }
+  void set_current_coords(const std::vector<real_t>& Xcur);
+  void clear_current_coords();
+  Configuration active_configuration() const noexcept { return active_config_; }
+  void use_reference_configuration() { active_config_ = Configuration::Reference; }
+  void use_current_configuration() { active_config_ = Configuration::Current; }
+
+  // ---- Topology access ----
+  const std::vector<CellShape>& cell_shapes() const noexcept { return cell_shape_; }
+  const CellShape& cell_shape(index_t c) const { return cell_shape_.at(static_cast<size_t>(c)); }
+  std::pair<const index_t*, size_t> cell_nodes_span(index_t c) const;
+  const std::vector<offset_t>& cell2node_offsets() const noexcept { return cell2node_offsets_; }
+  const std::vector<index_t>& cell2node() const noexcept { return cell2node_; }
+
+  const std::vector<CellShape>& face_shapes() const noexcept { return face_shape_; }
+  std::pair<const index_t*, size_t> face_nodes_span(index_t f) const;
+  const std::array<index_t,2>& face_cells(index_t f) const { return face2cell_.at(static_cast<size_t>(f)); }
+
+  const std::vector<std::array<index_t,2>>& edge2node() const noexcept { return edge2node_; }
+  const std::array<index_t,2>& edge_nodes(index_t e) const { return edge2node_.at(static_cast<size_t>(e)); }
+
+  // ---- IDs / ownership ----
+  const std::vector<gid_t>& node_gids() const noexcept { return node_gid_; }
+  const std::vector<gid_t>& cell_gids() const noexcept { return cell_gid_; }
+  const std::vector<gid_t>& face_gids() const noexcept { return face_gid_; }
+  const std::vector<gid_t>& edge_gids() const noexcept { return edge_gid_; }
+
+  void set_node_gids(std::vector<gid_t> gids) { node_gid_ = std::move(gids); }
+  void set_cell_gids(std::vector<gid_t> gids) { cell_gid_ = std::move(gids); }
+  void set_face_gids(std::vector<gid_t> gids) { face_gid_ = std::move(gids); }
+  void set_edge_gids(std::vector<gid_t> gids) { edge_gid_ = std::move(gids); }
+
+  index_t global_to_local_cell(gid_t gid) const;
+  index_t global_to_local_node(gid_t gid) const;
+  index_t global_to_local_face(gid_t gid) const;
+
+  // ---- Labels & sets ----
+  void set_region_label(index_t cell, label_t label);
+  label_t region_label(index_t cell) const;
+  std::vector<index_t> cells_with_label(label_t label) const;
+
+  void set_boundary_label(index_t face, label_t label);
+  label_t boundary_label(index_t face) const;
+  std::vector<index_t> faces_with_label(label_t label) const;
+
+  void add_to_set(EntityKind kind, const std::string& name, index_t id);
+  const std::vector<index_t>& get_set(EntityKind kind, const std::string& name) const;
+  bool has_set(EntityKind kind, const std::string& name) const;
+
+  void register_label(const std::string& name, label_t label);
+  std::string label_name(label_t label) const;
+  label_t label_from_name(const std::string& name) const;
+
+  // ---- Field attachment ----
+  FieldHandle attach_field(EntityKind kind, const std::string& name, FieldScalarType type,
+                          size_t components, size_t custom_bytes_per_component = 0);
+  FieldHandle attach_field_with_descriptor(EntityKind kind, const std::string& name,
+                                          FieldScalarType type, const FieldDescriptor& descriptor);
+  bool has_field(EntityKind kind, const std::string& name) const;
+  void remove_field(const FieldHandle& h);
+  void* field_data(const FieldHandle& h);
+  const void* field_data(const FieldHandle& h) const;
+  size_t field_components(const FieldHandle& h) const;
+  FieldScalarType field_type(const FieldHandle& h) const;
+  size_t field_entity_count(const FieldHandle& h) const;
+  size_t field_bytes_per_entity(const FieldHandle& h) const;
+
+  template <typename T>
+  T* field_data_as(const FieldHandle& h) { return reinterpret_cast<T*>(field_data(h)); }
+
+  template <typename T>
+  const T* field_data_as(const FieldHandle& h) const { return reinterpret_cast<const T*>(field_data(h)); }
+
+  // ---- Geometry operations (delegated) ----
+  std::array<real_t,3> cell_center(index_t c, Configuration cfg = Configuration::Reference) const;
+  std::array<real_t,3> face_center(index_t f, Configuration cfg = Configuration::Reference) const;
+  std::array<real_t,3> face_normal(index_t f, Configuration cfg = Configuration::Reference) const;
+  real_t face_area(index_t f, Configuration cfg = Configuration::Reference) const;
+  real_t cell_measure(index_t c, Configuration cfg = Configuration::Reference) const;
+  BoundingBox bounding_box(Configuration cfg = Configuration::Reference) const;
+
+  // ---- Quality metrics (delegated) ----
+  real_t compute_quality(index_t cell, const std::string& metric = "aspect_ratio") const;
+  std::pair<real_t,real_t> global_quality_range(const std::string& metric = "aspect_ratio") const;
+
+  // ---- Adjacency queries ----
+  std::vector<index_t> cell_neighbors(index_t c) const;
+  std::vector<index_t> node_cells(index_t n) const;
+  std::vector<index_t> face_neighbors(index_t f) const;
+  std::vector<index_t> boundary_faces() const;
+  std::vector<index_t> boundary_cells() const;
+
+  void build_node2cell();
+  void build_node2face();
+  void build_cell2cell();
+
+  // ---- Submesh extraction ----
+  MeshBase extract_submesh_by_region(label_t region_label) const;
+  MeshBase extract_submesh_by_regions(const std::vector<label_t>& region_labels) const;
+  MeshBase extract_submesh_by_boundary(label_t boundary_label) const;
+
+  // ---- Search & point location ----
+  PointLocateResult locate_point(const std::array<real_t,3>& x,
+                                Configuration cfg = Configuration::Reference) const;
+  std::vector<PointLocateResult> locate_points(const std::vector<std::array<real_t,3>>& X,
+                                              Configuration cfg = Configuration::Reference) const;
+  RayIntersectResult intersect_ray(const std::array<real_t,3>& origin,
+                                  const std::array<real_t,3>& direction,
+                                  Configuration cfg = Configuration::Reference) const;
+  void build_search_structure(Configuration cfg = Configuration::Reference) const;
+  void clear_search_structure() const;
+
+  // ---- Validation & diagnostics ----
+  void validate_basic() const;
+  void validate_topology() const;
+  void validate_geometry() const;
+  void report_statistics() const;
+  void write_debug(const std::string& prefix, const std::string& format = "vtu") const;
+
+  // ---- Memory management ----
+  void shrink_to_fit();
+  size_t memory_usage_bytes() const;
+
+  // ---- Event system ----
+  MeshEventBus& event_bus() { return event_bus_; }
+  const MeshEventBus& event_bus() const { return event_bus_; }
+
+  // ---- IO registry ----
+  using LoadFn = std::function<MeshBase(const MeshIOOptions&)>;
+  using SaveFn = std::function<void(const MeshBase&, const MeshIOOptions&)>;
+
+  static void register_reader(const std::string& format, LoadFn fn);
+  static void register_writer(const std::string& format, SaveFn fn);
+  static MeshBase load(const MeshIOOptions& opts);
+  void save(const MeshIOOptions& opts) const;
+  static std::vector<std::string> registered_readers();
+  static std::vector<std::string> registered_writers();
+
+  // ---- Builders ----
+  static MeshBase build_cartesian(int nx, int ny, int nz, const BoundingBox& domain);
+  static MeshBase build_extruded(const MeshBase& base_2d, int n_layers, real_t height);
+
+private:
+  // Core data
+  int spatial_dim_ = 0;
+  Configuration active_config_ = Configuration::Reference;
+
+  // Coordinates
+  std::vector<real_t> X_ref_;
+  std::vector<real_t> X_cur_;
+
+  // Cell topology
+  std::vector<CellShape> cell_shape_;
+  std::vector<offset_t> cell2node_offsets_;
+  std::vector<index_t> cell2node_;
+
+  // Face topology
+  std::vector<CellShape> face_shape_;
+  std::vector<offset_t> face2node_offsets_;
+  std::vector<index_t> face2node_;
+  std::vector<std::array<index_t,2>> face2cell_;
+
+  // Edge topology
+  std::vector<std::array<index_t,2>> edge2node_;
+
+  // Global IDs
+  std::vector<gid_t> node_gid_;
+  std::vector<gid_t> cell_gid_;
+  std::vector<gid_t> face_gid_;
+  std::vector<gid_t> edge_gid_;
+
+  // Ownership
+  std::vector<Ownership> node_owner_;
+  std::vector<Ownership> cell_owner_;
+  std::vector<Ownership> face_owner_;
+  std::vector<Ownership> edge_owner_;
+
+  // Labels
+  std::vector<label_t> cell_region_id_;
+  std::vector<label_t> face_boundary_id_;
+  std::unordered_map<std::string, std::vector<index_t>> entity_sets_[4];
+  std::unordered_map<std::string, label_t> label_from_name_;
+  std::vector<std::string> name_from_label_;
+
+  // Field attachments
+  struct FieldInfo {
+    FieldScalarType type;
+    size_t components;
+    size_t bytes_per_component;
+    std::vector<uint8_t> data;
+  };
+  struct AttachTable { std::unordered_map<std::string, FieldInfo> by_name; };
+  AttachTable attachments_[4];
+  uint32_t next_field_id_ = 1;
+  std::unordered_map<uint32_t, std::pair<EntityKind, std::string>> field_index_;
+  std::unordered_map<uint32_t, FieldDescriptor> field_descriptors_;
+
+  // Adjacency caches (mutable for lazy building)
+  mutable std::vector<offset_t> node2cell_offsets_;
+  mutable std::vector<index_t> node2cell_;
+  mutable std::vector<offset_t> node2face_offsets_;
+  mutable std::vector<index_t> node2face_;
+  mutable std::vector<offset_t> cell2cell_offsets_;
+  mutable std::vector<index_t> cell2cell_;
+
+  // Global to local maps
+  std::unordered_map<gid_t, index_t> global2local_cell_;
+  std::unordered_map<gid_t, index_t> global2local_node_;
+  std::unordered_map<gid_t, index_t> global2local_face_;
+
+  // Search acceleration
+  struct SearchAccel;
+  mutable std::unique_ptr<SearchAccel> search_accel_;
+
+  // Event bus
+  mutable MeshEventBus event_bus_;
+
+  // Helper methods
+  size_t entity_count(EntityKind k) const noexcept;
+  void invalidate_caches();
+
+  // IO registry storage
+  static std::unordered_map<std::string, LoadFn>& readers_();
+  static std::unordered_map<std::string, SaveFn>& writers_();
+};
+
+} // namespace svmp
+
+#endif // SVMP_MESH_BASE_H
