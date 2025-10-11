@@ -29,7 +29,7 @@
  */
 
 #include "Mesh.h"
-#include "SpatialHashing.h"
+#include "Validation/SpatialHashing.h"
 
 #include <algorithm>
 #include <cmath>

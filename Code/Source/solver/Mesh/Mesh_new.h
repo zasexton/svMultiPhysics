@@ -55,8 +55,8 @@
 #include "Geometry/MeshQuality.h"
 
 // Observer pattern
-#include "MeshObserver.h"
-#include "MeshFieldDescriptor.h"
+#include "Observer/MeshObserver.h"
+#include "Fields/MeshFieldDescriptor.h"
 
 // For backward compatibility, provide svmp namespace exports
 namespace svmp {

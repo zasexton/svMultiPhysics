@@ -33,8 +33,8 @@
 
 #include "MeshTypes.h"
 #include "../Topology/CellShape.h"
-#include "../MeshObserver.h"
-#include "../MeshFieldDescriptor.h"
+#include "../Observer/MeshObserver.h"
+#include "../Fields/MeshFieldDescriptor.h"
 
 #include <memory>
 #include <vector>

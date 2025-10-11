@@ -32,7 +32,7 @@
 #define SVMP_MESH_FIELDS_H
 
 #include "../Core/MeshTypes.h"
-#include "../MeshFieldDescriptor.h"
+#include "MeshFieldDescriptor.h"
 #include <vector>
 #include <unordered_map>
 #include <memory>

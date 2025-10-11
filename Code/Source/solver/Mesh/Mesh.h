@@ -43,8 +43,8 @@
 #include <utility>
 #include <vector>
 
-#include "MeshObserver.h"
-#include "MeshFieldDescriptor.h"
+#include "Observer/MeshObserver.h"
+#include "Fields/MeshFieldDescriptor.h"
 
 namespace svmp {
 

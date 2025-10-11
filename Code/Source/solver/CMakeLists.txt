@@ -191,20 +191,21 @@ set(CSRCS
   Mesh/Mesh.h Mesh/Mesh.cpp
   Mesh/Core/MeshTypes.h
   Mesh/Core/MeshBase.h
+  Mesh/Core/DistributedMesh.h
+  Mesh/Core/InterfaceMesh.h
   Mesh/Topology/CellShape.h Mesh/Topology/CellShape.cpp
   Mesh/Topology/MeshTopology.h Mesh/Topology/MeshTopology.cpp
   Mesh/Geometry/MeshGeometry.h Mesh/Geometry/MeshGeometry.cpp
   Mesh/Geometry/MeshQuality.h Mesh/Geometry/MeshQuality.cpp
+  Mesh/Geometry/MeshOrientation.h
   Mesh/Fields/MeshFields.h
+  Mesh/Fields/MeshFieldDescriptor.h
   Mesh/Labels/MeshLabels.h
   Mesh/Search/MeshSearch.h
   Mesh/Validation/MeshValidation.h
+  Mesh/Validation/SpatialHashing.h
   Mesh/Builders/MeshBuilders.h
-  Mesh/DistributedMesh.h
-  Mesh/InterfaceMesh.h
-  Mesh/MeshFieldDescriptor.h
-  Mesh/MeshObserver.h
-  Mesh/MeshOrientation.h
+  Mesh/Observer/MeshObserver.h
   Mesh/IO/MeshIO.h
   Mesh/IO/VTKReader.h Mesh/IO/VTKReader.cpp
   Mesh/IO/VTKWriter.h Mesh/IO/VTKWriter.cpp
