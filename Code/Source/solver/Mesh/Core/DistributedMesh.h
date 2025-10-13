@@ -31,7 +31,7 @@
 #ifndef SVMP_DISTRIBUTED_MESH_H
 #define SVMP_DISTRIBUTED_MESH_H
 
-#include "Mesh.h"
+#include "MeshBase.h"
 #include <mpi.h>
 #include <memory>
 #include <unordered_set>

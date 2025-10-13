@@ -29,7 +29,7 @@
  */
 
 #include "MeshGeometry.h"
-#include "../Mesh.h"
+#include "../Core/MeshBase.h"
 #include <cmath>
 #include <algorithm>
 

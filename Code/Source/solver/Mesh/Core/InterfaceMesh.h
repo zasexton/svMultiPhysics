@@ -31,8 +31,8 @@
 #ifndef SVMP_INTERFACE_MESH_H
 #define SVMP_INTERFACE_MESH_H
 
-#include "Mesh.h"
-#include "MeshOrientation.h"
+#include "MeshBase.h"
+#include "../Geometry/MeshOrientation.h"
 #include <memory>
 #include <string>
 #include <vector>

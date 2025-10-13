@@ -31,8 +31,9 @@
 #ifndef SVMP_SPATIAL_HASHING_H
 #define SVMP_SPATIAL_HASHING_H
 
-#include "Mesh.h"
-#include "GeometryKernels.h"
+#include "../Core/MeshBase.h"
+#include "../Topology/CellShape.h"
+// Note: GeometryKernels.h was removed - inlining necessary functions
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -240,21 +241,40 @@ public:
       switch (shape.family) {
         case CellFamily::Triangle:
           if (n_nodes >= 3) {
-            is_inverted = geometry::is_inverted(vertices, CellFamily::Triangle);
+            // Simple 2D orientation check for triangles
+            double v1x = vertices[1][0] - vertices[0][0];
+            double v1y = vertices[1][1] - vertices[0][1];
+            double v2x = vertices[2][0] - vertices[0][0];
+            double v2y = vertices[2][1] - vertices[0][1];
+            double cross_z = v1x * v2y - v1y * v2x;
+            is_inverted = (cross_z < 0);
           }
           break;
         case CellFamily::Tetra:
           if (n_nodes >= 4) {
-            is_inverted = geometry::is_inverted(vertices, CellFamily::Tetra);
+            // Simple volume check for tetrahedra
+            double v1x = vertices[1][0] - vertices[0][0];
+            double v1y = vertices[1][1] - vertices[0][1];
+            double v1z = vertices[1][2] - vertices[0][2];
+            double v2x = vertices[2][0] - vertices[0][0];
+            double v2y = vertices[2][1] - vertices[0][1];
+            double v2z = vertices[2][2] - vertices[0][2];
+            double v3x = vertices[3][0] - vertices[0][0];
+            double v3y = vertices[3][1] - vertices[0][1];
+            double v3z = vertices[3][2] - vertices[0][2];
+
+            // Scalar triple product
+            double volume = v1x * (v2y * v3z - v2z * v3y) -
+                          v1y * (v2x * v3z - v2z * v3x) +
+                          v1z * (v2x * v3y - v2y * v3x);
+            is_inverted = (volume < 0);
           }
           break;
         case CellFamily::Hex:
+          // Simplified check - just check if volume is negative
           if (n_nodes >= 8) {
-            std::array<std::array<double, 3>, 8> hex_verts;
-            for (size_t i = 0; i < 8; ++i) {
-              hex_verts[i] = vertices[i];
-            }
-            is_inverted = geometry::is_inverted(hex_verts, CellFamily::Hex);
+            real_t measure = mesh_.cell_measure(static_cast<index_t>(c));
+            is_inverted = (measure < 0);
           }
           break;
         default:

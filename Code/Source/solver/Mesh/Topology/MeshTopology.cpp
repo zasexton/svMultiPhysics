@@ -31,10 +31,19 @@
 #include "MeshTopology.h"
 #include "../Core/MeshBase.h"
 #include <unordered_map>
+#include <unordered_set>
 #include <queue>
 #include <algorithm>
 
 namespace svmp {
+
+// Hash function for std::pair<index_t, index_t>
+struct PairHash {
+  std::size_t operator()(const std::pair<index_t, index_t>& p) const {
+    // Cantor pairing function
+    return static_cast<std::size_t>(p.first + p.second) * (p.first + p.second + 1) / 2 + p.second;
+  }
+};
 
 // ---- Adjacency construction ----
 
@@ -406,8 +415,7 @@ std::vector<index_t> MeshTopology::cells_within_distance(const MeshBase& mesh,
 // ---- Edge operations ----
 
 std::vector<std::array<index_t,2>> MeshTopology::extract_edges(const MeshBase& mesh) {
-  std::unordered_set<std::pair<index_t,index_t>,
-                     std::hash<std::pair<index_t,index_t>>> edge_set;
+  std::unordered_set<std::pair<index_t,index_t>, PairHash> edge_set;
 
   // Extract edges from cells
   for (size_t c = 0; c < mesh.n_cells(); ++c) {
@@ -475,8 +483,7 @@ std::vector<std::array<index_t,2>> MeshTopology::extract_edges(const MeshBase& m
 bool MeshTopology::is_manifold(const MeshBase& mesh) {
   // Check that each edge is shared by at most 2 faces
   auto edges = extract_edges(mesh);
-  std::unordered_map<std::pair<index_t,index_t>, index_t,
-                     std::hash<std::pair<index_t,index_t>>> edge_face_count;
+  std::unordered_map<std::pair<index_t,index_t>, index_t, PairHash> edge_face_count;
 
   // Count faces per edge
   for (size_t f = 0; f < mesh.n_faces(); ++f) {
@@ -503,8 +510,7 @@ bool MeshTopology::is_manifold(const MeshBase& mesh) {
 }
 
 std::vector<std::array<index_t,2>> MeshTopology::non_manifold_edges(const MeshBase& mesh) {
-  std::unordered_map<std::pair<index_t,index_t>, index_t,
-                     std::hash<std::pair<index_t,index_t>>> edge_face_count;
+  std::unordered_map<std::pair<index_t,index_t>, index_t, PairHash> edge_face_count;
 
   // Count faces per edge
   for (size_t f = 0; f < mesh.n_faces(); ++f) {

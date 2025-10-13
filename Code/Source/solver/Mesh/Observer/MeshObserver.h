@@ -32,6 +32,8 @@
 #define SVMP_MESH_OBSERVER_H
 
 #include <algorithm>
+#include <functional>
+#include <iostream>
 #include <memory>
 #include <vector>
 

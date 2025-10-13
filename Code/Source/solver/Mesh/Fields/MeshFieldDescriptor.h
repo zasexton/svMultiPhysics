@@ -31,11 +31,16 @@
 #ifndef SVMP_MESH_FIELD_DESCRIPTOR_H
 #define SVMP_MESH_FIELD_DESCRIPTOR_H
 
-#include "Mesh.h"
+#include "../Core/MeshTypes.h"
 #include <string>
 #include <vector>
+#include <unordered_map>
+#include <stdexcept>
 
 namespace svmp {
+
+// Forward declaration
+class MeshBase;
 
 // ====================
 // P0 #3: Field Semantics & Metadata
@@ -128,18 +133,14 @@ public:
   explicit FieldManager(MeshBase& mesh) : mesh_(mesh) {}
 
   // Attach a field with full metadata
-  MeshBase::FieldHandle attach(const std::string& name, FieldScalarType type, const FieldDescriptor& descriptor) {
-    auto handle = mesh_.attach_field(descriptor.location, name, type, descriptor.components);
-    descriptors_[handle.id] = descriptor;
-    return handle;
-  }
+  FieldHandle attach(const std::string& name, FieldScalarType type, const FieldDescriptor& descriptor);
 
   // Query metadata
-  bool has_descriptor(const MeshBase::FieldHandle& h) const {
+  bool has_descriptor(const FieldHandle& h) const {
     return descriptors_.find(h.id) != descriptors_.end();
   }
 
-  const FieldDescriptor& descriptor(const MeshBase::FieldHandle& h) const {
+  const FieldDescriptor& descriptor(const FieldHandle& h) const {
     auto it = descriptors_.find(h.id);
     if (it == descriptors_.end()) {
       throw std::runtime_error("FieldManager: no descriptor for field " + h.name);
@@ -148,8 +149,8 @@ public:
   }
 
   // Query by intent
-  std::vector<MeshBase::FieldHandle> fields_with_intent(FieldIntent intent) const {
-    std::vector<MeshBase::FieldHandle> result;
+  std::vector<FieldHandle> fields_with_intent(FieldIntent intent) const {
+    std::vector<FieldHandle> result;
     for (const auto& [id, desc] : descriptors_) {
       if (desc.intent == intent) {
         // Reconstruct handle (needs name lookup from mesh)
@@ -161,8 +162,8 @@ public:
   }
 
   // Query time-dependent fields (for checkpointing, output)
-  std::vector<MeshBase::FieldHandle> time_dependent_fields() const {
-    std::vector<MeshBase::FieldHandle> result;
+  std::vector<FieldHandle> time_dependent_fields() const {
+    std::vector<FieldHandle> result;
     for (const auto& [id, desc] : descriptors_) {
       if (desc.time_dependent) {
         result.push_back({id, desc.location, ""});
@@ -172,8 +173,8 @@ public:
   }
 
   // Query fields requiring ghost exchange
-  std::vector<MeshBase::FieldHandle> fields_requiring_exchange() const {
-    std::vector<MeshBase::FieldHandle> result;
+  std::vector<FieldHandle> fields_requiring_exchange() const {
+    std::vector<FieldHandle> result;
     for (const auto& [id, desc] : descriptors_) {
       if (desc.ghost_policy != FieldGhostPolicy::None) {
         result.push_back({id, desc.location, ""});

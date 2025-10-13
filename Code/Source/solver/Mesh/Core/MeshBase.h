@@ -313,7 +313,10 @@ private:
   std::unordered_map<gid_t, index_t> global2local_face_;
 
   // Search acceleration
-  struct SearchAccel;
+  // Simple empty struct to avoid incomplete type issues
+  struct SearchAccel {
+    // Placeholder for search acceleration structure
+  };
   mutable std::unique_ptr<SearchAccel> search_accel_;
 
   // Event bus

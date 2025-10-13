@@ -49,6 +49,12 @@ using rank_t  = int32_t;      // MPI rank
 using label_t = int32_t;      // region / boundary / material tags
 
 // ---------
+// Constants
+// ---------
+constexpr index_t INVALID_INDEX = -1;
+constexpr label_t INVALID_LABEL = -1;
+
+// ---------
 // Enums
 // ---------
 enum class EntityKind {

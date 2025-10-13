@@ -268,7 +268,12 @@ public:
   };
 
   static ValidationReport validate_all(const MeshBase& mesh,
-                                      const ValidationConfig& config = ValidationConfig{});
+                                      const ValidationConfig& config);
+
+  static ValidationReport validate_all(const MeshBase& mesh) {
+    ValidationConfig config;
+    return validate_all(mesh, config);
+  }
 
   /**
    * @brief Quick validation (essential checks only)

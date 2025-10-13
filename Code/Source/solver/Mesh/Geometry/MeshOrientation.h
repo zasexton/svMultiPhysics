@@ -31,7 +31,7 @@
 #ifndef SVMP_MESH_ORIENTATION_H
 #define SVMP_MESH_ORIENTATION_H
 
-#include "Mesh.h"
+#include "../Core/MeshBase.h"
 #include <array>
 #include <vector>
 #include <stdexcept>

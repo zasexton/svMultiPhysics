@@ -29,7 +29,7 @@
  */
 
 #include "MeshQuality.h"
-#include "../Mesh.h"  // For MeshBase
+#include "../Core/MeshBase.h"
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>

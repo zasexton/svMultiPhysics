@@ -32,6 +32,7 @@
 #define SVMP_MESH_SEARCH_H
 
 #include "../Core/MeshTypes.h"
+#include "../Topology/CellShape.h"
 #include <memory>
 #include <vector>
 #include <array>
@@ -234,8 +235,19 @@ public:
    * @param cfg Mesh configuration
    */
   static void build_search_structure(const MeshBase& mesh,
-                                    const SearchConfig& config = SearchConfig{},
+                                    const SearchConfig& config,
                                     Configuration cfg = Configuration::Reference);
+
+  /**
+   * @brief Build search acceleration structure with default config
+   * @param mesh The mesh
+   * @param cfg Mesh configuration
+   */
+  static void build_search_structure(const MeshBase& mesh,
+                                    Configuration cfg = Configuration::Reference) {
+    SearchConfig config;
+    build_search_structure(mesh, config, cfg);
+  }
 
   /**
    * @brief Clear search structure
