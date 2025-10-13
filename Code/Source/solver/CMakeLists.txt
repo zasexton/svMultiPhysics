@@ -198,15 +198,15 @@ set(CSRCS
   Mesh/Geometry/MeshGeometry.h Mesh/Geometry/MeshGeometry.cpp
   Mesh/Geometry/MeshQuality.h Mesh/Geometry/MeshQuality.cpp
   Mesh/Geometry/MeshOrientation.h
-  Mesh/Fields/MeshFields.h
+  Mesh/Fields/MeshFields.h Mesh/Fields/MeshFields.cpp
   Mesh/Fields/MeshFieldDescriptor.h
-  Mesh/Labels/MeshLabels.h
-  Mesh/Search/MeshSearch.h
-  Mesh/Validation/MeshValidation.h
+  Mesh/Labels/MeshLabels.h Mesh/Labels/MeshLabels.cpp
+  Mesh/Search/MeshSearch.h Mesh/Search/MeshSearch.cpp
+  Mesh/Validation/MeshValidation.h Mesh/Validation/MeshValidation.cpp
   Mesh/Validation/SpatialHashing.h
-  Mesh/Builders/MeshBuilders.h
+  Mesh/Builders/MeshBuilders.h Mesh/Builders/MeshBuilders.cpp
   Mesh/Observer/MeshObserver.h
-  Mesh/IO/MeshIO.h
+  Mesh/IO/MeshIO.h Mesh/IO/MeshIO.cpp
   Mesh/IO/VTKReader.h Mesh/IO/VTKReader.cpp
   Mesh/IO/VTKWriter.h Mesh/IO/VTKWriter.cpp
   nn.h nn.cpp
