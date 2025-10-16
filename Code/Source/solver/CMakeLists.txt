@@ -190,7 +190,7 @@ set(CSRCS
   mesh.h mesh.cpp
   Mesh/Mesh.h Mesh/Mesh.cpp
   Mesh/Core/MeshTypes.h
-  Mesh/Core/MeshBase.h
+  Mesh/Core/MeshBase.h Mesh/Core/MeshBase.cpp
   Mesh/Core/DistributedMesh.h
   Mesh/Core/InterfaceMesh.h
   Mesh/Topology/CellShape.h Mesh/Topology/CellShape.cpp
@@ -204,7 +204,6 @@ set(CSRCS
   Mesh/Search/MeshSearch.h Mesh/Search/MeshSearch.cpp
   Mesh/Validation/MeshValidation.h Mesh/Validation/MeshValidation.cpp
   Mesh/Validation/SpatialHashing.h
-  Mesh/Builders/MeshBuilders.h Mesh/Builders/MeshBuilders.cpp
   Mesh/Observer/MeshObserver.h
   Mesh/IO/MeshIO.h Mesh/IO/MeshIO.cpp
   Mesh/IO/VTKReader.h Mesh/IO/VTKReader.cpp
