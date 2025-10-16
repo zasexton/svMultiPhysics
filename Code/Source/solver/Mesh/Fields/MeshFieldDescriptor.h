@@ -62,7 +62,7 @@ enum class FieldGhostPolicy {
 
 // Self-describing field metadata
 struct FieldDescriptor {
-  EntityKind location = EntityKind::Vertex;        // Where the field lives
+  EntityKind location = EntityKind::Vertex;        // Where the field lives (Vertex/Line/Face/Volume)
   size_t components = 1;                            // Number of components (1=scalar, 3=vector, 9=tensor, etc.)
   std::vector<std::string> component_names;         // Optional: {"x", "y", "z"} or {"xx", "xy", "xz", ...}
   std::string units;                                // Physical units: "m/s", "Pa", "K", "J/kg", etc.

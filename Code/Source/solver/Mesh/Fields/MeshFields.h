@@ -247,24 +247,24 @@ public:
   // ---- Field interpolation ----
 
   /**
-   * @brief Interpolate field from cells to nodes
+   * @brief Interpolate field from cells to vertices
    * @param mesh The mesh
    * @param cell_field Cell field handle
-   * @param node_field Node field handle (must exist)
+   * @param vertex_field Vertex field handle (must exist)
    */
-  static void interpolate_cell_to_node(const MeshBase& mesh,
-                                      const FieldHandle& cell_field,
-                                      const FieldHandle& node_field);
+  static void interpolate_cell_to_vertex(const MeshBase& mesh,
+                                        const FieldHandle& cell_field,
+                                        const FieldHandle& vertex_field);
 
   /**
-   * @brief Interpolate field from nodes to cells
+   * @brief Interpolate field from vertices to cells
    * @param mesh The mesh
-   * @param node_field Node field handle
+   * @param vertex_field Vertex field handle
    * @param cell_field Cell field handle (must exist)
    */
-  static void interpolate_node_to_cell(const MeshBase& mesh,
-                                      const FieldHandle& node_field,
-                                      const FieldHandle& cell_field);
+  static void interpolate_vertex_to_cell(const MeshBase& mesh,
+                                        const FieldHandle& vertex_field,
+                                        const FieldHandle& cell_field);
 
   /**
    * @brief Restrict field from fine to coarse mesh

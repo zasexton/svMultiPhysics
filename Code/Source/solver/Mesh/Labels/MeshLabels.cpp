@@ -181,7 +181,7 @@ std::vector<std::string> MeshLabels::list_sets(const MeshBase& mesh,
 
 void MeshLabels::create_set_from_label(MeshBase& mesh, EntityKind kind,
                                       const std::string& set_name, label_t label) {
-  if (kind == EntityKind::Cell) {
+  if (kind == EntityKind::Volume) {
     auto cells = cells_with_region(mesh, label);
     add_to_set(mesh, kind, set_name, cells);
   } else if (kind == EntityKind::Face) {
@@ -223,7 +223,7 @@ std::unordered_map<label_t, label_t> MeshLabels::renumber_labels(MeshBase& mesh,
                                                                 EntityKind kind) {
   std::unordered_map<label_t, label_t> old_to_new;
 
-  if (kind == EntityKind::Cell) {
+  if (kind == EntityKind::Volume) {
     auto unique = unique_region_labels(mesh);
     std::vector<label_t> sorted_labels(unique.begin(), unique.end());
     std::sort(sorted_labels.begin(), sorted_labels.end());
@@ -267,7 +267,7 @@ void MeshLabels::merge_labels(MeshBase& mesh, EntityKind kind,
                              label_t target_label) {
   std::unordered_set<label_t> sources(source_labels.begin(), source_labels.end());
 
-  if (kind == EntityKind::Cell) {
+  if (kind == EntityKind::Volume) {
     size_t n_cells = mesh.n_cells();
     for (size_t c = 0; c < n_cells; ++c) {
       label_t label = mesh.region_label(static_cast<index_t>(c));
@@ -291,7 +291,7 @@ std::unordered_map<index_t, label_t> MeshLabels::split_by_connectivity(MeshBase&
                                                                        label_t label) {
   std::unordered_map<index_t, label_t> entity_to_component;
 
-  if (kind == EntityKind::Cell) {
+  if (kind == EntityKind::Volume) {
     // Get all cells with this label
     auto cells = cells_with_region(mesh, label);
     std::unordered_set<index_t> cell_set(cells.begin(), cells.end());
@@ -353,7 +353,7 @@ std::unordered_map<index_t, label_t> MeshLabels::split_by_connectivity(MeshBase&
 
 void MeshLabels::copy_labels(const MeshBase& source, MeshBase& target,
                             EntityKind kind) {
-  if (kind == EntityKind::Cell) {
+  if (kind == EntityKind::Volume) {
     size_t n_cells = std::min(source.n_cells(), target.n_cells());
     for (size_t c = 0; c < n_cells; ++c) {
       label_t label = source.region_label(static_cast<index_t>(c));
@@ -371,7 +371,7 @@ void MeshLabels::copy_labels(const MeshBase& source, MeshBase& target,
 std::vector<label_t> MeshLabels::export_labels(const MeshBase& mesh, EntityKind kind) {
   std::vector<label_t> labels;
 
-  if (kind == EntityKind::Cell) {
+  if (kind == EntityKind::Volume) {
     size_t n_cells = mesh.n_cells();
     labels.resize(n_cells);
     for (size_t c = 0; c < n_cells; ++c) {
@@ -390,7 +390,7 @@ std::vector<label_t> MeshLabels::export_labels(const MeshBase& mesh, EntityKind 
 
 void MeshLabels::import_labels(MeshBase& mesh, EntityKind kind,
                               const std::vector<label_t>& labels) {
-  if (kind == EntityKind::Cell) {
+  if (kind == EntityKind::Volume) {
     size_t n_cells = std::min(labels.size(), mesh.n_cells());
     for (size_t c = 0; c < n_cells; ++c) {
       mesh.set_region_label(static_cast<index_t>(c), labels[c]);

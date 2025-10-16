@@ -96,18 +96,18 @@ bool MeshSearch::contains_point(const MeshBase& mesh,
 
 // ---- Nearest neighbor search ----
 
-std::pair<index_t, real_t> MeshSearch::nearest_node(const MeshBase& mesh,
-                                                   const std::array<real_t,3>& point,
-                                                   Configuration cfg) {
+std::pair<index_t, real_t> MeshSearch::nearest_vertex(const MeshBase& mesh,
+                                                     const std::array<real_t,3>& point,
+                                                     Configuration cfg) {
   index_t nearest_idx = INVALID_INDEX;
   real_t min_dist = std::numeric_limits<real_t>::max();
 
   const std::vector<real_t>& coords = (cfg == Configuration::Current && mesh.has_current_coords())
                                      ? mesh.X_cur() : mesh.X_ref();
   int dim = mesh.dim();
-  size_t n_nodes = mesh.n_nodes();
+  size_t n_vertices = mesh.n_vertices();
 
-  for (size_t n = 0; n < n_nodes; ++n) {
+  for (size_t n = 0; n < n_vertices; ++n) {
     real_t dist_sq = 0;
     for (int d = 0; d < dim; ++d) {
       real_t dx = coords[n * dim + d] - point[d];
@@ -123,7 +123,7 @@ std::pair<index_t, real_t> MeshSearch::nearest_node(const MeshBase& mesh,
   return {nearest_idx, min_dist};
 }
 
-std::vector<std::pair<index_t, real_t>> MeshSearch::k_nearest_nodes(
+std::vector<std::pair<index_t, real_t>> MeshSearch::k_nearest_vertices(
     const MeshBase& mesh,
     const std::array<real_t,3>& point,
     size_t k,
@@ -134,9 +134,9 @@ std::vector<std::pair<index_t, real_t>> MeshSearch::k_nearest_nodes(
   const std::vector<real_t>& coords = (cfg == Configuration::Current && mesh.has_current_coords())
                                      ? mesh.X_cur() : mesh.X_ref();
   int dim = mesh.dim();
-  size_t n_nodes = mesh.n_nodes();
+  size_t n_vertices = mesh.n_vertices();
 
-  for (size_t n = 0; n < n_nodes; ++n) {
+  for (size_t n = 0; n < n_vertices; ++n) {
     real_t dist_sq = 0;
     for (int d = 0; d < dim; ++d) {
       real_t dx = coords[n * dim + d] - point[d];
@@ -164,19 +164,19 @@ std::vector<std::pair<index_t, real_t>> MeshSearch::k_nearest_nodes(
   return results;
 }
 
-std::vector<index_t> MeshSearch::nodes_in_radius(const MeshBase& mesh,
-                                                const std::array<real_t,3>& point,
-                                                real_t radius,
-                                                Configuration cfg) {
-  std::vector<index_t> nodes;
+std::vector<index_t> MeshSearch::vertices_in_radius(const MeshBase& mesh,
+                                                   const std::array<real_t,3>& point,
+                                                   real_t radius,
+                                                   Configuration cfg) {
+  std::vector<index_t> vertices;
   real_t radius_sq = radius * radius;
 
   const std::vector<real_t>& coords = (cfg == Configuration::Current && mesh.has_current_coords())
                                      ? mesh.X_cur() : mesh.X_ref();
   int dim = mesh.dim();
-  size_t n_nodes = mesh.n_nodes();
+  size_t n_vertices = mesh.n_vertices();
 
-  for (size_t n = 0; n < n_nodes; ++n) {
+  for (size_t n = 0; n < n_vertices; ++n) {
     real_t dist_sq = 0;
     for (int d = 0; d < dim; ++d) {
       real_t dx = coords[n * dim + d] - point[d];
@@ -184,11 +184,11 @@ std::vector<index_t> MeshSearch::nodes_in_radius(const MeshBase& mesh,
     }
 
     if (dist_sq <= radius_sq) {
-      nodes.push_back(static_cast<index_t>(n));
+      vertices.push_back(static_cast<index_t>(n));
     }
   }
 
-  return nodes;
+  return vertices;
 }
 
 std::pair<index_t, real_t> MeshSearch::nearest_cell(const MeshBase& mesh,

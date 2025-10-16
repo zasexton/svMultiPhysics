@@ -120,42 +120,42 @@ public:
   // ---- Nearest neighbor search ----
 
   /**
-   * @brief Find nearest node to point
+   * @brief Find nearest vertex to point
    * @param mesh The mesh
    * @param point Query point
    * @param cfg Configuration
-   * @return Node index and distance
+   * @return Vertex index and distance
    */
-  static std::pair<index_t, real_t> nearest_node(const MeshBase& mesh,
-                                                const std::array<real_t,3>& point,
-                                                Configuration cfg = Configuration::Reference);
+  static std::pair<index_t, real_t> nearest_vertex(const MeshBase& mesh,
+                                                  const std::array<real_t,3>& point,
+                                                  Configuration cfg = Configuration::Reference);
 
   /**
-   * @brief Find k nearest nodes to point
+   * @brief Find k nearest vertices to point
    * @param mesh The mesh
    * @param point Query point
    * @param k Number of neighbors
    * @param cfg Configuration
-   * @return Vector of (node_index, distance) pairs
+   * @return Vector of (vertex_index, distance) pairs
    */
-  static std::vector<std::pair<index_t, real_t>> k_nearest_nodes(
+  static std::vector<std::pair<index_t, real_t>> k_nearest_vertices(
       const MeshBase& mesh,
       const std::array<real_t,3>& point,
       size_t k,
       Configuration cfg = Configuration::Reference);
 
   /**
-   * @brief Find all nodes within radius
+   * @brief Find all vertices within radius
    * @param mesh The mesh
    * @param point Query point
    * @param radius Search radius
    * @param cfg Configuration
-   * @return Vector of node indices
+   * @return Vector of vertex indices
    */
-  static std::vector<index_t> nodes_in_radius(const MeshBase& mesh,
-                                             const std::array<real_t,3>& point,
-                                             real_t radius,
-                                             Configuration cfg = Configuration::Reference);
+  static std::vector<index_t> vertices_in_radius(const MeshBase& mesh,
+                                                const std::array<real_t,3>& point,
+                                                real_t radius,
+                                                Configuration cfg = Configuration::Reference);
 
   /**
    * @brief Find nearest cell to point

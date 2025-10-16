@@ -42,10 +42,10 @@ namespace svmp {
 
 size_t MeshFields::entity_count(const MeshBase& mesh, EntityKind kind) {
   switch (kind) {
-    case EntityKind::Vertex: return mesh.n_nodes();
+    case EntityKind::Vertex: return mesh.n_vertices();
     case EntityKind::Edge: return mesh.n_edges();
     case EntityKind::Face: return mesh.n_faces();
-    case EntityKind::Cell: return mesh.n_cells();
+    case EntityKind::Volume: return mesh.n_cells();
     default: return 0;
   }
 }
@@ -176,9 +176,9 @@ void MeshFields::resize_fields(MeshBase& mesh, EntityKind kind, size_t new_count
 
 // ---- Field interpolation ----
 
-void MeshFields::interpolate_cell_to_node(const MeshBase& mesh,
-                                         const FieldHandle& cell_field,
-                                         const FieldHandle& node_field) {
+void MeshFields::interpolate_cell_to_vertex(const MeshBase& mesh,
+                                           const FieldHandle& cell_field,
+                                           const FieldHandle& node_field) {
   // Get field data
   const real_t* cell_data = field_data_as<real_t>(mesh, cell_field);
   real_t* node_data = const_cast<real_t*>(field_data_as<real_t>(mesh, node_field));
@@ -188,45 +188,45 @@ void MeshFields::interpolate_cell_to_node(const MeshBase& mesh,
   }
 
   size_t n_components = field_components(mesh, cell_field);
-  size_t n_nodes = mesh.n_nodes();
+  size_t n_vertices = mesh.n_vertices();
   size_t n_cells = mesh.n_cells();
 
-  // Initialize node data to zero
-  std::fill(node_data, node_data + n_nodes * n_components, 0.0);
+  // Initialize vertex data to zero
+  std::fill(node_data, node_data + n_vertices * n_components, 0.0);
 
-  // Count contributions per node
-  std::vector<size_t> node_counts(n_nodes, 0);
+  // Count contributions per vertex
+  std::vector<size_t> vertex_counts(n_vertices, 0);
 
-  // Accumulate cell values at nodes
+  // Accumulate cell values at vertices
   for (size_t c = 0; c < n_cells; ++c) {
-    auto [nodes_ptr, n_cell_nodes] = mesh.cell_nodes_span(static_cast<index_t>(c));
+    auto [vertices_ptr, n_cell_vertices] = mesh.cell_vertices_span(static_cast<index_t>(c));
 
-    for (size_t i = 0; i < n_cell_nodes; ++i) {
-      index_t node_id = nodes_ptr[i];
+    for (size_t i = 0; i < n_cell_vertices; ++i) {
+      index_t vertex_id = vertices_ptr[i];
 
-      // Add cell value to node
+      // Add cell value to vertex
       for (size_t comp = 0; comp < n_components; ++comp) {
-        node_data[node_id * n_components + comp] +=
+        node_data[vertex_id * n_components + comp] +=
           cell_data[c * n_components + comp];
       }
 
-      node_counts[node_id]++;
+      vertex_counts[vertex_id]++;
     }
   }
 
   // Average the accumulated values
-  for (size_t n = 0; n < n_nodes; ++n) {
-    if (node_counts[n] > 0) {
+  for (size_t v = 0; v < n_vertices; ++v) {
+    if (vertex_counts[v] > 0) {
       for (size_t comp = 0; comp < n_components; ++comp) {
-        node_data[n * n_components + comp] /= static_cast<real_t>(node_counts[n]);
+        node_data[v * n_components + comp] /= static_cast<real_t>(vertex_counts[v]);
       }
     }
   }
 }
 
-void MeshFields::interpolate_node_to_cell(const MeshBase& mesh,
-                                         const FieldHandle& node_field,
-                                         const FieldHandle& cell_field) {
+void MeshFields::interpolate_vertex_to_cell(const MeshBase& mesh,
+                                           const FieldHandle& node_field,
+                                           const FieldHandle& cell_field) {
   // Get field data
   const real_t* node_data = field_data_as<real_t>(mesh, node_field);
   real_t* cell_data = const_cast<real_t*>(field_data_as<real_t>(mesh, cell_field));
@@ -238,28 +238,28 @@ void MeshFields::interpolate_node_to_cell(const MeshBase& mesh,
   size_t n_components = field_components(mesh, node_field);
   size_t n_cells = mesh.n_cells();
 
-  // Average node values for each cell
+  // Average vertex values for each cell
   for (size_t c = 0; c < n_cells; ++c) {
-    auto [nodes_ptr, n_cell_nodes] = mesh.cell_nodes_span(static_cast<index_t>(c));
+    auto [vertices_ptr, n_cell_vertices] = mesh.cell_vertices_span(static_cast<index_t>(c));
 
     // Initialize cell value
     for (size_t comp = 0; comp < n_components; ++comp) {
       cell_data[c * n_components + comp] = 0.0;
     }
 
-    // Sum node values
-    for (size_t i = 0; i < n_cell_nodes; ++i) {
-      index_t node_id = nodes_ptr[i];
+    // Sum vertex values
+    for (size_t i = 0; i < n_cell_vertices; ++i) {
+      index_t vertex_id = vertices_ptr[i];
       for (size_t comp = 0; comp < n_components; ++comp) {
         cell_data[c * n_components + comp] +=
-          node_data[node_id * n_components + comp];
+          node_data[vertex_id * n_components + comp];
       }
     }
 
     // Average
-    if (n_cell_nodes > 0) {
+    if (n_cell_vertices > 0) {
       for (size_t comp = 0; comp < n_components; ++comp) {
-        cell_data[c * n_components + comp] /= static_cast<real_t>(n_cell_nodes);
+        cell_data[c * n_components + comp] /= static_cast<real_t>(n_cell_vertices);
       }
     }
   }
