@@ -45,7 +45,7 @@ namespace svmp {
 // --------------------
 struct CellShape {
   CellFamily family = CellFamily::Polygon;
-  int num_corners = 0;        // number of corner nodes (for poly: >= 3)
+  int num_corners = 0;        // number of corner vertices (for poly: >= 3)
   int order = 1;              // geometric/approximation order
   bool is_mixed_order = false;
   // Optional hints for variable-topology families (e.g., polyhedra & polygons)
@@ -73,8 +73,8 @@ struct CellShape {
   // Topological kind derived from cell family (by dimension)
   EntityKind topo_kind() const;  // Implemented after CellShapeUtils
 
-  // Expected node count for standard elements
-  int expected_nodes() const {
+  // Expected vertex count for standard elements
+  int expected_vertices() const {
     if (family == CellFamily::Point) {
       return 1;
     } else if (family == CellFamily::Line) {
@@ -102,10 +102,10 @@ struct CellShape {
     } else if (family == CellFamily::Pyramid) {
       if (order == 1) return 5;
       if (order == 2) return 14;
-      // Pyramids have irregular node counts for high order
+      // Pyramids have irregular vertex counts for high order
       return 5 + 8 * (order - 1) + (order - 1) * (order - 2) / 2;
     }
-    // Polygon/Polyhedron: variable node count
+    // Polygon/Polyhedron: variable vertex count
     return -1;
   }
 };

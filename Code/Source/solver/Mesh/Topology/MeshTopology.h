@@ -100,8 +100,8 @@ public:
    * @brief Get all cells sharing at least one vertex with given cell
    * @param mesh The mesh
    * @param cell Cell index
-   * @param node2cell_offsets Prebuilt vertex-to-cell offsets (optional)
-   * @param node2cell Prebuilt vertex-to-cell connectivity (optional)
+   * @param vertex2cell_offsets Prebuilt vertex-to-cell offsets (optional)
+   * @param vertex2cell Prebuilt vertex-to-cell connectivity (optional)
    * @return Vector of neighbor cell indices
    */
   static std::vector<index_t> cell_neighbors(const MeshBase& mesh, index_t cell,

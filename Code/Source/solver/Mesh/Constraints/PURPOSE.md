@@ -6,10 +6,10 @@ This subfolder implements **topological and geometric constraints** for mesh ent
 
 The Constraints folder provides mechanisms to represent and manage special relationships between mesh entities that arise from:
 
-1. **Adaptive mesh refinement** (hanging nodes)
+1. **Adaptive mesh refinement** (hanging vertices)
 2. **Periodic boundary conditions** (topologically equivalent entities)
 3. **Non-conforming mesh interfaces** (mortar methods)
-4. **Multi-point geometric constraints** (node tying)
+4. **Multi-point geometric constraints** (vertex tying)
 
 **Key principle**: This folder handles **topology and geometry only**. It does NOT implement:
 - Physics-specific constraints (contact, friction, etc.)
@@ -20,12 +20,12 @@ The Constraints folder provides mechanisms to represent and manage special relat
 
 ### ✓ What This Folder DOES Include
 
-#### 1. Hanging Node Constraints
-**Purpose**: Track parent-child relationships for nodes created during adaptive refinement.
+#### 1. Hanging Vertex Constraints
+**Purpose**: Track parent-child relationships for vertices created during adaptive refinement.
 
 **Topological nature**:
-- Which nodes are "hanging" (dependent on parent entities)
-- Which edges/faces contain hanging nodes
+- Which vertices are "hanging" (dependent on parent entities)
+- Which edges/faces contain hanging vertices
 - Parent-child connectivity for constraint equations
 
 **Use cases**:
@@ -35,12 +35,12 @@ The Constraints folder provides mechanisms to represent and manage special relat
 
 **Example**:
 ```cpp
-// A hanging node on an edge depends on the edge's endpoint nodes
-HangingNodeConstraint hnc;
-hnc.constrained_node = 5;
+// A hanging vertex on an edge depends on the edge's endpoint vertices
+HangingVertexConstraint hnc;
+hnc.constrained_vertex = 5;
 hnc.parent_entity = EntityKind::Edge;
 hnc.parent_id = 12;
-hnc.parent_nodes = {3, 4};        // Endpoints of edge 12
+hnc.parent_vertices = {3, 4};        // Endpoints of edge 12
 hnc.weights = {0.5, 0.5};         // Linear interpolation
 ```
 
@@ -48,7 +48,7 @@ hnc.weights = {0.5, 0.5};         // Linear interpolation
 **Purpose**: Identify topologically equivalent entities on opposite periodic boundaries.
 
 **Topological nature**:
-- Which node pairs are periodic equivalents
+- Which vertex pairs are periodic equivalents
 - Which face pairs match on opposite boundaries
 - Transformation/translation vectors between periodic surfaces
 
@@ -59,7 +59,7 @@ hnc.weights = {0.5, 0.5};         // Linear interpolation
 
 **Example**:
 ```cpp
-// Nodes 10 and 20 are periodic equivalents
+// Vertices 10 and 20 are periodic equivalents
 PeriodicConstraint pc;
 pc.entity_kind = EntityKind::Vertex;
 pc.primary_id = 10;
@@ -72,7 +72,7 @@ pc.rotation_matrix = identity;     // Optional rotation
 **Purpose**: Track topology of non-conforming mesh interfaces (mortar methods).
 
 **Topological nature**:
-- Which faces/nodes belong to each side of the interface
+- Which faces/vertices belong to each side of the interface
 - Interface pairing (master/slave surface identification)
 - Geometric overlap detection
 
@@ -96,24 +96,24 @@ mi.overlaps = compute_surface_overlaps(master, slave);  // Geometry
 ```
 
 #### 4. Multi-Point Constraints (Geometric)
-**Purpose**: Enforce geometric relationships between nodes (e.g., node tying).
+**Purpose**: Enforce geometric relationships between vertices (e.g., vertex tying).
 
 **Topological nature**:
 - Linear combinations of nodal coordinates
-- Master-slave node relationships
+- Master-slave vertex relationships
 - Coefficient matrices for geometric constraints
 
 **Use cases**:
-- Tying nodes together (merged meshes)
+- Tying vertices together (merged meshes)
 - Enforcing planarity or symmetry
-- Coupling nodes for continuity
+- Coupling vertices for continuity
 
 **Example**:
 ```cpp
-// Tie node 5 to the centroid of nodes {1, 2, 3}
+// Tie vertex 5 to the centroid of vertices {1, 2, 3}
 MultiPointConstraint mpc;
-mpc.constrained_node = 5;
-mpc.master_nodes = {1, 2, 3};
+mpc.constrained_vertex = 5;
+mpc.master_vertices = {1, 2, 3};
 mpc.weights = {1.0/3.0, 1.0/3.0, 1.0/3.0};
 ```
 
@@ -156,35 +156,35 @@ mpc.weights = {1.0/3.0, 1.0/3.0, 1.0/3.0};
 
 ## Key Classes (To Be Implemented)
 
-### `HangingNodeConstraints`
-Manages hanging node relationships for adaptive refinement.
+### `HangingVertexConstraints`
+Manages hanging vertex relationships for adaptive refinement.
 
 **Responsibilities**:
-- Detect hanging nodes from mesh refinement
+- Detect hanging vertices from mesh refinement
 - Store parent-child relationships
 - Compute interpolation weights
-- Query constraints for specific nodes/edges/faces
+- Query constraints for specific vertices/edges/faces
 
 **Key methods**:
 ```cpp
-class HangingNodeConstraints {
+class HangingVertexConstraints {
 public:
-    // Detect hanging nodes from refined mesh
-    void detect_hanging_nodes(const MeshBase& mesh);
+    // Detect hanging vertices from refined mesh
+    void detect_hanging_vertices(const MeshBase& mesh);
 
-    // Check if node is hanging
-    bool is_hanging(index_t node) const;
+    // Check if vertex is hanging
+    bool is_hanging(index_t vertex) const;
 
     // Get parent entity and interpolation weights
-    HangingNodeConstraint get_constraint(index_t node) const;
+    HangingVertexConstraint get_constraint(index_t vertex) const;
 
-    // Get all hanging nodes
-    const std::vector<index_t>& hanging_nodes() const;
+    // Get all hanging vertices
+    const std::vector<index_t>& hanging_vertices() const;
 };
 ```
 
 ### `PeriodicConstraints`
-Manages periodic node/face pairs for periodic domains.
+Manages periodic vertex/face pairs for periodic domains.
 
 **Responsibilities**:
 - Identify periodic entity pairs
@@ -217,7 +217,7 @@ Manages topology of non-conforming mesh interfaces.
 **Responsibilities**:
 - Store master/slave surface pairs
 - Compute geometric overlaps
-- Identify interface nodes/faces
+- Identify interface vertices/faces
 - Provide interface topology queries
 
 **Key methods**:
@@ -235,35 +235,35 @@ public:
     const std::vector<index_t>& master_faces() const;
     const std::vector<index_t>& slave_faces() const;
 
-    // Get nodes on each side
-    std::unordered_set<index_t> master_nodes() const;
-    std::unordered_set<index_t> slave_nodes() const;
+    // Get vertices on each side
+    std::unordered_set<index_t> master_vertices() const;
+    std::unordered_set<index_t> slave_vertices() const;
 };
 ```
 
 ### `MultiPointConstraints`
-Manages geometric multi-point constraints between nodes.
+Manages geometric multi-point constraints between vertices.
 
 **Responsibilities**:
 - Store linear constraint relationships
 - Validate constraint coefficients
-- Query constraints for specific nodes
+- Query constraints for specific vertices
 - Detect constraint conflicts
 
 **Key methods**:
 ```cpp
 class MultiPointConstraints {
 public:
-    // Add constraint: constrained_node = sum(weights[i] * master_nodes[i])
-    void add_constraint(index_t constrained_node,
-                       const std::vector<index_t>& master_nodes,
+    // Add constraint: constrained_vertex = sum(weights[i] * master_vertices[i])
+    void add_constraint(index_t constrained_vertex,
+                       const std::vector<index_t>& master_vertices,
                        const std::vector<real_t>& weights);
 
-    // Check if node is constrained
-    bool is_constrained(index_t node) const;
+    // Check if vertex is constrained
+    bool is_constrained(index_t vertex) const;
 
-    // Get constraint for node
-    MultiPointConstraint get_constraint(index_t node) const;
+    // Get constraint for vertex
+    MultiPointConstraint get_constraint(index_t vertex) const;
 
     // Validate constraints (no circular dependencies)
     bool validate() const;
@@ -277,8 +277,8 @@ public:
 - **Direction**: Constraints query Topology for parent entities, adjacency
 
 ### Adaptivity
-- **Relationship**: Refinement creates hanging nodes
-- **Direction**: Adaptivity notifies Constraints of new hanging nodes
+- **Relationship**: Refinement creates hanging vertices
+- **Direction**: Adaptivity notifies Constraints of new hanging vertices
 
 ### Geometry
 - **Relationship**: Constraints use geometric queries for overlap detection
@@ -286,7 +286,7 @@ public:
 
 ### Fields
 - **Relationship**: Constraints inform field interpolation
-- **Direction**: Fields query Constraints for hanging node weights
+- **Direction**: Fields query Constraints for hanging vertex weights
 
 ### Boundary
 - **Relationship**: Periodic constraints identified on boundary
@@ -303,7 +303,7 @@ public:
 **Solver folder**: Enforces constraints through equations, matrices, etc.
 
 ### 2. Geometry-Agnostic Storage
-Constraints store topology (node IDs, weights) independent of coordinate values. Geometric validation is separate.
+Constraints store topology (vertex IDs, weights) independent of coordinate values. Geometric validation is separate.
 
 ### 3. Observer Pattern Integration
 Constraint changes should trigger mesh events for dependent systems to update.
@@ -313,24 +313,24 @@ Constraints should validate relationships (e.g., parent entities exist) before a
 
 ## Usage Examples
 
-### Example 1: Hanging Node Detection After Refinement
+### Example 1: Hanging Vertex Detection After Refinement
 
 ```cpp
-#include "Constraints/HangingNodeConstraints.h"
+#include "Constraints/HangingVertexConstraints.h"
 #include "Adaptivity/MeshAdaptivity.h"
 
 // Refine mesh
 MeshAdaptivity adaptivity(mesh);
 adaptivity.refine_cells({10, 15, 20});
 
-// Detect hanging nodes
-HangingNodeConstraints hnc;
-hnc.detect_hanging_nodes(mesh);
+// Detect hanging vertices
+HangingVertexConstraints hnc;
+hnc.detect_hanging_vertices(mesh);
 
-// Query hanging nodes
-for (index_t node : hnc.hanging_nodes()) {
-    auto constraint = hnc.get_constraint(node);
-    std::cout << "Node " << node << " hangs on "
+// Query hanging vertices
+for (index_t vertex : hnc.hanging_vertices()) {
+    auto constraint = hnc.get_constraint(vertex);
+    std::cout << "Vertex " << vertex << " hangs on "
               << constraint.parent_entity << " " << constraint.parent_id << std::endl;
 }
 ```
@@ -348,10 +348,10 @@ auto info = detector.detect_boundary();
 // Identify periodic pairs (user-provided or automatic detection)
 PeriodicConstraints pc;
 
-// Add periodic node pairs (e.g., left and right boundaries)
-for (size_t i = 0; i < left_nodes.size(); ++i) {
+// Add periodic vertex pairs (e.g., left and right boundaries)
+for (size_t i = 0; i < left_vertices.size(); ++i) {
     pc.add_periodic_pair(EntityKind::Vertex,
-                        left_nodes[i], right_nodes[i],
+                        left_vertices[i], right_vertices[i],
                         {1.0, 0.0, 0.0});  // Translation vector
 }
 
@@ -375,8 +375,8 @@ interface.set_slave_surface(block2_boundary_faces);
 interface.compute_overlaps(mesh);
 
 // Get interface topology for solver
-auto master_nodes = interface.master_nodes();
-auto slave_nodes = interface.slave_nodes();
+auto master_vertices = interface.master_vertices();
+auto slave_vertices = interface.slave_vertices();
 
 // Solver uses this topology to build projection operators (not here!)
 ```
@@ -392,7 +392,7 @@ auto slave_nodes = interface.slave_nodes();
 ## Testing
 
 Unit tests should verify:
-- Hanging node detection accuracy
+- Hanging vertex detection accuracy
 - Periodic pair identification
 - Geometric overlap computation
 - Constraint validation (no circular dependencies)

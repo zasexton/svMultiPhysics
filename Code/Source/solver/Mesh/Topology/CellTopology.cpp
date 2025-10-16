@@ -112,7 +112,7 @@ std::vector<std::vector<int>> CellTopology::get_face_edges(CellFamily family) {
 }
 
 // ==========================================
-// Tetrahedron (4 nodes: 0,1,2,3)
+// Tetrahedron (4 vertices: 0,1,2,3)
 // ==========================================
 
 std::vector<std::vector<index_t>> CellTopology::tet_faces_canonical() {
@@ -132,10 +132,10 @@ std::vector<std::vector<index_t>> CellTopology::tet_faces_canonical() {
 std::vector<std::vector<index_t>> CellTopology::tet_faces_oriented() {
     // Faces with right-hand rule ordering (outward normals)
     return {
-        {0, 2, 1},  // Face opposite node 3 (CCW from outside)
-        {0, 1, 3},  // Face opposite node 2
-        {0, 3, 2},  // Face opposite node 1
-        {1, 2, 3}   // Face opposite node 0
+        {0, 2, 1},  // Face opposite vertex 3 (CCW from outside)
+        {0, 1, 3},  // Face opposite vertex 2
+        {0, 3, 2},  // Face opposite vertex 1
+        {1, 2, 3}   // Face opposite vertex 0
     };
 }
 
@@ -147,7 +147,7 @@ std::vector<std::array<index_t, 2>> CellTopology::tet_edges() {
 }
 
 // ==========================================
-// Hexahedron (8 nodes: standard ordering)
+// Hexahedron (8 vertices: standard ordering)
 // ==========================================
 
 std::vector<std::vector<index_t>> CellTopology::hex_faces_canonical() {
@@ -189,7 +189,7 @@ std::vector<std::array<index_t, 2>> CellTopology::hex_edges() {
 }
 
 // ==========================================
-// Wedge/Prism (6 nodes)
+// Wedge/Prism (6 vertices)
 // ==========================================
 
 std::vector<std::vector<index_t>> CellTopology::wedge_faces_canonical() {
@@ -228,7 +228,7 @@ std::vector<std::array<index_t, 2>> CellTopology::wedge_edges() {
 }
 
 // ==========================================
-// Pyramid (5 nodes: 4-node base + apex)
+// Pyramid (5 vertices: 4-vertex base + apex)
 // ==========================================
 
 std::vector<std::vector<index_t>> CellTopology::pyramid_faces_canonical() {
@@ -265,7 +265,7 @@ std::vector<std::array<index_t, 2>> CellTopology::pyramid_edges() {
 }
 
 // ==========================================
-// Triangle (3 nodes)
+// Triangle (3 vertices)
 // ==========================================
 
 std::vector<std::vector<index_t>> CellTopology::tri_edges_canonical() {
@@ -296,7 +296,7 @@ std::vector<std::array<index_t, 2>> CellTopology::tri_edges() {
 }
 
 // ==========================================
-// Quadrilateral (4 nodes)
+// Quadrilateral (4 vertices)
 // ==========================================
 
 std::vector<std::vector<index_t>> CellTopology::quad_edges_canonical() {

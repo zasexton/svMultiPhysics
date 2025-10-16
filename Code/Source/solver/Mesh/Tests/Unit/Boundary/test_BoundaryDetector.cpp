@@ -55,17 +55,17 @@ protected:
     /**
      * @brief Create a simple single tetrahedron mesh
      *
-     * Creates a tet with 4 nodes and 1 cell. All 4 faces should be on the boundary.
+     * Creates a tet with 4 vertices and 1 cell. All 4 faces should be on the boundary.
      */
     MeshBase create_single_tet_mesh() {
-        MeshBase mesh(3, 4, 1);  // 3D, 4 nodes, 1 cell
+        MeshBase mesh(3, 4, 1);  // 3D, 4 vertices, 1 cell
 
         // Define vertices
         std::vector<real_t> X_ref = {
-            0.0, 0.0, 0.0,  // Node 0
-            1.0, 0.0, 0.0,  // Node 1
-            0.0, 1.0, 0.0,  // Node 2
-            0.0, 0.0, 1.0   // Node 3
+            0.0, 0.0, 0.0,  // Vertex 0
+            1.0, 0.0, 0.0,  // Vertex 1
+            0.0, 1.0, 0.0,  // Vertex 2
+            0.0, 0.0, 1.0   // Vertex 3
         };
         mesh.set_X_ref(X_ref);
 
@@ -84,25 +84,25 @@ protected:
      * The shared face should be interior, other faces should be boundary.
      */
     MeshBase create_two_tet_mesh() {
-        MeshBase mesh(3, 5, 2);  // 3D, 5 nodes, 2 cells
+        MeshBase mesh(3, 5, 2);  // 3D, 5 vertices, 2 cells
 
         // Define vertices
         std::vector<real_t> X_ref = {
-            0.0, 0.0, 0.0,  // Node 0
-            1.0, 0.0, 0.0,  // Node 1
-            0.0, 1.0, 0.0,  // Node 2
-            0.0, 0.0, 1.0,  // Node 3
-            0.0, 0.0, 2.0   // Node 4 (for second tet)
+            0.0, 0.0, 0.0,  // Vertex 0
+            1.0, 0.0, 0.0,  // Vertex 1
+            0.0, 1.0, 0.0,  // Vertex 2
+            0.0, 0.0, 1.0,  // Vertex 3
+            0.0, 0.0, 2.0   // Vertex 4 (for second tet)
         };
         mesh.set_X_ref(X_ref);
 
         // Define cells
         CellShape shape(CellFamily::Tetra, 1);
 
-        // First tet: nodes 0, 1, 2, 3
+        // First tet: vertices 0, 1, 2, 3
         mesh.add_cell({0, 1, 2, 3}, shape);
 
-        // Second tet: nodes 0, 1, 2, 4 (shares face 0-1-2 with first tet)
+        // Second tet: vertices 0, 1, 2, 4 (shares face 0-1-2 with first tet)
         mesh.add_cell({0, 1, 2, 4}, shape);
 
         return mesh;
@@ -112,13 +112,13 @@ protected:
      * @brief Create a simple triangle mesh (2D)
      */
     MeshBase create_single_triangle_mesh() {
-        MeshBase mesh(2, 3, 1);  // 2D, 3 nodes, 1 cell
+        MeshBase mesh(2, 3, 1);  // 2D, 3 vertices, 1 cell
 
         // Define vertices
         std::vector<real_t> X_ref = {
-            0.0, 0.0,  // Node 0
-            1.0, 0.0,  // Node 1
-            0.0, 1.0   // Node 2
+            0.0, 0.0,  // Vertex 0
+            1.0, 0.0,  // Vertex 1
+            0.0, 1.0   // Vertex 2
         };
         mesh.set_X_ref(X_ref);
 
@@ -155,13 +155,13 @@ TEST_F(BoundaryDetectorTest, SingleTetHasFourBoundaryFaces) {
     EXPECT_EQ(info.interior_faces.size(), 0);
 }
 
-TEST_F(BoundaryDetectorTest, SingleTetHasFourBoundaryNodes) {
+TEST_F(BoundaryDetectorTest, SingleTetHasFourBoundaryVertices) {
     MeshBase mesh = create_single_tet_mesh();
     BoundaryDetector detector(mesh);
 
     auto info = detector.detect_boundary();
 
-    // All 4 nodes should be on boundary
+    // All 4 vertices should be on boundary
     EXPECT_EQ(info.boundary_vertices.size(), 4);
 }
 
@@ -251,7 +251,7 @@ TEST_F(BoundaryDetectorTest, SingleTriangleHasBoundary) {
     EXPECT_EQ(info.boundary_faces.size(), 3);
 }
 
-TEST_F(BoundaryDetectorTest, TriangleBoundaryEdgesHaveTwoNodes) {
+TEST_F(BoundaryDetectorTest, TriangleBoundaryEdgesHaveTwoVertices) {
     MeshBase mesh = create_single_triangle_mesh();
     BoundaryDetector detector(mesh);
 

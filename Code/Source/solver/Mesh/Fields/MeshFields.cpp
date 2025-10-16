@@ -178,12 +178,12 @@ void MeshFields::resize_fields(MeshBase& mesh, EntityKind kind, size_t new_count
 
 void MeshFields::interpolate_cell_to_vertex(const MeshBase& mesh,
                                            const FieldHandle& cell_field,
-                                           const FieldHandle& node_field) {
+                                           const FieldHandle& vertex_field) {
   // Get field data
   const real_t* cell_data = field_data_as<real_t>(mesh, cell_field);
-  real_t* node_data = const_cast<real_t*>(field_data_as<real_t>(mesh, node_field));
+  real_t* vertex_data = const_cast<real_t*>(field_data_as<real_t>(mesh, vertex_field));
 
-  if (!cell_data || !node_data) {
+  if (!cell_data || !vertex_data) {
     throw std::runtime_error("Invalid field handles for interpolation");
   }
 
@@ -192,7 +192,7 @@ void MeshFields::interpolate_cell_to_vertex(const MeshBase& mesh,
   size_t n_cells = mesh.n_cells();
 
   // Initialize vertex data to zero
-  std::fill(node_data, node_data + n_vertices * n_components, 0.0);
+  std::fill(vertex_data, vertex_data + n_vertices * n_components, 0.0);
 
   // Count contributions per vertex
   std::vector<size_t> vertex_counts(n_vertices, 0);
@@ -206,7 +206,7 @@ void MeshFields::interpolate_cell_to_vertex(const MeshBase& mesh,
 
       // Add cell value to vertex
       for (size_t comp = 0; comp < n_components; ++comp) {
-        node_data[vertex_id * n_components + comp] +=
+        vertex_data[vertex_id * n_components + comp] +=
           cell_data[c * n_components + comp];
       }
 
@@ -218,24 +218,24 @@ void MeshFields::interpolate_cell_to_vertex(const MeshBase& mesh,
   for (size_t v = 0; v < n_vertices; ++v) {
     if (vertex_counts[v] > 0) {
       for (size_t comp = 0; comp < n_components; ++comp) {
-        node_data[v * n_components + comp] /= static_cast<real_t>(vertex_counts[v]);
+        vertex_data[v * n_components + comp] /= static_cast<real_t>(vertex_counts[v]);
       }
     }
   }
 }
 
 void MeshFields::interpolate_vertex_to_cell(const MeshBase& mesh,
-                                           const FieldHandle& node_field,
+                                           const FieldHandle& vertex_field,
                                            const FieldHandle& cell_field) {
   // Get field data
-  const real_t* node_data = field_data_as<real_t>(mesh, node_field);
+  const real_t* vertex_data = field_data_as<real_t>(mesh, vertex_field);
   real_t* cell_data = const_cast<real_t*>(field_data_as<real_t>(mesh, cell_field));
 
-  if (!node_data || !cell_data) {
+  if (!vertex_data || !cell_data) {
     throw std::runtime_error("Invalid field handles for interpolation");
   }
 
-  size_t n_components = field_components(mesh, node_field);
+  size_t n_components = field_components(mesh, vertex_field);
   size_t n_cells = mesh.n_cells();
 
   // Average vertex values for each cell
@@ -252,7 +252,7 @@ void MeshFields::interpolate_vertex_to_cell(const MeshBase& mesh,
       index_t vertex_id = vertices_ptr[i];
       for (size_t comp = 0; comp < n_components; ++comp) {
         cell_data[c * n_components + comp] +=
-          node_data[vertex_id * n_components + comp];
+          vertex_data[vertex_id * n_components + comp];
       }
     }
 

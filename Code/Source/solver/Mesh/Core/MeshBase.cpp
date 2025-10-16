@@ -921,7 +921,7 @@ std::vector<index_t> MeshBase::cell_neighbors(index_t c) const {
 }
 
 std::vector<index_t> MeshBase::vertex_cells(index_t n) const {
-    // Build node2cell if not cached
+    // Build vertex2cell if not cached
     if (vertex2cell_offsets_.empty()) {
         const_cast<MeshBase*>(this)->build_vertex2cell();
     }
@@ -1002,51 +1002,51 @@ MeshBase MeshBase::extract_submesh_by_regions(const std::vector<label_t>& region
     }
 
     // Extract unique vertices
-    std::unordered_set<index_t> selected_nodes_set;
+    std::unordered_set<index_t> selected_vertices_set;
     for (index_t c : selected_cells) {
         auto [vertices_ptr, n_vertices] = cell_vertices_span(c);
         for (size_t i = 0; i < n_vertices; ++i) {
-            selected_nodes_set.insert(vertices_ptr[i]);
+            selected_vertices_set.insert(vertices_ptr[i]);
         }
     }
 
-    std::vector<index_t> selected_nodes(selected_nodes_set.begin(), selected_nodes_set.end());
-    std::sort(selected_nodes.begin(), selected_nodes.end());
+    std::vector<index_t> selected_vertices(selected_vertices_set.begin(), selected_vertices_set.end());
+    std::sort(selected_vertices.begin(), selected_vertices.end());
 
     // Build vertex renumbering map
-    std::unordered_map<index_t, index_t> old2new_node;
-    for (size_t i = 0; i < selected_nodes.size(); ++i) {
-        old2new_node[selected_nodes[i]] = static_cast<index_t>(i);
+    std::unordered_map<index_t, index_t> old2new_vertex;
+    for (size_t i = 0; i < selected_vertices.size(); ++i) {
+        old2new_vertex[selected_vertices[i]] = static_cast<index_t>(i);
     }
 
     // Build submesh coordinates
     std::vector<real_t> sub_X_ref;
-    sub_X_ref.reserve(selected_nodes.size() * spatial_dim_);
-    for (index_t n : selected_nodes) {
+    sub_X_ref.reserve(selected_vertices.size() * spatial_dim_);
+    for (index_t n : selected_vertices) {
         for (int d = 0; d < spatial_dim_; ++d) {
             sub_X_ref.push_back(X_ref_[n * spatial_dim_ + d]);
         }
     }
 
     // Build submesh cells
-    std::vector<offset_t> sub_cell2node_offsets;
-    std::vector<index_t> sub_cell2node;
+    std::vector<offset_t> sub_cell2vertex_offsets;
+    std::vector<index_t> sub_cell2vertex;
     std::vector<CellShape> sub_cell_shape;
 
-    sub_cell2node_offsets.push_back(0);
+    sub_cell2vertex_offsets.push_back(0);
     for (index_t c : selected_cells) {
         auto [vertices_ptr, n_vertices] = cell_vertices_span(c);
         for (size_t i = 0; i < n_vertices; ++i) {
-            sub_cell2node.push_back(old2new_node[vertices_ptr[i]]);
+            sub_cell2vertex.push_back(old2new_vertex[vertices_ptr[i]]);
         }
-        sub_cell2node_offsets.push_back(static_cast<offset_t>(sub_cell2node.size()));
+        sub_cell2vertex_offsets.push_back(static_cast<offset_t>(sub_cell2vertex.size()));
         sub_cell_shape.push_back(cell_shape_[c]);
     }
 
     // Create submesh
     MeshBase submesh;
-    submesh.build_from_arrays(spatial_dim_, sub_X_ref, sub_cell2node_offsets,
-                             sub_cell2node, sub_cell_shape);
+    submesh.build_from_arrays(spatial_dim_, sub_X_ref, sub_cell2vertex_offsets,
+                             sub_cell2vertex, sub_cell_shape);
 
     // Copy region labels
     for (size_t i = 0; i < selected_cells.size(); ++i) {
@@ -1077,47 +1077,47 @@ MeshBase MeshBase::extract_submesh_by_boundary(label_t boundary_label) const {
 
     // Similar extraction logic as extract_submesh_by_regions
     // (code reuse - could factor out common extraction logic)
-    std::unordered_set<index_t> selected_nodes_set;
+    std::unordered_set<index_t> selected_vertices_set;
     for (index_t c : selected_cells) {
         auto [vertices_ptr, n_vertices] = cell_vertices_span(c);
         for (size_t i = 0; i < n_vertices; ++i) {
-            selected_nodes_set.insert(vertices_ptr[i]);
+            selected_vertices_set.insert(vertices_ptr[i]);
         }
     }
 
-    std::vector<index_t> selected_nodes(selected_nodes_set.begin(), selected_nodes_set.end());
-    std::sort(selected_nodes.begin(), selected_nodes.end());
+    std::vector<index_t> selected_vertices(selected_vertices_set.begin(), selected_vertices_set.end());
+    std::sort(selected_vertices.begin(), selected_vertices.end());
 
-    std::unordered_map<index_t, index_t> old2new_node;
-    for (size_t i = 0; i < selected_nodes.size(); ++i) {
-        old2new_node[selected_nodes[i]] = static_cast<index_t>(i);
+    std::unordered_map<index_t, index_t> old2new_vertex;
+    for (size_t i = 0; i < selected_vertices.size(); ++i) {
+        old2new_vertex[selected_vertices[i]] = static_cast<index_t>(i);
     }
 
     std::vector<real_t> sub_X_ref;
-    sub_X_ref.reserve(selected_nodes.size() * spatial_dim_);
-    for (index_t n : selected_nodes) {
+    sub_X_ref.reserve(selected_vertices.size() * spatial_dim_);
+    for (index_t n : selected_vertices) {
         for (int d = 0; d < spatial_dim_; ++d) {
             sub_X_ref.push_back(X_ref_[n * spatial_dim_ + d]);
         }
     }
 
-    std::vector<offset_t> sub_cell2node_offsets;
-    std::vector<index_t> sub_cell2node;
+    std::vector<offset_t> sub_cell2vertex_offsets;
+    std::vector<index_t> sub_cell2vertex;
     std::vector<CellShape> sub_cell_shape;
 
-    sub_cell2node_offsets.push_back(0);
+    sub_cell2vertex_offsets.push_back(0);
     for (index_t c : selected_cells) {
         auto [vertices_ptr, n_vertices] = cell_vertices_span(c);
         for (size_t i = 0; i < n_vertices; ++i) {
-            sub_cell2node.push_back(old2new_node[vertices_ptr[i]]);
+            sub_cell2vertex.push_back(old2new_vertex[vertices_ptr[i]]);
         }
-        sub_cell2node_offsets.push_back(static_cast<offset_t>(sub_cell2node.size()));
+        sub_cell2vertex_offsets.push_back(static_cast<offset_t>(sub_cell2vertex.size()));
         sub_cell_shape.push_back(cell_shape_[c]);
     }
 
     MeshBase submesh;
-    submesh.build_from_arrays(spatial_dim_, sub_X_ref, sub_cell2node_offsets,
-                             sub_cell2node, sub_cell_shape);
+    submesh.build_from_arrays(spatial_dim_, sub_X_ref, sub_cell2vertex_offsets,
+                             sub_cell2vertex, sub_cell_shape);
 
     return submesh;
 }

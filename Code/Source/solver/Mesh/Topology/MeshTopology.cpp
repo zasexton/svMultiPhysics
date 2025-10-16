@@ -158,9 +158,9 @@ void MeshTopology::build_cell2cell(const MeshBase& mesh,
     }
   } else {
     // Build via shared vertices (slower, less accurate)
-    std::vector<offset_t> node2cell_offsets;
-    std::vector<index_t> node2cell;
-    build_vertex2volume(mesh, node2cell_offsets, node2cell);
+    std::vector<offset_t> vertex2cell_offsets;
+    std::vector<index_t> vertex2cell;
+    build_vertex2volume(mesh, vertex2cell_offsets, vertex2cell);
 
     std::vector<std::unordered_set<index_t>> neighbors(n_cells);
 
@@ -168,10 +168,10 @@ void MeshTopology::build_cell2cell(const MeshBase& mesh,
       auto [vertices_ptr, n_vertex] = mesh.cell_vertices_span(static_cast<index_t>(c));
       for (size_t i = 0; i < n_vertex; ++i) {
         index_t vertex_id = vertices_ptr[i];
-        offset_t start = node2cell_offsets[vertex_id];
-        offset_t end = node2cell_offsets[vertex_id + 1];
+        offset_t start = vertex2cell_offsets[vertex_id];
+        offset_t end = vertex2cell_offsets[vertex_id + 1];
         for (offset_t j = start; j < end; ++j) {
-          index_t other_cell = node2cell[static_cast<size_t>(j)];
+          index_t other_cell = vertex2cell[static_cast<size_t>(j)];
           if (other_cell != static_cast<index_t>(c)) {
             neighbors[c].insert(other_cell);
           }
@@ -225,16 +225,16 @@ std::vector<index_t> MeshTopology::cell_neighbors(const MeshBase& mesh, index_t 
 }
 
 std::vector<index_t> MeshTopology::vertex_cells(const MeshBase& mesh, index_t vertex,
-                                             const std::vector<offset_t>& node2cell_offsets,
-                                             const std::vector<index_t>& node2cell) {
-  if (!node2cell_offsets.empty()) {
+                                             const std::vector<offset_t>& vertex2cell_offsets,
+                                             const std::vector<index_t>& vertex2cell) {
+  if (!vertex2cell_offsets.empty()) {
     // Use provided adjacency
-    if (vertex < 0 || static_cast<size_t>(vertex) >= node2cell_offsets.size() - 1) {
+    if (vertex < 0 || static_cast<size_t>(vertex) >= vertex2cell_offsets.size() - 1) {
       return {};
     }
-    offset_t start = node2cell_offsets[vertex];
-    offset_t end = node2cell_offsets[vertex + 1];
-    return std::vector<index_t>(node2cell.begin() + start, node2cell.begin() + end);
+    offset_t start = vertex2cell_offsets[vertex];
+    offset_t end = vertex2cell_offsets[vertex + 1];
+    return std::vector<index_t>(vertex2cell.begin() + start, vertex2cell.begin() + end);
   } else {
     // Build on demand
     std::vector<offset_t> offsets;

@@ -215,7 +215,7 @@ TEST_F(CellTopologyTest, CanonicalAndOrientedHaveSameVertices) {
 TEST_F(CellTopologyTest, TetFaceIndicesAreValid) {
     auto faces = CellTopology::get_boundary_faces(CellFamily::Tetra);
 
-    // Tet has 4 nodes (indices 0-3)
+    // Tet has 4 vertices (indices 0-3)
     for (const auto& face : faces) {
         for (index_t idx : face) {
             EXPECT_GE(idx, 0);
@@ -227,7 +227,7 @@ TEST_F(CellTopologyTest, TetFaceIndicesAreValid) {
 TEST_F(CellTopologyTest, HexFaceIndicesAreValid) {
     auto faces = CellTopology::get_boundary_faces(CellFamily::Hex);
 
-    // Hex has 8 nodes (indices 0-7)
+    // Hex has 8 vertices (indices 0-7)
     for (const auto& face : faces) {
         for (index_t idx : face) {
             EXPECT_GE(idx, 0);
@@ -243,7 +243,7 @@ TEST_F(CellTopologyTest, HexFaceIndicesAreValid) {
 TEST_F(CellTopologyTest, TetEdgeIndicesAreValid) {
     auto edges = CellTopology::get_edges(CellFamily::Tetra);
 
-    // Tet has 4 nodes (indices 0-3)
+    // Tet has 4 vertices (indices 0-3)
     for (const auto& edge : edges) {
         for (index_t idx : edge) {
             EXPECT_GE(idx, 0);
@@ -255,7 +255,7 @@ TEST_F(CellTopologyTest, TetEdgeIndicesAreValid) {
 TEST_F(CellTopologyTest, HexEdgeIndicesAreValid) {
     auto edges = CellTopology::get_edges(CellFamily::Hex);
 
-    // Hex has 8 nodes (indices 0-7)
+    // Hex has 8 vertices (indices 0-7)
     for (const auto& edge : edges) {
         for (index_t idx : edge) {
             EXPECT_GE(idx, 0);

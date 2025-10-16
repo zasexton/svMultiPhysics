@@ -398,14 +398,14 @@ void DistributedMesh::migrate(const std::vector<rank_t>& new_owner_rank_per_cell
     // ========================================
 
     // Map from vertex to set of ranks that need it
-    std::map<index_t, std::set<rank_t>> node_destinations;
+    std::map<index_t, std::set<rank_t>> vertex_destinations;
 
     // Vertices needed by cells we keep
-    std::set<index_t> nodes_to_keep;
+    std::set<index_t> vertices_to_keep;
     for (index_t c : cells_to_keep) {
         auto [vertices_ptr2, n_vertices2] = local_mesh_->cell_vertices_span(c);
         for (size_t i = 0; i < n_vertices2; ++i) {
-            nodes_to_keep.insert(vertices_ptr2[i]);
+            vertices_to_keep.insert(vertices_ptr2[i]);
         }
     }
 
@@ -414,7 +414,7 @@ void DistributedMesh::migrate(const std::vector<rank_t>& new_owner_rank_per_cell
         for (index_t c : cells) {
             auto [vertices_ptr3, n_vertices3] = local_mesh_->cell_vertices_span(c);
             for (size_t i = 0; i < n_vertices3; ++i) {
-                node_destinations[vertices_ptr3[i]].insert(rank);
+                vertex_destinations[vertices_ptr3[i]].insert(rank);
             }
         }
     }
@@ -589,30 +589,30 @@ void DistributedMesh::migrate(const std::vector<rank_t>& new_owner_rank_per_cell
         packet.spatial_dim = local_mesh_->dim();
 
         // Map from old vertex index to new vertex index in packet
-        std::map<index_t, index_t> node_remap;
+        std::map<index_t, index_t> vertex_remap;
 
         // Collect unique vertices used by these cells
-        std::vector<index_t> nodes_for_rank;
+        std::vector<index_t> vertices_for_rank;
         for (index_t c : cells) {
             auto [vertices_ptr4, n_vertices4] = local_mesh_->cell_vertices_span(c);
             for (size_t i = 0; i < n_vertices4; ++i) {
-                if (node_remap.find(vertices_ptr4[i]) == node_remap.end()) {
-                    node_remap[vertices_ptr4[i]] = static_cast<index_t>(nodes_for_rank.size());
-                    nodes_for_rank.push_back(vertices_ptr4[i]);
+                if (vertex_remap.find(vertices_ptr4[i]) == vertex_remap.end()) {
+                    vertex_remap[vertices_ptr4[i]] = static_cast<index_t>(vertices_for_rank.size());
+                    vertices_for_rank.push_back(vertices_ptr4[i]);
                 }
             }
         }
 
-        packet.n_vertices = nodes_for_rank.size();
+        packet.n_vertices = vertices_for_rank.size();
 
         // Pack vertex data
-    const auto& all_node_gids = local_mesh_->vertex_gids();
+    const auto& all_vertex_gids = local_mesh_->vertex_gids();
         const auto& all_coords = (local_mesh_->active_configuration() == Configuration::Reference)
                                  ? local_mesh_->X_ref()
                                  : local_mesh_->X_cur();
 
-        for (index_t n : nodes_for_rank) {
-            packet.vertex_gids.push_back(all_node_gids[n]);
+        for (index_t n : vertices_for_rank) {
+            packet.vertex_gids.push_back(all_vertex_gids[n]);
             for (int d = 0; d < packet.spatial_dim; ++d) {
                 packet.vertex_coords.push_back(all_coords[n * packet.spatial_dim + d]);
             }
@@ -632,7 +632,7 @@ void DistributedMesh::migrate(const std::vector<rank_t>& new_owner_rank_per_cell
             // Remap connectivity to packet-local vertex indices
             auto [vertices_ptr5, n_vertices5] = local_mesh_->cell_vertices_span(c);
             for (size_t i = 0; i < n_vertices5; ++i) {
-                packet.cell_connectivity.push_back(node_remap[vertices_ptr5[i]]);
+                packet.cell_connectivity.push_back(vertex_remap[vertices_ptr5[i]]);
             }
             packet.cell_offsets.push_back(static_cast<offset_t>(packet.cell_connectivity.size()));
 
@@ -646,8 +646,8 @@ void DistributedMesh::migrate(const std::vector<rank_t>& new_owner_rank_per_cell
         // Pack field data (simplified - only packs data for migrating entities)
 
         // Pack vertex fields
-        auto node_field_names = local_mesh_->field_names(EntityKind::Vertex);
-        for (const auto& field_name : node_field_names) {
+        auto vertex_field_names = local_mesh_->field_names(EntityKind::Vertex);
+        for (const auto& field_name : vertex_field_names) {
             MeshPacket::FieldPacket field_packet;
             field_packet.name = field_name;
             field_packet.kind = EntityKind::Vertex;
@@ -661,9 +661,9 @@ void DistributedMesh::migrate(const std::vector<rank_t>& new_owner_rank_per_cell
 
             if (field_data) {
                 size_t bytes_per_entity = field_packet.components * field_packet.bytes_per_component;
-                field_packet.data.reserve(nodes_for_rank.size() * bytes_per_entity);
+                field_packet.data.reserve(vertices_for_rank.size() * bytes_per_entity);
 
-                for (index_t n : nodes_for_rank) {
+                for (index_t n : vertices_for_rank) {
                     const uint8_t* entity_data = &field_data[n * bytes_per_entity];
                     field_packet.data.insert(field_packet.data.end(),
                                            entity_data,
@@ -789,7 +789,7 @@ void DistributedMesh::migrate(const std::vector<rank_t>& new_owner_rank_per_cell
                             : local_mesh_->X_cur();
     const auto& old_vertex_gids = local_mesh_->vertex_gids();
 
-    for (index_t n : nodes_to_keep) {
+    for (index_t n : vertices_to_keep) {
         gid_t gid = old_vertex_gids[n];
         if (gid_to_new_vertex.find(gid) == gid_to_new_vertex.end()) {
             gid_to_new_vertex[gid] = next_vertex_id++;
@@ -829,8 +829,8 @@ void DistributedMesh::migrate(const std::vector<rank_t>& new_owner_rank_per_cell
 
             auto [vertices_ptr6, n_vertices6] = local_mesh_->cell_vertices_span(c);
         for (size_t i = 0; i < n_vertices6; ++i) {
-            gid_t node_gid = old_vertex_gids[vertices_ptr6[i]];
-            new_cell_connectivity.push_back(gid_to_new_vertex[node_gid]);
+            gid_t vertex_gid = old_vertex_gids[vertices_ptr6[i]];
+            new_cell_connectivity.push_back(gid_to_new_vertex[vertex_gid]);
         }
         new_cell_offsets.push_back(static_cast<offset_t>(new_cell_connectivity.size()));
 
@@ -852,8 +852,8 @@ void DistributedMesh::migrate(const std::vector<rank_t>& new_owner_rank_per_cell
 
             for (offset_t i = start; i < end; ++i) {
                 // Map from packet-local vertex index to global ID, then to new local index
-                gid_t node_gid = packet.vertex_gids[packet.cell_connectivity[i]];
-                new_cell_connectivity.push_back(gid_to_new_node[node_gid]);
+                gid_t vertex_gid = packet.vertex_gids[packet.cell_connectivity[i]];
+                new_cell_connectivity.push_back(gid_to_new_vertex[vertex_gid]);
             }
             new_cell_offsets.push_back(static_cast<offset_t>(new_cell_connectivity.size()));
 
@@ -869,8 +869,8 @@ void DistributedMesh::migrate(const std::vector<rank_t>& new_owner_rank_per_cell
     std::vector<MeshPacket::FieldPacket> kept_fields;
 
     // Save vertex fields for kept vertices
-    auto all_node_field_names = local_mesh_->field_names(EntityKind::Vertex);
-    for (const auto& field_name : all_node_field_names) {
+    auto all_vertex_field_names = local_mesh_->field_names(EntityKind::Vertex);
+    for (const auto& field_name : all_vertex_field_names) {
         MeshPacket::FieldPacket field_packet;
         field_packet.name = field_name;
         field_packet.kind = EntityKind::Vertex;
@@ -883,9 +883,9 @@ void DistributedMesh::migrate(const std::vector<rank_t>& new_owner_rank_per_cell
 
         if (field_data) {
             size_t bytes_per_entity = field_packet.components * field_packet.bytes_per_component;
-            field_packet.data.reserve(nodes_to_keep.size() * bytes_per_entity);
+            field_packet.data.reserve(vertices_to_keep.size() * bytes_per_entity);
 
-            for (index_t n : nodes_to_keep) {
+            for (index_t n : vertices_to_keep) {
                 const uint8_t* entity_data = &field_data[n * bytes_per_entity];
                 field_packet.data.insert(field_packet.data.end(),
                                        entity_data,
@@ -982,18 +982,18 @@ void DistributedMesh::migrate(const std::vector<rank_t>& new_owner_rank_per_cell
 
         // Restore data based on entity kind
         if (kind == EntityKind::Vertex) {
-            size_t new_node_idx = 0;
+            size_t new_vertex_idx = 0;
 
             // Restore kept vertex data
             if (!kept_fields.empty()) {
                 for (const auto& kept_field : kept_fields) {
                     if (kept_field.kind == EntityKind::Vertex && kept_field.name == name) {
-                        size_t n_kept_nodes = kept_field.data.size() / bytes_per_entity;
-                        for (size_t i = 0; i < n_kept_nodes; ++i) {
+                        size_t n_kept_vertices = kept_field.data.size() / bytes_per_entity;
+                        for (size_t i = 0; i < n_kept_vertices; ++i) {
                             const uint8_t* src = &kept_field.data[i * bytes_per_entity];
-                            uint8_t* dest = &field_data[new_node_idx * bytes_per_entity];
+                            uint8_t* dest = &field_data[new_vertex_idx * bytes_per_entity];
                             std::memcpy(dest, src, bytes_per_entity);
-                            new_node_idx++;
+                            new_vertex_idx++;
                         }
                         break;
                     }
@@ -1004,12 +1004,12 @@ void DistributedMesh::migrate(const std::vector<rank_t>& new_owner_rank_per_cell
             for (const auto& packet : recv_packets) {
                 for (const auto& recv_field : packet.fields) {
                     if (recv_field.kind == EntityKind::Vertex && recv_field.name == name) {
-                        size_t n_recv_nodes = recv_field.data.size() / bytes_per_entity;
-                        for (size_t i = 0; i < n_recv_nodes; ++i) {
+                        size_t n_recv_vertices = recv_field.data.size() / bytes_per_entity;
+                        for (size_t i = 0; i < n_recv_vertices; ++i) {
                             const uint8_t* src = &recv_field.data[i * bytes_per_entity];
-                            uint8_t* dest = &field_data[new_node_idx * bytes_per_entity];
+                            uint8_t* dest = &field_data[new_vertex_idx * bytes_per_entity];
                             std::memcpy(dest, src, bytes_per_entity);
-                            new_node_idx++;
+                            new_vertex_idx++;
                         }
                         break;
                     }
@@ -1388,31 +1388,31 @@ void DistributedMesh::build_exchange_patterns() {
     neighbor_ranks_.clear();
 
     // Build vertex exchange pattern
-    std::map<rank_t, std::vector<index_t>> node_send_map, node_recv_map;
+    std::map<rank_t, std::vector<index_t>> vertex_send_map, vertex_recv_map;
 
     for (index_t n = 0; n < static_cast<index_t>(vertex_owner_.size()); ++n) {
         if (vertex_owner_[n] == Ownership::Shared) {
             rank_t owner = vertex_owner_rank_[n];
             if (owner != my_rank_) {
-                node_send_map[owner].push_back(n);
+                vertex_send_map[owner].push_back(n);
                 neighbor_ranks_.insert(owner);
             }
         } else if (vertex_owner_[n] == Ownership::Ghost) {
             rank_t owner = vertex_owner_rank_[n];
-            node_recv_map[owner].push_back(n);
+            vertex_recv_map[owner].push_back(n);
             neighbor_ranks_.insert(owner);
         }
     }
 
     // Convert maps to exchange pattern
-    for (const auto& [rank, nodes] : node_send_map) {
+    for (const auto& [rank, vertices] : vertex_send_map) {
         vertex_exchange_.send_ranks.push_back(rank);
-        vertex_exchange_.send_lists.push_back(nodes);
+        vertex_exchange_.send_lists.push_back(vertices);
     }
 
-    for (const auto& [rank, nodes] : node_recv_map) {
+    for (const auto& [rank, vertices] : vertex_recv_map) {
         vertex_exchange_.recv_ranks.push_back(rank);
-        vertex_exchange_.recv_lists.push_back(nodes);
+        vertex_exchange_.recv_lists.push_back(vertices);
     }
 
     // Similarly build cell and face exchange patterns
@@ -1534,21 +1534,270 @@ void DistributedMesh::gather_shared_entities() {
 
 void DistributedMesh::sync_ghost_metadata() {
 #ifdef MESH_HAS_MPI
-    if (world_size_ == 1 || ghost_vertices_.empty()) {
+    if (world_size_ == 1 || (ghost_vertices_.empty() && ghost_cells_.empty())) {
         return;
     }
 
+    // =====================================================
     // Exchange ownership information for ghost entities
     // This ensures all ranks agree on who owns what
+    // =====================================================
 
-    // Step 1: Exchange ghost vertex global IDs with neighbors
-    // TODO: Implement metadata synchronization
+    // Step 1: Identify neighbor ranks by examining ghost entity ownership
+    std::set<rank_t> potential_neighbors;
 
-    // Step 2: Agree on ownership
-    // TODO: Implement ownership consensus
+    for (index_t n = 0; n < static_cast<index_t>(vertex_owner_.size()); ++n) {
+        if (vertex_owner_[n] == Ownership::Ghost || vertex_owner_[n] == Ownership::Shared) {
+            rank_t owner = vertex_owner_rank_[n];
+            if (owner >= 0 && owner != my_rank_) {
+                potential_neighbors.insert(owner);
+            }
+        }
+    }
 
-    // Step 3: Update owner rank arrays
-    // TODO: Update owner_rank arrays based on consensus
+    for (index_t c = 0; c < static_cast<index_t>(cell_owner_.size()); ++c) {
+        if (cell_owner_[c] == Ownership::Ghost || cell_owner_[c] == Ownership::Shared) {
+            rank_t owner = cell_owner_rank_[c];
+            if (owner >= 0 && owner != my_rank_) {
+                potential_neighbors.insert(owner);
+            }
+        }
+    }
+
+    std::vector<rank_t> neighbors(potential_neighbors.begin(), potential_neighbors.end());
+    int n_neighbors = static_cast<int>(neighbors.size());
+
+    if (n_neighbors == 0) {
+        return;  // No neighbors to synchronize with
+    }
+
+    // Step 2: Prepare metadata for exchange
+    // For each neighbor, pack:
+    // - Number of ghost vertices/cells we have from them
+    // - Global IDs of those entities
+    // - Current ownership status and owner rank
+
+    struct EntityMetadata {
+        gid_t global_id;
+        int8_t ownership;  // Cast from Ownership enum
+        rank_t owner_rank;
+    };
+
+    const auto& vertex_gids = local_mesh_->vertex_gids();
+    const auto& cell_gids = local_mesh_->cell_gids();
+
+    // Build per-neighbor metadata lists
+    std::vector<std::vector<EntityMetadata>> vertex_metadata_to_send(n_neighbors);
+    std::vector<std::vector<EntityMetadata>> cell_metadata_to_send(n_neighbors);
+
+    for (int i = 0; i < n_neighbors; ++i) {
+        rank_t neighbor = neighbors[i];
+
+        // Collect vertex metadata
+        for (index_t n = 0; n < static_cast<index_t>(vertex_owner_.size()); ++n) {
+            if ((vertex_owner_[n] == Ownership::Ghost || vertex_owner_[n] == Ownership::Shared)
+                && vertex_owner_rank_[n] == neighbor) {
+                EntityMetadata meta;
+                meta.global_id = vertex_gids[n];
+                meta.ownership = static_cast<int8_t>(vertex_owner_[n]);
+                meta.owner_rank = vertex_owner_rank_[n];
+                vertex_metadata_to_send[i].push_back(meta);
+            }
+        }
+
+        // Collect cell metadata
+        for (index_t c = 0; c < static_cast<index_t>(cell_owner_.size()); ++c) {
+            if ((cell_owner_[c] == Ownership::Ghost || cell_owner_[c] == Ownership::Shared)
+                && cell_owner_rank_[c] == neighbor) {
+                EntityMetadata meta;
+                meta.global_id = cell_gids[c];
+                meta.ownership = static_cast<int8_t>(cell_owner_[c]);
+                meta.owner_rank = cell_owner_rank_[c];
+                cell_metadata_to_send[i].push_back(meta);
+            }
+        }
+    }
+
+    // Step 3: Exchange metadata counts with neighbors
+    std::vector<int> vertex_send_counts(n_neighbors);
+    std::vector<int> cell_send_counts(n_neighbors);
+    std::vector<int> vertex_recv_counts(n_neighbors);
+    std::vector<int> cell_recv_counts(n_neighbors);
+
+    for (int i = 0; i < n_neighbors; ++i) {
+        vertex_send_counts[i] = static_cast<int>(vertex_metadata_to_send[i].size());
+        cell_send_counts[i] = static_cast<int>(cell_metadata_to_send[i].size());
+    }
+
+    // Exchange counts using point-to-point communication
+    std::vector<MPI_Request> count_requests;
+    count_requests.reserve(n_neighbors * 4);
+
+    for (int i = 0; i < n_neighbors; ++i) {
+        MPI_Request req;
+
+        // Send vertex count
+        MPI_Isend(&vertex_send_counts[i], 1, MPI_INT, neighbors[i], 100, comm_, &req);
+        count_requests.push_back(req);
+
+        // Receive vertex count
+        MPI_Irecv(&vertex_recv_counts[i], 1, MPI_INT, neighbors[i], 100, comm_, &req);
+        count_requests.push_back(req);
+
+        // Send cell count
+        MPI_Isend(&cell_send_counts[i], 1, MPI_INT, neighbors[i], 101, comm_, &req);
+        count_requests.push_back(req);
+
+        // Receive cell count
+        MPI_Irecv(&cell_recv_counts[i], 1, MPI_INT, neighbors[i], 101, comm_, &req);
+        count_requests.push_back(req);
+    }
+
+    MPI_Waitall(static_cast<int>(count_requests.size()), count_requests.data(), MPI_STATUSES_IGNORE);
+
+    // Step 4: Allocate receive buffers
+    std::vector<std::vector<EntityMetadata>> vertex_metadata_to_recv(n_neighbors);
+    std::vector<std::vector<EntityMetadata>> cell_metadata_to_recv(n_neighbors);
+
+    for (int i = 0; i < n_neighbors; ++i) {
+        vertex_metadata_to_recv[i].resize(vertex_recv_counts[i]);
+        cell_metadata_to_recv[i].resize(cell_recv_counts[i]);
+    }
+
+    // Step 5: Exchange metadata using non-blocking communication
+    std::vector<MPI_Request> data_requests;
+    data_requests.reserve(n_neighbors * 4);
+
+    for (int i = 0; i < n_neighbors; ++i) {
+        MPI_Request req;
+
+        // Send vertex metadata
+        if (vertex_send_counts[i] > 0) {
+            MPI_Isend(vertex_metadata_to_send[i].data(),
+                     vertex_send_counts[i] * sizeof(EntityMetadata),
+                     MPI_BYTE, neighbors[i], 200, comm_, &req);
+            data_requests.push_back(req);
+        }
+
+        // Receive vertex metadata
+        if (vertex_recv_counts[i] > 0) {
+            MPI_Irecv(vertex_metadata_to_recv[i].data(),
+                     vertex_recv_counts[i] * sizeof(EntityMetadata),
+                     MPI_BYTE, neighbors[i], 200, comm_, &req);
+            data_requests.push_back(req);
+        }
+
+        // Send cell metadata
+        if (cell_send_counts[i] > 0) {
+            MPI_Isend(cell_metadata_to_send[i].data(),
+                     cell_send_counts[i] * sizeof(EntityMetadata),
+                     MPI_BYTE, neighbors[i], 201, comm_, &req);
+            data_requests.push_back(req);
+        }
+
+        // Receive cell metadata
+        if (cell_recv_counts[i] > 0) {
+            MPI_Irecv(cell_metadata_to_recv[i].data(),
+                     cell_recv_counts[i] * sizeof(EntityMetadata),
+                     MPI_BYTE, neighbors[i], 201, comm_, &req);
+            data_requests.push_back(req);
+        }
+    }
+
+    MPI_Waitall(static_cast<int>(data_requests.size()), data_requests.data(), MPI_STATUSES_IGNORE);
+
+    // Step 6: Establish ownership consensus
+    // Rule: For each entity, the rank with the LOWEST rank number is the canonical owner
+    // This ensures deterministic, consistent ownership across all ranks
+
+    // Build maps from global ID to local index
+    std::map<gid_t, index_t> gid_to_vertex;
+    std::map<gid_t, index_t> gid_to_cell;
+
+    for (index_t n = 0; n < static_cast<index_t>(vertex_gids.size()); ++n) {
+        gid_to_vertex[vertex_gids[n]] = n;
+    }
+
+    for (index_t c = 0; c < static_cast<index_t>(cell_gids.size()); ++c) {
+        gid_to_cell[cell_gids[c]] = c;
+    }
+
+    // Process received vertex metadata and apply consensus
+    for (int i = 0; i < n_neighbors; ++i) {
+        for (const auto& meta : vertex_metadata_to_recv[i]) {
+            auto it = gid_to_vertex.find(meta.global_id);
+            if (it != gid_to_vertex.end()) {
+                index_t local_idx = it->second;
+
+                // Apply ownership consensus rule
+                // If neighbor claims ownership and has lower rank, accept it
+                rank_t neighbor_owner = meta.owner_rank;
+                rank_t current_owner = vertex_owner_rank_[local_idx];
+
+                // Lowest rank wins ownership
+                if (neighbor_owner < current_owner) {
+                    vertex_owner_rank_[local_idx] = neighbor_owner;
+                }
+
+                // Update ownership status based on consensus
+                if (vertex_owner_rank_[local_idx] == my_rank_) {
+                    vertex_owner_[local_idx] = Ownership::Owned;
+                } else if (meta.ownership == static_cast<int8_t>(Ownership::Shared) ||
+                          vertex_owner_[local_idx] == Ownership::Shared) {
+                    vertex_owner_[local_idx] = Ownership::Shared;
+                } else {
+                    vertex_owner_[local_idx] = Ownership::Ghost;
+                }
+            }
+        }
+    }
+
+    // Process received cell metadata and apply consensus
+    for (int i = 0; i < n_neighbors; ++i) {
+        for (const auto& meta : cell_metadata_to_recv[i]) {
+            auto it = gid_to_cell.find(meta.global_id);
+            if (it != gid_to_cell.end()) {
+                index_t local_idx = it->second;
+
+                // Apply ownership consensus rule
+                rank_t neighbor_owner = meta.owner_rank;
+                rank_t current_owner = cell_owner_rank_[local_idx];
+
+                // Lowest rank wins ownership
+                if (neighbor_owner < current_owner) {
+                    cell_owner_rank_[local_idx] = neighbor_owner;
+                }
+
+                // Update ownership status based on consensus
+                if (cell_owner_rank_[local_idx] == my_rank_) {
+                    cell_owner_[local_idx] = Ownership::Owned;
+                } else if (meta.ownership == static_cast<int8_t>(Ownership::Shared) ||
+                          cell_owner_[local_idx] == Ownership::Shared) {
+                    cell_owner_[local_idx] = Ownership::Shared;
+                } else {
+                    cell_owner_[local_idx] = Ownership::Ghost;
+                }
+            }
+        }
+    }
+
+    // Step 7: Update face ownership based on cell ownership
+    // Faces inherit ownership from their adjacent cells
+    for (index_t f = 0; f < static_cast<index_t>(face_owner_.size()); ++f) {
+        // Find cells adjacent to this face
+        // For now, use a simple heuristic: if any adjacent cell is owned, face is owned
+        // This is a simplified implementation - production code would need proper face-to-cell adjacency
+
+        // Default: inherit from current setting or mark as owned if uncertain
+        if (face_owner_[f] == Ownership::Ghost) {
+            // Keep ghost faces as ghost for now
+            // TODO: Implement proper face ownership based on adjacent cells
+        }
+    }
+
+    // Step 8: Final synchronization barrier to ensure all ranks have completed consensus
+    MPI_Barrier(comm_);
+
 #endif
 }
 

@@ -59,10 +59,10 @@ protected:
         MeshBase mesh(3, 4, 1);
 
         std::vector<real_t> X_ref = {
-            0.0, 0.0, 0.0,  // Node 0
-            1.0, 0.0, 0.0,  // Node 1
-            0.0, 1.0, 0.0,  // Node 2
-            0.0, 0.0, 1.0   // Node 3
+            0.0, 0.0, 0.0,  // Vertex 0
+            1.0, 0.0, 0.0,  // Vertex 1
+            0.0, 1.0, 0.0,  // Vertex 2
+            0.0, 0.0, 1.0   // Vertex 3
         };
         mesh.set_X_ref(X_ref);
 
@@ -79,9 +79,9 @@ protected:
         MeshBase mesh(2, 3, 1);
 
         std::vector<real_t> X_ref = {
-            0.0, 0.0,  // Node 0
-            1.0, 0.0,  // Node 1
-            0.0, 1.0   // Node 2
+            0.0, 0.0,  // Vertex 0
+            1.0, 0.0,  // Vertex 1
+            0.0, 1.0   // Vertex 2
         };
         mesh.set_X_ref(X_ref);
 
@@ -283,9 +283,9 @@ TEST_F(MeshGeometryTest, TetBoundingBox) {
 TEST_F(MeshGeometryTest, ComputeNormalFromVerticesTriangle) {
     MeshBase mesh(3, 3, 0);
     std::vector<real_t> X_ref = {
-        0.0, 0.0, 0.0,  // Node 0
-        1.0, 0.0, 0.0,  // Node 1
-        0.0, 1.0, 0.0   // Node 2
+        0.0, 0.0, 0.0,  // Vertex 0
+        1.0, 0.0, 0.0,  // Vertex 1
+        0.0, 1.0, 0.0   // Vertex 2
     };
     mesh.set_X_ref(X_ref);
 
@@ -302,9 +302,9 @@ TEST_F(MeshGeometryTest, ComputeNormalFromVerticesTriangle) {
 TEST_F(MeshGeometryTest, ComputeAreaFromVerticesTriangle) {
     MeshBase mesh(3, 3, 0);
     std::vector<real_t> X_ref = {
-        0.0, 0.0, 0.0,  // Node 0
-        1.0, 0.0, 0.0,  // Node 1
-        0.0, 1.0, 0.0   // Node 2
+        0.0, 0.0, 0.0,  // Vertex 0
+        1.0, 0.0, 0.0,  // Vertex 1
+        0.0, 1.0, 0.0   // Vertex 2
     };
     mesh.set_X_ref(X_ref);
 
@@ -319,9 +319,9 @@ TEST_F(MeshGeometryTest, ComputeAreaFromVerticesTriangle) {
 TEST_F(MeshGeometryTest, ComputeCentroidFromVertices) {
     MeshBase mesh(3, 3, 0);
     std::vector<real_t> X_ref = {
-        0.0, 0.0, 0.0,  // Node 0
-        3.0, 0.0, 0.0,  // Node 1
-        0.0, 3.0, 0.0   // Node 2
+        0.0, 0.0, 0.0,  // Vertex 0
+        3.0, 0.0, 0.0,  // Vertex 1
+        0.0, 3.0, 0.0   // Vertex 2
     };
     mesh.set_X_ref(X_ref);
 
@@ -336,8 +336,8 @@ TEST_F(MeshGeometryTest, ComputeCentroidFromVertices) {
 TEST_F(MeshGeometryTest, ComputeEdgeNormalFromVertices2D) {
     MeshBase mesh(2, 2, 0);
     std::vector<real_t> X_ref = {
-        0.0, 0.0,  // Node 0
-        1.0, 0.0   // Node 1
+        0.0, 0.0,  // Vertex 0
+        1.0, 0.0   // Vertex 1
     };
     mesh.set_X_ref(X_ref);
 

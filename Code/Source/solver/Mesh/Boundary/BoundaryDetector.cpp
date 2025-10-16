@@ -167,14 +167,14 @@ BoundaryDetector::compute_boundary_incidence() {
         // Apply topology definitions to this cell's actual vertices
         for (size_t i = 0; i < face_defs.size(); ++i) {
             // Convert local indices to global vertex IDs
-            std::vector<index_t> face_nodes;
-            face_nodes.reserve(face_defs[i].size());
+            std::vector<index_t> face_vertices;
+            face_vertices.reserve(face_defs[i].size());
             for (index_t local_idx : face_defs[i]) {
-                face_nodes.push_back(vertices_ptr[local_idx]);
+                face_vertices.push_back(vertices_ptr[local_idx]);
             }
 
             // Create canonical key (sorted)
-            BoundaryKey face_key(face_nodes);
+            BoundaryKey face_key(face_vertices);
 
             // Get oriented vertices (preserve ordering)
             std::vector<index_t> oriented_verts;
@@ -325,12 +325,12 @@ std::vector<BoundaryKey> BoundaryDetector::extract_cell_codim1(index_t cell_id) 
     boundary_keys.reserve(face_defs.size());
 
     for (const auto& face_def : face_defs) {
-        std::vector<index_t> face_nodes;
-        face_nodes.reserve(face_def.size());
+        std::vector<index_t> face_vertices;
+        face_vertices.reserve(face_def.size());
         for (index_t local_idx : face_def) {
-            face_nodes.push_back(vertices_ptr[local_idx]);
+            face_vertices.push_back(vertices_ptr[local_idx]);
         }
-        boundary_keys.emplace_back(face_nodes);
+        boundary_keys.emplace_back(face_vertices);
     }
 
     return boundary_keys;

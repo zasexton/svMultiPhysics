@@ -80,7 +80,7 @@ void bind_core(py::module_& m) {
       .def_readwrite("order", &CellShape::order)
       .def_readwrite("is_mixed_order", &CellShape::is_mixed_order)
       .def_readwrite("num_faces_hint", &CellShape::num_faces_hint)
-      .def("expected_nodes", &CellShape::expected_nodes)
+      .def("expected_vertices", &CellShape::expected_vertices)
       .def("topo_kind", &CellShape::topo_kind);
 
   // MeshBase bindings
@@ -135,14 +135,14 @@ void bind_core(py::module_& m) {
            [](MeshBase& mesh,
               int spatial_dim,
               const py::array& X_ref,
-              const py::object& cell2node_offsets,
-              const py::object& cell2node,
+              const py::object& cell2vertex_offsets,
+              const py::object& cell2vertex,
               const py::object& families,
               const py::object& orders_opt,
               const py::object& num_corners_opt) {
               std::vector<real_t> X = flatten_coords(X_ref, spatial_dim);
-              std::vector<offset_t> offsets = to_vector<offset_t>(cell2node_offsets);
-              std::vector<index_t>  conn    = to_vector<index_t>(cell2node);
+              std::vector<offset_t> offsets = to_vector<offset_t>(cell2vertex_offsets);
+              std::vector<index_t>  conn    = to_vector<index_t>(cell2vertex);
               std::vector<CellShape> shapes;
               shapes.reserve(offsets.size() ? offsets.size() - 1 : 0);
               std::vector<int> orders;
@@ -182,7 +182,7 @@ void bind_core(py::module_& m) {
               if (shapes.size() != n_cells) throw std::runtime_error("families length mismatch");
               mesh.build_from_arrays(spatial_dim, X, offsets, conn, shapes);
            },
-           py::arg("spatial_dim"), py::arg("X_ref"), py::arg("cell2node_offsets"), py::arg("cell2node"),
+           py::arg("spatial_dim"), py::arg("X_ref"), py::arg("cell2vertex_offsets"), py::arg("cell2vertex"),
            py::arg("families"), py::arg("orders") = py::none(), py::arg("num_corners") = py::none());
 }
 

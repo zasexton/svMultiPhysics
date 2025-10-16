@@ -129,7 +129,7 @@ public:
     for (size_t i = 0; i < n_vertices; ++i) {
       index_t vertex_id = vertices_ptr[i];
       // Need to map trace vertex to volume vertex via GID
-      // (simplified; production would maintain trace_node_to_volume_node map)
+      // (simplified; production would maintain trace_vertex_to_volume_vertex map)
       for (int d = 0; d < spatial_dim_; ++d) {
         center[d] += coords[vertex_id * spatial_dim_ + d];
       }
@@ -230,27 +230,27 @@ inline InterfaceMesh build_interface_impl(
   interface.trace_face_local_id_.reserve(face_indices.size());
 
   // Collect unique vertices
-  std::unordered_set<index_t> node_set;
+  std::unordered_set<index_t> vertex_set;
   for (index_t face_id : face_indices) {
     auto [vertices_ptr, n_vertices] = volume_mesh.face_vertices_span(face_id);
     for (size_t i = 0; i < n_vertices; ++i) {
-      node_set.insert(vertices_ptr[i]);
+      vertex_set.insert(vertices_ptr[i]);
     }
   }
 
-  std::vector<index_t> trace_nodes(node_set.begin(), node_set.end());
-  std::sort(trace_nodes.begin(), trace_nodes.end());
+  std::vector<index_t> trace_vertices(vertex_set.begin(), vertex_set.end());
+  std::sort(trace_vertices.begin(), trace_vertices.end());
 
   // Build vertex mapping
-  std::unordered_map<index_t, index_t> vol_to_trace_node;
-  for (size_t i = 0; i < trace_nodes.size(); ++i) {
-    vol_to_trace_node[trace_nodes[i]] = static_cast<index_t>(i);
+  std::unordered_map<index_t, index_t> vol_to_trace_vertex;
+  for (size_t i = 0; i < trace_vertices.size(); ++i) {
+    vol_to_trace_vertex[trace_vertices[i]] = static_cast<index_t>(i);
     // Set vertex GID (if available)
-    const auto& node_gids_alias = volume_mesh.vertex_gids();
-    if (!node_gids_alias.empty() && trace_nodes[i] < static_cast<index_t>(node_gids_alias.size())) {
-      interface.trace_vertex_gid_.push_back(node_gids_alias[trace_nodes[i]]);
+    const auto& vertex_gids_alias = volume_mesh.vertex_gids();
+    if (!vertex_gids_alias.empty() && trace_vertices[i] < static_cast<index_t>(vertex_gids_alias.size())) {
+      interface.trace_vertex_gid_.push_back(vertex_gids_alias[trace_vertices[i]]);
     } else {
-      interface.trace_vertex_gid_.push_back(static_cast<gid_t>(trace_nodes[i]));
+      interface.trace_vertex_gid_.push_back(static_cast<gid_t>(trace_vertices[i]));
     }
   }
 
@@ -268,7 +268,7 @@ inline InterfaceMesh build_interface_impl(
     // Get face vertices and map to trace-local IDs
     auto [vertices_ptr, n_vertices] = volume_mesh.face_vertices_span(face_id);
     for (size_t i = 0; i < n_vertices; ++i) {
-      interface.trace_face2vertex_.push_back(vol_to_trace_node[vertices_ptr[i]]);
+      interface.trace_face2vertex_.push_back(vol_to_trace_vertex[vertices_ptr[i]]);
     }
     interface.trace_face2vertex_offsets_.push_back(static_cast<offset_t>(interface.trace_face2vertex_.size()));
 

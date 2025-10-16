@@ -219,9 +219,9 @@ auto oriented_face_defs = CellTopology::get_oriented_boundary_faces(shape.family
 
 // Apply topology to this cell's actual vertices
 for (size_t i = 0; i < face_defs.size(); ++i) {
-    std::vector<index_t> face_nodes;
+    std::vector<index_t> face_vertices;
     for (index_t local_idx : face_defs[i]) {
-        face_nodes.push_back(nodes_ptr[local_idx]);
+        face_vertices.push_back(vertices_ptr[local_idx]);
     }
     // Process face...
 }

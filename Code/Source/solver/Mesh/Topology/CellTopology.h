@@ -54,7 +54,7 @@ namespace svmp {
  *
  * **Vertex Ordering Convention:**
  * All definitions use local vertex indices [0, 1, 2, ...] referring to
- * positions in a cell's node array.
+ * positions in a cell's vertex array.
  *
  * **Orientation Convention (Right-Hand Rule):**
  * Oriented faces are ordered such that the cross product of the first two

@@ -27,12 +27,12 @@ Usage
 
   # 2D square mesh with 2 triangles
   X = np.array([[0,0], [1,0], [1,1], [0,1]], dtype=float)
-  cell2node_offsets = [0, 3, 6]
-  cell2node = [0,1,2, 0,2,3]
+  cell2vertex_offsets = [0, 3, 6]
+  cell2vertex = [0,1,2, 0,2,3]
   families = ["Triangle", "Triangle"]
 
   m = core.Mesh(2)
-  m.build_from_arrays(2, X, cell2node_offsets, cell2node, families)
+  m.build_from_arrays(2, X, cell2vertex_offsets, cell2vertex, families)
   m.finalize()
 
   print("cells:", m.n_cells())
@@ -74,7 +74,7 @@ Exposed API
 - Struct: `CellShape`
 - Class: `Mesh`
   - `Mesh()`, `Mesh(spatial_dim)`
-  - `build_from_arrays(spatial_dim, X_ref, cell2node_offsets, cell2node, families, orders=None, num_corners=None)`
+  - `build_from_arrays(spatial_dim, X_ref, cell2vertex_offsets, cell2vertex, families, orders=None, num_corners=None)`
   - `finalize()`, `clear()`
   - `dim()`, `n_vertices()`, `n_cells()`, `n_faces()`, `n_edges()`
   - `bounding_box() -> (min[3], max[3])`
