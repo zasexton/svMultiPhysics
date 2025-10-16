@@ -36,6 +36,7 @@
 #include <memory>
 #include <vector>
 #include <unordered_map>
+#include <vtkSmartPointer.h>
 
 // Forward declarations for VTK classes
 class vtkUnstructuredGrid;
@@ -65,6 +66,7 @@ public:
    * @brief Configuration options for VTK writer
    */
   struct WriteOptions {
+    WriteOptions() = default;  ///< Default constructor
     bool binary = false;          ///< Write binary format (vs ASCII)
     bool compressed = false;      ///< Compress data (XML formats only)
     bool write_cell_data = true;  ///< Write cell-attached fields
@@ -96,25 +98,25 @@ public:
    * @brief Write mesh to legacy VTK file
    */
   static void write_vtk(const MeshBase& mesh, const std::string& filename,
-                       const WriteOptions& opts = WriteOptions{});
+                       const WriteOptions& opts);
 
   /**
    * @brief Write mesh to VTU (XML UnstructuredGrid) file
    */
   static void write_vtu(const MeshBase& mesh, const std::string& filename,
-                       const WriteOptions& opts = WriteOptions{});
+                       const WriteOptions& opts);
 
   /**
    * @brief Write mesh to VTP (XML PolyData) file
    */
   static void write_vtp(const MeshBase& mesh, const std::string& filename,
-                       const WriteOptions& opts = WriteOptions{});
+                       const WriteOptions& opts);
 
   /**
    * @brief Write parallel VTU file set (for DistributedMesh)
    */
   static void write_pvtu(const MeshBase& mesh, const std::string& filename,
-                        int rank, int size, const WriteOptions& opts = WriteOptions{});
+                        int rank, int size, const WriteOptions& opts);
 
 private:
   /**

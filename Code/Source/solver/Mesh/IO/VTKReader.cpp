@@ -39,6 +39,7 @@
 #include <vtkPolyDataReader.h>
 #include <vtkXMLPolyDataReader.h>
 #include <vtkDataSet.h>
+#include <vtkPointSet.h>
 #include <vtkCellArray.h>
 #include <vtkPoints.h>
 #include <vtkCell.h>
@@ -166,19 +167,36 @@ MeshBase VTKReader::convert_from_vtk_dataset(vtkDataSet* dataset) {
 
   setup_vtk_registry();
 
+  // Cast to vtkPointSet to access GetPoints()
+  // All mesh datasets (UnstructuredGrid, PolyData) inherit from vtkPointSet
+  vtkPointSet* pointset = vtkPointSet::SafeDownCast(dataset);
+  if (!pointset) {
+    throw std::runtime_error("VTKReader: Dataset is not a vtkPointSet (cannot extract points)");
+  }
+
   // Extract spatial dimension and coordinates
   int spatial_dim = 0;
-  std::vector<real_t> coordinates = extract_coordinates(dataset->GetPoints(), spatial_dim);
+  std::vector<real_t> coordinates = extract_coordinates(pointset->GetPoints(), spatial_dim);
 
   // Extract topology
   std::vector<CellShape> cell_shapes;
-  std::vector<offset_t> cell2node_offsets;
-  std::vector<index_t> cell2node;
-  extract_topology(dataset, cell_shapes, cell2node_offsets, cell2node);
+  std::vector<offset_t> cell2vertex_offsets;
+  std::vector<index_t> cell2vertex;
+  std::vector<CellShape> face_shapes;
+  std::vector<offset_t> face2vertex_offsets;
+  std::vector<index_t> face2vertex;
+  std::vector<std::array<index_t,2>> face2cell;
+  extract_topology(dataset, cell_shapes, cell2vertex_offsets, cell2vertex,
+                   face_shapes, face2vertex_offsets, face2vertex, face2cell);
 
   // Create mesh
   MeshBase mesh(spatial_dim);
-  mesh.build_from_arrays(spatial_dim, coordinates, cell2node_offsets, cell2node, cell_shapes);
+  mesh.build_from_arrays(spatial_dim, coordinates, cell2vertex_offsets, cell2vertex, cell_shapes);
+
+  // Install codim-1 entities if provided (e.g., from VTK polyhedron/polygon)
+  if (!face_shapes.empty()) {
+    mesh.set_faces_from_arrays(face_shapes, face2vertex_offsets, face2vertex, face2cell);
+  }
 
   // Read field data
   read_field_data(dataset, mesh);
@@ -192,14 +210,26 @@ MeshBase VTKReader::convert_from_vtk_dataset(vtkDataSet* dataset) {
 void VTKReader::extract_topology(
     vtkDataSet* dataset,
     std::vector<CellShape>& cell_shapes,
-    std::vector<offset_t>& cell2node_offsets,
-    std::vector<index_t>& cell2node)
+    std::vector<offset_t>& cell2vertex_offsets,
+    std::vector<index_t>& cell2vertex,
+    std::vector<CellShape>& face_shapes,
+    std::vector<offset_t>& face2vertex_offsets,
+    std::vector<index_t>& face2vertex,
+    std::vector<std::array<index_t,2>>& face2cell)
 {
   vtkIdType n_cells = dataset->GetNumberOfCells();
 
   cell_shapes.reserve(n_cells);
-  cell2node_offsets.reserve(n_cells + 1);
-  cell2node_offsets.push_back(0);
+  cell2vertex_offsets.reserve(n_cells + 1);
+  cell2vertex_offsets.push_back(0);
+
+  // Accumulate codim-1 entities using canonical keys
+  struct FaceAcc {
+    std::vector<index_t> vertices; // oriented vertices as reported by VTK
+    std::array<index_t,2> cells = {{-1,-1}};
+    CellShape shape;
+  };
+  std::unordered_map<std::vector<index_t>, FaceAcc> face_map; // key: sorted vertex ids
 
   // Process each cell
   for (vtkIdType c = 0; c < n_cells; ++c) {
@@ -210,12 +240,85 @@ void VTKReader::extract_topology(
     CellShape shape = vtk_to_cellshape(vtk_type);
     cell_shapes.push_back(shape);
 
-    // Get cell nodes
+    // Get cell vertices
     vtkIdType n_pts = cell->GetNumberOfPoints();
     for (vtkIdType i = 0; i < n_pts; ++i) {
-      cell2node.push_back(static_cast<index_t>(cell->GetPointId(i)));
+      cell2vertex.push_back(static_cast<index_t>(cell->GetPointId(i)));
     }
-    cell2node_offsets.push_back(static_cast<offset_t>(cell2node.size()));
+    cell2vertex_offsets.push_back(static_cast<offset_t>(cell2vertex.size()));
+
+    // Build codim-1 entities (faces for 3D, edges for 2D)
+    const int cell_dim = cell->GetCellDimension();
+    if (cell_dim == 3) {
+      int nf = cell->GetNumberOfFaces();
+      for (int i = 0; i < nf; ++i) {
+        vtkCell* f = cell->GetFace(i);
+        if (!f) continue;
+        vtkIdType fn = f->GetNumberOfPoints();
+        std::vector<index_t> fverts(fn);
+        for (vtkIdType j = 0; j < fn; ++j) fverts[j] = static_cast<index_t>(f->GetPointId(j));
+        // Canonical key: sorted vertices
+        std::vector<index_t> key = fverts;
+        std::sort(key.begin(), key.end());
+
+        auto& acc = face_map[key];
+        if (acc.vertices.empty()) acc.vertices = std::move(fverts);
+        if (acc.cells[0] < 0) acc.cells[0] = static_cast<index_t>(c);
+        else if (acc.cells[1] < 0 && acc.cells[0] != static_cast<index_t>(c)) acc.cells[1] = static_cast<index_t>(c);
+
+        // Shape family from face cell type
+        int ftype = f->GetCellType();
+        CellShape fshape;
+        if (ftype == VTK_TRIANGLE) fshape.family = CellFamily::Triangle;
+        else if (ftype == VTK_QUAD) fshape.family = CellFamily::Quad;
+        else fshape.family = CellFamily::Polygon;
+        fshape.order = 1;
+        fshape.num_corners = static_cast<int>(key.size());
+        fshape.is_mixed_order = false;
+        acc.shape = fshape;
+      }
+    } else if (cell_dim == 2) {
+      int ne = cell->GetNumberOfEdges();
+      for (int i = 0; i < ne; ++i) {
+        vtkCell* e = cell->GetEdge(i);
+        if (!e) continue;
+        vtkIdType en = e->GetNumberOfPoints();
+        if (en < 2) continue;
+        std::vector<index_t> everts(en);
+        for (vtkIdType j = 0; j < en; ++j) everts[j] = static_cast<index_t>(e->GetPointId(j));
+        std::vector<index_t> key = everts;
+        std::sort(key.begin(), key.end());
+
+        auto& acc = face_map[key];
+        if (acc.vertices.empty()) acc.vertices = std::move(everts);
+        if (acc.cells[0] < 0) acc.cells[0] = static_cast<index_t>(c);
+        else if (acc.cells[1] < 0 && acc.cells[0] != static_cast<index_t>(c)) acc.cells[1] = static_cast<index_t>(c);
+
+        CellShape fshape;
+        fshape.family = CellFamily::Line;
+        fshape.order = 1;
+        fshape.num_corners = 2;
+        fshape.is_mixed_order = false;
+        acc.shape = fshape;
+      }
+    }
+  }
+
+  // Materialize codim-1 arrays if any
+  if (!face_map.empty()) {
+    face2vertex_offsets.reserve(face_map.size() + 1);
+    face2vertex_offsets.push_back(0);
+    face_shapes.reserve(face_map.size());
+    face2cell.reserve(face_map.size());
+
+    for (auto& kv : face_map) {
+      auto& acc = kv.second;
+      // append vertices
+      face2vertex.insert(face2vertex.end(), acc.vertices.begin(), acc.vertices.end());
+      face2vertex_offsets.push_back(static_cast<offset_t>(face2vertex.size()));
+      face_shapes.push_back(acc.shape);
+      face2cell.push_back(acc.cells);
+    }
   }
 }
 
@@ -356,7 +459,7 @@ void VTKReader::read_cell_data(vtkDataSet* dataset, MeshBase& mesh) {
     }
 
     // Attach field to mesh
-    auto handle = mesh.attach_field(EntityKind::Cell, name, field_type, n_components);
+    auto handle = mesh.attach_field(EntityKind::Volume, name, field_type, n_components);
 
     // Copy data
     void* field_data = mesh.field_data(handle);

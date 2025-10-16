@@ -30,8 +30,12 @@
 
 #include "MeshIO.h"
 #include "../Core/MeshBase.h"
+
+#ifdef MESH_HAS_VTK
 #include "VTKReader.h"
 #include "VTKWriter.h"
+#endif
+
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -211,7 +215,6 @@ std::string MeshIO::detect_format_from_content(const std::string& filename) {
       if (line.find("PolyData") != std::string::npos) return "vtp";
       if (line.find("StructuredGrid") != std::string::npos) return "vts";
       if (line.find("RectilinearGrid") != std::string::npos) return "vtr";
-      if (line.find("ImageData") != std::string::npos) return "vti";
     }
 
     // STL format
@@ -350,6 +353,7 @@ void MeshIO::register_builtin_formats() {
   if (registered) return;
   registered = true;
 
+#ifdef MESH_HAS_VTK
   // Register VTK formats
   register_reader("vtk", [](const MeshIOOptions& opts) {
     return VTKReader::read_vtk(opts.filename);
@@ -379,6 +383,7 @@ void MeshIO::register_builtin_formats() {
   register_writer("pvtu", [](const MeshBase& mesh, const MeshIOOptions& opts) {
     VTKWriter::write_parallel(mesh, opts.filename, opts.n_parts, opts.compression);
   });
+#endif
 
   // Register other formats as they are implemented
   // STL, PLY, OBJ, OFF, etc.

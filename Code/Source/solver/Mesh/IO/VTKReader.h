@@ -103,8 +103,13 @@ private:
   static void extract_topology(
       vtkDataSet* dataset,
       std::vector<CellShape>& cell_shapes,
-      std::vector<offset_t>& cell2node_offsets,
-      std::vector<index_t>& cell2node);
+      std::vector<offset_t>& cell2vertex_offsets,
+      std::vector<index_t>& cell2vertex,
+      // Optional outputs for codim-1 entities (faces in 3D, edges in 2D)
+      std::vector<CellShape>& face_shapes,
+      std::vector<offset_t>& face2vertex_offsets,
+      std::vector<index_t>& face2vertex,
+      std::vector<std::array<index_t,2>>& face2cell);
 
   /**
    * @brief Extract coordinates from VTK points

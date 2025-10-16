@@ -272,23 +272,23 @@ vtkSmartPointer<vtkPolyData> VTKWriter::convert_to_polydata(const MeshBase& mesh
   vtkSmartPointer<vtkCellArray> polys = vtkSmartPointer<vtkCellArray>::New();
 
   for (size_t c = 0; c < mesh.n_cells(); ++c) {
-    auto [nodes_ptr, n_nodes] = mesh.cell_nodes_span(static_cast<index_t>(c));
+    auto [vertices_ptr, n_vertices] = mesh.cell_vertices_span(static_cast<index_t>(c));
     const auto& shape = mesh.cell_shape(static_cast<index_t>(c));
 
-    vtkSmartPointer<vtkIdList> cell_nodes = vtkSmartPointer<vtkIdList>::New();
-    for (size_t i = 0; i < n_nodes; ++i) {
-      cell_nodes->InsertNextId(nodes_ptr[i]);
+    vtkSmartPointer<vtkIdList> cell_vertices = vtkSmartPointer<vtkIdList>::New();
+    for (size_t i = 0; i < n_vertices; ++i) {
+      cell_vertices->InsertNextId(vertices_ptr[i]);
     }
 
     // Add to appropriate cell array based on family
     switch (shape.family) {
       case CellFamily::Line:
-        lines->InsertNextCell(cell_nodes);
+        lines->InsertNextCell(cell_vertices);
         break;
       case CellFamily::Triangle:
       case CellFamily::Quad:
       case CellFamily::Polygon:
-        polys->InsertNextCell(cell_nodes);
+        polys->InsertNextCell(cell_vertices);
         break;
       default:
         // 3D cells not directly supported in PolyData
@@ -311,7 +311,7 @@ vtkSmartPointer<vtkPoints> VTKWriter::create_vtk_points(const MeshBase& mesh, Co
                                       ? mesh.X_cur() : mesh.X_ref();
 
   int spatial_dim = mesh.dim();
-  size_t n_points = mesh.n_nodes();
+  size_t n_points = mesh.n_vertices();
 
   points->SetNumberOfPoints(n_points);
 
@@ -333,19 +333,19 @@ void VTKWriter::create_vtk_cells(const MeshBase& mesh, vtkDataSet* dataset) {
   ugrid->Allocate(mesh.n_cells());
 
   for (size_t c = 0; c < mesh.n_cells(); ++c) {
-    auto [nodes_ptr, n_nodes] = mesh.cell_nodes_span(static_cast<index_t>(c));
+    auto [vertices_ptr, n_vertices] = mesh.cell_vertices_span(static_cast<index_t>(c));
     const auto& shape = mesh.cell_shape(static_cast<index_t>(c));
 
     // Get VTK cell type
     int vtk_type = cellshape_to_vtk(shape);
 
-    // Create ID list for cell nodes
-    vtkSmartPointer<vtkIdList> cell_nodes = vtkSmartPointer<vtkIdList>::New();
-    for (size_t i = 0; i < n_nodes; ++i) {
-      cell_nodes->InsertNextId(nodes_ptr[i]);
+    // Create ID list for cell vertices
+    vtkSmartPointer<vtkIdList> cell_vertices = vtkSmartPointer<vtkIdList>::New();
+    for (size_t i = 0; i < n_vertices; ++i) {
+      cell_vertices->InsertNextId(vertices_ptr[i]);
     }
 
-    ugrid->InsertNextCell(vtk_type, cell_nodes);
+    ugrid->InsertNextCell(vtk_type, cell_vertices);
   }
 }
 
@@ -402,7 +402,7 @@ void VTKWriter::write_cell_data(const MeshBase& mesh, vtkDataSet* dataset,
   // Iterate through all cell fields
   for (int kind_idx = 0; kind_idx <= 3; ++kind_idx) {
     EntityKind kind = static_cast<EntityKind>(kind_idx);
-    if (kind != EntityKind::Cell) continue;
+    if (kind != EntityKind::Volume) continue;
 
     // This is a simplified approach - in production would need to enumerate fields
     // For now, write quality metrics as an example
@@ -443,13 +443,13 @@ void VTKWriter::write_point_data(const MeshBase& mesh, vtkDataSet* dataset,
     vtkSmartPointer<vtkDoubleArray> displacement = vtkSmartPointer<vtkDoubleArray>::New();
     displacement->SetName("Displacement");
     displacement->SetNumberOfComponents(3);
-    displacement->SetNumberOfTuples(mesh.n_nodes());
+    displacement->SetNumberOfTuples(mesh.n_vertices());
 
     const std::vector<real_t>& X_ref = mesh.X_ref();
     const std::vector<real_t>& X_cur = mesh.X_cur();
     int spatial_dim = mesh.dim();
 
-    for (size_t i = 0; i < mesh.n_nodes(); ++i) {
+    for (size_t i = 0; i < mesh.n_vertices(); ++i) {
       double disp[3] = {0, 0, 0};
       for (int d = 0; d < spatial_dim; ++d) {
         disp[d] = X_cur[i * spatial_dim + d] - X_ref[i * spatial_dim + d];
@@ -495,16 +495,16 @@ void VTKWriter::write_global_ids(const MeshBase& mesh, vtkDataSet* dataset) {
     dataset->GetCellData()->SetGlobalIds(gid_array);
   }
 
-  // Write node global IDs
-  const auto& node_gids = mesh.node_gids();
-  if (!node_gids.empty()) {
+  // Write vertex global IDs
+  const auto& vertex_gids = mesh.vertex_gids();
+  if (!vertex_gids.empty()) {
     vtkSmartPointer<vtkLongArray> gid_array = vtkSmartPointer<vtkLongArray>::New();
-    gid_array->SetName("GlobalNodeID");
+    gid_array->SetName("GlobalVertexID");
     gid_array->SetNumberOfComponents(1);
-    gid_array->SetNumberOfTuples(mesh.n_nodes());
+    gid_array->SetNumberOfTuples(mesh.n_vertices());
 
-    for (size_t n = 0; n < mesh.n_nodes(); ++n) {
-      gid_t gid = (n < node_gids.size()) ? node_gids[n] : static_cast<gid_t>(n);
+    for (size_t n = 0; n < mesh.n_vertices(); ++n) {
+      gid_t gid = (n < vertex_gids.size()) ? vertex_gids[n] : static_cast<gid_t>(n);
       gid_array->SetValue(n, gid);
     }
 
