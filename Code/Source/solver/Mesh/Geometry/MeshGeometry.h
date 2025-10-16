@@ -127,14 +127,17 @@ public:
                                                       Configuration cfg = Configuration::Reference);
 
   /**
-   * @brief Compute edge normal (for 2D meshes)
+   * @brief Compute edge normal
    * @param mesh The mesh
-   * @param edge Edge/face index in 2D
+   * @param edge Edge index
    * @param cfg Reference or current configuration
    * @return Unit normal vector perpendicular to edge
+   *
+   * For 2D meshes: Returns normal in xy-plane (z=0)
+   * For 3D edges: Returns a perpendicular vector
    */
-  static std::array<real_t,3> edge_normal_2d(const MeshBase& mesh, index_t edge,
-                                            Configuration cfg = Configuration::Reference);
+  static std::array<real_t,3> edge_normal(const MeshBase& mesh, index_t edge,
+                                         Configuration cfg = Configuration::Reference);
 
   // ---- Measures (length, area, volume) ----
 
@@ -185,6 +188,71 @@ public:
    */
   static real_t boundary_area(const MeshBase& mesh,
                             Configuration cfg = Configuration::Reference);
+
+  // ---- Boundary-specific geometry ----
+
+  /**
+   * @brief Compute normal from oriented vertex list (right-hand rule)
+   * @param mesh The mesh
+   * @param oriented_vertices Vertices in right-hand rule order
+   * @param cfg Reference or current configuration
+   * @return Normal vector (unnormalized) pointing outward
+   */
+  static std::array<real_t,3> compute_normal_from_vertices(
+      const MeshBase& mesh,
+      const std::vector<index_t>& oriented_vertices,
+      Configuration cfg = Configuration::Reference);
+
+  /**
+   * @brief Compute edge normal from oriented vertex list
+   * @param mesh The mesh
+   * @param oriented_vertices Edge vertices in order
+   * @param cfg Reference or current configuration
+   * @return Normal vector (unnormalized, perpendicular to edge)
+   *
+   * For 2D meshes: Returns normal in xy-plane (z=0)
+   * For 3D edges: Returns a perpendicular vector (additional context may be needed for unique direction)
+   */
+  static std::array<real_t,3> compute_edge_normal_from_vertices(
+      const MeshBase& mesh,
+      const std::vector<index_t>& oriented_vertices,
+      Configuration cfg = Configuration::Reference);
+
+  /**
+   * @brief Compute area from oriented vertex list
+   * @param mesh The mesh
+   * @param oriented_vertices Vertices defining the boundary
+   * @param cfg Reference or current configuration
+   * @return Area (or length for 1D boundaries)
+   */
+  static real_t compute_area_from_vertices(
+      const MeshBase& mesh,
+      const std::vector<index_t>& oriented_vertices,
+      Configuration cfg = Configuration::Reference);
+
+  /**
+   * @brief Compute centroid from vertex indices
+   * @param mesh The mesh
+   * @param vertices Vertex indices
+   * @param cfg Reference or current configuration
+   * @return Centroid coordinates
+   */
+  static std::array<real_t,3> compute_centroid_from_vertices(
+      const MeshBase& mesh,
+      const std::vector<index_t>& vertices,
+      Configuration cfg = Configuration::Reference);
+
+  /**
+   * @brief Compute bounding box from vertex indices
+   * @param mesh The mesh
+   * @param vertices Vertex indices
+   * @param cfg Reference or current configuration
+   * @return Bounding box
+   */
+  static BoundingBox compute_bounding_box_from_vertices(
+      const MeshBase& mesh,
+      const std::vector<index_t>& vertices,
+      Configuration cfg = Configuration::Reference);
 
   // ---- Specialized shape measures ----
 

@@ -53,25 +53,25 @@ using perm_code_t = int8_t; // -1 = not computed, 0+ = permutation index
 // ====================
 // Edge Permutations
 // ====================
-// For an edge with nodes [n0, n1], there are 2 possible orientations:
-//   Code 0: [n0, n1] (canonical)
-//   Code 1: [n1, n0] (reversed)
+// For an edge with vertices [v0, v1], there are 2 possible orientations:
+//   Code 0: [v0, v1] (canonical)
+//   Code 1: [v1, v0] (reversed)
 
 class EdgePermutation {
 public:
   static constexpr int num_orientations() { return 2; }
 
-  static std::array<index_t, 2> apply(perm_code_t code, index_t n0, index_t n1) {
-    if (code == 0) return {n0, n1};
-    if (code == 1) return {n1, n0};
+  static std::array<index_t, 2> apply(perm_code_t code, index_t v0, index_t v1) {
+    if (code == 0) return {v0, v1};
+    if (code == 1) return {v1, v0};
     throw std::runtime_error("EdgePermutation: invalid code " + std::to_string(code));
   }
 
-  static std::vector<index_t> apply(perm_code_t code, const std::vector<index_t>& nodes) {
-    if (nodes.size() != 2) {
-      throw std::runtime_error("EdgePermutation: expected 2 nodes, got " + std::to_string(nodes.size()));
+  static std::vector<index_t> apply(perm_code_t code, const std::vector<index_t>& vertices) {
+    if (vertices.size() != 2) {
+      throw std::runtime_error("EdgePermutation: expected 2 vertices, got " + std::to_string(vertices.size()));
     }
-    auto result = apply(code, nodes[0], nodes[1]);
+    auto result = apply(code, vertices[0], vertices[1]);
     return {result[0], result[1]};
   }
 
@@ -79,14 +79,14 @@ public:
   static perm_code_t compute(const std::array<index_t, 2>& canonical, const std::array<index_t, 2>& local) {
     if (canonical[0] == local[0] && canonical[1] == local[1]) return 0;
     if (canonical[0] == local[1] && canonical[1] == local[0]) return 1;
-    throw std::runtime_error("EdgePermutation: local nodes don't match canonical");
+    throw std::runtime_error("EdgePermutation: local vertices don't match canonical");
   }
 };
 
 // ====================
 // Face Permutations (Triangle)
 // ====================
-// For a triangle with nodes [n0, n1, n2], there are 6 possible orientations:
+// For a triangle with vertices [v0, v1, v2], there are 6 possible orientations:
 //   3 rotations × 2 reflections
 // Canonical ordering assumes counter-clockwise when viewed from "outside"
 
@@ -94,24 +94,24 @@ class TrianglePermutation {
 public:
   static constexpr int num_orientations() { return 6; }
 
-  static std::array<index_t, 3> apply(perm_code_t code, index_t n0, index_t n1, index_t n2) {
+  static std::array<index_t, 3> apply(perm_code_t code, index_t v0, index_t v1, index_t v2) {
     switch (code) {
-      case 0: return {n0, n1, n2}; // identity
-      case 1: return {n1, n2, n0}; // rotate +120°
-      case 2: return {n2, n0, n1}; // rotate +240°
-      case 3: return {n0, n2, n1}; // reflect across n0-midpoint
-      case 4: return {n2, n1, n0}; // reflect across n2-midpoint
-      case 5: return {n1, n0, n2}; // reflect across n1-midpoint
+      case 0: return {v0, v1, v2}; // identity
+      case 1: return {v1, v2, v0}; // rotate +120°
+      case 2: return {v2, v0, v1}; // rotate +240°
+      case 3: return {v0, v2, v1}; // reflect across v0-midpoint
+      case 4: return {v2, v1, v0}; // reflect across v2-midpoint
+      case 5: return {v1, v0, v2}; // reflect across v1-midpoint
       default:
         throw std::runtime_error("TrianglePermutation: invalid code " + std::to_string(code));
     }
   }
 
-  static std::vector<index_t> apply(perm_code_t code, const std::vector<index_t>& nodes) {
-    if (nodes.size() != 3) {
-      throw std::runtime_error("TrianglePermutation: expected 3 nodes, got " + std::to_string(nodes.size()));
+  static std::vector<index_t> apply(perm_code_t code, const std::vector<index_t>& vertices) {
+    if (vertices.size() != 3) {
+      throw std::runtime_error("TrianglePermutation: expected 3 vertices, got " + std::to_string(vertices.size()));
     }
-    auto result = apply(code, nodes[0], nodes[1], nodes[2]);
+    auto result = apply(code, vertices[0], vertices[1], vertices[2]);
     return {result[0], result[1], result[2]};
   }
 
@@ -124,40 +124,40 @@ public:
         return code;
       }
     }
-    throw std::runtime_error("TrianglePermutation: local nodes don't match any permutation of canonical");
+    throw std::runtime_error("TrianglePermutation: local vertices don't match any permutation of canonical");
   }
 };
 
 // ====================
 // Face Permutations (Quad)
 // ====================
-// For a quad with nodes [n0, n1, n2, n3], there are 8 possible orientations:
+// For a quad with vertices [v0, v1, v2, v3], there are 8 possible orientations:
 //   4 rotations × 2 reflections
 
 class QuadPermutation {
 public:
   static constexpr int num_orientations() { return 8; }
 
-  static std::array<index_t, 4> apply(perm_code_t code, index_t n0, index_t n1, index_t n2, index_t n3) {
+  static std::array<index_t, 4> apply(perm_code_t code, index_t v0, index_t v1, index_t v2, index_t v3) {
     switch (code) {
-      case 0: return {n0, n1, n2, n3}; // identity
-      case 1: return {n1, n2, n3, n0}; // rotate +90°
-      case 2: return {n2, n3, n0, n1}; // rotate +180°
-      case 3: return {n3, n0, n1, n2}; // rotate +270°
-      case 4: return {n0, n3, n2, n1}; // reflect across n0-n2 diagonal
-      case 5: return {n1, n0, n3, n2}; // reflect across n1-n3 diagonal
-      case 6: return {n3, n2, n1, n0}; // reflect + rotate
-      case 7: return {n2, n1, n0, n3}; // reflect + rotate
+      case 0: return {v0, v1, v2, v3}; // identity
+      case 1: return {v1, v2, v3, v0}; // rotate +90°
+      case 2: return {v2, v3, v0, v1}; // rotate +180°
+      case 3: return {v3, v0, v1, v2}; // rotate +270°
+      case 4: return {v0, v3, v2, v1}; // reflect across v0-v2 diagonal
+      case 5: return {v1, v0, v3, v2}; // reflect across v1-v3 diagonal
+      case 6: return {v3, v2, v1, v0}; // reflect + rotate
+      case 7: return {v2, v1, v0, v3}; // reflect + rotate
       default:
         throw std::runtime_error("QuadPermutation: invalid code " + std::to_string(code));
     }
   }
 
-  static std::vector<index_t> apply(perm_code_t code, const std::vector<index_t>& nodes) {
-    if (nodes.size() != 4) {
-      throw std::runtime_error("QuadPermutation: expected 4 nodes, got " + std::to_string(nodes.size()));
+  static std::vector<index_t> apply(perm_code_t code, const std::vector<index_t>& vertices) {
+    if (vertices.size() != 4) {
+      throw std::runtime_error("QuadPermutation: expected 4 vertices, got " + std::to_string(vertices.size()));
     }
-    auto result = apply(code, nodes[0], nodes[1], nodes[2], nodes[3]);
+    auto result = apply(code, vertices[0], vertices[1], vertices[2], vertices[3]);
     return {result[0], result[1], result[2], result[3]};
   }
 
@@ -168,7 +168,7 @@ public:
         return code;
       }
     }
-    throw std::runtime_error("QuadPermutation: local nodes don't match any permutation of canonical");
+    throw std::runtime_error("QuadPermutation: local vertices don't match any permutation of canonical");
   }
 };
 
@@ -249,7 +249,7 @@ private:
   void build_face_orientations() {
     // Placeholder: In production, this would:
     // 1. Loop over all cells
-    // 2. For each face, determine canonical ordering (e.g., min node ID first)
+    // 2. For each face, determine canonical ordering (e.g., min vertex ID first)
     // 3. Compare to cell's local ordering
     // 4. Compute and store permutation code
 

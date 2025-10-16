@@ -38,6 +38,8 @@
 
 namespace svmp {
 
+// Uses EntityKind (Vertex/Line/Face/Volume) to represent topological kind
+
 // --------------------
 // Cell shape metadata
 // --------------------
@@ -46,11 +48,15 @@ struct CellShape {
   int num_corners = 0;        // number of corner nodes (for poly: >= 3)
   int order = 1;              // geometric/approximation order
   bool is_mixed_order = false;
+  // Optional hints for variable-topology families (e.g., polyhedra & polygons)
+  int num_faces_hint = -1;    // number of faces for Polyhedron when known
+  int num_edges_hint = -1;    // number of edges for Polyhedron/Polygon when known
 
   // Helper methods
   bool is_linear() const { return order == 1; }
   bool is_quadratic() const { return order == 2; }
   bool is_high_order() const { return order > 2; }
+  bool is_1d() const { return family == CellFamily::Point; }
   bool is_2d() const {
     return family == CellFamily::Triangle ||
            family == CellFamily::Quad ||
@@ -64,9 +70,14 @@ struct CellShape {
            family == CellFamily::Polyhedron;
   }
 
+  // Topological kind derived from cell family (by dimension)
+  EntityKind topo_kind() const;  // Implemented after CellShapeUtils
+
   // Expected node count for standard elements
   int expected_nodes() const {
-    if (family == CellFamily::Line) {
+    if (family == CellFamily::Point) {
+      return 1;
+    } else if (family == CellFamily::Line) {
       return order + 1;
     } else if (family == CellFamily::Triangle) {
       if (order == 1) return 3;
@@ -135,9 +146,10 @@ namespace CellShapeUtils {
   // Get the number of faces for a standard cell type
   inline int num_faces(const CellShape& shape) {
     switch (shape.family) {
-      case CellFamily::Line: return 2;       // 2 vertices
-      case CellFamily::Triangle: return 3;   // 3 edges
-      case CellFamily::Quad: return 4;       // 4 edges
+      case CellFamily::Line: return 0;       // 1 face
+      case CellFamily::Triangle: return 1;   // 1 face
+      case CellFamily::Quad: return 1;       // 1 face
+      case CellFamily::Polygon: return 1;    // 1 face
       case CellFamily::Tetra: return 4;      // 4 triangular faces
       case CellFamily::Hex: return 6;        // 6 quadrilateral faces
       case CellFamily::Wedge: return 5;      // 2 triangles + 3 quads
@@ -156,25 +168,33 @@ namespace CellShapeUtils {
       case CellFamily::Hex: return 12;
       case CellFamily::Wedge: return 9;
       case CellFamily::Pyramid: return 8;
-      default: return -1;                    // Variable for poly
+      default: return -1;                    // Variable for polygon & polyhedron
     }
   }
 
-  // Get the spatial dimension for a cell family
-  inline int dimension(CellFamily family) {
+  // Get the topological entity kind for a cell family (by dimension)
+  inline EntityKind dimension(CellFamily family) {
     switch (family) {
-      case CellFamily::Line: return 1;
+      case CellFamily::Line:
+        return EntityKind::Edge;     // 1D
       case CellFamily::Triangle:
       case CellFamily::Quad:
-      case CellFamily::Polygon: return 2;
+      case CellFamily::Polygon:
+        return EntityKind::Face;     // 2D
       case CellFamily::Tetra:
       case CellFamily::Hex:
       case CellFamily::Wedge:
       case CellFamily::Pyramid:
-      case CellFamily::Polyhedron: return 3;
+      case CellFamily::Polyhedron:
+        return EntityKind::Volume;   // 3D
     }
-    return 0;
+    return EntityKind::Vertex;       // default/fallback (0D)
   }
+}
+
+// Implementation of CellShape::topo_kind() after CellShapeUtils is defined
+inline EntityKind CellShape::topo_kind() const {
+  return CellShapeUtils::dimension(family);
 }
 
 } // namespace svmp

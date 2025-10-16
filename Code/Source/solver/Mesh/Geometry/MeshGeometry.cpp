@@ -38,22 +38,22 @@ namespace svmp {
 // ---- Centers and bounding boxes ----
 
 std::array<real_t,3> MeshGeometry::cell_center(const MeshBase& mesh, index_t cell, Configuration cfg) {
-  auto [nodes_ptr, n_nodes] = mesh.cell_nodes_span(cell);
+  auto [vertices_ptr, n_vertices] = mesh.cell_vertices_span(cell);
   std::array<real_t,3> center = {{0,0,0}};
   const std::vector<real_t>& coords = (cfg == Configuration::Current && mesh.has_current_coords())
                                       ? mesh.X_cur() : mesh.X_ref();
   int spatial_dim = mesh.dim();
 
-  for (size_t i = 0; i < n_nodes; ++i) {
-    index_t node_id = nodes_ptr[i];
+  for (size_t i = 0; i < n_vertices; ++i) {
+    index_t vertex_id = vertices_ptr[i];
     for (int d = 0; d < spatial_dim; ++d) {
-      center[d] += coords[node_id * spatial_dim + d];
+      center[d] += coords[vertex_id * spatial_dim + d];
     }
   }
 
-  if (n_nodes > 0) {
+  if (n_vertices > 0) {
     for (int d = 0; d < 3; ++d) {
-      center[d] /= n_nodes;
+      center[d] /= n_vertices;
     }
   }
 
@@ -61,22 +61,22 @@ std::array<real_t,3> MeshGeometry::cell_center(const MeshBase& mesh, index_t cel
 }
 
 std::array<real_t,3> MeshGeometry::face_center(const MeshBase& mesh, index_t face, Configuration cfg) {
-  auto [nodes_ptr, n_nodes] = mesh.face_nodes_span(face);
+  auto [vertices_ptr, n_vertices] = mesh.face_vertices_span(face);
   std::array<real_t,3> center = {{0,0,0}};
   const std::vector<real_t>& coords = (cfg == Configuration::Current && mesh.has_current_coords())
                                       ? mesh.X_cur() : mesh.X_ref();
   int spatial_dim = mesh.dim();
 
-  for (size_t i = 0; i < n_nodes; ++i) {
-    index_t node_id = nodes_ptr[i];
+  for (size_t i = 0; i < n_vertices; ++i) {
+    index_t vertex_id = vertices_ptr[i];
     for (int d = 0; d < spatial_dim; ++d) {
-      center[d] += coords[node_id * spatial_dim + d];
+      center[d] += coords[vertex_id * spatial_dim + d];
     }
   }
 
-  if (n_nodes > 0) {
+  if (n_vertices > 0) {
     for (int d = 0; d < 3; ++d) {
-      center[d] /= n_nodes;
+      center[d] /= n_vertices;
     }
   }
 
@@ -88,9 +88,9 @@ BoundingBox MeshGeometry::bounding_box(const MeshBase& mesh, Configuration cfg) 
   const std::vector<real_t>& coords = (cfg == Configuration::Current && mesh.has_current_coords())
                                       ? mesh.X_cur() : mesh.X_ref();
   int spatial_dim = mesh.dim();
-  size_t n_nodes = mesh.n_nodes();
+  size_t n_vertices = mesh.n_vertices();
 
-  for (size_t i = 0; i < n_nodes; ++i) {
+  for (size_t i = 0; i < n_vertices; ++i) {
     for (int d = 0; d < spatial_dim; ++d) {
       real_t val = coords[i * spatial_dim + d];
       box.min[d] = std::min(box.min[d], val);
@@ -109,7 +109,7 @@ std::array<real_t,3> MeshGeometry::face_normal(const MeshBase& mesh, index_t fac
 }
 
 std::array<real_t,3> MeshGeometry::face_normal_unnormalized(const MeshBase& mesh, index_t face, Configuration cfg) {
-  auto [nodes_ptr, n_nodes] = mesh.face_nodes_span(face);
+  auto [vertices_ptr, n_vertices] = mesh.face_vertices_span(face);
   const std::vector<real_t>& coords = (cfg == Configuration::Current && mesh.has_current_coords())
                                       ? mesh.X_cur() : mesh.X_ref();
   int spatial_dim = mesh.dim();
@@ -117,12 +117,12 @@ std::array<real_t,3> MeshGeometry::face_normal_unnormalized(const MeshBase& mesh
 
   if (spatial_dim == 2) {
     // 2D: normal to line segment
-    if (n_nodes >= 2) {
+    if (n_vertices >= 2) {
       std::array<real_t,3> p0 = {{0,0,0}};
       std::array<real_t,3> p1 = {{0,0,0}};
       for (int d = 0; d < spatial_dim; ++d) {
-        p0[d] = coords[nodes_ptr[0] * spatial_dim + d];
-        p1[d] = coords[nodes_ptr[1] * spatial_dim + d];
+        p0[d] = coords[vertices_ptr[0] * spatial_dim + d];
+        p1[d] = coords[vertices_ptr[1] * spatial_dim + d];
       }
       // 90-degree rotation in 2D
       normal[0] = -(p1[1] - p0[1]);
@@ -130,14 +130,14 @@ std::array<real_t,3> MeshGeometry::face_normal_unnormalized(const MeshBase& mesh
     }
   } else if (spatial_dim == 3) {
     // 3D: cross product of two edges
-    if (n_nodes >= 3) {
+    if (n_vertices >= 3) {
       std::array<real_t,3> p0 = {{0,0,0}};
       std::array<real_t,3> p1 = {{0,0,0}};
       std::array<real_t,3> p2 = {{0,0,0}};
       for (int d = 0; d < spatial_dim; ++d) {
-        p0[d] = coords[nodes_ptr[0] * spatial_dim + d];
-        p1[d] = coords[nodes_ptr[1] * spatial_dim + d];
-        p2[d] = coords[nodes_ptr[2] * spatial_dim + d];
+        p0[d] = coords[vertices_ptr[0] * spatial_dim + d];
+        p1[d] = coords[vertices_ptr[1] * spatial_dim + d];
+        p2[d] = coords[vertices_ptr[2] * spatial_dim + d];
       }
       std::array<real_t,3> e1, e2;
       for (int d = 0; d < 3; ++d) {
@@ -154,46 +154,46 @@ std::array<real_t,3> MeshGeometry::face_normal_unnormalized(const MeshBase& mesh
 // ---- Measures ----
 
 real_t MeshGeometry::cell_measure(const MeshBase& mesh, index_t cell, Configuration cfg) {
-  auto [nodes_ptr, n_nodes] = mesh.cell_nodes_span(cell);
+  auto [vertices_ptr2, n_vertices2] = mesh.cell_vertices_span(cell);
   const std::vector<real_t>& coords = (cfg == Configuration::Current && mesh.has_current_coords())
                                       ? mesh.X_cur() : mesh.X_ref();
   const CellShape& shape = mesh.cell_shape(cell);
   int spatial_dim = mesh.dim();
 
   // Helper to get coordinates
-  auto get_coords = [&](index_t node_id) -> std::array<real_t,3> {
+  auto get_coords = [&](index_t vertex_id) -> std::array<real_t,3> {
     std::array<real_t,3> pt = {{0,0,0}};
     for (int d = 0; d < spatial_dim; ++d) {
-      pt[d] = coords[node_id * spatial_dim + d];
+      pt[d] = coords[vertex_id * spatial_dim + d];
     }
     return pt;
   };
 
   switch (shape.family) {
     case CellFamily::Line: {
-      if (n_nodes >= 2) {
-        auto p0 = get_coords(nodes_ptr[0]);
-        auto p1 = get_coords(nodes_ptr[1]);
+      if (n_vertices2 >= 2) {
+        auto p0 = get_coords(vertices_ptr2[0]);
+        auto p1 = get_coords(vertices_ptr2[1]);
         return distance(p0, p1);
       }
       break;
     }
 
     case CellFamily::Triangle: {
-      if (n_nodes >= 3) {
-        auto p0 = get_coords(nodes_ptr[0]);
-        auto p1 = get_coords(nodes_ptr[1]);
-        auto p2 = get_coords(nodes_ptr[2]);
+      if (n_vertices2 >= 3) {
+        auto p0 = get_coords(vertices_ptr2[0]);
+        auto p1 = get_coords(vertices_ptr2[1]);
+        auto p2 = get_coords(vertices_ptr2[2]);
         return triangle_area(p0, p1, p2);
       }
       break;
     }
 
     case CellFamily::Quad: {
-      if (n_nodes >= 4) {
+      if (n_vertices2 >= 4) {
         std::vector<std::array<real_t,3>> verts;
         for (size_t i = 0; i < 4; ++i) {
-          verts.push_back(get_coords(nodes_ptr[i]));
+          verts.push_back(get_coords(vertices_ptr2[i]));
         }
         return quad_area(verts);
       }
@@ -201,21 +201,21 @@ real_t MeshGeometry::cell_measure(const MeshBase& mesh, index_t cell, Configurat
     }
 
     case CellFamily::Tetra: {
-      if (n_nodes >= 4) {
-        auto p0 = get_coords(nodes_ptr[0]);
-        auto p1 = get_coords(nodes_ptr[1]);
-        auto p2 = get_coords(nodes_ptr[2]);
-        auto p3 = get_coords(nodes_ptr[3]);
+      if (n_vertices2 >= 4) {
+        auto p0 = get_coords(vertices_ptr2[0]);
+        auto p1 = get_coords(vertices_ptr2[1]);
+        auto p2 = get_coords(vertices_ptr2[2]);
+        auto p3 = get_coords(vertices_ptr2[3]);
         return std::abs(tet_volume(p0, p1, p2, p3));
       }
       break;
     }
 
     case CellFamily::Hex: {
-      if (n_nodes >= 8) {
+      if (n_vertices2 >= 8) {
         std::vector<std::array<real_t,3>> verts;
         for (size_t i = 0; i < 8; ++i) {
-          verts.push_back(get_coords(nodes_ptr[i]));
+          verts.push_back(get_coords(vertices_ptr2[i]));
         }
         return hex_volume(verts);
       }
@@ -223,10 +223,10 @@ real_t MeshGeometry::cell_measure(const MeshBase& mesh, index_t cell, Configurat
     }
 
     case CellFamily::Wedge: {
-      if (n_nodes >= 6) {
+      if (n_vertices2 >= 6) {
         std::vector<std::array<real_t,3>> verts;
         for (size_t i = 0; i < 6; ++i) {
-          verts.push_back(get_coords(nodes_ptr[i]));
+          verts.push_back(get_coords(vertices_ptr2[i]));
         }
         return wedge_volume(verts);
       }
@@ -234,10 +234,10 @@ real_t MeshGeometry::cell_measure(const MeshBase& mesh, index_t cell, Configurat
     }
 
     case CellFamily::Pyramid: {
-      if (n_nodes >= 5) {
+      if (n_vertices2 >= 5) {
         std::vector<std::array<real_t,3>> verts;
         for (size_t i = 0; i < 5; ++i) {
-          verts.push_back(get_coords(nodes_ptr[i]));
+          verts.push_back(get_coords(vertices_ptr2[i]));
         }
         return pyramid_volume(verts);
       }
@@ -253,42 +253,42 @@ real_t MeshGeometry::cell_measure(const MeshBase& mesh, index_t cell, Configurat
 }
 
 real_t MeshGeometry::face_area(const MeshBase& mesh, index_t face, Configuration cfg) {
-  auto [nodes_ptr, n_nodes] = mesh.face_nodes_span(face);
+  auto [vertices_ptr, n_vertices] = mesh.face_vertices_span(face);
   const std::vector<real_t>& coords = (cfg == Configuration::Current && mesh.has_current_coords())
                                       ? mesh.X_cur() : mesh.X_ref();
   int spatial_dim = mesh.dim();
 
   if (spatial_dim == 2) {
     // In 2D, "faces" are edges, so return edge length
-    if (n_nodes >= 2) {
+    if (n_vertices >= 2) {
       std::array<real_t,3> p0 = {{0,0,0}};
       std::array<real_t,3> p1 = {{0,0,0}};
       for (int d = 0; d < spatial_dim; ++d) {
-        p0[d] = coords[nodes_ptr[0] * spatial_dim + d];
-        p1[d] = coords[nodes_ptr[1] * spatial_dim + d];
+        p0[d] = coords[vertices_ptr[0] * spatial_dim + d];
+        p1[d] = coords[vertices_ptr[1] * spatial_dim + d];
       }
       return distance(p0, p1);
     }
   } else if (spatial_dim == 3) {
     // 3D face area
-    if (n_nodes == 3) {
+    if (n_vertices == 3) {
       // Triangle
       std::array<real_t,3> p0 = {{0,0,0}};
       std::array<real_t,3> p1 = {{0,0,0}};
       std::array<real_t,3> p2 = {{0,0,0}};
       for (int d = 0; d < spatial_dim; ++d) {
-        p0[d] = coords[nodes_ptr[0] * spatial_dim + d];
-        p1[d] = coords[nodes_ptr[1] * spatial_dim + d];
-        p2[d] = coords[nodes_ptr[2] * spatial_dim + d];
+        p0[d] = coords[vertices_ptr[0] * spatial_dim + d];
+        p1[d] = coords[vertices_ptr[1] * spatial_dim + d];
+        p2[d] = coords[vertices_ptr[2] * spatial_dim + d];
       }
       return triangle_area(p0, p1, p2);
-    } else if (n_nodes == 4) {
+    } else if (n_vertices == 4) {
       // Quadrilateral
       std::vector<std::array<real_t,3>> verts;
       for (size_t i = 0; i < 4; ++i) {
         std::array<real_t,3> pt = {{0,0,0}};
         for (int d = 0; d < spatial_dim; ++d) {
-          pt[d] = coords[nodes_ptr[i] * spatial_dim + d];
+          pt[d] = coords[vertices_ptr[i] * spatial_dim + d];
         }
         verts.push_back(pt);
       }
@@ -334,7 +334,7 @@ real_t MeshGeometry::triangle_area(const std::array<real_t,3>& p0,
 
 real_t MeshGeometry::hex_volume(const std::vector<std::array<real_t,3>>& v) {
   // Decompose hex into 6 tetrahedra
-  // Standard hex node ordering: 0-1-2-3 bottom, 4-5-6-7 top
+  // Standard hex vertex ordering: 0-1-2-3 bottom, 4-5-6-7 top
   real_t vol = 0;
   vol += std::abs(tet_volume(v[0], v[1], v[3], v[4]));
   vol += std::abs(tet_volume(v[1], v[2], v[3], v[6]));
@@ -402,6 +402,229 @@ real_t MeshGeometry::distance(const std::array<real_t,3>& p1,
   real_t dy = p2[1] - p1[1];
   real_t dz = p2[2] - p1[2];
   return std::sqrt(dx*dx + dy*dy + dz*dz);
+}
+
+// ---- Boundary-specific geometry ----
+
+std::array<real_t,3> MeshGeometry::compute_normal_from_vertices(
+    const MeshBase& mesh,
+    const std::vector<index_t>& oriented_vertices,
+    Configuration cfg) {
+
+  if (oriented_vertices.size() < 3) {
+    return {{0.0, 0.0, 0.0}};
+  }
+
+  // Get vertex coordinates from appropriate configuration
+  const auto& X = (cfg == Configuration::Current && mesh.has_current_coords())
+                  ? mesh.X_cur() : mesh.X_ref();
+  const int dim = mesh.dim();
+
+  const index_t v0 = oriented_vertices[0];
+  const index_t v1 = oriented_vertices[1];
+  const index_t v2 = oriented_vertices[2];
+
+  // Extract coordinates (stored as flat array: x0,y0,z0,x1,y1,z1,...)
+  std::array<real_t,3> p0 = {{X[v0*dim + 0], X[v0*dim + 1], dim > 2 ? X[v0*dim + 2] : 0.0}};
+  std::array<real_t,3> p1 = {{X[v1*dim + 0], X[v1*dim + 1], dim > 2 ? X[v1*dim + 2] : 0.0}};
+  std::array<real_t,3> p2 = {{X[v2*dim + 0], X[v2*dim + 1], dim > 2 ? X[v2*dim + 2] : 0.0}};
+
+  // Compute edge vectors
+  std::array<real_t,3> e1, e2;
+  for (int d = 0; d < 3; ++d) {
+    e1[d] = p1[d] - p0[d];
+    e2[d] = p2[d] - p0[d];
+  }
+
+  // Compute cross product: normal = e1 × e2
+  return cross(e1, e2);
+}
+
+std::array<real_t,3> MeshGeometry::compute_edge_normal_from_vertices(
+    const MeshBase& mesh,
+    const std::vector<index_t>& oriented_vertices,
+    Configuration cfg) {
+
+  if (oriented_vertices.size() < 2) {
+    return {{0.0, 0.0, 0.0}};
+  }
+
+  // Get vertex coordinates from appropriate configuration
+  const auto& X = (cfg == Configuration::Current && mesh.has_current_coords())
+                  ? mesh.X_cur() : mesh.X_ref();
+  const int dim = mesh.dim();
+
+  const index_t v0 = oriented_vertices[0];
+  const index_t v1 = oriented_vertices[1];
+
+  // Extract coordinates
+  std::array<real_t,3> p0 = {{0.0, 0.0, 0.0}};
+  std::array<real_t,3> p1 = {{0.0, 0.0, 0.0}};
+
+  for (int d = 0; d < dim; ++d) {
+    p0[d] = X[v0*dim + d];
+    p1[d] = X[v1*dim + d];
+  }
+
+  // Edge vector
+  std::array<real_t,3> edge;
+  for (int d = 0; d < 3; ++d) {
+    edge[d] = p1[d] - p0[d];
+  }
+
+  // Compute normal perpendicular to edge
+  if (dim == 2) {
+    // 2D: Outward normal (90-degree rotation counterclockwise in xy-plane)
+    return {{-edge[1], edge[0], 0.0}};
+  } else {
+    // 3D: Return a perpendicular vector (arbitrary choice without additional context)
+    // Choose a perpendicular direction using cross product with a reference vector
+    std::array<real_t,3> ref = {{1.0, 0.0, 0.0}};
+
+    // If edge is nearly parallel to ref, use a different reference
+    real_t dot_prod = edge[0] * ref[0] + edge[1] * ref[1] + edge[2] * ref[2];
+    real_t edge_mag = magnitude(edge);
+    if (std::abs(dot_prod) > 0.9 * edge_mag) {
+      ref = {{0.0, 1.0, 0.0}};
+    }
+
+    // Return perpendicular via cross product
+    return cross(edge, ref);
+  }
+}
+
+std::array<real_t,3> MeshGeometry::compute_centroid_from_vertices(
+    const MeshBase& mesh,
+    const std::vector<index_t>& vertices,
+    Configuration cfg) {
+
+  std::array<real_t,3> centroid = {{0.0, 0.0, 0.0}};
+
+  if (vertices.empty()) {
+    return centroid;
+  }
+
+  const auto& X = (cfg == Configuration::Current && mesh.has_current_coords())
+                  ? mesh.X_cur() : mesh.X_ref();
+  const int dim = mesh.dim();
+
+  // Sum all vertex coordinates
+  for (index_t v : vertices) {
+    for (int d = 0; d < dim; ++d) {
+      centroid[d] += X[v*dim + d];
+    }
+  }
+
+  // Average
+  for (int d = 0; d < 3; ++d) {
+    centroid[d] /= static_cast<real_t>(vertices.size());
+  }
+
+  return centroid;
+}
+
+real_t MeshGeometry::compute_area_from_vertices(
+    const MeshBase& mesh,
+    const std::vector<index_t>& oriented_vertices,
+    Configuration cfg) {
+
+  if (oriented_vertices.size() < 2) {
+    return 0.0;
+  }
+
+  const auto& X = (cfg == Configuration::Current && mesh.has_current_coords())
+                  ? mesh.X_cur() : mesh.X_ref();
+  const int dim = mesh.dim();
+
+  // Helper to get coordinates
+  auto get_coords = [&](index_t v) -> std::array<real_t,3> {
+    std::array<real_t,3> pt = {{0.0, 0.0, 0.0}};
+    for (int d = 0; d < dim; ++d) {
+      pt[d] = X[v*dim + d];
+    }
+    return pt;
+  };
+
+  if (dim == 2) {
+    // 1D boundary (edge): compute length
+    if (oriented_vertices.size() >= 2) {
+      auto p0 = get_coords(oriented_vertices[0]);
+      auto p1 = get_coords(oriented_vertices[1]);
+      return distance(p0, p1);
+    }
+  } else if (dim == 3) {
+    // 2D boundary (face): compute area
+    if (oriented_vertices.size() == 3) {
+      // Triangle
+      auto p0 = get_coords(oriented_vertices[0]);
+      auto p1 = get_coords(oriented_vertices[1]);
+      auto p2 = get_coords(oriented_vertices[2]);
+      return triangle_area(p0, p1, p2);
+    } else if (oriented_vertices.size() == 4) {
+      // Quadrilateral
+      std::vector<std::array<real_t,3>> verts;
+      for (index_t v : oriented_vertices) {
+        verts.push_back(get_coords(v));
+      }
+      return quad_area(verts);
+    } else if (oriented_vertices.size() > 4) {
+      // General polygon
+      std::vector<std::array<real_t,3>> verts;
+      for (index_t v : oriented_vertices) {
+        verts.push_back(get_coords(v));
+      }
+      return polygon_area(verts);
+    }
+  }
+
+  return 0.0;
+}
+
+real_t MeshGeometry::polygon_area(const std::vector<std::array<real_t,3>>& vertices) {
+  // Use fan triangulation from first vertex
+  if (vertices.size() < 3) {
+    return 0.0;
+  }
+
+  real_t total_area = 0.0;
+  for (size_t i = 1; i < vertices.size() - 1; ++i) {
+    total_area += triangle_area(vertices[0], vertices[i], vertices[i+1]);
+  }
+
+  return total_area;
+}
+
+BoundingBox MeshGeometry::compute_bounding_box_from_vertices(
+    const MeshBase& mesh,
+    const std::vector<index_t>& vertices,
+    Configuration cfg) {
+
+  BoundingBox box;
+
+  if (vertices.empty()) {
+    return box;
+  }
+
+  const auto& X = (cfg == Configuration::Current && mesh.has_current_coords())
+                  ? mesh.X_cur() : mesh.X_ref();
+  const int dim = mesh.dim();
+
+  // Initialize with first vertex
+  for (int d = 0; d < dim; ++d) {
+    box.min[d] = X[vertices[0]*dim + d];
+    box.max[d] = X[vertices[0]*dim + d];
+  }
+
+  // Expand to include all vertices
+  for (size_t i = 1; i < vertices.size(); ++i) {
+    for (int d = 0; d < dim; ++d) {
+      real_t val = X[vertices[i]*dim + d];
+      box.min[d] = std::min(box.min[d], val);
+      box.max[d] = std::max(box.max[d], val);
+    }
+  }
+
+  return box;
 }
 
 } // namespace svmp

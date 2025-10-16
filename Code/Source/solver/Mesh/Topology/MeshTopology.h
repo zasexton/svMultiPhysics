@@ -44,7 +44,7 @@ class MeshBase;
  * @brief Mesh topology operations and adjacency queries
  *
  * This class provides topology-related operations including:
- * - Adjacency relationship construction (node-to-cell, cell-to-cell, etc.)
+ * - Adjacency relationship construction (vertex-to-cell, cell-to-cell, etc.)
  * - Neighbor queries
  * - Boundary identification
  * - Connectivity analysis
@@ -55,24 +55,24 @@ public:
   // ---- Adjacency construction ----
 
   /**
-   * @brief Build node-to-cell adjacency
+   * @brief Build vertex-to-cell adjacency
    * @param mesh The mesh
-   * @param[out] node2cell_offsets CSR offsets (size n_nodes+1)
-   * @param[out] node2cell Concatenated cell indices
+   * @param[out] vertex2cell_offsets CSR offsets (size n_vertices+1)
+   * @param[out] vertex2cell Concatenated cell indices
    */
-  static void build_node2cell(const MeshBase& mesh,
-                              std::vector<offset_t>& node2cell_offsets,
-                              std::vector<index_t>& node2cell);
+  static void build_vertex2volume(const MeshBase& mesh,
+                                  std::vector<offset_t>& vertex2cell_offsets,
+                                  std::vector<index_t>& vertex2cell);
 
   /**
-   * @brief Build node-to-face adjacency
+   * @brief Build vertex-to-face adjacency
    * @param mesh The mesh
-   * @param[out] node2face_offsets CSR offsets (size n_nodes+1)
-   * @param[out] node2face Concatenated face indices
+   * @param[out] vertex2face_offsets CSR offsets (size n_vertices+1)
+   * @param[out] vertex2face Concatenated face indices
    */
-  static void build_node2face(const MeshBase& mesh,
-                              std::vector<offset_t>& node2face_offsets,
-                              std::vector<index_t>& node2face);
+  static void build_vertex2codim1(const MeshBase& mesh,
+                                  std::vector<offset_t>& vertex2entity_offsets,
+                                  std::vector<index_t>& vertex2entity);
 
   /**
    * @brief Build cell-to-cell adjacency through shared faces
@@ -85,23 +85,23 @@ public:
                               std::vector<index_t>& cell2cell);
 
   /**
-   * @brief Build face-to-face adjacency through shared edges
+   * @brief Build codim-1 to codim-1 adjacency through shared codim-2 entities
    * @param mesh The mesh
-   * @param[out] face2face_offsets CSR offsets (size n_faces+1)
-   * @param[out] face2face Concatenated neighbor face indices
+   * @param[out] entity2entity_offsets CSR offsets (size n_codim1+1)
+   * @param[out] entity2entity Concatenated neighbor indices
    */
-  static void build_face2face(const MeshBase& mesh,
-                              std::vector<offset_t>& face2face_offsets,
-                              std::vector<index_t>& face2face);
+  static void build_codim1_to_codim1(const MeshBase& mesh,
+                                     std::vector<offset_t>& entity2entity_offsets,
+                                     std::vector<index_t>& entity2entity);
 
   // ---- Neighbor queries ----
 
   /**
-   * @brief Get all cells sharing at least one node with given cell
+   * @brief Get all cells sharing at least one vertex with given cell
    * @param mesh The mesh
    * @param cell Cell index
-   * @param node2cell_offsets Prebuilt node-to-cell offsets (optional)
-   * @param node2cell Prebuilt node-to-cell connectivity (optional)
+   * @param node2cell_offsets Prebuilt vertex-to-cell offsets (optional)
+   * @param node2cell Prebuilt vertex-to-cell connectivity (optional)
    * @return Vector of neighbor cell indices
    */
   static std::vector<index_t> cell_neighbors(const MeshBase& mesh, index_t cell,
@@ -109,28 +109,28 @@ public:
                                             const std::vector<index_t>& cell2cell = {});
 
   /**
-   * @brief Get all cells containing given node
+   * @brief Get all cells containing given vertex
    * @param mesh The mesh
-   * @param node Node index
-   * @param node2cell_offsets Prebuilt node-to-cell offsets (optional)
-   * @param node2cell Prebuilt node-to-cell connectivity (optional)
+   * @param vertex Vertex index
+   * @param vertex2cell_offsets Prebuilt vertex-to-cell offsets (optional)
+   * @param vertex2cell Prebuilt vertex-to-cell connectivity (optional)
    * @return Vector of cell indices
    */
-  static std::vector<index_t> node_cells(const MeshBase& mesh, index_t node,
-                                        const std::vector<offset_t>& node2cell_offsets = {},
-                                        const std::vector<index_t>& node2cell = {});
+  static std::vector<index_t> vertex_cells(const MeshBase& mesh, index_t vertex,
+                                          const std::vector<offset_t>& vertex2cell_offsets = {},
+                                          const std::vector<index_t>& vertex2cell = {});
 
   /**
-   * @brief Get all faces containing given node
+   * @brief Get all faces containing given vertex
    * @param mesh The mesh
-   * @param node Node index
-   * @param node2face_offsets Prebuilt node-to-face offsets (optional)
-   * @param node2face Prebuilt node-to-face connectivity (optional)
+   * @param vertex Vertex index
+   * @param vertex2face_offsets Prebuilt vertex-to-face offsets (optional)
+   * @param vertex2face Prebuilt vertex-to-face connectivity (optional)
    * @return Vector of face indices
    */
-  static std::vector<index_t> node_faces(const MeshBase& mesh, index_t node,
-                                        const std::vector<offset_t>& node2face_offsets = {},
-                                        const std::vector<index_t>& node2face = {});
+  static std::vector<index_t> vertex_codim1(const MeshBase& mesh, index_t vertex,
+                                            const std::vector<offset_t>& vertex2entity_offsets = {},
+                                            const std::vector<index_t>& vertex2entity = {});
 
   /**
    * @brief Get cells adjacent to given face
@@ -138,7 +138,7 @@ public:
    * @param face Face index
    * @return Vector of 0, 1, or 2 cell indices
    */
-  static std::vector<index_t> face_cells(const MeshBase& mesh, index_t face);
+  static std::vector<index_t> codim1_cells(const MeshBase& mesh, index_t entity);
 
   // ---- Boundary identification ----
 
@@ -147,7 +147,7 @@ public:
    * @param mesh The mesh
    * @return Vector of boundary face indices
    */
-  static std::vector<index_t> boundary_faces(const MeshBase& mesh);
+  static std::vector<index_t> boundary_codim1(const MeshBase& mesh);
 
   /**
    * @brief Get all boundary cells (cells with at least one boundary face)
@@ -157,11 +157,11 @@ public:
   static std::vector<index_t> boundary_cells(const MeshBase& mesh);
 
   /**
-   * @brief Get all boundary nodes (nodes on boundary faces)
+   * @brief Get all boundary vertices (vertices on boundary faces)
    * @param mesh The mesh
-   * @return Vector of boundary node indices
+   * @return Vector of boundary vertex indices
    */
-  static std::vector<index_t> boundary_nodes(const MeshBase& mesh);
+  static std::vector<index_t> boundary_vertices(const MeshBase& mesh);
 
   /**
    * @brief Check if a face is on the boundary
@@ -169,7 +169,7 @@ public:
    * @param face Face index
    * @return True if face is on boundary
    */
-  static bool is_boundary_face(const MeshBase& mesh, index_t face);
+  static bool is_boundary_codim1(const MeshBase& mesh, index_t entity);
 
   /**
    * @brief Check if a cell is on the boundary
@@ -224,20 +224,20 @@ public:
     face_count_by_cell_type(const MeshBase& mesh);
 
   /**
-   * @brief Get valence (number of connected edges) for each node
+   * @brief Get valence (number of connected edges) for each vertex
    * @param mesh The mesh
-   * @return Vector of valences indexed by node
+   * @return Vector of valences indexed by vertex
    */
-  static std::vector<index_t> node_valence(const MeshBase& mesh);
+  static std::vector<index_t> vertex_valence(const MeshBase& mesh);
 
   /**
-   * @brief Find nodes with irregular valence
+   * @brief Find vertices with irregular valence
    * @param mesh The mesh
-   * @param expected_valence Expected valence for regular nodes
-   * @return Vector of irregular node indices
+   * @param expected_valence Expected valence for regular vertices
+   * @return Vector of irregular vertex indices
    */
-  static std::vector<index_t> irregular_nodes(const MeshBase& mesh,
-                                             index_t expected_valence);
+  static std::vector<index_t> irregular_vertices(const MeshBase& mesh,
+                                                index_t expected_valence);
 
   /**
    * @brief Compute Euler characteristic
@@ -251,7 +251,7 @@ public:
   /**
    * @brief Extract all unique edges from mesh topology
    * @param mesh The mesh
-   * @return Vector of edge node pairs
+   * @return Vector of edge vertex pairs
    */
   static std::vector<std::array<index_t,2>> extract_edges(const MeshBase& mesh);
 
@@ -270,7 +270,7 @@ public:
   /**
    * @brief Find boundary edges (edges on boundary faces)
    * @param mesh The mesh
-   * @return Vector of boundary edge node pairs
+   * @return Vector of boundary edge vertex pairs
    */
   static std::vector<std::array<index_t,2>> boundary_edges(const MeshBase& mesh);
 
@@ -286,16 +286,16 @@ public:
   /**
    * @brief Find non-manifold edges (shared by more than 2 faces)
    * @param mesh The mesh
-   * @return Vector of non-manifold edge node pairs
+   * @return Vector of non-manifold edge vertex pairs
    */
   static std::vector<std::array<index_t,2>> non_manifold_edges(const MeshBase& mesh);
 
   /**
-   * @brief Find non-manifold nodes
+   * @brief Find non-manifold vertices
    * @param mesh The mesh
-   * @return Vector of non-manifold node indices
+   * @return Vector of non-manifold vertex indices
    */
-  static std::vector<index_t> non_manifold_nodes(const MeshBase& mesh);
+  static std::vector<index_t> non_manifold_vertices(const MeshBase& mesh);
 };
 
 } // namespace svmp

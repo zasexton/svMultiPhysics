@@ -269,19 +269,19 @@ std::vector<index_t> MeshQuality::find_poor_quality_cells(const MeshBase& mesh, 
 // Helper: get cell vertices
 std::vector<std::array<real_t,3>> MeshQuality::get_cell_vertices(const MeshBase& mesh, index_t cell,
                                                                  Configuration cfg) {
-  auto [nodes_ptr, n_nodes] = mesh.cell_nodes_span(cell);
+  auto [vertices_ptr, n_vertices] = mesh.cell_vertices_span(cell);
   std::vector<std::array<real_t,3>> vertices;
-  vertices.reserve(n_nodes);
+  vertices.reserve(n_vertices);
 
   const std::vector<real_t>& coords = (cfg == Configuration::Current && mesh.has_current_coords())
                                      ? mesh.X_cur() : mesh.X_ref();
   int spatial_dim = mesh.dim();
 
-  for (size_t i = 0; i < n_nodes; ++i) {
-    index_t node_id = nodes_ptr[i];
+  for (size_t i = 0; i < n_vertices; ++i) {
+    index_t vertex_id = vertices_ptr[i];
     std::array<real_t,3> pt = {{0, 0, 0}};
     for (int d = 0; d < spatial_dim; ++d) {
-      pt[d] = coords[node_id * spatial_dim + d];
+      pt[d] = coords[vertex_id * spatial_dim + d];
     }
     vertices.push_back(pt);
   }

@@ -47,78 +47,78 @@ struct PairHash {
 
 // ---- Adjacency construction ----
 
-void MeshTopology::build_node2cell(const MeshBase& mesh,
-                                  std::vector<offset_t>& node2cell_offsets,
-                                  std::vector<index_t>& node2cell) {
-  size_t n_nodes = mesh.n_nodes();
+void MeshTopology::build_vertex2volume(const MeshBase& mesh,
+                                  std::vector<offset_t>& vertex2cell_offsets,
+                                  std::vector<index_t>& vertex2cell) {
+  size_t n_vertices = mesh.n_vertices();
   size_t n_cells = mesh.n_cells();
 
-  // Count cells per node
-  std::vector<index_t> counts(n_nodes, 0);
+  // Count cells per vertex
+  std::vector<index_t> counts(n_vertices, 0);
   for (size_t c = 0; c < n_cells; ++c) {
-    auto [nodes_ptr, n_node] = mesh.cell_nodes_span(static_cast<index_t>(c));
-    for (size_t i = 0; i < n_node; ++i) {
-      counts[nodes_ptr[i]]++;
+    auto [vertices_ptr, n_vertex] = mesh.cell_vertices_span(static_cast<index_t>(c));
+    for (size_t i = 0; i < n_vertex; ++i) {
+      counts[vertices_ptr[i]]++;
     }
   }
 
   // Build offsets
-  node2cell_offsets.resize(n_nodes + 1);
-  node2cell_offsets[0] = 0;
-  for (size_t n = 0; n < n_nodes; ++n) {
-    node2cell_offsets[n + 1] = node2cell_offsets[n] + counts[n];
+  vertex2cell_offsets.resize(n_vertices + 1);
+  vertex2cell_offsets[0] = 0;
+  for (size_t n = 0; n < n_vertices; ++n) {
+    vertex2cell_offsets[n + 1] = vertex2cell_offsets[n] + counts[n];
   }
 
   // Fill connectivity
-  node2cell.resize(static_cast<size_t>(node2cell_offsets.back()));
-  std::vector<offset_t> pos(n_nodes, 0);
+  vertex2cell.resize(static_cast<size_t>(vertex2cell_offsets.back()));
+  std::vector<offset_t> pos(n_vertices, 0);
   for (size_t c = 0; c < n_cells; ++c) {
-    auto [nodes_ptr, n_node] = mesh.cell_nodes_span(static_cast<index_t>(c));
-    for (size_t i = 0; i < n_node; ++i) {
-      index_t node_id = nodes_ptr[i];
-      offset_t offset = node2cell_offsets[node_id];
-      node2cell[static_cast<size_t>(offset + pos[node_id]++)] = static_cast<index_t>(c);
+    auto [vertices_ptr, n_vertex] = mesh.cell_vertices_span(static_cast<index_t>(c));
+    for (size_t i = 0; i < n_vertex; ++i) {
+      index_t vertex_id = vertices_ptr[i];
+      offset_t offset = vertex2cell_offsets[vertex_id];
+      vertex2cell[static_cast<size_t>(offset + pos[vertex_id]++)] = static_cast<index_t>(c);
     }
   }
 }
 
-void MeshTopology::build_node2face(const MeshBase& mesh,
-                                  std::vector<offset_t>& node2face_offsets,
-                                  std::vector<index_t>& node2face) {
-  size_t n_nodes = mesh.n_nodes();
+void MeshTopology::build_vertex2codim1(const MeshBase& mesh,
+                                  std::vector<offset_t>& vertex2entity_offsets,
+                                  std::vector<index_t>& vertex2entity) {
+  size_t n_vertices = mesh.n_vertices();
   size_t n_faces = mesh.n_faces();
 
   if (n_faces == 0) {
-    node2face_offsets.clear();
-    node2face.clear();
+    vertex2entity_offsets.clear();
+    vertex2entity.clear();
     return;
   }
 
-  // Count faces per node
-  std::vector<index_t> counts(n_nodes, 0);
+  // Count faces per vertex
+  std::vector<index_t> counts(n_vertices, 0);
   for (size_t f = 0; f < n_faces; ++f) {
-    auto [nodes_ptr, n_node] = mesh.face_nodes_span(static_cast<index_t>(f));
-    for (size_t i = 0; i < n_node; ++i) {
-      counts[nodes_ptr[i]]++;
+    auto [vertices_ptr, n_vertex] = mesh.face_vertices_span(static_cast<index_t>(f));
+    for (size_t i = 0; i < n_vertex; ++i) {
+      counts[vertices_ptr[i]]++;
     }
   }
 
   // Build offsets
-  node2face_offsets.resize(n_nodes + 1);
-  node2face_offsets[0] = 0;
-  for (size_t n = 0; n < n_nodes; ++n) {
-    node2face_offsets[n + 1] = node2face_offsets[n] + counts[n];
+  vertex2entity_offsets.resize(n_vertices + 1);
+  vertex2entity_offsets[0] = 0;
+  for (size_t n = 0; n < n_vertices; ++n) {
+    vertex2entity_offsets[n + 1] = vertex2entity_offsets[n] + counts[n];
   }
 
   // Fill connectivity
-  node2face.resize(static_cast<size_t>(node2face_offsets.back()));
-  std::vector<offset_t> pos(n_nodes, 0);
+  vertex2entity.resize(static_cast<size_t>(vertex2entity_offsets.back()));
+  std::vector<offset_t> pos(n_vertices, 0);
   for (size_t f = 0; f < n_faces; ++f) {
-    auto [nodes_ptr, n_node] = mesh.face_nodes_span(static_cast<index_t>(f));
-    for (size_t i = 0; i < n_node; ++i) {
-      index_t node_id = nodes_ptr[i];
-      offset_t offset = node2face_offsets[node_id];
-      node2face[static_cast<size_t>(offset + pos[node_id]++)] = static_cast<index_t>(f);
+    auto [vertices_ptr, n_vertex] = mesh.face_vertices_span(static_cast<index_t>(f));
+    for (size_t i = 0; i < n_vertex; ++i) {
+      index_t vertex_id = vertices_ptr[i];
+      offset_t offset = vertex2entity_offsets[vertex_id];
+      vertex2entity[static_cast<size_t>(offset + pos[vertex_id]++)] = static_cast<index_t>(f);
     }
   }
 }
@@ -157,19 +157,19 @@ void MeshTopology::build_cell2cell(const MeshBase& mesh,
       }
     }
   } else {
-    // Build via shared nodes (slower, less accurate)
+    // Build via shared vertices (slower, less accurate)
     std::vector<offset_t> node2cell_offsets;
     std::vector<index_t> node2cell;
-    build_node2cell(mesh, node2cell_offsets, node2cell);
+    build_vertex2volume(mesh, node2cell_offsets, node2cell);
 
     std::vector<std::unordered_set<index_t>> neighbors(n_cells);
 
     for (size_t c = 0; c < n_cells; ++c) {
-      auto [nodes_ptr, n_node] = mesh.cell_nodes_span(static_cast<index_t>(c));
-      for (size_t i = 0; i < n_node; ++i) {
-        index_t node_id = nodes_ptr[i];
-        offset_t start = node2cell_offsets[node_id];
-        offset_t end = node2cell_offsets[node_id + 1];
+      auto [vertices_ptr, n_vertex] = mesh.cell_vertices_span(static_cast<index_t>(c));
+      for (size_t i = 0; i < n_vertex; ++i) {
+        index_t vertex_id = vertices_ptr[i];
+        offset_t start = node2cell_offsets[vertex_id];
+        offset_t end = node2cell_offsets[vertex_id + 1];
         for (offset_t j = start; j < end; ++j) {
           index_t other_cell = node2cell[static_cast<size_t>(j)];
           if (other_cell != static_cast<index_t>(c)) {
@@ -224,37 +224,37 @@ std::vector<index_t> MeshTopology::cell_neighbors(const MeshBase& mesh, index_t 
   }
 }
 
-std::vector<index_t> MeshTopology::node_cells(const MeshBase& mesh, index_t node,
+std::vector<index_t> MeshTopology::vertex_cells(const MeshBase& mesh, index_t vertex,
                                              const std::vector<offset_t>& node2cell_offsets,
                                              const std::vector<index_t>& node2cell) {
   if (!node2cell_offsets.empty()) {
     // Use provided adjacency
-    if (node < 0 || static_cast<size_t>(node) >= node2cell_offsets.size() - 1) {
+    if (vertex < 0 || static_cast<size_t>(vertex) >= node2cell_offsets.size() - 1) {
       return {};
     }
-    offset_t start = node2cell_offsets[node];
-    offset_t end = node2cell_offsets[node + 1];
+    offset_t start = node2cell_offsets[vertex];
+    offset_t end = node2cell_offsets[vertex + 1];
     return std::vector<index_t>(node2cell.begin() + start, node2cell.begin() + end);
   } else {
     // Build on demand
     std::vector<offset_t> offsets;
     std::vector<index_t> cells;
-    build_node2cell(mesh, offsets, cells);
-    if (node < 0 || static_cast<size_t>(node) >= offsets.size() - 1) {
+    build_vertex2volume(mesh, offsets, cells);
+    if (vertex < 0 || static_cast<size_t>(vertex) >= offsets.size() - 1) {
       return {};
     }
-    offset_t start = offsets[node];
-    offset_t end = offsets[node + 1];
+    offset_t start = offsets[vertex];
+    offset_t end = offsets[vertex + 1];
     return std::vector<index_t>(cells.begin() + start, cells.begin() + end);
   }
 }
 
-std::vector<index_t> MeshTopology::face_cells(const MeshBase& mesh, index_t face) {
-  if (face < 0 || static_cast<size_t>(face) >= mesh.n_faces()) {
+std::vector<index_t> MeshTopology::codim1_cells(const MeshBase& mesh, index_t entity) {
+  if (entity < 0 || static_cast<size_t>(entity) >= mesh.n_faces()) {
     return {};
   }
   std::vector<index_t> result;
-  const auto& fc = mesh.face_cells(face);
+  const auto& fc = mesh.face_cells(entity);
   if (fc[0] >= 0) result.push_back(fc[0]);
   if (fc[1] >= 0) result.push_back(fc[1]);
   return result;
@@ -262,7 +262,7 @@ std::vector<index_t> MeshTopology::face_cells(const MeshBase& mesh, index_t face
 
 // ---- Boundary identification ----
 
-std::vector<index_t> MeshTopology::boundary_faces(const MeshBase& mesh) {
+std::vector<index_t> MeshTopology::boundary_codim1(const MeshBase& mesh) {
   std::vector<index_t> result;
   size_t n_faces = mesh.n_faces();
 
@@ -290,25 +290,25 @@ std::vector<index_t> MeshTopology::boundary_cells(const MeshBase& mesh) {
   return std::vector<index_t>(boundary_set.begin(), boundary_set.end());
 }
 
-std::vector<index_t> MeshTopology::boundary_nodes(const MeshBase& mesh) {
+std::vector<index_t> MeshTopology::boundary_vertices(const MeshBase& mesh) {
   std::unordered_set<index_t> boundary_set;
-  auto bfaces = boundary_faces(mesh);
+  auto bfaces = boundary_codim1(mesh);
 
   for (index_t f : bfaces) {
-    auto [nodes_ptr, n_nodes] = mesh.face_nodes_span(f);
-    for (size_t i = 0; i < n_nodes; ++i) {
-      boundary_set.insert(nodes_ptr[i]);
+    auto [vertices_ptr, n_vertices] = mesh.face_vertices_span(f);
+    for (size_t i = 0; i < n_vertices; ++i) {
+      boundary_set.insert(vertices_ptr[i]);
     }
   }
 
   return std::vector<index_t>(boundary_set.begin(), boundary_set.end());
 }
 
-bool MeshTopology::is_boundary_face(const MeshBase& mesh, index_t face) {
-  if (face < 0 || static_cast<size_t>(face) >= mesh.n_faces()) {
+bool MeshTopology::is_boundary_codim1(const MeshBase& mesh, index_t entity) {
+  if (entity < 0 || static_cast<size_t>(entity) >= mesh.n_faces()) {
     return false;
   }
-  const auto& fc = mesh.face_cells(face);
+  const auto& fc = mesh.face_cells(entity);
   return fc[1] < 0;
 }
 
@@ -419,7 +419,7 @@ std::vector<std::array<index_t,2>> MeshTopology::extract_edges(const MeshBase& m
 
   // Extract edges from cells
   for (size_t c = 0; c < mesh.n_cells(); ++c) {
-    auto [nodes_ptr, n_nodes] = mesh.cell_nodes_span(static_cast<index_t>(c));
+    auto [vertices_ptr, n_vertices] = mesh.cell_vertices_span(static_cast<index_t>(c));
     const auto& shape = mesh.cell_shape(static_cast<index_t>(c));
 
     // Get edges based on cell type
@@ -453,17 +453,17 @@ std::vector<std::array<index_t,2>> MeshTopology::extract_edges(const MeshBase& m
                       {0,4}, {1,4}, {2,4}, {3,4}}; // to apex
         break;
       default:
-        // For polygons/polyhedra, connect consecutive nodes
-        for (size_t i = 0; i < n_nodes; ++i) {
+        // For polygons/polyhedra, connect consecutive vertices
+        for (size_t i = 0; i < n_vertices; ++i) {
           local_edges.push_back({static_cast<int>(i),
-                                static_cast<int>((i + 1) % n_nodes)});
+                                static_cast<int>((i + 1) % n_vertices)});
         }
     }
 
     // Add edges to set (with canonical ordering)
     for (const auto& [i, j] : local_edges) {
-      index_t n1 = nodes_ptr[i];
-      index_t n2 = nodes_ptr[j];
+      index_t n1 = vertices_ptr[i];
+      index_t n2 = vertices_ptr[j];
       if (n1 > n2) std::swap(n1, n2);
       edge_set.insert({n1, n2});
     }
@@ -487,12 +487,12 @@ bool MeshTopology::is_manifold(const MeshBase& mesh) {
 
   // Count faces per edge
   for (size_t f = 0; f < mesh.n_faces(); ++f) {
-    auto [nodes_ptr, n_nodes] = mesh.face_nodes_span(static_cast<index_t>(f));
+    auto [vertices_ptr, n_vertices] = mesh.face_vertices_span(static_cast<index_t>(f));
 
     // Extract edges from face
-    for (size_t i = 0; i < n_nodes; ++i) {
-      index_t n1 = nodes_ptr[i];
-      index_t n2 = nodes_ptr[(i + 1) % n_nodes];
+    for (size_t i = 0; i < n_vertices; ++i) {
+      index_t n1 = vertices_ptr[i];
+      index_t n2 = vertices_ptr[(i + 1) % n_vertices];
       if (n1 > n2) std::swap(n1, n2);
       edge_face_count[{n1, n2}]++;
     }
@@ -503,7 +503,7 @@ bool MeshTopology::is_manifold(const MeshBase& mesh) {
     if (count > 2) return false;
   }
 
-  // Also check that cells around each node form a valid neighborhood
+  // Also check that cells around each vertex form a valid neighborhood
   // (more complex check omitted for brevity)
 
   return true;
@@ -514,11 +514,11 @@ std::vector<std::array<index_t,2>> MeshTopology::non_manifold_edges(const MeshBa
 
   // Count faces per edge
   for (size_t f = 0; f < mesh.n_faces(); ++f) {
-    auto [nodes_ptr, n_nodes] = mesh.face_nodes_span(static_cast<index_t>(f));
+    auto [vertices_ptr, n_vertices] = mesh.face_vertices_span(static_cast<index_t>(f));
 
-    for (size_t i = 0; i < n_nodes; ++i) {
-      index_t n1 = nodes_ptr[i];
-      index_t n2 = nodes_ptr[(i + 1) % n_nodes];
+    for (size_t i = 0; i < n_vertices; ++i) {
+      index_t n1 = vertices_ptr[i];
+      index_t n2 = vertices_ptr[(i + 1) % n_vertices];
       if (n1 > n2) std::swap(n1, n2);
       edge_face_count[{n1, n2}]++;
     }
