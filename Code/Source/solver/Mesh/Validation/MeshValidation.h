@@ -104,11 +104,11 @@ public:
   static ValidationResult check_csr_offsets(const MeshBase& mesh);
 
   /**
-   * @brief Check node indices are in valid range
+   * @brief Check vertex indices are in valid range
    * @param mesh The mesh
    * @return Validation result
    */
-  static ValidationResult check_node_indices(const MeshBase& mesh);
+  static ValidationResult check_vertex_indices(const MeshBase& mesh);
 
   // ---- Topology validation ----
 
@@ -120,20 +120,20 @@ public:
   static ValidationResult validate_topology(const MeshBase& mesh);
 
   /**
-   * @brief Find duplicate nodes
+   * @brief Find duplicate vertices
    * @param mesh The mesh
    * @param tolerance Geometric tolerance
-   * @return Validation result with duplicate node pairs
+   * @return Validation result with duplicate vertex pairs
    */
-  static ValidationResult find_duplicate_nodes(const MeshBase& mesh,
-                                              real_t tolerance = 1e-10);
+  static ValidationResult find_duplicate_vertices(const MeshBase& mesh,
+                                                 real_t tolerance = 1e-10);
 
   /**
-   * @brief Find isolated nodes (not used by any cell)
+   * @brief Find isolated vertices (not used by any cell)
    * @param mesh The mesh
-   * @return Validation result with isolated node indices
+   * @return Validation result with isolated vertex indices
    */
-  static ValidationResult find_isolated_nodes(const MeshBase& mesh);
+  static ValidationResult find_isolated_vertices(const MeshBase& mesh);
 
   /**
    * @brief Find degenerate cells (zero or negative volume)
@@ -152,11 +152,11 @@ public:
   static ValidationResult find_inverted_cells(const MeshBase& mesh);
 
   /**
-   * @brief Check for repeated nodes within cells
+   * @brief Check for repeated vertices within cells
    * @param mesh The mesh
    * @return Validation result
    */
-  static ValidationResult check_repeated_nodes_in_cells(const MeshBase& mesh);
+  static ValidationResult check_repeated_vertices_in_cells(const MeshBase& mesh);
 
   /**
    * @brief Check face-cell consistency
@@ -285,20 +285,20 @@ public:
   // ---- Repair operations ----
 
   /**
-   * @brief Merge duplicate nodes
+   * @brief Merge duplicate vertices
    * @param mesh The mesh
    * @param tolerance Merge tolerance
-   * @return Number of nodes merged
+   * @return Number of vertices merged
    */
-  static index_t merge_duplicate_nodes(MeshBase& mesh,
-                                      real_t tolerance = 1e-10);
+  static index_t merge_duplicate_vertices(MeshBase& mesh,
+                                         real_t tolerance = 1e-10);
 
   /**
-   * @brief Remove isolated nodes
+   * @brief Remove isolated vertices
    * @param mesh The mesh
-   * @return Number of nodes removed
+   * @return Number of vertices removed
    */
-  static index_t remove_isolated_nodes(MeshBase& mesh);
+  static index_t remove_isolated_vertices(MeshBase& mesh);
 
   /**
    * @brief Remove degenerate cells
@@ -310,7 +310,7 @@ public:
                                         real_t tolerance = 1e-12);
 
   /**
-   * @brief Fix inverted cells by reordering nodes
+   * @brief Fix inverted cells by reordering vertices
    * @param mesh The mesh
    * @return Number of cells fixed
    */

@@ -46,7 +46,7 @@ namespace validation {
 // ====================
 // P1.4: Spatial Hashing for Mesh Validation
 // ====================
-// Efficient O(N) duplicate node detection and inverted element checking
+// Efficient O(N) duplicate vertex detection and inverted element checking
 // using spatial hashing instead of O(N²) brute force comparisons.
 
 // ---- Spatial hash grid for duplicate detection ----
@@ -88,7 +88,7 @@ public:
     }
   }
 
-  // Find duplicate nodes within tolerance
+  // Find duplicate vertices within tolerance
   std::vector<std::pair<index_t, index_t>> find_duplicates() const {
     std::vector<std::pair<index_t, index_t>> duplicates;
     std::unordered_set<std::pair<index_t, index_t>, PairHash> seen;
@@ -117,7 +117,7 @@ public:
     return duplicates;
   }
 
-  // Find nodes within tolerance of a given point
+  // Find vertices within tolerance of a given point
   std::vector<index_t> find_nearby(const std::array<double, 3>& point) const {
     std::vector<index_t> nearby;
     auto key = get_grid_key(point);
@@ -192,16 +192,16 @@ public:
   explicit MeshValidator(MeshBase& mesh, double tolerance = 1e-8)
     : mesh_(mesh), tolerance_(tolerance) {}
 
-  // Find duplicate nodes in O(N) time
-  std::vector<std::pair<index_t, index_t>> find_duplicate_nodes() {
+  // Find duplicate vertices in O(N) time
+  std::vector<std::pair<index_t, index_t>> find_duplicate_vertices() {
     SpatialHashGrid grid(tolerance_);
 
     const auto& coords = mesh_.X_ref();
     int dim = mesh_.dim();
-    size_t n_nodes = mesh_.n_nodes();
+    size_t n_vertices = mesh_.n_vertices();
 
-    // Insert all nodes into spatial hash grid
-    for (size_t i = 0; i < n_nodes; ++i) {
+    // Insert all vertices into spatial hash grid
+    for (size_t i = 0; i < n_vertices; ++i) {
       std::array<double, 3> pt = {0, 0, 0};
       for (int d = 0; d < dim; ++d) {
         pt[d] = coords[i * dim + d];
@@ -221,14 +221,14 @@ public:
     size_t n_cells = mesh_.n_cells();
 
     for (size_t c = 0; c < n_cells; ++c) {
-      auto [nodes_ptr, n_nodes] = mesh_.cell_nodes_span(static_cast<index_t>(c));
+      auto [vertices_ptr, n_vertices] = mesh_.cell_vertices_span(static_cast<index_t>(c));
       const auto& shape = mesh_.cell_shape(static_cast<index_t>(c));
 
-      // Get node coordinates
-      std::vector<std::array<double, 3>> vertices(n_nodes);
-      for (size_t i = 0; i < n_nodes; ++i) {
+      // Get vertex coordinates
+      std::vector<std::array<double, 3>> vertices(n_vertices);
+      for (size_t i = 0; i < n_vertices; ++i) {
         for (int d = 0; d < dim; ++d) {
-          vertices[i][d] = coords[nodes_ptr[i] * dim + d];
+          vertices[i][d] = coords[vertices_ptr[i] * dim + d];
         }
         for (int d = dim; d < 3; ++d) {
           vertices[i][d] = 0.0;
@@ -240,7 +240,7 @@ public:
       // Check based on cell type
       switch (shape.family) {
         case CellFamily::Triangle:
-          if (n_nodes >= 3) {
+          if (n_vertices >= 3) {
             // Simple 2D orientation check for triangles
             double v1x = vertices[1][0] - vertices[0][0];
             double v1y = vertices[1][1] - vertices[0][1];
@@ -251,7 +251,7 @@ public:
           }
           break;
         case CellFamily::Tetra:
-          if (n_nodes >= 4) {
+          if (n_vertices >= 4) {
             // Simple volume check for tetrahedra
             double v1x = vertices[1][0] - vertices[0][0];
             double v1y = vertices[1][1] - vertices[0][1];
@@ -272,7 +272,7 @@ public:
           break;
         case CellFamily::Hex:
           // Simplified check - just check if volume is negative
-          if (n_nodes >= 8) {
+          if (n_vertices >= 8) {
             real_t measure = mesh_.cell_measure(static_cast<index_t>(c));
             is_inverted = (measure < 0);
           }
@@ -325,23 +325,23 @@ public:
   void validate_and_report() {
     std::cout << "\n=== Mesh Validation Report ===" << std::endl;
     std::cout << "Mesh dimensions: " << mesh_.dim() << "D" << std::endl;
-    std::cout << "Number of nodes: " << mesh_.n_nodes() << std::endl;
+    std::cout << "Number of vertices: " << mesh_.n_vertices() << std::endl;
     std::cout << "Number of cells: " << mesh_.n_cells() << std::endl;
     std::cout << "Number of faces: " << mesh_.n_faces() << std::endl;
 
-    // Check for duplicate nodes
-    auto duplicates = find_duplicate_nodes();
+    // Check for duplicate vertices
+    auto duplicates = find_duplicate_vertices();
     if (!duplicates.empty()) {
-      std::cout << "\nWARNING: Found " << duplicates.size() << " duplicate node pairs:" << std::endl;
+      std::cout << "\nWARNING: Found " << duplicates.size() << " duplicate vertex pairs:" << std::endl;
       for (size_t i = 0; i < std::min(size_t(10), duplicates.size()); ++i) {
-        std::cout << "  Nodes " << duplicates[i].first << " and "
+        std::cout << "  Vertices " << duplicates[i].first << " and "
                   << duplicates[i].second << " are within tolerance" << std::endl;
       }
       if (duplicates.size() > 10) {
         std::cout << "  ... and " << (duplicates.size() - 10) << " more pairs" << std::endl;
       }
     } else {
-      std::cout << "\n✓ No duplicate nodes found (tolerance: " << tolerance_ << ")" << std::endl;
+      std::cout << "\n✓ No duplicate vertices found (tolerance: " << tolerance_ << ")" << std::endl;
     }
 
     // Check for inverted elements

@@ -102,10 +102,10 @@ MeshValidation::ValidationResult MeshValidation::validate_basic(const MeshBase& 
     return result;
   }
 
-  // Check that we have nodes and cells
-  if (mesh.n_nodes() == 0) {
+  // Check that we have vertices and cells
+  if (mesh.n_vertices() == 0) {
     result.passed = false;
-    result.message = "Mesh has no nodes";
+    result.message = "Mesh has no vertices";
     return result;
   }
 
@@ -125,7 +125,7 @@ MeshValidation::ValidationResult MeshValidation::check_array_sizes(const MeshBas
   result.passed = true;
 
   // Check coordinate array size
-  size_t expected_coord_size = mesh.n_nodes() * mesh.dim();
+  size_t expected_coord_size = mesh.n_vertices() * mesh.dim();
   size_t actual_coord_size = mesh.X_ref().size();
 
   if (actual_coord_size != expected_coord_size) {
@@ -149,18 +149,18 @@ MeshValidation::ValidationResult MeshValidation::check_csr_offsets(const MeshBas
   size_t n_cells = mesh.n_cells();
 
   for (size_t c = 0; c < n_cells; ++c) {
-    auto [nodes_ptr, n_nodes] = mesh.cell_nodes_span(static_cast<index_t>(c));
+    auto [vertices_ptr, n_vertices] = mesh.cell_vertices_span(static_cast<index_t>(c));
 
-    if (n_nodes == 0) {
+    if (n_vertices == 0) {
       result.passed = false;
-      result.message = "Cell " + std::to_string(c) + " has no nodes";
+      result.message = "Cell " + std::to_string(c) + " has no vertices";
       result.problem_entities.push_back(static_cast<index_t>(c));
     }
 
-    // Check for reasonable number of nodes per cell
-    if (n_nodes > 100) {  // Arbitrary large number
+    // Check for reasonable number of vertices per cell
+    if (n_vertices > 100) {  // Arbitrary large number
       result.passed = false;
-      result.message = "Cell " + std::to_string(c) + " has suspiciously many nodes: " + std::to_string(n_nodes);
+      result.message = "Cell " + std::to_string(c) + " has suspiciously many vertices: " + std::to_string(n_vertices);
       result.problem_entities.push_back(static_cast<index_t>(c));
     }
   }
@@ -172,21 +172,21 @@ MeshValidation::ValidationResult MeshValidation::check_csr_offsets(const MeshBas
   return result;
 }
 
-MeshValidation::ValidationResult MeshValidation::check_node_indices(const MeshBase& mesh) {
+MeshValidation::ValidationResult MeshValidation::check_vertex_indices(const MeshBase& mesh) {
   ValidationResult result;
-  result.check_name = "Node indices";
+  result.check_name = "Vertex indices";
   result.passed = true;
 
   size_t n_cells = mesh.n_cells();
-  size_t n_nodes = mesh.n_nodes();
+  size_t n_vertices = mesh.n_vertices();
 
   for (size_t c = 0; c < n_cells; ++c) {
-    auto [nodes_ptr, n_nodes_cell] = mesh.cell_nodes_span(static_cast<index_t>(c));
+    auto [vertices_ptr, n_vertices_cell] = mesh.cell_vertices_span(static_cast<index_t>(c));
 
-    for (size_t i = 0; i < n_nodes_cell; ++i) {
-      if (nodes_ptr[i] < 0 || nodes_ptr[i] >= static_cast<index_t>(n_nodes)) {
+    for (size_t i = 0; i < n_vertices_cell; ++i) {
+      if (vertices_ptr[i] < 0 || vertices_ptr[i] >= static_cast<index_t>(n_vertices)) {
         result.passed = false;
-        result.message = "Cell " + std::to_string(c) + " has invalid node index: " + std::to_string(nodes_ptr[i]);
+        result.message = "Cell " + std::to_string(c) + " has invalid vertex index: " + std::to_string(vertices_ptr[i]);
         result.problem_entities.push_back(static_cast<index_t>(c));
         break;
       }
@@ -194,7 +194,7 @@ MeshValidation::ValidationResult MeshValidation::check_node_indices(const MeshBa
   }
 
   if (result.passed) {
-    result.message = "All node indices are valid";
+    result.message = "All vertex indices are valid";
   }
 
   return result;
@@ -208,7 +208,7 @@ MeshValidation::ValidationResult MeshValidation::validate_topology(const MeshBas
   result.passed = true;
 
   // Run several topology checks
-  auto isolated = find_isolated_nodes(mesh);
+  auto isolated = find_isolated_vertices(mesh);
   if (!isolated.passed) {
     result.passed = false;
     result.message = "Topology issues found: " + isolated.message;
@@ -216,7 +216,7 @@ MeshValidation::ValidationResult MeshValidation::validate_topology(const MeshBas
     return result;
   }
 
-  auto repeated = check_repeated_nodes_in_cells(mesh);
+  auto repeated = check_repeated_vertices_in_cells(mesh);
   if (!repeated.passed) {
     result.passed = false;
     result.message = "Topology issues found: " + repeated.message;
@@ -228,18 +228,18 @@ MeshValidation::ValidationResult MeshValidation::validate_topology(const MeshBas
   return result;
 }
 
-MeshValidation::ValidationResult MeshValidation::find_duplicate_nodes(const MeshBase& mesh, real_t tolerance) {
+MeshValidation::ValidationResult MeshValidation::find_duplicate_vertices(const MeshBase& mesh, real_t tolerance) {
   ValidationResult result;
-  result.check_name = "Duplicate nodes";
+  result.check_name = "Duplicate vertices";
   result.passed = true;
 
   validation::SpatialHashGrid grid(tolerance);
   const auto& coords = mesh.X_ref();
   int dim = mesh.dim();
-  size_t n_nodes = mesh.n_nodes();
+  size_t n_vertices = mesh.n_vertices();
 
-  // Insert all nodes into spatial hash grid
-  for (size_t i = 0; i < n_nodes; ++i) {
+  // Insert all vertices into spatial hash grid
+  for (size_t i = 0; i < n_vertices; ++i) {
     std::array<double, 3> pt = {0, 0, 0};
     for (int d = 0; d < dim; ++d) {
       pt[d] = coords[i * dim + d];
@@ -251,50 +251,50 @@ MeshValidation::ValidationResult MeshValidation::find_duplicate_nodes(const Mesh
 
   if (!duplicates.empty()) {
     result.passed = false;
-    result.message = "Found " + std::to_string(duplicates.size()) + " duplicate node pairs";
+    result.message = "Found " + std::to_string(duplicates.size()) + " duplicate vertex pairs";
 
-    // Add the duplicate nodes to problem entities
+    // Add the duplicate vertices to problem entities
     for (const auto& [n1, n2] : duplicates) {
       result.problem_entities.push_back(n1);
       result.problem_entities.push_back(n2);
     }
   } else {
-    result.message = "No duplicate nodes found";
+    result.message = "No duplicate vertices found";
   }
 
   return result;
 }
 
-MeshValidation::ValidationResult MeshValidation::find_isolated_nodes(const MeshBase& mesh) {
+MeshValidation::ValidationResult MeshValidation::find_isolated_vertices(const MeshBase& mesh) {
   ValidationResult result;
-  result.check_name = "Isolated nodes";
+  result.check_name = "Isolated vertices";
   result.passed = true;
 
-  size_t n_nodes = mesh.n_nodes();
+  size_t n_vertices = mesh.n_vertices();
   size_t n_cells = mesh.n_cells();
 
-  std::vector<bool> node_used(n_nodes, false);
+  std::vector<bool> vertex_used(n_vertices, false);
 
-  // Mark all nodes used by cells
+  // Mark all vertices used by cells
   for (size_t c = 0; c < n_cells; ++c) {
-    auto [nodes_ptr, n_nodes_cell] = mesh.cell_nodes_span(static_cast<index_t>(c));
-    for (size_t i = 0; i < n_nodes_cell; ++i) {
-      node_used[nodes_ptr[i]] = true;
+    auto [vertices_ptr, n_vertices_cell] = mesh.cell_vertices_span(static_cast<index_t>(c));
+    for (size_t i = 0; i < n_vertices_cell; ++i) {
+      vertex_used[vertices_ptr[i]] = true;
     }
   }
 
-  // Find unused nodes
-  for (size_t n = 0; n < n_nodes; ++n) {
-    if (!node_used[n]) {
-      result.problem_entities.push_back(static_cast<index_t>(n));
+  // Find unused vertices
+  for (size_t v = 0; v < n_vertices; ++v) {
+    if (!vertex_used[v]) {
+      result.problem_entities.push_back(static_cast<index_t>(v));
     }
   }
 
   if (!result.problem_entities.empty()) {
     result.passed = false;
-    result.message = "Found " + std::to_string(result.problem_entities.size()) + " isolated nodes";
+    result.message = "Found " + std::to_string(result.problem_entities.size()) + " isolated vertices";
   } else {
-    result.message = "No isolated nodes found";
+    result.message = "No isolated vertices found";
   }
 
   return result;
@@ -346,31 +346,31 @@ MeshValidation::ValidationResult MeshValidation::find_inverted_cells(const MeshB
   return result;
 }
 
-MeshValidation::ValidationResult MeshValidation::check_repeated_nodes_in_cells(const MeshBase& mesh) {
+MeshValidation::ValidationResult MeshValidation::check_repeated_vertices_in_cells(const MeshBase& mesh) {
   ValidationResult result;
-  result.check_name = "Repeated nodes in cells";
+  result.check_name = "Repeated vertices in cells";
   result.passed = true;
 
   size_t n_cells = mesh.n_cells();
 
   for (size_t c = 0; c < n_cells; ++c) {
-    auto [nodes_ptr, n_nodes] = mesh.cell_nodes_span(static_cast<index_t>(c));
+    auto [vertices_ptr, n_vertices] = mesh.cell_vertices_span(static_cast<index_t>(c));
 
-    std::unordered_set<index_t> unique_nodes;
-    for (size_t i = 0; i < n_nodes; ++i) {
-      if (unique_nodes.count(nodes_ptr[i]) > 0) {
+    std::unordered_set<index_t> unique_vertices;
+    for (size_t i = 0; i < n_vertices; ++i) {
+      if (unique_vertices.count(vertices_ptr[i]) > 0) {
         result.problem_entities.push_back(static_cast<index_t>(c));
         break;
       }
-      unique_nodes.insert(nodes_ptr[i]);
+      unique_vertices.insert(vertices_ptr[i]);
     }
   }
 
   if (!result.problem_entities.empty()) {
     result.passed = false;
-    result.message = "Found " + std::to_string(result.problem_entities.size()) + " cells with repeated nodes";
+    result.message = "Found " + std::to_string(result.problem_entities.size()) + " cells with repeated vertices";
   } else {
-    result.message = "No cells with repeated nodes";
+    result.message = "No cells with repeated vertices";
   }
 
   return result;
@@ -598,16 +598,16 @@ MeshValidation::ValidationReport MeshValidation::validate_all(const MeshBase& me
     report.add_result(validate_basic(mesh));
     report.add_result(check_array_sizes(mesh));
     report.add_result(check_csr_offsets(mesh));
-    report.add_result(check_node_indices(mesh));
+    report.add_result(check_vertex_indices(mesh));
   }
 
   // Topology checks
   if (config.check_topology) {
-    report.add_result(find_duplicate_nodes(mesh, config.duplicate_tolerance));
-    report.add_result(find_isolated_nodes(mesh));
+    report.add_result(find_duplicate_vertices(mesh, config.duplicate_tolerance));
+    report.add_result(find_isolated_vertices(mesh));
     report.add_result(find_degenerate_cells(mesh, config.degenerate_tolerance));
     report.add_result(find_inverted_cells(mesh));
-    report.add_result(check_repeated_nodes_in_cells(mesh));
+    report.add_result(check_repeated_vertices_in_cells(mesh));
     report.add_result(check_face_cell_consistency(mesh));
   }
 
@@ -647,9 +647,9 @@ MeshValidation::ValidationReport MeshValidation::validate_quick(const MeshBase& 
 
 // ---- Repair operations ----
 
-index_t MeshValidation::merge_duplicate_nodes(MeshBase& mesh, real_t tolerance) {
-  // Find duplicate nodes
-  auto result = find_duplicate_nodes(mesh, tolerance);
+index_t MeshValidation::merge_duplicate_vertices(MeshBase& mesh, real_t tolerance) {
+  // Find duplicate vertices
+  auto result = find_duplicate_vertices(mesh, tolerance);
 
   if (result.passed) {
     return 0;  // No duplicates to merge
@@ -661,16 +661,16 @@ index_t MeshValidation::merge_duplicate_nodes(MeshBase& mesh, real_t tolerance) 
   return 0;
 }
 
-index_t MeshValidation::remove_isolated_nodes(MeshBase& mesh) {
-  // Find isolated nodes
-  auto result = find_isolated_nodes(mesh);
+index_t MeshValidation::remove_isolated_vertices(MeshBase& mesh) {
+  // Find isolated vertices
+  auto result = find_isolated_vertices(mesh);
 
   if (result.passed) {
-    return 0;  // No isolated nodes
+    return 0;  // No isolated vertices
   }
 
   // TODO: Implement actual removal logic
-  // This requires renumbering nodes and updating connectivity
+  // This requires renumbering vertices and updating connectivity
 
   return 0;
 }
@@ -697,8 +697,8 @@ index_t MeshValidation::fix_inverted_cells(MeshBase& mesh) {
     return 0;  // No inverted cells
   }
 
-  // TODO: Implement node reordering logic
-  // This requires swapping nodes to fix orientation
+  // TODO: Implement vertex reordering logic
+  // This requires swapping vertices to fix orientation
 
   return 0;
 }
@@ -717,7 +717,7 @@ std::string MeshValidation::generate_statistics_report(const MeshBase& mesh) {
 
   ss << "\n=== Mesh Statistics ===" << std::endl;
   ss << "Dimension: " << mesh.dim() << "D" << std::endl;
-  ss << "Number of nodes: " << mesh.n_nodes() << std::endl;
+  ss << "Number of vertices: " << mesh.n_vertices() << std::endl;
   ss << "Number of cells: " << mesh.n_cells() << std::endl;
   ss << "Number of faces: " << mesh.n_faces() << std::endl;
   ss << "Number of edges: " << mesh.n_edges() << std::endl;
@@ -763,11 +763,11 @@ MeshValidation::ValidationReport MeshValidation::compare_meshes(const MeshBase& 
   basic_result.check_name = "Basic properties";
   basic_result.passed = true;
 
-  if (mesh1.n_nodes() != mesh2.n_nodes()) {
+  if (mesh1.n_vertices() != mesh2.n_vertices()) {
     basic_result.passed = false;
-    basic_result.message = "Different number of nodes: " +
-                          std::to_string(mesh1.n_nodes()) + " vs " +
-                          std::to_string(mesh2.n_nodes());
+    basic_result.message = "Different number of vertices: " +
+                          std::to_string(mesh1.n_vertices()) + " vs " +
+                          std::to_string(mesh2.n_vertices());
   } else if (mesh1.n_cells() != mesh2.n_cells()) {
     basic_result.passed = false;
     basic_result.message = "Different number of cells: " +
@@ -780,7 +780,7 @@ MeshValidation::ValidationReport MeshValidation::compare_meshes(const MeshBase& 
   report.add_result(basic_result);
 
   // Compare coordinates
-  if (mesh1.n_nodes() == mesh2.n_nodes()) {
+  if (mesh1.n_vertices() == mesh2.n_vertices()) {
     ValidationResult coord_result;
     coord_result.check_name = "Coordinates";
     coord_result.passed = true;
@@ -789,7 +789,7 @@ MeshValidation::ValidationReport MeshValidation::compare_meshes(const MeshBase& 
     const auto& coords2 = mesh2.X_ref();
     int dim = std::min(mesh1.dim(), mesh2.dim());
 
-    for (size_t i = 0; i < mesh1.n_nodes(); ++i) {
+    for (size_t i = 0; i < mesh1.n_vertices(); ++i) {
       real_t dist_sq = 0;
       for (int d = 0; d < dim; ++d) {
         real_t diff = coords1[i * dim + d] - coords2[i * dim + d];
@@ -804,9 +804,9 @@ MeshValidation::ValidationReport MeshValidation::compare_meshes(const MeshBase& 
     if (!coord_result.problem_entities.empty()) {
       coord_result.passed = false;
       coord_result.message = std::to_string(coord_result.problem_entities.size()) +
-                            " nodes differ by more than tolerance";
+                            " vertices differ by more than tolerance";
     } else {
-      coord_result.message = "All node coordinates match within tolerance";
+      coord_result.message = "All vertex coordinates match within tolerance";
     }
 
     report.add_result(coord_result);
