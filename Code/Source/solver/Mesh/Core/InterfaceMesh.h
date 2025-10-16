@@ -74,20 +74,20 @@ public:
 
   // ---- Basic queries
   size_t n_faces() const { return trace_face_gid_.size(); }
-  size_t n_nodes() const { return trace_node_gid_.size(); }
+  size_t n_vertices() const { return trace_vertex_gid_.size(); }
   int spatial_dim() const { return spatial_dim_; }
 
   // ---- Topology access
   const std::vector<gid_t>& face_gids() const { return trace_face_gid_; }
-  const std::vector<gid_t>& node_gids() const { return trace_node_gid_; }
+  const std::vector<gid_t>& vertex_gids() const { return trace_vertex_gid_; }
 
   // Face connectivity (CSR format)
-  const std::vector<offset_t>& face2node_offsets() const { return trace_face2node_offsets_; }
-  const std::vector<index_t>& face2node() const { return trace_face2node_; }
-  std::pair<const index_t*, size_t> face_nodes_span(index_t local_face_id) const {
-    size_t start = static_cast<size_t>(trace_face2node_offsets_[local_face_id]);
-    size_t end = static_cast<size_t>(trace_face2node_offsets_[local_face_id + 1]);
-    return {&trace_face2node_[start], end - start};
+  const std::vector<offset_t>& face2vertex_offsets() const { return trace_face2vertex_offsets_; }
+  const std::vector<index_t>& face2vertex() const { return trace_face2vertex_; }
+  std::pair<const index_t*, size_t> face_vertices_span(index_t local_face_id) const {
+    size_t start = static_cast<size_t>(trace_face2vertex_offsets_[local_face_id]);
+    size_t end = static_cast<size_t>(trace_face2vertex_offsets_[local_face_id + 1]);
+    return {&trace_face2vertex_[start], end - start};
   }
 
   // ---- Incidence to volume mesh
@@ -114,28 +114,28 @@ public:
     index_t vol_cell = volume_cell(local_face_id);
     int local_f = local_face_in_cell(local_face_id);
     // Compute normal from volume mesh geometry
-    // (simplified; production would use face nodes and orientation)
+    // (simplified; production would use face vertices and orientation)
     return volume_mesh.face_normal(volume_mesh.boundary_faces()[local_f], cfg);
   }
 
   // ---- Geometry (requires volume mesh)
   std::array<real_t,3> face_center(index_t local_face_id, const MeshBase& volume_mesh,
                                    Configuration cfg = Configuration::Reference) const {
-    auto [nodes_ptr, n_nodes] = face_nodes_span(local_face_id);
+    auto [vertices_ptr, n_vertices] = face_vertices_span(local_face_id);
     const auto& coords = (cfg == Configuration::Current && volume_mesh.has_current_coords())
                          ? volume_mesh.X_cur() : volume_mesh.X_ref();
 
     std::array<real_t,3> center = {0, 0, 0};
-    for (size_t i = 0; i < n_nodes; ++i) {
-      index_t node_id = nodes_ptr[i];
-      // Need to map trace node to volume node via GID
+    for (size_t i = 0; i < n_vertices; ++i) {
+      index_t vertex_id = vertices_ptr[i];
+      // Need to map trace vertex to volume vertex via GID
       // (simplified; production would maintain trace_node_to_volume_node map)
       for (int d = 0; d < spatial_dim_; ++d) {
-        center[d] += coords[node_id * spatial_dim_ + d];
+        center[d] += coords[vertex_id * spatial_dim_ + d];
       }
     }
     for (int d = 0; d < spatial_dim_; ++d) {
-      center[d] /= static_cast<real_t>(n_nodes);
+      center[d] /= static_cast<real_t>(n_vertices);
     }
     return center;
   }
@@ -194,9 +194,9 @@ private:
 
   // Trace topology (local numbering)
   std::vector<gid_t> trace_face_gid_;        // global IDs for trace faces
-  std::vector<gid_t> trace_node_gid_;        // global IDs for trace nodes
-  std::vector<offset_t> trace_face2node_offsets_; // CSR offsets
-  std::vector<index_t> trace_face2node_;     // CSR connectivity (trace-local node IDs)
+  std::vector<gid_t> trace_vertex_gid_;      // global IDs for trace vertices
+  std::vector<offset_t> trace_face2vertex_offsets_; // CSR offsets
+  std::vector<index_t> trace_face2vertex_;   // CSR connectivity (trace-local vertex IDs)
 
   // Incidence to volume mesh
   std::vector<index_t> trace_face2vol_cell_;  // parent volume cell for each trace face
@@ -229,33 +229,33 @@ inline InterfaceMesh build_interface_impl(
   interface.trace_face2vol_cell_.reserve(face_indices.size());
   interface.trace_face_local_id_.reserve(face_indices.size());
 
-  // Collect unique nodes
+  // Collect unique vertices
   std::unordered_set<index_t> node_set;
   for (index_t face_id : face_indices) {
-    auto [nodes_ptr, n_nodes] = volume_mesh.face_nodes_span(face_id);
-    for (size_t i = 0; i < n_nodes; ++i) {
-      node_set.insert(nodes_ptr[i]);
+    auto [vertices_ptr, n_vertices] = volume_mesh.face_vertices_span(face_id);
+    for (size_t i = 0; i < n_vertices; ++i) {
+      node_set.insert(vertices_ptr[i]);
     }
   }
 
   std::vector<index_t> trace_nodes(node_set.begin(), node_set.end());
   std::sort(trace_nodes.begin(), trace_nodes.end());
 
-  // Build node mapping
+  // Build vertex mapping
   std::unordered_map<index_t, index_t> vol_to_trace_node;
   for (size_t i = 0; i < trace_nodes.size(); ++i) {
     vol_to_trace_node[trace_nodes[i]] = static_cast<index_t>(i);
-    // Set node GID (if available)
-    const auto& node_gids = volume_mesh.node_gids();
-    if (!node_gids.empty() && trace_nodes[i] < static_cast<index_t>(node_gids.size())) {
-      interface.trace_node_gid_.push_back(node_gids[trace_nodes[i]]);
+    // Set vertex GID (if available)
+    const auto& node_gids_alias = volume_mesh.vertex_gids();
+    if (!node_gids_alias.empty() && trace_nodes[i] < static_cast<index_t>(node_gids_alias.size())) {
+      interface.trace_vertex_gid_.push_back(node_gids_alias[trace_nodes[i]]);
     } else {
-      interface.trace_node_gid_.push_back(static_cast<gid_t>(trace_nodes[i]));
+      interface.trace_vertex_gid_.push_back(static_cast<gid_t>(trace_nodes[i]));
     }
   }
 
   // Build face topology
-  interface.trace_face2node_offsets_.push_back(0);
+  interface.trace_face2vertex_offsets_.push_back(0);
   for (index_t face_id : face_indices) {
     // Set face GID
     const auto& face_gids = volume_mesh.face_gids();
@@ -265,12 +265,12 @@ inline InterfaceMesh build_interface_impl(
       interface.trace_face_gid_.push_back(static_cast<gid_t>(face_id));
     }
 
-    // Get face nodes and map to trace-local IDs
-    auto [nodes_ptr, n_nodes] = volume_mesh.face_nodes_span(face_id);
-    for (size_t i = 0; i < n_nodes; ++i) {
-      interface.trace_face2node_.push_back(vol_to_trace_node[nodes_ptr[i]]);
+    // Get face vertices and map to trace-local IDs
+    auto [vertices_ptr, n_vertices] = volume_mesh.face_vertices_span(face_id);
+    for (size_t i = 0; i < n_vertices; ++i) {
+      interface.trace_face2vertex_.push_back(vol_to_trace_node[vertices_ptr[i]]);
     }
-    interface.trace_face2node_offsets_.push_back(static_cast<offset_t>(interface.trace_face2node_.size()));
+    interface.trace_face2vertex_offsets_.push_back(static_cast<offset_t>(interface.trace_face2vertex_.size()));
 
     // Store incidence to volume mesh
     const auto& face_cells = volume_mesh.face_cells(face_id);

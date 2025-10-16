@@ -73,10 +73,10 @@ public:
   bool is_shared_cell(index_t i) const;
   rank_t owner_rank_cell(index_t i) const;
 
-  bool is_owned_node(index_t i) const;
-  bool is_ghost_node(index_t i) const;
-  bool is_shared_node(index_t i) const;
-  rank_t owner_rank_node(index_t i) const;
+  bool is_owned_vertex(index_t i) const;
+  bool is_ghost_vertex(index_t i) const;
+  bool is_shared_vertex(index_t i) const;
+  rank_t owner_rank_vertex(index_t i) const;
 
   bool is_owned_face(index_t i) const;
   bool is_ghost_face(index_t i) const;
@@ -88,7 +88,7 @@ public:
   // ---- Ghost layer construction
   void build_ghost_layer(int levels);
   void clear_ghosts();
-  void update_ghosts(const std::vector<MeshBase::FieldHandle>& fields);
+  void update_ghosts(const std::vector<FieldHandle>& fields);
 
   // ---- Migration & load balancing
   void migrate(const std::vector<rank_t>& new_owner_rank_per_cell);
@@ -99,15 +99,15 @@ public:
   void save_parallel(const MeshIOOptions& opts) const;
 
   // ---- Global reductions
-  size_t global_n_nodes() const;
+  size_t global_n_vertices() const;
   size_t global_n_cells() const;
   size_t global_n_faces() const;
 
-  MeshBase::BoundingBox global_bounding_box() const;
+  BoundingBox global_bounding_box() const;
 
   // ---- Distributed search
-  MeshBase::PointLocateResult locate_point_global(const std::array<real_t,3>& x,
-                                                  Configuration cfg = Configuration::Reference) const;
+  PointLocateResult locate_point_global(const std::array<real_t,3>& x,
+                                        Configuration cfg = Configuration::Reference) const;
 
   // ---- Communication patterns
   struct ExchangePattern {
@@ -117,7 +117,7 @@ public:
     std::vector<std::vector<index_t>> recv_lists; // entities to recv per rank
   };
 
-  const ExchangePattern& node_exchange_pattern() const { return node_exchange_; }
+  const ExchangePattern& vertex_exchange_pattern() const { return vertex_exchange_; }
   const ExchangePattern& cell_exchange_pattern() const { return cell_exchange_; }
 
   void build_exchange_patterns();
@@ -133,23 +133,23 @@ private:
   std::unordered_set<rank_t> neighbor_ranks_;
 
   // Per-entity ownership
-  std::vector<Ownership> node_owner_;
+  std::vector<Ownership> vertex_owner_;
   std::vector<Ownership> face_owner_;
   std::vector<Ownership> cell_owner_;
 
   // Owner ranks (for shared/ghost entities)
   std::vector<rank_t> cell_owner_rank_;
   std::vector<rank_t> face_owner_rank_;
-  std::vector<rank_t> node_owner_rank_;
+  std::vector<rank_t> vertex_owner_rank_;
 
   // Communication patterns
-  ExchangePattern node_exchange_;
+  ExchangePattern vertex_exchange_;
   ExchangePattern cell_exchange_;
   ExchangePattern face_exchange_;
 
   // Ghost layer metadata
   int ghost_levels_ = 0;
-  std::unordered_set<index_t> ghost_nodes_;
+  std::unordered_set<index_t> ghost_vertices_;
   std::unordered_set<index_t> ghost_cells_;
   std::unordered_set<index_t> ghost_faces_;
 
@@ -179,9 +179,10 @@ public:
   DistributedMesh& dist_mesh() { return *dmesh_; }
   const DistributedMesh& dist_mesh() const { return *dmesh_; }
 
-  Mesh<Dim> local_mesh() {
-    return Mesh<Dim>(dmesh_->local_mesh_ptr());
-  }
+  // TODO: Implement when Mesh<Dim> wrapper is available
+  // Mesh<Dim> local_mesh() {
+  //   return Mesh<Dim>(dmesh_->local_mesh_ptr());
+  // }
 
 private:
   std::shared_ptr<DistributedMesh> dmesh_;

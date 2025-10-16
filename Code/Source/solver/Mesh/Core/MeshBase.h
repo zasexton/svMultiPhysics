@@ -50,7 +50,7 @@ namespace svmp {
  * @brief Core mesh container class
  *
  * This class provides the fundamental mesh data structure with:
- * - Topology storage (cells, faces, edges, nodes)
+ * - Topology storage (volumes, faces, edges, vertices)
  * - Coordinate storage (reference and current configurations)
  * - Field attachment system
  * - Label and set management
@@ -71,33 +71,38 @@ public:
   explicit MeshBase(int spatial_dim);
   ~MeshBase() = default;
 
+  // Copy and move constructors
+  MeshBase(const MeshBase&) = delete;
+  MeshBase& operator=(const MeshBase&) = delete;
+  MeshBase(MeshBase&&) = default;
+  MeshBase& operator=(MeshBase&&) = default;
+
   // ---- Builders ----
   void clear();
-  void reserve(index_t n_nodes, index_t n_cells, index_t n_faces = 0);
+  void reserve(index_t n_vertices, index_t n_cells, index_t n_faces = 0);
 
   void build_from_arrays(
       int spatial_dim,
       const std::vector<real_t>& X_ref,
-      const std::vector<offset_t>& cell2node_offsets,
-      const std::vector<index_t>& cell2node,
+      const std::vector<offset_t>& cell2vertex_offsets,
+      const std::vector<index_t>& cell2vertex,
       const std::vector<CellShape>& cell_shape);
 
   void set_faces_from_arrays(
       const std::vector<CellShape>& face_shape,
-      const std::vector<offset_t>& face2node_offsets,
-      const std::vector<index_t>& face2node,
+      const std::vector<offset_t>& face2vertex_offsets,
+      const std::vector<index_t>& face2vertex,
       const std::vector<std::array<index_t,2>>& face2cell);
-
-  void set_edges_from_arrays(const std::vector<std::array<index_t,2>>& edge2node);
+  void set_edges_from_arrays(const std::vector<std::array<index_t,2>>& edge2vertex);
 
   void finalize();
 
   // ---- Basic queries ----
   int dim() const noexcept { return spatial_dim_; }
-  size_t n_nodes() const noexcept { return X_ref_.size() / (spatial_dim_ > 0 ? spatial_dim_ : 1); }
+  size_t n_vertices() const noexcept { return X_ref_.size() / (spatial_dim_ > 0 ? spatial_dim_ : 1); }
   size_t n_cells() const noexcept { return cell_shape_.size(); }
   size_t n_faces() const noexcept { return face_shape_.size(); }
-  size_t n_edges() const noexcept { return edge2node_.size(); }
+  size_t n_edges() const noexcept { return edge2vertex_.size(); }
 
   // ---- Coordinates ----
   const std::vector<real_t>& X_ref() const noexcept { return X_ref_; }
@@ -112,36 +117,38 @@ public:
   // ---- Topology access ----
   const std::vector<CellShape>& cell_shapes() const noexcept { return cell_shape_; }
   const CellShape& cell_shape(index_t c) const { return cell_shape_.at(static_cast<size_t>(c)); }
-  std::pair<const index_t*, size_t> cell_nodes_span(index_t c) const;
-  const std::vector<offset_t>& cell2node_offsets() const noexcept { return cell2node_offsets_; }
-  const std::vector<index_t>& cell2node() const noexcept { return cell2node_; }
+  std::pair<const index_t*, size_t> cell_vertices_span(index_t c) const;
+  const std::vector<offset_t>& cell2vertex_offsets() const noexcept { return cell2vertex_offsets_; }
+  const std::vector<index_t>& cell2vertex() const noexcept { return cell2vertex_; }
 
   const std::vector<CellShape>& face_shapes() const noexcept { return face_shape_; }
-  std::pair<const index_t*, size_t> face_nodes_span(index_t f) const;
+  std::pair<const index_t*, size_t> face_vertices_span(index_t f) const;
   const std::array<index_t,2>& face_cells(index_t f) const { return face2cell_.at(static_cast<size_t>(f)); }
 
-  const std::vector<std::array<index_t,2>>& edge2node() const noexcept { return edge2node_; }
-  const std::array<index_t,2>& edge_nodes(index_t e) const { return edge2node_.at(static_cast<size_t>(e)); }
+  const std::vector<std::array<index_t,2>>& edge2vertex() const noexcept { return edge2vertex_; }
+  const std::array<index_t,2>& edge_vertices(index_t e) const { return edge2vertex_.at(static_cast<size_t>(e)); }
 
   // ---- IDs / ownership ----
-  const std::vector<gid_t>& node_gids() const noexcept { return node_gid_; }
+  const std::vector<gid_t>& vertex_gids() const noexcept { return vertex_gid_; }
   const std::vector<gid_t>& cell_gids() const noexcept { return cell_gid_; }
   const std::vector<gid_t>& face_gids() const noexcept { return face_gid_; }
   const std::vector<gid_t>& edge_gids() const noexcept { return edge_gid_; }
 
-  void set_node_gids(std::vector<gid_t> gids) { node_gid_ = std::move(gids); }
-  void set_cell_gids(std::vector<gid_t> gids) { cell_gid_ = std::move(gids); }
-  void set_face_gids(std::vector<gid_t> gids) { face_gid_ = std::move(gids); }
-  void set_edge_gids(std::vector<gid_t> gids) { edge_gid_ = std::move(gids); }
+  void set_vertex_gids(std::vector<gid_t> gids);
+  void set_cell_gids(std::vector<gid_t> gids);
+  void set_face_gids(std::vector<gid_t> gids);
+  void set_edge_gids(std::vector<gid_t> gids);
 
   index_t global_to_local_cell(gid_t gid) const;
-  index_t global_to_local_node(gid_t gid) const;
+  index_t global_to_local_vertex(gid_t gid) const;
   index_t global_to_local_face(gid_t gid) const;
+  index_t global_to_local_edge(gid_t gid) const;
 
   // ---- Labels & sets ----
   void set_region_label(index_t cell, label_t label);
   label_t region_label(index_t cell) const;
   std::vector<index_t> cells_with_label(label_t label) const;
+  const std::vector<label_t>& cell_region_ids() const noexcept { return cell_region_id_; }
 
   void set_boundary_label(index_t face, label_t label);
   label_t boundary_label(index_t face) const;
@@ -169,6 +176,14 @@ public:
   size_t field_entity_count(const FieldHandle& h) const;
   size_t field_bytes_per_entity(const FieldHandle& h) const;
 
+  // Field enumeration
+  std::vector<std::string> field_names(EntityKind kind) const;
+  void* field_data_by_name(EntityKind kind, const std::string& name);
+  const void* field_data_by_name(EntityKind kind, const std::string& name) const;
+  size_t field_components_by_name(EntityKind kind, const std::string& name) const;
+  FieldScalarType field_type_by_name(EntityKind kind, const std::string& name) const;
+  size_t field_bytes_per_component_by_name(EntityKind kind, const std::string& name) const;
+
   template <typename T>
   T* field_data_as(const FieldHandle& h) { return reinterpret_cast<T*>(field_data(h)); }
 
@@ -189,13 +204,13 @@ public:
 
   // ---- Adjacency queries ----
   std::vector<index_t> cell_neighbors(index_t c) const;
-  std::vector<index_t> node_cells(index_t n) const;
+  std::vector<index_t> vertex_cells(index_t v) const;
   std::vector<index_t> face_neighbors(index_t f) const;
   std::vector<index_t> boundary_faces() const;
   std::vector<index_t> boundary_cells() const;
 
-  void build_node2cell();
-  void build_node2face();
+  void build_vertex2cell();
+  void build_vertex2face();
   void build_cell2cell();
 
   // ---- Submesh extraction ----
@@ -240,10 +255,6 @@ public:
   static std::vector<std::string> registered_readers();
   static std::vector<std::string> registered_writers();
 
-  // ---- Builders ----
-  static MeshBase build_cartesian(int nx, int ny, int nz, const BoundingBox& domain);
-  static MeshBase build_extruded(const MeshBase& base_2d, int n_layers, real_t height);
-
 private:
   // Core data
   int spatial_dim_ = 0;
@@ -255,26 +266,26 @@ private:
 
   // Cell topology
   std::vector<CellShape> cell_shape_;
-  std::vector<offset_t> cell2node_offsets_;
-  std::vector<index_t> cell2node_;
+  std::vector<offset_t> cell2vertex_offsets_;
+  std::vector<index_t> cell2vertex_;
 
   // Face topology
   std::vector<CellShape> face_shape_;
-  std::vector<offset_t> face2node_offsets_;
-  std::vector<index_t> face2node_;
+  std::vector<offset_t> face2vertex_offsets_;
+  std::vector<index_t> face2vertex_;
   std::vector<std::array<index_t,2>> face2cell_;
 
   // Edge topology
-  std::vector<std::array<index_t,2>> edge2node_;
+  std::vector<std::array<index_t,2>> edge2vertex_;
 
   // Global IDs
-  std::vector<gid_t> node_gid_;
+  std::vector<gid_t> vertex_gid_;
   std::vector<gid_t> cell_gid_;
   std::vector<gid_t> face_gid_;
   std::vector<gid_t> edge_gid_;
 
   // Ownership
-  std::vector<Ownership> node_owner_;
+  std::vector<Ownership> vertex_owner_;
   std::vector<Ownership> cell_owner_;
   std::vector<Ownership> face_owner_;
   std::vector<Ownership> edge_owner_;
@@ -300,17 +311,18 @@ private:
   std::unordered_map<uint32_t, FieldDescriptor> field_descriptors_;
 
   // Adjacency caches (mutable for lazy building)
-  mutable std::vector<offset_t> node2cell_offsets_;
-  mutable std::vector<index_t> node2cell_;
-  mutable std::vector<offset_t> node2face_offsets_;
-  mutable std::vector<index_t> node2face_;
+  mutable std::vector<offset_t> vertex2cell_offsets_;
+  mutable std::vector<index_t> vertex2cell_;
+  mutable std::vector<offset_t> vertex2face_offsets_;
+  mutable std::vector<index_t> vertex2face_;
   mutable std::vector<offset_t> cell2cell_offsets_;
   mutable std::vector<index_t> cell2cell_;
 
   // Global to local maps
   std::unordered_map<gid_t, index_t> global2local_cell_;
-  std::unordered_map<gid_t, index_t> global2local_node_;
+  std::unordered_map<gid_t, index_t> global2local_vertex_;
   std::unordered_map<gid_t, index_t> global2local_face_;
+  std::unordered_map<gid_t, index_t> global2local_edge_;
 
   // Search acceleration
   // Simple empty struct to avoid incomplete type issues
@@ -325,6 +337,7 @@ private:
   // Helper methods
   size_t entity_count(EntityKind k) const noexcept;
   void invalidate_caches();
+  void rebuild_gid_maps();
 
   // IO registry storage
   static std::unordered_map<std::string, LoadFn>& readers_();

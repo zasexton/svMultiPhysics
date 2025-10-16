@@ -98,7 +98,7 @@ public:
   MeshBase& base() noexcept { return *base_; }
 
   // Fast path aliases for common operations
-  size_t n_nodes() const noexcept { return base_->n_nodes(); }
+  size_t n_vertices() const noexcept { return base_->n_vertices(); }
   size_t n_cells() const noexcept { return base_->n_cells(); }
   size_t n_faces() const noexcept { return base_->n_faces(); }
   size_t n_edges() const noexcept { return base_->n_edges(); }
@@ -126,14 +126,14 @@ public:
 
   // Type-safe coordinate access (when dimension is known)
   template <int D = Dim, typename std::enable_if<D == 2, int>::type = 0>
-  std::array<real_t,2> node_coords_2d(index_t n, Configuration cfg = Configuration::Reference) const {
+  std::array<real_t,2> vertex_coords_2d(index_t n, Configuration cfg = Configuration::Reference) const {
     const std::vector<real_t>& coords = (cfg == Configuration::Current && base_->has_current_coords())
                                        ? base_->X_cur() : base_->X_ref();
     return {{coords[n*2], coords[n*2+1]}};
   }
 
   template <int D = Dim, typename std::enable_if<D == 3, int>::type = 0>
-  std::array<real_t,3> node_coords_3d(index_t n, Configuration cfg = Configuration::Reference) const {
+  std::array<real_t,3> vertex_coords_3d(index_t n, Configuration cfg = Configuration::Reference) const {
     const std::vector<real_t>& coords = (cfg == Configuration::Current && base_->has_current_coords())
                                        ? base_->X_cur() : base_->X_ref();
     return {{coords[n*3], coords[n*3+1], coords[n*3+2]}};

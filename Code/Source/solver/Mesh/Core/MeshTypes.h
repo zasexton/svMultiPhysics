@@ -41,7 +41,7 @@ namespace svmp {
 // ------------------------
 // Fundamental type aliases
 // ------------------------
-using index_t = int32_t;      // local indices (nodes/faces/cells)
+using index_t = int32_t;      // local indices (vertices/faces/cells)
 using offset_t = int64_t;     // CSR offsets (can handle > 2B entries)
 using gid_t   = int64_t;      // global IDs across MPI ranks
 using real_t  = double;       // geometry coordinates
@@ -59,9 +59,9 @@ constexpr label_t INVALID_LABEL = -1;
 // ---------
 enum class EntityKind {
   Vertex = 0,
-  Edge = 1,
-  Face = 2,
-  Cell = 3
+  Edge   = 1,
+  Face   = 2,
+  Volume = 3   // 3D cells
 };
 
 enum class Ownership {
@@ -82,15 +82,22 @@ enum class Configuration {
   Current
 };
 
+/**
+ * @brief Topological and geometric constraint types
+ *
+ * Constraint types that represent special topological/geometric relationships
+ * between mesh entities. These are mesh-level constraints only - physics-specific
+ * constraints (e.g., contact, friction) belong in the Solver, not here.
+ */
 enum class ConstraintKind {
-  None,
-  Hanging,
-  Periodic,
-  Mortar,
-  Contact
+  None,      // No constraint
+  Hanging,   // Hanging vertex from adaptive refinement
+  Periodic,  // Periodic boundary equivalence
+  Mortar     // Non-conforming interface topology
 };
 
 enum class CellFamily {
+  Point,
   Line,
   Triangle,
   Quad,
@@ -112,7 +119,10 @@ enum class ReorderAlgo {
 
 enum class PartitionHint {
   None,
-  Metis,
+  Cells,      // Balance by number of cells
+  Vertices,   // Balance by number of vertices
+  Memory,     // Balance by memory usage
+  Metis,      // Use METIS graph partitioning
   ParMetis,
   Scotch,
   Zoltan,
