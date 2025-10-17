@@ -62,6 +62,18 @@ namespace svmp {
  */
 class CellTopology {
 public:
+    // Lightweight zero-allocation views over topology tables
+    struct FaceListView {
+        const index_t* indices = nullptr;   // flattened vertex indices
+        const int* offsets = nullptr;       // size = face_count + 1
+        int face_count = 0;
+    };
+
+    struct EdgeListView {
+        const index_t* pairs_flat = nullptr; // flattened [v0, v1, v0, v1, ...]
+        int edge_count = 0;
+    };
+
     /**
      * @brief Get canonical (n-1)-face definitions for a cell type
      *
@@ -84,6 +96,9 @@ public:
      */
     static std::vector<std::vector<index_t>> get_oriented_boundary_faces(CellFamily family);
 
+    // Zero-allocation oriented face view for fixed families (prototype: Tet/Hex)
+    static FaceListView get_oriented_boundary_faces_view(CellFamily family);
+
     /**
      * @brief Get edge definitions for a cell type
      *
@@ -92,6 +107,9 @@ public:
      * @throws std::runtime_error if cell type not supported
      */
     static std::vector<std::array<index_t, 2>> get_edges(CellFamily family);
+
+    // Zero-allocation edge view for fixed families (prototype: Tet/Hex)
+    static EdgeListView get_edges_view(CellFamily family);
 
     /**
      * @brief Get face-to-edge connectivity for a cell type

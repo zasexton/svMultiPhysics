@@ -32,6 +32,90 @@
 #include <algorithm>
 
 namespace svmp {
+namespace {
+// Static topology tables for fixed families (prototype: Tet/Hex)
+
+// Tetrahedron: oriented faces (outward, right-hand rule)
+// Faces: {1,2,3}, {0,3,2}, {0,1,3}, {0,2,1}
+constexpr index_t TET_FACES_ORIENTED_IDX[] = {
+    1,2,3,  0,3,2,  0,1,3,  0,2,1
+};
+constexpr int TET_FACES_ORIENTED_OFF[] = {0,3,6,9,12};
+
+// Tetrahedron edges (6)
+constexpr index_t TET_EDGES_FLAT[] = {
+    0,1, 0,2, 0,3, 1,2, 1,3, 2,3
+};
+
+// Hexahedron: oriented faces (outward, right-hand rule)
+// Faces: bottom (0,1,2,3), top (4,7,6,5), sides (0,1,5,4), (1,2,6,5), (2,3,7,6), (3,0,4,7)
+constexpr index_t HEX_FACES_ORIENTED_IDX[] = {
+    0,1,2,3,  4,7,6,5,  0,1,5,4,  1,2,6,5,  2,3,7,6,  3,0,4,7
+};
+constexpr int HEX_FACES_ORIENTED_OFF[] = {0,4,8,12,16,20,24};
+
+// Hexahedron edges (12)
+constexpr index_t HEX_EDGES_FLAT[] = {
+    0,1, 1,2, 2,3, 3,0,
+    4,5, 5,6, 6,7, 7,4,
+    0,4, 1,5, 2,6, 3,7
+};
+
+// =========================
+// Triangle (2D cell) faces (edges) oriented CCW
+constexpr index_t TRI_FACES_ORIENTED_IDX[] = {
+    0,1,  1,2,  2,0
+};
+constexpr int TRI_FACES_ORIENTED_OFF[] = {0,2,4,6};
+
+// Triangle edges (3)
+constexpr index_t TRI_EDGES_FLAT[] = {
+    0,1, 1,2, 2,0
+};
+
+// =========================
+// Quad (2D cell) faces (edges) oriented CCW
+constexpr index_t QUAD_FACES_ORIENTED_IDX[] = {
+    0,1,  1,2,  2,3,  3,0
+};
+constexpr int QUAD_FACES_ORIENTED_OFF[] = {0,2,4,6,8};
+
+// Quad edges (4)
+constexpr index_t QUAD_EDGES_FLAT[] = {
+    0,1, 1,2, 2,3, 3,0
+};
+
+// =========================
+// Wedge (triangular prism) oriented faces
+// Faces: bottom (0,2,1), top (3,4,5), sides (0,1,4,3), (1,2,5,4), (2,0,3,5)
+constexpr index_t WEDGE_FACES_ORIENTED_IDX[] = {
+    0,2,1,   3,4,5,   0,1,4,3,   1,2,5,4,   2,0,3,5
+};
+constexpr int WEDGE_FACES_ORIENTED_OFF[] = {0,3,6,10,14,18};
+
+// Wedge edges (9): bottom 3, top 3, vertical 3
+constexpr index_t WEDGE_EDGES_FLAT[] = {
+    0,1, 1,2, 2,0,
+    3,4, 4,5, 5,3,
+    0,3, 1,4, 2,5
+};
+
+// =========================
+// Pyramid oriented faces
+// Base (0,1,2,3), sides: (0,4,1), (1,4,2), (2,4,3), (3,4,0)
+constexpr index_t PYR_FACES_ORIENTED_IDX[] = {
+    0,1,2,3,   0,4,1,   1,4,2,   2,4,3,   3,4,0
+};
+constexpr int PYR_FACES_ORIENTED_OFF[] = {0,4,7,10,13,16};
+
+// Pyramid edges (8): base 4, apex connections 4
+constexpr index_t PYR_EDGES_FLAT[] = {
+    0,1, 1,2, 2,3, 3,0,
+    0,4, 1,4, 2,4, 3,4
+};
+} // anonymous namespace
+
+// begin public interface
 
 // ==========================================
 // Public Interface
@@ -57,40 +141,83 @@ std::vector<std::vector<index_t>> CellTopology::get_boundary_faces(CellFamily fa
 }
 
 std::vector<std::vector<index_t>> CellTopology::get_oriented_boundary_faces(CellFamily family) {
+    auto view = get_oriented_boundary_faces_view(family);
+    if (view.indices && view.offsets && view.face_count > 0) {
+        std::vector<std::vector<index_t>> faces(view.face_count);
+        for (int f = 0; f < view.face_count; ++f) {
+            int b = view.offsets[f];
+            int e = view.offsets[f+1];
+            faces[f].assign(view.indices + b, view.indices + e);
+        }
+        return faces;
+    }
+    // Fallback to original implementations if view unavailable
     switch (family) {
-        case CellFamily::Tetra:
-            return tet_faces_oriented();
-        case CellFamily::Hex:
-            return hex_faces_oriented();
-        case CellFamily::Wedge:
-            return wedge_faces_oriented();
-        case CellFamily::Pyramid:
-            return pyramid_faces_oriented();
-        case CellFamily::Triangle:
-            return tri_edges_oriented();
-        case CellFamily::Quad:
-            return quad_edges_oriented();
+        case CellFamily::Wedge:   return wedge_faces_oriented();
+        case CellFamily::Pyramid: return pyramid_faces_oriented();
+        case CellFamily::Triangle:return tri_edges_oriented();
+        case CellFamily::Quad:    return quad_edges_oriented();
         default:
             throw std::runtime_error("Unsupported cell family for oriented boundary face extraction");
     }
 }
 
-std::vector<std::array<index_t, 2>> CellTopology::get_edges(CellFamily family) {
+CellTopology::FaceListView CellTopology::get_oriented_boundary_faces_view(CellFamily family) {
     switch (family) {
         case CellFamily::Tetra:
-            return tet_edges();
+            return {TET_FACES_ORIENTED_IDX, TET_FACES_ORIENTED_OFF, 4};
         case CellFamily::Hex:
-            return hex_edges();
-        case CellFamily::Wedge:
-            return wedge_edges();
-        case CellFamily::Pyramid:
-            return pyramid_edges();
+            return {HEX_FACES_ORIENTED_IDX, HEX_FACES_ORIENTED_OFF, 6};
         case CellFamily::Triangle:
-            return tri_edges();
+            return {TRI_FACES_ORIENTED_IDX, TRI_FACES_ORIENTED_OFF, 3};
         case CellFamily::Quad:
-            return quad_edges();
+            return {QUAD_FACES_ORIENTED_IDX, QUAD_FACES_ORIENTED_OFF, 4};
+        case CellFamily::Wedge:
+            return {WEDGE_FACES_ORIENTED_IDX, WEDGE_FACES_ORIENTED_OFF, 5};
+        case CellFamily::Pyramid:
+            return {PYR_FACES_ORIENTED_IDX, PYR_FACES_ORIENTED_OFF, 5};
+        default:
+            return {nullptr, nullptr, 0};
+    }
+}
+
+std::vector<std::array<index_t, 2>> CellTopology::get_edges(CellFamily family) {
+    auto view = get_edges_view(family);
+    if (view.pairs_flat && view.edge_count > 0) {
+        std::vector<std::array<index_t,2>> edges;
+        edges.reserve(static_cast<size_t>(view.edge_count));
+        for (int i = 0; i < view.edge_count; ++i) {
+            edges.push_back({view.pairs_flat[2*i+0], view.pairs_flat[2*i+1]});
+        }
+        return edges;
+    }
+    // Fallback to original implementations if view unavailable
+    switch (family) {
+        case CellFamily::Wedge:   return wedge_edges();
+        case CellFamily::Pyramid: return pyramid_edges();
+        case CellFamily::Triangle:return tri_edges();
+        case CellFamily::Quad:    return quad_edges();
         default:
             throw std::runtime_error("Unsupported cell family for edge extraction");
+    }
+}
+
+CellTopology::EdgeListView CellTopology::get_edges_view(CellFamily family) {
+    switch (family) {
+        case CellFamily::Tetra:
+            return {TET_EDGES_FLAT, 6};
+        case CellFamily::Hex:
+            return {HEX_EDGES_FLAT, 12};
+        case CellFamily::Triangle:
+            return {TRI_EDGES_FLAT, 3};
+        case CellFamily::Quad:
+            return {QUAD_EDGES_FLAT, 4};
+        case CellFamily::Wedge:
+            return {WEDGE_EDGES_FLAT, 9};
+        case CellFamily::Pyramid:
+            return {PYR_EDGES_FLAT, 8};
+        default:
+            return {nullptr, 0};
     }
 }
 
