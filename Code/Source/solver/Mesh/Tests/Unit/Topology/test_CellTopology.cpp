@@ -31,6 +31,9 @@
 #include "gtest/gtest.h"
 #include "Topology/CellTopology.h"
 #include "Topology/CellShape.h"
+#include <unordered_map>
+#include <unordered_set>
+#include <algorithm>
 
 namespace svmp {
 namespace test {
@@ -206,6 +209,209 @@ TEST_F(CellTopologyTest, CanonicalAndOrientedHaveSameVertices) {
 
         EXPECT_EQ(canon_sorted, orient_sorted);
     }
+}
+
+// Check that canonical vs oriented faces match (as sets) across families
+TEST_F(CellTopologyTest, CanonicalVsOrientedMatchForAllFixedFamilies) {
+    std::vector<CellFamily> families = {
+        CellFamily::Triangle,
+        CellFamily::Quad,
+        CellFamily::Tetra,
+        CellFamily::Hex,
+        CellFamily::Wedge,
+        CellFamily::Pyramid
+    };
+
+    for (auto family : families) {
+        auto canonical = CellTopology::get_boundary_faces(family);
+        auto oriented  = CellTopology::get_oriented_boundary_faces(family);
+        ASSERT_EQ(canonical.size(), oriented.size());
+        for (size_t i = 0; i < canonical.size(); ++i) {
+            std::vector<index_t> a = canonical[i];
+            std::vector<index_t> b = oriented[i];
+            std::sort(a.begin(), a.end());
+            std::sort(b.begin(), b.end());
+            EXPECT_EQ(a, b);
+        }
+    }
+}
+
+// ==========================================
+// Tests: Canonical views are sorted within-face
+// ==========================================
+
+TEST_F(CellTopologyTest, CanonicalViewFacesAreSorted) {
+    std::vector<CellFamily> families = {
+        CellFamily::Triangle, CellFamily::Quad,
+        CellFamily::Tetra,    CellFamily::Hex,
+        CellFamily::Wedge,    CellFamily::Pyramid
+    };
+    for (auto family : families) {
+        auto view = CellTopology::get_boundary_faces_canonical_view(family);
+        ASSERT_TRUE(view.indices != nullptr);
+        ASSERT_TRUE(view.offsets != nullptr);
+        for (int f = 0; f < view.face_count; ++f) {
+            int b = view.offsets[f], e = view.offsets[f+1];
+            for (int i = b + 1; i < e; ++i) {
+                EXPECT_LE(view.indices[i-1], view.indices[i]);
+            }
+        }
+    }
+}
+
+// ==========================================
+// Tests: Oriented faces traverse shared edges in opposite directions (3D)
+// ==========================================
+
+static void expect_edge_orientations_cancel(const std::vector<std::vector<index_t>>& faces) {
+    // Count directed edges across all faces
+    std::unordered_map<long long, int> dir_counts;
+    auto key = [](index_t a, index_t b) {
+        // pack into 64-bit key
+        return (static_cast<long long>(a) << 32) | static_cast<unsigned long long>(static_cast<uint32_t>(b));
+    };
+    for (const auto& f : faces) {
+        size_t k = f.size();
+        for (size_t i = 0; i < k; ++i) {
+            index_t u = f[i];
+            index_t v = f[(i+1) % k];
+            dir_counts[key(u,v)]++;
+        }
+    }
+    // For each directed edge, there must be an opposite with same count
+    for (const auto& p : dir_counts) {
+        long long packed = p.first;
+        index_t u = static_cast<index_t>(packed >> 32);
+        index_t v = static_cast<index_t>(packed & 0xffffffff);
+        long long inv = key(v,u);
+        auto it = dir_counts.find(inv);
+        ASSERT_NE(it, dir_counts.end());
+        EXPECT_EQ(p.second, it->second);
+    }
+}
+
+TEST_F(CellTopologyTest, OrientedFacesOppositeEdgeTraversal_TetHexWedgePyr) {
+    // Only 3D families
+    std::vector<CellFamily> families = {
+        CellFamily::Tetra, CellFamily::Hex, CellFamily::Wedge, CellFamily::Pyramid
+    };
+    for (auto family : families) {
+        auto faces = CellTopology::get_oriented_boundary_faces(family);
+        expect_edge_orientations_cancel(faces);
+    }
+}
+
+// ==========================================
+// Tests: View integrity (sizes and offsets)
+// ==========================================
+
+TEST_F(CellTopologyTest, ViewsHaveConsistentOffsetsAndSizes) {
+    auto check_faces = [](const CellTopology::FaceListView& v) {
+        if (!v.indices) return; // skip empties
+        ASSERT_TRUE(v.offsets != nullptr);
+        ASSERT_GE(v.face_count, 1);
+        // last offset equals total indices length
+        int total = v.offsets[v.face_count];
+        ASSERT_GT(total, 0);
+        // offsets must be non-decreasing
+        for (int i = 1; i <= v.face_count; ++i) {
+            EXPECT_GE(v.offsets[i], v.offsets[i-1]);
+        }
+    };
+    auto check_edges = [](const CellTopology::EdgeListView& v) {
+        if (!v.pairs_flat) return;
+        ASSERT_GE(v.edge_count, 1);
+    };
+
+    // Fixed families
+    std::vector<CellFamily> families = {
+        CellFamily::Triangle, CellFamily::Quad,
+        CellFamily::Tetra,    CellFamily::Hex,
+        CellFamily::Wedge,    CellFamily::Pyramid
+    };
+    for (auto f : families) {
+        check_faces(CellTopology::get_oriented_boundary_faces_view(f));
+        check_faces(CellTopology::get_boundary_faces_canonical_view(f));
+        check_edges(CellTopology::get_edges_view(f));
+    }
+}
+
+// ==========================================
+// Tests: Variable-arity families (polygon, prism(m), pyramid(m))
+// ==========================================
+
+TEST_F(CellTopologyTest, PolygonViews_M5) {
+    int m = 5;
+    auto fv = CellTopology::get_polygon_faces_view(m);
+    auto fcv= CellTopology::get_polygon_faces_canonical_view(m);
+    auto ev = CellTopology::get_polygon_edges_view(m);
+    ASSERT_EQ(fv.face_count, m);
+    ASSERT_EQ(ev.edge_count, m);
+    // canonical pairs are sorted within each edge (a <= b)
+    for (int i = 0; i < m; ++i) {
+        int b = fcv.offsets[i], e = fcv.offsets[i+1];
+        ASSERT_EQ(e - b, 2);
+        EXPECT_LE(fcv.indices[b+0], fcv.indices[b+1]);
+    }
+}
+
+TEST_F(CellTopologyTest, PrismViews_M5_CountsAndOrientation) {
+    int m = 5;
+    auto fv = CellTopology::get_prism_faces_view(m);
+    auto ev = CellTopology::get_prism_edges_view(m);
+    ASSERT_EQ(fv.face_count, 2 + m);
+    ASSERT_EQ(ev.edge_count, 3 * m);
+    // Build materialized faces and check oriented edge cancellation
+    std::vector<std::vector<index_t>> faces;
+    faces.reserve(fv.face_count);
+    for (int f = 0; f < fv.face_count; ++f) {
+        int b = fv.offsets[f], e = fv.offsets[f+1];
+        faces.emplace_back(fv.indices + b, fv.indices + e);
+    }
+    expect_edge_orientations_cancel(faces);
+}
+
+TEST_F(CellTopologyTest, PyramidViews_M5_CountsAndOrientation) {
+    int m = 5;
+    auto fv = CellTopology::get_pyramid_faces_view(m);
+    auto ev = CellTopology::get_pyramid_edges_view(m);
+    ASSERT_EQ(fv.face_count, 1 + m);
+    ASSERT_EQ(ev.edge_count, m + m);
+    std::vector<std::vector<index_t>> faces;
+    for (int f = 0; f < fv.face_count; ++f) {
+        int b = fv.offsets[f], e = fv.offsets[f+1];
+        faces.emplace_back(fv.indices + b, fv.indices + e);
+    }
+    expect_edge_orientations_cancel(faces);
+}
+
+// ==========================================
+// Tests: Higher-order assembly helpers
+// ==========================================
+
+TEST_F(CellTopologyTest, HighOrderAssembly_Tri6_Tet10) {
+    // Tri6: 3 corners + 3 edge mids
+    std::vector<index_t> tri_c = {0,1,2};
+    std::vector<index_t> tri_e = {3,4,5};
+    auto tri_order = CellTopology::HighOrderOrdering::assemble_quadratic_polygon(3, tri_c, tri_e);
+    std::vector<index_t> tri_expected = {0,1,2,3,4,5};
+    EXPECT_EQ(tri_order, tri_expected);
+
+    // Tet10: 4 corners + 6 edge mids
+    std::vector<index_t> tet_c = {0,1,2,3};
+    std::vector<index_t> tet_e = {4,5,6,7,8,9};
+    auto tet_order = CellTopology::HighOrderOrdering::assemble_quadratic(CellFamily::Tetra, tet_c, tet_e);
+    std::vector<index_t> tet_expected = {0,1,2,3,4,5,6,7,8,9};
+    EXPECT_EQ(tet_order, tet_expected);
+}
+
+TEST_F(CellTopologyTest, HighOrderAssembly_SizeValidation) {
+    // Mismatched counts should throw
+    std::vector<index_t> c = {0,1,2,3};
+    std::vector<index_t> e_bad = {4,5}; // wrong size for tet
+    EXPECT_THROW(
+        (void)CellTopology::HighOrderOrdering::assemble_quadratic(CellFamily::Tetra, c, e_bad),
+        std::invalid_argument);
 }
 
 // ==========================================
