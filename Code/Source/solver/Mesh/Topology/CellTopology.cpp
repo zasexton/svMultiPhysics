@@ -131,11 +131,13 @@ std::vector<std::vector<index_t>> CellTopology::tet_faces_canonical() {
 
 std::vector<std::vector<index_t>> CellTopology::tet_faces_oriented() {
     // Faces with right-hand rule ordering (outward normals)
+    // Ordering chosen to match a common dimension-agnostic simplex convention:
+    // (1,2,3), (0,3,2), (0,1,3), (0,2,1) each listed CCW as seen from outside
     return {
-        {0, 2, 1},  // Face opposite vertex 3 (CCW from outside)
-        {0, 1, 3},  // Face opposite vertex 2
-        {0, 3, 2},  // Face opposite vertex 1
-        {1, 2, 3}   // Face opposite vertex 0
+        {1, 2, 3},  // opposite vertex 0
+        {0, 3, 2},  // opposite vertex 1
+        {0, 1, 3},  // opposite vertex 2
+        {0, 2, 1}   // opposite vertex 3
     };
 }
 
@@ -166,14 +168,19 @@ std::vector<std::vector<index_t>> CellTopology::hex_faces_canonical() {
 }
 
 std::vector<std::vector<index_t>> CellTopology::hex_faces_oriented() {
-    // Right-hand rule ordering (outward normals)
+    // Right-hand rule ordering (outward normals), consistent with
+    // dimension-agnostic orthotope rules and VTK-compatible face loops.
+    // One valid outward set:
+    //  - bottom: (0,1,2,3)
+    //  - top   : (4,7,6,5)
+    //  - sides : (0,1,5,4), (1,2,6,5), (2,3,7,6), (3,0,4,7)
     return {
-        {0, 3, 2, 1},  // bottom (z-)
-        {4, 5, 6, 7},  // top (z+)
+        {0, 1, 2, 3},  // bottom (z-)
+        {4, 7, 6, 5},  // top (z+)
         {0, 1, 5, 4},  // front (y-)
-        {2, 3, 7, 6},  // back (y+)
-        {0, 4, 7, 3},  // left (x-)
-        {1, 2, 6, 5}   // right (x+)
+        {1, 2, 6, 5},  // right (x+)
+        {2, 3, 7, 6},  // back  (y+)
+        {3, 0, 4, 7}   // left  (x-)
     };
 }
 
@@ -246,12 +253,13 @@ std::vector<std::vector<index_t>> CellTopology::pyramid_faces_canonical() {
 }
 
 std::vector<std::vector<index_t>> CellTopology::pyramid_faces_oriented() {
+    // Base listed CCW as seen from outside; side triangles follow (i, apex, i+1)
     return {
-        {0, 3, 2, 1},  // quad base
-        {0, 1, 4},     // triangle
-        {1, 2, 4},     // triangle
-        {2, 3, 4},     // triangle
-        {3, 0, 4}      // triangle
+        {0, 1, 2, 3},  // quad base (outward)
+        {0, 4, 1},     // side triangles (wrap i+1 mod 4)
+        {1, 4, 2},
+        {2, 4, 3},
+        {3, 4, 0}
     };
 }
 
