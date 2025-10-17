@@ -301,7 +301,13 @@ endif()
 
 if(MESH_BUILD_TESTS)
     message(STATUS "Building mesh tests")
-    add_subdirectory(test_compile)
+    # Enable CTest at top-level so tests are discoverable from the build root
+    enable_testing()
+    add_subdirectory(Tests)
+    # Legacy test_compile directory (if it exists)
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_compile)
+        add_subdirectory(test_compile)
+    endif()
 endif()
 
 #------------------------------------------------------------------------------

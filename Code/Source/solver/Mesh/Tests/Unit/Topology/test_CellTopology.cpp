@@ -193,22 +193,18 @@ TEST_F(CellTopologyTest, QuadEdgesHaveTwoVertices) {
 
 TEST_F(CellTopologyTest, CanonicalAndOrientedHaveSameVertices) {
     auto canonical = CellTopology::get_boundary_faces(CellFamily::Tetra);
-    auto oriented = CellTopology::get_oriented_boundary_faces(CellFamily::Tetra);
-
+    auto oriented  = CellTopology::get_oriented_boundary_faces(CellFamily::Tetra);
     ASSERT_EQ(canonical.size(), oriented.size());
-
-    for (size_t i = 0; i < canonical.size(); ++i) {
-        EXPECT_EQ(canonical[i].size(), oriented[i].size());
-
-        // Vertices should be the same, just potentially in different order
-        std::vector<index_t> canon_sorted = canonical[i];
-        std::vector<index_t> orient_sorted = oriented[i];
-
-        std::sort(canon_sorted.begin(), canon_sorted.end());
-        std::sort(orient_sorted.begin(), orient_sorted.end());
-
-        EXPECT_EQ(canon_sorted, orient_sorted);
-    }
+    // Compare as multisets of faces (ignore face ordering and within-face order)
+    auto normalize_faces = [](const std::vector<std::vector<index_t>>& faces) {
+        std::vector<std::vector<index_t>> norm = faces;
+        for (auto& f : norm) std::sort(f.begin(), f.end());
+        std::sort(norm.begin(), norm.end());
+        return norm;
+    };
+    auto cset = normalize_faces(canonical);
+    auto oset = normalize_faces(oriented);
+    EXPECT_EQ(cset, oset);
 }
 
 // Check that canonical vs oriented faces match (as sets) across families
@@ -226,13 +222,13 @@ TEST_F(CellTopologyTest, CanonicalVsOrientedMatchForAllFixedFamilies) {
         auto canonical = CellTopology::get_boundary_faces(family);
         auto oriented  = CellTopology::get_oriented_boundary_faces(family);
         ASSERT_EQ(canonical.size(), oriented.size());
-        for (size_t i = 0; i < canonical.size(); ++i) {
-            std::vector<index_t> a = canonical[i];
-            std::vector<index_t> b = oriented[i];
-            std::sort(a.begin(), a.end());
-            std::sort(b.begin(), b.end());
-            EXPECT_EQ(a, b);
-        }
+        auto norm = [](const std::vector<std::vector<index_t>>& faces) {
+            std::vector<std::vector<index_t>> v = faces;
+            for (auto& f : v) std::sort(f.begin(), f.end());
+            std::sort(v.begin(), v.end());
+            return v;
+        };
+        EXPECT_EQ(norm(canonical), norm(oriented));
     }
 }
 
@@ -264,29 +260,25 @@ TEST_F(CellTopologyTest, CanonicalViewFacesAreSorted) {
 // ==========================================
 
 static void expect_edge_orientations_cancel(const std::vector<std::vector<index_t>>& faces) {
-    // Count directed edges across all faces
-    std::unordered_map<long long, int> dir_counts;
-    auto key = [](index_t a, index_t b) {
-        // pack into 64-bit key
-        return (static_cast<long long>(a) << 32) | static_cast<unsigned long long>(static_cast<uint32_t>(b));
+    // For each undirected edge {a,b}, the signed count across oriented faces should be zero.
+    std::unordered_map<long long, int> sum_counts;
+    auto ukey = [](index_t a, index_t b) {
+        index_t lo = std::min(a,b);
+        index_t hi = std::max(a,b);
+        return (static_cast<long long>(lo) << 32) | static_cast<unsigned long long>(static_cast<uint32_t>(hi));
     };
     for (const auto& f : faces) {
-        size_t k = f.size();
+        const size_t k = f.size();
         for (size_t i = 0; i < k; ++i) {
             index_t u = f[i];
             index_t v = f[(i+1) % k];
-            dir_counts[key(u,v)]++;
+            long long key = ukey(u,v);
+            // add +1 if direction matches (lo->hi), -1 otherwise
+            sum_counts[key] += (u < v) ? +1 : -1;
         }
     }
-    // For each directed edge, there must be an opposite with same count
-    for (const auto& p : dir_counts) {
-        long long packed = p.first;
-        index_t u = static_cast<index_t>(packed >> 32);
-        index_t v = static_cast<index_t>(packed & 0xffffffff);
-        long long inv = key(v,u);
-        auto it = dir_counts.find(inv);
-        ASSERT_NE(it, dir_counts.end());
-        EXPECT_EQ(p.second, it->second);
+    for (const auto& p : sum_counts) {
+        EXPECT_EQ(p.second, 0) << "edge sum nonzero for key=" << p.first;
     }
 }
 

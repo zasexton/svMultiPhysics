@@ -30,6 +30,7 @@
 
 #include "CellTopology.h"
 #include <algorithm>
+#include <memory>
 
 namespace svmp {
 namespace {
@@ -48,9 +49,10 @@ constexpr index_t TET_EDGES_FLAT[] = {
 };
 
 // Hexahedron: oriented faces (outward, right-hand rule)
-// Faces: bottom (0,1,2,3), top (4,7,6,5), sides (0,1,5,4), (1,2,6,5), (2,3,7,6), (3,0,4,7)
+// Chosen to ensure adjacent faces traverse shared edges in opposite directions.
+// Faces: bottom (0,3,2,1), top (4,5,6,7), sides (0,1,5,4), (1,2,6,5), (2,3,7,6), (3,0,4,7)
 constexpr index_t HEX_FACES_ORIENTED_IDX[] = {
-    0,1,2,3,  4,7,6,5,  0,1,5,4,  1,2,6,5,  2,3,7,6,  3,0,4,7
+    0,3,2,1,  4,5,6,7,  0,1,5,4,  1,2,6,5,  2,3,7,6,  3,0,4,7
 };
 constexpr int HEX_FACES_ORIENTED_OFF[] = {0,4,8,12,16,20,24};
 
