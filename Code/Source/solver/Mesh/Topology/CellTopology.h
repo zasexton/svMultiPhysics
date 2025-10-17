@@ -96,8 +96,12 @@ public:
      */
     static std::vector<std::vector<index_t>> get_oriented_boundary_faces(CellFamily family);
 
-    // Zero-allocation oriented face view for fixed families (prototype: Tet/Hex)
+    // Zero-allocation oriented face view for fixed families (Tet/Hex/Tri/Quad/Wedge/Pyramid)
     static FaceListView get_oriented_boundary_faces_view(CellFamily family);
+
+    // Zero-allocation canonical (sorted within-face) face view for fixed families
+    // Canonical views are useful for topology detection (orientation-independent keys)
+    static FaceListView get_boundary_faces_canonical_view(CellFamily family);
 
     /**
      * @brief Get edge definitions for a cell type
@@ -108,8 +112,70 @@ public:
      */
     static std::vector<std::array<index_t, 2>> get_edges(CellFamily family);
 
-    // Zero-allocation edge view for fixed families (prototype: Tet/Hex)
+    // Zero-allocation edge view for fixed families (Tet/Hex/Tri/Quad/Wedge/Pyramid)
     static EdgeListView get_edges_view(CellFamily family);
+
+    // ----------------------
+    // Variable-arity families
+    // ----------------------
+    // Polygon (2D): vertices 0..m-1 (CCW). Faces = edges in CCW.
+    // Views use the following vertex indexing conventions for derived 3D cells:
+    //  - Prism(m): base 0..m-1, top m..2m-1 (paired i <-> i+m)
+    //  - Pyramid(m): base 0..m-1, apex m
+    // Oriented faces follow right-hand rule and outward normals.
+
+    // Polygon (n-gon) oriented/canonical face and edge views
+    static FaceListView get_polygon_faces_view(int m);
+    static FaceListView get_polygon_faces_canonical_view(int m);
+    static EdgeListView get_polygon_edges_view(int m);
+
+    // m-gonal Prism oriented/canonical faces and edges
+    static FaceListView get_prism_faces_view(int m);
+    static FaceListView get_prism_faces_canonical_view(int m);
+    static EdgeListView get_prism_edges_view(int m);
+
+    // m-gonal Pyramid oriented/canonical faces and edges
+    static FaceListView get_pyramid_faces_view(int m);
+    static FaceListView get_pyramid_faces_canonical_view(int m);
+    static EdgeListView get_pyramid_edges_view(int m);
+
+    // ----------------------------
+    // Higher-order node ordering
+    // ----------------------------
+    // Helpers to assemble quadratic element node ordering using the views above.
+    // Ordering: corners -> edge midpoints (edge view order) -> face midpoints (face view order) -> body center (optional)
+    struct HighOrderOrdering {
+        // Fixed families
+        static std::vector<index_t> assemble_quadratic(
+            CellFamily family,
+            const std::vector<index_t>& corners,
+            const std::vector<index_t>& edge_mids,
+            const std::vector<index_t>& face_mids = {},
+            bool include_center = false,
+            index_t center = 0);
+
+        // Variable-arity families
+        static std::vector<index_t> assemble_quadratic_polygon(
+            int m,
+            const std::vector<index_t>& corners,
+            const std::vector<index_t>& edge_mids);
+
+        static std::vector<index_t> assemble_quadratic_prism(
+            int m,
+            const std::vector<index_t>& corners,           // size = 2m (base then top)
+            const std::vector<index_t>& edge_mids,         // size = 3m
+            const std::vector<index_t>& face_mids = {},    // size = 2 + m (optional)
+            bool include_center = false,
+            index_t center = 0);
+
+        static std::vector<index_t> assemble_quadratic_pyramid(
+            int m,
+            const std::vector<index_t>& corners,           // size = m+1 (base then apex)
+            const std::vector<index_t>& edge_mids,         // size = m + m
+            const std::vector<index_t>& face_mids = {},    // size = 1 + m (optional)
+            bool include_center = false,
+            index_t center = 0);
+    };
 
     /**
      * @brief Get face-to-edge connectivity for a cell type

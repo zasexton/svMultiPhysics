@@ -122,19 +122,24 @@ constexpr index_t PYR_EDGES_FLAT[] = {
 // ==========================================
 
 std::vector<std::vector<index_t>> CellTopology::get_boundary_faces(CellFamily family) {
+    // Prefer canonical view (zero-allocation) for fixed families, fallback to original
+    auto view = get_boundary_faces_canonical_view(family);
+    if (view.indices && view.offsets && view.face_count > 0) {
+        std::vector<std::vector<index_t>> faces(view.face_count);
+        for (int f = 0; f < view.face_count; ++f) {
+            int b = view.offsets[f];
+            int e = view.offsets[f+1];
+            faces[f].assign(view.indices + b, view.indices + e);
+        }
+        return faces;
+    }
     switch (family) {
-        case CellFamily::Tetra:
-            return tet_faces_canonical();
-        case CellFamily::Hex:
-            return hex_faces_canonical();
-        case CellFamily::Wedge:
-            return wedge_faces_canonical();
-        case CellFamily::Pyramid:
-            return pyramid_faces_canonical();
-        case CellFamily::Triangle:
-            return tri_edges_canonical();
-        case CellFamily::Quad:
-            return quad_edges_canonical();
+        case CellFamily::Tetra:   return tet_faces_canonical();
+        case CellFamily::Hex:     return hex_faces_canonical();
+        case CellFamily::Wedge:   return wedge_faces_canonical();
+        case CellFamily::Pyramid: return pyramid_faces_canonical();
+        case CellFamily::Triangle:return tri_edges_canonical();
+        case CellFamily::Quad:    return quad_edges_canonical();
         default:
             throw std::runtime_error("Unsupported cell family for boundary face extraction");
     }
@@ -181,6 +186,55 @@ CellTopology::FaceListView CellTopology::get_oriented_boundary_faces_view(CellFa
     }
 }
 
+// ------------------------------
+// Canonical (sorted) face views
+// ------------------------------
+namespace {
+// Fixed-family canonical faces (sorted within-face) for topology detection
+
+// Triangle canonical edges (faces in 2D): {0,1},{1,2},{0,2}
+constexpr index_t TRI_FACES_CAN_IDX[] = { 0,1, 1,2, 0,2 };
+constexpr int TRI_FACES_CAN_OFF[] = {0,2,4,6};
+
+// Quad canonical edges: {0,1},{1,2},{2,3},{0,3}
+constexpr index_t QUAD_FACES_CAN_IDX[] = { 0,1, 1,2, 2,3, 0,3 };
+constexpr int QUAD_FACES_CAN_OFF[] = {0,2,4,6,8};
+
+// Tetra canonical faces: {0,1,2}, {0,1,3}, {0,2,3}, {1,2,3}
+constexpr index_t TET_FACES_CAN_IDX[] = { 0,1,2, 0,1,3, 0,2,3, 1,2,3 };
+constexpr int TET_FACES_CAN_OFF[] = {0,3,6,9,12};
+
+// Hex canonical faces: bottom, top, front, right, back, left (sorted within each face)
+constexpr index_t HEX_FACES_CAN_IDX[] = {
+    0,1,2,3,  4,5,6,7,  0,1,4,5,  1,2,5,6,  2,3,6,7,  0,3,4,7
+};
+constexpr int HEX_FACES_CAN_OFF[] = {0,4,8,12,16,20,24};
+
+// Wedge canonical faces: bottom, top, and three quads (each sorted within-face)
+constexpr index_t WEDGE_FACES_CAN_IDX[] = {
+    0,1,2,   3,4,5,   0,1,3,4,   1,2,4,5,   0,2,3,5
+};
+constexpr int WEDGE_FACES_CAN_OFF[] = {0,3,6,10,14,18};
+
+// Pyramid canonical faces: base and side triangles (sorted within-face)
+constexpr index_t PYR_FACES_CAN_IDX[] = {
+    0,1,2,3,  0,1,4,  1,2,4,  2,3,4,  0,3,4
+};
+constexpr int PYR_FACES_CAN_OFF[] = {0,4,7,10,13,16};
+} // anonymous namespace
+
+CellTopology::FaceListView CellTopology::get_boundary_faces_canonical_view(CellFamily family) {
+    switch (family) {
+        case CellFamily::Triangle: return {TRI_FACES_CAN_IDX,  TRI_FACES_CAN_OFF,  3};
+        case CellFamily::Quad:     return {QUAD_FACES_CAN_IDX, QUAD_FACES_CAN_OFF, 4};
+        case CellFamily::Tetra:    return {TET_FACES_CAN_IDX,  TET_FACES_CAN_OFF,  4};
+        case CellFamily::Hex:      return {HEX_FACES_CAN_IDX,  HEX_FACES_CAN_OFF,  6};
+        case CellFamily::Wedge:    return {WEDGE_FACES_CAN_IDX,WEDGE_FACES_CAN_OFF,5};
+        case CellFamily::Pyramid:  return {PYR_FACES_CAN_IDX,  PYR_FACES_CAN_OFF,  5};
+        default:                   return {nullptr, nullptr, 0};
+    }
+}
+
 std::vector<std::array<index_t, 2>> CellTopology::get_edges(CellFamily family) {
     auto view = get_edges_view(family);
     if (view.pairs_flat && view.edge_count > 0) {
@@ -219,6 +273,377 @@ CellTopology::EdgeListView CellTopology::get_edges_view(CellFamily family) {
         default:
             return {nullptr, 0};
     }
+}
+
+// ======================================================
+// Variable-arity families: polygon, prism(m), pyramid(m)
+// ======================================================
+namespace {
+struct FaceCacheEntry {
+    std::vector<index_t> idx;   // flattened indices
+    std::vector<int> off;       // CSR offsets
+    int count = 0;              // number of faces
+};
+struct EdgeCacheEntry {
+    std::vector<index_t> pairs; // flattened pairs [v0,v1,...]
+    int count = 0;              // number of edges
+};
+
+// Caches keyed by m
+static std::unordered_map<int, std::shared_ptr<FaceCacheEntry>> poly_face_cache;
+static std::unordered_map<int, std::shared_ptr<FaceCacheEntry>> poly_face_can_cache;
+static std::unordered_map<int, std::shared_ptr<EdgeCacheEntry>> poly_edge_cache;
+
+static std::unordered_map<int, std::shared_ptr<FaceCacheEntry>> prism_face_cache;
+static std::unordered_map<int, std::shared_ptr<FaceCacheEntry>> prism_face_can_cache;
+static std::unordered_map<int, std::shared_ptr<EdgeCacheEntry>> prism_edge_cache;
+
+static std::unordered_map<int, std::shared_ptr<FaceCacheEntry>> pyr_face_cache;
+static std::unordered_map<int, std::shared_ptr<FaceCacheEntry>> pyr_face_can_cache;
+static std::unordered_map<int, std::shared_ptr<EdgeCacheEntry>> pyr_edge_cache;
+
+inline std::shared_ptr<FaceCacheEntry> build_polygon_faces_oriented(int m) {
+    auto e = std::make_shared<FaceCacheEntry>();
+    e->count = m;
+    e->off.resize(m + 1);
+    e->idx.reserve(2 * m);
+    int off = 0;
+    for (int i = 0; i < m; ++i) {
+        e->off[i] = off;
+        int j = (i + 1) % m;
+        e->idx.push_back(i);
+        e->idx.push_back(j);
+        off += 2;
+    }
+    e->off[m] = off;
+    return e;
+}
+
+inline std::shared_ptr<FaceCacheEntry> build_polygon_faces_canonical(int m) {
+    auto e = std::make_shared<FaceCacheEntry>();
+    e->count = m;
+    e->off.resize(m + 1);
+    e->idx.reserve(2 * m);
+    int off = 0;
+    for (int i = 0; i < m; ++i) {
+        e->off[i] = off;
+        int j = (i + 1) % m;
+        int a = std::min(i, j);
+        int b = std::max(i, j);
+        e->idx.push_back(a);
+        e->idx.push_back(b);
+        off += 2;
+    }
+    e->off[m] = off;
+    return e;
+}
+
+inline std::shared_ptr<EdgeCacheEntry> build_polygon_edges_oriented(int m) {
+    auto e = std::make_shared<EdgeCacheEntry>();
+    e->count = m;
+    e->pairs.reserve(2 * m);
+    for (int i = 0; i < m; ++i) {
+        int j = (i + 1) % m;
+        e->pairs.push_back(i);
+        e->pairs.push_back(j);
+    }
+    return e;
+}
+
+inline std::shared_ptr<FaceCacheEntry> build_prism_faces_oriented(int m) {
+    auto e = std::make_shared<FaceCacheEntry>();
+    e->count = 2 + m; // bottom, top, m side quads
+    e->off.clear();
+    e->off.reserve(e->count + 1);
+    e->idx.clear();
+    e->idx.reserve(2 * m + 4 * m);
+    int off = 0;
+    // bottom (reverse base order): 0, m-1, ..., 1
+    e->off.push_back(off);
+    e->idx.push_back(0);
+    for (int k = m - 1; k >= 1; --k) e->idx.push_back(k);
+    off += m;
+    e->off.push_back(off);
+    // top in base order: m..2m-1
+    for (int k = 0; k < m; ++k) e->idx.push_back(m + k);
+    off += m;
+    e->off.push_back(off);
+    // side quads: (i, i+1, m+i+1, m+i)
+    for (int i = 0; i < m; ++i) {
+        int i1 = (i + 1) % m;
+        e->idx.push_back(i);
+        e->idx.push_back(i1);
+        e->idx.push_back(m + i1);
+        e->idx.push_back(m + i);
+        off += 4;
+        e->off.push_back(off);
+    }
+    return e;
+}
+
+inline std::shared_ptr<FaceCacheEntry> build_prism_faces_canonical(int m) {
+    auto oriented = build_prism_faces_oriented(m);
+    // sort indices within each face to create canonical version
+    auto e = std::make_shared<FaceCacheEntry>(*oriented);
+    for (int f = 0; f < e->count; ++f) {
+        int b = e->off[f];
+        int eoff = e->off[f+1];
+        std::sort(e->idx.begin() + b, e->idx.begin() + eoff);
+    }
+    return e;
+}
+
+inline std::shared_ptr<EdgeCacheEntry> build_prism_edges_oriented(int m) {
+    auto e = std::make_shared<EdgeCacheEntry>();
+    e->count = 3 * m;
+    e->pairs.reserve(2 * e->count);
+    // bottom edges
+    for (int i = 0; i < m; ++i) {
+        int j = (i + 1) % m;
+        e->pairs.push_back(i);
+        e->pairs.push_back(j);
+    }
+    // top edges
+    for (int i = 0; i < m; ++i) {
+        int j = (i + 1) % m;
+        e->pairs.push_back(m + i);
+        e->pairs.push_back(m + j);
+    }
+    // vertical edges
+    for (int i = 0; i < m; ++i) {
+        e->pairs.push_back(i);
+        e->pairs.push_back(m + i);
+    }
+    return e;
+}
+
+inline std::shared_ptr<FaceCacheEntry> build_pyramid_faces_oriented(int m) {
+    auto e = std::make_shared<FaceCacheEntry>();
+    e->count = 1 + m; // base + m sides
+    e->off.reserve(e->count + 1);
+    e->idx.reserve(m + 3 * m);
+    int off = 0;
+    // base CCW: 0..m-1
+    e->off.push_back(off);
+    for (int k = 0; k < m; ++k) e->idx.push_back(k);
+    off += m;
+    e->off.push_back(off);
+    // sides: (i, apex, i+1)
+    for (int i = 0; i < m; ++i) {
+        int i1 = (i + 1) % m;
+        e->idx.push_back(i);
+        e->idx.push_back(m);
+        e->idx.push_back(i1);
+        off += 3;
+        e->off.push_back(off);
+    }
+    return e;
+}
+
+inline std::shared_ptr<FaceCacheEntry> build_pyramid_faces_canonical(int m) {
+    auto oriented = build_pyramid_faces_oriented(m);
+    auto e = std::make_shared<FaceCacheEntry>(*oriented);
+    for (int f = 0; f < e->count; ++f) {
+        int b = e->off[f];
+        int eoff = e->off[f+1];
+        std::sort(e->idx.begin() + b, e->idx.begin() + eoff);
+    }
+    return e;
+}
+
+inline std::shared_ptr<EdgeCacheEntry> build_pyramid_edges_oriented(int m) {
+    auto e = std::make_shared<EdgeCacheEntry>();
+    e->count = m + m; // base edges + edges to apex
+    e->pairs.reserve(2 * e->count);
+    // base edges
+    for (int i = 0; i < m; ++i) {
+        int j = (i + 1) % m;
+        e->pairs.push_back(i);
+        e->pairs.push_back(j);
+    }
+    // edges to apex
+    for (int i = 0; i < m; ++i) {
+        e->pairs.push_back(i);
+        e->pairs.push_back(m);
+    }
+    return e;
+}
+} // anonymous namespace (variable-arity caches)
+
+CellTopology::FaceListView CellTopology::get_polygon_faces_view(int m) {
+    if (m < 3) return {nullptr, nullptr, 0};
+    auto& cache = poly_face_cache;
+    auto it = cache.find(m);
+    if (it == cache.end()) it = cache.emplace(m, build_polygon_faces_oriented(m)).first;
+    auto& e = *it->second;
+    return {e.idx.data(), e.off.data(), e.count};
+}
+
+CellTopology::FaceListView CellTopology::get_polygon_faces_canonical_view(int m) {
+    if (m < 3) return {nullptr, nullptr, 0};
+    auto& cache = poly_face_can_cache;
+    auto it = cache.find(m);
+    if (it == cache.end()) it = cache.emplace(m, build_polygon_faces_canonical(m)).first;
+    auto& e = *it->second;
+    return {e.idx.data(), e.off.data(), e.count};
+}
+
+CellTopology::EdgeListView CellTopology::get_polygon_edges_view(int m) {
+    if (m < 3) return {nullptr, 0};
+    auto& cache = poly_edge_cache;
+    auto it = cache.find(m);
+    if (it == cache.end()) it = cache.emplace(m, build_polygon_edges_oriented(m)).first;
+    auto& e = *it->second;
+    return {e.pairs.data(), e.count};
+}
+
+CellTopology::FaceListView CellTopology::get_prism_faces_view(int m) {
+    if (m < 3) return {nullptr, nullptr, 0};
+    auto& cache = prism_face_cache;
+    auto it = cache.find(m);
+    if (it == cache.end()) it = cache.emplace(m, build_prism_faces_oriented(m)).first;
+    auto& e = *it->second;
+    return {e.idx.data(), e.off.data(), e.count};
+}
+
+CellTopology::FaceListView CellTopology::get_prism_faces_canonical_view(int m) {
+    if (m < 3) return {nullptr, nullptr, 0};
+    auto& cache = prism_face_can_cache;
+    auto it = cache.find(m);
+    if (it == cache.end()) it = cache.emplace(m, build_prism_faces_canonical(m)).first;
+    auto& e = *it->second;
+    return {e.idx.data(), e.off.data(), e.count};
+}
+
+CellTopology::EdgeListView CellTopology::get_prism_edges_view(int m) {
+    if (m < 3) return {nullptr, 0};
+    auto& cache = prism_edge_cache;
+    auto it = cache.find(m);
+    if (it == cache.end()) it = cache.emplace(m, build_prism_edges_oriented(m)).first;
+    auto& e = *it->second;
+    return {e.pairs.data(), e.count};
+}
+
+CellTopology::FaceListView CellTopology::get_pyramid_faces_view(int m) {
+    if (m < 3) return {nullptr, nullptr, 0};
+    auto& cache = pyr_face_cache;
+    auto it = cache.find(m);
+    if (it == cache.end()) it = cache.emplace(m, build_pyramid_faces_oriented(m)).first;
+    auto& e = *it->second;
+    return {e.idx.data(), e.off.data(), e.count};
+}
+
+CellTopology::FaceListView CellTopology::get_pyramid_faces_canonical_view(int m) {
+    if (m < 3) return {nullptr, nullptr, 0};
+    auto& cache = pyr_face_can_cache;
+    auto it = cache.find(m);
+    if (it == cache.end()) it = cache.emplace(m, build_pyramid_faces_canonical(m)).first;
+    auto& e = *it->second;
+    return {e.idx.data(), e.off.data(), e.count};
+}
+
+CellTopology::EdgeListView CellTopology::get_pyramid_edges_view(int m) {
+    if (m < 3) return {nullptr, 0};
+    auto& cache = pyr_edge_cache;
+    auto it = cache.find(m);
+    if (it == cache.end()) it = cache.emplace(m, build_pyramid_edges_oriented(m)).first;
+    auto& e = *it->second;
+    return {e.pairs.data(), e.count};
+}
+
+// ------------------------------------------
+// Higher-order node ordering (quadratic, VTK)
+// ------------------------------------------
+std::vector<index_t> CellTopology::HighOrderOrdering::assemble_quadratic(
+    CellFamily family,
+    const std::vector<index_t>& corners,
+    const std::vector<index_t>& edge_mids,
+    const std::vector<index_t>& face_mids,
+    bool include_center,
+    index_t center) {
+
+    // Check counts against topology views
+    auto eview = CellTopology::get_edges_view(family);
+    auto fview = CellTopology::get_oriented_boundary_faces_view(family);
+    if (eview.edge_count != static_cast<int>(edge_mids.size())) {
+        throw std::invalid_argument("edge_mids size does not match edge count for family");
+    }
+    if (fview.face_count != 0 && !face_mids.empty() && fview.face_count != static_cast<int>(face_mids.size())) {
+        throw std::invalid_argument("face_mids size does not match face count for family");
+    }
+
+    std::vector<index_t> out;
+    out.reserve(corners.size() + edge_mids.size() + face_mids.size() + (include_center ? 1 : 0));
+    out.insert(out.end(), corners.begin(), corners.end());
+    out.insert(out.end(), edge_mids.begin(), edge_mids.end());
+    out.insert(out.end(), face_mids.begin(), face_mids.end());
+    if (include_center) out.push_back(center);
+    return out;
+}
+
+std::vector<index_t> CellTopology::HighOrderOrdering::assemble_quadratic_polygon(
+    int m,
+    const std::vector<index_t>& corners,
+    const std::vector<index_t>& edge_mids) {
+    auto eview = CellTopology::get_polygon_edges_view(m);
+    if (eview.edge_count != static_cast<int>(edge_mids.size())) {
+        throw std::invalid_argument("edge_mids size does not match polygon edge count");
+    }
+    std::vector<index_t> out;
+    out.reserve(corners.size() + edge_mids.size());
+    out.insert(out.end(), corners.begin(), corners.end());
+    out.insert(out.end(), edge_mids.begin(), edge_mids.end());
+    return out;
+}
+
+std::vector<index_t> CellTopology::HighOrderOrdering::assemble_quadratic_prism(
+    int m,
+    const std::vector<index_t>& corners,
+    const std::vector<index_t>& edge_mids,
+    const std::vector<index_t>& face_mids,
+    bool include_center,
+    index_t center) {
+
+    auto eview = CellTopology::get_prism_edges_view(m);
+    auto fview = CellTopology::get_prism_faces_view(m);
+    if (eview.edge_count != static_cast<int>(edge_mids.size())) {
+        throw std::invalid_argument("edge_mids size does not match prism edge count");
+    }
+    if (!face_mids.empty() && fview.face_count != static_cast<int>(face_mids.size())) {
+        throw std::invalid_argument("face_mids size does not match prism face count");
+    }
+    std::vector<index_t> out;
+    out.reserve(corners.size() + edge_mids.size() + face_mids.size() + (include_center ? 1 : 0));
+    out.insert(out.end(), corners.begin(), corners.end());
+    out.insert(out.end(), edge_mids.begin(), edge_mids.end());
+    out.insert(out.end(), face_mids.begin(), face_mids.end());
+    if (include_center) out.push_back(center);
+    return out;
+}
+
+std::vector<index_t> CellTopology::HighOrderOrdering::assemble_quadratic_pyramid(
+    int m,
+    const std::vector<index_t>& corners,
+    const std::vector<index_t>& edge_mids,
+    const std::vector<index_t>& face_mids,
+    bool include_center,
+    index_t center) {
+
+    auto eview = CellTopology::get_pyramid_edges_view(m);
+    auto fview = CellTopology::get_pyramid_faces_view(m);
+    if (eview.edge_count != static_cast<int>(edge_mids.size())) {
+        throw std::invalid_argument("edge_mids size does not match pyramid edge count");
+    }
+    if (!face_mids.empty() && fview.face_count != static_cast<int>(face_mids.size())) {
+        throw std::invalid_argument("face_mids size does not match pyramid face count");
+    }
+    std::vector<index_t> out;
+    out.reserve(corners.size() + edge_mids.size() + face_mids.size() + (include_center ? 1 : 0));
+    out.insert(out.end(), corners.begin(), corners.end());
+    out.insert(out.end(), edge_mids.begin(), edge_mids.end());
+    out.insert(out.end(), face_mids.begin(), face_mids.end());
+    if (include_center) out.push_back(center);
+    return out;
 }
 
 std::vector<std::vector<int>> CellTopology::get_face_edges(CellFamily family) {
