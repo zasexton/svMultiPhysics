@@ -409,12 +409,99 @@ static std::vector<vtkIdType> reorder_high_order_to_vtk(const MeshBase& mesh,
     used[best_k] = 1; return pool[best_k];
   };
 
-  // Determine expected counts per family
+  // If p>2, use CellTopology high-order pattern (Lagrange preferred, else Serendipity)
+  if (shape.order > 2) {
+    int p_lag = CellTopology::infer_lagrange_order(shape.family, n_vertices);
+    int p_ser = (p_lag<0) ? CellTopology::infer_serendipity_order(shape.family, n_vertices) : -1;
+    int p = (p_lag>0) ? p_lag : p_ser;
+    CellTopology::HighOrderKind kind = (p_lag>0) ? CellTopology::HighOrderKind::Lagrange : CellTopology::HighOrderKind::Serendipity;
+    if (p > 2) {
+      auto pattern = CellTopology::vtk_high_order_pattern(shape.family, p, kind);
+      std::vector<vtkIdType> out; out.reserve(n_vertices);
+      // corners
+      out.insert(out.end(), corners.begin(), corners.end());
+
+      auto eview = CellTopology::get_edges_view(shape.family);
+      auto fview = CellTopology::get_oriented_boundary_faces_view(shape.family);
+
+      auto lerp = [&](const std::array<double,3>& a,const std::array<double,3>& b,double t){
+        return std::array<double,3>{ (1-t)*a[0]+t*b[0], (1-t)*a[1]+t*b[1], (1-t)*a[2]+t*b[2] };
+      };
+      auto trilin = [&](double u,double v,double w){
+        // Hex trilinear with corners 0..7
+        auto P = [&](int idx){ return get_pt(corners[idx]); };
+        double a00 = (1-u), a10 = u, b00 = (1-v), b10 = v, c00 = (1-w), c10 = w;
+        auto p000=P(0), p100=P(1), p110=P(2), p010=P(3), p001=P(4), p101=P(5), p111=P(6), p011=P(7);
+        std::array<double,3> r{0,0,0};
+        auto acc=[&](const std::array<double,3>& p,double wgt){ r[0]+=wgt*p[0]; r[1]+=wgt*p[1]; r[2]+=wgt*p[2]; };
+        acc(p000, a00*b00*c00); acc(p100, a10*b00*c00); acc(p110, a10*b10*c00); acc(p010, a00*b10*c00);
+        acc(p001, a00*b00*c10); acc(p101, a10*b00*c10); acc(p111, a10*b10*c10); acc(p011, a00*b10*c10);
+        return r;
+      };
+
+      // Build a mapping by consuming pool according to pattern
+      for (const auto& role : pattern.sequence) {
+        if (role.role == CellTopology::HONodeRole::Corner) continue; // already emitted
+        if (role.role == CellTopology::HONodeRole::Edge) {
+          int ei = role.idx0; int steps = role.idx2; int step = role.idx1; if (ei<0 || ei>=eview.edge_count) continue;
+          int li = eview.pairs_flat[2*ei+0]; int lj = eview.pairs_flat[2*ei+1];
+          if (li>= (int)nc || lj>= (int)nc) continue;
+          double t = (double)step / (double)(steps+1);
+          auto pa = get_pt(corners[li]); auto pb = get_pt(corners[lj]);
+          auto tgt = lerp(pa,pb,t);
+          index_t pick = take_nearest(tgt);
+          if (pick!=INVALID_INDEX) out.push_back(pick);
+        } else if (role.role == CellTopology::HONodeRole::Face) {
+          int fi = role.idx0; if (fi<0 || fi>=fview.face_count) continue;
+          int b = fview.offsets[fi], e = fview.offsets[fi+1]; int fv=e-b;
+          if (fv==3) {
+            // Tri face barycentric
+            double i = (double)role.idx1, j=(double)role.idx2, denom = (double)(p-1);
+            double t1 = i/denom, t2=j/denom, t0 = std::max(0.0, 1.0 - t1 - t2);
+            int l0=fview.indices[b+0], l1=fview.indices[b+1], l2=fview.indices[b+2];
+            auto P0=get_pt(corners[l0]), P1=get_pt(corners[l1]), P2=get_pt(corners[l2]);
+            std::array<double,3> tgt{ t0*P0[0]+t1*P1[0]+t2*P2[0], t0*P0[1]+t1*P1[1]+t2*P2[1], t0*P0[2]+t1*P1[2]+t2*P2[2] };
+            index_t pick = take_nearest(tgt);
+            if (pick!=INVALID_INDEX) out.push_back(pick);
+          } else if (fv==4) {
+            // Quad face bilinear
+            double u = (double)role.idx1/(double)(p-1), v=(double)role.idx2/(double)(p-1);
+            int l0=fview.indices[b+0], l1=fview.indices[b+1], l2=fview.indices[b+2], l3=fview.indices[b+3];
+            auto P0=get_pt(corners[l0]), P1=get_pt(corners[l1]), P2=get_pt(corners[l2]), P3=get_pt(corners[l3]);
+            std::array<double,3> tgt{
+              (1-u)*(1-v)*P0[0] + u*(1-v)*P1[0] + u*v*P2[0] + (1-u)*v*P3[0],
+              (1-u)*(1-v)*P0[1] + u*(1-v)*P1[1] + u*v*P2[1] + (1-u)*v*P3[1],
+              (1-u)*(1-v)*P0[2] + u*(1-v)*P1[2] + u*v*P2[2] + (1-u)*v*P3[2]
+            };
+            index_t pick = take_nearest(tgt);
+            if (pick!=INVALID_INDEX) out.push_back(pick);
+          }
+        } else if (role.role == CellTopology::HONodeRole::Volume) {
+          // Only Hex implemented for now
+          if (shape.family == CellFamily::Hex) {
+            double u=(double)role.idx0/(double)(p-1), v=(double)role.idx1/(double)(p-1), w=(double)role.idx2/(double)(p-1);
+            auto tgt = trilin(u,v,w);
+            index_t pick = take_nearest(tgt);
+            if (pick!=INVALID_INDEX) out.push_back(pick);
+          } else {
+            // fallback: pick nearest to centroid
+            std::array<double,3> c{0,0,0}; for(size_t i=0;i<nc;++i){ auto q=get_pt(corners[i]); c[0]+=q[0]; c[1]+=q[1]; c[2]+=q[2]; }
+            c[0]/=nc; c[1]/=nc; c[2]/=nc; index_t pick=take_nearest(c); if (pick!=INVALID_INDEX) out.push_back(pick);
+          }
+        }
+      }
+      // Append any leftovers in pool order to preserve count
+      for (size_t k=0;k<pool.size();++k) if(!used[k]) out.push_back(pool[k]);
+      return out;
+    }
+  }
+
+  // Determine expected counts per family (quadratic defaults)
   size_t need_edge = 0, need_face = 0, need_center = 0;
   switch (shape.family) {
     case CellFamily::Triangle: need_edge = 3; break; // Tri6
     case CellFamily::Quad:
-      if (n_vertices >= 9) { need_edge = 4; need_face = 1; }
+      if (n_vertices >= 9) { need_edge = 4; need_center = 1; }
       else { need_edge = 4; }
       break;
     case CellFamily::Tetra: need_edge = 6; break; // Tet10
@@ -474,7 +561,11 @@ static std::vector<vtkIdType> reorder_high_order_to_vtk(const MeshBase& mesh,
     c[0]/=nc; c[1]/=nc; c[2]/=nc;
     double best=1e300; vtkIdType id=-1;
     for (auto v: rest){ auto p=get_pt(v); double d2=dist2(p,c); if(d2<best){best=d2; id=v;} }
-    if (id>=0) body_center.push_back(id);
+    if (id>=0) {
+      body_center.push_back(id);
+      // mark used in pool so it won't be appended as leftover
+      for (size_t k=0;k<pool.size();++k) if (pool[k]==id) { used[k]=1; break; }
+    }
   }
 
   std::vector<vtkIdType> out; out.reserve(n_vertices);

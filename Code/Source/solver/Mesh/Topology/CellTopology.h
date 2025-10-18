@@ -115,6 +115,37 @@ public:
     // Zero-allocation edge view for fixed families (Tet/Hex/Tri/Quad/Wedge/Pyramid)
     static EdgeListView get_edges_view(CellFamily family);
 
+    // ----------------------------
+    // High-order (p>2) scaffolding
+    // ----------------------------
+    enum class HighOrderKind { Lagrange, Serendipity };
+
+    enum class HONodeRole { Corner, Edge, Face, Volume };
+
+    struct HighOrderNodeRole {
+        HONodeRole role;
+        // For Corner: idx0=local corner id
+        // For Edge:   idx0=edge index, idx1=step index (1..p-1), idx2=total steps (p-1)
+        // For Face:   idx0=face index, idx1=i (1..p-1), idx2=j (Tri: 1..p-1-i; Quad: 1..p-1)
+        // For Volume: idx0=i, idx1=j, idx2=k (1..p-1)
+        int idx0 = 0, idx1 = 0, idx2 = 0;
+    };
+
+    struct HighOrderVTKPattern {
+        HighOrderKind kind = HighOrderKind::Lagrange;
+        int order = 2;
+        std::vector<HighOrderNodeRole> sequence; // in VTK expected order
+    };
+
+    // Returns an abstract description of VTK's high-order node ordering for a given family/order/kind.
+    // This does not include global vertex IDs — it provides the structural sequence (corners/edges/faces/volume).
+    static HighOrderVTKPattern vtk_high_order_pattern(CellFamily family, int p, HighOrderKind kind = HighOrderKind::Lagrange);
+
+    // Helper: infer Lagrange order p from total node count (best-effort). Returns -1 if unknown.
+    static int infer_lagrange_order(CellFamily family, size_t node_count);
+    // Helper: infer Serendipity order p from total node count (best-effort). Returns -1 if unknown.
+    static int infer_serendipity_order(CellFamily family, size_t node_count);
+
     // ----------------------
     // Variable-arity families
     // ----------------------

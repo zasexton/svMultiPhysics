@@ -30,6 +30,7 @@
 
 #include "CellTopology.h"
 #include <algorithm>
+#include <cmath>
 #include <memory>
 
 namespace svmp {
@@ -888,6 +889,143 @@ std::vector<std::array<index_t, 2>> CellTopology::quad_edges() {
     return {
         {0, 1}, {1, 2}, {2, 3}, {3, 0}
     };
+}
+
+// ==========================================
+// High-order (p>2) scaffolding
+// ==========================================
+
+CellTopology::HighOrderVTKPattern CellTopology::vtk_high_order_pattern(CellFamily family, int p, HighOrderKind kind) {
+    HighOrderVTKPattern pat; pat.kind = kind; pat.order = p;
+    if (p <= 2) return pat; // handled by quadratic/linear paths
+
+    // Corners first
+    int nc = 0;
+    switch (family) {
+        case CellFamily::Triangle: nc = 3; break;
+        case CellFamily::Quad:     nc = 4; break;
+        case CellFamily::Tetra:    nc = 4; break;
+        case CellFamily::Hex:      nc = 8; break;
+        case CellFamily::Wedge:    nc = 6; break;
+        case CellFamily::Pyramid:  nc = 5; break;
+        default: break;
+    }
+    for (int i=0;i<nc;++i) pat.sequence.push_back({HONodeRole::Corner, i,0,0});
+
+    // Edge nodes: enumerate topology edges and add (p-1) nodes per edge for Lagrange/Serendipity
+    auto eview = get_edges_view(family);
+    int edgeNodes = std::max(0, p-1);
+    for (int ei=0; ei<eview.edge_count; ++ei) {
+        for (int k=1; k<=edgeNodes; ++k) pat.sequence.push_back({HONodeRole::Edge, ei, k, edgeNodes});
+    }
+
+    // Face interior nodes (Lagrange only, Serendipity typically omits 2D interior for p=3 but may include for higher)
+    if (kind == HighOrderKind::Lagrange) {
+        if (family == CellFamily::Triangle || family == CellFamily::Quad || family == CellFamily::Hex || family == CellFamily::Wedge || family == CellFamily::Pyramid) {
+            // Faces for 3D cells; for 2D, faces are edges so skip here
+            if (family == CellFamily::Triangle || family == CellFamily::Quad) {
+                // 2D: no face interior concept beyond element interior; handled separately if needed
+            } else {
+                auto fview = get_oriented_boundary_faces_view(family);
+                for (int fi=0; fi<fview.face_count; ++fi) {
+                    int b = fview.offsets[fi], e = fview.offsets[fi+1];
+                    int fv = e-b;
+                    if (fv == 3) {
+                        // Triangular face: barycentric i,j >=1, i+j <= p-2 (VTK ordering lexicographic)
+                        for (int i=1; i<=p-2; ++i) {
+                            for (int j=1; j<=p-1-i; ++j) {
+                                pat.sequence.push_back({HONodeRole::Face, fi, i, j});
+                            }
+                        }
+                    } else if (fv == 4) {
+                        // Quadrilateral face: grid i=1..p-1, j=1..p-1 (row-major)
+                        for (int i=1; i<=p-1; ++i) {
+                            for (int j=1; j<=p-1; ++j) {
+                                pat.sequence.push_back({HONodeRole::Face, fi, i, j});
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Volume interior nodes (Lagrange only): for Hex and Tetra/Wedge/Pyramid (scaffolding)
+    if (kind == HighOrderKind::Lagrange) {
+        if (family == CellFamily::Hex) {
+            for (int i=1;i<=p-1;++i)
+                for (int j=1;j<=p-1;++j)
+                    for (int k=1;k<=p-1;++k)
+                        pat.sequence.push_back({HONodeRole::Volume, i,j,k});
+        } else if (family == CellFamily::Tetra) {
+            // Barycentric volume: i,j,k >=1, i+j+k <= p-3 (approximate scaffolding)
+            for (int i=1;i<=p-3;++i)
+                for (int j=1;j<=p-2-i;++j)
+                    for (int k=1;k<=p-1-i-j;++k)
+                        pat.sequence.push_back({HONodeRole::Volume, i,j,k});
+        } else if (family == CellFamily::Wedge) {
+            // Two tri directions (i,j) with i+j<=p-2 and one linear k
+            for (int i=1;i<=p-2;++i)
+                for (int j=1;j<=p-1-i;++j)
+                    for (int k=1;k<=p-1;++k)
+                        pat.sequence.push_back({HONodeRole::Volume, i,j,k});
+        } else if (family == CellFamily::Pyramid) {
+            // TODO: VTK Lagrange pyramid volume node mapping is non-trivial; leave empty for scaffolding
+        }
+    }
+
+    return pat;
+}
+
+int CellTopology::infer_lagrange_order(CellFamily family, size_t node_count) {
+    // infer p from total nodes n for Lagrange elements
+    switch (family) {
+        case CellFamily::Triangle: {
+            // n = (p+1)(p+2)/2
+            // solve p^2 + 3p + 2 - 2n = 0
+            double D = 9.0 - 8.0*(2.0 - (double)node_count);
+            if (D < 0) return -1;
+            double p = (-3.0 + std::sqrt(D)) / 2.0;
+            int pi = (int)std::round(p);
+            if ((size_t)((pi+1)*(pi+2)/2) == node_count) return pi;
+            return -1;
+        }
+        case CellFamily::Quad: {
+            // n = (p+1)^2
+            int pi = (int)std::lround(std::sqrt((double)node_count)) - 1;
+            if ((size_t)((pi+1)*(pi+1)) == node_count) return pi;
+            return -1;
+        }
+        case CellFamily::Tetra: {
+            // n = (p+1)(p+2)(p+3)/6
+            for (int pi=2; pi<=12; ++pi) {
+                size_t n = (size_t)(pi+1)*(pi+2)*(pi+3)/6;
+                if (n == node_count) return pi;
+            }
+            return -1;
+        }
+        case CellFamily::Hex: {
+            // n = (p+1)^3
+            int pi = (int)std::lround(std::cbrt((double)node_count)) - 1;
+            if ((size_t)((pi+1)*(pi+1)*(pi+1)) == node_count) return pi;
+            return -1;
+        }
+        default:
+            return -1;
+    }
+}
+
+int CellTopology::infer_serendipity_order(CellFamily family, size_t node_count) {
+    // Best-effort formulas (2D serendipity): n = (p+1)^2 - (p-1)(p-3)
+    if (family == CellFamily::Quad) {
+        for (int pi=2; pi<=12; ++pi) {
+            size_t n = (size_t)((pi+1)*(pi+1) - (pi-1)*(pi-3));
+            if (n == node_count) return pi;
+        }
+        return -1;
+    }
+    // Other families TBD
+    return -1;
 }
 
 } // namespace svmp
