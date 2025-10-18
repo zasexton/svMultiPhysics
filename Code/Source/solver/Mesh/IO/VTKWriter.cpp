@@ -326,6 +326,49 @@ vtkSmartPointer<vtkPoints> VTKWriter::create_vtk_points(const MeshBase& mesh, Co
   return points;
 }
 
+// Helper: choose VTK cell type for a given family/order/count
+static int choose_vtk_type_for(const CellShape& shape, size_t n_vertices) {
+  // Linear
+  if (shape.order <= 1) {
+    switch (shape.family) {
+      case CellFamily::Line: return VTK_LINE;
+      case CellFamily::Triangle: return VTK_TRIANGLE;
+      case CellFamily::Quad: return VTK_QUAD;
+      case CellFamily::Tetra: return VTK_TETRA;
+      case CellFamily::Hex: return VTK_HEXAHEDRON;
+      case CellFamily::Wedge: return VTK_WEDGE;
+      case CellFamily::Pyramid: return VTK_PYRAMID;
+      case CellFamily::Polygon: return VTK_POLYGON;
+      case CellFamily::Polyhedron: return VTK_POLYHEDRON;
+      default: return VTK_POLYGON;
+    }
+  }
+
+  // Quadratic and higher (we key off vertex count to disambiguate variants)
+  switch (shape.family) {
+    case CellFamily::Line:
+      return (n_vertices >= 3) ? VTK_QUADRATIC_EDGE : VTK_LINE;
+    case CellFamily::Triangle:
+      return (n_vertices >= 6) ? VTK_QUADRATIC_TRIANGLE : VTK_TRIANGLE;
+    case CellFamily::Quad:
+      if (n_vertices >= 9) return VTK_BIQUADRATIC_QUAD; // with center node
+      if (n_vertices >= 8) return VTK_QUADRATIC_QUAD;    // 4 edge mids
+      return VTK_QUAD;
+    case CellFamily::Tetra:
+      return (n_vertices >= 10) ? VTK_QUADRATIC_TETRA : VTK_TETRA;
+    case CellFamily::Hex:
+      if (n_vertices >= 27) return VTK_TRIQUADRATIC_HEXAHEDRON; // 12 edge + 6 face + 1 center
+      if (n_vertices >= 20) return VTK_QUADRATIC_HEXAHEDRON;     // 12 edge mids
+      return VTK_HEXAHEDRON;
+    case CellFamily::Wedge:
+      return (n_vertices >= 15) ? VTK_QUADRATIC_WEDGE : VTK_WEDGE;
+    case CellFamily::Pyramid:
+      return (n_vertices >= 13) ? VTK_QUADRATIC_PYRAMID : VTK_PYRAMID;
+    default:
+      return VTK_POLYGON;
+  }
+}
+
 void VTKWriter::create_vtk_cells(const MeshBase& mesh, vtkDataSet* dataset) {
   vtkUnstructuredGrid* ugrid = vtkUnstructuredGrid::SafeDownCast(dataset);
   if (!ugrid) return;
@@ -336,8 +379,8 @@ void VTKWriter::create_vtk_cells(const MeshBase& mesh, vtkDataSet* dataset) {
     auto [vertices_ptr, n_vertices] = mesh.cell_vertices_span(static_cast<index_t>(c));
     const auto& shape = mesh.cell_shape(static_cast<index_t>(c));
 
-    // Get VTK cell type
-    int vtk_type = cellshape_to_vtk(shape);
+    // Get VTK cell type (consider higher-order variants via vertex count)
+    int vtk_type = choose_vtk_type_for(shape, n_vertices);
 
     // Create ID list for cell vertices
     vtkSmartPointer<vtkIdList> cell_vertices = vtkSmartPointer<vtkIdList>::New();
