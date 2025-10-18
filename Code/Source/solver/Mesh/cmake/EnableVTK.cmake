@@ -25,9 +25,38 @@
 if(MESH_ENABLE_VTK)
     if(USE_SYSTEM_VTK)
         # Use system-installed VTK
+        # Prefer distro-installed VTK over Conda when both are present.
+        # Conda VTK packages can be inconsistent (missing optional modules
+        # like IOFFMPEG) and cause hard errors during find_package().
+
+        # Temporarily ignore $CONDA_PREFIX in CMake's prefix search so we do not
+        # default to a Conda VTK. Restore the variable after the lookup.
+        set(_SVMP_OLD_IGNORE_PREFIX "${CMAKE_IGNORE_PREFIX_PATH}")
+        if(DEFINED ENV{CONDA_PREFIX} AND NOT "$ENV{CONDA_PREFIX}" STREQUAL "")
+            list(APPEND CMAKE_IGNORE_PREFIX_PATH "$ENV{CONDA_PREFIX}")
+            if(WIN32)
+                # On Windows, CMake packages often live under .../Library
+                list(APPEND CMAKE_IGNORE_PREFIX_PATH "$ENV{CONDA_PREFIX}/Library")
+            endif()
+            message(STATUS "EnableVTK: Ignoring Conda prefix for VTK lookup: $ENV{CONDA_PREFIX}")
+        endif()
+
+        # Also guard against VTK_DIR pointing into the Conda prefix
+        if(DEFINED VTK_DIR AND DEFINED ENV{CONDA_PREFIX})
+            string(FIND "${VTK_DIR}" "$ENV{CONDA_PREFIX}" _svmp_vtkdir_in_conda)
+            if(NOT _svmp_vtkdir_in_conda EQUAL -1)
+                message(STATUS "EnableVTK: VTK_DIR points into Conda prefix; ignoring it: ${VTK_DIR}")
+                unset(VTK_DIR CACHE)
+                unset(VTK_DIR)
+            endif()
+        endif()
+
         # Try to find VTK, catching any errors in VTK's config files
         set(VTK_FIND_ERROR FALSE)
         find_package(VTK QUIET)
+
+        # Restore previous ignore list to avoid affecting other packages (e.g., GTest)
+        set(CMAKE_IGNORE_PREFIX_PATH "${_SVMP_OLD_IGNORE_PREFIX}")
 
         if(VTK_FOUND)
             # Additional check: verify VTK libraries are actually accessible
