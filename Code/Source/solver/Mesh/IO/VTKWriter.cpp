@@ -58,6 +58,8 @@
 #include <stdexcept>
 #include <fstream>
 #include <sstream>
+#include <cmath>
+#include "../Topology/CellTopology.h"
 
 namespace svmp {
 
@@ -369,6 +371,122 @@ static int choose_vtk_type_for(const CellShape& shape, size_t n_vertices) {
   }
 }
 
+// Reorder arbitrary high-order connectivity into VTK expected ordering:
+// corners -> edge mids (topology edge view order) -> face mids (face view order) -> center
+// Assumptions:
+// - Corner vertices occupy the first 'num_corners' entries of the connectivity
+// - One edge midpoint per edge (quadratic); optional face midpoints and center for specific families
+// - For families with face mids and center (Hex27), we assign by geometric proximity
+static std::vector<vtkIdType> reorder_high_order_to_vtk(const MeshBase& mesh,
+                                                        index_t cell_id,
+                                                        const index_t* verts,
+                                                        size_t n_vertices,
+                                                        const CellShape& shape) {
+  const int dim = mesh.dim();
+  const auto& X = mesh.X_ref();
+  const auto get_pt = [&](index_t v)->std::array<double,3> {
+    std::array<double,3> p{0,0,0};
+    for (int d=0; d<dim; ++d) p[d] = X[v*dim + d];
+    return p;
+  };
+  auto dist2 = [&](const std::array<double,3>& a, const std::array<double,3>& b){
+    double dx=a[0]-b[0], dy=a[1]-b[1], dz=a[2]-b[2]; return dx*dx+dy*dy+dz*dz; };
+
+  const size_t nc = (shape.num_corners > 0) ? static_cast<size_t>(shape.num_corners) : n_vertices;
+  std::vector<vtkIdType> corners; corners.reserve(nc);
+  for (size_t i=0;i<nc && i<n_vertices;++i) corners.push_back(verts[i]);
+
+  std::vector<index_t> pool;
+  for (size_t i=nc;i<n_vertices;++i) pool.push_back(verts[i]);
+  std::vector<char> used(pool.size(), 0);
+  auto take_nearest = [&](const std::array<double,3>& target)->index_t {
+    double best = 1e300; int best_k = -1;
+    for (size_t k=0;k<pool.size();++k) if(!used[k]) {
+      auto p = get_pt(pool[k]); double d2 = dist2(p,target);
+      if (d2 < best) { best = d2; best_k = static_cast<int>(k); }
+    }
+    if (best_k < 0) return INVALID_INDEX;
+    used[best_k] = 1; return pool[best_k];
+  };
+
+  // Determine expected counts per family
+  size_t need_edge = 0, need_face = 0, need_center = 0;
+  switch (shape.family) {
+    case CellFamily::Triangle: need_edge = 3; break; // Tri6
+    case CellFamily::Quad:
+      if (n_vertices >= 9) { need_edge = 4; need_face = 1; }
+      else { need_edge = 4; }
+      break;
+    case CellFamily::Tetra: need_edge = 6; break; // Tet10
+    case CellFamily::Hex:
+      if (n_vertices >= 27) { need_edge = 12; need_face = 6; need_center = 1; }
+      else { need_edge = 12; }
+      break;
+    case CellFamily::Wedge: need_edge = 9; break;  // Wedge15
+    case CellFamily::Pyramid: need_edge = 8; break; // Pyr13
+    default: break;
+  }
+
+  need_edge = std::min(need_edge, pool.size());
+
+  // Edge midpoints in topology edge order
+  std::vector<vtkIdType> edge_mids; edge_mids.reserve(need_edge);
+  auto eview = CellTopology::get_edges_view(shape.family);
+  for (int ei=0; ei<eview.edge_count && edge_mids.size()<need_edge; ++ei) {
+    int li = eview.pairs_flat[2*ei+0];
+    int lj = eview.pairs_flat[2*ei+1];
+    if (li >= static_cast<int>(nc) || lj >= static_cast<int>(nc)) { continue; }
+    auto pa = get_pt(corners[li]);
+    auto pb = get_pt(corners[lj]);
+    std::array<double,3> mid{ (pa[0]+pb[0])*0.5, (pa[1]+pb[1])*0.5, (pa[2]+pb[2])*0.5 };
+    index_t pick = take_nearest(mid);
+    if (pick == INVALID_INDEX) break;
+    edge_mids.push_back(pick);
+  }
+
+  // Face midpoints in oriented face order (only for families that have them)
+  std::vector<vtkIdType> face_mids; face_mids.reserve(need_face);
+  if (need_face > 0) {
+    auto fview = CellTopology::get_oriented_boundary_faces_view(shape.family);
+    for (int fi=0; fi<fview.face_count && face_mids.size()<need_face; ++fi) {
+      int b = fview.offsets[fi], e = fview.offsets[fi+1];
+      std::array<double,3> cen{0,0,0}; int cnt=0;
+      for (int k=b; k<e; ++k) {
+        int lv = fview.indices[k]; if (lv>=static_cast<int>(nc)) continue;
+        auto p = get_pt(corners[lv]);
+        cen[0]+=p[0]; cen[1]+=p[1]; cen[2]+=p[2]; ++cnt;
+      }
+      if (cnt>0) { cen[0]/=cnt; cen[1]/=cnt; cen[2]/=cnt; }
+      index_t pick = take_nearest(cen);
+      if (pick == INVALID_INDEX) break;
+      face_mids.push_back(pick);
+    }
+  }
+
+  // Body center (if present)
+  std::vector<vtkIdType> rest;
+  for (size_t k=0;k<pool.size();++k) if(!used[k]) rest.push_back(pool[k]);
+  std::vector<vtkIdType> body_center;
+  if (need_center > 0 && !rest.empty()) {
+    // pick the point closest to cell centroid
+    std::array<double,3> c{0,0,0};
+    for (size_t i=0;i<nc;++i){ auto p=get_pt(corners[i]); c[0]+=p[0]; c[1]+=p[1]; c[2]+=p[2]; }
+    c[0]/=nc; c[1]/=nc; c[2]/=nc;
+    double best=1e300; vtkIdType id=-1;
+    for (auto v: rest){ auto p=get_pt(v); double d2=dist2(p,c); if(d2<best){best=d2; id=v;} }
+    if (id>=0) body_center.push_back(id);
+  }
+
+  std::vector<vtkIdType> out; out.reserve(n_vertices);
+  out.insert(out.end(), corners.begin(), corners.end());
+  out.insert(out.end(), edge_mids.begin(), edge_mids.end());
+  out.insert(out.end(), face_mids.begin(), face_mids.end());
+  out.insert(out.end(), body_center.begin(), body_center.end());
+  // Append any leftovers (best-effort) to keep connectivity length consistent
+  for (size_t k=0;k<pool.size();++k) if(!used[k]) out.push_back(pool[k]);
+  return out;
+}
+
 void VTKWriter::create_vtk_cells(const MeshBase& mesh, vtkDataSet* dataset) {
   vtkUnstructuredGrid* ugrid = vtkUnstructuredGrid::SafeDownCast(dataset);
   if (!ugrid) return;
@@ -382,10 +500,13 @@ void VTKWriter::create_vtk_cells(const MeshBase& mesh, vtkDataSet* dataset) {
     // Get VTK cell type (consider higher-order variants via vertex count)
     int vtk_type = choose_vtk_type_for(shape, n_vertices);
 
-    // Create ID list for cell vertices
+    // Create ID list for cell vertices (with optional high-order reordering)
     vtkSmartPointer<vtkIdList> cell_vertices = vtkSmartPointer<vtkIdList>::New();
-    for (size_t i = 0; i < n_vertices; ++i) {
-      cell_vertices->InsertNextId(vertices_ptr[i]);
+    if (n_vertices > static_cast<size_t>(shape.num_corners) && shape.num_corners > 0) {
+      auto reordered = reorder_high_order_to_vtk(mesh, static_cast<index_t>(c), vertices_ptr, n_vertices, shape);
+      for (auto vid : reordered) cell_vertices->InsertNextId(vid);
+    } else {
+      for (size_t i = 0; i < n_vertices; ++i) cell_vertices->InsertNextId(vertices_ptr[i]);
     }
 
     ugrid->InsertNextCell(vtk_type, cell_vertices);
