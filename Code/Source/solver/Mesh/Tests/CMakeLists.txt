@@ -18,6 +18,9 @@ endif()
 # Add Topology unit tests (header-only, no MPI)
 add_subdirectory(Unit/Topology)
 
+# Add IO unit tests (only when VTK is enabled and found)
+add_subdirectory(Unit/IO)
+
 # Future test subdirectories can be added here
 # add_subdirectory(Unit/Topology)
 # add_subdirectory(Unit/Geometry)
