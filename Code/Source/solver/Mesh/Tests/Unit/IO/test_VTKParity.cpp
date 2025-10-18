@@ -336,7 +336,7 @@ TEST(VTKParity, HighOrder_ReorderAndRoundTrip) {
     size_t expected_size = (size_t)nc;
     switch (cs.fam) {
       case CellFamily::Triangle: expected_size += 3; break;            // Tri6
-      case CellFamily::Quad: expected_size += (cs.variant?5:4); break; // Quad9 or Quad8
+      case CellFamily::Quad: expected_size += (cs.variant?5:4); break; // Quad9 (edges+center) or Quad8 (edges)
       case CellFamily::Tetra: expected_size += 6; break;               // Tet10
       case CellFamily::Hex: expected_size += (cs.variant?19:12); break;// Hex27 or Hex20
       case CellFamily::Wedge: expected_size += 9; break;               // Wedge15
@@ -361,13 +361,108 @@ TEST(VTKParity, HighOrder_ReorderAndRoundTrip) {
     std::sort(mids_orig.begin(), mids_orig.end());
     EXPECT_EQ(mids_read, mids_orig) << cs.name;
 
-    // For variants with a center, the last entry should be the center id we appended
-    if (center_id >= 0 && !(cs.fam==CellFamily::Hex && cs.variant==1)) {
-      EXPECT_EQ(conn_read.back(), center_id) << cs.name;
+    // Verify specific VTK mid-edge ordering and optional face/center positions
+    // Expected edge mid ids are corners offset + index in edge order
+    auto expect_edge_count = [&](int n){
+      for (int i=0;i<n;++i) ASSERT_LT((size_t)(nc+i), conn_read.size()) << cs.name;
+      for (int i=0;i<n;++i) EXPECT_EQ(conn_read[nc+i], (index_t)(nc+i)) << cs.name << " edge "<<i;
+    };
+    auto expect_face_mids = [&](const std::vector<int>& faceMidIdx){
+      for (size_t i=0;i<faceMidIdx.size();++i){
+        size_t pos = nc + (cs.fam==CellFamily::Hex?12:4) + i; // after edge mids
+        if (cs.fam==CellFamily::Quad) pos = nc + 4 + i; // not really used (no face mids for Quad9)
+        ASSERT_LT(pos, conn_read.size()) << cs.name;
+        EXPECT_EQ(conn_read[pos], (index_t)(nc + faceMidIdx[i])) << cs.name << " face "<<i;
+      }
+    };
+
+    switch (cs.fam) {
+      case CellFamily::Triangle: expect_edge_count(3); break; // Tri6: edges 0..2
+      case CellFamily::Quad:
+        expect_edge_count(4);
+        if (cs.variant==1) {
+          // Center last
+          EXPECT_EQ(conn_read.back(), (index_t)(nc+4)) << cs.name;
+        }
+        break;
+      case CellFamily::Tetra: expect_edge_count(6); break; // Tet10: edges 0..5
+      case CellFamily::Hex:
+        expect_edge_count(12);
+        if (cs.variant==1) {
+          // Face mids expected in order indices 12..17; center last (or penultimate if extra)
+          std::vector<int> faceIdx = {12,13,14,15,16,17};
+          expect_face_mids(faceIdx);
+          // center id
+          size_t lastPos = conn_read.size()-1;
+          if (conn_read.size()==(expected_size+1)) lastPos = conn_read.size()-2; // extra dup tolerated
+          EXPECT_EQ(conn_read[lastPos], (index_t)(nc+18)) << cs.name;
+        }
+        break;
+      case CellFamily::Wedge: expect_edge_count(9); break;  // Wedge15: edges 0..8
+      case CellFamily::Pyramid: expect_edge_count(8); break; // Pyr13: edges 0..7
+      default: break;
     }
   }
 }
 
 }} // namespace svmp::test
 
+#endif // MESH_HAS_VTK
+
+// -----------------------------------------------------------------------------
+// Future higher-than-quadratic parity (Lagrange/Serendipity) — disabled for now
+// -----------------------------------------------------------------------------
+// These tests document the exact expected mid-edge and face-internal node index
+// positions for higher-than-quadratic elements. They are disabled until the
+// writer/reader implement VTK Lagrange/Serendipity families.
+
+#ifdef MESH_HAS_VTK
+namespace svmp { namespace test {
+
+// Lagrange Triangle, order 3 (Tri10):
+// - 3 corners, 6 edge nodes (2 per edge), 1 interior face node
+// Expected VTK ordering after corners: edge nodes along (0-1), (1-2), (2-0) in parametric order, then 1 face node.
+TEST(VTKParity, DISABLED_Lagrange_Tri_Order3_FaceMapping) {
+  // Expected relative positions after 3 corners: 6 edge nodes + 1 face node
+  const int corners = 3;
+  const int edge_nodes = 6;
+  const int face_nodes = 1;
+  ASSERT_EQ(corners + edge_nodes + face_nodes, 10);
+  // TODO: when Lagrange Triangle writer is added, construct Tri10, write/read, then verify:
+  // - conn[corners + 0..1] belong to edge (0,1)
+  // - conn[corners + 2..3] belong to edge (1,2)
+  // - conn[corners + 4..5] belong to edge (2,0)
+  // - conn.back() is the face-interior node
+}
+
+// Lagrange Quadrilateral, order 3 (Quad16):
+// - 4 corners, 8 edge nodes (2 per edge), 4 interior face nodes (grid-like)
+// Expected VTK ordering after corners: edges (0-1),(1-2),(2-3),(3-0) each with 2 nodes; then 4 face nodes
+TEST(VTKParity, DISABLED_Lagrange_Quad_Order3_FaceMapping) {
+  const int corners = 4;
+  const int edge_nodes = 8;
+  const int face_nodes = 4;
+  ASSERT_EQ(corners + edge_nodes + face_nodes, 16);
+  // TODO: when Lagrange Quad writer is added, construct Quad16, write/read, then verify:
+  // - conn[4 + 0..1] edge (0,1)
+  // - conn[4 + 2..3] edge (1,2)
+  // - conn[4 + 4..5] edge (2,3)
+  // - conn[4 + 6..7] edge (3,0)
+  // - conn[12..15] are face-internal nodes in VTK row-major parametric ordering
+}
+
+// Serendipity Quadrilateral, order 3 (12 nodes):
+// - 4 corners, 8 edge nodes (2 per edge), no face interior nodes
+TEST(VTKParity, DISABLED_Serendipity_Quad_Order3_EdgeMapping) {
+  const int corners = 4;
+  const int edge_nodes = 8;
+  ASSERT_EQ(corners + edge_nodes, 12);
+  // TODO: when Serendipity Quad writer is added, construct 12-node serendipity quad, write/read, then verify:
+  // - conn[4 + 0..1] edge (0,1)
+  // - conn[4 + 2..3] edge (1,2)
+  // - conn[4 + 4..5] edge (2,3)
+  // - conn[4 + 6..7] edge (3,0)
+}
+
+}} // namespace svmp::test
 #endif // MESH_HAS_VTK
