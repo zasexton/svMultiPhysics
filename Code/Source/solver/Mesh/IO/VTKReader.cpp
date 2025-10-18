@@ -229,7 +229,20 @@ void VTKReader::extract_topology(
     std::array<index_t,2> cells = {{-1,-1}};
     CellShape shape;
   };
-  std::unordered_map<std::vector<index_t>, FaceAcc> face_map; // key: sorted vertex ids
+  // Hash for vector<index_t> keys (sorted vertex IDs). Marked noexcept to satisfy
+  // libstdc++ hashtable requirements for bucket index computation.
+  struct VecIndexHash {
+    size_t operator()(const std::vector<index_t>& v) const noexcept {
+      // 64-bit FNV-1a inspired + hash_combine
+      size_t h = 1469598103934665603ull;
+      for (index_t x : v) {
+        size_t k = std::hash<index_t>{}(x);
+        h ^= k + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+      }
+      return h;
+    }
+  };
+  std::unordered_map<std::vector<index_t>, FaceAcc, VecIndexHash> face_map; // key: sorted vertex ids
 
   // Process each cell
   for (vtkIdType c = 0; c < n_cells; ++c) {
