@@ -94,6 +94,32 @@ public:
   void migrate(const std::vector<rank_t>& new_owner_rank_per_cell);
   void rebalance(PartitionHint hint, const std::unordered_map<std::string,std::string>& options = {});
 
+  // ---- Partition quality metrics
+  struct PartitionMetrics {
+    // Load balance metrics
+    double load_imbalance_factor;  // Max_load / Avg_load - 1.0
+    size_t min_cells_per_rank;
+    size_t max_cells_per_rank;
+    size_t avg_cells_per_rank;
+
+    // Communication metrics
+    size_t total_edge_cuts;        // Number of cell-cell edges crossing ranks
+    size_t total_shared_faces;     // Number of faces shared between ranks
+    size_t total_ghost_cells;      // Total ghost cells across all ranks
+    double avg_neighbors_per_rank; // Average number of neighboring ranks
+
+    // Memory metrics
+    size_t min_memory_per_rank;    // Bytes
+    size_t max_memory_per_rank;    // Bytes
+    double memory_imbalance_factor;
+
+    // Migration metrics (if applicable)
+    size_t cells_to_migrate;       // Number of cells that would move
+    size_t migration_volume;       // Total bytes to transfer
+  };
+
+  PartitionMetrics compute_partition_quality() const;
+
   // ---- Parallel I/O
   static DistributedMesh load_parallel(const MeshIOOptions& opts, MPI_Comm comm);
   void save_parallel(const MeshIOOptions& opts) const;
@@ -158,6 +184,7 @@ private:
                             size_t bytes_per_entity, const ExchangePattern& pattern);
   void gather_shared_entities();
   void sync_ghost_metadata();
+  void synchronize_field_data(EntityKind kind, const std::string& field_name);
 };
 
 // ========================
