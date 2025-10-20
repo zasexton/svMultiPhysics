@@ -58,8 +58,6 @@ protected:
      * Creates a tet with 4 vertices and 1 cell. All 4 faces should be on the boundary.
      */
     MeshBase create_single_tet_mesh() {
-        MeshBase mesh(3, 4, 1);  // 3D, 4 vertices, 1 cell
-
         // Define vertices
         std::vector<real_t> X_ref = {
             0.0, 0.0, 0.0,  // Vertex 0
@@ -67,14 +65,17 @@ protected:
             0.0, 1.0, 0.0,  // Vertex 2
             0.0, 0.0, 1.0   // Vertex 3
         };
-        mesh.set_X_ref(X_ref);
 
         // Define cell connectivity (tetrahedron)
+        std::vector<offset_t> offs = {0, 4};
         std::vector<index_t> connectivity = {0, 1, 2, 3};
-        CellShape shape(CellFamily::Tetra, 1);  // Linear tet
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Tetra;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 4;
 
-        mesh.add_cell(connectivity, shape);
-
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, connectivity, shapes);
         return mesh;
     }
 
@@ -84,8 +85,6 @@ protected:
      * The shared face should be interior, other faces should be boundary.
      */
     MeshBase create_two_tet_mesh() {
-        MeshBase mesh(3, 5, 2);  // 3D, 5 vertices, 2 cells
-
         // Define vertices
         std::vector<real_t> X_ref = {
             0.0, 0.0, 0.0,  // Vertex 0
@@ -94,17 +93,22 @@ protected:
             0.0, 0.0, 1.0,  // Vertex 3
             0.0, 0.0, 2.0   // Vertex 4 (for second tet)
         };
-        mesh.set_X_ref(X_ref);
 
-        // Define cells
-        CellShape shape(CellFamily::Tetra, 1);
+        // Two cells with shared face (0,1,2)
+        std::vector<offset_t> offs = {0, 4, 8};
+        std::vector<index_t> connectivity = {
+            0, 1, 2, 3,   // First tet
+            0, 1, 2, 4    // Second tet
+        };
+        std::vector<CellShape> shapes(2);
+        for (int i = 0; i < 2; ++i) {
+            shapes[i].family = CellFamily::Tetra;
+            shapes[i].order = 1;
+            shapes[i].num_corners = 4;
+        }
 
-        // First tet: vertices 0, 1, 2, 3
-        mesh.add_cell({0, 1, 2, 3}, shape);
-
-        // Second tet: vertices 0, 1, 2, 4 (shares face 0-1-2 with first tet)
-        mesh.add_cell({0, 1, 2, 4}, shape);
-
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, connectivity, shapes);
         return mesh;
     }
 
@@ -112,20 +116,23 @@ protected:
      * @brief Create a simple triangle mesh (2D)
      */
     MeshBase create_single_triangle_mesh() {
-        MeshBase mesh(2, 3, 1);  // 2D, 3 vertices, 1 cell
-
         // Define vertices
         std::vector<real_t> X_ref = {
             0.0, 0.0,  // Vertex 0
             1.0, 0.0,  // Vertex 1
             0.0, 1.0   // Vertex 2
         };
-        mesh.set_X_ref(X_ref);
 
-        // Define cell connectivity (triangle)
-        CellShape shape(CellFamily::Triangle, 1);
-        mesh.add_cell({0, 1, 2}, shape);
+        // Single triangle
+        std::vector<offset_t> offs = {0, 3};
+        std::vector<index_t> connectivity = {0, 1, 2};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Triangle;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 3;
 
+        MeshBase mesh;
+        mesh.build_from_arrays(2, X_ref, offs, connectivity, shapes);
         return mesh;
     }
 };
@@ -151,8 +158,8 @@ TEST_F(BoundaryDetectorTest, SingleTetHasFourBoundaryFaces) {
     auto info = detector.detect_boundary();
 
     // A single tet has 4 faces, all should be on boundary
-    EXPECT_EQ(info.boundary_faces.size(), 4);
-    EXPECT_EQ(info.interior_faces.size(), 0);
+    EXPECT_EQ(info.boundary_entities.size(), 4);
+    EXPECT_EQ(info.interior_entities.size(), 0);
 }
 
 TEST_F(BoundaryDetectorTest, SingleTetHasFourBoundaryVertices) {
@@ -173,8 +180,8 @@ TEST_F(BoundaryDetectorTest, TwoTetsShareInteriorFace) {
 
     // 2 tets have 8 faces total, but share 1 face
     // So: 7 unique faces, 6 boundary + 1 interior
-    EXPECT_EQ(info.boundary_faces.size(), 6);
-    EXPECT_EQ(info.interior_faces.size(), 1);
+    EXPECT_EQ(info.boundary_entities.size(), 6);
+    EXPECT_EQ(info.interior_entities.size(), 1);
 }
 
 // ==========================================
@@ -188,10 +195,10 @@ TEST_F(BoundaryDetectorTest, BoundaryFacesHaveOrientation) {
     auto info = detector.detect_boundary();
 
     // Each boundary face should have oriented vertices
-    EXPECT_EQ(info.oriented_boundary_faces.size(), info.boundary_faces.size());
+    EXPECT_EQ(info.oriented_boundary_entities.size(), info.boundary_entities.size());
 
     // Each face should have 3 vertices (triangular)
-    for (const auto& oriented_verts : info.oriented_boundary_faces) {
+    for (const auto& oriented_verts : info.oriented_boundary_entities) {
         EXPECT_EQ(oriented_verts.size(), 3);
     }
 }
@@ -208,7 +215,7 @@ TEST_F(BoundaryDetectorTest, ChainComplexMatchesIncidenceCounting) {
     auto chain_boundary = detector.detect_boundary_chain_complex();
 
     // Both methods should find the same number of boundary faces
-    EXPECT_EQ(chain_boundary.size(), info.boundary_faces.size());
+    EXPECT_EQ(chain_boundary.size(), info.boundary_entities.size());
 }
 
 // ==========================================
@@ -233,7 +240,7 @@ TEST_F(BoundaryDetectorTest, ManifoldMeshHasNoNonManifoldFaces) {
     auto info = detector.detect_boundary();
 
     EXPECT_FALSE(info.has_nonmanifold());
-    EXPECT_EQ(info.nonmanifold_faces.size(), 0);
+    EXPECT_EQ(info.nonmanifold_entities.size(), 0);
 }
 
 // ==========================================
@@ -248,7 +255,7 @@ TEST_F(BoundaryDetectorTest, SingleTriangleHasBoundary) {
 
     EXPECT_TRUE(info.has_boundary());
     // A single triangle has 3 edges, all should be on boundary
-    EXPECT_EQ(info.boundary_faces.size(), 3);
+    EXPECT_EQ(info.boundary_entities.size(), 3);
 }
 
 TEST_F(BoundaryDetectorTest, TriangleBoundaryEdgesHaveTwoVertices) {
@@ -258,7 +265,7 @@ TEST_F(BoundaryDetectorTest, TriangleBoundaryEdgesHaveTwoVertices) {
     auto info = detector.detect_boundary();
 
     // Each boundary edge should have 2 vertices
-    for (const auto& oriented_verts : info.oriented_boundary_faces) {
+    for (const auto& oriented_verts : info.oriented_boundary_entities) {
         EXPECT_EQ(oriented_verts.size(), 2);
     }
 }
