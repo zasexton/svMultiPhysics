@@ -15,17 +15,25 @@ else()
     message(STATUS "Skipping Unit/Core tests (MPI not enabled or not found)")
 endif()
 
-# Add Topology unit tests (header-only, no MPI)
+# Add Topology unit tests (no MPI)
 add_subdirectory(Unit/Topology)
+
+# Add Geometry tests (no MPI)
+add_subdirectory(Unit/Geometry)
+
+# Add Boundary tests (no MPI)
+add_subdirectory(Unit/Boundary)
 
 # Add IO unit tests (only when VTK is enabled and found)
 add_subdirectory(Unit/IO)
+
 
 # Future test subdirectories can be added here
 # add_subdirectory(Unit/Topology)
 # add_subdirectory(Unit/Geometry)
 # add_subdirectory(Unit/Fields)
 # add_subdirectory(Unit/IO)
+
 # add_subdirectory(Unit/Validation)
 # add_subdirectory(Integration)
 # add_subdirectory(Performance)
