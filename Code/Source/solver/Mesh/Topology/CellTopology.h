@@ -37,6 +37,29 @@
 #include <array>
 #include <stdexcept>
 
+/*
+ * Quick Reference: Lagrange Total Node Counts (order p)
+ *
+ * - Line     : (p+1)
+ * - Triangle : (p+1)(p+2)/2
+ * - Quad     : (p+1)^2   (Serendipity common: 4 + 4*(p-1)  → Q8, Q12, ...)
+ * - Tetra    : (p+1)(p+2)(p+3)/6
+ * - Hex      : (p+1)^3   (Serendipity common: p=2 → 20; higher p omit interior nodes)
+ * - Wedge    : (p+1)(p+1)(p+2)/2
+ * - Pyramid  : sum_{m=1}^{p+1} m^2 = (p+1)(p+2)(2p+3)/6
+ *
+ * Interior node counts (p ≥ 2):
+ * - Edge     : (p-1) per edge
+ * - Face Tri : (p-1)(p-2)/2
+ * - Face Quad: (p-1)^2
+ * - Vol Hex  : (p-1)^3
+ * - Vol Tetra: (p-1)(p-2)(p-3)/6
+ * - Vol Wedge: (p-1) * ((p-1)(p-2)/2)
+ * - Vol Pyramid: (p-2)(p-1)(2p-3)/6
+ *
+ * These counts match VTK Lagrange families and the enumeration in high_order_pattern().
+ */
+
 namespace svmp {
 
 /**
@@ -131,6 +154,17 @@ public:
         int idx0 = 0, idx1 = 0, idx2 = 0;
     };
 
+
+    // Lagrange Interior Node Counts (p >= 2)
+    // - Edges: each topology edge contributes (p-1) interior nodes.
+    // - Faces: triangular face interior = (p-1)(p-2)/2; quadrilateral face interior = (p-1)^2.
+    // - Volumes:
+    //   * Hex:    (p-1)^3
+    //   * Tetra:  (p-1)(p-2)(p-3)/6
+    //   * Wedge:  (p-1) * ( (p-1)(p-2)/2 )
+    //   * Pyramid:(p-2)(p-1)(2p-3)/6
+    // These counts match the VTK Lagrange families and our high_order_pattern enumeration.
+
     struct HighOrderPattern {
         HighOrderKind kind = HighOrderKind::Lagrange;
         int order = 2;
@@ -212,6 +246,10 @@ public:
      * @brief Get face-to-edge connectivity for a cell type
      *
      * Returns which edges form each face (useful for face traversal).
+     * The face indexing used here matches get_oriented_boundary_faces_view(family)
+     * when available; otherwise it matches get_boundary_faces_canonical_view(family).
+     * For 2D families (Triangle, Quad), each "face" is an edge, so each entry
+     * contains a single edge index.
      *
      * @param family Cell type
      * @return Vector where element i contains edge indices forming face i

@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <unordered_map>
 
 namespace svmp {
 namespace {
@@ -39,6 +40,7 @@ namespace {
 
 // Tetrahedron: oriented faces (outward, right-hand rule)
 // Faces: {1,2,3}, {0,3,2}, {0,1,3}, {0,2,1}
+// Reference: VTK tetrahedron corner/face ordering (vtkTetra), VTK File Formats doc.
 constexpr index_t TET_FACES_ORIENTED_IDX[] = {
     1,2,3,  0,3,2,  0,1,3,  0,2,1
 };
@@ -52,6 +54,7 @@ constexpr index_t TET_EDGES_FLAT[] = {
 // Hexahedron: oriented faces (outward, right-hand rule)
 // Chosen to ensure adjacent faces traverse shared edges in opposite directions.
 // Faces: bottom (0,3,2,1), top (4,5,6,7), sides (0,1,5,4), (1,2,6,5), (2,3,7,6), (3,0,4,7)
+// Reference: VTK hexahedron corner/face ordering (vtkHexahedron), VTK File Formats doc.
 constexpr index_t HEX_FACES_ORIENTED_IDX[] = {
     0,3,2,1,  4,5,6,7,  0,1,5,4,  1,2,6,5,  2,3,7,6,  3,0,4,7
 };
@@ -66,6 +69,7 @@ constexpr index_t HEX_EDGES_FLAT[] = {
 
 // =========================
 // Triangle (2D cell) faces (edges) oriented CCW
+// Reference: VTK triangle (vtkTriangle), edges oriented CCW.
 constexpr index_t TRI_FACES_ORIENTED_IDX[] = {
     0,1,  1,2,  2,0
 };
@@ -78,6 +82,7 @@ constexpr index_t TRI_EDGES_FLAT[] = {
 
 // =========================
 // Quad (2D cell) faces (edges) oriented CCW
+// Reference: VTK quad (vtkQuad), edges oriented CCW.
 constexpr index_t QUAD_FACES_ORIENTED_IDX[] = {
     0,1,  1,2,  2,3,  3,0
 };
@@ -91,6 +96,7 @@ constexpr index_t QUAD_EDGES_FLAT[] = {
 // =========================
 // Wedge (triangular prism) oriented faces
 // Faces: bottom (0,2,1), top (3,4,5), sides (0,1,4,3), (1,2,5,4), (2,0,3,5)
+// Reference: VTK wedge (vtkWedge) face ordering and orientation.
 constexpr index_t WEDGE_FACES_ORIENTED_IDX[] = {
     0,2,1,   3,4,5,   0,1,4,3,   1,2,5,4,   2,0,3,5
 };
@@ -106,6 +112,7 @@ constexpr index_t WEDGE_EDGES_FLAT[] = {
 // =========================
 // Pyramid oriented faces
 // Base (0,1,2,3), sides: (0,4,1), (1,4,2), (2,4,3), (3,4,0)
+// Reference: VTK pyramid (vtkPyramid) face ordering and orientation.
 constexpr index_t PYR_FACES_ORIENTED_IDX[] = {
     0,1,2,3,   0,4,1,   1,4,2,   2,4,3,   3,4,0
 };
@@ -651,19 +658,82 @@ std::vector<index_t> CellTopology::HighOrderOrdering::assemble_quadratic_pyramid
 
 std::vector<std::vector<int>> CellTopology::get_face_edges(CellFamily family) {
     // Face-to-edge connectivity (which edges bound each face)
-    // This is useful for face traversal algorithms
-    switch (family) {
-        case CellFamily::Tetra:
-            return {{0, 1, 2}, {0, 3, 4}, {1, 4, 5}, {2, 3, 5}};
-        case CellFamily::Hex:
-            return {{0, 1, 2, 3}, {4, 5, 6, 7}, {0, 4, 8, 9}, {2, 6, 10, 11}, {3, 7, 8, 11}, {1, 5, 9, 10}};
-        case CellFamily::Triangle:
-            return {{0}, {1}, {2}};
-        case CellFamily::Quad:
-            return {{0}, {1}, {2}, {3}};
-        default:
-            throw std::runtime_error("Face-to-edge connectivity not implemented for this cell type");
+    // Implementation derives mapping directly from the oriented (preferred) or canonical face views
+    // and the edge view, avoiding hard-coded tables.
+    // Reference for face orientation/ordering: VTK cell definitions (vtkTetra, vtkHexahedron,
+    // vtkWedge, vtkPyramid, vtkTriangle, vtkQuad). See VTK Doxygen and the VTK File Formats
+    // documentation for the expected corner ordering and outward face orientation.
+    // This method ensures the mapping stays consistent with the tables above.
+
+    // Try to use oriented face view; if unavailable, use canonical view.
+    FaceListView fview = get_oriented_boundary_faces_view(family);
+    bool used_oriented = true;
+    if (!(fview.indices && fview.offsets && fview.face_count > 0)) {
+        fview = get_boundary_faces_canonical_view(family);
+        used_oriented = false;
     }
+    // Get edges view
+    EdgeListView eview = get_edges_view(family);
+    if (!(fview.indices && fview.offsets && fview.face_count > 0 && eview.pairs_flat && eview.edge_count > 0)) {
+        // 2D families (Triangle/Quad) still have oriented/canonical face views and edges
+        // If we cannot get views, fall back to previous behavior
+        switch (family) {
+            case CellFamily::Triangle: return {{0}, {1}, {2}}; // faces are edges in 2D
+            case CellFamily::Quad:     return {{0}, {1}, {2}, {3}};
+            default:
+                throw std::runtime_error("Face-to-edge connectivity not available for this cell type");
+        }
+    }
+
+    // Build map from undirected edge key -> edge index
+    std::unordered_map<long long, int> edge_map;
+    edge_map.reserve(static_cast<size_t>(eview.edge_count) * 2);
+    auto pack = [](index_t a, index_t b) -> long long {
+        index_t lo = std::min(a,b);
+        index_t hi = std::max(a,b);
+        return (static_cast<long long>(lo) << 32) | static_cast<unsigned long long>(static_cast<uint32_t>(hi));
+    };
+    for (int ei = 0; ei < eview.edge_count; ++ei) {
+        index_t a = eview.pairs_flat[2*ei+0];
+        index_t b = eview.pairs_flat[2*ei+1];
+        edge_map.emplace(pack(a,b), ei);
+    }
+
+    std::vector<std::vector<int>> face2edges;
+    face2edges.resize(static_cast<size_t>(fview.face_count));
+
+    for (int fi = 0; fi < fview.face_count; ++fi) {
+        int b = fview.offsets[fi];
+        int e = fview.offsets[fi+1];
+        int fv = e - b;
+        // Handle 2D faces specially: they are edges; return the single matching edge index
+        if (fv == 2) {
+            index_t u = fview.indices[b+0];
+            index_t v = fview.indices[b+1];
+            auto it = edge_map.find(pack(u,v));
+            if (it == edge_map.end()) {
+                throw std::runtime_error("Face-to-edge mapping failed: edge not found (2D)");
+            }
+            face2edges[fi] = { it->second };
+            continue;
+        }
+
+        // For 3D faces (tri or quad), walk the face loop and map each boundary edge
+        std::vector<int> edges_for_face;
+        edges_for_face.reserve(fv);
+        for (int k = 0; k < fv; ++k) {
+            index_t u = fview.indices[b + k];
+            index_t v = fview.indices[b + ((k + 1) % fv)];
+            auto it = edge_map.find(pack(u,v));
+            if (it == edge_map.end()) {
+                throw std::runtime_error("Face-to-edge mapping failed: edge not found (3D)");
+            }
+            edges_for_face.push_back(it->second);
+        }
+        face2edges[fi] = std::move(edges_for_face);
+    }
+
+    return face2edges;
 }
 
 // ==========================================
@@ -723,19 +793,16 @@ std::vector<std::vector<index_t>> CellTopology::hex_faces_canonical() {
 }
 
 std::vector<std::vector<index_t>> CellTopology::hex_faces_oriented() {
-    // Right-hand rule ordering (outward normals), consistent with
-    // dimension-agnostic orthotope rules and VTK-compatible face loops.
-    // One valid outward set:
-    //  - bottom: (0,1,2,3)
-    //  - top   : (4,7,6,5)
-    //  - sides : (0,1,5,4), (1,2,6,5), (2,3,7,6), (3,0,4,7)
+    // Right-hand rule ordering (outward normals), matching the static
+    // HEX_FACES_ORIENTED_IDX/OFF tables used by get_oriented_boundary_faces_view.
+    // Reference: VTK hexahedron corner and face ordering (vtkHexahedron).
     return {
-        {0, 1, 2, 3},  // bottom (z-)
-        {4, 7, 6, 5},  // top (z+)
-        {0, 1, 5, 4},  // front (y-)
-        {1, 2, 6, 5},  // right (x+)
-        {2, 3, 7, 6},  // back  (y+)
-        {3, 0, 4, 7}   // left  (x-)
+        {0,3,2,1},  // bottom (z-)
+        {4,5,6,7},  // top (z+)
+        {0,1,5,4},  // front
+        {1,2,6,5},  // right
+        {2,3,7,6},  // back
+        {3,0,4,7}   // left
     };
 }
 
@@ -921,7 +988,7 @@ CellTopology::HighOrderPattern CellTopology::high_order_pattern(CellFamily famil
 
     // Face interior nodes (Lagrange only, Serendipity typically omits 2D interior for p=3 but may include for higher)
     if (kind == HighOrderKind::Lagrange) {
-        if (family == CellFamily::Triangle || family == CellFamily::Quad || family == CellFamily::Hex || family == CellFamily::Wedge || family == CellFamily::Pyramid) {
+        if (family == CellFamily::Triangle || family == CellFamily::Quad || family == CellFamily::Tetra || family == CellFamily::Hex || family == CellFamily::Wedge || family == CellFamily::Pyramid) {
             // Faces for 3D cells; for 2D, faces are edges so skip here
             if (family == CellFamily::Triangle || family == CellFamily::Quad) {
                 // 2D: no face interior concept beyond element interior; handled separately if needed
@@ -958,19 +1025,36 @@ CellTopology::HighOrderPattern CellTopology::high_order_pattern(CellFamily famil
                     for (int k=1;k<=p-1;++k)
                         pat.sequence.push_back({HONodeRole::Volume, i,j,k});
         } else if (family == CellFamily::Tetra) {
-            // Barycentric volume: i,j,k >=1, i+j+k <= p-3 (approximate scaffolding)
+            // VTK Lagrange tetrahedron interior nodes (barycentric enumeration):
+            // i, j, k >= 1 with i + j + k <= p - 1 - 1 (equivalently, all four barycentric
+            // coordinates >= 1). Total count = (p-1)(p-2)(p-3)/6.
             for (int i=1;i<=p-3;++i)
                 for (int j=1;j<=p-2-i;++j)
                     for (int k=1;k<=p-1-i-j;++k)
                         pat.sequence.push_back({HONodeRole::Volume, i,j,k});
         } else if (family == CellFamily::Wedge) {
-            // Two tri directions (i,j) with i+j<=p-2 and one linear k
+            // VTK Lagrange wedge interior nodes: two triangular directions (i,j) with
+            // 1 <= i <= p-2, 1 <= j <= p-1-i (matching triangular face interior nodes),
+            // and one linear index k = 1..p-1 along the third axis.
             for (int i=1;i<=p-2;++i)
                 for (int j=1;j<=p-1-i;++j)
                     for (int k=1;k<=p-1;++k)
                         pat.sequence.push_back({HONodeRole::Volume, i,j,k});
         } else if (family == CellFamily::Pyramid) {
-            // TODO: VTK Lagrange pyramid volume node mapping is non-trivial; leave empty for scaffolding
+            // VTK Lagrange pyramid interior (volume) nodes:
+            // Layered enumeration along the vertical index k = 1..p-2. At each layer k, the
+            // in-layer grid has size n = (p+1 - k) and strictly interior points are (n-2)^2.
+            // Total interior nodes sum to (p-2)(p-1)(2p-3)/6, matching
+            // N_total - [corners + edge + face] where N_total = sum_{m=1}^{p+1} m^2.
+            // Reference: VTK vtkLagrangePyramid ordering and counts.
+            for (int k=1; k<=p-2; ++k) {
+                int n = (p + 1) - k; // grid size at this layer
+                for (int i=1; i<=n-2; ++i) {
+                    for (int j=1; j<=n-2; ++j) {
+                        pat.sequence.push_back({HONodeRole::Volume, i, j, k});
+                    }
+                }
+            }
         }
     }
 
@@ -983,7 +1067,7 @@ int CellTopology::infer_lagrange_order(CellFamily family, size_t node_count) {
         case CellFamily::Triangle: {
             // n = (p+1)(p+2)/2
             // solve p^2 + 3p + 2 - 2n = 0
-            double D = 9.0 - 8.0*(2.0 - (double)node_count);
+            double D = 1.0 + 8.0*(double)node_count;
             if (D < 0) return -1;
             double p = (-3.0 + std::sqrt(D)) / 2.0;
             int pi = (int)std::round(p);
@@ -1010,21 +1094,48 @@ int CellTopology::infer_lagrange_order(CellFamily family, size_t node_count) {
             if ((size_t)((pi+1)*(pi+1)*(pi+1)) == node_count) return pi;
             return -1;
         }
+        case CellFamily::Wedge: {
+            // Triangular prism (wedge): n = (p+1)*(p+1)*(p+2)/2
+            // Reference: VTK Lagrange wedge point count; also consistent with CellShape::expected_vertices()
+            for (int pi=2; pi<=12; ++pi) {
+                size_t n = (size_t)(pi+1)*(pi+1)*(pi+2)/2;
+                if (n == node_count) return pi;
+            }
+            // Also allow linear/quadratic quick matches
+            if (node_count == 6) return 1;
+            if (node_count == 18) return 2;
+            return -1;
+        }
+        case CellFamily::Pyramid: {
+            // Lagrange pyramid total nodes: N = sum_{m=1}^{p+1} m^2 = (p+1)(p+2)(2p+3)/6
+            for (int pi=1; pi<=20; ++pi) {
+                size_t n = (size_t)(pi+1)*(pi+2)*(2*pi+3)/6;
+                if (n == node_count) return pi;
+            }
+            // Quadratic classic (non-Lagrange) special case: 13 nodes (no base center). Accept as p=2.
+            if (node_count == 13) return 2;
+            return -1;
+        }
         default:
             return -1;
     }
 }
 
 int CellTopology::infer_serendipity_order(CellFamily family, size_t node_count) {
-    // Best-effort formulas (2D serendipity): n = (p+1)^2 - (p-1)(p-3)
+    // Tighten handling for Quad serendipity: recognize common Q8 and Q12 only.
+    // Reference: standard 2D serendipity families omit interior nodes:
+    //  - p=2: 8 nodes (edge midpoints only)
+    //  - p=3: 12 nodes (two per edge)
     if (family == CellFamily::Quad) {
-        for (int pi=2; pi<=12; ++pi) {
-            size_t n = (size_t)((pi+1)*(pi+1) - (pi-1)*(pi-3));
-            if (n == node_count) return pi;
+        // Common 2D serendipity pattern: corners + (p-1) nodes per edge, no interior nodes.
+        // Node count n = 4 + 4*(p-1) for p >= 2.
+        if (node_count >= 8 && (node_count - 4) % 4 == 0) {
+            int pi = (int)((node_count - 4)/4) + 1;
+            if (pi >= 2 && (size_t)(4 + 4*(pi-1)) == node_count) return pi;
         }
         return -1;
     }
-    // Other families TBD
+    // Other families: unavailable
     return -1;
 }
 
