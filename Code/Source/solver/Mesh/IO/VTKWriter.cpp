@@ -329,6 +329,12 @@ vtkSmartPointer<vtkPoints> VTKWriter::create_vtk_points(const MeshBase& mesh, Co
 }
 
 // Helper: choose VTK cell type for a given family/order/count
+// Inference policy
+// - Prefer Lagrange: infer p from total node count via CellTopology::infer_lagrange_order.
+//   If p>2, use explicit VTK_LAGRANGE_* types where available.
+// - If Lagrange inference is not a match, optionally infer Serendipity (currently Quad only)
+//   via CellTopology::infer_serendipity_order, and pick the closest VTK quadratic/biquadratic.
+// - Otherwise, fall back to classic linear/quadratic variants based on node count thresholds.
 static int choose_vtk_type_for(const CellShape& shape, size_t n_vertices) {
   // Linear
   if (shape.order <= 1) {

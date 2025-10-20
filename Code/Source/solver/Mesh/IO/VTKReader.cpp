@@ -255,6 +255,10 @@ void VTKReader::extract_topology(
     int vtk_type = cell->GetCellType();
     CellShape shape = vtk_to_cellshape(vtk_type);
     // For Lagrange/Serendipity, infer order from node count
+    // Inference policy
+    // - If VTK reports a Lagrange type, prefer Lagrange and infer p from node count.
+    // - Else if a Serendipity type is reported, infer p from node count using serendipity rules.
+    // - Otherwise, leave the default order from the vtk_to_order_map_ (typically linear/quadratic).
     vtkIdType n_pts = cell->GetNumberOfPoints();
     if (vtk_lagrange_types_.count(vtk_type)) {
       int p = CellTopology::infer_lagrange_order(shape.family, static_cast<size_t>(n_pts));
