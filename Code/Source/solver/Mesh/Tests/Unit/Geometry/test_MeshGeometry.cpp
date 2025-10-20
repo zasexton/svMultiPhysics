@@ -56,19 +56,24 @@ protected:
      * @brief Create a unit tetrahedron mesh
      */
     MeshBase create_unit_tet_mesh() {
-        MeshBase mesh(3, 4, 1);
-
+        // Coordinates for 4 vertices in 3D
         std::vector<real_t> X_ref = {
             0.0, 0.0, 0.0,  // Vertex 0
             1.0, 0.0, 0.0,  // Vertex 1
             0.0, 1.0, 0.0,  // Vertex 2
             0.0, 0.0, 1.0   // Vertex 3
         };
-        mesh.set_X_ref(X_ref);
 
-        CellShape shape(CellFamily::Tetra, 1);
-        mesh.add_cell({0, 1, 2, 3}, shape);
+        // Single tetrahedron connectivity
+        std::vector<offset_t> offs = {0, 4};
+        std::vector<index_t> conn = {0, 1, 2, 3};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Tetra;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 4;
 
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, conn, shapes);
         return mesh;
     }
 
@@ -76,18 +81,23 @@ protected:
      * @brief Create a unit triangle mesh (2D)
      */
     MeshBase create_unit_triangle_mesh() {
-        MeshBase mesh(2, 3, 1);
-
+        // Coordinates for 3 vertices in 2D (z is omitted for 2D meshes)
         std::vector<real_t> X_ref = {
             0.0, 0.0,  // Vertex 0
             1.0, 0.0,  // Vertex 1
             0.0, 1.0   // Vertex 2
         };
-        mesh.set_X_ref(X_ref);
 
-        CellShape shape(CellFamily::Triangle, 1);
-        mesh.add_cell({0, 1, 2}, shape);
+        // Single triangle connectivity
+        std::vector<offset_t> offs = {0, 3};
+        std::vector<index_t> conn = {0, 1, 2};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Triangle;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 3;
 
+        MeshBase mesh;
+        mesh.build_from_arrays(2, X_ref, offs, conn, shapes);
         return mesh;
     }
 
@@ -281,13 +291,18 @@ TEST_F(MeshGeometryTest, TetBoundingBox) {
 // ==========================================
 
 TEST_F(MeshGeometryTest, ComputeNormalFromVerticesTriangle) {
-    MeshBase mesh(3, 3, 0);
+    // 3D coordinates for 3 vertices (triangle)
     std::vector<real_t> X_ref = {
         0.0, 0.0, 0.0,  // Vertex 0
         1.0, 0.0, 0.0,  // Vertex 1
         0.0, 1.0, 0.0   // Vertex 2
     };
-    mesh.set_X_ref(X_ref);
+    // Build a mesh with coordinates only (no cells)
+    std::vector<offset_t> offs0 = {0};
+    std::vector<index_t> empty_conn;
+    std::vector<CellShape> empty_shapes;
+    MeshBase mesh;
+    mesh.build_from_arrays(3, X_ref, offs0, empty_conn, empty_shapes);
 
     std::vector<index_t> oriented_verts = {0, 1, 2};
 
@@ -300,13 +315,16 @@ TEST_F(MeshGeometryTest, ComputeNormalFromVerticesTriangle) {
 }
 
 TEST_F(MeshGeometryTest, ComputeAreaFromVerticesTriangle) {
-    MeshBase mesh(3, 3, 0);
     std::vector<real_t> X_ref = {
         0.0, 0.0, 0.0,  // Vertex 0
         1.0, 0.0, 0.0,  // Vertex 1
         0.0, 1.0, 0.0   // Vertex 2
     };
-    mesh.set_X_ref(X_ref);
+    std::vector<offset_t> offs0 = {0};
+    std::vector<index_t> empty_conn;
+    std::vector<CellShape> empty_shapes;
+    MeshBase mesh;
+    mesh.build_from_arrays(3, X_ref, offs0, empty_conn, empty_shapes);
 
     std::vector<index_t> oriented_verts = {0, 1, 2};
 
@@ -317,13 +335,16 @@ TEST_F(MeshGeometryTest, ComputeAreaFromVerticesTriangle) {
 }
 
 TEST_F(MeshGeometryTest, ComputeCentroidFromVertices) {
-    MeshBase mesh(3, 3, 0);
     std::vector<real_t> X_ref = {
         0.0, 0.0, 0.0,  // Vertex 0
         3.0, 0.0, 0.0,  // Vertex 1
         0.0, 3.0, 0.0   // Vertex 2
     };
-    mesh.set_X_ref(X_ref);
+    std::vector<offset_t> offs0 = {0};
+    std::vector<index_t> empty_conn;
+    std::vector<CellShape> empty_shapes;
+    MeshBase mesh;
+    mesh.build_from_arrays(3, X_ref, offs0, empty_conn, empty_shapes);
 
     std::vector<index_t> verts = {0, 1, 2};
 
@@ -334,12 +355,15 @@ TEST_F(MeshGeometryTest, ComputeCentroidFromVertices) {
 }
 
 TEST_F(MeshGeometryTest, ComputeEdgeNormalFromVertices2D) {
-    MeshBase mesh(2, 2, 0);
     std::vector<real_t> X_ref = {
         0.0, 0.0,  // Vertex 0
         1.0, 0.0   // Vertex 1
     };
-    mesh.set_X_ref(X_ref);
+    std::vector<offset_t> offs0 = {0};
+    std::vector<index_t> empty_conn;
+    std::vector<CellShape> empty_shapes;
+    MeshBase mesh;
+    mesh.build_from_arrays(2, X_ref, offs0, empty_conn, empty_shapes);
 
     std::vector<index_t> oriented_verts = {0, 1};
 

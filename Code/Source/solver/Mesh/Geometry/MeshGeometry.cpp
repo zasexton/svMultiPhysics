@@ -29,6 +29,7 @@
  */
 
 #include "MeshGeometry.h"
+#include "PolyGeometry.h"
 #include "../Core/MeshBase.h"
 #include <cmath>
 #include <algorithm>
@@ -129,22 +130,12 @@ std::array<real_t,3> MeshGeometry::face_normal_unnormalized(const MeshBase& mesh
       normal[1] = p1[0] - p0[0];
     }
   } else if (spatial_dim == 3) {
-    // 3D: cross product of two edges
+    // 3D: robust Newell normal over the polygon vertices
     if (n_vertices >= 3) {
-      std::array<real_t,3> p0 = {{0,0,0}};
-      std::array<real_t,3> p1 = {{0,0,0}};
-      std::array<real_t,3> p2 = {{0,0,0}};
-      for (int d = 0; d < spatial_dim; ++d) {
-        p0[d] = coords[vertices_ptr[0] * spatial_dim + d];
-        p1[d] = coords[vertices_ptr[1] * spatial_dim + d];
-        p2[d] = coords[vertices_ptr[2] * spatial_dim + d];
-      }
-      std::array<real_t,3> e1, e2;
-      for (int d = 0; d < 3; ++d) {
-        e1[d] = p1[d] - p0[d];
-        e2[d] = p2[d] - p0[d];
-      }
-      normal = cross(e1, e2);
+      std::vector<index_t> ids;
+      ids.reserve(n_vertices);
+      for (size_t i = 0; i < n_vertices; ++i) ids.push_back(vertices_ptr[i]);
+      normal = PolyGeometry::polygon_normal(mesh, ids, cfg);
     }
   }
 
@@ -270,29 +261,12 @@ real_t MeshGeometry::face_area(const MeshBase& mesh, index_t face, Configuration
       return distance(p0, p1);
     }
   } else if (spatial_dim == 3) {
-    // 3D face area
-    if (n_vertices == 3) {
-      // Triangle
-      std::array<real_t,3> p0 = {{0,0,0}};
-      std::array<real_t,3> p1 = {{0,0,0}};
-      std::array<real_t,3> p2 = {{0,0,0}};
-      for (int d = 0; d < spatial_dim; ++d) {
-        p0[d] = coords[vertices_ptr[0] * spatial_dim + d];
-        p1[d] = coords[vertices_ptr[1] * spatial_dim + d];
-        p2[d] = coords[vertices_ptr[2] * spatial_dim + d];
-      }
-      return triangle_area(p0, p1, p2);
-    } else if (n_vertices == 4) {
-      // Quadrilateral
-      std::vector<std::array<real_t,3>> verts;
-      for (size_t i = 0; i < 4; ++i) {
-        std::array<real_t,3> pt = {{0,0,0}};
-        for (int d = 0; d < spatial_dim; ++d) {
-          pt[d] = coords[vertices_ptr[i] * spatial_dim + d];
-        }
-        verts.push_back(pt);
-      }
-      return quad_area(verts);
+    // 3D face area via polygon formula for any n >= 3
+    if (n_vertices >= 3) {
+      std::vector<index_t> ids;
+      ids.reserve(n_vertices);
+      for (size_t i = 0; i < n_vertices; ++i) ids.push_back(vertices_ptr[i]);
+      return PolyGeometry::polygon_area(mesh, ids, cfg);
     }
   }
 
@@ -499,28 +473,27 @@ std::array<real_t,3> MeshGeometry::compute_centroid_from_vertices(
     Configuration cfg) {
 
   std::array<real_t,3> centroid = {{0.0, 0.0, 0.0}};
-
-  if (vertices.empty()) {
+  if (vertices.empty()) return centroid;
+  if (vertices.size() == 1) {
+    const auto& X = (cfg == Configuration::Current && mesh.has_current_coords())
+                    ? mesh.X_cur() : mesh.X_ref();
+    int dim = mesh.dim();
+    centroid[0] = X[vertices[0]*dim + 0];
+    centroid[1] = (dim > 1 ? X[vertices[0]*dim + 1] : 0.0);
+    centroid[2] = (dim > 2 ? X[vertices[0]*dim + 2] : 0.0);
     return centroid;
   }
-
-  const auto& X = (cfg == Configuration::Current && mesh.has_current_coords())
-                  ? mesh.X_cur() : mesh.X_ref();
-  const int dim = mesh.dim();
-
-  // Sum all vertex coordinates
-  for (index_t v : vertices) {
-    for (int d = 0; d < dim; ++d) {
-      centroid[d] += X[v*dim + d];
-    }
+  if (vertices.size() == 2) {
+    const auto& X = (cfg == Configuration::Current && mesh.has_current_coords())
+                    ? mesh.X_cur() : mesh.X_ref();
+    int dim = mesh.dim();
+    centroid[0] = (X[vertices[0]*dim + 0] + X[vertices[1]*dim + 0]) / 2.0;
+    centroid[1] = (dim > 1 ? (X[vertices[0]*dim + 1] + X[vertices[1]*dim + 1]) / 2.0 : 0.0);
+    centroid[2] = (dim > 2 ? (X[vertices[0]*dim + 2] + X[vertices[1]*dim + 2]) / 2.0 : 0.0);
+    return centroid;
   }
-
-  // Average
-  for (int d = 0; d < 3; ++d) {
-    centroid[d] /= static_cast<real_t>(vertices.size());
-  }
-
-  return centroid;
+  // Polygon centroid (area-weighted)
+  return PolyGeometry::polygon_centroid(mesh, vertices, cfg);
 }
 
 real_t MeshGeometry::compute_area_from_vertices(
@@ -567,13 +540,9 @@ real_t MeshGeometry::compute_area_from_vertices(
         verts.push_back(get_coords(v));
       }
       return quad_area(verts);
-    } else if (oriented_vertices.size() > 4) {
-      // General polygon
-      std::vector<std::array<real_t,3>> verts;
-      for (index_t v : oriented_vertices) {
-        verts.push_back(get_coords(v));
-      }
-      return polygon_area(verts);
+    } else if (oriented_vertices.size() > 2) {
+      // General polygon (tri/quad/poly)
+      return PolyGeometry::polygon_area(mesh, oriented_vertices, cfg);
     }
   }
 
@@ -581,17 +550,7 @@ real_t MeshGeometry::compute_area_from_vertices(
 }
 
 real_t MeshGeometry::polygon_area(const std::vector<std::array<real_t,3>>& vertices) {
-  // Use fan triangulation from first vertex
-  if (vertices.size() < 3) {
-    return 0.0;
-  }
-
-  real_t total_area = 0.0;
-  for (size_t i = 1; i < vertices.size() - 1; ++i) {
-    total_area += triangle_area(vertices[0], vertices[i], vertices[i+1]);
-  }
-
-  return total_area;
+  return PolyGeometry::polygon_area(vertices);
 }
 
 BoundingBox MeshGeometry::compute_bounding_box_from_vertices(
