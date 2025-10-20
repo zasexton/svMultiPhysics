@@ -74,36 +74,54 @@ struct CellShape {
   EntityKind topo_kind() const;  // Implemented after CellShapeUtils
 
   // Expected vertex count for standard elements
+  //
+  // Convention
+  // - Returns the Lagrange (complete) node count by default for order >= 1.
+  // - Some formats also use Serendipity variants with fewer interior nodes.
+  //   Where these are common we mention them explicitly below, but this
+  //   function still returns the Lagrange count to keep high‑order logic
+  //   consistent with complete polynomial spaces.
   int expected_vertices() const {
     if (family == CellFamily::Point) {
       return 1;
     } else if (family == CellFamily::Line) {
+      // Lagrange: p+1 nodes; Serendipity is not applicable for 1D
       return order + 1;
     } else if (family == CellFamily::Triangle) {
+      // Lagrange (standard): p=1 -> 3, p=2 -> 6, p>=3 -> (p+1)(p+2)/2
+      // Serendipity: uncommon for triangles (Lagrange is typical)
       if (order == 1) return 3;
       if (order == 2) return 6;
       return (order + 1) * (order + 2) / 2;
     } else if (family == CellFamily::Quad) {
+      // Lagrange: p=1 -> 4, p=2 -> 9, p>=3 -> (p+1)^2
+      // Serendipity (common): p=2 -> 8 (Q8), p=3 -> 12 (Q12), in general 4 + 4*(p-1)
       if (order == 1) return 4;
       if (order == 2) return 9;
       return (order + 1) * (order + 1);
     } else if (family == CellFamily::Tetra) {
+      // Lagrange: p=1 -> 4, p=2 -> 10, p>=3 -> (p+1)(p+2)(p+3)/6
+      // Serendipity: rare for tetrahedra; Lagrange is typical
       if (order == 1) return 4;
       if (order == 2) return 10;
       return (order + 1) * (order + 2) * (order + 3) / 6;
     } else if (family == CellFamily::Hex) {
+      // Lagrange: p=1 -> 8, p=2 -> 27, p>=3 -> (p+1)^3
+      // Serendipity (common): p=2 -> 20 (HEX20), higher p often omit interior nodes
       if (order == 1) return 8;
       if (order == 2) return 27;
       return (order + 1) * (order + 1) * (order + 1);
     } else if (family == CellFamily::Wedge) {
+      // Lagrange: p=1 -> 6, p=2 -> 18, p>=3 -> (p+1)(p+1)(p+2)/2
+      // Serendipity (VTK quadratic wedge): 15 nodes (edge midpoints only)
       if (order == 1) return 6;
       if (order == 2) return 18;
       return (order + 1) * (order + 1) * (order + 2) / 2;
     } else if (family == CellFamily::Pyramid) {
-      if (order == 1) return 5;
-      if (order == 2) return 14;
-      // Pyramids have irregular vertex counts for high order
-      return 5 + 8 * (order - 1) + (order - 1) * (order - 2) / 2;
+      // Lagrange pyramid total nodes (VTK): N = sum_{m=1}^{p+1} m^2 = (p+1)(p+2)(2p+3)/6
+      // Legacy quadratic pyramids often appear with 13 (no base center) or 14 nodes; this
+      // function returns the Lagrange count (14 for p=2).
+      return (order + 1) * (order + 2) * (2 * order + 3) / 6;
     }
     // Polygon/Polyhedron: variable vertex count
     return -1;
