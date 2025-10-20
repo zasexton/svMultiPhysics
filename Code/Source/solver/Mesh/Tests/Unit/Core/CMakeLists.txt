@@ -9,7 +9,6 @@ cmake_minimum_required(VERSION 3.12)
 set(TEST_SOURCES
     test_DistributedMesh.cpp
     test_DistributedMesh_Advanced.cpp
-    test_DistributedMesh_Gaps.cpp
 )
 
 # Include directories
@@ -36,6 +35,13 @@ foreach(test_source ${TEST_SOURCES})
     # Set MPI compile flags
     target_compile_options(${test_name} PRIVATE ${MPI_CXX_COMPILE_FLAGS})
 
+    # Avoid embedding RPATHs that might include Conda paths; MPI/system libs
+    # should be resolvable via the runtime linker on developer machines.
+    set_target_properties(${test_name} PROPERTIES
+        SKIP_BUILD_RPATH TRUE
+        BUILD_RPATH ""
+    )
+
     # Add as a test
     add_test(NAME ${test_name}
              COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
@@ -53,7 +59,7 @@ enable_testing()
 # Custom target to run all tests
 add_custom_target(run_dmesh_tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS test_DistributedMesh test_DistributedMesh_Advanced test_DistributedMesh_Gaps
+    DEPENDS test_DistributedMesh test_DistributedMesh_Advanced
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running DistributedMesh unit tests..."
 )

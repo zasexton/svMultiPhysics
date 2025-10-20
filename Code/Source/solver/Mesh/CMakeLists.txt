@@ -6,6 +6,53 @@
 
 cmake_minimum_required(VERSION 3.12)
 
+#------------------------------------------------------------------------------
+# Environment sanitization: ignore active Conda/Miniconda environments
+# to avoid accidental linkage against $CONDA_PREFIX libraries (e.g., libX11).
+# This keeps the Mesh build deterministic on systems with Conda enabled.
+#------------------------------------------------------------------------------
+
+# Helper to remove any entries under a given prefix from a CMake list variable
+function(_svmp_filter_out_prefix list_var prefix)
+    if(NOT DEFINED ${list_var})
+        return()
+    endif()
+    set(_svmp_new_list "")
+    foreach(_p IN LISTS ${list_var})
+        if(NOT _p STREQUAL "")
+            string(FIND "${_p}" "${prefix}" _svmp_pos)
+            if(_svmp_pos EQUAL -1)
+                list(APPEND _svmp_new_list "${_p}")
+            endif()
+        endif()
+    endforeach()
+    set(${list_var} "${_svmp_new_list}" PARENT_SCOPE)
+endfunction()
+
+# If running inside Conda, prefer system toolchains and libraries by
+# (1) ignoring the Conda prefix in CMake's find_* searches and
+# (2) filtering common search path variables to drop $CONDA_PREFIX entries.
+if(DEFINED ENV{CONDA_PREFIX} AND NOT "$ENV{CONDA_PREFIX}" STREQUAL "")
+    set(_SVMP_CONDA_PREFIX "$ENV{CONDA_PREFIX}")
+    message(STATUS "svmesh: Detected Conda environment at: ${_SVMP_CONDA_PREFIX}")
+
+    # Avoid find_package/find_library picking up Conda packages
+    list(APPEND CMAKE_IGNORE_PREFIX_PATH "${_SVMP_CONDA_PREFIX}")
+    if(WIN32)
+        list(APPEND CMAKE_IGNORE_PREFIX_PATH "${_SVMP_CONDA_PREFIX}/Library")
+    endif()
+
+    # Filter path-like variables that may have been pre-seeded by the shell
+    _svmp_filter_out_prefix(CMAKE_PREFIX_PATH        "${_SVMP_CONDA_PREFIX}")
+    _svmp_filter_out_prefix(CMAKE_LIBRARY_PATH       "${_SVMP_CONDA_PREFIX}")
+    _svmp_filter_out_prefix(CMAKE_INCLUDE_PATH       "${_SVMP_CONDA_PREFIX}")
+    _svmp_filter_out_prefix(CMAKE_PROGRAM_PATH       "${_SVMP_CONDA_PREFIX}")
+
+    # Prefer $ORIGIN-based RPATH to avoid embedding absolute Conda paths
+    set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
+    set(CMAKE_INSTALL_RPATH_USE_LINK_PATH OFF)
+endif()
+
 # Set CMake policies for compatibility with fetched VTK
 if(POLICY CMP0074)
     cmake_policy(SET CMP0074 NEW)  # find_package() uses <PackageName>_ROOT variables
@@ -163,6 +210,9 @@ set(MESH_GEOMETRY_SOURCES
     Geometry/MeshQuality.h
     Geometry/MeshQuality.cpp
     Geometry/MeshOrientation.h
+    Geometry/GeometryConfig.h
+    Geometry/PolyGeometry.h
+    Geometry/PolyGeometry.cpp
 )
 
 # Boundary
