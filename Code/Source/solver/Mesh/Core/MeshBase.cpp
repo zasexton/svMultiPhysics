@@ -1360,7 +1360,6 @@ size_t MeshBase::entity_count(EntityKind k) const noexcept {
     switch (k) {
         case EntityKind::Vertex: return n_vertices();
         case EntityKind::Edge:   return n_edges();
-        case EntityKind::Line:   return n_edges();
         case EntityKind::Face:   return n_faces();
         case EntityKind::Volume: return n_cells();
     }

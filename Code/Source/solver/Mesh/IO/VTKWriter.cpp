@@ -347,6 +347,22 @@ static int choose_vtk_type_for(const CellShape& shape, size_t n_vertices) {
   }
 
   // Quadratic and higher (we key off vertex count to disambiguate variants)
+  // For order>2 prefer Lagrange/Serendipity explicit types when available
+  int p_lag = CellTopology::infer_lagrange_order(shape.family, n_vertices);
+  int p_ser = (p_lag<0) ? CellTopology::infer_serendipity_order(shape.family, n_vertices) : -1;
+  if (p_lag > 2) {
+    switch (shape.family) {
+      case CellFamily::Line: return VTK_LAGRANGE_CURVE; // curve is Lagrange line in VTK
+      case CellFamily::Triangle: return VTK_LAGRANGE_TRIANGLE;
+      case CellFamily::Quad: return VTK_LAGRANGE_QUADRILATERAL;
+      case CellFamily::Tetra: return VTK_LAGRANGE_TETRAHEDRON;
+      case CellFamily::Hex: return VTK_LAGRANGE_HEXAHEDRON;
+      case CellFamily::Wedge: return VTK_LAGRANGE_WEDGE;
+      case CellFamily::Pyramid: return VTK_LAGRANGE_PYRAMID;
+      default: break;
+    }
+  }
+
   switch (shape.family) {
     case CellFamily::Line:
       return (n_vertices >= 3) ? VTK_QUADRATIC_EDGE : VTK_LINE;
@@ -416,7 +432,7 @@ static std::vector<vtkIdType> reorder_high_order_to_vtk(const MeshBase& mesh,
     int p = (p_lag>0) ? p_lag : p_ser;
     CellTopology::HighOrderKind kind = (p_lag>0) ? CellTopology::HighOrderKind::Lagrange : CellTopology::HighOrderKind::Serendipity;
     if (p > 2) {
-      auto pattern = CellTopology::vtk_high_order_pattern(shape.family, p, kind);
+      auto pattern = CellTopology::high_order_pattern(shape.family, p, kind);
       std::vector<vtkIdType> out; out.reserve(n_vertices);
       // corners
       out.insert(out.end(), corners.begin(), corners.end());

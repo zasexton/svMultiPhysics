@@ -9,6 +9,7 @@ cmake_minimum_required(VERSION 3.12)
 set(TEST_SOURCES
     test_DistributedMesh.cpp
     test_DistributedMesh_Advanced.cpp
+    test_DistributedMesh_Gaps.cpp
 )
 
 # Include directories
@@ -52,7 +53,7 @@ enable_testing()
 # Custom target to run all tests
 add_custom_target(run_dmesh_tests
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS test_DistributedMesh test_DistributedMesh_Advanced
+    DEPENDS test_DistributedMesh test_DistributedMesh_Advanced test_DistributedMesh_Gaps
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running DistributedMesh unit tests..."
 )

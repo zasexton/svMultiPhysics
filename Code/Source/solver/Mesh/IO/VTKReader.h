@@ -36,6 +36,7 @@
 #include <memory>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 
 // Forward declarations for VTK classes
 class vtkUnstructuredGrid;
@@ -150,6 +151,8 @@ private:
    * @brief Map from VTK cell type ID to element order
    */
   static std::unordered_map<int, int> vtk_to_order_map_;
+  static std::unordered_set<int> vtk_lagrange_types_;
+  static std::unordered_set<int> vtk_serendipity_types_;
 
   /**
    * @brief Flag indicating if VTK registry has been initialized

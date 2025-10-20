@@ -895,8 +895,8 @@ std::vector<std::array<index_t, 2>> CellTopology::quad_edges() {
 // High-order (p>2) scaffolding
 // ==========================================
 
-CellTopology::HighOrderVTKPattern CellTopology::vtk_high_order_pattern(CellFamily family, int p, HighOrderKind kind) {
-    HighOrderVTKPattern pat; pat.kind = kind; pat.order = p;
+CellTopology::HighOrderPattern CellTopology::high_order_pattern(CellFamily family, int p, HighOrderKind kind) {
+    HighOrderPattern pat; pat.kind = kind; pat.order = p;
     if (p <= 2) return pat; // handled by quadratic/linear paths
 
     // Corners first

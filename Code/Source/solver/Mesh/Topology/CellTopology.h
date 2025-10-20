@@ -131,7 +131,7 @@ public:
         int idx0 = 0, idx1 = 0, idx2 = 0;
     };
 
-    struct HighOrderVTKPattern {
+    struct HighOrderPattern {
         HighOrderKind kind = HighOrderKind::Lagrange;
         int order = 2;
         std::vector<HighOrderNodeRole> sequence; // in VTK expected order
@@ -139,7 +139,7 @@ public:
 
     // Returns an abstract description of VTK's high-order node ordering for a given family/order/kind.
     // This does not include global vertex IDs — it provides the structural sequence (corners/edges/faces/volume).
-    static HighOrderVTKPattern vtk_high_order_pattern(CellFamily family, int p, HighOrderKind kind = HighOrderKind::Lagrange);
+    static HighOrderPattern high_order_pattern(CellFamily family, int p, HighOrderKind kind = HighOrderKind::Lagrange);
 
     // Helper: infer Lagrange order p from total node count (best-effort). Returns -1 if unknown.
     static int infer_lagrange_order(CellFamily family, size_t node_count);

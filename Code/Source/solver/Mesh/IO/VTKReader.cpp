@@ -50,6 +50,7 @@
 #include <vtkFloatArray.h>
 #include <vtkDoubleArray.h>
 #include <vtkCellTypes.h>
+#include "../Topology/CellTopology.h"
 
 #include <iostream>
 #include <stdexcept>
@@ -60,6 +61,8 @@ namespace svmp {
 // Static member definitions
 std::unordered_map<int, CellFamily> VTKReader::vtk_to_family_map_;
 std::unordered_map<int, int> VTKReader::vtk_to_order_map_;
+std::unordered_set<int> VTKReader::vtk_lagrange_types_;
+std::unordered_set<int> VTKReader::vtk_serendipity_types_;
 bool VTKReader::registry_initialized_ = false;
 
 VTKReader::VTKReader() {
@@ -251,10 +254,18 @@ void VTKReader::extract_topology(
 
     int vtk_type = cell->GetCellType();
     CellShape shape = vtk_to_cellshape(vtk_type);
+    // For Lagrange/Serendipity, infer order from node count
+    vtkIdType n_pts = cell->GetNumberOfPoints();
+    if (vtk_lagrange_types_.count(vtk_type)) {
+      int p = CellTopology::infer_lagrange_order(shape.family, static_cast<size_t>(n_pts));
+      if (p > 2) shape.order = p;
+    } else if (vtk_serendipity_types_.count(vtk_type)) {
+      int p = CellTopology::infer_serendipity_order(shape.family, static_cast<size_t>(n_pts));
+      if (p > 2) shape.order = p;
+    }
     cell_shapes.push_back(shape);
 
     // Get cell vertices
-    vtkIdType n_pts = cell->GetNumberOfPoints();
     for (vtkIdType i = 0; i < n_pts; ++i) {
       cell2vertex.push_back(static_cast<index_t>(cell->GetPointId(i)));
     }
@@ -606,6 +617,18 @@ void VTKReader::setup_vtk_registry() {
 
   vtk_to_family_map_[VTK_QUADRATIC_PYRAMID] = CellFamily::Pyramid;
   vtk_to_order_map_[VTK_QUADRATIC_PYRAMID] = 2;
+
+  // Lagrange families (order >= 2)
+  vtk_lagrange_types_.insert(VTK_LAGRANGE_CURVE);
+  vtk_lagrange_types_.insert(VTK_LAGRANGE_TRIANGLE);
+  vtk_lagrange_types_.insert(VTK_LAGRANGE_QUADRILATERAL);
+  vtk_lagrange_types_.insert(VTK_LAGRANGE_TETRAHEDRON);
+  vtk_lagrange_types_.insert(VTK_LAGRANGE_HEXAHEDRON);
+  vtk_lagrange_types_.insert(VTK_LAGRANGE_WEDGE);
+  vtk_lagrange_types_.insert(VTK_LAGRANGE_PYRAMID);
+
+  // Serendipity families (2D/3D subsets)
+  // Serendipity families: not available in this VTK; leave empty (pattern scaffolding only)
 
   registry_initialized_ = true;
 }

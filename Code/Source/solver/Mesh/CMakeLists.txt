@@ -40,6 +40,8 @@ option(MESH_VTK_ENABLE_IOLEGACY "Enable VTK IOLegacy module when fetching VTK" O
 option(MESH_BUILD_TESTS "Build mesh tests" OFF)
 option(MESH_BUILD_SHARED "Build mesh as shared library" OFF)
 option(MESH_ENABLE_PYTHON "Build Python bindings (pybind11)" OFF)
+option(MESH_ENABLE_COVERAGE "Enable code coverage analysis (requires gcov/lcov)" OFF)
+option(MESH_ENABLE_VALGRIND "Enable memory analysis with valgrind" OFF)
 
 # For standalone builds, set up include directories
 if(MESH_STANDALONE_BUILD)
@@ -67,6 +69,62 @@ endif()
 
 # VTK (optional, only needed for VTK I/O)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableVTK.cmake)
+
+#------------------------------------------------------------------------------
+# Coverage support
+#------------------------------------------------------------------------------
+
+if(MESH_ENABLE_COVERAGE)
+    if(NOT MESH_BUILD_TESTS)
+        message(WARNING "Coverage enabled but tests are not being built. Setting MESH_BUILD_TESTS=ON")
+        set(MESH_BUILD_TESTS ON)
+    endif()
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        message(STATUS "Enabling code coverage instrumentation")
+        add_compile_options(--coverage -O0 -g)
+        add_link_options(--coverage)
+
+        # Find required tools
+        find_program(GCOV_EXECUTABLE gcov)
+        find_program(LCOV_EXECUTABLE lcov)
+        find_program(GENHTML_EXECUTABLE genhtml)
+
+        if(NOT LCOV_EXECUTABLE)
+            message(WARNING "lcov not found - coverage report generation will not be available")
+        endif()
+        if(NOT GENHTML_EXECUTABLE)
+            message(WARNING "genhtml not found - HTML coverage report will not be available")
+        endif()
+    else()
+        message(WARNING "Code coverage requires GNU or Clang compiler")
+        set(MESH_ENABLE_COVERAGE OFF)
+    endif()
+endif()
+
+#------------------------------------------------------------------------------
+# Valgrind support
+#------------------------------------------------------------------------------
+
+if(MESH_ENABLE_VALGRIND)
+    find_program(VALGRIND_EXECUTABLE valgrind)
+    if(NOT VALGRIND_EXECUTABLE)
+        message(WARNING "valgrind not found - memory analysis will not be available")
+        set(MESH_ENABLE_VALGRIND OFF)
+    else()
+        message(STATUS "Valgrind found at: ${VALGRIND_EXECUTABLE}")
+        # Set common valgrind options
+        set(VALGRIND_OPTIONS
+            --leak-check=full
+            --show-leak-kinds=all
+            --track-origins=yes
+            --verbose
+            --log-file=valgrind_%p.log
+            --suppressions=${CMAKE_CURRENT_SOURCE_DIR}/cmake/valgrind.supp
+            CACHE STRING "Options for valgrind memory analysis"
+        )
+    endif()
+endif()
 
 #------------------------------------------------------------------------------
 # Source files
@@ -308,6 +366,152 @@ if(MESH_BUILD_TESTS)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_compile)
         add_subdirectory(test_compile)
     endif()
+
+    #--------------------------------------------------------------------------
+    # Coverage targets (only if coverage is enabled)
+    #--------------------------------------------------------------------------
+
+    if(MESH_ENABLE_COVERAGE AND LCOV_EXECUTABLE)
+        # Create coverage baseline
+        add_custom_target(coverage-baseline
+            COMMAND ${LCOV_EXECUTABLE} --capture --initial
+                    --directory ${CMAKE_BINARY_DIR}
+                    --output-file ${CMAKE_BINARY_DIR}/coverage-base.info
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            COMMENT "Capturing coverage baseline..."
+        )
+
+        # Run tests and capture coverage
+        add_custom_target(coverage-run
+            COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -V
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            COMMENT "Running tests for coverage analysis..."
+        )
+
+        # Capture coverage data after test run
+        add_custom_target(coverage-capture
+            COMMAND ${LCOV_EXECUTABLE} --capture
+                    --directory ${CMAKE_BINARY_DIR}
+                    --output-file ${CMAKE_BINARY_DIR}/coverage-test.info
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            COMMENT "Capturing coverage data..."
+        )
+
+        # Combine baseline and test coverage
+        add_custom_target(coverage-combine
+            COMMAND ${LCOV_EXECUTABLE}
+                    --add-tracefile ${CMAKE_BINARY_DIR}/coverage-base.info
+                    --add-tracefile ${CMAKE_BINARY_DIR}/coverage-test.info
+                    --output-file ${CMAKE_BINARY_DIR}/coverage-total.info
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            COMMENT "Combining coverage data..."
+        )
+
+        # Remove external and system files from coverage
+        add_custom_target(coverage-filter
+            COMMAND ${LCOV_EXECUTABLE}
+                    --remove ${CMAKE_BINARY_DIR}/coverage-total.info
+                    '/usr/*' '*/build/*' '*/Tests/*' '*/test_compile/*' '*/ThirdParty/*' '*/_deps/*'
+                    --output-file ${CMAKE_BINARY_DIR}/coverage-filtered.info
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            COMMENT "Filtering coverage data..."
+        )
+
+        # Generate HTML report
+        if(GENHTML_EXECUTABLE)
+            add_custom_target(coverage-html
+                COMMAND ${GENHTML_EXECUTABLE}
+                        ${CMAKE_BINARY_DIR}/coverage-filtered.info
+                        --output-directory ${CMAKE_BINARY_DIR}/coverage-report
+                        --title "svMultiPhysics Mesh Library Coverage Report"
+                        --legend --show-details --demangle-cpp
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+                COMMENT "Generating HTML coverage report..."
+            )
+        endif()
+
+        # Main coverage target that runs all steps
+        add_custom_target(coverage
+            COMMAND ${CMAKE_COMMAND} --build . --target coverage-baseline
+            COMMAND ${CMAKE_COMMAND} --build . --target coverage-run
+            COMMAND ${CMAKE_COMMAND} --build . --target coverage-capture
+            COMMAND ${CMAKE_COMMAND} --build . --target coverage-combine
+            COMMAND ${CMAKE_COMMAND} --build . --target coverage-filter
+            COMMAND ${GENHTML_EXECUTABLE}
+                    ${CMAKE_BINARY_DIR}/coverage-filtered.info
+                    --output-directory ${CMAKE_BINARY_DIR}/coverage-report
+                    --title "svMultiPhysics Mesh Library Coverage Report"
+                    --legend --show-details --demangle-cpp
+            COMMAND ${CMAKE_COMMAND} -E echo "Coverage report generated in: ${CMAKE_BINARY_DIR}/coverage-report/index.html"
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            COMMENT "Generating complete coverage report..."
+        )
+
+        # Clean coverage data
+        add_custom_target(coverage-clean
+            COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/coverage-report
+            COMMAND ${CMAKE_COMMAND} -E remove -f ${CMAKE_BINARY_DIR}/*.info
+            COMMAND ${CMAKE_COMMAND} -E remove -f ${CMAKE_BINARY_DIR}/*.gcda
+            COMMAND ${CMAKE_COMMAND} -E remove -f ${CMAKE_BINARY_DIR}/*.gcno
+            COMMAND find ${CMAKE_BINARY_DIR} -name "*.gcda" -delete
+            COMMAND find ${CMAKE_BINARY_DIR} -name "*.gcno" -delete
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            COMMENT "Cleaning coverage data..."
+        )
+    endif()
+
+    #--------------------------------------------------------------------------
+    # Valgrind memory analysis targets
+    #--------------------------------------------------------------------------
+
+    if(MESH_ENABLE_VALGRIND AND VALGRIND_EXECUTABLE)
+        # Run all tests under valgrind
+        add_custom_target(valgrind
+            COMMAND ${CMAKE_CTEST_COMMAND}
+                    --overwrite MemoryCheckCommand=${VALGRIND_EXECUTABLE}
+                    --overwrite MemoryCheckCommandOptions="${VALGRIND_OPTIONS}"
+                    -T MemCheck --output-on-failure
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            COMMENT "Running tests under valgrind memory checker..."
+        )
+
+        # Run specific test under valgrind (usage: make valgrind-test_DistributedMesh)
+        # Create individual valgrind targets for each test executable
+        if(TARGET test_DistributedMesh)
+            add_custom_target(valgrind-test_DistributedMesh
+                COMMAND ${VALGRIND_EXECUTABLE} ${VALGRIND_OPTIONS}
+                        ${CMAKE_BINARY_DIR}/Tests/Unit/Core/test_DistributedMesh
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+                COMMENT "Running test_DistributedMesh under valgrind..."
+            )
+        endif()
+
+        if(TARGET test_DistributedMesh_Advanced)
+            add_custom_target(valgrind-test_DistributedMesh_Advanced
+                COMMAND ${VALGRIND_EXECUTABLE} ${VALGRIND_OPTIONS}
+                        ${CMAKE_BINARY_DIR}/Tests/Unit/Core/test_DistributedMesh_Advanced
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+                COMMENT "Running test_DistributedMesh_Advanced under valgrind..."
+            )
+        endif()
+
+        # MPI tests under valgrind (requires special handling)
+        if(MPI_FOUND)
+            add_custom_target(valgrind-mpi
+                COMMAND mpirun -n 2 ${VALGRIND_EXECUTABLE} ${VALGRIND_OPTIONS}
+                        ${CMAKE_BINARY_DIR}/Tests/Unit/Core/test_DistributedMesh
+                WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+                COMMENT "Running MPI tests under valgrind..."
+            )
+        endif()
+
+        # Clean valgrind logs
+        add_custom_target(valgrind-clean
+            COMMAND ${CMAKE_COMMAND} -E remove -f ${CMAKE_BINARY_DIR}/valgrind*.log
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            COMMENT "Cleaning valgrind logs..."
+        )
+    endif()
 endif()
 
 #------------------------------------------------------------------------------
@@ -339,6 +543,18 @@ if(MESH_ENABLE_VTK)
     endif()
 endif()
 message(STATUS "  Build tests: ${MESH_BUILD_TESTS}")
+if(MESH_BUILD_TESTS)
+    message(STATUS "    Coverage analysis: ${MESH_ENABLE_COVERAGE}")
+    if(MESH_ENABLE_COVERAGE AND LCOV_EXECUTABLE)
+        message(STATUS "      lcov found: ${LCOV_EXECUTABLE}")
+        message(STATUS "      Use 'make coverage' to generate coverage report")
+    endif()
+    message(STATUS "    Valgrind analysis: ${MESH_ENABLE_VALGRIND}")
+    if(MESH_ENABLE_VALGRIND AND VALGRIND_EXECUTABLE)
+        message(STATUS "      valgrind found: ${VALGRIND_EXECUTABLE}")
+        message(STATUS "      Use 'make valgrind' to run memory analysis")
+    endif()
+endif()
 message(STATUS "  Build shared: ${MESH_BUILD_SHARED}")
 message(STATUS "  Standalone build: ${MESH_STANDALONE_BUILD}")
 message(STATUS "")
