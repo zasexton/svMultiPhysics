@@ -53,6 +53,7 @@
 #include <memory>
 #include <vector>
 #include <random>
+#include <chrono>
 
 namespace svmp {
 namespace test {

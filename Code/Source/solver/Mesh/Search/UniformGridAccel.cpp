@@ -359,9 +359,12 @@ RayIntersectResult UniformGridAccel::intersect_ray(
 
   if (hit_face != INVALID_INDEX) {
     result.found = true;
+    result.hit = true;
     result.face_id = hit_face;
     result.t = min_t;
+    result.distance = min_t;
     result.point = hit_point;
+    result.hit_point = hit_point;
     stats_.hit_count++;
   }
 
@@ -411,9 +414,12 @@ std::vector<RayIntersectResult> UniformGridAccel::intersect_ray_all(
                                           tri.vertices[2], t)) {
           RayIntersectResult hit;
           hit.found = true;
+          hit.hit = true;
           hit.face_id = tri.face_id;
           hit.t = t;
+          hit.distance = t;
           hit.point = ray.point_at(t);
+          hit.hit_point = hit.point;
           results.push_back(hit);
         }
       }

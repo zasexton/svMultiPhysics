@@ -44,6 +44,16 @@ namespace svmp {
 // Cell shape metadata
 // --------------------
 struct CellShape {
+  // Compatibility constants to allow usages like CellShape::Hexahedron
+  static constexpr CellFamily Line         = CellFamily::Line;
+  static constexpr CellFamily Triangle     = CellFamily::Triangle;
+  static constexpr CellFamily Quad         = CellFamily::Quad;
+  static constexpr CellFamily Quadrilateral= CellFamily::Quad;
+  static constexpr CellFamily Tetrahedron  = CellFamily::Tetra;
+  static constexpr CellFamily Hexahedron   = CellFamily::Hex;
+  static constexpr CellFamily Wedge        = CellFamily::Wedge;
+  static constexpr CellFamily Prism        = CellFamily::Wedge;
+  static constexpr CellFamily Pyramid      = CellFamily::Pyramid;
   CellFamily family = CellFamily::Polygon;
   int num_corners = 0;        // number of corner vertices (for poly: >= 3)
   int order = 1;              // geometric/approximation order

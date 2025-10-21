@@ -153,7 +153,7 @@ private:
   // State
   bool is_built_ = false;
   Configuration built_cfg_ = Configuration::Reference;
-  SearchStats stats_;
+  mutable SearchStats stats_;
 
   // ---- Helper methods ----
 
