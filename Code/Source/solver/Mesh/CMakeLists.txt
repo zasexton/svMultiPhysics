@@ -89,6 +89,8 @@ option(MESH_BUILD_SHARED "Build mesh as shared library" OFF)
 option(MESH_ENABLE_PYTHON "Build Python bindings (pybind11)" OFF)
 option(MESH_ENABLE_COVERAGE "Enable code coverage analysis (requires gcov/lcov)" OFF)
 option(MESH_ENABLE_VALGRIND "Enable memory analysis with valgrind" OFF)
+option(MESH_ENABLE_GTEST "Enable building GTest-based unit tests" ON)
+option(USE_SYSTEM_GTEST "Use system-installed GTest (no fetch)" ON)
 
 # For standalone builds, set up include directories
 if(MESH_STANDALONE_BUILD)
@@ -240,6 +242,25 @@ set(MESH_LABELS_SOURCES
 set(MESH_SEARCH_SOURCES
     Search/MeshSearch.h
     Search/MeshSearch.cpp
+    Search/SearchAccel.h
+    Search/SearchAccel.cpp
+    Search/SearchPrimitives.h
+    Search/SearchPrimitives.cpp
+    Search/SearchBuilders.h
+    Search/SearchBuilders.cpp
+    Search/UniformGridAccel.h
+    Search/UniformGridAccel.cpp
+    Search/KDTreeAccel.h
+    Search/KDTreeAccel.cpp
+)
+
+list(APPEND MESH_SEARCH_SOURCES
+    Search/OctreeAccel.h
+    Search/OctreeAccel.cpp
+    Search/RTreeAccel.h
+    Search/RTreeAccel.cpp
+    Search/BVHAccel.h
+    Search/BVHAccel.cpp
 )
 
 # Validation
@@ -252,6 +273,13 @@ set(MESH_VALIDATION_SOURCES
 # Observer
 set(MESH_OBSERVER_SOURCES
     Observer/MeshObserver.h
+    Observer/ScopedSubscription.h
+    Observer/ObserverRegistry.h
+    Observer/ObserverRegistry.cpp
+    Observer/EventCounterObserver.h
+    Observer/EventCounterObserver.cpp
+    Observer/EventLogObserver.h
+    Observer/EventLogObserver.cpp
 )
 
 # I/O (basic, always included)
@@ -349,6 +377,11 @@ target_include_directories(svmesh PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../..>
     $<INSTALL_INTERFACE:include>
 )
+
+# Propagate test build flag as a preprocessor define so headers can adapt
+if(MESH_BUILD_TESTS)
+    target_compile_definitions(svmesh PUBLIC MESH_BUILD_TESTS)
+endif()
 
 #------------------------------------------------------------------------------
 # Installation
@@ -594,6 +627,8 @@ if(MESH_ENABLE_VTK)
 endif()
 message(STATUS "  Build tests: ${MESH_BUILD_TESTS}")
 if(MESH_BUILD_TESTS)
+    message(STATUS "    GTest enabled: ${MESH_ENABLE_GTEST}")
+    message(STATUS "    Use system GTest: ${USE_SYSTEM_GTEST}")
     message(STATUS "    Coverage analysis: ${MESH_ENABLE_COVERAGE}")
     if(MESH_ENABLE_COVERAGE AND LCOV_EXECUTABLE)
         message(STATUS "      lcov found: ${LCOV_EXECUTABLE}")
