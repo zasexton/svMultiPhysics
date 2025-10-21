@@ -79,7 +79,9 @@ enum class MappingKind {
 
 enum class Configuration {
   Reference,
-  Current
+  Current,
+  // Compatibility alias expected by some tests
+  Deformed
 };
 
 /**
@@ -181,6 +183,8 @@ struct PointLocateResult {
   index_t cell_id = -1;
   std::array<real_t,3> xi = {{0,0,0}};
   bool found = false;
+  // Compatibility field expected by some accelerators
+  std::array<real_t,3> parametric_coords = {{0,0,0}};
 };
 
 struct RayIntersectResult {
@@ -188,6 +192,13 @@ struct RayIntersectResult {
   real_t t = -1.0;
   std::array<real_t,3> point = {{0,0,0}};
   bool found = false;
+  // Compatibility fields used by some tests
+  bool hit = false;                         // alias of found
+  real_t distance = -1.0;                  // alias of t
+  std::array<real_t,3> hit_point = {{0,0,0}}; // alias of point
+  // Optional details (used by some accelerators)
+  std::array<real_t,3> normal = {{0,0,0}};
+  std::array<real_t,3> barycentric = {{0,0,0}};
 };
 
 } // namespace svmp
