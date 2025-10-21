@@ -33,6 +33,7 @@
 #include <cmath>
 #include <iomanip>
 #include <numeric>
+#include <set>
 #include <sstream>
 
 namespace svmp {
@@ -334,9 +335,9 @@ std::string EventCounterObserver::compare_snapshots(
     size_t count1 = (it1 != s1.stats.end()) ? it1->second.count : 0;
     size_t count2 = (it2 != s2.stats.end()) ? it2->second.count : 0;
 
-    ss << "  " << std::left << std::setw(20) << event_name(event)
-       << ": " << std::right << std::setw(8) << count1
-       << " -> " << std::setw(8) << count2
+    ss << "  " << event_name(event)
+       << ": " << count1
+       << " -> " << count2
        << " (" << std::showpos << static_cast<int64_t>(count2 - count1)
        << std::noshowpos << ")" << std::endl;
   }
