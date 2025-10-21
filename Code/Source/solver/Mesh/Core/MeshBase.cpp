@@ -460,6 +460,29 @@ void MeshBase::clear_current_coords() {
     event_bus_.notify(MeshEvent::GeometryChanged);
 }
 
+std::array<real_t,3> MeshBase::get_vertex_coords(index_t v) const {
+    std::array<real_t,3> pt{0,0,0};
+    if (v < 0 || static_cast<size_t>(v) >= n_vertices()) return pt;
+    const std::vector<real_t>& coords = (has_current_coords()) ? X_cur_ : X_ref_;
+    int d = std::max(1, spatial_dim_);
+    for (int i = 0; i < d && i < 3; ++i) {
+        pt[i] = coords[static_cast<size_t>(v) * d + i];
+    }
+    return pt;
+}
+
+void MeshBase::set_vertex_coords(index_t v, const std::array<real_t,3>& xyz) {
+    if (v < 0 || static_cast<size_t>(v) >= n_vertices()) return;
+    int d = std::max(1, spatial_dim_);
+    if (X_cur_.size() != X_ref_.size()) {
+        X_cur_ = X_ref_;
+    }
+    for (int i = 0; i < d && i < 3; ++i) {
+        X_cur_[static_cast<size_t>(v) * d + i] = xyz[i];
+    }
+    event_bus_.notify(MeshEvent::GeometryChanged);
+}
+
 // ==========================================
 // Topology Access
 // ==========================================
@@ -476,6 +499,11 @@ std::pair<const index_t*, size_t> MeshBase::cell_vertices_span(index_t c) const 
     return {&cell2vertex_[start], count};
 }
 
+std::vector<index_t> MeshBase::cell_vertices(index_t c) const {
+    auto [ptr, count] = cell_vertices_span(c);
+    return std::vector<index_t>(ptr, ptr + count);
+}
+
 std::pair<const index_t*, size_t> MeshBase::face_vertices_span(index_t f) const {
     if (f < 0 || f >= static_cast<index_t>(face_shape_.size())) {
         throw std::out_of_range("face_vertices_span: invalid face index");
@@ -486,6 +514,65 @@ std::pair<const index_t*, size_t> MeshBase::face_vertices_span(index_t f) const 
     size_t count = static_cast<size_t>(end - start);
 
     return {&face2vertex_[start], count};
+}
+
+std::vector<index_t> MeshBase::face_vertices(index_t f) const {
+    auto [ptr, count] = face_vertices_span(f);
+    return std::vector<index_t>(ptr, ptr + count);
+}
+
+std::vector<index_t> MeshBase::cell_faces(index_t c) const {
+    std::vector<index_t> faces;
+    for (index_t f = 0; f < static_cast<index_t>(face2cell_.size()); ++f) {
+        const auto& fc = face2cell_[f];
+        if (fc[0] == c || fc[1] == c) {
+            faces.push_back(f);
+        }
+    }
+    return faces;
+}
+
+void MeshBase::add_vertex(index_t id, const std::array<real_t,3>& xyz) {
+    // Initialize dimension if unknown
+    if (spatial_dim_ == 0) spatial_dim_ = 3;
+    // Append coordinates (assume ids are sequential for testing convenience)
+    for (int i = 0; i < std::max(1, spatial_dim_); ++i) {
+        X_ref_.push_back(xyz[i]);
+    }
+    // IDs
+    vertex_gid_.push_back(id);
+}
+
+void MeshBase::add_cell(index_t id, CellFamily family, const std::vector<index_t>& vertices) {
+    if (cell2vertex_offsets_.empty()) cell2vertex_offsets_.push_back(0);
+    // Append connectivity
+    for (auto v : vertices) {
+        cell2vertex_.push_back(v);
+    }
+    cell2vertex_offsets_.push_back(static_cast<offset_t>(cell2vertex_.size()));
+    // Shape
+    CellShape shape;
+    shape.family = family;
+    shape.order = 1;
+    shape.num_corners = static_cast<int>(vertices.size());
+    cell_shape_.push_back(shape);
+    cell_gid_.push_back(id);
+}
+
+void MeshBase::add_boundary_face(index_t id, const std::vector<index_t>& vertices) {
+    if (face2vertex_offsets_.empty()) face2vertex_offsets_.push_back(0);
+    for (auto v : vertices) face2vertex_.push_back(v);
+    face2vertex_offsets_.push_back(static_cast<offset_t>(face2vertex_.size()));
+    // Shape inference (tri/quad/poly)
+    CellShape fshape;
+    if (vertices.size() == 3) fshape.family = CellFamily::Triangle;
+    else if (vertices.size() == 4) fshape.family = CellFamily::Quad;
+    else fshape.family = CellFamily::Polygon;
+    fshape.num_corners = static_cast<int>(vertices.size());
+    face_shape_.push_back(fshape);
+    face_gid_.push_back(id);
+    // Mark as boundary by setting second incident to INVALID_INDEX
+    face2cell_.push_back({INVALID_INDEX, INVALID_INDEX});
 }
 
 // ==========================================

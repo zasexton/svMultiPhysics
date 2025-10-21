@@ -103,6 +103,8 @@ public:
   size_t n_cells() const noexcept { return cell_shape_.size(); }
   size_t n_faces() const noexcept { return face_shape_.size(); }
   size_t n_edges() const noexcept { return edge2vertex_.size(); }
+  // Number of boundary faces (faces with a single incident cell or explicitly marked)
+  size_t n_boundary_faces() const { return boundary_faces().size(); }
 
   // ---- Coordinates ----
   const std::vector<real_t>& X_ref() const noexcept { return X_ref_; }
@@ -114,15 +116,33 @@ public:
   void use_reference_configuration() { active_config_ = Configuration::Reference; }
   void use_current_configuration() { active_config_ = Configuration::Current; }
 
+  // Convenience vertex coordinate accessors (for small testing workflows)
+  std::array<real_t,3> get_vertex_coords(index_t v) const;
+  void set_vertex_coords(index_t v, const std::array<real_t,3>& xyz);
+  void set_vertex_deformed_coords(index_t v, const std::array<real_t,3>& xyz) { set_vertex_coords(v, xyz); }
+
   // ---- Topology access ----
   const std::vector<CellShape>& cell_shapes() const noexcept { return cell_shape_; }
   const CellShape& cell_shape(index_t c) const { return cell_shape_.at(static_cast<size_t>(c)); }
   std::pair<const index_t*, size_t> cell_vertices_span(index_t c) const;
+  // Convenience: return cell vertices as a vector
+  std::vector<index_t> cell_vertices(index_t c) const;
+  // Legacy/compat: get full connectivity for a cell
+  std::vector<index_t> get_cell_connectivity(index_t c) const { return cell_vertices(c); }
   const std::vector<offset_t>& cell2vertex_offsets() const noexcept { return cell2vertex_offsets_; }
   const std::vector<index_t>& cell2vertex() const noexcept { return cell2vertex_; }
 
   const std::vector<CellShape>& face_shapes() const noexcept { return face_shape_; }
   std::pair<const index_t*, size_t> face_vertices_span(index_t f) const;
+  // Convenience: return face vertices as a vector
+  std::vector<index_t> face_vertices(index_t f) const;
+  // Convenience: list faces incident to a cell (linear scan)
+  std::vector<index_t> cell_faces(index_t c) const;
+
+  // ---- Incremental builders (testing convenience; not optimized for large meshes) ----
+  void add_vertex(index_t id, const std::array<real_t,3>& xyz);
+  void add_cell(index_t id, CellFamily family, const std::vector<index_t>& vertices);
+  void add_boundary_face(index_t id, const std::vector<index_t>& vertices);
   const std::array<index_t,2>& face_cells(index_t f) const { return face2cell_.at(static_cast<size_t>(f)); }
 
   const std::vector<std::array<index_t,2>>& edge2vertex() const noexcept { return edge2vertex_; }
@@ -228,6 +248,7 @@ public:
                                   Configuration cfg = Configuration::Reference) const;
   void build_search_structure(Configuration cfg = Configuration::Reference) const;
   void clear_search_structure() const;
+  bool has_search_structure() const { return static_cast<bool>(search_accel_); }
 
   // ---- Validation & diagnostics ----
   void validate_basic() const;
