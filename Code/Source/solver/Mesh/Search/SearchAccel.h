@@ -53,6 +53,12 @@ struct SearchStats {
   size_t hit_count = 0;             // Successful queries
   size_t n_entities = 0;            // Number of entities in structure
   size_t tree_depth = 0;            // Tree depth (for tree structures)
+  // Extended counters used by some accelerators
+  size_t n_nodes = 0;               // Node count (trees/BVH)
+  size_t n_node_visits = 0;         // Node visits across queries
+  double total_query_time_ms = 0.0; // Aggregate query time
+  // Compatibility alias (used by some modules/tests)
+  size_t n_queries = 0;             // Total queries performed
 
   real_t hit_ratio() const {
     return query_count > 0 ? static_cast<real_t>(hit_count) / query_count : 0.0;
@@ -64,6 +70,8 @@ struct SearchStats {
  */
 class IAccel {
 public:
+  // Compatibility alias for configuration enum used in tests
+  using Configuration = svmp::Configuration;
   virtual ~IAccel() = default;
 
   // ---- Building ----

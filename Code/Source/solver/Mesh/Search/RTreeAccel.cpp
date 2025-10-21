@@ -30,12 +30,14 @@
 
 #include "RTreeAccel.h"
 #include "SearchBuilders.h"
+#include "../Core/MeshBase.h"
 #include <algorithm>
 #include <numeric>
 #include <cmath>
 #include <stack>
 
 namespace svmp {
+using namespace search;
 
 // ---- Building ----
 
@@ -99,7 +101,19 @@ void RTreeAccel::build(const MeshBase& mesh,
 
   // Extract boundary triangles for ray intersection
   if (config.primary_use == MeshSearch::QueryType::RayIntersection) {
-    boundary_triangles_ = SearchBuilders::extract_boundary_triangles(mesh, vertex_coords_);
+    auto tris = SearchBuilders::extract_boundary_triangles(mesh, vertex_coords_);
+    boundary_triangles_.clear();
+    boundary_triangles_.reserve(tris.size());
+    for (const auto& t : tris) {
+      BoundaryTriangle bt;
+      bt.vertices = t.vertices;
+      // Compute flat normal
+      auto e1 = search::subtract(bt.vertices[1], bt.vertices[0]);
+      auto e2 = search::subtract(bt.vertices[2], bt.vertices[0]);
+      bt.normal = search::cross(e1, e2);
+      bt.face_id = t.face_id;
+      boundary_triangles_.push_back(bt);
+    }
   }
 
   // Compute statistics

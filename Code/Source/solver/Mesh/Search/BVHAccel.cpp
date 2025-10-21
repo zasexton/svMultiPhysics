@@ -30,6 +30,7 @@
 
 #include "BVHAccel.h"
 #include "SearchBuilders.h"
+#include "../Core/MeshBase.h"
 #include <algorithm>
 #include <limits>
 #include <stack>
@@ -37,6 +38,7 @@
 #include <numeric>
 
 namespace svmp {
+using namespace search;
 
 // ---- Building ----
 
@@ -74,7 +76,19 @@ void BVHAccel::build(const MeshBase& mesh,
 
   if (config.primary_use == MeshSearch::QueryType::RayIntersection) {
     // For ray intersection, use boundary triangles
-    boundary_triangles_ = SearchBuilders::extract_boundary_triangles(mesh, vertex_coords_);
+    auto tris = SearchBuilders::extract_boundary_triangles(mesh, vertex_coords_);
+    boundary_triangles_.clear();
+    boundary_triangles_.reserve(tris.size());
+    for (const auto& t : tris) {
+      BoundaryTriangle bt;
+      bt.vertices = t.vertices;
+      // Precompute normal
+      auto e1 = search::subtract(bt.vertices[1], bt.vertices[0]);
+      auto e2 = search::subtract(bt.vertices[2], bt.vertices[0]);
+      bt.normal = search::cross(e1, e2);
+      bt.face_id = t.face_id;
+      boundary_triangles_.push_back(bt);
+    }
 
     primitives.reserve(boundary_triangles_.size());
     for (size_t i = 0; i < boundary_triangles_.size(); ++i) {
@@ -992,7 +1006,18 @@ void BVHAccel::refit(const MeshBase& mesh) {
   // Update primitive bounds
   if (!boundary_triangles_.empty()) {
     // Update triangle vertices
-    boundary_triangles_ = SearchBuilders::extract_boundary_triangles(mesh, vertex_coords_);
+    auto tris = SearchBuilders::extract_boundary_triangles(mesh, vertex_coords_);
+    boundary_triangles_.clear();
+    boundary_triangles_.reserve(tris.size());
+    for (const auto& t : tris) {
+      BoundaryTriangle bt;
+      bt.vertices = t.vertices;
+      auto e1 = search::subtract(bt.vertices[1], bt.vertices[0]);
+      auto e2 = search::subtract(bt.vertices[2], bt.vertices[0]);
+      bt.normal = search::cross(e1, e2);
+      bt.face_id = t.face_id;
+      boundary_triangles_.push_back(bt);
+    }
   } else {
     // Update cell AABBs
     primitive_aabbs_ = SearchBuilders::compute_cell_aabbs(mesh, vertex_coords_);
