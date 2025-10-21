@@ -38,6 +38,7 @@
 #include <queue>
 #include <array>
 #include <unordered_set>
+#include <algorithm>
 
 namespace svmp {
 
@@ -158,7 +159,8 @@ private:
         : bounds(b), depth(d) {
       center = bounds.center();
       auto extents = bounds.extents();
-      half_size = std::max({extents[0], extents[1], extents[2]}) * 0.5;
+      real_t max_ext = std::max(extents[0], std::max(extents[1], extents[2]));
+      half_size = max_ext * 0.5;
     }
 
     // Get child octant for a point (0-7)
@@ -222,7 +224,7 @@ private:
   // State
   bool is_built_ = false;
   Configuration built_cfg_ = Configuration::Reference;
-  SearchStats stats_;
+  mutable SearchStats stats_;
 
   // Build parameters
   int max_depth_ = 10;
