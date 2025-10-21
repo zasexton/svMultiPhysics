@@ -84,7 +84,8 @@ void KDTreeAccel::build(const MeshBase& mesh,
   stats_.build_time_ms = duration.count();
   stats_.n_entities = n_vertices + mesh.n_cells();
   stats_.tree_depth = compute_tree_depth(root_.get());
-  stats_.memory_bytes = sizeof(KDNode) * count_nodes(root_.get()) +
+  stats_.n_nodes = count_nodes(root_.get());
+  stats_.memory_bytes = sizeof(KDNode) * stats_.n_nodes +
                        sizeof(std::array<real_t,3>) * vertices_.size() +
                        sizeof(search::AABB) * cell_aabbs_.size();
 }
@@ -503,17 +504,37 @@ RayIntersectResult KDTreeAccel::intersect_ray(
     const std::array<real_t,3>& origin,
     const std::array<real_t,3>& direction,
     real_t max_distance) const {
-
-  // KD-tree is primarily for vertex queries
-  // For ray intersection, we'd need a different structure or fallback
   RayIntersectResult result;
   result.found = false;
   result.face_id = -1;
   result.t = -1.0;
+  if (!is_built_ || cell_aabbs_.empty()) {
+    return result;
+  }
+  stats_.query_count++;
+  search::Ray ray(origin, search::normalize3(direction), 0.0, max_distance);
 
-  // Could implement by finding cells near ray and testing them
-  // For now, return not implemented
-
+  real_t best_t = max_distance;
+  index_t best_cell = INVALID_INDEX;
+  for (index_t c = 0; c < static_cast<index_t>(cell_aabbs_.size()); ++c) {
+    real_t t_near, t_far;
+    if (search::ray_aabb_intersect(ray, cell_aabbs_[c], t_near, t_far)) {
+      if (t_near >= ray.t_min && t_near < best_t) {
+        best_t = t_near;
+        best_cell = c;
+      }
+    }
+  }
+  if (best_cell != INVALID_INDEX) {
+    result.found = true;
+    result.hit = true;
+    result.face_id = -1;
+    result.t = best_t;
+    result.distance = best_t;
+    result.point = ray.point_at(best_t);
+    result.hit_point = result.point;
+    stats_.hit_count++;
+  }
   return result;
 }
 
@@ -522,9 +543,29 @@ std::vector<RayIntersectResult> KDTreeAccel::intersect_ray_all(
     const std::array<real_t,3>& origin,
     const std::array<real_t,3>& direction,
     real_t max_distance) const {
-
-  // Not efficiently supported by KD-tree
-  return {};
+  std::vector<RayIntersectResult> results;
+  if (!is_built_ || cell_aabbs_.empty()) {
+    return results;
+  }
+  stats_.query_count++;
+  search::Ray ray(origin, search::normalize3(direction), 0.0, max_distance);
+  for (index_t c = 0; c < static_cast<index_t>(cell_aabbs_.size()); ++c) {
+    real_t t_near, t_far;
+    if (search::ray_aabb_intersect(ray, cell_aabbs_[c], t_near, t_far)) {
+      RayIntersectResult hit;
+      hit.found = true;
+      hit.hit = true;
+      hit.face_id = -1;
+      hit.t = t_near;
+      hit.distance = t_near;
+      hit.point = ray.point_at(t_near);
+      hit.hit_point = hit.point;
+      results.push_back(hit);
+    }
+  }
+  std::sort(results.begin(), results.end(), [](const RayIntersectResult& a, const RayIntersectResult& b){return a.distance < b.distance;});
+  if (!results.empty()) stats_.hit_count++;
+  return results;
 }
 
 // ---- Region queries ----
