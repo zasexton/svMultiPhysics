@@ -43,8 +43,8 @@ std::vector<std::array<real_t,3>> SearchBuilders::extract_vertex_coords(
     const MeshBase& mesh,
     Configuration cfg) {
 
-  const std::vector<real_t>& coords = (cfg == Configuration::Current && mesh.has_current_coords())
-                                     ? mesh.X_cur() : mesh.X_ref();
+  const std::vector<real_t>& coords = ((cfg != Configuration::Reference) && mesh.has_current_coords())
+                                      ? mesh.X_cur() : mesh.X_ref();
   int dim = mesh.dim();
   size_t n_vertices = mesh.n_vertices();
 
@@ -147,6 +147,25 @@ std::vector<AABB> SearchBuilders::compute_all_cell_aabbs(const MeshBase& mesh,
     aabbs.push_back(compute_cell_aabb(mesh, static_cast<index_t>(c), cfg));
   }
 
+  return aabbs;
+}
+
+std::vector<AABB> SearchBuilders::compute_cell_aabbs(const MeshBase& mesh,
+                                                     const std::vector<std::array<real_t,3>>& vertex_coords) {
+  size_t n_cells = mesh.n_cells();
+  std::vector<AABB> aabbs;
+  aabbs.reserve(n_cells);
+
+  for (size_t c = 0; c < n_cells; ++c) {
+    AABB aabb;
+    auto verts = mesh.cell_vertices(static_cast<index_t>(c));
+    for (index_t vid : verts) {
+      if (vid >= 0 && static_cast<size_t>(vid) < vertex_coords.size()) {
+        aabb.include(vertex_coords[static_cast<size_t>(vid)]);
+      }
+    }
+    aabbs.push_back(aabb);
+  }
   return aabbs;
 }
 
@@ -256,6 +275,51 @@ std::vector<SearchBuilders::TriangleWithFace> SearchBuilders::triangulate_bounda
   }
 
   return triangles;
+}
+
+std::vector<SearchBuilders::TriangleWithFace> SearchBuilders::extract_boundary_triangles(
+    const MeshBase& mesh,
+    const std::vector<std::array<real_t,3>>& vertex_coords) {
+  std::vector<TriangleWithFace> triangles;
+  auto boundary_faces = get_boundary_faces(mesh);
+  for (index_t face_id : boundary_faces) {
+    auto verts = mesh.face_vertices(face_id);
+    if (verts.size() < 3) continue;
+    // Fan triangulation
+    for (size_t i = 1; i + 1 < verts.size(); ++i) {
+      TriangleWithFace tri;
+      auto v0 = static_cast<size_t>(verts[0]);
+      auto v1 = static_cast<size_t>(verts[i]);
+      auto v2 = static_cast<size_t>(verts[i+1]);
+      if (v0 < vertex_coords.size() && v1 < vertex_coords.size() && v2 < vertex_coords.size()) {
+        tri.vertices = { vertex_coords[v0], vertex_coords[v1], vertex_coords[v2] };
+        tri.face_id = face_id;
+        triangles.push_back(tri);
+      }
+    }
+  }
+  return triangles;
+}
+
+bool SearchBuilders::point_in_cell(const MeshBase& mesh,
+                                   const std::vector<std::array<real_t,3>>& vertex_coords,
+                                   index_t cell_id,
+                                   const std::array<real_t,3>& p,
+                                   std::array<real_t,3>& xi) {
+  if (cell_id < 0 || static_cast<size_t>(cell_id) >= mesh.n_cells()) return false;
+  auto shape = mesh.cell_shape(cell_id);
+  auto verts_idx = mesh.cell_vertices(cell_id);
+  std::vector<std::array<real_t,3>> verts;
+  verts.reserve(verts_idx.size());
+  for (auto vid : verts_idx) {
+    if (vid < 0 || static_cast<size_t>(vid) >= vertex_coords.size()) return false;
+    verts.push_back(vertex_coords[static_cast<size_t>(vid)]);
+  }
+  bool inside = search::point_in_cell(p, shape, verts);
+  if (inside) {
+    xi = SearchBuilders::compute_parametric_coords(mesh, cell_id, p, Configuration::Reference);
+  }
+  return inside;
 }
 
 // ---- Cell center computation ----

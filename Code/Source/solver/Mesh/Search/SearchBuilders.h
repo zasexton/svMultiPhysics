@@ -61,6 +61,13 @@ public:
       const MeshBase& mesh,
       Configuration cfg);
 
+  // Compatibility overloads used by some accelerators/tests
+  static std::vector<std::array<real_t,3>> extract_vertex_coords(
+      const MeshBase& mesh) { return extract_vertex_coords(mesh, Configuration::Reference); }
+
+  static std::vector<std::array<real_t,3>> extract_deformed_coords(
+      const MeshBase& mesh) { return extract_vertex_coords(mesh, Configuration::Current); }
+
   /**
    * @brief Extract coordinates for specific vertex
    * @param mesh The mesh
@@ -126,6 +133,10 @@ public:
    */
   static std::vector<AABB> compute_all_cell_aabbs(const MeshBase& mesh,
                                                   Configuration cfg);
+
+  // Overload: compute cell AABBs from provided vertex coordinates
+  static std::vector<AABB> compute_cell_aabbs(const MeshBase& mesh,
+                                              const std::vector<std::array<real_t,3>>& vertex_coords);
 
   /**
    * @brief Compute AABB for a face
@@ -201,6 +212,18 @@ public:
   static std::vector<TriangleWithFace> triangulate_boundary(
       const MeshBase& mesh,
       Configuration cfg);
+
+  // Extract boundary triangles using precomputed vertex coordinates
+  static std::vector<TriangleWithFace> extract_boundary_triangles(
+      const MeshBase& mesh,
+      const std::vector<std::array<real_t,3>>& vertex_coords);
+
+  // Point-in-cell convenience (returns also parametric coords)
+  static bool point_in_cell(const MeshBase& mesh,
+                            const std::vector<std::array<real_t,3>>& vertex_coords,
+                            index_t cell_id,
+                            const std::array<real_t,3>& p,
+                            std::array<real_t,3>& xi);
 
   // ---- Cell center computation ----
 
