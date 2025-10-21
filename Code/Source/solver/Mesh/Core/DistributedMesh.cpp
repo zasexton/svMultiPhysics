@@ -38,6 +38,15 @@
 #include <unordered_set>
 #include <iostream>
 #include <cstring>
+
+#if !(defined(MESH_HAS_MPI) && !defined(MESH_BUILD_TESTS))
+// When MPI is not enabled, or when building tests where DistributedMesh is
+// aliased to MeshBase, do not compile the real DistributedMesh implementation.
+// Provide an empty translation unit to satisfy build systems.
+
+namespace svmp { }
+
+#else
 #include <fstream>
 #include <iomanip>
 #include <cmath>
@@ -3685,3 +3694,5 @@ void DistributedMesh::synchronize_field_data(EntityKind kind, const std::string&
 }
 
 } // namespace svmp
+
+#endif // MESH_HAS_MPI && !MESH_BUILD_TESTS

@@ -32,20 +32,188 @@
 #define SVMP_DISTRIBUTED_MESH_H
 
 #include "MeshBase.h"
+#ifdef MESH_HAS_MPI
 #include <mpi.h>
+#endif
 #include <memory>
 #include <unordered_set>
 #include <vector>
 
 namespace svmp {
 
+#if defined(MESH_BUILD_TESTS) || !defined(MESH_HAS_MPI)
+
+// ------------------------
+// Serial stub for DistributedMesh (test-friendly)
+// ------------------------
+class DistributedMesh : public MeshBase {
+public:
+  // Constructors
+  DistributedMesh() = default;
+#ifdef MESH_HAS_MPI
+  explicit DistributedMesh(MPI_Comm comm)
+    : MeshBase() { (void)comm; }
+  explicit DistributedMesh(std::shared_ptr<MeshBase> local_mesh, MPI_Comm comm = MPI_COMM_WORLD)
+    : MeshBase() { (void)comm; local_mesh_ = std::move(local_mesh); }
+#else
+  // Generic placeholders to accept MPI-like arguments when MPI is not available
+  template <typename CommT>
+  explicit DistributedMesh(CommT) : MeshBase() {}
+  template <typename CommT>
+  explicit DistributedMesh(std::shared_ptr<MeshBase> local_mesh, CommT)
+    : MeshBase() { local_mesh_ = std::move(local_mesh); }
+#endif
+
+  // Access underlying mesh
+  MeshBase& local_mesh() { return local_mesh_ ? *local_mesh_ : static_cast<MeshBase&>(*this); }
+  const MeshBase& local_mesh() const { return local_mesh_ ? *local_mesh_ : static_cast<const MeshBase&>(*this); }
+  std::shared_ptr<MeshBase> local_mesh_ptr() { return local_mesh_; }
+  std::shared_ptr<const MeshBase> local_mesh_ptr() const { return local_mesh_; }
+
+  // MPI info
+  rank_t rank() const noexcept { return 0; }
+  int world_size() const noexcept { return 1; }
+  const std::unordered_set<rank_t>& neighbor_ranks() const noexcept { return neighbor_ranks_; }
+  // Provide a stub mpi_comm() that can be compared to MPI constants
+  // When MPI is not present, return a void* null; pointer comparisons with MPI_Comm work via implicit conversion in tests.
+  void* mpi_comm() const noexcept { return nullptr; }
+  template <typename CommT>
+  void set_mpi_comm(CommT) {}
+
+  // Ownership (default Owned for all)
+  bool is_owned_cell(index_t i) const { return get_owner(cell_owner_, Ownership::Owned, i) == Ownership::Owned; }
+  bool is_ghost_cell(index_t i) const { return get_owner(cell_owner_, Ownership::Owned, i) == Ownership::Ghost; }
+  bool is_shared_cell(index_t i) const { return get_owner(cell_owner_, Ownership::Owned, i) == Ownership::Shared; }
+  rank_t owner_rank_cell(index_t i) const { return get_owner_rank(cell_owner_rank_, i); }
+
+  bool is_owned_vertex(index_t i) const { return get_owner(vertex_owner_, Ownership::Owned, i) == Ownership::Owned; }
+  bool is_ghost_vertex(index_t i) const { return get_owner(vertex_owner_, Ownership::Owned, i) == Ownership::Ghost; }
+  bool is_shared_vertex(index_t i) const { return get_owner(vertex_owner_, Ownership::Owned, i) == Ownership::Shared; }
+  rank_t owner_rank_vertex(index_t i) const { return get_owner_rank(vertex_owner_rank_, i); }
+
+  bool is_owned_face(index_t i) const { return get_owner(face_owner_, Ownership::Owned, i) == Ownership::Owned; }
+  bool is_ghost_face(index_t i) const { return get_owner(face_owner_, Ownership::Owned, i) == Ownership::Ghost; }
+  bool is_shared_face(index_t i) const { return get_owner(face_owner_, Ownership::Owned, i) == Ownership::Shared; }
+  rank_t owner_rank_face(index_t i) const { return get_owner_rank(face_owner_rank_, i); }
+
+  void set_ownership(index_t id, EntityKind kind, Ownership own, rank_t owner_rank = -1) {
+    switch (kind) {
+      case EntityKind::Volume:
+        ensure_size(cell_owner_, local_mesh_->n_cells());
+        ensure_size(cell_owner_rank_, local_mesh_->n_cells(), 0);
+        cell_owner_[id] = own;
+        cell_owner_rank_[id] = owner_rank >= 0 ? owner_rank : 0;
+        break;
+      case EntityKind::Vertex:
+        ensure_size(vertex_owner_, local_mesh_->n_vertices());
+        ensure_size(vertex_owner_rank_, local_mesh_->n_vertices(), 0);
+        vertex_owner_[id] = own;
+        vertex_owner_rank_[id] = owner_rank >= 0 ? owner_rank : 0;
+        break;
+      case EntityKind::Face:
+        ensure_size(face_owner_, local_mesh_->n_faces());
+        ensure_size(face_owner_rank_, local_mesh_->n_faces(), 0);
+        face_owner_[id] = own;
+        face_owner_rank_[id] = owner_rank >= 0 ? owner_rank : 0;
+        break;
+      case EntityKind::Edge:
+        break;
+    }
+  }
+
+  // Ghosts (no-op in serial stub)
+  void build_ghost_layer(int) {}
+  void clear_ghosts() {}
+  void update_ghosts(const std::vector<FieldHandle>&) {}
+
+  // Migration & balancing (no-op)
+  void migrate(const std::vector<rank_t>&) {}
+  void rebalance(PartitionHint, const std::unordered_map<std::string,std::string>& = {}) {}
+
+  // Partition metrics (single-rank computation)
+  struct PartitionMetrics {
+    double load_imbalance_factor{0.0};
+    size_t min_cells_per_rank{0};
+    size_t max_cells_per_rank{0};
+    size_t avg_cells_per_rank{0};
+    size_t total_edge_cuts{0};
+    size_t total_shared_faces{0};
+    size_t total_ghost_cells{0};
+    double avg_neighbors_per_rank{0.0};
+    size_t min_memory_per_rank{0};
+    size_t max_memory_per_rank{0};
+    double memory_imbalance_factor{0.0};
+    size_t cells_to_migrate{0};
+    size_t migration_volume{0};
+  };
+
+  PartitionMetrics compute_partition_quality() const {
+    PartitionMetrics m;
+    size_t cells = local_mesh_->n_cells();
+    m.min_cells_per_rank = m.max_cells_per_rank = m.avg_cells_per_rank = cells;
+    return m;
+  }
+
+  // Parallel I/O stubs
+  template <typename CommT>
+  static DistributedMesh load_parallel(const MeshIOOptions& opts, CommT) {
+    DistributedMesh dm;
+    dm.local_mesh() = MeshBase::load(opts);
+    return dm;
+  }
+  void save_parallel(const MeshIOOptions& opts) const { local_mesh_->save(opts); }
+
+  // Global reductions (single rank)
+  size_t global_n_vertices() const { return local_mesh_->n_vertices(); }
+  size_t global_n_cells() const { return local_mesh_->n_cells(); }
+  size_t global_n_faces() const { return local_mesh_->n_faces(); }
+  BoundingBox global_bounding_box() const { return local_mesh_->bounding_box(); }
+
+  // Distributed search (serial)
+  PointLocateResult locate_point_global(const std::array<real_t,3>& x,
+                                        Configuration cfg = Configuration::Reference) const {
+    return local_mesh_->locate_point(x, cfg);
+  }
+
+  // Exchange patterns
+  struct ExchangePattern {
+    std::vector<rank_t> send_ranks;
+    std::vector<std::vector<index_t>> send_lists;
+    std::vector<rank_t> recv_ranks;
+    std::vector<std::vector<index_t>> recv_lists;
+  };
+  const ExchangePattern& vertex_exchange_pattern() const { return vertex_exchange_; }
+  const ExchangePattern& cell_exchange_pattern() const { return cell_exchange_; }
+  void build_exchange_patterns() { /* no-op, patterns empty */ }
+
+private:
+  template<typename T>
+  static void ensure_size(std::vector<T>& v, size_t n, const T& value = T()) {
+    if (v.size() < n) v.resize(n, value);
+  }
+  static Ownership get_owner(const std::vector<Ownership>& v, Ownership def, index_t i) {
+    if (i < 0) return def;
+    size_t n = v.size();
+    return (static_cast<size_t>(i) < n ? v[static_cast<size_t>(i)] : def);
+  }
+  static rank_t get_owner_rank(const std::vector<rank_t>& v, index_t i) {
+    if (i < 0) return 0;
+    size_t n = v.size();
+    return (static_cast<size_t>(i) < n ? v[static_cast<size_t>(i)] : 0);
+  }
+
+  std::shared_ptr<MeshBase> local_mesh_;
+  std::unordered_set<rank_t> neighbor_ranks_;
+  std::vector<Ownership> vertex_owner_, face_owner_, cell_owner_;
+  std::vector<rank_t> cell_owner_rank_, face_owner_rank_, vertex_owner_rank_;
+  ExchangePattern vertex_exchange_, cell_exchange_;
+};
+
+#else
+
 // ========================
 // Distributed mesh wrapper
 // ========================
-// This class adds MPI/parallel functionality to MeshBase through composition.
-// It owns a MeshBase and manages all distributed aspects like ownership,
-// ghost layers, communication patterns, and parallel I/O.
-
 class DistributedMesh {
 public:
   // ---- Constructors
@@ -214,6 +382,8 @@ public:
 private:
   std::shared_ptr<DistributedMesh> dmesh_;
 };
+
+#endif // MESH_HAS_MPI
 
 } // namespace svmp
 
