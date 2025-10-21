@@ -36,6 +36,7 @@
 #include <array>
 #include <vector>
 #include <utility>
+#include <cmath>
 
 namespace svmp {
 namespace search {
@@ -54,12 +55,17 @@ struct AABB {
 
   void include(const std::array<real_t,3>& p);
   void include(const AABB& other);
+  // Compatibility helpers: some modules use 'expand' terminology
+  inline void expand(const std::array<real_t,3>& p) { include(p); }
+  inline void expand(const AABB& other) { include(other); }
   bool overlaps(const AABB& other) const;
   bool contains(const std::array<real_t,3>& p) const;
   std::array<real_t,3> center() const;
   std::array<real_t,3> extents() const;
   real_t volume() const;
   real_t surface_area() const;
+  // Compute closest point on box to p
+  std::array<real_t,3> closest_point(const std::array<real_t,3>& p) const;
 };
 
 /**
@@ -70,14 +76,17 @@ struct Ray {
   std::array<real_t,3> direction;  // Should be normalized
   real_t t_min = 0.0;
   real_t t_max = 1e30;
+  // Compatibility alias used by some accelerators/tests
+  real_t max_t = 1e30;
 
   Ray() = default;
   Ray(const std::array<real_t,3>& o, const std::array<real_t,3>& d,
       real_t tmin = 0.0, real_t tmax = 1e30)
-      : origin(o), direction(d), t_min(tmin), t_max(tmax) {}
+      : origin(o), direction(d), t_min(tmin), t_max(tmax), max_t(tmax) {}
 
   std::array<real_t,3> point_at(real_t t) const;
 };
+
 
 // ---- Geometric predicates ----
 
@@ -367,6 +376,26 @@ inline std::array<real_t,3> add3(const std::array<real_t,3>& a,
  */
 inline std::array<real_t,3> scale3(const std::array<real_t,3>& v, real_t s) {
   return {v[0]*s, v[1]*s, v[2]*s};
+}
+
+// Vector utility compat wrappers expected by some accelerators
+inline std::array<real_t,3> subtract(const std::array<real_t,3>& a,
+                                     const std::array<real_t,3>& b) {
+  return sub3(a, b);
+}
+
+inline real_t dot(const std::array<real_t,3>& a,
+                  const std::array<real_t,3>& b) {
+  return dot3(a, b);
+}
+
+inline std::array<real_t,3> cross(const std::array<real_t,3>& a,
+                                  const std::array<real_t,3>& b) {
+  return cross3(a, b);
+}
+
+inline real_t norm_squared(const std::array<real_t,3>& v) {
+  return dot3(v, v);
 }
 
 } // namespace search

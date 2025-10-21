@@ -70,12 +70,28 @@ bool AABB::contains(const std::array<real_t,3>& p) const {
   return true;
 }
 
+// Closest point on AABB to a given point (clamped)
+static inline std::array<real_t,3> clamp3(const std::array<real_t,3>& x,
+                                          const std::array<real_t,3>& lo,
+                                          const std::array<real_t,3>& hi) {
+  return {
+    std::min(hi[0], std::max(lo[0], x[0])),
+    std::min(hi[1], std::max(lo[1], x[1])),
+    std::min(hi[2], std::max(lo[2], x[2]))
+  };
+}
+
 std::array<real_t,3> AABB::center() const {
   return {
     0.5 * (min[0] + max[0]),
     0.5 * (min[1] + max[1]),
     0.5 * (min[2] + max[2])
   };
+}
+
+// Provide closest_point convenience expected by some accelerators
+std::array<real_t,3> AABB::closest_point(const std::array<real_t,3>& p) const {
+  return clamp3(p, min, max);
 }
 
 std::array<real_t,3> AABB::extents() const {
