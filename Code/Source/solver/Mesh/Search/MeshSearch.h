@@ -78,7 +78,17 @@ public:
     int grid_resolution = 32;        // Grid cells per dimension
     real_t tolerance = 1e-10;        // Geometric tolerance
     bool use_cache = true;           // Cache recent searches
+    // Primary query type (compat with some accelerators/tests)
+    enum class QueryType {
+      PointLocation,
+      NearestNeighbor,
+      RayIntersection
+    };
+    QueryType primary_use = QueryType::PointLocation;
   };
+
+  // Compatibility alias so tests can use MeshSearch::QueryType
+  using QueryType = SearchConfig::QueryType;
 
   // ---- Point location ----
 

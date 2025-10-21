@@ -291,17 +291,16 @@ std::pair<std::array<real_t,3>, index_t> MeshSearch::closest_boundary_point(
 void MeshSearch::build_search_structure(const MeshBase& mesh,
                                        const SearchConfig& config,
                                        Configuration cfg) {
-  // TODO: Implement search structure building
-  // This would create spatial acceleration structures like octrees, kd-trees, etc.
+  // Delegate to MeshBase holder (placeholder in current implementation)
+  mesh.build_search_structure(cfg);
 }
 
 void MeshSearch::clear_search_structure(const MeshBase& mesh) {
-  // TODO: Implement search structure clearing
+  mesh.clear_search_structure();
 }
 
 bool MeshSearch::has_search_structure(const MeshBase& mesh) {
-  // TODO: Check if search structure exists
-  return false;
+  return mesh.has_search_structure();
 }
 
 // ---- Spatial queries ----
