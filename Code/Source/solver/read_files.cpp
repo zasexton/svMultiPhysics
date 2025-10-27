@@ -1,32 +1,5 @@
-/* Copyright (c) Stanford University, The Regents of the University of California, and others.
- *
- * All Rights Reserved.
- *
- * See Copyright-SimVascular.txt for additional details.
- *
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sublicense, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject
- * to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
- * IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
- * PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
- * OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
- * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
- * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
- * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
+// SPDX-FileCopyrightText: Copyright (c) Stanford University, The Regents of the University of California, and others.
+// SPDX-License-Identifier: BSD-3-Clause
 
 // The functions defined here replicate the Fortran functions defined in READFILES.f.
 
@@ -205,6 +178,13 @@ void read_bc(Simulation* simulation, EquationParameters* eq_params, eqType& lEq,
   } else if (std::set<std::string>{"Coupled Momentum","CMM"}.count(bc_type)) {
     lBc.bType = utils::ibset(lBc.bType, enum_int(BoundaryConditionType::bType_CMM)); 
 
+  } else if (std::set<std::string>{"RIS0D", "RIS0D"}.count(bc_type)) {
+    lBc.bType = utils::ibset(lBc.bType, enum_int(BoundaryConditionType::bType_Ris0D));
+    auto& com_mod = simulation->com_mod;
+    lBc.bType = utils::ibset(lBc.bType, enum_int(BoundaryConditionType::bType_Neu));
+    com_mod.ris0DFlag = true;
+    lBc.resistance = bc_params->resistance.value();
+
   } else {
     throw std::runtime_error("[read_bc] Unknown boundary condition type '" + bc_type + "'.");
   }
@@ -254,12 +234,40 @@ void read_bc(Simulation* simulation, EquationParameters* eq_params, eqType& lEq,
       read_fourier_coeff_values_file(file_name, lBc);
     }
 
+  // There are currently two coupling methods: GenBC and svZeroDSolver.
+  //
+  // A coupling method is defined if com_mod.cplBC.schm is set.
+  //
   } else if (ctmp == "Coupled") { 
     lBc.bType = utils::ibset(lBc.bType, enum_int(BoundaryConditionType::bType_cpl)); 
     com_mod.cplBC.nFa = com_mod.cplBC.nFa + 1;
     lBc.cplBCptr = com_mod.cplBC.nFa - 1;
-    if (com_mod.cplBC.schm == CplBCType::cplBC_NA) {
-      throw std::runtime_error("[read_bc] Couple to cplBC' must be specified before using Coupled BC.");
+    auto& face_name = com_mod.msh[lBc.iM].fa[lBc.iFa].name;
+
+    // The svZeroDSolver_interface parameter is defined.
+    //
+    if (com_mod.cplBC.svzerod_solver_interface.has_data) { 
+      if (!bc_params->svzerod_solver_block.defined()) {
+        std::string error_msg = std::string("The svZeroDSolver_block parameter must be defined for the 'Coupled' ") + 
+            std::string(" boundary condition for the face '") + face_name + "'.";
+        throw std::runtime_error(error_msg);
+      }
+      auto block_name = bc_params->svzerod_solver_block();
+      com_mod.cplBC.svzerod_solver_interface.add_block_face(block_name, face_name);
+
+    // Assume coupling with GenBC.
+    //
+    } else if (com_mod.cplBC.schm != CplBCType::cplBC_NA) {
+      if (bc_params->svzerod_solver_block.defined()) {
+        std::string error_msg = std::string("The svZeroDSolver_block parameter cannot be defined for the 'Coupled' ") + 
+            std::string(" boundary condition for the face '") + face_name + "' when Couple_to_genBC parameters is used.";
+        throw std::runtime_error(error_msg);
+      }
+
+    } else { 
+      std::string error_msg = std::string("A coupling method must be defined for the 'Coupled' ") + 
+            std::string(" boundary condition parameter for face '") + face_name + "'.";
+      throw std::runtime_error(error_msg);
     }
 
   } else if (ctmp == "Resistance") { 
@@ -357,9 +365,20 @@ void read_bc(Simulation* simulation, EquationParameters* eq_params, eqType& lEq,
 
   // Stiffness and damping parameters for Robin BC
   if (utils::btest(lBc.bType, enum_int(BoundaryConditionType::bType_Robin))) { 
-    lBc.k = bc_params->stiffness.value();
-    lBc.c = bc_params->damping.value();
-    lBc.rbnN = bc_params->apply_along_normal_direction.value();
+    
+    // Read VTP file path for per-node stiffness and damping (optional)
+    if (bc_params->spatial_values_file_path.defined()) {
+      lBc.robin_bc = RobinBoundaryCondition(bc_params->spatial_values_file_path.value(), 
+                                            bc_params->apply_along_normal_direction.value(),
+                                            com_mod.msh[lBc.iM].fa[lBc.iFa],
+                                            simulation->logger);
+    } else {
+      lBc.robin_bc = RobinBoundaryCondition(bc_params->stiffness.value(), 
+                                            bc_params->damping.value(),
+                                            bc_params->apply_along_normal_direction.value(),
+                                            com_mod.msh[lBc.iM].fa[lBc.iFa],
+                                            simulation->logger);
+    }
   }
 
   // To impose value or flux
@@ -1399,24 +1418,27 @@ void read_eq(Simulation* simulation, EquationParameters* eq_params, eqType& lEq)
 
   if (cplBC.xo.size() == 0) {
     std::string cplbc_type_str;
+
     if (eq_params->couple_to_genBC.defined()) {
       cplBC.useGenBC = true;
       cplbc_type_str = eq_params->couple_to_genBC.type.value();
-    } else if (eq_params->couple_to_svZeroD.defined()) {
+
+    } else if (eq_params->svzerodsolver_interface_parameters.defined()) {
       cplBC.useSvZeroD = true;
-      cplbc_type_str = eq_params->couple_to_svZeroD.type.value();
+      cplbc_type_str = eq_params->svzerodsolver_interface_parameters.coupling_type.value();
+      cplBC.svzerod_solver_interface.set_data(eq_params->svzerodsolver_interface_parameters);
+
     } else if (eq_params->couple_to_cplBC.defined()) {
       cplbc_type_str = eq_params->couple_to_cplBC.type.value();
     }
 
-    if (eq_params->couple_to_genBC.defined() || eq_params->couple_to_cplBC.defined() || eq_params->couple_to_svZeroD.defined()) {
+    if (cplBC.useGenBC || cplBC.useSvZeroD) { 
       try {
         cplBC.schm = consts::cplbc_name_to_type.at(cplbc_type_str);
       } catch (const std::out_of_range& exception) {
         throw std::runtime_error("Unknown coupled BC type '" + cplbc_type_str + ".");
       }
     }
-
 
     if (cplBC.schm != consts::CplBCType::cplBC_NA) { 
       if (cplBC.useGenBC) {
@@ -1426,9 +1448,10 @@ void read_eq(Simulation* simulation, EquationParameters* eq_params, eqType& lEq)
         cplBC.commuName = "GenBC.int";
         cplBC.nX = 0;
         cplBC.xp.resize(cplBC.nX);
+
       } else if (cplBC.useSvZeroD) {
-        cplBC.commuName = "svZeroD_interface.dat";
         cplBC.nX = 0;
+
       } else {
         auto& cplBC_params = eq_params->couple_to_cplBC;
         cplBC.nX = cplBC_params.number_of_unknowns.value();
@@ -1599,6 +1622,7 @@ void read_fiber_temporal_values_file(FiberReinforcementStressParameters& fiber_p
   std::string line;
 
   while (std::getline(temporal_values_file, line)) { 
+    line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
     if (line == "") {
       continue;
     }
@@ -1682,7 +1706,23 @@ void read_files(Simulation* simulation, const std::string& file_name)
     com_mod.stFileFlag = gen_params.continue_previous_simulation.value();
   }
 
-  // Set simulatioin and module member data from XML parameters.
+  // Setup logging to history file.
+  if (!simulation->com_mod.cm.slv(simulation->cm_mod)) {
+    std::string hist_file_name;
+
+    if (chnl_mod.appPath != "") { 
+      auto mkdir_arg = std::string("mkdir -p ") + chnl_mod.appPath;
+      std::system(mkdir_arg.c_str());
+      hist_file_name = chnl_mod.appPath + "/" + simulation->history_file_name;
+    } else {
+      hist_file_name = simulation->history_file_name;
+    }
+
+    bool output_to_cout = true;
+    simulation->logger.initialize(hist_file_name, output_to_cout);
+  }
+
+  // Set simulation and module member data from XML parameters.
   simulation->set_module_parameters();
 
   // Read mesh and BCs data.
@@ -1887,6 +1927,7 @@ void read_fourier_coeff_values_file(const std::string& file_name, bcType& lBc)
   int n = 0;
 
   while (std::getline(temporal_values_file, line)) { 
+    line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
     if (line == "") {
       continue;
     }
@@ -1912,6 +1953,7 @@ void read_fourier_coeff_values_file(const std::string& file_name, bcType& lBc)
   int j = 0;
 
   while (std::getline(temporal_values_file, line)) { 
+    line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
     if (line == "") {
       continue;
     }
@@ -1921,10 +1963,9 @@ void read_fourier_coeff_values_file(const std::string& file_name, bcType& lBc)
       values.push_back(value);
     }
 
-    int num_vals = values.size();
-    for (int i = 0; i < values.size(); i++) {
-      lBc.gt.r(i,j) = values[i]; 
-      lBc.gt.i(i,j) = values[i+num_vals];
+    for (int i = 0; i < lBc.gt.d; i++) { 
+      lBc.gt.r(i,j) = values[i];
+      lBc.gt.i(i,j) = values[i + lBc.gt.d];
     }
 
     j += 1;
@@ -1954,6 +1995,7 @@ void read_fourier_coeff_values_file(const std::string& file_name, bfType& lBf)
   int n = 0;
 
   while (std::getline(temporal_values_file, line)) { 
+    line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
     if (line == "") {
       continue;
     }
@@ -1979,6 +2021,7 @@ void read_fourier_coeff_values_file(const std::string& file_name, bfType& lBf)
   int j = 0;
 
   while (std::getline(temporal_values_file, line)) { 
+    line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
     if (line == "") {
       continue;
     }
@@ -1988,10 +2031,9 @@ void read_fourier_coeff_values_file(const std::string& file_name, bfType& lBf)
       values.push_back(value);
     }
 
-    int num_vals = values.size();
-    for (int i = 0; i < values.size(); i++) {
-      lBf.bt.r(i,j) = values[i]; 
-      lBf.bt.i(i,j) = values[i+num_vals];
+    for (int i = 0; i < lBf.bt.d; i++) { 
+      lBf.bt.r(i,j) = values[i];
+      lBf.bt.i(i,j) = values[i + lBf.bt.d];
     }
 
     j += 1;
@@ -2071,7 +2113,7 @@ void read_ls(Simulation* simulation, EquationParameters* eq_params, consts::Solv
   #endif
 
   if (!linear_algebra.defined()) {
-    throw std::runtime_error("[svFSIplus] No <Linear_algebra> section has been defined for equation '" + 
+    throw std::runtime_error("[svMultiPhysics] ERROR: No <Linear_algebra> section has been defined for equation '" + 
         eq_params->type() + ".");
   }
 
@@ -2626,27 +2668,36 @@ void read_temporal_values(const std::string& file_name, bcType& lBc)
   std::vector<std::vector<double>> temporal_values;
   double time, value;
   std::string line;
+  int line_number = 1;
+  int num_values_per_line = lBc.gt.d + 1;
 
   while (std::getline(temporal_values_file, line)) { 
+    line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
     if (line == "") {
       continue;
     }
-    std::istringstream line_input(line);
+    // Remove leading and trailing spaces.
+    auto cleaned_line = std::regex_replace(line, std::regex("^ +| +$|( ) +"), "$1");
+    std::istringstream line_input(cleaned_line);
     std::vector<double> values;
 
     while (!line_input.eof()) {
       line_input >> value;
+
       if (line_input.fail()) { 
-        throw std::runtime_error("Error reading values for the temporal values file '" + file_name + "' for line '" + line + "'.");
+        throw std::runtime_error("Error reading values for the temporal values file '" + file_name + "' for line " +
+            std::to_string(line_number) + ": '" + line + "'; value number " + std::to_string(values.size()+1) + " is not a double.");
       }
       values.push_back(value);
     }
 
-    if (values.size() != 2) { 
-      throw std::runtime_error("Error reading values for the temporal values file '" + file_name + "' for line '" + line + "'.");
+    if (values.size() != num_values_per_line) { 
+      throw std::runtime_error("Error reading values for the temporal values file '" + file_name + "' for line " +
+          std::to_string(line_number) + ": '" + line + "'; expected " + std::to_string(num_values_per_line) + " values per line.");
     }
 
     temporal_values.push_back(values);
+    line_number += 1;
   }
 
   if (lBc.gt.lrmp) {
@@ -2685,6 +2736,7 @@ void read_temporal_values(const std::string& file_name, bfType& lBf)
   std::string line;
 
   while (std::getline(temporal_values_file, line)) { 
+    line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
     if (line == "") {
       continue;
     }

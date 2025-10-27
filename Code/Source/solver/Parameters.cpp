@@ -1,35 +1,8 @@
-/* Copyright (c) Stanford University, The Regents of the University of California, and others.
- *
- * All Rights Reserved.
- *
- * See Copyright-SimVascular.txt for additional details.
- *
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sublicense, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject
- * to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
- * IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
- * PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
- * OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
- * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
- * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
- * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
+// SPDX-FileCopyrightText: Copyright (c) Stanford University, The Regents of the University of California, and others.
+// SPDX-License-Identifier: BSD-3-Clause
 
 //
-// The class methods defined here are used to process svFSIplus simulation parameters 
+// The class methods defined here are used to process svMultiPhysics simulation parameters 
 // read in from an XML-format file. 
 //
 // XML files are parsed using tinyxml2 (https://github.com/leethomason/tinyxml2).
@@ -44,6 +17,8 @@
 //   - MeshParameters - Mesh parameter section
 //   - EquationParameters - Equation parameter section
 //   - ProjectionParameters  - Projection parameter section
+//   - RISProjectionParameters  - RIS Projection parameter section
+//   - URISMeshParameters - Mesh parameter section
 //
 // These section objects may also contain objects representing the sub-sections 
 // defined for each section. 
@@ -174,6 +149,12 @@ void Parameters::read_xml(std::string file_name)
 
   // Set Add_equation values.
   set_equation_values(root_element);
+
+  // Set RIS projection values.
+  set_RIS_projection_values(root_element);
+
+  // Set RIS projection values.
+  set_URIS_mesh_values(root_element);
 }
 
 void Parameters::set_contact_values(tinyxml2::XMLElement* root_element)
@@ -245,6 +226,40 @@ void Parameters::set_projection_values(tinyxml2::XMLElement* root_element)
     projection_parameters.push_back(proj_params);
 
     add_proj_item = add_proj_item->NextSiblingElement(ProjectionParameters::xml_element_name_.c_str());
+  }
+}
+
+void Parameters::set_RIS_projection_values(tinyxml2::XMLElement* root_element)
+{
+  auto add_RIS_proj_item = root_element->FirstChildElement(RISProjectionParameters::xml_element_name_.c_str());
+
+  while (add_RIS_proj_item) {
+    const char* RIS_proj_name;
+    auto result = add_RIS_proj_item->QueryStringAttribute("name", &RIS_proj_name);
+
+    RISProjectionParameters* RIS_proj_params = new RISProjectionParameters();
+    RIS_proj_params->name.set(std::string(RIS_proj_name));
+    RIS_proj_params->set_values(add_RIS_proj_item);
+    RIS_projection_parameters.push_back(RIS_proj_params);
+
+    add_RIS_proj_item = add_RIS_proj_item->NextSiblingElement(RISProjectionParameters::xml_element_name_.c_str());
+  }
+}
+
+void Parameters::set_URIS_mesh_values(tinyxml2::XMLElement* root_element)
+{
+  auto add_URIS_mesh_item = root_element->FirstChildElement(URISMeshParameters::xml_element_name_.c_str());
+
+  while (add_URIS_mesh_item) {
+    const char* URIS_mesh_name;
+    auto result = add_URIS_mesh_item->QueryStringAttribute("name", &URIS_mesh_name);
+
+    URISMeshParameters* URIS_mesh_params = new URISMeshParameters();
+    URIS_mesh_params->name.set(std::string(URIS_mesh_name));
+    URIS_mesh_params->set_values(add_URIS_mesh_item);
+    URIS_mesh_parameters.push_back(URIS_mesh_params);
+
+    add_URIS_mesh_item = add_URIS_mesh_item->NextSiblingElement(URISMeshParameters::xml_element_name_.c_str());
   }
 }
 
@@ -401,6 +416,7 @@ BoundaryConditionParameters::BoundaryConditionParameters()
   set_parameter("Spatial_profile_file_path", "", !required, spatial_profile_file_path);
   set_parameter("Spatial_values_file_path", "", !required, spatial_values_file_path);
   set_parameter("Stiffness", 1.0, !required, stiffness);
+  set_parameter("svZeroDSolver_block", "", !required, svzerod_solver_block);
 
   set_parameter("Temporal_and_spatial_values_file_path", "", !required, temporal_and_spatial_values_file_path);
   set_parameter("Temporal_values_file_path", "", !required, temporal_values_file_path);
@@ -414,6 +430,8 @@ BoundaryConditionParameters::BoundaryConditionParameters()
 
   set_parameter("Weakly_applied", false, !required, weakly_applied);
   set_parameter("Zero_out_perimeter", false, !required, zero_out_perimeter);
+
+  set_parameter("Resistance", 1.e5, !required, resistance);
 }
 
 void BoundaryConditionParameters::print_parameters()
@@ -486,6 +504,7 @@ const std::string ConstitutiveModelParameters::HOLZAPFEL_OGDEN_MA_MODEL = "Holza
 const std::string ConstitutiveModelParameters::LEE_SACKS = "Lee-Sacks";
 const std::string ConstitutiveModelParameters::NEOHOOKEAN_MODEL = "neoHookean";
 const std::string ConstitutiveModelParameters::STVENANT_KIRCHHOFF_MODEL = "stVenantKirchhoff";
+const std::string ConstitutiveModelParameters::CANN_MODEL = "CANN";
 
 /// @brief Supported constitutive model types and their aliases.
 const std::map<std::string, std::string> ConstitutiveModelParameters::constitutive_model_types = {
@@ -505,6 +524,9 @@ const std::map<std::string, std::string> ConstitutiveModelParameters::constituti
 
   {ConstitutiveModelParameters::STVENANT_KIRCHHOFF_MODEL, ConstitutiveModelParameters::STVENANT_KIRCHHOFF_MODEL},
   {"stVK",                                                ConstitutiveModelParameters::STVENANT_KIRCHHOFF_MODEL},
+
+  {ConstitutiveModelParameters::CANN_MODEL, ConstitutiveModelParameters::CANN_MODEL},
+  {"CANN", ConstitutiveModelParameters::CANN_MODEL},
 }; 
 
 /// @brief Define a map to set the parameters for each constitutive model.
@@ -520,6 +542,7 @@ SetConstitutiveModelParamMapType SetConstitutiveModelParamMap = {
   {ConstitutiveModelParameters::LEE_SACKS, [](CmpType cp, CmpXmlType params) -> void {cp->lee_sacks.set_values(params);}},
   {ConstitutiveModelParameters::NEOHOOKEAN_MODEL, [](CmpType cp, CmpXmlType params) -> void {cp->neo_hookean.set_values(params);}},
   {ConstitutiveModelParameters::STVENANT_KIRCHHOFF_MODEL, [](CmpType cp, CmpXmlType params) -> void {cp->stvenant_kirchhoff.set_values(params);}},
+  {ConstitutiveModelParameters::CANN_MODEL, [](CmpType cp, CmpXmlType params) -> void {cp->cann.set_values(params);}}
 };
 
 /// @brief Define a map to print parameters for each constitutive model.
@@ -533,6 +556,7 @@ PrintConstitutiveModelParamMapType PrintConstitutiveModelParamMap = {
   {ConstitutiveModelParameters::LEE_SACKS, [](CmpType cp) -> void {cp->lee_sacks.print_parameters();}},
   {ConstitutiveModelParameters::NEOHOOKEAN_MODEL, [](CmpType cp) -> void {cp->neo_hookean.print_parameters();}},
   {ConstitutiveModelParameters::STVENANT_KIRCHHOFF_MODEL, [](CmpType cp) -> void {cp->stvenant_kirchhoff.print_parameters();}},
+  {ConstitutiveModelParameters::CANN_MODEL, [](CmpType cp) -> void {cp->cann.print_parameters();}}
 };
 
 
@@ -749,6 +773,135 @@ void StVenantKirchhoffParameters::print_parameters()
 {
 }
 
+/// @brief  Process parameters for the "Add_row" xml element
+///
+/// Define the xml element name for CANN row parameters
+const std::string CANNRowParameters::xml_element_name_ = "Add_row";
+CANNRowParameters::CANNRowParameters()
+{
+  set_xml_element_name(xml_element_name_);
+
+  // A parameter that must be defined.
+  bool required = true;
+
+  set_parameter("row_name", "", required, row_name);
+
+  // Initialize row parameters and add it to params map
+  int invariant = 1;
+  std::initializer_list<int> activation_func = {1,1,1}; 
+  std::initializer_list<double> weights_vec = {1.0,1.0,1.0};
+
+  set_parameter("Invariant_num", invariant ,required, row.invariant_index);
+  set_parameter("Activation_functions", activation_func,required, row.activation_functions);
+  set_parameter("Weights", weights_vec,required,row.weights);
+}
+
+void CANNRowParameters::print_parameters()
+{
+  std::cout << std::endl;
+  std::cout << "---------------" << std::endl;
+  std::cout << "CANN Row Parameters" << std::endl;
+  std::cout << "---------------" << std::endl;
+  std::cout << "Invariant number: " << row.invariant_index << std::endl;
+  std::cout << "Activation function 0: " << row.activation_functions[0] << std::endl;
+  std::cout << "Activation function 1: " << row.activation_functions[1] << std::endl;
+  std::cout << "Activation function 2: " << row.activation_functions[2] << std::endl;
+  std::cout << "Weight 0: " << row.weights[0] << std::endl;
+  std::cout << "Weight 1: " << row.weights[1] << std::endl;
+  std::cout << "Weight 2: " << row.weights[2] << std::endl;
+}
+
+void CANNRowParameters::set_values(tinyxml2::XMLElement* row_elem)
+{
+  if (!row_elem) {
+    throw std::runtime_error("CANNRowParameters::set_values: Received null XML element.");
+  }
+
+  using namespace tinyxml2;
+
+  std::string error_msg = "Unknown " + xml_element_name_ + " XML element '"; 
+
+  // Set row_name for current row element
+  const char* row_name_input;
+  auto result = row_elem->QueryStringAttribute("row_name", &row_name_input);
+  row_name.set(std::string(row_name_input));
+
+  auto item = row_elem->FirstChildElement();
+
+  // Iterate over all child elements for this row
+  while(item != nullptr) {
+    auto name = std::string(item->Value());
+    auto value = item->GetText();
+
+    if (value == nullptr) { 
+      throw std::runtime_error(error_msg + name + "'.");
+    }
+
+    try {
+      set_parameter_value_CANN(name, value);
+    } catch (const std::bad_function_call& exception) {
+      throw std::runtime_error(error_msg + name + "'.");
+    }
+
+    item = item->NextSiblingElement();
+  }
+}
+
+/// @brief Constructor for CANNParameters class. Initializes parameter table
+CANNParameters::CANNParameters()
+{
+  // A parameter that must be defined.
+  bool required = true;
+
+  set_xml_element_name("Constitutive_model type=CANN");
+
+  // No need to initialize rows.
+}
+
+/// @brief Destructor for CANNParameters class. Deletes memory dynamically allocated
+/// to the rows of the table.
+CANNParameters::~CANNParameters()
+{
+    for (auto row : rows) {
+        delete row;  // Free allocated memory
+    }
+    rows.clear();
+}
+
+void CANNParameters::set_values(tinyxml2::XMLElement* xml_elem)
+{ 
+  using namespace tinyxml2;
+  std::string error_msg = "Unknown Constitutive_model type=CANN XML element '";
+
+  auto row_elem = xml_elem->FirstChildElement("Add_row"); // initializes pointer to first row name
+
+  while (row_elem != nullptr) {
+    CANNRowParameters* row = new CANNRowParameters();
+    row->set_values(row_elem); // Populate row parameters
+    rows.push_back(row); // store the pointer to row in vector
+
+    row_elem = row_elem->NextSiblingElement("Add_row");
+  }
+
+  if (rows.empty()) {
+    throw std::runtime_error(error_msg + "Add_row'. No rows found.");
+  }
+
+  value_set = true;
+}
+
+void CANNParameters::print_parameters()
+{
+  std::cout << std::endl;
+  std::cout << "---------------" << std::endl;
+  std::cout << "CANN Parameters" << std::endl;
+  std::cout << "---------------" << std::endl;
+
+  for (auto& row : rows) {
+    row->print_parameters();
+  }
+}
+
 ConstitutiveModelParameters::ConstitutiveModelParameters()
 {
   // A parameter that must be defined.
@@ -926,47 +1079,48 @@ void CoupleGenBCParameters::set_values(tinyxml2::XMLElement* xml_elem)
   value_set = true;
 }
 
-
 //////////////////////////////////////////////////////////
-//                  CoupleSvZeroDParameters               //
+//             svZeroDSolverInterfaceParameters         //
 //////////////////////////////////////////////////////////
 
-// Coupling to svZeroD.
+// The svZeroDSolverInterfaceParameters class stores parameters sued to
+// interface to the svZeroDSolver.
 
-// Define the XML element name for equation Couple_to_svZeroD parameters.
-const std::string CoupleSvZeroDParameters::xml_element_name_ = "Couple_to_svZeroD";
+// Define the XML element name for the svZeroDSolver_interface parameters.
+const std::string svZeroDSolverInterfaceParameters::xml_element_name_ = "svZeroDSolver_interface";
 
-CoupleSvZeroDParameters::CoupleSvZeroDParameters()
+svZeroDSolverInterfaceParameters::svZeroDSolverInterfaceParameters()
 {
   // A parameter that must be defined.
   bool required = true;
 
-  type = Parameter<std::string>("type", "", required);
+  set_parameter("Coupling_type", "", required, coupling_type);
+
+  set_parameter("Initial_flows", 0.0, !required, initial_flows);
+  set_parameter("Initial_pressures", 0.0, !required, initial_pressures);
+
+  set_parameter("Configuration_file", "", required, configuration_file);
+
+  set_parameter("Shared_library", "", required, shared_library);
+
 };
 
-void CoupleSvZeroDParameters::set_values(tinyxml2::XMLElement* xml_elem)
+void svZeroDSolverInterfaceParameters::set_values(tinyxml2::XMLElement* xml_elem)
 {
-  std::string error_msg = "Unknown Couple_to_svZeroD type=TYPE XML element '";
-  
-  // Get the 'type' from the <Couple_to_genBC type=TYPE> element.
-  const char* stype;
-  auto result = xml_elem->QueryStringAttribute("type", &stype);
-  if (stype == nullptr) {
-    throw std::runtime_error("No TYPE given in the XML <Couple_to_svZeroD type=TYPE> element.");
-  }
-  type.set(std::string(stype));
+  std::string error_msg = "Unknown svZeroDSolver_interface XML element '";
+
+  // Process child elements.
+  //
   auto item = xml_elem->FirstChildElement();
-  
+
   using std::placeholders::_1;
   using std::placeholders::_2;
-  std::function<void(const std::string&, const std::string&)> ftpr = 
-      std::bind( &CoupleSvZeroDParameters::set_parameter_value, *this, _1, _2);
-  
+  std::function<void(const std::string&, const std::string&)> ftpr =
+      std::bind( &svZeroDSolverInterfaceParameters::set_parameter_value, *this, _1, _2);
   xml_util_set_parameters(ftpr, xml_elem, error_msg);
-  
+
   value_set = true;
 }
-
 
 //////////////////////////////////////////////////////////
 //                  OutputParameters                    //
@@ -1920,8 +2074,8 @@ void EquationParameters::set_values(tinyxml2::XMLElement* eq_elem)
     } else if (name == CoupleGenBCParameters::xml_element_name_) {
       couple_to_genBC.set_values(item);
 
-    } else if (name == CoupleSvZeroDParameters::xml_element_name_) {
-      couple_to_svZeroD.set_values(item);
+    } else if (name == svZeroDSolverInterfaceParameters::xml_element_name_) {
+      svzerodsolver_interface_parameters.set_values(item);
 
     } else if (name == DomainParameters::xml_element_name_) {
       auto domain_params = new DomainParameters();
@@ -2408,6 +2562,189 @@ void ProjectionParameters::set_values(tinyxml2::XMLElement* xml_elem)
 
   xml_util_set_parameters(ftpr, xml_elem, error_msg);
 }
+
+//////////////////////////////////////////////////////////
+//        RISProjectionParameters       //
+//////////////////////////////////////////////////////////
+
+/// @brief Define the XML element name for mesh parameters.
+const std::string RISProjectionParameters::xml_element_name_ = "Add_RIS_projection";
+
+RISProjectionParameters::RISProjectionParameters()
+{
+  // A parameter that must be defined.
+  bool required = true;
+
+  name = Parameter<std::string>("name", "", required);
+
+  set_parameter("Project_from_face", "", required, project_from_face);
+  set_parameter("Resistance", 1.e6, !required, resistance);
+  set_parameter("Projection_tolerance", 0.0, !required, projection_tolerance);
+}
+
+void RISProjectionParameters::set_values(tinyxml2::XMLElement* xml_elem)
+{
+  using namespace tinyxml2;
+  std::string error_msg = "Unknown " + xml_element_name_ + " XML element '";
+
+  // Get the 'type' from the <Add_RIS_projection name=NAME> element.
+  const char* sname;
+  auto result = xml_elem->QueryStringAttribute("name", &sname);
+  if (sname == nullptr) {
+    throw std::runtime_error("No TYPE given in the XML <Add_projection name=NAME> element.");
+  }
+  name.set(std::string(sname));
+
+  using std::placeholders::_1;
+  using std::placeholders::_2;
+
+  std::function<void(const std::string&, const std::string&)> ftpr =
+      std::bind( &RISProjectionParameters::set_parameter_value, *this, _1, _2);
+
+  xml_util_set_parameters(ftpr, xml_elem, error_msg);
+}
+
+
+//////////////////////////////////////////////////////////
+//                  URIS Mesh Parameters                //
+//////////////////////////////////////////////////////////
+// [HZ] implemente URIS parameters here
+
+// Process parameters for the 'Add_URIS_mesh' XML element used for defining URIS mesh elements.
+
+/// @brief Define the XML element name for mesh parameters.
+const std::string URISMeshParameters::xml_element_name_ = "Add_URIS_mesh";
+
+URISMeshParameters::URISMeshParameters()
+{
+  bool required = true;
+
+  // Mesh name from Add_mesh element.
+  name = Parameter<std::string>("name", "", required);
+
+  // Parameters under Add_mesh element.
+  //
+  set_parameter("Mesh_scale_factor", 1.0,  !required, mesh_scale_factor);
+  set_parameter("Thickness", 0.04,  !required, thickness);
+  set_parameter("Closed_thickness", 0.25,  !required, close_thickness);
+  set_parameter("Resistance", 1.0e5,  !required, resistance);
+  set_parameter("Closed_resistance", 1.0e5,  !required, resistance_close);
+  set_parameter("Valve_starts_as_closed", true,  !required, valve_starts_as_closed);
+  set_parameter("Positive_flow_normal_file_path", "",  !required, positive_flow_normal_file_path);
+}
+
+void URISMeshParameters::print_parameters()
+{
+  std::cout << std::endl;
+  std::cout << "---------------" << std::endl;
+  std::cout << "URIS Mesh Parameters" << std::endl;
+  std::cout << "---------------" << std::endl;
+  std::cout << name.name() << ": " << name.value() << std::endl;
+
+  auto params_name_value = get_parameter_list();
+  for (auto& [ key, value ] : params_name_value) { 
+    std::cout << key << ": " << value << std::endl;
+  }
+
+  for (auto& face : URIS_face_parameters) {
+    face->print_parameters();
+  }
+}
+
+void URISMeshParameters::set_values(tinyxml2::XMLElement* mesh_elem)
+{
+  using namespace tinyxml2;
+  std::string error_msg = "Unknown " + xml_element_name_ + " XML element '"; 
+  auto item = mesh_elem->FirstChildElement();
+
+  while (item != nullptr) {
+    auto name = std::string(item->Value());
+
+    // Add_face sub-element.
+    if (name == URISFaceParameters::xml_element_name_) {
+      auto URIS_face_params = new URISFaceParameters();
+      URIS_face_params->set_values(item);
+      URIS_face_parameters.push_back(URIS_face_params);
+    } else if (item->GetText() != nullptr) {
+      auto value = item->GetText();
+      try {
+        set_parameter_value(name, value);
+      } catch (const std::bad_function_call& exception) {
+        throw std::runtime_error(error_msg + name + "'.");
+      }
+    } else {
+      throw std::runtime_error(error_msg + name + "'.");
+    }
+
+    item = item->NextSiblingElement();
+  }
+}
+
+
+//////////////////////////////////////////////////////////
+//                  URIS Face Parameters                //
+//////////////////////////////////////////////////////////
+
+/// @brief Process parameters for the 'Add_URIS_face' XML element.
+///
+/// Define the XML element name for face parameters.
+const std::string URISFaceParameters::xml_element_name_ = "Add_URIS_face";
+
+URISFaceParameters::URISFaceParameters()
+{
+  set_xml_element_name(xml_element_name_);
+
+  // A parameter that must be defined.
+  bool required = true;
+
+  name = Parameter<std::string>("name", "", required);
+
+  set_parameter("Face_file_path", "", !required, face_file_path);
+  set_parameter("Open_motion_file_path", "", !required, open_motion_file_path);
+  set_parameter("Close_motion_file_path", "", !required, close_motion_file_path);
+
+  // set_parameter("End_nodes_face_file_path", "", !required, end_nodes_face_file_path);
+  // set_parameter("Quadrature_modifier_TRI3", (2.0/3.0), !required, quadrature_modifier_TRI3);
+}
+
+void URISFaceParameters::print_parameters()
+{
+  std::cout << std::endl;
+  std::cout << "---------------" << std::endl;
+  std::cout << "URIS Face Parameters" << std::endl;
+  std::cout << "---------------" << std::endl;
+  std::cout << name.name() << ": " << name.value() << std::endl;
+  std::cout << face_file_path.name() << ": " << face_file_path.value() << std::endl;
+}
+
+void URISFaceParameters::set_values(tinyxml2::XMLElement* face_elem)
+{
+  using namespace tinyxml2;
+
+  std::string error_msg = "Unknown " + xml_element_name_ + " XML element '"; 
+  const char* face_name;
+  auto result = face_elem->QueryStringAttribute("name", &face_name);
+  name.set(std::string(face_name));
+  auto item = face_elem->FirstChildElement();
+
+  while (item != nullptr) {
+    auto name = std::string(item->Value());
+    auto value = item->GetText();
+
+    if (value == nullptr) { 
+      throw std::runtime_error(error_msg + name + "'.");
+    }
+
+    try {
+      set_parameter_value(name, value);
+    } catch (const std::bad_function_call& exception) {
+      throw std::runtime_error(error_msg + name + "'.");
+    }
+
+    item = item->NextSiblingElement();
+  }
+}
+
 
 //////////////////////////////////////////////////////////
 //                 LinearAlgebraParameters              //

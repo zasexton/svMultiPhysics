@@ -23,9 +23,20 @@ def test_LV_Guccione_passive(n_proc):
     test_folder = "LV_Guccione_passive"
     run_with_reference(base_folder, test_folder, fields, n_proc)
 
+def test_LV_HolzapfelOgden_active(n_proc):
+    test_folder = "LV_HolzapfelOgden_active"
+    run_with_reference(base_folder, test_folder, fields, n_proc)
 
 def test_LV_HolzapfelOgden_passive(n_proc):
     test_folder = "LV_HolzapfelOgden_passive"
+    run_with_reference(base_folder, test_folder, fields, n_proc)
+
+def test_LV_HolzapfelOgden_passive_CANN(n_proc):
+    test_folder = "LV_HolzapfelOgden_passive_CANN"
+    run_with_reference(base_folder, test_folder, fields, n_proc)
+
+def test_LV_CANN_artery_material_model(n_proc):
+    test_folder = "LV_CANN_artery_material_model"
     run_with_reference(base_folder, test_folder, fields, n_proc)
 
 def test_LV_HolzapfelOgdenModifiedAnisotropy_passive(n_proc):
@@ -36,9 +47,17 @@ def test_block_compression(n_proc):
     test_folder = "block_compression"
     run_with_reference(base_folder, test_folder, fields, n_proc)
 
+def test_block_compression_CANN(n_proc):
+    test_folder = "block_compression_CANN"
+    run_with_reference(base_folder, test_folder, fields, n_proc)
+
 def test_robin(n_proc):
     test_folder = "robin"
     run_with_reference(base_folder, test_folder, fields, n_proc)
+
+def test_spatially_variable_robin(n_proc):
+    test_folder = "spatially_variable_robin"
+    run_with_reference(base_folder, test_folder, fields, n_proc, t_max=2)
 
 def test_LV_NeoHookean_passive(n_proc):
     test_folder = "LV_NeoHookean_passive"

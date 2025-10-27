@@ -1,32 +1,5 @@
-/* Copyright (c) Stanford University, The Regents of the University of California, and others.
- *
- * All Rights Reserved.
- *
- * See Copyright-SimVascular.txt for additional details.
- *
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sublicense, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject
- * to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
- * IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
- * PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
- * OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
- * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
- * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
- * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
+// SPDX-FileCopyrightText: Copyright (c) Stanford University, The Regents of the University of California, and others.
+// SPDX-License-Identifier: BSD-3-Clause
 
 // Reproduces subroutines defined in MATMODELS.f.
 
@@ -35,6 +8,7 @@
 #include "fft.h"
 #include "mat_fun.h"
 #include "utils.h"
+#include "ArtificialNeuralNetMaterial.h"
 
 #include <math.h>
 #include <utility> // std::pair
@@ -747,6 +721,40 @@ void compute_pk2cc(const ComMod& com_mod, const CepMod& cep_mod, const dmnType& 
       g2 = g2 + (0.5*ddc4s/stM.bss)*(rexp - 1.0);
       g2   = 4.0*stM.ass*g2;
       CC += g2*dyadic_product<nsd>(Hss, Hss);
+    } break;
+
+    // Universal Material Subroutine - CANN Model
+    
+    case ConstitutiveModelType::stArtificialNeuralNet: {
+      
+      // Reading parameter table
+      auto &CANNModel = stM.paramTable;
+
+      double psi,dpsi[9],ddpsi[9];
+      double Inv[9] = {0,0,0,0,0,0,0,0,0};
+      std::array<Matrix<nsd>, 9> dInv;
+      std::array<Tensor<nsd>,9> ddInv;
+      Matrix<nsd> N1;
+
+      // Compute and store invariants and derivatives wrt C in array of matrices/tensors
+      CANNModel.computeInvariantsAndDerivatives<nsd>(C, fl, nfd, J2d, J4d, Ci, Idm, Tfa, N1, psi, Inv, dInv, ddInv);
+
+      // Strain energy function and derivatives
+      CANNModel.evaluate(Inv, psi, dpsi, ddpsi);
+
+      for (int i = 0; i < 9; i++) {
+        S += 2*dInv[i]*dpsi[i];
+      }
+
+      // Fiber reinforcement/active stress
+      S += Tfa*N1;
+      
+      // Stiffness Tensor
+      for(int x = 0; x < 9; x++){
+        CC += 4*dpsi[x]*ddInv[x];
+        CC += 4*ddpsi[x]*dyadic_product<nsd>(dInv[x],dInv[x]);
+      }
+
     } break;
 
 

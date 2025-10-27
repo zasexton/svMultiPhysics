@@ -1,32 +1,5 @@
-/* Copyright (c) Stanford University, The Regents of the University of California, and others.
- *
- * All Rights Reserved.
- *
- * See Copyright-SimVascular.txt for additional details.
- *
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files (the
- * "Software"), to deal in the Software without restriction, including
- * without limitation the rights to use, copy, modify, merge, publish,
- * distribute, sublicense, and/or sell copies of the Software, and to
- * permit persons to whom the Software is furnished to do so, subject
- * to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included
- * in all copies or substantial portions of the Software.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
- * IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
- * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
- * PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
- * OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
- * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
- * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
- * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
+// SPDX-FileCopyrightText: Copyright (c) Stanford University, The Regents of the University of California, and others.
+// SPDX-License-Identifier: BSD-3-Clause
 
 #include "ComMod.h"
 
@@ -61,6 +34,7 @@ ComMod::ComMod()
   pstEq        = false;
   sstEq        = false;
   ibFlag       = false;
+  risFlag      = false;
 
 }
 
@@ -116,6 +90,14 @@ eqType::eqType()
 }
 
 eqType::~eqType()
+{
+}
+
+////////////////////////////
+// s t m o d e l  T y p e //
+////////////////////////////
+
+stModelType::stModelType()
 {
 }
 
@@ -202,6 +184,47 @@ mshType::mshType()
 rmshType::rmshType()
 {
   isReqd  = false;
+}
+
+
+/////////////////////////////////////////////////////////
+// s v Z e r o D S o l v e r I n t e r f a c e T y p e //
+/////////////////////////////////////////////////////////
+
+void svZeroDSolverInterfaceType::set_data(const svZeroDSolverInterfaceParameters& params)
+{
+  if (!params.defined()) {
+    return;
+  }
+
+  configuration_file= params.configuration_file();
+
+  coupling_type = params.coupling_type();
+
+  solver_library = params.shared_library();
+
+  if (params.initial_flows.defined()) { 
+    have_initial_flows = true;
+    initial_flows = params.initial_flows();
+  }
+
+  if (params.initial_pressures.defined()) { 
+    have_initial_pressures = true;
+    initial_pressures = params.initial_pressures();
+  }
+
+  has_data = true;
+}
+
+//----------------
+// add_block_face
+//----------------
+// Add a block name / face name pair representing the coupling of a 
+// 0D block with a 3D face.
+//
+void svZeroDSolverInterfaceType::add_block_face(const std::string& block_name, const std::string& face_name)
+{
+  block_surface_map[block_name] = face_name;
 }
 
 
