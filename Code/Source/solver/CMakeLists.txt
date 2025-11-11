@@ -190,7 +190,6 @@ set(CSRCS
   mat_models.h mat_models.cpp
   mesh.h mesh.cpp
   nn.h nn.cpp
-  odes.h odes.cpp
   output.h output.cpp
   load_msh.h load_msh.cpp
   pic.h pic.cpp
