@@ -416,6 +416,21 @@ class ParameterLists
     std::string xml_element_name = "";
 };
 
+//----------------------
+// IncludeParameterFile
+//----------------------
+// The IncludeParameterFile class is used to read and set the 
+// root element of external XML file.
+//
+class IncludeParametersFile 
+{
+  public:
+    IncludeParametersFile(const char* file_name);
+    tinyxml2::XMLDocument document;
+    tinyxml2::XMLElement* root_element = nullptr;
+    static std::string NAME;
+};
+
 //////////////////////////////////////////////////////////
 //            ConstitutiveModelParameters               //
 //////////////////////////////////////////////////////////
@@ -1153,7 +1168,7 @@ class DomainParameters : public ParameterLists
     static const std::string xml_element_name_;
 
     void print_parameters();
-    void set_values(tinyxml2::XMLElement* xml_elem);
+    void set_values(tinyxml2::XMLElement* xml_elem, bool from_external_xml = false);
 
     // Parameters for sub-elements under the Domain element.
     ConstitutiveModelParameters constitutive_model;
@@ -1190,6 +1205,7 @@ class DomainParameters : public ParameterLists
     Parameter<double> force_y;
     Parameter<double> force_z;
 
+    Parameter<std::string> include_xml;
     Parameter<double> isotropic_conductivity;
 
     Parameter<double> mass_damping;
@@ -1311,7 +1327,7 @@ class EquationParameters : public ParameterLists
     static const std::string xml_element_name_;
 
     void print_parameters();
-    void set_values(tinyxml2::XMLElement* xml_elem);
+    void set_values(tinyxml2::XMLElement* xml_elem, DomainParameters* default_domain=nullptr);
 
     Parameter<double> backflow_stabilization_coefficient;
 
@@ -1324,6 +1340,7 @@ class EquationParameters : public ParameterLists
 
     Parameter<double> elasticity_modulus;
 
+    Parameter<std::string> include_xml;
     Parameter<std::string> initialize;
     Parameter<bool> initialize_rcr_from_flow;
 
@@ -1375,6 +1392,7 @@ class EquationParameters : public ParameterLists
     SolidViscosityParameters solid_viscosity;
 
     ECGLeadsParameters ecg_leads;
+
 };
 
 /// @brief The GeneralSimulationParameters class stores paramaters for the
@@ -1406,7 +1424,7 @@ class GeneralSimulationParameters : public ParameterLists
     GeneralSimulationParameters();
 
     void print_parameters();
-    void set_values(tinyxml2::XMLElement* xml_element);
+    void set_values(tinyxml2::XMLElement* xml_element, bool from_external_xml = false);
 
     std::string xml_element_name;
 
@@ -1425,6 +1443,7 @@ class GeneralSimulationParameters : public ParameterLists
     Parameter<double> spectral_radius_of_infinite_time_step;
     Parameter<double> time_step_size;
 
+    Parameter<std::string> include_xml;
     Parameter<int> increment_in_saving_restart_files;
     Parameter<int> increment_in_saving_vtk_files;
     Parameter<int> number_of_spatial_dimensions;
@@ -1490,7 +1509,7 @@ class MeshParameters : public ParameterLists
     static const std::string xml_element_name_;
 
     void print_parameters();
-    void set_values(tinyxml2::XMLElement* mesh_elem);
+    void set_values(tinyxml2::XMLElement* mesh_elem, bool from_external_xml = false);
     std::string get_name() const { return name.value(); };
     std::string get_path() const { return mesh_file_path.value(); };
 
@@ -1509,6 +1528,7 @@ class MeshParameters : public ParameterLists
     std::vector<VectorParameter<double>> fiber_directions;
     //VectorParameter<double> fiber_direction;
 
+    Parameter<std::string> include_xml;
     Parameter<std::string> initial_displacements_file_path;
     Parameter<std::string> initial_pressures_file_path;
     Parameter<bool> initialize_rcr_from_flow;

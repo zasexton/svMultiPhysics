@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 //
-// The class methods defined here are used to process svMultiPhysics simulation parameters
+// The class methods defined here are used to process svMultiPhysics simulation parameters 
 // read in from an XML-format file. 
 //
 // XML files are parsed using tinyxml2 (https://github.com/leethomason/tinyxml2).
@@ -34,6 +34,14 @@
 //
 // If a section does not contain any sub-sections then all parameters can be parsed automatically. 
 // See LinearSolverParameters::set_values() for an example. 
+//
+// Each section can read in parameters stored in an external XML file by adding an 'include_xml'
+// 'Parameter<std::string>' used to set the external XML file name. This is currently supported
+// for the following sections
+//   - GeneralSimulationParameters
+//   - MeshParameters
+//   - DomainParameters
+//   - EquationParameters
 //
 #include "Parameters.h"
 #include "consts.h"
@@ -73,6 +81,26 @@ void xml_util_set_parameters( std::function<void(const std::string&, const std::
     }
 
     item = item->NextSiblingElement();
+  }
+}
+
+//-----------------------
+// IncludeParametersFile
+//-----------------------
+// Set the root element of external XML file.
+//
+std::string IncludeParametersFile::NAME = "Include_xml";
+
+IncludeParametersFile::IncludeParametersFile(const char* cfile_name)
+{
+  std::string file_name(cfile_name);
+  file_name.erase(std::remove_if(file_name.begin(), file_name.end(), ::isspace), file_name.end());
+  auto error = document.LoadFile(file_name.c_str());
+  root_element = document.FirstChildElement(Parameters::FSI_FILE.c_str());
+
+  if (root_element == nullptr) {
+    throw std::runtime_error("The following error occured while reading the XML file '" +
+        file_name + "'.\n" + "[svMultiPhysics] ERROR " + std::string(document.ErrorStr()));
   }
 }
 
@@ -790,7 +818,7 @@ CANNRowParameters::CANNRowParameters()
 
   // Initialize row parameters and add it to params map
   int invariant = 1;
-  std::initializer_list<int> activation_func = {1,1,1};
+  std::initializer_list<int> activation_func = {1,1,1}; 
   std::initializer_list<double> weights_vec = {1.0,1.0,1.0};
 
   set_parameter("Invariant_num", invariant ,required, row.invariant_index);
@@ -821,7 +849,7 @@ void CANNRowParameters::set_values(tinyxml2::XMLElement* row_elem)
 
   using namespace tinyxml2;
 
-  std::string error_msg = "Unknown " + xml_element_name_ + " XML element '";
+  std::string error_msg = "Unknown " + xml_element_name_ + " XML element '"; 
 
   // Set row_name for current row element
   const char* row_name_input;
@@ -835,7 +863,7 @@ void CANNRowParameters::set_values(tinyxml2::XMLElement* row_elem)
     auto name = std::string(item->Value());
     auto value = item->GetText();
 
-    if (value == nullptr) {
+    if (value == nullptr) { 
       throw std::runtime_error(error_msg + name + "'.");
     }
 
@@ -871,7 +899,7 @@ CANNParameters::~CANNParameters()
 }
 
 void CANNParameters::set_values(tinyxml2::XMLElement* xml_elem)
-{
+{ 
   using namespace tinyxml2;
   std::string error_msg = "Unknown Constitutive_model type=CANN XML element '";
 
@@ -1388,12 +1416,12 @@ FluidViscosityParameters::FluidViscosityParameters()
   // A parameter that must be defined.
   bool required = true;
 
-  // Stores model from the <Viscosity model= > XML element
+  // Stores model from the <Viscosity model= > XML element 
   model = Parameter<std::string>("model", "", required);
 }
 
 void FluidViscosityParameters::print_parameters()
-{
+{ 
   std::cout << std::endl;
   std::cout << "--------------------" << std::endl;
   std::cout << "Viscosity Parameters" << std::endl;
@@ -1412,13 +1440,13 @@ void FluidViscosityParameters::set_values(tinyxml2::XMLElement* xml_elem)
   auto result = xml_elem->QueryStringAttribute("model", &smodel);
 
   if (smodel == nullptr) {
-    throw std::runtime_error("No MODEL given in the <Viscosity model=MODEL > XML element.");
+    throw std::runtime_error("No MODEL given in the <Viscosity model=MODEL > XML element."); 
   }
   model.set(std::string(smodel));
 
   // Check fluid_viscosity model name.
-  if (model_names.count(model.value()) == 0) {
-      throw std::runtime_error("Unknown fluid viscosity model '" + model.value() +
+  if (model_names.count(model.value()) == 0) { 
+      throw std::runtime_error("Unknown fluid viscosity model '" + model.value() + 
         "' in '" + xml_elem->Name() + "'.");
   }
 
@@ -1543,7 +1571,7 @@ void SolidViscosityParameters::set_values(tinyxml2::XMLElement* xml_elem)
 
   // Check solid viscosity model name.
   if (model_names.count(model.value()) == 0) { 
-      throw std::runtime_error("Unknown solid viscosity model '" + model.value() +
+      throw std::runtime_error("Unknown solid viscosity model '" + model.value() + 
         "' in '" + xml_elem->Name() + "'.");
   }
 
@@ -1592,6 +1620,7 @@ DomainParameters::DomainParameters()
   set_parameter("Force_y", 0.0, !required, force_y);
   set_parameter("Force_z", 0.0, !required, force_z);
 
+  set_parameter("Include_xml", "", !required, include_xml);
   set_parameter("Isotropic_conductivity", 0.0, !required, isotropic_conductivity);
 
   set_parameter("Mass_damping", 0.0, !required, mass_damping);
@@ -1646,17 +1675,29 @@ void DomainParameters::print_parameters()
   solid_viscosity.print_parameters();
 }
 
-void DomainParameters::set_values(tinyxml2::XMLElement* domain_elem)
+//------------
+// set_values
+//------------
+// Set the domain parameter values from the XML.
+//
+// If 'from_external_xml' is true then parameter values are read from an external xml file
+// using the 'Include_xml' parameter.
+//
+void DomainParameters::set_values(tinyxml2::XMLElement* domain_elem, bool from_external_xml)
 {
   using namespace tinyxml2;
   std::string error_msg = "Unknown " + xml_element_name_ + " XML element '"; 
 
-  const char* sid;
-  auto result = domain_elem->QueryStringAttribute("id", &sid);
-  if (sid == nullptr) {
-    throw std::runtime_error("No ID found in the  <Domain id=ID> XML element.");
+  // If not reading from an external xml file then get the <Domain id=ID> 'id' attrribute.
+  //
+  if (!from_external_xml) {
+    const char* sid;
+    auto result = domain_elem->QueryStringAttribute("id", &sid);
+    if (sid == nullptr) {
+      throw std::runtime_error("No ID found in the  <Domain id=ID> XML element.");
+    }
+    id.set(std::string(sid));
   }
-  id.set(std::string(sid));
 
   auto item = domain_elem->FirstChildElement();
   
@@ -1684,7 +1725,12 @@ void DomainParameters::set_values(tinyxml2::XMLElement* domain_elem)
       else {
         throw std::runtime_error("Viscosity model not supported for equation '" + equation.value() + "'.");
       }
-  
+
+    } else if (name == include_xml.name()) {
+      auto value = item->GetText();
+      IncludeParametersFile include_parameters(value);
+      set_values(include_parameters.root_element, true);
+
     } else if (name == std::string("Add_ODE")) {
       // Parse a reaction ODE sub-element with children:
       //   <ODE_system> dx0_dt = ... </ODE_system>
@@ -2004,6 +2050,7 @@ EquationParameters::EquationParameters()
   //
   set_parameter("Coupled", false, !required, coupled);
 
+  set_parameter(IncludeParametersFile::NAME, "", !required, include_xml);
   set_parameter("Initialize", "", !required, initialize);
   set_parameter("Initialize_RCR_from_flow", false, !required, initialize_rcr_from_flow);
 
@@ -2060,10 +2107,24 @@ void EquationParameters::print_parameters()
   ecg_leads.print_parameters();
 }
 
-void EquationParameters::set_values(tinyxml2::XMLElement* eq_elem)
+void EquationParameters::set_values(tinyxml2::XMLElement* eq_elem, DomainParameters* domain)
 {
-  using namespace tinyxml2;
-  default_domain = new DomainParameters();
+  static std::set<std::string> viscosity_names {
+      FluidViscosityParameters::xml_element_name_,
+      SolidViscosityParameters::xml_element_name_
+  };
+
+  static std::set<consts::EquationType> fluid_eqs {
+      consts::EquationType::phys_fluid,
+      consts::EquationType::phys_CMM,
+      consts::EquationType::phys_stokes
+   };
+
+  if (domain == nullptr) {
+    default_domain = new DomainParameters();
+    domain = default_domain;
+  }
+
   auto item = eq_elem->FirstChildElement();
 
   // Parse XML sub-elements.
@@ -2084,8 +2145,8 @@ void EquationParameters::set_values(tinyxml2::XMLElement* eq_elem)
       boundary_conditions.push_back(bc_params);
 
     } else if (name == ConstitutiveModelParameters::xml_element_name_) {
-      default_domain->constitutive_model.set_values(item);
-      default_domain->constitutive_model.check_constitutive_model(type);
+      domain->constitutive_model.set_values(item);
+      domain->constitutive_model.check_constitutive_model(type);
 
     } else if (name == CoupleCplBCParameters::xml_element_name_) {
       couple_to_cplBC.set_values(item);
@@ -2102,7 +2163,7 @@ void EquationParameters::set_values(tinyxml2::XMLElement* eq_elem)
       domains.push_back(domain_params);
 
     } else if (name == FiberReinforcementStressParameters::xml_element_name_) {
-      default_domain->fiber_reinforcement_stress.set_values(item);
+      domain->fiber_reinforcement_stress.set_values(item);
 
     } else if (name == LinearSolverParameters::xml_element_name_) {
       linear_solver.set_values(item);
@@ -2116,14 +2177,15 @@ void EquationParameters::set_values(tinyxml2::XMLElement* eq_elem)
       remesher.set_values(item);
 
     } else if (name == StimulusParameters::xml_element_name_) {
-      default_domain->stimulus.set_values(item);
+      domain->stimulus.set_values(item);
 
-    } else if (name == FluidViscosityParameters::xml_element_name_ || name == SolidViscosityParameters::xml_element_name_) {
+    } else if (viscosity_names.count(name)) {
       auto eq_type = consts::equation_name_to_type.at(type.value());
-      if (eq_type == consts::EquationType::phys_fluid || eq_type == consts::EquationType::phys_CMM || eq_type == consts::EquationType::phys_stokes) {
-        default_domain->fluid_viscosity.set_values(item);
+
+      if (fluid_eqs.count(eq_type)) {
+        domain->fluid_viscosity.set_values(item);
       } else if (eq_type == consts::EquationType::phys_struct || eq_type == consts::EquationType::phys_ustruct) {
-        default_domain->solid_viscosity.set_values(item);
+        domain->solid_viscosity.set_values(item);
       } else {
         throw std::runtime_error("Viscosity model not supported for equation '" + type.value() + "'.");
       }
@@ -2155,6 +2217,11 @@ void EquationParameters::set_values(tinyxml2::XMLElement* eq_elem)
     } else if (name == VariableWallPropsParameters::xml_element_name_) {
       variable_wall_properties.set_values(item);
 
+    } else if (name == include_xml.name()) {
+      auto value = item->GetText();
+      IncludeParametersFile include_parameters(value);
+      set_values(include_parameters.root_element, default_domain);
+
     } else if (item->GetText() != nullptr) {
       auto value = item->GetText();
 
@@ -2171,8 +2238,9 @@ void EquationParameters::set_values(tinyxml2::XMLElement* eq_elem)
         }
       }
 
+
     } else {
-      throw std::runtime_error("Unknown " + xml_element_name_ + " XML element '" + name + ".");
+      throw std::runtime_error("[Equation] Unknown " + xml_element_name_ + " XML element '" + name + ".");
     }
 
     item = item->NextSiblingElement();
@@ -2209,6 +2277,7 @@ GeneralSimulationParameters::GeneralSimulationParameters()
 
   set_parameter("Debug", false, !required, debug);
 
+  set_parameter("Include_xml", "", !required, include_xml);
   set_parameter("Increment_in_saving_restart_files", 0, !required, increment_in_saving_restart_files);
   set_parameter("Increment_in_saving_VTK_files", 0, !required, increment_in_saving_vtk_files);
 
@@ -2251,28 +2320,45 @@ void GeneralSimulationParameters::print_parameters()
 }
 
 /// @brief Set general parameters values from XML.
-void GeneralSimulationParameters::set_values(tinyxml2::XMLElement* xml_element)
+void GeneralSimulationParameters::set_values(tinyxml2::XMLElement* xml_element, bool from_external_xml)
 {
   using namespace tinyxml2;
+  tinyxml2::XMLElement* item;
 
   // Set parameter values from the XML elements.
   //
-  auto general_params = xml_element->FirstChildElement(xml_element_name.c_str());
-  auto item = general_params->FirstChildElement();
+  if (from_external_xml) {
+    item = xml_element->FirstChildElement();
+  } else {
+    auto general_params = xml_element->FirstChildElement(xml_element_name.c_str());
+    item = general_params->FirstChildElement();
+  }
 
   while (item != nullptr) {
     std::string name = std::string(item->Value());
     auto value = item->GetText();
-    try {
-      set_parameter_value(name, value);
-    } catch (const std::bad_function_call& exception) {
-      throw std::runtime_error("Unknown XML GeneralSimulationParameters element '" + name + ".");
+
+    if (name == include_xml.name()) {
+      auto value = item->GetText();
+      IncludeParametersFile include_parameters(value);
+      set_values(include_parameters.root_element, true);
+
+    } else {
+
+      try {
+        set_parameter_value(name, value);
+      } catch (const std::bad_function_call& exception) {
+        throw std::runtime_error("Unknown XML GeneralSimulationParameters element '" + name + ".");
+      }
     }
+
     item = item->NextSiblingElement();
   }
 
   // Check that required parameters have been set.
-  check_required();
+  if (!from_external_xml) {
+    check_required();
+  }
 }
 
 //////////////////////////////////////////////////////////
@@ -2454,6 +2540,7 @@ MeshParameters::MeshParameters()
   set_parameter("Mesh_scale_factor", 1.0, !required, mesh_scale_factor);
   set_parameter("Prestress_file_path", "", !required, prestress_file_path);
 
+  set_parameter("Include_xml", "", !required, include_xml);
   set_parameter("Initial_displacements_file_path", "", !required, initial_displacements_file_path);
   set_parameter("Initial_pressures_file_path", "", !required, initial_pressures_file_path);
   set_parameter("Initial_velocities_file_path", "", !required, initial_velocities_file_path);
@@ -2486,7 +2573,7 @@ void MeshParameters::print_parameters()
   }
 }
 
-void MeshParameters::set_values(tinyxml2::XMLElement* mesh_elem)
+void MeshParameters::set_values(tinyxml2::XMLElement* mesh_elem, bool from_external_xml)
 {
   using namespace tinyxml2;
   std::string error_msg = "Unknown " + xml_element_name_ + " XML element '"; 
@@ -2510,7 +2597,12 @@ void MeshParameters::set_values(tinyxml2::XMLElement* mesh_elem)
       dir.set(value);
       fiber_directions.push_back(dir);
 
-    // Just a simple element. 
+    } else if (name == include_xml.name()) {
+      auto value = item->GetText();
+      IncludeParametersFile include_parameters(value);
+      set_values(include_parameters.root_element, true);
+
+    // Just a simple element.
     } else if (item->GetText() != nullptr) {
       auto value = item->GetText();
       try {
@@ -2531,7 +2623,7 @@ void MeshParameters::set_values(tinyxml2::XMLElement* mesh_elem)
 /////////////////////////////////////////////////////////////////////////////
 
 // The PrecomputedSolutionParameters class stores parameters for the
-// 'Precomputed_solution' XML element used to read in the data from a
+// 'Precomputed_solution' XML element used to read in the data from a 
 // precomputed solution for the simulation state.
 
 const std::string PrecomputedSolutionParameters::xml_element_name_ = "Precomputed_solution";
@@ -2682,7 +2774,7 @@ void URISMeshParameters::print_parameters()
   std::cout << name.name() << ": " << name.value() << std::endl;
 
   auto params_name_value = get_parameter_list();
-  for (auto& [ key, value ] : params_name_value) {
+  for (auto& [ key, value ] : params_name_value) { 
     std::cout << key << ": " << value << std::endl;
   }
 
@@ -2694,7 +2786,7 @@ void URISMeshParameters::print_parameters()
 void URISMeshParameters::set_values(tinyxml2::XMLElement* mesh_elem)
 {
   using namespace tinyxml2;
-  std::string error_msg = "Unknown " + xml_element_name_ + " XML element '";
+  std::string error_msg = "Unknown " + xml_element_name_ + " XML element '"; 
   auto item = mesh_elem->FirstChildElement();
 
   while (item != nullptr) {
@@ -2761,7 +2853,7 @@ void URISFaceParameters::set_values(tinyxml2::XMLElement* face_elem)
 {
   using namespace tinyxml2;
 
-  std::string error_msg = "Unknown " + xml_element_name_ + " XML element '";
+  std::string error_msg = "Unknown " + xml_element_name_ + " XML element '"; 
   const char* face_name;
   auto result = face_elem->QueryStringAttribute("name", &face_name);
   name.set(std::string(face_name));
@@ -2771,7 +2863,7 @@ void URISFaceParameters::set_values(tinyxml2::XMLElement* face_elem)
     auto name = std::string(item->Value());
     auto value = item->GetText();
 
-    if (value == nullptr) {
+    if (value == nullptr) { 
       throw std::runtime_error(error_msg + name + "'.");
     }
 
