@@ -11,8 +11,8 @@ is_not_Darwin = True
 if platform.system() == "Darwin": is_not_Darwin = False
 
 this_file_dir = os.path.abspath(os.path.dirname(__file__))
-cpp_exec = os.path.join(this_file_dir, "..", "build", "svFSI-build", "bin", "svFSI")
-cpp_exec_p = os.path.join(this_file_dir, "..", "build-petsc", "svFSI-build", "bin", "svFSI")
+cpp_exec = os.path.join(this_file_dir, "..", "build", "svMultiPhysics-build", "bin", "svmultiphysics")
+cpp_exec_p = os.path.join(this_file_dir, "..", "build-petsc", "svMultiPhysics-build", "bin", "svmultiphysics")
 
 # Relative tolerances for each tested field
 RTOL = {
@@ -49,7 +49,7 @@ def run_by_name(folder, name, t_max, n_proc=1):
     Run a test case and return results
     Args:
         folder: location from which test will be executed
-        name: name of svFSIplus input file (.xml)
+        name: name of svMultiPhysics input file (.xml)
         t_max: time step to compare
         n_proc: number of processors
 
@@ -64,7 +64,7 @@ def run_by_name(folder, name, t_max, n_proc=1):
 
     # run simulation
     if is_not_Darwin:
-        if folder.endswith("petsc"):
+        if "petsc" in folder:
             cmd = " ".join(
             [
                 "mpirun",
@@ -87,7 +87,7 @@ def run_by_name(folder, name, t_max, n_proc=1):
             ]
             )
     else:
-        if folder.endswith("petsc") or folder.endswith("trilinos"): 
+        if "petsc" in folder or "trilinos" in folder: 
             return
         else:
             cmd = " ".join(
@@ -108,7 +108,7 @@ def run_by_name(folder, name, t_max, n_proc=1):
         folder, str(n_proc) + "-procs", "result_" + str(t_max).zfill(3) + ".vtu"
     )
     if not os.path.exists(fname):
-        raise RuntimeError("No svFSIplus output: " + fname)
+        raise RuntimeError("No svMultiPhysics output: " + fname)
     return meshio.read(fname)
 
 
@@ -119,7 +119,7 @@ def run_with_reference(
     n_proc=1,
     t_max=1,
     name_ref=None,
-    name_inp="svFSI.xml",
+    name_inp="solver.xml",
 ):
     """
     Run a test case and compare it to a stored reference solution
@@ -128,7 +128,7 @@ def run_with_reference(
         fields: array fields to compare (e.g. ["Pressure", "Velocity"])
         n_proc: number of processors
         t_max: time step to compare
-        name_inp: name of svFSIplus input file (.xml)
+        name_inp: name of svMultiPhysics input file (.xml)
         name_ref: name of refence file (.vtu)
     """
     # default reference name
@@ -141,7 +141,7 @@ def run_with_reference(
     if is_not_Darwin:
         res = run_by_name(folder, name_inp, t_max, n_proc)
     else:
-        if folder.endswith("petsc") or folder.endswith("trilinos"): 
+        if "petsc" in folder or "trilinos" in folder: 
             return
         else:
             res = run_by_name(folder, name_inp, t_max, n_proc)

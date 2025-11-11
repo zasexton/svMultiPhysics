@@ -34,6 +34,18 @@ def test_LV_Guccione_active(n_proc):
     test_folder = "LV_Guccione_active"
     run_with_reference(base_folder, test_folder, fields, n_proc)
 
+def test_LV_HolzapfelOgden_active(n_proc):
+    test_folder = "LV_HolzapfelOgden_active"
+    run_with_reference(base_folder, test_folder, fields, n_proc)
+
+def test_LV_HolzapfelOgden_passive(n_proc):
+    test_folder = "LV_HolzapfelOgden_passive"
+    run_with_reference(base_folder, test_folder, fields, n_proc)
+
+def test_LV_HolzapfelOgdenModifiedAnisotropy_passive(n_proc):
+    test_folder = "LV_HolzapfelOgdenModifiedAnisotropy_passive"
+    run_with_reference(base_folder, test_folder, fields, n_proc)
+
 def test_LV_NeoHookean_passive_genBC(n_proc):
     test_folder = "LV_NeoHookean_passive_genBC"
 
@@ -44,7 +56,7 @@ def test_LV_NeoHookean_passive_genBC(n_proc):
             os.remove(name)
 
     # Compile genBC
-    os.chdir("genBC_svFSIplus")
+    os.chdir("genBC_svMultiPhysics")
     subprocess.run(["make", "clean"], check=True)
     subprocess.run(["make"], check=True)
 
@@ -57,3 +69,15 @@ def test_LV_NeoHookean_passive_sv0D(n_proc):
     test_folder = "LV_NeoHookean_passive_sv0D"
 
     run_with_reference(base_folder, test_folder, fields, n_proc, t_max=3)
+
+def test_spatially_variable_robin(n_proc):
+    test_folder = "spatially_variable_robin"
+    run_with_reference(base_folder, test_folder, fields, n_proc, t_max=2)
+
+def test_tensile_adventitia_Newtonian_viscosity(n_proc):
+    test_folder = "tensile_adventitia_Newtonian_viscosity"
+    run_with_reference(base_folder, test_folder, fields, n_proc, t_max=1)
+
+def test_tensile_adventitia_Potential_viscosity(n_proc):
+    test_folder = "tensile_adventitia_Potential_viscosity"
+    run_with_reference(base_folder, test_folder, fields, n_proc, t_max=1)
