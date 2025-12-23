@@ -13,6 +13,7 @@
 #include "Topology/CellShape.h"
 #include "Topology/CellTopology.h"
 
+#include <algorithm>
 #include <cmath>
 #include <numeric>
 
@@ -194,6 +195,26 @@ MeshBase make_curved_quadratic_line_mesh() {
   return mesh;
 }
 
+MeshBase make_curved_cubic_line_mesh_localized() {
+  // Cubic Lagrange line (4 nodes) with localized curvature near xi=-1/3.
+  // Equispaced nodes: xi = {-1, -1/3, 1/3, 1}.
+  std::vector<real_t> X = {
+      0.0, 0.0, 0.0,        // xi=-1
+      1.0 / 3.0, 0.35, 0.0, // xi=-1/3 (bulge)
+      2.0 / 3.0, 0.0, 0.0,  // xi=+1/3
+      1.0, 0.0, 0.0         // xi=+1
+  };
+
+  std::vector<offset_t> offs = {0, 4};
+  std::vector<index_t> conn = {0, 1, 2, 3};
+  CellShape shape = make_shape(CellFamily::Line, 3);
+  std::vector<CellShape> shapes = {shape};
+
+  MeshBase mesh;
+  mesh.build_from_arrays(3, X, offs, conn, shapes);
+  return mesh;
+}
+
 MeshBase make_quadratic_serendipity_quad8_face_mesh() {
   // Single quadratic serendipity quad face (Q8) with lifted mid-edge nodes.
   std::vector<real_t> X = {
@@ -225,6 +246,61 @@ MeshBase make_quadratic_serendipity_quad8_face_mesh() {
   std::vector<index_t> face_conn = {0, 1, 2, 3, 4, 5, 6, 7};
   std::vector<std::array<index_t,2>> face2cell = {{{INVALID_INDEX, INVALID_INDEX}}};
   mesh.set_faces_from_arrays(face_shapes, face_offs, face_conn, face2cell);
+  return mesh;
+}
+
+MeshBase make_curved_quad8_cell_with_curved_bottom_edge() {
+  MeshBase mesh = make_quadratic_serendipity_identity(CellFamily::Quad);
+  mesh.set_current_coords(mesh.X_ref());
+
+  // For Quad8 serendipity, edge mid-nodes are vertices 4..7 in the edge-view order.
+  // Bottom edge (0-1) midpoint is vertex 4.
+  auto p = mesh.get_vertex_coords(4);
+  p[2] += 0.6;
+  mesh.set_vertex_coords(4, p);
+  return mesh;
+}
+
+MeshBase make_curved_hex20_with_linear_faces() {
+  // Start from an identity Hex20 (serendipity) reference cell.
+  MeshBase mesh = make_quadratic_serendipity_identity(CellFamily::Hex);
+
+  // Add current coords and curve the bottom face by lifting its edge mid-nodes.
+  mesh.set_current_coords(mesh.X_ref());
+  auto lift_z = [&](index_t v, real_t dz) {
+    auto p = mesh.get_vertex_coords(v);
+    p[2] += dz;
+    mesh.set_vertex_coords(v, p);
+  };
+  // Hex20 edge nodes are vertices 8..19 (see CurvilinearEval::eval_hex20 comments).
+  // Bottom face edges: (0,1)->8, (1,2)->9, (2,3)->10, (3,0)->11.
+  lift_z(8, 0.5);
+  lift_z(9, 0.5);
+  lift_z(10, 0.5);
+  lift_z(11, 0.5);
+
+  // Provide only linear quad faces (corners only), so curvature must come from the volume mapping.
+  std::vector<CellShape> face_shapes(6);
+  for (auto& fs : face_shapes) {
+    fs.family = CellFamily::Quad;
+    fs.order = 1;
+    fs.num_corners = 4;
+  }
+
+  std::vector<offset_t> face_offs = {0, 4, 8, 12, 16, 20, 24};
+  std::vector<index_t> face_conn = {
+      0, 1, 2, 3,  // z=-1
+      4, 5, 6, 7,  // z=+1
+      0, 1, 5, 4,  // y=-1
+      1, 2, 6, 5,  // x=+1
+      2, 3, 7, 6,  // y=+1
+      3, 0, 4, 7   // x=-1
+  };
+  std::vector<std::array<index_t, 2>> face2cell(6);
+  for (auto& fc : face2cell) fc = {{0, INVALID_INDEX}};
+
+  mesh.set_faces_from_arrays(face_shapes, face_offs, face_conn, face2cell);
+  mesh.finalize();
   return mesh;
 }
 
@@ -384,6 +460,140 @@ TEST(TessellationTest, FaceTessellation_RefinementAndHighOrderMapping) {
 
   // Param point (xi=0, eta=-1) is the bottom edge midpoint -> should map to node 4 (z=0.2).
   EXPECT_NEAR(tess.vertices[1][2], 0.2, kTol);
+}
+
+TEST(TessellationTest, BoundaryTessellation_FromHighOrderCellWhenFacesAreLinear) {
+  const MeshBase mesh = make_curved_hex20_with_linear_faces();
+
+  // Find the bottom face (all corner z == -1 in current coords).
+  index_t bottom_face = INVALID_INDEX;
+  for (index_t f = 0; f < static_cast<index_t>(mesh.n_faces()); ++f) {
+    auto [fv, n] = mesh.face_vertices_span(f);
+    if (!fv || n < 4) continue;
+    bool is_bottom = true;
+    for (int i = 0; i < 4; ++i) {
+      const auto p = mesh.get_vertex_coords(fv[static_cast<size_t>(i)]);
+      is_bottom = is_bottom && (std::abs(p[2] + 1.0) < 1e-12);
+    }
+    if (is_bottom) { bottom_face = f; break; }
+  }
+  ASSERT_NE(bottom_face, INVALID_INDEX);
+
+  TessellationConfig cfg;
+  cfg.refinement_level = 1;
+  cfg.configuration = Configuration::Current;
+  const auto faces = Tessellator::tessellate_boundary(mesh, cfg);
+
+  const TessellatedFace* tess = nullptr;
+  for (const auto& tf : faces) {
+    if (tf.face_id == bottom_face) { tess = &tf; break; }
+  }
+  ASSERT_NE(tess, nullptr);
+  ASSERT_FALSE(tess->vertices.empty());
+
+  real_t zmin = 1e100;
+  real_t zmax = -1e100;
+  for (const auto& p : tess->vertices) {
+    zmin = std::min(zmin, p[2]);
+    zmax = std::max(zmax, p[2]);
+  }
+
+  // Linear face tessellation would keep z constant at -1.0, but the volume mapping is curved.
+  EXPECT_NEAR(zmin, -1.0, 1e-12);
+  EXPECT_GT(zmax - zmin, 0.25);
+}
+
+TEST(TessellationTest, LocalAdaptiveRefinement_CurvedCubicLine_IsNonUniform) {
+  const MeshBase mesh = make_curved_cubic_line_mesh_localized();
+
+  TessellationConfig cfg;
+  cfg.local_adaptive = true;
+  cfg.refinement_level = 0;
+  cfg.min_refinement_level = 0;
+  cfg.max_refinement_level = 5;
+  cfg.curvature_threshold = 0.04;
+
+  const auto tess = Tessellator::tessellate_cell(mesh, 0, cfg);
+
+  const int base_level = Tessellator::suggest_refinement_level(3);  // p=3 -> level 2
+  const int base_segments = 1 << base_level;
+  EXPECT_GT(tess.n_sub_elements(), base_segments);
+  EXPECT_LT(tess.n_sub_elements(), 1 << cfg.max_refinement_level);
+
+  ASSERT_GT(tess.vertices.size(), 2u);
+  real_t min_dx = 1e100;
+  real_t max_dx = 0.0;
+  for (size_t i = 0; i + 1 < tess.vertices.size(); ++i) {
+    const real_t dx = std::abs(tess.vertices[i + 1][0] - tess.vertices[i][0]);
+    min_dx = std::min(min_dx, dx);
+    max_dx = std::max(max_dx, dx);
+  }
+  EXPECT_GT(max_dx / std::max(min_dx, static_cast<real_t>(1e-15)), 1.5);
+}
+
+TEST(TessellationTest, LocalAdaptiveRefinement_CurvedQuad_RefinesNearCurvedEdge) {
+  const MeshBase mesh = make_curved_quad8_cell_with_curved_bottom_edge();
+
+  TessellationConfig cfg;
+  cfg.local_adaptive = true;
+  cfg.refinement_level = 0;
+  cfg.min_refinement_level = 0;
+  cfg.max_refinement_level = 4;
+  cfg.curvature_threshold = 0.06;
+  cfg.configuration = Configuration::Current;
+
+  const auto tess = Tessellator::tessellate_cell(mesh, 0, cfg);
+
+  // Base for p=2 is level 1 -> 2x2 quads.
+  EXPECT_GT(tess.n_sub_elements(), 4);
+  EXPECT_LT(tess.n_sub_elements(), (1 << cfg.max_refinement_level) * (1 << cfg.max_refinement_level));
+
+  std::vector<real_t> x_bottom;
+  std::vector<real_t> x_top;
+  x_bottom.reserve(tess.vertices.size());
+  x_top.reserve(tess.vertices.size());
+
+  for (const auto& p : tess.vertices) {
+    if (std::abs(p[1] + 1.0) < 1e-12) x_bottom.push_back(p[0]);
+    if (std::abs(p[1] - 1.0) < 1e-12) x_top.push_back(p[0]);
+  }
+  ASSERT_FALSE(x_bottom.empty());
+  ASSERT_FALSE(x_top.empty());
+
+  auto count_unique = [](std::vector<real_t> xs) -> size_t {
+    std::sort(xs.begin(), xs.end());
+    const real_t tol = 1e-12;
+    size_t n = 0;
+    for (size_t i = 0; i < xs.size(); ++i) {
+      if (i == 0 || std::abs(xs[i] - xs[i - 1]) > tol) ++n;
+    }
+    return n;
+  };
+
+  const size_t nb = count_unique(std::move(x_bottom));
+  const size_t nt = count_unique(std::move(x_top));
+  EXPECT_GT(nb, nt);
+}
+
+TEST(TessellationTest, FieldEvaluator_StoresValuesPerVertex) {
+  const MeshBase mesh = make_linear_reference_cell(CellFamily::Quad);
+
+  TessellationConfig cfg;
+  cfg.refinement_level = 2;
+  cfg.field_evaluator = [](index_t /*cell*/, const TessParamPoint& xi, std::vector<real_t>& out) {
+    out.resize(1);
+    out[0] = xi[0] + static_cast<real_t>(2.0) * xi[1] + static_cast<real_t>(3.0) * xi[2];
+  };
+
+  const auto tess = Tessellator::tessellate_cell(mesh, 0, cfg);
+  ASSERT_EQ(tess.field_values.size(), tess.vertices.size());
+
+  for (size_t i = 0; i < tess.vertices.size(); ++i) {
+    ASSERT_EQ(tess.field_values[i].size(), 1u);
+    const real_t expected = tess.vertices[i][0] + static_cast<real_t>(2.0) * tess.vertices[i][1] +
+                            static_cast<real_t>(3.0) * tess.vertices[i][2];
+    EXPECT_NEAR(tess.field_values[i][0], expected, kTol);
+  }
 }
 
 } // namespace test

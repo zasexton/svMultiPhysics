@@ -35,6 +35,7 @@
 #include "../Topology/CellShape.h"
 
 #include <array>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -75,8 +76,16 @@ struct TessellationConfig {
     int refinement_level{0};                 // 0 = minimal
     bool adaptive{false};                    // if true, increase refinement_level until chord error <= curvature_threshold
     real_t curvature_threshold{0.1};         // relative chord-error threshold used when adaptive=true
-    bool interpolate_fields{false};          // reserved (not implemented)
-    std::vector<std::string> field_names;    // reserved (not implemented)
+    bool local_adaptive{false};              // if true, perform per-subcell adaptive refinement (line/quad supported)
+    int min_refinement_level{0};             // minimum refinement level when adaptive/local_adaptive is enabled
+    int max_refinement_level{8};             // maximum refinement level when adaptive/local_adaptive is enabled
+
+    // Optional field evaluator. If provided, tessellation will evaluate this callback
+    // at each tessellated vertex and store values in `field_values` (per-vertex vectors).
+    std::function<void(index_t cell, const TessParamPoint& xi, std::vector<real_t>& out)> field_evaluator;
+
+    bool interpolate_fields{false};          // legacy/reserved
+    std::vector<std::string> field_names;    // legacy/reserved
     Configuration configuration{Configuration::Reference};
 };
 
@@ -119,6 +128,18 @@ private:
     static SubdivisionGrid subdivide_hex(int level);
     static SubdivisionGrid subdivide_wedge(int level);
     static SubdivisionGrid subdivide_pyramid(int level);
+
+    static SubdivisionGrid subdivide_line_local_adaptive(
+        int base_level,
+        int max_level,
+        real_t curvature_threshold,
+        const std::function<std::array<real_t, 3>(const TessParamPoint&)>& map);
+
+    static SubdivisionGrid subdivide_quad_local_adaptive(
+        int base_level,
+        int max_level,
+        real_t curvature_threshold,
+        const std::function<std::array<real_t, 3>(const TessParamPoint&)>& map);
 
     static void map_subdivision_to_physical(
         const MeshBase& mesh,
