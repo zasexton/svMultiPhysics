@@ -63,7 +63,7 @@ struct ParentChildMap {
   std::map<size_t, std::vector<size_t>> parent_vertex_to_children;
 
   /** Refinement pattern used for each parent */
-  std::map<size_t, RefinementPattern> parent_patterns;
+  std::map<size_t, AdaptivityOptions::RefinementPattern> parent_patterns;
 };
 
 /**

@@ -287,6 +287,22 @@ void InjectionTransfer::restrict(
 }
 
 std::unique_ptr<FieldTransfer> FieldTransferFactory::create(const AdaptivityOptions& options) {
+  // Prefer the high-level selection when explicitly set (tests use this).
+  if (options.field_transfer != FieldTransferType::LINEAR_INTERPOLATION) {
+    switch (options.field_transfer) {
+      case FieldTransferType::INJECTION:
+        return create_injection();
+      case FieldTransferType::HIGH_ORDER:
+        return create_high_order();
+      case FieldTransferType::CONSERVATIVE:
+        return create_conservative();
+      case FieldTransferType::LINEAR_INTERPOLATION:
+      default:
+        break;
+    }
+  }
+
+  // Backward compatibility: select based on legacy prolongation choice.
   switch (options.prolongation_method) {
     case AdaptivityOptions::ProlongationMethod::COPY:
       return create_injection();
@@ -385,4 +401,3 @@ TransferStats FieldTransferUtils::transfer_all_fields(
 }
 
 } // namespace svmp
-
