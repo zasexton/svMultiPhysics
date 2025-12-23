@@ -36,6 +36,7 @@
 #include <array>
 #include <vector>
 #include <functional>
+#include <limits>
 
 namespace svmp {
 
@@ -162,8 +163,8 @@ public:
      * @return Shape function values and derivatives
      */
     static ShapeFunctionValues evaluate_shape_functions(
-        CellShape shape,
-        int order,
+        const CellShape& shape,
+        size_t n_nodes,
         const ParametricPoint& xi);
 
     /**
@@ -208,7 +209,7 @@ public:
      * @return True if inside or on boundary
      */
     static bool is_inside_reference_element(
-        CellShape shape,
+        const CellShape& shape,
         const ParametricPoint& xi,
         real_t tolerance = 1e-10);
 
@@ -217,7 +218,7 @@ public:
      * @param shape Cell shape
      * @return Centroid in parametric space
      */
-    static ParametricPoint reference_element_center(CellShape shape);
+    static ParametricPoint reference_element_center(const CellShape& shape);
 
     /**
      * @brief Determine polynomial order from vertex count
@@ -225,7 +226,7 @@ public:
      * @param n_vertices Number of vertices in element
      * @return Polynomial order (1 for linear, 2 for quadratic, etc.)
      */
-    static int deduce_order(CellShape shape, int n_vertices);
+    static int deduce_order(const CellShape& shape, size_t n_nodes);
 
 private:
     // ---- Shape function evaluation (per cell type) ----
@@ -237,19 +238,19 @@ private:
         int order, const ParametricPoint& xi);
 
     static ShapeFunctionValues eval_quad_shape_functions(
-        int order, const ParametricPoint& xi);
+        int order, size_t n_nodes, const ParametricPoint& xi);
 
     static ShapeFunctionValues eval_tet_shape_functions(
         int order, const ParametricPoint& xi);
 
     static ShapeFunctionValues eval_hex_shape_functions(
-        int order, const ParametricPoint& xi);
+        int order, size_t n_nodes, const ParametricPoint& xi);
 
     static ShapeFunctionValues eval_wedge_shape_functions(
-        int order, const ParametricPoint& xi);
+        int order, size_t n_nodes, const ParametricPoint& xi);
 
     static ShapeFunctionValues eval_pyramid_shape_functions(
-        int order, const ParametricPoint& xi);
+        int order, size_t n_nodes, const ParametricPoint& xi);
 
     // ---- Lagrange basis functions ----
 
@@ -308,7 +309,7 @@ public:
      * @return Quadrature points and weights
      */
     static std::vector<QuadraturePoint> get_quadrature_rule(
-        CellShape shape,
+        const CellShape& shape,
         int order);
 
     /**
@@ -339,7 +340,7 @@ public:
      * @return Points and weights
      */
     static std::vector<QuadraturePoint> tensor_product_quadrature(
-        CellShape shape,
+        const CellShape& shape,
         int order);
 
 private:

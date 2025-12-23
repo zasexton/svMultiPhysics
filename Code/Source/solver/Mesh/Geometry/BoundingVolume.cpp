@@ -31,10 +31,16 @@
 #include "BoundingVolume.h"
 #include "../Core/MeshBase.h"
 #include "MeshGeometry.h"
-#include <Eigen/Dense>
-#include <Eigen/Eigenvalues>
 #include <cmath>
 #include <algorithm>
+
+#if __has_include(<Eigen/Dense>) && __has_include(<Eigen/Eigenvalues>)
+#include <Eigen/Dense>
+#include <Eigen/Eigenvalues>
+#define SVMP_HAVE_EIGEN 1
+#else
+#define SVMP_HAVE_EIGEN 0
+#endif
 
 namespace svmp {
 
@@ -226,7 +232,8 @@ std::vector<AABB> BoundingVolumeBuilder::build_cell_aabbs(
     std::vector<AABB> boxes(n_cells);
 
     for (index_t cell = 0; cell < n_cells; ++cell) {
-        boxes[cell] = MeshGeometry::cell_bounding_box(mesh, cell, cfg);
+        auto bb = MeshGeometry::cell_bounding_box(mesh, cell, cfg);
+        boxes[cell] = AABB(bb.min, bb.max);
     }
 
     return boxes;
@@ -239,13 +246,16 @@ std::vector<AABB> BoundingVolumeBuilder::build_face_aabbs(
     const index_t n_faces = mesh.n_faces();
     std::vector<AABB> boxes(n_faces);
 
-    // Get coordinate accessor
+    const auto& X = ((cfg == Configuration::Current || cfg == Configuration::Deformed) && mesh.has_current_coords())
+                        ? mesh.X_cur()
+                        : mesh.X_ref();
+    const int dim = mesh.dim();
     auto get_coords = [&](index_t vid) -> std::array<real_t, 3> {
-        if (cfg == Configuration::Current || cfg == Configuration::Deformed) {
-            return mesh.vertex_current_coordinates(vid);
-        } else {
-            return mesh.vertex_reference_coordinates(vid);
+        std::array<real_t, 3> pt = {0.0, 0.0, 0.0};
+        for (int d = 0; d < dim; ++d) {
+            pt[d] = X[static_cast<size_t>(vid) * dim + d];
         }
+        return pt;
     };
 
     for (index_t face = 0; face < n_faces; ++face) {
@@ -274,13 +284,16 @@ std::vector<AABB> BoundingVolumeBuilder::build_edge_aabbs(
     const index_t n_edges = mesh.n_edges();
     std::vector<AABB> boxes(n_edges);
 
-    // Get coordinate accessor
+    const auto& X = ((cfg == Configuration::Current || cfg == Configuration::Deformed) && mesh.has_current_coords())
+                        ? mesh.X_cur()
+                        : mesh.X_ref();
+    const int dim = mesh.dim();
     auto get_coords = [&](index_t vid) -> std::array<real_t, 3> {
-        if (cfg == Configuration::Current || cfg == Configuration::Deformed) {
-            return mesh.vertex_current_coordinates(vid);
-        } else {
-            return mesh.vertex_reference_coordinates(vid);
+        std::array<real_t, 3> pt = {0.0, 0.0, 0.0};
+        for (int d = 0; d < dim; ++d) {
+            pt[d] = X[static_cast<size_t>(vid) * dim + d];
         }
+        return pt;
     };
 
     for (index_t edge = 0; edge < n_edges; ++edge) {
@@ -309,7 +322,8 @@ AABB BoundingVolumeBuilder::build_mesh_aabb(
     const MeshBase& mesh,
     Configuration cfg) {
 
-    return MeshGeometry::bounding_box(mesh, cfg);
+    auto bb = MeshGeometry::bounding_box(mesh, cfg);
+    return AABB(bb.min, bb.max);
 }
 
 std::vector<BoundingSphere> BoundingVolumeBuilder::build_cell_spheres(
@@ -321,8 +335,8 @@ std::vector<BoundingSphere> BoundingVolumeBuilder::build_cell_spheres(
 
     for (index_t cell = 0; cell < n_cells; ++cell) {
         // Use AABB as initial approximation
-        auto box = MeshGeometry::cell_bounding_box(mesh, cell, cfg);
-        spheres[cell] = BoundingSphere(box);
+        auto bb = MeshGeometry::cell_bounding_box(mesh, cell, cfg);
+        spheres[cell] = BoundingSphere(AABB(bb.min, bb.max));
 
         // Could refine with Welzl's algorithm for tighter fit, but AABB sphere is sufficient
     }
@@ -344,11 +358,15 @@ OBB BoundingVolumeBuilder::build_cell_obb_pca(
 
     // Get coordinate accessor
     auto get_coords = [&](index_t vid) -> std::array<real_t, 3> {
-        if (cfg == Configuration::Current || cfg == Configuration::Deformed) {
-            return mesh.vertex_current_coordinates(vid);
-        } else {
-            return mesh.vertex_reference_coordinates(vid);
+        const auto& X = ((cfg == Configuration::Current || cfg == Configuration::Deformed) && mesh.has_current_coords())
+                            ? mesh.X_cur()
+                            : mesh.X_ref();
+        const int dim = mesh.dim();
+        std::array<real_t, 3> pt = {0.0, 0.0, 0.0};
+        for (int d = 0; d < dim; ++d) {
+            pt[d] = X[static_cast<size_t>(vid) * dim + d];
         }
+        return pt;
     };
 
     // Collect points
@@ -514,7 +532,10 @@ std::array<std::array<real_t, 3>, 3>
 BoundingVolumeBuilder::compute_principal_axes(
     const std::array<std::array<real_t, 3>, 3>& covariance) {
 
-    // Use Eigen for eigendecomposition
+    std::array<std::array<real_t, 3>, 3> axes;
+
+    // If Eigen is unavailable, fall back to axis-aligned directions.
+#if SVMP_HAVE_EIGEN
     Eigen::Matrix3d C;
     C << covariance[0][0], covariance[0][1], covariance[0][2],
          covariance[1][0], covariance[1][1], covariance[1][2],
@@ -523,9 +544,6 @@ BoundingVolumeBuilder::compute_principal_axes(
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(C);
     Eigen::Matrix3d eigenvectors = solver.eigenvectors();
 
-    // Extract column vectors (sorted by eigenvalue magnitude, largest last)
-    std::array<std::array<real_t, 3>, 3> axes;
-
     // Use eigenvectors in decreasing eigenvalue order (largest variance first)
     for (int i = 0; i < 3; ++i) {
         int col = 2 - i; // Reverse order (largest eigenvalue last in Eigen)
@@ -533,6 +551,11 @@ BoundingVolumeBuilder::compute_principal_axes(
         axes[i][1] = eigenvectors(1, col);
         axes[i][2] = eigenvectors(2, col);
     }
+#else
+    axes[0] = {1.0, 0.0, 0.0};
+    axes[1] = {0.0, 1.0, 0.0};
+    axes[2] = {0.0, 0.0, 1.0};
+#endif
 
     return axes;
 }
