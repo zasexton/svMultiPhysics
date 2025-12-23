@@ -191,10 +191,192 @@ static void test_hex_face_and_edge_orientations() {
   }
 }
 
+static std::vector<std::array<int,2>> quad_lagrange_indices_vtk(int p, bool include_interior) {
+  std::vector<std::array<int,2>> idx;
+  idx.reserve(static_cast<size_t>((p + 1) * (p + 1)));
+
+  idx.push_back({0, 0});
+  idx.push_back({p, 0});
+  idx.push_back({p, p});
+  idx.push_back({0, p});
+
+  const auto eview = CellTopology::get_edges_view(CellFamily::Quad);
+  const int steps = std::max(0, p - 1);
+  const std::array<std::array<int,2>,4> corner_grid = {{{0,0},{p,0},{p,p},{0,p}}};
+  for (int ei = 0; ei < eview.edge_count; ++ei) {
+    const int a = static_cast<int>(eview.pairs_flat[2 * ei + 0]);
+    const int b = static_cast<int>(eview.pairs_flat[2 * ei + 1]);
+    const auto A = corner_grid[static_cast<size_t>(a)];
+    const auto B = corner_grid[static_cast<size_t>(b)];
+    for (int k = 1; k <= steps; ++k) {
+      const double t = static_cast<double>(k) / static_cast<double>(p);
+      const int ii = static_cast<int>(std::lround((1.0 - t) * A[0] + t * B[0]));
+      const int jj = static_cast<int>(std::lround((1.0 - t) * A[1] + t * B[1]));
+      idx.push_back({ii, jj});
+    }
+  }
+
+  if (include_interior) {
+    for (int i = 1; i <= p - 1; ++i) {
+      for (int j = 1; j <= p - 1; ++j) {
+        idx.push_back({i, j});
+      }
+    }
+  }
+  return idx;
+}
+
+static std::vector<std::array<int,3>> triangle_exponents_vtk(int p) {
+  std::vector<std::array<int,3>> exps;
+  exps.reserve(static_cast<size_t>((p + 1) * (p + 2) / 2));
+  exps.push_back({p, 0, 0});
+  exps.push_back({0, p, 0});
+  exps.push_back({0, 0, p});
+
+  const auto eview = CellTopology::get_edges_view(CellFamily::Triangle);
+  const int steps = std::max(0, p - 1);
+  for (int ei = 0; ei < eview.edge_count; ++ei) {
+    const int a = static_cast<int>(eview.pairs_flat[2 * ei + 0]);
+    const int b = static_cast<int>(eview.pairs_flat[2 * ei + 1]);
+    for (int k = 1; k <= steps; ++k) {
+      std::array<int,3> e = {0, 0, 0};
+      e[static_cast<size_t>(a)] = p - k;
+      e[static_cast<size_t>(b)] = k;
+      exps.push_back(e);
+    }
+  }
+
+  for (int i = 1; i <= p - 2; ++i) {
+    for (int j = 1; j <= p - 1 - i; ++j) {
+      exps.push_back({p - i - j, i, j});
+    }
+  }
+  return exps;
+}
+
+static void test_high_order_face_permutations() {
+  const int p = 3;
+
+  // ---- Quad p=3 Lagrange ----
+  {
+    const auto idx = quad_lagrange_indices_vtk(p, /*include_interior=*/true);
+    std::vector<int> in(idx.size(), 0);
+    for (size_t n = 0; n < idx.size(); ++n) {
+      in[n] = 100 * idx[n][0] + idx[n][1];
+    }
+
+    auto find_idx = [&](int i, int j) -> index_t {
+      for (index_t n = 0; n < static_cast<index_t>(idx.size()); ++n) {
+        if (idx[static_cast<size_t>(n)][0] == i && idx[static_cast<size_t>(n)][1] == j) return n;
+      }
+      return INVALID_INDEX;
+    };
+
+    auto map_coord = [&](perm_code_t code, int i, int j) -> std::array<int,2> {
+      switch (code) {
+        case 0: return {i, j};
+        case 1: return {p - j, i};
+        case 2: return {p - i, p - j};
+        case 3: return {j, p - i};
+        case 4: return {j, i};
+        case 5: return {p - i, j};
+        case 6: return {i, p - j};
+        case 7: return {p - j, p - i};
+        default: return {0, 0};
+      }
+    };
+
+    for (perm_code_t code = 0; code < QuadPermutation::num_orientations(); ++code) {
+      const auto perm = HighOrderFacePermutation::quad(p, CellTopology::HighOrderKind::Lagrange, code);
+      ASSERT(perm.size() == idx.size());
+
+      std::vector<char> seen(idx.size(), 0);
+      for (auto pi : perm) {
+        ASSERT(pi >= 0);
+        ASSERT(static_cast<size_t>(pi) < idx.size());
+        seen[static_cast<size_t>(pi)]++;
+      }
+      for (auto s : seen) ASSERT(s == 1);
+
+      std::vector<int> out(idx.size(), 0);
+      for (size_t n = 0; n < idx.size(); ++n) out[n] = in[static_cast<size_t>(perm[n])];
+
+      // Corners: permutation should match corner dihedral code.
+      const auto corner_perm = QuadPermutation::apply(code, 0, 1, 2, 3);
+      for (int k = 0; k < 4; ++k) {
+        ASSERT(perm[static_cast<size_t>(k)] == corner_perm[static_cast<size_t>(k)]);
+      }
+
+      // All nodes: verify expected coordinate mapping on the (i,j) grid.
+      for (size_t n = 0; n < idx.size(); ++n) {
+        const int i_new = idx[n][0];
+        const int j_new = idx[n][1];
+        const auto [i_old, j_old] = map_coord(code, i_new, j_new);
+        const index_t expected_old_idx = find_idx(i_old, j_old);
+        ASSERT(expected_old_idx != INVALID_INDEX);
+        ASSERT(out[n] == in[static_cast<size_t>(expected_old_idx)]);
+      }
+    }
+  }
+
+  // ---- Triangle p=3 (Lagrange) ----
+  {
+    const auto exps = triangle_exponents_vtk(p);
+    std::vector<int> in(exps.size(), 0);
+    for (size_t n = 0; n < exps.size(); ++n) {
+      in[n] = 100 * exps[n][0] + 10 * exps[n][1] + exps[n][2];
+    }
+
+    auto find_idx = [&](const std::array<int,3>& e)->index_t {
+      for (index_t n = 0; n < static_cast<index_t>(exps.size()); ++n) {
+        if (exps[static_cast<size_t>(n)] == e) return n;
+      }
+      return INVALID_INDEX;
+    };
+
+    for (perm_code_t code = 0; code < TrianglePermutation::num_orientations(); ++code) {
+      const auto perm = HighOrderFacePermutation::triangle(p, code);
+      ASSERT(perm.size() == exps.size());
+
+      std::vector<char> seen(exps.size(), 0);
+      for (auto pi : perm) {
+        ASSERT(pi >= 0);
+        ASSERT(static_cast<size_t>(pi) < exps.size());
+        seen[static_cast<size_t>(pi)]++;
+      }
+      for (auto s : seen) ASSERT(s == 1);
+
+      std::vector<int> out(exps.size(), 0);
+      for (size_t n = 0; n < exps.size(); ++n) out[n] = in[static_cast<size_t>(perm[n])];
+
+      const auto corner_perm = TrianglePermutation::apply(code, 0, 1, 2);
+      for (int k = 0; k < 3; ++k) {
+        ASSERT(perm[static_cast<size_t>(k)] == corner_perm[static_cast<size_t>(k)]);
+      }
+
+      std::array<int,3> inv{};
+      for (int k = 0; k < 3; ++k) inv[static_cast<size_t>(corner_perm[static_cast<size_t>(k)])] = k;
+
+      for (size_t n = 0; n < exps.size(); ++n) {
+        const auto& ef = exps[n];
+        const std::array<int,3> ec = {
+            ef[static_cast<size_t>(inv[0])],
+            ef[static_cast<size_t>(inv[1])],
+            ef[static_cast<size_t>(inv[2])],
+        };
+        const index_t expected_old = find_idx(ec);
+        ASSERT(expected_old != INVALID_INDEX);
+        ASSERT(out[n] == in[static_cast<size_t>(expected_old)]);
+      }
+    }
+  }
+}
+
 } // namespace svmp::test
 
 int main() {
   svmp::test::test_hex_face_and_edge_orientations();
+  svmp::test::test_high_order_face_permutations();
   std::cout << "MeshOrientation tests PASSED\n";
   return 0;
 }

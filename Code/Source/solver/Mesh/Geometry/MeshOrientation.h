@@ -35,6 +35,9 @@
 #include "../Topology/CellTopology.h"
 #include <array>
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <unordered_map>
 #include <vector>
 #include <stdexcept>
 
@@ -171,6 +174,184 @@ public:
       }
     }
     throw std::runtime_error("QuadPermutation: local vertices don't match any permutation of canonical");
+  }
+};
+
+// ====================
+// High-order node permutations (Line/Triangle/Quad)
+// ====================
+// Given a dihedral permutation code for corners, construct the corresponding
+// permutation for all high-order nodes on the entity in the internal (VTK-like)
+// ordering used by CurvilinearEval and CellTopology::high_order_face_local_nodes.
+//
+// The returned vector `perm` satisfies:
+//   out[i] = in[perm[i]]
+// where `in` is a node list in the cell-local ordering and `out` is the same
+// face in the mesh-face ordering.
+
+class HighOrderFacePermutation {
+public:
+  static std::vector<index_t> line(int p, perm_code_t code) {
+    if (p < 1) {
+      throw std::invalid_argument("HighOrderFacePermutation::line: p must be >= 1");
+    }
+    const int n = p + 1;
+    std::vector<index_t> perm(static_cast<size_t>(n));
+    if (code == 0) {
+      for (int i = 0; i < n; ++i) perm[static_cast<size_t>(i)] = static_cast<index_t>(i);
+      return perm;
+    }
+    if (code == 1) {
+      for (int i = 0; i < n; ++i) perm[static_cast<size_t>(i)] = static_cast<index_t>(p - i);
+      return perm;
+    }
+    throw std::runtime_error("HighOrderFacePermutation::line: invalid code " + std::to_string(code));
+  }
+
+  static std::vector<index_t> triangle(int p, perm_code_t code) {
+    if (p < 1) {
+      throw std::invalid_argument("HighOrderFacePermutation::triangle: p must be >= 1");
+    }
+    if (code < 0 || code >= TrianglePermutation::num_orientations()) {
+      throw std::runtime_error("HighOrderFacePermutation::triangle: invalid code " + std::to_string(code));
+    }
+
+    const auto perm_idx = TrianglePermutation::apply(code, index_t(0), index_t(1), index_t(2));
+    std::array<int,3> inv{};
+    for (int i = 0; i < 3; ++i) {
+      inv[static_cast<size_t>(perm_idx[static_cast<size_t>(i)])] = i;
+    }
+
+    std::vector<std::array<int,3>> exps;
+    exps.reserve(static_cast<size_t>((p + 1) * (p + 2) / 2));
+
+    exps.push_back({p, 0, 0});
+    exps.push_back({0, p, 0});
+    exps.push_back({0, 0, p});
+
+    const auto eview = CellTopology::get_edges_view(CellFamily::Triangle);
+    const int steps = std::max(0, p - 1);
+    for (int ei = 0; ei < eview.edge_count; ++ei) {
+      const int a = static_cast<int>(eview.pairs_flat[2 * ei + 0]);
+      const int b = static_cast<int>(eview.pairs_flat[2 * ei + 1]);
+      for (int k = 1; k <= steps; ++k) {
+        std::array<int,3> e = {0, 0, 0};
+        e[static_cast<size_t>(a)] = p - k;
+        e[static_cast<size_t>(b)] = k;
+        exps.push_back(e);
+      }
+    }
+
+    for (int i = 1; i <= p - 2; ++i) {
+      for (int j = 1; j <= p - 1 - i; ++j) {
+        exps.push_back({p - i - j, i, j});
+      }
+    }
+
+    auto pack = [](int a, int b, int c) -> uint32_t {
+      return (static_cast<uint32_t>(a) << 16) | (static_cast<uint32_t>(b) << 8) | static_cast<uint32_t>(c);
+    };
+
+    std::unordered_map<uint32_t, index_t> exp2idx;
+    exp2idx.reserve(exps.size());
+    for (index_t i = 0; i < static_cast<index_t>(exps.size()); ++i) {
+      const auto& e = exps[static_cast<size_t>(i)];
+      exp2idx.emplace(pack(e[0], e[1], e[2]), i);
+    }
+
+    std::vector<index_t> perm(exps.size(), INVALID_INDEX);
+    for (size_t i = 0; i < exps.size(); ++i) {
+      const auto& ef = exps[i];
+      const int ec0 = ef[static_cast<size_t>(inv[0])];
+      const int ec1 = ef[static_cast<size_t>(inv[1])];
+      const int ec2 = ef[static_cast<size_t>(inv[2])];
+      const auto it = exp2idx.find(pack(ec0, ec1, ec2));
+      if (it == exp2idx.end()) {
+        throw std::runtime_error("HighOrderFacePermutation::triangle: failed to map node");
+      }
+      perm[i] = it->second;
+    }
+
+    return perm;
+  }
+
+  static std::vector<index_t> quad(int p, CellTopology::HighOrderKind kind, perm_code_t code) {
+    if (p < 1) {
+      throw std::invalid_argument("HighOrderFacePermutation::quad: p must be >= 1");
+    }
+    if (code < 0 || code >= QuadPermutation::num_orientations()) {
+      throw std::runtime_error("HighOrderFacePermutation::quad: invalid code " + std::to_string(code));
+    }
+
+    std::vector<std::array<int,2>> idx;
+    idx.reserve(static_cast<size_t>((p + 1) * (p + 1)));
+
+    idx.push_back({0, 0});
+    idx.push_back({p, 0});
+    idx.push_back({p, p});
+    idx.push_back({0, p});
+
+    const auto eview = CellTopology::get_edges_view(CellFamily::Quad);
+    const int steps = std::max(0, p - 1);
+    const std::array<std::array<int,2>,4> corner_grid = {{{0,0},{p,0},{p,p},{0,p}}};
+    for (int ei = 0; ei < eview.edge_count; ++ei) {
+      const int a = static_cast<int>(eview.pairs_flat[2 * ei + 0]);
+      const int b = static_cast<int>(eview.pairs_flat[2 * ei + 1]);
+      const auto A = corner_grid[static_cast<size_t>(a)];
+      const auto B = corner_grid[static_cast<size_t>(b)];
+      for (int k = 1; k <= steps; ++k) {
+        const real_t t = static_cast<real_t>(k) / static_cast<real_t>(p);
+        const int ii = static_cast<int>(std::lround((1.0 - t) * A[0] + t * B[0]));
+        const int jj = static_cast<int>(std::lround((1.0 - t) * A[1] + t * B[1]));
+        idx.push_back({ii, jj});
+      }
+    }
+
+    if (kind == CellTopology::HighOrderKind::Lagrange) {
+      for (int i = 1; i <= p - 1; ++i) {
+        for (int j = 1; j <= p - 1; ++j) {
+          idx.push_back({i, j});
+        }
+      }
+    }
+
+    std::vector<index_t> lookup(static_cast<size_t>(p + 1) * static_cast<size_t>(p + 1), INVALID_INDEX);
+    auto key = [p](int i, int j) -> size_t {
+      return static_cast<size_t>(i * (p + 1) + j);
+    };
+    for (index_t n = 0; n < static_cast<index_t>(idx.size()); ++n) {
+      const int i = idx[static_cast<size_t>(n)][0];
+      const int j = idx[static_cast<size_t>(n)][1];
+      lookup[key(i, j)] = n;
+    }
+
+    const auto perm_idx = QuadPermutation::apply(code, index_t(0), index_t(1), index_t(2), index_t(3));
+    const auto origin = corner_grid[static_cast<size_t>(perm_idx[0])];
+    const auto x1 = corner_grid[static_cast<size_t>(perm_idx[1])];
+    const auto x3 = corner_grid[static_cast<size_t>(perm_idx[3])];
+
+    const int ux = (x1[0] - origin[0]) / p;
+    const int uy = (x1[1] - origin[1]) / p;
+    const int vx = (x3[0] - origin[0]) / p;
+    const int vy = (x3[1] - origin[1]) / p;
+
+    std::vector<index_t> perm(idx.size(), INVALID_INDEX);
+    for (size_t n = 0; n < idx.size(); ++n) {
+      const int i = idx[n][0];
+      const int j = idx[n][1];
+      const int oi = origin[0] + i * ux + j * vx;
+      const int oj = origin[1] + i * uy + j * vy;
+      if (oi < 0 || oi > p || oj < 0 || oj > p) {
+        throw std::runtime_error("HighOrderFacePermutation::quad: mapped node out of range");
+      }
+      const index_t mapped = lookup[key(oi, oj)];
+      if (mapped == INVALID_INDEX) {
+        throw std::runtime_error("HighOrderFacePermutation::quad: failed to map node");
+      }
+      perm[n] = mapped;
+    }
+
+    return perm;
   }
 };
 
