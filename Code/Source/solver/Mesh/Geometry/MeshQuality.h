@@ -113,10 +113,12 @@ public:
 
   // Quality thresholds for different metrics
   struct QualityThresholds {
-    real_t poor = 0;       // Below this is poor quality
-    real_t acceptable = 0;  // Above this is acceptable
-    real_t good = 0;       // Above this is good
-    real_t excellent = 0;  // Above this is excellent
+   // Note: Some metrics are "higher is better" while others are "lower is better"
+   // (e.g., aspect ratio). Interpretation of these cutoffs depends on the metric.
+   real_t poor = 0;
+   real_t acceptable = 0;
+   real_t good = 0;
+   real_t excellent = 0;
   };
 
   static QualityThresholds get_thresholds(Metric metric, CellFamily family);
