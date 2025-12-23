@@ -37,6 +37,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <sstream>
@@ -98,6 +99,11 @@ public:
    */
   EventLogObserver(const Config& config, LogSink sink);
 
+  EventLogObserver(const EventLogObserver&) = delete;
+  EventLogObserver& operator=(const EventLogObserver&) = delete;
+  EventLogObserver(EventLogObserver&&) = delete;
+  EventLogObserver& operator=(EventLogObserver&&) = delete;
+
   /**
    * @brief Handle mesh event
    */
@@ -113,7 +119,10 @@ public:
   /**
    * @brief Set log detail level
    */
-  void set_log_level(LogLevel level) { config_.level = level; }
+  void set_log_level(LogLevel level) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_.level = level;
+  }
 
   /**
    * @brief Enable/disable event throttling
@@ -136,12 +145,18 @@ public:
   /**
    * @brief Enable/disable timestamps
    */
-  void set_timestamps(bool enabled) { config_.include_timestamp = enabled; }
+  void set_timestamps(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_.include_timestamp = enabled;
+  }
 
   /**
    * @brief Set output sink
    */
-  void set_sink(LogSink sink) { sink_ = sink; }
+  void set_sink(LogSink sink) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    sink_ = std::move(sink);
+  }
 
   /**
    * @brief Set output to file
@@ -163,7 +178,10 @@ public:
   /**
    * @brief Get total event count
    */
-  size_t total_events() const { return total_events_; }
+  size_t total_events() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return total_events_;
+  }
 
   /**
    * @brief Get count for specific event type
@@ -173,7 +191,10 @@ public:
   /**
    * @brief Get throttled (dropped) event count
    */
-  size_t throttled_events() const { return throttled_events_; }
+  size_t throttled_events() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return throttled_events_;
+  }
 
   /**
    * @brief Reset all counters
@@ -205,6 +226,9 @@ private:
    * @brief Get current timestamp string
    */
   std::string get_timestamp() const;
+
+  mutable std::mutex mutex_;
+  mutable std::mutex output_mutex_;
 
   Config config_;
   LogSink sink_;

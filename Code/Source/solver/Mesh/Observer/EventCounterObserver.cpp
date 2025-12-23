@@ -164,18 +164,22 @@ std::vector<EventCounterObserver::HistogramBin>
 EventCounterObserver::generate_histogram(MeshEvent event, size_t num_bins) const {
   std::vector<HistogramBin> histogram;
 
-  auto it = event_stats_.find(event);
-  if (it == event_stats_.end() || it->second.count <= 1) {
-    return histogram;  // No data or not enough for intervals
+  if (num_bins == 0) {
+    return histogram;
   }
 
-  const auto& stats = it->second;
-  auto min_ms = stats.min_interval.count();
-  auto max_ms = stats.max_interval.count();
+  auto intervals_it = all_intervals_.find(event);
+  if (intervals_it == all_intervals_.end() || intervals_it->second.empty()) {
+    return histogram;  // Histogram data collection not enabled or no intervals recorded
+  }
+
+  const auto& intervals = intervals_it->second;
+  auto [min_it, max_it] = std::minmax_element(intervals.begin(), intervals.end());
+  const auto min_ms = min_it->count();
+  const auto max_ms = max_it->count();
 
   if (min_ms == max_ms) {
-    // All intervals are the same
-    histogram.push_back({stats.min_interval, stats.max_interval, stats.count - 1});
+    histogram.push_back({*min_it, *max_it, intervals.size()});
     return histogram;
   }
 
@@ -192,16 +196,13 @@ EventCounterObserver::generate_histogram(MeshEvent event, size_t num_bins) const
   }
 
   // Fill bins
-  if (config_.enable_histograms) {
-    auto intervals_it = all_intervals_.find(event);
-    if (intervals_it != all_intervals_.end()) {
-      for (const auto& interval : intervals_it->second) {
-        auto ms = interval.count();
-        size_t bin_idx = static_cast<size_t>((ms - min_ms) / bin_width);
-        if (bin_idx >= num_bins) bin_idx = num_bins - 1;
-        histogram[bin_idx].count++;
-      }
+  for (const auto& interval : intervals) {
+    auto ms = interval.count();
+    size_t bin_idx = static_cast<size_t>((ms - min_ms) / bin_width);
+    if (bin_idx >= num_bins) {
+      bin_idx = num_bins - 1;
     }
+    histogram[bin_idx].count++;
   }
 
   return histogram;
@@ -210,6 +211,10 @@ EventCounterObserver::generate_histogram(MeshEvent event, size_t num_bins) const
 std::vector<EventCounterObserver::HistogramBin>
 EventCounterObserver::generate_combined_histogram(size_t num_bins) const {
   std::vector<HistogramBin> histogram;
+
+  if (num_bins == 0) {
+    return histogram;
+  }
 
   // Collect all intervals
   std::vector<std::chrono::milliseconds> all_combined;

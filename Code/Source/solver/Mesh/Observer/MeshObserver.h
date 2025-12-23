@@ -35,6 +35,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace svmp {
@@ -45,7 +46,7 @@ namespace svmp {
 // Mesh emits events; subsystems subscribe.
 // Keeps caches coherent without tight coupling.
 //
-// Events: topology_change, geometry_change, partition_change, labels_change, fields_change
+// Events: topology_change, geometry_change, partition_change, labels_change, fields_change, adaptivity_applied
 // Subscribers: GeometryCache, BVH, InterfaceMesh, physics modules, etc.
 
 // ====================
@@ -95,31 +96,102 @@ public:
 
 class MeshEventBus {
 public:
-  MeshEventBus() = default;
+  struct State {
+    mutable std::mutex mutex;
+    std::vector<MeshObserver*> observers;                        // non-owning pointers
+    std::vector<std::shared_ptr<MeshObserver>> owned_observers;  // owned observers
+  };
+
+  MeshEventBus() : state_(std::make_shared<State>()) {}
+  MeshEventBus(const MeshEventBus&) = delete;
+  MeshEventBus& operator=(const MeshEventBus&) = delete;
+  MeshEventBus(MeshEventBus&&) noexcept = default;
+  MeshEventBus& operator=(MeshEventBus&&) noexcept = default;
+
+  std::weak_ptr<State> weak_state() const noexcept { return state_; }
 
   // Register an observer (lifetime must exceed this bus)
   void subscribe(MeshObserver* observer) {
-    if (observer && std::find(observers_.begin(), observers_.end(), observer) == observers_.end()) {
-      observers_.push_back(observer);
+    if (!observer) {
+      return;
+    }
+
+    auto state = state_;
+    if (!state) {
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (std::find(state->observers.begin(), state->observers.end(), observer) == state->observers.end()) {
+      state->observers.push_back(observer);
     }
   }
 
   // Register an observer with shared ownership
   void subscribe(std::shared_ptr<MeshObserver> observer) {
-    if (observer) {
-      owned_observers_.push_back(observer);
-      subscribe(observer.get());
+    if (!observer) {
+      return;
+    }
+
+    auto state = state_;
+    if (!state) {
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+
+    // Avoid retaining duplicate shared_ptr references for the same observer instance.
+    auto* raw = observer.get();
+    const bool already_owned = std::any_of(
+        state->owned_observers.begin(), state->owned_observers.end(),
+        [raw](const std::shared_ptr<MeshObserver>& existing) { return existing.get() == raw; });
+    if (!already_owned) {
+      state->owned_observers.push_back(std::move(observer));
+    }
+
+    // Ensure the raw pointer is subscribed (deduplicated by subscribe(MeshObserver*)).
+    if (std::find(state->observers.begin(), state->observers.end(), raw) == state->observers.end()) {
+      state->observers.push_back(raw);
     }
   }
 
   // Unregister an observer
   void unsubscribe(MeshObserver* observer) {
-    observers_.erase(std::remove(observers_.begin(), observers_.end(), observer), observers_.end());
+    auto state = state_;
+    if (!state) {
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+    state->observers.erase(std::remove(state->observers.begin(), state->observers.end(), observer), state->observers.end());
+    state->owned_observers.erase(
+        std::remove_if(state->owned_observers.begin(), state->owned_observers.end(),
+                       [observer](const std::shared_ptr<MeshObserver>& owned) {
+                         return owned.get() == observer;
+                       }),
+        state->owned_observers.end());
   }
 
   // Notify all observers of an event
   void notify(MeshEvent event) {
-    for (auto* obs : observers_) {
+    auto state = state_;
+    if (!state) {
+      return;
+    }
+
+    // Snapshot iteration to tolerate subscribe/unsubscribe and avoid holding
+    // locks during callbacks. Subscribers added/removed during notification
+    // will take effect on the next notify() call.
+    std::vector<MeshObserver*> snapshot;
+    std::vector<std::shared_ptr<MeshObserver>> owned_snapshot;
+    {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      snapshot = state->observers;
+      owned_snapshot = state->owned_observers; // keep owned observers alive for the duration
+    }
+
+    (void)owned_snapshot;
+    for (auto* obs : snapshot) {
       if (obs) {
         obs->on_mesh_event(event);
       }
@@ -127,18 +199,49 @@ public:
   }
 
   // Query
-  size_t num_observers() const { return observers_.size(); }
-  bool has_observers() const { return !observers_.empty(); }
+  size_t num_observers() const {
+    auto state = state_;
+    if (!state) {
+      return 0;
+    }
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+    return state->observers.size();
+  }
+  bool has_observers() const {
+    auto state = state_;
+    if (!state) {
+      return false;
+    }
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+    return !state->observers.empty();
+  }
+
+  bool is_subscribed(const MeshObserver* observer) const {
+    auto state = state_;
+    if (!state || !observer) {
+      return false;
+    }
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+    return std::find(state->observers.begin(), state->observers.end(), observer) != state->observers.end();
+  }
 
   // Clear all observers
   void clear() {
-    observers_.clear();
-    owned_observers_.clear();
+    auto state = state_;
+    if (!state) {
+      return;
+    }
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+    state->observers.clear();
+    state->owned_observers.clear();
   }
 
 private:
-  std::vector<MeshObserver*> observers_;                    // non-owning pointers
-  std::vector<std::shared_ptr<MeshObserver>> owned_observers_; // owned observers
+  std::shared_ptr<State> state_;
 };
 
 // ====================
