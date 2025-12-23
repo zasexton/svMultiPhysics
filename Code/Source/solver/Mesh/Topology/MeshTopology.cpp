@@ -34,6 +34,7 @@
 #include <unordered_set>
 #include <queue>
 #include <algorithm>
+#include <limits>
 
 namespace svmp {
 
@@ -197,6 +198,64 @@ void MeshTopology::build_cell2cell(const MeshBase& mesh,
   }
 }
 
+void MeshTopology::build_codim1_to_codim1(const MeshBase& mesh,
+                                         std::vector<offset_t>& entity2entity_offsets,
+                                         std::vector<index_t>& entity2entity) {
+  const size_t n_faces = mesh.n_faces();
+  entity2entity_offsets.assign(n_faces + 1, 0);
+  entity2entity.clear();
+
+  if (n_faces == 0) {
+    return;
+  }
+
+  // Map canonical edge -> faces incident to that edge.
+  std::unordered_map<std::pair<index_t, index_t>, std::vector<index_t>, PairHash> edge2faces;
+  edge2faces.reserve(n_faces * 4);
+
+  for (size_t f = 0; f < n_faces; ++f) {
+    auto [verts_ptr, n_verts] = mesh.face_vertices_span(static_cast<index_t>(f));
+    if (n_verts < 2) continue;
+    for (size_t i = 0; i < n_verts; ++i) {
+      index_t a = verts_ptr[i];
+      index_t b = verts_ptr[(i + 1) % n_verts];
+      if (a > b) std::swap(a, b);
+      edge2faces[{a, b}].push_back(static_cast<index_t>(f));
+    }
+  }
+
+  std::vector<std::vector<index_t>> neighbors(n_faces);
+  for (const auto& kv : edge2faces) {
+    const auto& faces = kv.second;
+    if (faces.size() < 2) continue;
+    for (size_t i = 0; i < faces.size(); ++i) {
+      const index_t fi = faces[i];
+      auto& nset = neighbors[static_cast<size_t>(fi)];
+      for (size_t j = 0; j < faces.size(); ++j) {
+        if (i == j) continue;
+        nset.push_back(faces[j]);
+      }
+    }
+  }
+
+  // Deduplicate and build CSR.
+  for (size_t f = 0; f < n_faces; ++f) {
+    auto& n = neighbors[f];
+    std::sort(n.begin(), n.end());
+    n.erase(std::unique(n.begin(), n.end()), n.end());
+    entity2entity_offsets[f + 1] = entity2entity_offsets[f] + static_cast<offset_t>(n.size());
+  }
+
+  entity2entity.resize(static_cast<size_t>(entity2entity_offsets.back()));
+  for (size_t f = 0; f < n_faces; ++f) {
+    const auto& n = neighbors[f];
+    const offset_t start = entity2entity_offsets[f];
+    for (size_t i = 0; i < n.size(); ++i) {
+      entity2entity[static_cast<size_t>(start + static_cast<offset_t>(i))] = n[i];
+    }
+  }
+}
+
 // ---- Neighbor queries ----
 
 std::vector<index_t> MeshTopology::cell_neighbors(const MeshBase& mesh, index_t cell,
@@ -247,6 +306,30 @@ std::vector<index_t> MeshTopology::vertex_cells(const MeshBase& mesh, index_t ve
     offset_t end = offsets[vertex + 1];
     return std::vector<index_t>(cells.begin() + start, cells.begin() + end);
   }
+}
+
+std::vector<index_t> MeshTopology::vertex_codim1(const MeshBase& mesh,
+                                                 index_t vertex,
+                                                 const std::vector<offset_t>& vertex2entity_offsets,
+                                                 const std::vector<index_t>& vertex2entity) {
+  if (!vertex2entity_offsets.empty()) {
+    if (vertex < 0 || static_cast<size_t>(vertex) >= vertex2entity_offsets.size() - 1) {
+      return {};
+    }
+    const offset_t start = vertex2entity_offsets[vertex];
+    const offset_t end = vertex2entity_offsets[vertex + 1];
+    return std::vector<index_t>(vertex2entity.begin() + start, vertex2entity.begin() + end);
+  }
+
+  std::vector<offset_t> offsets;
+  std::vector<index_t> ents;
+  build_vertex2codim1(mesh, offsets, ents);
+  if (vertex < 0 || static_cast<size_t>(vertex) >= offsets.size() - 1) {
+    return {};
+  }
+  const offset_t start = offsets[vertex];
+  const offset_t end = offsets[vertex + 1];
+  return std::vector<index_t>(ents.begin() + start, ents.begin() + end);
 }
 
 std::vector<index_t> MeshTopology::codim1_cells(const MeshBase& mesh, index_t entity) {
@@ -310,6 +393,18 @@ bool MeshTopology::is_boundary_codim1(const MeshBase& mesh, index_t entity) {
   }
   const auto& fc = mesh.face_cells(entity);
   return fc[1] < 0;
+}
+
+bool MeshTopology::is_boundary_cell(const MeshBase& mesh, index_t cell) {
+  if (cell < 0 || static_cast<size_t>(cell) >= mesh.n_cells()) {
+    return false;
+  }
+  for (const auto f : mesh.cell_faces(cell)) {
+    if (is_boundary_codim1(mesh, f)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // ---- Connectivity analysis ----
@@ -412,6 +507,72 @@ std::vector<index_t> MeshTopology::cells_within_distance(const MeshBase& mesh,
   return result;
 }
 
+// ---- Topological features ----
+
+std::unordered_map<CellFamily, std::pair<index_t, index_t>> MeshTopology::face_count_by_cell_type(const MeshBase& mesh) {
+  std::unordered_map<CellFamily, std::pair<index_t, index_t>> stats;
+
+  for (size_t c = 0; c < mesh.n_cells(); ++c) {
+    const auto family = mesh.cell_shape(static_cast<index_t>(c)).family;
+    const index_t face_count = static_cast<index_t>(mesh.cell_faces(static_cast<index_t>(c)).size());
+    auto it = stats.find(family);
+    if (it == stats.end()) {
+      stats.emplace(family, std::make_pair(face_count, face_count));
+    } else {
+      it->second.first = std::min(it->second.first, face_count);
+      it->second.second = std::max(it->second.second, face_count);
+    }
+  }
+
+  return stats;
+}
+
+std::vector<index_t> MeshTopology::vertex_valence(const MeshBase& mesh) {
+  const size_t n_vertices = mesh.n_vertices();
+  std::vector<index_t> valence(n_vertices, 0);
+
+  std::vector<std::array<index_t, 2>> edges;
+  if (mesh.n_edges() > 0) {
+    edges.assign(mesh.edge2vertex().begin(), mesh.edge2vertex().end());
+  } else {
+    edges = extract_edges(mesh);
+  }
+
+  for (const auto& e : edges) {
+    const index_t v0 = e[0];
+    const index_t v1 = e[1];
+    if (v0 >= 0 && static_cast<size_t>(v0) < n_vertices) valence[static_cast<size_t>(v0)]++;
+    if (v1 >= 0 && static_cast<size_t>(v1) < n_vertices) valence[static_cast<size_t>(v1)]++;
+  }
+
+  return valence;
+}
+
+std::vector<index_t> MeshTopology::irregular_vertices(const MeshBase& mesh, index_t expected_valence) {
+  const auto valence = vertex_valence(mesh);
+  std::vector<index_t> irregular;
+  for (size_t v = 0; v < valence.size(); ++v) {
+    if (valence[v] != expected_valence) {
+      irregular.push_back(static_cast<index_t>(v));
+    }
+  }
+  return irregular;
+}
+
+int MeshTopology::euler_characteristic(const MeshBase& mesh) {
+  const int V = static_cast<int>(mesh.n_vertices());
+  const int C = static_cast<int>(mesh.n_cells());
+  const int F = static_cast<int>(mesh.n_faces());
+
+  if (mesh.dim() == 2) {
+    // 2D: V - E + F(cells), where mesh.n_faces() are edges.
+    return V - F + C;
+  }
+
+  const int E = static_cast<int>(mesh.n_edges() > 0 ? mesh.n_edges() : extract_edges(mesh).size());
+  return V - E + F - C;
+}
+
 // ---- Edge operations ----
 
 std::vector<std::array<index_t,2>> MeshTopology::extract_edges(const MeshBase& mesh) {
@@ -478,6 +639,113 @@ std::vector<std::array<index_t,2>> MeshTopology::extract_edges(const MeshBase& m
   return edges;
 }
 
+void MeshTopology::build_edge2cell(const MeshBase& mesh,
+                                   const std::vector<std::array<index_t, 2>>& edges,
+                                   std::vector<offset_t>& edge2cell_offsets,
+                                   std::vector<index_t>& edge2cell) {
+  const size_t n_edges = edges.size();
+  edge2cell_offsets.assign(n_edges + 1, 0);
+  edge2cell.clear();
+
+  if (n_edges == 0) {
+    return;
+  }
+
+  std::unordered_map<std::pair<index_t, index_t>, size_t, PairHash> edge_to_id;
+  edge_to_id.reserve(n_edges * 2);
+  for (size_t e = 0; e < n_edges; ++e) {
+    index_t a = edges[e][0];
+    index_t b = edges[e][1];
+    if (a > b) std::swap(a, b);
+    edge_to_id[{a, b}] = e;
+  }
+
+  std::vector<std::vector<index_t>> adj_lists(n_edges);
+
+  for (size_t c = 0; c < mesh.n_cells(); ++c) {
+    auto [verts_ptr, n_verts] = mesh.cell_vertices_span(static_cast<index_t>(c));
+    const auto family = mesh.cell_shape(static_cast<index_t>(c)).family;
+
+    std::vector<std::pair<int, int>> local_edges;
+    switch (family) {
+      case CellFamily::Line:
+        local_edges = {{0, 1}};
+        break;
+      case CellFamily::Triangle:
+        local_edges = {{0, 1}, {1, 2}, {2, 0}};
+        break;
+      case CellFamily::Quad:
+        local_edges = {{0, 1}, {1, 2}, {2, 3}, {3, 0}};
+        break;
+      case CellFamily::Tetra:
+        local_edges = {{0, 1}, {0, 2}, {0, 3}, {1, 2}, {1, 3}, {2, 3}};
+        break;
+      case CellFamily::Hex:
+        local_edges = {{0, 1}, {1, 2}, {2, 3}, {3, 0},  {4, 5}, {5, 6}, {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+        break;
+      case CellFamily::Wedge:
+        local_edges = {{0, 1}, {1, 2}, {2, 0},  {3, 4}, {4, 5}, {5, 3}, {0, 3}, {1, 4}, {2, 5}};
+        break;
+      case CellFamily::Pyramid:
+        local_edges = {{0, 1}, {1, 2}, {2, 3}, {3, 0},  {0, 4}, {1, 4}, {2, 4}, {3, 4}};
+        break;
+      default:
+        for (size_t i = 0; i < n_verts; ++i) {
+          local_edges.push_back({static_cast<int>(i), static_cast<int>((i + 1) % n_verts)});
+        }
+        break;
+    }
+
+    for (const auto& le : local_edges) {
+      index_t a = verts_ptr[le.first];
+      index_t b = verts_ptr[le.second];
+      if (a > b) std::swap(a, b);
+      auto it = edge_to_id.find({a, b});
+      if (it != edge_to_id.end()) {
+        adj_lists[it->second].push_back(static_cast<index_t>(c));
+      }
+    }
+  }
+
+  // Build CSR (deduplicate per edge).
+  for (size_t e = 0; e < n_edges; ++e) {
+    auto& lst = adj_lists[e];
+    std::sort(lst.begin(), lst.end());
+    lst.erase(std::unique(lst.begin(), lst.end()), lst.end());
+    edge2cell_offsets[e + 1] = edge2cell_offsets[e] + static_cast<offset_t>(lst.size());
+  }
+
+  edge2cell.resize(static_cast<size_t>(edge2cell_offsets.back()));
+  for (size_t e = 0; e < n_edges; ++e) {
+    const auto& lst = adj_lists[e];
+    const offset_t start = edge2cell_offsets[e];
+    for (size_t i = 0; i < lst.size(); ++i) {
+      edge2cell[static_cast<size_t>(start + static_cast<offset_t>(i))] = lst[i];
+    }
+  }
+}
+
+std::vector<std::array<index_t, 2>> MeshTopology::boundary_edges(const MeshBase& mesh) {
+  std::unordered_set<std::pair<index_t, index_t>, PairHash> edge_set;
+  for (index_t f : boundary_codim1(mesh)) {
+    auto [verts_ptr, n_verts] = mesh.face_vertices_span(f);
+    if (n_verts < 2) continue;
+    for (size_t i = 0; i < n_verts; ++i) {
+      index_t a = verts_ptr[i];
+      index_t b = verts_ptr[(i + 1) % n_verts];
+      if (a > b) std::swap(a, b);
+      edge_set.insert({a, b});
+    }
+  }
+
+  std::vector<std::array<index_t, 2>> result;
+  result.reserve(edge_set.size());
+  for (const auto& e : edge_set) {
+    result.push_back({{e.first, e.second}});
+  }
+  return result;
+}
+
 // ---- Manifold checks ----
 
 bool MeshTopology::is_manifold(const MeshBase& mesh) {
@@ -533,6 +801,15 @@ std::vector<std::array<index_t,2>> MeshTopology::non_manifold_edges(const MeshBa
   }
 
   return result;
+}
+
+std::vector<index_t> MeshTopology::non_manifold_vertices(const MeshBase& mesh) {
+  std::unordered_set<index_t> vset;
+  for (const auto& e : non_manifold_edges(mesh)) {
+    vset.insert(e[0]);
+    vset.insert(e[1]);
+  }
+  return std::vector<index_t>(vset.begin(), vset.end());
 }
 
 } // namespace svmp
