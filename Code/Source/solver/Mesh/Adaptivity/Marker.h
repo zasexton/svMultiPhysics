@@ -406,7 +406,8 @@ public:
   static std::unique_ptr<Marker> create_region_aware(
       std::unique_ptr<Marker> base_marker,
       const std::set<int>& include_regions = {},
-      const std::set<int>& exclude_regions = {});
+      const std::set<int>& exclude_regions = {},
+      const std::set<int>& exclude_boundaries = {});
 };
 
 /**

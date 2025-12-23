@@ -380,7 +380,14 @@ bool RegionAwareMarker::should_consider_element(
   }
 
   // Check boundary exclusion
-  // TODO: Check if element is on boundary with excluded label
+  if (!config_.exclude_boundaries.empty()) {
+    for (const auto face : mesh.cell_faces(static_cast<index_t>(elem_id))) {
+      const int bnd = static_cast<int>(mesh.boundary_label(face));
+      if (config_.exclude_boundaries.count(bnd) > 0) {
+        return false;
+      }
+    }
+  }
 
   return true;
 }
@@ -615,7 +622,10 @@ std::unique_ptr<Marker> MarkerFactory::create(const AdaptivityOptions& options) 
 
     case AdaptivityOptions::MarkingStrategy::REGION_AWARE: {
       auto base = create_fixed_fraction(options.refine_fraction, options.coarsen_fraction);
-      return create_region_aware(std::move(base), options.include_regions, options.exclude_regions);
+      return create_region_aware(std::move(base),
+                                options.include_regions,
+                                options.exclude_regions,
+                                options.exclude_boundaries);
     }
 
     default:
@@ -654,11 +664,13 @@ std::unique_ptr<Marker> MarkerFactory::create_fixed_count(
 std::unique_ptr<Marker> MarkerFactory::create_region_aware(
     std::unique_ptr<Marker> base_marker,
     const std::set<int>& include_regions,
-    const std::set<int>& exclude_regions) {
+    const std::set<int>& exclude_regions,
+    const std::set<int>& exclude_boundaries) {
   RegionAwareMarker::Config config;
   config.base_marker = std::move(base_marker);
   config.include_regions = include_regions;
   config.exclude_regions = exclude_regions;
+  config.exclude_boundaries = exclude_boundaries;
   return std::make_unique<RegionAwareMarker>(std::move(config));
 }
 
@@ -717,9 +729,7 @@ void MarkerUtils::apply_constraints(
   // Apply max level constraint
   for (size_t i = 0; i < marks.size(); ++i) {
     if (marks[i] == MarkType::REFINE) {
-      // Refinement history/levels are not yet modeled in MeshBase.
-      // Treat all cells as level 0 for now.
-      const size_t level = 0;
+      const size_t level = mesh.refinement_level(static_cast<index_t>(i));
       if (level >= options.max_refinement_level) {
         marks[i] = MarkType::NONE;
       }
@@ -731,7 +741,7 @@ void MarkerUtils::apply_constraints(
   size_t predicted_count = mesh.n_cells() - stats.num_marked_coarsen +
                           stats.num_marked_refine * 4;  // Assuming 1:4 refinement
 
-  if (predicted_count > options.max_element_count) {
+  if (predicted_count > options.max_cell_count) {
     // Remove refinement marks
     for (auto& mark : marks) {
       if (mark == MarkType::REFINE) {
@@ -740,7 +750,7 @@ void MarkerUtils::apply_constraints(
     }
   }
 
-  if (predicted_count < options.min_element_count) {
+  if (predicted_count < options.min_cell_count) {
     // Remove coarsening marks
     for (auto& mark : marks) {
       if (mark == MarkType::COARSEN) {

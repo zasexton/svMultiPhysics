@@ -40,6 +40,20 @@
 namespace svmp {
 
 /**
+ * @brief High-level field transfer selection used by Adaptivity unit tests.
+ *
+ * This is intentionally coarse-grained: it selects a concrete FieldTransfer
+ * implementation, while finer-grained options (e.g., prolongation vs.
+ * restriction variants) remain controlled by the legacy method enums.
+ */
+enum class FieldTransferType {
+  LINEAR_INTERPOLATION,
+  CONSERVATIVE,
+  HIGH_ORDER,
+  INJECTION
+};
+
+/**
  * @brief Unified options for mesh adaptivity operations
  *
  * Contains all configuration parameters for error estimation, marking,
@@ -62,11 +76,11 @@ struct AdaptivityOptions {
   /** Minimum refinement level (for coarsening) */
   size_t min_refinement_level = 0;
 
-  /** Maximum number of elements allowed after refinement */
-  size_t max_element_count = std::numeric_limits<size_t>::max();
+  /** Maximum number of cells allowed after refinement */
+  size_t max_cell_count = std::numeric_limits<size_t>::max();
 
-  /** Minimum number of elements to maintain */
-  size_t min_element_count = 1;
+  /** Minimum number of cells to maintain */
+  size_t min_cell_count = 1;
 
   /** Create new mesh or modify in place */
   bool create_new_mesh = true;
@@ -188,6 +202,22 @@ struct AdaptivityOptions {
 
   ConformityMode conformity_mode = ConformityMode::ENFORCE_CONFORMING;
 
+  /**
+   * @brief Maximum refinement level difference across neighbors (2:1 balance)
+   *
+   * This is a topological constraint (not a mesh-quality metric):
+   * - `max_level_difference == 1` enforces classic 2:1 balance.
+   * - Larger values allow deeper local refinement (and require multi-level hanging constraints).
+   */
+  size_t max_level_difference = 1;
+
+  /**
+   * @brief Use minimal GREEN/BLUE/ANISOTROPIC closure patterns when possible
+   *
+   * When false, closure upgrades to RED refinement to enforce conformity.
+   */
+  bool use_green_closure = true;
+
   /** Maximum closure iterations */
   size_t max_closure_iterations = 10;
 
@@ -197,6 +227,9 @@ struct AdaptivityOptions {
   // ====================
   // Field Transfer
   // ====================
+
+  /** High-level transfer selection (factory choice). */
+  FieldTransferType field_transfer = FieldTransferType::LINEAR_INTERPOLATION;
 
   /** Prolongation (coarse to fine) method */
   enum class ProlongationMethod {
@@ -233,6 +266,19 @@ struct AdaptivityOptions {
 
   /** Check mesh quality after adaptivity */
   bool check_quality = true;
+
+  /**
+   * @brief Enforce a per-refinement quality gate
+   *
+   * When enabled, each refined parent cell must produce children whose minimum
+   * quality is at least `min_refined_quality`. If a closure-selected pattern
+   * (GREEN/BLUE/ANISOTROPIC) fails, the manager may upgrade to RED to preserve
+   * conformity.
+   */
+  bool enforce_quality_after_refinement = true;
+
+  /** Minimum acceptable per-refinement quality */
+  double min_refined_quality = 0.2;
 
   /** Minimum acceptable element quality */
   double min_quality = 0.01;
@@ -316,7 +362,7 @@ struct AdaptivityOptions {
   bool validate() const {
     // Basic validation
     if (max_refinement_level < min_refinement_level) return false;
-    if (max_element_count < min_element_count) return false;
+    if (max_cell_count < min_cell_count) return false;
     if (refine_fraction < 0.0 || refine_fraction > 1.0) return false;
     if (coarsen_fraction < 0.0 || coarsen_fraction > 1.0) return false;
     if (refine_fraction + coarsen_fraction > 1.0) return false;
