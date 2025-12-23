@@ -32,8 +32,11 @@
 #define SVMP_OBSERVER_REGISTRY_H
 
 #include "MeshObserver.h"
+#include "../Core/MeshBase.h"
+#include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -41,7 +44,6 @@ namespace svmp {
 
 // Forward declarations
 class MeshBase;
-template<typename T> class SearchAccel;
 
 /**
  * @brief Central registry for managing common mesh observers
@@ -65,6 +67,10 @@ public:
   static std::shared_ptr<MeshObserver> attach_search_invalidator(
       MeshEventBus& bus, AccelType& accel);
 
+  template<typename AccelType>
+  static std::shared_ptr<MeshObserver> attach_search_invalidator(
+      MeshBase& mesh, AccelType& accel);
+
   /**
    * @brief Attach a geometry cache invalidator to a mesh
    *
@@ -77,6 +83,10 @@ public:
   template<typename CacheType>
   static std::shared_ptr<MeshObserver> attach_geometry_cache_invalidator(
       MeshEventBus& bus, CacheType& cache);
+
+  template<typename CacheType>
+  static std::shared_ptr<MeshObserver> attach_geometry_cache_invalidator(
+      MeshBase& mesh, CacheType& cache);
 
   /**
    * @brief Attach a label-dependent cache invalidator
@@ -91,6 +101,10 @@ public:
   static std::shared_ptr<MeshObserver> attach_label_cache_invalidator(
       MeshEventBus& bus, CacheType& cache);
 
+  template<typename CacheType>
+  static std::shared_ptr<MeshObserver> attach_label_cache_invalidator(
+      MeshBase& mesh, CacheType& cache);
+
   /**
    * @brief Attach a field-dependent cache invalidator
    *
@@ -103,6 +117,10 @@ public:
   template<typename CacheType>
   static std::shared_ptr<MeshObserver> attach_field_cache_invalidator(
       MeshEventBus& bus, CacheType& cache);
+
+  template<typename CacheType>
+  static std::shared_ptr<MeshObserver> attach_field_cache_invalidator(
+      MeshBase& mesh, CacheType& cache);
 
   /**
    * @brief Attach an event logger for debugging
@@ -117,6 +135,11 @@ public:
       const std::string& prefix = "Mesh",
       bool enabled = true);
 
+  static std::shared_ptr<MeshObserver> attach_event_logger(
+      MeshBase& mesh,
+      const std::string& prefix = "Mesh",
+      bool enabled = true);
+
   /**
    * @brief Attach an event counter for diagnostics
    *
@@ -124,6 +147,7 @@ public:
    * @return Shared pointer to the created event counter
    */
   static std::shared_ptr<EventCounter> attach_event_counter(MeshEventBus& bus);
+  static std::shared_ptr<EventCounter> attach_event_counter(MeshBase& mesh);
 
   /**
    * @brief Create a multi-event cache invalidator
@@ -147,6 +171,7 @@ public:
     std::string type;
     std::weak_ptr<MeshObserver> observer;
     std::string mesh_id;
+    std::weak_ptr<MeshEventBus::State> bus_state;
   };
 
   /**
@@ -160,7 +185,8 @@ public:
   void register_observer(const std::string& mesh_id,
                          const std::string& name,
                          const std::string& type,
-                         std::weak_ptr<MeshObserver> observer);
+                         std::weak_ptr<MeshObserver> observer,
+                         std::weak_ptr<MeshEventBus::State> bus_state = {});
 
   /**
    * @brief Get all registered observers for a mesh
@@ -185,7 +211,16 @@ public:
 private:
   ObserverRegistry() = default;
 
+  mutable std::mutex mutex_;
   mutable std::map<std::string, std::vector<ObserverEntry>> registry_;
+
+  static std::string bus_id(const MeshEventBus& bus) {
+    return "MeshEventBus@" + std::to_string(reinterpret_cast<std::uintptr_t>(&bus));
+  }
+
+  static std::string mesh_id(const MeshBase& mesh) {
+    return mesh.mesh_id();
+  }
 };
 
 // ====================
@@ -217,19 +252,20 @@ private:
   std::vector<MeshEvent> trigger_events_;
 };
 
-// Search invalidator - responds to topology, geometry, and partition changes
+// Search invalidator - responds to topology/geometry/partition/adaptivity changes
 template<typename AccelType>
-class SearchInvalidator : public MeshObserver {
-public:
-  explicit SearchInvalidator(AccelType& accel) : accel_(accel) {}
+  class SearchInvalidator : public MeshObserver {
+  public:
+	  explicit SearchInvalidator(AccelType& accel) : accel_(accel) {}
 
-  void on_mesh_event(MeshEvent event) override {
-    if (event == MeshEvent::TopologyChanged ||
-        event == MeshEvent::GeometryChanged ||
-        event == MeshEvent::PartitionChanged) {
-      accel_.invalidate();
-    }
-  }
+	  void on_mesh_event(MeshEvent event) override {
+	    if (event == MeshEvent::TopologyChanged ||
+	        event == MeshEvent::GeometryChanged ||
+	        event == MeshEvent::PartitionChanged ||
+	        event == MeshEvent::AdaptivityApplied) {
+	      accel_.invalidate();
+	    }
+	  }
 
   const char* observer_name() const override {
     return "SearchInvalidator";
@@ -242,15 +278,35 @@ private:
 template<typename AccelType>
 std::shared_ptr<MeshObserver> ObserverRegistry::attach_search_invalidator(
     MeshEventBus& bus, AccelType& accel) {
+  const auto id = bus_id(bus);
   auto observer = std::make_shared<SearchInvalidator<AccelType>>(accel);
   bus.subscribe(observer);
 
-  // Register with global registry for diagnostics
   instance().register_observer(
-      "mesh", // Would need actual mesh ID in practice
+      id,
       "SearchInvalidator",
       "SearchAccel",
-      observer
+      observer,
+      bus.weak_state()
+  );
+
+  return observer;
+}
+
+template<typename AccelType>
+std::shared_ptr<MeshObserver> ObserverRegistry::attach_search_invalidator(
+    MeshBase& mesh, AccelType& accel) {
+  const auto id = mesh_id(mesh);
+  auto observer = std::make_shared<SearchInvalidator<AccelType>>(accel);
+  mesh.event_bus().subscribe(observer);
+
+  // Register with global registry for diagnostics
+  instance().register_observer(
+      id,
+      "SearchInvalidator",
+      "SearchAccel",
+      observer,
+      mesh.event_bus().weak_state()
   );
 
   return observer;
@@ -259,14 +315,34 @@ std::shared_ptr<MeshObserver> ObserverRegistry::attach_search_invalidator(
 template<typename CacheType>
 std::shared_ptr<MeshObserver> ObserverRegistry::attach_geometry_cache_invalidator(
     MeshEventBus& bus, CacheType& cache) {
+  const auto id = bus_id(bus);
   auto observer = std::make_shared<CacheInvalidator<CacheType>>(cache);
   bus.subscribe(observer);
 
   instance().register_observer(
-      "mesh",
+      id,
       "GeometryCacheInvalidator",
       "GeometryCache",
-      observer
+      observer,
+      bus.weak_state()
+  );
+
+  return observer;
+}
+
+template<typename CacheType>
+std::shared_ptr<MeshObserver> ObserverRegistry::attach_geometry_cache_invalidator(
+    MeshBase& mesh, CacheType& cache) {
+  const auto id = mesh_id(mesh);
+  auto observer = std::make_shared<CacheInvalidator<CacheType>>(cache);
+  mesh.event_bus().subscribe(observer);
+
+  instance().register_observer(
+      id,
+      "GeometryCacheInvalidator",
+      "GeometryCache",
+      observer,
+      mesh.event_bus().weak_state()
   );
 
   return observer;
@@ -275,14 +351,34 @@ std::shared_ptr<MeshObserver> ObserverRegistry::attach_geometry_cache_invalidato
 template<typename CacheType>
 std::shared_ptr<MeshObserver> ObserverRegistry::attach_label_cache_invalidator(
     MeshEventBus& bus, CacheType& cache) {
+  const auto id = bus_id(bus);
   auto observer = create_multi_event_invalidator(cache, {MeshEvent::LabelsChanged});
   bus.subscribe(observer);
 
   instance().register_observer(
-      "mesh",
+      id,
       "LabelCacheInvalidator",
       "LabelCache",
-      observer
+      observer,
+      bus.weak_state()
+  );
+
+  return observer;
+}
+
+template<typename CacheType>
+std::shared_ptr<MeshObserver> ObserverRegistry::attach_label_cache_invalidator(
+    MeshBase& mesh, CacheType& cache) {
+  const auto id = mesh_id(mesh);
+  auto observer = create_multi_event_invalidator(cache, {MeshEvent::LabelsChanged});
+  mesh.event_bus().subscribe(observer);
+
+  instance().register_observer(
+      id,
+      "LabelCacheInvalidator",
+      "LabelCache",
+      observer,
+      mesh.event_bus().weak_state()
   );
 
   return observer;
@@ -291,14 +387,34 @@ std::shared_ptr<MeshObserver> ObserverRegistry::attach_label_cache_invalidator(
 template<typename CacheType>
 std::shared_ptr<MeshObserver> ObserverRegistry::attach_field_cache_invalidator(
     MeshEventBus& bus, CacheType& cache) {
+  const auto id = bus_id(bus);
   auto observer = create_multi_event_invalidator(cache, {MeshEvent::FieldsChanged});
   bus.subscribe(observer);
 
   instance().register_observer(
-      "mesh",
+      id,
       "FieldCacheInvalidator",
       "FieldCache",
-      observer
+      observer,
+      bus.weak_state()
+  );
+
+  return observer;
+}
+
+template<typename CacheType>
+std::shared_ptr<MeshObserver> ObserverRegistry::attach_field_cache_invalidator(
+    MeshBase& mesh, CacheType& cache) {
+  const auto id = mesh_id(mesh);
+  auto observer = create_multi_event_invalidator(cache, {MeshEvent::FieldsChanged});
+  mesh.event_bus().subscribe(observer);
+
+  instance().register_observer(
+      id,
+      "FieldCacheInvalidator",
+      "FieldCache",
+      observer,
+      mesh.event_bus().weak_state()
   );
 
   return observer;

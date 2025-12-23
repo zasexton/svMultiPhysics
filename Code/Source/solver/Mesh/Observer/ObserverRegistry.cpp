@@ -70,13 +70,16 @@ ObserverRegistry& ObserverRegistry::instance() {
 void ObserverRegistry::register_observer(const std::string& mesh_id,
                                         const std::string& name,
                                         const std::string& type,
-                                        std::weak_ptr<MeshObserver> observer) {
-  ObserverEntry entry{name, type, observer, mesh_id};
+                                        std::weak_ptr<MeshObserver> observer,
+                                        std::weak_ptr<MeshEventBus::State> bus_state) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  ObserverEntry entry{name, type, observer, mesh_id, std::move(bus_state)};
   registry_[mesh_id].push_back(entry);
 }
 
 std::vector<ObserverRegistry::ObserverEntry>
 ObserverRegistry::get_observers(const std::string& mesh_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
   auto it = registry_.find(mesh_id);
   if (it != registry_.end()) {
     return it->second;
@@ -86,6 +89,7 @@ ObserverRegistry::get_observers(const std::string& mesh_id) const {
 
 std::vector<ObserverRegistry::ObserverEntry>
 ObserverRegistry::get_all_observers() const {
+  std::lock_guard<std::mutex> lock(mutex_);
   std::vector<ObserverEntry> all_entries;
   for (const auto& [mesh_id, entries] : registry_) {
     all_entries.insert(all_entries.end(), entries.begin(), entries.end());
@@ -94,6 +98,7 @@ ObserverRegistry::get_all_observers() const {
 }
 
 void ObserverRegistry::cleanup_expired() {
+  std::lock_guard<std::mutex> lock(mutex_);
   for (auto& [mesh_id, entries] : registry_) {
     entries.erase(
       std::remove_if(entries.begin(), entries.end(),
@@ -117,33 +122,65 @@ void ObserverRegistry::cleanup_expired() {
 }
 
 std::string ObserverRegistry::diagnostic_report() const {
+  std::map<std::string, std::vector<ObserverEntry>> registry_snapshot;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    registry_snapshot = registry_;
+  }
   std::stringstream report;
   report << "=== Observer Registry Diagnostic Report ===" << std::endl;
-  report << "Total meshes monitored: " << registry_.size() << std::endl;
+  report << "Total meshes monitored: " << registry_snapshot.size() << std::endl;
 
   size_t total_observers = 0;
   size_t active_observers = 0;
+  size_t subscribed_observers = 0;
+  size_t detached_observers = 0;
 
-  for (const auto& [mesh_id, entries] : registry_) {
+  for (const auto& [mesh_id, entries] : registry_snapshot) {
     report << std::endl << "Mesh ID: " << mesh_id << std::endl;
     report << "  Observers: " << entries.size() << std::endl;
 
     for (const auto& entry : entries) {
       total_observers++;
-      bool is_active = !entry.observer.expired();
+      const auto obs = entry.observer.lock();
+      bool is_active = static_cast<bool>(obs);
       if (is_active) {
         active_observers++;
       }
 
+      std::string status;
+      if (!is_active) {
+        status = "EXPIRED";
+      } else if (const auto bus_state = entry.bus_state.lock()) {
+        bool subscribed = false;
+        {
+          std::lock_guard<std::mutex> lock(bus_state->mutex);
+          subscribed = std::find(bus_state->observers.begin(),
+                                 bus_state->observers.end(),
+                                 obs.get()) != bus_state->observers.end();
+        }
+        if (subscribed) {
+          status = "ACTIVE/SUBSCRIBED";
+          subscribed_observers++;
+        } else {
+          status = "ACTIVE/DETACHED";
+          detached_observers++;
+        }
+      } else {
+        status = "ACTIVE/UNKNOWN";
+      }
+
       report << "    - " << std::left << std::setw(25) << entry.name
              << " [" << std::setw(15) << entry.type << "] "
-             << (is_active ? "ACTIVE" : "EXPIRED") << std::endl;
+             << status << std::endl;
     }
   }
 
   report << std::endl << "Summary:" << std::endl;
   report << "  Total observers: " << total_observers << std::endl;
   report << "  Active observers: " << active_observers << std::endl;
+  report << "  Subscribed observers: " << subscribed_observers << std::endl;
+  report << "  Detached observers: " << detached_observers << std::endl;
   report << "  Expired observers: " << (total_observers - active_observers) << std::endl;
 
   return report.str();
@@ -157,10 +194,29 @@ std::shared_ptr<MeshObserver> ObserverRegistry::attach_event_logger(
   bus.subscribe(logger);
 
   instance().register_observer(
-      prefix,  // Use prefix as mesh ID for loggers
+      bus_id(bus),
       "EventLogger",
       "Logging",
-      logger
+      logger,
+      bus.weak_state()
+  );
+
+  return logger;
+}
+
+std::shared_ptr<MeshObserver> ObserverRegistry::attach_event_logger(
+    MeshBase& mesh,
+    const std::string& prefix,
+    bool enabled) {
+  auto logger = std::make_shared<ConfigurableEventLogger>(prefix, enabled);
+  mesh.event_bus().subscribe(logger);
+
+  instance().register_observer(
+      mesh_id(mesh),
+      "EventLogger",
+      "Logging",
+      logger,
+      mesh.event_bus().weak_state()
   );
 
   return logger;
@@ -172,10 +228,27 @@ std::shared_ptr<EventCounter> ObserverRegistry::attach_event_counter(
   bus.subscribe(counter);
 
   instance().register_observer(
-      "mesh",
+      bus_id(bus),
       "EventCounter",
       "Diagnostics",
-      counter
+      counter,
+      bus.weak_state()
+  );
+
+  return counter;
+}
+
+std::shared_ptr<EventCounter> ObserverRegistry::attach_event_counter(
+    MeshBase& mesh) {
+  auto counter = std::make_shared<EventCounter>();
+  mesh.event_bus().subscribe(counter);
+
+  instance().register_observer(
+      mesh_id(mesh),
+      "EventCounter",
+      "Diagnostics",
+      counter,
+      mesh.event_bus().weak_state()
   );
 
   return counter;

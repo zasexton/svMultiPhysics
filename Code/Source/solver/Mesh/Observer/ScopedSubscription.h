@@ -69,6 +69,7 @@ public:
   ScopedSubscription(MeshEventBus* bus, MeshObserver* observer)
       : bus_(bus), observer_(observer), owned_(false) {
     if (bus_ && observer_) {
+      state_ = bus_->weak_state();
       bus_->subscribe(observer_);
     }
   }
@@ -82,6 +83,7 @@ public:
   ScopedSubscription(MeshEventBus* bus, std::shared_ptr<MeshObserver> observer)
       : bus_(bus), observer_(observer.get()), owned_observer_(observer), owned_(true) {
     if (bus_ && owned_observer_) {
+      state_ = bus_->weak_state();
       bus_->subscribe(owned_observer_);
     }
   }
@@ -102,10 +104,12 @@ public:
    */
   ScopedSubscription(ScopedSubscription&& other) noexcept
       : bus_(other.bus_),
+        state_(std::move(other.state_)),
         observer_(other.observer_),
         owned_observer_(std::move(other.owned_observer_)),
         owned_(other.owned_) {
     other.bus_ = nullptr;
+    other.state_.reset();
     other.observer_ = nullptr;
     other.owned_ = false;
   }
@@ -117,10 +121,12 @@ public:
     if (this != &other) {
       unsubscribe();
       bus_ = other.bus_;
+      state_ = std::move(other.state_);
       observer_ = other.observer_;
       owned_observer_ = std::move(other.owned_observer_);
       owned_ = other.owned_;
       other.bus_ = nullptr;
+      other.state_.reset();
       other.observer_ = nullptr;
       other.owned_ = false;
     }
@@ -133,8 +139,19 @@ public:
    * After calling this, the subscription becomes inactive.
    */
   void unsubscribe() {
-    if (bus_ && observer_) {
-      bus_->unsubscribe(observer_);
+    if (observer_) {
+      if (auto state = state_.lock()) {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->observers.erase(
+            std::remove(state->observers.begin(), state->observers.end(), observer_),
+            state->observers.end());
+        state->owned_observers.erase(
+            std::remove_if(state->owned_observers.begin(), state->owned_observers.end(),
+                           [this](const std::shared_ptr<MeshObserver>& owned) {
+                             return owned.get() == observer_;
+                           }),
+            state->owned_observers.end());
+      }
     }
     reset();
   }
@@ -144,6 +161,7 @@ public:
    */
   void reset() {
     bus_ = nullptr;
+    state_.reset();
     observer_ = nullptr;
     owned_observer_.reset();
     owned_ = false;
@@ -160,6 +178,7 @@ public:
   MeshObserver* release() {
     MeshObserver* released = owned_ ? nullptr : observer_;
     bus_ = nullptr;
+    state_.reset();
     observer_ = nullptr;
     owned_observer_.reset();
     owned_ = false;
@@ -170,7 +189,7 @@ public:
    * @brief Check if the subscription is active
    */
   bool is_active() const {
-    return bus_ != nullptr && observer_ != nullptr;
+    return observer_ != nullptr && !state_.expired();
   }
 
   /**
@@ -190,6 +209,7 @@ public:
 
 private:
   MeshEventBus* bus_ = nullptr;
+  std::weak_ptr<MeshEventBus::State> state_;
   MeshObserver* observer_ = nullptr;
   std::shared_ptr<MeshObserver> owned_observer_;
   bool owned_ = false;
