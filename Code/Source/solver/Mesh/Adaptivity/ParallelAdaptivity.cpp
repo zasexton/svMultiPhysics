@@ -29,8 +29,8 @@
  */
 
 #include "ParallelAdaptivity.h"
-#include "../DistributedMesh.h"
-#include "../MeshFields.h"
+#include "../Core/DistributedMesh.h"
+#include "../Fields/MeshFields.h"
 #include "ErrorEstimator.h"
 #include "Marker.h"
 #include <algorithm>
