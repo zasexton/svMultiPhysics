@@ -175,6 +175,17 @@ public:
     // This does not include global vertex IDs — it provides the structural sequence (corners/edges/faces/volume).
     static HighOrderPattern high_order_pattern(CellFamily family, int p, HighOrderKind kind = HighOrderKind::Lagrange);
 
+    // High-order sub-entity extraction helpers (local node indices into a cell's connectivity array).
+    // Ordering is consistent with the internal canonical (VTK-like) ordering used throughout Geometry.
+    //
+    // Notes:
+    // - For 3D cell families, face_id follows get_oriented_boundary_faces_view() order.
+    // - For 2D cell families (Triangle/Quad), faces are edges (fv==2).
+    static std::vector<index_t> high_order_face_local_nodes(CellFamily family, int p, int face_id,
+                                                            HighOrderKind kind = HighOrderKind::Lagrange);
+    static std::vector<index_t> high_order_edge_local_nodes(CellFamily family, int p, int edge_id,
+                                                            HighOrderKind kind = HighOrderKind::Lagrange);
+
     // Helper: infer Lagrange order p from total node count (best-effort). Returns -1 if unknown.
     static int infer_lagrange_order(CellFamily family, size_t node_count);
     // Helper: infer Serendipity order p from total node count (best-effort). Returns -1 if unknown.

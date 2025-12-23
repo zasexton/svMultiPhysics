@@ -991,7 +991,22 @@ CellTopology::HighOrderPattern CellTopology::high_order_pattern(CellFamily famil
         if (family == CellFamily::Triangle || family == CellFamily::Quad || family == CellFamily::Tetra || family == CellFamily::Hex || family == CellFamily::Wedge || family == CellFamily::Pyramid) {
             // Faces for 3D cells; for 2D, faces are edges so skip here
             if (family == CellFamily::Triangle || family == CellFamily::Quad) {
-                // 2D: no face interior concept beyond element interior; handled separately if needed
+                // 2D: element interior nodes are treated as a single "face" with face_id = 0.
+                if (family == CellFamily::Triangle) {
+                    // Triangular interior: barycentric i,j >=1, i+j <= p-2 (lexicographic)
+                    for (int i=1; i<=p-2; ++i) {
+                        for (int j=1; j<=p-1-i; ++j) {
+                            pat.sequence.push_back({HONodeRole::Face, 0, i, j});
+                        }
+                    }
+                } else {
+                    // Quadrilateral interior: grid i=1..p-1, j=1..p-1 (row-major)
+                    for (int i=1; i<=p-1; ++i) {
+                        for (int j=1; j<=p-1; ++j) {
+                            pat.sequence.push_back({HONodeRole::Face, 0, i, j});
+                        }
+                    }
+                }
             } else {
                 auto fview = get_oriented_boundary_faces_view(family);
                 for (int fi=0; fi<fview.face_count; ++fi) {
@@ -1061,6 +1076,197 @@ CellTopology::HighOrderPattern CellTopology::high_order_pattern(CellFamily famil
     return pat;
 }
 
+namespace {
+int corner_count(CellFamily family) {
+    switch (family) {
+        case CellFamily::Triangle: return 3;
+        case CellFamily::Quad:     return 4;
+        case CellFamily::Tetra:    return 4;
+        case CellFamily::Hex:      return 8;
+        case CellFamily::Wedge:    return 6;
+        case CellFamily::Pyramid:  return 5;
+        default:                  return 0;
+    }
+}
+
+size_t face_interior_node_count(int fv, int p, CellTopology::HighOrderKind kind) {
+    if (kind != CellTopology::HighOrderKind::Lagrange) return 0;
+    if (p <= 1) return 0;
+    if (fv == 4) {
+        const int t = p - 1;
+        return static_cast<size_t>(t * t);
+    }
+    if (fv == 3) {
+        if (p <= 2) return 0;
+        const int t1 = p - 1;
+        const int t2 = p - 2;
+        return static_cast<size_t>(t1 * t2 / 2);
+    }
+    return 0;
+}
+
+int find_edge_id(CellFamily family, int a, int b) {
+    const auto eview = CellTopology::get_edges_view(family);
+    if (!eview.pairs_flat) return -1;
+    const int lo = std::min(a, b);
+    const int hi = std::max(a, b);
+    for (int ei = 0; ei < eview.edge_count; ++ei) {
+        const int u = static_cast<int>(eview.pairs_flat[2 * ei + 0]);
+        const int v = static_cast<int>(eview.pairs_flat[2 * ei + 1]);
+        if (std::min(u, v) == lo && std::max(u, v) == hi) return ei;
+    }
+    return -1;
+}
+} // namespace
+
+std::vector<index_t> CellTopology::high_order_edge_local_nodes(
+    CellFamily family, int p, int edge_id, HighOrderKind kind) {
+
+    (void)kind; // edge ordering is the same for Lagrange vs serendipity (corners + edge nodes)
+    if (p < 1) {
+        throw std::invalid_argument("high_order_edge_local_nodes: p must be >= 1");
+    }
+
+    const auto eview = get_edges_view(family);
+    if (!eview.pairs_flat || eview.edge_count <= 0) {
+        throw std::runtime_error("high_order_edge_local_nodes: unsupported cell family");
+    }
+    if (edge_id < 0 || edge_id >= eview.edge_count) {
+        throw std::out_of_range("high_order_edge_local_nodes: invalid edge id");
+    }
+
+    const int nc = corner_count(family);
+    const int a = static_cast<int>(eview.pairs_flat[2 * edge_id + 0]);
+    const int b = static_cast<int>(eview.pairs_flat[2 * edge_id + 1]);
+
+    std::vector<index_t> out;
+    out.reserve(static_cast<size_t>(p + 1));
+    out.push_back(static_cast<index_t>(a));
+    if (p > 1) {
+        const int steps = p - 1;
+        const int base = nc + edge_id * steps;
+        for (int k = 0; k < steps; ++k) {
+            out.push_back(static_cast<index_t>(base + k));
+        }
+    }
+    out.push_back(static_cast<index_t>(b));
+    return out;
+}
+
+std::vector<index_t> CellTopology::high_order_face_local_nodes(
+    CellFamily family, int p, int face_id, HighOrderKind kind) {
+
+    if (p < 1) {
+        throw std::invalid_argument("high_order_face_local_nodes: p must be >= 1");
+    }
+
+    const auto fview = get_oriented_boundary_faces_view(family);
+    if (!fview.indices || !fview.offsets || fview.face_count <= 0) {
+        throw std::runtime_error("high_order_face_local_nodes: unsupported cell family");
+    }
+    if (face_id < 0 || face_id >= fview.face_count) {
+        throw std::out_of_range("high_order_face_local_nodes: invalid face id");
+    }
+
+    const int nc = corner_count(family);
+    const auto eview = get_edges_view(family);
+    if (!eview.pairs_flat || eview.edge_count <= 0) {
+        throw std::runtime_error("high_order_face_local_nodes: missing edge view");
+    }
+
+    const int b = fview.offsets[face_id];
+    const int e = fview.offsets[face_id + 1];
+    const int fv = e - b;
+    if (fv < 2) {
+        throw std::runtime_error("high_order_face_local_nodes: face has < 2 corners");
+    }
+
+    std::vector<int> corners;
+    corners.reserve(static_cast<size_t>(fv));
+    for (int i = 0; i < fv; ++i) {
+        corners.push_back(static_cast<int>(fview.indices[b + i]));
+    }
+
+    const int edge_steps = std::max(0, p - 1);
+    const size_t face_interior = face_interior_node_count(fv, p, kind);
+
+    // 2D: faces are edges; ordering must match CurvilinearEvaluator line ordering:
+    // [end0, interior..., end1] (equispaced along the oriented edge direction).
+    if (fv == 2) {
+        std::vector<index_t> out;
+        out.reserve(static_cast<size_t>(2 + edge_steps));
+        const int a = corners[0];
+        const int b0 = corners[1];
+        out.push_back(static_cast<index_t>(a));
+        if (p > 1) {
+            const int ei = find_edge_id(family, a, b0);
+            if (ei < 0) {
+                throw std::runtime_error("high_order_face_local_nodes: failed to find edge for line face");
+            }
+            const int u = static_cast<int>(eview.pairs_flat[2 * ei + 0]);
+            const int v = static_cast<int>(eview.pairs_flat[2 * ei + 1]);
+            const bool forward = (u == a && v == b0);
+            const int base = nc + ei * edge_steps;
+            if (forward) {
+                for (int k = 0; k < edge_steps; ++k) out.push_back(static_cast<index_t>(base + k));
+            } else {
+                for (int k = edge_steps - 1; k >= 0; --k) out.push_back(static_cast<index_t>(base + k));
+            }
+        }
+        out.push_back(static_cast<index_t>(b0));
+        return out;
+    }
+
+    size_t reserve = static_cast<size_t>(fv);
+    if (edge_steps > 0) reserve += static_cast<size_t>(fv * edge_steps);
+    reserve += face_interior;
+
+    std::vector<index_t> out;
+    out.reserve(reserve);
+
+    // Corners (in oriented face order).
+    for (int c : corners) out.push_back(static_cast<index_t>(c));
+
+    if (p <= 1) return out;
+
+    // Edges (walk the oriented face loop).
+    {
+        for (int i = 0; i < fv; ++i) {
+            const int a = corners[static_cast<size_t>(i)];
+            const int b1 = corners[static_cast<size_t>((i + 1) % fv)];
+            const int ei = find_edge_id(family, a, b1);
+            if (ei < 0) {
+                throw std::runtime_error("high_order_face_local_nodes: failed to find face edge");
+            }
+            const int u = static_cast<int>(eview.pairs_flat[2 * ei + 0]);
+            const int v = static_cast<int>(eview.pairs_flat[2 * ei + 1]);
+            const bool forward = (u == a && v == b1);
+            const int base = nc + ei * edge_steps;
+            if (forward) {
+                for (int k = 0; k < edge_steps; ++k) out.push_back(static_cast<index_t>(base + k));
+            } else {
+                for (int k = edge_steps - 1; k >= 0; --k) out.push_back(static_cast<index_t>(base + k));
+            }
+        }
+    }
+
+    // Face interior nodes (Lagrange only).
+    if (kind == HighOrderKind::Lagrange && face_interior > 0) {
+        size_t offset = static_cast<size_t>(nc) + static_cast<size_t>(eview.edge_count) * static_cast<size_t>(edge_steps);
+        for (int fi = 0; fi < face_id; ++fi) {
+            const int fb = fview.offsets[fi];
+            const int fe = fview.offsets[fi + 1];
+            offset += face_interior_node_count(fe - fb, p, kind);
+        }
+
+        for (size_t k = 0; k < face_interior; ++k) {
+            out.push_back(static_cast<index_t>(offset + k));
+        }
+    }
+
+    return out;
+}
+
 int CellTopology::infer_lagrange_order(CellFamily family, size_t node_count) {
     // infer p from total nodes n for Lagrange elements
     switch (family) {
@@ -1122,20 +1328,46 @@ int CellTopology::infer_lagrange_order(CellFamily family, size_t node_count) {
 }
 
 int CellTopology::infer_serendipity_order(CellFamily family, size_t node_count) {
-    // Tighten handling for Quad serendipity: recognize common Q8 and Q12 only.
-    // Reference: standard 2D serendipity families omit interior nodes:
-    //  - p=2: 8 nodes (edge midpoints only)
-    //  - p=3: 12 nodes (two per edge)
+    // Serendipity patterns (edge nodes only; no face/volume interior):
+    // - Quad:     n = 4 + 4*(p-1)
+    // - Hex:      n = 8 + 12*(p-1)   (quadratic: 20)
+    // - Wedge:    n = 6 + 9*(p-1)    (quadratic: 15)
+    // - Pyramid:  n = 5 + 8*(p-1)    (quadratic: 13)
+    //
+    // These are common "quadratic" VTK-style elements and are also frequently used in Gmsh/Exodus.
+
     if (family == CellFamily::Quad) {
-        // Common 2D serendipity pattern: corners + (p-1) nodes per edge, no interior nodes.
-        // Node count n = 4 + 4*(p-1) for p >= 2.
         if (node_count >= 8 && (node_count - 4) % 4 == 0) {
-            int pi = (int)((node_count - 4)/4) + 1;
-            if (pi >= 2 && (size_t)(4 + 4*(pi-1)) == node_count) return pi;
+            int pi = (int)((node_count - 4) / 4) + 1;
+            if (pi >= 2 && (size_t)(4 + 4 * (pi - 1)) == node_count) return pi;
         }
         return -1;
     }
-    // Other families: unavailable
+
+    if (family == CellFamily::Hex) {
+        if (node_count >= 20 && (node_count - 8) % 12 == 0) {
+            int pi = (int)((node_count - 8) / 12) + 1;
+            if (pi >= 2 && (size_t)(8 + 12 * (pi - 1)) == node_count) return pi;
+        }
+        return -1;
+    }
+
+    if (family == CellFamily::Wedge) {
+        if (node_count >= 15 && (node_count - 6) % 9 == 0) {
+            int pi = (int)((node_count - 6) / 9) + 1;
+            if (pi >= 2 && (size_t)(6 + 9 * (pi - 1)) == node_count) return pi;
+        }
+        return -1;
+    }
+
+    if (family == CellFamily::Pyramid) {
+        if (node_count >= 13 && (node_count - 5) % 8 == 0) {
+            int pi = (int)((node_count - 5) / 8) + 1;
+            if (pi >= 2 && (size_t)(5 + 8 * (pi - 1)) == node_count) return pi;
+        }
+        return -1;
+    }
+
     return -1;
 }
 
