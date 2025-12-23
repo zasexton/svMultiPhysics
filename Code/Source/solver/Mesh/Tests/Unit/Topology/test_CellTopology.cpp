@@ -846,6 +846,13 @@ TEST_F(CellTopologyTest, HighOrderPattern_RoleSequence_p3_Tetra_Hex) {
     expect_role_sequence_basics(CellFamily::Hex, 3, 8, 24, 0, 24, 8);
 }
 
+TEST_F(CellTopologyTest, HighOrderPattern_RoleSequence_p3_Tri_Quad) {
+    // Triangle p=3: corners=3, edges=3*(p-1)=6, interior=(p-1)(p-2)/2=1, vols=0
+    expect_role_sequence_basics(CellFamily::Triangle, 3, 3, 6, 1, 0, 0);
+    // Quad p=3: corners=4, edges=4*(p-1)=8, interior=(p-1)^2=4, vols=0
+    expect_role_sequence_basics(CellFamily::Quad, 3, 4, 8, 0, 4, 0);
+}
+
 
 // ==========================================
 // Tests: Face list order for Hex/Wedge/Pyramid
@@ -972,6 +979,26 @@ TEST_F(CellTopologyTest, HighOrder_PerFaceOrdering_Tetra_p4) {
     }
 }
 
+TEST_F(CellTopologyTest, HighOrder_ElementInteriorOrdering_Triangle_Quad) {
+    // Triangle p=4: interior (i,j) lexicographic for face_id=0.
+    {
+        int p = 4;
+        auto pat = CellTopology::high_order_pattern(CellFamily::Triangle, p, CellTopology::HighOrderKind::Lagrange);
+        std::vector<std::pair<int,int>> expected = {{1,1},{1,2},{2,1}};
+        auto got = face_interior_roles(pat, 0);
+        ASSERT_EQ(got, expected);
+    }
+
+    // Quad p=3: interior i=1..2, j=1..2 (row-major in j).
+    {
+        int p = 3;
+        auto pat = CellTopology::high_order_pattern(CellFamily::Quad, p, CellTopology::HighOrderKind::Lagrange);
+        std::vector<std::pair<int,int>> expected = {{1,1},{1,2},{2,1},{2,2}};
+        auto got = face_interior_roles(pat, 0);
+        ASSERT_EQ(got, expected);
+    }
+}
+
 TEST_F(CellTopologyTest, HighOrder_PerFaceOrdering_Hex_p3) {
     int p = 3; // quad faces row‑major i=1..2, j=1..2
     auto pat = CellTopology::high_order_pattern(CellFamily::Hex, p, CellTopology::HighOrderKind::Lagrange);
@@ -1020,6 +1047,124 @@ TEST_F(CellTopologyTest, HighOrder_PerFaceOrdering_Pyramid_p3) {
             std::vector<std::pair<int,int>> expected;
             for (int i=1;i<=p-1;++i) for (int j=1;j<=p-1;++j) expected.emplace_back(i,j);
             ASSERT_EQ(got, expected);
+        }
+    }
+}
+
+// ==========================================
+// Tests: High-order sub-entity extraction (face/edge local node indices)
+// ==========================================
+
+static size_t tri_face_node_count(int p, CellTopology::HighOrderKind kind) {
+    const size_t corners = 3;
+    const size_t edge = 3 * static_cast<size_t>(std::max(0, p - 1));
+    const size_t face = (kind == CellTopology::HighOrderKind::Lagrange && p >= 3)
+                            ? static_cast<size_t>((p - 1) * (p - 2) / 2)
+                            : 0u;
+    return corners + edge + face;
+}
+
+static size_t quad_face_node_count(int p, CellTopology::HighOrderKind kind) {
+    const size_t corners = 4;
+    const size_t edge = 4 * static_cast<size_t>(std::max(0, p - 1));
+    const size_t face = (kind == CellTopology::HighOrderKind::Lagrange && p >= 2)
+                            ? static_cast<size_t>((p - 1) * (p - 1))
+                            : 0u;
+    return corners + edge + face;
+}
+
+static size_t line_face_node_count(int p) {
+    const size_t corners = 2;
+    const size_t edge = static_cast<size_t>(std::max(0, p - 1));
+    return corners + edge;
+}
+
+TEST_F(CellTopologyTest, HighOrderFaceLocalNodes_Counts_p3_Lagrange) {
+    const int p = 3;
+    const auto kind = CellTopology::HighOrderKind::Lagrange;
+
+    for (auto fam : {CellFamily::Tetra, CellFamily::Hex, CellFamily::Wedge, CellFamily::Pyramid}) {
+        const auto fview = CellTopology::get_oriented_boundary_faces_view(fam);
+        ASSERT_GT(fview.face_count, 0);
+
+        // Total Lagrange node counts.
+        size_t n_total = 0;
+        switch (fam) {
+            case CellFamily::Tetra:   n_total = static_cast<size_t>((p + 1) * (p + 2) * (p + 3) / 6); break;
+            case CellFamily::Hex:     n_total = static_cast<size_t>((p + 1) * (p + 1) * (p + 1)); break;
+            case CellFamily::Wedge:   n_total = static_cast<size_t>((p + 1) * (p + 1) * (p + 2) / 2); break;
+            case CellFamily::Pyramid: n_total = static_cast<size_t>((p + 1) * (p + 2) * (2 * p + 3) / 6); break;
+            default: break;
+        }
+        ASSERT_GT(n_total, 0u);
+
+        for (int fi = 0; fi < fview.face_count; ++fi) {
+            const int b = fview.offsets[fi];
+            const int e = fview.offsets[fi + 1];
+            const int fv = e - b;
+
+            const auto nodes = CellTopology::high_order_face_local_nodes(fam, p, fi, kind);
+            if (fv == 3) {
+                ASSERT_EQ(nodes.size(), tri_face_node_count(p, kind));
+            } else if (fv == 4) {
+                ASSERT_EQ(nodes.size(), quad_face_node_count(p, kind));
+            } else if (fv == 2) {
+                ASSERT_EQ(nodes.size(), line_face_node_count(p));
+            } else {
+                FAIL() << "Unexpected face vertex count for fixed family";
+            }
+
+            std::vector<index_t> sorted = nodes;
+            std::sort(sorted.begin(), sorted.end());
+            ASSERT_EQ(sorted.size(), nodes.size());
+            ASSERT_EQ(std::unique(sorted.begin(), sorted.end()), sorted.end());
+            ASSERT_LT(static_cast<size_t>(sorted.back()), n_total);
+        }
+    }
+}
+
+TEST_F(CellTopologyTest, HighOrderFaceLocalNodes_Counts_p2_Serendipity) {
+    const int p = 2;
+    const auto kind = CellTopology::HighOrderKind::Serendipity;
+
+    // 2D quad faces are edges.
+    {
+        const auto fview = CellTopology::get_oriented_boundary_faces_view(CellFamily::Quad);
+        ASSERT_EQ(fview.face_count, 4);
+        const size_t n_total = 8; // Quad8
+        for (int fi = 0; fi < fview.face_count; ++fi) {
+            const auto nodes = CellTopology::high_order_face_local_nodes(CellFamily::Quad, p, fi, kind);
+            ASSERT_EQ(nodes.size(), line_face_node_count(p));
+            ASSERT_LT(static_cast<size_t>(*std::max_element(nodes.begin(), nodes.end())), n_total);
+        }
+    }
+
+    // 3D serendipity quadratic families.
+    struct Case {
+        CellFamily fam;
+        size_t n_total;
+    };
+    const std::vector<Case> cases = {
+        {CellFamily::Hex, 20},
+        {CellFamily::Wedge, 15},
+        {CellFamily::Pyramid, 13},
+    };
+
+    for (const auto& c : cases) {
+        const auto fview = CellTopology::get_oriented_boundary_faces_view(c.fam);
+        for (int fi = 0; fi < fview.face_count; ++fi) {
+            const int b = fview.offsets[fi];
+            const int e = fview.offsets[fi + 1];
+            const int fv = e - b;
+            const auto nodes = CellTopology::high_order_face_local_nodes(c.fam, p, fi, kind);
+            if (fv == 3) {
+                ASSERT_EQ(nodes.size(), tri_face_node_count(p, kind));
+            } else if (fv == 4) {
+                ASSERT_EQ(nodes.size(), quad_face_node_count(p, kind));
+            } else {
+                FAIL() << "Unexpected face size";
+            }
+            ASSERT_LT(static_cast<size_t>(*std::max_element(nodes.begin(), nodes.end())), c.n_total);
         }
     }
 }
