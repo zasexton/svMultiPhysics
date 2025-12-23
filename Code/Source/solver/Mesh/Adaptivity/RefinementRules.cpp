@@ -31,6 +31,7 @@
 #include "RefinementRules.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace svmp {
@@ -51,7 +52,7 @@ size_t LineRefinementRule::num_children(CellFamily family, RefinementPattern pat
 RefinedElement LineRefinementRule::refine(
     const std::vector<std::array<real_t, 3>>& vertices,
     CellFamily family,
-    RefinementPattern pattern,
+    const RefinementSpec& spec,
     size_t level) const {
 
   if (family != CellFamily::Line || vertices.size() != 2) {
@@ -60,11 +61,12 @@ RefinedElement LineRefinementRule::refine(
 
   RefinedElement refined;
   refined.child_level = level + 1;
-  refined.pattern = pattern;
+  refined.pattern = spec.pattern;
 
   // Create midpoint
   auto midpoint = RefinementUtils::edge_midpoint(vertices[0], vertices[1]);
   refined.new_vertices.push_back(midpoint);
+  refined.new_vertex_weights.push_back({{0, 0.5}, {1, 0.5}});
 
   // Create two child lines
   // Child 0: vertex 0 to midpoint
@@ -72,6 +74,7 @@ RefinedElement LineRefinementRule::refine(
 
   // Child 1: midpoint to vertex 1
   refined.child_connectivity.push_back({2, 1});
+  refined.child_families = {CellFamily::Line, CellFamily::Line};
 
   return refined;
 }
@@ -99,6 +102,8 @@ size_t TriangleRefinementRule::num_children(CellFamily family, RefinementPattern
   switch (pattern) {
     case RefinementPattern::RED:
       return 4;
+    case RefinementPattern::BLUE:
+      return 3;
     case RefinementPattern::GREEN:
     case RefinementPattern::BISECTION:
       return 2;
@@ -110,18 +115,20 @@ size_t TriangleRefinementRule::num_children(CellFamily family, RefinementPattern
 RefinedElement TriangleRefinementRule::refine(
     const std::vector<std::array<real_t, 3>>& vertices,
     CellFamily family,
-    RefinementPattern pattern,
+    const RefinementSpec& spec,
     size_t level) const {
 
   if (family != CellFamily::Triangle || vertices.size() != 3) {
     throw std::invalid_argument("Invalid element for triangle refinement");
   }
 
-  switch (pattern) {
+  switch (spec.pattern) {
     case RefinementPattern::RED:
       return red_refine(vertices, level);
     case RefinementPattern::GREEN:
-      return green_refine(vertices, 0, level);  // Default to splitting edge 0
+      return green_refine(vertices, spec.selector, level);
+    case RefinementPattern::BLUE:
+      return blue_refine(vertices, spec.selector, level);
     case RefinementPattern::BISECTION:
       return bisect(vertices, level);
     default:
@@ -131,7 +138,7 @@ RefinedElement TriangleRefinementRule::refine(
 
 std::vector<RefinementPattern> TriangleRefinementRule::compatible_patterns(CellFamily family) const {
   if (family != CellFamily::Triangle) return {};
-  return {RefinementPattern::RED, RefinementPattern::GREEN, RefinementPattern::BISECTION};
+  return {RefinementPattern::RED, RefinementPattern::GREEN, RefinementPattern::BLUE, RefinementPattern::BISECTION};
 }
 
 RefinementPattern TriangleRefinementRule::default_pattern(CellFamily family) const {
@@ -158,6 +165,9 @@ RefinedElement TriangleRefinementRule::red_refine(
   refined.new_vertices.push_back(m01);
   refined.new_vertices.push_back(m12);
   refined.new_vertices.push_back(m20);
+  refined.new_vertex_weights.push_back({{0, 0.5}, {1, 0.5}});
+  refined.new_vertex_weights.push_back({{1, 0.5}, {2, 0.5}});
+  refined.new_vertex_weights.push_back({{2, 0.5}, {0, 0.5}});
 
   // Create 4 child triangles
   // Original vertices: 0, 1, 2
@@ -170,6 +180,7 @@ RefinedElement TriangleRefinementRule::red_refine(
 
   // Center triangle
   refined.child_connectivity.push_back({3, 4, 5});
+  refined.child_families.assign(refined.child_connectivity.size(), CellFamily::Triangle);
 
   return refined;
 }
@@ -185,9 +196,9 @@ RefinedElement TriangleRefinementRule::green_refine(
 
   // Split only one edge
   std::array<real_t, 3> midpoint;
-  index_t v0 = 0;
-  index_t v1 = 0;
-  index_t v2 = 0;
+  size_t v0 = 0;
+  size_t v1 = 0;
+  size_t v2 = 0;
 
   // Determine which edge to split and vertex ordering
   switch (edge_to_split) {
@@ -209,11 +220,42 @@ RefinedElement TriangleRefinementRule::green_refine(
   }
 
   refined.new_vertices.push_back(midpoint);
+  refined.new_vertex_weights.push_back({{v0, 0.5}, {v1, 0.5}});
 
   // Create 2 child triangles
   // New vertex index is 3
   refined.child_connectivity.push_back({v0, 3, v2});  // First child
   refined.child_connectivity.push_back({3, v1, v2});  // Second child
+  refined.child_families = {CellFamily::Triangle, CellFamily::Triangle};
+
+  return refined;
+}
+
+RefinedElement TriangleRefinementRule::blue_refine(
+    const std::vector<std::array<real_t, 3>>& vertices,
+    size_t shared_vertex,
+    size_t level) const {
+  RefinedElement refined;
+  refined.child_level = level + 1;
+  refined.pattern = RefinementPattern::BLUE;
+
+  const size_t s = shared_vertex % 3u;
+  const size_t a = (s + 1u) % 3u;
+  const size_t b = (s + 2u) % 3u;
+
+  // New vertices: midpoint(s,a) then midpoint(s,b). Local indices 3 and 4.
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[s], vertices[a]));
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[s], vertices[b]));
+  refined.new_vertex_weights.push_back({{s, 0.5}, {a, 0.5}});
+  refined.new_vertex_weights.push_back({{s, 0.5}, {b, 0.5}});
+
+  // Children:
+  //  - small triangle at shared vertex
+  //  - and two triangles completing the domain.
+  refined.child_connectivity.push_back({s, 3, 4});
+  refined.child_connectivity.push_back({3, a, b});
+  refined.child_connectivity.push_back({4, 3, b});
+  refined.child_families.assign(refined.child_connectivity.size(), CellFamily::Triangle);
 
   return refined;
 }
@@ -251,19 +293,24 @@ size_t QuadRefinementRule::num_children(CellFamily family, RefinementPattern pat
   }
 }
 
+size_t QuadRefinementRule::num_children(CellFamily family, const RefinementSpec& spec) const {
+  (void)spec.selector;
+  return num_children(family, spec.pattern);
+}
+
 RefinedElement QuadRefinementRule::refine(
     const std::vector<std::array<real_t, 3>>& vertices,
     CellFamily family,
-    RefinementPattern pattern,
+    const RefinementSpec& spec,
     size_t level) const {
 
   if (family != CellFamily::Quad || vertices.size() != 4) {
     throw std::invalid_argument("Invalid element for quad refinement");
   }
 
-  switch (pattern) {
+  switch (spec.pattern) {
     case RefinementPattern::ANISOTROPIC:
-      return anisotropic_refine(vertices, 0, level);  // Default direction 0
+      return anisotropic_refine(vertices, spec.selector % 2u, level);
     default:
       return regular_refine(vertices, level);
   }
@@ -301,6 +348,11 @@ RefinedElement QuadRefinementRule::regular_refine(
   refined.new_vertices.push_back(m23);  // 6
   refined.new_vertices.push_back(m30);  // 7
   refined.new_vertices.push_back(center);  // 8
+  refined.new_vertex_weights.push_back({{0, 0.5}, {1, 0.5}});
+  refined.new_vertex_weights.push_back({{1, 0.5}, {2, 0.5}});
+  refined.new_vertex_weights.push_back({{2, 0.5}, {3, 0.5}});
+  refined.new_vertex_weights.push_back({{3, 0.5}, {0, 0.5}});
+  refined.new_vertex_weights.push_back({{0, 0.25}, {1, 0.25}, {2, 0.25}, {3, 0.25}});
 
   // Create 4 child quads
   // Original vertices: 0, 1, 2, 3
@@ -310,6 +362,7 @@ RefinedElement QuadRefinementRule::regular_refine(
   refined.child_connectivity.push_back({4, 1, 5, 8});  // Bottom-right
   refined.child_connectivity.push_back({8, 5, 2, 6});  // Top-right
   refined.child_connectivity.push_back({7, 8, 6, 3});  // Top-left
+  refined.child_families.assign(refined.child_connectivity.size(), CellFamily::Quad);
 
   return refined;
 }
@@ -330,6 +383,8 @@ RefinedElement QuadRefinementRule::anisotropic_refine(
 
     refined.new_vertices.push_back(m01);  // 4
     refined.new_vertices.push_back(m32);  // 5
+    refined.new_vertex_weights.push_back({{0, 0.5}, {1, 0.5}});
+    refined.new_vertex_weights.push_back({{3, 0.5}, {2, 0.5}});
 
     // Two child quads
     refined.child_connectivity.push_back({0, 4, 5, 3});  // Left
@@ -341,11 +396,14 @@ RefinedElement QuadRefinementRule::anisotropic_refine(
 
     refined.new_vertices.push_back(m03);  // 4
     refined.new_vertices.push_back(m12);  // 5
+    refined.new_vertex_weights.push_back({{0, 0.5}, {3, 0.5}});
+    refined.new_vertex_weights.push_back({{1, 0.5}, {2, 0.5}});
 
     // Two child quads
     refined.child_connectivity.push_back({0, 1, 5, 4});  // Bottom
     refined.child_connectivity.push_back({4, 5, 2, 3});  // Top
   }
+  refined.child_families.assign(refined.child_connectivity.size(), CellFamily::Quad);
 
   return refined;
 }
@@ -364,6 +422,8 @@ size_t TetrahedronRefinementRule::num_children(CellFamily family, RefinementPatt
   switch (pattern) {
     case RefinementPattern::RED:
       return 8;
+    case RefinementPattern::GREEN:
+      return 4;
     case RefinementPattern::BISECTION:
       return 2;
     default:
@@ -371,17 +431,24 @@ size_t TetrahedronRefinementRule::num_children(CellFamily family, RefinementPatt
   }
 }
 
+size_t TetrahedronRefinementRule::num_children(CellFamily family, const RefinementSpec& spec) const {
+  (void)spec.selector;
+  return num_children(family, spec.pattern);
+}
+
 RefinedElement TetrahedronRefinementRule::refine(
     const std::vector<std::array<real_t, 3>>& vertices,
     CellFamily family,
-    RefinementPattern pattern,
+    const RefinementSpec& spec,
     size_t level) const {
 
   if (family != CellFamily::Tetra || vertices.size() != 4) {
     throw std::invalid_argument("Invalid element for tetrahedron refinement");
   }
 
-  switch (pattern) {
+  switch (spec.pattern) {
+    case RefinementPattern::GREEN:
+      return face_green_refine(vertices, spec.selector % 4u, level);
     case RefinementPattern::BISECTION:
       return bisect(vertices, RefinementUtils::find_longest_edge(vertices, family), level);
     default:
@@ -391,7 +458,7 @@ RefinedElement TetrahedronRefinementRule::refine(
 
 std::vector<RefinementPattern> TetrahedronRefinementRule::compatible_patterns(CellFamily family) const {
   if (family != CellFamily::Tetra) return {};
-  return {RefinementPattern::RED, RefinementPattern::BISECTION};
+  return {RefinementPattern::RED, RefinementPattern::GREEN, RefinementPattern::BISECTION};
 }
 
 RefinementPattern TetrahedronRefinementRule::default_pattern(CellFamily family) const {
@@ -421,6 +488,12 @@ RefinedElement TetrahedronRefinementRule::red_refine(
   refined.new_vertices.push_back(m12);  // 7
   refined.new_vertices.push_back(m13);  // 8
   refined.new_vertices.push_back(m23);  // 9
+  refined.new_vertex_weights.push_back({{0, 0.5}, {1, 0.5}});
+  refined.new_vertex_weights.push_back({{0, 0.5}, {2, 0.5}});
+  refined.new_vertex_weights.push_back({{0, 0.5}, {3, 0.5}});
+  refined.new_vertex_weights.push_back({{1, 0.5}, {2, 0.5}});
+  refined.new_vertex_weights.push_back({{1, 0.5}, {3, 0.5}});
+  refined.new_vertex_weights.push_back({{2, 0.5}, {3, 0.5}});
 
   // Create 8 child tetrahedra
   // Corner tets (at original vertices)
@@ -435,7 +508,89 @@ RefinedElement TetrahedronRefinementRule::red_refine(
   refined.child_connectivity.push_back({4, 5, 6, 8});
   refined.child_connectivity.push_back({4, 5, 8, 7});
   refined.child_connectivity.push_back({5, 6, 8, 9});
-  refined.child_connectivity.push_back({5, 7, 8, 9});
+  refined.child_connectivity.push_back({5, 7, 9, 8});
+  refined.child_families.assign(refined.child_connectivity.size(), CellFamily::Tetra);
+
+  return refined;
+}
+
+RefinedElement TetrahedronRefinementRule::face_green_refine(
+    const std::vector<std::array<real_t, 3>>& vertices,
+    size_t opposite_vertex,
+    size_t level) const {
+  if (opposite_vertex > 3) {
+    throw std::invalid_argument("face_green_refine: opposite_vertex out of range");
+  }
+
+  RefinedElement refined;
+  refined.child_level = level + 1;
+  refined.pattern = RefinementPattern::GREEN;
+
+  const size_t ov = opposite_vertex;
+  std::array<size_t, 3> face{};
+  size_t k = 0;
+  for (size_t i = 0; i < 4; ++i) {
+    if (i == ov) continue;
+    face[k++] = i;
+  }
+
+  const size_t a = face[0];
+  const size_t b = face[1];
+  const size_t c = face[2];
+
+  // Face-edge midpoints: (a,b), (b,c), (c,a). New local indices 4,5,6.
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[a], vertices[b]));
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[b], vertices[c]));
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[c], vertices[a]));
+  refined.new_vertex_weights.push_back({{a, 0.5}, {b, 0.5}});
+  refined.new_vertex_weights.push_back({{b, 0.5}, {c, 0.5}});
+  refined.new_vertex_weights.push_back({{c, 0.5}, {a, 0.5}});
+
+  // Face refined into 4 triangles, each connected to ov.
+  const size_t mab = 4;
+  const size_t mbc = 5;
+  const size_t mca = 6;
+
+  refined.child_connectivity.push_back({ov, a, mab, mca});
+  refined.child_connectivity.push_back({ov, mab, b, mbc});
+  refined.child_connectivity.push_back({ov, mca, mbc, c});
+  refined.child_connectivity.push_back({ov, mab, mbc, mca});
+
+  auto get_point = [&](size_t idx) -> std::array<real_t, 3> {
+    if (idx < vertices.size()) {
+      return vertices[idx];
+    }
+    const size_t new_idx = idx - vertices.size();
+    if (new_idx >= refined.new_vertices.size()) {
+      return std::array<real_t, 3>{0.0, 0.0, 0.0};
+    }
+    return refined.new_vertices[new_idx];
+  };
+
+  auto signed_det = [&](const std::vector<size_t>& conn) -> real_t {
+    const auto p0 = get_point(conn[0]);
+    const auto p1 = get_point(conn[1]);
+    const auto p2 = get_point(conn[2]);
+    const auto p3 = get_point(conn[3]);
+
+    const std::array<real_t, 3> e1 = {p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]};
+    const std::array<real_t, 3> e2 = {p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]};
+    const std::array<real_t, 3> e3 = {p3[0] - p0[0], p3[1] - p0[1], p3[2] - p0[2]};
+
+    return e1[0] * (e2[1] * e3[2] - e2[2] * e3[1]) - e1[1] * (e2[0] * e3[2] - e2[2] * e3[0]) +
+           e1[2] * (e2[0] * e3[1] - e2[1] * e3[0]);
+  };
+
+  const real_t det_parent = signed_det({0, 1, 2, 3});
+  if (std::abs(det_parent) > static_cast<real_t>(0)) {
+    for (auto& child : refined.child_connectivity) {
+      const real_t det_child = signed_det(child);
+      if (det_child * det_parent < static_cast<real_t>(0)) {
+        std::swap(child[2], child[3]);
+      }
+    }
+  }
+  refined.child_families.assign(refined.child_connectivity.size(), CellFamily::Tetra);
 
   return refined;
 }
@@ -453,10 +608,10 @@ RefinedElement TetrahedronRefinementRule::bisect(
   // This creates 2 child tetrahedra
 
   // Determine vertices of longest edge
-  index_t v0 = 0;
-  index_t v1 = 0;
-  index_t v2 = 0;
-  index_t v3 = 0;
+  size_t v0 = 0;
+  size_t v1 = 0;
+  size_t v2 = 0;
+  size_t v3 = 0;
   switch (longest_edge) {
     case 0: v0 = 0; v1 = 1; v2 = 2; v3 = 3; break;
     case 1: v0 = 0; v1 = 2; v2 = 1; v3 = 3; break;
@@ -469,10 +624,12 @@ RefinedElement TetrahedronRefinementRule::bisect(
 
   auto midpoint = RefinementUtils::edge_midpoint(vertices[v0], vertices[v1]);
   refined.new_vertices.push_back(midpoint);  // Index 4
+  refined.new_vertex_weights.push_back({{v0, 0.5}, {v1, 0.5}});
 
   // Create 2 child tets
   refined.child_connectivity.push_back({v0, 4, v2, v3});  // First child
   refined.child_connectivity.push_back({4, v1, v2, v3});  // Second child
+  refined.child_families = {CellFamily::Tetra, CellFamily::Tetra};
 
   return refined;
 }
@@ -499,19 +656,32 @@ size_t HexahedronRefinementRule::num_children(CellFamily family, RefinementPatte
   }
 }
 
+size_t HexahedronRefinementRule::num_children(CellFamily family, const RefinementSpec& spec) const {
+  if (family != CellFamily::Hex) return 0;
+  if (spec.pattern != RefinementPattern::ANISOTROPIC) {
+    return num_children(family, spec.pattern);
+  }
+  const std::uint32_t axis_mask = spec.selector;
+  const unsigned bits = ((axis_mask & 1u) ? 1u : 0u) + ((axis_mask & 2u) ? 1u : 0u) + ((axis_mask & 4u) ? 1u : 0u);
+  if (bits == 0u) {
+    return 8;
+  }
+  return static_cast<size_t>(1u) << bits;
+}
+
 RefinedElement HexahedronRefinementRule::refine(
     const std::vector<std::array<real_t, 3>>& vertices,
     CellFamily family,
-    RefinementPattern pattern,
+    const RefinementSpec& spec,
     size_t level) const {
 
   if (family != CellFamily::Hex || vertices.size() != 8) {
     throw std::invalid_argument("Invalid element for hexahedron refinement");
   }
 
-  switch (pattern) {
+  switch (spec.pattern) {
     case RefinementPattern::ANISOTROPIC:
-      return anisotropic_refine(vertices, 0, level);
+      return anisotropic_refine(vertices, spec.selector, level);
     default:
       return regular_refine(vertices, level);
   }
@@ -572,9 +742,33 @@ RefinedElement HexahedronRefinementRule::regular_refine(
   auto center = RefinementUtils::cell_center(vertices);  // 26
 
   // Store all new vertices
-  for (const auto& v : edge_mids) refined.new_vertices.push_back(v);
-  for (const auto& v : face_centers) refined.new_vertices.push_back(v);
+  for (size_t i = 0; i < edge_mids.size(); ++i) refined.new_vertices.push_back(edge_mids[i]);
+  for (size_t i = 0; i < face_centers.size(); ++i) refined.new_vertices.push_back(face_centers[i]);
   refined.new_vertices.push_back(center);
+
+  // Edge-midpoint weights (12)
+  refined.new_vertex_weights.push_back({{0, 0.5}, {1, 0.5}});
+  refined.new_vertex_weights.push_back({{1, 0.5}, {2, 0.5}});
+  refined.new_vertex_weights.push_back({{2, 0.5}, {3, 0.5}});
+  refined.new_vertex_weights.push_back({{3, 0.5}, {0, 0.5}});
+  refined.new_vertex_weights.push_back({{4, 0.5}, {5, 0.5}});
+  refined.new_vertex_weights.push_back({{5, 0.5}, {6, 0.5}});
+  refined.new_vertex_weights.push_back({{6, 0.5}, {7, 0.5}});
+  refined.new_vertex_weights.push_back({{7, 0.5}, {4, 0.5}});
+  refined.new_vertex_weights.push_back({{0, 0.5}, {4, 0.5}});
+  refined.new_vertex_weights.push_back({{1, 0.5}, {5, 0.5}});
+  refined.new_vertex_weights.push_back({{2, 0.5}, {6, 0.5}});
+  refined.new_vertex_weights.push_back({{3, 0.5}, {7, 0.5}});
+  // Face-center weights (6)
+  refined.new_vertex_weights.push_back({{0, 0.25}, {1, 0.25}, {2, 0.25}, {3, 0.25}});
+  refined.new_vertex_weights.push_back({{4, 0.25}, {5, 0.25}, {6, 0.25}, {7, 0.25}});
+  refined.new_vertex_weights.push_back({{0, 0.25}, {1, 0.25}, {5, 0.25}, {4, 0.25}});
+  refined.new_vertex_weights.push_back({{3, 0.25}, {2, 0.25}, {6, 0.25}, {7, 0.25}});
+  refined.new_vertex_weights.push_back({{0, 0.25}, {3, 0.25}, {7, 0.25}, {4, 0.25}});
+  refined.new_vertex_weights.push_back({{1, 0.25}, {2, 0.25}, {6, 0.25}, {5, 0.25}});
+  // Cell-center weights
+  refined.new_vertex_weights.push_back({{0, 0.125}, {1, 0.125}, {2, 0.125}, {3, 0.125},
+                                       {4, 0.125}, {5, 0.125}, {6, 0.125}, {7, 0.125}});
 
   // Create 8 child hexahedra
   // Using the indexing: original (0-7), edge mids (8-19), face centers (20-25), center (26)
@@ -590,46 +784,150 @@ RefinedElement HexahedronRefinementRule::regular_refine(
   refined.child_connectivity.push_back({22, 17, 25, 26, 12, 5, 13, 21});  // Top-front-right
   refined.child_connectivity.push_back({26, 25, 18, 23, 21, 13, 6, 14});  // Top-back-right
   refined.child_connectivity.push_back({24, 26, 23, 19, 15, 21, 14, 7});  // Top-back-left
+  refined.child_families.assign(refined.child_connectivity.size(), CellFamily::Hex);
 
   return refined;
 }
 
 RefinedElement HexahedronRefinementRule::anisotropic_refine(
     const std::vector<std::array<real_t, 3>>& vertices,
-    size_t direction,
+    std::uint32_t axis_mask,
     size_t level) const {
 
   RefinedElement refined;
   refined.child_level = level + 1;
   refined.pattern = RefinementPattern::ANISOTROPIC;
 
-  // Simplified anisotropic refinement - split in one direction only
-  // This creates 4 child hexahedra
+  // Axis bitmask X=1, Y=2, Z=4.
+  const bool split_x = (axis_mask & 1u) != 0u;
+  const bool split_y = (axis_mask & 2u) != 0u;
+  const bool split_z = (axis_mask & 4u) != 0u;
 
-  // For now, implement splitting in Z direction
-  // Create midpoints on vertical edges
-  auto m04 = RefinementUtils::edge_midpoint(vertices[0], vertices[4]);
-  auto m15 = RefinementUtils::edge_midpoint(vertices[1], vertices[5]);
-  auto m26 = RefinementUtils::edge_midpoint(vertices[2], vertices[6]);
-  auto m37 = RefinementUtils::edge_midpoint(vertices[3], vertices[7]);
+  const std::vector<double> xs = split_x ? std::vector<double>{0.0, 0.5, 1.0} : std::vector<double>{0.0, 1.0};
+  const std::vector<double> ys = split_y ? std::vector<double>{0.0, 0.5, 1.0} : std::vector<double>{0.0, 1.0};
+  const std::vector<double> zs = split_z ? std::vector<double>{0.0, 0.5, 1.0} : std::vector<double>{0.0, 1.0};
 
-  refined.new_vertices.push_back(m04);  // 8
-  refined.new_vertices.push_back(m15);  // 9
-  refined.new_vertices.push_back(m26);  // 10
-  refined.new_vertices.push_back(m37);  // 11
+  const auto corner_weights = [](double x, double y, double z) {
+    const double xm = 1.0 - x;
+    const double ym = 1.0 - y;
+    const double zm = 1.0 - z;
+    // Corner ordering matches the standard Hex vertex numbering in this file.
+    return std::array<double, 8>{
+        xm * ym * zm,  // 0 (0,0,0)
+        x * ym * zm,   // 1 (1,0,0)
+        x * y * zm,    // 2 (1,1,0)
+        xm * y * zm,   // 3 (0,1,0)
+        xm * ym * z,   // 4 (0,0,1)
+        x * ym * z,    // 5 (1,0,1)
+        x * y * z,     // 6 (1,1,1)
+        xm * y * z     // 7 (0,1,1)
+    };
+  };
 
-  // Create 2 child hexahedra
-  refined.child_connectivity.push_back({0, 1, 2, 3, 8, 9, 10, 11});   // Bottom half
-  refined.child_connectivity.push_back({8, 9, 10, 11, 4, 5, 6, 7});   // Top half
+  // Map grid point (ix,iy,iz) to local vertex index in the refined element.
+  // We treat the 8 original corners as parent-local indices 0..7; all other grid points are new.
+  const int nx = static_cast<int>(xs.size());
+  const int ny = static_cast<int>(ys.size());
+  const int nz = static_cast<int>(zs.size());
 
-  // Note: This is simplified - full anisotropic would create 4 children
-  // by also splitting in one horizontal direction
+  const auto is_corner = [&](int ix, int iy, int iz) {
+    const bool cx = (ix == 0 || ix == nx - 1);
+    const bool cy = (iy == 0 || iy == ny - 1);
+    const bool cz = (iz == 0 || iz == nz - 1);
+    return cx && cy && cz;
+  };
 
+  const auto corner_index = [&](int ix, int iy, int iz) -> size_t {
+    const int xbit = (ix == nx - 1) ? 1 : 0;
+    const int ybit = (iy == ny - 1) ? 1 : 0;
+    const int zbit = (iz == nz - 1) ? 1 : 0;
+    // Map (xbit,ybit,zbit) to standard corner id.
+    // zbit=0: 0:(0,0),1:(1,0),2:(1,1),3:(0,1)
+    // zbit=1: 4:(0,0),5:(1,0),6:(1,1),7:(0,1)
+    if (zbit == 0) {
+      if (ybit == 0) return xbit == 0 ? 0 : 1;
+      return xbit == 0 ? 3 : 2;
+    }
+    if (ybit == 0) return xbit == 0 ? 4 : 5;
+    return xbit == 0 ? 7 : 6;
+  };
+
+  const size_t kInvalid = std::numeric_limits<size_t>::max();
+  std::vector<size_t> grid_to_local(static_cast<size_t>(nx * ny * nz), kInvalid);
+  auto grid_flat = [&](int ix, int iy, int iz) { return (iz * ny + iy) * nx + ix; };
+
+  // Assign local indices.
+  size_t next_new_local = 8;  // new vertices start after parent corners
+  for (int iz = 0; iz < nz; ++iz) {
+    for (int iy = 0; iy < ny; ++iy) {
+      for (int ix = 0; ix < nx; ++ix) {
+        const int flat = grid_flat(ix, iy, iz);
+        if (is_corner(ix, iy, iz)) {
+          grid_to_local[static_cast<size_t>(flat)] = corner_index(ix, iy, iz);
+        } else {
+          grid_to_local[static_cast<size_t>(flat)] = next_new_local++;
+        }
+      }
+    }
+  }
+
+  // Build new vertices list in ascending local index order.
+  const size_t n_new = static_cast<size_t>(next_new_local - 8);
+  refined.new_vertices.resize(n_new);
+  refined.new_vertex_weights.resize(n_new);
+
+  for (int iz = 0; iz < nz; ++iz) {
+    for (int iy = 0; iy < ny; ++iy) {
+      for (int ix = 0; ix < nx; ++ix) {
+        if (is_corner(ix, iy, iz)) continue;
+        const size_t local = grid_to_local[static_cast<size_t>(grid_flat(ix, iy, iz))];
+        const size_t out_idx = local - 8;
+        const double x = xs[static_cast<size_t>(ix)];
+        const double y = ys[static_cast<size_t>(iy)];
+        const double z = zs[static_cast<size_t>(iz)];
+
+        const auto w = corner_weights(x, y, z);
+        std::array<real_t, 3> p{static_cast<real_t>(0.0), static_cast<real_t>(0.0), static_cast<real_t>(0.0)};
+        std::vector<std::pair<size_t, double>> weights;
+        for (size_t c = 0; c < 8; ++c) {
+          if (w[c] == 0.0) continue;
+          weights.emplace_back(c, w[c]);
+          for (int d = 0; d < 3; ++d) {
+            p[static_cast<size_t>(d)] += static_cast<real_t>(w[c]) * vertices[c][static_cast<size_t>(d)];
+          }
+        }
+        refined.new_vertices[out_idx] = p;
+        refined.new_vertex_weights[out_idx] = std::move(weights);
+      }
+    }
+  }
+
+  // Children: tensor-product subcells.
+  const int cx = nx - 1;
+  const int cy = ny - 1;
+  const int cz = nz - 1;
+  for (int kz = 0; kz < cz; ++kz) {
+    for (int ky = 0; ky < cy; ++ky) {
+      for (int kx = 0; kx < cx; ++kx) {
+        const size_t v000 = grid_to_local[static_cast<size_t>(grid_flat(kx, ky, kz))];
+        const size_t v100 = grid_to_local[static_cast<size_t>(grid_flat(kx + 1, ky, kz))];
+        const size_t v110 = grid_to_local[static_cast<size_t>(grid_flat(kx + 1, ky + 1, kz))];
+        const size_t v010 = grid_to_local[static_cast<size_t>(grid_flat(kx, ky + 1, kz))];
+        const size_t v001 = grid_to_local[static_cast<size_t>(grid_flat(kx, ky, kz + 1))];
+        const size_t v101 = grid_to_local[static_cast<size_t>(grid_flat(kx + 1, ky, kz + 1))];
+        const size_t v111 = grid_to_local[static_cast<size_t>(grid_flat(kx + 1, ky + 1, kz + 1))];
+        const size_t v011 = grid_to_local[static_cast<size_t>(grid_flat(kx, ky + 1, kz + 1))];
+        refined.child_connectivity.push_back({v000, v100, v110, v010, v001, v101, v111, v011});
+      }
+    }
+  }
+
+  refined.child_families.assign(refined.child_connectivity.size(), CellFamily::Hex);
   return refined;
 }
 
 // ====================
-// Other Element Types (Wedge, Pyramid) - Placeholder
+// WedgeRefinementRule Implementation
 // ====================
 
 bool WedgeRefinementRule::can_refine(CellFamily family, size_t level) const {
@@ -638,26 +936,184 @@ bool WedgeRefinementRule::can_refine(CellFamily family, size_t level) const {
 
 size_t WedgeRefinementRule::num_children(CellFamily family, RefinementPattern pattern) const {
   if (family != CellFamily::Wedge) return 0;
-  return 8;  // Standard wedge refinement
+  switch (pattern) {
+    case RefinementPattern::GREEN:
+      return 4;
+    case RefinementPattern::ISOTROPIC:
+    case RefinementPattern::RED:
+    default:
+      return 8;
+  }
+}
+
+size_t WedgeRefinementRule::num_children(CellFamily family, const RefinementSpec& spec) const {
+  (void)spec.selector;
+  return num_children(family, spec.pattern);
 }
 
 RefinedElement WedgeRefinementRule::refine(
     const std::vector<std::array<real_t, 3>>& vertices,
     CellFamily family,
-    RefinementPattern pattern,
+    const RefinementSpec& spec,
     size_t level) const {
-  // TODO: Implement wedge refinement
-  throw std::runtime_error("Wedge refinement not yet implemented");
+  if (family != CellFamily::Wedge || vertices.size() != 6) {
+    throw std::invalid_argument("Invalid element for wedge refinement");
+  }
+
+  switch (spec.pattern) {
+    case RefinementPattern::GREEN:
+      return green_refine(vertices, spec.selector % 3u, level);
+    case RefinementPattern::ISOTROPIC:
+    case RefinementPattern::RED:
+    default:
+      return red_refine(vertices, level);
+  }
 }
 
 std::vector<RefinementPattern> WedgeRefinementRule::compatible_patterns(CellFamily family) const {
   if (family != CellFamily::Wedge) return {};
-  return {RefinementPattern::ISOTROPIC};
+  return {RefinementPattern::ISOTROPIC, RefinementPattern::GREEN};
 }
 
 RefinementPattern WedgeRefinementRule::default_pattern(CellFamily family) const {
   return RefinementPattern::ISOTROPIC;
 }
+
+RefinedElement WedgeRefinementRule::red_refine(
+    const std::vector<std::array<real_t, 3>>& vertices,
+    size_t level) const {
+  // Matches the unit-test expectations in test_WedgeRefinement.cpp.
+  RefinedElement refined;
+  refined.child_level = level + 1;
+  refined.pattern = RefinementPattern::RED;
+
+  refined.new_vertices.reserve(12);
+  refined.new_vertex_weights.reserve(12);
+
+  // Bottom triangle edge midpoints: 6,7,8
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[0], vertices[1])); // 6
+  refined.new_vertex_weights.push_back({{0, 0.5}, {1, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[1], vertices[2])); // 7
+  refined.new_vertex_weights.push_back({{1, 0.5}, {2, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[2], vertices[0])); // 8
+  refined.new_vertex_weights.push_back({{2, 0.5}, {0, 0.5}});
+
+  // Top triangle edge midpoints: 9,10,11
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[3], vertices[4])); // 9
+  refined.new_vertex_weights.push_back({{3, 0.5}, {4, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[4], vertices[5])); // 10
+  refined.new_vertex_weights.push_back({{4, 0.5}, {5, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[5], vertices[3])); // 11
+  refined.new_vertex_weights.push_back({{5, 0.5}, {3, 0.5}});
+
+  // Vertical edge midpoints: 12,13,14
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[0], vertices[3])); // 12
+  refined.new_vertex_weights.push_back({{0, 0.5}, {3, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[1], vertices[4])); // 13
+  refined.new_vertex_weights.push_back({{1, 0.5}, {4, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[2], vertices[5])); // 14
+  refined.new_vertex_weights.push_back({{2, 0.5}, {5, 0.5}});
+
+  // Mid-layer vertices: midpoints between bottom and top edge midpoints
+  // 15 = mid(6,9), 16 = mid(7,10), 17 = mid(8,11)
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(refined.new_vertices[0], refined.new_vertices[3])); // 15
+  refined.new_vertex_weights.push_back({{0, 0.25}, {1, 0.25}, {3, 0.25}, {4, 0.25}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(refined.new_vertices[1], refined.new_vertices[4])); // 16
+  refined.new_vertex_weights.push_back({{1, 0.25}, {2, 0.25}, {4, 0.25}, {5, 0.25}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(refined.new_vertices[2], refined.new_vertices[5])); // 17
+  refined.new_vertex_weights.push_back({{2, 0.25}, {0, 0.25}, {5, 0.25}, {3, 0.25}});
+
+  // Child connectivity (local indices: original 0..5, new 6..17).
+  refined.child_connectivity = {
+      // Bottom layer
+      {0, 6, 8, 12, 15, 17},  // Child 0
+      {6, 1, 7, 15, 13, 16},  // Child 1
+      {8, 7, 2, 17, 16, 14},  // Child 2
+      {6, 7, 8, 15, 16, 17},  // Child 3
+      // Top layer
+      {12, 15, 17, 3, 9, 11},   // Child 4
+      {15, 13, 16, 9, 4, 10},   // Child 5
+      {17, 16, 14, 11, 10, 5},  // Child 6
+      {15, 16, 17, 9, 10, 11}   // Child 7
+  };
+  refined.child_families.assign(refined.child_connectivity.size(), CellFamily::Wedge);
+  return refined;
+}
+
+RefinedElement WedgeRefinementRule::green_refine(
+    const std::vector<std::array<real_t, 3>>& vertices,
+    size_t base_edge,
+    size_t level) const {
+  // Quad-face closure refinement: split the selected quad face (base_edge) into a 2x2 grid,
+  // yielding 4 wedge children. This is used by 3D RED–GREEN closure tests.
+  const size_t e = base_edge % 3u;
+
+  // Local wedge convention:
+  // - bottom tri: 0,1,2
+  // - top tri:    3,4,5 (0->3,1->4,2->5)
+  const auto edge_endpoints = [&](size_t edge_id) -> std::array<size_t, 2> {
+    switch (edge_id) {
+      case 0: return {0u, 1u};
+      case 1: return {1u, 2u};
+      case 2: return {2u, 0u};
+      default: return {0u, 1u};
+    }
+  };
+  const std::array<size_t, 2> ab = edge_endpoints(e);
+  const size_t a0 = ab[0];
+  const size_t a1 = ab[1];
+  const size_t c0 = 3u - a0 - a1; // remaining vertex in {0,1,2}
+  const size_t a0_top = a0 + 3u;
+  const size_t a1_top = a1 + 3u;
+  const size_t c0_top = c0 + 3u;
+
+  RefinedElement refined;
+  refined.child_level = level + 1;
+  refined.pattern = RefinementPattern::GREEN;
+
+  refined.new_vertices.reserve(6);
+  refined.new_vertex_weights.reserve(6);
+
+  // 6: bottom midpoint of edge (a0,a1)
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[a0], vertices[a1]));
+  refined.new_vertex_weights.push_back({{a0, 0.5}, {a1, 0.5}});
+  // 7: top midpoint of edge (a0_top,a1_top)
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[a0_top], vertices[a1_top]));
+  refined.new_vertex_weights.push_back({{a0_top, 0.5}, {a1_top, 0.5}});
+  // 8: vertical midpoint (a0,a0_top)
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[a0], vertices[a0_top]));
+  refined.new_vertex_weights.push_back({{a0, 0.5}, {a0_top, 0.5}});
+  // 9: vertical midpoint (a1,a1_top)
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[a1], vertices[a1_top]));
+  refined.new_vertex_weights.push_back({{a1, 0.5}, {a1_top, 0.5}});
+  // 10: vertical midpoint (c0,c0_top)
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[c0], vertices[c0_top]));
+  refined.new_vertex_weights.push_back({{c0, 0.5}, {c0_top, 0.5}});
+  // 11: quad-face center (mid between bottom/top edge midpoints)
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(refined.new_vertices[0], refined.new_vertices[1]));
+  refined.new_vertex_weights.push_back({{a0, 0.25}, {a1, 0.25}, {a0_top, 0.25}, {a1_top, 0.25}});
+
+  const size_t m_ab_bottom = 6;
+  const size_t m_ab_top = 7;
+  const size_t m_a0 = 8;
+  const size_t m_a1 = 9;
+  const size_t m_c = 10;
+  const size_t m_center = 11;
+
+  // 4 child wedges (2 bottom layer + 2 top layer).
+  refined.child_connectivity = {
+      {a0, m_ab_bottom, c0, m_a0, m_center, m_c},
+      {m_ab_bottom, a1, c0, m_center, m_a1, m_c},
+      {m_a0, m_center, m_c, a0_top, m_ab_top, c0_top},
+      {m_center, m_a1, m_c, m_ab_top, a1_top, c0_top},
+  };
+  refined.child_families.assign(refined.child_connectivity.size(), CellFamily::Wedge);
+  return refined;
+}
+
+// ====================
+// PyramidRefinementRule Implementation
+// ====================
 
 bool PyramidRefinementRule::can_refine(CellFamily family, size_t level) const {
   return family == CellFamily::Pyramid && level < 10;
@@ -665,25 +1121,146 @@ bool PyramidRefinementRule::can_refine(CellFamily family, size_t level) const {
 
 size_t PyramidRefinementRule::num_children(CellFamily family, RefinementPattern pattern) const {
   if (family != CellFamily::Pyramid) return 0;
-  return 10;  // Standard pyramid refinement
+  switch (pattern) {
+    case RefinementPattern::ANISOTROPIC:
+      return 4;
+    case RefinementPattern::ISOTROPIC:
+    case RefinementPattern::RED:
+    default:
+      return 10;
+  }
+}
+
+size_t PyramidRefinementRule::num_children(CellFamily family, const RefinementSpec& spec) const {
+  (void)spec.selector;
+  return num_children(family, spec.pattern);
 }
 
 RefinedElement PyramidRefinementRule::refine(
     const std::vector<std::array<real_t, 3>>& vertices,
     CellFamily family,
-    RefinementPattern pattern,
+    const RefinementSpec& spec,
     size_t level) const {
-  // TODO: Implement pyramid refinement
-  throw std::runtime_error("Pyramid refinement not yet implemented");
+  if (family != CellFamily::Pyramid || vertices.size() != 5) {
+    throw std::invalid_argument("Invalid element for pyramid refinement");
+  }
+
+  switch (spec.pattern) {
+    case RefinementPattern::ANISOTROPIC:
+      return base_split_refine(vertices, level);
+    case RefinementPattern::ISOTROPIC:
+    case RefinementPattern::RED:
+    default:
+      return red_refine(vertices, level);
+  }
 }
 
 std::vector<RefinementPattern> PyramidRefinementRule::compatible_patterns(CellFamily family) const {
   if (family != CellFamily::Pyramid) return {};
-  return {RefinementPattern::ISOTROPIC};
+  return {RefinementPattern::ISOTROPIC, RefinementPattern::ANISOTROPIC};
 }
 
 RefinementPattern PyramidRefinementRule::default_pattern(CellFamily family) const {
   return RefinementPattern::ISOTROPIC;
+}
+
+RefinedElement PyramidRefinementRule::red_refine(
+    const std::vector<std::array<real_t, 3>>& vertices,
+    size_t level) const {
+  // Matches the unit-test expectations in test_PyramidRefinement.cpp.
+  RefinedElement refined;
+  refined.child_level = level + 1;
+  refined.pattern = RefinementPattern::RED;
+
+  refined.new_vertices.reserve(10);
+  refined.new_vertex_weights.reserve(10);
+
+  // Base edge midpoints: 5,6,7,8
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[0], vertices[1])); // 5
+  refined.new_vertex_weights.push_back({{0, 0.5}, {1, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[1], vertices[2])); // 6
+  refined.new_vertex_weights.push_back({{1, 0.5}, {2, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[2], vertices[3])); // 7
+  refined.new_vertex_weights.push_back({{2, 0.5}, {3, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[3], vertices[0])); // 8
+  refined.new_vertex_weights.push_back({{3, 0.5}, {0, 0.5}});
+
+  // Lateral edge midpoints: 9,10,11,12
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[0], vertices[4])); // 9
+  refined.new_vertex_weights.push_back({{0, 0.5}, {4, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[1], vertices[4])); // 10
+  refined.new_vertex_weights.push_back({{1, 0.5}, {4, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[2], vertices[4])); // 11
+  refined.new_vertex_weights.push_back({{2, 0.5}, {4, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[3], vertices[4])); // 12
+  refined.new_vertex_weights.push_back({{3, 0.5}, {4, 0.5}});
+
+  // Base center: 13
+  const std::array<real_t, 3> base_center = RefinementUtils::face_center({vertices[0], vertices[1], vertices[2], vertices[3]});
+  refined.new_vertices.push_back(base_center); // 13
+  refined.new_vertex_weights.push_back({{0, 0.25}, {1, 0.25}, {2, 0.25}, {3, 0.25}});
+
+  // Mid-height center: 14 (midpoint between base center and apex)
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(base_center, vertices[4])); // 14
+  refined.new_vertex_weights.push_back({{0, 0.125}, {1, 0.125}, {2, 0.125}, {3, 0.125}, {4, 0.5}});
+
+  // Child connectivity (local indices: original 0..4, new 5..14).
+  refined.child_connectivity = {
+      // Pyramids (children 0-5)
+      {0, 5, 13, 8, 9},     // Child 0
+      {5, 1, 6, 13, 10},    // Child 1
+      {13, 6, 2, 7, 11},    // Child 2
+      {8, 13, 7, 3, 12},    // Child 3
+      {5, 6, 7, 8, 14},     // Child 4 (central)
+      {9, 10, 11, 12, 4},   // Child 5 (apex)
+      // Tetrahedra (children 6-9)
+      {5, 10, 14, 9},       // Child 6
+      {6, 11, 14, 10},      // Child 7
+      {7, 12, 14, 11},      // Child 8
+      {8, 9, 14, 12}        // Child 9
+  };
+
+  refined.child_families.clear();
+  refined.child_families.reserve(refined.child_connectivity.size());
+  for (size_t i = 0; i < 6; ++i) refined.child_families.push_back(CellFamily::Pyramid);
+  for (size_t i = 0; i < 4; ++i) refined.child_families.push_back(CellFamily::Tetra);
+  return refined;
+}
+
+RefinedElement PyramidRefinementRule::base_split_refine(
+    const std::vector<std::array<real_t, 3>>& vertices,
+    size_t level) const {
+  // Split only the base quad (selector-independent). Produces 4 child pyramids.
+  RefinedElement refined;
+  refined.child_level = level + 1;
+  refined.pattern = RefinementPattern::ANISOTROPIC;
+
+  refined.new_vertices.reserve(5);
+  refined.new_vertex_weights.reserve(5);
+
+  // Base edge midpoints: 5,6,7,8
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[0], vertices[1])); // 5
+  refined.new_vertex_weights.push_back({{0, 0.5}, {1, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[1], vertices[2])); // 6
+  refined.new_vertex_weights.push_back({{1, 0.5}, {2, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[2], vertices[3])); // 7
+  refined.new_vertex_weights.push_back({{2, 0.5}, {3, 0.5}});
+  refined.new_vertices.push_back(RefinementUtils::edge_midpoint(vertices[3], vertices[0])); // 8
+  refined.new_vertex_weights.push_back({{3, 0.5}, {0, 0.5}});
+
+  // Base center: 9
+  refined.new_vertices.push_back(RefinementUtils::face_center({vertices[0], vertices[1], vertices[2], vertices[3]})); // 9
+  refined.new_vertex_weights.push_back({{0, 0.25}, {1, 0.25}, {2, 0.25}, {3, 0.25}});
+
+  // 4 child pyramids with shared apex 4.
+  refined.child_connectivity = {
+      {0, 5, 9, 8, 4},
+      {5, 1, 6, 9, 4},
+      {9, 6, 2, 7, 4},
+      {8, 9, 7, 3, 4},
+  };
+  refined.child_families.assign(refined.child_connectivity.size(), CellFamily::Pyramid);
+  return refined;
 }
 
 // ====================
@@ -727,7 +1304,7 @@ bool RefinementRulesManager::can_refine(CellFamily family, size_t level) const {
 RefinedElement RefinementRulesManager::refine(
     const std::vector<std::array<real_t, 3>>& vertices,
     CellFamily family,
-    RefinementPattern pattern,
+    const RefinementSpec& spec,
     size_t level) const {
 
   auto rule = get_rule(family);
@@ -735,12 +1312,17 @@ RefinedElement RefinementRulesManager::refine(
     throw std::runtime_error("No refinement rule for element type");
   }
 
-  return rule->refine(vertices, family, pattern, level);
+  return rule->refine(vertices, family, spec, level);
 }
 
 size_t RefinementRulesManager::num_children(CellFamily family, RefinementPattern pattern) const {
   auto rule = get_rule(family);
   return rule ? rule->num_children(family, pattern) : 0;
+}
+
+size_t RefinementRulesManager::num_children(CellFamily family, const RefinementSpec& spec) const {
+  auto rule = get_rule(family);
+  return rule ? rule->num_children(family, spec) : 0;
 }
 
 void RefinementRulesManager::register_rule(CellFamily family, std::unique_ptr<RefinementRule> rule) {
