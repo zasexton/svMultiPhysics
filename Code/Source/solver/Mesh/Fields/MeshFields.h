@@ -32,10 +32,11 @@
 #define SVMP_MESH_FIELDS_H
 
 #include "../Core/MeshTypes.h"
+#include "../Core/EntityTransferMap.h"
 #include "MeshFieldDescriptor.h"
+#include <algorithm>
+#include <type_traits>
 #include <vector>
-#include <unordered_map>
-#include <memory>
 #include <string>
 
 namespace svmp {
@@ -54,25 +55,6 @@ class MeshBase;
  */
 class MeshFields {
 public:
-  /**
-   * @brief Field storage information
-   */
-  struct FieldInfo {
-    FieldScalarType type;              // Scalar type
-    size_t components;                  // Number of components per entity
-    size_t bytes_per_component;         // Bytes per component (for Custom type)
-    std::vector<uint8_t> data;          // Raw data storage
-    FieldDescriptor descriptor;         // Optional metadata
-  };
-
-  /**
-   * @brief Field collection for an entity type
-   */
-  struct FieldCollection {
-    std::unordered_map<std::string, FieldInfo> fields;
-    size_t entity_count = 0;
-  };
-
   // ---- Field attachment ----
 
   /**
@@ -154,6 +136,31 @@ public:
   }
 
   /**
+   * @brief Get typed field data pointer with runtime scalar-type checking.
+   *
+   * Throws std::invalid_argument if the field scalar type does not match `T`.
+   */
+  template <typename T>
+  static T* field_data_as_checked(MeshBase& mesh, const FieldHandle& handle) {
+    using U = std::remove_cv_t<std::remove_reference_t<T>>;
+    constexpr FieldScalarType expected = scalar_type_for_<U>();
+    if (field_type(mesh, handle) != expected) {
+      throw std::invalid_argument("field_data_as_checked: scalar type mismatch");
+    }
+    return field_data_as<U>(mesh, handle);
+  }
+
+  template <typename T>
+  static const T* field_data_as_checked(const MeshBase& mesh, const FieldHandle& handle) {
+    using U = std::remove_cv_t<std::remove_reference_t<T>>;
+    constexpr FieldScalarType expected = scalar_type_for_<U>();
+    if (field_type(mesh, handle) != expected) {
+      throw std::invalid_argument("field_data_as_checked: scalar type mismatch");
+    }
+    return field_data_as<U>(mesh, handle);
+  }
+
+  /**
    * @brief Get field properties
    */
   static size_t field_components(const MeshBase& mesh, const FieldHandle& handle);
@@ -191,6 +198,21 @@ public:
   static FieldHandle get_field_handle(const MeshBase& mesh,
                                      EntityKind kind,
                                      const std::string& name);
+
+  /**
+   * @brief List fields whose descriptor requests a specific ghost policy.
+   *
+   * Fields without descriptors are ignored.
+   */
+  static std::vector<FieldHandle> fields_with_ghost_policy(const MeshBase& mesh,
+                                                           FieldGhostPolicy policy);
+
+  /**
+   * @brief Convenience: fields that need direct ghost exchange.
+   */
+  static std::vector<FieldHandle> fields_requiring_exchange(const MeshBase& mesh) {
+    return fields_with_ghost_policy(mesh, FieldGhostPolicy::Exchange);
+  }
 
   /**
    * @brief Count total number of fields
@@ -234,6 +256,16 @@ public:
     std::fill(data, data + count, value);
   }
 
+  template <typename T>
+  static void fill_field_checked(MeshBase& mesh,
+                                 const FieldHandle& handle,
+                                 const T& value) {
+    using U = std::remove_cv_t<std::remove_reference_t<T>>;
+    U* data = field_data_as_checked<U>(mesh, handle);
+    size_t count = field_entity_count(mesh, handle) * field_components(mesh, handle);
+    std::fill(data, data + count, static_cast<U>(value));
+  }
+
   /**
    * @brief Resize field for new entity count
    * @param mesh The mesh
@@ -252,7 +284,7 @@ public:
    * @param cell_field Cell field handle
    * @param vertex_field Vertex field handle (must exist)
    */
-  static void interpolate_cell_to_vertex(const MeshBase& mesh,
+  static void interpolate_cell_to_vertex(MeshBase& mesh,
                                         const FieldHandle& cell_field,
                                         const FieldHandle& vertex_field);
 
@@ -262,7 +294,7 @@ public:
    * @param vertex_field Vertex field handle
    * @param cell_field Cell field handle (must exist)
    */
-  static void interpolate_vertex_to_cell(const MeshBase& mesh,
+  static void interpolate_vertex_to_cell(MeshBase& mesh,
                                         const FieldHandle& vertex_field,
                                         const FieldHandle& cell_field);
 
@@ -274,9 +306,23 @@ public:
    * @param coarse_field Field on coarse mesh
    */
   static void restrict_field(const MeshBase& fine_mesh,
-                            const MeshBase& coarse_mesh,
+                            MeshBase& coarse_mesh,
                             const FieldHandle& fine_field,
                             const FieldHandle& coarse_field);
+
+  /**
+   * @brief Restrict field using an explicit transfer map (dst=coarse, src=fine)
+   *
+   * The map must satisfy:
+   * - map.kind == fine_field.kind == coarse_field.kind
+   * - map.src_count == fine_mesh.field_entity_count(fine_field)
+   * - map.dst_count == coarse_mesh.field_entity_count(coarse_field)
+   */
+  static void restrict_field(const MeshBase& fine_mesh,
+                            MeshBase& coarse_mesh,
+                            const FieldHandle& fine_field,
+                            const FieldHandle& coarse_field,
+                            const EntityTransferMap& map);
 
   /**
    * @brief Prolongate field from coarse to fine mesh
@@ -286,9 +332,35 @@ public:
    * @param fine_field Field on fine mesh
    */
   static void prolongate_field(const MeshBase& coarse_mesh,
-                              const MeshBase& fine_mesh,
+                              MeshBase& fine_mesh,
                               const FieldHandle& coarse_field,
                               const FieldHandle& fine_field);
+
+  /**
+   * @brief Prolongate field using an explicit transfer map (dst=fine, src=coarse)
+   *
+   * The map must satisfy:
+   * - map.kind == coarse_field.kind == fine_field.kind
+   * - map.src_count == coarse_mesh.field_entity_count(coarse_field)
+   * - map.dst_count == fine_mesh.field_entity_count(fine_field)
+   */
+  static void prolongate_field(const MeshBase& coarse_mesh,
+                              MeshBase& fine_mesh,
+                              const FieldHandle& coarse_field,
+                              const FieldHandle& fine_field,
+                              const EntityTransferMap& map);
+
+  /**
+   * @brief Build a volume-weighted restriction map for cell fields.
+   *
+   * `coarse_to_fine_cells[c]` lists the fine cell indices that contribute to coarse cell c.
+   * Weights are computed from `fine_mesh.cell_measure()` and normalized per coarse cell.
+   */
+  static EntityTransferMap make_volume_weighted_cell_restriction_map(
+      const MeshBase& fine_mesh,
+      const MeshBase& coarse_mesh,
+      const std::vector<std::vector<index_t>>& coarse_to_fine_cells,
+      Configuration cfg = Configuration::Reference);
 
   // ---- Field statistics ----
 
@@ -336,9 +408,25 @@ private:
   // Helper to get entity count
   static size_t entity_count(const MeshBase& mesh, EntityKind kind);
 
-  // Helper to access field storage
-  static FieldCollection& get_collection(MeshBase& mesh, EntityKind kind);
-  static const FieldCollection& get_collection(const MeshBase& mesh, EntityKind kind);
+  template <typename>
+  struct always_false_ : std::false_type {};
+
+  template <typename T>
+  static constexpr FieldScalarType scalar_type_for_() {
+    if constexpr (std::is_same_v<T, int32_t>) {
+      return FieldScalarType::Int32;
+    } else if constexpr (std::is_same_v<T, int64_t>) {
+      return FieldScalarType::Int64;
+    } else if constexpr (std::is_same_v<T, float>) {
+      return FieldScalarType::Float32;
+    } else if constexpr (std::is_same_v<T, double>) {
+      return FieldScalarType::Float64;
+    } else if constexpr (std::is_same_v<T, uint8_t>) {
+      return FieldScalarType::UInt8;
+    } else {
+      static_assert(always_false_<T>::value, "Unsupported scalar type for MeshFields checked access");
+    }
+  }
 };
 
 } // namespace svmp
