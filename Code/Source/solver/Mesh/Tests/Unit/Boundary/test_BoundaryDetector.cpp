@@ -34,6 +34,9 @@
 #include "Core/MeshBase.h"
 #include "Topology/CellShape.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace svmp {
 namespace test {
 
@@ -287,6 +290,230 @@ protected:
         mesh.build_from_arrays(3, X_ref, offs, connectivity, shapes);
         return mesh;
     }
+
+    MeshBase create_single_wedge_mesh() {
+        std::vector<real_t> X_ref = {
+            0.0, 0.0, 0.0,  // 0
+            1.0, 0.0, 0.0,  // 1
+            0.0, 1.0, 0.0,  // 2
+            0.0, 0.0, 1.0,  // 3
+            1.0, 0.0, 1.0,  // 4
+            0.0, 1.0, 1.0   // 5
+        };
+
+        std::vector<offset_t> offs = {0, 6};
+        std::vector<index_t> connectivity = {0, 1, 2, 3, 4, 5};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Wedge;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 6;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, connectivity, shapes);
+        return mesh;
+    }
+
+    MeshBase create_single_pyramid_mesh() {
+        std::vector<real_t> X_ref = {
+            0.0, 0.0, 0.0,  // 0
+            1.0, 0.0, 0.0,  // 1
+            1.0, 1.0, 0.0,  // 2
+            0.0, 1.0, 0.0,  // 3
+            0.5, 0.5, 1.0   // 4 apex
+        };
+
+        std::vector<offset_t> offs = {0, 5};
+        std::vector<index_t> connectivity = {0, 1, 2, 3, 4};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Pyramid;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 5;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, connectivity, shapes);
+        return mesh;
+    }
+
+    MeshBase create_single_polygon_mesh(int n) {
+        std::vector<real_t> X_ref;
+        X_ref.reserve(static_cast<size_t>(2 * n));
+        for (int i = 0; i < n; ++i) {
+            const real_t a = 2.0 * 3.14159265358979323846 * static_cast<real_t>(i) / static_cast<real_t>(n);
+            X_ref.push_back(std::cos(a));
+            X_ref.push_back(std::sin(a));
+        }
+
+        std::vector<offset_t> offs = {0, static_cast<offset_t>(n)};
+        std::vector<index_t> connectivity;
+        connectivity.reserve(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) connectivity.push_back(i);
+
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Polygon;
+        shapes[0].order = 1;
+        shapes[0].num_corners = n;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(2, X_ref, offs, connectivity, shapes);
+        return mesh;
+    }
+
+    MeshBase create_three_tets_share_face_nonmanifold_mesh() {
+        std::vector<real_t> X_ref = {
+            0.0, 0.0, 0.0,  // 0
+            1.0, 0.0, 0.0,  // 1
+            0.0, 1.0, 0.0,  // 2
+            0.0, 0.0, 1.0,  // 3
+            0.0, 0.0, 2.0,  // 4
+            0.0, 0.0, 3.0   // 5
+        };
+
+        std::vector<offset_t> offs = {0, 4, 8, 12};
+        std::vector<index_t> connectivity = {
+            0, 1, 2, 3,
+            0, 1, 2, 4,
+            0, 1, 2, 5
+        };
+
+        std::vector<CellShape> shapes(3);
+        for (int i = 0; i < 3; ++i) {
+            shapes[i].family = CellFamily::Tetra;
+            shapes[i].order = 1;
+            shapes[i].num_corners = 4;
+        }
+
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, connectivity, shapes);
+        return mesh;
+    }
+
+    MeshBase create_quadratic_tet_mesh_p2() {
+        // VTK-style quadratic tetra ordering: corners then edge nodes in edge-view order.
+        std::vector<real_t> X_ref = {
+            0.0, 0.0, 0.0,  // 0
+            1.0, 0.0, 0.0,  // 1
+            0.0, 1.0, 0.0,  // 2
+            0.0, 0.0, 1.0,  // 3
+            0.5, 0.0, 0.0,  // 4 (0-1)
+            0.0, 0.5, 0.0,  // 5 (0-2)
+            0.0, 0.0, 0.5,  // 6 (0-3)
+            0.5, 0.5, 0.0,  // 7 (1-2)
+            0.5, 0.0, 0.5,  // 8 (1-3)
+            0.0, 0.5, 0.5   // 9 (2-3)
+        };
+
+        std::vector<offset_t> offs = {0, 10};
+        std::vector<index_t> connectivity = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Tetra;
+        shapes[0].order = 2;
+        shapes[0].num_corners = 4;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, connectivity, shapes);
+        return mesh;
+    }
+
+    MeshBase create_cubic_tet_mesh_p3() {
+        // VTK-style cubic tetra ordering:
+        // corners (4) + edge nodes (6 edges * 2 nodes) + face interior nodes (4 faces * 1 node) = 20.
+        std::vector<real_t> X_ref;
+        X_ref.reserve(20 * 3);
+
+        auto push = [&](real_t x, real_t y, real_t z) {
+            X_ref.push_back(x);
+            X_ref.push_back(y);
+            X_ref.push_back(z);
+        };
+
+        // corners
+        push(0.0, 0.0, 0.0); // 0
+        push(1.0, 0.0, 0.0); // 1
+        push(0.0, 1.0, 0.0); // 2
+        push(0.0, 0.0, 1.0); // 3
+
+        // edge nodes (two per edge)
+        push(1.0 / 3.0, 0.0, 0.0); // 4  (0-1)
+        push(2.0 / 3.0, 0.0, 0.0); // 5  (0-1)
+
+        push(0.0, 1.0 / 3.0, 0.0); // 6  (0-2)
+        push(0.0, 2.0 / 3.0, 0.0); // 7  (0-2)
+
+        push(0.0, 0.0, 1.0 / 3.0); // 8  (0-3)
+        push(0.0, 0.0, 2.0 / 3.0); // 9  (0-3)
+
+        push(2.0 / 3.0, 1.0 / 3.0, 0.0); // 10 (1-2)
+        push(1.0 / 3.0, 2.0 / 3.0, 0.0); // 11 (1-2)
+
+        push(2.0 / 3.0, 0.0, 1.0 / 3.0); // 12 (1-3)
+        push(1.0 / 3.0, 0.0, 2.0 / 3.0); // 13 (1-3)
+
+        push(0.0, 2.0 / 3.0, 1.0 / 3.0); // 14 (2-3)
+        push(0.0, 1.0 / 3.0, 2.0 / 3.0); // 15 (2-3)
+
+        // face interior nodes (one per face in the oriented-face table order)
+        push(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0); // 16 face {1,2,3}
+        push(0.0, 1.0 / 3.0, 1.0 / 3.0);       // 17 face {0,3,2}
+        push(1.0 / 3.0, 0.0, 1.0 / 3.0);       // 18 face {0,1,3}
+        push(1.0 / 3.0, 1.0 / 3.0, 0.0);       // 19 face {0,2,1}
+
+        std::vector<offset_t> offs = {0, 20};
+        std::vector<index_t> connectivity;
+        connectivity.reserve(20);
+        for (int i = 0; i < 20; ++i) connectivity.push_back(i);
+
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Tetra;
+        shapes[0].order = 3;
+        shapes[0].num_corners = 4;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, connectivity, shapes);
+        return mesh;
+    }
+
+    MeshBase create_cubic_triangle_mesh_p3() {
+        // VTK-style cubic triangle ordering: corners (3) + edge nodes (3 edges * 2 nodes) + 1 interior = 10.
+        std::vector<real_t> X_ref;
+        X_ref.reserve(10 * 2);
+
+        auto push = [&](real_t x, real_t y) {
+            X_ref.push_back(x);
+            X_ref.push_back(y);
+        };
+
+        // corners
+        push(0.0, 0.0); // 0
+        push(1.0, 0.0); // 1
+        push(0.0, 1.0); // 2
+
+        // edge nodes (two per edge, in edge-view order)
+        push(1.0 / 3.0, 0.0); // 3 (0-1)
+        push(2.0 / 3.0, 0.0); // 4 (0-1)
+
+        push(2.0 / 3.0, 1.0 / 3.0); // 5 (1-2)
+        push(1.0 / 3.0, 2.0 / 3.0); // 6 (1-2)
+
+        push(0.0, 2.0 / 3.0); // 7 (2-0)
+        push(0.0, 1.0 / 3.0); // 8 (2-0)
+
+        // interior node
+        push(1.0 / 3.0, 1.0 / 3.0); // 9
+
+        std::vector<offset_t> offs = {0, 10};
+        std::vector<index_t> connectivity;
+        connectivity.reserve(10);
+        for (int i = 0; i < 10; ++i) connectivity.push_back(i);
+
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Triangle;
+        shapes[0].order = 3;
+        shapes[0].num_corners = 3;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(2, X_ref, offs, connectivity, shapes);
+        return mesh;
+    }
 };
 
 // ==========================================
@@ -507,6 +734,179 @@ TEST_F(BoundaryDetectorTest, MixedDimMeshUsesMaximalCellsOnly) {
     ASSERT_EQ(info.oriented_boundary_entities.size(), info.boundary_entities.size());
     for (const auto& verts : info.oriented_boundary_entities) {
         EXPECT_EQ(verts.size(), 3u);
+    }
+}
+
+// ==========================================
+// Additional Tests: Wedge / Pyramid / Polygon
+// ==========================================
+
+TEST_F(BoundaryDetectorTest, SingleWedgeHasFiveBoundaryFacesAndOneComponent) {
+    MeshBase mesh = create_single_wedge_mesh();
+    BoundaryDetector detector(mesh);
+
+    auto info = detector.detect_boundary();
+
+    EXPECT_EQ(info.boundary_entities.size(), 5u);
+    EXPECT_EQ(info.interior_entities.size(), 0u);
+    EXPECT_FALSE(info.has_nonmanifold());
+
+    // Two triangles and three quads.
+    size_t tri = 0, quad = 0;
+    for (const auto& verts : info.oriented_boundary_entities) {
+        if (verts.size() == 3) tri++;
+        if (verts.size() == 4) quad++;
+    }
+    EXPECT_EQ(tri, 2u);
+    EXPECT_EQ(quad, 3u);
+
+    EXPECT_EQ(info.boundary_vertices.size(), 6u);
+    ASSERT_EQ(info.components.size(), 1u);
+    EXPECT_EQ(info.components[0].n_entities(), 5u);
+    EXPECT_EQ(info.components[0].n_vertices(), 6u);
+}
+
+TEST_F(BoundaryDetectorTest, SinglePyramidHasFiveBoundaryFacesAndOneComponent) {
+    MeshBase mesh = create_single_pyramid_mesh();
+    BoundaryDetector detector(mesh);
+
+    auto info = detector.detect_boundary();
+
+    EXPECT_EQ(info.boundary_entities.size(), 5u);
+    EXPECT_FALSE(info.has_nonmanifold());
+
+    size_t tri = 0, quad = 0;
+    for (const auto& verts : info.oriented_boundary_entities) {
+        if (verts.size() == 3) tri++;
+        if (verts.size() == 4) quad++;
+    }
+    EXPECT_EQ(tri, 4u);
+    EXPECT_EQ(quad, 1u);
+
+    EXPECT_EQ(info.boundary_vertices.size(), 5u);
+    ASSERT_EQ(info.components.size(), 1u);
+    EXPECT_EQ(info.components[0].n_entities(), 5u);
+    EXPECT_EQ(info.components[0].n_vertices(), 5u);
+}
+
+TEST_F(BoundaryDetectorTest, Polygon2DHasBoundaryEdgesAndOneComponent) {
+    MeshBase mesh = create_single_polygon_mesh(5);
+    BoundaryDetector detector(mesh);
+
+    auto info = detector.detect_boundary();
+
+    EXPECT_EQ(info.boundary_entities.size(), 5u);
+    EXPECT_EQ(info.boundary_vertices.size(), 5u);
+    ASSERT_EQ(info.components.size(), 1u);
+    EXPECT_EQ(info.components[0].n_entities(), 5u);
+    EXPECT_EQ(info.components[0].n_vertices(), 5u);
+}
+
+// ==========================================
+// Additional Tests: Non-manifold
+// ==========================================
+
+TEST_F(BoundaryDetectorTest, NonManifoldFaceDetected) {
+    MeshBase mesh = create_three_tets_share_face_nonmanifold_mesh();
+    BoundaryDetector detector(mesh);
+
+    auto info = detector.detect_boundary();
+
+    EXPECT_TRUE(info.has_nonmanifold());
+    EXPECT_EQ(info.nonmanifold_entities.size(), 1u);
+    EXPECT_EQ(info.interior_entities.size(), 0u);
+    EXPECT_EQ(info.boundary_entities.size(), 9u);
+    EXPECT_EQ(info.boundary_vertices.size(), 6u);
+
+    const auto nonmanifold = detector.detect_nonmanifold_codim1();
+    EXPECT_EQ(nonmanifold.size(), 1u);
+}
+
+// ==========================================
+// Additional Tests: High-order elements
+// ==========================================
+
+TEST_F(BoundaryDetectorTest, QuadraticTetraIncludesAllBoundaryNodes) {
+    MeshBase mesh = create_quadratic_tet_mesh_p2();
+    BoundaryDetector detector(mesh);
+
+    auto info = detector.detect_boundary();
+
+    // Same number of topological faces, but boundary nodes include edge midpoints.
+    EXPECT_EQ(info.boundary_entities.size(), 4u);
+    EXPECT_EQ(info.boundary_vertices.size(), 10u);
+    ASSERT_EQ(info.components.size(), 1u);
+    EXPECT_EQ(info.components[0].n_vertices(), 10u);
+
+    ASSERT_EQ(info.oriented_boundary_entities.size(), info.boundary_entities.size());
+    for (const auto& verts : info.oriented_boundary_entities) {
+        // Quadratic triangle boundary ring: 3 corners + 3 edge nodes.
+        EXPECT_EQ(verts.size(), 6u);
+    }
+}
+
+TEST_F(BoundaryDetectorTest, CubicTetraIncludesFaceInteriorNodesInBoundaryVertices) {
+    MeshBase mesh = create_cubic_tet_mesh_p3();
+    BoundaryDetector detector(mesh);
+
+    auto info = detector.detect_boundary();
+
+    EXPECT_EQ(info.boundary_entities.size(), 4u);
+    EXPECT_EQ(info.boundary_vertices.size(), 20u);
+    EXPECT_TRUE(info.boundary_vertices.count(16) > 0);
+    EXPECT_TRUE(info.boundary_vertices.count(19) > 0);
+
+    ASSERT_EQ(info.components.size(), 1u);
+    EXPECT_EQ(info.components[0].n_vertices(), 20u);
+
+    for (const auto& verts : info.oriented_boundary_entities) {
+        // Cubic triangle boundary ring: 3 corners + 3 edges*(2 nodes) = 9 nodes.
+        EXPECT_EQ(verts.size(), 9u);
+        EXPECT_TRUE(std::find(verts.begin(), verts.end(), 16) == verts.end());
+    }
+}
+
+TEST_F(BoundaryDetectorTest, CubicTriangleExcludesInteriorNodeFromBoundaryVertices) {
+    MeshBase mesh = create_cubic_triangle_mesh_p3();
+    BoundaryDetector detector(mesh);
+
+    auto info = detector.detect_boundary();
+
+    EXPECT_EQ(info.boundary_entities.size(), 3u);
+    EXPECT_EQ(info.boundary_vertices.size(), 9u);
+    EXPECT_TRUE(info.boundary_vertices.count(9) == 0);
+    ASSERT_EQ(info.components.size(), 1u);
+    EXPECT_EQ(info.components[0].n_vertices(), 9u);
+
+    auto expected_edge_nodes = [](index_t a, index_t b) -> std::vector<index_t> {
+        if (a > b) std::swap(a, b);
+        if (a == 0 && b == 1) return {3, 4};
+        if (a == 1 && b == 2) return {5, 6};
+        if (a == 0 && b == 2) return {7, 8};
+        return {};
+    };
+
+    ASSERT_EQ(info.oriented_boundary_entities.size(), info.boundary_entities.size());
+    for (size_t i = 0; i < info.boundary_entities.size(); ++i) {
+        const index_t ent_id = info.boundary_entities[i];
+        const auto& key = info.entity_keys[ent_id];
+        const auto& endpoints = key.vertices();
+        ASSERT_EQ(endpoints.size(), 2u);
+        auto expected = expected_edge_nodes(endpoints[0], endpoints[1]);
+        ASSERT_EQ(expected.size(), 2u);
+
+        const auto& verts = info.oriented_boundary_entities[i];
+        // Cubic edge polyline: 2 corners + 2 edge nodes = 4.
+        EXPECT_EQ(verts.size(), 4u);
+        EXPECT_TRUE(std::find(verts.begin(), verts.end(), 9) == verts.end());
+
+        EXPECT_TRUE((verts.front() == endpoints[0] && verts.back() == endpoints[1]) ||
+                    (verts.front() == endpoints[1] && verts.back() == endpoints[0]));
+
+        std::vector<index_t> middle = {verts[1], verts[2]};
+        std::sort(middle.begin(), middle.end());
+        std::sort(expected.begin(), expected.end());
+        EXPECT_EQ(middle, expected);
     }
 }
 

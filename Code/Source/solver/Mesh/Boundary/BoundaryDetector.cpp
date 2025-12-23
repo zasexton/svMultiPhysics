@@ -305,15 +305,9 @@ BoundaryDetector::compute_boundary_incidence() const {
 
                 if (fv == 2) {
                     // 2D: codim-1 entity is an edge.
-                    if (entity_local.size() < static_cast<size_t>(2 + edge_steps)) {
-                        throw std::runtime_error("BoundaryDetector: unexpected high-order edge node list size");
-                    }
-                    ring_local.reserve(static_cast<size_t>(2 + edge_steps));
-                    ring_local.push_back(oriented_face_defs[i][0]);
-                    for (int k = 0; k < edge_steps; ++k) {
-                        ring_local.push_back(entity_local[static_cast<size_t>(2 + k)]);
-                    }
-                    ring_local.push_back(oriented_face_defs[i][1]);
+                    // high_order_face_local_nodes() already returns [end0, interior..., end1] in the
+                    // oriented edge direction, so it can be used directly as an oriented polyline.
+                    ring_local = entity_local;
                 } else {
                     // 3D: codim-1 entity is a face. Build a cyclic ring by interleaving edge nodes.
                     const size_t min_sz = static_cast<size_t>(fv) + static_cast<size_t>(fv) * static_cast<size_t>(edge_steps);
