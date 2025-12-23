@@ -211,13 +211,23 @@ public:
     using ResidualFunc = std::function<double(
         const MeshBase&, size_t elem_id, const MeshFields*)>;
 
+    /** Residual callback for a cell/element (preferred name: cell_residual). */
+    ResidualFunc cell_residual;
+
+    /** Backward-compatible alias for cell_residual. */
     ResidualFunc element_residual;
 
     /** Function to compute edge/face residual */
     ResidualFunc edge_residual;
 
+    /** Backward-compatible alias for edge_residual. */
+    ResidualFunc face_residual;
+
     /** Include edge residuals */
     bool include_edge_residuals = true;
+
+    /** Backward-compatible alias for include_edge_residuals. */
+    bool include_face_residuals = true;
 
     /** Scaling constant */
     double scaling_constant = 1.0;
@@ -391,6 +401,7 @@ public:
     double mean_error;
     double std_dev;
     double total_error;
+    size_t num_cells;
     size_t num_elements;
   };
 

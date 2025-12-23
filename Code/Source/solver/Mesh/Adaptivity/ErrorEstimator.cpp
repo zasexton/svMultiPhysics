@@ -108,6 +108,13 @@ double JumpIndicatorEstimator::compute_face_jump(
 
 ResidualBasedEstimator::ResidualBasedEstimator(const Config& config)
     : config_(config) {
+  if (!config_.element_residual && config_.cell_residual) {
+    config_.element_residual = config_.cell_residual;
+  }
+  if (!config_.edge_residual && config_.face_residual) {
+    config_.edge_residual = config_.face_residual;
+  }
+  config_.include_edge_residuals = config_.include_edge_residuals || config_.include_face_residuals;
   if (!config_.element_residual) {
     throw std::invalid_argument("Element residual function must be provided");
   }
@@ -352,11 +359,13 @@ ErrorEstimatorUtils::ErrorStats ErrorEstimatorUtils::compute_statistics(
     stats.mean_error = 0.0;
     stats.std_dev = 0.0;
     stats.total_error = 0.0;
+    stats.num_cells = 0;
     stats.num_elements = 0;
     return stats;
   }
 
   stats.num_elements = indicators.size();
+  stats.num_cells = stats.num_elements;
   stats.min_error = *std::min_element(indicators.begin(), indicators.end());
   stats.max_error = *std::max_element(indicators.begin(), indicators.end());
   stats.total_error = std::accumulate(indicators.begin(), indicators.end(), 0.0);
@@ -394,4 +403,3 @@ void ErrorEstimatorUtils::write_to_field(
 }
 
 } // namespace svmp
-
