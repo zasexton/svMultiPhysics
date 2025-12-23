@@ -44,6 +44,9 @@ namespace svmp {
 // Forward declarations
 class MeshBase;
 
+// Quality options are currently sourced from AdaptivityOptions.
+using QualityOptions = AdaptivityOptions;
+
 /**
  * @brief Quality metrics for elements
  */
@@ -98,7 +101,7 @@ struct ElementQuality {
 /**
  * @brief Mesh quality statistics
  */
-struct MeshQuality {
+struct MeshQualityReport {
   /** Minimum element quality */
   double min_quality = 0.0;
 
@@ -155,7 +158,7 @@ public:
    * @param options Quality options
    * @return Mesh quality statistics
    */
-  virtual MeshQuality compute_mesh_quality(
+  virtual MeshQualityReport compute_mesh_quality(
       const MeshBase& mesh,
       const QualityOptions& options) const = 0;
 
@@ -214,13 +217,14 @@ public:
     MetricType primary_metric = MetricType::ASPECT_RATIO;
   };
 
-  explicit GeometricQualityChecker(const Config& config = {});
+  GeometricQualityChecker() : GeometricQualityChecker(Config{}) {}
+  explicit GeometricQualityChecker(const Config& config);
 
   ElementQuality compute_element_quality(
       const MeshBase& mesh,
       size_t elem_id) const override;
 
-  MeshQuality compute_mesh_quality(
+  MeshQualityReport compute_mesh_quality(
       const MeshBase& mesh,
       const QualityOptions& options) const override;
 
@@ -295,13 +299,14 @@ public:
     bool check_condition = true;
   };
 
-  explicit JacobianQualityChecker(const Config& config = {});
+  JacobianQualityChecker() : JacobianQualityChecker(Config{}) {}
+  explicit JacobianQualityChecker(const Config& config);
 
   ElementQuality compute_element_quality(
       const MeshBase& mesh,
       size_t elem_id) const override;
 
-  MeshQuality compute_mesh_quality(
+  MeshQualityReport compute_mesh_quality(
       const MeshBase& mesh,
       const QualityOptions& options) const override;
 
@@ -355,13 +360,14 @@ public:
     bool check_size_field = false;
   };
 
-  explicit SizeQualityChecker(const Config& config = {});
+  SizeQualityChecker() : SizeQualityChecker(Config{}) {}
+  explicit SizeQualityChecker(const Config& config);
 
   ElementQuality compute_element_quality(
       const MeshBase& mesh,
       size_t elem_id) const override;
 
-  MeshQuality compute_mesh_quality(
+  MeshQualityReport compute_mesh_quality(
       const MeshBase& mesh,
       const QualityOptions& options) const override;
 
@@ -407,7 +413,7 @@ public:
       const MeshBase& mesh,
       size_t elem_id) const override;
 
-  MeshQuality compute_mesh_quality(
+  MeshQualityReport compute_mesh_quality(
       const MeshBase& mesh,
       const QualityOptions& options) const override;
 
@@ -425,8 +431,8 @@ private:
       const std::vector<std::pair<ElementQuality, double>>& qualities) const;
 
   /** Combine mesh qualities */
-  MeshQuality combine_mesh_qualities(
-      const std::vector<std::pair<MeshQuality, double>>& qualities) const;
+  MeshQualityReport combine_mesh_qualities(
+      const std::vector<std::pair<MeshQualityReport, double>>& qualities) const;
 };
 
 /**
@@ -468,7 +474,8 @@ public:
     double relaxation = 0.5;
   };
 
-  explicit QualitySmoother(const Config& config = {});
+  QualitySmoother() : QualitySmoother(Config{}) {}
+  explicit QualitySmoother(const Config& config);
 
   /**
    * @brief Smooth mesh to improve quality
@@ -548,19 +555,19 @@ public:
    * @brief Create geometric quality checker
    */
   static std::unique_ptr<QualityChecker> create_geometric(
-      const GeometricQualityChecker::Config& config = {});
+      const GeometricQualityChecker::Config& config = GeometricQualityChecker::Config{});
 
   /**
    * @brief Create Jacobian quality checker
    */
   static std::unique_ptr<QualityChecker> create_jacobian(
-      const JacobianQualityChecker::Config& config = {});
+      const JacobianQualityChecker::Config& config = JacobianQualityChecker::Config{});
 
   /**
    * @brief Create size quality checker
    */
   static std::unique_ptr<QualityChecker> create_size(
-      const SizeQualityChecker::Config& config = {});
+      const SizeQualityChecker::Config& config = SizeQualityChecker::Config{});
 
   /**
    * @brief Create composite quality checker
@@ -593,14 +600,14 @@ public:
    * @brief Compute quality improvement
    */
   static double compute_quality_improvement(
-      const MeshQuality& before,
-      const MeshQuality& after);
+      const MeshQualityReport& before,
+      const MeshQualityReport& after);
 
   /**
    * @brief Write quality report
    */
   static void write_quality_report(
-      const MeshQuality& quality,
+      const MeshQualityReport& quality,
       const std::string& filename);
 
   /**
@@ -608,7 +615,7 @@ public:
    */
   static std::vector<std::string> suggest_improvements(
       const MeshBase& mesh,
-      const MeshQuality& quality);
+      const MeshQualityReport& quality);
 };
 
 } // namespace svmp
