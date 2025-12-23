@@ -33,6 +33,7 @@
 
 #include "Options.h"
 #include "Marker.h"
+#include "RefinementRules.h"
 #include <map>
 #include <memory>
 #include <set>
@@ -42,6 +43,7 @@ namespace svmp {
 
 // Forward declarations
 class MeshBase;
+class MeshFields;
 
 /**
  * @brief Hanging node information
@@ -167,7 +169,8 @@ public:
     bool check_edge_conformity = true;
   };
 
-  explicit ClosureConformityEnforcer(const Config& config = {});
+  ClosureConformityEnforcer() : ClosureConformityEnforcer(Config{}) {}
+  explicit ClosureConformityEnforcer(const Config& config);
 
   NonConformity check_conformity(
       const MeshBase& mesh,
@@ -243,7 +246,8 @@ public:
     double constraint_tolerance = 1e-10;
   };
 
-  explicit HangingNodeConformityEnforcer(const Config& config = {});
+  HangingNodeConformityEnforcer() : HangingNodeConformityEnforcer(Config{}) {}
+  explicit HangingNodeConformityEnforcer(const Config& config);
 
   NonConformity check_conformity(
       const MeshBase& mesh,
@@ -312,7 +316,8 @@ public:
     double pattern_cost = 0.5;
   };
 
-  explicit MinimalClosureEnforcer(const Config& config = {});
+  MinimalClosureEnforcer() : MinimalClosureEnforcer(Config{}) {}
+  explicit MinimalClosureEnforcer(const Config& config);
 
   NonConformity check_conformity(
       const MeshBase& mesh,
@@ -357,19 +362,19 @@ public:
    * @brief Create closure conformity enforcer
    */
   static std::unique_ptr<ConformityEnforcer> create_closure(
-      const ClosureConformityEnforcer::Config& config = {});
+      const ClosureConformityEnforcer::Config& config = ClosureConformityEnforcer::Config{});
 
   /**
    * @brief Create hanging node conformity enforcer
    */
   static std::unique_ptr<ConformityEnforcer> create_hanging_node(
-      const HangingNodeConformityEnforcer::Config& config = {});
+      const HangingNodeConformityEnforcer::Config& config = HangingNodeConformityEnforcer::Config{});
 
   /**
    * @brief Create minimal closure enforcer
    */
   static std::unique_ptr<ConformityEnforcer> create_minimal_closure(
-      const MinimalClosureEnforcer::Config& config = {});
+      const MinimalClosureEnforcer::Config& config = MinimalClosureEnforcer::Config{});
 };
 
 /**
