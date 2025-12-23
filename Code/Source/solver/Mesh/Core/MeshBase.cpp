@@ -148,6 +148,7 @@ void MeshBase::clear() {
 	    cell_region_id_.clear();
 	    face_boundary_id_.clear();
 	    edge_label_id_.clear();
+	    cell_refinement_level_.clear();
 	    for (int i = 0; i < 4; ++i) {
 	        entity_sets_[i].clear();
 	    }
@@ -268,6 +269,7 @@ void MeshBase::build_from_arrays(
 
 	    // Initialize region labels to 0
 	    cell_region_id_.resize(cell_shape_.size(), 0);
+	    cell_refinement_level_.resize(cell_shape_.size(), 0);
 
 	    // Initialize vertex labels to INVALID_LABEL (unlabeled)
 	    vertex_label_id_.resize(n_vertices, INVALID_LABEL);
@@ -753,6 +755,9 @@ void MeshBase::add_cell(index_t id, CellFamily family, const std::vector<index_t
     if (cell_region_id_.size() < cell_shape_.size()) {
         cell_region_id_.resize(cell_shape_.size(), 0);
     }
+    if (cell_refinement_level_.size() < cell_shape_.size()) {
+        cell_refinement_level_.resize(cell_shape_.size(), 0);
+    }
 
     // Keep cell-attached fields consistent for incremental building workflows.
     resize_fields(EntityKind::Volume, n_cells());
@@ -816,6 +821,41 @@ index_t MeshBase::global_to_local_edge(gid_t gid) const {
         return it->second;
     }
     return INVALID_INDEX;
+}
+
+// ==========================================
+// Adaptivity metadata
+// ==========================================
+
+size_t MeshBase::refinement_level(index_t cell) const {
+    if (cell < 0 || cell >= static_cast<index_t>(cell_shape_.size())) {
+        return 0;
+    }
+    if (cell_refinement_level_.size() != cell_shape_.size()) {
+        return 0;
+    }
+    return cell_refinement_level_[static_cast<size_t>(cell)];
+}
+
+void MeshBase::set_refinement_level(index_t cell, size_t level) {
+    if (cell < 0 || cell >= static_cast<index_t>(cell_shape_.size())) {
+        throw std::out_of_range("set_refinement_level: invalid cell index");
+    }
+    if (cell_refinement_level_.size() != cell_shape_.size()) {
+        cell_refinement_level_.resize(cell_shape_.size(), 0);
+    }
+    cell_refinement_level_[static_cast<size_t>(cell)] = level;
+}
+
+void MeshBase::set_cell_refinement_levels(std::vector<size_t> levels) {
+    if (!levels.empty() && levels.size() != cell_shape_.size()) {
+        throw std::invalid_argument("set_cell_refinement_levels: size mismatch");
+    }
+    if (levels.empty()) {
+        cell_refinement_level_.assign(cell_shape_.size(), 0);
+        return;
+    }
+    cell_refinement_level_ = std::move(levels);
 }
 
 // ==========================================

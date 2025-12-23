@@ -194,6 +194,13 @@ public:
   index_t global_to_local_face(gid_t gid) const;
   index_t global_to_local_edge(gid_t gid) const;
 
+  // ---- Adaptivity metadata ----
+  /// @brief Per-cell h-refinement level (0 = original/coarsest).
+  size_t refinement_level(index_t cell) const;
+  void set_refinement_level(index_t cell, size_t level);
+  const std::vector<size_t>& cell_refinement_levels() const noexcept { return cell_refinement_level_; }
+  void set_cell_refinement_levels(std::vector<size_t> levels);
+
   // ---- Labels & sets ----
   void set_region_label(index_t cell, label_t label);
   label_t region_label(index_t cell) const;
@@ -375,6 +382,7 @@ private:
   std::vector<label_t> cell_region_id_;
   std::vector<label_t> face_boundary_id_;
   std::vector<label_t> edge_label_id_;
+  std::vector<size_t> cell_refinement_level_;
   std::unordered_map<std::string, std::vector<index_t>> entity_sets_[4];
   std::unordered_map<std::string, label_t> label_from_name_;
   std::vector<std::string> name_from_label_;
