@@ -73,7 +73,7 @@ struct NonConformity {
   std::vector<HangingNode> hanging_nodes;
 
   /** Elements that need closure refinement */
-  std::set<size_t> elements_needing_closure;
+  std::set<size_t> cells_needing_closure;
 
   /** Edges with hanging nodes */
   std::set<std::pair<size_t, size_t>> non_conforming_edges;
@@ -86,7 +86,7 @@ struct NonConformity {
 
   /** Is mesh conforming */
   bool is_conforming() const {
-    return hanging_nodes.empty() && elements_needing_closure.empty();
+    return hanging_nodes.empty() && cells_needing_closure.empty();
   }
 };
 
@@ -187,8 +187,20 @@ public:
 
   std::string name() const override { return "ClosureConformity"; }
 
+  /**
+   * @brief Get the computed refinement specs for the last closure pass.
+   *
+   * Keys are cell indices from the mesh passed to `enforce_conformity`.
+   */
+  const std::map<size_t, RefinementSpec>& get_cell_refinement_specs() const {
+    return cell_refinement_specs_;
+  }
+
 private:
   Config config_;
+
+  // Populated by enforce_conformity().
+  mutable std::map<size_t, RefinementSpec> cell_refinement_specs_;
 
   /** Check if edge is conforming */
   bool is_edge_conforming(
@@ -422,6 +434,22 @@ public:
       MeshFields& fields,
       const MeshBase& mesh,
       const NonConformity& non_conformity);
+
+  /**
+   * @brief Build solver-ready hanging-vertex constraints (local vertex indices).
+   *
+   * Returns: hanging_vertex_index -> {master_vertex_index -> weight}
+   */
+  static std::map<size_t, std::map<size_t, double>> build_hanging_vertex_constraints(
+      const MeshBase& mesh);
+
+  /**
+   * @brief Build solver-ready hanging-vertex constraints (stable vertex GIDs).
+   *
+   * Returns: hanging_vertex_gid -> {master_vertex_gid -> weight}
+   */
+  static std::map<gid_t, std::map<gid_t, double>> build_hanging_vertex_constraints_gid(
+      const MeshBase& mesh);
 };
 
 } // namespace svmp
