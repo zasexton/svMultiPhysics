@@ -38,14 +38,24 @@
 namespace svmp {
 
 /**
- * @brief Robust polygon geometry utilities (planar polygons in 3D).
+ * @brief Robust polygon and (convex) polyhedron geometry utilities.
  *
  * These helpers operate on either explicit 3D vertex arrays or on
  * a MeshBase with a list of vertex indices. For mesh-based variants,
  * coordinates are taken from the selected configuration (Reference or Current).
+ *
+ * Polyhedron routines require explicit face connectivity on the mesh
+ * (i.e., `MeshBase::face_vertices_span` and `MeshBase::cell_faces` must be valid).
+ * Current implementations assume a closed, watertight, convex polyhedron.
  */
 class PolyGeometry {
 public:
+  struct PolyhedronMassProperties {
+    real_t volume = 0.0;               // positive volume
+    std::array<real_t,3> centroid{};   // geometric centroid
+    bool is_valid = false;            // false if faces are missing/non-manifold/inconsistent
+  };
+
   // ---- 3D coordinates API ----
 
   // Newell normal (unnormalized). Returns zero vector for degenerate input.
@@ -70,9 +80,26 @@ public:
   static std::array<real_t,3> polygon_centroid(const MeshBase& mesh,
                                                const std::vector<index_t>& vertices,
                                                Configuration cfg = Configuration::Reference);
+
+  // ---- Convex polyhedra (mesh-based; face connectivity required) ----
+
+  // Polyhedron volume via decomposition into tetrahedra from an interior point (convex only).
+  static real_t polyhedron_volume(const MeshBase& mesh,
+                                  index_t cell,
+                                  Configuration cfg = Configuration::Reference);
+
+  // Polyhedron centroid via tetrahedral decomposition from an interior point (convex only).
+  static std::array<real_t,3> polyhedron_centroid(const MeshBase& mesh,
+                                                  index_t cell,
+                                                  Configuration cfg = Configuration::Reference);
+
+  // General (possibly non-convex) polyhedron mass properties using oriented faces and
+  // a divergence-theorem surface integral (requires a watertight, manifold face set).
+  static PolyhedronMassProperties polyhedron_mass_properties(const MeshBase& mesh,
+                                                             index_t cell,
+                                                             Configuration cfg = Configuration::Reference);
 };
 
 } // namespace svmp
 
 #endif // SVMP_POLY_GEOMETRY_H
-
