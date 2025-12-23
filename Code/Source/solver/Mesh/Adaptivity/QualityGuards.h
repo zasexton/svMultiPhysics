@@ -44,8 +44,45 @@ namespace svmp {
 // Forward declarations
 class MeshBase;
 
-// Quality options are currently sourced from AdaptivityOptions.
-using QualityOptions = AdaptivityOptions;
+/**
+ * @brief Options for mesh quality checks
+ *
+ * This is intentionally smaller than AdaptivityOptions and can be used
+ * independently (e.g., in unit tests).
+ */
+struct QualityOptions {
+  enum class QualityMetric {
+    ASPECT_RATIO,
+    JACOBIAN,
+    SIZE_GRADATION
+  };
+
+  QualityMetric primary_metric = QualityMetric::ASPECT_RATIO;
+
+  /** Minimum acceptable overall quality score */
+  double min_quality_threshold = 0.01;
+
+  /** Maximum acceptable aspect ratio */
+  double max_aspect_ratio = 1e6;
+
+  /** Maximum acceptable size gradation ratio */
+  double max_size_gradation = 1e6;
+
+  /** If true, quality checks are considered fatal (solver-level policy). */
+  bool fail_on_poor_quality = true;
+
+  /** Enable mesh smoothing as a follow-on quality improvement step. */
+  bool enable_smoothing = false;
+
+  /** Max iterations to attempt when smoothing is enabled. */
+  size_t max_smoothing_iterations = 0;
+
+  static QualityOptions from_adaptivity(const AdaptivityOptions& options) {
+    QualityOptions q;
+    q.min_quality_threshold = options.min_quality;
+    return q;
+  }
+};
 
 /**
  * @brief Quality metrics for elements
@@ -98,6 +135,9 @@ struct ElementQuality {
   }
 };
 
+// Backward/compat: tests use CellQuality terminology.
+using CellQuality = ElementQuality;
+
 /**
  * @brief Mesh quality statistics
  */
@@ -113,6 +153,9 @@ struct MeshQualityReport {
 
   /** Number of poor quality elements */
   size_t num_poor_elements = 0;
+
+  /** Backward/compat: tests use "cells" terminology. */
+  size_t num_poor_cells = 0;
 
   /** Number of inverted elements */
   size_t num_inverted = 0;
@@ -133,12 +176,20 @@ struct MeshQualityReport {
   std::vector<std::string> suggestions;
 };
 
+// Backward/compat: tests use MeshQuality terminology.
+using MeshQuality = MeshQualityReport;
+
 /**
  * @brief Abstract base class for quality checking strategies
  */
 class QualityChecker {
 public:
   virtual ~QualityChecker() = default;
+
+  /** Backward/compat: tests use "cell" terminology. */
+  ElementQuality compute_cell_quality(const MeshBase& mesh, size_t cell_id) const {
+    return compute_element_quality(mesh, cell_id);
+  }
 
   /**
    * @brief Compute quality of single element
@@ -550,6 +601,9 @@ public:
    * @brief Create quality checker based on options
    */
   static std::unique_ptr<QualityChecker> create(const QualityOptions& options);
+  static std::unique_ptr<QualityChecker> create(const AdaptivityOptions& options) {
+    return create(QualityOptions::from_adaptivity(options));
+  }
 
   /**
    * @brief Create geometric quality checker
@@ -595,6 +649,16 @@ public:
       const MeshBase& mesh,
       const QualityChecker& checker,
       const QualityOptions& options);
+
+  /**
+   * @brief Backward/compat: find poor cells (same as poor elements).
+   */
+  static std::set<size_t> find_poor_cells(
+      const MeshBase& mesh,
+      const QualityChecker& checker,
+      const QualityOptions& options) {
+    return find_poor_elements(mesh, checker, options);
+  }
 
   /**
    * @brief Compute quality improvement

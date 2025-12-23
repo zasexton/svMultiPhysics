@@ -61,9 +61,10 @@ MeshQualityReport basic_mesh_quality_report(
     report.min_quality = std::min(report.min_quality, s);
     report.max_quality = std::max(report.max_quality, s);
     sum += s;
-    if (s < options.min_quality) {
+    if (s < options.min_quality_threshold) {
       report.failed_elements.insert(i);
       report.num_poor_elements++;
+      report.num_poor_cells++;
     }
     if (q.inverted) {
       report.num_inverted++;
@@ -72,6 +73,8 @@ MeshQualityReport basic_mesh_quality_report(
 
   report.avg_quality = sum / static_cast<double>(n);
   report.acceptable = report.failed_elements.empty();
+  // Keep aliases consistent.
+  report.num_poor_elements = report.num_poor_cells;
   return report;
 }
 
@@ -109,7 +112,7 @@ MeshQualityReport GeometricQualityChecker::compute_mesh_quality(
 bool GeometricQualityChecker::check_element(
     const ElementQuality& quality,
     const QualityOptions& options) const {
-  return quality.overall_quality() >= options.min_quality;
+  return quality.overall_quality() >= options.min_quality_threshold;
 }
 
 JacobianQualityChecker::JacobianQualityChecker(const Config& config)
@@ -135,7 +138,7 @@ MeshQualityReport JacobianQualityChecker::compute_mesh_quality(
 bool JacobianQualityChecker::check_element(
     const ElementQuality& quality,
     const QualityOptions& options) const {
-  return quality.overall_quality() >= options.min_quality;
+  return quality.overall_quality() >= options.min_quality_threshold;
 }
 
 SizeQualityChecker::SizeQualityChecker(const Config& config)
@@ -160,7 +163,7 @@ MeshQualityReport SizeQualityChecker::compute_mesh_quality(
 bool SizeQualityChecker::check_element(
     const ElementQuality& quality,
     const QualityOptions& options) const {
-  return quality.overall_quality() >= options.min_quality;
+  return quality.overall_quality() >= options.min_quality_threshold;
 }
 
 void CompositeQualityChecker::add_checker(
@@ -192,7 +195,7 @@ MeshQualityReport CompositeQualityChecker::compute_mesh_quality(
 bool CompositeQualityChecker::check_element(
     const ElementQuality& quality,
     const QualityOptions& options) const {
-  return quality.overall_quality() >= options.min_quality;
+  return quality.overall_quality() >= options.min_quality_threshold;
 }
 
 ElementQuality CompositeQualityChecker::combine_qualities(
@@ -287,8 +290,15 @@ bool QualitySmoother::is_feature_edge(
 }
 
 std::unique_ptr<QualityChecker> QualityCheckerFactory::create(const QualityOptions& options) {
-  (void)options;
-  return create_geometric();
+  switch (options.primary_metric) {
+    case QualityOptions::QualityMetric::JACOBIAN:
+      return create_jacobian();
+    case QualityOptions::QualityMetric::SIZE_GRADATION:
+      return create_size();
+    case QualityOptions::QualityMetric::ASPECT_RATIO:
+    default:
+      return create_geometric();
+  }
 }
 
 std::unique_ptr<QualityChecker> QualityCheckerFactory::create_geometric(
@@ -351,4 +361,3 @@ std::vector<std::string> QualityGuardUtils::suggest_improvements(
 }
 
 } // namespace svmp
-
