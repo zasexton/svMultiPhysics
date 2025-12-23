@@ -48,6 +48,7 @@ class MeshBase;
  * This class manages:
  * - Region labels (material/subdomain IDs for cells)
  * - Boundary labels (boundary condition IDs for faces)
+ * - Edge and vertex labels (feature/marker tags)
  * - Named sets of entities
  * - Label-name bidirectional mapping
  */
@@ -67,7 +68,7 @@ public:
    * @brief Get region label for a cell
    * @param mesh The mesh
    * @param cell Cell index
-   * @return Region label (0 if not set)
+   * @return Region label (0 by default, INVALID_LABEL for invalid index)
    */
   static label_t region_label(const MeshBase& mesh, index_t cell);
 
@@ -117,7 +118,7 @@ public:
    * @brief Get boundary label for a face
    * @param mesh The mesh
    * @param face Face index
-   * @return Boundary label (0 if not set)
+   * @return Boundary label (INVALID_LABEL if not set or invalid index)
    */
   static label_t boundary_label(const MeshBase& mesh, index_t face);
 
@@ -152,6 +153,28 @@ public:
    * @return Map from label to face count
    */
   static std::unordered_map<label_t, size_t> count_by_boundary(const MeshBase& mesh);
+
+  // ---- Edge labels ----
+
+  static void set_edge_label(MeshBase& mesh, index_t edge, label_t label);
+  static label_t edge_label(const MeshBase& mesh, index_t edge);
+  static std::vector<index_t> edges_with_label(const MeshBase& mesh, label_t label);
+  static void set_edge_labels(MeshBase& mesh,
+                              const std::vector<index_t>& edges,
+                              label_t label);
+  static std::unordered_set<label_t> unique_edge_labels(const MeshBase& mesh);
+  static std::unordered_map<label_t, size_t> count_by_edge(const MeshBase& mesh);
+
+  // ---- Vertex labels ----
+
+  static void set_vertex_label(MeshBase& mesh, index_t vertex, label_t label);
+  static label_t vertex_label(const MeshBase& mesh, index_t vertex);
+  static std::vector<index_t> vertices_with_label(const MeshBase& mesh, label_t label);
+  static void set_vertex_labels(MeshBase& mesh,
+                                const std::vector<index_t>& vertices,
+                                label_t label);
+  static std::unordered_set<label_t> unique_vertex_labels(const MeshBase& mesh);
+  static std::unordered_map<label_t, size_t> count_by_vertex(const MeshBase& mesh);
 
   // ---- Named sets ----
 
@@ -235,7 +258,7 @@ public:
   /**
    * @brief Create set from entities with given label
    * @param mesh The mesh
-   * @param kind Entity type (Cell or Face)
+   * @param kind Entity type (Vertex, Edge, Face, or Volume)
    * @param set_name Set name to create
    * @param label Label value
    */
@@ -290,7 +313,7 @@ public:
   /**
    * @brief Renumber labels to be contiguous starting from 0
    * @param mesh The mesh
-   * @param kind Entity type (Cell or Face)
+   * @param kind Entity type (Vertex, Edge, Face, or Volume)
    * @return Map from old to new labels
    */
   static std::unordered_map<label_t, label_t> renumber_labels(MeshBase& mesh,
@@ -299,7 +322,7 @@ public:
   /**
    * @brief Merge multiple labels into one
    * @param mesh The mesh
-   * @param kind Entity type (Cell or Face)
+   * @param kind Entity type (Vertex, Edge, Face, or Volume)
    * @param source_labels Labels to merge
    * @param target_label Target label
    */
@@ -311,7 +334,7 @@ public:
   /**
    * @brief Split entities with one label into multiple labels based on connectivity
    * @param mesh The mesh
-   * @param kind Entity type (Cell or Face)
+   * @param kind Entity type (Vertex, Edge, Face, or Volume)
    * @param label Label to split
    * @return Map from entity to new component label
    */
@@ -323,7 +346,7 @@ public:
    * @brief Copy labels from one mesh to another
    * @param source Source mesh
    * @param target Target mesh
-   * @param kind Entity type
+   * @param kind Entity type (Vertex, Edge, Face, or Volume)
    */
   static void copy_labels(const MeshBase& source,
                          MeshBase& target,
@@ -332,7 +355,7 @@ public:
   /**
    * @brief Export labels to array
    * @param mesh The mesh
-   * @param kind Entity type (Cell or Face)
+   * @param kind Entity type (Vertex, Edge, Face, or Volume)
    * @return Vector of labels indexed by entity
    */
   static std::vector<label_t> export_labels(const MeshBase& mesh,
@@ -341,7 +364,7 @@ public:
   /**
    * @brief Import labels from array
    * @param mesh The mesh
-   * @param kind Entity type (Cell or Face)
+   * @param kind Entity type (Vertex, Edge, Face, or Volume)
    * @param labels Vector of labels indexed by entity
    */
   static void import_labels(MeshBase& mesh,
