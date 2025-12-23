@@ -342,39 +342,21 @@ private:
  */
 class AdaptivityManagerBuilder {
 public:
-  AdaptivityManagerBuilder& with_options(const AdaptivityOptions& options) {
-    options_ = options;
-    return *this;
-  }
+  AdaptivityManagerBuilder& with_options(const AdaptivityOptions& options);
 
   AdaptivityManagerBuilder& with_error_estimator(
-      std::unique_ptr<ErrorEstimator> estimator) {
-    error_estimator_ = std::move(estimator);
-    return *this;
-  }
+      std::unique_ptr<ErrorEstimator> estimator);
 
-  AdaptivityManagerBuilder& with_marker(std::unique_ptr<Marker> marker) {
-    marker_ = std::move(marker);
-    return *this;
-  }
+  AdaptivityManagerBuilder& with_marker(std::unique_ptr<Marker> marker);
 
   AdaptivityManagerBuilder& with_field_transfer(
-      std::unique_ptr<FieldTransfer> transfer) {
-    field_transfer_ = std::move(transfer);
-    return *this;
-  }
+      std::unique_ptr<FieldTransfer> transfer);
 
   AdaptivityManagerBuilder& with_quality_checker(
-      std::unique_ptr<QualityChecker> checker) {
-    quality_checker_ = std::move(checker);
-    return *this;
-  }
+      std::unique_ptr<QualityChecker> checker);
 
   AdaptivityManagerBuilder& with_conformity_enforcer(
-      std::unique_ptr<ConformityEnforcer> enforcer) {
-    conformity_enforcer_ = std::move(enforcer);
-    return *this;
-  }
+      std::unique_ptr<ConformityEnforcer> enforcer);
 
   std::unique_ptr<AdaptivityManager> build();
 
@@ -438,8 +420,7 @@ public:
    * @brief Write adaptivity metrics to field
    */
   static void write_metrics_to_fields(
-      const MeshBase& mesh,
-      MeshFields& fields,
+      MeshBase& mesh,
       const std::vector<double>& error_indicators,
       const std::vector<MarkType>& marks);
 };
