@@ -1,4 +1,22 @@
-build
+# Build directories (CMake/Ninja/etc.)
+build*/
+cmake-build*/
+
+# CMake generated files (including accidental in-source builds)
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/CTestTestfile.cmake
+**/Makefile
+**/install_manifest.txt
+**/compile_commands.json
+Testing/
+
+# Ninja generated files
+**/.ninja_deps
+**/.ninja_log
+**/build.ninja
+**/rules.ninja
 
 # System files osx 
 **/.DS_Store
@@ -20,6 +38,21 @@ __pycache__
 
 # Doxygen output
 Documentation/html/
+
+# Compiled artifacts
+*.o
+*.obj
+*.lo
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+*.pdb
+*.ilk
+*.dSYM/
 
 # genBC files
 **/genBC/obj/
