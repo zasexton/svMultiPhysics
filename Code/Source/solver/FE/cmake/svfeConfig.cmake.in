@@ -1,0 +1,39 @@
+# svfeConfig.cmake - Configuration file for svMultiPhysics FE library
+#
+# This file is used when the FE library is installed and consumed by external projects
+# It provides information about the FE library and its dependencies
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Find required dependencies based on build configuration
+if(@FE_ENABLE_MPI@)
+    find_dependency(MPI)
+endif()
+
+if(@FE_ENABLE_EIGEN@)
+    find_dependency(Eigen3 3.3 REQUIRED)
+endif()
+
+if(@FE_ENABLE_TRILINOS@)
+    find_dependency(Trilinos)
+endif()
+
+if(@FE_ENABLE_PETSC@)
+    find_dependency(PETSc)
+endif()
+
+# Include the targets file
+include("${CMAKE_CURRENT_LIST_DIR}/svfeTargets.cmake")
+
+# Set variables for consumers
+set(SVFE_INCLUDE_DIRS "@CMAKE_INSTALL_INCLUDEDIR@/svfe")
+set(SVFE_LIBRARIES svfe::svfe)
+set(SVFE_HAS_MPI @FE_ENABLE_MPI@)
+set(SVFE_HAS_EIGEN @FE_ENABLE_EIGEN@)
+set(SVFE_HAS_TRILINOS @FE_ENABLE_TRILINOS@)
+set(SVFE_HAS_PETSC @FE_ENABLE_PETSC@)
+set(SVFE_VERSION @PROJECT_VERSION@)
+
+check_required_components(svfe)
