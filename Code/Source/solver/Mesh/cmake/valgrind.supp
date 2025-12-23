@@ -1,0 +1,219 @@
+# Valgrind suppression file for svMultiPhysics Mesh Library
+# This file contains suppressions for known false positives and system library issues
+
+# ============================================================================
+# MPI-related suppressions
+# ============================================================================
+
+{
+   MPI_Init_Leak1
+   Memcheck:Leak
+   fun:malloc
+   ...
+   fun:PMPI_Init
+}
+
+{
+   MPI_Init_Leak2
+   Memcheck:Leak
+   fun:calloc
+   ...
+   fun:PMPI_Init
+}
+
+{
+   MPI_Init_Leak3
+   Memcheck:Leak
+   fun:realloc
+   ...
+   fun:PMPI_Init
+}
+
+{
+   MPI_Comm_Leak
+   Memcheck:Leak
+   fun:malloc
+   ...
+   fun:PMPI_Comm_*
+}
+
+{
+   MPI_Finalize_Leak
+   Memcheck:Leak
+   fun:malloc
+   ...
+   fun:PMPI_Finalize
+}
+
+{
+   OpenMPI_Init
+   Memcheck:Leak
+   fun:malloc
+   ...
+   fun:ompi_mpi_init
+}
+
+{
+   OpenMPI_BTL
+   Memcheck:Leak
+   fun:malloc
+   ...
+   fun:mca_btl_*
+}
+
+{
+   OpenMPI_PML
+   Memcheck:Leak
+   fun:malloc
+   ...
+   fun:mca_pml_*
+}
+
+{
+   OpenMPI_COLL
+   Memcheck:Leak
+   fun:malloc
+   ...
+   fun:mca_coll_*
+}
+
+# ============================================================================
+# VTK-related suppressions
+# ============================================================================
+
+{
+   VTK_vtkNew_Leak
+   Memcheck:Leak
+   fun:_Znwm
+   ...
+   fun:_ZN*vtkNew*
+}
+
+{
+   VTK_SmartPointer_Leak
+   Memcheck:Leak
+   fun:_Znwm
+   ...
+   fun:_ZN*vtkSmartPointer*
+}
+
+{
+   VTK_ObjectFactory
+   Memcheck:Leak
+   fun:malloc
+   ...
+   fun:_ZN*vtkObjectFactory*
+}
+
+# ============================================================================
+# C++ Standard Library suppressions
+# ============================================================================
+
+{
+   STL_String_Leak
+   Memcheck:Leak
+   fun:_Znwm
+   fun:_ZNSs*
+   ...
+   fun:_ZNSs*
+}
+
+{
+   STL_Vector_Grow
+   Memcheck:Leak
+   fun:_Znwm
+   fun:_ZNSt6vector*
+}
+
+{
+   STL_Locale_Leak
+   Memcheck:Leak
+   fun:malloc
+   ...
+   fun:_ZNSt6locale*
+}
+
+# ============================================================================
+# glibc and system library suppressions
+# ============================================================================
+
+{
+   glibc_dlopen
+   Memcheck:Leak
+   fun:malloc
+   ...
+   fun:dlopen*
+}
+
+{
+   glibc_backtrace
+   Memcheck:Leak
+   fun:malloc
+   ...
+   fun:backtrace*
+}
+
+{
+   pthread_create
+   Memcheck:Leak
+   fun:calloc
+   ...
+   fun:pthread_create*
+}
+
+{
+   ld_library_path
+   Memcheck:Leak
+   fun:malloc
+   ...
+   fun:_dl_init
+}
+
+# ============================================================================
+# Conditional jump suppressions (often from optimized code)
+# ============================================================================
+
+{
+   MPI_Conditional_Jump
+   Memcheck:Cond
+   ...
+   fun:PMPI_*
+}
+
+{
+   OpenMPI_Conditional_Jump
+   Memcheck:Cond
+   ...
+   fun:ompi_*
+}
+
+# ============================================================================
+# Uninitialized value suppressions
+# ============================================================================
+
+{
+   MPI_Uninit_Write
+   Memcheck:Param
+   write(buf)
+   ...
+   fun:PMPI_*
+}
+
+{
+   MPI_Uninit_Writev
+   Memcheck:Param
+   writev(vector[...])
+   ...
+   fun:PMPI_*
+}
+
+# ============================================================================
+# Application-specific suppressions (add as needed)
+# ============================================================================
+
+{
+   svmesh_test_helper_leak
+   Memcheck:Leak
+   fun:_Znwm
+   fun:_Z*create_test_mesh*
+}
