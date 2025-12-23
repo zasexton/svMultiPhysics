@@ -31,6 +31,7 @@
 #include "MeshSearch.h"
 #include "../Core/MeshBase.h"
 #include "../Geometry/MeshGeometry.h"
+#include "SearchAccel.h"
 #include <algorithm>
 #include <limits>
 #include <queue>
@@ -39,12 +40,50 @@
 
 namespace svmp {
 
+namespace {
+
+Configuration canonical_cfg(Configuration cfg) {
+  return (cfg == Configuration::Deformed) ? Configuration::Current : cfg;
+}
+
+Configuration effective_cfg(const MeshBase& mesh, Configuration cfg) {
+  cfg = canonical_cfg(cfg);
+  if (cfg == Configuration::Current && !mesh.has_current_coords()) {
+    return Configuration::Reference;
+  }
+  return cfg;
+}
+
+bool configs_match(Configuration built, Configuration requested) {
+  return canonical_cfg(built) == canonical_cfg(requested);
+}
+
+const IAccel* accel_if_built(const MeshBase& mesh, Configuration cfg) {
+  const auto* holder = mesh.search_accel();
+  if (!holder || !holder->accel || !holder->accel->is_built()) {
+    return nullptr;
+  }
+
+  cfg = effective_cfg(mesh, cfg);
+  if (!configs_match(holder->accel->built_config(), cfg)) {
+    return nullptr;
+  }
+
+  return holder->accel.get();
+}
+
+} // namespace
+
 // ---- Point location ----
 
 PointLocateResult MeshSearch::locate_point(const MeshBase& mesh,
                                           const std::array<real_t,3>& point,
                                           Configuration cfg,
                                           index_t hint_cell) {
+  if (const auto* accel = accel_if_built(mesh, cfg)) {
+    return accel->locate_point(mesh, point, hint_cell);
+  }
+
   // Simple linear search implementation
   PointLocateResult result;
   result.found = false;
@@ -78,6 +117,10 @@ PointLocateResult MeshSearch::locate_point(const MeshBase& mesh,
 std::vector<PointLocateResult> MeshSearch::locate_points(const MeshBase& mesh,
                                                         const std::vector<std::array<real_t,3>>& points,
                                                         Configuration cfg) {
+  if (const auto* accel = accel_if_built(mesh, cfg)) {
+    return accel->locate_points(mesh, points);
+  }
+
   std::vector<PointLocateResult> results;
   results.reserve(points.size());
 
@@ -99,6 +142,10 @@ bool MeshSearch::contains_point(const MeshBase& mesh,
 std::pair<index_t, real_t> MeshSearch::nearest_vertex(const MeshBase& mesh,
                                                      const std::array<real_t,3>& point,
                                                      Configuration cfg) {
+  if (const auto* accel = accel_if_built(mesh, cfg)) {
+    return accel->nearest_vertex(mesh, point);
+  }
+
   index_t nearest_idx = INVALID_INDEX;
   real_t min_dist = std::numeric_limits<real_t>::max();
 
@@ -128,6 +175,10 @@ std::vector<std::pair<index_t, real_t>> MeshSearch::k_nearest_vertices(
     const std::array<real_t,3>& point,
     size_t k,
     Configuration cfg) {
+  if (const auto* accel = accel_if_built(mesh, cfg)) {
+    return accel->k_nearest_vertices(mesh, point, k);
+  }
+
   using HeapEntry = std::pair<real_t, index_t>;
   std::priority_queue<HeapEntry> max_heap;
 
@@ -168,6 +219,10 @@ std::vector<index_t> MeshSearch::vertices_in_radius(const MeshBase& mesh,
                                                    const std::array<real_t,3>& point,
                                                    real_t radius,
                                                    Configuration cfg) {
+  if (const auto* accel = accel_if_built(mesh, cfg)) {
+    return accel->vertices_in_radius(mesh, point, radius);
+  }
+
   std::vector<index_t> vertices;
   real_t radius_sq = radius * radius;
 
@@ -217,6 +272,10 @@ RayIntersectResult MeshSearch::intersect_ray(const MeshBase& mesh,
                                             const std::array<real_t,3>& direction,
                                             Configuration cfg,
                                             real_t max_distance) {
+  if (const auto* accel = accel_if_built(mesh, cfg)) {
+    return accel->intersect_ray(mesh, origin, direction, max_distance);
+  }
+
   RayIntersectResult result;
   result.found = false;
   result.face_id = -1;
@@ -234,6 +293,10 @@ std::vector<RayIntersectResult> MeshSearch::intersect_ray_all(
     const std::array<real_t,3>& direction,
     Configuration cfg,
     real_t max_distance) {
+  if (const auto* accel = accel_if_built(mesh, cfg)) {
+    return accel->intersect_ray_all(mesh, origin, direction, max_distance);
+  }
+
   std::vector<RayIntersectResult> results;
 
   // TODO: Implement finding all ray-mesh intersections
@@ -291,8 +354,7 @@ std::pair<std::array<real_t,3>, index_t> MeshSearch::closest_boundary_point(
 void MeshSearch::build_search_structure(const MeshBase& mesh,
                                        const SearchConfig& config,
                                        Configuration cfg) {
-  // Delegate to MeshBase holder (placeholder in current implementation)
-  mesh.build_search_structure(cfg);
+  mesh.build_search_structure(config, effective_cfg(mesh, cfg));
 }
 
 void MeshSearch::clear_search_structure(const MeshBase& mesh) {
@@ -309,6 +371,10 @@ std::vector<index_t> MeshSearch::cells_in_box(const MeshBase& mesh,
                                              const std::array<real_t,3>& box_min,
                                              const std::array<real_t,3>& box_max,
                                              Configuration cfg) {
+  if (const auto* accel = accel_if_built(mesh, cfg)) {
+    return accel->cells_in_box(mesh, box_min, box_max);
+  }
+
   std::vector<index_t> cells;
   size_t n_cells = mesh.n_cells();
 
@@ -335,6 +401,10 @@ std::vector<index_t> MeshSearch::cells_in_sphere(const MeshBase& mesh,
                                                 const std::array<real_t,3>& center,
                                                 real_t radius,
                                                 Configuration cfg) {
+  if (const auto* accel = accel_if_built(mesh, cfg)) {
+    return accel->cells_in_sphere(mesh, center, radius);
+  }
+
   std::vector<index_t> cells;
   real_t radius_sq = radius * radius;
   size_t n_cells = mesh.n_cells();
