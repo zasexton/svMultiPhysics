@@ -13,8 +13,8 @@ The **Boundary** subfolder provides **topological and geometric** operations for
 - Handle mixed element meshes (tet, hex, wedge, pyramid, triangle, quad)
 
 ### 2. Geometric Boundary Analysis
-- Compute outward-pointing normals (right-hand rule convention)
-- Extract oriented boundary entities for accurate geometric calculations
+- Provide outward orientation (right-hand rule convention) for boundary entities
+- Return oriented vertex order so Geometry can compute normals/areas/centroids
 - Support 1D (vertex boundaries), 2D (edge boundaries), and 3D (face boundaries)
 
 ### 3. Canonical Representation
@@ -24,8 +24,8 @@ The **Boundary** subfolder provides **topological and geometric** operations for
 
 ### 4. Component Analysis
 - Extract connected components of boundary surfaces
-- Track topological properties (closed, orientable)
-- Compute geometric properties (area, centroid, bounding box)
+- Provide component membership (which boundary entities belong to each component)
+- Store per-component fields (e.g. `closed`, `orientable`, `area`, `centroid`) for other modules to populate
 
 ## What This Folder DOES Include
 
@@ -36,10 +36,8 @@ The **Boundary** subfolder provides **topological and geometric** operations for
   - Non-manifold detection
 
 ✓ **Geometric computations**
-  - Normal vectors for boundary faces/edges
-  - Vertex ordering conventions (right-hand rule)
-  - Component area and centroid calculation
-  - Bounding box computation
+  - Vertex ordering conventions (right-hand rule / CCW)
+  - Oriented boundary entities for Geometry computations
 
 ✓ **Data structures**
   - `BoundaryKey`: Canonical boundary representation
@@ -48,7 +46,6 @@ The **Boundary** subfolder provides **topological and geometric** operations for
 
 ✓ **Mesh introspection**
   - Query which (n-1) entities are on boundary
-  - Extract boundary submeshes
   - Identify boundary vertices
 
 ## What This Folder DOES NOT Include
@@ -120,28 +117,19 @@ MeshBase mesh = /* ... */;
 BoundaryDetector detector(mesh);
 auto boundary_info = detector.detect_boundary();
 
-// Extract boundary submesh
-auto boundary_mesh = mesh.extract_boundary_submesh(boundary_info);
-
-// Compute geometric properties
-for (const auto& comp : boundary_info.components) {
-    auto area = compute_component_area(mesh, comp);
-    // Example: use oriented vertices from the first boundary entity in this component
-    // to compute normals/areas where applicable.
+// Boundary entities are returned as IDs into boundary_info.entity_keys
+for (index_t ent_id : boundary_info.boundary_entities) {
+    const auto& key = boundary_info.entity_keys[ent_id];
+    // key.vertices() are the (corner) vertex IDs defining this boundary entity
 }
 
 // ===== In Solver code (separate layer) =====
-// Solver reads boundary_info to identify where to apply BCs
-for (const auto& ent_idx : boundary_info.boundary_entities) {
-    label_t bc_label = mesh.boundary_label(ent_idx);
-
-    // Apply physics-specific BC based on label
-    if (bc_label == INLET_LABEL) {
-        apply_velocity_bc(ent_idx, inlet_velocity);
-    } else if (bc_label == WALL_LABEL) {
-        apply_no_slip_bc(ent_idx);
-    }
-    // BC application logic lives in solver, not Mesh folder
+// If your workflow uses labeled boundary faces/edges, use MeshBase's explicit codim-1 entities:
+// (MeshBase::finalize() can build these for standard cell families.)
+mesh.finalize();
+for (index_t f : mesh.boundary_faces()) {
+    label_t bc_label = mesh.boundary_label(f);
+    // Apply physics-specific BC based on label (solver responsibility).
 }
 ```
 

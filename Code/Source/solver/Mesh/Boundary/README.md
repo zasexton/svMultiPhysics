@@ -66,13 +66,14 @@ Oriented boundary key that preserves vertex ordering and sign. Used when orienta
 - Computing outward-pointing normals
 - Chain complex with signed incidence matrices
 
+`OrientedBoundaryKey` is currently an auxiliary type; `BoundaryDetector` returns oriented vertex lists directly.
+
 ### `BoundaryComponent`
 Represents a connected component of the boundary. Each component is a maximal connected set of boundary (_n_-1)-faces, where connectivity is defined through shared (_n_-2)-faces.
 
 Features:
 - Face and vertex storage
-- Topological properties (closed, orientable)
-- Geometric properties (area, centroid)
+- Fields to store topological/geometric properties (e.g. `closed`, `orientable`, `area`, `centroid`) that can be populated by other modules (e.g. `Geometry/`, `Validation/`)
 
 ### `BoundaryDetector`
 Main detection engine. Provides:
@@ -256,7 +257,10 @@ The boundary detector maintains **two representations** for each boundary:
 2. **Oriented (right-hand rule)**: Used for geometric computations
    - Vertices in original order from cell definition (from `CellTopology`)
    - Preserves orientation for outward-pointing normals
-   - Stored in `BoundaryIncidence::oriented_vertices` and `BoundaryInfo::oriented_boundary_faces`
+   - Stored in `BoundaryIncidence::oriented_vertices` and `BoundaryInfo::oriented_boundary_entities`
+
+**Entity IDs**:
+- `BoundaryInfo::boundary_entities`, `interior_entities`, and `nonmanifold_entities` store indices into `BoundaryInfo::entity_keys`.
 
 This dual representation ensures:
 - Efficient topological detection (via canonical keys)
