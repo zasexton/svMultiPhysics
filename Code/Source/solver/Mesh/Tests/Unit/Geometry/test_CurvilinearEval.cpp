@@ -381,6 +381,77 @@ TEST(CurvilinearEvalTest, IdentityMapping_QuadraticSerendipity) {
   }
 }
 
+#ifdef MESH_HAS_EIGEN
+TEST(CurvilinearEvalTest, PyramidLagrange_P5_PartitionOfUnityAndInverseMap) {
+  const int p = 5;
+  const CellShape shape = make_shape(CellFamily::Pyramid, p);
+  const auto nodes = vtk_lagrange_nodes(CellFamily::Pyramid, p);
+  ASSERT_EQ(nodes.size(), static_cast<size_t>(shape.expected_vertices()));
+
+  // Distort reference node coordinates slightly to exercise conditioning + inverse_map.
+  std::vector<ParametricPoint> X = nodes;
+  for (auto& pt : X) {
+    const real_t x = pt[0];
+    const real_t y = pt[1];
+    const real_t z = pt[2];
+    pt[0] = x + 0.05 * x * (1.0 - z);
+    pt[1] = y + 0.04 * y * (1.0 - z);
+    pt[2] = z + 0.01 * x * y;
+  }
+
+  const MeshBase mesh = make_identity_mesh(shape, X);
+
+  const ParametricPoint xi = {0.2, -0.1, 0.3};
+  const auto sf = CurvilinearEvaluator::evaluate_shape_functions(shape, nodes.size(), xi);
+  real_t sum = 0.0;
+  for (real_t Ni : sf.N) sum += Ni;
+  EXPECT_NEAR(sum, 1.0, 1e-12);
+
+  const auto fwd = CurvilinearEvaluator::evaluate_geometry(mesh, 0, xi);
+  ASSERT_TRUE(fwd.is_valid);
+  const auto inv = CurvilinearEvaluator::inverse_map(mesh, 0, fwd.coordinates);
+  EXPECT_TRUE(inv.second);
+  EXPECT_NEAR(inv.first[0], xi[0], 1e-9);
+  EXPECT_NEAR(inv.first[1], xi[1], 1e-9);
+  EXPECT_NEAR(inv.first[2], xi[2], 1e-9);
+}
+
+TEST(CurvilinearEvalTest, PyramidLagrange_P5_NodalKronecker) {
+  const int p = 5;
+  const CellShape shape = make_shape(CellFamily::Pyramid, p);
+  const auto nodes = vtk_lagrange_nodes(CellFamily::Pyramid, p);
+  const size_t n = nodes.size();
+  ASSERT_EQ(n, static_cast<size_t>(shape.expected_vertices()));
+
+  for (size_t j = 0; j < n; ++j) {
+    const auto sf = CurvilinearEvaluator::evaluate_shape_functions(shape, n, nodes[j]);
+    ASSERT_EQ(sf.N.size(), n);
+    for (size_t i = 0; i < n; ++i) {
+      const real_t expect = (i == j) ? 1.0 : 0.0;
+      EXPECT_NEAR(sf.N[i], expect, 5e-9) << "i=" << i << " j=" << j;
+    }
+  }
+}
+
+TEST(CurvilinearEvalTest, PyramidLagrange_P7_NodalKroneckerSubset) {
+  const int p = 7;
+  const CellShape shape = make_shape(CellFamily::Pyramid, p);
+  const auto nodes = vtk_lagrange_nodes(CellFamily::Pyramid, p);
+  const size_t n = nodes.size();
+  ASSERT_EQ(n, static_cast<size_t>(shape.expected_vertices()));
+
+  // Check a subset of nodes (corners + a few interior nodes) for Kronecker delta.
+  const std::vector<size_t> sample = {0u, 1u, 2u, 3u, 4u, n / 3u, n / 2u, n - 2u};
+  for (size_t j : sample) {
+    const auto sf = CurvilinearEvaluator::evaluate_shape_functions(shape, n, nodes[j]);
+    ASSERT_EQ(sf.N.size(), n);
+    for (size_t i = 0; i < n; ++i) {
+      const real_t expect = (i == j) ? 1.0 : 0.0;
+      EXPECT_NEAR(sf.N[i], expect, 5e-9) << "i=" << i << " j=" << j;
+    }
+  }
+}
+#endif
+
 } // namespace test
 } // namespace svmp
-
