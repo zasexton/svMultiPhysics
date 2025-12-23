@@ -182,6 +182,121 @@ TEST_F(PolyGeometryTest, MeshGeometryAreaCentroidHelpersUsePoly) {
   EXPECT_TRUE(approx3(c1, c2));
 }
 
+static MeshBase make_concave_L_prism_polyhedron_mesh(bool include_top_face = true) {
+  // An "L-shaped" concave polygon extruded in z: height=1.
+  //
+  // Base polygon (z=0), CCW:
+  //   (0,0) (2,0) (2,1) (1,1) (1,2) (0,2)
+  // Top polygon (z=1): same vertices shifted in z.
+  //
+  // Analytic volume = area*height = 3*1 = 3.
+  // Analytic centroid_xy = centroid(2x2 square minus 1x1 square at top-right):
+  //   (4*(1,1) - 1*(1.5,1.5)) / 3 = (5/6, 5/6).
+  std::vector<real_t> X = {
+      0, 0, 0,  // 0
+      2, 0, 0,  // 1
+      2, 1, 0,  // 2
+      1, 1, 0,  // 3
+      1, 2, 0,  // 4
+      0, 2, 0,  // 5
+      0, 0, 1,  // 6
+      2, 0, 1,  // 7
+      2, 1, 1,  // 8
+      1, 1, 1,  // 9
+      1, 2, 1,  // 10
+      0, 2, 1   // 11
+  };
+
+  std::vector<offset_t> offs = {0, 12};
+  std::vector<index_t> conn = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+  std::vector<CellShape> shapes(1);
+  shapes[0].family = CellFamily::Polyhedron;
+  shapes[0].order = 1;
+  shapes[0].num_corners = 12;
+
+  MeshBase mesh;
+  mesh.build_from_arrays(3, X, offs, conn, shapes);
+
+  const int n_faces = include_top_face ? 8 : 7;
+  std::vector<CellShape> face_shapes;
+  face_shapes.reserve(static_cast<size_t>(n_faces));
+
+  CellShape poly;
+  poly.family = CellFamily::Polygon;
+  poly.order = 1;
+  poly.num_corners = 6;
+  face_shapes.push_back(poly); // bottom
+  if (include_top_face) {
+    face_shapes.push_back(poly); // top
+  }
+
+  CellShape quad;
+  quad.family = CellFamily::Quad;
+  quad.order = 1;
+  quad.num_corners = 4;
+  for (int i = 0; i < 6; ++i) face_shapes.push_back(quad); // sides
+
+  std::vector<offset_t> face_offs;
+  face_offs.reserve(static_cast<size_t>(n_faces + 1));
+  face_offs.push_back(0);
+
+  std::vector<index_t> face_conn;
+
+  // bottom (concave polygon); choose a fan-friendly first vertex (0) for robust triangulation.
+  face_conn.insert(face_conn.end(), {0, 1, 2, 3, 4, 5});
+  face_offs.push_back(static_cast<offset_t>(face_conn.size()));
+
+  if (include_top_face) {
+    // top polygon
+    face_conn.insert(face_conn.end(), {6, 7, 8, 9, 10, 11});
+    face_offs.push_back(static_cast<offset_t>(face_conn.size()));
+  }
+
+  // side quads following base boundary edges
+  const std::array<index_t, 6> b = {0, 1, 2, 3, 4, 5};
+  for (int i = 0; i < 6; ++i) {
+    const int j = (i + 1) % 6;
+    const index_t v0 = b[static_cast<size_t>(i)];
+    const index_t v1 = b[static_cast<size_t>(j)];
+    const index_t w0 = v0 + 6;
+    const index_t w1 = v1 + 6;
+    face_conn.insert(face_conn.end(), {v0, v1, w1, w0});
+    face_offs.push_back(static_cast<offset_t>(face_conn.size()));
+  }
+
+  std::vector<std::array<index_t,2>> face2cell(static_cast<size_t>(n_faces));
+  for (auto& fc : face2cell) fc = {{0, INVALID_INDEX}};
+
+  mesh.set_faces_from_arrays(face_shapes, face_offs, face_conn, face2cell);
+  return mesh;
+}
+
+TEST_F(PolyGeometryTest, PolyhedronMassProperties_ConcaveLPrism) {
+  const MeshBase mesh = make_concave_L_prism_polyhedron_mesh(true);
+
+  const auto props = PolyGeometry::polyhedron_mass_properties(mesh, 0);
+  ASSERT_TRUE(props.is_valid);
+  EXPECT_NEAR(props.volume, 3.0, 1e-12);
+  EXPECT_NEAR(props.centroid[0], 5.0 / 6.0, 1e-12);
+  EXPECT_NEAR(props.centroid[1], 5.0 / 6.0, 1e-12);
+  EXPECT_NEAR(props.centroid[2], 0.5, 1e-12);
+
+  // MeshGeometry should route to the same robust polyhedron method.
+  EXPECT_NEAR(MeshGeometry::cell_measure(mesh, 0), 3.0, 1e-12);
+  const auto c = MeshGeometry::cell_centroid(mesh, 0);
+  EXPECT_NEAR(c[0], 5.0 / 6.0, 1e-12);
+  EXPECT_NEAR(c[1], 5.0 / 6.0, 1e-12);
+  EXPECT_NEAR(c[2], 0.5, 1e-12);
+}
+
+TEST_F(PolyGeometryTest, PolyhedronMassProperties_InvalidOpenSurface) {
+  // Missing top face -> boundary edges appear once, not watertight.
+  const MeshBase mesh = make_concave_L_prism_polyhedron_mesh(false);
+  const auto props = PolyGeometry::polyhedron_mass_properties(mesh, 0);
+  EXPECT_FALSE(props.is_valid);
+  EXPECT_TRUE(approx(props.volume, 0.0));
+}
+
 
 } // namespace test
 } // namespace svmp
