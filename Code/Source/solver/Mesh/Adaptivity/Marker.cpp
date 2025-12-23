@@ -30,7 +30,6 @@
 
 #include "Marker.h"
 #include "../Core/MeshBase.h"
-#include "../Fields/MeshFields.h"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -345,7 +344,7 @@ std::vector<MarkType> RegionAwareMarker::mark(
     }
 
     // Force refinement in specified regions
-    int region_label = mesh.cell_label(i, 0);  // Assuming region label at index 0
+    const int region_label = static_cast<int>(mesh.region_label(static_cast<index_t>(i)));
     if (config_.force_refine_regions.count(region_label) > 0) {
       marks[i] = MarkType::REFINE;
     }
@@ -366,7 +365,7 @@ bool RegionAwareMarker::should_consider_element(
     const MeshBase& mesh,
     size_t elem_id) const {
 
-  int region_label = mesh.cell_label(elem_id, 0);
+  const int region_label = static_cast<int>(mesh.region_label(static_cast<index_t>(elem_id)));
 
   // Check inclusion list
   if (!config_.include_regions.empty()) {
@@ -443,23 +442,27 @@ std::vector<double> GradientMarker::compute_gradients(
   // Compute gradient magnitude for each element
   for (size_t i = 0; i < num_elems; ++i) {
     // Get element neighbors
-    auto neighbors = mesh.cell_neighbors(i);
+    auto neighbors = mesh.cell_neighbors(static_cast<index_t>(i));
 
     if (neighbors.empty()) continue;
 
     double grad_mag = 0.0;
     size_t count = 0;
 
-    for (size_t neighbor : neighbors) {
-      if (neighbor < num_elems) {
-        double diff = indicators[neighbor] - indicators[i];
+    for (index_t neighbor : neighbors) {
+      if (neighbor >= 0 && static_cast<size_t>(neighbor) < num_elems) {
+        const double diff = indicators[static_cast<size_t>(neighbor)] - indicators[i];
         // Approximate distance using element sizes
-        double h = std::pow(mesh.cell_measure(i), 1.0/mesh.spatial_dim());
-        double h_neighbor = std::pow(mesh.cell_measure(neighbor), 1.0/mesh.spatial_dim());
+        const double h = std::pow(mesh.cell_measure(static_cast<index_t>(i)),
+                                  1.0 / static_cast<double>(mesh.dim()));
+        const double h_neighbor = std::pow(mesh.cell_measure(neighbor),
+                                           1.0 / static_cast<double>(mesh.dim()));
         double dist = 0.5 * (h + h_neighbor);
 
-        grad_mag += (diff / dist) * (diff / dist);
-        count++;
+        if (dist > 0.0) {
+          grad_mag += (diff / dist) * (diff / dist);
+          count++;
+        }
       }
     }
 
@@ -714,7 +717,9 @@ void MarkerUtils::apply_constraints(
   // Apply max level constraint
   for (size_t i = 0; i < marks.size(); ++i) {
     if (marks[i] == MarkType::REFINE) {
-      size_t level = mesh.cell_refinement_level(i);
+      // Refinement history/levels are not yet modeled in MeshBase.
+      // Treat all cells as level 0 for now.
+      const size_t level = 0;
       if (level >= options.max_refinement_level) {
         marks[i] = MarkType::NONE;
       }
@@ -723,7 +728,7 @@ void MarkerUtils::apply_constraints(
 
   // Apply element count constraints
   auto stats = count_marks(marks);
-  size_t predicted_count = mesh.num_cells() - stats.num_marked_coarsen +
+  size_t predicted_count = mesh.n_cells() - stats.num_marked_coarsen +
                           stats.num_marked_refine * 4;  // Assuming 1:4 refinement
 
   if (predicted_count > options.max_element_count) {
@@ -754,11 +759,12 @@ void MarkerUtils::smooth_marking(
     std::vector<MarkType> new_marks = marks;
 
     for (size_t i = 0; i < marks.size(); ++i) {
-      auto neighbors = mesh.cell_neighbors(i);
+      auto neighbors = mesh.cell_neighbors(static_cast<index_t>(i));
 
       int refine_neighbors = 0;
-      for (size_t neighbor : neighbors) {
-        if (neighbor < marks.size() && marks[neighbor] == MarkType::REFINE) {
+      for (index_t neighbor : neighbors) {
+        if (neighbor >= 0 && static_cast<size_t>(neighbor) < marks.size()
+            && marks[static_cast<size_t>(neighbor)] == MarkType::REFINE) {
           refine_neighbors++;
         }
       }
@@ -776,20 +782,28 @@ void MarkerUtils::smooth_marking(
 }
 
 void MarkerUtils::write_marks_to_field(
-    MeshFields& fields,
+    MeshBase& mesh,
     const std::string& field_name,
     const std::vector<MarkType>& marks) {
 
-  auto field = fields.create_field(field_name, FieldLocation::CELL, 1);
+  if (!mesh.has_field(EntityKind::Volume, field_name)) {
+    mesh.attach_field(EntityKind::Volume, field_name, FieldScalarType::Float64, 1);
+  }
 
-  for (size_t i = 0; i < marks.size(); ++i) {
+  auto* data = static_cast<double*>(mesh.field_data_by_name(EntityKind::Volume, field_name));
+  if (!data) {
+    throw std::runtime_error("Failed to access marks field storage");
+  }
+
+  const size_t n = std::min(marks.size(), mesh.n_cells());
+  for (size_t i = 0; i < n; ++i) {
     double value = 0.0;
     switch (marks[i]) {
       case MarkType::REFINE: value = 1.0; break;
       case MarkType::COARSEN: value = -1.0; break;
       case MarkType::NONE: value = 0.0; break;
     }
-    field->set_cell_value(i, value);
+    data[i] = value;
   }
 }
 

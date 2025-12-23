@@ -120,9 +120,10 @@ public:
 
     /** Maximum indicator value to consider for coarsening */
     double max_coarsen_indicator = std::numeric_limits<double>::max();
-  };
+	  };
 
-  explicit FixedFractionMarker(const Config& config = {});
+	  FixedFractionMarker() : FixedFractionMarker(Config{}) {}
+	  explicit FixedFractionMarker(const Config& config);
 
   std::vector<MarkType> mark(
       const std::vector<double>& indicators,
@@ -176,9 +177,10 @@ public:
 
     /** Number of standard deviations for coarsening */
     double coarsen_std_dev = -1.0;
-  };
+	  };
 
-  explicit ThresholdMarker(const Config& config = {});
+	  ThresholdMarker() : ThresholdMarker(Config{}) {}
+	  explicit ThresholdMarker(const Config& config);
 
   std::vector<MarkType> mark(
       const std::vector<double>& indicators,
@@ -214,9 +216,10 @@ public:
 
     /** Ensure non-overlapping marks */
     bool exclusive_marking = true;
-  };
+	  };
 
-  explicit FixedCountMarker(const Config& config = {});
+	  FixedCountMarker() : FixedCountMarker(Config{}) {}
+	  explicit FixedCountMarker(const Config& config);
 
   std::vector<MarkType> mark(
       const std::vector<double>& indicators,
@@ -302,9 +305,10 @@ public:
 
     /** Normalize gradients */
     bool normalize_gradients = true;
-  };
+	  };
 
-  explicit GradientMarker(const Config& config = {});
+	  GradientMarker() : GradientMarker(Config{}) {}
+	  explicit GradientMarker(const Config& config);
 
   std::vector<MarkType> mark(
       const std::vector<double>& indicators,
@@ -441,7 +445,7 @@ public:
    * @brief Write marks to field for visualization
    */
   static void write_marks_to_field(
-      MeshFields& fields,
+      MeshBase& mesh,
       const std::string& field_name,
       const std::vector<MarkType>& marks);
 };
