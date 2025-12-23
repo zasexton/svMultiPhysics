@@ -91,6 +91,10 @@ option(MESH_ENABLE_COVERAGE "Enable code coverage analysis (requires gcov/lcov)"
 option(MESH_ENABLE_VALGRIND "Enable memory analysis with valgrind" OFF)
 option(MESH_ENABLE_GTEST "Enable building GTest-based unit tests" ON)
 option(USE_SYSTEM_GTEST "Use system-installed GTest (no fetch)" ON)
+option(MESH_ENABLE_EIGEN "Enable Eigen support (optional)" ON)
+option(USE_SYSTEM_EIGEN "Use system Eigen instead of fetching" ON)
+set(EIGEN_GIT_TAG "3.4.0" CACHE STRING "Eigen Git tag to fetch (when not using system Eigen)")
+option(MESH_ENABLE_ADAPTIVITY "Enable mesh Adaptivity module (h-refinement)" OFF)
 
 # For standalone builds, set up include directories
 if(MESH_STANDALONE_BUILD)
@@ -118,6 +122,9 @@ endif()
 
 # VTK (optional, only needed for VTK I/O)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableVTK.cmake)
+
+# Eigen (optional; used by some geometry/adaptivity features)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableEIGEN.cmake)
 
 #------------------------------------------------------------------------------
 # Coverage support
@@ -203,6 +210,10 @@ set(MESH_TOPOLOGY_SOURCES
     Topology/CellTopology.cpp
     Topology/MeshTopology.h
     Topology/MeshTopology.cpp
+    Topology/FaceEmbedding.h
+    Topology/FaceEmbedding.cpp
+    Topology/NodeOrdering.h
+    Topology/NodeOrdering.cpp
 )
 
 # Geometry
@@ -212,9 +223,21 @@ set(MESH_GEOMETRY_SOURCES
     Geometry/MeshQuality.h
     Geometry/MeshQuality.cpp
     Geometry/MeshOrientation.h
+    Geometry/CurvilinearEval.h
+    Geometry/CurvilinearEval.cpp
+    Geometry/PyramidBasis.h
+    Geometry/PyramidBasis.cpp
+    Geometry/Tessellation.h
+    Geometry/Tessellation.cpp
     Geometry/GeometryConfig.h
+    Geometry/BoundingVolume.h
+    Geometry/BoundingVolume.cpp
+    Geometry/GeometryCache.h
+    Geometry/GeometryCache.cpp
     Geometry/PolyGeometry.h
     Geometry/PolyGeometry.cpp
+    Geometry/PolyhedronTessellation.h
+    Geometry/PolyhedronTessellation.cpp
 )
 
 # Boundary
@@ -230,12 +253,19 @@ set(MESH_FIELDS_SOURCES
     Fields/MeshFields.h
     Fields/MeshFields.cpp
     Fields/MeshFieldDescriptor.h
+    Fields/MeshFieldDescriptor.cpp
 )
 
 # Labels
 set(MESH_LABELS_SOURCES
     Labels/MeshLabels.h
     Labels/MeshLabels.cpp
+)
+
+# Constraints
+set(MESH_CONSTRAINTS_SOURCES
+    Constraints/HangingVertexConstraints.h
+    Constraints/HangingVertexConstraints.cpp
 )
 
 # Search
@@ -282,6 +312,20 @@ set(MESH_OBSERVER_SOURCES
     Observer/EventLogObserver.cpp
 )
 
+# Motion
+set(MESH_MOTION_SOURCES
+    Motion/MotionConfig.h
+    Motion/IMotionBackend.h
+    Motion/MotionState.h
+    Motion/MotionState.cpp
+    Motion/MotionFields.h
+    Motion/MotionFields.cpp
+    Motion/MotionQuality.h
+    Motion/MotionQuality.cpp
+    Motion/MeshMotion.h
+    Motion/MeshMotion.cpp
+)
+
 # I/O (basic, always included)
 set(MESH_IO_SOURCES
     IO/MeshIO.h
@@ -304,6 +348,43 @@ set(MESH_MAIN_SOURCES
     Mesh.h
 )
 
+# Adaptivity (optional)
+set(MESH_ADAPTIVITY_SOURCES
+    Adaptivity/Options.h
+    Adaptivity/RefinementRules.h
+    Adaptivity/RefinementRules.cpp
+    Adaptivity/Conformity.h
+    Adaptivity/Conformity.cpp
+    Adaptivity/Marker.h
+    Adaptivity/Marker.cpp
+    Adaptivity/ErrorEstimator.h
+    Adaptivity/ErrorEstimator.cpp
+    Adaptivity/FieldTransfer.h
+    Adaptivity/FieldTransfer.cpp
+    Adaptivity/QualityGuards.h
+    Adaptivity/QualityGuards.cpp
+    Adaptivity/AdaptivityManager.h
+    Adaptivity/AdaptivityManager.cpp
+    Adaptivity/AdaptivityMetrics.h
+    Adaptivity/AdaptivityMetrics.cpp
+    Adaptivity/CoarseningRules.h
+    Adaptivity/CoarseningRules.cpp
+    Adaptivity/MultiLevelAdaptivity.h
+    Adaptivity/MultiLevelAdaptivity.cpp
+    Adaptivity/HighOrderEmbedding.h
+    Adaptivity/HighOrderEmbedding.cpp
+    Adaptivity/RefinementDelta.h
+    Adaptivity/FEInterface.h
+    Adaptivity/ErrorEstimatorDetail.h
+)
+
+if(MESH_ENABLE_MPI AND MPI_FOUND)
+    list(APPEND MESH_ADAPTIVITY_SOURCES
+        Adaptivity/ParallelAdaptivity.h
+        Adaptivity/ParallelAdaptivity.cpp
+    )
+endif()
+
 # Combine all sources
 set(MESH_ALL_SOURCES
     ${MESH_CORE_SOURCES}
@@ -312,12 +393,18 @@ set(MESH_ALL_SOURCES
     ${MESH_BOUNDARY_SOURCES}
     ${MESH_FIELDS_SOURCES}
     ${MESH_LABELS_SOURCES}
+    ${MESH_CONSTRAINTS_SOURCES}
     ${MESH_SEARCH_SOURCES}
     ${MESH_VALIDATION_SOURCES}
     ${MESH_OBSERVER_SOURCES}
+    ${MESH_MOTION_SOURCES}
     ${MESH_IO_SOURCES}
     ${MESH_MAIN_SOURCES}
 )
+
+if(MESH_ENABLE_ADAPTIVITY)
+    list(APPEND MESH_ALL_SOURCES ${MESH_ADAPTIVITY_SOURCES})
+endif()
 
 #------------------------------------------------------------------------------
 # Build library
@@ -346,6 +433,19 @@ endif()
 
 if(MESH_ENABLE_VTK)
     target_compile_definitions(svmesh PUBLIC MESH_HAS_VTK)
+endif()
+
+if(MESH_ENABLE_EIGEN AND EIGEN_FOUND)
+    target_compile_definitions(svmesh PUBLIC MESH_HAS_EIGEN)
+    if(TARGET Eigen3::Eigen)
+        target_link_libraries(svmesh PUBLIC Eigen3::Eigen)
+    elseif(EIGEN3_INCLUDE_DIR)
+        target_include_directories(svmesh PUBLIC ${EIGEN3_INCLUDE_DIR})
+    endif()
+endif()
+
+if(MESH_ENABLE_ADAPTIVITY)
+    target_compile_definitions(svmesh PUBLIC MESH_HAS_ADAPTIVITY)
 endif()
 
 #------------------------------------------------------------------------------
@@ -613,6 +713,8 @@ message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C++ standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "  MPI support: ${MESH_ENABLE_MPI}")
 message(STATUS "  VTK support: ${MESH_ENABLE_VTK}")
+message(STATUS "  Eigen support: ${MESH_ENABLE_EIGEN}")
+message(STATUS "  Adaptivity: ${MESH_ENABLE_ADAPTIVITY}")
 if(MESH_ENABLE_VTK)
     message(STATUS "    Use system VTK: ${USE_SYSTEM_VTK}")
     if(NOT USE_SYSTEM_VTK)

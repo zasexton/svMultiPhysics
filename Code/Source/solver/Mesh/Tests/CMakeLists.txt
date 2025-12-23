@@ -96,6 +96,13 @@ foreach(src_rel IN LISTS ALL_TEST_SOURCES)
     set(_uses_gtest TRUE)
   endif()
 
+  # Some unit tests depend on shared fixtures implemented in companion .cpp files.
+  # Add these sources automatically based on header usage to avoid link errors.
+  set(_extra_sources)
+  if(_src_contents MATCHES "MeshFieldsFixture\\.h")
+    list(APPEND _extra_sources ${MESH_TEST_ROOT}/Unit/Adaptivity/MeshFieldsFixture.cpp)
+  endif()
+
 
   # Optional: skip IO parity test unless VTK is enabled and found
   if(_category STREQUAL "IO" AND (NOT MESH_ENABLE_VTK OR NOT VTK_FOUND))
@@ -109,7 +116,7 @@ foreach(src_rel IN LISTS ALL_TEST_SOURCES)
     continue()
   endif()
 
-  add_executable(${test_name} ${src_abs})
+  add_executable(${test_name} ${src_abs} ${_extra_sources})
   target_link_libraries(${test_name} PRIVATE svmesh)
   if(_uses_gtest)
     # Only link gtest_main when the test does not provide its own main()
