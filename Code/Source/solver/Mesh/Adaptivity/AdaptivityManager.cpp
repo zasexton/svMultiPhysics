@@ -32,6 +32,7 @@
 #include "Conformity.h"
 #include "FieldTransfer.h"
 #include "QualityGuards.h"
+#include "RefinementDelta.h"
 #include "../Core/MeshBase.h"
 #include <algorithm>
 #include <sstream>
@@ -40,12 +41,14 @@ namespace svmp {
 
 std::string AdaptivityResult::summary() const {
   std::ostringstream ss;
-  ss << "AdaptivityResult{success=" << (success ? "true" : "false")
-     << ", elements=" << initial_element_count << "->" << final_element_count
-     << ", vertices=" << initial_vertex_count << "->" << final_vertex_count
-     << ", refined=" << num_refined << ", coarsened=" << num_coarsened
-     << ", min_quality=" << min_quality << ", avg_quality=" << avg_quality
-     << "}";
+  ss << "Adaptivity Result Summary\n";
+  ss << "  Success: " << (success ? "true" : "false") << "\n";
+  ss << "  Cells: " << initial_cell_count << " -> " << final_cell_count << "\n";
+  ss << "  Vertices: " << initial_vertex_count << " -> " << final_vertex_count << "\n";
+  ss << "  Refined: " << num_refined << "\n";
+  ss << "  Coarsened: " << num_coarsened << "\n";
+  ss << "  Min quality: " << min_quality << "\n";
+  ss << "  Avg quality: " << avg_quality << "\n";
   return ss.str();
 }
 
@@ -72,7 +75,7 @@ AdaptivityManager::~AdaptivityManager() = default;
 
 AdaptivityResult AdaptivityManager::adapt(MeshBase& mesh, MeshFields* fields) {
   AdaptivityResult result;
-  result.initial_element_count = mesh.n_cells();
+  result.initial_cell_count = mesh.n_cells();
   result.initial_vertex_count = mesh.n_vertices();
 
   // Compute error indicators + marks (but do not modify the mesh yet).
@@ -88,12 +91,12 @@ AdaptivityResult AdaptivityManager::adapt(MeshBase& mesh, MeshFields* fields) {
   result.final_error = result.initial_error;
 
   if (options_.check_quality && quality_checker_) {
-    const auto q = quality_checker_->compute_mesh_quality(mesh, options_);
+    const auto q = quality_checker_->compute_mesh_quality(mesh, QualityOptions::from_adaptivity(options_));
     result.min_quality = q.min_quality;
     result.avg_quality = q.avg_quality;
   }
 
-  result.final_element_count = mesh.n_cells();
+  result.final_cell_count = mesh.n_cells();
   result.final_vertex_count = mesh.n_vertices();
   result.success = true;
 
@@ -150,6 +153,10 @@ void AdaptivityManager::set_conformity_enforcer(std::unique_ptr<ConformityEnforc
   conformity_enforcer_ = std::move(enforcer);
 }
 
+void AdaptivityManager::set_fe_interface(std::shared_ptr<AdaptivityFEInterface> fe) {
+  fe_interface_ = std::move(fe);
+}
+
 bool AdaptivityManager::needs_adaptation(const MeshBase& mesh, const MeshFields* fields) const {
   (void)fields;
   if (!error_estimator_) {
@@ -168,14 +175,14 @@ bool AdaptivityManager::needs_adaptation(const MeshBase& mesh, const MeshFields*
 
 AdaptivityResult AdaptivityManager::estimate_adaptation(const MeshBase& mesh, const MeshFields* fields) const {
   AdaptivityResult result;
-  result.initial_element_count = mesh.n_cells();
+  result.initial_cell_count = mesh.n_cells();
   result.initial_vertex_count = mesh.n_vertices();
   if (error_estimator_) {
     const auto indicators = error_estimator_->estimate(mesh, fields, options_);
     result.initial_error = ErrorEstimatorUtils::compute_global_error(indicators, options_.error_norm_power);
     result.final_error = result.initial_error;
   }
-  result.final_element_count = result.initial_element_count;
+  result.final_cell_count = result.initial_cell_count;
   result.final_vertex_count = result.initial_vertex_count;
   result.success = true;
   result.warning_messages.push_back("Estimate-only: refinement/coarsening not yet implemented.");
@@ -310,9 +317,9 @@ AdaptivityResult AdaptivityUtils::uniform_coarsening(MeshBase& mesh, size_t num_
   (void)num_levels;
   (void)fields;
   AdaptivityResult result;
-  result.initial_element_count = mesh.n_cells();
+  result.initial_cell_count = mesh.n_cells();
   result.initial_vertex_count = mesh.n_vertices();
-  result.final_element_count = result.initial_element_count;
+  result.final_cell_count = result.initial_cell_count;
   result.final_vertex_count = result.initial_vertex_count;
   result.success = false;
   result.warning_messages.push_back("Uniform coarsening is not yet implemented.");
@@ -345,7 +352,8 @@ AdaptivityUtils::LevelStats AdaptivityUtils::get_level_stats(const MeshBase& mes
   stats.min_level = 0;
   stats.max_level = 0;
   stats.avg_level = 0.0;
-  stats.element_count_per_level = {mesh.n_cells()};
+  stats.cell_count_per_level = {mesh.n_cells()};
+  stats.element_count_per_level = stats.cell_count_per_level;
   return stats;
 }
 

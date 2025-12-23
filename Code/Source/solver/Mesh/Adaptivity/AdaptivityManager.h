@@ -34,6 +34,7 @@
 #include "Options.h"
 #include "ErrorEstimator.h"
 #include "Marker.h"
+#include "RefinementDelta.h"
 #include <chrono>
 #include <memory>
 #include <string>
@@ -48,6 +49,7 @@ class RefinementRule;
 class FieldTransfer;
 class QualityChecker;
 class ConformityEnforcer;
+class AdaptivityFEInterface;
 
 /**
  * @brief Result of adaptivity operation
@@ -59,17 +61,20 @@ struct AdaptivityResult {
   /** Adapted mesh (if create_new_mesh was true) */
   std::unique_ptr<MeshBase> adapted_mesh;
 
+  /** Optional GID-based delta for the last refinement/coarsening pass */
+  std::unique_ptr<RefinementDelta> refinement_delta;
+
   /** Number of refinement steps performed */
   size_t refinement_steps = 0;
 
   /** Number of coarsening steps performed */
   size_t coarsening_steps = 0;
 
-  /** Number of elements before adaptation */
-  size_t initial_element_count = 0;
+  /** Number of cells before adaptation */
+  size_t initial_cell_count = 0;
 
-  /** Number of elements after adaptation */
-  size_t final_element_count = 0;
+  /** Number of cells after adaptation */
+  size_t final_cell_count = 0;
 
   /** Number of vertices before adaptation */
   size_t initial_vertex_count = 0;
@@ -213,6 +218,11 @@ public:
    */
   void set_conformity_enforcer(std::unique_ptr<ConformityEnforcer> enforcer);
 
+  /**
+   * @brief Set optional FE interface for high-order embedding and solver callbacks.
+   */
+  void set_fe_interface(std::shared_ptr<AdaptivityFEInterface> fe);
+
   // Query methods
 
   /**
@@ -326,6 +336,7 @@ private:
   std::unique_ptr<FieldTransfer> field_transfer_;
   std::unique_ptr<QualityChecker> quality_checker_;
   std::unique_ptr<ConformityEnforcer> conformity_enforcer_;
+  std::shared_ptr<AdaptivityFEInterface> fe_interface_;
 
   // Cached data from last adaptation
   std::vector<double> last_indicators_;
@@ -410,6 +421,7 @@ public:
   struct LevelStats {
     size_t min_level = 0;
     size_t max_level = 0;
+    std::vector<size_t> cell_count_per_level;
     std::vector<size_t> element_count_per_level;
     double avg_level = 0.0;
   };
