@@ -31,7 +31,10 @@
 #ifndef SVMP_FIELD_TRANSFER_H
 #define SVMP_FIELD_TRANSFER_H
 
+#include "Marker.h"
 #include "Options.h"
+#include "RefinementRules.h"
+#include <array>
 #include <map>
 #include <memory>
 #include <string>
@@ -174,7 +177,8 @@ public:
     bool check_quality = false;
   };
 
-  explicit LinearInterpolationTransfer(const Config& config = {});
+  LinearInterpolationTransfer() : LinearInterpolationTransfer(Config{}) {}
+  explicit LinearInterpolationTransfer(const Config& config);
 
   TransferStats transfer(
       const MeshBase& old_mesh,
@@ -246,7 +250,8 @@ public:
     size_t max_conservation_iterations = 10;
   };
 
-  explicit ConservativeTransfer(const Config& config = {});
+  ConservativeTransfer() : ConservativeTransfer(Config{}) {}
+  explicit ConservativeTransfer(const Config& config);
 
   TransferStats transfer(
       const MeshBase& old_mesh,
@@ -327,7 +332,8 @@ public:
     WeightFunction weight_function = WeightFunction::INVERSE_DISTANCE;
   };
 
-  explicit HighOrderTransfer(const Config& config = {});
+  HighOrderTransfer() : HighOrderTransfer(Config{}) {}
+  explicit HighOrderTransfer(const Config& config);
 
   TransferStats transfer(
       const MeshBase& old_mesh,
@@ -420,19 +426,19 @@ public:
    * @brief Create linear interpolation transfer
    */
   static std::unique_ptr<FieldTransfer> create_linear(
-      const LinearInterpolationTransfer::Config& config = {});
+      const LinearInterpolationTransfer::Config& config = LinearInterpolationTransfer::Config{});
 
   /**
    * @brief Create conservative transfer
    */
   static std::unique_ptr<FieldTransfer> create_conservative(
-      const ConservativeTransfer::Config& config = {});
+      const ConservativeTransfer::Config& config = ConservativeTransfer::Config{});
 
   /**
    * @brief Create high-order transfer
    */
   static std::unique_ptr<FieldTransfer> create_high_order(
-      const HighOrderTransfer::Config& config = {});
+      const HighOrderTransfer::Config& config = HighOrderTransfer::Config{});
 
   /**
    * @brief Create injection transfer
