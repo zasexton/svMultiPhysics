@@ -41,7 +41,7 @@
 
 namespace svmp {
 
-#if defined(MESH_BUILD_TESTS) || !defined(MESH_HAS_MPI)
+#if !defined(MESH_HAS_MPI)
 
 // ------------------------
 // Serial stub for DistributedMesh (test-friendly)
@@ -91,44 +91,50 @@ public:
   bool is_shared_vertex(index_t i) const { return get_owner(vertex_owner_, Ownership::Owned, i) == Ownership::Shared; }
   rank_t owner_rank_vertex(index_t i) const { return get_owner_rank(vertex_owner_rank_, i); }
 
-  bool is_owned_face(index_t i) const { return get_owner(face_owner_, Ownership::Owned, i) == Ownership::Owned; }
-  bool is_ghost_face(index_t i) const { return get_owner(face_owner_, Ownership::Owned, i) == Ownership::Ghost; }
-  bool is_shared_face(index_t i) const { return get_owner(face_owner_, Ownership::Owned, i) == Ownership::Shared; }
-  rank_t owner_rank_face(index_t i) const { return get_owner_rank(face_owner_rank_, i); }
+	  bool is_owned_face(index_t i) const { return get_owner(face_owner_, Ownership::Owned, i) == Ownership::Owned; }
+	  bool is_ghost_face(index_t i) const { return get_owner(face_owner_, Ownership::Owned, i) == Ownership::Ghost; }
+	  bool is_shared_face(index_t i) const { return get_owner(face_owner_, Ownership::Owned, i) == Ownership::Shared; }
+	  rank_t owner_rank_face(index_t i) const { return get_owner_rank(face_owner_rank_, i); }
 
-  void set_ownership(index_t id, EntityKind kind, Ownership own, rank_t owner_rank = -1) {
-    switch (kind) {
-      case EntityKind::Volume:
-        ensure_size(cell_owner_, local_mesh_->n_cells());
-        ensure_size(cell_owner_rank_, local_mesh_->n_cells(), 0);
-        cell_owner_[id] = own;
-        cell_owner_rank_[id] = owner_rank >= 0 ? owner_rank : 0;
-        break;
-      case EntityKind::Vertex:
-        ensure_size(vertex_owner_, local_mesh_->n_vertices());
-        ensure_size(vertex_owner_rank_, local_mesh_->n_vertices(), 0);
-        vertex_owner_[id] = own;
-        vertex_owner_rank_[id] = owner_rank >= 0 ? owner_rank : 0;
-        break;
-      case EntityKind::Face:
-        ensure_size(face_owner_, local_mesh_->n_faces());
-        ensure_size(face_owner_rank_, local_mesh_->n_faces(), 0);
-        face_owner_[id] = own;
-        face_owner_rank_[id] = owner_rank >= 0 ? owner_rank : 0;
-        break;
-      case EntityKind::Edge:
-        break;
-    }
-  }
+	  void set_ownership(index_t id, EntityKind kind, Ownership own, rank_t owner_rank = -1) {
+	    auto& mesh = local_mesh();
+	    switch (kind) {
+	      case EntityKind::Volume:
+	        ensure_size(cell_owner_, mesh.n_cells());
+	        ensure_size(cell_owner_rank_, mesh.n_cells(), 0);
+	        cell_owner_[id] = own;
+	        cell_owner_rank_[id] = owner_rank >= 0 ? owner_rank : 0;
+	        break;
+	      case EntityKind::Vertex:
+	        ensure_size(vertex_owner_, mesh.n_vertices());
+	        ensure_size(vertex_owner_rank_, mesh.n_vertices(), 0);
+	        vertex_owner_[id] = own;
+	        vertex_owner_rank_[id] = owner_rank >= 0 ? owner_rank : 0;
+	        break;
+	      case EntityKind::Face:
+	        ensure_size(face_owner_, mesh.n_faces());
+	        ensure_size(face_owner_rank_, mesh.n_faces(), 0);
+	        face_owner_[id] = own;
+	        face_owner_rank_[id] = owner_rank >= 0 ? owner_rank : 0;
+	        break;
+	      case EntityKind::Edge:
+	        break;
+	    }
+	    mesh.event_bus().notify(MeshEvent::PartitionChanged);
+	  }
 
-  // Ghosts (no-op in serial stub)
-  void build_ghost_layer(int) {}
-  void clear_ghosts() {}
-  void update_ghosts(const std::vector<FieldHandle>&) {}
+	  // Ghosts (no-op in serial stub)
+	  void build_ghost_layer(int) { local_mesh().event_bus().notify(MeshEvent::PartitionChanged); }
+	  void clear_ghosts() { local_mesh().event_bus().notify(MeshEvent::PartitionChanged); }
+	  void update_ghosts(const std::vector<FieldHandle>&) { local_mesh().event_bus().notify(MeshEvent::FieldsChanged); }
+	  void update_exchange_ghost_fields() { local_mesh().event_bus().notify(MeshEvent::FieldsChanged); }
+	  void update_exchange_ghost_coordinates(Configuration = Configuration::Current) {}
 
-  // Migration & balancing (no-op)
-  void migrate(const std::vector<rank_t>&) {}
-  void rebalance(PartitionHint, const std::unordered_map<std::string,std::string>& = {}) {}
+	  // Migration & balancing (no-op)
+	  void migrate(const std::vector<rank_t>&) { local_mesh().event_bus().notify(MeshEvent::PartitionChanged); }
+	  void rebalance(PartitionHint, const std::unordered_map<std::string,std::string>& = {}) {
+	    local_mesh().event_bus().notify(MeshEvent::PartitionChanged);
+	  }
 
   // Partition metrics (single-rank computation)
   struct PartitionMetrics {
@@ -147,33 +153,33 @@ public:
     size_t migration_volume{0};
   };
 
-  PartitionMetrics compute_partition_quality() const {
-    PartitionMetrics m;
-    size_t cells = local_mesh_->n_cells();
-    m.min_cells_per_rank = m.max_cells_per_rank = m.avg_cells_per_rank = cells;
-    return m;
-  }
+	  PartitionMetrics compute_partition_quality() const {
+	    PartitionMetrics m;
+	    size_t cells = local_mesh().n_cells();
+	    m.min_cells_per_rank = m.max_cells_per_rank = m.avg_cells_per_rank = cells;
+	    return m;
+	  }
 
   // Parallel I/O stubs
-  template <typename CommT>
-  static DistributedMesh load_parallel(const MeshIOOptions& opts, CommT) {
-    DistributedMesh dm;
-    dm.local_mesh() = MeshBase::load(opts);
-    return dm;
-  }
-  void save_parallel(const MeshIOOptions& opts) const { local_mesh_->save(opts); }
+	  template <typename CommT>
+	  static DistributedMesh load_parallel(const MeshIOOptions& opts, CommT) {
+	    DistributedMesh dm;
+	    dm.local_mesh() = MeshBase::load(opts);
+	    return dm;
+	  }
+	  void save_parallel(const MeshIOOptions& opts) const { local_mesh().save(opts); }
 
-  // Global reductions (single rank)
-  size_t global_n_vertices() const { return local_mesh_->n_vertices(); }
-  size_t global_n_cells() const { return local_mesh_->n_cells(); }
-  size_t global_n_faces() const { return local_mesh_->n_faces(); }
-  BoundingBox global_bounding_box() const { return local_mesh_->bounding_box(); }
+	  // Global reductions (single rank)
+	  size_t global_n_vertices() const { return local_mesh().n_vertices(); }
+	  size_t global_n_cells() const { return local_mesh().n_cells(); }
+	  size_t global_n_faces() const { return local_mesh().n_faces(); }
+	  BoundingBox global_bounding_box() const { return local_mesh().bounding_box(); }
 
-  // Distributed search (serial)
-  PointLocateResult locate_point_global(const std::array<real_t,3>& x,
-                                        Configuration cfg = Configuration::Reference) const {
-    return local_mesh_->locate_point(x, cfg);
-  }
+	  // Distributed search (serial)
+	  PointLocateResult locate_point_global(const std::array<real_t,3>& x,
+	                                        Configuration cfg = Configuration::Reference) const {
+	    return local_mesh().locate_point(x, cfg);
+	  }
 
   // Exchange patterns
   struct ExchangePattern {
@@ -257,6 +263,8 @@ public:
   void build_ghost_layer(int levels);
   void clear_ghosts();
   void update_ghosts(const std::vector<FieldHandle>& fields);
+  void update_exchange_ghost_fields();
+  void update_exchange_ghost_coordinates(Configuration cfg = Configuration::Current);
 
   // ---- Migration & load balancing
   void migrate(const std::vector<rank_t>& new_owner_rank_per_cell);

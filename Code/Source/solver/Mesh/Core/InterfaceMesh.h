@@ -33,9 +33,15 @@
 
 #include "MeshBase.h"
 #include "../Geometry/MeshOrientation.h"
+#include "../Topology/CellTopology.h"
 #include <memory>
 #include <string>
 #include <vector>
+#include <array>
+#include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
+#include <stdexcept>
 
 namespace svmp {
 
@@ -111,11 +117,8 @@ public:
   // Get outward normal at face center (requires volume mesh for geometry)
   std::array<real_t,3> face_normal(index_t local_face_id, const MeshBase& volume_mesh,
                                    Configuration cfg = Configuration::Reference) const {
-    index_t vol_cell = volume_cell(local_face_id);
-    int local_f = local_face_in_cell(local_face_id);
-    // Compute normal from volume mesh geometry
-    // (simplified; production would use face vertices and orientation)
-    return volume_mesh.face_normal(volume_mesh.boundary_faces()[local_f], cfg);
+    const index_t vol_face = trace_face_to_volume_face_.at(static_cast<size_t>(local_face_id));
+    return volume_mesh.face_normal(vol_face, cfg);
   }
 
   // ---- Geometry (requires volume mesh)
@@ -127,11 +130,10 @@ public:
 
     std::array<real_t,3> center = {0, 0, 0};
     for (size_t i = 0; i < n_vertices; ++i) {
-      index_t vertex_id = vertices_ptr[i];
-      // Need to map trace vertex to volume vertex via GID
-      // (simplified; production would maintain trace_vertex_to_volume_vertex map)
+      const index_t trace_v = vertices_ptr[i];
+      const index_t vol_v = trace_vertex_to_volume_vertex_.at(static_cast<size_t>(trace_v));
       for (int d = 0; d < spatial_dim_; ++d) {
-        center[d] += coords[vertex_id * spatial_dim_ + d];
+        center[d] += coords[vol_v * spatial_dim_ + d];
       }
     }
     for (int d = 0; d < spatial_dim_; ++d) {
@@ -142,29 +144,75 @@ public:
 
   real_t face_area(index_t local_face_id, const MeshBase& volume_mesh,
                    Configuration cfg = Configuration::Reference) const {
-    index_t vol_cell = volume_cell(local_face_id);
-    int local_f = local_face_in_cell(local_face_id);
-    // Use volume mesh face area computation
-    // (simplified; production would access via face GID)
-    const auto& boundary_faces = volume_mesh.boundary_faces();
-    if (local_f >= 0 && local_f < static_cast<int>(boundary_faces.size())) {
-      return volume_mesh.face_area(boundary_faces[local_f], cfg);
-    }
-    return 0.0;
+    const index_t vol_face = trace_face_to_volume_face_.at(static_cast<size_t>(local_face_id));
+    return volume_mesh.face_area(vol_face, cfg);
   }
 
   // ---- Field attachments (interface fields)
   // Interface-specific fields (e.g., wall shear stress, heat flux, contact pressure)
-  MeshBase::FieldHandle attach_field(const std::string& name, FieldScalarType type,
-                                     size_t components, size_t custom_bytes = 0) {
-    // Store field data locally (simplified version)
-    // Production would use a full field attachment system
-    MeshBase::FieldHandle h;
-    h.id = next_field_id_++;
-    h.kind = EntityKind::Face;
-    h.name = name;
-    // TODO: allocate storage
-    return h;
+  FieldHandle attach_field(const std::string& name, FieldScalarType type,
+                           size_t components, size_t custom_bytes = 0) {
+    auto existing = fields_by_name_.find(name);
+    if (existing != fields_by_name_.end()) {
+      return existing->second.handle;
+    }
+
+    const size_t bpc = (type == FieldScalarType::Custom) ? custom_bytes : bytes_per(type);
+    if (bpc == 0) {
+      throw std::runtime_error("InterfaceMesh::attach_field: invalid bytes per component for '" + name + "'");
+    }
+
+    FieldInfo info;
+    info.handle.id = next_field_id_++;
+    info.handle.kind = EntityKind::Face;
+    info.handle.name = name;
+    info.type = type;
+    info.components = components;
+    info.bytes_per_component = bpc;
+    info.data.assign(n_faces() * components * bpc, uint8_t{0});
+
+    fields_by_name_[name] = info;
+    fields_by_id_[info.handle.id] = name;
+    return info.handle;
+  }
+
+  bool has_field(const std::string& name) const {
+    return fields_by_name_.find(name) != fields_by_name_.end();
+  }
+
+  FieldHandle get_field_handle(const std::string& name) const {
+    auto it = fields_by_name_.find(name);
+    if (it == fields_by_name_.end()) return {};
+    return it->second.handle;
+  }
+
+  void* field_data(const FieldHandle& h) {
+    auto it_name = fields_by_id_.find(h.id);
+    if (it_name == fields_by_id_.end()) return nullptr;
+    auto it = fields_by_name_.find(it_name->second);
+    if (it == fields_by_name_.end()) return nullptr;
+    return it->second.data.data();
+  }
+
+  const void* field_data(const FieldHandle& h) const {
+    auto it_name = fields_by_id_.find(h.id);
+    if (it_name == fields_by_id_.end()) return nullptr;
+    auto it = fields_by_name_.find(it_name->second);
+    if (it == fields_by_name_.end()) return nullptr;
+    return it->second.data.data();
+  }
+
+  size_t field_bytes_per_entity(const FieldHandle& h) const {
+    auto it_name = fields_by_id_.find(h.id);
+    if (it_name == fields_by_id_.end()) return 0;
+    auto it = fields_by_name_.find(it_name->second);
+    if (it == fields_by_name_.end()) return 0;
+    return it->second.components * it->second.bytes_per_component;
+  }
+
+  template <typename T>
+  T* field_data_as(const FieldHandle& h) {
+    return reinterpret_cast<T*>(field_data(h));
   }
 
   // ---- Label/set system for interface regions
@@ -187,6 +235,14 @@ public:
   const std::string& parent_face_set() const { return parent_face_set_; }
 
 private:
+  struct FieldInfo {
+    FieldHandle handle;
+    FieldScalarType type{};
+    size_t components = 0;
+    size_t bytes_per_component = 0;
+    std::vector<uint8_t> data;
+  };
+
   // Metadata
   std::string name_;
   std::string parent_face_set_;
@@ -199,8 +255,10 @@ private:
   std::vector<index_t> trace_face2vertex_;   // CSR connectivity (trace-local vertex IDs)
 
   // Incidence to volume mesh
+  std::vector<index_t> trace_face_to_volume_face_; // volume-mesh face id for each trace face
   std::vector<index_t> trace_face2vol_cell_;  // parent volume cell for each trace face
   std::vector<int> trace_face_local_id_;      // local face index within parent cell
+  std::vector<index_t> trace_vertex_to_volume_vertex_; // volume-mesh vertex id for each trace vertex
 
   // Orientation
   std::vector<perm_code_t> trace_face_orientation_; // permutation code for each face
@@ -210,6 +268,8 @@ private:
 
   // Field management
   uint32_t next_field_id_ = 1;
+  std::unordered_map<std::string, FieldInfo> fields_by_name_;
+  std::unordered_map<uint32_t, std::string> fields_by_id_;
 
   // Builder helper
   friend InterfaceMesh build_interface_impl(const MeshBase&, const std::vector<index_t>&, bool);
@@ -226,8 +286,43 @@ inline InterfaceMesh build_interface_impl(
   InterfaceMesh interface;
   interface.spatial_dim_ = volume_mesh.dim();
   interface.trace_face_gid_.reserve(face_indices.size());
+  interface.trace_face_to_volume_face_.reserve(face_indices.size());
   interface.trace_face2vol_cell_.reserve(face_indices.size());
   interface.trace_face_local_id_.reserve(face_indices.size());
+
+  auto compute_local_face_in_cell = [&volume_mesh](index_t cell_id, index_t face_id) -> int {
+    if (cell_id < 0) return -1;
+
+    CellTopology::FaceListView view{};
+    try {
+      view = CellTopology::get_boundary_faces_canonical_view(volume_mesh.cell_shape(cell_id).family);
+    } catch (...) {
+      return -1;
+    }
+
+    auto [face_verts_ptr, n_face_verts] = volume_mesh.face_vertices_span(face_id);
+    std::vector<index_t> face_verts(face_verts_ptr, face_verts_ptr + n_face_verts);
+    std::sort(face_verts.begin(), face_verts.end());
+
+    auto [cell_verts_ptr, n_cell_verts] = volume_mesh.cell_vertices_span(cell_id);
+    (void)n_cell_verts;
+
+    for (int lf = 0; lf < view.face_count; ++lf) {
+      const int start = view.offsets[lf];
+      const int end = view.offsets[lf + 1];
+      std::vector<index_t> cand;
+      cand.reserve(static_cast<size_t>(end - start));
+      for (int i = start; i < end; ++i) {
+        cand.push_back(cell_verts_ptr[view.indices[i]]);
+      }
+      std::sort(cand.begin(), cand.end());
+      if (cand == face_verts) {
+        return lf;
+      }
+    }
+
+    return -1;
+  };
 
   // Collect unique vertices
   std::unordered_set<index_t> vertex_set;
@@ -245,6 +340,7 @@ inline InterfaceMesh build_interface_impl(
   std::unordered_map<index_t, index_t> vol_to_trace_vertex;
   for (size_t i = 0; i < trace_vertices.size(); ++i) {
     vol_to_trace_vertex[trace_vertices[i]] = static_cast<index_t>(i);
+    interface.trace_vertex_to_volume_vertex_.push_back(trace_vertices[i]);
     // Set vertex GID (if available)
     const auto& vertex_gids_alias = volume_mesh.vertex_gids();
     if (!vertex_gids_alias.empty() && trace_vertices[i] < static_cast<index_t>(vertex_gids_alias.size())) {
@@ -257,6 +353,8 @@ inline InterfaceMesh build_interface_impl(
   // Build face topology
   interface.trace_face2vertex_offsets_.push_back(0);
   for (index_t face_id : face_indices) {
+    interface.trace_face_to_volume_face_.push_back(face_id);
+
     // Set face GID
     const auto& face_gids = volume_mesh.face_gids();
     if (!face_gids.empty() && face_id < static_cast<index_t>(face_gids.size())) {
@@ -274,14 +372,27 @@ inline InterfaceMesh build_interface_impl(
 
     // Store incidence to volume mesh
     const auto& face_cells = volume_mesh.face_cells(face_id);
-    interface.trace_face2vol_cell_.push_back(face_cells[0]); // inner cell
-    interface.trace_face_local_id_.push_back(-1); // TODO: compute local face index
+    index_t parent_cell = INVALID_INDEX;
+    if (face_cells[0] != INVALID_INDEX) parent_cell = face_cells[0];
+    else if (face_cells[1] != INVALID_INDEX) parent_cell = face_cells[1];
+    interface.trace_face2vol_cell_.push_back(parent_cell);
+    interface.trace_face_local_id_.push_back(compute_local_face_in_cell(parent_cell, face_id));
   }
 
   // Compute orientation if requested
   if (compute_orientation) {
-    interface.trace_face_orientation_.resize(face_indices.size(), 0);
-    // TODO: implement orientation computation using OrientationManager
+    interface.trace_face_orientation_.assign(face_indices.size(), -1);
+
+    OrientationManager orient(volume_mesh);
+    orient.build();
+
+    for (size_t i = 0; i < face_indices.size(); ++i) {
+      const index_t cell = interface.trace_face2vol_cell_[i];
+      const int lf = interface.trace_face_local_id_[i];
+      if (cell >= 0 && lf >= 0) {
+        interface.trace_face_orientation_[i] = orient.face_orientation(cell, lf);
+      }
+    }
   }
 
   return interface;

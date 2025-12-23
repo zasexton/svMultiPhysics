@@ -39,17 +39,16 @@
 #include <iostream>
 #include <cstring>
 
-#if !(defined(MESH_HAS_MPI) && !defined(MESH_BUILD_TESTS))
-// When MPI is not enabled, or when building tests where DistributedMesh is
-// aliased to MeshBase, do not compile the real DistributedMesh implementation.
+#ifndef MESH_HAS_MPI
+// When MPI is not enabled, do not compile the real DistributedMesh implementation.
 // Provide an empty translation unit to satisfy build systems.
-
 namespace svmp { }
-
 #else
 #include <fstream>
 #include <iomanip>
 #include <cmath>
+
+#include "../Fields/MeshFields.h"
 
 #ifdef MESH_HAS_METIS
 // METIS graph partitioning library
@@ -565,87 +564,827 @@ void DistributedMesh::set_ownership(index_t entity_id, EntityKind kind,
         default:
             break;
     }
+    if (local_mesh_) {
+        local_mesh_->event_bus().notify(MeshEvent::PartitionChanged);
+    }
 }
 
 // ==========================================
 // Ghost Layer Construction
 // ==========================================
 
+#ifdef MESH_HAS_MPI
+namespace {
+
+struct FaceKey {
+    int8_t n = 0;
+    std::array<gid_t,4> v{{INVALID_GID, INVALID_GID, INVALID_GID, INVALID_GID}};
+};
+
+struct FaceKeyHash {
+    size_t operator()(const FaceKey& k) const noexcept {
+        uint64_t h = 0xcbf29ce484222325ULL;
+        auto mix = [&h](uint64_t x) {
+            h ^= x + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        };
+        mix(static_cast<uint64_t>(k.n));
+        for (int i = 0; i < k.n; ++i) {
+            mix(static_cast<uint64_t>(k.v[static_cast<size_t>(i)]));
+        }
+        return static_cast<size_t>(h);
+    }
+};
+
+struct FaceKeyEq {
+    bool operator()(const FaceKey& a, const FaceKey& b) const noexcept {
+        if (a.n != b.n) return false;
+        for (int i = 0; i < a.n; ++i) {
+            if (a.v[static_cast<size_t>(i)] != b.v[static_cast<size_t>(i)]) return false;
+        }
+        return true;
+    }
+};
+
+struct BoundaryFaceRecord {
+    FaceKey key;
+    gid_t adjacent_cell_gid = INVALID_GID;
+    rank_t src_rank = -1;
+};
+
+struct FaceMatchRecord {
+    rank_t neighbor_rank = -1;
+    gid_t neighbor_cell_gid = INVALID_GID;
+};
+
+struct FaceAdjQuery {
+    FaceKey key;
+    gid_t adjacent_cell_gid = INVALID_GID;
+};
+
+struct FaceAdjReply {
+    gid_t neighbor_cell_gid = INVALID_GID;
+    rank_t neighbor_owner_rank = -1;
+};
+
+inline FaceKey make_face_key(const MeshBase& mesh, index_t face_id) {
+    FaceKey key;
+    auto [verts, n] = mesh.face_vertices_span(face_id);
+    if (n <= 0 || n > 4) return key;
+    key.n = static_cast<int8_t>(n);
+    const auto& vg = mesh.vertex_gids();
+    for (size_t i = 0; i < n; ++i) {
+        key.v[i] = vg[static_cast<size_t>(verts[i])];
+    }
+    std::sort(key.v.begin(), key.v.begin() + n);
+    return key;
+}
+
+// Extract a submesh containing a set of cells specified by global IDs.
+inline MeshBase extract_cells_by_gid(const MeshBase& mesh, const std::vector<gid_t>& cell_gids) {
+    MeshBase submesh;
+    const int dim = mesh.dim();
+
+    std::unordered_map<gid_t, index_t> gid_to_local_vertex;
+    gid_to_local_vertex.reserve(cell_gids.size() * 8);
+
+    std::vector<gid_t> new_vertex_gids;
+    std::vector<real_t> new_coords;
+    std::vector<gid_t> new_cell_gids;
+    std::vector<CellShape> new_cell_shapes;
+    std::vector<offset_t> new_offsets{0};
+    std::vector<index_t> new_conn;
+
+    const auto& X = mesh.X_ref();
+    const auto& vg = mesh.vertex_gids();
+
+    for (gid_t cg : cell_gids) {
+        const index_t c = mesh.global_to_local_cell(cg);
+        if (c == INVALID_INDEX) continue;
+
+        new_cell_gids.push_back(cg);
+        new_cell_shapes.push_back(mesh.cell_shape(c));
+
+        auto [cverts, nverts] = mesh.cell_vertices_span(c);
+        for (size_t i = 0; i < nverts; ++i) {
+            const index_t v = cverts[i];
+            const gid_t gid = vg[static_cast<size_t>(v)];
+            auto it = gid_to_local_vertex.find(gid);
+            if (it == gid_to_local_vertex.end()) {
+                const index_t new_id = static_cast<index_t>(new_vertex_gids.size());
+                gid_to_local_vertex[gid] = new_id;
+                new_vertex_gids.push_back(gid);
+                for (int d = 0; d < dim; ++d) {
+                    new_coords.push_back(X[static_cast<size_t>(v) * dim + d]);
+                }
+            }
+            new_conn.push_back(gid_to_local_vertex[gid]);
+        }
+        new_offsets.push_back(static_cast<offset_t>(new_conn.size()));
+    }
+
+    // Empty packet: return a default-constructed mesh (caller decides how to handle).
+    if (new_cell_gids.empty()) {
+        return submesh;
+    }
+
+    submesh.build_from_arrays(dim, new_coords, new_offsets, new_conn, new_cell_shapes);
+    submesh.set_vertex_gids(std::move(new_vertex_gids));
+    submesh.set_cell_gids(std::move(new_cell_gids));
+    submesh.finalize();
+    return submesh;
+}
+
+} // namespace
+#endif // MESH_HAS_MPI
+
 void DistributedMesh::build_ghost_layer(int levels) {
 #ifdef MESH_HAS_MPI
-    if (world_size_ == 1) {
-        return;  // No ghosts needed for serial run
+    if (world_size_ == 1) return;
+    if (levels <= 0) {
+        clear_ghosts();
+        return;
     }
+
+    // Always start from a clean (no-ghost) state.
+    if (ghost_levels_ > 0 || !ghost_cells_.empty() || !ghost_vertices_.empty()) {
+        clear_ghosts();
+    }
+
+    // Ensure ownership arrays exist for the base partition (owned/shared).
+    gather_shared_entities();
 
     ghost_levels_ = levels;
 
-    // Clear existing ghosts
-    clear_ghosts();
+    auto rebuild_with_ghost_meshes = [&](const std::vector<std::pair<rank_t, MeshBase>>& incoming) -> std::vector<gid_t> {
+        const size_t old_n_vertices = local_mesh_->n_vertices();
+        const size_t old_n_cells = local_mesh_->n_cells();
+        const auto old_cell_regions = local_mesh_->cell_region_ids();
 
-    // Build vertex-to-cell adjacency if not already cached
-    local_mesh_->build_vertex2cell();
+        const auto old_vertex_owner = vertex_owner_;
+        const auto old_vertex_owner_rank = vertex_owner_rank_;
+        const auto old_cell_owner = cell_owner_;
+        const auto old_cell_owner_rank = cell_owner_rank_;
 
-    // Step 1: Identify boundary vertices (on inter-processor boundaries)
-    std::set<index_t> boundary_vertices;
-    for (index_t n = 0; n < static_cast<index_t>(vertex_owner_.size()); ++n) {
-        if (vertex_owner_[n] == Ownership::Shared) {
-            boundary_vertices.insert(n);
-        }
-    }
+        // Preserve vertex and cell fields (face/edge fields are not preserved currently).
+        struct FieldSnapshot {
+            std::string name;
+            EntityKind kind;
+            FieldScalarType type;
+            size_t components;
+            size_t bytes_per_component;
+            bool has_descriptor = false;
+            FieldDescriptor descriptor;
+            std::vector<uint8_t> data;
+        };
 
-    // Step 2: For each level, find cells adjacent to boundary
-    std::set<index_t> ghost_cells_set;
-    std::set<index_t> current_front = boundary_vertices;
+        std::vector<FieldSnapshot> saved_fields;
 
-    for (int level = 0; level < levels; ++level) {
-        std::set<index_t> next_front;
+        auto snapshot_fields = [&](EntityKind kind, size_t n_entities) {
+            for (const auto& fname : local_mesh_->field_names(kind)) {
+                FieldSnapshot snap;
+                snap.name = fname;
+                snap.kind = kind;
+                snap.type = local_mesh_->field_type_by_name(kind, fname);
+                snap.components = local_mesh_->field_components_by_name(kind, fname);
+                snap.bytes_per_component = local_mesh_->field_bytes_per_component_by_name(kind, fname);
 
-        // Find cells touching current front vertices
-        for (index_t n : current_front) {
-            auto cells = local_mesh_->vertex_cells(n);
-            for (index_t c : cells) {
-                if (!is_owned_cell(c) && ghost_cells_set.find(c) == ghost_cells_set.end()) {
-                    ghost_cells_set.insert(c);
-
-                    // Add vertices of this cell to next front
-                    auto [vertices, n_vertices] = local_mesh_->cell_vertices_span(c);
-                    for (size_t i = 0; i < n_vertices; ++i) {
-                        if (boundary_vertices.find(vertices[i]) == boundary_vertices.end()) {
-                            next_front.insert(vertices[i]);
-                        }
+                const auto hnd = local_mesh_->field_handle(kind, fname);
+                if (hnd.id != 0) {
+                    if (const auto* desc = local_mesh_->field_descriptor(hnd)) {
+                        snap.has_descriptor = true;
+                        snap.descriptor = *desc;
                     }
+                }
+
+                const uint8_t* src = static_cast<const uint8_t*>(local_mesh_->field_data_by_name(kind, fname));
+                if (!src) continue;
+
+                const size_t bpe = snap.components * snap.bytes_per_component;
+                snap.data.assign(src, src + n_entities * bpe);
+                saved_fields.push_back(std::move(snap));
+            }
+        };
+
+        snapshot_fields(EntityKind::Vertex, old_n_vertices);
+        snapshot_fields(EntityKind::Volume, old_n_cells);
+
+        // Start with current mesh arrays.
+        std::vector<real_t> new_coords = local_mesh_->X_ref();
+        std::vector<gid_t> new_vertex_gids = local_mesh_->vertex_gids();
+
+        std::unordered_map<gid_t, index_t> gid_to_new_vertex;
+        gid_to_new_vertex.reserve(new_vertex_gids.size() + 1024);
+        for (index_t v = 0; v < static_cast<index_t>(new_vertex_gids.size()); ++v) {
+            gid_to_new_vertex[new_vertex_gids[static_cast<size_t>(v)]] = v;
+        }
+
+        // Track owner ranks for newly created vertices (best-effort).
+        std::unordered_map<gid_t, rank_t> new_vertex_owner;
+
+        // Add new vertices from incoming meshes.
+        for (const auto& [owner_rank, m] : incoming) {
+            const auto& vg = m.vertex_gids();
+            const auto& X = m.X_ref();
+            const int dim = m.dim();
+
+            for (index_t v = 0; v < static_cast<index_t>(vg.size()); ++v) {
+                const gid_t gid = vg[static_cast<size_t>(v)];
+                if (gid_to_new_vertex.find(gid) != gid_to_new_vertex.end()) continue;
+                const index_t new_id = static_cast<index_t>(new_vertex_gids.size());
+                gid_to_new_vertex[gid] = new_id;
+                new_vertex_gids.push_back(gid);
+                for (int d = 0; d < dim; ++d) {
+                    new_coords.push_back(X[static_cast<size_t>(v) * dim + d]);
+                }
+                new_vertex_owner[gid] = owner_rank;
+            }
+        }
+
+        std::vector<CellShape> new_cell_shapes = local_mesh_->cell_shapes();
+        std::vector<offset_t> new_offsets = local_mesh_->cell2vertex_offsets();
+        std::vector<index_t> new_conn = local_mesh_->cell2vertex();
+        std::vector<gid_t> new_cell_gids = local_mesh_->cell_gids();
+
+        std::unordered_set<gid_t> present_cells;
+        present_cells.reserve(new_cell_gids.size() + 1024);
+        for (gid_t gid : new_cell_gids) present_cells.insert(gid);
+
+        std::vector<std::pair<gid_t, rank_t>> appended_cells; // (cell_gid, owner_rank)
+
+        // Append incoming ghost cells.
+        for (const auto& [owner_rank, m] : incoming) {
+            const auto& cell_gids = m.cell_gids();
+            const auto& vg = m.vertex_gids();
+
+            for (index_t c = 0; c < static_cast<index_t>(cell_gids.size()); ++c) {
+                const gid_t cg = cell_gids[static_cast<size_t>(c)];
+                if (!present_cells.insert(cg).second) continue;
+
+                appended_cells.emplace_back(cg, owner_rank);
+
+                new_cell_gids.push_back(cg);
+                new_cell_shapes.push_back(m.cell_shape(c));
+
+                auto [cverts, nverts] = m.cell_vertices_span(c);
+                for (size_t i = 0; i < nverts; ++i) {
+                    const gid_t vgid = vg[static_cast<size_t>(cverts[i])];
+                    new_conn.push_back(gid_to_new_vertex.at(vgid));
+                }
+                new_offsets.push_back(static_cast<offset_t>(new_conn.size()));
+            }
+        }
+
+        // Rebuild mesh (this clears fields, so restore after).
+        const int dim = local_mesh_->dim();
+        local_mesh_->clear();
+        local_mesh_->build_from_arrays(dim, new_coords, new_offsets, new_conn, new_cell_shapes);
+        local_mesh_->set_vertex_gids(std::move(new_vertex_gids));
+        local_mesh_->set_cell_gids(std::move(new_cell_gids));
+        local_mesh_->finalize();
+
+        // Preserve region labels for existing (non-ghost) cells.
+        if (!old_cell_regions.empty()) {
+            const index_t n_keep = static_cast<index_t>(std::min(old_n_cells, local_mesh_->n_cells()));
+            for (index_t c = 0; c < n_keep; ++c) {
+                local_mesh_->set_region_label(c, old_cell_regions[static_cast<size_t>(c)]);
+            }
+        }
+
+        // Restore fields (vertex and cell only).
+        for (const auto& snap : saved_fields) {
+            const size_t n_entities = (snap.kind == EntityKind::Vertex) ? old_n_vertices : old_n_cells;
+            const size_t bpe = snap.components * snap.bytes_per_component;
+            auto h = local_mesh_->attach_field(snap.kind, snap.name, snap.type, snap.components, snap.bytes_per_component);
+            uint8_t* dst = static_cast<uint8_t*>(local_mesh_->field_data(h));
+            if (!dst) continue;
+            std::memcpy(dst, snap.data.data(), snap.data.size());
+            std::memset(dst + snap.data.size(), 0, (local_mesh_->field_entity_count(h) - n_entities) * bpe);
+            if (snap.has_descriptor) {
+                local_mesh_->set_field_descriptor(h, snap.descriptor);
+            }
+        }
+
+        // Resize ownership arrays.
+        vertex_owner_.resize(local_mesh_->n_vertices(), Ownership::Owned);
+        vertex_owner_rank_.resize(local_mesh_->n_vertices(), my_rank_);
+        cell_owner_.resize(local_mesh_->n_cells(), Ownership::Owned);
+        cell_owner_rank_.resize(local_mesh_->n_cells(), my_rank_);
+
+        // Preserve old ownership for existing entities.
+        for (size_t i = 0; i < std::min(old_n_vertices, vertex_owner_.size()); ++i) {
+            vertex_owner_[i] = old_vertex_owner[i];
+            vertex_owner_rank_[i] = old_vertex_owner_rank[i];
+        }
+        for (size_t i = 0; i < std::min(old_n_cells, cell_owner_.size()); ++i) {
+            cell_owner_[i] = old_cell_owner[i];
+            cell_owner_rank_[i] = old_cell_owner_rank[i];
+        }
+
+        // Mark newly appended vertices as ghosts (best-effort owner rank).
+        const auto& vg_final = local_mesh_->vertex_gids();
+        for (index_t v = static_cast<index_t>(old_n_vertices); v < static_cast<index_t>(local_mesh_->n_vertices()); ++v) {
+            vertex_owner_[v] = Ownership::Ghost;
+            auto it = new_vertex_owner.find(vg_final[static_cast<size_t>(v)]);
+            vertex_owner_rank_[v] = (it != new_vertex_owner.end()) ? it->second : -1;
+        }
+
+        // Mark newly appended cells as ghosts with the sending owner rank.
+        std::vector<gid_t> newly_added_cell_gids;
+        newly_added_cell_gids.reserve(appended_cells.size());
+
+        const auto& cg_final = local_mesh_->cell_gids();
+        for (index_t c = static_cast<index_t>(old_n_cells); c < static_cast<index_t>(local_mesh_->n_cells()); ++c) {
+            cell_owner_[c] = Ownership::Ghost;
+            const gid_t gid = cg_final[static_cast<size_t>(c)];
+            // appended_cells is in the same order as appended to new_cell_gids.
+            const size_t appended_idx = static_cast<size_t>(c) - old_n_cells;
+            if (appended_idx < appended_cells.size()) {
+                cell_owner_rank_[c] = appended_cells[appended_idx].second;
+            } else {
+                cell_owner_rank_[c] = -1;
+            }
+            newly_added_cell_gids.push_back(gid);
+        }
+
+        // Faces are rebuilt by MeshBase::finalize(); set a conservative ownership mark.
+        face_owner_.assign(local_mesh_->n_faces(), Ownership::Owned);
+        face_owner_rank_.assign(local_mesh_->n_faces(), my_rank_);
+        for (index_t f = 0; f < static_cast<index_t>(local_mesh_->n_faces()); ++f) {
+            auto fc = local_mesh_->face_cells(f);
+            const index_t c0 = fc[0];
+            const index_t c1 = fc[1];
+            const bool c0_ghost = (c0 != INVALID_INDEX && c0 < static_cast<index_t>(cell_owner_.size()) && cell_owner_[c0] == Ownership::Ghost);
+            const bool c1_ghost = (c1 != INVALID_INDEX && c1 < static_cast<index_t>(cell_owner_.size()) && cell_owner_[c1] == Ownership::Ghost);
+            if (c0_ghost || c1_ghost) {
+                face_owner_[f] = Ownership::Ghost;
+                const index_t gc = c0_ghost ? c0 : c1;
+                face_owner_rank_[f] = cell_owner_rank_[gc];
+            }
+        }
+
+        // Update ghost sets.
+        ghost_cells_.clear();
+        ghost_vertices_.clear();
+        ghost_faces_.clear();
+
+        for (index_t c = 0; c < static_cast<index_t>(cell_owner_.size()); ++c) {
+            if (cell_owner_[c] == Ownership::Ghost) {
+                ghost_cells_.insert(c);
+            }
+        }
+
+        for (index_t f = 0; f < static_cast<index_t>(face_owner_.size()); ++f) {
+            if (face_owner_[f] == Ownership::Ghost) {
+                ghost_faces_.insert(f);
+            }
+        }
+
+        for (index_t c : ghost_cells_) {
+            auto [cverts, nverts] = local_mesh_->cell_vertices_span(c);
+            for (size_t i = 0; i < nverts; ++i) {
+                ghost_vertices_.insert(cverts[i]);
+            }
+        }
+
+        // Recompute canonical owner ranks for all entities (including imported ghosts)
+        // based on global IDs so ghost/shared field updates can fetch directly from owners.
+        //
+        // Without this, newly imported vertices may inherit the sending cell-rank as their
+        // owner (even when the canonical owner is a different rank), which can require
+        // multi-hop propagation and breaks single-step ghost updates.
+        std::vector<index_t> explicit_ghost_vertices;
+        explicit_ghost_vertices.reserve(ghost_vertices_.size());
+        for (index_t v = 0; v < static_cast<index_t>(vertex_owner_.size()); ++v) {
+            if (vertex_owner_[static_cast<size_t>(v)] == Ownership::Ghost) {
+                explicit_ghost_vertices.push_back(v);
+            }
+        }
+        const std::vector<index_t> explicit_ghost_cells(ghost_cells_.begin(), ghost_cells_.end());
+        const std::vector<index_t> explicit_ghost_faces(ghost_faces_.begin(), ghost_faces_.end());
+
+        gather_shared_entities();
+
+        for (index_t v : explicit_ghost_vertices) {
+            vertex_owner_[static_cast<size_t>(v)] = Ownership::Ghost;
+        }
+        for (index_t c : explicit_ghost_cells) {
+            cell_owner_[static_cast<size_t>(c)] = Ownership::Ghost;
+        }
+        for (index_t f : explicit_ghost_faces) {
+            face_owner_[static_cast<size_t>(f)] = Ownership::Ghost;
+        }
+
+        return newly_added_cell_gids;
+    };
+
+    auto alltoallv_records = [&](const std::vector<char>& send_buffer,
+                                 const std::vector<int>& send_counts,
+                                 std::vector<char>& recv_buffer,
+                                 std::vector<int>& recv_counts,
+                                 std::vector<int>& recv_displs) {
+        std::vector<int> send_displs(world_size_ + 1, 0);
+        for (int r = 0; r < world_size_; ++r) {
+            send_displs[r + 1] = send_displs[r] + send_counts[r];
+        }
+
+        recv_counts.assign(world_size_, 0);
+        MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, comm_);
+
+        recv_displs.assign(world_size_ + 1, 0);
+        for (int r = 0; r < world_size_; ++r) {
+            recv_displs[r + 1] = recv_displs[r] + recv_counts[r];
+        }
+
+        recv_buffer.assign(static_cast<size_t>(recv_displs[world_size_]), 0);
+
+        MPI_Alltoallv(send_buffer.data(),
+                      send_counts.data(),
+                      send_displs.data(),
+                      MPI_BYTE,
+                      recv_buffer.data(),
+                      recv_counts.data(),
+                      recv_displs.data(),
+                      MPI_BYTE,
+                      comm_);
+    };
+
+    auto match_partition_faces = [&]() -> std::unordered_map<rank_t, std::unordered_set<gid_t>> {
+        // Send all boundary faces (keyed by vertex GIDs) to their home ranks, match pairs, and
+        // return the set of remote cell gids we need to import from each neighbor rank.
+        std::vector<BoundaryFaceRecord> local_faces;
+        const auto boundary = local_mesh_->boundary_faces();
+        local_faces.reserve(boundary.size());
+
+        for (index_t f : boundary) {
+            const auto fc = local_mesh_->face_cells(f);
+            const index_t adj = (fc[0] != INVALID_INDEX) ? fc[0] : fc[1];
+            if (adj == INVALID_INDEX) continue;
+
+            // Only consider faces adjacent to locally-owned cells at layer 1.
+            if (adj >= static_cast<index_t>(cell_owner_rank_.size()) || cell_owner_rank_[adj] != my_rank_) {
+                continue;
+            }
+
+            BoundaryFaceRecord rec;
+            rec.key = make_face_key(*local_mesh_, f);
+            if (rec.key.n == 0) continue;
+            rec.adjacent_cell_gid = local_mesh_->cell_gids()[static_cast<size_t>(adj)];
+            rec.src_rank = my_rank_;
+            local_faces.push_back(rec);
+        }
+
+        // Bucket by home rank.
+        std::vector<int> send_counts(world_size_, 0);
+        std::vector<std::vector<BoundaryFaceRecord>> by_dest(world_size_);
+
+        FaceKeyHash hasher;
+        for (const auto& rec : local_faces) {
+            const int home = static_cast<int>(hasher(rec.key) % static_cast<size_t>(world_size_));
+            by_dest[home].push_back(rec);
+        }
+
+        for (int r = 0; r < world_size_; ++r) {
+            send_counts[r] = static_cast<int>(by_dest[r].size() * sizeof(BoundaryFaceRecord));
+        }
+
+        std::vector<char> send_buffer;
+        send_buffer.resize(static_cast<size_t>(std::accumulate(send_counts.begin(), send_counts.end(), 0)));
+
+        {
+            size_t offset = 0;
+            for (int r = 0; r < world_size_; ++r) {
+                const auto bytes = by_dest[r].size() * sizeof(BoundaryFaceRecord);
+                if (bytes > 0) {
+                    std::memcpy(send_buffer.data() + offset, by_dest[r].data(), bytes);
+                    offset += bytes;
                 }
             }
         }
 
-        // Update front for next level
-        current_front = next_front;
-        boundary_vertices.insert(next_front.begin(), next_front.end());
-    }
+        std::vector<char> recv_buffer;
+        std::vector<int> recv_counts, recv_displs;
+        alltoallv_records(send_buffer, send_counts, recv_buffer, recv_counts, recv_displs);
 
-    // Step 3: Mark ghost cells and vertices
-    ghost_cells_ = std::unordered_set<index_t>(ghost_cells_set.begin(), ghost_cells_set.end());
-
-    for (index_t c : ghost_cells_) {
-        cell_owner_[c] = Ownership::Ghost;
-
-        // Mark vertices of ghost cells as ghost if not already shared
-        auto [vertices, n_vertices] = local_mesh_->cell_vertices_span(c);
-        for (size_t i = 0; i < n_vertices; ++i) {
-            if (vertex_owner_[vertices[i]] != Ownership::Shared) {
-                vertex_owner_[vertices[i]] = Ownership::Ghost;
-                ghost_vertices_.insert(vertices[i]);
+        // Group received faces by key.
+        std::unordered_map<FaceKey, std::vector<BoundaryFaceRecord>, FaceKeyHash, FaceKeyEq> groups;
+        for (int r = 0; r < world_size_; ++r) {
+            const int n_bytes = recv_counts[r];
+            const int n_recs = n_bytes / static_cast<int>(sizeof(BoundaryFaceRecord));
+            const auto* recs = reinterpret_cast<const BoundaryFaceRecord*>(recv_buffer.data() + recv_displs[r]);
+            for (int i = 0; i < n_recs; ++i) {
+                groups[recs[i].key].push_back(recs[i]);
             }
         }
-    }
 
-    // Step 4: Exchange ghost metadata with neighbors
-    sync_ghost_metadata();
+        // Build match messages to return.
+        std::vector<std::vector<FaceMatchRecord>> matches_by_rank(world_size_);
+        for (const auto& [key, vec] : groups) {
+            if (vec.size() != 2) continue;
+            const auto& a = vec[0];
+            const auto& b = vec[1];
+            if (a.src_rank == b.src_rank) continue;
+            matches_by_rank[a.src_rank].push_back({b.src_rank, b.adjacent_cell_gid});
+            matches_by_rank[b.src_rank].push_back({a.src_rank, a.adjacent_cell_gid});
+        }
 
-    // Step 5: Build communication patterns
-    build_exchange_patterns();
-#endif
-}
+        send_counts.assign(world_size_, 0);
+        send_buffer.clear();
+
+        for (int r = 0; r < world_size_; ++r) {
+            send_counts[r] = static_cast<int>(matches_by_rank[r].size() * sizeof(FaceMatchRecord));
+        }
+
+        send_buffer.resize(static_cast<size_t>(std::accumulate(send_counts.begin(), send_counts.end(), 0)));
+        {
+            size_t offset = 0;
+            for (int r = 0; r < world_size_; ++r) {
+                const auto bytes = matches_by_rank[r].size() * sizeof(FaceMatchRecord);
+                if (bytes > 0) {
+                    std::memcpy(send_buffer.data() + offset, matches_by_rank[r].data(), bytes);
+                    offset += bytes;
+                }
+            }
+        }
+
+        recv_buffer.clear();
+        alltoallv_records(send_buffer, send_counts, recv_buffer, recv_counts, recv_displs);
+
+        std::unordered_map<rank_t, std::unordered_set<gid_t>> requests;
+        for (int r = 0; r < world_size_; ++r) {
+            const int n_bytes = recv_counts[r];
+            const int n_recs = n_bytes / static_cast<int>(sizeof(FaceMatchRecord));
+            const auto* recs = reinterpret_cast<const FaceMatchRecord*>(recv_buffer.data() + recv_displs[r]);
+            for (int i = 0; i < n_recs; ++i) {
+                if (recs[i].neighbor_rank >= 0 && recs[i].neighbor_rank < world_size_) {
+                    requests[recs[i].neighbor_rank].insert(recs[i].neighbor_cell_gid);
+                }
+            }
+        }
+        return requests;
+    };
+
+    auto exchange_cells = [&](const std::unordered_map<rank_t, std::unordered_set<gid_t>>& request_sets) -> std::vector<gid_t> {
+        // Phase 1: All-to-all exchange of requested cell IDs.
+        std::vector<int> send_counts(world_size_, 0);
+        std::vector<int> send_displs(world_size_ + 1, 0);
+        std::vector<gid_t> send_gids;
+
+        for (int r = 0; r < world_size_; ++r) {
+            auto it = request_sets.find(r);
+            if (it == request_sets.end()) continue;
+            send_counts[r] = static_cast<int>(it->second.size());
+        }
+
+        for (int r = 0; r < world_size_; ++r) {
+            send_displs[r + 1] = send_displs[r] + send_counts[r];
+        }
+        send_gids.assign(static_cast<size_t>(send_displs[world_size_]), INVALID_GID);
+
+        for (int r = 0; r < world_size_; ++r) {
+            auto it = request_sets.find(r);
+            if (it == request_sets.end()) continue;
+            int pos = send_displs[r];
+            for (gid_t gid : it->second) {
+                send_gids[static_cast<size_t>(pos++)] = gid;
+            }
+        }
+
+        std::vector<int> recv_counts(world_size_, 0), recv_displs(world_size_ + 1, 0);
+        MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, comm_);
+        for (int r = 0; r < world_size_; ++r) {
+            recv_displs[r + 1] = recv_displs[r] + recv_counts[r];
+        }
+
+        std::vector<gid_t> recv_gids(static_cast<size_t>(recv_displs[world_size_]), INVALID_GID);
+        MPI_Alltoallv(send_gids.data(), send_counts.data(), send_displs.data(), MPI_LONG_LONG,
+                      recv_gids.data(), recv_counts.data(), recv_displs.data(), MPI_LONG_LONG,
+                      comm_);
+
+        // Phase 2: Pack outgoing meshes for ranks that requested from us.
+        std::vector<std::vector<char>> outgoing(world_size_);
+        for (int r = 0; r < world_size_; ++r) {
+            if (recv_counts[r] == 0) continue;
+            std::vector<gid_t> req;
+            req.reserve(static_cast<size_t>(recv_counts[r]));
+            for (int i = 0; i < recv_counts[r]; ++i) {
+                req.push_back(recv_gids[static_cast<size_t>(recv_displs[r] + i)]);
+            }
+
+            MeshBase sub = extract_cells_by_gid(*local_mesh_, req);
+            if (sub.n_cells() > 0) {
+                serialize_mesh(sub, outgoing[r]);
+            } else {
+                outgoing[r].clear();
+            }
+        }
+
+        // Exchange sizes first.
+        const int tag_size = 5000;
+        const int tag_data = 5001;
+
+        std::vector<int> incoming_sizes(world_size_, 0);
+        std::vector<MPI_Request> reqs;
+        reqs.reserve(world_size_ * 2);
+
+        for (int r = 0; r < world_size_; ++r) {
+            if (send_counts[r] > 0) {
+                MPI_Request q;
+                MPI_Irecv(&incoming_sizes[r], 1, MPI_INT, r, tag_size, comm_, &q);
+                reqs.push_back(q);
+            }
+            if (recv_counts[r] > 0) {
+                MPI_Request q;
+                int sz = static_cast<int>(outgoing[r].size());
+                MPI_Isend(&sz, 1, MPI_INT, r, tag_size, comm_, &q);
+                reqs.push_back(q);
+            }
+        }
+
+        if (!reqs.empty()) {
+            MPI_Waitall(static_cast<int>(reqs.size()), reqs.data(), MPI_STATUSES_IGNORE);
+        }
+
+        // Exchange payloads.
+        std::vector<std::vector<char>> incoming(world_size_);
+        reqs.clear();
+
+        for (int r = 0; r < world_size_; ++r) {
+            if (send_counts[r] > 0) {
+                incoming[r].resize(static_cast<size_t>(incoming_sizes[r]));
+                MPI_Request q;
+                MPI_Irecv(incoming[r].data(), incoming_sizes[r], MPI_CHAR, r, tag_data, comm_, &q);
+                reqs.push_back(q);
+            }
+            if (recv_counts[r] > 0) {
+                MPI_Request q;
+                MPI_Isend(outgoing[r].data(),
+                          static_cast<int>(outgoing[r].size()),
+                          MPI_CHAR, r, tag_data, comm_, &q);
+                reqs.push_back(q);
+            }
+        }
+
+        if (!reqs.empty()) {
+            MPI_Waitall(static_cast<int>(reqs.size()), reqs.data(), MPI_STATUSES_IGNORE);
+        }
+
+        std::vector<std::pair<rank_t, MeshBase>> received_meshes;
+        for (int r = 0; r < world_size_; ++r) {
+            if (send_counts[r] == 0) continue;
+            if (incoming_sizes[r] == 0) continue;
+            MeshBase m;
+            deserialize_mesh(incoming[r], m);
+            if (m.n_cells() > 0) {
+                received_meshes.emplace_back(static_cast<rank_t>(r), std::move(m));
+            }
+        }
+
+        if (received_meshes.empty()) {
+            return {};
+        }
+
+        return rebuild_with_ghost_meshes(received_meshes);
+    };
+
+    // ---- Layer 1: match partition boundary faces and import adjacent cells.
+    auto layer1_requests = match_partition_faces();
+    std::vector<gid_t> frontier = exchange_cells(layer1_requests);
+
+    // ---- Additional layers: expand from the last imported ghost cells.
+    for (int layer = 2; layer <= levels; ++layer) {
+        if (frontier.empty()) break;
+
+        std::unordered_set<gid_t> frontier_set(frontier.begin(), frontier.end());
+
+        // Build face-key queries for boundary faces adjacent to frontier ghost cells.
+        std::vector<std::vector<FaceAdjQuery>> queries_by_rank(world_size_);
+        for (index_t f : local_mesh_->boundary_faces()) {
+            const auto fc = local_mesh_->face_cells(f);
+            const index_t adj = (fc[0] != INVALID_INDEX) ? fc[0] : fc[1];
+            if (adj == INVALID_INDEX) continue;
+            const gid_t adj_gid = local_mesh_->cell_gids()[static_cast<size_t>(adj)];
+            if (frontier_set.find(adj_gid) == frontier_set.end()) continue;
+
+            const rank_t owner = cell_owner_rank_[static_cast<size_t>(adj)];
+            if (owner < 0 || owner == my_rank_) continue;
+
+            FaceAdjQuery q;
+            q.key = make_face_key(*local_mesh_, f);
+            if (q.key.n == 0) continue;
+            q.adjacent_cell_gid = adj_gid;
+            queries_by_rank[owner].push_back(q);
+        }
+
+        // Exchange queries via all-to-allv.
+        std::vector<int> send_counts(world_size_, 0);
+        for (int r = 0; r < world_size_; ++r) {
+            send_counts[r] = static_cast<int>(queries_by_rank[r].size() * sizeof(FaceAdjQuery));
+        }
+
+        std::vector<char> send_buffer;
+        send_buffer.resize(static_cast<size_t>(std::accumulate(send_counts.begin(), send_counts.end(), 0)));
+        {
+            size_t off = 0;
+            for (int r = 0; r < world_size_; ++r) {
+                const auto bytes = queries_by_rank[r].size() * sizeof(FaceAdjQuery);
+                if (bytes > 0) {
+                    std::memcpy(send_buffer.data() + off, queries_by_rank[r].data(), bytes);
+                    off += bytes;
+                }
+            }
+        }
+
+        std::vector<char> recv_buffer;
+        std::vector<int> recv_counts, recv_displs;
+        alltoallv_records(send_buffer, send_counts, recv_buffer, recv_counts, recv_displs);
+
+        // Build a local lookup table from face key -> face id for answering queries.
+        std::unordered_map<FaceKey, index_t, FaceKeyHash, FaceKeyEq> face_lookup;
+        face_lookup.reserve(local_mesh_->n_faces() * 2);
+        for (index_t f = 0; f < static_cast<index_t>(local_mesh_->n_faces()); ++f) {
+            const auto key = make_face_key(*local_mesh_, f);
+            if (key.n == 0) continue;
+            face_lookup.emplace(key, f);
+        }
+
+        // Prepare replies for each source rank, preserving query order.
+        std::vector<std::vector<FaceAdjReply>> replies_by_rank(world_size_);
+        for (int r = 0; r < world_size_; ++r) {
+            const int n_bytes = recv_counts[r];
+            const int n_recs = n_bytes / static_cast<int>(sizeof(FaceAdjQuery));
+            const auto* qs = reinterpret_cast<const FaceAdjQuery*>(recv_buffer.data() + recv_displs[r]);
+            auto& out = replies_by_rank[r];
+            out.resize(static_cast<size_t>(n_recs));
+
+            for (int i = 0; i < n_recs; ++i) {
+                FaceAdjReply rep;
+                auto it = face_lookup.find(qs[i].key);
+                if (it != face_lookup.end()) {
+                    const index_t f_id = it->second;
+                    const auto fc = local_mesh_->face_cells(f_id);
+                    const index_t c0 = fc[0];
+                    const index_t c1 = fc[1];
+                    const gid_t g0 = (c0 != INVALID_INDEX) ? local_mesh_->cell_gids()[static_cast<size_t>(c0)] : INVALID_GID;
+                    const gid_t g1 = (c1 != INVALID_INDEX) ? local_mesh_->cell_gids()[static_cast<size_t>(c1)] : INVALID_GID;
+                    index_t neigh = INVALID_INDEX;
+                    if (c0 != INVALID_INDEX && g0 != qs[i].adjacent_cell_gid) neigh = c0;
+                    if (c1 != INVALID_INDEX && g1 != qs[i].adjacent_cell_gid) neigh = c1;
+
+                    if (neigh != INVALID_INDEX) {
+                        rep.neighbor_cell_gid = local_mesh_->cell_gids()[static_cast<size_t>(neigh)];
+                        rep.neighbor_owner_rank = cell_owner_rank_[static_cast<size_t>(neigh)];
+                    }
+                }
+                out[static_cast<size_t>(i)] = rep;
+            }
+        }
+
+        // All-to-allv replies back.
+        send_counts.assign(world_size_, 0);
+        for (int r = 0; r < world_size_; ++r) {
+            send_counts[r] = static_cast<int>(replies_by_rank[r].size() * sizeof(FaceAdjReply));
+        }
+
+        send_buffer.clear();
+        send_buffer.resize(static_cast<size_t>(std::accumulate(send_counts.begin(), send_counts.end(), 0)));
+        {
+            size_t off = 0;
+            for (int r = 0; r < world_size_; ++r) {
+                const auto bytes = replies_by_rank[r].size() * sizeof(FaceAdjReply);
+                if (bytes > 0) {
+                    std::memcpy(send_buffer.data() + off, replies_by_rank[r].data(), bytes);
+                    off += bytes;
+                }
+            }
+        }
+
+        recv_buffer.clear();
+        alltoallv_records(send_buffer, send_counts, recv_buffer, recv_counts, recv_displs);
+
+        // Build next layer requests from replies.
+        std::unordered_map<rank_t, std::unordered_set<gid_t>> next_requests;
+        for (int r = 0; r < world_size_; ++r) {
+            const int n_bytes = recv_counts[r];
+            const int n_recs = n_bytes / static_cast<int>(sizeof(FaceAdjReply));
+            const auto* reps = reinterpret_cast<const FaceAdjReply*>(recv_buffer.data() + recv_displs[r]);
+
+            for (int i = 0; i < n_recs; ++i) {
+                const auto& rep = reps[i];
+                if (rep.neighbor_cell_gid == INVALID_GID) continue;
+                if (rep.neighbor_owner_rank < 0 || rep.neighbor_owner_rank == my_rank_) continue;
+                if (local_mesh_->global_to_local_cell(rep.neighbor_cell_gid) != INVALID_INDEX) continue;
+                next_requests[rep.neighbor_owner_rank].insert(rep.neighbor_cell_gid);
+            }
+        }
+
+	        frontier = exchange_cells(next_requests);
+	    }
+
+	    if (local_mesh_) {
+	        local_mesh_->event_bus().notify(MeshEvent::PartitionChanged);
+	    }
+	#endif
+	}
 
 void DistributedMesh::clear_ghosts() {
     ghost_vertices_.clear();
@@ -653,10 +1392,167 @@ void DistributedMesh::clear_ghosts() {
     ghost_faces_.clear();
     ghost_levels_ = 0;
 
-    // Reset ownership for all entities to owned
-    std::fill(vertex_owner_.begin(), vertex_owner_.end(), Ownership::Owned);
-    std::fill(cell_owner_.begin(), cell_owner_.end(), Ownership::Owned);
-    std::fill(face_owner_.begin(), face_owner_.end(), Ownership::Owned);
+#ifdef MESH_HAS_MPI
+    auto notify_partition_changed = [&]() {
+        if (local_mesh_) {
+            local_mesh_->event_bus().notify(MeshEvent::PartitionChanged);
+        }
+    };
+
+    if (world_size_ == 1) {
+        notify_partition_changed();
+        return;
+    }
+
+    // Filter out ghost cells (keep locally owned cells only).
+    std::vector<index_t> keep_cells;
+    keep_cells.reserve(local_mesh_->n_cells());
+    for (index_t c = 0; c < static_cast<index_t>(local_mesh_->n_cells()); ++c) {
+        if (c < static_cast<index_t>(cell_owner_rank_.size()) && cell_owner_rank_[c] == my_rank_) {
+            keep_cells.push_back(c);
+        }
+    }
+
+    if (keep_cells.size() == local_mesh_->n_cells()) {
+        // No ghosts present; preserve existing shared/owned state.
+        notify_partition_changed();
+        return;
+    }
+
+    // Collect vertices used by kept cells.
+    std::unordered_set<index_t> keep_vertex_set;
+    for (index_t c : keep_cells) {
+        auto [verts, n] = local_mesh_->cell_vertices_span(c);
+        for (size_t i = 0; i < n; ++i) keep_vertex_set.insert(verts[i]);
+    }
+
+    std::vector<index_t> keep_vertices(keep_vertex_set.begin(), keep_vertex_set.end());
+    std::sort(keep_vertices.begin(), keep_vertices.end());
+
+    std::unordered_map<index_t, index_t> old2new_vertex;
+    old2new_vertex.reserve(keep_vertices.size());
+    for (size_t i = 0; i < keep_vertices.size(); ++i) {
+        old2new_vertex[keep_vertices[i]] = static_cast<index_t>(i);
+    }
+
+    const int dim = local_mesh_->dim();
+    std::vector<real_t> new_coords;
+    new_coords.reserve(keep_vertices.size() * static_cast<size_t>(dim));
+    for (index_t v : keep_vertices) {
+        for (int d = 0; d < dim; ++d) {
+            new_coords.push_back(local_mesh_->X_ref()[static_cast<size_t>(v) * dim + d]);
+        }
+    }
+
+    std::vector<CellShape> new_shapes;
+    std::vector<gid_t> new_cell_gids;
+    std::vector<label_t> new_cell_regions;
+    std::vector<offset_t> new_offsets{0};
+    std::vector<index_t> new_conn;
+
+    new_shapes.reserve(keep_cells.size());
+    new_cell_gids.reserve(keep_cells.size());
+    new_cell_regions.reserve(keep_cells.size());
+
+    for (index_t c : keep_cells) {
+        new_shapes.push_back(local_mesh_->cell_shape(c));
+        new_cell_gids.push_back(local_mesh_->cell_gids()[static_cast<size_t>(c)]);
+        new_cell_regions.push_back(local_mesh_->cell_region_ids().empty()
+                                       ? 0
+                                       : local_mesh_->cell_region_ids()[static_cast<size_t>(c)]);
+
+        auto [verts, n] = local_mesh_->cell_vertices_span(c);
+        for (size_t i = 0; i < n; ++i) {
+            new_conn.push_back(old2new_vertex[verts[i]]);
+        }
+        new_offsets.push_back(static_cast<offset_t>(new_conn.size()));
+    }
+
+    std::vector<gid_t> new_vertex_gids;
+    new_vertex_gids.reserve(keep_vertices.size());
+    for (index_t v : keep_vertices) {
+        new_vertex_gids.push_back(local_mesh_->vertex_gids()[static_cast<size_t>(v)]);
+    }
+
+    // Preserve vertex and cell fields for kept entities.
+    struct FieldSnapshot {
+        std::string name;
+        EntityKind kind;
+        FieldScalarType type;
+        size_t components;
+        size_t bytes_per_component;
+        bool has_descriptor = false;
+        FieldDescriptor descriptor;
+        std::vector<uint8_t> data;
+    };
+
+    std::vector<FieldSnapshot> saved_fields;
+    auto snapshot_fields = [&](EntityKind kind, const std::vector<index_t>& keep_ids) {
+        for (const auto& fname : local_mesh_->field_names(kind)) {
+            FieldSnapshot snap;
+            snap.name = fname;
+            snap.kind = kind;
+            snap.type = local_mesh_->field_type_by_name(kind, fname);
+            snap.components = local_mesh_->field_components_by_name(kind, fname);
+            snap.bytes_per_component = local_mesh_->field_bytes_per_component_by_name(kind, fname);
+
+            const auto hnd = local_mesh_->field_handle(kind, fname);
+            if (hnd.id != 0) {
+                if (const auto* desc = local_mesh_->field_descriptor(hnd)) {
+                    snap.has_descriptor = true;
+                    snap.descriptor = *desc;
+                }
+            }
+
+            const uint8_t* src = static_cast<const uint8_t*>(local_mesh_->field_data_by_name(kind, fname));
+            if (!src) continue;
+
+            const size_t bpe = snap.components * snap.bytes_per_component;
+            snap.data.reserve(keep_ids.size() * bpe);
+            for (index_t id : keep_ids) {
+                const uint8_t* p = src + static_cast<size_t>(id) * bpe;
+                snap.data.insert(snap.data.end(), p, p + bpe);
+            }
+            saved_fields.push_back(std::move(snap));
+        }
+    };
+
+    snapshot_fields(EntityKind::Vertex, keep_vertices);
+    snapshot_fields(EntityKind::Volume, keep_cells);
+
+    local_mesh_->clear();
+    local_mesh_->build_from_arrays(dim, new_coords, new_offsets, new_conn, new_shapes);
+    local_mesh_->set_vertex_gids(std::move(new_vertex_gids));
+    local_mesh_->set_cell_gids(std::move(new_cell_gids));
+    local_mesh_->finalize();
+
+    // Restore cell region labels.
+    for (index_t c = 0; c < static_cast<index_t>(new_cell_regions.size()); ++c) {
+        local_mesh_->set_region_label(c, new_cell_regions[static_cast<size_t>(c)]);
+    }
+
+    // Restore fields (vertex and cell).
+    for (const auto& snap : saved_fields) {
+        auto h = local_mesh_->attach_field(snap.kind, snap.name, snap.type, snap.components, snap.bytes_per_component);
+        uint8_t* dst = static_cast<uint8_t*>(local_mesh_->field_data(h));
+        if (!dst) continue;
+        std::memcpy(dst, snap.data.data(), snap.data.size());
+        if (snap.has_descriptor) {
+            local_mesh_->set_field_descriptor(h, snap.descriptor);
+        }
+    }
+
+    // Reset ownership for base mesh and recompute shared entities.
+    vertex_owner_.assign(local_mesh_->n_vertices(), Ownership::Owned);
+    vertex_owner_rank_.assign(local_mesh_->n_vertices(), my_rank_);
+    cell_owner_.assign(local_mesh_->n_cells(), Ownership::Owned);
+    cell_owner_rank_.assign(local_mesh_->n_cells(), my_rank_);
+    face_owner_.assign(local_mesh_->n_faces(), Ownership::Owned);
+    face_owner_rank_.assign(local_mesh_->n_faces(), my_rank_);
+
+    gather_shared_entities();
+    notify_partition_changed();
+#endif
 }
 
 void DistributedMesh::update_ghosts(const std::vector<FieldHandle>& fields) {
@@ -732,16 +1628,79 @@ void DistributedMesh::update_ghosts(const std::vector<FieldHandle>& fields) {
     }
 
     // Optional: Report performance
-    if (getenv("MESH_VERBOSE")) {
-        double update_time = MPI_Wtime() - update_start;
-        double max_update_time;
-        MPI_Reduce(&update_time, &max_update_time, 1, MPI_DOUBLE, MPI_MAX, 0, comm_);
+	    if (getenv("MESH_VERBOSE")) {
+	        double update_time = MPI_Wtime() - update_start;
+	        double max_update_time;
+	        MPI_Reduce(&update_time, &max_update_time, 1, MPI_DOUBLE, MPI_MAX, 0, comm_);
 
-        if (my_rank_ == 0) {
-            std::cout << "Ghost update for " << fields.size()
-                      << " fields completed in " << max_update_time << " seconds\n";
-        }
+	        if (my_rank_ == 0) {
+	            std::cout << "Ghost update for " << fields.size()
+	                      << " fields completed in " << max_update_time << " seconds\n";
+	        }
+	    }
+
+	    if (local_mesh_) {
+	        local_mesh_->event_bus().notify(MeshEvent::FieldsChanged);
+	    }
+	#endif
+	}
+
+void DistributedMesh::update_exchange_ghost_fields() {
+#ifdef MESH_HAS_MPI
+    if (!local_mesh_) {
+        return;
     }
+    const auto fields = MeshFields::fields_requiring_exchange(*local_mesh_);
+    update_ghosts(fields);
+#endif
+}
+
+void DistributedMesh::update_exchange_ghost_coordinates(Configuration cfg) {
+#ifdef MESH_HAS_MPI
+    if (!local_mesh_) {
+        return;
+    }
+    if (world_size_ == 1) {
+        return;
+    }
+
+    const bool use_current = (cfg == Configuration::Current || cfg == Configuration::Deformed);
+    if (!use_current) {
+        return;
+    }
+
+    // Ensure current coordinates exist for in-place exchange.
+    if (!local_mesh_->has_current_coords()) {
+        local_mesh_->set_current_coords(local_mesh_->X_ref());
+    }
+
+    const int dim = local_mesh_->dim();
+    if (dim <= 0) {
+        return;
+    }
+
+    // Check if exchange patterns are built.
+    if (vertex_exchange_.send_ranks.empty() && vertex_exchange_.recv_ranks.empty() &&
+        cell_exchange_.send_ranks.empty() && cell_exchange_.recv_ranks.empty() &&
+        face_exchange_.send_ranks.empty() && face_exchange_.recv_ranks.empty()) {
+        build_exchange_patterns();
+    }
+
+    auto* coords = local_mesh_->X_cur_data_mutable();
+    if (!coords) {
+        return;
+    }
+
+    const size_t bytes_per_vertex = static_cast<size_t>(dim) * sizeof(real_t);
+    exchange_entity_data(EntityKind::Vertex,
+                         coords,
+                         coords,
+                         bytes_per_vertex,
+                         vertex_exchange_);
+
+    local_mesh_->event_bus().notify(MeshEvent::GeometryChanged);
+#else
+    (void)cfg;
 #endif
 }
 
@@ -1451,13 +2410,17 @@ void DistributedMesh::migrate(const std::vector<rank_t>& new_owner_rank_per_cell
     face_owner_rank_.resize(local_mesh_->n_faces(), my_rank_);
 
     // ========================================
-    // Step 7: Rebuild ghost layers
-    // ========================================
+	    // Step 7: Rebuild ghost layers
+	    // ========================================
 
-    gather_shared_entities();
-    build_ghost_layer(ghost_levels_);
-#endif
-}
+	    gather_shared_entities();
+	    build_ghost_layer(ghost_levels_);
+
+	    if (local_mesh_) {
+	        local_mesh_->event_bus().notify(MeshEvent::PartitionChanged);
+	    }
+	#endif
+	}
 
 void DistributedMesh::rebalance(PartitionHint hint,
                                const std::unordered_map<std::string,std::string>& options) {
@@ -1823,10 +2786,14 @@ void DistributedMesh::rebalance(PartitionHint hint,
             break;
     }
 
-    // Step 3: Migrate cells to new owners
-    migrate(new_owner_rank_per_cell);
-#endif
-}
+	    // Step 3: Migrate cells to new owners
+	    migrate(new_owner_rank_per_cell);
+
+	    if (local_mesh_) {
+	        local_mesh_->event_bus().notify(MeshEvent::PartitionChanged);
+	    }
+	#endif
+	}
 
 // ==========================================
 // Partition Quality Metrics
@@ -2691,67 +3658,119 @@ void DistributedMesh::build_exchange_patterns() {
         return;
     }
 
+    // If no ghost layer exists, detect shared entities first so ownership arrays
+    // reflect the base partition before building exchange patterns.
+    if (ghost_levels_ == 0 && ghost_vertices_.empty() && ghost_cells_.empty() && ghost_faces_.empty()) {
+        gather_shared_entities();
+    }
+
     // Clear existing patterns
     vertex_exchange_ = ExchangePattern{};
     cell_exchange_ = ExchangePattern{};
     face_exchange_ = ExchangePattern{};
     neighbor_ranks_.clear();
 
-    // Build vertex exchange pattern
-    std::map<rank_t, std::vector<index_t>> vertex_send_map, vertex_recv_map;
+    auto build_request_response_pattern =
+        [&](const std::vector<Ownership>& ownership,
+            const std::vector<rank_t>& owner_rank,
+            const std::vector<gid_t>& gids,
+            const auto& global_to_local) -> ExchangePattern {
+            ExchangePattern pattern;
 
-    for (index_t n = 0; n < static_cast<index_t>(vertex_owner_.size()); ++n) {
-        if (vertex_owner_[n] == Ownership::Shared) {
-            rank_t owner = vertex_owner_rank_[n];
-            if (owner != my_rank_) {
-                vertex_send_map[owner].push_back(n);
-                neighbor_ranks_.insert(owner);
+            // Build "request" lists: for each owner rank, send the GIDs we need values for.
+            std::vector<std::vector<gid_t>> request_gids(static_cast<size_t>(world_size_));
+            std::vector<std::vector<index_t>> recv_lists(static_cast<size_t>(world_size_));
+
+            for (index_t i = 0; i < static_cast<index_t>(ownership.size()); ++i) {
+                if (ownership[static_cast<size_t>(i)] == Ownership::Owned) {
+                    continue;
+                }
+                const rank_t owner = owner_rank[static_cast<size_t>(i)];
+                if (owner < 0 || owner == my_rank_ || owner >= world_size_) {
+                    continue;
+                }
+                request_gids[static_cast<size_t>(owner)].push_back(gids[static_cast<size_t>(i)]);
+                recv_lists[static_cast<size_t>(owner)].push_back(i);
             }
-        } else if (vertex_owner_[n] == Ownership::Ghost) {
-            rank_t owner = vertex_owner_rank_[n];
-            vertex_recv_map[owner].push_back(n);
-            neighbor_ranks_.insert(owner);
-        }
-    }
 
-    // Convert maps to exchange pattern
-    for (const auto& [rank, vertices] : vertex_send_map) {
-        vertex_exchange_.send_ranks.push_back(rank);
-        vertex_exchange_.send_lists.push_back(vertices);
-    }
-
-    for (const auto& [rank, vertices] : vertex_recv_map) {
-        vertex_exchange_.recv_ranks.push_back(rank);
-        vertex_exchange_.recv_lists.push_back(vertices);
-    }
-
-    // Build cell exchange pattern
-    std::map<rank_t, std::vector<index_t>> cell_send_map, cell_recv_map;
-
-    for (index_t c = 0; c < static_cast<index_t>(cell_owner_.size()); ++c) {
-        if (cell_owner_[c] == Ownership::Shared) {
-            rank_t owner = cell_owner_rank_[c];
-            if (owner != my_rank_) {
-                cell_send_map[owner].push_back(c);
-                neighbor_ranks_.insert(owner);
+            // Exchange request GIDs using MPI_Alltoallv (bytes).
+            std::vector<int> send_counts(world_size_, 0);
+            std::vector<int> send_displs(world_size_ + 1, 0);
+            for (int r = 0; r < world_size_; ++r) {
+                send_counts[r] = static_cast<int>(request_gids[static_cast<size_t>(r)].size() * sizeof(gid_t));
+                send_displs[r + 1] = send_displs[r] + send_counts[r];
             }
-        } else if (cell_owner_[c] == Ownership::Ghost) {
-            rank_t owner = cell_owner_rank_[c];
-            cell_recv_map[owner].push_back(c);
-            neighbor_ranks_.insert(owner);
-        }
-    }
 
-    // Convert cell maps to exchange pattern
-    for (const auto& [rank, cells] : cell_send_map) {
-        cell_exchange_.send_ranks.push_back(rank);
-        cell_exchange_.send_lists.push_back(cells);
-    }
+            std::vector<char> send_buffer(static_cast<size_t>(send_displs[world_size_]));
+            for (int r = 0; r < world_size_; ++r) {
+                const auto& vec = request_gids[static_cast<size_t>(r)];
+                if (!vec.empty()) {
+                    std::memcpy(send_buffer.data() + send_displs[r],
+                                vec.data(),
+                                vec.size() * sizeof(gid_t));
+                }
+            }
 
-    for (const auto& [rank, cells] : cell_recv_map) {
-        cell_exchange_.recv_ranks.push_back(rank);
-        cell_exchange_.recv_lists.push_back(cells);
-    }
+            std::vector<int> recv_counts(world_size_, 0);
+            MPI_Alltoall(send_counts.data(), 1, MPI_INT,
+                         recv_counts.data(), 1, MPI_INT, comm_);
+
+            std::vector<int> recv_displs(world_size_ + 1, 0);
+            for (int r = 0; r < world_size_; ++r) {
+                recv_displs[r + 1] = recv_displs[r] + recv_counts[r];
+            }
+
+            std::vector<char> recv_buffer(static_cast<size_t>(recv_displs[world_size_]));
+
+            MPI_Alltoallv(send_buffer.data(), send_counts.data(), send_displs.data(), MPI_BYTE,
+                          recv_buffer.data(), recv_counts.data(), recv_displs.data(), MPI_BYTE,
+                          comm_);
+
+            // Receive side: map the entities we requested from each owner rank.
+            for (int r = 0; r < world_size_; ++r) {
+                if (!recv_lists[static_cast<size_t>(r)].empty()) {
+                    pattern.recv_ranks.push_back(r);
+                    pattern.recv_lists.push_back(std::move(recv_lists[static_cast<size_t>(r)]));
+                }
+            }
+
+            // Send side: for each requesting rank, build the local index list (same order as requests).
+            for (int r = 0; r < world_size_; ++r) {
+                const int n_bytes = recv_counts[r];
+                if (n_bytes <= 0) {
+                    continue;
+                }
+
+                const int n_gids = n_bytes / static_cast<int>(sizeof(gid_t));
+                const gid_t* requested =
+                    reinterpret_cast<const gid_t*>(recv_buffer.data() + recv_displs[r]);
+
+                std::vector<index_t> send_list;
+                send_list.reserve(static_cast<size_t>(n_gids));
+                for (int i = 0; i < n_gids; ++i) {
+                    send_list.push_back(global_to_local(requested[i]));
+                }
+
+                pattern.send_ranks.push_back(r);
+                pattern.send_lists.push_back(std::move(send_list));
+            }
+
+            return pattern;
+        };
+
+    vertex_exchange_ =
+        build_request_response_pattern(
+            vertex_owner_,
+            vertex_owner_rank_,
+            local_mesh_->vertex_gids(),
+            [&](gid_t gid) { return local_mesh_->global_to_local_vertex(gid); });
+
+    cell_exchange_ =
+        build_request_response_pattern(
+            cell_owner_,
+            cell_owner_rank_,
+            local_mesh_->cell_gids(),
+            [&](gid_t gid) { return local_mesh_->global_to_local_cell(gid); });
 
     // Build face exchange pattern
     std::map<rank_t, std::vector<index_t>> face_send_map, face_recv_map;
@@ -2761,12 +3780,10 @@ void DistributedMesh::build_exchange_patterns() {
             rank_t owner = face_owner_rank_[f];
             if (owner != my_rank_) {
                 face_send_map[owner].push_back(f);
-                neighbor_ranks_.insert(owner);
             }
         } else if (face_owner_[f] == Ownership::Ghost) {
             rank_t owner = face_owner_rank_[f];
             face_recv_map[owner].push_back(f);
-            neighbor_ranks_.insert(owner);
         }
     }
 
@@ -2780,6 +3797,19 @@ void DistributedMesh::build_exchange_patterns() {
         face_exchange_.recv_ranks.push_back(rank);
         face_exchange_.recv_lists.push_back(faces);
     }
+
+    // Update neighbor ranks based on the final patterns.
+    auto add_neighbors = [&](const ExchangePattern& p) {
+        for (rank_t r : p.send_ranks) {
+            if (r >= 0 && r < world_size_ && r != my_rank_) neighbor_ranks_.insert(r);
+        }
+        for (rank_t r : p.recv_ranks) {
+            if (r >= 0 && r < world_size_ && r != my_rank_) neighbor_ranks_.insert(r);
+        }
+    };
+    add_neighbors(vertex_exchange_);
+    add_neighbors(cell_exchange_);
+    add_neighbors(face_exchange_);
 #endif
 }
 
@@ -2791,12 +3821,20 @@ void DistributedMesh::exchange_entity_data(EntityKind kind, const void* send_dat
                                           void* recv_data, size_t bytes_per_entity,
                                           const ExchangePattern& pattern) {
 #ifdef MESH_HAS_MPI
-    if (world_size_ == 1 || pattern.send_ranks.empty()) {
+    if (world_size_ == 1 || (pattern.send_ranks.empty() && pattern.recv_ranks.empty())) {
         return;
     }
 
     const uint8_t* send_bytes = static_cast<const uint8_t*>(send_data);
     uint8_t* recv_bytes = static_cast<uint8_t*>(recv_data);
+
+    size_t n_entities = 0;
+    switch (kind) {
+        case EntityKind::Vertex: n_entities = local_mesh_->n_vertices(); break;
+        case EntityKind::Volume: n_entities = local_mesh_->n_cells(); break;
+        case EntityKind::Face:   n_entities = local_mesh_->n_faces(); break;
+        case EntityKind::Edge:   n_entities = local_mesh_->n_edges(); break;
+    }
 
     // Allocate buffers
     std::vector<std::vector<uint8_t>> send_buffers(pattern.send_ranks.size());
@@ -2809,9 +3847,14 @@ void DistributedMesh::exchange_entity_data(EntityKind kind, const void* send_dat
 
         for (size_t j = 0; j < send_list.size(); ++j) {
             index_t entity = send_list[j];
-            std::memcpy(&send_buffers[i][j * bytes_per_entity],
-                       &send_bytes[entity * bytes_per_entity],
-                       bytes_per_entity);
+            uint8_t* out = &send_buffers[i][j * bytes_per_entity];
+            if (entity < 0 || static_cast<size_t>(entity) >= n_entities) {
+                std::memset(out, 0, bytes_per_entity);
+            } else {
+                std::memcpy(out,
+                            &send_bytes[static_cast<size_t>(entity) * bytes_per_entity],
+                            bytes_per_entity);
+            }
         }
     }
 
@@ -2851,9 +3894,12 @@ void DistributedMesh::exchange_entity_data(EntityKind kind, const void* send_dat
 
         for (size_t j = 0; j < recv_list.size(); ++j) {
             index_t entity = recv_list[j];
-            std::memcpy(&recv_bytes[entity * bytes_per_entity],
-                       &recv_buffers[i][j * bytes_per_entity],
-                       bytes_per_entity);
+            if (entity < 0 || static_cast<size_t>(entity) >= n_entities) {
+                continue;
+            }
+            std::memcpy(&recv_bytes[static_cast<size_t>(entity) * bytes_per_entity],
+                        &recv_buffers[i][j * bytes_per_entity],
+                        bytes_per_entity);
         }
     }
 #endif
