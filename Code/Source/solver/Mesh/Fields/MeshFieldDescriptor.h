@@ -34,7 +34,6 @@
 #include "../Core/MeshTypes.h"
 #include <string>
 #include <vector>
-#include <unordered_map>
 #include <stdexcept>
 
 namespace svmp {
@@ -62,7 +61,7 @@ enum class FieldGhostPolicy {
 
 // Self-describing field metadata
 struct FieldDescriptor {
-  EntityKind location = EntityKind::Vertex;        // Where the field lives (Vertex/Line/Face/Volume)
+  EntityKind location = EntityKind::Vertex;        // Where the field lives (Vertex/Edge/Face/Volume)
   size_t components = 1;                            // Number of components (1=scalar, 3=vector, 9=tensor, etc.)
   std::vector<std::string> component_names;         // Optional: {"x", "y", "z"} or {"xx", "xy", "xz", ...}
   std::string units;                                // Physical units: "m/s", "Pa", "K", "J/kg", etc.
@@ -136,56 +135,20 @@ public:
   FieldHandle attach(const std::string& name, FieldScalarType type, const FieldDescriptor& descriptor);
 
   // Query metadata
-  bool has_descriptor(const FieldHandle& h) const {
-    return descriptors_.find(h.id) != descriptors_.end();
-  }
-
-  const FieldDescriptor& descriptor(const FieldHandle& h) const {
-    auto it = descriptors_.find(h.id);
-    if (it == descriptors_.end()) {
-      throw std::runtime_error("FieldManager: no descriptor for field " + h.name);
-    }
-    return it->second;
-  }
+  bool has_descriptor(const FieldHandle& h) const;
+  const FieldDescriptor& descriptor(const FieldHandle& h) const;
 
   // Query by intent
-  std::vector<FieldHandle> fields_with_intent(FieldIntent intent) const {
-    std::vector<FieldHandle> result;
-    for (const auto& [id, desc] : descriptors_) {
-      if (desc.intent == intent) {
-        // Reconstruct handle (needs name lookup from mesh)
-        // This is a simplified version; in practice, you'd cache handles
-        result.push_back({id, desc.location, ""});
-      }
-    }
-    return result;
-  }
+  std::vector<FieldHandle> fields_with_intent(FieldIntent intent) const;
 
   // Query time-dependent fields (for checkpointing, output)
-  std::vector<FieldHandle> time_dependent_fields() const {
-    std::vector<FieldHandle> result;
-    for (const auto& [id, desc] : descriptors_) {
-      if (desc.time_dependent) {
-        result.push_back({id, desc.location, ""});
-      }
-    }
-    return result;
-  }
+  std::vector<FieldHandle> time_dependent_fields() const;
 
   // Query fields requiring ghost exchange
-  std::vector<FieldHandle> fields_requiring_exchange() const {
-    std::vector<FieldHandle> result;
-    for (const auto& [id, desc] : descriptors_) {
-      if (desc.ghost_policy != FieldGhostPolicy::None) {
-        result.push_back({id, desc.location, ""});
-      }
-    }
-    return result;
-  }
+  std::vector<FieldHandle> fields_requiring_exchange() const;
 
 private:
   MeshBase& mesh_;
-  std::unordered_map<uint32_t, FieldDescriptor> descriptors_;
 };
 
 } // namespace svmp
