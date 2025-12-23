@@ -105,9 +105,10 @@ public:
 
     /** Weight by element volume */
     bool volume_weighted = true;
-  };
+	  };
 
-  explicit GradientRecoveryEstimator(const Config& config = {});
+	  GradientRecoveryEstimator() : GradientRecoveryEstimator(Config{}) {}
+	  explicit GradientRecoveryEstimator(const Config& config);
 
   std::vector<double> estimate(
       const MeshBase& mesh,
@@ -167,9 +168,10 @@ public:
 
     /** Power for jump norm */
     double norm_power = 2.0;
-  };
+	  };
 
-  explicit JumpIndicatorEstimator(const Config& config = {});
+	  JumpIndicatorEstimator() : JumpIndicatorEstimator(Config{}) {}
+	  explicit JumpIndicatorEstimator(const Config& config);
 
   std::vector<double> estimate(
       const MeshBase& mesh,
@@ -258,9 +260,10 @@ public:
 
     /** Scaling factor */
     double scale_factor = 1.0;
-  };
+	  };
 
-  explicit UserFieldEstimator(const Config& config = {});
+	  UserFieldEstimator() : UserFieldEstimator(Config{}) {}
+	  explicit UserFieldEstimator(const Config& config);
 
   std::vector<double> estimate(
       const MeshBase& mesh,
@@ -397,7 +400,7 @@ public:
    * @brief Write error indicators to field
    */
   static void write_to_field(
-      MeshFields& fields,
+      MeshBase& mesh,
       const std::string& field_name,
       const std::vector<double>& indicators);
 };
