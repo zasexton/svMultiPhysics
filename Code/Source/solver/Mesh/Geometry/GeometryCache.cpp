@@ -31,6 +31,7 @@
 #include "GeometryCache.h"
 #include "../Core/MeshBase.h"
 #include "MeshGeometry.h"
+#include <type_traits>
 
 namespace svmp {
 
@@ -38,9 +39,13 @@ namespace svmp {
 // GeometryCache Implementation
 //=============================================================================
 
+GeometryCache::GeometryCache(const MeshBase& mesh)
+    : GeometryCache(mesh, CacheConfig{}) {}
+
 GeometryCache::GeometryCache(const MeshBase& mesh, const CacheConfig& config)
     : mesh_(mesh), config_(config) {
     ensure_cache_capacity();
+    subscription_ = ScopedSubscription(&mesh_.event_bus(), this);
 }
 
 void GeometryCache::on_mesh_event(MeshEvent event) {
@@ -49,8 +54,8 @@ void GeometryCache::on_mesh_event(MeshEvent event) {
         invalidate_all();
         ensure_cache_capacity(); // Resize caches if topology changed
     } else if (event == MeshEvent::GeometryChanged) {
-        // Only invalidate current configuration (coordinates changed)
-        invalidate_cur_cache();
+        // Without configuration-specific events, conservatively invalidate both.
+        invalidate_all();
     } else if (event == MeshEvent::AdaptivityApplied) {
         // Adaptivity changes both topology and geometry
         invalidate_all();
@@ -105,22 +110,24 @@ real_t GeometryCache::cell_measure(index_t cell, Configuration cfg) {
 }
 
 AABB GeometryCache::cell_bounding_box(index_t cell, Configuration cfg) {
+    auto to_aabb = [](const BoundingBox& bb) -> AABB { return AABB(bb.min, bb.max); };
+
     if (!config_.enable_cell_bboxes) {
-        return MeshGeometry::cell_bounding_box(mesh_, cell, cfg);
+        return to_aabb(MeshGeometry::cell_bounding_box(mesh_, cell, cfg));
     }
 
     if (cfg == Configuration::Reference && config_.cache_reference) {
         return get_or_compute(ref_cache_.cell_bboxes, cell, [&]() {
-            return MeshGeometry::cell_bounding_box(mesh_, cell, cfg);
+            return to_aabb(MeshGeometry::cell_bounding_box(mesh_, cell, cfg));
         });
     } else if ((cfg == Configuration::Current || cfg == Configuration::Deformed) &&
                config_.cache_current) {
         return get_or_compute(cur_cache_.cell_bboxes, cell, [&]() {
-            return MeshGeometry::cell_bounding_box(mesh_, cell, cfg);
+            return to_aabb(MeshGeometry::cell_bounding_box(mesh_, cell, cfg));
         });
     }
 
-    return MeshGeometry::cell_bounding_box(mesh_, cell, cfg);
+    return to_aabb(MeshGeometry::cell_bounding_box(mesh_, cell, cfg));
 }
 
 //=============================================================================
@@ -212,24 +219,26 @@ std::array<real_t, 3> GeometryCache::edge_center(index_t edge, Configuration cfg
 //=============================================================================
 
 AABB GeometryCache::mesh_bounding_box(Configuration cfg) {
+    auto to_aabb = [](const BoundingBox& bb) -> AABB { return AABB(bb.min, bb.max); };
+
     if (!config_.enable_mesh_bbox) {
-        return MeshGeometry::bounding_box(mesh_, cfg);
+        return to_aabb(MeshGeometry::bounding_box(mesh_, cfg));
     }
 
     if (cfg == Configuration::Reference && config_.cache_reference) {
         if (!ref_cache_.mesh_bbox.has_value()) {
-            ref_cache_.mesh_bbox = MeshGeometry::bounding_box(mesh_, cfg);
+            ref_cache_.mesh_bbox = to_aabb(MeshGeometry::bounding_box(mesh_, cfg));
         }
         return ref_cache_.mesh_bbox.value();
     } else if ((cfg == Configuration::Current || cfg == Configuration::Deformed) &&
                config_.cache_current) {
         if (!cur_cache_.mesh_bbox.has_value()) {
-            cur_cache_.mesh_bbox = MeshGeometry::bounding_box(mesh_, cfg);
+            cur_cache_.mesh_bbox = to_aabb(MeshGeometry::bounding_box(mesh_, cfg));
         }
         return cur_cache_.mesh_bbox.value();
     }
 
-    return MeshGeometry::bounding_box(mesh_, cfg);
+    return to_aabb(MeshGeometry::bounding_box(mesh_, cfg));
 }
 
 real_t GeometryCache::total_volume(Configuration cfg) {
@@ -429,11 +438,11 @@ void GeometryCache::invalidate_cur_cache() {
     cur_cache_.valid = false;
 }
 
-template<typename T>
+template<typename T, typename ComputeFn>
 const T& GeometryCache::get_or_compute(
     std::vector<std::optional<T>>& cache,
     index_t index,
-    std::function<T()> compute_fn) const {
+    ComputeFn&& compute_fn) const {
 
     if (index < 0 || index >= static_cast<index_t>(cache.size())) {
         static T default_value{};

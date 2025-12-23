@@ -33,11 +33,13 @@
 
 #include "../Core/MeshTypes.h"
 #include "../Observer/MeshObserver.h"
+#include "../Observer/ScopedSubscription.h"
 #include "BoundingVolume.h"
 #include <vector>
 #include <array>
 #include <memory>
 #include <optional>
+#include <functional>
 
 namespace svmp {
 
@@ -91,7 +93,13 @@ public:
      * @param mesh The mesh to cache geometry for
      * @param config Cache configuration
      */
-    explicit GeometryCache(const MeshBase& mesh, const CacheConfig& config = CacheConfig{});
+    explicit GeometryCache(const MeshBase& mesh);
+    explicit GeometryCache(const MeshBase& mesh, const CacheConfig& config);
+
+    GeometryCache(const GeometryCache&) = delete;
+    GeometryCache& operator=(const GeometryCache&) = delete;
+    GeometryCache(GeometryCache&&) = delete;
+    GeometryCache& operator=(GeometryCache&&) = delete;
 
     ~GeometryCache() override = default;
 
@@ -226,6 +234,7 @@ private:
     const MeshBase& mesh_;
     CacheConfig config_;
     mutable CacheStats stats_;
+    ScopedSubscription subscription_;
 
     // ---- Reference configuration caches ----
     struct RefCaches {
@@ -262,35 +271,11 @@ private:
     void invalidate_ref_cache();
     void invalidate_cur_cache();
 
-    template<typename T>
+    template<typename T, typename ComputeFn>
     const T& get_or_compute(
         std::vector<std::optional<T>>& cache,
         index_t index,
-        std::function<T()> compute_fn) const;
-};
-
-/**
- * @brief Cache invalidator observer (simplified standalone version)
- *
- * Standalone observer that invalidates a GeometryCache on relevant events.
- * Can be used to wire multiple caches to a mesh.
- */
-class CacheInvalidator : public MeshObserver {
-public:
-    explicit CacheInvalidator(GeometryCache& cache) : cache_(cache) {}
-
-    void on_mesh_event(MeshEvent event) override {
-        if (event == MeshEvent::TopologyChanged ||
-            event == MeshEvent::GeometryChanged ||
-            event == MeshEvent::AdaptivityApplied) {
-            cache_.invalidate_all();
-        }
-    }
-
-    const char* observer_name() const override { return "CacheInvalidator"; }
-
-private:
-    GeometryCache& cache_;
+        ComputeFn&& compute_fn) const;
 };
 
 } // namespace svmp

@@ -56,14 +56,31 @@ public:
   // ---- Centers and bounding boxes ----
 
   /**
-   * @brief Compute center (centroid) of a cell
+   * @brief Compute a vertex-average center of a cell
    * @param mesh The mesh
    * @param cell Cell index
    * @param cfg Reference or current configuration
-   * @return Cell center coordinates
+   * @return Vertex-average center coordinates
+   *
+   * Notes:
+   * - For simplices (line/tri/tet) this matches the geometric centroid.
+   * - For general polyhedra and pyramids this differs from the volume centroid.
    */
   static std::array<real_t,3> cell_center(const MeshBase& mesh, index_t cell,
                                          Configuration cfg = Configuration::Reference);
+
+  /**
+   * @brief Compute geometric centroid of a cell in its topological dimension
+   * @param mesh The mesh
+   * @param cell Cell index
+   * @param cfg Reference or current configuration
+   * @return Cell centroid coordinates
+   *
+   * For 3D elements, this is the volume centroid; for 2D elements, the area centroid.
+   * For polyhedra, this requires explicit face connectivity and assumes a convex, watertight cell.
+   */
+  static std::array<real_t,3> cell_centroid(const MeshBase& mesh, index_t cell,
+                                           Configuration cfg = Configuration::Reference);
 
   /**
    * @brief Compute center of a face
