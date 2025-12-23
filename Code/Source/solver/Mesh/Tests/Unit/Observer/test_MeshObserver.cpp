@@ -30,6 +30,7 @@
 
 #include <gtest/gtest.h>
 #include "../../../Observer/MeshObserver.h"
+#include "../../../Observer/ScopedSubscription.h"
 #include <memory>
 #include <vector>
 
@@ -50,6 +51,23 @@ public:
   const char* observer_name() const override { return name; }
 
   void clear() { events.clear(); }
+};
+
+class SelfUnsubscribingObserver : public MeshObserver {
+public:
+  explicit SelfUnsubscribingObserver(MeshEventBus& bus) : bus_(bus) {}
+
+  void on_mesh_event(MeshEvent) override {
+    ++call_count;
+    bus_.unsubscribe(this);
+  }
+
+  const char* observer_name() const override { return "SelfUnsubscribingObserver"; }
+
+  size_t call_count = 0;
+
+private:
+  MeshEventBus& bus_;
 };
 
 // Test cache class for CacheInvalidator
@@ -116,6 +134,35 @@ TEST_F(MeshEventBusTest, SubscribeOwning) {
   EXPECT_TRUE(bus.has_observers());
 }
 
+TEST_F(MeshEventBusTest, SubscribeOwningDoesNotDuplicateSharedPtr) {
+  auto shared_obs = std::make_shared<TestObserver>("SharedObserver");
+  EXPECT_EQ(shared_obs.use_count(), 1);
+
+  bus.subscribe(shared_obs);
+  EXPECT_EQ(bus.num_observers(), 1);
+  EXPECT_EQ(shared_obs.use_count(), 2);  // bus holds a shared_ptr
+
+  bus.subscribe(shared_obs);  // Should not retain a second shared_ptr
+  EXPECT_EQ(bus.num_observers(), 1);
+  EXPECT_EQ(shared_obs.use_count(), 2);
+}
+
+TEST_F(MeshEventBusTest, UnsubscribeOwnedObserverReleasesOwnership) {
+  auto shared_obs = std::make_shared<TestObserver>("SharedObserver");
+  std::weak_ptr<TestObserver> weak_obs = shared_obs;
+
+  bus.subscribe(shared_obs);
+  EXPECT_EQ(bus.num_observers(), 1);
+  EXPECT_EQ(shared_obs.use_count(), 2);
+
+  bus.unsubscribe(shared_obs.get());
+  EXPECT_EQ(bus.num_observers(), 0);
+  EXPECT_EQ(shared_obs.use_count(), 1);
+
+  shared_obs.reset();
+  EXPECT_TRUE(weak_obs.expired());
+}
+
 TEST_F(MeshEventBusTest, PreventDuplicateSubscription) {
   bus.subscribe(observer1.get());
   bus.subscribe(observer1.get());  // Should not add duplicate
@@ -161,6 +208,27 @@ TEST_F(MeshEventBusTest, NotifyMultipleObservers) {
   EXPECT_EQ(observer2->events[0], MeshEvent::LabelsChanged);
 }
 
+TEST_F(MeshEventBusTest, UnsubscribeDuringNotifyIsSafe) {
+  SelfUnsubscribingObserver self(bus);
+  bus.subscribe(&self);
+  bus.subscribe(observer1.get());
+
+  EXPECT_EQ(bus.num_observers(), 2);
+
+  EXPECT_NO_THROW(bus.notify(MeshEvent::TopologyChanged));
+  EXPECT_EQ(self.call_count, 1);
+  EXPECT_EQ(bus.num_observers(), 1);
+
+  ASSERT_EQ(observer1->events.size(), 1);
+  EXPECT_EQ(observer1->events[0], MeshEvent::TopologyChanged);
+
+  // Observer was removed during the first notification and should not be called again.
+  bus.notify(MeshEvent::GeometryChanged);
+  EXPECT_EQ(self.call_count, 1);
+  ASSERT_EQ(observer1->events.size(), 2);
+  EXPECT_EQ(observer1->events[1], MeshEvent::GeometryChanged);
+}
+
 TEST_F(MeshEventBusTest, NotifyWithNoObservers) {
   // Should not crash
   EXPECT_NO_THROW(bus.notify(MeshEvent::FieldsChanged));
@@ -191,6 +259,31 @@ TEST_F(MeshEventBusTest, MixedOwnershipSubscriptions) {
   bus.notify(MeshEvent::PartitionChanged);
   EXPECT_EQ(observer1->events.size(), 1);
   EXPECT_EQ(shared_obs->events.size(), 1);
+}
+
+TEST(MeshEventBusMoveTest, ScopedSubscriptionUnsubscribesAfterBusMove) {
+  MeshEventBus bus;
+  TestObserver observer("Observer");
+
+  MeshEventBus moved_bus;
+  {
+    ScopedSubscription sub(&bus, &observer);
+    EXPECT_TRUE(sub.is_active());
+    EXPECT_EQ(bus.num_observers(), 1u);
+
+    moved_bus = std::move(bus);
+    EXPECT_EQ(moved_bus.num_observers(), 1u);
+
+    moved_bus.notify(MeshEvent::TopologyChanged);
+    ASSERT_EQ(observer.events.size(), 1u);
+    EXPECT_EQ(observer.events[0], MeshEvent::TopologyChanged);
+  }
+
+  EXPECT_EQ(moved_bus.num_observers(), 0u);
+
+  observer.clear();
+  moved_bus.notify(MeshEvent::GeometryChanged);
+  EXPECT_TRUE(observer.events.empty());
 }
 
 TEST_F(MeshEventBusTest, NullObserverHandling) {

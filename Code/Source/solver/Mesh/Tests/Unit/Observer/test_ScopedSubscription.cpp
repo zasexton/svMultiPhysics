@@ -136,8 +136,8 @@ TEST_F(ScopedSubscriptionTest, OwningSubscription) {
   // After scope, observer should be unsubscribed
   EXPECT_EQ(bus.num_observers(), 0);
 
-  // Observer may or may not be destroyed depending on bus internals
-  // (bus holds shared_ptr too)
+  // Observer should be destroyed once the subscription and the last shared_ptr go out of scope.
+  EXPECT_TRUE(observer_destroyed);
 }
 
 TEST_F(ScopedSubscriptionTest, ManualUnsubscribe) {

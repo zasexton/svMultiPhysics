@@ -232,6 +232,27 @@ TEST_F(ObserverRegistryTest, AttachEventCounter) {
   EXPECT_EQ(counter->count(MeshEvent::LabelsChanged), 0);
 }
 
+TEST(ObserverRegistryMeshOverloadsTest, RegistersUsingMeshId) {
+  MeshBase mesh;
+  const auto id = mesh.mesh_id();
+
+  auto counter = ObserverRegistry::attach_event_counter(mesh);
+  ASSERT_NE(counter, nullptr);
+
+  const auto entries = ObserverRegistry::instance().get_observers(id);
+  ASSERT_FALSE(entries.empty());
+
+  bool found = false;
+  for (const auto& entry : entries) {
+    if (entry.name == "EventCounter" && entry.type == "Diagnostics") {
+      found = true;
+      EXPECT_EQ(entry.mesh_id, id);
+      break;
+    }
+  }
+  EXPECT_TRUE(found);
+}
+
 TEST_F(ObserverRegistryTest, CreateMultiEventInvalidator) {
   std::vector<MeshEvent> events = {
     MeshEvent::LabelsChanged,
@@ -313,21 +334,39 @@ TEST_F(ObserverRegistryTest, CleanupExpired) {
 }
 
 TEST_F(ObserverRegistryTest, DiagnosticReport) {
+	  auto& registry = ObserverRegistry::instance();
+
+	  // Clean registry first
+	  registry.cleanup_expired();
+
+	  // Register some observers
+	  auto obs1 = std::make_shared<EventCounter>();
+	  bus.subscribe(obs1);
+	  registry.register_observer("test_mesh", "TestCounter", "Diagnostics", obs1, bus.weak_state());
+
+	  auto report = registry.diagnostic_report();
+
+	  EXPECT_TRUE(report.find("Observer Registry Diagnostic Report") != std::string::npos);
+	  EXPECT_TRUE(report.find("test_mesh") != std::string::npos);
+	  EXPECT_TRUE(report.find("TestCounter") != std::string::npos);
+	  EXPECT_TRUE(report.find("ACTIVE/SUBSCRIBED") != std::string::npos);
+}
+
+TEST_F(ObserverRegistryTest, DiagnosticReportShowsDetachedWhenUnsubscribed) {
   auto& registry = ObserverRegistry::instance();
 
-  // Clean registry first
   registry.cleanup_expired();
 
-  // Register some observers
   auto obs1 = std::make_shared<EventCounter>();
-  registry.register_observer("test_mesh", "TestCounter", "Diagnostics", obs1);
+  bus.subscribe(obs1);
+  registry.register_observer("detached_mesh", "DetachedCounter", "Diagnostics", obs1, bus.weak_state());
+
+  bus.unsubscribe(obs1.get());
 
   auto report = registry.diagnostic_report();
-
-  EXPECT_TRUE(report.find("Observer Registry Diagnostic Report") != std::string::npos);
-  EXPECT_TRUE(report.find("test_mesh") != std::string::npos);
-  EXPECT_TRUE(report.find("TestCounter") != std::string::npos);
-  EXPECT_TRUE(report.find("ACTIVE") != std::string::npos);
+  EXPECT_TRUE(report.find("detached_mesh") != std::string::npos);
+  EXPECT_TRUE(report.find("DetachedCounter") != std::string::npos);
+  EXPECT_TRUE(report.find("ACTIVE/DETACHED") != std::string::npos);
 }
 
 // ====================
@@ -417,11 +456,11 @@ TEST(SearchInvalidatorTest, InvalidatesOnCorrectEvents) {
   invalidator.on_mesh_event(MeshEvent::LabelsChanged);
   EXPECT_TRUE(accel.is_valid());
 
-  invalidator.on_mesh_event(MeshEvent::FieldsChanged);
-  EXPECT_TRUE(accel.is_valid());
+	invalidator.on_mesh_event(MeshEvent::FieldsChanged);
+	EXPECT_TRUE(accel.is_valid());
 
-  invalidator.on_mesh_event(MeshEvent::AdaptivityApplied);
-  EXPECT_TRUE(accel.is_valid());
+	invalidator.on_mesh_event(MeshEvent::AdaptivityApplied);
+	EXPECT_FALSE(accel.is_valid());
 }
 
 TEST(SearchInvalidatorTest, ObserverName) {

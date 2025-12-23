@@ -262,6 +262,32 @@ TEST_F(EventCounterObserverTest, GenerateHistogramSingleEvent) {
   EXPECT_TRUE(histogram.empty());  // Need at least 2 events for intervals
 }
 
+TEST_F(EventCounterObserverTest, GenerateHistogramWithoutHistogramData) {
+  // Default configuration does not collect histogram interval samples.
+  counter->on_mesh_event(MeshEvent::TopologyChanged);
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  counter->on_mesh_event(MeshEvent::TopologyChanged);
+
+  auto histogram = counter->generate_histogram(MeshEvent::TopologyChanged, 10);
+  EXPECT_TRUE(histogram.empty());
+}
+
+TEST_F(EventCounterObserverTest, GenerateHistogramZeroBins) {
+  EventCounterObserver::Config config;
+  config.enable_histograms = true;
+  EventCounterObserver hist_counter(config);
+
+  hist_counter.on_mesh_event(MeshEvent::TopologyChanged);
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  hist_counter.on_mesh_event(MeshEvent::TopologyChanged);
+
+  auto histogram = hist_counter.generate_histogram(MeshEvent::TopologyChanged, 0);
+  EXPECT_TRUE(histogram.empty());
+
+  auto combined = hist_counter.generate_combined_histogram(0);
+  EXPECT_TRUE(combined.empty());
+}
+
 TEST_F(EventCounterObserverTest, GenerateHistogramWithData) {
   EventCounterObserver::Config config;
   config.enable_histograms = true;
