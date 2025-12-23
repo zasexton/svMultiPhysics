@@ -101,6 +101,151 @@ protected:
         return mesh;
     }
 
+    MeshBase create_unit_quad_mesh() {
+        // Unit square in 2D.
+        std::vector<real_t> X_ref = {
+            0.0, 0.0,  // 0
+            1.0, 0.0,  // 1
+            1.0, 1.0,  // 2
+            0.0, 1.0   // 3
+        };
+
+        std::vector<offset_t> offs = {0, 4};
+        std::vector<index_t> conn = {0, 1, 2, 3};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Quad;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 4;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(2, X_ref, offs, conn, shapes);
+        return mesh;
+    }
+
+    MeshBase create_unit_hex_mesh(bool finalize_topology = false) {
+        // Unit cube in 3D.
+        std::vector<real_t> X_ref = {
+            0.0, 0.0, 0.0,  // 0
+            1.0, 0.0, 0.0,  // 1
+            1.0, 1.0, 0.0,  // 2
+            0.0, 1.0, 0.0,  // 3
+            0.0, 0.0, 1.0,  // 4
+            1.0, 0.0, 1.0,  // 5
+            1.0, 1.0, 1.0,  // 6
+            0.0, 1.0, 1.0   // 7
+        };
+
+        std::vector<offset_t> offs = {0, 8};
+        std::vector<index_t> conn = {0, 1, 2, 3, 4, 5, 6, 7};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Hex;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 8;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, conn, shapes);
+        if (finalize_topology) {
+            mesh.finalize();
+        }
+        return mesh;
+    }
+
+    MeshBase create_unit_wedge_mesh() {
+        // Right triangular prism:
+        // base triangle (z=0): (0,0), (1,0), (0,1)
+        // top (z=1): base + (0,0,1)
+        std::vector<real_t> X_ref = {
+            0.0, 0.0, 0.0,  // 0
+            1.0, 0.0, 0.0,  // 1
+            0.0, 1.0, 0.0,  // 2
+            0.0, 0.0, 1.0,  // 3
+            1.0, 0.0, 1.0,  // 4
+            0.0, 1.0, 1.0   // 5
+        };
+
+        std::vector<offset_t> offs = {0, 6};
+        std::vector<index_t> conn = {0, 1, 2, 3, 4, 5};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Wedge;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 6;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, conn, shapes);
+        return mesh;
+    }
+
+    MeshBase create_unit_pyramid_mesh() {
+        // Square base on z=0 with apex at z=1 above center.
+        std::vector<real_t> X_ref = {
+            0.0, 0.0, 0.0,  // 0
+            1.0, 0.0, 0.0,  // 1
+            1.0, 1.0, 0.0,  // 2
+            0.0, 1.0, 0.0,  // 3
+            0.5, 0.5, 1.0   // 4
+        };
+
+        std::vector<offset_t> offs = {0, 5};
+        std::vector<index_t> conn = {0, 1, 2, 3, 4};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Pyramid;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 5;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, conn, shapes);
+        return mesh;
+    }
+
+    MeshBase create_unit_cube_polyhedron_mesh() {
+        // Unit cube as a polyhedron with explicit quad faces.
+        std::vector<real_t> X_ref = {
+            0.0, 0.0, 0.0,  // 0
+            1.0, 0.0, 0.0,  // 1
+            1.0, 1.0, 0.0,  // 2
+            0.0, 1.0, 0.0,  // 3
+            0.0, 0.0, 1.0,  // 4
+            1.0, 0.0, 1.0,  // 5
+            1.0, 1.0, 1.0,  // 6
+            0.0, 1.0, 1.0   // 7
+        };
+
+        std::vector<offset_t> offs = {0, 8};
+        std::vector<index_t> conn = {0, 1, 2, 3, 4, 5, 6, 7};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Polyhedron;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 8;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, conn, shapes);
+
+        // Face list: 6 quads (vertex ordering does not matter for volume/centroid).
+        std::vector<CellShape> face_shapes(6);
+        for (auto& fs : face_shapes) {
+            fs.family = CellFamily::Quad;
+            fs.order = 1;
+            fs.num_corners = 4;
+        }
+
+        std::vector<offset_t> face_offs = {0, 4, 8, 12, 16, 20, 24};
+        std::vector<index_t> face_conn = {
+            0, 1, 2, 3,  // z=0
+            4, 5, 6, 7,  // z=1
+            0, 1, 5, 4,  // y=0
+            1, 2, 6, 5,  // x=1
+            2, 3, 7, 6,  // y=1
+            3, 0, 4, 7   // x=0
+        };
+
+        std::vector<std::array<index_t,2>> face2cell(6);
+        for (auto& fc : face2cell) {
+            fc = {{0, INVALID_INDEX}};
+        }
+        mesh.set_faces_from_arrays(face_shapes, face_offs, face_conn, face2cell);
+        return mesh;
+    }
+
     /**
      * @brief Helper to compare real_t values within tolerance
      */
@@ -182,6 +327,15 @@ TEST_F(MeshGeometryTest, Distance) {
     EXPECT_TRUE(approx_equal(result, 5.0));
 }
 
+TEST_F(MeshGeometryTest, AngleAtVertex) {
+    std::array<real_t,3> p1 = {{1.0, 0.0, 0.0}};
+    std::array<real_t,3> p2 = {{0.0, 0.0, 0.0}};
+    std::array<real_t,3> p3 = {{0.0, 1.0, 0.0}};
+
+    // Right angle at p2.
+    EXPECT_TRUE(approx_equal(MeshGeometry::angle(p1, p2, p3), static_cast<real_t>(M_PI) * 0.5));
+}
+
 // ==========================================
 // Tests: Triangle Area
 // ==========================================
@@ -246,6 +400,28 @@ TEST_F(MeshGeometryTest, TriangleCellCenter) {
     EXPECT_TRUE(approx_equal(center, {{1.0/3.0, 1.0/3.0, 0.0}}));
 }
 
+TEST_F(MeshGeometryTest, HexWedgePyramidCellCenters) {
+    auto hex = create_unit_hex_mesh();
+    auto wedge = create_unit_wedge_mesh();
+    auto pyramid = create_unit_pyramid_mesh();
+
+    EXPECT_TRUE(approx_equal(MeshGeometry::cell_center(hex, 0), {{0.5, 0.5, 0.5}}));
+    EXPECT_TRUE(approx_equal(MeshGeometry::cell_center(wedge, 0), {{1.0/3.0, 1.0/3.0, 0.5}}));
+    // Note: current MeshGeometry::cell_center is the vertex-average ("barycenter of corners").
+    EXPECT_TRUE(approx_equal(MeshGeometry::cell_center(pyramid, 0), {{0.5, 0.5, 0.2}}));
+}
+
+TEST_F(MeshGeometryTest, CellCentroidPyramidDiffersFromVertexAverage) {
+    auto pyramid = create_unit_pyramid_mesh();
+
+    const auto bary = MeshGeometry::cell_center(pyramid, 0);
+    const auto cent = MeshGeometry::cell_centroid(pyramid, 0);
+
+    EXPECT_TRUE(approx_equal(bary, {{0.5, 0.5, 0.2}}));
+    // Volume centroid of a right pyramid is at z = h/4.
+    EXPECT_TRUE(approx_equal(cent, {{0.5, 0.5, 0.25}}));
+}
+
 // ==========================================
 // Tests: Cell Measures
 // ==========================================
@@ -268,6 +444,48 @@ TEST_F(MeshGeometryTest, TriangleCellArea) {
     EXPECT_TRUE(approx_equal(area, 0.5));
 }
 
+TEST_F(MeshGeometryTest, QuadCellArea) {
+    MeshBase mesh = create_unit_quad_mesh();
+    EXPECT_TRUE(approx_equal(MeshGeometry::cell_measure(mesh, 0), 1.0));
+}
+
+TEST_F(MeshGeometryTest, PolygonCellArea) {
+    // Unit square as a generic polygon cell in a 3D-embedded mesh.
+    std::vector<real_t> X_ref = {
+        0.0, 0.0, 0.0,  // 0
+        1.0, 0.0, 0.0,  // 1
+        1.0, 1.0, 0.0,  // 2
+        0.0, 1.0, 0.0   // 3
+    };
+    std::vector<offset_t> offs = {0, 4};
+    std::vector<index_t> conn = {0, 1, 2, 3};
+    std::vector<CellShape> shapes(1);
+    shapes[0].family = CellFamily::Polygon;
+    shapes[0].order = 1;
+    shapes[0].num_corners = 4;
+
+    MeshBase mesh;
+    mesh.build_from_arrays(3, X_ref, offs, conn, shapes);
+
+    EXPECT_TRUE(approx_equal(MeshGeometry::cell_measure(mesh, 0), 1.0));
+}
+
+TEST_F(MeshGeometryTest, HexWedgePyramidCellMeasures) {
+    auto hex = create_unit_hex_mesh();
+    auto wedge = create_unit_wedge_mesh();
+    auto pyramid = create_unit_pyramid_mesh();
+
+    EXPECT_TRUE(approx_equal(MeshGeometry::cell_measure(hex, 0), 1.0));
+    EXPECT_TRUE(approx_equal(MeshGeometry::cell_measure(wedge, 0), 0.5));
+    EXPECT_TRUE(approx_equal(MeshGeometry::cell_measure(pyramid, 0), 1.0/3.0));
+}
+
+TEST_F(MeshGeometryTest, PolyhedronCellVolumeAndCentroid) {
+    auto poly = create_unit_cube_polyhedron_mesh();
+    EXPECT_TRUE(approx_equal(MeshGeometry::cell_measure(poly, 0), 1.0));
+    EXPECT_TRUE(approx_equal(MeshGeometry::cell_centroid(poly, 0), {{0.5, 0.5, 0.5}}));
+}
+
 // ==========================================
 // Tests: Bounding Boxes
 // ==========================================
@@ -281,6 +499,18 @@ TEST_F(MeshGeometryTest, TetBoundingBox) {
     EXPECT_TRUE(approx_equal(bbox.min[1], 0.0));
     EXPECT_TRUE(approx_equal(bbox.min[2], 0.0));
 
+    EXPECT_TRUE(approx_equal(bbox.max[0], 1.0));
+    EXPECT_TRUE(approx_equal(bbox.max[1], 1.0));
+    EXPECT_TRUE(approx_equal(bbox.max[2], 1.0));
+}
+
+TEST_F(MeshGeometryTest, HexBoundingBox) {
+    MeshBase mesh = create_unit_hex_mesh();
+    auto bbox = MeshGeometry::cell_bounding_box(mesh, 0);
+
+    EXPECT_TRUE(approx_equal(bbox.min[0], 0.0));
+    EXPECT_TRUE(approx_equal(bbox.min[1], 0.0));
+    EXPECT_TRUE(approx_equal(bbox.min[2], 0.0));
     EXPECT_TRUE(approx_equal(bbox.max[0], 1.0));
     EXPECT_TRUE(approx_equal(bbox.max[1], 1.0));
     EXPECT_TRUE(approx_equal(bbox.max[2], 1.0));
@@ -312,6 +542,30 @@ TEST_F(MeshGeometryTest, ComputeNormalFromVerticesTriangle) {
     EXPECT_TRUE(approx_equal(normal[0], 0.0));
     EXPECT_TRUE(approx_equal(normal[1], 0.0));
     EXPECT_TRUE(approx_equal(std::abs(normal[2]), 1.0));
+}
+
+TEST_F(MeshGeometryTest, ComputeNormalFromVerticesCollinearFirstThree) {
+    // Polygon where the first three vertices are collinear (cross-product would fail).
+    std::vector<real_t> X_ref = {
+        0.0, 0.0, 0.0,  // 0
+        1.0, 0.0, 0.0,  // 1
+        2.0, 0.0, 0.0,  // 2 (collinear with 0,1)
+        2.0, 1.0, 0.0,  // 3
+        0.0, 1.0, 0.0   // 4
+    };
+    std::vector<offset_t> offs0 = {0};
+    std::vector<index_t> empty_conn;
+    std::vector<CellShape> empty_shapes;
+    MeshBase mesh;
+    mesh.build_from_arrays(3, X_ref, offs0, empty_conn, empty_shapes);
+
+    std::vector<index_t> oriented_verts = {0, 1, 2, 3, 4};
+    auto normal = MeshGeometry::compute_normal_from_vertices(mesh, oriented_verts);
+
+    EXPECT_TRUE(approx_equal(normal[0], 0.0));
+    EXPECT_TRUE(approx_equal(normal[1], 0.0));
+    EXPECT_GT(normal[2], 0.0);
+    EXPECT_TRUE(approx_equal(normal[2], 4.0));  // 2*area for 2x1 rectangle = 4
 }
 
 TEST_F(MeshGeometryTest, ComputeAreaFromVerticesTriangle) {
@@ -371,6 +625,35 @@ TEST_F(MeshGeometryTest, ComputeEdgeNormalFromVertices2D) {
 
     // Edge goes in +x direction, normal should be in +y direction (90° CCW)
     EXPECT_TRUE(approx_equal(normal, {{0.0, 1.0, 0.0}}));
+}
+
+TEST_F(MeshGeometryTest, TotalVolumeAndBoundaryAreaHex) {
+    MeshBase mesh = create_unit_hex_mesh(/*finalize_topology=*/true);
+
+    EXPECT_TRUE(approx_equal(MeshGeometry::total_volume(mesh), 1.0));
+    EXPECT_TRUE(approx_equal(MeshGeometry::boundary_area(mesh), 6.0));
+
+    // Edge lengths should all be 1 for a unit cube.
+    ASSERT_GT(mesh.n_edges(), 0u);
+    for (index_t e = 0; e < static_cast<index_t>(mesh.n_edges()); ++e) {
+        EXPECT_TRUE(approx_equal(MeshGeometry::edge_length(mesh, e), 1.0));
+    }
+}
+
+TEST_F(MeshGeometryTest, DeformedUsesCurrentCoordsWhenAvailable) {
+    MeshBase mesh = create_unit_tet_mesh();
+
+    // Shift current coordinates by +1 in x.
+    auto X_cur = mesh.X_ref();
+    for (size_t i = 0; i < X_cur.size(); i += 3) {
+        X_cur[i] += 1.0;
+    }
+    mesh.set_current_coords(X_cur);
+
+    auto cref = MeshGeometry::cell_center(mesh, 0, Configuration::Reference);
+    auto cdef = MeshGeometry::cell_center(mesh, 0, Configuration::Deformed);
+    EXPECT_TRUE(approx_equal(cref, {{0.25, 0.25, 0.25}}));
+    EXPECT_TRUE(approx_equal(cdef, {{1.25, 0.25, 0.25}}));
 }
 
 } // namespace test
