@@ -135,6 +135,158 @@ protected:
         mesh.build_from_arrays(2, X_ref, offs, connectivity, shapes);
         return mesh;
     }
+
+    /**
+     * @brief Create a simple quad mesh (2D)
+     */
+    MeshBase create_single_quad_mesh() {
+        std::vector<real_t> X_ref = {
+            0.0, 0.0,  // Vertex 0
+            1.0, 0.0,  // Vertex 1
+            1.0, 1.0,  // Vertex 2
+            0.0, 1.0   // Vertex 3
+        };
+
+        std::vector<offset_t> offs = {0, 4};
+        std::vector<index_t> connectivity = {0, 1, 2, 3};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Quad;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 4;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(2, X_ref, offs, connectivity, shapes);
+        return mesh;
+    }
+
+    /**
+     * @brief Create a single hexahedron mesh (3D)
+     */
+    MeshBase create_single_hex_mesh() {
+        std::vector<real_t> X_ref = {
+            0.0, 0.0, 0.0,  // 0
+            1.0, 0.0, 0.0,  // 1
+            1.0, 1.0, 0.0,  // 2
+            0.0, 1.0, 0.0,  // 3
+            0.0, 0.0, 1.0,  // 4
+            1.0, 0.0, 1.0,  // 5
+            1.0, 1.0, 1.0,  // 6
+            0.0, 1.0, 1.0   // 7
+        };
+
+        std::vector<offset_t> offs = {0, 8};
+        std::vector<index_t> connectivity = {0, 1, 2, 3, 4, 5, 6, 7};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Hex;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 8;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, connectivity, shapes);
+        return mesh;
+    }
+
+    /**
+     * @brief Create a 1D line mesh embedded in 3D coordinates
+     */
+    MeshBase create_single_line_mesh_in_3d() {
+        std::vector<real_t> X_ref = {
+            0.0, 0.0, 0.0,  // 0
+            1.0, 0.0, 0.0   // 1
+        };
+
+        std::vector<offset_t> offs = {0, 2};
+        std::vector<index_t> connectivity = {0, 1};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Line;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 2;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, connectivity, shapes);
+        return mesh;
+    }
+
+    /**
+     * @brief Create a 2D surface triangle embedded in 3D coordinates
+     */
+    MeshBase create_surface_triangle_mesh_in_3d() {
+        std::vector<real_t> X_ref = {
+            0.0, 0.0, 0.0,  // 0
+            1.0, 0.0, 0.0,  // 1
+            0.0, 1.0, 0.0   // 2
+        };
+
+        std::vector<offset_t> offs = {0, 3};
+        std::vector<index_t> connectivity = {0, 1, 2};
+        std::vector<CellShape> shapes(1);
+        shapes[0].family = CellFamily::Triangle;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 3;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, connectivity, shapes);
+        return mesh;
+    }
+
+    /**
+     * @brief Create two disconnected triangles (2D)
+     */
+    MeshBase create_two_disconnected_triangles_mesh() {
+        std::vector<real_t> X_ref = {
+            0.0, 0.0,   // 0
+            1.0, 0.0,   // 1
+            0.0, 1.0,   // 2
+            10.0, 0.0,  // 3
+            11.0, 0.0,  // 4
+            10.0, 1.0   // 5
+        };
+
+        std::vector<offset_t> offs = {0, 3, 6};
+        std::vector<index_t> connectivity = {0, 1, 2, 3, 4, 5};
+        std::vector<CellShape> shapes(2);
+        for (int i = 0; i < 2; ++i) {
+            shapes[i].family = CellFamily::Triangle;
+            shapes[i].order = 1;
+            shapes[i].num_corners = 3;
+        }
+
+        MeshBase mesh;
+        mesh.build_from_arrays(2, X_ref, offs, connectivity, shapes);
+        return mesh;
+    }
+
+    /**
+     * @brief Create a mixed-dimensional mesh (tetra + triangle).
+     *
+     * Boundary detection should operate on the maximal cell dimension only.
+     */
+    MeshBase create_mixed_dim_mesh_tet_plus_triangle() {
+        std::vector<real_t> X_ref = {
+            0.0, 0.0, 0.0,  // 0
+            1.0, 0.0, 0.0,  // 1
+            0.0, 1.0, 0.0,  // 2
+            0.0, 0.0, 1.0   // 3
+        };
+
+        std::vector<offset_t> offs = {0, 4, 7};
+        std::vector<index_t> connectivity = {
+            0, 1, 2, 3,  // tet
+            0, 1, 2      // triangle
+        };
+
+        std::vector<CellShape> shapes(2);
+        shapes[0].family = CellFamily::Tetra;
+        shapes[0].order = 1;
+        shapes[0].num_corners = 4;
+        shapes[1].family = CellFamily::Triangle;
+        shapes[1].order = 1;
+        shapes[1].num_corners = 3;
+
+        MeshBase mesh;
+        mesh.build_from_arrays(3, X_ref, offs, connectivity, shapes);
+        return mesh;
+    }
 };
 
 // ==========================================
@@ -256,6 +408,106 @@ TEST_F(BoundaryDetectorTest, SingleTriangleHasBoundary) {
     EXPECT_TRUE(info.has_boundary());
     // A single triangle has 3 edges, all should be on boundary
     EXPECT_EQ(info.boundary_entities.size(), 3);
+}
+
+TEST_F(BoundaryDetectorTest, SingleTriangleHasSingleBoundaryComponent) {
+    MeshBase mesh = create_single_triangle_mesh();
+    BoundaryDetector detector(mesh);
+
+    auto info = detector.detect_boundary();
+
+    ASSERT_EQ(info.components.size(), 1u);
+    EXPECT_EQ(info.components[0].n_entities(), 3u);
+    EXPECT_EQ(info.components[0].n_vertices(), 3u);
+}
+
+TEST_F(BoundaryDetectorTest, TwoDisconnectedTrianglesHaveTwoBoundaryComponents) {
+    MeshBase mesh = create_two_disconnected_triangles_mesh();
+    BoundaryDetector detector(mesh);
+
+    auto info = detector.detect_boundary();
+
+    EXPECT_EQ(info.boundary_entities.size(), 6u);
+    ASSERT_EQ(info.components.size(), 2u);
+    for (const auto& comp : info.components) {
+        EXPECT_EQ(comp.n_entities(), 3u);
+        EXPECT_EQ(comp.n_vertices(), 3u);
+    }
+}
+
+TEST_F(BoundaryDetectorTest, SingleQuadHasSingleBoundaryComponent) {
+    MeshBase mesh = create_single_quad_mesh();
+    BoundaryDetector detector(mesh);
+
+    auto info = detector.detect_boundary();
+
+    EXPECT_EQ(info.boundary_entities.size(), 4u);
+    ASSERT_EQ(info.components.size(), 1u);
+    EXPECT_EQ(info.components[0].n_entities(), 4u);
+    EXPECT_EQ(info.components[0].n_vertices(), 4u);
+}
+
+TEST_F(BoundaryDetectorTest, SingleHexHasSingleBoundaryComponent) {
+    MeshBase mesh = create_single_hex_mesh();
+    BoundaryDetector detector(mesh);
+
+    auto info = detector.detect_boundary();
+
+    EXPECT_EQ(info.boundary_entities.size(), 6u);
+    EXPECT_EQ(info.boundary_vertices.size(), 8u);
+    ASSERT_EQ(info.components.size(), 1u);
+    EXPECT_EQ(info.components[0].n_entities(), 6u);
+    EXPECT_EQ(info.components[0].n_vertices(), 8u);
+}
+
+TEST_F(BoundaryDetectorTest, LineIn3DHasTwoBoundaryVertices) {
+    MeshBase mesh = create_single_line_mesh_in_3d();
+    BoundaryDetector detector(mesh);
+
+    auto info = detector.detect_boundary();
+
+    EXPECT_EQ(info.boundary_entities.size(), 2u);
+    EXPECT_EQ(info.boundary_vertices.size(), 2u);
+    ASSERT_EQ(info.boundary_types.size(), info.boundary_entities.size());
+    for (auto kind : info.boundary_types) {
+        EXPECT_EQ(kind, EntityKind::Vertex);
+    }
+    EXPECT_EQ(info.components.size(), 2u);
+}
+
+TEST_F(BoundaryDetectorTest, SurfaceTriangleIn3DHasEdgeBoundaryTypes) {
+    MeshBase mesh = create_surface_triangle_mesh_in_3d();
+    BoundaryDetector detector(mesh);
+
+    auto info = detector.detect_boundary();
+
+    EXPECT_EQ(info.boundary_entities.size(), 3u);
+    ASSERT_EQ(info.boundary_types.size(), info.boundary_entities.size());
+    for (auto kind : info.boundary_types) {
+        EXPECT_EQ(kind, EntityKind::Edge);
+    }
+    ASSERT_EQ(info.components.size(), 1u);
+    EXPECT_EQ(info.components[0].n_entities(), 3u);
+}
+
+TEST_F(BoundaryDetectorTest, MixedDimMeshUsesMaximalCellsOnly) {
+    MeshBase mesh = create_mixed_dim_mesh_tet_plus_triangle();
+    BoundaryDetector detector(mesh);
+
+    auto info = detector.detect_boundary();
+
+    // Only tet faces should contribute (4 boundary faces); the triangle is lower-dimensional.
+    EXPECT_EQ(info.boundary_entities.size(), 4u);
+    ASSERT_EQ(info.boundary_types.size(), info.boundary_entities.size());
+    for (auto kind : info.boundary_types) {
+        EXPECT_EQ(kind, EntityKind::Face);
+    }
+
+    // Tet boundary faces are triangles.
+    ASSERT_EQ(info.oriented_boundary_entities.size(), info.boundary_entities.size());
+    for (const auto& verts : info.oriented_boundary_entities) {
+        EXPECT_EQ(verts.size(), 3u);
+    }
 }
 
 TEST_F(BoundaryDetectorTest, TriangleBoundaryEdgesHaveTwoVertices) {

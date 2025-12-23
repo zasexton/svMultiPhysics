@@ -68,7 +68,9 @@ namespace svmp {
  * - Mixed element mesh support
  * - Non-manifold detection
  * - Connected component extraction
- * - Periodic mesh handling
+ *
+ * Notes:
+ * - Periodic equivalence constraints are handled in `Constraints/`; this detector operates on raw topology.
  */
 class BoundaryDetector {
 public:
@@ -84,7 +86,12 @@ public:
     struct BoundaryIncidence {
         BoundaryKey key;                                // Canonical boundary representation
         std::vector<index_t> incident_cells;            // Cells sharing this boundary
-        std::vector<std::vector<index_t>> oriented_vertices;  // Oriented vertex lists (one per incident cell)
+        // Oriented boundary ring vertex lists (one per incident cell). For faces this is a cyclic
+        // ordering suitable for Geometry routines (no face-interior nodes).
+        std::vector<std::vector<index_t>> oriented_vertices;
+        // Full vertex lists on the codim-1 entity (one per incident cell). May include higher-order
+        // nodes (edge/face interior) when present in the cell connectivity.
+        std::vector<std::vector<index_t>> entity_vertices;
         int count = 0;                                  // Number of incident cells
 
         bool is_boundary() const { return count == 1; }
@@ -92,11 +99,15 @@ public:
         bool is_nonmanifold() const { return count > 2; }
 
         // Get oriented vertices for boundary (outward-pointing normal convention)
-        std::vector<index_t> boundary_orientation() const {
-            if (is_boundary() && !oriented_vertices.empty()) {
-                return oriented_vertices[0];
-            }
-            return key.vertices();  // Fallback to canonical
+        const std::vector<index_t>& boundary_orientation() const {
+            if (is_boundary() && !oriented_vertices.empty()) return oriented_vertices[0];
+            return key.vertices();
+        }
+
+        // Get all vertices on the boundary entity (may include higher-order nodes)
+        const std::vector<index_t>& boundary_entity_vertices() const {
+            if (is_boundary() && !entity_vertices.empty()) return entity_vertices[0];
+            return key.vertices();
         }
     };
 
@@ -104,7 +115,11 @@ public:
      * @brief Boundary detection result
      */
     struct BoundaryInfo {
-        // Generic (n-1)-entity indices grouped by classification
+        // Canonical representation for all unique codim-1 entities.
+        // Entity IDs returned below are indices into this vector.
+        std::vector<BoundaryKey> entity_keys;
+
+        // Generic (n-1)-entity indices grouped by classification (indices into entity_keys)
         std::vector<index_t> boundary_entities;                   // Boundary (n-1)-entities (incidence = 1)
         std::vector<index_t> interior_entities;                   // Interior (n-1)-entities (incidence = 2)
         std::vector<index_t> nonmanifold_entities;                // Non-manifold (n-1)-entities (incidence > 2)
@@ -149,11 +164,11 @@ public:
      * @brief Get boundary incidence counts for all (n-1)-boundaries
      * @return Map from boundary key to incidence information
      */
-    std::unordered_map<BoundaryKey, BoundaryIncidence, BoundaryKey::Hash> compute_boundary_incidence();
+    std::unordered_map<BoundaryKey, BoundaryIncidence, BoundaryKey::Hash> compute_boundary_incidence() const;
 
     /**
      * @brief Extract connected components of the boundary
-     * @param boundary_faces Indices of boundary faces
+     * @param boundary_entities Entity IDs (indices into BoundaryInfo::entity_keys)
      * @return Vector of connected boundary components
      */
     std::vector<BoundaryComponent> extract_boundary_components(
@@ -201,13 +216,14 @@ private:
     // Helper: extract (n-2) sub-entities from a cyclic (ring) list of vertices
     std::vector<BoundaryKey> extract_codim2_from_ring(const std::vector<index_t>& vertices) const;
 
-    // BFS for connected components
-    void bfs_boundary_component(
-        index_t start_entity,
+    // Helper: compute connected components given a stable entity-ID ordering.
+    std::vector<BoundaryComponent> extract_boundary_components_impl(
         const std::vector<index_t>& boundary_entities,
-        const std::unordered_map<BoundaryKey, std::vector<index_t>, BoundaryKey::Hash>& sub_to_entities,
-        std::unordered_set<index_t>& visited,
-        BoundaryComponent& component) const;
+        const std::vector<BoundaryKey>& all_entities,
+        const std::unordered_map<BoundaryKey, BoundaryIncidence, BoundaryKey::Hash>& incidence_map) const;
+
+    // Topological dimension of the mesh (derived from max cell family dimension).
+    int topo_dim_ = 0;
 };
 
 } // namespace svmp
