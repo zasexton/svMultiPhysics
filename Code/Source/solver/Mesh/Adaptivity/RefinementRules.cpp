@@ -39,22 +39,22 @@ namespace svmp {
 // LineRefinementRule Implementation
 // ====================
 
-bool LineRefinementRule::can_refine(CellType type, size_t level) const {
-  return type == CellType::LINE && level < 10;  // Max 10 levels
+bool LineRefinementRule::can_refine(CellFamily family, size_t level) const {
+  return family == CellFamily::Line && level < 10;  // Max 10 levels
 }
 
-size_t LineRefinementRule::num_children(CellType type, RefinementPattern pattern) const {
-  if (type != CellType::LINE) return 0;
+size_t LineRefinementRule::num_children(CellFamily family, RefinementPattern pattern) const {
+  if (family != CellFamily::Line) return 0;
   return 2;  // Line always splits into 2
 }
 
 RefinedElement LineRefinementRule::refine(
-    const std::vector<std::array<double, 3>>& vertices,
-    CellType type,
+    const std::vector<std::array<real_t, 3>>& vertices,
+    CellFamily family,
     RefinementPattern pattern,
     size_t level) const {
 
-  if (type != CellType::LINE || vertices.size() != 2) {
+  if (family != CellFamily::Line || vertices.size() != 2) {
     throw std::invalid_argument("Invalid element for line refinement");
   }
 
@@ -76,12 +76,12 @@ RefinedElement LineRefinementRule::refine(
   return refined;
 }
 
-std::vector<RefinementPattern> LineRefinementRule::compatible_patterns(CellType type) const {
-  if (type != CellType::LINE) return {};
+std::vector<RefinementPattern> LineRefinementRule::compatible_patterns(CellFamily family) const {
+  if (family != CellFamily::Line) return {};
   return {RefinementPattern::ISOTROPIC};
 }
 
-RefinementPattern LineRefinementRule::default_pattern(CellType type) const {
+RefinementPattern LineRefinementRule::default_pattern(CellFamily family) const {
   return RefinementPattern::ISOTROPIC;
 }
 
@@ -89,12 +89,12 @@ RefinementPattern LineRefinementRule::default_pattern(CellType type) const {
 // TriangleRefinementRule Implementation
 // ====================
 
-bool TriangleRefinementRule::can_refine(CellType type, size_t level) const {
-  return type == CellType::TRIANGLE && level < 10;
+bool TriangleRefinementRule::can_refine(CellFamily family, size_t level) const {
+  return family == CellFamily::Triangle && level < 10;
 }
 
-size_t TriangleRefinementRule::num_children(CellType type, RefinementPattern pattern) const {
-  if (type != CellType::TRIANGLE) return 0;
+size_t TriangleRefinementRule::num_children(CellFamily family, RefinementPattern pattern) const {
+  if (family != CellFamily::Triangle) return 0;
 
   switch (pattern) {
     case RefinementPattern::RED:
@@ -108,12 +108,12 @@ size_t TriangleRefinementRule::num_children(CellType type, RefinementPattern pat
 }
 
 RefinedElement TriangleRefinementRule::refine(
-    const std::vector<std::array<double, 3>>& vertices,
-    CellType type,
+    const std::vector<std::array<real_t, 3>>& vertices,
+    CellFamily family,
     RefinementPattern pattern,
     size_t level) const {
 
-  if (type != CellType::TRIANGLE || vertices.size() != 3) {
+  if (family != CellFamily::Triangle || vertices.size() != 3) {
     throw std::invalid_argument("Invalid element for triangle refinement");
   }
 
@@ -129,17 +129,17 @@ RefinedElement TriangleRefinementRule::refine(
   }
 }
 
-std::vector<RefinementPattern> TriangleRefinementRule::compatible_patterns(CellType type) const {
-  if (type != CellType::TRIANGLE) return {};
+std::vector<RefinementPattern> TriangleRefinementRule::compatible_patterns(CellFamily family) const {
+  if (family != CellFamily::Triangle) return {};
   return {RefinementPattern::RED, RefinementPattern::GREEN, RefinementPattern::BISECTION};
 }
 
-RefinementPattern TriangleRefinementRule::default_pattern(CellType type) const {
+RefinementPattern TriangleRefinementRule::default_pattern(CellFamily family) const {
   return RefinementPattern::RED;
 }
 
 RefinedElement TriangleRefinementRule::red_refine(
-    const std::vector<std::array<double, 3>>& vertices,
+    const std::vector<std::array<real_t, 3>>& vertices,
     size_t level) const {
 
   RefinedElement refined;
@@ -175,7 +175,7 @@ RefinedElement TriangleRefinementRule::red_refine(
 }
 
 RefinedElement TriangleRefinementRule::green_refine(
-    const std::vector<std::array<double, 3>>& vertices,
+    const std::vector<std::array<real_t, 3>>& vertices,
     size_t edge_to_split,
     size_t level) const {
 
@@ -184,8 +184,10 @@ RefinedElement TriangleRefinementRule::green_refine(
   refined.pattern = RefinementPattern::GREEN;
 
   // Split only one edge
-  std::array<double, 3> midpoint;
-  size_t v0, v1, v2;
+  std::array<real_t, 3> midpoint;
+  index_t v0 = 0;
+  index_t v1 = 0;
+  index_t v2 = 0;
 
   // Determine which edge to split and vertex ordering
   switch (edge_to_split) {
@@ -217,11 +219,11 @@ RefinedElement TriangleRefinementRule::green_refine(
 }
 
 RefinedElement TriangleRefinementRule::bisect(
-    const std::vector<std::array<double, 3>>& vertices,
+    const std::vector<std::array<real_t, 3>>& vertices,
     size_t level) const {
 
   // Find longest edge
-  size_t longest_edge = RefinementUtils::find_longest_edge(vertices, CellType::TRIANGLE);
+  size_t longest_edge = RefinementUtils::find_longest_edge(vertices, CellFamily::Triangle);
 
   // Use green refinement on longest edge
   return green_refine(vertices, longest_edge, level);
@@ -231,12 +233,12 @@ RefinedElement TriangleRefinementRule::bisect(
 // QuadRefinementRule Implementation
 // ====================
 
-bool QuadRefinementRule::can_refine(CellType type, size_t level) const {
-  return type == CellType::QUAD && level < 10;
+bool QuadRefinementRule::can_refine(CellFamily family, size_t level) const {
+  return family == CellFamily::Quad && level < 10;
 }
 
-size_t QuadRefinementRule::num_children(CellType type, RefinementPattern pattern) const {
-  if (type != CellType::QUAD) return 0;
+size_t QuadRefinementRule::num_children(CellFamily family, RefinementPattern pattern) const {
+  if (family != CellFamily::Quad) return 0;
 
   switch (pattern) {
     case RefinementPattern::ISOTROPIC:
@@ -250,12 +252,12 @@ size_t QuadRefinementRule::num_children(CellType type, RefinementPattern pattern
 }
 
 RefinedElement QuadRefinementRule::refine(
-    const std::vector<std::array<double, 3>>& vertices,
-    CellType type,
+    const std::vector<std::array<real_t, 3>>& vertices,
+    CellFamily family,
     RefinementPattern pattern,
     size_t level) const {
 
-  if (type != CellType::QUAD || vertices.size() != 4) {
+  if (family != CellFamily::Quad || vertices.size() != 4) {
     throw std::invalid_argument("Invalid element for quad refinement");
   }
 
@@ -267,17 +269,17 @@ RefinedElement QuadRefinementRule::refine(
   }
 }
 
-std::vector<RefinementPattern> QuadRefinementRule::compatible_patterns(CellType type) const {
-  if (type != CellType::QUAD) return {};
+std::vector<RefinementPattern> QuadRefinementRule::compatible_patterns(CellFamily family) const {
+  if (family != CellFamily::Quad) return {};
   return {RefinementPattern::ISOTROPIC, RefinementPattern::ANISOTROPIC};
 }
 
-RefinementPattern QuadRefinementRule::default_pattern(CellType type) const {
+RefinementPattern QuadRefinementRule::default_pattern(CellFamily family) const {
   return RefinementPattern::ISOTROPIC;
 }
 
 RefinedElement QuadRefinementRule::regular_refine(
-    const std::vector<std::array<double, 3>>& vertices,
+    const std::vector<std::array<real_t, 3>>& vertices,
     size_t level) const {
 
   RefinedElement refined;
@@ -313,7 +315,7 @@ RefinedElement QuadRefinementRule::regular_refine(
 }
 
 RefinedElement QuadRefinementRule::anisotropic_refine(
-    const std::vector<std::array<double, 3>>& vertices,
+    const std::vector<std::array<real_t, 3>>& vertices,
     size_t direction,
     size_t level) const {
 
@@ -352,12 +354,12 @@ RefinedElement QuadRefinementRule::anisotropic_refine(
 // TetrahedronRefinementRule Implementation
 // ====================
 
-bool TetrahedronRefinementRule::can_refine(CellType type, size_t level) const {
-  return type == CellType::TETRAHEDRON && level < 10;
+bool TetrahedronRefinementRule::can_refine(CellFamily family, size_t level) const {
+  return family == CellFamily::Tetra && level < 10;
 }
 
-size_t TetrahedronRefinementRule::num_children(CellType type, RefinementPattern pattern) const {
-  if (type != CellType::TETRAHEDRON) return 0;
+size_t TetrahedronRefinementRule::num_children(CellFamily family, RefinementPattern pattern) const {
+  if (family != CellFamily::Tetra) return 0;
 
   switch (pattern) {
     case RefinementPattern::RED:
@@ -370,34 +372,34 @@ size_t TetrahedronRefinementRule::num_children(CellType type, RefinementPattern 
 }
 
 RefinedElement TetrahedronRefinementRule::refine(
-    const std::vector<std::array<double, 3>>& vertices,
-    CellType type,
+    const std::vector<std::array<real_t, 3>>& vertices,
+    CellFamily family,
     RefinementPattern pattern,
     size_t level) const {
 
-  if (type != CellType::TETRAHEDRON || vertices.size() != 4) {
+  if (family != CellFamily::Tetra || vertices.size() != 4) {
     throw std::invalid_argument("Invalid element for tetrahedron refinement");
   }
 
   switch (pattern) {
     case RefinementPattern::BISECTION:
-      return bisect(vertices, RefinementUtils::find_longest_edge(vertices, type), level);
+      return bisect(vertices, RefinementUtils::find_longest_edge(vertices, family), level);
     default:
       return red_refine(vertices, level);
   }
 }
 
-std::vector<RefinementPattern> TetrahedronRefinementRule::compatible_patterns(CellType type) const {
-  if (type != CellType::TETRAHEDRON) return {};
+std::vector<RefinementPattern> TetrahedronRefinementRule::compatible_patterns(CellFamily family) const {
+  if (family != CellFamily::Tetra) return {};
   return {RefinementPattern::RED, RefinementPattern::BISECTION};
 }
 
-RefinementPattern TetrahedronRefinementRule::default_pattern(CellType type) const {
+RefinementPattern TetrahedronRefinementRule::default_pattern(CellFamily family) const {
   return RefinementPattern::RED;
 }
 
 RefinedElement TetrahedronRefinementRule::red_refine(
-    const std::vector<std::array<double, 3>>& vertices,
+    const std::vector<std::array<real_t, 3>>& vertices,
     size_t level) const {
 
   RefinedElement refined;
@@ -439,7 +441,7 @@ RefinedElement TetrahedronRefinementRule::red_refine(
 }
 
 RefinedElement TetrahedronRefinementRule::bisect(
-    const std::vector<std::array<double, 3>>& vertices,
+    const std::vector<std::array<real_t, 3>>& vertices,
     size_t longest_edge,
     size_t level) const {
 
@@ -451,7 +453,10 @@ RefinedElement TetrahedronRefinementRule::bisect(
   // This creates 2 child tetrahedra
 
   // Determine vertices of longest edge
-  size_t v0, v1, v2, v3;
+  index_t v0 = 0;
+  index_t v1 = 0;
+  index_t v2 = 0;
+  index_t v3 = 0;
   switch (longest_edge) {
     case 0: v0 = 0; v1 = 1; v2 = 2; v3 = 3; break;
     case 1: v0 = 0; v1 = 2; v2 = 1; v3 = 3; break;
@@ -476,12 +481,12 @@ RefinedElement TetrahedronRefinementRule::bisect(
 // HexahedronRefinementRule Implementation
 // ====================
 
-bool HexahedronRefinementRule::can_refine(CellType type, size_t level) const {
-  return type == CellType::HEXAHEDRON && level < 10;
+bool HexahedronRefinementRule::can_refine(CellFamily family, size_t level) const {
+  return family == CellFamily::Hex && level < 10;
 }
 
-size_t HexahedronRefinementRule::num_children(CellType type, RefinementPattern pattern) const {
-  if (type != CellType::HEXAHEDRON) return 0;
+size_t HexahedronRefinementRule::num_children(CellFamily family, RefinementPattern pattern) const {
+  if (family != CellFamily::Hex) return 0;
 
   switch (pattern) {
     case RefinementPattern::ISOTROPIC:
@@ -495,12 +500,12 @@ size_t HexahedronRefinementRule::num_children(CellType type, RefinementPattern p
 }
 
 RefinedElement HexahedronRefinementRule::refine(
-    const std::vector<std::array<double, 3>>& vertices,
-    CellType type,
+    const std::vector<std::array<real_t, 3>>& vertices,
+    CellFamily family,
     RefinementPattern pattern,
     size_t level) const {
 
-  if (type != CellType::HEXAHEDRON || vertices.size() != 8) {
+  if (family != CellFamily::Hex || vertices.size() != 8) {
     throw std::invalid_argument("Invalid element for hexahedron refinement");
   }
 
@@ -512,17 +517,17 @@ RefinedElement HexahedronRefinementRule::refine(
   }
 }
 
-std::vector<RefinementPattern> HexahedronRefinementRule::compatible_patterns(CellType type) const {
-  if (type != CellType::HEXAHEDRON) return {};
+std::vector<RefinementPattern> HexahedronRefinementRule::compatible_patterns(CellFamily family) const {
+  if (family != CellFamily::Hex) return {};
   return {RefinementPattern::ISOTROPIC, RefinementPattern::ANISOTROPIC};
 }
 
-RefinementPattern HexahedronRefinementRule::default_pattern(CellType type) const {
+RefinementPattern HexahedronRefinementRule::default_pattern(CellFamily family) const {
   return RefinementPattern::ISOTROPIC;
 }
 
 RefinedElement HexahedronRefinementRule::regular_refine(
-    const std::vector<std::array<double, 3>>& vertices,
+    const std::vector<std::array<real_t, 3>>& vertices,
     size_t level) const {
 
   RefinedElement refined;
@@ -534,7 +539,7 @@ RefinedElement HexahedronRefinementRule::regular_refine(
   // Top: 4, 5, 6, 7
 
   // Create edge midpoints (12 edges)
-  std::vector<std::array<double, 3>> edge_mids;
+  std::vector<std::array<real_t, 3>> edge_mids;
   // Bottom edges
   edge_mids.push_back(RefinementUtils::edge_midpoint(vertices[0], vertices[1]));  // 8
   edge_mids.push_back(RefinementUtils::edge_midpoint(vertices[1], vertices[2]));  // 9
@@ -552,7 +557,7 @@ RefinedElement HexahedronRefinementRule::regular_refine(
   edge_mids.push_back(RefinementUtils::edge_midpoint(vertices[3], vertices[7]));  // 19
 
   // Create face centers (6 faces)
-  std::vector<std::array<double, 3>> face_centers;
+  std::vector<std::array<real_t, 3>> face_centers;
   // Bottom and top
   face_centers.push_back(RefinementUtils::face_center({vertices[0], vertices[1], vertices[2], vertices[3]}));  // 20
   face_centers.push_back(RefinementUtils::face_center({vertices[4], vertices[5], vertices[6], vertices[7]}));  // 21
@@ -590,7 +595,7 @@ RefinedElement HexahedronRefinementRule::regular_refine(
 }
 
 RefinedElement HexahedronRefinementRule::anisotropic_refine(
-    const std::vector<std::array<double, 3>>& vertices,
+    const std::vector<std::array<real_t, 3>>& vertices,
     size_t direction,
     size_t level) const {
 
@@ -627,57 +632,57 @@ RefinedElement HexahedronRefinementRule::anisotropic_refine(
 // Other Element Types (Wedge, Pyramid) - Placeholder
 // ====================
 
-bool WedgeRefinementRule::can_refine(CellType type, size_t level) const {
-  return type == CellType::WEDGE && level < 10;
+bool WedgeRefinementRule::can_refine(CellFamily family, size_t level) const {
+  return family == CellFamily::Wedge && level < 10;
 }
 
-size_t WedgeRefinementRule::num_children(CellType type, RefinementPattern pattern) const {
-  if (type != CellType::WEDGE) return 0;
+size_t WedgeRefinementRule::num_children(CellFamily family, RefinementPattern pattern) const {
+  if (family != CellFamily::Wedge) return 0;
   return 8;  // Standard wedge refinement
 }
 
 RefinedElement WedgeRefinementRule::refine(
-    const std::vector<std::array<double, 3>>& vertices,
-    CellType type,
+    const std::vector<std::array<real_t, 3>>& vertices,
+    CellFamily family,
     RefinementPattern pattern,
     size_t level) const {
   // TODO: Implement wedge refinement
   throw std::runtime_error("Wedge refinement not yet implemented");
 }
 
-std::vector<RefinementPattern> WedgeRefinementRule::compatible_patterns(CellType type) const {
-  if (type != CellType::WEDGE) return {};
+std::vector<RefinementPattern> WedgeRefinementRule::compatible_patterns(CellFamily family) const {
+  if (family != CellFamily::Wedge) return {};
   return {RefinementPattern::ISOTROPIC};
 }
 
-RefinementPattern WedgeRefinementRule::default_pattern(CellType type) const {
+RefinementPattern WedgeRefinementRule::default_pattern(CellFamily family) const {
   return RefinementPattern::ISOTROPIC;
 }
 
-bool PyramidRefinementRule::can_refine(CellType type, size_t level) const {
-  return type == CellType::PYRAMID && level < 10;
+bool PyramidRefinementRule::can_refine(CellFamily family, size_t level) const {
+  return family == CellFamily::Pyramid && level < 10;
 }
 
-size_t PyramidRefinementRule::num_children(CellType type, RefinementPattern pattern) const {
-  if (type != CellType::PYRAMID) return 0;
+size_t PyramidRefinementRule::num_children(CellFamily family, RefinementPattern pattern) const {
+  if (family != CellFamily::Pyramid) return 0;
   return 10;  // Standard pyramid refinement
 }
 
 RefinedElement PyramidRefinementRule::refine(
-    const std::vector<std::array<double, 3>>& vertices,
-    CellType type,
+    const std::vector<std::array<real_t, 3>>& vertices,
+    CellFamily family,
     RefinementPattern pattern,
     size_t level) const {
   // TODO: Implement pyramid refinement
   throw std::runtime_error("Pyramid refinement not yet implemented");
 }
 
-std::vector<RefinementPattern> PyramidRefinementRule::compatible_patterns(CellType type) const {
-  if (type != CellType::PYRAMID) return {};
+std::vector<RefinementPattern> PyramidRefinementRule::compatible_patterns(CellFamily family) const {
+  if (family != CellFamily::Pyramid) return {};
   return {RefinementPattern::ISOTROPIC};
 }
 
-RefinementPattern PyramidRefinementRule::default_pattern(CellType type) const {
+RefinementPattern PyramidRefinementRule::default_pattern(CellFamily family) const {
   return RefinementPattern::ISOTROPIC;
 }
 
@@ -691,62 +696,55 @@ RefinementRulesManager& RefinementRulesManager::instance() {
 }
 
 RefinementRulesManager::RefinementRulesManager() {
-  // Initialize rules for each element type
-  rules_.resize(static_cast<size_t>(CellType::MAX_CELL_TYPE));
-
   // Create and register rules
-  rules_[static_cast<size_t>(CellType::LINE)] = std::make_unique<LineRefinementRule>();
-  rules_[static_cast<size_t>(CellType::TRIANGLE)] = std::make_unique<TriangleRefinementRule>();
-  rules_[static_cast<size_t>(CellType::QUAD)] = std::make_unique<QuadRefinementRule>();
-  rules_[static_cast<size_t>(CellType::TETRAHEDRON)] = std::make_unique<TetrahedronRefinementRule>();
-  rules_[static_cast<size_t>(CellType::HEXAHEDRON)] = std::make_unique<HexahedronRefinementRule>();
-  rules_[static_cast<size_t>(CellType::WEDGE)] = std::make_unique<WedgeRefinementRule>();
-  rules_[static_cast<size_t>(CellType::PYRAMID)] = std::make_unique<PyramidRefinementRule>();
+  rules_[static_cast<size_t>(CellFamily::Line)] = std::make_unique<LineRefinementRule>();
+  rules_[static_cast<size_t>(CellFamily::Triangle)] = std::make_unique<TriangleRefinementRule>();
+  rules_[static_cast<size_t>(CellFamily::Quad)] = std::make_unique<QuadRefinementRule>();
+  rules_[static_cast<size_t>(CellFamily::Tetra)] = std::make_unique<TetrahedronRefinementRule>();
+  rules_[static_cast<size_t>(CellFamily::Hex)] = std::make_unique<HexahedronRefinementRule>();
+  rules_[static_cast<size_t>(CellFamily::Wedge)] = std::make_unique<WedgeRefinementRule>();
+  rules_[static_cast<size_t>(CellFamily::Pyramid)] = std::make_unique<PyramidRefinementRule>();
 
   // Set up rule map
   for (size_t i = 0; i < rules_.size(); ++i) {
-    if (rules_[i]) {
-      rule_map_[i] = rules_[i].get();
-    } else {
-      rule_map_[i] = nullptr;
-    }
+    rule_map_[i] = rules_[i].get();
   }
 }
 
-RefinementRule* RefinementRulesManager::get_rule(CellType type) const {
-  size_t idx = static_cast<size_t>(type);
+RefinementRule* RefinementRulesManager::get_rule(CellFamily family) const {
+  size_t idx = static_cast<size_t>(family);
   if (idx < rule_map_.size()) {
     return rule_map_[idx];
   }
   return nullptr;
 }
 
-bool RefinementRulesManager::can_refine(CellType type, size_t level) const {
-  auto rule = get_rule(type);
-  return rule ? rule->can_refine(type, level) : false;
+bool RefinementRulesManager::can_refine(CellFamily family, size_t level) const {
+  auto rule = get_rule(family);
+  return rule ? rule->can_refine(family, level) : false;
 }
 
 RefinedElement RefinementRulesManager::refine(
-    const std::vector<std::array<double, 3>>& vertices,
-    CellType type,
+    const std::vector<std::array<real_t, 3>>& vertices,
+    CellFamily family,
     RefinementPattern pattern,
     size_t level) const {
 
-  auto rule = get_rule(type);
+  auto rule = get_rule(family);
   if (!rule) {
     throw std::runtime_error("No refinement rule for element type");
   }
 
-  return rule->refine(vertices, type, pattern, level);
+  return rule->refine(vertices, family, pattern, level);
 }
 
-size_t RefinementRulesManager::num_children(CellType type, RefinementPattern pattern) const {
-  auto rule = get_rule(type);
-  return rule ? rule->num_children(type, pattern) : 0;
+size_t RefinementRulesManager::num_children(CellFamily family, RefinementPattern pattern) const {
+  auto rule = get_rule(family);
+  return rule ? rule->num_children(family, pattern) : 0;
 }
 
-void RefinementRulesManager::register_rule(CellType type, std::unique_ptr<RefinementRule> rule) {
-  size_t idx = static_cast<size_t>(type);
+void RefinementRulesManager::register_rule(CellFamily family, std::unique_ptr<RefinementRule> rule) {
+  size_t idx = static_cast<size_t>(family);
   if (idx < rules_.size()) {
     rules_[idx] = std::move(rule);
     rule_map_[idx] = rules_[idx].get();
@@ -757,21 +755,23 @@ void RefinementRulesManager::register_rule(CellType type, std::unique_ptr<Refine
 // RefinementUtils Implementation
 // ====================
 
-std::array<double, 3> RefinementUtils::edge_midpoint(
-    const std::array<double, 3>& v1,
-    const std::array<double, 3>& v2) {
+std::array<real_t, 3> RefinementUtils::edge_midpoint(
+    const std::array<real_t, 3>& v1,
+    const std::array<real_t, 3>& v2) {
 
-  std::array<double, 3> midpoint;
+  std::array<real_t, 3> midpoint;
   for (int i = 0; i < 3; ++i) {
-    midpoint[i] = 0.5 * (v1[i] + v2[i]);
+    midpoint[i] = static_cast<real_t>(0.5) * (v1[i] + v2[i]);
   }
   return midpoint;
 }
 
-std::array<double, 3> RefinementUtils::face_center(
-    const std::vector<std::array<double, 3>>& face_vertices) {
+std::array<real_t, 3> RefinementUtils::face_center(
+    const std::vector<std::array<real_t, 3>>& face_vertices) {
 
-  std::array<double, 3> center = {0.0, 0.0, 0.0};
+  std::array<real_t, 3> center = {static_cast<real_t>(0.0),
+                                  static_cast<real_t>(0.0),
+                                  static_cast<real_t>(0.0)};
   for (const auto& v : face_vertices) {
     for (int i = 0; i < 3; ++i) {
       center[i] += v[i];
@@ -787,27 +787,27 @@ std::array<double, 3> RefinementUtils::face_center(
   return center;
 }
 
-std::array<double, 3> RefinementUtils::cell_center(
-    const std::vector<std::array<double, 3>>& cell_vertices) {
+std::array<real_t, 3> RefinementUtils::cell_center(
+    const std::vector<std::array<real_t, 3>>& cell_vertices) {
 
   return face_center(cell_vertices);  // Same computation
 }
 
 size_t RefinementUtils::find_longest_edge(
-    const std::vector<std::array<double, 3>>& vertices,
-    CellType type) {
+    const std::vector<std::array<real_t, 3>>& vertices,
+    CellFamily family) {
 
-  double max_length_sq = 0.0;
+  real_t max_length_sq = static_cast<real_t>(0.0);
   size_t longest_edge = 0;
 
   // Define edges based on element type
   std::vector<std::pair<size_t, size_t>> edges;
 
-  switch (type) {
-    case CellType::TRIANGLE:
+  switch (family) {
+    case CellFamily::Triangle:
       edges = {{0,1}, {1,2}, {2,0}};
       break;
-    case CellType::TETRAHEDRON:
+    case CellFamily::Tetra:
       edges = {{0,1}, {0,2}, {0,3}, {1,2}, {1,3}, {2,3}};
       break;
     default:
@@ -818,9 +818,9 @@ size_t RefinementUtils::find_longest_edge(
     const auto& v1 = vertices[edges[i].first];
     const auto& v2 = vertices[edges[i].second];
 
-    double length_sq = 0.0;
+    real_t length_sq = static_cast<real_t>(0.0);
     for (int j = 0; j < 3; ++j) {
-      double diff = v2[j] - v1[j];
+      const real_t diff = v2[j] - v1[j];
       length_sq += diff * diff;
     }
 
@@ -835,7 +835,7 @@ size_t RefinementUtils::find_longest_edge(
 
 bool RefinementUtils::check_refinement_quality(
     const RefinedElement& refined,
-    double min_quality) {
+    real_t min_quality) {
 
   // TODO: Implement quality checking for refined elements
   // This would compute quality metrics for each child element

@@ -31,7 +31,7 @@
 #ifndef SVMP_REFINEMENT_RULES_H
 #define SVMP_REFINEMENT_RULES_H
 
-#include "../Core/CellTopology.h"
+#include "../Topology/CellTopology.h"
 #include <array>
 #include <memory>
 #include <vector>
@@ -55,13 +55,13 @@ enum class RefinementPattern {
  */
 struct RefinedElement {
   /** Child element connectivity (vertex indices) */
-  std::vector<std::vector<size_t>> child_connectivity;
+  std::vector<std::vector<index_t>> child_connectivity;
 
   /** New vertex positions (for vertices created by this element) */
-  std::vector<std::array<double, 3>> new_vertices;
+  std::vector<std::array<real_t, 3>> new_vertices;
 
   /** Parent-child face mapping */
-  std::vector<std::pair<size_t, size_t>> face_inheritance;
+  std::vector<std::pair<index_t, index_t>> face_inheritance;
 
   /** Refinement level of children */
   size_t child_level;
@@ -80,12 +80,12 @@ public:
   /**
    * @brief Check if element can be refined
    */
-  virtual bool can_refine(CellType type, size_t level) const = 0;
+  virtual bool can_refine(CellFamily family, size_t level) const = 0;
 
   /**
    * @brief Get number of children produced by refinement
    */
-  virtual size_t num_children(CellType type, RefinementPattern pattern) const = 0;
+  virtual size_t num_children(CellFamily family, RefinementPattern pattern) const = 0;
 
   /**
    * @brief Refine an element
@@ -97,20 +97,20 @@ public:
    * @return Refined element information
    */
   virtual RefinedElement refine(
-      const std::vector<std::array<double, 3>>& vertices,
-      CellType type,
+      const std::vector<std::array<real_t, 3>>& vertices,
+      CellFamily family,
       RefinementPattern pattern,
       size_t level) const = 0;
 
   /**
    * @brief Get compatible refinement patterns for element type
    */
-  virtual std::vector<RefinementPattern> compatible_patterns(CellType type) const = 0;
+  virtual std::vector<RefinementPattern> compatible_patterns(CellFamily family) const = 0;
 
   /**
    * @brief Get default refinement pattern for element type
    */
-  virtual RefinementPattern default_pattern(CellType type) const = 0;
+  virtual RefinementPattern default_pattern(CellFamily family) const = 0;
 };
 
 /**
@@ -118,15 +118,15 @@ public:
  */
 class LineRefinementRule : public RefinementRule {
 public:
-  bool can_refine(CellType type, size_t level) const override;
-  size_t num_children(CellType type, RefinementPattern pattern) const override;
+  bool can_refine(CellFamily family, size_t level) const override;
+  size_t num_children(CellFamily family, RefinementPattern pattern) const override;
   RefinedElement refine(
-      const std::vector<std::array<double, 3>>& vertices,
-      CellType type,
+      const std::vector<std::array<real_t, 3>>& vertices,
+      CellFamily family,
       RefinementPattern pattern,
       size_t level) const override;
-  std::vector<RefinementPattern> compatible_patterns(CellType type) const override;
-  RefinementPattern default_pattern(CellType type) const override;
+  std::vector<RefinementPattern> compatible_patterns(CellFamily family) const override;
+  RefinementPattern default_pattern(CellFamily family) const override;
 };
 
 /**
@@ -134,31 +134,31 @@ public:
  */
 class TriangleRefinementRule : public RefinementRule {
 public:
-  bool can_refine(CellType type, size_t level) const override;
-  size_t num_children(CellType type, RefinementPattern pattern) const override;
+  bool can_refine(CellFamily family, size_t level) const override;
+  size_t num_children(CellFamily family, RefinementPattern pattern) const override;
   RefinedElement refine(
-      const std::vector<std::array<double, 3>>& vertices,
-      CellType type,
+      const std::vector<std::array<real_t, 3>>& vertices,
+      CellFamily family,
       RefinementPattern pattern,
       size_t level) const override;
-  std::vector<RefinementPattern> compatible_patterns(CellType type) const override;
-  RefinementPattern default_pattern(CellType type) const override;
+  std::vector<RefinementPattern> compatible_patterns(CellFamily family) const override;
+  RefinementPattern default_pattern(CellFamily family) const override;
 
 private:
   /** Red refinement (4 children) */
   RefinedElement red_refine(
-      const std::vector<std::array<double, 3>>& vertices,
+      const std::vector<std::array<real_t, 3>>& vertices,
       size_t level) const;
 
   /** Green refinement (2 children) */
   RefinedElement green_refine(
-      const std::vector<std::array<double, 3>>& vertices,
+      const std::vector<std::array<real_t, 3>>& vertices,
       size_t edge_to_split,
       size_t level) const;
 
   /** Bisection refinement */
   RefinedElement bisect(
-      const std::vector<std::array<double, 3>>& vertices,
+      const std::vector<std::array<real_t, 3>>& vertices,
       size_t level) const;
 };
 
@@ -167,25 +167,25 @@ private:
  */
 class QuadRefinementRule : public RefinementRule {
 public:
-  bool can_refine(CellType type, size_t level) const override;
-  size_t num_children(CellType type, RefinementPattern pattern) const override;
+  bool can_refine(CellFamily family, size_t level) const override;
+  size_t num_children(CellFamily family, RefinementPattern pattern) const override;
   RefinedElement refine(
-      const std::vector<std::array<double, 3>>& vertices,
-      CellType type,
+      const std::vector<std::array<real_t, 3>>& vertices,
+      CellFamily family,
       RefinementPattern pattern,
       size_t level) const override;
-  std::vector<RefinementPattern> compatible_patterns(CellType type) const override;
-  RefinementPattern default_pattern(CellType type) const override;
+  std::vector<RefinementPattern> compatible_patterns(CellFamily family) const override;
+  RefinementPattern default_pattern(CellFamily family) const override;
 
 private:
   /** Regular refinement (4 children) */
   RefinedElement regular_refine(
-      const std::vector<std::array<double, 3>>& vertices,
+      const std::vector<std::array<real_t, 3>>& vertices,
       size_t level) const;
 
   /** Anisotropic refinement in one direction (2 children) */
   RefinedElement anisotropic_refine(
-      const std::vector<std::array<double, 3>>& vertices,
+      const std::vector<std::array<real_t, 3>>& vertices,
       size_t direction,
       size_t level) const;
 };
@@ -195,25 +195,25 @@ private:
  */
 class TetrahedronRefinementRule : public RefinementRule {
 public:
-  bool can_refine(CellType type, size_t level) const override;
-  size_t num_children(CellType type, RefinementPattern pattern) const override;
+  bool can_refine(CellFamily family, size_t level) const override;
+  size_t num_children(CellFamily family, RefinementPattern pattern) const override;
   RefinedElement refine(
-      const std::vector<std::array<double, 3>>& vertices,
-      CellType type,
+      const std::vector<std::array<real_t, 3>>& vertices,
+      CellFamily family,
       RefinementPattern pattern,
       size_t level) const override;
-  std::vector<RefinementPattern> compatible_patterns(CellType type) const override;
-  RefinementPattern default_pattern(CellType type) const override;
+  std::vector<RefinementPattern> compatible_patterns(CellFamily family) const override;
+  RefinementPattern default_pattern(CellFamily family) const override;
 
 private:
   /** Red refinement (8 children) */
   RefinedElement red_refine(
-      const std::vector<std::array<double, 3>>& vertices,
+      const std::vector<std::array<real_t, 3>>& vertices,
       size_t level) const;
 
   /** Bisection refinement (2 children) */
   RefinedElement bisect(
-      const std::vector<std::array<double, 3>>& vertices,
+      const std::vector<std::array<real_t, 3>>& vertices,
       size_t longest_edge,
       size_t level) const;
 };
@@ -223,25 +223,25 @@ private:
  */
 class HexahedronRefinementRule : public RefinementRule {
 public:
-  bool can_refine(CellType type, size_t level) const override;
-  size_t num_children(CellType type, RefinementPattern pattern) const override;
+  bool can_refine(CellFamily family, size_t level) const override;
+  size_t num_children(CellFamily family, RefinementPattern pattern) const override;
   RefinedElement refine(
-      const std::vector<std::array<double, 3>>& vertices,
-      CellType type,
+      const std::vector<std::array<real_t, 3>>& vertices,
+      CellFamily family,
       RefinementPattern pattern,
       size_t level) const override;
-  std::vector<RefinementPattern> compatible_patterns(CellType type) const override;
-  RefinementPattern default_pattern(CellType type) const override;
+  std::vector<RefinementPattern> compatible_patterns(CellFamily family) const override;
+  RefinementPattern default_pattern(CellFamily family) const override;
 
 private:
   /** Regular refinement (8 children) */
   RefinedElement regular_refine(
-      const std::vector<std::array<double, 3>>& vertices,
+      const std::vector<std::array<real_t, 3>>& vertices,
       size_t level) const;
 
   /** Anisotropic refinement in one direction (4 children) */
   RefinedElement anisotropic_refine(
-      const std::vector<std::array<double, 3>>& vertices,
+      const std::vector<std::array<real_t, 3>>& vertices,
       size_t direction,
       size_t level) const;
 };
@@ -251,15 +251,15 @@ private:
  */
 class WedgeRefinementRule : public RefinementRule {
 public:
-  bool can_refine(CellType type, size_t level) const override;
-  size_t num_children(CellType type, RefinementPattern pattern) const override;
+  bool can_refine(CellFamily family, size_t level) const override;
+  size_t num_children(CellFamily family, RefinementPattern pattern) const override;
   RefinedElement refine(
-      const std::vector<std::array<double, 3>>& vertices,
-      CellType type,
+      const std::vector<std::array<real_t, 3>>& vertices,
+      CellFamily family,
       RefinementPattern pattern,
       size_t level) const override;
-  std::vector<RefinementPattern> compatible_patterns(CellType type) const override;
-  RefinementPattern default_pattern(CellType type) const override;
+  std::vector<RefinementPattern> compatible_patterns(CellFamily family) const override;
+  RefinementPattern default_pattern(CellFamily family) const override;
 };
 
 /**
@@ -267,15 +267,15 @@ public:
  */
 class PyramidRefinementRule : public RefinementRule {
 public:
-  bool can_refine(CellType type, size_t level) const override;
-  size_t num_children(CellType type, RefinementPattern pattern) const override;
+  bool can_refine(CellFamily family, size_t level) const override;
+  size_t num_children(CellFamily family, RefinementPattern pattern) const override;
   RefinedElement refine(
-      const std::vector<std::array<double, 3>>& vertices,
-      CellType type,
+      const std::vector<std::array<real_t, 3>>& vertices,
+      CellFamily family,
       RefinementPattern pattern,
       size_t level) const override;
-  std::vector<RefinementPattern> compatible_patterns(CellType type) const override;
-  RefinementPattern default_pattern(CellType type) const override;
+  std::vector<RefinementPattern> compatible_patterns(CellFamily family) const override;
+  RefinementPattern default_pattern(CellFamily family) const override;
 };
 
 /**
@@ -289,36 +289,37 @@ public:
   /**
    * @brief Get refinement rule for element type
    */
-  RefinementRule* get_rule(CellType type) const;
+  RefinementRule* get_rule(CellFamily family) const;
 
   /**
    * @brief Check if element type can be refined
    */
-  bool can_refine(CellType type, size_t level) const;
+  bool can_refine(CellFamily family, size_t level) const;
 
   /**
    * @brief Refine an element
    */
   RefinedElement refine(
-      const std::vector<std::array<double, 3>>& vertices,
-      CellType type,
+      const std::vector<std::array<real_t, 3>>& vertices,
+      CellFamily family,
       RefinementPattern pattern,
       size_t level) const;
 
   /**
    * @brief Get number of children for refinement
    */
-  size_t num_children(CellType type, RefinementPattern pattern) const;
+  size_t num_children(CellFamily family, RefinementPattern pattern) const;
 
   /**
    * @brief Register a custom refinement rule
    */
-  void register_rule(CellType type, std::unique_ptr<RefinementRule> rule);
+  void register_rule(CellFamily family, std::unique_ptr<RefinementRule> rule);
 
 private:
   RefinementRulesManager();
-  std::vector<std::unique_ptr<RefinementRule>> rules_;
-  std::array<RefinementRule*, static_cast<size_t>(CellType::MAX_CELL_TYPE)> rule_map_;
+  static constexpr size_t kCellFamilyCount = static_cast<size_t>(CellFamily::Polyhedron) + 1;
+  std::array<std::unique_ptr<RefinementRule>, kCellFamilyCount> rules_{};
+  std::array<RefinementRule*, kCellFamilyCount> rule_map_{};
 };
 
 /**
@@ -329,35 +330,35 @@ public:
   /**
    * @brief Compute edge midpoint
    */
-  static std::array<double, 3> edge_midpoint(
-      const std::array<double, 3>& v1,
-      const std::array<double, 3>& v2);
+  static std::array<real_t, 3> edge_midpoint(
+      const std::array<real_t, 3>& v1,
+      const std::array<real_t, 3>& v2);
 
   /**
    * @brief Compute face center
    */
-  static std::array<double, 3> face_center(
-      const std::vector<std::array<double, 3>>& face_vertices);
+  static std::array<real_t, 3> face_center(
+      const std::vector<std::array<real_t, 3>>& face_vertices);
 
   /**
    * @brief Compute cell center
    */
-  static std::array<double, 3> cell_center(
-      const std::vector<std::array<double, 3>>& cell_vertices);
+  static std::array<real_t, 3> cell_center(
+      const std::vector<std::array<real_t, 3>>& cell_vertices);
 
   /**
    * @brief Find longest edge of element
    */
   static size_t find_longest_edge(
-      const std::vector<std::array<double, 3>>& vertices,
-      CellType type);
+      const std::vector<std::array<real_t, 3>>& vertices,
+      CellFamily family);
 
   /**
    * @brief Check if refinement preserves quality
    */
   static bool check_refinement_quality(
       const RefinedElement& refined,
-      double min_quality = 0.1);
+      real_t min_quality = 0.1);
 
   /**
    * @brief Generate edge-to-vertex connectivity for refined element
