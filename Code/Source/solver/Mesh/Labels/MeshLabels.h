@@ -32,6 +32,8 @@
 #define SVMP_MESH_LABELS_H
 
 #include "../Core/MeshTypes.h"
+#include <map>
+#include <utility>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -175,6 +177,78 @@ public:
                                 label_t label);
   static std::unordered_set<label_t> unique_vertex_labels(const MeshBase& mesh);
   static std::unordered_map<label_t, size_t> count_by_vertex(const MeshBase& mesh);
+
+  // ---- Adaptivity provenance / refinement tracking ----
+
+  /**
+   * @brief Clear all refinement provenance tracked on the mesh.
+   *
+   * This is intended for tests and for workflows that reuse MeshBase objects.
+   */
+  static void clear_refinement_tracking(MeshBase& mesh);
+
+  /**
+   * @brief Get children (local cell indices) of a parent cell ID.
+   *
+   * The parent identifier is the (stable) cell GID used when the parent existed.
+   */
+  static std::vector<index_t> get_children_cells(const MeshBase& mesh, index_t parent_cell_id);
+
+  /**
+   * @brief Get parent cell ID for a child cell (local index).
+   *
+   * The return value is a (stable) cell GID of the parent, even if the parent
+   * cell no longer exists in the current mesh.
+   */
+  static index_t get_parent_cell(const MeshBase& mesh, index_t child_cell);
+
+  /**
+   * @brief GID-based parent lookup (hierarchical refinement).
+   */
+  static gid_t get_parent_cell_gid(const MeshBase& mesh, gid_t child_cell_gid);
+
+  /**
+   * @brief GID-based children lookup (hierarchical refinement).
+   */
+  static std::vector<gid_t> get_children_cells_gid(const MeshBase& mesh, gid_t parent_cell_gid);
+
+  /**
+   * @brief Get refinement level for a cell (local index).
+   */
+  static size_t refinement_level(const MeshBase& mesh, index_t cell);
+
+  /**
+   * @brief Get recorded refinement pattern for a cell (local index).
+   *
+   * Encoded as an integer matching `AdaptivityOptions::RefinementPattern`.
+   */
+  static int get_refinement_pattern(const MeshBase& mesh, index_t cell);
+
+  /**
+   * @brief Get number of siblings for a cell (children of the same parent).
+   */
+  static size_t get_sibling_count(const MeshBase& mesh, index_t cell);
+
+  /**
+   * @brief Group children by parent cell ID (GID).
+   */
+  static std::map<index_t, std::vector<index_t>> group_siblings_by_parent(const MeshBase& mesh);
+
+  /**
+   * @brief Check if all children of a parent are marked for coarsening.
+   */
+  static bool is_sibling_group_complete(const MeshBase& mesh,
+                                       index_t parent_cell_id,
+                                       const std::vector<bool>& coarsen_marks);
+
+  /**
+   * @brief Flatten hierarchical vertex provenance to root corner vertices (GID-based).
+   *
+   * Returns a sparse stencil `root_vertex_gid -> weight` such that:
+   *   x(vertex_gid) = sum_i weight_i * x(root_vertex_gid_i)
+   */
+  static std::vector<std::pair<gid_t, double>> flatten_vertex_provenance_gid(
+      const MeshBase& mesh, gid_t vertex_gid);
 
   // ---- Named sets ----
 

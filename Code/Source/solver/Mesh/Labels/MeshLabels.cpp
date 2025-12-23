@@ -1055,4 +1055,73 @@ void MeshLabels::import_labels(MeshBase& mesh, EntityKind kind,
   }
 }
 
+// ---- Adaptivity provenance / refinement tracking ----
+
+void MeshLabels::clear_refinement_tracking(MeshBase& mesh) {
+  (void)mesh;
+}
+
+std::vector<index_t> MeshLabels::get_children_cells(const MeshBase& mesh, index_t parent_cell_id) {
+  (void)mesh;
+  (void)parent_cell_id;
+  return {};
+}
+
+index_t MeshLabels::get_parent_cell(const MeshBase& mesh, index_t child_cell) {
+  (void)mesh;
+  (void)child_cell;
+  return INVALID_INDEX;
+}
+
+gid_t MeshLabels::get_parent_cell_gid(const MeshBase& mesh, gid_t child_cell_gid) {
+  (void)mesh;
+  (void)child_cell_gid;
+  return INVALID_GID;
+}
+
+std::vector<gid_t> MeshLabels::get_children_cells_gid(const MeshBase& mesh, gid_t parent_cell_gid) {
+  (void)mesh;
+  (void)parent_cell_gid;
+  return {};
+}
+
+size_t MeshLabels::refinement_level(const MeshBase& mesh, index_t cell) {
+  (void)mesh;
+  (void)cell;
+  return 0;
+}
+
+int MeshLabels::get_refinement_pattern(const MeshBase& mesh, index_t cell) {
+  (void)mesh;
+  (void)cell;
+  return 0;
+}
+
+size_t MeshLabels::get_sibling_count(const MeshBase& mesh, index_t cell) {
+  (void)mesh;
+  (void)cell;
+  return 0;
+}
+
+std::map<index_t, std::vector<index_t>> MeshLabels::group_siblings_by_parent(const MeshBase& mesh) {
+  (void)mesh;
+  return {};
+}
+
+bool MeshLabels::is_sibling_group_complete(const MeshBase& mesh,
+                                           index_t parent_cell_id,
+                                           const std::vector<bool>& coarsen_marks) {
+  (void)mesh;
+  (void)parent_cell_id;
+  (void)coarsen_marks;
+  return false;
+}
+
+std::vector<std::pair<gid_t, double>> MeshLabels::flatten_vertex_provenance_gid(
+    const MeshBase& mesh, gid_t vertex_gid) {
+  (void)mesh;
+  (void)vertex_gid;
+  return {};
+}
+
 } // namespace svmp
