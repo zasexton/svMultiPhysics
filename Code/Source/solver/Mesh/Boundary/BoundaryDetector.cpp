@@ -74,19 +74,6 @@ EntityKind boundary_entity_kind(int topo_dim) {
     }
 }
 
-int cell_corner_count(CellFamily family) {
-    switch (family) {
-        case CellFamily::Line:     return 2;
-        case CellFamily::Triangle: return 3;
-        case CellFamily::Quad:     return 4;
-        case CellFamily::Tetra:    return 4;
-        case CellFamily::Hex:      return 8;
-        case CellFamily::Wedge:    return 6;
-        case CellFamily::Pyramid:  return 5;
-        default:                   return 0;
-    }
-}
-
 struct OrderKind {
     int p = 1;
     CellTopology::HighOrderKind kind = CellTopology::HighOrderKind::Lagrange;
