@@ -30,6 +30,7 @@
 
 #include "GmshReader.h"
 #include "MeshIO.h"
+#include "../Topology/NodeOrdering.h"
 #include <algorithm>
 #include <sstream>
 #include <stdexcept>
@@ -649,35 +650,13 @@ int GmshReader::gmsh_element_dimension(int gmsh_type) {
 }
 
 void GmshReader::reorder_nodes_to_svmp(int gmsh_type, std::vector<size_t>& nodes) {
-    // Gmsh and our convention may differ for some elements
-    // Most linear elements have the same ordering
-    // High-order elements may need reordering
+    const CellShape shape = gmsh_to_cellshape(gmsh_type);
+    if (shape.family == CellFamily::Point) return;
 
-    // For now, handle the most common cases that differ
-    switch (gmsh_type) {
-        case GMSH_HEXAHEDRON20:
-        case GMSH_HEXAHEDRON27:
-            // Gmsh hex20/27 node ordering may differ
-            // Our ordering follows VTK convention
-            // Gmsh: corners then edges then faces then center
-            // For now, assume compatible ordering
-            break;
-
-        case GMSH_PRISM:
-        case GMSH_PRISM15:
-        case GMSH_PRISM18:
-            // Wedge/prism ordering is usually compatible
-            break;
-
-        case GMSH_PYRAMID:
-        case GMSH_PYRAMID13:
-        case GMSH_PYRAMID14:
-            // Pyramid ordering is usually compatible
-            break;
-
-        default:
-            // No reordering needed for most elements
-            break;
+    try {
+        NodeOrdering::reorder_to_vtk(NodeOrderingFormat::Gmsh, shape.family, shape.order, nodes);
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string("GmshReader: failed to reorder nodes: ") + e.what());
     }
 }
 

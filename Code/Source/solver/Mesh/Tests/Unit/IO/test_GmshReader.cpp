@@ -9,6 +9,7 @@
 #include "../../../IO/GmshReader.h"
 #include "../../../Core/MeshBase.h"
 #include "../../../Core/MeshTypes.h"
+#include "Geometry/CurvilinearEval.h"
 
 #include <fstream>
 #include <sstream>
@@ -225,6 +226,41 @@ $Elements
 $EndElements
 )";
 
+// Quadratic line mesh (3-node line / LINE3). Connectivity in Gmsh ordering is [v0, v1, mid].
+const char* LINE3_MESH_V2 = R"(
+$MeshFormat
+2.2 0 8
+$EndMeshFormat
+$Nodes
+3
+1 -1.0 0.0 0.0
+2  1.0 0.0 0.0
+3  0.0 0.0 0.0
+$EndNodes
+$Elements
+1
+1 8 2 1 1 1 2 3
+$EndElements
+)";
+
+// Cubic line mesh (4-node edge / EDGE4). Connectivity in Gmsh ordering is [v0, v1, interior...].
+const char* EDGE4_MESH_V2 = R"(
+$MeshFormat
+2.2 0 8
+$EndMeshFormat
+$Nodes
+4
+1 -1.0 0.0 0.0
+2  1.0 0.0 0.0
+3 -0.3333333333333333 0.0 0.0
+4  0.3333333333333333 0.0 0.0
+$EndNodes
+$Elements
+1
+1 26 2 1 1 1 2 3 4
+$EndElements
+)";
+
 // ==========================================
 // Sample Gmsh Files (MSH 4.1 Format)
 // ==========================================
@@ -397,6 +433,39 @@ TEST_F(GmshReaderTest, ReadQuadraticTriangleV2) {
     auto shape = mesh.cell_shape(0);
     EXPECT_EQ(shape.family, CellFamily::Triangle);
     EXPECT_EQ(shape.order, 2);  // Quadratic
+}
+
+TEST_F(GmshReaderTest, ReadQuadraticLine3V2_ReordersToVTK) {
+    std::string filename = write_temp_file(LINE3_MESH_V2);
+
+    MeshBase mesh = GmshReader::read(filename);
+    ASSERT_EQ(mesh.n_cells(), 1u);
+
+    auto shape = mesh.cell_shape(0);
+    EXPECT_EQ(shape.family, CellFamily::Line);
+    EXPECT_EQ(shape.order, 2);
+
+    // Identity mapping check: nodes are located at the reference parametric positions.
+    const auto eval0 = CurvilinearEvaluator::evaluate_geometry(mesh, 0, {0.0, 0.0, 0.0});
+    EXPECT_NEAR(eval0.coordinates[0], 0.0, 1e-12);
+    EXPECT_NEAR(eval0.coordinates[1], 0.0, 1e-12);
+    EXPECT_NEAR(eval0.coordinates[2], 0.0, 1e-12);
+}
+
+TEST_F(GmshReaderTest, ReadCubicEdge4V2_ReordersToVTK) {
+    std::string filename = write_temp_file(EDGE4_MESH_V2);
+
+    MeshBase mesh = GmshReader::read(filename);
+    ASSERT_EQ(mesh.n_cells(), 1u);
+
+    auto shape = mesh.cell_shape(0);
+    EXPECT_EQ(shape.family, CellFamily::Line);
+    EXPECT_EQ(shape.order, 3);
+
+    const auto eval0 = CurvilinearEvaluator::evaluate_geometry(mesh, 0, {0.0, 0.0, 0.0});
+    EXPECT_NEAR(eval0.coordinates[0], 0.0, 1e-12);
+    EXPECT_NEAR(eval0.coordinates[1], 0.0, 1e-12);
+    EXPECT_NEAR(eval0.coordinates[2], 0.0, 1e-12);
 }
 
 TEST_F(GmshReaderTest, ReadQuadMeshV4) {
