@@ -53,6 +53,7 @@ using label_t = int32_t;      // region / boundary / material tags
 // ---------
 constexpr index_t INVALID_INDEX = -1;
 constexpr label_t INVALID_LABEL = -1;
+constexpr gid_t INVALID_GID = -1;
 
 // ---------
 // Enums

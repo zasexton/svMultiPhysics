@@ -35,6 +35,7 @@
 #include "../Topology/CellShape.h"
 #include "../Observer/MeshObserver.h"
 #include "../Fields/MeshFieldDescriptor.h"
+#include "../Search/SearchAccel.h"
 
 #include <memory>
 #include <vector>
@@ -93,12 +94,22 @@ public:
       const std::vector<offset_t>& face2vertex_offsets,
       const std::vector<index_t>& face2vertex,
       const std::vector<std::array<index_t,2>>& face2cell);
+  void set_cell_faces_from_arrays(
+      const std::vector<offset_t>& cell2face_offsets,
+      const std::vector<index_t>& cell2face,
+      const std::vector<int8_t>& cell2face_sense);
+  void set_cell_faces_from_arrays(
+      const std::vector<offset_t>& cell2face_offsets,
+      const std::vector<index_t>& cell2face,
+      const std::vector<int8_t>& cell2face_sense,
+      const std::vector<int8_t>& cell2face_perm);
   void set_edges_from_arrays(const std::vector<std::array<index_t,2>>& edge2vertex);
 
   void finalize();
 
   // ---- Basic queries ----
   int dim() const noexcept { return spatial_dim_; }
+  const std::string& mesh_id() const noexcept { return mesh_id_; }
   size_t n_vertices() const noexcept { return X_ref_.size() / (spatial_dim_ > 0 ? spatial_dim_ : 1); }
   size_t n_cells() const noexcept { return cell_shape_.size(); }
   size_t n_faces() const noexcept { return face_shape_.size(); }
@@ -110,6 +121,13 @@ public:
   const std::vector<real_t>& X_ref() const noexcept { return X_ref_; }
   const std::vector<real_t>& X_cur() const noexcept { return X_cur_; }
   bool has_current_coords() const noexcept { return !X_cur_.empty(); }
+  /// @brief Mutable pointer to current coordinates (advanced use).
+  ///
+  /// This is intended for internal Mesh-library routines that need to update
+  /// a subset of vertex coordinates in-place (e.g., MPI ghost synchronization)
+  /// without copying the full coordinate array. Callers are responsible for
+  /// emitting a GeometryChanged event after mutating this buffer.
+  real_t* X_cur_data_mutable() noexcept { return X_cur_.empty() ? nullptr : X_cur_.data(); }
   void set_current_coords(const std::vector<real_t>& Xcur);
   void clear_current_coords();
   Configuration active_configuration() const noexcept { return active_config_; }
@@ -136,8 +154,20 @@ public:
   std::pair<const index_t*, size_t> face_vertices_span(index_t f) const;
   // Convenience: return face vertices as a vector
   std::vector<index_t> face_vertices(index_t f) const;
-  // Convenience: list faces incident to a cell (linear scan)
+  // Faces incident to a cell.
+  // - If cell->face adjacency is available, this is O(1) + O(n_faces(cell)).
+  // - Otherwise, it falls back to a linear scan of face2cell_.
   std::vector<index_t> cell_faces(index_t c) const;
+  std::pair<const index_t*, size_t> cell_faces_span(index_t c) const;
+  std::pair<const int8_t*, size_t> cell_face_senses_span(index_t c) const;
+  std::pair<const int8_t*, size_t> cell_face_permutations_span(index_t c) const;
+  // Zero-copy access to face connectivity in CSR form
+  const std::vector<offset_t>& face2vertex_offsets() const noexcept { return face2vertex_offsets_; }
+  const std::vector<index_t>& face2vertex() const noexcept { return face2vertex_; }
+  // Incident cell IDs for each face (size = n_faces)
+  const std::vector<std::array<index_t,2>>& face2cell() const noexcept { return face2cell_; }
+  // Boundary labels per face (size = n_faces, INVALID_LABEL = unlabeled)
+  const std::vector<label_t>& face_boundary_ids() const noexcept { return face_boundary_id_; }
 
   // ---- Incremental builders (testing convenience; not optimized for large meshes) ----
   void add_vertex(index_t id, const std::array<real_t,3>& xyz);
@@ -174,13 +204,28 @@ public:
   label_t boundary_label(index_t face) const;
   std::vector<index_t> faces_with_label(label_t label) const;
 
+  void set_edge_label(index_t edge, label_t label);
+  label_t edge_label(index_t edge) const;
+  std::vector<index_t> edges_with_label(label_t label) const;
+  const std::vector<label_t>& edge_label_ids() const noexcept { return edge_label_id_; }
+
+  void set_vertex_label(index_t vertex, label_t label);
+  label_t vertex_label(index_t vertex) const;
+  std::vector<index_t> vertices_with_label(label_t label) const;
+  const std::vector<label_t>& vertex_label_ids() const noexcept { return vertex_label_id_; }
+
   void add_to_set(EntityKind kind, const std::string& name, index_t id);
   const std::vector<index_t>& get_set(EntityKind kind, const std::string& name) const;
   bool has_set(EntityKind kind, const std::string& name) const;
+  void remove_from_set(EntityKind kind, const std::string& name, index_t id);
+  void remove_set(EntityKind kind, const std::string& name);
+  std::vector<std::string> list_sets(EntityKind kind) const;
 
   void register_label(const std::string& name, label_t label);
   std::string label_name(label_t label) const;
   label_t label_from_name(const std::string& name) const;
+  std::unordered_map<label_t, std::string> list_label_names() const;
+  void clear_label_registry();
 
   // ---- Field attachment ----
   FieldHandle attach_field(EntityKind kind, const std::string& name, FieldScalarType type,
@@ -188,6 +233,7 @@ public:
   FieldHandle attach_field_with_descriptor(EntityKind kind, const std::string& name,
                                           FieldScalarType type, const FieldDescriptor& descriptor);
   bool has_field(EntityKind kind, const std::string& name) const;
+  FieldHandle field_handle(EntityKind kind, const std::string& name) const;
   void remove_field(const FieldHandle& h);
   void* field_data(const FieldHandle& h);
   const void* field_data(const FieldHandle& h) const;
@@ -195,6 +241,9 @@ public:
   FieldScalarType field_type(const FieldHandle& h) const;
   size_t field_entity_count(const FieldHandle& h) const;
   size_t field_bytes_per_entity(const FieldHandle& h) const;
+  const FieldDescriptor* field_descriptor(const FieldHandle& h) const;
+  void set_field_descriptor(const FieldHandle& h, const FieldDescriptor& descriptor);
+  void resize_fields(EntityKind kind, size_t new_count);
 
   // Field enumeration
   std::vector<std::string> field_names(EntityKind kind) const;
@@ -212,6 +261,7 @@ public:
 
   // ---- Geometry operations (delegated) ----
   std::array<real_t,3> cell_center(index_t c, Configuration cfg = Configuration::Reference) const;
+  std::array<real_t,3> cell_centroid(index_t c, Configuration cfg = Configuration::Reference) const;
   std::array<real_t,3> face_center(index_t f, Configuration cfg = Configuration::Reference) const;
   std::array<real_t,3> face_normal(index_t f, Configuration cfg = Configuration::Reference) const;
   real_t face_area(index_t f, Configuration cfg = Configuration::Reference) const;
@@ -247,8 +297,11 @@ public:
                                   const std::array<real_t,3>& direction,
                                   Configuration cfg = Configuration::Reference) const;
   void build_search_structure(Configuration cfg = Configuration::Reference) const;
+  void build_search_structure(const MeshSearch::SearchConfig& config,
+                              Configuration cfg = Configuration::Reference) const;
   void clear_search_structure() const;
-  bool has_search_structure() const { return static_cast<bool>(search_accel_); }
+  bool has_search_structure() const { return search_accel_ && search_accel_->is_valid(); }
+  const SearchAccel* search_accel() const noexcept { return search_accel_.get(); }
 
   // ---- Validation & diagnostics ----
   void validate_basic() const;
@@ -263,7 +316,7 @@ public:
 
   // ---- Event system ----
   MeshEventBus& event_bus() { return event_bus_; }
-  const MeshEventBus& event_bus() const { return event_bus_; }
+  MeshEventBus& event_bus() const { return event_bus_; }
 
   // ---- IO registry ----
   using LoadFn = std::function<MeshBase(const MeshIOOptions&)>;
@@ -279,6 +332,7 @@ public:
 private:
   // Core data
   int spatial_dim_ = 0;
+  std::string mesh_id_;
   Configuration active_config_ = Configuration::Reference;
 
   // Coordinates
@@ -295,6 +349,11 @@ private:
   std::vector<offset_t> face2vertex_offsets_;
   std::vector<index_t> face2vertex_;
   std::vector<std::array<index_t,2>> face2cell_;
+  // Optional cell->face adjacency (parallel arrays).
+  std::vector<offset_t> cell2face_offsets_;
+  std::vector<index_t> cell2face_;
+  std::vector<int8_t> cell2face_sense_;
+  std::vector<int8_t> cell2face_perm_;
 
   // Edge topology
   std::vector<std::array<index_t,2>> edge2vertex_;
@@ -312,14 +371,17 @@ private:
   std::vector<Ownership> edge_owner_;
 
   // Labels
+  std::vector<label_t> vertex_label_id_;
   std::vector<label_t> cell_region_id_;
   std::vector<label_t> face_boundary_id_;
+  std::vector<label_t> edge_label_id_;
   std::unordered_map<std::string, std::vector<index_t>> entity_sets_[4];
   std::unordered_map<std::string, label_t> label_from_name_;
   std::vector<std::string> name_from_label_;
 
   // Field attachments
   struct FieldInfo {
+    uint32_t id = 0;
     FieldScalarType type;
     size_t components;
     size_t bytes_per_component;
@@ -346,10 +408,6 @@ private:
   std::unordered_map<gid_t, index_t> global2local_edge_;
 
   // Search acceleration
-  // Simple empty struct to avoid incomplete type issues
-  struct SearchAccel {
-    // Placeholder for search acceleration structure
-  };
   mutable std::unique_ptr<SearchAccel> search_accel_;
 
   // Event bus

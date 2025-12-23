@@ -115,6 +115,10 @@ public:
     return base_->cell_center(c, cfg);
   }
 
+  std::array<real_t,3> cell_centroid(index_t c, Configuration cfg = Configuration::Reference) const {
+    return base_->cell_centroid(c, cfg);
+  }
+
   real_t cell_measure(index_t c, Configuration cfg = Configuration::Reference) const {
     return base_->cell_measure(c, cfg);
   }

@@ -40,12 +40,47 @@
 #include "../Boundary/BoundaryKey.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <numeric>
 #include <iostream>
 #include <sstream>
 #include <cstring>
 
+namespace {
+std::atomic<std::uint64_t> next_mesh_id{0};
+
+std::string make_mesh_id() {
+  return "MeshBase#" + std::to_string(++next_mesh_id);
+}
+} // namespace
+
 namespace svmp {
+
+namespace {
+class SearchAccelInvalidator final : public MeshObserver {
+public:
+  explicit SearchAccelInvalidator(SearchAccel* accel) : accel_(accel) {}
+
+  void on_mesh_event(MeshEvent event) override {
+    if (!accel_) {
+      return;
+    }
+
+    if (event == MeshEvent::TopologyChanged ||
+        event == MeshEvent::GeometryChanged ||
+        event == MeshEvent::PartitionChanged ||
+        event == MeshEvent::AdaptivityApplied) {
+      accel_->invalidate();
+    }
+  }
+
+  const char* observer_name() const override { return "SearchAccelInvalidator"; }
+
+private:
+  SearchAccel* accel_ = nullptr;
+};
+} // namespace
 
 // ==========================================
 // Constructors and Lifecycle
@@ -53,17 +88,23 @@ namespace svmp {
 
 MeshBase::MeshBase()
     : spatial_dim_(0),
+      mesh_id_(make_mesh_id()),
       active_config_(Configuration::Reference),
-      next_field_id_(1) {
+      next_field_id_(1),
+      search_accel_(std::make_unique<SearchAccel>()) {
+  event_bus_.subscribe(std::make_shared<SearchAccelInvalidator>(search_accel_.get()));
 }
 
 MeshBase::MeshBase(int spatial_dim)
     : spatial_dim_(spatial_dim),
+      mesh_id_(make_mesh_id()),
       active_config_(Configuration::Reference),
-      next_field_id_(1) {
+      next_field_id_(1),
+      search_accel_(std::make_unique<SearchAccel>()) {
     if (spatial_dim < 0 || spatial_dim > 3) {
         throw std::invalid_argument("MeshBase: spatial dimension must be 0, 1, 2, or 3");
     }
+    event_bus_.subscribe(std::make_shared<SearchAccelInvalidator>(search_accel_.get()));
 }
 
 // ==========================================
@@ -84,6 +125,9 @@ void MeshBase::clear() {
     face2vertex_offsets_.clear();
     face2vertex_.clear();
     face2cell_.clear();
+    cell2face_offsets_.clear();
+    cell2face_.clear();
+    cell2face_sense_.clear();
 
     edge2vertex_.clear();
 
@@ -99,13 +143,15 @@ void MeshBase::clear() {
     face_owner_.clear();
     edge_owner_.clear();
 
-    // Clear labels
-    cell_region_id_.clear();
-    face_boundary_id_.clear();
-    for (int i = 0; i < 4; ++i) {
-        entity_sets_[i].clear();
-    }
-    label_from_name_.clear();
+	    // Clear labels
+	    vertex_label_id_.clear();
+	    cell_region_id_.clear();
+	    face_boundary_id_.clear();
+	    edge_label_id_.clear();
+	    for (int i = 0; i < 4; ++i) {
+	        entity_sets_[i].clear();
+	    }
+	    label_from_name_.clear();
     name_from_label_.clear();
 
     // Clear fields
@@ -135,6 +181,7 @@ void MeshBase::clear() {
     // Notify observers
     event_bus_.notify(MeshEvent::TopologyChanged);
     event_bus_.notify(MeshEvent::GeometryChanged);
+    event_bus_.notify(MeshEvent::FieldsChanged);
 }
 
 void MeshBase::reserve(index_t n_vertices, index_t n_cells, index_t n_faces) {
@@ -155,8 +202,12 @@ void MeshBase::reserve(index_t n_vertices, index_t n_cells, index_t n_faces) {
         face2cell_.reserve(n_faces);
     }
 
-    // Reserve labels
-    cell_region_id_.reserve(n_cells);
+	    // Reserve labels
+	    vertex_label_id_.reserve(n_vertices);
+	    cell_region_id_.reserve(n_cells);
+	    if (n_faces > 0) {
+	        face_boundary_id_.reserve(n_faces);
+	    }
 
     // Reserve global IDs
     vertex_gid_.reserve(n_vertices);
@@ -215,8 +266,11 @@ void MeshBase::build_from_arrays(
     cell2vertex_ = cell2vertex;
     cell_shape_ = cell_shape;
 
-    // Initialize region labels to 0
-    cell_region_id_.resize(cell_shape_.size(), 0);
+	    // Initialize region labels to 0
+	    cell_region_id_.resize(cell_shape_.size(), 0);
+
+	    // Initialize vertex labels to INVALID_LABEL (unlabeled)
+	    vertex_label_id_.resize(n_vertices, INVALID_LABEL);
 
     // Build global IDs (default to local indices)
     vertex_gid_.resize(n_vertices);
@@ -259,6 +313,33 @@ void MeshBase::set_faces_from_arrays(
     face2vertex_ = face2vertex;
     face2cell_ = face2cell;
 
+    // Build cell->face adjacency if cell count is known. Orientation (sense) is unknown here,
+    // unless provided explicitly via set_cell_faces_from_arrays().
+    cell2face_offsets_.assign(cell_shape_.size() + 1, 0);
+    if (!cell_shape_.empty() && !face2cell_.empty()) {
+        for (const auto& fc : face2cell_) {
+            if (fc[0] != INVALID_INDEX) cell2face_offsets_[static_cast<size_t>(fc[0]) + 1]++;
+            if (fc[1] != INVALID_INDEX) cell2face_offsets_[static_cast<size_t>(fc[1]) + 1]++;
+        }
+        for (size_t i = 0; i + 1 < cell2face_offsets_.size(); ++i) {
+            cell2face_offsets_[i + 1] += cell2face_offsets_[i];
+        }
+        cell2face_.assign(static_cast<size_t>(cell2face_offsets_.back()), INVALID_INDEX);
+        cell2face_sense_.assign(cell2face_.size(), 0);
+        std::vector<offset_t> cursor = cell2face_offsets_;
+        for (index_t f = 0; f < static_cast<index_t>(face2cell_.size()); ++f) {
+            const auto& fc = face2cell_[static_cast<size_t>(f)];
+            if (fc[0] != INVALID_INDEX) {
+                const size_t pos = static_cast<size_t>(cursor[static_cast<size_t>(fc[0])]++);
+                cell2face_[pos] = f;
+            }
+            if (fc[1] != INVALID_INDEX) {
+                const size_t pos = static_cast<size_t>(cursor[static_cast<size_t>(fc[1])]++);
+                cell2face_[pos] = f;
+            }
+        }
+    }
+
     // Initialize boundary labels to INVALID_LABEL (unlabeled)
     face_boundary_id_.resize(face_shape.size(), INVALID_LABEL);
 
@@ -270,13 +351,48 @@ void MeshBase::set_faces_from_arrays(
         global2local_face_[face_gid_[i]] = i;
     }
 
+    // Keep face-attached fields consistent with the new face count.
+    resize_fields(EntityKind::Face, face_shape_.size());
+
     // Topology changed -> invalidate caches and notify observers
     invalidate_caches();
     event_bus_.notify(MeshEvent::TopologyChanged);
 }
 
-void MeshBase::set_edges_from_arrays(const std::vector<std::array<index_t,2>>& edge2vertex) {
-    edge2vertex_ = edge2vertex;
+void MeshBase::set_cell_faces_from_arrays(
+    const std::vector<offset_t>& cell2face_offsets,
+    const std::vector<index_t>& cell2face,
+    const std::vector<int8_t>& cell2face_sense) {
+
+    if (cell2face_offsets.size() != cell_shape_.size() + 1) {
+        throw std::invalid_argument("set_cell_faces_from_arrays: offsets size mismatch with n_cells");
+    }
+    if (!cell2face_offsets.empty() && cell2face_offsets.front() != 0) {
+        throw std::invalid_argument("set_cell_faces_from_arrays: offsets must start at 0");
+    }
+    if (cell2face_offsets.empty() && !cell_shape_.empty()) {
+        throw std::invalid_argument("set_cell_faces_from_arrays: empty offsets for non-empty cell list");
+    }
+    if (!cell2face_offsets.empty() && static_cast<size_t>(cell2face_offsets.back()) != cell2face.size()) {
+        throw std::invalid_argument("set_cell_faces_from_arrays: offsets back != connectivity size");
+    }
+    if (cell2face.size() != cell2face_sense.size()) {
+        throw std::invalid_argument("set_cell_faces_from_arrays: sense size mismatch");
+    }
+
+    cell2face_offsets_ = cell2face_offsets;
+    cell2face_ = cell2face;
+    cell2face_sense_ = cell2face_sense;
+
+    invalidate_caches();
+    event_bus_.notify(MeshEvent::TopologyChanged);
+}
+
+	void MeshBase::set_edges_from_arrays(const std::vector<std::array<index_t,2>>& edge2vertex) {
+	    edge2vertex_ = edge2vertex;
+
+	    // Initialize edge labels to INVALID_LABEL (unlabeled)
+	    edge_label_id_.resize(edge2vertex_.size(), INVALID_LABEL);
 
     // Build edge global IDs
     edge_gid_.resize(edge2vertex.size());
@@ -287,6 +403,9 @@ void MeshBase::set_edges_from_arrays(const std::vector<std::array<index_t,2>>& e
     for (index_t i = 0; i < static_cast<index_t>(edge_gid_.size()); ++i) {
         global2local_edge_[edge_gid_[i]] = i;
     }
+
+    // Keep edge-attached fields consistent with the new edge count.
+    resize_fields(EntityKind::Edge, edge2vertex_.size());
 
     // Topology changed -> invalidate caches and notify observers
     invalidate_caches();
@@ -303,6 +422,7 @@ void MeshBase::finalize() {
             std::vector<index_t> incident_cells;
             CellFamily family = CellFamily::Polygon;
             int num_corners = 0;
+            int order = 1;
             bool family_set = false;
         };
 
@@ -323,6 +443,24 @@ void MeshBase::finalize() {
                 auto face_defs = CellTopology::get_boundary_faces(cshape.family);
                 auto oriented_defs = CellTopology::get_oriented_boundary_faces(cshape.family);
 
+                // Deduce p and high-order kind from the cell's node count (VTK-like ordering).
+                int p = 1;
+                CellTopology::HighOrderKind kind = CellTopology::HighOrderKind::Lagrange;
+                if (n_vertices > static_cast<size_t>(cshape.num_corners)) {
+                    const int p_ser = CellTopology::infer_serendipity_order(cshape.family, n_vertices);
+                    const int p_lag = CellTopology::infer_lagrange_order(cshape.family, n_vertices);
+                    if (p_ser > 0) {
+                        p = p_ser;
+                        kind = CellTopology::HighOrderKind::Serendipity;
+                    } else if (p_lag > 0) {
+                        p = p_lag;
+                        kind = CellTopology::HighOrderKind::Lagrange;
+                    } else if (cshape.order > 1) {
+                        // Fallback to declared order (best-effort).
+                        p = cshape.order;
+                    }
+                }
+
                 for (size_t i = 0; i < face_defs.size(); ++i) {
                     // Canonical key (sorted vertices)
                     std::vector<index_t> face_vertices;
@@ -330,10 +468,23 @@ void MeshBase::finalize() {
                     for (index_t li : face_defs[i]) face_vertices.push_back(vertices_ptr[li]);
                     BoundaryKey key(face_vertices);
 
-                    // Oriented vertices (preserve ordering)
+                    // Oriented face nodes (corners + high-order nodes when p>1).
                     std::vector<index_t> orn;
-                    orn.reserve(oriented_defs[i].size());
-                    for (index_t li : oriented_defs[i]) orn.push_back(vertices_ptr[li]);
+                    if (p <= 1) {
+                        orn.reserve(oriented_defs[i].size());
+                        for (index_t li : oriented_defs[i]) orn.push_back(vertices_ptr[li]);
+                    } else {
+                        const auto local = CellTopology::high_order_face_local_nodes(cshape.family, p,
+                                                                                      static_cast<int>(i), kind);
+                        orn.reserve(local.size());
+                        for (index_t li : local) {
+                            const size_t idx = static_cast<size_t>(li);
+                            if (idx >= n_vertices) {
+                                throw std::runtime_error("MeshBase::finalize: high-order face index out of range");
+                            }
+                            orn.push_back(vertices_ptr[idx]);
+                        }
+                    }
 
                     auto& acc = face_map[key];
                     if (acc.oriented_vertices.empty()) acc.oriented_vertices = std::move(orn);
@@ -350,6 +501,7 @@ void MeshBase::finalize() {
                                                        : CellFamily::Polygon;
                         }
                         acc.num_corners = static_cast<int>(face_defs[i].size());
+                        acc.order = std::max(1, p);
                         acc.family_set = true;
                     }
                 }
@@ -403,7 +555,7 @@ void MeshBase::finalize() {
             CellShape fshape;
             fshape.family = acc.family;
             fshape.num_corners = acc.num_corners;
-            fshape.order = 1;
+            fshape.order = acc.order;
             fshape.is_mixed_order = false;
             new_face_shape.push_back(fshape);
 
@@ -522,6 +674,10 @@ std::vector<index_t> MeshBase::face_vertices(index_t f) const {
 }
 
 std::vector<index_t> MeshBase::cell_faces(index_t c) const {
+    auto [ptr, count] = cell_faces_span(c);
+    if (ptr && count > 0) {
+        return std::vector<index_t>(ptr, ptr + count);
+    }
     std::vector<index_t> faces;
     for (index_t f = 0; f < static_cast<index_t>(face2cell_.size()); ++f) {
         const auto& fc = face2cell_[f];
@@ -532,15 +688,50 @@ std::vector<index_t> MeshBase::cell_faces(index_t c) const {
     return faces;
 }
 
-void MeshBase::add_vertex(index_t id, const std::array<real_t,3>& xyz) {
+std::pair<const index_t*, size_t> MeshBase::cell_faces_span(index_t c) const {
+    if (c < 0 || c >= static_cast<index_t>(cell_shape_.size())) {
+        throw std::out_of_range("cell_faces_span: invalid cell index");
+    }
+    if (cell2face_offsets_.size() != cell_shape_.size() + 1 || cell2face_.empty()) {
+        return {nullptr, 0};
+    }
+    const offset_t start = cell2face_offsets_[static_cast<size_t>(c)];
+    const offset_t end = cell2face_offsets_[static_cast<size_t>(c) + 1];
+    const size_t count = static_cast<size_t>(end - start);
+    return {&cell2face_[static_cast<size_t>(start)], count};
+}
+
+std::pair<const int8_t*, size_t> MeshBase::cell_face_senses_span(index_t c) const {
+    if (c < 0 || c >= static_cast<index_t>(cell_shape_.size())) {
+        throw std::out_of_range("cell_face_senses_span: invalid cell index");
+    }
+    if (cell2face_sense_.size() != cell2face_.size()) {
+        return {nullptr, 0};
+    }
+    auto [faces_ptr, count] = cell_faces_span(c);
+    if (!faces_ptr || count == 0) return {nullptr, 0};
+
+    const offset_t start = cell2face_offsets_[static_cast<size_t>(c)];
+    return {&cell2face_sense_[static_cast<size_t>(start)], count};
+}
+
+	void MeshBase::add_vertex(index_t id, const std::array<real_t,3>& xyz) {
     // Initialize dimension if unknown
     if (spatial_dim_ == 0) spatial_dim_ = 3;
     // Append coordinates (assume ids are sequential for testing convenience)
     for (int i = 0; i < std::max(1, spatial_dim_); ++i) {
         X_ref_.push_back(xyz[i]);
     }
-    // IDs
-    vertex_gid_.push_back(id);
+	    // IDs
+	    vertex_gid_.push_back(id);
+
+	    // Keep vertex labels in sync with vertices (default = INVALID_LABEL)
+	    if (vertex_label_id_.size() < n_vertices()) {
+	        vertex_label_id_.resize(n_vertices(), INVALID_LABEL);
+	    }
+
+    // Keep vertex-attached fields consistent for incremental building workflows.
+    resize_fields(EntityKind::Vertex, n_vertices());
 }
 
 void MeshBase::add_cell(index_t id, CellFamily family, const std::vector<index_t>& vertices) {
@@ -557,6 +748,14 @@ void MeshBase::add_cell(index_t id, CellFamily family, const std::vector<index_t
     shape.num_corners = static_cast<int>(vertices.size());
     cell_shape_.push_back(shape);
     cell_gid_.push_back(id);
+
+    // Keep region labels in sync with cells (default region = 0)
+    if (cell_region_id_.size() < cell_shape_.size()) {
+        cell_region_id_.resize(cell_shape_.size(), 0);
+    }
+
+    // Keep cell-attached fields consistent for incremental building workflows.
+    resize_fields(EntityKind::Volume, n_cells());
 }
 
 void MeshBase::add_boundary_face(index_t id, const std::vector<index_t>& vertices) {
@@ -573,6 +772,14 @@ void MeshBase::add_boundary_face(index_t id, const std::vector<index_t>& vertice
     face_gid_.push_back(id);
     // Mark as boundary by setting second incident to INVALID_INDEX
     face2cell_.push_back({INVALID_INDEX, INVALID_INDEX});
+
+    // Keep boundary labels in sync with faces (default = INVALID_LABEL)
+    if (face_boundary_id_.size() < face_shape_.size()) {
+        face_boundary_id_.resize(face_shape_.size(), INVALID_LABEL);
+    }
+
+    // Keep face-attached fields consistent for incremental building workflows.
+    resize_fields(EntityKind::Face, n_faces());
 }
 
 // ==========================================
@@ -661,20 +868,112 @@ label_t MeshBase::boundary_label(index_t face) const {
     return face_boundary_id_[face];
 }
 
-std::vector<index_t> MeshBase::faces_with_label(label_t label) const {
-    std::vector<index_t> faces;
-    for (index_t i = 0; i < static_cast<index_t>(face_boundary_id_.size()); ++i) {
-        if (face_boundary_id_[i] == label) {
-            faces.push_back(i);
-        }
+	std::vector<index_t> MeshBase::faces_with_label(label_t label) const {
+	    std::vector<index_t> faces;
+	    for (index_t i = 0; i < static_cast<index_t>(face_boundary_id_.size()); ++i) {
+	        if (face_boundary_id_[i] == label) {
+	            faces.push_back(i);
+	        }
+	    }
+	    return faces;
+	}
+
+	void MeshBase::set_edge_label(index_t edge, label_t label) {
+	    if (edge < 0 || edge >= static_cast<index_t>(edge2vertex_.size())) {
+	        throw std::out_of_range("set_edge_label: invalid edge index");
+	    }
+	    if (edge_label_id_.size() != edge2vertex_.size()) {
+	        edge_label_id_.resize(edge2vertex_.size(), INVALID_LABEL);
+	    }
+	    edge_label_id_[edge] = label;
+	    event_bus_.notify(MeshEvent::LabelsChanged);
+	}
+
+	label_t MeshBase::edge_label(index_t edge) const {
+	    if (edge < 0 || edge >= static_cast<index_t>(edge_label_id_.size())) {
+	        return INVALID_LABEL;
+	    }
+	    return edge_label_id_[edge];
+	}
+
+	std::vector<index_t> MeshBase::edges_with_label(label_t label) const {
+	    std::vector<index_t> edges;
+	    for (index_t i = 0; i < static_cast<index_t>(edge_label_id_.size()); ++i) {
+	        if (edge_label_id_[i] == label) {
+	            edges.push_back(i);
+	        }
+	    }
+	    return edges;
+	}
+
+	void MeshBase::set_vertex_label(index_t vertex, label_t label) {
+	    if (vertex < 0 || static_cast<size_t>(vertex) >= n_vertices()) {
+	        throw std::out_of_range("set_vertex_label: invalid vertex index");
+	    }
+	    if (vertex_label_id_.size() != n_vertices()) {
+	        vertex_label_id_.resize(n_vertices(), INVALID_LABEL);
+	    }
+	    vertex_label_id_[vertex] = label;
+	    event_bus_.notify(MeshEvent::LabelsChanged);
+	}
+
+	label_t MeshBase::vertex_label(index_t vertex) const {
+	    if (vertex < 0 || vertex >= static_cast<index_t>(vertex_label_id_.size())) {
+	        return INVALID_LABEL;
+	    }
+	    return vertex_label_id_[vertex];
+	}
+
+	std::vector<index_t> MeshBase::vertices_with_label(label_t label) const {
+	    std::vector<index_t> vertices;
+	    for (index_t i = 0; i < static_cast<index_t>(vertex_label_id_.size()); ++i) {
+	        if (vertex_label_id_[i] == label) {
+	            vertices.push_back(i);
+	        }
+	    }
+	    return vertices;
+	}
+
+	void MeshBase::add_to_set(EntityKind kind, const std::string& name, index_t id) {
+	    int kind_idx = static_cast<int>(kind);
+	    auto& vec = entity_sets_[kind_idx][name];
+	    if (std::find(vec.begin(), vec.end(), id) == vec.end()) {
+	        vec.push_back(id);
+	    }
+	    event_bus_.notify(MeshEvent::LabelsChanged);
+	}
+
+void MeshBase::remove_from_set(EntityKind kind, const std::string& name, index_t id) {
+    int kind_idx = static_cast<int>(kind);
+    auto it = entity_sets_[kind_idx].find(name);
+    if (it == entity_sets_[kind_idx].end()) {
+        return;
     }
-    return faces;
+
+    auto& vec = it->second;
+    const auto before = vec.size();
+    vec.erase(std::remove(vec.begin(), vec.end(), id), vec.end());
+    if (vec.size() != before) {
+        event_bus_.notify(MeshEvent::LabelsChanged);
+    }
 }
 
-void MeshBase::add_to_set(EntityKind kind, const std::string& name, index_t id) {
+void MeshBase::remove_set(EntityKind kind, const std::string& name) {
     int kind_idx = static_cast<int>(kind);
-    entity_sets_[kind_idx][name].push_back(id);
-    event_bus_.notify(MeshEvent::LabelsChanged);
+    if (entity_sets_[kind_idx].erase(name) > 0) {
+        event_bus_.notify(MeshEvent::LabelsChanged);
+    }
+}
+
+std::vector<std::string> MeshBase::list_sets(EntityKind kind) const {
+    int kind_idx = static_cast<int>(kind);
+    std::vector<std::string> names;
+    names.reserve(entity_sets_[kind_idx].size());
+    for (const auto& kv : entity_sets_[kind_idx]) {
+        names.push_back(kv.first);
+    }
+    std::sort(names.begin(), names.end());
+    return names;
 }
 
 const std::vector<index_t>& MeshBase::get_set(EntityKind kind, const std::string& name) const {
@@ -693,9 +992,40 @@ bool MeshBase::has_set(EntityKind kind, const std::string& name) const {
 }
 
 void MeshBase::register_label(const std::string& name, label_t label) {
+    if (label < 0) {
+        throw std::invalid_argument("register_label: label must be non-negative");
+    }
+
+    // If this name was previously associated with a different label, clear that back-reference.
+    auto existing = label_from_name_.find(name);
+    if (existing != label_from_name_.end() && existing->second != label) {
+        const label_t old_label = existing->second;
+        if (old_label >= 0 && old_label < static_cast<label_t>(name_from_label_.size()) &&
+            name_from_label_[old_label] == name) {
+            name_from_label_[old_label].clear();
+        }
+    }
+
+    // If this label already has a different registered name, remove its name->label mapping.
+    if (label < static_cast<label_t>(name_from_label_.size())) {
+        const auto& old_name = name_from_label_[label];
+        if (!old_name.empty() && old_name != name) {
+            label_from_name_.erase(old_name);
+        }
+    }
+
+    // Clean up any additional names pointing to this label (legacy state).
+    for (auto it = label_from_name_.begin(); it != label_from_name_.end(); ) {
+        if (it->second == label && it->first != name) {
+            it = label_from_name_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     label_from_name_[name] = label;
     if (label >= static_cast<label_t>(name_from_label_.size())) {
-        name_from_label_.resize(label + 1);
+        name_from_label_.resize(static_cast<size_t>(label) + 1);
     }
     name_from_label_[label] = name;
     event_bus_.notify(MeshEvent::LabelsChanged);
@@ -716,6 +1046,27 @@ label_t MeshBase::label_from_name(const std::string& name) const {
     return INVALID_LABEL;
 }
 
+std::unordered_map<label_t, std::string> MeshBase::list_label_names() const {
+    std::unordered_map<label_t, std::string> out;
+    out.reserve(name_from_label_.size());
+    for (size_t i = 0; i < name_from_label_.size(); ++i) {
+        const auto& name = name_from_label_[i];
+        if (!name.empty()) {
+            out[static_cast<label_t>(i)] = name;
+        }
+    }
+    return out;
+}
+
+void MeshBase::clear_label_registry() {
+    if (label_from_name_.empty() && name_from_label_.empty()) {
+        return;
+    }
+    label_from_name_.clear();
+    name_from_label_.clear();
+    event_bus_.notify(MeshEvent::LabelsChanged);
+}
+
 // ==========================================
 // Field Attachment System
 // ==========================================
@@ -730,6 +1081,10 @@ FieldHandle MeshBase::attach_field(EntityKind kind, const std::string& name,
         throw std::runtime_error("attach_field: field '" + name + "' already exists");
     }
 
+    if (components == 0) {
+        throw std::invalid_argument("attach_field: components must be positive");
+    }
+
     // Determine bytes per component
     size_t bytes_per_comp = (type == FieldScalarType::Custom)
         ? custom_bytes_per_component
@@ -742,8 +1097,12 @@ FieldHandle MeshBase::attach_field(EntityKind kind, const std::string& name,
     // Get entity count
     size_t n_entities = entity_count(kind);
 
+    // Allocate a stable ID for this field
+    const uint32_t field_id = next_field_id_++;
+
     // Create field info
     FieldInfo info;
+    info.id = field_id;
     info.type = type;
     info.components = components;
     info.bytes_per_component = bytes_per_comp;
@@ -754,7 +1113,7 @@ FieldHandle MeshBase::attach_field(EntityKind kind, const std::string& name,
 
     // Create handle
     FieldHandle handle;
-    handle.id = next_field_id_++;
+    handle.id = field_id;
     handle.kind = kind;
     handle.name = name;
 
@@ -769,6 +1128,9 @@ FieldHandle MeshBase::attach_field(EntityKind kind, const std::string& name,
 
 FieldHandle MeshBase::attach_field_with_descriptor(EntityKind kind, const std::string& name,
                                                   FieldScalarType type, const FieldDescriptor& descriptor) {
+    if (descriptor.location != kind) {
+        throw std::invalid_argument("attach_field_with_descriptor: descriptor location mismatch for field '" + name + "'");
+    }
     FieldHandle handle = attach_field(kind, name, type, descriptor.components);
     field_descriptors_[handle.id] = descriptor;
     return handle;
@@ -777,6 +1139,20 @@ FieldHandle MeshBase::attach_field_with_descriptor(EntityKind kind, const std::s
 bool MeshBase::has_field(EntityKind kind, const std::string& name) const {
     int kind_idx = static_cast<int>(kind);
     return attachments_[kind_idx].by_name.find(name) != attachments_[kind_idx].by_name.end();
+}
+
+FieldHandle MeshBase::field_handle(EntityKind kind, const std::string& name) const {
+    FieldHandle handle;
+    handle.kind = kind;
+    handle.name = name;
+
+    int kind_idx = static_cast<int>(kind);
+    auto it = attachments_[kind_idx].by_name.find(name);
+    if (it == attachments_[kind_idx].by_name.end()) {
+        return handle;  // id remains 0
+    }
+    handle.id = it->second.id;
+    return handle;
 }
 
 void MeshBase::remove_field(const FieldHandle& h) {
@@ -885,6 +1261,51 @@ size_t MeshBase::field_bytes_per_entity(const FieldHandle& h) const {
     return field_it->second.components * field_it->second.bytes_per_component;
 }
 
+const FieldDescriptor* MeshBase::field_descriptor(const FieldHandle& h) const {
+    auto it = field_descriptors_.find(h.id);
+    if (it == field_descriptors_.end()) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
+void MeshBase::set_field_descriptor(const FieldHandle& h, const FieldDescriptor& descriptor) {
+    auto it = field_index_.find(h.id);
+    if (it == field_index_.end()) {
+        throw std::invalid_argument("set_field_descriptor: invalid field handle");
+    }
+
+    const EntityKind kind = it->second.first;
+    if (descriptor.location != kind) {
+        throw std::invalid_argument("set_field_descriptor: descriptor location mismatch");
+    }
+
+    if (field_components(h) != descriptor.components) {
+        throw std::invalid_argument("set_field_descriptor: descriptor components mismatch");
+    }
+
+    field_descriptors_[h.id] = descriptor;
+    event_bus_.notify(MeshEvent::FieldsChanged);
+}
+
+void MeshBase::resize_fields(EntityKind kind, size_t new_count) {
+    int kind_idx = static_cast<int>(kind);
+    bool changed = false;
+
+    for (auto& [name, info] : attachments_[kind_idx].by_name) {
+        const size_t bytes_per_entity = info.components * info.bytes_per_component;
+        const size_t new_size = new_count * bytes_per_entity;
+        if (info.data.size() != new_size) {
+            info.data.resize(new_size, 0);
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        event_bus_.notify(MeshEvent::FieldsChanged);
+    }
+}
+
 std::vector<std::string> MeshBase::field_names(EntityKind kind) const {
     std::vector<std::string> names;
     int kind_idx = static_cast<int>(kind);
@@ -950,6 +1371,10 @@ size_t MeshBase::field_bytes_per_component_by_name(EntityKind kind, const std::s
 
 std::array<real_t,3> MeshBase::cell_center(index_t c, Configuration cfg) const {
     return MeshGeometry::cell_center(*this, c, cfg);
+}
+
+std::array<real_t,3> MeshBase::cell_centroid(index_t c, Configuration cfg) const {
+    return MeshGeometry::cell_centroid(*this, c, cfg);
 }
 
 std::array<real_t,3> MeshBase::face_center(index_t f, Configuration cfg) const {
@@ -1229,15 +1654,51 @@ RayIntersectResult MeshBase::intersect_ray(const std::array<real_t,3>& origin,
 }
 
 void MeshBase::build_search_structure(Configuration cfg) const {
-    // In a full implementation, this would build acceleration structures
-    // For now, just create the placeholder
+    MeshSearch::SearchConfig config;
+    build_search_structure(config, cfg);
+}
+
+void MeshBase::build_search_structure(const MeshSearch::SearchConfig& config, Configuration cfg) const {
+    if (config.type == MeshSearch::AccelType::None) {
+        clear_search_structure();
+        return;
+    }
+
+    // Treat Deformed as Current (compatibility alias).
+    if (cfg == Configuration::Deformed) {
+        cfg = Configuration::Current;
+    }
+    if (cfg == Configuration::Current && !has_current_coords()) {
+        cfg = Configuration::Reference;
+    }
+
     if (!search_accel_) {
         search_accel_ = std::make_unique<SearchAccel>();
+    } else {
+        // Drop any previous structure/configuration.
+        search_accel_->invalidate();
     }
+
+    search_accel_->accel = AccelFactory::create(config.type);
+    if (!search_accel_->accel) {
+        // Defensive: factory returns nullptr only for AccelType::None (handled above).
+        clear_search_structure();
+        return;
+    }
+
+    search_accel_->accel->build(*this, cfg, config);
+    search_accel_->built_cfg = cfg;
+
+    const auto bbox = bounding_box(cfg);
+    search_accel_->bounds = {bbox.min[0], bbox.min[1], bbox.min[2],
+                             bbox.max[0], bbox.max[1], bbox.max[2]};
+    search_accel_->stats = search_accel_->accel->get_stats();
 }
 
 void MeshBase::clear_search_structure() const {
-    search_accel_.reset();
+    if (search_accel_) {
+        search_accel_->invalidate();
+    }
 }
 
 // ==========================================
@@ -1317,8 +1778,10 @@ void MeshBase::shrink_to_fit() {
     face_owner_.shrink_to_fit();
     edge_owner_.shrink_to_fit();
 
-    cell_region_id_.shrink_to_fit();
-    face_boundary_id_.shrink_to_fit();
+	    cell_region_id_.shrink_to_fit();
+	    face_boundary_id_.shrink_to_fit();
+	    edge_label_id_.shrink_to_fit();
+	    vertex_label_id_.shrink_to_fit();
 
     vertex2cell_offsets_.shrink_to_fit();
     vertex2cell_.shrink_to_fit();
@@ -1361,9 +1824,11 @@ size_t MeshBase::memory_usage_bytes() const {
     total += face_owner_.capacity() * sizeof(Ownership);
     total += edge_owner_.capacity() * sizeof(Ownership);
 
-    // Labels
-    total += cell_region_id_.capacity() * sizeof(label_t);
-    total += face_boundary_id_.capacity() * sizeof(label_t);
+	    // Labels
+	    total += vertex_label_id_.capacity() * sizeof(label_t);
+	    total += cell_region_id_.capacity() * sizeof(label_t);
+	    total += face_boundary_id_.capacity() * sizeof(label_t);
+	    total += edge_label_id_.capacity() * sizeof(label_t);
 
     // Adjacency caches
     total += vertex2cell_offsets_.capacity() * sizeof(offset_t);
@@ -1471,6 +1936,7 @@ void MeshBase::set_vertex_gids(std::vector<gid_t> gids) {
     for (index_t i = 0; i < static_cast<index_t>(vertex_gid_.size()); ++i) {
         global2local_vertex_[vertex_gid_[i]] = i;
     }
+    event_bus_.notify(MeshEvent::TopologyChanged);
 }
 
 void MeshBase::set_cell_gids(std::vector<gid_t> gids) {
@@ -1480,6 +1946,7 @@ void MeshBase::set_cell_gids(std::vector<gid_t> gids) {
     for (index_t i = 0; i < static_cast<index_t>(cell_gid_.size()); ++i) {
         global2local_cell_[cell_gid_[i]] = i;
     }
+    event_bus_.notify(MeshEvent::TopologyChanged);
 }
 
 void MeshBase::set_face_gids(std::vector<gid_t> gids) {
@@ -1489,6 +1956,7 @@ void MeshBase::set_face_gids(std::vector<gid_t> gids) {
     for (index_t i = 0; i < static_cast<index_t>(face_gid_.size()); ++i) {
         global2local_face_[face_gid_[i]] = i;
     }
+    event_bus_.notify(MeshEvent::TopologyChanged);
 }
 
 void MeshBase::set_edge_gids(std::vector<gid_t> gids) {
@@ -1498,6 +1966,7 @@ void MeshBase::set_edge_gids(std::vector<gid_t> gids) {
     for (index_t i = 0; i < static_cast<index_t>(edge_gid_.size()); ++i) {
         global2local_edge_[edge_gid_[i]] = i;
     }
+    event_bus_.notify(MeshEvent::TopologyChanged);
 }
 
 void MeshBase::rebuild_gid_maps() {
