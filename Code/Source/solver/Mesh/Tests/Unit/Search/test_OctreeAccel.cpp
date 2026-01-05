@@ -31,7 +31,6 @@
 #include <gtest/gtest.h>
 #include "Search/OctreeAccel.h"
 #include "Core/MeshBase.h"
-#include "Core/DistributedMesh.h"
 #include "Geometry/MeshGeometry.h"
 #include <random>
 #include <chrono>
@@ -49,7 +48,7 @@ protected:
 
   void create_test_mesh() {
     // Create a 3x3x3 mesh with non-uniform spacing to test octree subdivisions
-    mesh_ = std::make_unique<DistributedMesh>();
+    mesh_ = std::make_unique<MeshBase>();
 
     // Add vertices in a non-uniform grid
     std::vector<std::array<real_t,3>> vertices;
@@ -98,7 +97,7 @@ protected:
   }
 
   void create_large_mesh(int n_points) {
-    mesh_ = std::make_unique<DistributedMesh>();
+    mesh_ = std::make_unique<MeshBase>();
 
     // Create clustered points to test octree efficiency
     std::mt19937 gen(42);
@@ -408,8 +407,8 @@ TEST_F(OctreeAccelTest, CellsInSphere) {
 
   auto results1 = octree_->cells_in_sphere(*mesh_, center1, radius1);
 
-  // Large sphere spanning octants
-  std::array<real_t,3> center2 = {0.5, 0.5, 0.5};
+  // Larger sphere spanning octants (same center, larger radius)
+  std::array<real_t,3> center2 = center1;
   real_t radius2 = 0.5;
 
   auto results2 = octree_->cells_in_sphere(*mesh_, center2, radius2);
@@ -523,7 +522,7 @@ TEST_F(OctreeAccelTest, DeformedConfiguration) {
 
 // Test empty mesh
 TEST_F(OctreeAccelTest, EmptyMesh) {
-  mesh_ = std::make_unique<DistributedMesh>();
+  mesh_ = std::make_unique<MeshBase>();
   mesh_->finalize();
 
   octree_ = std::make_unique<OctreeAccel>();

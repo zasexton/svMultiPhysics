@@ -169,7 +169,7 @@ public:
 
         // Get statistics
         auto stats = accel.get_stats();
-        ASSERT_GT(stats.build_time_ms, 0);
+        // build_time_ms is recorded in whole milliseconds and can be 0 on fast builds.
         ASSERT_GT(stats.memory_bytes, 0);
         ASSERT_GT(stats.n_entities, 0);
 

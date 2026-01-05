@@ -31,7 +31,6 @@
 #include <gtest/gtest.h>
 #include "Search/KDTreeAccel.h"
 #include "Core/MeshBase.h"
-#include "Core/DistributedMesh.h"
 #include "Geometry/MeshGeometry.h"
 #include <random>
 #include <chrono>
@@ -49,7 +48,7 @@ protected:
 
   void create_test_mesh() {
     // Create a simple 2x2x2 hex mesh
-    mesh_ = std::make_unique<DistributedMesh>();
+    mesh_ = std::make_unique<MeshBase>();
 
     // Add vertices for a unit cube subdivided into 8 hexahedra
     std::vector<std::array<real_t,3>> vertices = {
@@ -96,7 +95,7 @@ protected:
   }
 
   void create_large_mesh(int n_points) {
-    mesh_ = std::make_unique<DistributedMesh>();
+    mesh_ = std::make_unique<MeshBase>();
 
     // Create random points
     std::mt19937 gen(42);  // Fixed seed for reproducibility
@@ -454,7 +453,7 @@ TEST_F(KDTreeAccelTest, DeformedConfiguration) {
 
 // Test empty mesh
 TEST_F(KDTreeAccelTest, EmptyMesh) {
-  mesh_ = std::make_unique<DistributedMesh>();
+  mesh_ = std::make_unique<MeshBase>();
   mesh_->finalize();
 
   kdtree_ = std::make_unique<KDTreeAccel>();

@@ -32,7 +32,6 @@
 #include "Search/RTreeAccel.h"
 #include "Search/SearchPrimitives.h"
 #include "Core/MeshBase.h"
-#include "Core/DistributedMesh.h"
 #include "Geometry/MeshGeometry.h"
 #include <random>
 #include <chrono>
@@ -50,7 +49,7 @@ protected:
 
   void create_test_mesh() {
     // Create a mesh suitable for testing R-Tree dynamic operations
-    mesh_ = std::make_unique<DistributedMesh>();
+    mesh_ = std::make_unique<MeshBase>();
 
     // Create a 3x3 grid of vertices
     int idx = 0;
@@ -96,7 +95,7 @@ protected:
   }
 
   void create_dynamic_mesh(int initial_cells) {
-    mesh_ = std::make_unique<DistributedMesh>();
+    mesh_ = std::make_unique<MeshBase>();
 
     // Create initial vertices
     std::mt19937 gen(42);
@@ -184,7 +183,7 @@ TEST_F(RTreeAccelTest, DynamicInsertion) {
     std::array<real_t,3> box_max = {real_t(i) + 0.9, 0.9, 0.9};
 
     // Create a dummy mesh for testing
-    DistributedMesh dummy_mesh;
+    MeshBase dummy_mesh;
     dummy_mesh.finalize();
 
     auto found = rtree_->cells_in_box(dummy_mesh, box_min, box_max);
@@ -237,7 +236,7 @@ TEST_F(RTreeAccelTest, DynamicDeletion) {
   EXPECT_LE(after_delete_stats.n_nodes, initial_stats.n_nodes);
 
   // Verify removed entries are gone
-  DistributedMesh dummy_mesh;
+  MeshBase dummy_mesh;
   dummy_mesh.finalize();
 
   for (int i = 0; i < 10; i += 2) {
@@ -573,7 +572,7 @@ TEST_F(RTreeAccelTest, MixedOperations) {
   std::cout << "  Depth: " << final_stats.tree_depth << "\n";
 
   // Verify tree still works
-  DistributedMesh dummy_mesh;
+  MeshBase dummy_mesh;
   dummy_mesh.finalize();
 
   std::array<real_t,3> query_min = {2.0, 2.0, 0.0};
@@ -659,7 +658,7 @@ TEST_F(RTreeAccelTest, DeformedConfiguration) {
 
 // Test empty mesh
 TEST_F(RTreeAccelTest, EmptyMesh) {
-  mesh_ = std::make_unique<DistributedMesh>();
+  mesh_ = std::make_unique<MeshBase>();
   mesh_->finalize();
 
   rtree_ = std::make_unique<RTreeAccel>();

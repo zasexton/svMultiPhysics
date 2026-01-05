@@ -347,8 +347,12 @@ public:
             std::array<real_t, 3> direction = {1, 0, 0};
 
             auto result = MeshSearch::intersect_ray(*mesh, origin, direction);
-            // Note: This requires boundary faces to be properly set up
-            // The test mesh may not have proper boundary faces
+            ASSERT_TRUE(result.found);
+            ASSERT_TRUE(result.hit);
+            ASSERT_NE(result.face_id, INVALID_INDEX);
+            ASSERT_GE(result.t, 0.0);
+            // Box spans x in [0,3], so entry intersection is at x=0 -> t = 1.
+            ASSERT_NEAR(result.t, 1.0, 1e-8);
         }
 
         // Test all ray intersections
@@ -357,11 +361,15 @@ public:
             std::array<real_t, 3> direction = {1, 0, 0};
 
             auto results = MeshSearch::intersect_ray_all(*mesh, origin, direction);
+            ASSERT_EQ(results.size(), 2u);
 
             // Verify results are sorted by t
             for (size_t i = 1; i < results.size(); ++i) {
                 ASSERT_LE(results[i-1].t, results[i].t);
             }
+
+            ASSERT_NEAR(results[0].t, 1.0, 1e-8);
+            ASSERT_NEAR(results[1].t, 4.0, 1e-8);
         }
 
         std::cout << "  ✓ Ray intersection tests passed\n";
@@ -376,8 +384,9 @@ public:
         {
             std::array<real_t, 3> inside = {1.5, 1.5, 0};
             real_t dist = MeshSearch::signed_distance(*mesh, inside);
-            // Implementation may not compute true signed distance
-            ASSERT_GE(dist, 0);
+            // Inside the [0,3]x[0,3] domain -> negative distance to boundary.
+            ASSERT_LT(dist, 0);
+            ASSERT_NEAR(dist, -1.5, 1e-8);
         }
 
         // Test closest boundary point
@@ -396,7 +405,13 @@ public:
                 std::pow(closest[1] - query[1], 2) +
                 std::pow(closest[2] - query[2], 2)
             );
-            ASSERT_LT(dist, 10);  // Reasonable distance
+            ASSERT_NEAR(dist, 1.5, 1e-8);
+            // Closest point should lie on the boundary of the square.
+            bool on_boundary = (std::abs(closest[0] - 0.0) < 1e-8) ||
+                               (std::abs(closest[0] - 3.0) < 1e-8) ||
+                               (std::abs(closest[1] - 0.0) < 1e-8) ||
+                               (std::abs(closest[1] - 3.0) < 1e-8);
+            ASSERT_TRUE(on_boundary);
         }
 
         std::cout << "  ✓ Distance query tests passed\n";

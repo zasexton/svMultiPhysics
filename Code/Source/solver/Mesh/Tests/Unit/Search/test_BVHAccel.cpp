@@ -31,7 +31,6 @@
 #include <gtest/gtest.h>
 #include "Search/BVHAccel.h"
 #include "Core/MeshBase.h"
-#include "Core/DistributedMesh.h"
 #include "Geometry/MeshGeometry.h"
 #include <random>
 #include <chrono>
@@ -49,7 +48,7 @@ protected:
 
   void create_test_mesh() {
     // Create a mesh with boundary faces for ray tracing tests
-    mesh_ = std::make_unique<DistributedMesh>();
+    mesh_ = std::make_unique<MeshBase>();
 
     // Create a cube mesh with explicit boundary
     std::vector<std::array<real_t,3>> vertices = {
@@ -80,7 +79,7 @@ protected:
   }
 
   void create_complex_mesh(int n_cells) {
-    mesh_ = std::make_unique<DistributedMesh>();
+    mesh_ = std::make_unique<MeshBase>();
 
     // Create a mesh with many cells for performance testing
     std::mt19937 gen(42);
@@ -507,7 +506,7 @@ TEST_F(BVHAccelTest, SAHCost) {
   std::cout << "SAH cost for 3x3x3 mesh: " << sah_cost << "\n";
 
   // Create unbalanced mesh and compare
-  mesh_ = std::make_unique<DistributedMesh>();
+  mesh_ = std::make_unique<MeshBase>();
 
   // Add vertices in a line (worst case for BVH)
   for (int i = 0; i < 10; ++i) {
@@ -616,7 +615,7 @@ TEST_F(BVHAccelTest, DeformedConfiguration) {
 
 // Test empty mesh
 TEST_F(BVHAccelTest, EmptyMesh) {
-  mesh_ = std::make_unique<DistributedMesh>();
+  mesh_ = std::make_unique<MeshBase>();
   mesh_->finalize();
 
   bvh_ = std::make_unique<BVHAccel>();
