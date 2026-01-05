@@ -22,6 +22,7 @@ struct GeneralizedAlphaFirstOrderIntegratorOptions {
     // Order used to reconstruct u_dot^n from history without storing rate vectors.
     // 1 -> (u^n - u^{n-1})/dt
     // 2 -> 2nd-order backward difference (variable step supported)
+    // 0 -> do not reconstruct: assume uPrev2 stores u_dot^n (TimeLoop may inject this)
     int history_rate_order{2};
 };
 

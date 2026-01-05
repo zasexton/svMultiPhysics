@@ -27,8 +27,8 @@ GeneralizedAlphaFirstOrderIntegrator::GeneralizedAlphaFirstOrderIntegrator(Gener
                 "GeneralizedAlphaFirstOrderIntegrator: alpha_f must be > 0");
     FE_THROW_IF(!(options_.gamma > 0.0), InvalidArgumentException,
                 "GeneralizedAlphaFirstOrderIntegrator: gamma must be > 0");
-    FE_THROW_IF(options_.history_rate_order < 1, InvalidArgumentException,
-                "GeneralizedAlphaFirstOrderIntegrator: history_rate_order must be >= 1");
+    FE_THROW_IF(options_.history_rate_order < 0, InvalidArgumentException,
+                "GeneralizedAlphaFirstOrderIntegrator: history_rate_order must be >= 0");
 }
 
 assembly::TimeIntegrationContext
@@ -60,6 +60,23 @@ GeneralizedAlphaFirstOrderIntegrator::buildContext(int max_time_derivative_order
     FE_THROW_IF(available_history < 2, InvalidArgumentException,
                 "TimeIntegrator '" + name() + "': requires at least 2 history states (u^n and u^{n-1})");
 
+    const double c = alpha_m / (gamma * dt * alpha_f);
+    const double c0 = (1.0 - alpha_m) - alpha_m * (1.0 - gamma) / gamma;
+
+    // Option 0: use an injected u_dot^n stored in the 2nd history slot (u^{n-1}).
+    // This keeps the generalized-α method one-step in (u, u_dot) while avoiding
+    // explicit u_dot storage in the Systems layer.
+    if (options_.history_rate_order == 0) {
+        assembly::TimeDerivativeStencil s;
+        s.order = 1;
+        s.a.assign(3, 0.0);
+        s.a[0] = static_cast<Real>(c);   // u_{n+alpha_f}
+        s.a[1] = static_cast<Real>(-c);  // u_n
+        s.a[2] = static_cast<Real>(c0);  // injected u_dot^n (stored in u^{n-1} slot)
+        ctx.dt1 = s;
+        return ctx;
+    }
+
     const int q_max = std::max(1, available_history - 1);
     const int q = std::max(1, std::min(options_.history_rate_order, q_max));
 
@@ -89,9 +106,6 @@ GeneralizedAlphaFirstOrderIntegrator::buildContext(int max_time_derivative_order
     const auto w = math::finiteDifferenceWeights(/*derivative_order=*/1, /*x0=*/0.0, nodes);
     FE_THROW_IF(static_cast<int>(w.size()) != q + 1, InvalidArgumentException,
                 "TimeIntegrator '" + name() + "': internal error computing history weights");
-
-    const double c = alpha_m / (gamma * dt * alpha_f);
-    const double c0 = (1.0 - alpha_m) - alpha_m * (1.0 - gamma) / gamma;
 
     assembly::TimeDerivativeStencil s;
     s.order = 1;
