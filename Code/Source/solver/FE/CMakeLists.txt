@@ -1654,12 +1654,18 @@ if(FE_BUILD_TESTS)
         endif()
 
         # TimeStepping module tests (depends on Systems + Forms + Backends; no Mesh required)
-        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/TimeStepping/test_main.cpp)
-            set(FE_TIMESTEPPING_TEST_SOURCES
-                Tests/Unit/TimeStepping/test_StepController.cpp
-                Tests/Unit/TimeStepping/test_TimeLoopConvergence.cpp
-                Tests/Unit/TimeStepping/test_main.cpp
-            )
+	        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/TimeStepping/test_main.cpp)
+	            set(FE_TIMESTEPPING_TEST_SOURCES
+	                Tests/Unit/TimeStepping/test_TimeHistory.cpp
+	                Tests/Unit/TimeStepping/test_TimeIntegrators.cpp
+	                Tests/Unit/TimeStepping/test_TimeLoopStability.cpp
+	                Tests/Unit/TimeStepping/test_TimeSteppingUtils.cpp
+	                Tests/Unit/TimeStepping/test_StepControllers.cpp
+	                Tests/Unit/TimeStepping/test_MultiStageScheme.cpp
+	                Tests/Unit/TimeStepping/test_StepController.cpp
+	                Tests/Unit/TimeStepping/test_TimeLoopConvergence.cpp
+	                Tests/Unit/TimeStepping/test_main.cpp
+	            )
             add_executable(test_fe_timestepping ${FE_TIMESTEPPING_TEST_SOURCES})
             target_link_libraries(test_fe_timestepping
                 PRIVATE
