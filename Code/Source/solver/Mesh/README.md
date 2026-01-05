@@ -6,6 +6,7 @@ This directory contains the modernized mesh infrastructure for svMultiPhysics. T
 
 - **Core/**: Core mesh types and base classes
   - `MeshTypes.h`: Basic type definitions
+  - `MeshComm.h`: Communicator wrapper (serial + MPI)
   - `MeshBase.h`: Base mesh interface
   - `InterfaceMesh.h`: Interface mesh support
   - `DistributedMesh.h`: Distributed mesh with MPI support
@@ -131,17 +132,17 @@ When built as part of the main svMultiPhysics project, the mesh components are a
 - CMake 3.10 or newer
 
 ### Optional
-- **MPI**: Required for distributed mesh support (DistributedMesh)
+- **MPI**: Enables distributed mesh support (`DistributedMesh` / `svmp::Mesh`)
 - **VTK**: Required for VTK I/O operations (VTKReader, VTKWriter)
 
 ## Testing
 
-The `test_compile/` directory contains compilation tests to verify that all mesh components compile correctly. To run these tests:
+Enable `MESH_BUILD_TESTS=ON` and run `ctest` from the build directory:
 
 ```bash
 cmake -DMESH_BUILD_TESTS=ON ..
-make
-./test_compile/mesh_compile_test
+cmake --build . -j
+ctest --output-on-failure
 ```
 
 ## Notes
@@ -149,5 +150,16 @@ make
 - The mesh infrastructure is designed to be modular and extensible
 - Header-only components (Core, Observer) have minimal dependencies
 - MPI features are only available when compiled with `MESH_ENABLE_MPI=ON`
+- Prefer `Mesh.h` + `svmp::Mesh` + `svmp::MeshComm` in user code to avoid `#ifdef MESH_HAS_MPI`
 - VTK I/O features are only available when compiled with `MESH_ENABLE_VTK=ON`
 - All includes use relative paths from the `solver/` directory for consistency
+
+## I/O Policies (Serial + MPI)
+
+- Prefer `svmp::load_mesh(...)` / `svmp::save_mesh(...)` from `Mesh.h` so the same call sites work in both builds.
+- **Serial builds (no MPI)**: `load_mesh`/`save_mesh` are local and use the `MeshBase` I/O registry (`IO/*`).
+- **MPI builds**: `load_mesh(..., MeshComm::world())` dispatches to `DistributedMesh::load_parallel(...)`:
+  - `.pvtu`/`.pvtk`: each rank loads its own piece (expected naming: `<base>_p<rank>.vtu`, with a fallback to `<base>_<rank>.vtu`).
+  - Other formats (e.g. `.vtu`): rank 0 loads the full mesh and distributes a cell-partitioned submesh to each rank.
+  - Optional: `MeshIOOptions::kv["ghost_layers"]` requests ghost-layer construction after load (default `0`).
+- **MPI saves**: `save_mesh(mesh, "<name>.pvtu")` writes per-rank pieces plus a rank-0 master file; other paths default to per-rank outputs with a `_rank<r>` suffix.
