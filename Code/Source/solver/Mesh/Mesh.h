@@ -31,6 +31,10 @@
 #ifndef SVMP_MESH_H
 #define SVMP_MESH_H
 
+#include <algorithm>
+#include <cctype>
+#include <stdexcept>
+
 /**
  * @file Mesh.h
  * @brief Main entry point for the refactored mesh infrastructure
@@ -38,13 +42,15 @@
  * This header includes all the essential mesh components:
  * - Core types and data structures
  * - MeshBase class for runtime-dimensional meshes
- * - Mesh<Dim> template for compile-time dimensional meshes
+ * - MeshView<Dim> template for compile-time dimensional local meshes
  * - Component classes for specialized functionality
  */
 
 // Core components
 #include "Core/MeshTypes.h"
+#include "Core/MeshComm.h"
 #include "Core/MeshBase.h"
+#include "Core/DistributedMesh.h"
 
 // Topology components
 #include "Topology/CellShape.h"
@@ -60,17 +66,18 @@
 // For backward compatibility, provide svmp namespace exports
 namespace svmp {
 
-// The main mesh class is MeshBase (defined in Core/MeshBase.h)
+// The main public mesh class is Mesh (a DistributedMesh that works in serial + MPI).
+// MeshBase remains the underlying local mesh implementation.
 // Additional functionality is provided by component classes:
 // - MeshGeometry: Geometric computations
 // - MeshQuality: Quality metrics
-// - MeshTopology: Adjacency operations (to be implemented)
-// - MeshFields: Field management (to be implemented)
-// - MeshLabels: Label operations (to be implemented)
-// - MeshSearch: Point location (to be implemented)
+// - MeshTopology: Adjacency and topology operations
+// - MeshFields: Field management
+// - MeshLabels: Label and set operations
+// - MeshSearch: Point location and spatial queries
 
 /**
- * @brief Compile-time typed mesh view
+ * @brief Compile-time typed local mesh view
  *
  * Provides a typed interface to MeshBase with dimension known at compile time.
  * This allows for more efficient code generation and type safety.
@@ -78,14 +85,14 @@ namespace svmp {
  * @tparam Dim Spatial dimension (1, 2, or 3)
  */
 template <int Dim>
-class Mesh {
+class MeshView {
 public:
-  explicit Mesh(std::shared_ptr<MeshBase> base)
+  explicit MeshView(std::shared_ptr<MeshBase> base)
     : base_(std::move(base))
   {
-    if (!base_) throw std::invalid_argument("Mesh<Dim>: null base");
+    if (!base_) throw std::invalid_argument("MeshView<Dim>: null base");
     if (base_->dim() != 0 && base_->dim() != Dim) {
-      throw std::invalid_argument("Mesh<Dim>: dimension mismatch");
+      throw std::invalid_argument("MeshView<Dim>: dimension mismatch");
     }
   }
 
@@ -147,10 +154,170 @@ private:
   std::shared_ptr<MeshBase> base_;
 };
 
-// Convenience aliases
-using Mesh1D = Mesh<1>;
-using Mesh2D = Mesh<2>;
-using Mesh3D = Mesh<3>;
+// Main public mesh type (distributed when MPI is enabled, serial otherwise).
+using Mesh = DistributedMesh;
+
+// Convenience aliases for compile-time dimensional local views
+using Mesh1D = MeshView<1>;
+using Mesh2D = MeshView<2>;
+using Mesh3D = MeshView<3>;
+
+// Convenience aliases for compile-time dimensional distributed meshes
+template <int Dim>
+using Mesh_t = DistributedMesh_t<Dim>;
+
+// ============================================================================
+// DistributedMesh as Default Mesh Type
+// ============================================================================
+//
+// DistributedMesh is the recommended mesh type for all applications:
+// - In serial mode (no MPI): operates as a simple wrapper around MeshBase
+// - In parallel mode (with MPI): provides full distributed mesh functionality
+//
+// This allows the same code to work in both serial and parallel contexts
+// without modification.
+// ============================================================================
+
+/**
+ * @brief Create an empty distributed mesh
+ * @return Shared pointer to a new DistributedMesh
+ */
+inline std::shared_ptr<Mesh> create_mesh() {
+  return std::make_shared<Mesh>(MeshComm::world());
+}
+
+/**
+ * @brief Create a distributed mesh wrapping an existing MeshBase
+ * @param base Shared pointer to an existing MeshBase
+ * @return Shared pointer to a new DistributedMesh wrapping the base
+ */
+inline std::shared_ptr<Mesh> create_mesh(std::shared_ptr<MeshBase> base) {
+  return std::make_shared<Mesh>(std::move(base));
+}
+
+/**
+ * @brief Create a mesh with a specific communicator
+ * @param comm Mesh communicator (serial-safe)
+ * @return Shared pointer to a new DistributedMesh
+ */
+inline std::shared_ptr<Mesh> create_mesh(MeshComm comm) {
+  return std::make_shared<Mesh>(comm);
+}
+
+/**
+ * @brief Create a mesh wrapping an existing MeshBase with a communicator
+ * @param base Shared pointer to an existing MeshBase
+ * @param comm Mesh communicator (serial-safe)
+ * @return Shared pointer to a new DistributedMesh
+ */
+inline std::shared_ptr<Mesh> create_mesh(std::shared_ptr<MeshBase> base, MeshComm comm) {
+  return std::make_shared<Mesh>(std::move(base), comm);
+}
+
+#ifdef MESH_HAS_MPI
+/**
+ * @brief Create a mesh with a specific MPI communicator
+ * @param comm MPI communicator
+ * @return Shared pointer to a new Mesh
+ */
+[[deprecated("Use create_mesh(MeshComm) instead of MPI_Comm overloads.")]]
+inline std::shared_ptr<Mesh> create_mesh(MPI_Comm comm) {
+  return create_mesh(MeshComm(comm));
+}
+
+/**
+ * @brief Create a mesh wrapping an existing MeshBase with MPI communicator
+ * @param base Shared pointer to an existing MeshBase
+ * @param comm MPI communicator
+ * @return Shared pointer to a new Mesh
+ */
+[[deprecated("Use create_mesh(std::shared_ptr<MeshBase>, MeshComm) instead of MPI_Comm overloads.")]]
+inline std::shared_ptr<Mesh> create_mesh(std::shared_ptr<MeshBase> base, MPI_Comm comm) {
+  return create_mesh(std::move(base), MeshComm(comm));
+}
+#endif
+
+/**
+ * @brief Load a mesh file and wrap it in a DistributedMesh
+ *
+ * In MPI builds, when `comm.is_parallel()` this dispatches to
+ * `DistributedMesh::load_parallel(...)` (rank-0 load + distribute or
+ * format-specific parallel I/O). In serial builds this loads locally.
+ *
+ * @param options I/O options for loading
+ * @param comm Mesh communicator (serial-safe)
+ * @return Shared pointer to a DistributedMesh containing the loaded mesh
+ */
+inline std::shared_ptr<Mesh> load_mesh(const MeshIOOptions& options, MeshComm comm) {
+  if (comm.is_parallel()) {
+    auto dmesh = Mesh::load_parallel(options, comm);
+    return std::make_shared<Mesh>(std::move(dmesh));
+  }
+  auto base = std::make_shared<MeshBase>(MeshBase::load(options));
+  return std::make_shared<Mesh>(std::move(base), comm);
+}
+
+/**
+ * @brief Load a mesh file using the default communicator policy.
+ *
+ * The default is `MeshComm::world()` so MPI programs get distributed load by default.
+ */
+inline std::shared_ptr<Mesh> load_mesh(const MeshIOOptions& options) {
+  return load_mesh(options, MeshComm::world());
+}
+
+/**
+ * @brief Load a mesh file and wrap it in a DistributedMesh
+ *
+ * @param filename Path to mesh file
+ * @param comm Mesh communicator (serial-safe)
+ * @return Shared pointer to a DistributedMesh containing the loaded mesh
+ */
+inline std::shared_ptr<Mesh> load_mesh(const std::string& filename, MeshComm comm) {
+  MeshIOOptions opts;
+  opts.path = filename;
+  // Best-effort format inference from file extension.
+  const auto dot = filename.find_last_of('.');
+  if (dot != std::string::npos && dot + 1 < filename.size()) {
+    std::string ext = filename.substr(dot + 1);
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    opts.format = ext;
+  }
+  return load_mesh(opts, comm);
+}
+
+/**
+ * @brief Load a mesh file using the default communicator policy.
+ *
+ * The default is `MeshComm::world()` so MPI programs get distributed load by default.
+ */
+inline std::shared_ptr<Mesh> load_mesh(const std::string& filename) {
+  return load_mesh(filename, MeshComm::world());
+}
+
+/**
+ * @brief Save a mesh using distributed I/O policy (or local save in serial).
+ */
+inline void save_mesh(const Mesh& mesh, const MeshIOOptions& options) {
+  mesh.save_parallel(options);
+}
+
+/**
+ * @brief Save a mesh file with best-effort format inference from file extension.
+ */
+inline void save_mesh(const Mesh& mesh, const std::string& filename) {
+  MeshIOOptions opts;
+  opts.path = filename;
+  const auto dot = filename.find_last_of('.');
+  if (dot != std::string::npos && dot + 1 < filename.size()) {
+    std::string ext = filename.substr(dot + 1);
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    opts.format = ext;
+  }
+  save_mesh(mesh, opts);
+}
 
 } // namespace svmp
 
