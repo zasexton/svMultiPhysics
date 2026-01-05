@@ -161,11 +161,30 @@ public:
     // Configuration (Assembler interface)
     // =========================================================================
 
+    using Assembler::assembleBoth;
+    using Assembler::assembleBoundaryFaces;
+    using Assembler::assembleMatrix;
+
     void setDofMap(const dofs::DofMap& dof_map) override;
+    void setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset = 0) override;
+    void setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset = 0) override;
     void setDofHandler(const dofs::DofHandler& dof_handler) override;
     void setConstraints(const constraints::AffineConstraints* constraints) override;
     void setSparsityPattern(const sparsity::SparsityPattern* sparsity) override;
     void setOptions(const AssemblyOptions& options) override;
+    void setCurrentSolution(std::span<const Real> solution) override;
+    void setPreviousSolution(std::span<const Real> solution) override;
+    void setPreviousSolution2(std::span<const Real> solution) override;
+    void setPreviousSolutionK(int k, std::span<const Real> solution) override;
+    void setTimeIntegrationContext(const TimeIntegrationContext* ctx) override;
+    void setTime(Real time) override;
+    void setTimeStep(Real dt) override;
+    void setRealParameterGetter(
+        const std::function<std::optional<Real>(std::string_view)>* get_real_param) noexcept override;
+    void setParameterGetter(
+        const std::function<std::optional<params::Value>(std::string_view)>* get_param) noexcept override;
+    void setUserData(const void* user_data) noexcept override;
+    void setMaterialStateProvider(IMaterialStateProvider* provider) noexcept override;
     [[nodiscard]] const AssemblyOptions& getOptions() const noexcept override;
 
     // =========================================================================
@@ -209,6 +228,15 @@ public:
         const IMeshAccess& mesh,
         int boundary_marker,
         const spaces::FunctionSpace& space,
+        AssemblyKernel& kernel,
+        GlobalSystemView* matrix_view,
+        GlobalSystemView* vector_view) override;
+
+    [[nodiscard]] AssemblyResult assembleBoundaryFaces(
+        const IMeshAccess& mesh,
+        int boundary_marker,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
         AssemblyKernel& kernel,
         GlobalSystemView* matrix_view,
         GlobalSystemView* vector_view) override;
@@ -287,9 +315,11 @@ private:
         GlobalIndex face_id,
         GlobalIndex cell_id,
         LocalIndex local_face_id,
-        const spaces::FunctionSpace& space,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
         RequiredData required_data,
-        ContextType type);
+        ContextType type,
+        std::span<const LocalIndex> align_facet_to_reference = {});
 
     /**
      * @brief Insert local contributions into global system
@@ -371,7 +401,10 @@ private:
 
     // Configuration
     AssemblyOptions options_;
-    const dofs::DofMap* dof_map_{nullptr};
+    const dofs::DofMap* row_dof_map_{nullptr};
+    const dofs::DofMap* col_dof_map_{nullptr};
+    GlobalIndex row_dof_offset_{0};
+    GlobalIndex col_dof_offset_{0};
     const dofs::DofHandler* dof_handler_{nullptr};
     const constraints::AffineConstraints* constraints_{nullptr};
     const sparsity::SparsityPattern* sparsity_{nullptr};
@@ -401,9 +434,22 @@ private:
     std::vector<Real> scratch_basis_values_;
     std::vector<AssemblyContext::Vector3D> scratch_ref_gradients_;
     std::vector<AssemblyContext::Vector3D> scratch_phys_gradients_;
+    std::vector<AssemblyContext::Matrix3x3> scratch_ref_hessians_;
+    std::vector<AssemblyContext::Matrix3x3> scratch_phys_hessians_;
     std::vector<AssemblyContext::Vector3D> scratch_normals_;
 
     // State
+    std::span<const Real> current_solution_{};
+    std::vector<std::span<const Real>> previous_solutions_{};
+    std::vector<Real> local_solution_coeffs_{};
+    std::vector<std::vector<Real>> local_prev_solution_coeffs_{};
+    Real time_{0.0};
+    Real dt_{0.0};
+    const std::function<std::optional<Real>(std::string_view)>* get_real_param_{nullptr};
+    const std::function<std::optional<params::Value>(std::string_view)>* get_param_{nullptr};
+    const void* user_data_{nullptr};
+    const TimeIntegrationContext* time_integration_{nullptr};
+    IMaterialStateProvider* material_state_provider_{nullptr};
     bool initialized_{false};
 };
 

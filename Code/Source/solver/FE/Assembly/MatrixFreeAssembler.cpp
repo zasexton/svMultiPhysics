@@ -31,6 +31,13 @@
 #include "MatrixFreeAssembler.h"
 #include "Core/FEException.h"
 #include "Constraints/AffineConstraints.h"  // For full AffineConstraints definition
+#include "Dofs/DofMap.h"
+#include "Spaces/FunctionSpace.h"
+#include "Elements/Element.h"
+#include "Quadrature/QuadratureFactory.h"
+#include "Geometry/MappingFactory.h"
+#include "Math/Vector.h"
+#include "Basis/BasisFunction.h"
 
 #include <chrono>
 #include <algorithm>
@@ -131,6 +138,203 @@ private:
     mutable KernelOutput output_;
 };
 
+namespace {
+
+struct CellContextScratch {
+    std::vector<std::array<Real, 3>> cell_coords;
+
+    std::vector<AssemblyContext::Point3D> quad_points;
+    std::vector<Real> quad_weights;
+    std::vector<AssemblyContext::Point3D> phys_points;
+    std::vector<AssemblyContext::Matrix3x3> jacobians;
+    std::vector<AssemblyContext::Matrix3x3> inv_jacobians;
+    std::vector<Real> jac_dets;
+    std::vector<Real> integration_weights;
+
+    std::vector<Real> test_basis_values;
+    std::vector<AssemblyContext::Vector3D> test_ref_gradients;
+    std::vector<AssemblyContext::Vector3D> test_phys_gradients;
+
+    std::vector<Real> trial_basis_values;
+    std::vector<AssemblyContext::Vector3D> trial_ref_gradients;
+    std::vector<AssemblyContext::Vector3D> trial_phys_gradients;
+};
+
+CellContextScratch& cellScratch()
+{
+    static thread_local CellContextScratch scratch;
+    return scratch;
+}
+
+void prepareCellContext(AssemblyContext& context,
+                        const IMeshAccess& mesh,
+                        GlobalIndex cell_id,
+                        const spaces::FunctionSpace& test_space,
+                        const spaces::FunctionSpace& trial_space,
+                        RequiredData required_data)
+{
+    auto& scratch = cellScratch();
+
+    const ElementType cell_type = mesh.getCellType(cell_id);
+    const int dim = mesh.dimension();
+
+    const auto& test_element = test_space.getElement(cell_type, cell_id);
+    const auto& trial_element = (&test_space == &trial_space)
+                                  ? test_element
+                                  : trial_space.getElement(cell_type, cell_id);
+
+    auto quad_rule = test_element.quadrature();
+    if (!quad_rule) {
+        const int quad_order = quadrature::QuadratureFactory::recommended_order(
+            test_element.polynomial_order(), false);
+        quad_rule = quadrature::QuadratureFactory::create(cell_type, quad_order);
+    }
+
+    const auto n_qpts = static_cast<LocalIndex>(quad_rule->num_points());
+    const auto n_test_dofs = static_cast<LocalIndex>(test_element.num_dofs());
+    const auto n_trial_dofs = static_cast<LocalIndex>(trial_element.num_dofs());
+
+    mesh.getCellCoordinates(cell_id, scratch.cell_coords);
+
+    std::vector<math::Vector<Real, 3>> node_coords(scratch.cell_coords.size());
+    for (std::size_t i = 0; i < scratch.cell_coords.size(); ++i) {
+        node_coords[i] = math::Vector<Real, 3>{
+            scratch.cell_coords[i][0],
+            scratch.cell_coords[i][1],
+            scratch.cell_coords[i][2]};
+    }
+
+    geometry::MappingRequest map_request;
+    map_request.element_type = cell_type;
+    map_request.geometry_order = 1;
+    map_request.use_affine = true;
+    auto mapping = geometry::MappingFactory::create(map_request, node_coords);
+
+    scratch.quad_points.resize(n_qpts);
+    scratch.quad_weights.resize(n_qpts);
+    scratch.phys_points.resize(n_qpts);
+    scratch.jacobians.resize(n_qpts);
+    scratch.inv_jacobians.resize(n_qpts);
+    scratch.jac_dets.resize(n_qpts);
+    scratch.integration_weights.resize(n_qpts);
+
+    scratch.test_basis_values.resize(static_cast<std::size_t>(n_test_dofs * n_qpts));
+    scratch.test_ref_gradients.resize(static_cast<std::size_t>(n_test_dofs * n_qpts));
+    scratch.test_phys_gradients.resize(static_cast<std::size_t>(n_test_dofs * n_qpts));
+
+    const bool different_spaces = (&test_space != &trial_space);
+    if (different_spaces) {
+        scratch.trial_basis_values.resize(static_cast<std::size_t>(n_trial_dofs * n_qpts));
+        scratch.trial_ref_gradients.resize(static_cast<std::size_t>(n_trial_dofs * n_qpts));
+        scratch.trial_phys_gradients.resize(static_cast<std::size_t>(n_trial_dofs * n_qpts));
+    } else {
+        scratch.trial_basis_values.clear();
+        scratch.trial_ref_gradients.clear();
+        scratch.trial_phys_gradients.clear();
+    }
+
+    const auto& quad_points = quad_rule->points();
+    const auto& quad_weights = quad_rule->weights();
+
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        const auto& qpt = quad_points[q];
+        scratch.quad_points[q] = {qpt[0], qpt[1], qpt[2]};
+        scratch.quad_weights[q] = quad_weights[q];
+
+        const math::Vector<Real, 3> xi{qpt[0], qpt[1], qpt[2]};
+        const auto x_phys = mapping->map_to_physical(xi);
+        scratch.phys_points[q] = {x_phys[0], x_phys[1], x_phys[2]};
+
+        const auto J = mapping->jacobian(xi);
+        const auto J_inv = mapping->jacobian_inverse(xi);
+        const Real det_J = mapping->jacobian_determinant(xi);
+
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                scratch.jacobians[q][i][j] = J(i, j);
+                scratch.inv_jacobians[q][i][j] = J_inv(i, j);
+            }
+        }
+        scratch.jac_dets[q] = det_J;
+        scratch.integration_weights[q] = quad_weights[q] * std::abs(det_J);
+    }
+
+    const auto& test_basis = test_element.basis();
+    std::vector<Real> values_at_pt;
+    std::vector<basis::Gradient> gradients_at_pt;
+
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        const math::Vector<Real, 3> xi{
+            scratch.quad_points[q][0],
+            scratch.quad_points[q][1],
+            scratch.quad_points[q][2]};
+
+        test_basis.evaluate_values(xi, values_at_pt);
+        test_basis.evaluate_gradients(xi, gradients_at_pt);
+
+        for (LocalIndex i = 0; i < n_test_dofs; ++i) {
+            const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
+            scratch.test_basis_values[idx] = values_at_pt[i];
+            scratch.test_ref_gradients[idx] = {
+                gradients_at_pt[i][0],
+                gradients_at_pt[i][1],
+                gradients_at_pt[i][2]};
+
+            const auto& grad_ref = scratch.test_ref_gradients[idx];
+            const auto& J_inv = scratch.inv_jacobians[q];
+            AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
+            for (int d1 = 0; d1 < dim; ++d1) {
+                for (int d2 = 0; d2 < dim; ++d2) {
+                    grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
+                }
+            }
+            scratch.test_phys_gradients[idx] = grad_phys;
+        }
+
+        if (different_spaces) {
+            const auto& trial_basis = trial_element.basis();
+            trial_basis.evaluate_values(xi, values_at_pt);
+            trial_basis.evaluate_gradients(xi, gradients_at_pt);
+
+            for (LocalIndex j = 0; j < n_trial_dofs; ++j) {
+                const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
+                scratch.trial_basis_values[idx] = values_at_pt[j];
+                scratch.trial_ref_gradients[idx] = {
+                    gradients_at_pt[j][0],
+                    gradients_at_pt[j][1],
+                    gradients_at_pt[j][2]};
+
+                const auto& grad_ref = scratch.trial_ref_gradients[idx];
+                const auto& J_inv = scratch.inv_jacobians[q];
+                AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
+                for (int d1 = 0; d1 < dim; ++d1) {
+                    for (int d2 = 0; d2 < dim; ++d2) {
+                        grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
+                    }
+                }
+                scratch.trial_phys_gradients[idx] = grad_phys;
+            }
+        }
+    }
+
+    context.configure(cell_id, test_element, trial_element, required_data);
+    context.setQuadratureData(scratch.quad_points, scratch.quad_weights);
+    context.setPhysicalPoints(scratch.phys_points);
+    context.setJacobianData(scratch.jacobians, scratch.inv_jacobians, scratch.jac_dets);
+    context.setIntegrationWeights(scratch.integration_weights);
+
+    context.setTestBasisData(n_test_dofs, scratch.test_basis_values, scratch.test_ref_gradients);
+    context.setPhysicalGradients(scratch.test_phys_gradients,
+                                 different_spaces ? scratch.trial_phys_gradients
+                                                  : scratch.test_phys_gradients);
+
+    if (different_spaces) {
+        context.setTrialBasisData(n_trial_dofs, scratch.trial_basis_values, scratch.trial_ref_gradients);
+    }
+}
+
+} // namespace
+
 // ============================================================================
 // MatrixFreeAssembler Implementation
 // ============================================================================
@@ -219,13 +423,27 @@ void MatrixFreeAssembler::setup() {
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    // Get dimensions
-    // Note: This would come from DofMap in actual implementation
-    num_rows_ = mesh_->numCells() * 8;  // Placeholder
-    num_cols_ = num_rows_;  // Square for now
+    // Dimensions (single global DOF space)
+    num_rows_ = dof_map_->getNumDofs();
+    num_cols_ = num_rows_;
 
-    GlobalIndex num_cells = mesh_->numCells();
-    element_cache_.resize(static_cast<std::size_t>(num_cells));
+    // Element cache: stable slot per cell id.
+    const GlobalIndex num_cells = mesh_->numCells();
+    element_cache_.assign(static_cast<std::size_t>(num_cells), MatrixFreeElementData{});
+    mesh_->forEachCell([&](GlobalIndex cell_id) {
+        FE_THROW_IF(cell_id < 0 || cell_id >= num_cells, FEException,
+                    "MatrixFreeAssembler::setup: invalid cell id");
+
+        auto& elem = element_cache_[static_cast<std::size_t>(cell_id)];
+        elem.cell_id = cell_id;
+        elem.cell_type = mesh_->getCellType(cell_id);
+
+        const auto dofs = dof_map_->getCellDofs(cell_id);
+        elem.dofs.assign(dofs.begin(), dofs.end());
+
+        // Optional kernel-specific caching (physics data, coefficients, etc.).
+        elem.kernel_data.clear();
+    });
 
     // Initialize thread-local storage
     int num_threads = options_.num_threads;
@@ -246,17 +464,6 @@ void MatrixFreeAssembler::setup() {
         thread_contexts_[idx] = std::make_unique<AssemblyContext>();
     }
 
-    // Cache data based on assembly level
-    if (options_.assembly_level >= AssemblyLevel::Partial) {
-        if (options_.cache_geometry) {
-            cacheGeometryData();
-        }
-        if (options_.cache_basis) {
-            cacheBasisData();
-        }
-        cacheKernelData();
-    }
-
     is_setup_ = true;
 
     auto end_time = std::chrono::high_resolution_clock::now();
@@ -267,10 +474,6 @@ void MatrixFreeAssembler::setup() {
     stats_.cached_bytes = 0;
     for (const auto& elem : element_cache_) {
         stats_.cached_bytes += elem.dofs.size() * sizeof(GlobalIndex);
-        stats_.cached_bytes += elem.jacobians.size() * sizeof(Real);
-        stats_.cached_bytes += elem.basis_values.size() * sizeof(Real);
-        stats_.cached_bytes += elem.basis_gradients.size() * sizeof(Real);
-        stats_.cached_bytes += elem.quadrature_weights.size() * sizeof(Real);
         stats_.cached_bytes += elem.kernel_data.size() * sizeof(Real);
     }
 }
@@ -367,9 +570,14 @@ void MatrixFreeAssembler::apply(std::span<const Real> x, std::span<Real> y) {
 void MatrixFreeAssembler::applyAdd(std::span<const Real> x, std::span<Real> y) {
     FE_THROW_IF(!isConfigured(), "MatrixFreeAssembler not configured");
 
-    if (!is_setup_ && options_.assembly_level != AssemblyLevel::None) {
+    if (!is_setup_) {
         setup();
     }
+
+    FE_THROW_IF(static_cast<GlobalIndex>(x.size()) < num_cols_, FEException,
+                "MatrixFreeAssembler::applyAdd: input vector too small");
+    FE_THROW_IF(static_cast<GlobalIndex>(y.size()) < num_rows_, FEException,
+                "MatrixFreeAssembler::applyAdd: output vector too small");
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
@@ -378,6 +586,8 @@ void MatrixFreeAssembler::applyAdd(std::span<const Real> x, std::span<Real> y) {
     if (options_.apply_constraints && constraints_) {
         zeroConstrainedEntries(x_work);
     }
+
+    const RequiredData required_data = kernel_->getRequiredData();
 
 #ifdef _OPENMP
     int num_threads = options_.num_threads > 0 ? options_.num_threads
@@ -394,6 +604,9 @@ void MatrixFreeAssembler::applyAdd(std::span<const Real> x, std::span<Real> y) {
         #pragma omp for
         for (std::size_t i = 0; i < element_cache_.size(); ++i) {
             const auto& elem = element_cache_[i];
+            if (elem.cell_id < 0) {
+                continue;
+            }
 
             // Extract local x values
             std::size_t n_dofs = elem.dofs.size();
@@ -404,8 +617,8 @@ void MatrixFreeAssembler::applyAdd(std::span<const Real> x, std::span<Real> y) {
                 x_local[j] = x_work[static_cast<std::size_t>(elem.dofs[j])];
             }
 
-            // Prepare context (use cached data)
-            // context.setFromCache(elem);
+            prepareCellContext(context, *mesh_, elem.cell_id,
+                               *test_space_, *trial_space_, required_data);
 
             // Apply kernel
             if (!elem.kernel_data.empty()) {
@@ -434,6 +647,9 @@ void MatrixFreeAssembler::applyAdd(std::span<const Real> x, std::span<Real> y) {
     auto& y_local = thread_y_local_[0];
 
     for (const auto& elem : element_cache_) {
+        if (elem.cell_id < 0) {
+            continue;
+        }
         std::size_t n_dofs = elem.dofs.size();
         x_local.resize(n_dofs);
         y_local.resize(n_dofs);
@@ -441,6 +657,9 @@ void MatrixFreeAssembler::applyAdd(std::span<const Real> x, std::span<Real> y) {
         for (std::size_t j = 0; j < n_dofs; ++j) {
             x_local[j] = x_work[static_cast<std::size_t>(elem.dofs[j])];
         }
+
+        prepareCellContext(context, *mesh_, elem.cell_id,
+                           *test_space_, *trial_space_, required_data);
 
         if (!elem.kernel_data.empty()) {
             kernel_->applyLocalCached(context, elem.kernel_data, x_local, y_local);

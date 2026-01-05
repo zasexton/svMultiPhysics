@@ -24,12 +24,32 @@
 #include "Math/Matrix.h"
 
 #include <chrono>
+#include <algorithm>
 #include <stdexcept>
 #include <cmath>
 
 namespace svmp {
 namespace FE {
 namespace assembly {
+
+namespace {
+
+int requiredHistoryStates(const TimeIntegrationContext* ctx) noexcept
+{
+    if (ctx == nullptr) {
+        return 0;
+    }
+    int required = 0;
+    if (ctx->dt1) {
+        required = std::max(required, ctx->dt1->requiredHistoryStates());
+    }
+    if (ctx->dt2) {
+        required = std::max(required, ctx->dt2->requiredHistoryStates());
+    }
+    return required;
+}
+
+} // namespace
 
 // ============================================================================
 // Construction
@@ -54,13 +74,31 @@ StandardAssembler& StandardAssembler::operator=(StandardAssembler&& other) noexc
 
 void StandardAssembler::setDofMap(const dofs::DofMap& dof_map)
 {
-    dof_map_ = &dof_map;
+    row_dof_map_ = &dof_map;
+    col_dof_map_ = &dof_map;
+    row_dof_offset_ = 0;
+    col_dof_offset_ = 0;
+}
+
+void StandardAssembler::setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset)
+{
+    row_dof_map_ = &dof_map;
+    row_dof_offset_ = row_offset;
+}
+
+void StandardAssembler::setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset)
+{
+    col_dof_map_ = &dof_map;
+    col_dof_offset_ = col_offset;
 }
 
 void StandardAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
 {
     dof_handler_ = &dof_handler;
-    dof_map_ = &dof_handler.getDofMap();
+    row_dof_map_ = &dof_handler.getDofMap();
+    col_dof_map_ = row_dof_map_;
+    row_dof_offset_ = 0;
+    col_dof_offset_ = 0;
 }
 
 void StandardAssembler::setConstraints(const constraints::AffineConstraints* constraints)
@@ -84,6 +122,67 @@ void StandardAssembler::setOptions(const AssemblyOptions& options)
     options_ = options;
 }
 
+void StandardAssembler::setCurrentSolution(std::span<const Real> solution)
+{
+    current_solution_ = solution;
+}
+
+void StandardAssembler::setPreviousSolution(std::span<const Real> solution)
+{
+    setPreviousSolutionK(1, solution);
+}
+
+void StandardAssembler::setPreviousSolution2(std::span<const Real> solution)
+{
+    setPreviousSolutionK(2, solution);
+}
+
+void StandardAssembler::setPreviousSolutionK(int k, std::span<const Real> solution)
+{
+    FE_THROW_IF(k <= 0, FEException, "StandardAssembler::setPreviousSolutionK: k must be >= 1");
+    if (previous_solutions_.size() < static_cast<std::size_t>(k)) {
+        previous_solutions_.resize(static_cast<std::size_t>(k));
+    }
+    previous_solutions_[static_cast<std::size_t>(k - 1)] = solution;
+}
+
+void StandardAssembler::setTimeIntegrationContext(const TimeIntegrationContext* ctx)
+{
+    time_integration_ = ctx;
+}
+
+void StandardAssembler::setTime(Real time)
+{
+    time_ = time;
+}
+
+void StandardAssembler::setTimeStep(Real dt)
+{
+    dt_ = dt;
+}
+
+void StandardAssembler::setRealParameterGetter(
+    const std::function<std::optional<Real>(std::string_view)>* get_real_param) noexcept
+{
+    get_real_param_ = get_real_param;
+}
+
+void StandardAssembler::setParameterGetter(
+    const std::function<std::optional<params::Value>(std::string_view)>* get_param) noexcept
+{
+    get_param_ = get_param;
+}
+
+void StandardAssembler::setUserData(const void* user_data) noexcept
+{
+    user_data_ = user_data;
+}
+
+void StandardAssembler::setMaterialStateProvider(IMaterialStateProvider* provider) noexcept
+{
+    material_state_provider_ = provider;
+}
+
 const AssemblyOptions& StandardAssembler::getOptions() const noexcept
 {
     return options_;
@@ -91,7 +190,7 @@ const AssemblyOptions& StandardAssembler::getOptions() const noexcept
 
 bool StandardAssembler::isConfigured() const noexcept
 {
-    return dof_map_ != nullptr;
+    return row_dof_map_ != nullptr;
 }
 
 // ============================================================================
@@ -105,7 +204,9 @@ void StandardAssembler::initialize()
     }
 
     // Reserve working storage based on DOF map
-    const auto max_dofs = dof_map_->getMaxDofsPerCell();
+    const auto max_row_dofs = row_dof_map_->getMaxDofsPerCell();
+    const auto max_col_dofs = col_dof_map_ ? col_dof_map_->getMaxDofsPerCell() : max_row_dofs;
+    const auto max_dofs = std::max(max_row_dofs, max_col_dofs);
     const auto max_dofs_size = static_cast<std::size_t>(max_dofs);
 
     row_dofs_.reserve(max_dofs_size);
@@ -141,6 +242,11 @@ void StandardAssembler::reset()
     context_.clear();
     row_dofs_.clear();
     col_dofs_.clear();
+    current_solution_ = {};
+    previous_solutions_.clear();
+    local_solution_coeffs_.clear();
+    local_prev_solution_coeffs_.clear();
+    time_integration_ = nullptr;
     initialized_ = false;
 }
 
@@ -201,6 +307,18 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
     GlobalSystemView* matrix_view,
     GlobalSystemView* vector_view)
 {
+    return assembleBoundaryFaces(mesh, boundary_marker, space, space, kernel, matrix_view, vector_view);
+}
+
+AssemblyResult StandardAssembler::assembleBoundaryFaces(
+    const IMeshAccess& mesh,
+    int boundary_marker,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
+    AssemblyKernel& kernel,
+    GlobalSystemView* matrix_view,
+    GlobalSystemView* vector_view)
+{
     AssemblyResult result;
     auto start_time = std::chrono::steady_clock::now();
 
@@ -219,20 +337,111 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
     }
 
     const auto required_data = kernel.getRequiredData();
+    const bool need_solution =
+        hasFlag(required_data, RequiredData::SolutionValues) ||
+        hasFlag(required_data, RequiredData::SolutionGradients) ||
+        hasFlag(required_data, RequiredData::SolutionHessians) ||
+        hasFlag(required_data, RequiredData::SolutionLaplacians);
+    const bool need_material_state =
+        hasFlag(required_data, RequiredData::MaterialState);
+    const auto material_state_spec = kernel.materialStateSpec();
+
+    if (need_material_state) {
+        FE_THROW_IF(material_state_provider_ == nullptr, FEException,
+                    "StandardAssembler::assembleBoundaryFaces: kernel requires material state but no material state provider was set");
+        FE_THROW_IF(material_state_spec.bytes_per_qpt == 0u, FEException,
+                    "StandardAssembler::assembleBoundaryFaces: kernel requires material state but materialStateSpec().bytes_per_qpt == 0");
+    }
+
+    FE_CHECK_NOT_NULL(row_dof_map_, "StandardAssembler::assembleBoundaryFaces: row_dof_map");
+    if (!col_dof_map_) {
+        col_dof_map_ = row_dof_map_;
+        col_dof_offset_ = row_dof_offset_;
+    }
 
     // Iterate over boundary faces with given marker
     mesh.forEachBoundaryFace(boundary_marker,
         [&](GlobalIndex face_id, GlobalIndex cell_id) {
-            // Get cell DOFs
-            auto cell_dofs = dof_map_->getCellDofs(cell_id);
-            row_dofs_.assign(cell_dofs.begin(), cell_dofs.end());
-            col_dofs_.assign(cell_dofs.begin(), cell_dofs.end());
+            // Get cell DOFs (rows/cols may come from different maps)
+            auto row_cell_dofs = row_dof_map_->getCellDofs(cell_id);
+            auto col_cell_dofs = col_dof_map_->getCellDofs(cell_id);
+
+            row_dofs_.resize(row_cell_dofs.size());
+            for (std::size_t i = 0; i < row_cell_dofs.size(); ++i) {
+                row_dofs_[i] = row_cell_dofs[i] + row_dof_offset_;
+            }
+
+            col_dofs_.resize(col_cell_dofs.size());
+            for (std::size_t j = 0; j < col_cell_dofs.size(); ++j) {
+                col_dofs_[j] = col_cell_dofs[j] + col_dof_offset_;
+            }
 
             // Prepare context for face
             LocalIndex local_face_id = mesh.getLocalFaceIndex(face_id, cell_id);
-            prepareContextFace(context_, mesh, face_id, cell_id, local_face_id, space,
+            prepareContextFace(context_, mesh, face_id, cell_id, local_face_id, test_space, trial_space,
                                required_data, ContextType::BoundaryFace);
+            context_.setMaterialState(nullptr, nullptr, 0u, 0u);
+            context_.setTimeIntegrationContext(time_integration_);
+            context_.setTime(time_);
+            context_.setTimeStep(dt_);
+            context_.setRealParameterGetter(get_real_param_);
+            context_.setParameterGetter(get_param_);
+            context_.setUserData(user_data_);
+            context_.clearAllPreviousSolutionData();
             context_.setBoundaryMarker(boundary_marker);
+
+            if (need_solution) {
+                FE_THROW_IF(current_solution_.empty(), FEException,
+                            "StandardAssembler::assembleBoundaryFaces: kernel requires solution but no solution was set");
+                local_solution_coeffs_.resize(col_dofs_.size());
+                for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
+                    const auto dof = col_dofs_[i];
+                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+                                "StandardAssembler::assembleBoundaryFaces: solution vector too small for DOF " + std::to_string(dof));
+                    local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
+                }
+                context_.setSolutionCoefficients(local_solution_coeffs_);
+
+                if (time_integration_ != nullptr) {
+                    const int required = requiredHistoryStates(time_integration_);
+                    if (required > 0) {
+                        FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
+                                    "StandardAssembler::assembleBoundaryFaces: time integration requires " +
+                                        std::to_string(required) + " history states, but only " +
+                                        std::to_string(previous_solutions_.size()) + " were provided");
+                        if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
+                            local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
+                        }
+                        for (int k = 1; k <= required; ++k) {
+                            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                            FE_THROW_IF(prev.empty(), FEException,
+                                        "StandardAssembler::assembleBoundaryFaces: previous solution (k=" +
+                                            std::to_string(k) + ") not set");
+                            auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                            local_prev.resize(col_dofs_.size());
+                            for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
+                                const auto dof = col_dofs_[i];
+                                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
+                                            "StandardAssembler::assembleBoundaryFaces: previous solution vector too small for DOF " +
+                                                std::to_string(dof));
+                                local_prev[i] = prev[static_cast<std::size_t>(dof)];
+                            }
+                            context_.setPreviousSolutionCoefficientsK(k, local_prev);
+                        }
+                    }
+                }
+            }
+
+            if (need_material_state) {
+                auto view = material_state_provider_->getBoundaryFaceState(kernel, face_id, context_.numQuadraturePoints());
+                FE_THROW_IF(!view, FEException,
+                            "StandardAssembler::assembleBoundaryFaces: material state provider returned null storage");
+                FE_THROW_IF(view.bytes_per_qpt != material_state_spec.bytes_per_qpt, FEException,
+                            "StandardAssembler::assembleBoundaryFaces: material state bytes_per_qpt mismatch");
+                FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
+                            "StandardAssembler::assembleBoundaryFaces: invalid material state stride");
+                context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes);
+            }
 
             // Compute local contributions
             kernel_output_.clear();
@@ -281,35 +490,222 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     }
 
     const auto required_data = kernel.getRequiredData();
+    const bool need_solution =
+        hasFlag(required_data, RequiredData::SolutionValues) ||
+        hasFlag(required_data, RequiredData::SolutionGradients) ||
+        hasFlag(required_data, RequiredData::SolutionHessians) ||
+        hasFlag(required_data, RequiredData::SolutionLaplacians);
+    const bool need_material_state =
+        hasFlag(required_data, RequiredData::MaterialState);
+    const auto material_state_spec = kernel.materialStateSpec();
+
+    if (need_material_state) {
+        FE_THROW_IF(material_state_provider_ == nullptr, FEException,
+                    "StandardAssembler::assembleInteriorFaces: kernel requires material state but no material state provider was set");
+        FE_THROW_IF(material_state_spec.bytes_per_qpt == 0u, FEException,
+                    "StandardAssembler::assembleInteriorFaces: kernel requires material state but materialStateSpec().bytes_per_qpt == 0");
+    }
+
+    FE_CHECK_NOT_NULL(row_dof_map_, "StandardAssembler::assembleInteriorFaces: row_dof_map");
+    if (!col_dof_map_) {
+        col_dof_map_ = row_dof_map_;
+        col_dof_offset_ = row_dof_offset_;
+    }
 
     // Create second context for the "plus" side
     AssemblyContext context_plus;
-    context_plus.reserve(dof_map_->getMaxDofsPerCell(), 27, mesh.dimension());
+    const auto max_row_dofs = row_dof_map_->getMaxDofsPerCell();
+    const auto max_col_dofs = col_dof_map_->getMaxDofsPerCell();
+    context_plus.reserve(std::max(max_row_dofs, max_col_dofs), 27, mesh.dimension());
 
     // Kernel outputs for DG face terms
     KernelOutput output_minus, output_plus, coupling_mp, coupling_pm;
 
     // Scratch for DOFs
-    std::vector<GlobalIndex> minus_dofs, plus_dofs;
+    std::vector<GlobalIndex> minus_row_dofs, plus_row_dofs;
+    std::vector<GlobalIndex> minus_col_dofs, plus_col_dofs;
+    std::vector<Real> plus_solution_coeffs;
+    std::vector<std::vector<Real>> plus_prev_solution_coeffs;
+    std::vector<GlobalIndex> cell_nodes_minus;
+    std::vector<GlobalIndex> cell_nodes_plus;
 
     mesh.forEachInteriorFace(
         [&](GlobalIndex face_id, GlobalIndex cell_minus, GlobalIndex cell_plus) {
-            // Get DOFs for both cells
-            auto minus_cell_dofs = dof_map_->getCellDofs(cell_minus);
-            auto plus_cell_dofs = dof_map_->getCellDofs(cell_plus);
+            // Get DOFs for both cells (rows/cols may differ)
+            auto minus_row_local = row_dof_map_->getCellDofs(cell_minus);
+            auto plus_row_local = row_dof_map_->getCellDofs(cell_plus);
+            auto minus_col_local = col_dof_map_->getCellDofs(cell_minus);
+            auto plus_col_local = col_dof_map_->getCellDofs(cell_plus);
 
-            minus_dofs.assign(minus_cell_dofs.begin(), minus_cell_dofs.end());
-            plus_dofs.assign(plus_cell_dofs.begin(), plus_cell_dofs.end());
+            minus_row_dofs.resize(minus_row_local.size());
+            for (std::size_t i = 0; i < minus_row_local.size(); ++i) {
+                minus_row_dofs[i] = minus_row_local[i] + row_dof_offset_;
+            }
+            plus_row_dofs.resize(plus_row_local.size());
+            for (std::size_t i = 0; i < plus_row_local.size(); ++i) {
+                plus_row_dofs[i] = plus_row_local[i] + row_dof_offset_;
+            }
+
+            minus_col_dofs.resize(minus_col_local.size());
+            for (std::size_t j = 0; j < minus_col_local.size(); ++j) {
+                minus_col_dofs[j] = minus_col_local[j] + col_dof_offset_;
+            }
+            plus_col_dofs.resize(plus_col_local.size());
+            for (std::size_t j = 0; j < plus_col_local.size(); ++j) {
+                plus_col_dofs[j] = plus_col_local[j] + col_dof_offset_;
+            }
 
             // Prepare contexts for both sides
             LocalIndex local_face_minus = mesh.getLocalFaceIndex(face_id, cell_minus);
             LocalIndex local_face_plus = mesh.getLocalFaceIndex(face_id, cell_plus);
 
-            prepareContextFace(context_, mesh, face_id, cell_minus, local_face_minus, test_space,
+            prepareContextFace(context_, mesh, face_id, cell_minus, local_face_minus, test_space, trial_space,
                                required_data, ContextType::InteriorFace);
+            context_.setMaterialState(nullptr, nullptr, 0u, 0u);
+            context_.setTimeIntegrationContext(time_integration_);
+            context_.setTime(time_);
+            context_.setTimeStep(dt_);
+            context_.setRealParameterGetter(get_real_param_);
+            context_.setParameterGetter(get_param_);
+            context_.setUserData(user_data_);
+            context_.clearAllPreviousSolutionData();
 
-            prepareContextFace(context_plus, mesh, face_id, cell_plus, local_face_plus, test_space,
-                               required_data, ContextType::InteriorFace);
+            std::array<LocalIndex, 4> align_plus_storage{};
+            std::span<const LocalIndex> align_plus{};
+            const ElementType cell_type_minus = mesh.getCellType(cell_minus);
+            const ElementType cell_type_plus = mesh.getCellType(cell_plus);
+            if (cell_type_minus == cell_type_plus) {
+                elements::ReferenceElement ref = elements::ReferenceElement::create(cell_type_minus);
+                const auto& face_nodes_minus = ref.face_nodes(static_cast<std::size_t>(local_face_minus));
+                const auto& face_nodes_plus = ref.face_nodes(static_cast<std::size_t>(local_face_plus));
+                if (face_nodes_minus.size() == face_nodes_plus.size() &&
+                    (face_nodes_minus.size() == 2 || face_nodes_minus.size() == 3)) {
+                    mesh.getCellNodes(cell_minus, cell_nodes_minus);
+                    mesh.getCellNodes(cell_plus, cell_nodes_plus);
+
+                    for (std::size_t j = 0; j < face_nodes_plus.size(); ++j) {
+                        const GlobalIndex global_plus = cell_nodes_plus.at(static_cast<std::size_t>(face_nodes_plus[j]));
+                        std::size_t i_match = face_nodes_minus.size();
+                        for (std::size_t i = 0; i < face_nodes_minus.size(); ++i) {
+                            const GlobalIndex global_minus = cell_nodes_minus.at(static_cast<std::size_t>(face_nodes_minus[i]));
+                            if (global_minus == global_plus) {
+                                i_match = i;
+                                break;
+                            }
+                        }
+                        align_plus_storage[j] = static_cast<LocalIndex>(i_match);
+                    }
+
+                    bool ok = true;
+                    for (std::size_t j = 0; j < face_nodes_plus.size(); ++j) {
+                        if (static_cast<std::size_t>(align_plus_storage[j]) >= face_nodes_minus.size()) {
+                            ok = false;
+                            break;
+                        }
+                    }
+
+                    if (ok) {
+                        align_plus = std::span<const LocalIndex>(
+                            align_plus_storage.data(),
+                            face_nodes_plus.size());
+                    }
+                }
+            }
+
+            prepareContextFace(context_plus, mesh, face_id, cell_plus, local_face_plus, test_space, trial_space,
+                               required_data, ContextType::InteriorFace, align_plus);
+            context_plus.setMaterialState(nullptr, nullptr, 0u, 0u);
+            context_plus.setTimeIntegrationContext(time_integration_);
+            context_plus.setTime(time_);
+            context_plus.setTimeStep(dt_);
+            context_plus.setRealParameterGetter(get_real_param_);
+            context_plus.setParameterGetter(get_param_);
+            context_plus.setUserData(user_data_);
+            context_plus.clearAllPreviousSolutionData();
+
+            if (need_solution) {
+                FE_THROW_IF(current_solution_.empty(), FEException,
+                            "StandardAssembler::assembleInteriorFaces: kernel requires solution but no solution was set");
+
+                local_solution_coeffs_.resize(minus_col_dofs.size());
+                for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
+                    const auto dof = minus_col_dofs[i];
+                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+                                "StandardAssembler::assembleInteriorFaces: solution vector too small for DOF " + std::to_string(dof));
+                    local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
+                }
+                context_.setSolutionCoefficients(local_solution_coeffs_);
+
+                plus_solution_coeffs.resize(plus_col_dofs.size());
+                for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
+                    const auto dof = plus_col_dofs[i];
+                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+                                "StandardAssembler::assembleInteriorFaces: solution vector too small for DOF " + std::to_string(dof));
+                    plus_solution_coeffs[i] = current_solution_[static_cast<std::size_t>(dof)];
+                }
+                context_plus.setSolutionCoefficients(plus_solution_coeffs);
+
+                if (time_integration_ != nullptr) {
+                    const int required = requiredHistoryStates(time_integration_);
+                    if (required > 0) {
+                        FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
+                                    "StandardAssembler::assembleInteriorFaces: time integration requires " +
+                                        std::to_string(required) + " history states, but only " +
+                                        std::to_string(previous_solutions_.size()) + " were provided");
+                        if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
+                            local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
+                        }
+                        if (plus_prev_solution_coeffs.size() < static_cast<std::size_t>(required)) {
+                            plus_prev_solution_coeffs.resize(static_cast<std::size_t>(required));
+                        }
+
+                        for (int k = 1; k <= required; ++k) {
+                            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                            FE_THROW_IF(prev.empty(), FEException,
+                                        "StandardAssembler::assembleInteriorFaces: previous solution (k=" +
+                                            std::to_string(k) + ") not set");
+
+                            auto& local_prev_minus = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                            local_prev_minus.resize(minus_col_dofs.size());
+                            for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
+                                const auto dof = minus_col_dofs[i];
+                                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
+                                            "StandardAssembler::assembleInteriorFaces: previous solution vector too small for DOF " +
+                                                std::to_string(dof));
+                                local_prev_minus[i] = prev[static_cast<std::size_t>(dof)];
+                            }
+                            context_.setPreviousSolutionCoefficientsK(k, local_prev_minus);
+
+                            auto& local_prev_plus = plus_prev_solution_coeffs[static_cast<std::size_t>(k - 1)];
+                            local_prev_plus.resize(plus_col_dofs.size());
+                            for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
+                                const auto dof = plus_col_dofs[i];
+                                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
+                                            "StandardAssembler::assembleInteriorFaces: previous solution vector too small for DOF " +
+                                                std::to_string(dof));
+                                local_prev_plus[i] = prev[static_cast<std::size_t>(dof)];
+                            }
+                            context_plus.setPreviousSolutionCoefficientsK(k, local_prev_plus);
+                        }
+                    }
+                }
+            }
+
+            if (need_material_state) {
+                FE_THROW_IF(context_plus.numQuadraturePoints() != context_.numQuadraturePoints(), FEException,
+                            "StandardAssembler::assembleInteriorFaces: mismatched quadrature point counts for interior face state binding");
+
+                auto view = material_state_provider_->getInteriorFaceState(kernel, face_id, context_.numQuadraturePoints());
+                FE_THROW_IF(!view, FEException,
+                            "StandardAssembler::assembleInteriorFaces: material state provider returned null storage");
+                FE_THROW_IF(view.bytes_per_qpt != material_state_spec.bytes_per_qpt, FEException,
+                            "StandardAssembler::assembleInteriorFaces: material state bytes_per_qpt mismatch");
+                FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
+                            "StandardAssembler::assembleInteriorFaces: invalid material state stride");
+
+                context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes);
+                context_plus.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes);
+            }
 
             // Compute DG face contributions
             output_minus.clear();
@@ -324,23 +720,23 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             // Insert contributions (4 blocks for DG)
             // Self-coupling: minus-minus
             if (output_minus.has_matrix || output_minus.has_vector) {
-                insertLocal(output_minus, minus_dofs, minus_dofs, &matrix_view, vector_view);
+                insertLocal(output_minus, minus_row_dofs, minus_col_dofs, &matrix_view, vector_view);
             }
 
             // Self-coupling: plus-plus
             if (output_plus.has_matrix || output_plus.has_vector) {
-                insertLocal(output_plus, plus_dofs, plus_dofs, &matrix_view, vector_view);
+                insertLocal(output_plus, plus_row_dofs, plus_col_dofs, &matrix_view, vector_view);
             }
 
             // Cross-coupling: minus-plus (minus rows, plus cols)
             if (coupling_mp.has_matrix) {
-                matrix_view.addMatrixEntries(minus_dofs, plus_dofs,
+                matrix_view.addMatrixEntries(minus_row_dofs, plus_col_dofs,
                                              coupling_mp.local_matrix);
             }
 
             // Cross-coupling: plus-minus (plus rows, minus cols)
             if (coupling_pm.has_matrix) {
-                matrix_view.addMatrixEntries(plus_dofs, minus_dofs,
+                matrix_view.addMatrixEntries(plus_row_dofs, minus_col_dofs,
                                              coupling_pm.local_matrix);
             }
 
@@ -382,26 +778,112 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         vector_view->beginAssemblyPhase();
     }
 
-    const bool is_rectangular = (&test_space != &trial_space);
     const auto required_data = kernel.getRequiredData();
+    const bool need_solution =
+        hasFlag(required_data, RequiredData::SolutionValues) ||
+        hasFlag(required_data, RequiredData::SolutionGradients) ||
+        hasFlag(required_data, RequiredData::SolutionHessians) ||
+        hasFlag(required_data, RequiredData::SolutionLaplacians);
+    const bool need_material_state =
+        hasFlag(required_data, RequiredData::MaterialState);
+    const auto material_state_spec = kernel.materialStateSpec();
+
+    if (need_material_state) {
+        FE_THROW_IF(material_state_provider_ == nullptr, FEException,
+                    "StandardAssembler::assembleCellsCore: kernel requires material state but no material state provider was set");
+        FE_THROW_IF(material_state_spec.bytes_per_qpt == 0, FEException,
+                    "StandardAssembler::assembleCellsCore: kernel requires material state but materialStateSpec().bytes_per_qpt == 0");
+    }
+
+    FE_CHECK_NOT_NULL(row_dof_map_, "StandardAssembler::assembleCellsCore: row_dof_map");
+    if (!col_dof_map_) {
+        col_dof_map_ = row_dof_map_;
+        col_dof_offset_ = row_dof_offset_;
+    }
 
     // Iterate over cells
     mesh.forEachCell([&](GlobalIndex cell_id) {
-        // Get element DOFs
-        auto test_dofs = dof_map_->getCellDofs(cell_id);
-        row_dofs_.assign(test_dofs.begin(), test_dofs.end());
+        // Get element DOFs (rows/cols may differ)
+        auto row_local = row_dof_map_->getCellDofs(cell_id);
+        auto col_local = col_dof_map_->getCellDofs(cell_id);
 
-        if (is_rectangular) {
-            // For rectangular, trial DOFs may differ
-            // This would require a separate DOF map for trial space
-            // For now, assume same DOF map
-            col_dofs_.assign(test_dofs.begin(), test_dofs.end());
-        } else {
-            col_dofs_.assign(test_dofs.begin(), test_dofs.end());
+        row_dofs_.resize(row_local.size());
+        for (std::size_t i = 0; i < row_local.size(); ++i) {
+            row_dofs_[i] = row_local[i] + row_dof_offset_;
+        }
+
+        col_dofs_.resize(col_local.size());
+        for (std::size_t j = 0; j < col_local.size(); ++j) {
+            col_dofs_[j] = col_local[j] + col_dof_offset_;
         }
 
         // Prepare assembly context
         prepareContext(context_, mesh, cell_id, test_space, trial_space, required_data);
+        context_.setMaterialState(nullptr, nullptr, 0u, 0u);
+        context_.setTimeIntegrationContext(time_integration_);
+        context_.setTime(time_);
+        context_.setTimeStep(dt_);
+        context_.setRealParameterGetter(get_real_param_);
+        context_.setParameterGetter(get_param_);
+        context_.setUserData(user_data_);
+        context_.clearAllPreviousSolutionData();
+        FE_THROW_IF(row_dofs_.size() != static_cast<std::size_t>(context_.numTestDofs()), FEException,
+                    "StandardAssembler::assembleCellsCore: row DOF count does not match test space element DOFs");
+        FE_THROW_IF(col_dofs_.size() != static_cast<std::size_t>(context_.numTrialDofs()), FEException,
+                    "StandardAssembler::assembleCellsCore: column DOF count does not match trial space element DOFs");
+
+        if (need_solution) {
+            FE_THROW_IF(current_solution_.empty(), FEException,
+                        "StandardAssembler::assembleCellsCore: kernel requires solution but no solution was set");
+            local_solution_coeffs_.resize(col_dofs_.size());
+            for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
+                const auto dof = col_dofs_[i];
+                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+                            "StandardAssembler::assembleCellsCore: solution vector too small for DOF " + std::to_string(dof));
+                local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
+            }
+            context_.setSolutionCoefficients(local_solution_coeffs_);
+
+            if (time_integration_ != nullptr) {
+                const int required = requiredHistoryStates(time_integration_);
+                if (required > 0) {
+                    FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
+                                "StandardAssembler::assembleCellsCore: time integration requires " +
+                                    std::to_string(required) + " history states, but only " +
+                                    std::to_string(previous_solutions_.size()) + " were provided");
+                    if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
+                        local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
+                    }
+                    for (int k = 1; k <= required; ++k) {
+                        const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                        FE_THROW_IF(prev.empty(), FEException,
+                                    "StandardAssembler::assembleCellsCore: previous solution (k=" +
+                                        std::to_string(k) + ") not set");
+                        auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                        local_prev.resize(col_dofs_.size());
+                        for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
+                            const auto dof = col_dofs_[i];
+                            FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
+                                        "StandardAssembler::assembleCellsCore: previous solution vector too small for DOF " +
+                                            std::to_string(dof));
+                            local_prev[i] = prev[static_cast<std::size_t>(dof)];
+                        }
+                        context_.setPreviousSolutionCoefficientsK(k, local_prev);
+                    }
+                }
+            }
+        }
+
+        if (need_material_state) {
+            auto view = material_state_provider_->getCellState(kernel, cell_id, context_.numQuadraturePoints());
+            FE_THROW_IF(!view, FEException,
+                        "StandardAssembler::assembleCellsCore: material state provider returned null storage");
+            FE_THROW_IF(view.bytes_per_qpt != material_state_spec.bytes_per_qpt, FEException,
+                        "StandardAssembler::assembleCellsCore: material state bytes_per_qpt mismatch");
+            FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
+                        "StandardAssembler::assembleCellsCore: invalid material state stride");
+            context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes);
+        }
 
         // Compute local matrix/vector via kernel
         kernel_output_.clear();
@@ -462,8 +944,39 @@ void StandardAssembler::prepareContext(
     }
 
     const auto n_qpts = static_cast<LocalIndex>(quad_rule->num_points());
-    const auto n_test_dofs = static_cast<LocalIndex>(test_element.num_dofs());
-    const auto n_trial_dofs = static_cast<LocalIndex>(trial_element.num_dofs());
+    const auto n_test_dofs = static_cast<LocalIndex>(test_space.dofs_per_element());
+    const auto n_trial_dofs = static_cast<LocalIndex>(trial_space.dofs_per_element());
+    const auto n_test_scalar_dofs = static_cast<LocalIndex>(test_element.num_dofs());
+    const auto n_trial_scalar_dofs = static_cast<LocalIndex>(trial_element.num_dofs());
+    const bool test_is_product = (test_space.space_type() == spaces::SpaceType::Product);
+    const bool trial_is_product = (trial_space.space_type() == spaces::SpaceType::Product);
+    if (test_is_product) {
+        FE_CHECK_ARG(test_space.field_type() == FieldType::Vector,
+                     "StandardAssembler::prepareContext: ProductSpace test space must be vector-valued");
+        FE_CHECK_ARG(test_space.value_dimension() > 0,
+                     "StandardAssembler::prepareContext: invalid test space value dimension");
+        FE_CHECK_ARG(n_test_dofs ==
+                         static_cast<LocalIndex>(
+                             n_test_scalar_dofs * static_cast<LocalIndex>(test_space.value_dimension())),
+                     "StandardAssembler::prepareContext: test ProductSpace DOF count mismatch");
+    } else {
+        FE_CHECK_ARG(n_test_dofs == n_test_scalar_dofs,
+                     "StandardAssembler::prepareContext: non-Product test space DOF count mismatch");
+    }
+    if (trial_is_product) {
+        FE_CHECK_ARG(trial_space.field_type() == FieldType::Vector,
+                     "StandardAssembler::prepareContext: ProductSpace trial space must be vector-valued");
+        FE_CHECK_ARG(trial_space.value_dimension() > 0,
+                     "StandardAssembler::prepareContext: invalid trial space value dimension");
+        FE_CHECK_ARG(n_trial_dofs ==
+                         static_cast<LocalIndex>(
+                             n_trial_scalar_dofs * static_cast<LocalIndex>(trial_space.value_dimension())),
+                     "StandardAssembler::prepareContext: trial ProductSpace DOF count mismatch");
+    } else {
+        FE_CHECK_ARG(n_trial_dofs == n_trial_scalar_dofs,
+                     "StandardAssembler::prepareContext: non-Product trial space DOF count mismatch");
+    }
+    const bool need_basis_hessians = hasFlag(required_data, RequiredData::BasisHessians);
 
     // 4. Get cell node coordinates from mesh
     mesh.getCellCoordinates(cell_id, cell_coords_);
@@ -498,16 +1011,26 @@ void StandardAssembler::prepareContext(
     scratch_basis_values_.resize(test_basis_size);
     scratch_ref_gradients_.resize(test_basis_size);
     scratch_phys_gradients_.resize(test_basis_size);
+    if (need_basis_hessians) {
+        scratch_ref_hessians_.resize(test_basis_size);
+        scratch_phys_hessians_.resize(test_basis_size);
+    }
 
     // Storage for trial if different from test
     std::vector<Real> trial_basis_values;
     std::vector<AssemblyContext::Vector3D> trial_ref_gradients;
     std::vector<AssemblyContext::Vector3D> trial_phys_gradients;
+    std::vector<AssemblyContext::Matrix3x3> trial_ref_hessians;
+    std::vector<AssemblyContext::Matrix3x3> trial_phys_hessians;
 
     if (&test_space != &trial_space) {
         trial_basis_values.resize(trial_basis_size);
         trial_ref_gradients.resize(trial_basis_size);
         trial_phys_gradients.resize(trial_basis_size);
+        if (need_basis_hessians) {
+            trial_ref_hessians.resize(trial_basis_size);
+            trial_phys_hessians.resize(trial_basis_size);
+        }
     }
 
     // 7. Copy quadrature data and compute physical points and Jacobians
@@ -547,6 +1070,7 @@ void StandardAssembler::prepareContext(
     const auto& test_basis = test_element.basis();
     std::vector<Real> values_at_pt;
     std::vector<basis::Gradient> gradients_at_pt;
+    std::vector<basis::Hessian> hessians_at_pt;
 
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const math::Vector<Real, 3> xi{
@@ -557,14 +1081,18 @@ void StandardAssembler::prepareContext(
         // Evaluate test basis values and gradients
         test_basis.evaluate_values(xi, values_at_pt);
         test_basis.evaluate_gradients(xi, gradients_at_pt);
+        if (need_basis_hessians) {
+            test_basis.evaluate_hessians(xi, hessians_at_pt);
+        }
 
         for (LocalIndex i = 0; i < n_test_dofs; ++i) {
+            const LocalIndex si = test_is_product ? static_cast<LocalIndex>(i % n_test_scalar_dofs) : i;
             const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
-            scratch_basis_values_[idx] = values_at_pt[i];
+            scratch_basis_values_[idx] = values_at_pt[static_cast<std::size_t>(si)];
             scratch_ref_gradients_[idx] = {
-                gradients_at_pt[i][0],
-                gradients_at_pt[i][1],
-                gradients_at_pt[i][2]};
+                gradients_at_pt[static_cast<std::size_t>(si)][0],
+                gradients_at_pt[static_cast<std::size_t>(si)][1],
+                gradients_at_pt[static_cast<std::size_t>(si)][2]};
 
             // Transform gradient to physical space: grad_phys = J^{-T} * grad_ref
             const auto& grad_ref = scratch_ref_gradients_[idx];
@@ -577,6 +1105,34 @@ void StandardAssembler::prepareContext(
                 }
             }
             scratch_phys_gradients_[idx] = grad_phys;
+
+            if (need_basis_hessians) {
+                AssemblyContext::Matrix3x3 H_ref{};
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                            hessians_at_pt[static_cast<std::size_t>(si)](static_cast<std::size_t>(r),
+                                                                         static_cast<std::size_t>(c));
+                    }
+                }
+                scratch_ref_hessians_[idx] = H_ref;
+
+                AssemblyContext::Matrix3x3 H_phys{};
+                for (int r = 0; r < dim; ++r) {
+                    for (int c = 0; c < dim; ++c) {
+                        Real sum = 0.0;
+                        for (int a = 0; a < dim; ++a) {
+                            for (int b = 0; b < dim; ++b) {
+                                sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                       H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                       J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                            }
+                        }
+                        H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                    }
+                }
+                scratch_phys_hessians_[idx] = H_phys;
+            }
         }
 
         // Evaluate trial basis if different
@@ -584,14 +1140,18 @@ void StandardAssembler::prepareContext(
             const auto& trial_basis = trial_element.basis();
             trial_basis.evaluate_values(xi, values_at_pt);
             trial_basis.evaluate_gradients(xi, gradients_at_pt);
+            if (need_basis_hessians) {
+                trial_basis.evaluate_hessians(xi, hessians_at_pt);
+            }
 
             for (LocalIndex j = 0; j < n_trial_dofs; ++j) {
+                const LocalIndex sj = trial_is_product ? static_cast<LocalIndex>(j % n_trial_scalar_dofs) : j;
                 const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
-                trial_basis_values[idx] = values_at_pt[j];
+                trial_basis_values[idx] = values_at_pt[static_cast<std::size_t>(sj)];
                 trial_ref_gradients[idx] = {
-                    gradients_at_pt[j][0],
-                    gradients_at_pt[j][1],
-                    gradients_at_pt[j][2]};
+                    gradients_at_pt[static_cast<std::size_t>(sj)][0],
+                    gradients_at_pt[static_cast<std::size_t>(sj)][1],
+                    gradients_at_pt[static_cast<std::size_t>(sj)][2]};
 
                 // Transform gradient
                 const auto& grad_ref = trial_ref_gradients[idx];
@@ -604,12 +1164,40 @@ void StandardAssembler::prepareContext(
                     }
                 }
                 trial_phys_gradients[idx] = grad_phys;
+
+                if (need_basis_hessians) {
+                    AssemblyContext::Matrix3x3 H_ref{};
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                hessians_at_pt[static_cast<std::size_t>(sj)](static_cast<std::size_t>(r),
+                                                                             static_cast<std::size_t>(c));
+                        }
+                    }
+                    trial_ref_hessians[idx] = H_ref;
+
+                    AssemblyContext::Matrix3x3 H_phys{};
+                    for (int r = 0; r < dim; ++r) {
+                        for (int c = 0; c < dim; ++c) {
+                            Real sum = 0.0;
+                            for (int a = 0; a < dim; ++a) {
+                                for (int b = 0; b < dim; ++b) {
+                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                           H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                }
+                            }
+                            H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                        }
+                    }
+                    trial_phys_hessians[idx] = H_phys;
+                }
             }
         }
     }
 
     // 9. Configure context with basic info
-    context.configure(cell_id, test_element, trial_element, required_data);
+    context.configure(cell_id, test_space, trial_space, required_data);
 
     // 10. Set all computed data into context
     context.setQuadratureData(scratch_quad_points_, scratch_quad_weights_);
@@ -619,12 +1207,42 @@ void StandardAssembler::prepareContext(
 
     // Set test basis data
     context.setTestBasisData(n_test_dofs, scratch_basis_values_, scratch_ref_gradients_);
+
+    // Set trial basis data if different (must happen before setting trial gradients)
+    if (&test_space != &trial_space) {
+        context.setTrialBasisData(n_trial_dofs, trial_basis_values, trial_ref_gradients);
+    }
+
     context.setPhysicalGradients(scratch_phys_gradients_,
         (&test_space != &trial_space) ? trial_phys_gradients : scratch_phys_gradients_);
 
-    // Set trial basis data if different
-    if (&test_space != &trial_space) {
-        context.setTrialBasisData(n_trial_dofs, trial_basis_values, trial_ref_gradients);
+    if (need_basis_hessians) {
+        context.setTestBasisHessians(n_test_dofs, scratch_ref_hessians_);
+        if (&test_space != &trial_space) {
+            context.setTrialBasisHessians(n_trial_dofs, trial_ref_hessians);
+        }
+        context.setPhysicalHessians(scratch_phys_hessians_,
+                                    (&test_space != &trial_space) ? trial_phys_hessians : scratch_phys_hessians_);
+    }
+
+    if (hasFlag(required_data, RequiredData::EntityMeasures)) {
+        Real cell_volume = 0.0;
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            cell_volume += scratch_integration_weights_[static_cast<std::size_t>(q)];
+        }
+
+        Real h = 0.0;
+        for (std::size_t a = 0; a < n_nodes; ++a) {
+            for (std::size_t b = a + 1; b < n_nodes; ++b) {
+                const Real dx = node_coords[a][0] - node_coords[b][0];
+                const Real dy = node_coords[a][1] - node_coords[b][1];
+                const Real dz = node_coords[a][2] - node_coords[b][2];
+                const Real dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (dist > h) h = dist;
+            }
+        }
+
+        context.setEntityMeasures(h, cell_volume, /*facet_area=*/0.0);
     }
 }
 
@@ -634,16 +1252,19 @@ void StandardAssembler::prepareContextFace(
     GlobalIndex face_id,
     GlobalIndex cell_id,
     LocalIndex local_face_id,
-    const spaces::FunctionSpace& space,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
     RequiredData required_data,
-    ContextType type)
+    ContextType type,
+    std::span<const LocalIndex> align_facet_to_reference)
 {
     // 1. Get element type from mesh
     const ElementType cell_type = mesh.getCellType(cell_id);
     const int dim = mesh.dimension();
 
-    // 2. Get element for the space
-    const auto& element = getElement(space, cell_id, cell_type);
+    // 2. Get element for test and trial spaces
+    const auto& test_element = getElement(test_space, cell_id, cell_type);
+    const auto& trial_element = getElement(trial_space, cell_id, cell_type);
 
     // 3. Determine face element type from reference topology
     elements::ReferenceElement ref = elements::ReferenceElement::create(cell_type);
@@ -666,11 +1287,43 @@ void StandardAssembler::prepareContextFace(
 
     // 4. Create a face quadrature rule
     const int quad_order = quadrature::QuadratureFactory::recommended_order(
-        element.polynomial_order(), false);
+        std::max(test_element.polynomial_order(), trial_element.polynomial_order()), false);
     auto quad_rule = quadrature::QuadratureFactory::create(face_type, quad_order);
 
     const auto n_qpts = static_cast<LocalIndex>(quad_rule->num_points());
-    const auto n_dofs = static_cast<LocalIndex>(element.num_dofs());
+    const auto n_test_dofs = static_cast<LocalIndex>(test_space.dofs_per_element());
+    const auto n_trial_dofs = static_cast<LocalIndex>(trial_space.dofs_per_element());
+    const auto n_test_scalar_dofs = static_cast<LocalIndex>(test_element.num_dofs());
+    const auto n_trial_scalar_dofs = static_cast<LocalIndex>(trial_element.num_dofs());
+    const bool test_is_product = (test_space.space_type() == spaces::SpaceType::Product);
+    const bool trial_is_product = (trial_space.space_type() == spaces::SpaceType::Product);
+    if (test_is_product) {
+        FE_CHECK_ARG(test_space.field_type() == FieldType::Vector,
+                     "StandardAssembler::prepareContextFace: ProductSpace test space must be vector-valued");
+        FE_CHECK_ARG(test_space.value_dimension() > 0,
+                     "StandardAssembler::prepareContextFace: invalid test space value dimension");
+        FE_CHECK_ARG(n_test_dofs ==
+                         static_cast<LocalIndex>(
+                             n_test_scalar_dofs * static_cast<LocalIndex>(test_space.value_dimension())),
+                     "StandardAssembler::prepareContextFace: test ProductSpace DOF count mismatch");
+    } else {
+        FE_CHECK_ARG(n_test_dofs == n_test_scalar_dofs,
+                     "StandardAssembler::prepareContextFace: non-Product test space DOF count mismatch");
+    }
+    if (trial_is_product) {
+        FE_CHECK_ARG(trial_space.field_type() == FieldType::Vector,
+                     "StandardAssembler::prepareContextFace: ProductSpace trial space must be vector-valued");
+        FE_CHECK_ARG(trial_space.value_dimension() > 0,
+                     "StandardAssembler::prepareContextFace: invalid trial space value dimension");
+        FE_CHECK_ARG(n_trial_dofs ==
+                         static_cast<LocalIndex>(
+                             n_trial_scalar_dofs * static_cast<LocalIndex>(trial_space.value_dimension())),
+                     "StandardAssembler::prepareContextFace: trial ProductSpace DOF count mismatch");
+    } else {
+        FE_CHECK_ARG(n_trial_dofs == n_trial_scalar_dofs,
+                     "StandardAssembler::prepareContextFace: non-Product trial space DOF count mismatch");
+    }
+    const bool need_basis_hessians = hasFlag(required_data, RequiredData::BasisHessians);
 
     // 5. Get cell node coordinates from mesh
     mesh.getCellCoordinates(cell_id, cell_coords_);
@@ -701,10 +1354,31 @@ void StandardAssembler::prepareContextFace(
     scratch_integration_weights_.resize(n_qpts);
     scratch_normals_.resize(n_qpts);
 
-    const auto basis_size = static_cast<std::size_t>(n_dofs * n_qpts);
-    scratch_basis_values_.resize(basis_size);
-    scratch_ref_gradients_.resize(basis_size);
-    scratch_phys_gradients_.resize(basis_size);
+    const auto test_basis_size = static_cast<std::size_t>(n_test_dofs * n_qpts);
+    const auto trial_basis_size = static_cast<std::size_t>(n_trial_dofs * n_qpts);
+    scratch_basis_values_.resize(test_basis_size);
+    scratch_ref_gradients_.resize(test_basis_size);
+    scratch_phys_gradients_.resize(test_basis_size);
+    if (need_basis_hessians) {
+        scratch_ref_hessians_.resize(test_basis_size);
+        scratch_phys_hessians_.resize(test_basis_size);
+    }
+
+    std::vector<Real> trial_basis_values;
+    std::vector<AssemblyContext::Vector3D> trial_ref_gradients;
+    std::vector<AssemblyContext::Vector3D> trial_phys_gradients;
+    std::vector<AssemblyContext::Matrix3x3> trial_ref_hessians;
+    std::vector<AssemblyContext::Matrix3x3> trial_phys_hessians;
+
+    if (&test_space != &trial_space) {
+        trial_basis_values.resize(trial_basis_size);
+        trial_ref_gradients.resize(trial_basis_size);
+        trial_phys_gradients.resize(trial_basis_size);
+        if (need_basis_hessians) {
+            trial_ref_hessians.resize(trial_basis_size);
+            trial_phys_hessians.resize(trial_basis_size);
+        }
+    }
 
     // 8. Map face quadrature points to element reference coordinates and compute normals/weights
     const auto& quad_points = quad_rule->points();
@@ -720,7 +1394,19 @@ void StandardAssembler::prepareContextFace(
         math::Vector<Real, 3> facet_coords{};
         if (face_type == ElementType::Line2) {
             // Line quadrature is on [-1,1]; facet parameterization uses t in [0,1]
-            facet_coords = math::Vector<Real, 3>{(qpt[0] + Real(1)) * Real(0.5), Real(0), Real(0)};
+            Real t = (qpt[0] + Real(1)) * Real(0.5);
+            if (!align_facet_to_reference.empty() && align_facet_to_reference.size() == 2) {
+                const Real w_ref0 = Real(1) - t;
+                const Real w_ref1 = t;
+                const std::array<Real, 2> w_ref{w_ref0, w_ref1};
+                std::array<Real, 2> w_local{0.0, 0.0};
+                for (std::size_t j = 0; j < 2; ++j) {
+                    const auto src = static_cast<std::size_t>(align_facet_to_reference[j]);
+                    w_local[j] = w_ref[src];
+                }
+                t = w_local[1];
+            }
+            facet_coords = math::Vector<Real, 3>{t, Real(0), Real(0)};
         } else if (face_type == ElementType::Quad4) {
             // Quad quadrature is on [-1,1]^2; facet parameterization uses (s,t) in [0,1]^2
             facet_coords = math::Vector<Real, 3>{
@@ -729,7 +1415,30 @@ void StandardAssembler::prepareContextFace(
                 Real(0)};
         } else {
             // Triangle quadrature uses reference simplex coordinates (0<=x,y, x+y<=1)
-            facet_coords = math::Vector<Real, 3>{qpt[0], qpt[1], Real(0)};
+            const Real x = qpt[0];
+            const Real y = qpt[1];
+            facet_coords = math::Vector<Real, 3>{x, y, Real(0)};
+
+            // For interior faces, the plus-side element may have a different local face
+            // vertex ordering. The weak-form evaluation assumes that q is the same
+            // physical point on both sides, so we optionally permute barycentric weights
+            // to align this face parameterization to a reference orientation.
+            if (!align_facet_to_reference.empty()) {
+                const Real w_ref0 = Real(1) - x - y;
+                const Real w_ref1 = x;
+                const Real w_ref2 = y;
+                const std::array<Real, 3> w_ref{w_ref0, w_ref1, w_ref2};
+
+                if (align_facet_to_reference.size() == 3) {
+                    std::array<Real, 3> w_local{0.0, 0.0, 0.0};
+                    for (std::size_t j = 0; j < 3; ++j) {
+                        const auto src = static_cast<std::size_t>(align_facet_to_reference[j]);
+                        w_local[j] = w_ref[src];
+                    }
+                    // Convert back to (x,y) for the local face ordering.
+                    facet_coords = math::Vector<Real, 3>{w_local[1], w_local[2], Real(0)};
+                }
+            }
         }
 
         // Map to the cell reference coordinates on the requested face
@@ -764,9 +1473,10 @@ void StandardAssembler::prepareContextFace(
     }
 
     // 9. Evaluate basis functions at face quadrature points
-    const auto& basis = element.basis();
+    const auto& test_basis = test_element.basis();
     std::vector<Real> values_at_pt;
     std::vector<basis::Gradient> gradients_at_pt;
+    std::vector<basis::Hessian> hessians_at_pt;
 
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const math::Vector<Real, 3> xi{
@@ -774,16 +1484,20 @@ void StandardAssembler::prepareContextFace(
             scratch_quad_points_[q][1],
             scratch_quad_points_[q][2]};
 
-        basis.evaluate_values(xi, values_at_pt);
-        basis.evaluate_gradients(xi, gradients_at_pt);
+        test_basis.evaluate_values(xi, values_at_pt);
+        test_basis.evaluate_gradients(xi, gradients_at_pt);
+        if (need_basis_hessians) {
+            test_basis.evaluate_hessians(xi, hessians_at_pt);
+        }
 
-        for (LocalIndex i = 0; i < n_dofs; ++i) {
+        for (LocalIndex i = 0; i < n_test_dofs; ++i) {
+            const LocalIndex si = test_is_product ? static_cast<LocalIndex>(i % n_test_scalar_dofs) : i;
             const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
-            scratch_basis_values_[idx] = values_at_pt[i];
+            scratch_basis_values_[idx] = values_at_pt[static_cast<std::size_t>(si)];
             scratch_ref_gradients_[idx] = {
-                gradients_at_pt[i][0],
-                gradients_at_pt[i][1],
-                gradients_at_pt[i][2]};
+                gradients_at_pt[static_cast<std::size_t>(si)][0],
+                gradients_at_pt[static_cast<std::size_t>(si)][1],
+                gradients_at_pt[static_cast<std::size_t>(si)][2]};
 
             const auto& grad_ref = scratch_ref_gradients_[idx];
             const auto& J_inv = scratch_inv_jacobians_[q];
@@ -795,18 +1509,137 @@ void StandardAssembler::prepareContextFace(
                 }
             }
             scratch_phys_gradients_[idx] = grad_phys;
+
+            if (need_basis_hessians) {
+                AssemblyContext::Matrix3x3 H_ref{};
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                            hessians_at_pt[static_cast<std::size_t>(si)](static_cast<std::size_t>(r),
+                                                                         static_cast<std::size_t>(c));
+                    }
+                }
+                scratch_ref_hessians_[idx] = H_ref;
+
+                AssemblyContext::Matrix3x3 H_phys{};
+                for (int r = 0; r < dim; ++r) {
+                    for (int c = 0; c < dim; ++c) {
+                        Real sum = 0.0;
+                        for (int a = 0; a < dim; ++a) {
+                            for (int b = 0; b < dim; ++b) {
+                                sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                       H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                       J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                            }
+                        }
+                        H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                    }
+                }
+                scratch_phys_hessians_[idx] = H_phys;
+            }
+        }
+
+        if (&test_space != &trial_space) {
+            const auto& trial_basis = trial_element.basis();
+            trial_basis.evaluate_values(xi, values_at_pt);
+            trial_basis.evaluate_gradients(xi, gradients_at_pt);
+            if (need_basis_hessians) {
+                trial_basis.evaluate_hessians(xi, hessians_at_pt);
+            }
+
+            for (LocalIndex j = 0; j < n_trial_dofs; ++j) {
+                const LocalIndex sj = trial_is_product ? static_cast<LocalIndex>(j % n_trial_scalar_dofs) : j;
+                const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
+                trial_basis_values[idx] = values_at_pt[static_cast<std::size_t>(sj)];
+                trial_ref_gradients[idx] = {
+                    gradients_at_pt[static_cast<std::size_t>(sj)][0],
+                    gradients_at_pt[static_cast<std::size_t>(sj)][1],
+                    gradients_at_pt[static_cast<std::size_t>(sj)][2]};
+
+                const auto& grad_ref = trial_ref_gradients[idx];
+                const auto& J_inv = scratch_inv_jacobians_[q];
+                AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
+
+                for (int d1 = 0; d1 < dim; ++d1) {
+                    for (int d2 = 0; d2 < dim; ++d2) {
+                        grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
+                    }
+                }
+                trial_phys_gradients[idx] = grad_phys;
+
+                if (need_basis_hessians) {
+                    AssemblyContext::Matrix3x3 H_ref{};
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                hessians_at_pt[static_cast<std::size_t>(sj)](static_cast<std::size_t>(r),
+                                                                             static_cast<std::size_t>(c));
+                        }
+                    }
+                    trial_ref_hessians[idx] = H_ref;
+
+                    AssemblyContext::Matrix3x3 H_phys{};
+                    for (int r = 0; r < dim; ++r) {
+                        for (int c = 0; c < dim; ++c) {
+                            Real sum = 0.0;
+                            for (int a = 0; a < dim; ++a) {
+                                for (int b = 0; b < dim; ++b) {
+                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                           H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                }
+                            }
+                            H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                        }
+                    }
+                    trial_phys_hessians[idx] = H_phys;
+                }
+            }
         }
     }
 
     // 10. Configure face context and set computed data
-    context.configureFace(face_id, cell_id, local_face_id, element, required_data, type);
+    context.configureFace(face_id, cell_id, local_face_id, test_space, trial_space, required_data, type);
     context.setQuadratureData(scratch_quad_points_, scratch_quad_weights_);
     context.setPhysicalPoints(scratch_phys_points_);
     context.setJacobianData(scratch_jacobians_, scratch_inv_jacobians_, scratch_jac_dets_);
     context.setIntegrationWeights(scratch_integration_weights_);
-    context.setTestBasisData(n_dofs, scratch_basis_values_, scratch_ref_gradients_);
-    context.setPhysicalGradients(scratch_phys_gradients_, scratch_phys_gradients_);
+    context.setTestBasisData(n_test_dofs, scratch_basis_values_, scratch_ref_gradients_);
+    if (&test_space != &trial_space) {
+        context.setTrialBasisData(n_trial_dofs, trial_basis_values, trial_ref_gradients);
+    }
+    context.setPhysicalGradients(scratch_phys_gradients_,
+                                 (&test_space != &trial_space) ? trial_phys_gradients : scratch_phys_gradients_);
     context.setNormals(scratch_normals_);
+
+    if (need_basis_hessians) {
+        context.setTestBasisHessians(n_test_dofs, scratch_ref_hessians_);
+        if (&test_space != &trial_space) {
+            context.setTrialBasisHessians(n_trial_dofs, trial_ref_hessians);
+        }
+        context.setPhysicalHessians(scratch_phys_hessians_,
+                                    (&test_space != &trial_space) ? trial_phys_hessians : scratch_phys_hessians_);
+    }
+
+    if (hasFlag(required_data, RequiredData::EntityMeasures)) {
+        Real facet_area = 0.0;
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            facet_area += scratch_integration_weights_[static_cast<std::size_t>(q)];
+        }
+
+        Real h = 0.0;
+        for (std::size_t a = 0; a < n_nodes; ++a) {
+            for (std::size_t b = a + 1; b < n_nodes; ++b) {
+                const Real dx = node_coords[a][0] - node_coords[b][0];
+                const Real dy = node_coords[a][1] - node_coords[b][1];
+                const Real dz = node_coords[a][2] - node_coords[b][2];
+                const Real dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (dist > h) h = dist;
+            }
+        }
+
+        context.setEntityMeasures(h, /*cell_volume=*/0.0, facet_area);
+    }
 }
 
 AssemblyContext::Vector3D StandardAssembler::computeFaceNormal(
@@ -815,8 +1648,20 @@ AssemblyContext::Vector3D StandardAssembler::computeFaceNormal(
     int dim) const
 {
     (void)dim;
-    const auto n = elements::ElementTransform::reference_facet_normal(
+    auto n = elements::ElementTransform::reference_facet_normal(
         cell_type, static_cast<int>(local_face_id));
+    // NOTE: Face quadrature points/weights are defined on canonical face
+    // reference domains (e.g., Triangle3 has area 0.5). For some reference
+    // element facets (e.g., the oblique tetra face), the mapping from the
+    // canonical face to the element-reference face carries a constant metric
+    // factor. Scaling the reference normal by that factor yields correct
+    // surface measures via the cofactor (det(J) * J^{-T}) formula.
+    if ((cell_type == ElementType::Tetra4 || cell_type == ElementType::Tetra10) && local_face_id == 2) {
+        const Real scale = std::sqrt(Real(3));
+        n[0] *= scale;
+        n[1] *= scale;
+        n[2] *= scale;
+    }
     return {n[0], n[1], n[2]};
 }
 
@@ -983,10 +1828,10 @@ void StandardAssembler::insertLocalConstrained(
 
             constraint_distributor_->distributeLocalToGlobal(
                 output.local_matrix, output.local_vector,
-                row_dofs, matrix_ops, vector_ops);
+                row_dofs, col_dofs, matrix_ops, vector_ops);
         } else {
             constraint_distributor_->distributeMatrixToGlobal(
-                output.local_matrix, row_dofs, matrix_ops);
+                output.local_matrix, row_dofs, col_dofs, matrix_ops);
         }
     } else if (vector_view && output.has_vector && constraint_distributor_) {
         // Vector-only with constraints
