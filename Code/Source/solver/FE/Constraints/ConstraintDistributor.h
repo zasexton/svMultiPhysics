@@ -306,6 +306,25 @@ public:
         IVectorOperations& rhs) const;
 
     /**
+     * @brief Distribute element matrix and RHS to global system (rectangular)
+     *
+     * Supports test/trial spaces with distinct DOF lists. The RHS is associated
+     * with the row (test) DOFs.
+     *
+     * @param cell_matrix Element matrix (row-major, n_rows x n_cols)
+     * @param cell_rhs Element RHS (size n_rows)
+     * @param row_dofs Global row DOF indices (size n_rows)
+     * @param col_dofs Global column DOF indices (size n_cols)
+     */
+    void distributeLocalToGlobal(
+        std::span<const double> cell_matrix,
+        std::span<const double> cell_rhs,
+        std::span<const GlobalIndex> row_dofs,
+        std::span<const GlobalIndex> col_dofs,
+        IMatrixOperations& matrix,
+        IVectorOperations& rhs) const;
+
+    /**
      * @brief Distribute element matrix only
      *
      * @param cell_matrix Element stiffness matrix
@@ -315,6 +334,19 @@ public:
     void distributeMatrixToGlobal(
         std::span<const double> cell_matrix,
         std::span<const GlobalIndex> cell_dofs,
+        IMatrixOperations& matrix) const;
+
+    /**
+     * @brief Distribute element matrix only (rectangular)
+     *
+     * @param cell_matrix Element matrix (row-major, n_rows x n_cols)
+     * @param row_dofs Global row DOF indices (size n_rows)
+     * @param col_dofs Global column DOF indices (size n_cols)
+     */
+    void distributeMatrixToGlobal(
+        std::span<const double> cell_matrix,
+        std::span<const GlobalIndex> row_dofs,
+        std::span<const GlobalIndex> col_dofs,
         IMatrixOperations& matrix) const;
 
     /**
@@ -435,6 +467,14 @@ private:
         std::span<const double> cell_matrix,
         std::span<const double> cell_rhs,
         std::span<const GlobalIndex> cell_dofs,
+        IMatrixOperations* matrix,
+        IVectorOperations* rhs) const;
+
+    void distributeElementCoreRectangular(
+        std::span<const double> cell_matrix,
+        std::span<const double> cell_rhs,
+        std::span<const GlobalIndex> row_dofs,
+        std::span<const GlobalIndex> col_dofs,
         IMatrixOperations* matrix,
         IVectorOperations* rhs) const;
 

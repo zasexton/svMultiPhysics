@@ -124,11 +124,9 @@ TEST(ConstraintDistributorTest, DistributeLocalToGlobal_Dirichlet) {
     // If symmetric, column contributions from constrained vars are moved to RHS.
 
     // Row 0 (constrained):
-    // Contributions 1.0 (0,0) and 2.0 (0,1) should be ignored or handled specially.
-    // Usually local-to-global adds nothing to constrained rows, and we post-process diagonal.
-    // OR distributor adds diagonal explicitly.
-    // Let's assume standard behavior: constrained row entries are dropped.
-    EXPECT_DOUBLE_EQ(global_matrix(0, 0), 0.0); // Or options.constrained_diagonal?
+    // Element contributions are eliminated and the row is set to an identity-like
+    // constraint row to keep the global system well-posed.
+    EXPECT_DOUBLE_EQ(global_matrix(0, 0), 1.0);
     EXPECT_DOUBLE_EQ(global_matrix(0, 1), 0.0);
 
     // Row 1 (unconstrained):
@@ -142,7 +140,7 @@ TEST(ConstraintDistributorTest, DistributeLocalToGlobal_Dirichlet) {
     EXPECT_DOUBLE_EQ(global_matrix(1, 1), 4.0);
 
     // RHS:
-    // Row 0: Dropped. (constrained)
+    // Row 0: u_0 = 0
     // Row 1: 6.0 - 3.0 * (inhomogeneity=0) = 6.0.
     // (Note: distribute doesn't clear the global RHS, it adds. Initial is 0).
     EXPECT_DOUBLE_EQ(global_rhs[0], 0.0);
@@ -172,8 +170,8 @@ TEST(ConstraintDistributorTest, DistributeLocalToGlobal_InhomogeneousDirichlet) 
 
     distributor.distributeLocalToGlobal(elem_mat, elem_rhs, dofs, global_matrix, global_rhs);
 
-    // Row 0 (constrained): Dropped
-    EXPECT_DOUBLE_EQ(global_matrix(0, 0), 0.0);
+    // Row 0 (constrained): identity-like row, u_0 = 10
+    EXPECT_DOUBLE_EQ(global_matrix(0, 0), 1.0);
     EXPECT_DOUBLE_EQ(global_matrix(0, 1), 0.0);
 
     // Row 1 (unconstrained):
@@ -183,8 +181,8 @@ TEST(ConstraintDistributorTest, DistributeLocalToGlobal_InhomogeneousDirichlet) 
     EXPECT_DOUBLE_EQ(global_matrix(1, 1), 4.0);
 
     // RHS:
-    // Row 0: Dropped
-    EXPECT_DOUBLE_EQ(global_rhs[0], 0.0);
+    // Row 0: u_0 = 10
+    EXPECT_DOUBLE_EQ(global_rhs[0], 10.0);
     // Row 1: 6.0 - 3.0 * 10.0 = -24.0
     EXPECT_DOUBLE_EQ(global_rhs[1], -24.0);
 }

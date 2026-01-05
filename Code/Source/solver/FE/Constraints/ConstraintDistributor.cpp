@@ -69,6 +69,23 @@ void ConstraintDistributor::distributeLocalToGlobal(
     distributeElementCore(cell_matrix, cell_rhs, cell_dofs, &matrix, &rhs);
 }
 
+void ConstraintDistributor::distributeLocalToGlobal(
+    std::span<const double> cell_matrix,
+    std::span<const double> cell_rhs,
+    std::span<const GlobalIndex> row_dofs,
+    std::span<const GlobalIndex> col_dofs,
+    IMatrixOperations& matrix,
+    IVectorOperations& rhs) const
+{
+    if (!constraints_) {
+        matrix.addValues(row_dofs, col_dofs, cell_matrix);
+        rhs.addValues(row_dofs, cell_rhs);
+        return;
+    }
+
+    distributeElementCoreRectangular(cell_matrix, cell_rhs, row_dofs, col_dofs, &matrix, &rhs);
+}
+
 void ConstraintDistributor::distributeMatrixToGlobal(
     std::span<const double> cell_matrix,
     std::span<const GlobalIndex> cell_dofs,
@@ -83,6 +100,21 @@ void ConstraintDistributor::distributeMatrixToGlobal(
     distributeElementCore(cell_matrix, empty_rhs, cell_dofs, &matrix, nullptr);
 }
 
+void ConstraintDistributor::distributeMatrixToGlobal(
+    std::span<const double> cell_matrix,
+    std::span<const GlobalIndex> row_dofs,
+    std::span<const GlobalIndex> col_dofs,
+    IMatrixOperations& matrix) const
+{
+    if (!constraints_) {
+        matrix.addValues(row_dofs, col_dofs, cell_matrix);
+        return;
+    }
+
+    std::span<const double> empty_rhs;
+    distributeElementCoreRectangular(cell_matrix, empty_rhs, row_dofs, col_dofs, &matrix, nullptr);
+}
+
 void ConstraintDistributor::distributeRhsToGlobal(
     std::span<const double> cell_rhs,
     std::span<const GlobalIndex> cell_dofs,
@@ -95,6 +127,160 @@ void ConstraintDistributor::distributeRhsToGlobal(
 
     std::span<const double> empty_matrix;
     distributeElementCore(empty_matrix, cell_rhs, cell_dofs, nullptr, &rhs);
+}
+
+void ConstraintDistributor::distributeElementCoreRectangular(
+    std::span<const double> cell_matrix,
+    std::span<const double> cell_rhs,
+    std::span<const GlobalIndex> row_dofs,
+    std::span<const GlobalIndex> col_dofs,
+    IMatrixOperations* matrix,
+    IVectorOperations* rhs) const
+{
+    const std::size_t n_rows = row_dofs.size();
+    const std::size_t n_cols = col_dofs.size();
+
+    const bool has_constrained =
+        hasConstrainedDof(row_dofs) || hasConstrainedDof(col_dofs);
+
+    if (!has_constrained) {
+        if (matrix && !cell_matrix.empty()) {
+            matrix->addValues(row_dofs, col_dofs, cell_matrix);
+        }
+        if (rhs && !cell_rhs.empty()) {
+            rhs->addValues(row_dofs, cell_rhs);
+        }
+        return;
+    }
+
+    if (matrix && !cell_matrix.empty()) {
+        for (std::size_t i = 0; i < n_rows; ++i) {
+            const GlobalIndex row_dof = row_dofs[i];
+            const auto row_constraint = constraints_->getConstraint(row_dof);
+
+            for (std::size_t j = 0; j < n_cols; ++j) {
+                const GlobalIndex col_dof = col_dofs[j];
+                const double value = cell_matrix[i * n_cols + j];
+
+                if (std::abs(value) < options_.zero_tolerance) {
+                    continue;
+                }
+
+                const auto col_constraint = constraints_->getConstraint(col_dof);
+
+                if (!row_constraint && !col_constraint) {
+                    matrix->addValue(row_dof, col_dof, value);
+                }
+                else if (row_constraint && !col_constraint) {
+                    if (row_constraint->isDirichlet()) {
+                        continue;
+                    }
+                    for (const auto& entry : row_constraint->entries) {
+                        matrix->addValue(entry.master_dof, col_dof,
+                                         entry.weight * value);
+                    }
+                }
+                else if (!row_constraint && col_constraint) {
+                    if (col_constraint->isDirichlet()) {
+                        if (rhs && options_.apply_inhomogeneities) {
+                            const double inhom = col_constraint->inhomogeneity;
+                            if (std::abs(inhom) > options_.zero_tolerance) {
+                                rhs->addValue(row_dof, -value * inhom);
+                            }
+                        }
+                        continue;
+                    }
+                    if (options_.symmetric) {
+                        for (const auto& entry : col_constraint->entries) {
+                            matrix->addValue(row_dof, entry.master_dof,
+                                             entry.weight * value);
+                        }
+                        if (rhs && options_.apply_inhomogeneities) {
+                            const double inhom = col_constraint->inhomogeneity;
+                            if (std::abs(inhom) > options_.zero_tolerance) {
+                                rhs->addValue(row_dof, -value * inhom);
+                            }
+                        }
+                    }
+                }
+                else {
+                    if (row_constraint->isDirichlet()) {
+                        continue;
+                    }
+                    if (col_constraint->isDirichlet()) {
+                        if (rhs && options_.apply_inhomogeneities) {
+                            const double inhom = col_constraint->inhomogeneity;
+                            if (std::abs(inhom) > options_.zero_tolerance) {
+                                for (const auto& r_entry : row_constraint->entries) {
+                                    rhs->addValue(r_entry.master_dof,
+                                                  -r_entry.weight * value * inhom);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    for (const auto& r_entry : row_constraint->entries) {
+                        for (const auto& c_entry : col_constraint->entries) {
+                            const double combined_weight =
+                                r_entry.weight * c_entry.weight * value;
+                            if (std::abs(combined_weight) >= options_.zero_tolerance) {
+                                matrix->addValue(r_entry.master_dof, c_entry.master_dof,
+                                                 combined_weight);
+                            }
+                        }
+                        if (rhs && options_.apply_inhomogeneities) {
+                            const double inhom = col_constraint->inhomogeneity;
+                            if (std::abs(inhom) > options_.zero_tolerance) {
+                                rhs->addValue(r_entry.master_dof,
+                                              -r_entry.weight * value * inhom);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (rhs && !cell_rhs.empty()) {
+        for (std::size_t i = 0; i < n_rows; ++i) {
+            const GlobalIndex dof = row_dofs[i];
+            const double value = cell_rhs[i];
+
+            if (std::abs(value) < options_.zero_tolerance) {
+                continue;
+            }
+
+            const auto constraint = constraints_->getConstraint(dof);
+
+            if (!constraint) {
+                rhs->addValue(dof, value);
+            } else if (constraint->isDirichlet()) {
+                continue;
+            } else {
+                for (const auto& entry : constraint->entries) {
+                    rhs->addValue(entry.master_dof, entry.weight * value);
+                }
+            }
+        }
+    }
+
+    // Ensure Dirichlet rows are well-posed (identity-like with RHS inhomogeneity).
+    for (std::size_t i = 0; i < n_rows; ++i) {
+        const auto dof = row_dofs[i];
+        const auto constraint = constraints_->getConstraint(dof);
+        if (!constraint || !constraint->isDirichlet()) {
+            continue;
+        }
+
+        if (matrix) {
+            matrix->setDiagonal(dof, options_.constrained_diagonal);
+        }
+        if (rhs) {
+            const double inhom = options_.apply_inhomogeneities ? constraint->inhomogeneity : 0.0;
+            rhs->setValue(dof, inhom * options_.constrained_diagonal);
+        }
+    }
 }
 
 void ConstraintDistributor::distributeElementCore(
@@ -250,6 +436,30 @@ void ConstraintDistributor::distributeElementCore(
                     rhs->addValue(entry.master_dof, entry.weight * value);
                 }
             }
+        }
+    }
+
+    // Ensure constrained rows are well-posed.
+    //
+    // Dirichlet rows/cols were skipped above (to eliminate couplings) under the
+    // assumption that the constrained rows are set to identity-like form.
+    // Without this post-step, constrained rows can remain entirely zero.
+    //
+    // For matrix-only assembly, setDiagonal is sufficient; for RHS assembly, set
+    // constrained entries to the inhomogeneity value (scaled by diagonal).
+    for (std::size_t i = 0; i < n_dofs; ++i) {
+        const auto dof = cell_dofs[i];
+        auto constraint = constraints_->getConstraint(dof);
+        if (!constraint || !constraint->isDirichlet()) {
+            continue;
+        }
+
+        if (matrix) {
+            matrix->setDiagonal(dof, options_.constrained_diagonal);
+        }
+        if (rhs) {
+            const double inhom = options_.apply_inhomogeneities ? constraint->inhomogeneity : 0.0;
+            rhs->setValue(dof, inhom * options_.constrained_diagonal);
         }
     }
 }
