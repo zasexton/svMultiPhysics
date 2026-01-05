@@ -31,6 +31,7 @@
 #include "Conformity.h"
 #include "../Core/MeshBase.h"
 #include "../Fields/MeshFields.h"
+#include "../Labels/MeshLabels.h"
 #include "../Topology/CellTopology.h"
 #include <algorithm>
 #include <cmath>
@@ -1305,14 +1306,173 @@ void ConformityUtils::write_nonconformity_to_field(
 
 std::map<size_t, std::map<size_t, double>> ConformityUtils::build_hanging_vertex_constraints(
     const MeshBase& mesh) {
-  (void)mesh;
-  return {};
+  const size_t n_vertices = mesh.n_vertices();
+  if (n_vertices == 0) return {};
+
+  // Identify physical boundary vertices. In a nonconforming mesh, internal refinement interfaces
+  // show up as "boundary faces" (since topology doesn't match), so we exclude only faces that are
+  // likely true domain boundaries.
+  std::vector<uint8_t> is_boundary(n_vertices, static_cast<uint8_t>(0));
+  struct BoundaryGroup {
+    bool has_root_only_face = false;
+    bool has_nonroot_face = false;
+    std::vector<index_t> faces;
+  };
+  auto sorted_unique_gid = [](std::vector<gid_t> v) {
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+    return v;
+  };
+  auto is_root_vertex = [&](gid_t g) {
+    const auto flat = MeshLabels::flatten_vertex_provenance_gid(mesh, g);
+    if (flat.size() != 1u) return false;
+    if (flat[0].first != g) return false;
+    return std::abs(flat[0].second - 1.0) < 1e-14;
+  };
+
+  std::map<std::vector<gid_t>, BoundaryGroup> groups;
+  for (index_t f : mesh.boundary_faces()) {
+    std::vector<gid_t> root;
+    bool all_root = true;
+    for (index_t v : mesh.face_vertices(f)) {
+      if (v < 0 || static_cast<size_t>(v) >= n_vertices) continue;
+      const gid_t g = mesh.vertex_gids().at(static_cast<size_t>(v));
+      all_root = all_root && is_root_vertex(g);
+      for (const auto& kv : MeshLabels::flatten_vertex_provenance_gid(mesh, g)) {
+        if (kv.first != INVALID_GID) root.push_back(kv.first);
+      }
+    }
+    root = sorted_unique_gid(std::move(root));
+    auto& grp = groups[root];
+    grp.faces.push_back(f);
+    if (all_root) grp.has_root_only_face = true;
+    else grp.has_nonroot_face = true;
+  }
+
+  for (const auto& kv : groups) {
+    const auto& grp = kv.second;
+    const bool mixed = grp.has_root_only_face && grp.has_nonroot_face;
+    if (mixed) continue; // likely internal nonconforming interface
+    for (index_t f : grp.faces) {
+      for (index_t v : mesh.face_vertices(f)) {
+        if (v >= 0 && static_cast<size_t>(v) < n_vertices) {
+          is_boundary[static_cast<size_t>(v)] = static_cast<uint8_t>(1);
+        }
+      }
+    }
+  }
+
+  std::map<size_t, std::map<size_t, double>> constraints;
+
+  for (index_t v = 0; v < static_cast<index_t>(n_vertices); ++v) {
+    if (is_boundary[static_cast<size_t>(v)] != 0u) continue;
+
+    const gid_t vg = mesh.vertex_gids().at(static_cast<size_t>(v));
+    auto flat = MeshLabels::flatten_vertex_provenance_gid(mesh, vg);
+
+    // Reduce and prune near-zero entries.
+    std::map<gid_t, double> accum;
+    for (const auto& kv : flat) {
+      if (kv.first == INVALID_GID) continue;
+      if (std::abs(kv.second) < 1e-14) continue;
+      accum[kv.first] += kv.second;
+    }
+
+    if (accum.size() != 2u) continue;  // Only handle edge-based (2-parent) constraints here.
+
+    std::map<size_t, double> eq;
+    for (const auto& kv : accum) {
+      const index_t root = mesh.global_to_local_vertex(kv.first);
+      if (root == INVALID_INDEX) {
+        eq.clear();
+        break;
+      }
+      eq[static_cast<size_t>(root)] = kv.second;
+    }
+
+    if (eq.size() == 2u) {
+      constraints[static_cast<size_t>(v)] = std::move(eq);
+    }
+  }
+
+  return constraints;
 }
 
 std::map<gid_t, std::map<gid_t, double>> ConformityUtils::build_hanging_vertex_constraints_gid(
     const MeshBase& mesh) {
-  (void)mesh;
-  return {};
+  const size_t n_vertices = mesh.n_vertices();
+  if (n_vertices == 0) return {};
+
+  // Identify physical boundary vertices (see non-GID variant for rationale).
+  std::vector<uint8_t> is_boundary(n_vertices, static_cast<uint8_t>(0));
+  struct BoundaryGroup {
+    bool has_root_only_face = false;
+    bool has_nonroot_face = false;
+    std::vector<index_t> faces;
+  };
+  auto sorted_unique_gid = [](std::vector<gid_t> v) {
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+    return v;
+  };
+  auto is_root_vertex = [&](gid_t g) {
+    const auto flat = MeshLabels::flatten_vertex_provenance_gid(mesh, g);
+    if (flat.size() != 1u) return false;
+    if (flat[0].first != g) return false;
+    return std::abs(flat[0].second - 1.0) < 1e-14;
+  };
+
+  std::map<std::vector<gid_t>, BoundaryGroup> groups;
+  for (index_t f : mesh.boundary_faces()) {
+    std::vector<gid_t> root;
+    bool all_root = true;
+    for (index_t v : mesh.face_vertices(f)) {
+      if (v < 0 || static_cast<size_t>(v) >= n_vertices) continue;
+      const gid_t g = mesh.vertex_gids().at(static_cast<size_t>(v));
+      all_root = all_root && is_root_vertex(g);
+      for (const auto& kv : MeshLabels::flatten_vertex_provenance_gid(mesh, g)) {
+        if (kv.first != INVALID_GID) root.push_back(kv.first);
+      }
+    }
+    root = sorted_unique_gid(std::move(root));
+    auto& grp = groups[root];
+    grp.faces.push_back(f);
+    if (all_root) grp.has_root_only_face = true;
+    else grp.has_nonroot_face = true;
+  }
+
+  for (const auto& kv : groups) {
+    const auto& grp = kv.second;
+    const bool mixed = grp.has_root_only_face && grp.has_nonroot_face;
+    if (mixed) continue;
+    for (index_t f : grp.faces) {
+      for (index_t v : mesh.face_vertices(f)) {
+        if (v >= 0 && static_cast<size_t>(v) < n_vertices) {
+          is_boundary[static_cast<size_t>(v)] = static_cast<uint8_t>(1);
+        }
+      }
+    }
+  }
+
+  std::map<gid_t, std::map<gid_t, double>> constraints;
+  for (index_t v = 0; v < static_cast<index_t>(n_vertices); ++v) {
+    if (is_boundary[static_cast<size_t>(v)] != 0u) continue;
+
+    const gid_t vg = mesh.vertex_gids().at(static_cast<size_t>(v));
+    auto flat = MeshLabels::flatten_vertex_provenance_gid(mesh, vg);
+
+    std::map<gid_t, double> eq;
+    for (const auto& kv : flat) {
+      if (kv.first == INVALID_GID) continue;
+      if (std::abs(kv.second) < 1e-14) continue;
+      eq[kv.first] += kv.second;
+    }
+
+    if (eq.size() != 2u) continue;
+    constraints[vg] = std::move(eq);
+  }
+
+  return constraints;
 }
 
 } // namespace svmp
