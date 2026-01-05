@@ -188,28 +188,6 @@ set(CSRCS
   mat_fun.h mat_fun.cpp
   mat_models.h mat_models.cpp
   mesh.h mesh.cpp
-  Mesh/Mesh.h Mesh/Mesh.cpp
-  Mesh/Core/MeshTypes.h
-  Mesh/Core/MeshBase.h Mesh/Core/MeshBase.cpp
-  Mesh/Core/DistributedMesh.h
-  Mesh/Core/InterfaceMesh.h
-  Mesh/Topology/CellShape.h Mesh/Topology/CellShape.cpp
-  Mesh/Topology/MeshTopology.h Mesh/Topology/MeshTopology.cpp
-  Mesh/Topology/PartitionTopology.h Mesh/Topology/PartitionTopology.cpp
-  Mesh/Topology/DistributedTopology.h Mesh/Topology/DistributedTopology.cpp
-  Mesh/Geometry/MeshGeometry.h Mesh/Geometry/MeshGeometry.cpp
-  Mesh/Geometry/MeshQuality.h Mesh/Geometry/MeshQuality.cpp
-  Mesh/Geometry/MeshOrientation.h
-  Mesh/Fields/MeshFields.h Mesh/Fields/MeshFields.cpp
-  Mesh/Fields/MeshFieldDescriptor.h
-  Mesh/Labels/MeshLabels.h Mesh/Labels/MeshLabels.cpp
-  Mesh/Search/MeshSearch.h Mesh/Search/MeshSearch.cpp
-  Mesh/Validation/MeshValidation.h Mesh/Validation/MeshValidation.cpp
-  Mesh/Validation/SpatialHashing.h
-  Mesh/Observer/MeshObserver.h
-  Mesh/IO/MeshIO.h Mesh/IO/MeshIO.cpp
-  Mesh/IO/VTKReader.h Mesh/IO/VTKReader.cpp
-  Mesh/IO/VTKWriter.h Mesh/IO/VTKWriter.cpp
   nn.h nn.cpp
   output.h output.cpp
   load_msh.h load_msh.cpp
