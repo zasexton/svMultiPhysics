@@ -1,0 +1,77 @@
+/* Copyright (c) Stanford University, The Regents of the University of California, and others.
+ *
+ * All Rights Reserved.
+ *
+ * See Copyright-SimVascular.txt for additional details.
+ */
+
+#ifndef SVMP_FE_SYSTEMS_FORMSINSTALLER_H
+#define SVMP_FE_SYSTEMS_FORMSINSTALLER_H
+
+/**
+ * @file FormsInstaller.h
+ * @brief Helpers to lower FE/Forms weak forms into FE/Systems kernels.
+ */
+
+#include "Core/Types.h"
+
+#include "Forms/BlockForm.h"
+#include "Systems/OperatorRegistry.h"
+
+#include <initializer_list>
+#include <memory>
+#include <span>
+#include <vector>
+
+namespace svmp {
+namespace FE {
+
+namespace assembly {
+class AssemblyKernel;
+}
+
+namespace forms {
+class FormExpr;
+}
+
+namespace systems {
+
+class FESystem;
+
+struct FormInstallOptions {
+    forms::ADMode ad_mode{forms::ADMode::Forward};
+    forms::SymbolicOptions compiler_options{};
+};
+
+using KernelPtr = std::shared_ptr<assembly::AssemblyKernel>;
+
+KernelPtr installResidualForm(
+    FESystem& system,
+    const OperatorTag& op,
+    FieldId test_field,
+    FieldId trial_field,
+    const forms::FormExpr& residual_form,
+    const FormInstallOptions& options = {});
+
+std::vector<std::vector<KernelPtr>> installResidualBlocks(
+    FESystem& system,
+    const OperatorTag& op,
+    std::span<const FieldId> test_fields,
+    std::span<const FieldId> trial_fields,
+    const forms::BlockBilinearForm& blocks,
+    const FormInstallOptions& options = {});
+
+std::vector<std::vector<KernelPtr>> installResidualBlocks(
+    FESystem& system,
+    const OperatorTag& op,
+    std::initializer_list<FieldId> test_fields,
+    std::initializer_list<FieldId> trial_fields,
+    const forms::BlockBilinearForm& blocks,
+    const FormInstallOptions& options = {});
+
+} // namespace systems
+} // namespace FE
+} // namespace svmp
+
+#endif // SVMP_FE_SYSTEMS_FORMSINSTALLER_H
+

@@ -14,12 +14,11 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/GlobalSystemView.h"
-#include "Forms/FormCompiler.h"
-#include "Forms/FormKernels.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
+#include "Systems/FormsInstaller.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <memory>
@@ -47,12 +46,47 @@ svmp::FE::dofs::MeshTopologyInfo singleTetraTopology()
 
 } // namespace
 
+TEST(SpaceHelpersTest, MeshInferredSpacesRejectMixedCellTypes)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::TwoCellMixedTypeMeshAccess>();
+    EXPECT_THROW((void)svmp::FE::spaces::inferUniformElementType(*mesh),
+                 svmp::FE::InvalidArgumentException);
+    EXPECT_THROW((void)svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, /*order=*/1),
+                 svmp::FE::InvalidArgumentException);
+
+    EXPECT_EQ(svmp::FE::spaces::inferUniformElementType(*mesh, /*domain_id=*/1), ElementType::Tetra4);
+    EXPECT_EQ(svmp::FE::spaces::inferUniformElementType(*mesh, /*domain_id=*/2), ElementType::Hex8);
+
+    auto fluid = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1,
+                                               mesh,
+                                               /*order=*/1,
+                                               /*components=*/3,
+                                               /*domain_id=*/1);
+    EXPECT_EQ(fluid->element_type(), ElementType::Tetra4);
+
+    auto solid = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1,
+                                         mesh,
+                                         /*order=*/2,
+                                         /*components=*/1,
+                                         /*domain_id=*/2);
+    EXPECT_EQ(solid->element_type(), ElementType::Hex8);
+
+    EXPECT_THROW((void)svmp::FE::spaces::inferUniformElementType(*mesh, /*domain_id=*/42),
+                 svmp::FE::InvalidArgumentException);
+}
+
 TEST(NavierStokesCoupledFormsTest, ResidualAndJacobianMatchFiniteDifferences)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
 
-    auto u_space = svmp::FE::spaces::SpaceFactory::create_vector_h1(ElementType::Tetra4, /*order=*/1, /*components=*/3);
-    auto p_space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1,
+                                                 mesh,
+                                                 /*order=*/1,
+                                                 /*components=*/3);
+    auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1,
+                                           mesh,
+                                           /*order=*/1,
+                                           /*components=*/1);
 
     svmp::FE::systems::FESystem sys(mesh);
     const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = u_space, .components = 3});
@@ -68,8 +102,6 @@ TEST(NavierStokesCoupledFormsTest, ResidualAndJacobianMatchFiniteDifferences)
     const Real nu = 0.01;
     const auto nu_c = svmp::FE::forms::FormExpr::constant(nu);
 
-    svmp::FE::forms::FormCompiler compiler;
-
     // Momentum: ( (u·∇)u, v ) + nu (∇u, ∇v)
     const auto uu_residual =
         (svmp::FE::forms::inner(svmp::FE::forms::grad(u) * u, v) +
@@ -82,20 +114,17 @@ TEST(NavierStokesCoupledFormsTest, ResidualAndJacobianMatchFiniteDifferences)
     // Continuity: (q, div(u))
     const auto pu_residual = (q * svmp::FE::forms::div(u)).dx();
 
-    auto uu_ir = compiler.compileResidual(uu_residual);
-    auto up_ir = compiler.compileResidual(up_residual);
-    auto pu_ir = compiler.compileResidual(pu_residual);
+    svmp::FE::forms::BlockBilinearForm blocks(/*tests=*/2, /*trials=*/2);
+    blocks.setBlock(0, 0, uu_residual);
+    blocks.setBlock(0, 1, up_residual);
+    blocks.setBlock(1, 0, pu_residual);
 
-    auto uu_kernel = std::make_shared<svmp::FE::forms::NonlinearFormKernel>(std::move(uu_ir),
-                                                                            svmp::FE::forms::ADMode::Forward);
-    auto up_kernel = std::make_shared<svmp::FE::forms::NonlinearFormKernel>(std::move(up_ir),
-                                                                            svmp::FE::forms::ADMode::Forward);
-    auto pu_kernel = std::make_shared<svmp::FE::forms::NonlinearFormKernel>(std::move(pu_ir),
-                                                                            svmp::FE::forms::ADMode::Forward);
-
-    sys.addCellKernel("ns", u_field, u_field, uu_kernel);
-    sys.addCellKernel("ns", u_field, p_field, up_kernel);
-    sys.addCellKernel("ns", p_field, u_field, pu_kernel);
+    (void)svmp::FE::systems::installResidualBlocks(
+        sys, "ns",
+        {u_field, p_field},
+        {u_field, p_field},
+        blocks,
+        svmp::FE::systems::FormInstallOptions{.ad_mode = svmp::FE::forms::ADMode::Forward});
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -150,4 +179,3 @@ TEST(NavierStokesCoupledFormsTest, ResidualAndJacobianMatchFiniteDifferences)
         }
     }
 }
-

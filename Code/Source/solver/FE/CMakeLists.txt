@@ -561,6 +561,7 @@ set(FE_GEOMETRY_SOURCES
 set(FE_SYSTEMS_HEADERS
     Systems/ContactPenaltyKernel.h
     Systems/FESystem.h
+    Systems/FormsInstaller.h
     Systems/FieldRegistry.h
     Systems/GlobalKernel.h
     Systems/GlobalKernelStateProvider.h
@@ -583,6 +584,7 @@ set(FE_SYSTEMS_HEADERS
 set(FE_SYSTEMS_SOURCES
     Systems/ContactPenaltyKernel.cpp
     Systems/FESystem.cpp
+    Systems/FormsInstaller.cpp
     Systems/FieldRegistry.cpp
     Systems/GlobalKernelStateProvider.cpp
     Systems/MaterialStateProvider.cpp
