@@ -71,11 +71,20 @@ struct GeneralizedAlphaSecondOrderParams {
 /**
  * @brief Convert spectral radius at infinity to generalized-α parameters for 2nd-order systems.
  *
- * Chung–Hulbert (1993) style parameterization:
- *   alpha_m = (2*rho_inf - 1) / (rho_inf + 1)
- *   alpha_f = rho_inf / (rho_inf + 1)
- *   gamma   = 1/2 + alpha_m - alpha_f
- *   beta    = 1/4 * (1 + alpha_m - alpha_f)^2
+ * Chung–Hulbert (1993) spectral-radius parameterization expressed in this library’s stage convention:
+ *   u_stage = (1 - alpha_f) * u_n + alpha_f * u_{n+1}
+ *   a_stage = (1 - alpha_m) * a_n + alpha_m * a_{n+1}
+ *
+ * With this convention the commonly published Chung–Hulbert parameters
+ *   alpha_m^CH = (2*rho_inf - 1) / (rho_inf + 1),
+ *   alpha_f^CH = rho_inf / (rho_inf + 1)
+ * are transformed as:
+ *   alpha_m = 1 - alpha_m^CH = (2 - rho_inf) / (1 + rho_inf)
+ *   alpha_f = 1 - alpha_f^CH = 1 / (1 + rho_inf)
+ *
+ * The resulting (beta,gamma) match the standard second-order accuracy conditions:
+ *   gamma = 1/2 + alpha_m - alpha_f
+ *   beta  = 1/4 * (1 + alpha_m - alpha_f)^2
  */
 [[nodiscard]] inline GeneralizedAlphaSecondOrderParams
 generalizedAlphaSecondOrderFromRhoInf(double rho_inf)
@@ -85,8 +94,8 @@ generalizedAlphaSecondOrderFromRhoInf(double rho_inf)
                 "generalizedAlphaSecondOrderFromRhoInf: rho_inf must be finite and in [0,1]");
 
     GeneralizedAlphaSecondOrderParams p;
-    p.alpha_m = (2.0 * rho_inf - 1.0) / (rho_inf + 1.0);
-    p.alpha_f = rho_inf / (rho_inf + 1.0);
+    p.alpha_m = (2.0 - rho_inf) / (1.0 + rho_inf);
+    p.alpha_f = 1.0 / (1.0 + rho_inf);
     p.gamma = 0.5 + p.alpha_m - p.alpha_f;
     const double c = 1.0 + p.alpha_m - p.alpha_f;
     p.beta = 0.25 * c * c;
@@ -157,7 +166,7 @@ initializeSecondOrderStateFromDisplacementHistory(const TimeHistory& history,
             return;
         }
         const int available = static_cast<int>(u_hist.size());
-        const int n_points = std::min(std::max(min_points, 0), std::min(available, std::max(1, max_points)));
+        const int n_points = std::min(available, std::max(1, max_points));
         if (n_points < min_points) {
             points_used = 0;
             return;
