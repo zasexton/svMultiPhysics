@@ -1,13 +1,13 @@
 /**
- * @file test_MeshBaseAccess.cpp
- * @brief Unit tests for Assembly MeshBaseAccess adapter (requires Mesh library)
+ * @file test_MeshAccess.cpp
+ * @brief Unit tests for Assembly MeshAccess adapter (requires Mesh library)
  */
 
 #include <gtest/gtest.h>
 
-#include "Assembly/MeshBaseAccess.h"
+#include "Assembly/MeshAccess.h"
 
-#include "Mesh/Core/MeshBase.h"
+#include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
 
 #include <algorithm>
@@ -16,18 +16,22 @@
 
 using svmp::CellFamily;
 using svmp::CellShape;
+using svmp::EntityKind;
+using svmp::Mesh;
 using svmp::MeshBase;
+using svmp::Ownership;
 
 using svmp::FE::ElementType;
 using svmp::FE::GlobalIndex;
 using svmp::FE::LocalIndex;
 using svmp::FE::Real;
-using svmp::FE::assembly::MeshBaseAccess;
+using svmp::FE::assembly::MeshAccess;
 
 namespace {
 
-MeshBase build_two_triangles_mesh() {
-    MeshBase mesh;
+Mesh build_two_triangles_mesh() {
+    auto base = std::make_shared<MeshBase>();
+    auto& mesh = *base;
 
     // 2D mesh with two triangles sharing edge (1,2):
     //  cell0: (0,1,2), cell1: (1,3,2)
@@ -91,11 +95,12 @@ MeshBase build_two_triangles_mesh() {
     mesh.set_boundary_label(/*face=*/4, /*label=*/2);
 
     mesh.finalize();
-    return mesh;
+    return Mesh(std::move(base), svmp::MeshComm::self());
 }
 
-MeshBase build_two_tetrahedra_mesh() {
-    MeshBase mesh;
+Mesh build_two_tetrahedra_mesh() {
+    auto base = std::make_shared<MeshBase>();
+    auto& mesh = *base;
 
     // 3D mesh with two tetrahedra sharing face (1,2,3):
     //  cell0: (0,1,2,3), cell1: (1,2,3,4)
@@ -167,14 +172,14 @@ MeshBase build_two_tetrahedra_mesh() {
     mesh.set_boundary_label(/*face=*/6, /*label=*/20);
 
     mesh.finalize();
-    return mesh;
+    return Mesh(std::move(base), svmp::MeshComm::self());
 }
 
 } // namespace
 
-TEST(MeshBaseAccess, TwoTrianglesBoundaryAndInteriorFaces) {
-    const auto mesh = build_two_triangles_mesh();
-    MeshBaseAccess access(mesh);
+TEST(MeshAccess, TwoTrianglesBoundaryAndInteriorFaces) {
+    auto mesh = build_two_triangles_mesh();
+    MeshAccess access(mesh);
 
     EXPECT_EQ(access.dimension(), 2);
     EXPECT_EQ(access.numCells(), 2);
@@ -236,9 +241,9 @@ TEST(MeshBaseAccess, TwoTrianglesBoundaryAndInteriorFaces) {
     EXPECT_EQ(adj.second, 1);
 }
 
-TEST(MeshBaseAccess, TwoTetrahedraLocalFaceIndexAndMarkers) {
-    const auto mesh = build_two_tetrahedra_mesh();
-    MeshBaseAccess access(mesh);
+TEST(MeshAccess, TwoTetrahedraLocalFaceIndexAndMarkers) {
+    auto mesh = build_two_tetrahedra_mesh();
+    MeshAccess access(mesh);
 
     EXPECT_EQ(access.dimension(), 3);
     EXPECT_EQ(access.numCells(), 2);
@@ -274,11 +279,11 @@ TEST(MeshBaseAccess, TwoTetrahedraLocalFaceIndexAndMarkers) {
     EXPECT_EQ(interior[0], std::make_tuple(GlobalIndex{2}, GlobalIndex{0}, GlobalIndex{1}));
 }
 
-TEST(MeshBaseAccess, CoordinateConfigurationOverrideIsDeterministic) {
+TEST(MeshAccess, CoordinateConfigurationOverrideIsDeterministic) {
     auto mesh = build_two_triangles_mesh();
 
     // Make current coordinates different from reference.
-    auto X_cur = mesh.X_ref();
+    auto X_cur = mesh.base().X_ref();
     for (std::size_t i = 0; i < X_cur.size(); i += 2) {
         X_cur[i] += 10.0; // shift x only
     }
@@ -287,8 +292,8 @@ TEST(MeshBaseAccess, CoordinateConfigurationOverrideIsDeterministic) {
     // Even if the mesh "active configuration" is reference, an explicit override
     // must deterministically select the requested coordinate set.
     mesh.use_reference_configuration();
-    MeshBaseAccess use_current(mesh, svmp::Configuration::Current);
-    MeshBaseAccess use_reference(mesh, svmp::Configuration::Reference);
+    MeshAccess use_current(mesh, svmp::Configuration::Current);
+    MeshAccess use_reference(mesh, svmp::Configuration::Reference);
 
     const auto x0_cur = use_current.getNodeCoordinates(0);
     const auto x0_ref = use_reference.getNodeCoordinates(0);
@@ -298,7 +303,30 @@ TEST(MeshBaseAccess, CoordinateConfigurationOverrideIsDeterministic) {
 
     // And the override should still win if the mesh is in current configuration.
     mesh.use_current_configuration();
-    MeshBaseAccess use_reference2(mesh, svmp::Configuration::Reference);
+    MeshAccess use_reference2(mesh, svmp::Configuration::Reference);
     const auto x0_ref2 = use_reference2.getNodeCoordinates(0);
     EXPECT_NEAR(x0_ref2[0], Real(0.0), 1e-12);
+}
+
+TEST(MeshAccess, OwnedCellIterationRespectsGhosts) {
+    auto mesh = build_two_triangles_mesh();
+    mesh.set_ownership(/*id=*/1, EntityKind::Volume, Ownership::Ghost, /*owner_rank=*/1);
+
+    MeshAccess access(mesh);
+    EXPECT_EQ(access.numCells(), 2);
+    EXPECT_EQ(access.numOwnedCells(), 1);
+    EXPECT_TRUE(access.isOwnedCell(0));
+    EXPECT_FALSE(access.isOwnedCell(1));
+
+    std::vector<GlobalIndex> owned;
+    access.forEachOwnedCell([&](GlobalIndex c) { owned.push_back(c); });
+    EXPECT_EQ(owned, (std::vector<GlobalIndex>{0}));
+
+    // Boundary faces adjacent to ghost cells should not be iterated for assembly.
+    std::vector<std::pair<GlobalIndex, GlobalIndex>> b_all;
+    access.forEachBoundaryFace(/*marker=*/-1, [&](GlobalIndex f, GlobalIndex c) {
+        b_all.emplace_back(f, c);
+    });
+    std::sort(b_all.begin(), b_all.end());
+    EXPECT_EQ(b_all, (std::vector<std::pair<GlobalIndex, GlobalIndex>>{{0, 0}, {2, 0}}));
 }
