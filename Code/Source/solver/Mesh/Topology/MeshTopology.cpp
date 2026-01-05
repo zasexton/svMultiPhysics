@@ -90,7 +90,7 @@ void MeshTopology::build_vertex2codim1(const MeshBase& mesh,
   size_t n_faces = mesh.n_faces();
 
   if (n_faces == 0) {
-    vertex2entity_offsets.clear();
+    vertex2entity_offsets.assign(n_vertices + 1, 0);
     vertex2entity.clear();
     return;
   }
@@ -613,6 +613,24 @@ std::vector<std::array<index_t,2>> MeshTopology::extract_edges(const MeshBase& m
         local_edges = {{0,1}, {1,2}, {2,3}, {3,0},  // base
                       {0,4}, {1,4}, {2,4}, {3,4}}; // to apex
         break;
+      case CellFamily::Polyhedron: {
+        // A 3D polyhedron requires explicit face connectivity to define edges.
+        const auto faces = mesh.cell_faces(static_cast<index_t>(c));
+        if (faces.empty()) {
+          throw std::runtime_error("MeshTopology::extract_edges: Polyhedron requires explicit faces");
+        }
+        for (index_t f : faces) {
+          auto [fv, nf] = mesh.face_vertices_span(f);
+          if (nf < 2) continue;
+          for (size_t i = 0; i < nf; ++i) {
+            index_t n1 = fv[i];
+            index_t n2 = fv[(i + 1) % nf];
+            if (n1 > n2) std::swap(n1, n2);
+            edge_set.insert({n1, n2});
+          }
+        }
+        continue;
+      }
       default:
         // For polygons/polyhedra, connect consecutive vertices
         for (size_t i = 0; i < n_vertices; ++i) {

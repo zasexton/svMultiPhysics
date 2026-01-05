@@ -49,6 +49,11 @@ class MeshBase;
  * - Boundary identification
  * - Connectivity analysis
  * - Topological invariants
+ *
+ * Notes on distributed meshes:
+ * - All operations are rank-local and operate on the provided `MeshBase` data.
+ * - No MPI communication or global reductions are performed here.
+ * - In MPI runs, results depend on the local partition (and any ghost layer present).
  */
 class MeshTopology {
 public:

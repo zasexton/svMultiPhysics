@@ -66,7 +66,7 @@ struct CellShape {
   bool is_linear() const { return order == 1; }
   bool is_quadratic() const { return order == 2; }
   bool is_high_order() const { return order > 2; }
-  bool is_1d() const { return family == CellFamily::Point; }
+  bool is_1d() const { return family == CellFamily::Line; }
   bool is_2d() const {
     return family == CellFamily::Triangle ||
            family == CellFamily::Quad ||
