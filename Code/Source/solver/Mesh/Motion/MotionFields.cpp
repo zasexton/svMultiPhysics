@@ -31,6 +31,7 @@
 #include "MotionFields.h"
 
 #include "../Core/MeshBase.h"
+#include "../Core/DistributedMesh.h"
 #include "../Fields/MeshFields.h"
 #include "../Fields/MeshFieldDescriptor.h"
 
@@ -159,6 +160,18 @@ void update_coordinates_from_displacement(MeshBase& mesh,
 
   mesh.set_current_coords(X_new);
   mesh.use_current_configuration();
+}
+
+MotionFieldHandles attach_motion_fields(Mesh& mesh, int nsd)
+{
+  return attach_motion_fields(mesh.local_mesh(), nsd);
+}
+
+void update_coordinates_from_displacement(Mesh& mesh,
+                                          const MotionFieldHandles& hnd,
+                                          bool accumulate)
+{
+  update_coordinates_from_displacement(mesh.local_mesh(), hnd, accumulate);
 }
 
 } // namespace motion

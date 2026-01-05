@@ -31,6 +31,7 @@
 #include "MotionState.h"
 
 #include "../Core/MeshBase.h"
+#include "../Core/DistributedMesh.h"
 #include "../Fields/MeshFields.h"
 
 #include <stdexcept>
@@ -44,6 +45,11 @@ void save_coordinates(const MeshBase& mesh, MotionCoordinateBackup& backup)
   backup.active_config = mesh.active_configuration();
   backup.X_cur         = mesh.X_cur();
   backup.initialized   = true;
+}
+
+void save_coordinates(const Mesh& mesh, MotionCoordinateBackup& backup)
+{
+  save_coordinates(mesh.local_mesh(), backup);
 }
 
 void restore_coordinates(MeshBase& mesh, const MotionCoordinateBackup& backup)
@@ -67,6 +73,11 @@ void restore_coordinates(MeshBase& mesh, const MotionCoordinateBackup& backup)
     // Treat Current/Deformed as the same active configuration.
     mesh.use_current_configuration();
   }
+}
+
+void restore_coordinates(Mesh& mesh, const MotionCoordinateBackup& backup)
+{
+  restore_coordinates(mesh.local_mesh(), backup);
 }
 
 void update_velocity_from_displacement(MeshBase& mesh,
@@ -115,6 +126,13 @@ void update_velocity_from_displacement(MeshBase& mesh,
       vel[vel_offset + k] = disp[disp_offset + k] * inv_dt;
     }
   }
+}
+
+void update_velocity_from_displacement(Mesh& mesh,
+                                       const MotionFieldHandles& hnd,
+                                       real_t dt)
+{
+  update_velocity_from_displacement(mesh.local_mesh(), hnd, dt);
 }
 
 } // namespace motion

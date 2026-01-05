@@ -45,6 +45,10 @@
 namespace svmp {
 
 class MeshBase;
+class DistributedMesh;
+// Phase 5 (UNIFY_MESH): prefer the unified runtime mesh type name.
+// In the Mesh library, `Mesh` is currently an alias of `DistributedMesh`.
+using Mesh = DistributedMesh;
 
 namespace motion {
 
@@ -75,6 +79,7 @@ struct MotionFieldHandles {
  * @throws std::runtime_error if @p nsd is incompatible with the mesh.
  */
 MotionFieldHandles attach_motion_fields(MeshBase& mesh, int nsd);
+MotionFieldHandles attach_motion_fields(Mesh& mesh, int nsd);
 
 /**
  * @brief Update mesh coordinates from a displacement field.
@@ -104,6 +109,9 @@ MotionFieldHandles attach_motion_fields(MeshBase& mesh, int nsd);
  *                   current configuration when available.
  */
 void update_coordinates_from_displacement(MeshBase& mesh,
+                                          const MotionFieldHandles& hnd,
+                                          bool accumulate);
+void update_coordinates_from_displacement(Mesh& mesh,
                                           const MotionFieldHandles& hnd,
                                           bool accumulate);
 

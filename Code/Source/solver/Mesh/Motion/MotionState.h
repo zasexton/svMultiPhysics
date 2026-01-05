@@ -39,8 +39,8 @@
  *  - Backing up and restoring mesh coordinates around motion steps.
  *  - Updating mesh-velocity fields from displacement in a time step.
  *
- * All operations are expressed purely in terms of MeshBase and motion
- * fields; no FE/DOF or solver-level concepts are introduced here.
+ * All operations are expressed in terms of the Mesh local view (MeshBase)
+ * and motion fields; no FE/DOF or solver-level concepts are introduced here.
  */
 
 #include "../Core/MeshTypes.h"
@@ -85,6 +85,7 @@ struct MotionCoordinateBackup {
  * @param backup  Output backup data (overwritten).
  */
 void save_coordinates(const MeshBase& mesh, MotionCoordinateBackup& backup);
+void save_coordinates(const Mesh& mesh, MotionCoordinateBackup& backup);
 
 /**
  * @brief Restore mesh coordinate state from a backup.
@@ -97,6 +98,7 @@ void save_coordinates(const MeshBase& mesh, MotionCoordinateBackup& backup);
  * @param backup  Backup to restore from.
  */
 void restore_coordinates(MeshBase& mesh, const MotionCoordinateBackup& backup);
+void restore_coordinates(Mesh& mesh, const MotionCoordinateBackup& backup);
 
 /**
  * @brief Update mesh-velocity field from displacement over a time step.
@@ -115,6 +117,9 @@ void restore_coordinates(MeshBase& mesh, const MotionCoordinateBackup& backup);
  * @param dt   Time step size (must be positive).
  */
 void update_velocity_from_displacement(MeshBase& mesh,
+                                       const MotionFieldHandles& hnd,
+                                       real_t dt);
+void update_velocity_from_displacement(Mesh& mesh,
                                        const MotionFieldHandles& hnd,
                                        real_t dt);
 
