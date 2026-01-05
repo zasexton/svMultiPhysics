@@ -21,7 +21,7 @@
  *
  * This class is MESH-LIBRARY-INDEPENDENT. It accepts topology data through
  * the MeshTopologyInfo struct, which can be populated from any mesh source.
- * Convenience overloads for MeshBase/DistributedMesh are provided via
+ * Convenience overloads for MeshBase/Mesh are provided via
  * conditional compilation when the Mesh library is available.
  */
 
@@ -45,6 +45,9 @@
 namespace svmp {
     class MeshBase;
     class DistributedMesh;
+    // Phase 5 (UNIFY_MESH): prefer the unified runtime mesh type name.
+    // In the Mesh library, `Mesh` is currently an alias of `DistributedMesh`.
+    using Mesh = DistributedMesh;
 }
 
 namespace svmp {
@@ -497,16 +500,19 @@ public:
                         const DofDistributionOptions& options = {});
 
     /**
-     * @brief Distribute DOFs on a distributed (MPI) mesh (convenience wrapper)
+     * @brief Distribute DOFs on the unified runtime mesh (convenience wrapper)
      *
-     * @param mesh The distributed mesh
+     * In MPI builds this uses distributed ownership/ghost information from
+     * `svmp::Mesh`. In serial builds it reduces to the local mesh behavior.
+     *
+     * @param mesh The runtime mesh (serial or MPI-distributed)
      * @param space The function space
      * @param options Distribution options (rank info from mesh if not set)
      * @throws FEException if already finalized or distribution fails
      *
      * @note Only available when compiled with Mesh library
      */
-    void distributeDofs(const DistributedMesh& mesh,
+    void distributeDofs(const Mesh& mesh,
                         const spaces::FunctionSpace& space,
                         const DofDistributionOptions& options = {});
 
@@ -517,6 +523,27 @@ public:
      * @throws FEException if already finalized
      */
     void setDofMap(DofMap dof_map);
+
+    /**
+     * @brief Manually set DOF partition (owned/ghost/relevant)
+     *
+     * This is primarily intended for composite/multi-field workflows that
+     * construct a monolithic DOF map externally and need to provide matching
+     * ownership metadata.
+     *
+     * @throws FEException if already finalized
+     */
+    void setPartition(DofPartition partition);
+
+    /**
+     * @brief Manually set the entity-to-DOF map
+     *
+     * Required for boundary DOF extraction helpers when DOFs are constructed
+     * via @ref setDofMap rather than distributed through DofHandler.
+     *
+     * @throws FEException if already finalized
+     */
+    void setEntityDofMap(std::unique_ptr<EntityDofMap> entity_dof_map);
 
     /**
      * @brief Renumber DOFs using specified strategy

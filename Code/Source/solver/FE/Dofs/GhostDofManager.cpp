@@ -10,20 +10,9 @@
 // This module can be built without the Mesh library. Use an explicit compile
 // definition when available; __has_include is not sufficient when headers are
 // present but the Mesh library is not linked (e.g., FE standalone builds).
-#if defined(SVMP_FE_WITH_MESH)
-#  if SVMP_FE_WITH_MESH
-#    include "../../Mesh/Core/DistributedMesh.h"
-#    define GHOSTMANAGER_HAS_MESH 1
-#  else
-#    define GHOSTMANAGER_HAS_MESH 0
-#  endif
-#elif defined(__has_include)
-#  if __has_include("../../Mesh/Core/DistributedMesh.h")
-#    include "../../Mesh/Core/DistributedMesh.h"
-#    define GHOSTMANAGER_HAS_MESH 1
-#  else
-#    define GHOSTMANAGER_HAS_MESH 0
-#  endif
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#  include "Mesh/Mesh.h"
+#  define GHOSTMANAGER_HAS_MESH 1
 #else
 #  define GHOSTMANAGER_HAS_MESH 0
 #endif
@@ -51,7 +40,7 @@ GhostDofManager& GhostDofManager::operator=(GhostDofManager&&) noexcept = defaul
 
 #if GHOSTMANAGER_HAS_MESH
 
-void GhostDofManager::identifyGhostDofs(const DistributedMesh& mesh,
+void GhostDofManager::identifyGhostDofs(const Mesh& mesh,
                                          const DofMap& dof_map) {
     my_rank_ = mesh.rank();
 
@@ -81,7 +70,7 @@ void GhostDofManager::identifyGhostDofs(const DistributedMesh& mesh,
     ghost_dofs_ = IndexSet(std::move(ghost_dof_list));
 }
 
-void GhostDofManager::identifySharedDofs(const DistributedMesh& mesh,
+void GhostDofManager::identifySharedDofs(const Mesh& mesh,
                                           const DofMap& dof_map) {
     my_rank_ = mesh.rank();
 
@@ -131,12 +120,12 @@ void GhostDofManager::identifySharedDofs(const DistributedMesh& mesh,
 
 #else
 
-void GhostDofManager::identifyGhostDofs(const DistributedMesh& /*mesh*/,
+void GhostDofManager::identifyGhostDofs(const Mesh& /*mesh*/,
                                          const DofMap& /*dof_map*/) {
     throw FEException("GhostDofManager: Mesh library not available");
 }
 
-void GhostDofManager::identifySharedDofs(const DistributedMesh& /*mesh*/,
+void GhostDofManager::identifySharedDofs(const Mesh& /*mesh*/,
                                           const DofMap& /*dof_map*/) {
     throw FEException("GhostDofManager: Mesh library not available");
 }

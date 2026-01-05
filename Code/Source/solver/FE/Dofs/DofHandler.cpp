@@ -17,24 +17,10 @@
 // Mesh convenience overloads require the Mesh library to be linked, not just headers present.
 // Standalone FE builds inside the svMultiPhysics repo still see Mesh headers, so __has_include
 // alone is insufficient. Prefer an explicit compile definition when provided.
-#if defined(SVMP_FE_WITH_MESH)
-#  if SVMP_FE_WITH_MESH
-#    include "../../Mesh/Core/MeshBase.h"
-#    include "../../Mesh/Core/DistributedMesh.h"
-#    include "../../Mesh/Observer/ScopedSubscription.h"
-#    define DOFHANDLER_HAS_MESH 1
-#  else
-#    define DOFHANDLER_HAS_MESH 0
-#  endif
-#elif defined(__has_include)
-#  if __has_include("../../Mesh/Core/MeshBase.h")
-#    include "../../Mesh/Core/MeshBase.h"
-#    include "../../Mesh/Core/DistributedMesh.h"
-#    include "../../Mesh/Observer/ScopedSubscription.h"
-#    define DOFHANDLER_HAS_MESH 1
-#  else
-#    define DOFHANDLER_HAS_MESH 0
-#  endif
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#  include "Mesh/Mesh.h"
+#  include "Mesh/Observer/ScopedSubscription.h"
+#  define DOFHANDLER_HAS_MESH 1
 #else
 #  define DOFHANDLER_HAS_MESH 0
 #endif
@@ -5747,20 +5733,20 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
     mesh_cache_->updateSnapshot(&mesh, ptrs, sig, dof_state_revision_);
 }
 
-void DofHandler::distributeDofs(const DistributedMesh& mesh,
+void DofHandler::distributeDofs(const Mesh& mesh,
                                 const spaces::FunctionSpace& space,
                                 const DofDistributionOptions& options) {
     checkNotFinalized();
 
     const auto& local_mesh = mesh.local_mesh();
     if (local_mesh.n_cells() == 0) {
-        throw FEException("DofHandler::distributeDofs(DistributedMesh): local mesh has no cells");
+        throw FEException("DofHandler::distributeDofs(Mesh): local mesh has no cells");
     }
 
     DofDistributionOptions opts = options;
     opts.my_rank = mesh.rank();
     opts.world_size = mesh.world_size();
-#if FE_HAS_MPI
+#if FE_HAS_MPI && defined(MESH_HAS_MPI)
     opts.mpi_comm = mesh.mpi_comm();
 #endif
 
@@ -5775,7 +5761,7 @@ void DofHandler::distributeDofs(const DistributedMesh& mesh,
     const auto cell0 = local_mesh.cell_vertices_span(0);
     const int n_verts = static_cast<int>(cell0.second);
     if (n_verts <= 0) {
-        throw FEException("DofHandler::distributeDofs(DistributedMesh): cell 0 has no vertices");
+        throw FEException("DofHandler::distributeDofs(Mesh): cell 0 has no vertices");
     }
 
     if (layout.is_continuous) {
@@ -5859,13 +5845,13 @@ void DofHandler::distributeDofs(const DistributedMesh& mesh,
                 const auto f2v_offsets = local_mesh.face2vertex_offsets();
                 const auto f2v = local_mesh.face2vertex();
                 if (f2v_offsets.size() != static_cast<std::size_t>(local_mesh.n_faces()) + 1u) {
-                    throw FEException("DofHandler::distributeDofs(DistributedMesh): invalid face2vertex_offsets size for 2D edge mapping");
+                    throw FEException("DofHandler::distributeDofs(Mesh): invalid face2vertex_offsets size for 2D edge mapping");
                 }
                 for (std::size_t f = 0; f + 1 < f2v_offsets.size(); ++f) {
                     const auto begin = static_cast<std::size_t>(f2v_offsets[f]);
                     const auto end = static_cast<std::size_t>(f2v_offsets[f + 1]);
                     if (end < begin || end > f2v.size() || (end - begin) != 2u) {
-                        throw FEException("DofHandler::distributeDofs(DistributedMesh): expected 2 vertices per face for 2D edge mapping");
+                        throw FEException("DofHandler::distributeDofs(Mesh): expected 2 vertices per face for 2D edge mapping");
                     }
                 }
 
@@ -5925,10 +5911,10 @@ void DofHandler::distributeDofs(const DistributedMesh& mesh,
     if ((missing_edges && need_edges) || (missing_faces && need_faces)) {
         if (opts.topology_completion == TopologyCompletion::RequireComplete) {
             if (missing_edges && need_edges) {
-                throw FEException("DofHandler::distributeDofs(DistributedMesh): edge-interior DOFs require Mesh edges (n_edges>0 and edge2vertex populated)");
+                throw FEException("DofHandler::distributeDofs(Mesh): edge-interior DOFs require Mesh edges (n_edges>0 and edge2vertex populated)");
             }
             if (missing_faces && need_faces) {
-                throw FEException("DofHandler::distributeDofs(DistributedMesh): face-interior DOFs require Mesh faces (n_faces>0 and face2vertex populated)");
+                throw FEException("DofHandler::distributeDofs(Mesh): face-interior DOFs require Mesh faces (n_faces>0 and face2vertex populated)");
             }
         }
 
@@ -5966,7 +5952,7 @@ void DofHandler::distributeDofs(const DistributedMesh& mesh,
     topology.dim = local_mesh.dim();
 
     if (topology.n_cells <= 0) {
-        throw FEException("DofHandler::distributeDofs(DistributedMesh): local mesh has no cells");
+        throw FEException("DofHandler::distributeDofs(Mesh): local mesh has no cells");
     }
 
     // Build cell-to-vertex connectivity
@@ -6000,7 +5986,7 @@ void DofHandler::distributeDofs(const DistributedMesh& mesh,
     topology.face_gids = std::vector<gid_t>(local_mesh.face_gids().begin(),
                                             local_mesh.face_gids().end());
 
-    // Cell owner ranks (owned/ghost flags) from DistributedMesh.
+    // Cell owner ranks (owned/ghost flags) from Mesh.
     topology.cell_owner_ranks.resize(static_cast<std::size_t>(topology.n_cells), opts.my_rank);
     for (GlobalIndex c = 0; c < topology.n_cells; ++c) {
         topology.cell_owner_ranks[static_cast<std::size_t>(c)] =
@@ -6064,10 +6050,10 @@ void DofHandler::distributeDofs(const DistributedMesh& mesh,
 
         const auto base_type = infer_base_type(local_mesh.cell_vertices(0).size());
         if (base_type == ElementType::Unknown) {
-            throw FEException("DofHandler::distributeDofs(DistributedMesh): unsupported cell type for edge/face topology derivation");
+            throw FEException("DofHandler::distributeDofs(Mesh): unsupported cell type for edge/face topology derivation");
         }
         if (topology.vertex_gids.size() != static_cast<std::size_t>(topology.n_vertices)) {
-            throw FEException("DofHandler::distributeDofs(DistributedMesh): vertex_gids are required to derive edge/face topology deterministically");
+            throw FEException("DofHandler::distributeDofs(Mesh): vertex_gids are required to derive edge/face topology deterministically");
         }
 
         const auto ref = elements::ReferenceElement::create(base_type);
@@ -6292,7 +6278,7 @@ void DofHandler::distributeDofs(const MeshBase& /*mesh*/,
                       "Use distributeDofs(MeshTopologyInfo, DofLayoutInfo, options) instead.");
 }
 
-void DofHandler::distributeDofs(const DistributedMesh& /*mesh*/,
+void DofHandler::distributeDofs(const Mesh& /*mesh*/,
                                 const spaces::FunctionSpace& /*space*/,
                                 const DofDistributionOptions& /*options*/) {
     throw FEException("DofHandler::distributeDofs: Mesh library not available. "
@@ -6312,6 +6298,17 @@ void DofHandler::setDofMap(DofMap dof_map) {
     checkNotFinalized();
     ++dof_state_revision_;
     dof_map_ = std::move(dof_map);
+}
+
+void DofHandler::setPartition(DofPartition partition) {
+    checkNotFinalized();
+    partition_ = std::move(partition);
+    ghost_cache_valid_ = false;
+}
+
+void DofHandler::setEntityDofMap(std::unique_ptr<EntityDofMap> entity_dof_map) {
+    checkNotFinalized();
+    entity_dof_map_ = std::move(entity_dof_map);
 }
 
 void DofHandler::renumberDofs(DofNumberingStrategy strategy) {

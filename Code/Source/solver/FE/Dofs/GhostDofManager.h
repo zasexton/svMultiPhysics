@@ -42,6 +42,9 @@
 // Forward declarations
 namespace svmp {
     class DistributedMesh;
+    // Phase 5 (UNIFY_MESH): prefer the unified runtime mesh type name.
+    // In the Mesh library, `Mesh` is currently an alias of `DistributedMesh`.
+    using Mesh = DistributedMesh;
 }
 
 namespace svmp {
@@ -159,7 +162,7 @@ public:
      * @param dof_map The DOF map
      * @throws FEException if mesh/dof_map is inconsistent
      */
-    void identifyGhostDofs(const DistributedMesh& mesh, const DofMap& dof_map);
+    void identifyGhostDofs(const Mesh& mesh, const DofMap& dof_map);
 
     /**
      * @brief Identify shared DOFs on partition boundaries
@@ -168,7 +171,7 @@ public:
      * @param dof_map The DOF map
      * @throws FEException if mesh/dof_map is inconsistent
      */
-    void identifySharedDofs(const DistributedMesh& mesh, const DofMap& dof_map);
+    void identifySharedDofs(const Mesh& mesh, const DofMap& dof_map);
 
     /**
      * @brief Manually set ghost DOFs (for testing/custom setups)
