@@ -38,6 +38,63 @@ TEST_F(PolyGeometryTest, QuadAreaAndCentroidRaw) {
   EXPECT_TRUE(approx3(c, {{0.5, 0.5, 0.0}}));
 }
 
+TEST_F(PolyGeometryTest, ConcaveLPolygonCentroidRaw) {
+  // "L" polygon, ordered so that triangle-fan centroid about verts[0] is not reliable.
+  // Base polygon (z=0), CCW:
+  //   (0,0) (2,0) (2,1) (1,1) (1,2) (0,2)
+  // Rotated start index to (2,0): {1,2,3,4,5,0}.
+  std::vector<std::array<real_t,3>> verts = {{
+      {2, 0, 0},
+      {2, 1, 0},
+      {1, 1, 0},
+      {1, 2, 0},
+      {0, 2, 0},
+      {0, 0, 0}
+  }};
+
+  // Analytic centroid of a 2x2 square minus 1x1 at top-right:
+  //   (4*(1,1) - 1*(1.5,1.5))/3 = (5/6, 5/6).
+  const auto c = PolyGeometry::polygon_centroid(verts);
+  EXPECT_TRUE(approx3(c, {{5.0 / 6.0, 5.0 / 6.0, 0.0}}));
+}
+
+TEST_F(PolyGeometryTest, TriangulatePlanarPolygon_ConcaveL_AreaClosure) {
+  std::vector<std::array<real_t,3>> verts = {{
+      {2, 0, 0},
+      {2, 1, 0},
+      {1, 1, 0},
+      {1, 2, 0},
+      {0, 2, 0},
+      {0, 0, 0}
+  }};
+
+  std::vector<std::array<index_t,3>> tris;
+  ASSERT_TRUE(PolyGeometry::triangulate_planar_polygon(verts, tris));
+  EXPECT_EQ(tris.size(), 4u);
+
+  real_t sum = 0.0;
+  for (const auto& t : tris) {
+    const auto& a = verts[static_cast<size_t>(t[0])];
+    const auto& b = verts[static_cast<size_t>(t[1])];
+    const auto& c = verts[static_cast<size_t>(t[2])];
+    sum += MeshGeometry::triangle_area(a, b, c);
+  }
+  EXPECT_TRUE(approx(sum, 3.0));
+}
+
+TEST_F(PolyGeometryTest, TriangulatePlanarPolygon_RejectsSelfIntersectingBowTie) {
+  // Self-intersecting "bow tie" polygon in z=0.
+  std::vector<std::array<real_t,3>> verts = {{
+      {0, 0, 0},
+      {1, 1, 0},
+      {0, 1, 0},
+      {1, 0, 0}
+  }};
+  std::vector<std::array<index_t,3>> tris;
+  EXPECT_FALSE(PolyGeometry::triangulate_planar_polygon(verts, tris));
+  EXPECT_TRUE(tris.empty());
+}
+
 TEST_F(PolyGeometryTest, TriangleAreaAndCentroidMesh) {
   // Build a mesh with 3 vertices in 3D (no cells)
   std::vector<real_t> X = {0,0,0, 1,0,0, 0,1,0};
@@ -242,13 +299,13 @@ static MeshBase make_concave_L_prism_polyhedron_mesh(bool include_top_face = tru
 
   std::vector<index_t> face_conn;
 
-  // bottom (concave polygon); choose a fan-friendly first vertex (0) for robust triangulation.
-  face_conn.insert(face_conn.end(), {0, 1, 2, 3, 4, 5});
+  // bottom (concave polygon); intentionally start from a non-kernel vertex to exercise triangulation.
+  face_conn.insert(face_conn.end(), {1, 2, 3, 4, 5, 0});
   face_offs.push_back(static_cast<offset_t>(face_conn.size()));
 
   if (include_top_face) {
     // top polygon
-    face_conn.insert(face_conn.end(), {6, 7, 8, 9, 10, 11});
+    face_conn.insert(face_conn.end(), {7, 8, 9, 10, 11, 6});
     face_offs.push_back(static_cast<offset_t>(face_conn.size()));
   }
 

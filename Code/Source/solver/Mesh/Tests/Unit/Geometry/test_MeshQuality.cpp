@@ -77,6 +77,48 @@ MeshBase make_hex(const std::array<std::array<real_t, 3>, 8>& pts) {
   return mesh;
 }
 
+MeshBase make_wedge(const std::array<std::array<real_t, 3>, 6>& pts) {
+  std::vector<real_t> X_ref;
+  X_ref.reserve(6 * 3);
+  for (const auto& p : pts) {
+    X_ref.push_back(p[0]);
+    X_ref.push_back(p[1]);
+    X_ref.push_back(p[2]);
+  }
+
+  std::vector<offset_t> offs = {0, 6};
+  std::vector<index_t> conn = {0, 1, 2, 3, 4, 5};
+  std::vector<CellShape> shapes(1);
+  shapes[0].family = CellFamily::Wedge;
+  shapes[0].order = 1;
+  shapes[0].num_corners = 6;
+
+  MeshBase mesh;
+  mesh.build_from_arrays(3, X_ref, offs, conn, shapes);
+  return mesh;
+}
+
+MeshBase make_pyramid(const std::array<std::array<real_t, 3>, 5>& pts) {
+  std::vector<real_t> X_ref;
+  X_ref.reserve(5 * 3);
+  for (const auto& p : pts) {
+    X_ref.push_back(p[0]);
+    X_ref.push_back(p[1]);
+    X_ref.push_back(p[2]);
+  }
+
+  std::vector<offset_t> offs = {0, 5};
+  std::vector<index_t> conn = {0, 1, 2, 3, 4};
+  std::vector<CellShape> shapes(1);
+  shapes[0].family = CellFamily::Pyramid;
+  shapes[0].order = 1;
+  shapes[0].num_corners = 5;
+
+  MeshBase mesh;
+  mesh.build_from_arrays(3, X_ref, offs, conn, shapes);
+  return mesh;
+}
+
 MeshBase make_quad(const std::array<std::array<real_t, 3>, 4>& pts) {
   std::vector<real_t> X_ref;
   X_ref.reserve(4 * 3);
@@ -297,6 +339,73 @@ TEST(MeshQualityTest, JacobianAndScaledJacobian_IdentityHexAndInvertedTet) {
                                 {0.0, 0.0, 1.0}}});
   EXPECT_NEAR(MeshQuality::compute(inv_tet, 0, "jacobian"), 0.0, 1e-12);
   EXPECT_NEAR(MeshQuality::compute(inv_tet, 0, "scaled_jacobian"), 0.0, 1e-12);
+}
+
+TEST(MeshQualityTest, JacobianScaledJacobianAndConditionNumber_IdentityWedgeAndPyramid) {
+  MeshBase ref_wedge = make_wedge({{{0.0, 0.0, -1.0},
+                                    {1.0, 0.0, -1.0},
+                                    {0.0, 1.0, -1.0},
+                                    {0.0, 0.0, 1.0},
+                                    {1.0, 0.0, 1.0},
+                                    {0.0, 1.0, 1.0}}});
+  EXPECT_NEAR(MeshQuality::compute(ref_wedge, 0, "jacobian"), 1.0, 1e-12);
+  EXPECT_NEAR(MeshQuality::compute(ref_wedge, 0, "scaled_jacobian"), 1.0, 1e-12);
+  EXPECT_NEAR(MeshQuality::compute(ref_wedge, 0, "condition_number"), 1.0, 1e-12);
+
+  MeshBase ref_pyr = make_pyramid({{{-1.0, -1.0, 0.0},
+                                    {1.0, -1.0, 0.0},
+                                    {1.0, 1.0, 0.0},
+                                    {-1.0, 1.0, 0.0},
+                                    {0.0, 0.0, 1.0}}});
+  EXPECT_NEAR(MeshQuality::compute(ref_pyr, 0, "jacobian"), 1.0, 1e-12);
+  EXPECT_NEAR(MeshQuality::compute(ref_pyr, 0, "scaled_jacobian"), 1.0, 1e-12);
+  EXPECT_NEAR(MeshQuality::compute(ref_pyr, 0, "condition_number"), 1.0, 1e-12);
+}
+
+TEST(MeshQualityTest, EdgeRatio_WedgeAndPyramid) {
+  MeshBase ref_wedge = make_wedge({{{0.0, 0.0, -1.0},
+                                    {1.0, 0.0, -1.0},
+                                    {0.0, 1.0, -1.0},
+                                    {0.0, 0.0, 1.0},
+                                    {1.0, 0.0, 1.0},
+                                    {0.0, 1.0, 1.0}}});
+  EXPECT_NEAR(MeshQuality::compute(ref_wedge, 0, "edge_ratio"), 2.0, 1e-12);
+
+  MeshBase ref_pyr = make_pyramid({{{-1.0, -1.0, 0.0},
+                                    {1.0, -1.0, 0.0},
+                                    {1.0, 1.0, 0.0},
+                                    {-1.0, 1.0, 0.0},
+                                    {0.0, 0.0, 1.0}}});
+  const real_t expected = 2.0 / std::sqrt(3.0);
+  EXPECT_NEAR(MeshQuality::compute(ref_pyr, 0, "edge_ratio"), expected, 1e-12);
+}
+
+TEST(MeshQualityTest, DistortionReducesScaledJacobian_WedgeAndPyramid) {
+  // Shear y by +0.5 * x: J columns become non-orthogonal.
+  MeshBase shear_wedge = make_wedge({{{0.0, 0.0, -1.0},
+                                      {1.0, 0.5, -1.0},
+                                      {0.0, 1.0, -1.0},
+                                      {0.0, 0.0, 1.0},
+                                      {1.0, 0.5, 1.0},
+                                      {0.0, 1.0, 1.0}}});
+  const real_t sj_w = MeshQuality::compute(shear_wedge, 0, "scaled_jacobian");
+  const real_t cn_w = MeshQuality::compute(shear_wedge, 0, "condition_number");
+  EXPECT_GT(sj_w, 0.0);
+  EXPECT_LT(sj_w, 1.0 - 1e-6);
+  EXPECT_GT(cn_w, 0.0);
+  EXPECT_LT(cn_w, 1.0 - 1e-6);
+
+  MeshBase shear_pyr = make_pyramid({{{-1.0, -1.5, 0.0},  // y' = y + 0.5 x
+                                      {1.0, -0.5, 0.0},
+                                      {1.0, 1.5, 0.0},
+                                      {-1.0, 0.5, 0.0},
+                                      {0.0, 0.0, 1.0}}});
+  const real_t sj_p = MeshQuality::compute(shear_pyr, 0, "scaled_jacobian");
+  const real_t cn_p = MeshQuality::compute(shear_pyr, 0, "condition_number");
+  EXPECT_GT(sj_p, 0.0);
+  EXPECT_LT(sj_p, 1.0 - 1e-6);
+  EXPECT_GT(cn_p, 0.0);
+  EXPECT_LT(cn_p, 1.0 - 1e-6);
 }
 
 TEST(MeshQualityTest, PolyhedronMetricsMatchTetAggregation) {

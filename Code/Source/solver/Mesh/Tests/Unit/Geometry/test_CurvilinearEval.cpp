@@ -12,6 +12,8 @@
 #include "Topology/CellShape.h"
 #include "Topology/CellTopology.h"
 
+#include <algorithm>
+#include <cmath>
 #include <numeric>
 
 namespace svmp {
@@ -299,6 +301,126 @@ TEST(CurvilinearEvalTest, PartitionOfUnity_LagrangeP3) {
   }
 }
 
+TEST(CurvilinearEvalTest, DerivativePartitionOfUnity_LagrangeP3) {
+  const int p = 3;
+  struct Case {
+    CellFamily family;
+    ParametricPoint xi;
+    int pdim;
+  };
+  const std::vector<Case> cases = {
+      {CellFamily::Triangle, {0.2, 0.3, 0.0}, 2},
+      {CellFamily::Hex, {0.1, -0.2, 0.3}, 3},
+      {CellFamily::Wedge, {0.2, 0.2, 0.0}, 3},
+      {CellFamily::Pyramid, {0.0, 0.0, 0.3}, 3},
+  };
+
+  for (const auto& c : cases) {
+    const CellShape shape = make_shape(c.family, p);
+    const auto nodes = vtk_lagrange_nodes(c.family, p);
+    const size_t n = nodes.size();
+    ASSERT_EQ(n, static_cast<size_t>(shape.expected_vertices()));
+    const auto sf = CurvilinearEvaluator::evaluate_shape_functions(shape, n, c.xi);
+
+    for (int d = 0; d < c.pdim; ++d) {
+      real_t sum = 0.0;
+      for (const auto& g : sf.dN_dxi) sum += g[static_cast<size_t>(d)];
+      EXPECT_NEAR(sum, 0.0, 1e-9) << "family=" << static_cast<int>(c.family) << " d=" << d;
+    }
+  }
+}
+
+TEST(CurvilinearEvalTest, FiniteDifference_dN_dxi_LagrangeP3) {
+  const int p = 3;
+  const real_t eps = 1e-6;
+  struct Case {
+    CellFamily family;
+    ParametricPoint xi;
+  };
+  const std::vector<Case> cases = {
+      {CellFamily::Hex, {0.1, -0.2, 0.3}},
+      {CellFamily::Pyramid, {0.0, 0.0, 0.3}},
+  };
+
+  for (const auto& c : cases) {
+    const CellShape shape = make_shape(c.family, p);
+    const auto nodes = vtk_lagrange_nodes(c.family, p);
+    const size_t n = nodes.size();
+    ASSERT_EQ(n, static_cast<size_t>(shape.expected_vertices()));
+
+    const auto sf0 = CurvilinearEvaluator::evaluate_shape_functions(shape, n, c.xi);
+    ASSERT_EQ(sf0.N.size(), n);
+    ASSERT_EQ(sf0.dN_dxi.size(), n);
+
+    for (int d = 0; d < 3; ++d) {
+      ParametricPoint xip = c.xi;
+      ParametricPoint xim = c.xi;
+      xip[static_cast<size_t>(d)] += eps;
+      xim[static_cast<size_t>(d)] -= eps;
+      const auto sfp = CurvilinearEvaluator::evaluate_shape_functions(shape, n, xip);
+      const auto sfm = CurvilinearEvaluator::evaluate_shape_functions(shape, n, xim);
+      ASSERT_EQ(sfp.N.size(), n);
+      ASSERT_EQ(sfm.N.size(), n);
+
+      real_t max_err = 0.0;
+      for (size_t i = 0; i < n; ++i) {
+        const real_t fd = (sfp.N[i] - sfm.N[i]) / (2.0 * eps);
+        max_err = std::max(max_err, std::abs(fd - sf0.dN_dxi[i][static_cast<size_t>(d)]));
+      }
+      EXPECT_LT(max_err, 5e-6) << "family=" << static_cast<int>(c.family) << " d=" << d;
+    }
+  }
+}
+
+TEST(CurvilinearEvalTest, JacobianMatchesFiniteDifference_IdentityMapping_LagrangeP3) {
+  const int p = 3;
+  const real_t eps = 1e-6;
+
+  struct Case { CellFamily family; ParametricPoint xi; };
+  const std::vector<Case> cases = {
+      {CellFamily::Tetra, {0.2, 0.2, 0.2}},
+      {CellFamily::Hex, {0.1, -0.2, 0.3}},
+      {CellFamily::Wedge, {0.2, 0.2, 0.0}},
+      {CellFamily::Pyramid, {0.0, 0.0, 0.3}},
+  };
+
+  for (const auto& c : cases) {
+    const CellShape shape = make_shape(c.family, p);
+    const auto nodes = vtk_lagrange_nodes(c.family, p);
+    ASSERT_EQ(nodes.size(), static_cast<size_t>(shape.expected_vertices()));
+    const MeshBase mesh = make_identity_mesh(shape, nodes);
+
+    const auto eval0 = CurvilinearEvaluator::evaluate_geometry(mesh, 0, c.xi);
+    ASSERT_TRUE(eval0.is_valid);
+    ASSERT_EQ(eval0.jacobian.parametric_dim, 3);
+
+    for (int k = 0; k < 3; ++k) {
+      for (int d = 0; d < 3; ++d) {
+        const real_t expect = (k == d) ? 1.0 : 0.0;
+        EXPECT_NEAR(eval0.jacobian.matrix[static_cast<size_t>(k)][static_cast<size_t>(d)], expect, 5e-9)
+            << "family=" << static_cast<int>(c.family) << " k=" << k << " d=" << d;
+      }
+    }
+
+    for (int d = 0; d < 3; ++d) {
+      ParametricPoint xip = c.xi;
+      ParametricPoint xim = c.xi;
+      xip[static_cast<size_t>(d)] += eps;
+      xim[static_cast<size_t>(d)] -= eps;
+      const auto evalp = CurvilinearEvaluator::evaluate_geometry(mesh, 0, xip);
+      const auto evalm = CurvilinearEvaluator::evaluate_geometry(mesh, 0, xim);
+      ASSERT_TRUE(evalp.is_valid);
+      ASSERT_TRUE(evalm.is_valid);
+
+      for (int k = 0; k < 3; ++k) {
+        const real_t fd = (evalp.coordinates[static_cast<size_t>(k)] - evalm.coordinates[static_cast<size_t>(k)]) / (2.0 * eps);
+        EXPECT_NEAR(fd, eval0.jacobian.matrix[static_cast<size_t>(k)][static_cast<size_t>(d)], 1e-6)
+            << "family=" << static_cast<int>(c.family) << " k=" << k << " d=" << d;
+      }
+    }
+  }
+}
+
 TEST(CurvilinearEvalTest, NodalKronecker_TriangleAndHex_P3) {
   const int p = 3;
 
@@ -381,7 +503,6 @@ TEST(CurvilinearEvalTest, IdentityMapping_QuadraticSerendipity) {
   }
 }
 
-#ifdef MESH_HAS_EIGEN
 TEST(CurvilinearEvalTest, PyramidLagrange_P5_PartitionOfUnityAndInverseMap) {
   const int p = 5;
   const CellShape shape = make_shape(CellFamily::Pyramid, p);
@@ -451,7 +572,6 @@ TEST(CurvilinearEvalTest, PyramidLagrange_P7_NodalKroneckerSubset) {
     }
   }
 }
-#endif
 
 } // namespace test
 } // namespace svmp

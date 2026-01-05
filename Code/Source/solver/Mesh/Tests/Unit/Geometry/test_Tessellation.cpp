@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numeric>
+#include <unordered_map>
 
 namespace svmp {
 namespace test {
@@ -462,6 +463,56 @@ TEST(TessellationTest, FaceTessellation_RefinementAndHighOrderMapping) {
   EXPECT_NEAR(tess.vertices[1][2], 0.2, kTol);
 }
 
+TEST(TessellationTest, FaceTessellation_ConcavePolygon_AreaClosure) {
+  // Concave "L" polygon in z=0 plane:
+  //   (0,0) (2,0) (2,1) (1,1) (1,2) (0,2)
+  std::vector<real_t> X = {
+      0.0, 0.0, 0.0,  // 0
+      2.0, 0.0, 0.0,  // 1
+      2.0, 1.0, 0.0,  // 2
+      1.0, 1.0, 0.0,  // 3
+      1.0, 2.0, 0.0,  // 4
+      0.0, 2.0, 0.0   // 5
+  };
+
+  std::vector<offset_t> cell_offs = {0};
+  std::vector<index_t> cell_conn;
+  std::vector<CellShape> cell_shapes;
+
+  MeshBase mesh;
+  mesh.build_from_arrays(3, X, cell_offs, cell_conn, cell_shapes);
+
+  CellShape fshape;
+  fshape.family = CellFamily::Polygon;
+  fshape.order = 1;
+  fshape.num_corners = 6;
+
+  std::vector<CellShape> face_shapes = {fshape};
+  std::vector<offset_t> face_offs = {0, 6};
+  // Start at vertex 1 to ensure this is not a triangle-fan-safe ordering.
+  std::vector<index_t> face_conn = {1, 2, 3, 4, 5, 0};
+  std::vector<std::array<index_t,2>> face2cell = {{{INVALID_INDEX, INVALID_INDEX}}};
+  mesh.set_faces_from_arrays(face_shapes, face_offs, face_conn, face2cell);
+
+  TessellationConfig cfg;
+  const auto tess = Tessellator::tessellate_face(mesh, 0, cfg);
+
+  EXPECT_EQ(tess.sub_element_shape.family, CellFamily::Triangle);
+  EXPECT_EQ(tess.n_sub_elements(), 4);
+
+  real_t sum = 0.0;
+  for (int si = 0; si < tess.n_sub_elements(); ++si) {
+    const int b = tess.offsets[static_cast<size_t>(si)];
+    const int e = tess.offsets[static_cast<size_t>(si + 1)];
+    ASSERT_EQ(e - b, 3);
+    const auto& a = tess.vertices[static_cast<size_t>(tess.connectivity[static_cast<size_t>(b + 0)])];
+    const auto& b0 = tess.vertices[static_cast<size_t>(tess.connectivity[static_cast<size_t>(b + 1)])];
+    const auto& c = tess.vertices[static_cast<size_t>(tess.connectivity[static_cast<size_t>(b + 2)])];
+    sum += MeshGeometry::triangle_area(a, b0, c);
+  }
+  EXPECT_NEAR(sum, 3.0, 1e-12);
+}
+
 TEST(TessellationTest, BoundaryTessellation_FromHighOrderCellWhenFacesAreLinear) {
   const MeshBase mesh = make_curved_hex20_with_linear_faces();
 
@@ -544,9 +595,11 @@ TEST(TessellationTest, LocalAdaptiveRefinement_CurvedQuad_RefinesNearCurvedEdge)
 
   const auto tess = Tessellator::tessellate_cell(mesh, 0, cfg);
 
-  // Base for p=2 is level 1 -> 2x2 quads.
-  EXPECT_GT(tess.n_sub_elements(), 4);
-  EXPECT_LT(tess.n_sub_elements(), (1 << cfg.max_refinement_level) * (1 << cfg.max_refinement_level));
+  // Local adaptive quads emit triangles; base for p=2 is level 1 -> 2x2 quads -> 8 triangles.
+  EXPECT_EQ(tess.sub_element_shape.family, CellFamily::Triangle);
+  EXPECT_GT(tess.n_sub_elements(), 8);
+  const int N = 1 << cfg.max_refinement_level;
+  EXPECT_LE(tess.n_sub_elements(), 2 * N * N);
 
   std::vector<real_t> x_bottom;
   std::vector<real_t> x_top;
@@ -573,6 +626,75 @@ TEST(TessellationTest, LocalAdaptiveRefinement_CurvedQuad_RefinesNearCurvedEdge)
   const size_t nb = count_unique(std::move(x_bottom));
   const size_t nt = count_unique(std::move(x_top));
   EXPECT_GT(nb, nt);
+}
+
+TEST(TessellationTest, LocalAdaptiveRefinement_Quad_IsConforming_NoHoles) {
+  // Uses an identity-in-(x,y) mapping (z is curved), so we can classify boundary edges by x/y.
+  const MeshBase mesh = make_curved_quad8_cell_with_curved_bottom_edge();
+
+  TessellationConfig cfg;
+  cfg.local_adaptive = true;
+  cfg.refinement_level = 0;
+  cfg.min_refinement_level = 0;
+  cfg.max_refinement_level = 4;
+  cfg.curvature_threshold = 0.06;
+  cfg.configuration = Configuration::Current;
+
+  const auto tess = Tessellator::tessellate_cell(mesh, 0, cfg);
+  ASSERT_EQ(tess.sub_element_shape.family, CellFamily::Triangle);
+
+  struct EdgeKey {
+    index_t a;
+    index_t b;
+    bool operator==(const EdgeKey& o) const noexcept { return a == o.a && b == o.b; }
+  };
+  struct EdgeHash {
+    size_t operator()(const EdgeKey& e) const noexcept {
+      const size_t ha = std::hash<index_t>{}(e.a);
+      const size_t hb = std::hash<index_t>{}(e.b);
+      return ha ^ (hb + 0x9e3779b97f4a7c15ULL + (ha << 6) + (ha >> 2));
+    }
+  };
+  auto make_edge = [](index_t u, index_t v) -> EdgeKey {
+    return (u < v) ? EdgeKey{u, v} : EdgeKey{v, u};
+  };
+
+  std::unordered_map<EdgeKey, int, EdgeHash> counts;
+  counts.reserve(static_cast<size_t>(tess.n_sub_elements()) * 3u);
+
+  for (int si = 0; si < tess.n_sub_elements(); ++si) {
+    const int b = tess.offsets[static_cast<size_t>(si)];
+    const int e = tess.offsets[static_cast<size_t>(si + 1)];
+    ASSERT_EQ(e - b, 3);
+    const index_t v0 = tess.connectivity[static_cast<size_t>(b + 0)];
+    const index_t v1 = tess.connectivity[static_cast<size_t>(b + 1)];
+    const index_t v2 = tess.connectivity[static_cast<size_t>(b + 2)];
+    counts[make_edge(v0, v1)]++;
+    counts[make_edge(v1, v2)]++;
+    counts[make_edge(v2, v0)]++;
+  }
+
+  auto on = [](real_t v, real_t target) -> bool { return std::abs(v - target) < 1e-12; };
+  auto is_boundary_edge = [&](index_t u, index_t v) -> bool {
+    const auto& a = tess.vertices[static_cast<size_t>(u)];
+    const auto& b = tess.vertices[static_cast<size_t>(v)];
+    // Boundary of reference quad is x=±1 or y=±1 (mapping preserves x/y).
+    if (on(a[1], -1.0) && on(b[1], -1.0)) return true;
+    if (on(a[1], 1.0) && on(b[1], 1.0)) return true;
+    if (on(a[0], -1.0) && on(b[0], -1.0)) return true;
+    if (on(a[0], 1.0) && on(b[0], 1.0)) return true;
+    return false;
+  };
+
+  for (const auto& kv : counts) {
+    const auto& e = kv.first;
+    const int c = kv.second;
+    if (is_boundary_edge(e.a, e.b)) {
+      EXPECT_EQ(c, 1) << "boundary edge (" << e.a << "," << e.b << ") count=" << c;
+    } else {
+      EXPECT_EQ(c, 2) << "internal edge (" << e.a << "," << e.b << ") count=" << c;
+    }
+  }
 }
 
 TEST(TessellationTest, FieldEvaluator_StoresValuesPerVertex) {

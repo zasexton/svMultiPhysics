@@ -52,6 +52,33 @@ MeshBase create_two_tet_mesh() {
   return mesh;
 }
 
+MeshBase create_unit_hex_mesh(bool finalize_topology = true) {
+  std::vector<real_t> X_ref = {
+      0.0, 0.0, 0.0,  // 0
+      1.0, 0.0, 0.0,  // 1
+      1.0, 1.0, 0.0,  // 2
+      0.0, 1.0, 0.0,  // 3
+      0.0, 0.0, 1.0,  // 4
+      1.0, 0.0, 1.0,  // 5
+      1.0, 1.0, 1.0,  // 6
+      0.0, 1.0, 1.0   // 7
+  };
+
+  std::vector<offset_t> offs = {0, 8};
+  std::vector<index_t> conn = {0, 1, 2, 3, 4, 5, 6, 7};
+  std::vector<CellShape> shapes(1);
+  shapes[0].family = CellFamily::Hex;
+  shapes[0].order = 1;
+  shapes[0].num_corners = 8;
+
+  MeshBase mesh;
+  mesh.build_from_arrays(3, X_ref, offs, conn, shapes);
+  if (finalize_topology) {
+    mesh.finalize();
+  }
+  return mesh;
+}
+
 #ifdef MESH_HAS_EIGEN
 MeshBase create_box_hex_mesh() {
   // Rectangular box: 2 x 1 x 0.5 (distinct PCA eigenvalues).
@@ -80,6 +107,43 @@ MeshBase create_box_hex_mesh() {
 #endif
 } // namespace
 
+TEST(BoundingVolumeTest, AABBIntersectsAndIntersection) {
+  AABB a({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0});
+  AABB b({0.5, 0.5, 0.5}, {2.0, 2.0, 2.0});
+  EXPECT_TRUE(a.intersects(b));
+
+  const auto i = a.intersection(b);
+  EXPECT_TRUE(i.is_valid());
+  EXPECT_TRUE(approx(i.min[0], 0.5));
+  EXPECT_TRUE(approx(i.min[1], 0.5));
+  EXPECT_TRUE(approx(i.min[2], 0.5));
+  EXPECT_TRUE(approx(i.max[0], 1.0));
+  EXPECT_TRUE(approx(i.max[1], 1.0));
+  EXPECT_TRUE(approx(i.max[2], 1.0));
+  EXPECT_TRUE(approx(i.volume(), 0.125));
+
+  AABB c({2.0, 2.0, 2.0}, {3.0, 3.0, 3.0});
+  EXPECT_FALSE(a.intersects(c));
+  EXPECT_FALSE(a.intersection(c).is_valid());
+}
+
+TEST(BoundingVolumeTest, BoundingSphereFromAABBContainsCorners) {
+  AABB box({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0});
+  BoundingSphere s(box);
+  EXPECT_TRUE(approx(s.center[0], 0.5));
+  EXPECT_TRUE(approx(s.center[1], 0.5));
+  EXPECT_TRUE(approx(s.center[2], 0.5));
+  EXPECT_TRUE(approx(s.radius, std::sqrt(3.0) * 0.5));
+
+  const std::array<std::array<real_t, 3>, 8> corners = {{
+      {{0.0, 0.0, 0.0}}, {{1.0, 0.0, 0.0}}, {{1.0, 1.0, 0.0}}, {{0.0, 1.0, 0.0}},
+      {{0.0, 0.0, 1.0}}, {{1.0, 0.0, 1.0}}, {{1.0, 1.0, 1.0}}, {{0.0, 1.0, 1.0}},
+  }};
+  for (const auto& c : corners) {
+    EXPECT_TRUE(s.contains(c));
+  }
+}
+
 TEST(BoundingVolumeTest, BuildCellAABBs) {
   MeshBase mesh = create_two_tet_mesh();
   auto boxes = BoundingVolumeBuilder::build_cell_aabbs(mesh, Configuration::Reference);
@@ -98,6 +162,73 @@ TEST(BoundingVolumeTest, BuildCellAABBs) {
   EXPECT_TRUE(approx(boxes[1].max[0], 11.0));
   EXPECT_TRUE(approx(boxes[1].max[1], 1.0));
   EXPECT_TRUE(approx(boxes[1].max[2], 1.0));
+}
+
+TEST(BoundingVolumeTest, BuildFaceAndEdgeAABBs_UnitHexDimensions) {
+  MeshBase mesh = create_unit_hex_mesh(/*finalize_topology=*/true);
+  ASSERT_EQ(mesh.n_faces(), 6u);
+  ASSERT_EQ(mesh.n_edges(), 12u);
+
+  const auto face_boxes = BoundingVolumeBuilder::build_face_aabbs(mesh, Configuration::Reference);
+  ASSERT_EQ(face_boxes.size(), mesh.n_faces());
+
+  for (const auto& b : face_boxes) {
+    ASSERT_TRUE(b.is_valid());
+    const auto dims = b.dimensions();
+    int zeros = 0;
+    int ones = 0;
+    for (int d = 0; d < 3; ++d) {
+      if (approx(dims[static_cast<size_t>(d)], 0.0)) zeros++;
+      if (approx(dims[static_cast<size_t>(d)], 1.0)) ones++;
+    }
+    EXPECT_EQ(zeros, 1);
+    EXPECT_EQ(ones, 2);
+  }
+
+  const auto edge_boxes = BoundingVolumeBuilder::build_edge_aabbs(mesh, Configuration::Reference);
+  ASSERT_EQ(edge_boxes.size(), mesh.n_edges());
+
+  for (const auto& b : edge_boxes) {
+    ASSERT_TRUE(b.is_valid());
+    const auto dims = b.dimensions();
+    int zeros = 0;
+    int ones = 0;
+    for (int d = 0; d < 3; ++d) {
+      if (approx(dims[static_cast<size_t>(d)], 0.0)) zeros++;
+      if (approx(dims[static_cast<size_t>(d)], 1.0)) ones++;
+    }
+    EXPECT_EQ(zeros, 2);
+    EXPECT_EQ(ones, 1);
+  }
+}
+
+TEST(BoundingVolumeTest, BuildMeshAABBAndCellSpheres_UnitHex) {
+  MeshBase mesh = create_unit_hex_mesh(/*finalize_topology=*/false);
+  const auto mesh_aabb = BoundingVolumeBuilder::build_mesh_aabb(mesh, Configuration::Reference);
+  EXPECT_TRUE(approx(mesh_aabb.min[0], 0.0));
+  EXPECT_TRUE(approx(mesh_aabb.min[1], 0.0));
+  EXPECT_TRUE(approx(mesh_aabb.min[2], 0.0));
+  EXPECT_TRUE(approx(mesh_aabb.max[0], 1.0));
+  EXPECT_TRUE(approx(mesh_aabb.max[1], 1.0));
+  EXPECT_TRUE(approx(mesh_aabb.max[2], 1.0));
+
+  const auto spheres = BoundingVolumeBuilder::build_cell_spheres(mesh, Configuration::Reference);
+  ASSERT_EQ(spheres.size(), 1u);
+  EXPECT_TRUE(approx(spheres[0].center[0], 0.5));
+  EXPECT_TRUE(approx(spheres[0].center[1], 0.5));
+  EXPECT_TRUE(approx(spheres[0].center[2], 0.5));
+  EXPECT_TRUE(approx(spheres[0].radius, std::sqrt(3.0) * 0.5));
+
+  // Sphere should contain all mesh vertices.
+  const auto& X = mesh.X_ref();
+  const int dim = mesh.dim();
+  for (index_t v = 0; v < static_cast<index_t>(mesh.n_vertices()); ++v) {
+    std::array<real_t, 3> pt = {0.0, 0.0, 0.0};
+    pt[0] = X[static_cast<size_t>(v) * dim + 0];
+    pt[1] = X[static_cast<size_t>(v) * dim + 1];
+    pt[2] = X[static_cast<size_t>(v) * dim + 2];
+    EXPECT_TRUE(spheres[0].contains(pt));
+  }
 }
 
 TEST(BoundingVolumeTest, BuildAABBTreePartitionsCells) {
@@ -135,6 +266,7 @@ TEST(BoundingVolumeTest, BuildAABBTreePartitionsCells) {
 TEST(BoundingVolumeTest, BuildCellOBBContainsVertices) {
   MeshBase mesh = create_box_hex_mesh();
   auto obb = BoundingVolumeBuilder::build_cell_obb_pca(mesh, 0, Configuration::Reference);
+  auto aabb = obb.to_aabb();
 
   const auto& X = mesh.X_ref();
   const int dim = mesh.dim();
@@ -144,10 +276,10 @@ TEST(BoundingVolumeTest, BuildCellOBBContainsVertices) {
     pt[1] = X[static_cast<size_t>(v) * dim + 1];
     pt[2] = X[static_cast<size_t>(v) * dim + 2];
     EXPECT_TRUE(obb.contains(pt));
+    EXPECT_TRUE(aabb.contains(pt));
   }
 }
 #endif
 
 } // namespace test
 } // namespace svmp
-
