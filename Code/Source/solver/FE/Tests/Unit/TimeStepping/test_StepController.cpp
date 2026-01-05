@@ -25,6 +25,7 @@
 #include "Systems/TransientSystem.h"
 
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
+#include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
 
 #include "TimeStepping/StepController.h"
 #include "TimeStepping/TimeHistory.h"
@@ -39,53 +40,9 @@ using svmp::FE::ElementType;
 using svmp::FE::GlobalIndex;
 using svmp::FE::Real;
 
+namespace ts_test = svmp::FE::timestepping::test;
+
 namespace {
-
-svmp::FE::dofs::MeshTopologyInfo singleTetraTopology()
-{
-    svmp::FE::dofs::MeshTopologyInfo topo;
-    topo.n_cells = 1;
-    topo.n_vertices = 4;
-    topo.dim = 3;
-    topo.cell2vertex_offsets = {0, 4};
-    topo.cell2vertex_data = {0, 1, 2, 3};
-    topo.vertex_gids = {0, 1, 2, 3};
-    topo.cell_gids = {0};
-    topo.cell_owner_ranks = {0};
-    return topo;
-}
-
-void setVectorByDof(svmp::FE::backends::GenericVector& vec, const std::vector<Real>& values)
-{
-    ASSERT_EQ(static_cast<std::size_t>(vec.size()), values.size());
-    auto view = vec.createAssemblyView();
-    ASSERT_NE(view.get(), nullptr);
-    view->beginAssemblyPhase();
-    for (GlobalIndex i = 0; i < vec.size(); ++i) {
-        view->addVectorEntry(i, values[static_cast<std::size_t>(i)], svmp::FE::assembly::AddMode::Insert);
-    }
-    view->finalizeAssembly();
-}
-
-std::unique_ptr<svmp::FE::backends::BackendFactory> createTestFactory()
-{
-#if defined(FE_HAS_EIGEN) && FE_HAS_EIGEN
-    return svmp::FE::backends::BackendFactory::create(svmp::FE::backends::BackendKind::Eigen);
-#else
-    return nullptr;
-#endif
-}
-
-svmp::FE::backends::SolverOptions directSolve()
-{
-    svmp::FE::backends::SolverOptions opts;
-    opts.method = svmp::FE::backends::SolverMethod::Direct;
-    opts.preconditioner = svmp::FE::backends::PreconditionerType::None;
-    opts.rel_tol = 1e-14;
-    opts.abs_tol = 1e-14;
-    opts.max_iter = 1;
-    return opts;
-}
 
 class RejectImmediatelyController final : public svmp::FE::timestepping::StepController {
 public:
@@ -233,21 +190,21 @@ TEST(TimeLoopAdaptiveStep, ReturnsFailureInsteadOfThrowWhenControllerStops)
     sys.addCellKernel("op", u_field, u_field, kernel);
 
     svmp::FE::systems::SetupInputs inputs;
-    inputs.topology_override = singleTetraTopology();
+    inputs.topology_override = ts_test::singleTetraTopology();
     sys.setup({}, inputs);
 
     auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
     svmp::FE::systems::TransientSystem transient(sys, integrator);
 
-    auto factory = createTestFactory();
+    auto factory = ts_test::createTestFactory();
     ASSERT_NE(factory.get(), nullptr);
-    auto linear = factory->createLinearSolver(directSolve());
+    auto linear = factory->createLinearSolver(ts_test::directSolve());
     ASSERT_NE(linear.get(), nullptr);
 
     auto history = svmp::FE::timestepping::TimeHistory::allocate(*factory, sys.dofHandler().getNumDofs());
     const std::vector<Real> u0 = {1.0, -0.5, 0.25, 2.0};
-    setVectorByDof(history.uPrev(), u0);
-    setVectorByDof(history.uPrev2(), u0);
+    ts_test::setVectorByDof(history.uPrev(), u0);
+    ts_test::setVectorByDof(history.uPrev2(), u0);
     history.resetCurrentToPrevious();
 
     svmp::FE::timestepping::TimeLoopOptions opts;
@@ -302,21 +259,21 @@ TEST(TimeLoopAdaptiveStep, CallsDtUpdatedCallbackOnAcceptedStep)
     sys.addCellKernel("op", u_field, u_field, kernel);
 
     svmp::FE::systems::SetupInputs inputs;
-    inputs.topology_override = singleTetraTopology();
+    inputs.topology_override = ts_test::singleTetraTopology();
     sys.setup({}, inputs);
 
     auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
     svmp::FE::systems::TransientSystem transient(sys, integrator);
 
-    auto factory = createTestFactory();
+    auto factory = ts_test::createTestFactory();
     ASSERT_NE(factory.get(), nullptr);
-    auto linear = factory->createLinearSolver(directSolve());
+    auto linear = factory->createLinearSolver(ts_test::directSolve());
     ASSERT_NE(linear.get(), nullptr);
 
     auto history = svmp::FE::timestepping::TimeHistory::allocate(*factory, sys.dofHandler().getNumDofs());
     const std::vector<Real> u0 = {1.0, -0.5, 0.25, 2.0};
-    setVectorByDof(history.uPrev(), u0);
-    setVectorByDof(history.uPrev2(), u0);
+    ts_test::setVectorByDof(history.uPrev(), u0);
+    ts_test::setVectorByDof(history.uPrev2(), u0);
     history.resetCurrentToPrevious();
 
     svmp::FE::timestepping::TimeLoopOptions opts;
@@ -373,22 +330,22 @@ TEST(TimeLoopAdaptiveStep, RetriesWhenLinearSolveFailsThenRecovers)
     sys.addCellKernel("op", u_field, u_field, kernel);
 
     svmp::FE::systems::SetupInputs inputs;
-    inputs.topology_override = singleTetraTopology();
+    inputs.topology_override = ts_test::singleTetraTopology();
     sys.setup({}, inputs);
 
     auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
     svmp::FE::systems::TransientSystem transient(sys, integrator);
 
-    auto factory = createTestFactory();
+    auto factory = ts_test::createTestFactory();
     ASSERT_NE(factory.get(), nullptr);
-    auto inner = factory->createLinearSolver(directSolve());
+    auto inner = factory->createLinearSolver(ts_test::directSolve());
     ASSERT_NE(inner.get(), nullptr);
     FailOnceLinearSolver linear(*inner, /*failures=*/1);
 
     auto history = svmp::FE::timestepping::TimeHistory::allocate(*factory, sys.dofHandler().getNumDofs());
     const std::vector<Real> u0 = {1.0, -0.5, 0.25, 2.0};
-    setVectorByDof(history.uPrev(), u0);
-    setVectorByDof(history.uPrev2(), u0);
+    ts_test::setVectorByDof(history.uPrev(), u0);
+    ts_test::setVectorByDof(history.uPrev2(), u0);
     history.resetCurrentToPrevious();
 
     svmp::FE::timestepping::TimeLoopOptions opts;
