@@ -215,6 +215,11 @@ public:
   }
 
   /**
+   * @brief Convenience: fields that need any ghost synchronization (Exchange or Accumulate).
+   */
+  static std::vector<FieldHandle> fields_requiring_ghost_update(const MeshBase& mesh);
+
+  /**
    * @brief Count total number of fields
    * @param mesh The mesh
    * @return Total field count

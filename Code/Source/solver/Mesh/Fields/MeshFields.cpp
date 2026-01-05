@@ -386,6 +386,32 @@ std::vector<FieldHandle> MeshFields::fields_with_ghost_policy(const MeshBase& me
   return result;
 }
 
+std::vector<FieldHandle> MeshFields::fields_requiring_ghost_update(const MeshBase& mesh) {
+  std::vector<FieldHandle> result;
+
+  for (int k = 0; k < 4; ++k) {
+    const auto kind = static_cast<EntityKind>(k);
+    for (const auto& name : mesh.field_names(kind)) {
+      FieldHandle h = mesh.field_handle(kind, name);
+      if (h.id == 0) continue;
+      const FieldDescriptor* desc = mesh.field_descriptor(h);
+      if (!desc) continue;
+      if (desc->ghost_policy != FieldGhostPolicy::None) {
+        result.push_back(h);
+      }
+    }
+  }
+
+  std::sort(result.begin(), result.end(), [](const FieldHandle& a, const FieldHandle& b) {
+    const int ak = static_cast<int>(a.kind);
+    const int bk = static_cast<int>(b.kind);
+    if (ak != bk) return ak < bk;
+    return a.name < b.name;
+  });
+
+  return result;
+}
+
 size_t MeshFields::total_field_count(const MeshBase& mesh) {
   size_t count = 0;
   for (int k = 0; k < 4; ++k) {
