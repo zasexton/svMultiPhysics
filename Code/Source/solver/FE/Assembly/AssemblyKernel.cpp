@@ -54,19 +54,20 @@ RequiredData MassKernel::getRequiredData() const
 
 void MassKernel::computeCell(const AssemblyContext& ctx, KernelOutput& output)
 {
-    const auto n_dofs = ctx.numTestDofs();
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
     const auto n_qpts = ctx.numQuadraturePoints();
 
-    output.reserve(n_dofs, n_dofs, true, false);
+    output.reserve(n_test, n_trial, true, false);
 
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const Real w = coefficient_ * ctx.integrationWeight(q);
 
-        for (LocalIndex i = 0; i < n_dofs; ++i) {
+        for (LocalIndex i = 0; i < n_test; ++i) {
             const Real phi_i = ctx.basisValue(i, q);
 
-            for (LocalIndex j = 0; j < n_dofs; ++j) {
-                const Real phi_j = ctx.basisValue(j, q);
+            for (LocalIndex j = 0; j < n_trial; ++j) {
+                const Real phi_j = ctx.trialBasisValue(j, q);
                 output.matrixEntry(i, j) += w * phi_i * phi_j;
             }
         }
@@ -89,19 +90,20 @@ RequiredData StiffnessKernel::getRequiredData() const
 
 void StiffnessKernel::computeCell(const AssemblyContext& ctx, KernelOutput& output)
 {
-    const auto n_dofs = ctx.numTestDofs();
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
     const auto n_qpts = ctx.numQuadraturePoints();
 
-    output.reserve(n_dofs, n_dofs, true, false);
+    output.reserve(n_test, n_trial, true, false);
 
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const Real w = coefficient_ * ctx.integrationWeight(q);
 
-        for (LocalIndex i = 0; i < n_dofs; ++i) {
+        for (LocalIndex i = 0; i < n_test; ++i) {
             const auto grad_i = ctx.physicalGradient(i, q);
 
-            for (LocalIndex j = 0; j < n_dofs; ++j) {
-                const auto grad_j = ctx.physicalGradient(j, q);
+            for (LocalIndex j = 0; j < n_trial; ++j) {
+                const auto grad_j = ctx.trialPhysicalGradient(j, q);
 
                 // Dot product of gradients
                 Real dot = grad_i[0] * grad_j[0] +
@@ -175,17 +177,18 @@ RequiredData PoissonKernel::getRequiredData() const
 
 void PoissonKernel::computeCell(const AssemblyContext& ctx, KernelOutput& output)
 {
-    const auto n_dofs = ctx.numTestDofs();
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
     const auto n_qpts = ctx.numQuadraturePoints();
 
-    output.reserve(n_dofs, n_dofs, true, true);
+    output.reserve(n_test, n_trial, true, true);
 
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const Real w = ctx.integrationWeight(q);
         const auto x = ctx.physicalPoint(q);
         const Real f = source_(x[0], x[1], x[2]);
 
-        for (LocalIndex i = 0; i < n_dofs; ++i) {
+        for (LocalIndex i = 0; i < n_test; ++i) {
             const Real phi_i = ctx.basisValue(i, q);
             const auto grad_i = ctx.physicalGradient(i, q);
 
@@ -193,8 +196,8 @@ void PoissonKernel::computeCell(const AssemblyContext& ctx, KernelOutput& output
             output.vectorEntry(i) += w * f * phi_i;
 
             // Stiffness: (grad phi_j, grad phi_i)
-            for (LocalIndex j = 0; j < n_dofs; ++j) {
-                const auto grad_j = ctx.physicalGradient(j, q);
+            for (LocalIndex j = 0; j < n_trial; ++j) {
+                const auto grad_j = ctx.trialPhysicalGradient(j, q);
 
                 Real dot = grad_i[0] * grad_j[0] +
                            grad_i[1] * grad_j[1] +

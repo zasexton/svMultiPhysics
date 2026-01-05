@@ -60,13 +60,19 @@
  */
 
 #include "Core/Types.h"
+#include "Core/ParameterValue.h"
 #include "AssemblyKernel.h"
+#include "TimeIntegrationContext.h"
 
 #include <vector>
 #include <span>
 #include <array>
+#include <functional>
 #include <memory>
+#include <optional>
+#include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace svmp {
 namespace FE {
@@ -193,6 +199,19 @@ public:
         RequiredData required_data);
 
     /**
+     * @brief Configure for a specific element (space-aware)
+     *
+     * Preferred overload when assembling vector-valued spaces (e.g. ProductSpace)
+     * because the prototype element DOF count may differ from the FunctionSpace
+     * DOF count.
+     */
+    void configure(
+        GlobalIndex cell_id,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        RequiredData required_data);
+
+    /**
      * @brief Configure for a face
      *
      * @param face_id Face index
@@ -207,6 +226,18 @@ public:
         GlobalIndex cell_id,
         LocalIndex local_face_id,
         const elements::Element& element,
+        RequiredData required_data,
+        ContextType type);
+
+    /**
+     * @brief Configure for a face (space-aware)
+     */
+    void configureFace(
+        GlobalIndex face_id,
+        GlobalIndex cell_id,
+        LocalIndex local_face_id,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
         RequiredData required_data,
         ContextType type);
 
@@ -228,6 +259,11 @@ public:
      * @brief Get current cell ID
      */
     [[nodiscard]] GlobalIndex cellId() const noexcept { return cell_id_; }
+
+    /**
+     * @brief Get current face ID (face contexts only)
+     */
+    [[nodiscard]] GlobalIndex faceId() const noexcept { return face_id_; }
 
     /**
      * @brief Get spatial dimension
@@ -255,6 +291,16 @@ public:
     [[nodiscard]] bool isSquare() const noexcept {
         return n_test_dofs_ == n_trial_dofs_;
     }
+
+    // =========================================================================
+    // Space Metadata
+    // =========================================================================
+
+    [[nodiscard]] FieldType testFieldType() const noexcept { return test_field_type_; }
+    [[nodiscard]] FieldType trialFieldType() const noexcept { return trial_field_type_; }
+
+    [[nodiscard]] int testValueDimension() const noexcept { return test_value_dim_; }
+    [[nodiscard]] int trialValueDimension() const noexcept { return trial_value_dim_; }
 
     // =========================================================================
     // Quadrature Data
@@ -354,6 +400,32 @@ public:
     [[nodiscard]] Vector3D normal(LocalIndex q) const;
 
     // =========================================================================
+    // Entity Measures (optional; prepared if RequiredData::EntityMeasures)
+    // =========================================================================
+
+    /**
+     * @brief Cell diameter h (max vertex distance)
+     *
+     * Available for all context types (cell/boundary/interior face) since all
+     * are associated with a cell.
+     */
+    [[nodiscard]] Real cellDiameter() const noexcept { return cell_diameter_; }
+
+    /**
+     * @brief Cell volume/measure
+     *
+     * Defined for cell contexts. Using this for face contexts is an error.
+     */
+    [[nodiscard]] Real cellVolume() const;
+
+    /**
+     * @brief Facet area/measure
+     *
+     * Defined for face contexts. Using this for cell contexts is an error.
+     */
+    [[nodiscard]] Real facetArea() const;
+
+    // =========================================================================
     // Basis Function Data (Test Space)
     // =========================================================================
 
@@ -395,6 +467,22 @@ public:
     [[nodiscard]] Vector3D physicalGradient(LocalIndex i, LocalIndex q) const;
 
     // =========================================================================
+    // Basis Hessians (optional; prepared if RequiredData::BasisHessians)
+    // =========================================================================
+
+    /**
+     * @brief Get reference Hessian of test basis function (d^2 phi / dxi^2)
+     */
+    [[nodiscard]] Matrix3x3 referenceHessian(LocalIndex i, LocalIndex q) const;
+
+    /**
+     * @brief Get physical Hessian of test basis function (d^2 phi / dx^2)
+     *
+     * For affine mappings: H_x(phi) = J^{-T} * H_xi(phi) * J^{-1}.
+     */
+    [[nodiscard]] Matrix3x3 physicalHessian(LocalIndex i, LocalIndex q) const;
+
+    // =========================================================================
     // Trial Basis Function Data (for rectangular assembly)
     // =========================================================================
 
@@ -416,6 +504,16 @@ public:
      */
     [[nodiscard]] Vector3D trialPhysicalGradient(LocalIndex j, LocalIndex q) const;
 
+    /**
+     * @brief Get reference Hessian of trial basis function (d^2 psi / dxi^2)
+     */
+    [[nodiscard]] Matrix3x3 trialReferenceHessian(LocalIndex j, LocalIndex q) const;
+
+    /**
+     * @brief Get physical Hessian of trial basis function (d^2 psi / dx^2)
+     */
+    [[nodiscard]] Matrix3x3 trialPhysicalHessian(LocalIndex j, LocalIndex q) const;
+
     // =========================================================================
     // Solution Data (for nonlinear problems)
     // =========================================================================
@@ -428,6 +526,26 @@ public:
     void setSolutionCoefficients(std::span<const Real> coefficients);
 
     /**
+     * @brief Set previous-step solution coefficients (u^{n-1}) for transient forms
+     *
+     * This is only required when assembling forms containing symbolic `dt(·,k)`
+     * in a transient time-integration context.
+     */
+    void setPreviousSolutionCoefficients(std::span<const Real> coefficients);
+
+    /**
+     * @brief Set previous-previous solution coefficients (u^{n-2}) for higher-order stencils
+     */
+    void setPreviousSolution2Coefficients(std::span<const Real> coefficients);
+
+    /**
+     * @brief Set k-th previous solution coefficients (u^{n-k})
+     *
+     * @param k History index (k=1 is u^{n-1})
+     */
+    void setPreviousSolutionCoefficientsK(int k, std::span<const Real> coefficients);
+
+    /**
      * @brief Get solution value at quadrature point
      *
      * u_h(x_q) = sum_i U_i * phi_i(x_q)
@@ -438,6 +556,31 @@ public:
     [[nodiscard]] Real solutionValue(LocalIndex q) const;
 
     /**
+     * @brief Get vector-valued solution value at quadrature point
+     *
+     * Only valid when the trial space is vector-valued (e.g. ProductSpace).
+     */
+    [[nodiscard]] Vector3D solutionVectorValue(LocalIndex q) const;
+
+    /**
+     * @brief Get previous-step solution value at quadrature point
+     */
+    [[nodiscard]] Real previousSolutionValue(LocalIndex q) const;
+
+    [[nodiscard]] Real previousSolutionValue(LocalIndex q, int k) const;
+
+    [[nodiscard]] Vector3D previousSolutionVectorValue(LocalIndex q) const;
+
+    [[nodiscard]] Vector3D previousSolutionVectorValue(LocalIndex q, int k) const;
+
+    /**
+     * @brief Get previous-previous solution value at quadrature point
+     */
+    [[nodiscard]] Real previousSolution2Value(LocalIndex q) const;
+
+    [[nodiscard]] Vector3D previousSolution2VectorValue(LocalIndex q) const;
+
+    /**
      * @brief Get solution gradient at quadrature point
      *
      * @param q Quadrature point index
@@ -446,11 +589,153 @@ public:
     [[nodiscard]] Vector3D solutionGradient(LocalIndex q) const;
 
     /**
+     * @brief Get Jacobian of a vector-valued solution at quadrature point
+     *
+     * Returns a 3x3 matrix with entries J[i][j] = d u_i / d x_j.
+     * Only the leading value_dimension() rows and spatial dimension() columns
+     * are meaningful.
+     */
+    [[nodiscard]] Matrix3x3 solutionJacobian(LocalIndex q) const;
+
+    /**
+     * @brief Get previous-step solution gradient at quadrature point
+     */
+    [[nodiscard]] Vector3D previousSolutionGradient(LocalIndex q) const;
+
+    [[nodiscard]] Matrix3x3 previousSolutionJacobian(LocalIndex q) const;
+
+    /**
+     * @brief Get previous-previous solution gradient at quadrature point
+     */
+    [[nodiscard]] Vector3D previousSolution2Gradient(LocalIndex q) const;
+
+    [[nodiscard]] Matrix3x3 previousSolution2Jacobian(LocalIndex q) const;
+
+    /**
+     * @brief Get solution Hessian at quadrature point
+     *
+     * Only available when RequiredData::SolutionHessians was requested.
+     */
+    [[nodiscard]] Matrix3x3 solutionHessian(LocalIndex q) const;
+
+    /**
+     * @brief Get solution Laplacian at quadrature point
+     *
+     * Only available when RequiredData::SolutionLaplacians was requested.
+     */
+    [[nodiscard]] Real solutionLaplacian(LocalIndex q) const;
+
+    /**
      * @brief Check if solution data is available
      */
     [[nodiscard]] bool hasSolutionData() const noexcept {
-        return !solution_values_.empty();
+        return !solution_values_.empty() || !solution_vector_values_.empty();
     }
+
+    [[nodiscard]] bool hasPreviousSolutionData() const noexcept;
+    [[nodiscard]] bool hasPreviousSolution2Data() const noexcept;
+
+    void clearPreviousSolutionData() noexcept
+    {
+        clearPreviousSolutionDataK(1);
+    }
+
+    void clearPreviousSolution2Data() noexcept
+    {
+        clearPreviousSolutionDataK(2);
+    }
+
+    void clearPreviousSolutionDataK(int k) noexcept;
+
+    void clearAllPreviousSolutionData() noexcept;
+
+    // =========================================================================
+    // Material State (optional)
+    // =========================================================================
+
+    /**
+     * @brief Bind per-integration-point state storage for the current cell
+     *
+     * The assembler should call this when the active kernel requests
+     * RequiredData::MaterialState.
+     */
+    void setMaterialState(std::byte* cell_state_base,
+                          std::size_t bytes_per_qpt,
+                          std::size_t stride_bytes) noexcept;
+
+    void setMaterialState(std::byte* cell_state_old_base,
+                          std::byte* cell_state_work_base,
+                          std::size_t bytes_per_qpt,
+                          std::size_t stride_bytes) noexcept;
+
+    [[nodiscard]] bool hasMaterialState() const noexcept { return material_state_work_base_ != nullptr; }
+    [[nodiscard]] std::size_t materialStateBytesPerQpt() const noexcept { return material_state_bytes_per_qpt_; }
+    [[nodiscard]] std::size_t materialStateStrideBytes() const noexcept { return material_state_stride_bytes_; }
+
+    /**
+     * @brief Access the state block for a single integration point
+     *
+     * Returns a mutable byte span so kernels can update state in-place.
+     */
+    [[nodiscard]] std::span<std::byte> materialState(LocalIndex q) const;
+
+    /**
+     * @brief Access the "old" state block for a single integration point
+     */
+    [[nodiscard]] std::span<const std::byte> materialStateOld(LocalIndex q) const;
+
+    /**
+     * @brief Access the "work/current" state block for a single integration point
+     */
+    [[nodiscard]] std::span<std::byte> materialStateWork(LocalIndex q) const;
+
+    // =========================================================================
+    // Transient / time integration context
+    // =========================================================================
+
+    /**
+     * @brief Attach a transient time-integration context for symbolic `dt(·,k)` lowering
+     *
+     * When null, kernels containing `dt(...)` must fail with a clear diagnostic.
+     */
+    void setTimeIntegrationContext(const TimeIntegrationContext* ctx) noexcept { time_integration_ = ctx; }
+
+    [[nodiscard]] const TimeIntegrationContext* timeIntegrationContext() const noexcept { return time_integration_; }
+
+    // =========================================================================
+    // System state context (optional)
+    // =========================================================================
+
+    void setTime(Real time) noexcept { time_ = time; }
+    void setTimeStep(Real dt) noexcept { dt_ = dt; }
+
+    [[nodiscard]] Real time() const noexcept { return time_; }
+    [[nodiscard]] Real timeStep() const noexcept { return dt_; }
+
+    void setRealParameterGetter(
+        const std::function<std::optional<Real>(std::string_view)>* get_real_param) noexcept
+    {
+        get_real_param_ = get_real_param;
+    }
+
+    [[nodiscard]] const std::function<std::optional<Real>(std::string_view)>* realParameterGetter() const noexcept
+    {
+        return get_real_param_;
+    }
+
+    void setParameterGetter(
+        const std::function<std::optional<params::Value>(std::string_view)>* get_param) noexcept
+    {
+        get_param_ = get_param;
+    }
+
+    [[nodiscard]] const std::function<std::optional<params::Value>(std::string_view)>* parameterGetter() const noexcept
+    {
+        return get_param_;
+    }
+
+    void setUserData(const void* user_data) noexcept { user_data_ = user_data; }
+    [[nodiscard]] const void* userData() const noexcept { return user_data_; }
 
     // =========================================================================
     // Face-Specific Data
@@ -517,6 +802,20 @@ public:
         std::span<const Vector3D> gradients);
 
     /**
+     * @brief Set reference Hessians for test basis functions
+     */
+    void setTestBasisHessians(
+        LocalIndex n_dofs,
+        std::span<const Matrix3x3> hessians);
+
+    /**
+     * @brief Set reference Hessians for trial basis functions
+     */
+    void setTrialBasisHessians(
+        LocalIndex n_dofs,
+        std::span<const Matrix3x3> hessians);
+
+    /**
      * @brief Set physical gradients (after Jacobian transformation)
      */
     void setPhysicalGradients(
@@ -524,9 +823,23 @@ public:
         std::span<const Vector3D> trial_gradients);
 
     /**
+     * @brief Set physical Hessians (after Jacobian transformation)
+     */
+    void setPhysicalHessians(
+        std::span<const Matrix3x3> test_hessians,
+        std::span<const Matrix3x3> trial_hessians);
+
+    /**
      * @brief Set normal vectors (for face contexts)
      */
     void setNormals(std::span<const Vector3D> normals);
+
+    /**
+     * @brief Set entity measures (cell diameter, cell volume, facet area)
+     *
+     * For cell contexts, set facet_area=0. For face contexts, set cell_volume=0.
+     */
+    void setEntityMeasures(Real cell_diameter, Real cell_volume, Real facet_area);
 
     /**
      * @brief Set solution values at quadrature points
@@ -552,6 +865,12 @@ private:
     LocalIndex n_trial_dofs_{0};
     LocalIndex n_qpts_{0};
 
+    // Space metadata (needed for vector-valued TrialFunction evaluation)
+    FieldType test_field_type_{FieldType::Scalar};
+    FieldType trial_field_type_{FieldType::Scalar};
+    int test_value_dim_{1};
+    int trial_value_dim_{1};
+
     // Quadrature data
     std::vector<Point3D> quad_points_;
     std::vector<Real> quad_weights_;
@@ -564,6 +883,11 @@ private:
     std::vector<Real> jacobian_dets_;
     std::vector<Vector3D> normals_;
 
+    // Entity measures (optional)
+    Real cell_diameter_{0.0};
+    Real cell_volume_{0.0};
+    Real facet_area_{0.0};
+
     // Test basis data (n_test_dofs * n_qpts arrays)
     std::vector<Real> test_basis_values_;           // [i * n_qpts + q]
     std::vector<Vector3D> test_ref_gradients_;      // [i * n_qpts + q]
@@ -575,10 +899,51 @@ private:
     std::vector<Vector3D> trial_phys_gradients_;
     bool trial_is_test_{true};  // Optimization flag
 
+    // Optional basis Hessians (n_dofs * n_qpts arrays)
+    std::vector<Matrix3x3> test_ref_hessians_;
+    std::vector<Matrix3x3> test_phys_hessians_;
+    std::vector<Matrix3x3> trial_ref_hessians_;
+    std::vector<Matrix3x3> trial_phys_hessians_;
+
     // Solution data (for nonlinear problems)
     std::vector<Real> solution_coefficients_;
     std::vector<Real> solution_values_;
+    std::vector<Vector3D> solution_vector_values_;
     std::vector<Vector3D> solution_gradients_;
+    std::vector<Matrix3x3> solution_jacobians_;
+    std::vector<Matrix3x3> solution_hessians_;
+    std::vector<Real> solution_laplacians_;
+
+    // Transient history solution data (optional)
+    struct HistorySolutionData {
+        std::vector<Real> coefficients{};
+        std::vector<Real> values{};
+        std::vector<Vector3D> vector_values{};
+        std::vector<Vector3D> gradients{};
+        std::vector<Matrix3x3> jacobians{};
+    };
+
+    // Indexing: history_solution_data_[k-1] corresponds to u^{n-k}, k >= 1.
+    std::vector<HistorySolutionData> history_solution_data_{};
+
+    // Optional per-cell material state storage (owned externally)
+    std::byte* material_state_old_base_{nullptr};
+    std::byte* material_state_work_base_{nullptr};
+    std::size_t material_state_bytes_per_qpt_{0};
+    std::size_t material_state_stride_bytes_{0};
+
+    // Optional time/parameter context (owned by Systems)
+    Real time_{0.0};
+    Real dt_{0.0};
+    const std::function<std::optional<Real>(std::string_view)>* get_real_param_{nullptr};
+    const std::function<std::optional<params::Value>(std::string_view)>* get_param_{nullptr};
+    const void* user_data_{nullptr};
+
+    // Optional transient time integration context (owned by Systems/TimeStepping)
+    const TimeIntegrationContext* time_integration_{nullptr};
+
+    // Remember last requested data flags so setSolutionCoefficients can compute only what is needed.
+    RequiredData required_data_{RequiredData::None};
 };
 
 // ============================================================================

@@ -60,9 +60,11 @@
  */
 
 #include "Core/Types.h"
+#include "Core/ParameterValue.h"
 
 #include <span>
 #include <vector>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <memory>
@@ -101,6 +103,7 @@ enum class RequiredData : std::uint32_t {
     InverseJacobians    = 1 << 3,   ///< Inverse Jacobians (for gradient transform)
     Normals             = 1 << 4,   ///< Surface normals (for faces)
     Tangents            = 1 << 5,   ///< Surface tangents (for edges/faces)
+    EntityMeasures      = 1 << 6,   ///< Cell/face measures (volume/area/diameter)
 
     // Basis function data
     BasisValues         = 1 << 8,   ///< Basis function values at quadrature points
@@ -158,6 +161,22 @@ inline constexpr bool hasFlag(RequiredData flags, RequiredData flag) {
 }
 
 // ============================================================================
+// Material State Specification (optional)
+// ============================================================================
+
+/**
+ * @brief Description of per-integration-point state storage required by a kernel
+ *
+ * Kernels that request RequiredData::MaterialState should override
+ * AssemblyKernel::materialStateSpec() to indicate how much storage is needed
+ * at each integration point.
+ */
+struct MaterialStateSpec {
+    std::size_t bytes_per_qpt{0};
+    std::size_t alignment{alignof(std::max_align_t)};
+};
+
+// ============================================================================
 // Kernel Result Structure
 // ============================================================================
 
@@ -193,14 +212,24 @@ struct KernelOutput {
         n_test_dofs = n_test;
         n_trial_dofs = n_trial;
 
+        has_matrix = need_matrix;
+        has_vector = need_vector;
+
         if (need_matrix) {
-            local_matrix.resize(static_cast<std::size_t>(n_test * n_trial), 0.0);
-            has_matrix = true;
+            const auto size =
+                static_cast<std::size_t>(n_test) * static_cast<std::size_t>(n_trial);
+            local_matrix.resize(size);
+            std::fill(local_matrix.begin(), local_matrix.end(), 0.0);
+        } else {
+            local_matrix.clear();
         }
 
         if (need_vector) {
-            local_vector.resize(static_cast<std::size_t>(n_test), 0.0);
-            has_vector = true;
+            const auto size = static_cast<std::size_t>(n_test);
+            local_vector.resize(size);
+            std::fill(local_vector.begin(), local_vector.end(), 0.0);
+        } else {
+            local_vector.clear();
         }
     }
 
@@ -299,9 +328,26 @@ public:
      */
     [[nodiscard]] virtual RequiredData getRequiredData() const = 0;
 
-    // =========================================================================
-    // Cell (Volume) Integration
-    // =========================================================================
+    /**
+     * @brief Optional per-integration-point state requirement
+     *
+     * If getRequiredData() includes RequiredData::MaterialState, kernels should
+     * override this to return a non-zero bytes_per_qpt (and desired alignment).
+     */
+	    [[nodiscard]] virtual MaterialStateSpec materialStateSpec() const noexcept { return {}; }
+
+	    /**
+	     * @brief Optional parameter requirements for this kernel
+	     *
+	     * Kernels may declare required and optional parameters (with defaults) for
+	     * validation by higher-level systems. The assembly layer does not
+	     * interpret these values directly.
+	     */
+	    [[nodiscard]] virtual std::vector<params::Spec> parameterSpecs() const { return {}; }
+
+	    // =========================================================================
+	    // Cell (Volume) Integration
+	    // =========================================================================
 
     /**
      * @brief Compute element matrix/vector for a cell
@@ -401,6 +447,17 @@ public:
      * @brief Get kernel name for debugging/logging
      */
     [[nodiscard]] virtual std::string name() const { return "GenericKernel"; }
+
+    /**
+     * @brief Maximum time-derivative order referenced by this kernel
+     *
+     * Kernels compiled from continuous-time formulations (e.g., containing
+     * `dt(u,k)` terms) can override this to signal that the problem is
+     * transient and requires time discretization (handled by FE/TimeStepping).
+     *
+     * Default is 0 (purely spatial / steady kernel).
+     */
+    [[nodiscard]] virtual int maxTemporalDerivativeOrder() const noexcept { return 0; }
 
     /**
      * @brief Check if kernel produces symmetric matrices

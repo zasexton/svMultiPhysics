@@ -63,20 +63,20 @@
 
 #include "Core/Types.h"
 #include "Core/FEException.h"
+#include "Core/ParameterValue.h"
+#include "Assembly/TimeIntegrationContext.h"
 
 #include <array>
+#include <cstddef>
 #include <memory>
 #include <span>
 #include <vector>
 #include <string>
+#include <string_view>
 #include <functional>
 #include <optional>
 
 namespace svmp {
-
-// Forward declarations for Mesh types
-class MeshBase;
-class DistributedMesh;
 
 namespace FE {
 
@@ -104,6 +104,74 @@ namespace assembly {
 class GlobalSystemView;
 class AssemblyKernel;
 class AssemblyContext;
+
+/**
+ * @brief View of per-integration-point state storage for a single cell
+ *
+ * The assembler is responsible for binding a view for the current cell into
+ * AssemblyContext when a kernel requests RequiredData::MaterialState.
+ */
+struct MaterialStateView {
+    std::byte* data_old{nullptr};      ///< Base pointer for "old" state (may be null/alias)
+    std::byte* data_work{nullptr};     ///< Base pointer for "work/current" state
+    std::size_t bytes_per_qpt{0};      ///< Payload bytes per integration point
+    std::size_t stride_bytes{0};       ///< Stride between integration points (>= bytes_per_qpt)
+
+    [[nodiscard]] explicit operator bool() const noexcept { return data_work != nullptr; }
+};
+
+/**
+ * @brief Provider interface for per-cell material state
+ *
+ * Implemented by higher-level orchestration layers (typically FE/Systems)
+ * to allocate and provide stable storage for kernels that request state.
+ */
+class IMaterialStateProvider {
+public:
+    virtual ~IMaterialStateProvider() = default;
+
+    [[nodiscard]] virtual MaterialStateView getCellState(const AssemblyKernel& kernel,
+                                                         GlobalIndex cell_id,
+                                                         LocalIndex num_qpts) = 0;
+
+    /**
+     * @brief Provide per-integration-point state storage for a boundary face
+     *
+     * The default implementation returns an empty view (unsupported).
+     */
+    [[nodiscard]] virtual MaterialStateView getBoundaryFaceState(const AssemblyKernel& /*kernel*/,
+                                                                 GlobalIndex /*face_id*/,
+                                                                 LocalIndex /*num_qpts*/)
+    {
+        return {};
+    }
+
+    /**
+     * @brief Provide per-integration-point state storage for an interior face (DG/contact)
+     *
+     * The default implementation returns an empty view (unsupported).
+     */
+    [[nodiscard]] virtual MaterialStateView getInteriorFaceState(const AssemblyKernel& /*kernel*/,
+                                                                 GlobalIndex /*face_id*/,
+                                                                 LocalIndex /*num_qpts*/)
+    {
+        return {};
+    }
+
+    /**
+     * @brief Prepare "work" state from "old" at the start of a time step
+     *
+     * Default is a no-op.
+     */
+    virtual void beginTimeStep() {}
+
+    /**
+     * @brief Commit the current time step (e.g., swap old/work buffers)
+     *
+     * Default is a no-op.
+     */
+    virtual void commitTimeStep() {}
+};
 
 // ============================================================================
 // Assembly Options and Configuration
@@ -195,7 +263,7 @@ struct AssemblyResult {
  *
  * This interface allows the assembler to iterate over mesh cells and faces
  * without depending on a specific mesh library. Implementations can be
- * provided for MeshBase, DistributedMesh, or external mesh libraries.
+ * provided for MeshBase, Mesh, or external mesh libraries.
  */
 class IMeshAccess {
 public:
@@ -320,6 +388,28 @@ public:
     virtual void setDofMap(const dofs::DofMap& dof_map) = 0;
 
     /**
+     * @brief Set the row (test) DOF map for rectangular assembly
+     *
+     * Default implementation forwards to @ref setDofMap and requires zero offset.
+     */
+    virtual void setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset = 0) {
+        FE_THROW_IF(row_offset != 0, FEException,
+                    "Assembler::setRowDofMap: offsets not supported by this assembler");
+        setDofMap(dof_map);
+    }
+
+    /**
+     * @brief Set the column (trial) DOF map for rectangular assembly
+     *
+     * Default implementation forwards to @ref setDofMap and requires zero offset.
+     */
+    virtual void setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset = 0) {
+        FE_THROW_IF(col_offset != 0, FEException,
+                    "Assembler::setColDofMap: offsets not supported by this assembler");
+        setDofMap(dof_map);
+    }
+
+    /**
      * @brief Set the DOF handler (alternative to setDofMap)
      *
      * @param dof_handler The DOF handler (must be finalized)
@@ -351,6 +441,115 @@ public:
      * @param options The assembly options
      */
     virtual void setOptions(const AssemblyOptions& options) = 0;
+
+    /**
+     * @brief Set the current solution vector for kernels that request solution data
+     *
+     * Assemblers that support solution-aware kernels (RequiredData::SolutionValues, etc.)
+     * should gather per-cell coefficients and populate AssemblyContext via
+     * AssemblyContext::setSolutionCoefficients(...) before invoking the kernel.
+     *
+     * Default implementation is a no-op; kernels requesting solution data will
+     * still fail unless the concrete assembler provides it.
+     */
+    virtual void setCurrentSolution(std::span<const Real> /*solution*/) {}
+
+    /**
+     * @brief Set the previous-step solution vector (u^{n-1}) for transient assembly
+     *
+     * Default implementation is a no-op.
+     */
+    virtual void setPreviousSolution(std::span<const Real> /*solution*/) {}
+
+    /**
+     * @brief Set the previous-previous solution vector (u^{n-2}) for transient assembly
+     *
+     * Default implementation is a no-op.
+     */
+    virtual void setPreviousSolution2(std::span<const Real> /*solution*/) {}
+
+    /**
+     * @brief Set the k-th previous solution vector (u^{n-k}) for transient assembly
+     *
+     * Default implementation forwards k=1,2 to setPreviousSolution/setPreviousSolution2.
+     * Higher k values are ignored unless overridden by a concrete assembler.
+     */
+    virtual void setPreviousSolutionK(int k, std::span<const Real> solution)
+    {
+        if (k == 1) {
+            setPreviousSolution(solution);
+        } else if (k == 2) {
+            setPreviousSolution2(solution);
+        }
+    }
+
+    /**
+     * @brief Attach a time-integration context for symbolic `dt(·,k)` lowering
+     *
+     * When null, kernels containing `dt(...)` must fail with a clear diagnostic.
+     *
+     * Default implementation is a no-op.
+     */
+    virtual void setTimeIntegrationContext(const TimeIntegrationContext* /*ctx*/) {}
+
+    /**
+     * @brief Set the current physical time (optional)
+     *
+     * Default implementation is a no-op.
+     */
+    virtual void setTime(Real /*time*/) {}
+
+    /**
+     * @brief Set the current time step size dt (optional)
+     *
+     * Default implementation is a no-op.
+     */
+    virtual void setTimeStep(Real /*dt*/) {}
+
+    /**
+     * @brief Provide a parameter getter (optional)
+     *
+     * This is typically backed by systems::SystemStateView::getRealParam and is
+     * forwarded into AssemblyContext for downstream evaluation (e.g., Forms/Constitutive).
+     *
+     * Default implementation is a no-op.
+     */
+    virtual void setRealParameterGetter(
+        const std::function<std::optional<Real>(std::string_view)>* /*get_real_param*/) noexcept
+    {
+    }
+
+    /**
+     * @brief Provide a typed parameter getter (optional)
+     *
+     * This is typically backed by systems::SystemStateView::getParam and is
+     * forwarded into AssemblyContext for downstream evaluation (e.g., Forms/Constitutive).
+     *
+     * Default implementation is a no-op.
+     */
+    virtual void setParameterGetter(
+        const std::function<std::optional<params::Value>(std::string_view)>* /*get_param*/) noexcept
+    {
+    }
+
+    /**
+     * @brief Provide an opaque user context pointer (optional)
+     *
+     * This is forwarded into AssemblyContext and can be used to supply
+     * application-owned services to constitutive evaluations.
+     *
+     * Default implementation is a no-op.
+     */
+    virtual void setUserData(const void* /*user_data*/) noexcept {}
+
+    /**
+     * @brief Provide per-cell state storage for kernels requesting RequiredData::MaterialState
+     *
+     * Default implementation is a no-op. Assemblers that support state (e.g.
+     * StandardAssembler) should override and bind the provided storage into
+     * AssemblyContext during element preparation.
+     */
+    virtual void setMaterialStateProvider(IMaterialStateProvider* /*provider*/) noexcept {}
 
     /**
      * @brief Get current options
@@ -480,6 +679,25 @@ public:
         AssemblyKernel& kernel,
         GlobalSystemView* matrix_view,
         GlobalSystemView* vector_view) = 0;
+
+    /**
+     * @brief Assemble boundary face contributions (rectangular)
+     *
+     * Supports bilinear forms where test_space != trial_space on the boundary.
+     * Default implementation supports only the square case.
+     */
+    [[nodiscard]] virtual AssemblyResult assembleBoundaryFaces(
+        const IMeshAccess& mesh,
+        int boundary_marker,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        AssemblyKernel& kernel,
+        GlobalSystemView* matrix_view,
+        GlobalSystemView* vector_view) {
+        FE_THROW_IF(&test_space != &trial_space, FEException,
+                    "Assembler::assembleBoundaryFaces: rectangular boundary assembly not implemented");
+        return assembleBoundaryFaces(mesh, boundary_marker, test_space, kernel, matrix_view, vector_view);
+    }
 
     /**
      * @brief Assemble interior face contributions (for DG)
