@@ -46,9 +46,9 @@ using namespace svmp;
 
 namespace {
 
-MeshBase make_unit_tet_mesh()
+Mesh make_unit_tet_mesh()
 {
-  MeshBase mesh;
+  Mesh mesh;
 
   const std::vector<real_t> coords = {
       0.0, 0.0, 0.0,  // v0
@@ -66,9 +66,9 @@ MeshBase make_unit_tet_mesh()
   return mesh;
 }
 
-MeshBase make_two_tet_mesh_with_inverted_second()
+Mesh make_two_tet_mesh_with_inverted_second()
 {
-  MeshBase mesh;
+  Mesh mesh;
 
   const std::vector<real_t> coords = {
       // Tet 0 (well-oriented)
@@ -248,16 +248,16 @@ TEST(MotionFieldsTest, AttachMotionFieldsCreatesExpectedFields)
   ASSERT_NE(hnd.displacement.id, 0u);
   ASSERT_NE(hnd.velocity.id, 0u);
 
-  EXPECT_TRUE(MeshFields::has_field(mesh, EntityKind::Vertex, "mesh_displacement"));
-  EXPECT_TRUE(MeshFields::has_field(mesh, EntityKind::Vertex, "mesh_velocity"));
+  EXPECT_TRUE(MeshFields::has_field(mesh.local_mesh(), EntityKind::Vertex, "mesh_displacement"));
+  EXPECT_TRUE(MeshFields::has_field(mesh.local_mesh(), EntityKind::Vertex, "mesh_velocity"));
 
-  EXPECT_EQ(MeshFields::field_type(mesh, hnd.displacement), FieldScalarType::Float64);
-  EXPECT_EQ(MeshFields::field_type(mesh, hnd.velocity), FieldScalarType::Float64);
-  EXPECT_EQ(MeshFields::field_components(mesh, hnd.displacement), 3u);
-  EXPECT_EQ(MeshFields::field_components(mesh, hnd.velocity), 3u);
+  EXPECT_EQ(MeshFields::field_type(mesh.local_mesh(), hnd.displacement), FieldScalarType::Float64);
+  EXPECT_EQ(MeshFields::field_type(mesh.local_mesh(), hnd.velocity), FieldScalarType::Float64);
+  EXPECT_EQ(MeshFields::field_components(mesh.local_mesh(), hnd.displacement), 3u);
+  EXPECT_EQ(MeshFields::field_components(mesh.local_mesh(), hnd.velocity), 3u);
 
-  const auto* disp_desc = MeshFields::field_descriptor(mesh, hnd.displacement);
-  const auto* vel_desc  = MeshFields::field_descriptor(mesh, hnd.velocity);
+  const auto* disp_desc = MeshFields::field_descriptor(mesh.local_mesh(), hnd.displacement);
+  const auto* vel_desc  = MeshFields::field_descriptor(mesh.local_mesh(), hnd.velocity);
   ASSERT_NE(disp_desc, nullptr);
   ASSERT_NE(vel_desc, nullptr);
 
@@ -283,11 +283,11 @@ TEST(MotionFieldsTest, UpdateCoordinatesFromDisplacementAbsoluteAndIncremental)
   const auto X_ref = mesh.X_ref();
 
   const auto hnd = motion::attach_motion_fields(mesh, 3);
-  auto* disp = MeshFields::field_data_as<real_t>(mesh, hnd.displacement);
+  auto* disp = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.displacement);
   ASSERT_NE(disp, nullptr);
 
   const size_t n_vertices = mesh.n_vertices();
-  const size_t ncomp = MeshFields::field_components(mesh, hnd.displacement);
+  const size_t ncomp = MeshFields::field_components(mesh.local_mesh(), hnd.displacement);
   ASSERT_EQ(ncomp, 3u);
 
   // Absolute update: X_cur = X_ref + u
@@ -340,7 +340,7 @@ TEST(MotionStateTest, RestoreWithoutCurrentForcesReferenceConfiguration)
   auto mesh = make_unit_tet_mesh();
 
   // Create an intentionally inconsistent state to ensure restore() is robust.
-  // (MeshBase allows switching active configuration independent of X_cur.)
+  // (Mesh local view allows switching active configuration independent of X_cur.)
   mesh.use_current_configuration();
   ASSERT_EQ(mesh.active_configuration(), Configuration::Current);
   ASSERT_FALSE(mesh.has_current_coords());
@@ -370,13 +370,13 @@ TEST(MotionStateTest, UpdateVelocityFromDisplacement)
   auto mesh = make_unit_tet_mesh();
   const auto hnd = motion::attach_motion_fields(mesh, 3);
 
-  auto* disp = MeshFields::field_data_as<real_t>(mesh, hnd.displacement);
-  auto* vel  = MeshFields::field_data_as<real_t>(mesh, hnd.velocity);
+  auto* disp = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.displacement);
+  auto* vel  = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.velocity);
   ASSERT_NE(disp, nullptr);
   ASSERT_NE(vel, nullptr);
 
   const size_t n_vertices = mesh.n_vertices();
-  const size_t ncomp = MeshFields::field_components(mesh, hnd.displacement);
+  const size_t ncomp = MeshFields::field_components(mesh.local_mesh(), hnd.displacement);
   ASSERT_EQ(ncomp, 3u);
 
   for (size_t v = 0; v < n_vertices; ++v) {
@@ -472,12 +472,12 @@ TEST(MeshMotionTest, InjectedBackendWritesFieldsAndUpdatesCoordinatesAndVelocity
   }
 
   const auto hnd = motion::attach_motion_fields(mesh, 3);
-  const auto* disp = MeshFields::field_data_as<real_t>(mesh, hnd.displacement);
-  const auto* vel  = MeshFields::field_data_as<real_t>(mesh, hnd.velocity);
+  const auto* disp = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.displacement);
+  const auto* vel  = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.velocity);
   ASSERT_NE(disp, nullptr);
   ASSERT_NE(vel, nullptr);
 
-  const size_t ncomp = MeshFields::field_components(mesh, hnd.displacement);
+  const size_t ncomp = MeshFields::field_components(mesh.local_mesh(), hnd.displacement);
   ASSERT_EQ(ncomp, 3u);
 
   for (size_t v = 0; v < mesh.n_vertices(); ++v) {
@@ -503,10 +503,10 @@ TEST(MeshMotionTest, BackendProvidedVelocityIsNotOverwritten)
   ASSERT_TRUE(mm.advance(dt));
 
   const auto hnd = motion::attach_motion_fields(mesh, 3);
-  const auto* vel  = MeshFields::field_data_as<real_t>(mesh, hnd.velocity);
+  const auto* vel  = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.velocity);
   ASSERT_NE(vel, nullptr);
 
-  const size_t ncomp = MeshFields::field_components(mesh, hnd.velocity);
+  const size_t ncomp = MeshFields::field_components(mesh.local_mesh(), hnd.velocity);
   ASSERT_EQ(ncomp, 3u);
 
   for (size_t v = 0; v < mesh.n_vertices(); ++v) {
@@ -547,12 +547,12 @@ TEST(MeshMotionTest, SubsteppingAccumulatesTotalDisplacementAndVelocity)
   }
 
   const auto hnd = motion::attach_motion_fields(mesh, 3);
-  const auto* disp = MeshFields::field_data_as<real_t>(mesh, hnd.displacement);
-  const auto* vel  = MeshFields::field_data_as<real_t>(mesh, hnd.velocity);
+  const auto* disp = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.displacement);
+  const auto* vel  = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.velocity);
   ASSERT_NE(disp, nullptr);
   ASSERT_NE(vel, nullptr);
 
-  const size_t ncomp = MeshFields::field_components(mesh, hnd.displacement);
+  const size_t ncomp = MeshFields::field_components(mesh.local_mesh(), hnd.displacement);
   ASSERT_EQ(ncomp, 3u);
 
   for (size_t v = 0; v < mesh.n_vertices(); ++v) {
@@ -588,12 +588,12 @@ TEST(MeshMotionTest, BacktrackingAvoidsInversionViaSmallerSubsteps)
   EXPECT_NEAR(X_cur[11], 0.0625, 1e-12); // z-coordinate of vertex 3
 
   const auto hnd = motion::attach_motion_fields(mesh, 3);
-  const auto* disp = MeshFields::field_data_as<real_t>(mesh, hnd.displacement);
-  const auto* vel  = MeshFields::field_data_as<real_t>(mesh, hnd.velocity);
+  const auto* disp = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.displacement);
+  const auto* vel  = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.velocity);
   ASSERT_NE(disp, nullptr);
   ASSERT_NE(vel, nullptr);
 
-  const size_t ncomp = MeshFields::field_components(mesh, hnd.displacement);
+  const size_t ncomp = MeshFields::field_components(mesh.local_mesh(), hnd.displacement);
   ASSERT_EQ(ncomp, 3u);
 
   // Total z displacement on vertex 3: 0.0625 - 1.0 = -0.9375
@@ -620,12 +620,12 @@ TEST(MeshMotionTest, MaxSubstepsLimitRejectsAndRestores)
 
   // Motion fields should remain attached but zeroed on failure.
   const auto hnd = motion::attach_motion_fields(mesh, 3);
-  const auto* disp = MeshFields::field_data_as<real_t>(mesh, hnd.displacement);
-  const auto* vel  = MeshFields::field_data_as<real_t>(mesh, hnd.velocity);
+  const auto* disp = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.displacement);
+  const auto* vel  = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.velocity);
   ASSERT_NE(disp, nullptr);
   ASSERT_NE(vel, nullptr);
 
-  const size_t ncomp = MeshFields::field_components(mesh, hnd.displacement);
+  const size_t ncomp = MeshFields::field_components(mesh.local_mesh(), hnd.displacement);
   ASSERT_EQ(ncomp, 3u);
 
   for (size_t v = 0; v < mesh.n_vertices(); ++v) {
@@ -644,11 +644,10 @@ TEST(MotionQualityTest, DistributedQualityIgnoresGhostCells)
 {
   auto mesh = make_two_tet_mesh_with_inverted_second();
 
-  DistributedMesh dmesh(std::make_shared<MeshBase>(std::move(mesh)), 0);
   // Mark the inverted tet as a ghost cell.
-  dmesh.set_ownership(1, EntityKind::Volume, Ownership::Ghost, 0);
+  mesh.set_ownership(1, EntityKind::Volume, Ownership::Ghost, 0);
 
-  const auto report = motion::evaluate_motion_quality(dmesh, Configuration::Reference);
+  const auto report = motion::evaluate_motion_quality(mesh, Configuration::Reference);
   EXPECT_FALSE(report.has_inverted_cells);
 }
 
@@ -656,12 +655,11 @@ TEST(MeshMotionTest, DistributedQualityGuardUsesOwnedCells)
 {
   auto mesh = make_two_tet_mesh_with_inverted_second();
 
-  DistributedMesh dmesh(std::make_shared<MeshBase>(std::move(mesh)), 0);
   // Mark the inverted tet as a ghost cell. If MeshMotion evaluated all cells
   // in the local mesh (including ghosts), the step would be rejected.
-  dmesh.set_ownership(1, EntityKind::Volume, Ownership::Ghost, 0);
+  mesh.set_ownership(1, EntityKind::Volume, Ownership::Ghost, 0);
 
-  motion::MeshMotion mm(dmesh);
+  motion::MeshMotion mm(mesh);
   mm.set_backend(std::make_shared<ConstantDisplacementBackend>());
 
   motion::MotionConfig cfg;
