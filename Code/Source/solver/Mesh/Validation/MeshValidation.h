@@ -40,6 +40,7 @@ namespace svmp {
 
 // Forward declaration
 class MeshBase;
+class DistributedMesh;
 
 /**
  * @brief Mesh validation and diagnostics
@@ -232,6 +233,7 @@ public:
    * @return Validation result
    */
   static ValidationResult check_parallel_consistency(const MeshBase& mesh);
+  static ValidationResult check_parallel_consistency(const DistributedMesh& mesh);
 
   /**
    * @brief Check global ID uniqueness
@@ -239,6 +241,7 @@ public:
    * @return Validation result
    */
   static ValidationResult check_global_ids(const MeshBase& mesh);
+  static ValidationResult check_global_ids(const DistributedMesh& mesh);
 
   /**
    * @brief Check ghost cell consistency
@@ -246,6 +249,7 @@ public:
    * @return Validation result
    */
   static ValidationResult check_ghost_cells(const MeshBase& mesh);
+  static ValidationResult check_ghost_cells(const DistributedMesh& mesh);
 
   // ---- Comprehensive validation ----
 
@@ -269,8 +273,14 @@ public:
 
   static ValidationReport validate_all(const MeshBase& mesh,
                                       const ValidationConfig& config);
+  static ValidationReport validate_all(const DistributedMesh& mesh,
+                                      const ValidationConfig& config);
 
   static ValidationReport validate_all(const MeshBase& mesh) {
+    ValidationConfig config;
+    return validate_all(mesh, config);
+  }
+  static ValidationReport validate_all(const DistributedMesh& mesh) {
     ValidationConfig config;
     return validate_all(mesh, config);
   }
@@ -281,6 +291,7 @@ public:
    * @return Validation report
    */
   static ValidationReport validate_quick(const MeshBase& mesh);
+  static ValidationReport validate_quick(const DistributedMesh& mesh);
 
   // ---- Repair operations ----
 
