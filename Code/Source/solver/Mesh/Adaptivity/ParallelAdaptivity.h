@@ -46,6 +46,9 @@ namespace svmp {
 class MeshBase;
 class DistributedMesh;
 class MeshFields;
+// Phase 5 (UNIFY_MESH): prefer the unified runtime mesh type name.
+// In the Mesh library, `Mesh` is currently an alias of `DistributedMesh`.
+using Mesh = DistributedMesh;
 
 /**
  * @brief Ghost layer information for parallel adaptivity
@@ -198,7 +201,8 @@ public:
     size_t max_consensus_iterations = 10;
   };
 
-  ParallelAdaptivityManager(MPI_Comm comm, const Config& config = {});
+  explicit ParallelAdaptivityManager(MPI_Comm comm);
+  ParallelAdaptivityManager(MPI_Comm comm, Config config);
 
   /**
    * @brief Perform parallel adaptive mesh refinement
@@ -209,7 +213,7 @@ public:
    * @return Adaptivity result with parallel statistics
    */
   AdaptivityResult adapt_parallel(
-      DistributedMesh& mesh,
+      Mesh& mesh,
       MeshFields* fields,
       const AdaptivityOptions& options);
 
@@ -220,7 +224,7 @@ public:
    * @param marks Refinement marks
    */
   void exchange_ghost_marks(
-      DistributedMesh& mesh,
+      Mesh& mesh,
       std::vector<MarkType>& marks);
 
   /**
@@ -231,7 +235,7 @@ public:
    * @return Number of iterations to reach consensus
    */
   size_t synchronize_marks(
-      DistributedMesh& mesh,
+      Mesh& mesh,
       std::vector<MarkType>& marks);
 
   /**
@@ -242,7 +246,7 @@ public:
    * @return Number of migrated elements
    */
   size_t rebalance_load(
-      DistributedMesh& mesh,
+      Mesh& mesh,
       MeshFields* fields);
 
   /**
@@ -271,42 +275,42 @@ private:
   CommPattern comm_pattern_;
 
   /** Initialize communication pattern */
-  void initialize_comm_pattern(const DistributedMesh& mesh);
+  void initialize_comm_pattern(const Mesh& mesh);
 
   /** Update ghost layers */
-  void update_ghost_layers(DistributedMesh& mesh);
+  void update_ghost_layers(Mesh& mesh);
 
   /** Exchange field data */
   void exchange_field_data(
-      const DistributedMesh& mesh,
+      Mesh& mesh,
       std::vector<double>& field_data);
 
   /** Compute load balance */
-  LoadBalance compute_load_balance(const DistributedMesh& mesh);
+  LoadBalance compute_load_balance(const Mesh& mesh);
 
   /** Migrate elements for load balancing */
   void migrate_elements(
-      DistributedMesh& mesh,
+      Mesh& mesh,
       const LoadBalance& balance);
 
   /** Check global conformity */
   bool check_global_conformity(
-      const DistributedMesh& mesh,
+      const Mesh& mesh,
       const std::vector<MarkType>& marks);
 
   /** Enforce conformity at processor boundaries */
   void enforce_boundary_conformity(
-      DistributedMesh& mesh,
+      Mesh& mesh,
       std::vector<MarkType>& marks);
 
   /** Collective error estimation */
   void collective_error_estimation(
-      const DistributedMesh& mesh,
+      Mesh& mesh,
       std::vector<double>& error_field);
 
   /** Global marking strategy */
   void apply_global_marking(
-      const DistributedMesh& mesh,
+      const Mesh& mesh,
       const std::vector<double>& error_field,
       std::vector<MarkType>& marks,
       const AdaptivityOptions& options);
@@ -395,16 +399,22 @@ public:
    */
   static std::vector<int> partition_mesh(
       const MeshBase& mesh,
+      int num_partitions);
+  static std::vector<int> partition_mesh(
+      const MeshBase& mesh,
       int num_partitions,
-      const Config& config = {});
+      Config config);
 
   /**
    * @brief Repartition for load balancing
    */
   static std::vector<int> repartition_mesh(
-      const DistributedMesh& mesh,
+      const Mesh& mesh,
+      const std::vector<double>& weights);
+  static std::vector<int> repartition_mesh(
+      const Mesh& mesh,
       const std::vector<double>& weights,
-      const Config& config = {});
+      Config config);
 
   /**
    * @brief Compute partition quality metrics
@@ -456,14 +466,14 @@ public:
    * @brief Build ghost layers
    */
   static GhostLayer build_ghost_layer(
-      const DistributedMesh& mesh,
+      const Mesh& mesh,
       size_t depth = 1);
 
   /**
    * @brief Update ghost values
    */
   static void update_ghost_values(
-      const DistributedMesh& mesh,
+      const Mesh& mesh,
       const GhostLayer& ghost,
       std::vector<double>& field_values);
 
@@ -471,7 +481,7 @@ public:
    * @brief Synchronize ghost marks
    */
   static void synchronize_ghost_marks(
-      const DistributedMesh& mesh,
+      const Mesh& mesh,
       const GhostLayer& ghost,
       std::vector<MarkType>& marks);
 
@@ -479,14 +489,14 @@ public:
    * @brief Check consistency across processors
    */
   static bool check_consistency(
-      const DistributedMesh& mesh,
+      const Mesh& mesh,
       const GhostLayer& ghost);
 
   /**
    * @brief Pack ghost data for communication
    */
   static std::vector<double> pack_ghost_data(
-      const DistributedMesh& mesh,
+      const Mesh& mesh,
       const GhostLayer& ghost,
       const std::vector<double>& field);
 
@@ -494,7 +504,7 @@ public:
    * @brief Unpack received ghost data
    */
   static void unpack_ghost_data(
-      const DistributedMesh& mesh,
+      const Mesh& mesh,
       const GhostLayer& ghost,
       const std::vector<double>& packed_data,
       std::vector<double>& field);
@@ -536,14 +546,16 @@ public:
    * @brief Compute load balance
    */
   static LoadBalance compute_balance(
-      const DistributedMesh& mesh,
-      const Config& config = {});
+      const Mesh& mesh);
+  static LoadBalance compute_balance(
+      const Mesh& mesh,
+      Config config);
 
   /**
    * @brief Execute load balancing
    */
   static void execute_balancing(
-      DistributedMesh& mesh,
+      Mesh& mesh,
       MeshFields* fields,
       const LoadBalance& balance);
 
@@ -551,29 +563,29 @@ public:
    * @brief Estimate balancing cost
    */
   static double estimate_cost(
-      const DistributedMesh& mesh,
+      const Mesh& mesh,
       const LoadBalance& balance);
 
 private:
   /** Diffusive load balancing */
   static LoadBalance diffusive_balance(
-      const DistributedMesh& mesh,
+      const Mesh& mesh,
       const Config& config);
 
   /** Direct load balancing */
   static LoadBalance direct_balance(
-      const DistributedMesh& mesh,
+      const Mesh& mesh,
       const Config& config);
 
   /** Pack elements for migration */
   static std::vector<uint8_t> pack_elements(
-      const DistributedMesh& mesh,
+      const Mesh& mesh,
       const std::vector<size_t>& elements,
       MeshFields* fields);
 
   /** Unpack migrated elements */
   static void unpack_elements(
-      DistributedMesh& mesh,
+      Mesh& mesh,
       const std::vector<uint8_t>& packed_data,
       MeshFields* fields);
 };
@@ -617,14 +629,14 @@ public:
    */
   static bool check_parallel_consistency(
       MPI_Comm comm,
-      const DistributedMesh& mesh);
+      const Mesh& mesh);
 
   /**
    * @brief Write parallel mesh for visualization
    */
   static void write_parallel_mesh(
       MPI_Comm comm,
-      const DistributedMesh& mesh,
+      const Mesh& mesh,
       const std::string& filename);
 };
 

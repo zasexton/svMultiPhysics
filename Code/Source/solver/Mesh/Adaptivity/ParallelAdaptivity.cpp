@@ -37,6 +37,7 @@
 #include <chrono>
 #include <cmath>
 #include <numeric>
+#include <unordered_set>
 
 namespace svmp {
 
@@ -45,8 +46,8 @@ namespace svmp {
 //=============================================================================
 
 ParallelAdaptivityManager::ParallelAdaptivityManager(
-    MPI_Comm comm, const Config& config)
-    : comm_(comm), config_(config) {
+    MPI_Comm comm, Config config)
+    : comm_(comm), config_(std::move(config)) {
 
   MPI_Comm_rank(comm_, &rank_);
   MPI_Comm_size(comm_, &size_);
@@ -55,15 +56,18 @@ ParallelAdaptivityManager::ParallelAdaptivityManager(
   local_manager_ = std::make_unique<AdaptivityManager>();
 }
 
+ParallelAdaptivityManager::ParallelAdaptivityManager(MPI_Comm comm)
+    : ParallelAdaptivityManager(comm, Config{}) {
+}
+
 AdaptivityResult ParallelAdaptivityManager::adapt_parallel(
-    DistributedMesh& mesh,
+    Mesh& mesh,
     MeshFields* fields,
     const AdaptivityOptions& options) {
 
   auto start_time = std::chrono::steady_clock::now();
 
-  // Initialize communication pattern
-  initialize_comm_pattern(mesh);
+  local_manager_->set_options(options);
 
   // Update ghost layers
   auto ghost_start = std::chrono::steady_clock::now();
@@ -71,26 +75,11 @@ AdaptivityResult ParallelAdaptivityManager::adapt_parallel(
   auto ghost_end = std::chrono::steady_clock::now();
   stats_.ghost_time = std::chrono::duration<double>(ghost_end - ghost_start).count();
 
+  // Initialize communication pattern (requires established neighbor/exchange info).
+  initialize_comm_pattern(mesh);
+
   // Perform local adaptation
-  auto local_result = local_manager_->adapt(mesh.get_local_mesh(), fields);
-
-  // Exchange marks with neighbors
-  if (config_.synchronize_marks) {
-    auto sync_start = std::chrono::steady_clock::now();
-    exchange_ghost_marks(mesh, local_result.marks);
-    size_t iterations = synchronize_marks(mesh, local_result.marks);
-    auto sync_end = std::chrono::steady_clock::now();
-    stats_.sync_time = std::chrono::duration<double>(sync_end - sync_start).count();
-    stats_.comm_rounds = iterations;
-  }
-
-  // Check global conformity
-  if (config_.global_conformity) {
-    enforce_boundary_conformity(mesh, local_result.marks);
-  }
-
-  // Apply refined marks
-  local_result = local_manager_->adapt(mesh.get_local_mesh(), fields);
+  auto local_result = local_manager_->adapt(mesh.local_mesh(), fields);
 
   // Load balance if needed
   if (config_.enable_load_balancing) {
@@ -111,7 +100,7 @@ AdaptivityResult ParallelAdaptivityManager::adapt_parallel(
   }
 
   // Gather global statistics
-  stats_.max_local_level = local_result.max_level;
+  stats_.max_local_level = 0;
 
   // Reduce statistics
   size_t global_refined, global_coarsened;
@@ -124,73 +113,139 @@ AdaptivityResult ParallelAdaptivityManager::adapt_parallel(
   local_result.num_coarsened = global_coarsened;
 
   auto end_time = std::chrono::steady_clock::now();
-  local_result.adaptation_time = std::chrono::duration<double>(end_time - start_time).count();
+  local_result.total_time = std::chrono::duration<double>(end_time - start_time);
 
   return local_result;
 }
 
 void ParallelAdaptivityManager::exchange_ghost_marks(
-    DistributedMesh& mesh,
+    Mesh& mesh,
     std::vector<MarkType>& marks) {
 
-  // Pack marks for ghost elements
-  std::vector<std::vector<int>> send_marks(size_);
-  std::vector<std::vector<int>> recv_marks(size_);
+  if (size_ <= 1) {
+    return;
+  }
 
-  for (const auto& [elem, owner] : ghost_layer_.ghost_owners) {
-    if (elem < marks.size()) {
-      send_marks[owner].push_back(elem);
-      send_marks[owner].push_back(static_cast<int>(marks[elem]));
+  auto& local = mesh.local_mesh();
+  const size_t n_cells = local.n_cells();
+  if (marks.size() != n_cells) {
+    marks.resize(n_cells, MarkType::NONE);
+  }
+
+  constexpr const char* kTmpFieldName = "__svmp_parallel_adaptivity_tmp_marks";
+  if (local.has_field(EntityKind::Volume, kTmpFieldName)) {
+    local.remove_field(local.field_handle(EntityKind::Volume, kTmpFieldName));
+  }
+  const auto h = local.attach_field(EntityKind::Volume, kTmpFieldName, FieldScalarType::Int32, 1);
+  auto* mark_data = local.field_data_as<int32_t>(h);
+  for (size_t c = 0; c < n_cells; ++c) {
+    mark_data[c] = static_cast<int32_t>(marks[c]);
+  }
+
+  // ------------------------------------------------------
+  // Ghost -> owner aggregation (conservative merge)
+  // ------------------------------------------------------
+  std::vector<std::vector<gid_t>> send_gids_per_rank(static_cast<size_t>(size_));
+  std::vector<std::vector<int>> send_marks_per_rank(static_cast<size_t>(size_));
+
+  const auto& cell_gids = local.cell_gids();
+  for (index_t c = 0; c < static_cast<index_t>(n_cells); ++c) {
+    if (mesh.is_owned_cell(c)) {
+      continue;
+    }
+
+    const rank_t owner = mesh.owner_rank_cell(c);
+    if (owner < 0 || owner >= static_cast<rank_t>(size_) || owner == static_cast<rank_t>(rank_)) {
+      continue;
+    }
+
+    send_gids_per_rank[static_cast<size_t>(owner)].push_back(cell_gids[static_cast<size_t>(c)]);
+    send_marks_per_rank[static_cast<size_t>(owner)].push_back(static_cast<int>(mark_data[static_cast<size_t>(c)]));
+  }
+
+  std::vector<int> send_counts(size_, 0);
+  for (int r = 0; r < size_; ++r) {
+    send_counts[r] = static_cast<int>(send_gids_per_rank[static_cast<size_t>(r)].size());
+  }
+
+  std::vector<int> recv_counts(size_, 0);
+  MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, comm_);
+
+  std::vector<int> send_displs(size_, 0);
+  std::vector<int> recv_displs(size_, 0);
+  int send_total = 0;
+  int recv_total = 0;
+  for (int r = 0; r < size_; ++r) {
+    send_displs[r] = send_total;
+    recv_displs[r] = recv_total;
+    send_total += send_counts[r];
+    recv_total += recv_counts[r];
+  }
+
+  std::vector<gid_t> send_gids_flat(static_cast<size_t>(send_total));
+  std::vector<int> send_marks_flat(static_cast<size_t>(send_total));
+  for (int r = 0; r < size_; ++r) {
+    const auto& gids = send_gids_per_rank[static_cast<size_t>(r)];
+    const auto& vals = send_marks_per_rank[static_cast<size_t>(r)];
+    const int base = send_displs[r];
+    for (size_t i = 0; i < gids.size(); ++i) {
+      send_gids_flat[static_cast<size_t>(base) + i] = gids[i];
+      send_marks_flat[static_cast<size_t>(base) + i] = vals[i];
     }
   }
 
-  // Exchange marks
-  if (config_.comm_strategy == Config::CommStrategy::NON_BLOCKING) {
-    std::vector<MPI_Request> requests;
+  std::vector<gid_t> recv_gids_flat(static_cast<size_t>(recv_total));
+  std::vector<int> recv_marks_flat(static_cast<size_t>(recv_total));
 
-    // Post receives
-    for (int p = 0; p < size_; ++p) {
-      if (p == rank_) continue;
+  MPI_Datatype gid_type =
+#ifdef MPI_INT64_T
+      MPI_INT64_T;
+#else
+      MPI_LONG_LONG;
+#endif
 
-      MPI_Request req;
-      int recv_size;
-      MPI_Irecv(&recv_size, 1, MPI_INT, p, 0, comm_, &req);
-      requests.push_back(req);
+  MPI_Alltoallv(send_gids_flat.data(), send_counts.data(), send_displs.data(), gid_type,
+                recv_gids_flat.data(), recv_counts.data(), recv_displs.data(), gid_type,
+                comm_);
+  MPI_Alltoallv(send_marks_flat.data(), send_counts.data(), send_displs.data(), MPI_INT,
+                recv_marks_flat.data(), recv_counts.data(), recv_displs.data(), MPI_INT,
+                comm_);
+
+  const auto merge_marks = [](MarkType a, MarkType b) -> MarkType {
+    if (a == MarkType::REFINE || b == MarkType::REFINE) return MarkType::REFINE;
+    if (a == MarkType::NONE || b == MarkType::NONE) return MarkType::NONE;
+    return MarkType::COARSEN;
+  };
+
+  for (int i = 0; i < recv_total; ++i) {
+    const gid_t gid = recv_gids_flat[static_cast<size_t>(i)];
+    const auto incoming = static_cast<MarkType>(recv_marks_flat[static_cast<size_t>(i)]);
+
+    const index_t local_cell = mesh.global_to_local_cell(gid);
+    if (local_cell == INVALID_INDEX) {
+      continue;
+    }
+    if (!mesh.is_owned_cell(local_cell)) {
+      continue;
     }
 
-    // Send sizes
-    for (int p = 0; p < size_; ++p) {
-      if (p == rank_) continue;
-
-      int send_size = send_marks[p].size();
-      MPI_Request req;
-      MPI_Isend(&send_size, 1, MPI_INT, p, 0, comm_, &req);
-      requests.push_back(req);
-    }
-
-    MPI_Waitall(requests.size(), requests.data(), MPI_STATUSES_IGNORE);
+    const auto current = static_cast<MarkType>(mark_data[static_cast<size_t>(local_cell)]);
+    mark_data[static_cast<size_t>(local_cell)] =
+        static_cast<int32_t>(merge_marks(current, incoming));
   }
 
-  // Update marks based on received data
-  for (int p = 0; p < size_; ++p) {
-    if (p == rank_) continue;
+  // Owner -> ghost propagation of final marks.
+  mesh.update_ghosts({h});
 
-    for (size_t i = 0; i < recv_marks[p].size(); i += 2) {
-      size_t elem = recv_marks[p][i];
-      MarkType mark = static_cast<MarkType>(recv_marks[p][i + 1]);
-
-      // Take maximum mark (conservative)
-      if (elem < marks.size()) {
-        if (mark > marks[elem]) {
-          marks[elem] = mark;
-        }
-      }
-    }
+  for (size_t c = 0; c < n_cells; ++c) {
+    marks[c] = static_cast<MarkType>(mark_data[c]);
   }
+
+  local.remove_field(h);
 }
 
 size_t ParallelAdaptivityManager::synchronize_marks(
-    DistributedMesh& mesh,
+    Mesh& mesh,
     std::vector<MarkType>& marks) {
 
   size_t iterations = 0;
@@ -202,13 +257,17 @@ size_t ParallelAdaptivityManager::synchronize_marks(
 
     // Check convergence
     size_t changes = 0;
-    std::vector<MarkType> old_marks = marks;
 
     // Update based on neighbor consistency
     for (size_t elem = 0; elem < marks.size(); ++elem) {
-      auto neighbors = mesh.get_local_mesh().get_element_neighbors(elem);
+      const auto neighbors = mesh.local_mesh().cell_neighbors(static_cast<index_t>(elem));
 
-      for (size_t neighbor : neighbors) {
+      for (const auto nbr_cell : neighbors) {
+        const auto neighbor = static_cast<size_t>(nbr_cell);
+        if (neighbor >= marks.size()) {
+          continue;
+        }
+
         if (marks[neighbor] == MarkType::REFINE &&
             marks[elem] == MarkType::NONE) {
           // Need to refine for conformity
@@ -231,7 +290,7 @@ size_t ParallelAdaptivityManager::synchronize_marks(
 }
 
 size_t ParallelAdaptivityManager::rebalance_load(
-    DistributedMesh& mesh,
+    Mesh& mesh,
     MeshFields* fields) {
 
   LoadBalance balance = compute_load_balance(mesh);
@@ -240,27 +299,84 @@ size_t ParallelAdaptivityManager::rebalance_load(
     return 0;
   }
 
-  // Migrate elements
-  migrate_elements(mesh, balance);
-
-  // Update fields
-  if (fields) {
-    // Redistribute field data
-    // Implementation depends on field storage
+  const auto& before_mesh = mesh.local_mesh();
+  const auto& before_gids = before_mesh.cell_gids();
+  std::unordered_set<gid_t> owned_before;
+  owned_before.reserve(before_mesh.n_cells());
+  for (index_t c = 0; c < static_cast<index_t>(before_mesh.n_cells()); ++c) {
+    if (mesh.is_owned_cell(c)) {
+      owned_before.insert(before_gids[static_cast<size_t>(c)]);
+    }
   }
 
-  return balance.migration_map.size();
+  PartitionHint hint = PartitionHint::Cells;
+  switch (config_.partition_method) {
+    case Config::PartitionMethod::GRAPH:
+#if defined(SVMP_HAS_METIS)
+      hint = PartitionHint::Metis;
+#else
+      hint = PartitionHint::Cells;
+#endif
+      break;
+    case Config::PartitionMethod::GEOMETRIC:
+      hint = PartitionHint::Vertices;
+      break;
+    case Config::PartitionMethod::SPACE_FILLING:
+    case Config::PartitionMethod::RECURSIVE:
+      hint = PartitionHint::Cells;
+      break;
+  }
+
+  mesh.rebalance(hint);
+
+  // Estimate the number of migrated elements as the number of owned cells that
+  // left this rank (sum over ranks gives a global migrated cell count).
+  const auto& after_mesh = mesh.local_mesh();
+  const auto& after_gids = after_mesh.cell_gids();
+  std::unordered_set<gid_t> owned_after;
+  owned_after.reserve(after_mesh.n_cells());
+  for (index_t c = 0; c < static_cast<index_t>(after_mesh.n_cells()); ++c) {
+    if (mesh.is_owned_cell(c)) {
+      owned_after.insert(after_gids[static_cast<size_t>(c)]);
+    }
+  }
+
+  size_t local_left = 0;
+  for (const auto gid : owned_before) {
+    if (owned_after.find(gid) == owned_after.end()) {
+      ++local_left;
+    }
+  }
+
+  size_t global_migrated = 0;
+  MPI_Allreduce(&local_left, &global_migrated, 1, MPI_UNSIGNED_LONG, MPI_SUM, comm_);
+
+  // Re-establish ghost layers to the configured depth and update exchange fields.
+  update_ghost_layers(mesh);
+  (void)fields;
+  mesh.update_exchange_ghost_fields();
+
+  return global_migrated;
 }
 
 void ParallelAdaptivityManager::initialize_comm_pattern(
-    const DistributedMesh& mesh) {
+    const Mesh& mesh) {
 
   // Determine communication neighbors
   comm_pattern_.send_procs.clear();
   comm_pattern_.recv_procs.clear();
 
   // Get mesh neighbors (processors sharing boundaries)
-  auto neighbors = mesh.get_neighbor_processors();
+  std::vector<int> neighbors;
+  neighbors.reserve(mesh.neighbor_ranks().size());
+  for (auto r : mesh.neighbor_ranks()) {
+    const int rr = static_cast<int>(r);
+    if (rr != rank_) {
+      neighbors.push_back(rr);
+    }
+  }
+  std::sort(neighbors.begin(), neighbors.end());
+  neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
 
   comm_pattern_.send_procs = neighbors;
   comm_pattern_.recv_procs = neighbors;
@@ -270,37 +386,58 @@ void ParallelAdaptivityManager::initialize_comm_pattern(
   comm_pattern_.recv_buffers.resize(size_);
 }
 
-void ParallelAdaptivityManager::update_ghost_layers(DistributedMesh& mesh) {
+void ParallelAdaptivityManager::update_ghost_layers(Mesh& mesh) {
+  // Ensure the DistributedMesh ghost infrastructure is established so that
+  // ownership/exchange patterns are valid for subsequent synchronization.
+  if (config_.ghost_depth > 0) {
+    mesh.build_ghost_layer(static_cast<int>(config_.ghost_depth));
+  } else {
+    mesh.build_exchange_patterns();
+  }
   ghost_layer_ = GhostLayerManager::build_ghost_layer(mesh, config_.ghost_depth);
 }
 
 void ParallelAdaptivityManager::exchange_field_data(
-    const DistributedMesh& mesh,
+    Mesh& mesh,
     std::vector<double>& field_data) {
 
-  // Pack field data for ghost elements
-  auto packed_data = GhostLayerManager::pack_ghost_data(mesh, ghost_layer_, field_data);
+  // For now, treat field_data as a per-cell scalar field and use the
+  // DistributedMesh ghost exchange to synchronize ghost values.
+  auto& local = mesh.local_mesh();
+  const size_t n_cells = local.n_cells();
 
-  // Exchange with neighbors
-  std::vector<double> recv_data(packed_data.size());
-
-  if (config_.comm_strategy == Config::CommStrategy::COLLECTIVE) {
-    MPI_Alltoall(packed_data.data(), packed_data.size() / size_, MPI_DOUBLE,
-                 recv_data.data(), packed_data.size() / size_, MPI_DOUBLE,
-                 comm_);
+  if (field_data.size() != n_cells) {
+    field_data.resize(n_cells, 0.0);
   }
 
-  // Unpack received data
-  GhostLayerManager::unpack_ghost_data(mesh, ghost_layer_, recv_data, field_data);
+  constexpr const char* kTmpFieldName = "__svmp_parallel_adaptivity_tmp_exchange";
+  if (local.has_field(EntityKind::Volume, kTmpFieldName)) {
+    local.remove_field(local.field_handle(EntityKind::Volume, kTmpFieldName));
+  }
+
+  const auto h = local.attach_field(EntityKind::Volume, kTmpFieldName, FieldScalarType::Float64, 1);
+  auto* data = local.field_data_as<real_t>(h);
+  for (size_t c = 0; c < n_cells; ++c) {
+    data[c] = field_data[c];
+  }
+
+  mesh.update_ghosts({h});
+
+  for (size_t c = 0; c < n_cells; ++c) {
+    field_data[c] = data[c];
+  }
+
+  local.remove_field(h);
 }
 
 LoadBalance ParallelAdaptivityManager::compute_load_balance(
-    const DistributedMesh& mesh) {
+    const Mesh& mesh) {
 
   LoadBalance balance;
 
   // Get local element count
-  size_t local_elements = mesh.get_local_mesh().num_elements();
+  // Use owned-only counts to avoid ghost-layer distortion.
+  size_t local_elements = mesh.n_owned_cells();
   balance.element_counts.resize(size_);
 
   // Gather element counts
@@ -311,12 +448,18 @@ LoadBalance ParallelAdaptivityManager::compute_load_balance(
   // Compute imbalance
   size_t total_elements = std::accumulate(balance.element_counts.begin(),
                                            balance.element_counts.end(), 0UL);
-  size_t avg_elements = total_elements / size_;
+  size_t avg_elements = (size_ > 0) ? (total_elements / static_cast<size_t>(size_)) : 0u;
   size_t max_elements = *std::max_element(balance.element_counts.begin(),
                                            balance.element_counts.end());
 
-  balance.imbalance_factor = static_cast<double>(max_elements) / avg_elements;
-  balance.needs_rebalancing = (balance.imbalance_factor > config_.imbalance_threshold);
+  if (avg_elements == 0) {
+    // Fewer elements than ranks; treat any rank with >1 element as imbalanced.
+    balance.imbalance_factor = (max_elements > 0) ? static_cast<double>(max_elements) : 0.0;
+  } else {
+    balance.imbalance_factor = static_cast<double>(max_elements) / avg_elements;
+  }
+  balance.needs_rebalancing =
+      (avg_elements > 0) && (balance.imbalance_factor > config_.imbalance_threshold);
 
   if (balance.needs_rebalancing) {
     // Compute target distribution
@@ -342,7 +485,7 @@ LoadBalance ParallelAdaptivityManager::compute_load_balance(
 }
 
 void ParallelAdaptivityManager::migrate_elements(
-    DistributedMesh& mesh,
+    Mesh& mesh,
     const LoadBalance& balance) {
 
   // Pack elements for migration
@@ -361,7 +504,7 @@ void ParallelAdaptivityManager::migrate_elements(
 }
 
 bool ParallelAdaptivityManager::check_global_conformity(
-    const DistributedMesh& mesh,
+    const Mesh& mesh,
     const std::vector<MarkType>& marks) {
 
   // Check local conformity
@@ -381,7 +524,7 @@ bool ParallelAdaptivityManager::check_global_conformity(
 }
 
 void ParallelAdaptivityManager::enforce_boundary_conformity(
-    DistributedMesh& mesh,
+    Mesh& mesh,
     std::vector<MarkType>& marks) {
 
   // Exchange marks at processor boundaries
@@ -399,12 +542,15 @@ void ParallelAdaptivityManager::enforce_boundary_conformity(
 }
 
 void ParallelAdaptivityManager::collective_error_estimation(
-    const DistributedMesh& mesh,
+    Mesh& mesh,
     std::vector<double>& error_field) {
 
   // Compute local error
   auto estimator = ErrorEstimatorFactory::create(AdaptivityOptions{});
-  estimator->estimate_error(mesh.get_local_mesh(), nullptr, error_field);
+  error_field = estimator->estimate(mesh.local_mesh(), nullptr, AdaptivityOptions{});
+  if (error_field.empty()) {
+    return;
+  }
 
   // Exchange ghost error values
   exchange_field_data(mesh, error_field);
@@ -420,7 +566,7 @@ void ParallelAdaptivityManager::collective_error_estimation(
 }
 
 void ParallelAdaptivityManager::apply_global_marking(
-    const DistributedMesh& mesh,
+    const Mesh& mesh,
     const std::vector<double>& error_field,
     std::vector<MarkType>& marks,
     const AdaptivityOptions& options) {
@@ -431,7 +577,7 @@ void ParallelAdaptivityManager::apply_global_marking(
 
   // Apply marking
   auto marker = MarkerFactory::create(options);
-  marker->mark_elements(mesh.get_local_mesh(), error_field, marks, options);
+  marks = marker->mark(error_field, mesh.local_mesh(), options);
 }
 
 //=============================================================================
@@ -462,16 +608,29 @@ double ParallelCommUtils::global_sum(MPI_Comm comm, double value) {
 
 std::vector<int> MeshPartitioner::partition_mesh(
     const MeshBase& mesh,
+    int num_partitions) {
+  return partition_mesh(mesh, num_partitions, Config{});
+}
+
+std::vector<int> MeshPartitioner::partition_mesh(
+    const MeshBase& mesh,
     int num_partitions,
-    const Config& config) {
+    Config config) {
+
+  (void)config;
 
   // Simplified partitioning
-  std::vector<int> partition(mesh.num_elements());
+  const size_t n_cells = mesh.n_cells();
+  std::vector<int> partition(n_cells);
 
   // Simple block partitioning
-  size_t elements_per_partition = mesh.num_elements() / num_partitions;
+  if (num_partitions <= 0) {
+    return partition;
+  }
+  const size_t elements_per_partition =
+      std::max<size_t>(1u, n_cells / static_cast<size_t>(num_partitions));
 
-  for (size_t i = 0; i < mesh.num_elements(); ++i) {
+  for (size_t i = 0; i < n_cells; ++i) {
     partition[i] = std::min(static_cast<int>(i / elements_per_partition),
                             num_partitions - 1);
   }
@@ -480,12 +639,20 @@ std::vector<int> MeshPartitioner::partition_mesh(
 }
 
 std::vector<int> MeshPartitioner::repartition_mesh(
-    const DistributedMesh& mesh,
+    const Mesh& mesh,
+    const std::vector<double>& weights) {
+  return repartition_mesh(mesh, weights, Config{});
+}
+
+std::vector<int> MeshPartitioner::repartition_mesh(
+    const Mesh& mesh,
     const std::vector<double>& weights,
-    const Config& config) {
+    Config config) {
+
+  (void)weights;
 
   // Simplified repartitioning
-  return partition_mesh(mesh.get_local_mesh(), mesh.get_num_processors(), config);
+  return partition_mesh(mesh.local_mesh(), mesh.world_size(), std::move(config));
 }
 
 MeshPartitioner::QualityMetrics MeshPartitioner::evaluate_partition(
@@ -506,14 +673,18 @@ MeshPartitioner::QualityMetrics MeshPartitioner::evaluate_partition(
   metrics.min_partition_size = *std::min_element(metrics.partition_sizes.begin(),
                                                   metrics.partition_sizes.end());
 
-  double avg_size = mesh.num_elements() / static_cast<double>(num_parts);
+  double avg_size = static_cast<double>(mesh.n_cells()) / static_cast<double>(num_parts);
   metrics.imbalance = metrics.max_partition_size / avg_size;
 
   // Compute edge cut (simplified)
   metrics.edge_cut = 0;
-  for (size_t elem = 0; elem < mesh.num_elements(); ++elem) {
-    auto neighbors = mesh.get_element_neighbors(elem);
-    for (size_t neighbor : neighbors) {
+  for (size_t elem = 0; elem < mesh.n_cells(); ++elem) {
+    const auto neighbors = mesh.cell_neighbors(static_cast<index_t>(elem));
+    for (const auto nbr_cell : neighbors) {
+      const auto neighbor = static_cast<size_t>(nbr_cell);
+      if (neighbor >= partition.size()) {
+        continue;
+      }
       if (partition[elem] != partition[neighbor]) {
         metrics.edge_cut++;
       }
@@ -529,47 +700,81 @@ MeshPartitioner::QualityMetrics MeshPartitioner::evaluate_partition(
 //=============================================================================
 
 GhostLayer GhostLayerManager::build_ghost_layer(
-    const DistributedMesh& mesh,
+    const Mesh& mesh,
     size_t depth) {
 
   GhostLayer ghost;
   ghost.depth = depth;
 
-  // Identify ghost elements (simplified)
-  // Would need actual distributed mesh interface
+  // Prefer DistributedMesh's ghost infrastructure as the source of truth.
+  // In the Mesh library, cell indices are rank-local; store them as `size_t`
+  // for compatibility with existing ParallelAdaptivity data structures.
+  const auto ghost_cells = mesh.ghost_cells();
+  ghost.ghost_elements.reserve(ghost_cells.size());
+
+  for (const auto c : ghost_cells) {
+    if (c < 0) {
+      continue;
+    }
+    const size_t cell = static_cast<size_t>(c);
+    ghost.ghost_elements.push_back(cell);
+    ghost.ghost_owners[cell] = static_cast<int>(mesh.owner_rank_cell(c));
+  }
+
+  // Record (at least) the owning rank for shared/ghost vertices.
+  const index_t n_vertices = static_cast<index_t>(mesh.local_mesh().n_vertices());
+  for (index_t v = 0; v < n_vertices; ++v) {
+    if (mesh.is_owned_vertex(v)) {
+      continue;
+    }
+    ghost.shared_vertices[static_cast<size_t>(v)].insert(static_cast<int>(mesh.owner_rank_vertex(v)));
+  }
 
   return ghost;
 }
 
 void GhostLayerManager::update_ghost_values(
-    const DistributedMesh& mesh,
+    const Mesh& mesh,
     const GhostLayer& ghost,
     std::vector<double>& field_values) {
+
+  (void)mesh;
+  (void)ghost;
+  (void)field_values;
 
   // Update ghost values from owning processors
   // Implementation depends on distributed mesh
 }
 
 void GhostLayerManager::synchronize_ghost_marks(
-    const DistributedMesh& mesh,
+    const Mesh& mesh,
     const GhostLayer& ghost,
     std::vector<MarkType>& marks) {
+
+  (void)mesh;
+  (void)ghost;
+  (void)marks;
 
   // Synchronize marks across ghost layers
 }
 
 bool GhostLayerManager::check_consistency(
-    const DistributedMesh& mesh,
+    const Mesh& mesh,
     const GhostLayer& ghost) {
+
+  (void)mesh;
+  (void)ghost;
 
   // Check that ghost values match owner values
   return true;
 }
 
 std::vector<double> GhostLayerManager::pack_ghost_data(
-    const DistributedMesh& mesh,
+    const Mesh& mesh,
     const GhostLayer& ghost,
     const std::vector<double>& field) {
+
+  (void)mesh;
 
   std::vector<double> packed_data;
 
@@ -583,10 +788,12 @@ std::vector<double> GhostLayerManager::pack_ghost_data(
 }
 
 void GhostLayerManager::unpack_ghost_data(
-    const DistributedMesh& mesh,
+    const Mesh& mesh,
     const GhostLayer& ghost,
     const std::vector<double>& packed_data,
     std::vector<double>& field) {
+
+  (void)mesh;
 
   size_t idx = 0;
   for (size_t elem : ghost.ghost_elements) {
@@ -601,8 +808,13 @@ void GhostLayerManager::unpack_ghost_data(
 //=============================================================================
 
 LoadBalance ParallelLoadBalancer::compute_balance(
-    const DistributedMesh& mesh,
-    const Config& config) {
+    const Mesh& mesh) {
+  return compute_balance(mesh, Config{});
+}
+
+LoadBalance ParallelLoadBalancer::compute_balance(
+    const Mesh& mesh,
+    Config config) {
 
   switch (config.algorithm) {
     case Config::Algorithm::DIFFUSIVE:
@@ -615,20 +827,27 @@ LoadBalance ParallelLoadBalancer::compute_balance(
 }
 
 void ParallelLoadBalancer::execute_balancing(
-    DistributedMesh& mesh,
+    Mesh& mesh,
     MeshFields* fields,
     const LoadBalance& balance) {
 
-  // Pack elements for migration
-  std::vector<std::vector<uint8_t>> send_buffers;
+  if (!balance.needs_rebalancing) {
+    return;
+  }
 
-  // Execute migration
-  // Update mesh and fields
+  // Delegate migration and partition updates to DistributedMesh.
+  mesh.rebalance(PartitionHint::Cells);
+
+  // Best-effort: update any exchange-marked fields after migration.
+  (void)fields;
+  mesh.update_exchange_ghost_fields();
 }
 
 double ParallelLoadBalancer::estimate_cost(
-    const DistributedMesh& mesh,
+    const Mesh& mesh,
     const LoadBalance& balance) {
+
+  (void)mesh;
 
   // Estimate migration cost
   double cost = balance.migration_map.size() * 1.0; // Simplified
@@ -636,8 +855,11 @@ double ParallelLoadBalancer::estimate_cost(
 }
 
 LoadBalance ParallelLoadBalancer::diffusive_balance(
-    const DistributedMesh& mesh,
+    const Mesh& mesh,
     const Config& config) {
+
+  (void)mesh;
+  (void)config;
 
   LoadBalance balance;
 
@@ -648,8 +870,11 @@ LoadBalance ParallelLoadBalancer::diffusive_balance(
 }
 
 LoadBalance ParallelLoadBalancer::direct_balance(
-    const DistributedMesh& mesh,
+    const Mesh& mesh,
     const Config& config) {
+
+  (void)mesh;
+  (void)config;
 
   LoadBalance balance;
 
@@ -734,7 +959,8 @@ ParallelStats ParallelAdaptivityUtils::gather_statistics(
   ParallelStats stats;
 
   // Gather timing statistics
-  MPI_Allreduce(&local_result.adaptation_time, &stats.comm_time, 1,
+  const double local_time = local_result.total_time.count();
+  MPI_Allreduce(&local_time, &stats.comm_time, 1,
                 MPI_DOUBLE, MPI_MAX, comm);
 
   // Gather adaptation counts
@@ -748,7 +974,9 @@ ParallelStats ParallelAdaptivityUtils::gather_statistics(
 
 bool ParallelAdaptivityUtils::check_parallel_consistency(
     MPI_Comm comm,
-    const DistributedMesh& mesh) {
+    const Mesh& mesh) {
+
+  (void)mesh;
 
   // Check consistency of shared entities
   bool local_consistent = true;
@@ -766,8 +994,10 @@ bool ParallelAdaptivityUtils::check_parallel_consistency(
 
 void ParallelAdaptivityUtils::write_parallel_mesh(
     MPI_Comm comm,
-    const DistributedMesh& mesh,
+    const Mesh& mesh,
     const std::string& filename) {
+
+  (void)mesh;
 
   // Parallel mesh output
   int rank;
