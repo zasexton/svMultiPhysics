@@ -555,6 +555,30 @@ void AffineConstraints::distribute(double* vec, GlobalIndex vec_size) const {
     }
 }
 
+void AffineConstraints::distributeHomogeneous(double* vec, GlobalIndex vec_size) const
+{
+    if (!is_closed_) {
+        CONSTRAINT_THROW("Cannot distributeHomogeneous: constraints not closed");
+    }
+
+    for (std::size_t i = 0; i < slave_dofs_.size(); ++i) {
+        GlobalIndex slave = slave_dofs_[i];
+        if (slave >= vec_size) continue;
+
+        auto begin_offset = static_cast<std::size_t>(entry_offsets_[i]);
+        auto end_offset = static_cast<std::size_t>(entry_offsets_[i + 1]);
+
+        double value = 0.0;
+        for (std::size_t j = begin_offset; j < end_offset; ++j) {
+            GlobalIndex master = entries_[j].master_dof;
+            if (master < vec_size) {
+                value += entries_[j].weight * vec[master];
+            }
+        }
+        vec[slave] = value;
+    }
+}
+
 void AffineConstraints::setConstrainedValues(double* vec, GlobalIndex vec_size) const {
     if (!is_closed_) {
         CONSTRAINT_THROW("Cannot set constrained values: constraints not closed");

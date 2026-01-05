@@ -220,6 +220,36 @@ TEST(AffineConstraintsTest, DistributeVectorWithInhomogeneity) {
     EXPECT_DOUBLE_EQ(vec[1], 5.0);
 }
 
+TEST(AffineConstraintsTest, DistributeVectorHomogeneousIgnoresInhomogeneity) {
+    AffineConstraints constraints;
+
+    // u_0 = u_1 + 10.0
+    constraints.addLine(0);
+    constraints.addEntry(0, 1, 1.0);
+    constraints.setInhomogeneity(0, 10.0);
+    constraints.close();
+
+    std::vector<double> vec = {0.0, 5.0};
+    constraints.distributeHomogeneous(vec.data(), static_cast<GlobalIndex>(vec.size()));
+
+    EXPECT_DOUBLE_EQ(vec[0], 5.0);
+    EXPECT_DOUBLE_EQ(vec[1], 5.0);
+}
+
+TEST(AffineConstraintsTest, DistributeVectorHomogeneousDirichletIsZero) {
+    AffineConstraints constraints;
+
+    // u_0 = 10.0 (Dirichlet)
+    constraints.addLine(0);
+    constraints.setInhomogeneity(0, 10.0);
+    constraints.close();
+
+    std::vector<double> vec = {123.0};
+    constraints.distributeHomogeneous(vec.data(), static_cast<GlobalIndex>(vec.size()));
+
+    EXPECT_DOUBLE_EQ(vec[0], 0.0);
+}
+
 // ============================================================================
 // Clear and reinitialize tests
 // ============================================================================

@@ -466,6 +466,25 @@ public:
     }
 
     /**
+     * @brief Distribute constraints to a vector, treating inhomogeneities as zero.
+     *
+     * Enforces the homogeneous form:
+     *   vec[slave] = sum(weight_i * vec[master_i])
+     *
+     * This is useful for derivative vectors (e.g., velocity/acceleration) when
+     * displacement constraints are time-independent, so their derivatives are
+     * homogeneous even if the displacement constraint itself is inhomogeneous.
+     */
+    void distributeHomogeneous(double* vec, GlobalIndex vec_size) const;
+
+    /**
+     * @brief Distribute constraints to a vector (std::vector), homogeneous form.
+     */
+    void distributeHomogeneous(std::vector<double>& vec) const {
+        distributeHomogeneous(vec.data(), static_cast<GlobalIndex>(vec.size()));
+    }
+
+    /**
      * @brief Set constrained DOF values in vector (just inhomogeneities)
      *
      * Sets vec[slave] = inhomogeneity for each constrained DOF.
