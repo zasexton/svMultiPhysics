@@ -41,6 +41,7 @@ namespace svmp {
 
 // Forward declaration
 class MeshBase;
+class DistributedMesh;
 
 /**
  * @brief Spatial search and point location for meshes
@@ -74,7 +75,7 @@ public:
   struct SearchConfig {
     AccelType type = AccelType::UniformGrid;
     int max_depth = 10;              // Maximum tree depth
-    int min_entities_per_leaf = 10;  // Minimum entities in leaf
+    int min_entities_per_leaf = 1;   // Minimum entities in leaf
     int grid_resolution = 32;        // Grid cells per dimension
     real_t tolerance = 1e-10;        // Geometric tolerance
     bool use_cache = true;           // Cache recent searches
@@ -106,6 +107,18 @@ public:
                                        index_t hint_cell = -1);
 
   /**
+   * @brief Locate point in a distributed mesh (collective in MPI builds).
+   *
+   * Semantics:
+   * - In serial builds (or single-rank runs), this is equivalent to locate_point(mesh.local_mesh(), ...).
+   * - In MPI builds, all ranks in the mesh communicator must call this with the same input point.
+   *   The owning rank returns a valid local cell_id; other ranks return found==true with cell_id==INVALID_INDEX.
+   */
+  static PointLocateResult locate_point_global(const DistributedMesh& mesh,
+                                              const std::array<real_t,3>& point,
+                                              Configuration cfg = Configuration::Reference);
+
+  /**
    * @brief Locate multiple points efficiently
    * @param mesh The mesh
    * @param points Query points
@@ -117,6 +130,16 @@ public:
                                                      Configuration cfg = Configuration::Reference);
 
   /**
+   * @brief Locate multiple points in a distributed mesh (collective in MPI builds).
+   *
+   * All ranks must pass the same `points` vector in MPI builds.
+   */
+  static std::vector<PointLocateResult> locate_points_global(
+      const DistributedMesh& mesh,
+      const std::vector<std::array<real_t,3>>& points,
+      Configuration cfg = Configuration::Reference);
+
+  /**
    * @brief Check if point is inside mesh domain
    * @param mesh The mesh
    * @param point Query point
@@ -126,6 +149,13 @@ public:
   static bool contains_point(const MeshBase& mesh,
                             const std::array<real_t,3>& point,
                             Configuration cfg = Configuration::Reference);
+
+  /**
+   * @brief Check if point is inside distributed mesh domain (collective in MPI builds).
+   */
+  static bool contains_point_global(const DistributedMesh& mesh,
+                                    const std::array<real_t,3>& point,
+                                    Configuration cfg = Configuration::Reference);
 
   // ---- Nearest neighbor search ----
 
@@ -196,6 +226,20 @@ public:
                                          real_t max_distance = 1e300);
 
   /**
+   * @brief Find the first ray-mesh intersection on a distributed mesh (collective in MPI builds).
+   *
+   * In MPI builds, all ranks must call this with identical inputs. The intersection is performed
+   * against the *true global boundary* (not partition interfaces), even when no ghost layer is present.
+   *
+   * On the winning rank, `face_id` is a local face index. On all other ranks, `face_id==INVALID_INDEX`.
+   */
+  static RayIntersectResult intersect_ray_global(const DistributedMesh& mesh,
+                                                const std::array<real_t,3>& origin,
+                                                const std::array<real_t,3>& direction,
+                                                Configuration cfg = Configuration::Reference,
+                                                real_t max_distance = 1e300);
+
+  /**
    * @brief Find all ray-mesh intersections
    * @param mesh The mesh
    * @param origin Ray origin
@@ -206,6 +250,19 @@ public:
    */
   static std::vector<RayIntersectResult> intersect_ray_all(
       const MeshBase& mesh,
+      const std::array<real_t,3>& origin,
+      const std::array<real_t,3>& direction,
+      Configuration cfg = Configuration::Reference,
+      real_t max_distance = 1e300);
+
+  /**
+   * @brief Find all ray-mesh intersections on a distributed mesh (collective in MPI builds).
+   *
+   * All ranks must pass identical inputs in MPI builds. The returned list is only populated on
+   * rank 0; other ranks return an empty vector.
+   */
+  static std::vector<RayIntersectResult> intersect_ray_all_global(
+      const DistributedMesh& mesh,
       const std::array<real_t,3>& origin,
       const std::array<real_t,3>& direction,
       Configuration cfg = Configuration::Reference,
@@ -225,6 +282,13 @@ public:
                                Configuration cfg = Configuration::Reference);
 
   /**
+   * @brief Compute signed distance to the true global boundary on a distributed mesh (collective in MPI builds).
+   */
+  static real_t signed_distance_global(const DistributedMesh& mesh,
+                                       const std::array<real_t,3>& point,
+                                       Configuration cfg = Configuration::Reference);
+
+  /**
    * @brief Find closest point on mesh boundary
    * @param mesh The mesh
    * @param point Query point
@@ -233,6 +297,17 @@ public:
    */
   static std::pair<std::array<real_t,3>, index_t> closest_boundary_point(
       const MeshBase& mesh,
+      const std::array<real_t,3>& point,
+      Configuration cfg = Configuration::Reference);
+
+  /**
+   * @brief Find closest point on the true global boundary of a distributed mesh (collective in MPI builds).
+   *
+   * On the winning rank, `index_t` is a local boundary-entity id (typically a face index for 3D meshes).
+   * On other ranks, `index_t==INVALID_INDEX`.
+   */
+  static std::pair<std::array<real_t,3>, index_t> closest_boundary_point_global(
+      const DistributedMesh& mesh,
       const std::array<real_t,3>& point,
       Configuration cfg = Configuration::Reference);
 
