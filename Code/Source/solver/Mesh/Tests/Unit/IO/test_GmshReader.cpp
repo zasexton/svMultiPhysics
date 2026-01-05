@@ -12,8 +12,10 @@
 #include "Geometry/CurvilinearEval.h"
 
 #include <fstream>
+#include <functional>
 #include <sstream>
 #include <cstdio>
+#include <cstdint>
 
 namespace svmp {
 namespace test {
@@ -46,9 +48,28 @@ protected:
         return filename;
     }
 
+    std::string write_temp_binary_file(const std::function<void(std::ofstream&)>& writer,
+                                       const std::string& suffix = ".msh") {
+        std::string filename = temp_dir_ + "_" + std::to_string(temp_files_.size()) + suffix;
+        std::ofstream file(filename, std::ios::binary);
+        writer(file);
+        file.close();
+        temp_files_.push_back(filename);
+        return filename;
+    }
+
     std::string temp_dir_;
     std::vector<std::string> temp_files_;
 };
+
+namespace {
+
+template <typename T>
+void write_bin(std::ofstream& out, const T& v) {
+    out.write(reinterpret_cast<const char*>(&v), sizeof(T));
+}
+
+} // namespace
 
 // ==========================================
 // Sample Gmsh Files (MSH 2.2 Format)
@@ -322,6 +343,45 @@ TEST_F(GmshReaderTest, ReadQuadMeshV2) {
     }
 }
 
+TEST_F(GmshReaderTest, ReadQuadMeshV2_Binary) {
+    const std::string filename = write_temp_binary_file([](std::ofstream& out) {
+        out << "$MeshFormat\n";
+        out << "2.2 1 8\n";
+        const int32_t one = 1;
+        write_bin(out, one);
+        out << "\n$EndMeshFormat\n";
+
+        out << "$Nodes\n";
+        out << "4\n";
+        // nodeTag, x, y, z
+        write_bin(out, int32_t{1}); write_bin(out, double{0.0}); write_bin(out, double{0.0}); write_bin(out, double{0.0});
+        write_bin(out, int32_t{2}); write_bin(out, double{1.0}); write_bin(out, double{0.0}); write_bin(out, double{0.0});
+        write_bin(out, int32_t{3}); write_bin(out, double{1.0}); write_bin(out, double{1.0}); write_bin(out, double{0.0});
+        write_bin(out, int32_t{4}); write_bin(out, double{0.0}); write_bin(out, double{1.0}); write_bin(out, double{0.0});
+        out << "\n$EndNodes\n";
+
+        out << "$Elements\n";
+        out << "1\n";
+        // Binary element blocks:
+        // elemType, numElementsInBlock, numTags
+        write_bin(out, int32_t{3}); // Quad
+        write_bin(out, int32_t{1}); // one element
+        write_bin(out, int32_t{2}); // physical, entity
+        // element record: elemNumber, tags..., nodeTags...
+        write_bin(out, int32_t{1}); // element number
+        write_bin(out, int32_t{1}); // physical tag
+        write_bin(out, int32_t{1}); // entity tag
+        write_bin(out, int32_t{1}); write_bin(out, int32_t{2}); write_bin(out, int32_t{3}); write_bin(out, int32_t{4});
+        out << "\n$EndElements\n";
+    });
+
+    MeshBase mesh = GmshReader::read(filename);
+    EXPECT_EQ(mesh.n_vertices(), 4u);
+    EXPECT_EQ(mesh.n_cells(), 1u);
+    EXPECT_EQ(mesh.cell_shape(0).family, CellFamily::Quad);
+    EXPECT_EQ(mesh.cell_shape(0).order, 1);
+}
+
 TEST_F(GmshReaderTest, ReadTriangleMeshV2) {
     std::string filename = write_temp_file(TRIANGLE_MESH_V2);
 
@@ -480,6 +540,52 @@ TEST_F(GmshReaderTest, ReadQuadMeshV4) {
         auto shape = mesh.cell_shape(c);
         EXPECT_EQ(shape.family, CellFamily::Quad);
     }
+}
+
+TEST_F(GmshReaderTest, ReadQuadMeshV4_Binary) {
+    const std::string filename = write_temp_binary_file([](std::ofstream& out) {
+        out << "$MeshFormat\n";
+        out << "4.1 1 8\n";
+        const int32_t one = 1;
+        write_bin(out, one);
+        out << "\n$EndMeshFormat\n";
+
+        out << "$Nodes\n";
+        // numEntityBlocks numNodes minNodeTag maxNodeTag
+        out << "1 4 1 4\n";
+        // entityDim entityTag parametric numNodesInBlock
+        out << "2 1 0 4\n";
+        // binary node tags (uint64)
+        write_bin(out, uint64_t{1});
+        write_bin(out, uint64_t{2});
+        write_bin(out, uint64_t{3});
+        write_bin(out, uint64_t{4});
+        // binary coordinates (double)
+        write_bin(out, double{0.0}); write_bin(out, double{0.0}); write_bin(out, double{0.0});
+        write_bin(out, double{1.0}); write_bin(out, double{0.0}); write_bin(out, double{0.0});
+        write_bin(out, double{1.0}); write_bin(out, double{1.0}); write_bin(out, double{0.0});
+        write_bin(out, double{0.0}); write_bin(out, double{1.0}); write_bin(out, double{0.0});
+        out << "\n$EndNodes\n";
+
+        out << "$Elements\n";
+        // numEntityBlocks numElements minElementTag maxElementTag
+        out << "1 1 1 1\n";
+        // entityDim entityTag elementType numElementsInBlock
+        out << "2 1 3 1\n";
+        // element tag (uint64) + node tags
+        write_bin(out, uint64_t{1});
+        write_bin(out, uint64_t{1});
+        write_bin(out, uint64_t{2});
+        write_bin(out, uint64_t{3});
+        write_bin(out, uint64_t{4});
+        out << "\n$EndElements\n";
+    });
+
+    MeshBase mesh = GmshReader::read(filename);
+    EXPECT_EQ(mesh.n_vertices(), 4u);
+    EXPECT_EQ(mesh.n_cells(), 1u);
+    EXPECT_EQ(mesh.cell_shape(0).family, CellFamily::Quad);
+    EXPECT_EQ(mesh.cell_shape(0).order, 1);
 }
 
 TEST_F(GmshReaderTest, IsGmshFile) {

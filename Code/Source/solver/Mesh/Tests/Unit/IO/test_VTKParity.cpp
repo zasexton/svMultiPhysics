@@ -422,46 +422,281 @@ namespace svmp { namespace test {
 // Lagrange Triangle, order 3 (Tri10):
 // - 3 corners, 6 edge nodes (2 per edge), 1 interior face node
 // Expected VTK ordering after corners: edge nodes along (0-1), (1-2), (2-0) in parametric order, then 1 face node.
-TEST(VTKParity, DISABLED_Lagrange_Tri_Order3_FaceMapping) {
-  // Expected relative positions after 3 corners: 6 edge nodes + 1 face node
-  const int corners = 3;
-  const int edge_nodes = 6;
-  const int face_nodes = 1;
-  ASSERT_EQ(corners + edge_nodes + face_nodes, 10);
-  // TODO: when Lagrange Triangle writer is added, construct Tri10, write/read, then verify:
-  // - conn[corners + 0..1] belong to edge (0,1)
-  // - conn[corners + 2..3] belong to edge (1,2)
-  // - conn[corners + 4..5] belong to edge (2,0)
-  // - conn.back() is the face-interior node
+TEST(VTKParity, Lagrange_Tri_Order3_FaceMapping) {
+  MeshBase mesh(2);
+
+  // Tri10 node ordering (VTK Lagrange triangle, p=3):
+  // corners (0,1,2),
+  // edge(0-1): 2 nodes, edge(1-2): 2 nodes, edge(2-0): 2 nodes,
+  // 1 interior node.
+  std::vector<std::array<real_t,3>> pts = {
+      {0.0, 0.0, 0.0}, // 0
+      {1.0, 0.0, 0.0}, // 1
+      {0.0, 1.0, 0.0}, // 2
+      {1.0 / 3.0, 0.0, 0.0}, // 3 edge 0-1 (t=1/3)
+      {2.0 / 3.0, 0.0, 0.0}, // 4 edge 0-1 (t=2/3)
+      {2.0 / 3.0, 1.0 / 3.0, 0.0}, // 5 edge 1-2 (t=1/3 from 1->2)
+      {1.0 / 3.0, 2.0 / 3.0, 0.0}, // 6 edge 1-2 (t=2/3)
+      {0.0, 2.0 / 3.0, 0.0}, // 7 edge 2-0 (t=1/3 from 2->0)
+      {0.0, 1.0 / 3.0, 0.0}, // 8 edge 2-0 (t=2/3)
+      {1.0 / 3.0, 1.0 / 3.0, 0.0}, // 9 interior
+  };
+
+  std::vector<real_t> X;
+  X.reserve(pts.size() * 2);
+  for (const auto& p : pts) {
+    X.push_back(p[0]);
+    X.push_back(p[1]);
+  }
+
+  std::vector<CellShape> shapes(1);
+  shapes[0].family = CellFamily::Triangle;
+  shapes[0].order = 3;
+  shapes[0].num_corners = 3;
+
+  std::vector<offset_t> offs = {0, static_cast<offset_t>(pts.size())};
+  std::vector<index_t> conn;
+  conn.reserve(pts.size());
+  for (index_t i = 0; i < static_cast<index_t>(pts.size()); ++i) conn.push_back(i);
+
+  mesh.build_from_arrays(2, X, offs, conn, shapes);
+  mesh.finalize();
+
+  std::string fname = "vtk_parity_tmp_lagrange_tri10.vtu";
+  MeshIOOptions optsW; optsW.format = "vtu"; optsW.path = fname;
+  VTKWriter::write(mesh, optsW);
+
+  MeshIOOptions optsR; optsR.format = "vtu"; optsR.path = fname;
+  auto mesh2 = VTKReader::read(optsR);
+
+  ASSERT_EQ(mesh2.n_cells(), 1u);
+  ASSERT_EQ(mesh2.n_vertices(), pts.size());
+  ASSERT_EQ(mesh2.cell_shape(0).family, CellFamily::Triangle);
+  ASSERT_EQ(mesh2.cell_shape(0).order, 3);
+
+  auto span = mesh2.cell_vertices_span(0);
+  std::vector<index_t> conn_read(span.first, span.first + span.second);
+  ASSERT_EQ(conn_read.size(), 10u);
+
+  EXPECT_EQ(conn_read[0], 0);
+  EXPECT_EQ(conn_read[1], 1);
+  EXPECT_EQ(conn_read[2], 2);
+  EXPECT_EQ(conn_read[3], 3);
+  EXPECT_EQ(conn_read[4], 4);
+  EXPECT_EQ(conn_read[5], 5);
+  EXPECT_EQ(conn_read[6], 6);
+  EXPECT_EQ(conn_read[7], 7);
+  EXPECT_EQ(conn_read[8], 8);
+  EXPECT_EQ(conn_read[9], 9);
 }
 
 // Lagrange Quadrilateral, order 3 (Quad16):
 // - 4 corners, 8 edge nodes (2 per edge), 4 interior face nodes (grid-like)
 // Expected VTK ordering after corners: edges (0-1),(1-2),(2-3),(3-0) each with 2 nodes; then 4 face nodes
-TEST(VTKParity, DISABLED_Lagrange_Quad_Order3_FaceMapping) {
-  const int corners = 4;
-  const int edge_nodes = 8;
-  const int face_nodes = 4;
-  ASSERT_EQ(corners + edge_nodes + face_nodes, 16);
-  // TODO: when Lagrange Quad writer is added, construct Quad16, write/read, then verify:
-  // - conn[4 + 0..1] edge (0,1)
-  // - conn[4 + 2..3] edge (1,2)
-  // - conn[4 + 4..5] edge (2,3)
-  // - conn[4 + 6..7] edge (3,0)
-  // - conn[12..15] are face-internal nodes in VTK row-major parametric ordering
+TEST(VTKParity, Lagrange_Quad_Order3_FaceMapping) {
+  MeshBase mesh(2);
+
+  // Quad16 node ordering (VTK Lagrange quadrilateral, p=3):
+  // corners (0,1,2,3),
+  // 2 nodes per edge in order (0-1),(1-2),(2-3),(3-0),
+  // 4 interior nodes in row-major parametric ordering.
+  std::vector<std::array<real_t,3>> pts = {
+      {0.0, 0.0, 0.0}, // 0
+      {1.0, 0.0, 0.0}, // 1
+      {1.0, 1.0, 0.0}, // 2
+      {0.0, 1.0, 0.0}, // 3
+      {1.0 / 3.0, 0.0, 0.0}, // 4 edge 0-1 (t=1/3)
+      {2.0 / 3.0, 0.0, 0.0}, // 5 edge 0-1 (t=2/3)
+      {1.0, 1.0 / 3.0, 0.0}, // 6 edge 1-2 (t=1/3)
+      {1.0, 2.0 / 3.0, 0.0}, // 7 edge 1-2 (t=2/3)
+      {2.0 / 3.0, 1.0, 0.0}, // 8 edge 2-3 (t=1/3 from 2->3)
+      {1.0 / 3.0, 1.0, 0.0}, // 9 edge 2-3 (t=2/3)
+      {0.0, 2.0 / 3.0, 0.0}, // 10 edge 3-0 (t=1/3 from 3->0)
+      {0.0, 1.0 / 3.0, 0.0}, // 11 edge 3-0 (t=2/3)
+      {1.0 / 3.0, 1.0 / 3.0, 0.0}, // 12 interior (i=1,j=1)
+      {1.0 / 3.0, 2.0 / 3.0, 0.0}, // 13 interior (i=1,j=2)
+      {2.0 / 3.0, 1.0 / 3.0, 0.0}, // 14 interior (i=2,j=1)
+      {2.0 / 3.0, 2.0 / 3.0, 0.0}, // 15 interior (i=2,j=2)
+  };
+
+  std::vector<real_t> X;
+  X.reserve(pts.size() * 2);
+  for (const auto& p : pts) {
+    X.push_back(p[0]);
+    X.push_back(p[1]);
+  }
+
+  std::vector<CellShape> shapes(1);
+  shapes[0].family = CellFamily::Quad;
+  shapes[0].order = 3;
+  shapes[0].num_corners = 4;
+
+  std::vector<offset_t> offs = {0, static_cast<offset_t>(pts.size())};
+  std::vector<index_t> conn;
+  conn.reserve(pts.size());
+  for (index_t i = 0; i < static_cast<index_t>(pts.size()); ++i) conn.push_back(i);
+
+  mesh.build_from_arrays(2, X, offs, conn, shapes);
+  mesh.finalize();
+
+  std::string fname = "vtk_parity_tmp_lagrange_quad16.vtu";
+  MeshIOOptions optsW; optsW.format = "vtu"; optsW.path = fname;
+  VTKWriter::write(mesh, optsW);
+
+  MeshIOOptions optsR; optsR.format = "vtu"; optsR.path = fname;
+  auto mesh2 = VTKReader::read(optsR);
+
+  ASSERT_EQ(mesh2.n_cells(), 1u);
+  ASSERT_EQ(mesh2.n_vertices(), pts.size());
+  ASSERT_EQ(mesh2.cell_shape(0).family, CellFamily::Quad);
+  ASSERT_EQ(mesh2.cell_shape(0).order, 3);
+
+  auto span = mesh2.cell_vertices_span(0);
+  std::vector<index_t> conn_read(span.first, span.first + span.second);
+  ASSERT_EQ(conn_read.size(), 16u);
+  for (index_t i = 0; i < 16; ++i) {
+    EXPECT_EQ(conn_read[static_cast<size_t>(i)], i);
+  }
 }
 
 // Serendipity Quadrilateral, order 3 (12 nodes):
 // - 4 corners, 8 edge nodes (2 per edge), no face interior nodes
-TEST(VTKParity, DISABLED_Serendipity_Quad_Order3_EdgeMapping) {
-  const int corners = 4;
-  const int edge_nodes = 8;
-  ASSERT_EQ(corners + edge_nodes, 12);
-  // TODO: when Serendipity Quad writer is added, construct 12-node serendipity quad, write/read, then verify:
-  // - conn[4 + 0..1] edge (0,1)
-  // - conn[4 + 2..3] edge (1,2)
-  // - conn[4 + 4..5] edge (2,3)
-  // - conn[4 + 6..7] edge (3,0)
+TEST(VTKParity, Serendipity_Quad_Order3_EdgeMapping) {
+  MeshBase mesh(2);
+
+  // Q12 node ordering (Serendipity p=3):
+  // corners (0,1,2,3),
+  // edge(0-1): 2 nodes, edge(1-2): 2 nodes, edge(2-3): 2 nodes, edge(3-0): 2 nodes.
+  std::vector<std::array<real_t,3>> pts = {
+      {0.0, 0.0, 0.0}, // 0
+      {1.0, 0.0, 0.0}, // 1
+      {1.0, 1.0, 0.0}, // 2
+      {0.0, 1.0, 0.0}, // 3
+      {1.0 / 3.0, 0.0, 0.0}, // 4 edge 0-1 (t=1/3)
+      {2.0 / 3.0, 0.0, 0.0}, // 5 edge 0-1 (t=2/3)
+      {1.0, 1.0 / 3.0, 0.0}, // 6 edge 1-2 (t=1/3)
+      {1.0, 2.0 / 3.0, 0.0}, // 7 edge 1-2 (t=2/3)
+      {2.0 / 3.0, 1.0, 0.0}, // 8 edge 2-3 (t=1/3 from 2->3)
+      {1.0 / 3.0, 1.0, 0.0}, // 9 edge 2-3 (t=2/3)
+      {0.0, 2.0 / 3.0, 0.0}, // 10 edge 3-0 (t=1/3 from 3->0)
+      {0.0, 1.0 / 3.0, 0.0}, // 11 edge 3-0 (t=2/3)
+  };
+
+  std::vector<real_t> X;
+  X.reserve(pts.size() * 2);
+  for (const auto& p : pts) {
+    X.push_back(p[0]);
+    X.push_back(p[1]);
+  }
+
+  std::vector<CellShape> shapes(1);
+  shapes[0].family = CellFamily::Quad;
+  shapes[0].order = 3;
+  shapes[0].num_corners = 4;
+
+  std::vector<offset_t> offs = {0, static_cast<offset_t>(pts.size())};
+  std::vector<index_t> conn;
+  conn.reserve(pts.size());
+  for (index_t i = 0; i < static_cast<index_t>(pts.size()); ++i) conn.push_back(i);
+
+  mesh.build_from_arrays(2, X, offs, conn, shapes);
+  mesh.finalize();
+
+  // Add a simple vertex-attached scalar field to verify that point data for the
+  // synthesized interior nodes is interpolated (not zero-filled) on write.
+  {
+    auto h = mesh.attach_field(EntityKind::Vertex, "Phi", FieldScalarType::Float64, 1);
+    auto* phi = mesh.field_data_as<double>(h);
+    const auto& Xr = mesh.X_ref();
+    for (size_t v = 0; v < mesh.n_vertices(); ++v) {
+      const double x = Xr[v * 2 + 0];
+      const double y = Xr[v * 2 + 1];
+      phi[v] = x + 2.0 * y;
+    }
+  }
+
+  // Add current coordinates so the writer outputs "Displacement" and we can
+  // verify Coons-patch interpolation for inserted interior points.
+  {
+    std::vector<real_t> Xcur = mesh.X_ref();
+    for (auto& x : Xcur) x *= 2.0; // displacement = X_ref
+    mesh.set_current_coords(Xcur);
+  }
+
+  std::string fname = "vtk_parity_tmp_serendipity_quad12.vtu";
+  MeshIOOptions optsW;
+  optsW.format = "vtu";
+  optsW.path = fname;
+  VTKWriter::write(mesh, optsW);
+
+  MeshIOOptions optsR;
+  optsR.format = "vtu";
+  optsR.path = fname;
+  auto mesh2 = VTKReader::read(optsR);
+
+  // VTK does not support p=3 serendipity quads directly; we write them as
+  // a Lagrange Quad16 by synthesizing 4 interior nodes. The edge-node ordering
+  // must be preserved.
+  ASSERT_EQ(mesh2.n_cells(), 1u);
+  ASSERT_EQ(mesh2.cell_shape(0).family, CellFamily::Quad);
+  ASSERT_EQ(mesh2.cell_shape(0).order, 3);
+  ASSERT_EQ(mesh2.n_vertices(), 16u);
+
+  auto span = mesh2.cell_vertices_span(0);
+  std::vector<index_t> conn_read(span.first, span.first + span.second);
+  ASSERT_EQ(conn_read.size(), 16u);
+
+  // Corners
+  EXPECT_EQ(conn_read[0], 0);
+  EXPECT_EQ(conn_read[1], 1);
+  EXPECT_EQ(conn_read[2], 2);
+  EXPECT_EQ(conn_read[3], 3);
+  // Edges: 2 nodes per edge in order (0-1),(1-2),(2-3),(3-0)
+  EXPECT_EQ(conn_read[4], 4);
+  EXPECT_EQ(conn_read[5], 5);
+  EXPECT_EQ(conn_read[6], 6);
+  EXPECT_EQ(conn_read[7], 7);
+  EXPECT_EQ(conn_read[8], 8);
+  EXPECT_EQ(conn_read[9], 9);
+  EXPECT_EQ(conn_read[10], 10);
+  EXPECT_EQ(conn_read[11], 11);
+  // Interior nodes are appended after edges.
+  EXPECT_EQ(conn_read[12], 12);
+  EXPECT_EQ(conn_read[13], 13);
+  EXPECT_EQ(conn_read[14], 14);
+  EXPECT_EQ(conn_read[15], 15);
+
+  // Point-field and displacement values for synthesized interior points should be
+  // Coons-patch interpolated from boundary nodes.
+  ASSERT_TRUE(mesh2.has_field(EntityKind::Vertex, "Phi"));
+  {
+    auto h = mesh2.field_handle(EntityKind::Vertex, "Phi");
+    ASSERT_EQ(mesh2.field_type(h), FieldScalarType::Float64);
+    ASSERT_EQ(mesh2.field_components(h), 1u);
+    const auto* phi = mesh2.field_data_as<double>(h);
+    const auto& Xr = mesh2.X_ref();
+    for (index_t v = 12; v < 16; ++v) {
+      const double x = Xr[static_cast<size_t>(v) * 2 + 0];
+      const double y = Xr[static_cast<size_t>(v) * 2 + 1];
+      EXPECT_NEAR(phi[v], x + 2.0 * y, 1e-12);
+    }
+  }
+
+  ASSERT_TRUE(mesh2.has_field(EntityKind::Vertex, "Displacement"));
+  {
+    auto h = mesh2.field_handle(EntityKind::Vertex, "Displacement");
+    ASSERT_EQ(mesh2.field_type(h), FieldScalarType::Float64);
+    ASSERT_EQ(mesh2.field_components(h), 3u);
+    const auto* disp = mesh2.field_data_as<double>(h);
+    const auto& Xr = mesh2.X_ref();
+    for (index_t v = 12; v < 16; ++v) {
+      const double x = Xr[static_cast<size_t>(v) * 2 + 0];
+      const double y = Xr[static_cast<size_t>(v) * 2 + 1];
+      EXPECT_NEAR(disp[static_cast<size_t>(v) * 3 + 0], x, 1e-12);
+      EXPECT_NEAR(disp[static_cast<size_t>(v) * 3 + 1], y, 1e-12);
+      EXPECT_NEAR(disp[static_cast<size_t>(v) * 3 + 2], 0.0, 1e-12);
+    }
+  }
 }
 
 }} // namespace svmp::test
