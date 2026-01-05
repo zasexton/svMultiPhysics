@@ -38,6 +38,11 @@ struct StepAttemptInfo {
 
     // Optional error estimate (scheme-dependent); <= 0 means "not provided".
     double error_norm{-1.0};
+
+    // Optional companion error estimates for adjacent orders (scheme-dependent).
+    // For VSVO-BDF these correspond to (scheme_order-1) and (scheme_order+1).
+    double error_norm_low{-1.0};
+    double error_norm_high{-1.0};
 };
 
 struct StepDecision {

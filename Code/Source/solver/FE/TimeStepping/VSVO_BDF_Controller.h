@@ -36,19 +36,20 @@ struct VSVO_BDF_ControllerOptions {
     double pi_alpha{0.7};
     double pi_beta{0.4};
 
-    // Heuristics
-    double increase_order_threshold{0.05};
-    double nonlinear_decrease_factor{0.5};
-};
+	    // Heuristics
+	    // Only consider order increases when the p+1 error estimate is below this threshold.
+	    // (A value <= 0 disables the gate.)
+	    double increase_order_threshold{0.05};
+	    double nonlinear_decrease_factor{0.5};
+	};
 
 /**
- * @brief Minimal variable-step/variable-order BDF controller (orders 1..5).
+ * @brief Variable-step/variable-order BDF controller (orders 1..5).
  *
- * This controller assumes `StepAttemptInfo::error_norm` is a weighted RMS norm
- * (<= 1 accepted) and uses a standard dt update:
- *   dt_{new} = dt * safety * error^{-1/(p+1)}
- *
- * It also proposes order increases when the error is very small.
+ * TimeLoop is expected to provide a weighted RMS error estimate for the current
+ * order in `StepAttemptInfo::error_norm`. If available, companion estimates for
+ * `p-1` and `p+1` may be provided in `error_norm_low` / `error_norm_high`,
+ * enabling a simple efficiency-based order selection.
  */
 class VSVO_BDF_Controller final : public StepController {
 public:

@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -77,11 +78,7 @@ StepDecision VSVO_BDF_Controller::onAccepted(const StepAttemptInfo& info)
 {
     StepDecision d;
     const int p = clampOrder(info.scheme_order > 0 ? info.scheme_order : options_.initial_order);
-    // Starter ramp: as history becomes available, increase order up to the
-    // user-provided max. This avoids getting stuck at BDF1 (and very small dt)
-    // when higher-order stencils are admissible.
-    const int starter_order = clampOrder(info.step_index + 1);
-    d.next_order = std::max(p, starter_order);
+    d.next_order = p;
 
     const double err = info.error_norm;
     if (!(err > 0.0) || !std::isfinite(err)) {
@@ -95,25 +92,24 @@ StepDecision VSVO_BDF_Controller::onAccepted(const StepAttemptInfo& info)
     d.accept = true;
     d.retry = false;
 
-    const bool have_prev = (info.step_index > 0) &&
-        (prev_error_norm_ > 0.0 && std::isfinite(prev_error_norm_) && prev_order_ == p);
-    const double prev_err = have_prev
-        ? prev_error_norm_
-        : err;
-    const double inv_p1 = 1.0 / static_cast<double>(p + 1);
-    const double k_i = options_.pi_alpha * inv_p1;
-    const double k_p = options_.pi_beta * inv_p1;
-    const double fac = options_.safety *
-        std::pow(1.0 / std::max(err, 1e-16), k_i) *
-        std::pow(1.0 / std::max(prev_err, 1e-16), k_p);
-
     if (err > 1.0) {
         d.accept = false;
         d.retry = (info.attempt_index < options_.max_retries);
+        d.next_order = clampOrder(p - 1);
+
+        // For rejected steps, base the reduction on the current error only. Using the
+        // previous accepted error can (pathologically) prevent dt reduction when the
+        // previous step was much easier than the current one.
+        const double prev_err = err;
+        const double inv_p1 = 1.0 / static_cast<double>(p + 1);
+        const double k_i = options_.pi_alpha * inv_p1;
+        const double k_p = options_.pi_beta * inv_p1;
+        const double fac = options_.safety *
+            std::pow(1.0 / std::max(err, 1e-16), k_i) *
+            std::pow(1.0 / std::max(prev_err, 1e-16), k_p);
 
         const double fac_clamped = std::min(1.0, std::max(options_.min_factor, fac));
         d.next_dt = clampDt(info.dt * fac_clamped);
-        d.next_order = clampOrder(p - 1);
         d.message = "rejected: error too large";
 
         if (!(d.next_dt > 0.0) || !std::isfinite(d.next_dt)) {
@@ -123,13 +119,69 @@ StepDecision VSVO_BDF_Controller::onAccepted(const StepAttemptInfo& info)
         return d;
     }
 
-    const double fac_clamped = std::min(options_.max_factor, std::max(options_.min_factor, fac));
-    d.next_dt = clampDt(info.dt * fac_clamped);
-    d.message = "accepted";
+    auto candidateFactor = [&](int q, double err_q) -> double {
+        if (!(err_q > 0.0) || !std::isfinite(err_q)) {
+            return 1.0;
+        }
+        const bool have_prev = (info.step_index > 0) &&
+            (prev_error_norm_ > 0.0 && std::isfinite(prev_error_norm_) && prev_order_ == q);
+        const double prev_err = have_prev ? prev_error_norm_ : err_q;
+        const double inv_q1 = 1.0 / static_cast<double>(q + 1);
+        const double k_i = options_.pi_alpha * inv_q1;
+        const double k_p = options_.pi_beta * inv_q1;
+        const double fac = options_.safety *
+            std::pow(1.0 / std::max(err_q, 1e-16), k_i) *
+            std::pow(1.0 / std::max(prev_err, 1e-16), k_p);
+        return std::min(options_.max_factor, std::max(options_.min_factor, fac));
+    };
 
-    if (err < options_.increase_order_threshold) {
-        d.next_order = clampOrder(d.next_order + 1);
+    struct Candidate {
+        int order{0};
+        double err{-1.0};
+        double next_dt{0.0};
+        double efficiency{-1.0};
+    };
+
+    std::vector<Candidate> candidates;
+    candidates.reserve(3);
+
+    auto addCandidate = [&](int q, double err_q) {
+        if (q < options_.min_order || q > options_.max_order) {
+            return;
+        }
+        if (!(err_q > 0.0) || !std::isfinite(err_q)) {
+            return;
+        }
+        const double fac = candidateFactor(q, err_q);
+        Candidate c;
+        c.order = q;
+        c.err = err_q;
+        c.next_dt = clampDt(info.dt * fac);
+        const double cost = static_cast<double>(q + 1);
+        c.efficiency = (cost > 0.0) ? (c.next_dt / cost) : c.next_dt;
+        candidates.push_back(c);
+    };
+
+    addCandidate(clampOrder(p - 1), info.error_norm_low);
+    addCandidate(p, err);
+    if (options_.increase_order_threshold <= 0.0 || info.error_norm_high < options_.increase_order_threshold) {
+        addCandidate(clampOrder(p + 1), info.error_norm_high);
     }
+
+    if (!candidates.empty()) {
+        const auto best_it = std::max_element(
+            candidates.begin(),
+            candidates.end(),
+            [](const Candidate& a, const Candidate& b) { return a.efficiency < b.efficiency; });
+        d.next_order = best_it->order;
+        d.next_dt = best_it->next_dt;
+    } else {
+        const double fac = candidateFactor(p, err);
+        d.next_dt = clampDt(info.dt * fac);
+        d.next_order = p;
+    }
+
+    d.message = "accepted";
 
     prev_error_norm_ = err;
     prev_order_ = p;
@@ -155,11 +207,8 @@ StepDecision VSVO_BDF_Controller::onRejected(const StepAttemptInfo& info, StepRe
         if (!(err > 0.0) || !std::isfinite(err)) {
             next *= options_.nonlinear_decrease_factor;
         } else {
-            const bool have_prev = (info.step_index > 0) &&
-                (prev_error_norm_ > 0.0 && std::isfinite(prev_error_norm_) && prev_order_ == p);
-            const double prev_err = have_prev
-                ? prev_error_norm_
-                : err;
+            // Same reasoning as in onAccepted(): ensure a reduction is driven by the current error.
+            const double prev_err = err;
             const double inv_p1 = 1.0 / static_cast<double>(p + 1);
             const double k_i = options_.pi_alpha * inv_p1;
             const double k_p = options_.pi_beta * inv_p1;
