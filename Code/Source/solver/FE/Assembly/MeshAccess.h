@@ -5,14 +5,14 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#ifndef SVMP_FE_ASSEMBLY_MESHBASEACCESS_H
-#define SVMP_FE_ASSEMBLY_MESHBASEACCESS_H
+#ifndef SVMP_FE_ASSEMBLY_MESHACCESS_H
+#define SVMP_FE_ASSEMBLY_MESHACCESS_H
 
 #include "Assembly/Assembler.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 
-#include "Mesh/Core/MeshTypes.h"
+#include "Mesh/Mesh.h"
 
 #include <vector>
 
@@ -21,7 +21,7 @@ namespace FE {
 namespace assembly {
 
 /**
- * @brief IMeshAccess adapter for svmp::MeshBase
+ * @brief IMeshAccess adapter for the unified svmp::Mesh (DistributedMesh)
  *
  * This adapter provides the Assembly module with mesh iteration and connectivity
  * access without baking Mesh dependencies into assembler implementations.
@@ -29,14 +29,14 @@ namespace assembly {
  * Notes:
  * - This class assumes the mesh topology is finalized (faces present) when face
  *   iteration or local-face lookup is used.
- * - Faces correspond to codimension-1 entities:
- *   - in 3D: polygonal faces
- *   - in 2D: edges (stored as Mesh "faces")
+ * - Cells/faces are interpreted as the *local* partition (owned + ghosts).
+ * - Ownership queries and "owned-only" iteration are driven by DistributedMesh
+ *   ownership metadata (serial-safe; defaults to all-owned in non-MPI builds).
  */
-class MeshBaseAccess final : public IMeshAccess {
+class MeshAccess final : public IMeshAccess {
 public:
-    explicit MeshBaseAccess(const svmp::MeshBase& mesh);
-    MeshBaseAccess(const svmp::MeshBase& mesh, svmp::Configuration cfg_override);
+    explicit MeshAccess(const svmp::Mesh& mesh);
+    MeshAccess(const svmp::Mesh& mesh, svmp::Configuration cfg_override);
 
     [[nodiscard]] GlobalIndex numCells() const override;
     [[nodiscard]] GlobalIndex numOwnedCells() const override;
@@ -72,7 +72,7 @@ public:
         std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> callback) const override;
 
 private:
-    const svmp::MeshBase& mesh_;
+    const svmp::Mesh& mesh_;
     bool coord_cfg_override_enabled_{false};
     svmp::Configuration coord_cfg_override_{};
 
@@ -89,4 +89,5 @@ private:
 
 #endif // defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 
-#endif // SVMP_FE_ASSEMBLY_MESHBASEACCESS_H
+#endif // SVMP_FE_ASSEMBLY_MESHACCESS_H
+
