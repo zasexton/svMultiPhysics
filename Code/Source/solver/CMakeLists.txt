@@ -195,6 +195,8 @@ set(CSRCS
   Mesh/Core/InterfaceMesh.h
   Mesh/Topology/CellShape.h Mesh/Topology/CellShape.cpp
   Mesh/Topology/MeshTopology.h Mesh/Topology/MeshTopology.cpp
+  Mesh/Topology/PartitionTopology.h Mesh/Topology/PartitionTopology.cpp
+  Mesh/Topology/DistributedTopology.h Mesh/Topology/DistributedTopology.cpp
   Mesh/Geometry/MeshGeometry.h Mesh/Geometry/MeshGeometry.cpp
   Mesh/Geometry/MeshQuality.h Mesh/Geometry/MeshQuality.cpp
   Mesh/Geometry/MeshOrientation.h

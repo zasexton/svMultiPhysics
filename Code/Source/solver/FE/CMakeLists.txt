@@ -203,6 +203,7 @@ set(FE_MATH_HEADERS
     Math/Rotations.h
     Math/Eigensolvers.h
     Math/Interpolation.h
+    Math/FiniteDifference.h
     Math/QuadratureSupport.h
     Math/SIMD.h
     Math/ExpressionOps.h
@@ -342,6 +343,7 @@ set(FE_SPACES_HEADERS
     Spaces/ProductSpace.h
     Spaces/MixedSpace.h
     Spaces/TraceSpace.h
+    Spaces/MortarSpace.h
     Spaces/CompositeSpace.h
     Spaces/EnrichedSpace.h
     Spaces/AdaptiveSpace.h
@@ -367,6 +369,7 @@ set(FE_SPACES_SOURCES
     Spaces/ProductSpace.cpp
     Spaces/MixedSpace.cpp
     Spaces/TraceSpace.cpp
+    Spaces/MortarSpace.cpp
     Spaces/CompositeSpace.cpp
     Spaces/EnrichedSpace.cpp
     Spaces/AdaptiveSpace.cpp
@@ -462,6 +465,7 @@ set(FE_ASSEMBLY_HEADERS
     Assembly/GlobalSystemView.h
     Assembly/AssemblyKernel.h
     Assembly/AssemblyContext.h
+    Assembly/TimeIntegrationContext.h
     Assembly/StandardAssembler.h
     Assembly/ParallelAssembler.h
     Assembly/GhostContributionManager.h
@@ -513,10 +517,10 @@ set(FE_ASSEMBLY_SOURCES
 
 if(FE_WITH_MESH)
     list(APPEND FE_ASSEMBLY_HEADERS
-        Assembly/MeshBaseAccess.h
+        Assembly/MeshAccess.h
     )
     list(APPEND FE_ASSEMBLY_SOURCES
-        Assembly/MeshBaseAccess.cpp
+        Assembly/MeshAccess.cpp
     )
 endif()
 
@@ -553,11 +557,105 @@ set(FE_GEOMETRY_SOURCES
     Geometry/GeometryQuadrature.cpp
 )
 
-# Multi-field system sources (TODO: implement)
+# Systems sources (requires FE/Assembly)
 set(FE_SYSTEMS_HEADERS
-    # Systems/MultiFieldLayout.h
-    # Systems/BlockStructure.h
-    # Systems/FieldCoupling.h
+    Systems/ContactPenaltyKernel.h
+    Systems/FESystem.h
+    Systems/FieldRegistry.h
+    Systems/GlobalKernel.h
+    Systems/GlobalKernelStateProvider.h
+    Systems/MaterialStateProvider.h
+    Systems/MeshSearchAccess.h
+    Systems/OperatorBackends.h
+    Systems/OperatorRegistry.h
+    Systems/ParameterRegistry.h
+    Systems/SearchAccess.h
+    Systems/SurfaceContactKernel.h
+    Systems/SystemAssembly.h
+    Systems/SystemConstraints.h
+    Systems/SystemSetup.h
+    Systems/SystemState.h
+    Systems/TimeIntegrator.h
+    Systems/TransientSystem.h
+    Systems/SystemsExceptions.h
+)
+
+set(FE_SYSTEMS_SOURCES
+    Systems/ContactPenaltyKernel.cpp
+    Systems/FESystem.cpp
+    Systems/FieldRegistry.cpp
+    Systems/GlobalKernelStateProvider.cpp
+    Systems/MaterialStateProvider.cpp
+    Systems/MeshSearchAccess.cpp
+    Systems/OperatorBackends.cpp
+    Systems/OperatorRegistry.cpp
+    Systems/ParameterRegistry.cpp
+    Systems/SurfaceContactKernel.cpp
+    Systems/SystemAssembly.cpp
+    Systems/SystemConstraints.cpp
+    Systems/SystemSetup.cpp
+    Systems/TimeIntegrator.cpp
+    Systems/TransientSystem.cpp
+)
+
+# Forms sources (requires FE/Assembly; used by SymbolicAssembler)
+set(FE_FORMS_HEADERS
+    Forms/Forms.h
+    Forms/FormExpr.h
+    Forms/Index.h
+    Forms/Einsum.h
+    Forms/FormIR.h
+    Forms/FormCompiler.h
+    Forms/FormKernels.h
+    Forms/Dual.h
+    Forms/Value.h
+    Forms/ConstitutiveModel.h
+    Forms/BlockForm.h
+    Forms/Complex.h
+    Forms/Vocabulary.h
+)
+
+set(FE_FORMS_SOURCES
+    Forms/FormExpr.cpp
+    Forms/Index.cpp
+    Forms/Einsum.cpp
+    Forms/FormIR.cpp
+    Forms/FormCompiler.cpp
+    Forms/FormKernels.cpp
+)
+
+# TimeStepping sources (requires FE/Systems + FE/Assembly + FE/Backends)
+set(FE_TIMESTEPPING_HEADERS
+    TimeStepping/TimeHistory.h
+    TimeStepping/MultiStageScheme.h
+    TimeStepping/NewtonSolver.h
+    TimeStepping/StepController.h
+    TimeStepping/VSVO_BDF_Controller.h
+    TimeStepping/GeneralizedAlpha.h
+    TimeStepping/NewmarkBeta.h
+    TimeStepping/TimeSteppingUtils.h
+    TimeStepping/TimeLoop.h
+)
+
+set(FE_TIMESTEPPING_SOURCES
+    TimeStepping/TimeHistory.cpp
+    TimeStepping/MultiStageScheme.cpp
+    TimeStepping/NewtonSolver.cpp
+    TimeStepping/StepController.cpp
+    TimeStepping/VSVO_BDF_Controller.cpp
+    TimeStepping/GeneralizedAlpha.cpp
+    TimeStepping/NewmarkBeta.cpp
+    TimeStepping/TimeLoop.cpp
+)
+
+# Constitutive sources (header-only; depends on FE/Forms boundary)
+set(FE_CONSTITUTIVE_HEADERS
+    Constitutive/ModelCRTP.h
+    Constitutive/ValueChecks.h
+    Constitutive/StateLayout.h
+    Constitutive/StateView.h
+    Constitutive/Parameters.h
+    Constitutive/GlobalLaw.h
 )
 
 # Sparsity pattern sources
@@ -613,10 +711,111 @@ set(FE_SPARSITY_SOURCES
 
 # Backend interface sources (TODO: implement)
 set(FE_BACKENDS_HEADERS
-    # Backends/BackendInterface.h
-    # Backends/EigenBackend.h
-    # Backends/TrilinosBackend.h
-    # Backends/PETScBackend.h
+    Backends/Interfaces/BackendKind.h
+    Backends/Interfaces/BackendFactory.h
+    Backends/Interfaces/GenericVector.h
+    Backends/Interfaces/GenericMatrix.h
+    Backends/Interfaces/LinearSolver.h
+    Backends/Interfaces/BlockVector.h
+    Backends/Interfaces/BlockMatrix.h
+
+    Backends/Utils/BackendOptions.h
+
+    Backends/Eigen/EigenFactory.h
+    Backends/Eigen/EigenVector.h
+    Backends/Eigen/EigenMatrix.h
+    Backends/Eigen/EigenLinearSolver.h
+
+    Backends/FSILS/FsilsFactory.h
+    Backends/FSILS/FsilsVector.h
+    Backends/FSILS/FsilsMatrix.h
+    Backends/FSILS/FsilsLinearSolver.h
+
+    # Vendored FSILS linear solver (copy of Code/Source/liner_solver)
+    Backends/FSILS/liner_solver/add_bc_mul.h
+    Backends/FSILS/liner_solver/bcast.h
+    Backends/FSILS/liner_solver/bicgs.h
+    Backends/FSILS/liner_solver/cgrad.h
+    Backends/FSILS/liner_solver/commu.h
+    Backends/FSILS/liner_solver/dot.h
+    Backends/FSILS/liner_solver/fils_struct.hpp
+    Backends/FSILS/liner_solver/fsils.hpp
+    Backends/FSILS/liner_solver/fsils_api.hpp
+    Backends/FSILS/liner_solver/fsils_std.h
+    Backends/FSILS/liner_solver/ge.h
+    Backends/FSILS/liner_solver/gmres.h
+    Backends/FSILS/liner_solver/lhs.h
+    Backends/FSILS/liner_solver/norm.h
+    Backends/FSILS/liner_solver/ns_solver.h
+    Backends/FSILS/liner_solver/omp_la.h
+    Backends/FSILS/liner_solver/pc_gmres.h
+    Backends/FSILS/liner_solver/precond.h
+    Backends/FSILS/liner_solver/spar_mul.h
+
+    Backends/PETSc/PetscUtils.h
+    Backends/PETSc/PetscFactory.h
+    Backends/PETSc/PetscVector.h
+    Backends/PETSc/PetscMatrix.h
+    Backends/PETSc/PetscLinearSolver.h
+
+    Backends/Trilinos/TrilinosUtils.h
+    Backends/Trilinos/TrilinosFactory.h
+    Backends/Trilinos/TrilinosVector.h
+    Backends/Trilinos/TrilinosMatrix.h
+    Backends/Trilinos/TrilinosLinearSolver.h
+)
+
+set(FE_BACKENDS_SOURCES
+    Backends/Interfaces/BackendKind.cpp
+    Backends/Interfaces/BackendFactory.cpp
+    Backends/Interfaces/BlockVector.cpp
+    Backends/Interfaces/BlockMatrix.cpp
+
+    Backends/Utils/BackendOptions.cpp
+
+    Backends/Eigen/EigenFactory.cpp
+    Backends/Eigen/EigenVector.cpp
+    Backends/Eigen/EigenMatrix.cpp
+    Backends/Eigen/EigenLinearSolver.cpp
+
+    Backends/FSILS/FsilsFactory.cpp
+    Backends/FSILS/FsilsVector.cpp
+    Backends/FSILS/FsilsMatrix.cpp
+    Backends/FSILS/FsilsLinearSolver.cpp
+    Backends/FSILS/FsilsLegacyStatics.cpp
+
+    # Vendored FSILS linear solver (copy of Code/Source/liner_solver)
+    Backends/FSILS/liner_solver/add_bc_mul.cpp
+    Backends/FSILS/liner_solver/bcast.cpp
+    Backends/FSILS/liner_solver/bc.cpp
+    Backends/FSILS/liner_solver/bicgs.cpp
+    Backends/FSILS/liner_solver/cgrad.cpp
+    Backends/FSILS/liner_solver/commu.cpp
+    Backends/FSILS/liner_solver/cput.cpp
+    Backends/FSILS/liner_solver/dot.cpp
+    Backends/FSILS/liner_solver/fils_struct.cpp
+    Backends/FSILS/liner_solver/ge.cpp
+    Backends/FSILS/liner_solver/gmres.cpp
+    Backends/FSILS/liner_solver/in_commu.cpp
+    Backends/FSILS/liner_solver/lhs.cpp
+    Backends/FSILS/liner_solver/ls.cpp
+    Backends/FSILS/liner_solver/norm.cpp
+    Backends/FSILS/liner_solver/ns_solver.cpp
+    Backends/FSILS/liner_solver/omp_la.cpp
+    Backends/FSILS/liner_solver/pc_gmres.cpp
+    Backends/FSILS/liner_solver/precond.cpp
+    Backends/FSILS/liner_solver/solve.cpp
+    Backends/FSILS/liner_solver/spar_mul.cpp
+
+    Backends/PETSc/PetscFactory.cpp
+    Backends/PETSc/PetscVector.cpp
+    Backends/PETSc/PetscMatrix.cpp
+    Backends/PETSc/PetscLinearSolver.cpp
+
+    Backends/Trilinos/TrilinosFactory.cpp
+    Backends/Trilinos/TrilinosVector.cpp
+    Backends/Trilinos/TrilinosMatrix.cpp
+    Backends/Trilinos/TrilinosLinearSolver.cpp
 )
 
 # Collect all sources
@@ -630,9 +829,7 @@ set(FE_ALL_HEADERS
     ${FE_DOFS_HEADERS}
     ${FE_CONSTRAINTS_HEADERS}
     ${FE_GEOMETRY_HEADERS}
-    ${FE_SYSTEMS_HEADERS}
     ${FE_SPARSITY_HEADERS}
-    ${FE_BACKENDS_HEADERS}
 )
 
 set(FE_ALL_SOURCES
@@ -648,8 +845,17 @@ set(FE_ALL_SOURCES
 )
 
 if(FE_ENABLE_ASSEMBLY)
+    list(APPEND FE_ALL_HEADERS ${FE_BACKENDS_HEADERS})
+    list(APPEND FE_ALL_SOURCES ${FE_BACKENDS_SOURCES})
     list(APPEND FE_ALL_HEADERS ${FE_ASSEMBLY_HEADERS})
     list(APPEND FE_ALL_SOURCES ${FE_ASSEMBLY_SOURCES})
+    list(APPEND FE_ALL_HEADERS ${FE_SYSTEMS_HEADERS})
+    list(APPEND FE_ALL_SOURCES ${FE_SYSTEMS_SOURCES})
+    list(APPEND FE_ALL_HEADERS ${FE_FORMS_HEADERS})
+    list(APPEND FE_ALL_SOURCES ${FE_FORMS_SOURCES})
+    list(APPEND FE_ALL_HEADERS ${FE_TIMESTEPPING_HEADERS})
+    list(APPEND FE_ALL_SOURCES ${FE_TIMESTEPPING_SOURCES})
+    list(APPEND FE_ALL_HEADERS ${FE_CONSTITUTIVE_HEADERS})
 endif()
 
 #------------------------------------------------------------------------------
@@ -767,6 +973,13 @@ if(FE_ENABLE_MPI)
     target_compile_definitions(svfe_dofs PUBLIC FE_HAS_MPI MESH_ENABLE_MPI MPICH_SKIP_MPICXX OMPI_SKIP_MPICXX _MPICC_H)
 endif()
 
+if(FE_ENABLE_EIGEN)
+    if(DEFINED FE_EIGEN_INCLUDE_DIR AND NOT FE_EIGEN_INCLUDE_DIR STREQUAL "")
+        target_include_directories(svfe_dofs PUBLIC ${FE_EIGEN_INCLUDE_DIR})
+    endif()
+    target_compile_definitions(svfe_dofs PUBLIC FE_HAS_EIGEN=1)
+endif()
+
 # Set target properties
 set_target_properties(svfe PROPERTIES
     CXX_STANDARD 20
@@ -809,6 +1022,148 @@ if(FE_ENABLE_MPI)
     # Disable removed MPI-2 C++ bindings in common MPI implementations to avoid
     # pulling deprecated headers (and associated warnings) through <mpi.h>.
     target_compile_definitions(svfe PUBLIC FE_HAS_MPI MESH_ENABLE_MPI MPICH_SKIP_MPICXX OMPI_SKIP_MPICXX _MPICC_H)
+endif()
+
+# Eigen is configured before the `svfe` target exists (EnableEigen.cmake), so
+# apply the discovered include directory + feature define here.
+if(FE_ENABLE_EIGEN)
+    if(DEFINED FE_EIGEN_INCLUDE_DIR AND NOT FE_EIGEN_INCLUDE_DIR STREQUAL "")
+        target_include_directories(svfe PUBLIC ${FE_EIGEN_INCLUDE_DIR})
+    endif()
+    target_compile_definitions(svfe PUBLIC FE_HAS_EIGEN=1)
+endif()
+
+#------------------------------------------------------------------------------
+# FSILS backend (vendored)
+#------------------------------------------------------------------------------
+
+# The FSILS backend is built from an in-tree copy of Code/Source/liner_solver and
+# is always available when the Assembly/Backends module is enabled.
+if(FE_ENABLE_ASSEMBLY)
+    target_compile_definitions(svfe PUBLIC FE_HAS_FSILS=1)
+
+    # The legacy solver-side containers used by FSILS (Vector/Array) require a
+    # C-string header to be available before template definitions are parsed.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(svfe PRIVATE -include cstring)
+    endif()
+
+    # FSILS depends on MPI even in "serial" mode (MPI_COMM_SELF).
+    if(NOT TARGET MPI::MPI_CXX AND NOT DEFINED FE_MPI_CXX_LIBRARIES)
+        find_package(MPI REQUIRED COMPONENTS CXX)
+    endif()
+
+    if(TARGET MPI::MPI_CXX)
+        target_link_libraries(svfe PUBLIC MPI::MPI_CXX)
+    elseif(DEFINED MPI_CXX_INCLUDE_DIRS AND DEFINED MPI_CXX_LIBRARIES)
+        target_include_directories(svfe PUBLIC ${MPI_CXX_INCLUDE_DIRS})
+        target_link_libraries(svfe PUBLIC ${MPI_CXX_LIBRARIES})
+    elseif(DEFINED FE_MPI_CXX_INCLUDE_DIRS AND DEFINED FE_MPI_CXX_LIBRARIES)
+        target_include_directories(svfe PUBLIC ${FE_MPI_CXX_INCLUDE_DIRS})
+        target_link_libraries(svfe PUBLIC ${FE_MPI_CXX_LIBRARIES})
+    else()
+        message(FATAL_ERROR "FE: FSILS backend requires MPI, but no MPI configuration was found")
+    endif()
+endif()
+
+#------------------------------------------------------------------------------
+# Optional external solver backends: PETSc / Trilinos
+#------------------------------------------------------------------------------
+
+# The FE Backends module is only compiled when Assembly is enabled.
+if((FE_ENABLE_PETSC OR FE_ENABLE_TRILINOS) AND NOT FE_ENABLE_ASSEMBLY)
+    message(FATAL_ERROR "FE: FE_ENABLE_PETSC / FE_ENABLE_TRILINOS require FE_ENABLE_ASSEMBLY=ON")
+endif()
+
+if(FE_ENABLE_ASSEMBLY AND FE_ENABLE_PETSC)
+    message(STATUS "FE: Configuring PETSc backend support")
+
+    set(_fe_petsc_configured OFF)
+
+    # Prefer a CMake package config if available (PETScConfig.cmake).
+    find_package(PETSc CONFIG QUIET)
+    if(PETSc_FOUND)
+        if(TARGET PETSc::PETSc)
+            target_link_libraries(svfe PUBLIC PETSc::PETSc)
+            set(_fe_petsc_configured ON)
+        elseif(TARGET PETSc::petsc)
+            target_link_libraries(svfe PUBLIC PETSc::petsc)
+            set(_fe_petsc_configured ON)
+        elseif(DEFINED PETSc_LIBRARIES AND DEFINED PETSc_INCLUDE_DIRS)
+            target_include_directories(svfe PUBLIC ${PETSc_INCLUDE_DIRS})
+            target_link_libraries(svfe PUBLIC ${PETSc_LIBRARIES})
+            set(_fe_petsc_configured ON)
+        endif()
+    endif()
+
+    # Fallback: support the legacy SV_PETSC_DIR (points at PETSC_DIR/PETSC_ARCH).
+    if(NOT _fe_petsc_configured)
+        set(_fe_petsc_arch_dir "")
+        if(DEFINED SV_PETSC_DIR AND NOT "${SV_PETSC_DIR}" STREQUAL "")
+            set(_fe_petsc_arch_dir "${SV_PETSC_DIR}")
+        elseif(DEFINED PETSC_DIR AND DEFINED PETSC_ARCH AND
+               NOT "${PETSC_DIR}" STREQUAL "" AND NOT "${PETSC_ARCH}" STREQUAL "")
+            set(_fe_petsc_arch_dir "${PETSC_DIR}/${PETSC_ARCH}")
+        elseif(DEFINED PETSC_DIR AND NOT "${PETSC_DIR}" STREQUAL "")
+            # Best-effort: PETSC_DIR may already be an arch-specific directory.
+            set(_fe_petsc_arch_dir "${PETSC_DIR}")
+        endif()
+
+        if(_fe_petsc_arch_dir STREQUAL "")
+            message(FATAL_ERROR "FE: FE_ENABLE_PETSC=ON but PETSc was not found. Provide PETScConfig.cmake or set SV_PETSC_DIR.")
+        endif()
+
+        if(NOT EXISTS "${_fe_petsc_arch_dir}/include")
+            message(FATAL_ERROR "FE: PETSc include directory not found: ${_fe_petsc_arch_dir}/include")
+        endif()
+        if(NOT EXISTS "${_fe_petsc_arch_dir}/lib")
+            message(FATAL_ERROR "FE: PETSc library directory not found: ${_fe_petsc_arch_dir}/lib")
+        endif()
+
+        set(_fe_petsc_include_dirs "${_fe_petsc_arch_dir}/include")
+        get_filename_component(_fe_petsc_root_dir "${_fe_petsc_arch_dir}" DIRECTORY)
+        if(EXISTS "${_fe_petsc_root_dir}/include")
+            list(APPEND _fe_petsc_include_dirs "${_fe_petsc_root_dir}/include")
+        endif()
+
+        find_library(_fe_petsc_library
+            NAMES petsc
+            PATHS "${_fe_petsc_arch_dir}/lib"
+            NO_DEFAULT_PATH
+        )
+        if(NOT _fe_petsc_library)
+            message(FATAL_ERROR "FE: PETSc library 'petsc' not found under ${_fe_petsc_arch_dir}/lib")
+        endif()
+
+        target_include_directories(svfe PUBLIC ${_fe_petsc_include_dirs})
+        target_link_libraries(svfe PUBLIC ${_fe_petsc_library})
+        set(_fe_petsc_configured ON)
+
+        message(STATUS "FE: PETSc configured via SV_PETSC_DIR/PETSC_DIR (${_fe_petsc_arch_dir})")
+    endif()
+
+    if(_fe_petsc_configured)
+        target_compile_definitions(svfe PUBLIC FE_HAS_PETSC=1)
+    endif()
+endif()
+
+if(FE_ENABLE_ASSEMBLY AND FE_ENABLE_TRILINOS)
+    message(STATUS "FE: Configuring Trilinos backend support")
+
+    find_package(Trilinos REQUIRED)
+    if(NOT Trilinos_FOUND)
+        message(FATAL_ERROR "FE: FE_ENABLE_TRILINOS=ON but Trilinos was not found")
+    endif()
+
+    # Prefer the imported aggregate target if available.
+    if(TARGET Trilinos::all_selected_libs)
+        target_link_libraries(svfe PUBLIC Trilinos::all_selected_libs)
+    else()
+        target_include_directories(svfe PUBLIC ${Trilinos_INCLUDE_DIRS} ${Trilinos_TPL_INCLUDE_DIRS})
+        target_link_libraries(svfe PUBLIC ${Trilinos_LIBRARIES} ${Trilinos_TPL_LIBRARIES})
+    endif()
+
+    target_compile_definitions(svfe PUBLIC FE_HAS_TRILINOS=1)
 endif()
 
 #------------------------------------------------------------------------------
@@ -1142,6 +1497,91 @@ if(FE_BUILD_TESTS)
     endif()
 
     if(FE_ENABLE_ASSEMBLY)
+        # Backends module tests
+	        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Backends/test_main.cpp)
+	            set(FE_BACKENDS_TEST_SOURCES
+	                Tests/Unit/Backends/test_BackendOptions.cpp
+	                Tests/Unit/Backends/test_BackendKind.cpp
+	                Tests/Unit/Backends/test_BackendFactory.cpp
+	                Tests/Unit/Backends/test_BlockSystems.cpp
+	                Tests/Unit/Backends/test_EigenBackend.cpp
+	                Tests/Unit/Backends/test_FsilsBackend.cpp
+	                Tests/Unit/Backends/test_LinearSolverConformance.cpp
+	                Tests/Unit/Backends/test_PetscBackend.cpp
+	                Tests/Unit/Backends/test_main.cpp
+	            )
+	            add_executable(test_fe_backends ${FE_BACKENDS_TEST_SOURCES})
+	            target_link_libraries(test_fe_backends
+	                PRIVATE
+	                    svfe
+	                    ${GTEST_LIBRARIES}
+	            )
+	            add_test(NAME FE_Backends_Tests COMMAND test_fe_backends)
+	        endif()
+
+	        # Trilinos-specific backends tests (separate main for Tpetra init)
+	        if(FE_ENABLE_TRILINOS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Backends/test_trilinos_main.cpp)
+	            set(FE_TRILINOS_BACKENDS_TEST_SOURCES
+	                Tests/Unit/Backends/test_TrilinosBackend.cpp
+	                Tests/Unit/Backends/test_LinearSolverConformance_Trilinos.cpp
+	                Tests/Unit/Backends/test_trilinos_main.cpp
+	            )
+	            add_executable(test_fe_backends_trilinos ${FE_TRILINOS_BACKENDS_TEST_SOURCES})
+	            target_link_libraries(test_fe_backends_trilinos
+	                PRIVATE
+	                    svfe
+	                    ${GTEST_LIBRARIES}
+	            )
+	            add_test(NAME FE_Trilinos_Backends_Tests COMMAND test_fe_backends_trilinos)
+	        endif()
+
+        # Forms module tests (depends on Assembly)
+        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Forms/test_main.cpp)
+	            set(FE_FORMS_TEST_SOURCES
+	                Tests/Unit/Forms/test_FormExpr.cpp
+	                Tests/Unit/Forms/test_FormCompiler.cpp
+	                Tests/Unit/Forms/test_Dual.cpp
+	                Tests/Unit/Forms/test_DynamicValueShapes.cpp
+	                Tests/Unit/Forms/test_FormKernel_Cell.cpp
+	                Tests/Unit/Forms/test_FormKernel_Boundary.cpp
+	                Tests/Unit/Forms/test_FormKernel_DG.cpp
+	                Tests/Unit/Forms/test_FormVocabulary.cpp
+                Tests/Unit/Forms/test_MixedSpaceVocabulary.cpp
+                Tests/Unit/Forms/test_Einsum.cpp
+                Tests/Unit/Forms/test_NonlinearFormKernel.cpp
+                Tests/Unit/Forms/test_ConstitutiveModel.cpp
+                Tests/Unit/Forms/test_PrimitiveTypes.cpp
+                Tests/Unit/Forms/test_main.cpp
+            )
+            add_executable(test_fe_forms ${FE_FORMS_TEST_SOURCES})
+            target_link_libraries(test_fe_forms
+                PRIVATE
+                    svfe
+                    ${GTEST_LIBRARIES}
+            )
+            add_test(NAME FE_Forms_Tests COMMAND test_fe_forms)
+        endif()
+
+        # Constitutive module tests (depends on Forms + Systems + Assembly)
+        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Constitutive/test_main.cpp)
+            set(FE_CONSTITUTIVE_TEST_SOURCES
+                Tests/Unit/Constitutive/test_ModelCRTP.cpp
+                Tests/Unit/Constitutive/test_LawAdapters.cpp
+                Tests/Unit/Constitutive/test_StateLayoutAndView.cpp
+                Tests/Unit/Constitutive/test_MaterialStatePlumbing.cpp
+                Tests/Unit/Constitutive/test_Parameters.cpp
+                Tests/Unit/Constitutive/test_GlobalLaw.cpp
+                Tests/Unit/Constitutive/test_main.cpp
+            )
+            add_executable(test_fe_constitutive ${FE_CONSTITUTIVE_TEST_SOURCES})
+            target_link_libraries(test_fe_constitutive
+                PRIVATE
+                    svfe
+                    ${GTEST_LIBRARIES}
+            )
+            add_test(NAME FE_Constitutive_Tests COMMAND test_fe_constitutive)
+        endif()
+
         # Assembly module tests
         set(FE_ASSEMBLY_TEST_SOURCES
             # Phase 1: CORE tests
@@ -1172,7 +1612,8 @@ if(FE_BUILD_TESTS)
         )
         if(FE_WITH_MESH)
             list(APPEND FE_ASSEMBLY_TEST_SOURCES
-                Tests/Unit/Assembly/test_MeshBaseAccess.cpp
+                Tests/Unit/Assembly/test_MeshAccess.cpp
+                Tests/Unit/Assembly/test_MeshAccess_HighOrder.cpp
             )
         endif()
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Assembly/test_main.cpp)
@@ -1183,6 +1624,47 @@ if(FE_BUILD_TESTS)
                     ${GTEST_LIBRARIES}
             )
             add_test(NAME FE_Assembly_Tests COMMAND test_fe_assembly)
+        endif()
+
+        # Systems module tests (Systems depends on Assembly; tests also require Mesh)
+        if(FE_WITH_MESH AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Systems/test_main.cpp)
+            set(FE_SYSTEMS_TEST_SOURCES
+                Tests/Unit/Systems/test_FieldRegistry.cpp
+                Tests/Unit/Systems/test_ContactPenaltyKernel.cpp
+                Tests/Unit/Systems/test_SurfaceContactKernel.cpp
+                Tests/Unit/Systems/test_ParameterRegistry.cpp
+                Tests/Unit/Systems/test_FieldEvaluation.cpp
+                Tests/Unit/Systems/test_FESystem.cpp
+                Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp
+                Tests/Unit/Systems/test_NavierStokesCoupled.cpp
+                Tests/Unit/Systems/test_SystemConstraints.cpp
+                Tests/Unit/Systems/test_OperatorBackends.cpp
+                Tests/Unit/Systems/test_TransientDt.cpp
+                Tests/Unit/Systems/test_main.cpp
+            )
+            add_executable(test_fe_systems ${FE_SYSTEMS_TEST_SOURCES})
+            target_link_libraries(test_fe_systems
+                PRIVATE
+                    svfe
+                    ${GTEST_LIBRARIES}
+            )
+            add_test(NAME FE_Systems_Tests COMMAND test_fe_systems)
+        endif()
+
+        # TimeStepping module tests (depends on Systems + Forms + Backends; no Mesh required)
+        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/TimeStepping/test_main.cpp)
+            set(FE_TIMESTEPPING_TEST_SOURCES
+                Tests/Unit/TimeStepping/test_StepController.cpp
+                Tests/Unit/TimeStepping/test_TimeLoopConvergence.cpp
+                Tests/Unit/TimeStepping/test_main.cpp
+            )
+            add_executable(test_fe_timestepping ${FE_TIMESTEPPING_TEST_SOURCES})
+            target_link_libraries(test_fe_timestepping
+                PRIVATE
+                    svfe
+                    ${GTEST_LIBRARIES}
+            )
+            add_test(NAME FE_TimeStepping_Tests COMMAND test_fe_timestepping)
         endif()
     endif()
 
@@ -1223,6 +1705,23 @@ if(FE_BUILD_TESTS)
             endif()
             add_fe_mpi_test(test_fe_constraints_mpi 2)
             add_fe_mpi_test(test_fe_constraints_mpi 4)
+        endif()
+
+        file(GLOB FE_BACKENDS_MPI_TEST_SOURCES
+            Tests/Unit/Backends/test_*MPI*.cpp
+        )
+        if(FE_BACKENDS_MPI_TEST_SOURCES)
+            add_executable(test_fe_backends_mpi ${FE_BACKENDS_MPI_TEST_SOURCES})
+            # MPI tests provide their own main() to call MPI_Init/MPI_Finalize,
+            # so do not link gtest_main here.
+            if(TARGET GTest::gtest)
+                target_link_libraries(test_fe_backends_mpi PRIVATE svfe GTest::gtest)
+            else()
+                set(_fe_backends_mpi_gtest_libs ${GTEST_LIBRARIES})
+                list(REMOVE_ITEM _fe_backends_mpi_gtest_libs gtest_main GTest::gtest_main)
+                target_link_libraries(test_fe_backends_mpi PRIVATE svfe ${_fe_backends_mpi_gtest_libs})
+            endif()
+            add_fe_mpi_test(test_fe_backends_mpi 2)
         endif()
     endif()
 endif()
