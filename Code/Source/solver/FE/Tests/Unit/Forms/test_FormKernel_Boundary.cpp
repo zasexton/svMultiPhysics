@@ -100,7 +100,7 @@ TEST(FormKernelBoundaryTest, DsVectorBoundaryMass_IsBlockDiagonal)
     vec_dof_map.finalize();
 
     spaces::H1Space scalar_space(ElementType::Tetra4, 1);
-    auto vec_space = spaces::SpaceFactory::create_vector_h1(ElementType::Tetra4, /*order=*/1, /*components=*/3);
+    auto vec_space = spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Tetra4, /*order=*/1, /*components=*/3);
 
     FormCompiler compiler;
 

@@ -289,6 +289,26 @@ TEST(FunctionSpaces, SpaceFactoryCreatesCoreSpaces) {
                  svmp::FE::FEException);
 }
 
+TEST(FunctionSpaces, FunctionSpaceAndVectorSpaceHelpersCreateExpectedSpaces) {
+    auto V = VectorSpace(SpaceType::H1, ElementType::Triangle3, 1, 2);
+    EXPECT_EQ(V->space_type(), SpaceType::Product);
+    EXPECT_EQ(V->field_type(), FieldType::Vector);
+    EXPECT_EQ(V->value_dimension(), 2);
+
+    auto P = Space(SpaceType::L2, ElementType::Triangle3, 1, 1);
+    EXPECT_EQ(P->space_type(), SpaceType::L2);
+    EXPECT_EQ(P->field_type(), FieldType::Scalar);
+    EXPECT_EQ(P->value_dimension(), 1);
+
+    auto Hdiv = VectorSpace(SpaceType::HDiv, ElementType::Quad4, 0, 2);
+    EXPECT_EQ(Hdiv->space_type(), SpaceType::HDiv);
+    EXPECT_EQ(Hdiv->field_type(), FieldType::Vector);
+    EXPECT_EQ(Hdiv->value_dimension(), 2);
+
+    EXPECT_THROW(Space(SpaceType::HCurl, ElementType::Quad4, 0, 3),
+                 svmp::FE::FEException);
+}
+
 TEST(FunctionSpaces, CompositeSpaceRegionMappingAndMetadata) {
     CompositeSpace composite;
 

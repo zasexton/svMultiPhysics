@@ -460,7 +460,7 @@ TEST(TransientDtTest, VectorDtPlusDiffusion_AssemblesBlockDiagonalScaledMassPlus
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
     auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
-    auto vec_space = svmp::FE::spaces::SpaceFactory::create_vector_h1(ElementType::Tetra4, 1, 3);
+    auto vec_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, ElementType::Tetra4, 1, 3);
 
     svmp::FE::systems::FESystem sys(mesh);
     const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = vec_space, .components = 3});
@@ -539,7 +539,7 @@ TEST(TransientDtTest, VectorDtPlusDiffusion_AssemblesBlockDiagonalScaledMassPlus
 TEST(TransientDtTest, SteadyAssemblyOfVectorDtFormFailsWithClearDiagnostic)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
-    auto vec_space = svmp::FE::spaces::SpaceFactory::create_vector_h1(ElementType::Tetra4, 1, 3);
+    auto vec_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, ElementType::Tetra4, 1, 3);
 
     svmp::FE::systems::FESystem sys(mesh);
     const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = vec_space, .components = 3});

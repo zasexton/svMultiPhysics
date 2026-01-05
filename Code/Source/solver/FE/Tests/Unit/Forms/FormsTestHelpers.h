@@ -351,6 +351,109 @@ private:
     std::vector<std::array<GlobalIndex, 4>> cells_;
 };
 
+class TwoCellMixedTypeMeshAccess final : public assembly::IMeshAccess {
+public:
+    TwoCellMixedTypeMeshAccess()
+    {
+        nodes_ = {
+            {0.0, 0.0, 0.0},  // 0
+            {1.0, 0.0, 0.0},  // 1
+            {0.0, 1.0, 0.0},  // 2
+            {0.0, 0.0, 1.0},  // 3
+            {1.0, 1.0, 0.0},  // 4
+            {1.0, 0.0, 1.0},  // 5
+            {0.0, 1.0, 1.0},  // 6
+            {1.0, 1.0, 1.0}   // 7
+        };
+        tetra_ = {0, 1, 2, 3};
+        hex_ = {0, 1, 4, 2, 3, 5, 7, 6};
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 2; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 2; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+
+    [[nodiscard]] ElementType getCellType(GlobalIndex cell_id) const override
+    {
+        return (cell_id == 0) ? ElementType::Tetra4 : ElementType::Hex8;
+    }
+
+    [[nodiscard]] int getCellDomainId(GlobalIndex cell_id) const override
+    {
+        // Domain IDs:
+        //  - Cell 0 (Tetra4) => 1
+        //  - Cell 1 (Hex8)   => 2
+        return (cell_id == 0) ? 1 : 2;
+    }
+
+    void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override
+    {
+        if (cell_id == 0) {
+            nodes.assign(tetra_.begin(), tetra_.end());
+        } else {
+            nodes.assign(hex_.begin(), hex_.end());
+        }
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex cell_id,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        std::vector<GlobalIndex> nodes;
+        getCellNodes(cell_id, nodes);
+        coords.resize(nodes.size());
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            coords[i] = nodes_.at(static_cast<std::size_t>(nodes[i]));
+        }
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/,
+                                               GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return -1; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        callback(0);
+        callback(1);
+    }
+
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        forEachCell(std::move(callback));
+    }
+
+    void forEachBoundaryFace(int /*marker*/,
+                             std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+private:
+    std::vector<std::array<Real, 3>> nodes_;
+    std::array<GlobalIndex, 4> tetra_{};
+    std::array<GlobalIndex, 8> hex_{};
+};
+
 inline dofs::DofMap createSingleTetraDofMap()
 {
     dofs::DofMap dof_map(1, 4, 4);
