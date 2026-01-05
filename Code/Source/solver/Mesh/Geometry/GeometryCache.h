@@ -207,23 +207,35 @@ public:
      */
     void warm_cache(Configuration cfg = Configuration::Reference);
 
-    /**
-     * @brief Get cache statistics (hit rate, memory usage)
-     */
-    struct CacheStats {
-        size_t cell_center_hits{0};
-        size_t cell_center_misses{0};
-        size_t cell_measure_hits{0};
-        size_t cell_measure_misses{0};
-        size_t memory_bytes{0};
-    };
+	    /**
+	     * @brief Get cache statistics (hit rate, memory usage)
+	     */
+	    struct CacheStats {
+	        size_t cell_center_hits{0};
+	        size_t cell_center_misses{0};
+	        size_t cell_measure_hits{0};
+	        size_t cell_measure_misses{0};
+	        size_t cell_bbox_hits{0};
+	        size_t cell_bbox_misses{0};
+	        size_t face_center_hits{0};
+	        size_t face_center_misses{0};
+	        size_t face_normal_hits{0};
+	        size_t face_normal_misses{0};
+	        size_t face_area_hits{0};
+	        size_t face_area_misses{0};
+	        size_t edge_center_hits{0};
+	        size_t edge_center_misses{0};
+	        size_t mesh_bbox_hits{0};
+	        size_t mesh_bbox_misses{0};
+	        size_t memory_bytes{0};
+	    };
 
     CacheStats get_stats() const { return stats_; }
 
-    /**
-     * @brief Clear cache statistics
-     */
-    void reset_stats() { stats_ = CacheStats{}; }
+	    /**
+	     * @brief Clear cache statistics
+	     */
+	    void reset_stats();
 
     /**
      * @brief Get cache configuration
@@ -267,15 +279,18 @@ private:
 
     // ---- Helper methods ----
 
-    void ensure_cache_capacity();
-    void invalidate_ref_cache();
-    void invalidate_cur_cache();
+	    void ensure_cache_capacity();
+	    size_t cache_memory_bytes() const;
+	    void invalidate_ref_cache();
+	    void invalidate_cur_cache();
 
-    template<typename T, typename ComputeFn>
-    const T& get_or_compute(
-        std::vector<std::optional<T>>& cache,
-        index_t index,
-        ComputeFn&& compute_fn) const;
+	    template<typename T, typename ComputeFn>
+	    const T& get_or_compute(
+	        std::vector<std::optional<T>>& cache,
+	        index_t index,
+	        size_t& hits,
+	        size_t& misses,
+	        ComputeFn&& compute_fn) const;
 };
 
 } // namespace svmp

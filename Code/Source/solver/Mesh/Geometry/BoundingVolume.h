@@ -242,13 +242,17 @@ struct BoundingSphere {
     /// Construct from AABB (smallest enclosing sphere)
     explicit BoundingSphere(const AABB& box);
 
-    /// Check if point is inside sphere
-    bool contains(const std::array<real_t, 3>& pt) const {
-        real_t dx = pt[0] - center[0];
-        real_t dy = pt[1] - center[1];
-        real_t dz = pt[2] - center[2];
-        return dx*dx + dy*dy + dz*dz <= radius*radius;
-    }
+	    /// Check if point is inside sphere
+	    bool contains(const std::array<real_t, 3>& pt) const {
+	        real_t dx = pt[0] - center[0];
+	        real_t dy = pt[1] - center[1];
+	        real_t dz = pt[2] - center[2];
+	        const real_t dist_sq = dx*dx + dy*dy + dz*dz;
+	        const real_t r_sq = radius * radius;
+	        const real_t tol = 64.0 * std::numeric_limits<real_t>::epsilon() *
+	                           std::max(static_cast<real_t>(1.0), r_sq);
+	        return dist_sq <= r_sq + tol;
+	    }
 
     /// Check if spheres intersect
     bool intersects(const BoundingSphere& other) const {

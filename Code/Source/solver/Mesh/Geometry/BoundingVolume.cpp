@@ -34,7 +34,7 @@
 #include <cmath>
 #include <algorithm>
 
-#if __has_include(<Eigen/Dense>) && __has_include(<Eigen/Eigenvalues>)
+#ifdef MESH_HAS_EIGEN
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 #define SVMP_HAVE_EIGEN 1

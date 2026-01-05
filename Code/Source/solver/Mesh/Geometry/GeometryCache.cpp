@@ -48,6 +48,12 @@ GeometryCache::GeometryCache(const MeshBase& mesh, const CacheConfig& config)
     subscription_ = ScopedSubscription(&mesh_.event_bus(), this);
 }
 
+void GeometryCache::reset_stats() {
+    const size_t bytes = cache_memory_bytes();
+    stats_ = CacheStats{};
+    stats_.memory_bytes = bytes;
+}
+
 void GeometryCache::on_mesh_event(MeshEvent event) {
     // Invalidate on topology or geometry changes
     if (event == MeshEvent::TopologyChanged) {
@@ -73,16 +79,14 @@ std::array<real_t, 3> GeometryCache::cell_center(index_t cell, Configuration cfg
     }
 
     if (cfg == Configuration::Reference && config_.cache_reference) {
-        return get_or_compute(ref_cache_.cell_centers, cell, [&]() {
-            ++stats_.cell_center_misses;
-            return MeshGeometry::cell_center(mesh_, cell, cfg);
-        });
+        return get_or_compute(ref_cache_.cell_centers, cell,
+                              stats_.cell_center_hits, stats_.cell_center_misses,
+                              [&]() { return MeshGeometry::cell_center(mesh_, cell, cfg); });
     } else if ((cfg == Configuration::Current || cfg == Configuration::Deformed) &&
                config_.cache_current) {
-        return get_or_compute(cur_cache_.cell_centers, cell, [&]() {
-            ++stats_.cell_center_misses;
-            return MeshGeometry::cell_center(mesh_, cell, cfg);
-        });
+        return get_or_compute(cur_cache_.cell_centers, cell,
+                              stats_.cell_center_hits, stats_.cell_center_misses,
+                              [&]() { return MeshGeometry::cell_center(mesh_, cell, cfg); });
     }
 
     return MeshGeometry::cell_center(mesh_, cell, cfg);
@@ -94,16 +98,14 @@ real_t GeometryCache::cell_measure(index_t cell, Configuration cfg) {
     }
 
     if (cfg == Configuration::Reference && config_.cache_reference) {
-        return get_or_compute(ref_cache_.cell_measures, cell, [&]() {
-            ++stats_.cell_measure_misses;
-            return MeshGeometry::cell_measure(mesh_, cell, cfg);
-        });
+        return get_or_compute(ref_cache_.cell_measures, cell,
+                              stats_.cell_measure_hits, stats_.cell_measure_misses,
+                              [&]() { return MeshGeometry::cell_measure(mesh_, cell, cfg); });
     } else if ((cfg == Configuration::Current || cfg == Configuration::Deformed) &&
                config_.cache_current) {
-        return get_or_compute(cur_cache_.cell_measures, cell, [&]() {
-            ++stats_.cell_measure_misses;
-            return MeshGeometry::cell_measure(mesh_, cell, cfg);
-        });
+        return get_or_compute(cur_cache_.cell_measures, cell,
+                              stats_.cell_measure_hits, stats_.cell_measure_misses,
+                              [&]() { return MeshGeometry::cell_measure(mesh_, cell, cfg); });
     }
 
     return MeshGeometry::cell_measure(mesh_, cell, cfg);
@@ -117,14 +119,14 @@ AABB GeometryCache::cell_bounding_box(index_t cell, Configuration cfg) {
     }
 
     if (cfg == Configuration::Reference && config_.cache_reference) {
-        return get_or_compute(ref_cache_.cell_bboxes, cell, [&]() {
-            return to_aabb(MeshGeometry::cell_bounding_box(mesh_, cell, cfg));
-        });
+        return get_or_compute(ref_cache_.cell_bboxes, cell,
+                              stats_.cell_bbox_hits, stats_.cell_bbox_misses,
+                              [&]() { return to_aabb(MeshGeometry::cell_bounding_box(mesh_, cell, cfg)); });
     } else if ((cfg == Configuration::Current || cfg == Configuration::Deformed) &&
                config_.cache_current) {
-        return get_or_compute(cur_cache_.cell_bboxes, cell, [&]() {
-            return to_aabb(MeshGeometry::cell_bounding_box(mesh_, cell, cfg));
-        });
+        return get_or_compute(cur_cache_.cell_bboxes, cell,
+                              stats_.cell_bbox_hits, stats_.cell_bbox_misses,
+                              [&]() { return to_aabb(MeshGeometry::cell_bounding_box(mesh_, cell, cfg)); });
     }
 
     return to_aabb(MeshGeometry::cell_bounding_box(mesh_, cell, cfg));
@@ -140,14 +142,14 @@ std::array<real_t, 3> GeometryCache::face_center(index_t face, Configuration cfg
     }
 
     if (cfg == Configuration::Reference && config_.cache_reference) {
-        return get_or_compute(ref_cache_.face_centers, face, [&]() {
-            return MeshGeometry::face_center(mesh_, face, cfg);
-        });
+        return get_or_compute(ref_cache_.face_centers, face,
+                              stats_.face_center_hits, stats_.face_center_misses,
+                              [&]() { return MeshGeometry::face_center(mesh_, face, cfg); });
     } else if ((cfg == Configuration::Current || cfg == Configuration::Deformed) &&
                config_.cache_current) {
-        return get_or_compute(cur_cache_.face_centers, face, [&]() {
-            return MeshGeometry::face_center(mesh_, face, cfg);
-        });
+        return get_or_compute(cur_cache_.face_centers, face,
+                              stats_.face_center_hits, stats_.face_center_misses,
+                              [&]() { return MeshGeometry::face_center(mesh_, face, cfg); });
     }
 
     return MeshGeometry::face_center(mesh_, face, cfg);
@@ -159,14 +161,14 @@ std::array<real_t, 3> GeometryCache::face_normal(index_t face, Configuration cfg
     }
 
     if (cfg == Configuration::Reference && config_.cache_reference) {
-        return get_or_compute(ref_cache_.face_normals, face, [&]() {
-            return MeshGeometry::face_normal(mesh_, face, cfg);
-        });
+        return get_or_compute(ref_cache_.face_normals, face,
+                              stats_.face_normal_hits, stats_.face_normal_misses,
+                              [&]() { return MeshGeometry::face_normal(mesh_, face, cfg); });
     } else if ((cfg == Configuration::Current || cfg == Configuration::Deformed) &&
                config_.cache_current) {
-        return get_or_compute(cur_cache_.face_normals, face, [&]() {
-            return MeshGeometry::face_normal(mesh_, face, cfg);
-        });
+        return get_or_compute(cur_cache_.face_normals, face,
+                              stats_.face_normal_hits, stats_.face_normal_misses,
+                              [&]() { return MeshGeometry::face_normal(mesh_, face, cfg); });
     }
 
     return MeshGeometry::face_normal(mesh_, face, cfg);
@@ -178,14 +180,14 @@ real_t GeometryCache::face_area(index_t face, Configuration cfg) {
     }
 
     if (cfg == Configuration::Reference && config_.cache_reference) {
-        return get_or_compute(ref_cache_.face_areas, face, [&]() {
-            return MeshGeometry::face_area(mesh_, face, cfg);
-        });
+        return get_or_compute(ref_cache_.face_areas, face,
+                              stats_.face_area_hits, stats_.face_area_misses,
+                              [&]() { return MeshGeometry::face_area(mesh_, face, cfg); });
     } else if ((cfg == Configuration::Current || cfg == Configuration::Deformed) &&
                config_.cache_current) {
-        return get_or_compute(cur_cache_.face_areas, face, [&]() {
-            return MeshGeometry::face_area(mesh_, face, cfg);
-        });
+        return get_or_compute(cur_cache_.face_areas, face,
+                              stats_.face_area_hits, stats_.face_area_misses,
+                              [&]() { return MeshGeometry::face_area(mesh_, face, cfg); });
     }
 
     return MeshGeometry::face_area(mesh_, face, cfg);
@@ -201,14 +203,14 @@ std::array<real_t, 3> GeometryCache::edge_center(index_t edge, Configuration cfg
     }
 
     if (cfg == Configuration::Reference && config_.cache_reference) {
-        return get_or_compute(ref_cache_.edge_centers, edge, [&]() {
-            return MeshGeometry::edge_center(mesh_, edge, cfg);
-        });
+        return get_or_compute(ref_cache_.edge_centers, edge,
+                              stats_.edge_center_hits, stats_.edge_center_misses,
+                              [&]() { return MeshGeometry::edge_center(mesh_, edge, cfg); });
     } else if ((cfg == Configuration::Current || cfg == Configuration::Deformed) &&
                config_.cache_current) {
-        return get_or_compute(cur_cache_.edge_centers, edge, [&]() {
-            return MeshGeometry::edge_center(mesh_, edge, cfg);
-        });
+        return get_or_compute(cur_cache_.edge_centers, edge,
+                              stats_.edge_center_hits, stats_.edge_center_misses,
+                              [&]() { return MeshGeometry::edge_center(mesh_, edge, cfg); });
     }
 
     return MeshGeometry::edge_center(mesh_, edge, cfg);
@@ -227,13 +229,19 @@ AABB GeometryCache::mesh_bounding_box(Configuration cfg) {
 
     if (cfg == Configuration::Reference && config_.cache_reference) {
         if (!ref_cache_.mesh_bbox.has_value()) {
+            ++stats_.mesh_bbox_misses;
             ref_cache_.mesh_bbox = to_aabb(MeshGeometry::bounding_box(mesh_, cfg));
+        } else {
+            ++stats_.mesh_bbox_hits;
         }
         return ref_cache_.mesh_bbox.value();
     } else if ((cfg == Configuration::Current || cfg == Configuration::Deformed) &&
                config_.cache_current) {
         if (!cur_cache_.mesh_bbox.has_value()) {
+            ++stats_.mesh_bbox_misses;
             cur_cache_.mesh_bbox = to_aabb(MeshGeometry::bounding_box(mesh_, cfg));
+        } else {
+            ++stats_.mesh_bbox_hits;
         }
         return cur_cache_.mesh_bbox.value();
     }
@@ -410,6 +418,33 @@ void GeometryCache::ensure_cache_capacity() {
         if (config_.enable_face_areas) cur_cache_.face_areas.resize(n_faces);
         if (config_.enable_edge_centers) cur_cache_.edge_centers.resize(n_edges);
     }
+
+    stats_.memory_bytes = cache_memory_bytes();
+}
+
+size_t GeometryCache::cache_memory_bytes() const {
+    size_t bytes = 0;
+    auto add = [&bytes](const auto& v) {
+        bytes += v.capacity() * sizeof(typename std::decay_t<decltype(v)>::value_type);
+    };
+
+    add(ref_cache_.cell_centers);
+    add(ref_cache_.cell_measures);
+    add(ref_cache_.cell_bboxes);
+    add(ref_cache_.face_centers);
+    add(ref_cache_.face_normals);
+    add(ref_cache_.face_areas);
+    add(ref_cache_.edge_centers);
+
+    add(cur_cache_.cell_centers);
+    add(cur_cache_.cell_measures);
+    add(cur_cache_.cell_bboxes);
+    add(cur_cache_.face_centers);
+    add(cur_cache_.face_normals);
+    add(cur_cache_.face_areas);
+    add(cur_cache_.edge_centers);
+
+    return bytes;
 }
 
 void GeometryCache::invalidate_ref_cache() {
@@ -442,6 +477,8 @@ template<typename T, typename ComputeFn>
 const T& GeometryCache::get_or_compute(
     std::vector<std::optional<T>>& cache,
     index_t index,
+    size_t& hits,
+    size_t& misses,
     ComputeFn&& compute_fn) const {
 
     if (index < 0 || index >= static_cast<index_t>(cache.size())) {
@@ -450,13 +487,10 @@ const T& GeometryCache::get_or_compute(
     }
 
     if (!cache[index].has_value()) {
+        ++misses;
         cache[index] = compute_fn();
     } else {
-        if constexpr (std::is_same_v<T, std::array<real_t, 3>>) {
-            ++stats_.cell_center_hits;
-        } else if constexpr (std::is_same_v<T, real_t>) {
-            ++stats_.cell_measure_hits;
-        }
+        ++hits;
     }
 
     return cache[index].value();
