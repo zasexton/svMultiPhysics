@@ -12,6 +12,7 @@
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Spaces/MixedSpace.h"
 #include "FE/Spaces/TraceSpace.h"
+#include "FE/Spaces/MortarSpace.h"
 #include "FE/Spaces/CompositeSpace.h"
 #include "FE/Spaces/EnrichedSpace.h"
 #include "FE/Spaces/AdaptiveSpace.h"
@@ -190,6 +191,27 @@ TEST(FunctionSpaces, TraceSpaceReducesDimension) {
     EXPECT_NEAR(val_trace[0], val_base[0], 1e-14);
 }
 
+TEST(FunctionSpaces, MortarSpaceWrapsInterfaceSpace) {
+    auto iface = std::make_shared<H1Space>(ElementType::Triangle3, 1);
+    MortarSpace mortar(iface);
+
+    EXPECT_EQ(mortar.space_type(), SpaceType::Mortar);
+    EXPECT_EQ(mortar.field_type(), iface->field_type());
+    EXPECT_EQ(mortar.continuity(), iface->continuity());
+    EXPECT_EQ(mortar.element_type(), iface->element_type());
+    EXPECT_EQ(mortar.topological_dimension(), iface->topological_dimension());
+    EXPECT_EQ(mortar.dofs_per_element(), iface->dofs_per_element());
+
+    FunctionSpace::Value xi{};
+    xi[0] = Real(0.2);
+    xi[1] = Real(0.3);
+
+    std::vector<Real> coeffs(mortar.dofs_per_element(), Real(1));
+    const auto val_mortar = mortar.evaluate(xi, coeffs);
+    const auto val_iface  = iface->evaluate(xi, coeffs);
+    EXPECT_NEAR(val_mortar[0], val_iface[0], 1e-14);
+}
+
 TEST(FunctionSpaces, EnrichedSpaceCombinesBaseAndEnrichment) {
     auto base = std::make_shared<H1Space>(ElementType::Line2, 1);
     auto enr  = std::make_shared<L2Space>(ElementType::Line2, 1);
@@ -262,6 +284,8 @@ TEST(FunctionSpaces, SpaceFactoryCreatesCoreSpaces) {
     EXPECT_EQ(hc->space_type(), SpaceType::HCurl);
 
     EXPECT_THROW(SpaceFactory::create(SpaceType::Mixed, ElementType::Triangle3, 1),
+                 svmp::FE::FEException);
+    EXPECT_THROW(SpaceFactory::create(SpaceType::Mortar, ElementType::Triangle3, 1),
                  svmp::FE::FEException);
 }
 

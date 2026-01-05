@@ -52,6 +52,7 @@ enum class SpaceType : std::uint8_t {
     Mixed,
     Product,
     Trace,
+    Mortar,
     Composite,
     Enriched,
     Adaptive,

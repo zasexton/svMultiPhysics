@@ -34,6 +34,7 @@ std::shared_ptr<FunctionSpace> SpaceFactory::create(SpaceType type,
                      "SpaceFactory::create: Isogeometric spaces require external basis and quadrature");
         case SpaceType::Mixed:
         case SpaceType::Trace:
+        case SpaceType::Mortar:
         case SpaceType::Composite:
         case SpaceType::Enriched:
         case SpaceType::Adaptive:
