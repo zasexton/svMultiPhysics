@@ -169,7 +169,9 @@ std::pair<index_t, real_t> UniformGridAccel::nearest_vertex(
 
   // Start with small radius and expand
   real_t search_radius = cell_size_[0];  // Start with one grid cell
-  const real_t max_radius = std::sqrt(bounds_.volume());
+  const auto ext = bounds_.extents();
+  const real_t max_radius =
+      std::sqrt(ext[0] * ext[0] + ext[1] * ext[1] + ext[2] * ext[2]);
 
   while (nearest_idx == INVALID_INDEX && search_radius < max_radius) {
     auto candidates = get_nearby_vertices(point, search_radius);
@@ -214,7 +216,9 @@ std::vector<std::pair<index_t, real_t>> UniformGridAccel::k_nearest_vertices(
 
   // Progressively expand search radius
   real_t search_radius = cell_size_[0];
-  const real_t max_radius = std::sqrt(bounds_.volume());
+  const auto ext = bounds_.extents();
+  const real_t max_radius =
+      std::sqrt(ext[0] * ext[0] + ext[1] * ext[1] + ext[2] * ext[2]);
 
   while (max_heap.size() < k && search_radius < max_radius) {
     auto candidates = get_nearby_vertices(point, search_radius);

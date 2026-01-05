@@ -192,6 +192,26 @@ bool point_in_cell(const std::array<real_t,3>& p,
                   const std::vector<std::array<real_t,3>>& vertices,
                   real_t tol) {
   switch (shape.family) {
+    case CellFamily::Line:
+      if (vertices.size() >= 2) {
+        return point_segment_distance(p, vertices[0], vertices[1]) <= tol;
+      }
+      break;
+
+    case CellFamily::Triangle:
+      if (vertices.size() >= 3) {
+        return point_in_triangle(p, vertices[0], vertices[1], vertices[2], tol);
+      }
+      break;
+
+    case CellFamily::Quad:
+      if (vertices.size() >= 4) {
+        // Fan triangulation: (0,1,2) and (0,2,3)
+        return point_in_triangle(p, vertices[0], vertices[1], vertices[2], tol) ||
+               point_in_triangle(p, vertices[0], vertices[2], vertices[3], tol);
+      }
+      break;
+
     case CellFamily::Tetra:
       if (vertices.size() >= 4) {
         return point_in_tetrahedron(p, vertices[0], vertices[1],

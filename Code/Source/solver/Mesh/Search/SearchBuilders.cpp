@@ -30,6 +30,7 @@
 
 #include "SearchBuilders.h"
 #include "../Core/MeshBase.h"
+#include "../Geometry/CurvilinearEval.h"
 #include <algorithm>
 #include <cmath>
 #include <unordered_set>
@@ -263,14 +264,46 @@ std::vector<SearchBuilders::TriangleWithFace> SearchBuilders::triangulate_bounda
   std::vector<TriangleWithFace> triangles;
   auto boundary_faces = get_boundary_faces(mesh);
 
+  // If the mesh exposes surface-like boundary faces (>= 3 vertices), triangulate them.
+  // Otherwise (e.g., a surface mesh where "faces" are edges), treat 2D cells as the
+  // boundary surface and triangulate cells instead.
+  bool has_triangulatable_boundary_faces = false;
   for (index_t face_id : boundary_faces) {
-    auto face_triangles = triangulate_face(mesh, face_id, cfg);
+    auto [vptr, nv] = mesh.face_vertices_span(face_id);
+    if (nv >= 3) {
+      has_triangulatable_boundary_faces = true;
+      break;
+    }
+  }
 
-    for (const auto& tri : face_triangles) {
-      TriangleWithFace twf;
-      twf.vertices = tri;
-      twf.face_id = face_id;
-      triangles.push_back(twf);
+  if (has_triangulatable_boundary_faces) {
+    for (index_t face_id : boundary_faces) {
+      auto face_triangles = triangulate_face(mesh, face_id, cfg);
+
+      for (const auto& tri : face_triangles) {
+        TriangleWithFace twf;
+        twf.vertices = tri;
+        twf.face_id = face_id;
+        triangles.push_back(twf);
+      }
+    }
+    return triangles;
+  }
+
+  // Surface mesh fallback: triangulate 2D cells and use `face_id` as the cell id.
+  for (index_t c = 0; c < static_cast<index_t>(mesh.n_cells()); ++c) {
+    const auto& shape = mesh.cell_shape(c);
+    if (!shape.is_2d()) continue;
+
+    auto vertices = get_cell_vertex_coords(mesh, c, cfg);
+    if (vertices.size() < 3) continue;
+
+    // Fan triangulation from first vertex
+    for (size_t i = 1; i + 1 < vertices.size(); ++i) {
+      TriangleWithFace tri;
+      tri.vertices = {vertices[0], vertices[i], vertices[i + 1]};
+      tri.face_id = c;
+      triangles.push_back(tri);
     }
   }
 
@@ -282,18 +315,51 @@ std::vector<SearchBuilders::TriangleWithFace> SearchBuilders::extract_boundary_t
     const std::vector<std::array<real_t,3>>& vertex_coords) {
   std::vector<TriangleWithFace> triangles;
   auto boundary_faces = get_boundary_faces(mesh);
+  bool has_triangulatable_boundary_faces = false;
   for (index_t face_id : boundary_faces) {
-    auto verts = mesh.face_vertices(face_id);
+    auto [vptr, nv] = mesh.face_vertices_span(face_id);
+    if (nv >= 3) {
+      has_triangulatable_boundary_faces = true;
+      break;
+    }
+  }
+
+  if (has_triangulatable_boundary_faces) {
+    for (index_t face_id : boundary_faces) {
+      auto verts = mesh.face_vertices(face_id);
+      if (verts.size() < 3) continue;
+      // Fan triangulation
+      for (size_t i = 1; i + 1 < verts.size(); ++i) {
+        TriangleWithFace tri;
+        auto v0 = static_cast<size_t>(verts[0]);
+        auto v1 = static_cast<size_t>(verts[i]);
+        auto v2 = static_cast<size_t>(verts[i + 1]);
+        if (v0 < vertex_coords.size() && v1 < vertex_coords.size() && v2 < vertex_coords.size()) {
+          tri.vertices = {vertex_coords[v0], vertex_coords[v1], vertex_coords[v2]};
+          tri.face_id = face_id;
+          triangles.push_back(tri);
+        }
+      }
+    }
+    return triangles;
+  }
+
+  // Surface mesh fallback: triangulate 2D cells and use `face_id` as the cell id.
+  for (index_t c = 0; c < static_cast<index_t>(mesh.n_cells()); ++c) {
+    const auto& shape = mesh.cell_shape(c);
+    if (!shape.is_2d()) continue;
+
+    auto verts = mesh.cell_vertices(c);
     if (verts.size() < 3) continue;
     // Fan triangulation
     for (size_t i = 1; i + 1 < verts.size(); ++i) {
       TriangleWithFace tri;
-      auto v0 = static_cast<size_t>(verts[0]);
-      auto v1 = static_cast<size_t>(verts[i]);
-      auto v2 = static_cast<size_t>(verts[i+1]);
+      const size_t v0 = static_cast<size_t>(verts[0]);
+      const size_t v1 = static_cast<size_t>(verts[i]);
+      const size_t v2 = static_cast<size_t>(verts[i + 1]);
       if (v0 < vertex_coords.size() && v1 < vertex_coords.size() && v2 < vertex_coords.size()) {
-        tri.vertices = { vertex_coords[v0], vertex_coords[v1], vertex_coords[v2] };
-        tri.face_id = face_id;
+        tri.vertices = {vertex_coords[v0], vertex_coords[v1], vertex_coords[v2]};
+        tri.face_id = c;
         triangles.push_back(tri);
       }
     }
@@ -432,26 +498,66 @@ std::array<real_t,3> SearchBuilders::hex_parametric_coords(
     return {0, 0, 0};
   }
 
-  // Initial guess at center
+  // Initial guess at center of reference element
   std::array<real_t,3> xi = {0, 0, 0};
 
-  // Newton-Raphson iteration
+  // Reference-hex corner sign pattern (VTK/standard ordering):
+  // 0:(-,-,-), 1:(+,-,-), 2:(+,+,-), 3:(-,+,-), 4:(-,-,+), 5:(+,-,+), 6:(+,+,+), 7:(-,+,+)
+  static constexpr real_t sr[8] = {-1, 1, 1,-1,-1, 1, 1,-1};
+  static constexpr real_t ss[8] = {-1,-1, 1, 1,-1,-1, 1, 1};
+  static constexpr real_t st[8] = {-1,-1,-1,-1, 1, 1, 1, 1};
+
+  auto solve_3x3 = [](const real_t J[3][3], const real_t b[3], real_t x[3]) -> bool {
+    const real_t a00 = J[0][0], a01 = J[0][1], a02 = J[0][2];
+    const real_t a10 = J[1][0], a11 = J[1][1], a12 = J[1][2];
+    const real_t a20 = J[2][0], a21 = J[2][1], a22 = J[2][2];
+
+    const real_t det =
+        a00 * (a11 * a22 - a12 * a21) -
+        a01 * (a10 * a22 - a12 * a20) +
+        a02 * (a10 * a21 - a11 * a20);
+
+    if (!std::isfinite(det) || std::abs(det) < 1e-14) {
+      return false;
+    }
+
+    const real_t inv00 =  (a11 * a22 - a12 * a21) / det;
+    const real_t inv01 =  (a02 * a21 - a01 * a22) / det;
+    const real_t inv02 =  (a01 * a12 - a02 * a11) / det;
+    const real_t inv10 =  (a12 * a20 - a10 * a22) / det;
+    const real_t inv11 =  (a00 * a22 - a02 * a20) / det;
+    const real_t inv12 =  (a02 * a10 - a00 * a12) / det;
+    const real_t inv20 =  (a10 * a21 - a11 * a20) / det;
+    const real_t inv21 =  (a01 * a20 - a00 * a21) / det;
+    const real_t inv22 =  (a00 * a11 - a01 * a10) / det;
+
+    x[0] = inv00 * b[0] + inv01 * b[1] + inv02 * b[2];
+    x[1] = inv10 * b[0] + inv11 * b[1] + inv12 * b[2];
+    x[2] = inv20 * b[0] + inv21 * b[1] + inv22 * b[2];
+    return std::isfinite(x[0]) && std::isfinite(x[1]) && std::isfinite(x[2]);
+  };
+
   for (int iter = 0; iter < max_iter; ++iter) {
-    // Evaluate shape functions and derivatives
-    // This is a simplified version - full implementation would use proper shape functions
+    const real_t r = xi[0];
+    const real_t s = xi[1];
+    const real_t t = xi[2];
 
-    // Trilinear interpolation
+    // Shape functions and derivatives at (r,s,t)
     real_t N[8];
-    N[0] = 0.125 * (1 - xi[0]) * (1 - xi[1]) * (1 - xi[2]);
-    N[1] = 0.125 * (1 + xi[0]) * (1 - xi[1]) * (1 - xi[2]);
-    N[2] = 0.125 * (1 + xi[0]) * (1 + xi[1]) * (1 - xi[2]);
-    N[3] = 0.125 * (1 - xi[0]) * (1 + xi[1]) * (1 - xi[2]);
-    N[4] = 0.125 * (1 - xi[0]) * (1 - xi[1]) * (1 + xi[2]);
-    N[5] = 0.125 * (1 + xi[0]) * (1 - xi[1]) * (1 + xi[2]);
-    N[6] = 0.125 * (1 + xi[0]) * (1 + xi[1]) * (1 + xi[2]);
-    N[7] = 0.125 * (1 - xi[0]) * (1 + xi[1]) * (1 + xi[2]);
+    real_t dNdr[8];
+    real_t dNds[8];
+    real_t dNdt[8];
 
-    // Compute current position
+    for (int i = 0; i < 8; ++i) {
+      const real_t ar = 1 + sr[i] * r;
+      const real_t as = 1 + ss[i] * s;
+      const real_t at = 1 + st[i] * t;
+      N[i]    = 0.125 * ar * as * at;
+      dNdr[i] = 0.125 * sr[i] * as * at;
+      dNds[i] = 0.125 * ar * ss[i] * at;
+      dNdt[i] = 0.125 * ar * as * st[i];
+    }
+
     std::array<real_t,3> x_current = {0, 0, 0};
     for (int i = 0; i < 8; ++i) {
       for (int d = 0; d < 3; ++d) {
@@ -459,22 +565,45 @@ std::array<real_t,3> SearchBuilders::hex_parametric_coords(
       }
     }
 
-    // Check convergence
-    real_t residual = 0;
-    for (int d = 0; d < 3; ++d) {
-      real_t diff = p[d] - x_current[d];
-      residual += diff * diff;
-    }
-
-    if (std::sqrt(residual) < tol) {
+    const real_t b[3] = {p[0] - x_current[0], p[1] - x_current[1], p[2] - x_current[2]};
+    const real_t res_norm = std::sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
+    if (res_norm < tol) {
       break;
     }
 
-    // Update xi (simplified - full version would compute Jacobian)
-    // This is a placeholder for proper Newton iteration
+    real_t J[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
+    for (int i = 0; i < 8; ++i) {
+      const auto& X = hex_vertices[i];
+      J[0][0] += dNdr[i] * X[0];
+      J[0][1] += dNds[i] * X[0];
+      J[0][2] += dNdt[i] * X[0];
+
+      J[1][0] += dNdr[i] * X[1];
+      J[1][1] += dNds[i] * X[1];
+      J[1][2] += dNdt[i] * X[1];
+
+      J[2][0] += dNdr[i] * X[2];
+      J[2][1] += dNds[i] * X[2];
+      J[2][2] += dNdt[i] * X[2];
+    }
+
+    real_t delta[3] = {0, 0, 0};
+    if (!solve_3x3(J, b, delta)) {
+      break;
+    }
+
+    const real_t step_norm = std::sqrt(delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]);
+    xi[0] += delta[0];
+    xi[1] += delta[1];
+    xi[2] += delta[2];
+
+    // Keep the iteration stable by clamping to the reference cube.
     for (int d = 0; d < 3; ++d) {
-      xi[d] += 0.1 * (p[d] - x_current[d]);
-      xi[d] = std::max(-1.0, std::min(1.0, xi[d]));
+      xi[d] = std::max<real_t>(-1.0, std::min<real_t>(1.0, xi[d]));
+    }
+
+    if (step_norm < tol) {
+      break;
     }
   }
 
@@ -487,6 +616,17 @@ std::array<real_t,3> SearchBuilders::compute_parametric_coords(
     const std::array<real_t,3>& p,
     Configuration cfg) {
 
+  // Treat Deformed as Current (compatibility alias).
+  if (cfg == Configuration::Deformed) {
+    cfg = Configuration::Current;
+  }
+  if (cfg == Configuration::Current && !mesh.has_current_coords()) {
+    cfg = Configuration::Reference;
+  }
+  if (cell_id < 0 || static_cast<size_t>(cell_id) >= mesh.n_cells()) {
+    return {0, 0, 0};
+  }
+
   auto shape = mesh.cell_shape(cell_id);
   auto vertices = get_cell_vertex_coords(mesh, cell_id, cfg);
 
@@ -498,9 +638,8 @@ std::array<real_t,3> SearchBuilders::compute_parametric_coords(
       return hex_parametric_coords(p, vertices);
 
     default:
-      // For other shapes, return a default
-      // Full implementation would handle all shape types
-      return {0, 0, 0};
+      // Fallback: use a general inverse mapping for all supported families.
+      return svmp::CurvilinearEvaluator::inverse_map(mesh, cell_id, p, cfg).first;
   }
 }
 

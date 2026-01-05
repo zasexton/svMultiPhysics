@@ -177,7 +177,11 @@ void RTreeAccel::insert(index_t entity_id, const search::AABB& bounds) {
     }
   }
 
+  is_built_ = true;
+  tree_height_ = root_ ? get_tree_height(root_.get()) : 0;
   stats_.n_nodes = count_nodes(root_.get());
+  stats_.tree_depth = tree_height_;
+  stats_.memory_bytes = compute_memory_usage();
 }
 
 void RTreeAccel::remove(index_t entity_id, const search::AABB& bounds) {
@@ -208,7 +212,10 @@ void RTreeAccel::remove(index_t entity_id, const search::AABB& bounds) {
     }
   }
 
+  tree_height_ = root_ ? get_tree_height(root_.get()) : 0;
   stats_.n_nodes = count_nodes(root_.get());
+  stats_.tree_depth = tree_height_;
+  stats_.memory_bytes = compute_memory_usage();
 }
 
 // ---- Bulk loading (STR) ----
@@ -224,6 +231,7 @@ void RTreeAccel::bulk_load(const std::vector<std::pair<index_t, search::AABB>>& 
   is_built_ = true;
 
   stats_.n_nodes = count_nodes(root_.get());
+  stats_.tree_depth = tree_height_;
   stats_.memory_bytes = compute_memory_usage();
 }
 

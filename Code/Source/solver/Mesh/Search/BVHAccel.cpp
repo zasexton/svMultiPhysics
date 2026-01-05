@@ -48,6 +48,10 @@ void BVHAccel::build(const MeshBase& mesh,
   clear();
 
   built_cfg_ = cfg;
+  if (config.max_depth > 0) {
+    max_depth_ = config.max_depth;
+  }
+  max_primitives_per_leaf_ = std::max(1, config.min_entities_per_leaf);
   stats_ = SearchStats();
   auto start_time = std::chrono::steady_clock::now();
 
@@ -169,13 +173,49 @@ std::unique_ptr<BVHAccel::BVHNode> BVHAccel::build_recursive(
 
   if (build_method_ == BuildMethod::SAH) {
     // Use Surface Area Heuristic
+    const bool force_full_split = (max_primitives_per_leaf_ <= 1);
     mid = find_sah_split(primitives, start, end, split_axis, split_cost);
 
-    // Check if leaf is better than split
-    real_t leaf_cost = intersection_cost_ * n_primitives;
-    if (leaf_cost < split_cost || mid == start || mid == end) {
-      return create_leaf(primitives, start, end, depth);
+    // If SAH fails to produce a valid partition, fall back to an equal-count split
+    // along the longest centroid axis to guarantee progress (avoid oversized leaves).
+    if (mid == start || mid == end) {
+      search::AABB centroid_bounds = compute_centroid_bounds(primitives, start, end);
+      auto extents = centroid_bounds.extents();
+      split_axis = 0;
+      if (extents[1] > extents[split_axis]) split_axis = 1;
+      if (extents[2] > extents[split_axis]) split_axis = 2;
+
+      mid = (start + end) / 2;
+      std::nth_element(primitives.begin() + start, primitives.begin() + mid,
+                       primitives.begin() + end,
+                       [split_axis](const PrimitiveInfo& a, const PrimitiveInfo& b) {
+                         return a.centroid[split_axis] < b.centroid[split_axis];
+                       });
     }
+
+    // Check if leaf is better than split unless the user explicitly asked for
+    // a full refinement to `max_primitives_per_leaf_` (e.g., 1 primitive/leaf).
+    if (!force_full_split) {
+      real_t leaf_cost = intersection_cost_ * n_primitives;
+      if (leaf_cost < split_cost) {
+        return create_leaf(primitives, start, end, depth);
+      }
+    }
+
+    // Partition primitives for recursion. `find_sah_split(...)` computes the split
+    // but does not reorder the range.
+    if (split_axis < 0) {
+      split_axis = 0;
+    }
+    if (mid <= start || mid >= end) {
+      mid = (start + end) / 2;
+    }
+    mid = std::max(start + 1, std::min(mid, end - 1));
+    std::nth_element(primitives.begin() + start, primitives.begin() + mid,
+                     primitives.begin() + end,
+                     [split_axis](const PrimitiveInfo& a, const PrimitiveInfo& b) {
+                       return a.centroid[split_axis] < b.centroid[split_axis];
+                     });
   } else if (build_method_ == BuildMethod::Middle) {
     // Simple middle split
     search::AABB centroid_bounds = compute_centroid_bounds(primitives, start, end);
@@ -1086,6 +1126,12 @@ real_t BVHAccel::compute_sah_cost_recursive(const BVHNode* node) const {
     real_t left_area = node->left->area;
     real_t right_area = node->right->area;
     real_t total_area = node->area;
+
+    // Degenerate bounds (e.g., line meshes) yield zero surface area. In that case,
+    // fall back to an unweighted traversal cost to avoid NaNs.
+    if (!std::isfinite(total_area) || total_area <= 0.0) {
+      return traversal_cost_ + left_cost + right_cost;
+    }
 
     return traversal_cost_ +
            (left_area / total_area) * left_cost +
