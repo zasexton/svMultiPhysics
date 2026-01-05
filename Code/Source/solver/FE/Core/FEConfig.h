@@ -54,6 +54,10 @@
     #define FE_DEBUG_MODE 0
 #endif
 
+#if FE_DEBUG_MODE
+#include <cassert>
+#endif
+
 // MPI support detection.
 //
 // FE can be built in two modes:
@@ -411,7 +415,6 @@ enum class BoundsCheckLevel {
 // ============================================================================
 
 #if FE_DEBUG_MODE
-    #include <cassert>
     #define FE_ASSERT(cond) assert(cond)
     #define FE_ASSERT_MSG(cond, msg) assert((cond) && (msg))
 #else

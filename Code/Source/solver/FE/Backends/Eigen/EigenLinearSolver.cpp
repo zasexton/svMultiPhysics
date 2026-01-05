@@ -12,6 +12,7 @@
 #include "Core/FEException.h"
 
 #if defined(FE_HAS_EIGEN)
+#include <iostream>
 #include <Eigen/IterativeLinearSolvers>
 #include <Eigen/SparseLU>
 #include <unsupported/Eigen/IterativeSolvers>
