@@ -90,6 +90,20 @@ public:
     [[nodiscard]] std::span<const std::span<const Real>> uHistorySpans() const noexcept { return u_history_spans_; }
     [[nodiscard]] std::span<const double> dtHistory() const noexcept { return dt_history_; }
 
+    /**
+     * @brief Replace the stored dt history (size must match historyDepth()).
+     *
+     * `dtHistory()[0]` corresponds to the last accepted step size (dtPrev()).
+     * This is primarily intended for restart of variable-step schemes.
+     */
+    void setDtHistory(std::span<const double> dt_history);
+    void setDtHistory(const std::vector<double>& dt_history) { setDtHistory(std::span<const double>(dt_history.data(), dt_history.size())); }
+
+    /**
+     * @brief Check whether the first `required_entries` dt history values are finite and > 0.
+     */
+    [[nodiscard]] bool dtHistoryIsValid(int required_entries) const noexcept;
+
     void setTime(double t) noexcept { time_ = t; }
     [[nodiscard]] double time() const noexcept { return time_; }
 

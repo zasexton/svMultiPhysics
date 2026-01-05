@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 namespace svmp {
 namespace FE {
@@ -237,6 +238,39 @@ std::span<Real> TimeHistory::uDDotSpan()
 std::span<const Real> TimeHistory::uDDotSpan() const
 {
     return uDDot().localSpan();
+}
+
+void TimeHistory::setDtHistory(std::span<const double> dt_history)
+{
+    FE_THROW_IF(dt_history.size() != dt_history_.size(),
+                InvalidArgumentException,
+                "TimeHistory::setDtHistory: size mismatch (expected " + std::to_string(dt_history_.size()) +
+                    ", got " + std::to_string(dt_history.size()) + ")");
+
+    dt_history_.assign(dt_history.begin(), dt_history.end());
+    if (!dt_history_.empty()) {
+        const double v0 = dt_history_[0];
+        if (v0 > 0.0 && std::isfinite(v0)) {
+            dt_prev_ = v0;
+        }
+    }
+}
+
+bool TimeHistory::dtHistoryIsValid(int required_entries) const noexcept
+{
+    if (required_entries <= 0) {
+        return true;
+    }
+    if (required_entries > static_cast<int>(dt_history_.size())) {
+        return false;
+    }
+    for (int i = 0; i < required_entries; ++i) {
+        const double v = dt_history_[static_cast<std::size_t>(i)];
+        if (!(v > 0.0) || !std::isfinite(v)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void TimeHistory::updateGhosts()
