@@ -64,8 +64,14 @@ public:
   // Polygon area using Newell's method (0 for degenerate or < 3 vertices).
   static real_t polygon_area(const std::vector<std::array<real_t,3>>& verts);
 
-  // Polygon centroid using triangle fan decomposition (robust for planar polygon).
+  // Polygon centroid via projected shoelace / Green's theorem (supports concave simple polygons).
   static std::array<real_t,3> polygon_centroid(const std::vector<std::array<real_t,3>>& verts);
+
+  // Triangulate a planar, simple polygon using ear clipping.
+  // Returns false for degenerate or self-intersecting input.
+  // Output triangles are indices into the input vertex list.
+  static bool triangulate_planar_polygon(const std::vector<std::array<real_t,3>>& verts,
+                                         std::vector<std::array<index_t,3>>& triangles);
 
   // ---- Mesh-based API (indices into mesh vertex list) ----
 
@@ -80,6 +86,13 @@ public:
   static std::array<real_t,3> polygon_centroid(const MeshBase& mesh,
                                                const std::vector<index_t>& vertices,
                                                Configuration cfg = Configuration::Reference);
+
+  // Triangulate a planar, simple polygon specified by mesh vertex IDs.
+  // Output triangles are indices into the provided `vertices` list (not global mesh IDs).
+  static bool triangulate_planar_polygon(const MeshBase& mesh,
+                                         const std::vector<index_t>& vertices,
+                                         std::vector<std::array<index_t,3>>& triangles,
+                                         Configuration cfg = Configuration::Reference);
 
   // ---- Convex polyhedra (mesh-based; face connectivity required) ----
 

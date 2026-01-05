@@ -133,6 +133,189 @@ namespace {
     inline std::array<real_t,3> scale3(const std::array<real_t,3>& a, real_t s) {
       return {a[0] * s, a[1] * s, a[2] * s};
     }
+
+    inline int dominant_axis(const std::array<real_t,3>& n) {
+      const real_t ax = std::abs(n[0]);
+      const real_t ay = std::abs(n[1]);
+      const real_t az = std::abs(n[2]);
+      if (ax >= ay && ax >= az) return 0;
+      if (ay >= az) return 1;
+      return 2;
+    }
+
+    inline std::array<real_t,2> project2(const std::array<real_t,3>& p, int drop_axis) {
+      switch (drop_axis) {
+        case 0: return {p[1], p[2]}; // yz
+        case 1: return {p[0], p[2]}; // xz
+        default: return {p[0], p[1]}; // xy
+      }
+    }
+
+    inline real_t orient2d(const std::array<real_t,2>& a,
+                           const std::array<real_t,2>& b,
+                           const std::array<real_t,2>& c) {
+      return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    }
+
+    inline bool on_segment_2d(const std::array<real_t,2>& a,
+                              const std::array<real_t,2>& b,
+                              const std::array<real_t,2>& p,
+                              real_t tol) {
+      return (std::min(a[0], b[0]) - tol <= p[0] && p[0] <= std::max(a[0], b[0]) + tol) &&
+             (std::min(a[1], b[1]) - tol <= p[1] && p[1] <= std::max(a[1], b[1]) + tol);
+    }
+
+    inline bool segments_intersect_2d(const std::array<real_t,2>& p1,
+                                      const std::array<real_t,2>& q1,
+                                      const std::array<real_t,2>& p2,
+                                      const std::array<real_t,2>& q2,
+                                      real_t tol) {
+      const real_t o1 = orient2d(p1, q1, p2);
+      const real_t o2 = orient2d(p1, q1, q2);
+      const real_t o3 = orient2d(p2, q2, p1);
+      const real_t o4 = orient2d(p2, q2, q1);
+
+      const auto sgn = [&](real_t v) -> int {
+        if (v > tol) return 1;
+        if (v < -tol) return -1;
+        return 0;
+      };
+
+      const int s1o1 = sgn(o1);
+      const int s1o2 = sgn(o2);
+      const int s2o3 = sgn(o3);
+      const int s2o4 = sgn(o4);
+
+      if (s1o1 * s1o2 < 0 && s2o3 * s2o4 < 0) return true;
+
+      if (s1o1 == 0 && on_segment_2d(p1, q1, p2, tol)) return true;
+      if (s1o2 == 0 && on_segment_2d(p1, q1, q2, tol)) return true;
+      if (s2o3 == 0 && on_segment_2d(p2, q2, p1, tol)) return true;
+      if (s2o4 == 0 && on_segment_2d(p2, q2, q1, tol)) return true;
+
+      return false;
+    }
+
+    inline bool is_simple_polygon_2d(const std::vector<std::array<real_t,2>>& pts,
+                                     const std::vector<index_t>& idx,
+                                     real_t tol) {
+      const size_t n = idx.size();
+      if (n < 3) return false;
+      for (size_t i = 0; i < n; ++i) {
+        const size_t i2 = (i + 1) % n;
+        const auto& a0 = pts[static_cast<size_t>(idx[i])];
+        const auto& a1 = pts[static_cast<size_t>(idx[i2])];
+        for (size_t j = i + 1; j < n; ++j) {
+          const size_t j2 = (j + 1) % n;
+          if (i == j || i2 == j || i == j2 || i2 == j2) continue; // share endpoint
+          const auto& b0 = pts[static_cast<size_t>(idx[j])];
+          const auto& b1 = pts[static_cast<size_t>(idx[j2])];
+          if (segments_intersect_2d(a0, a1, b0, b1, tol)) return false;
+        }
+      }
+      return true;
+    }
+
+    inline bool point_in_triangle_2d(const std::array<real_t,2>& p,
+                                     const std::array<real_t,2>& a,
+                                     const std::array<real_t,2>& b,
+                                     const std::array<real_t,2>& c,
+                                     real_t tol) {
+      const real_t o = orient2d(a, b, c);
+      if (std::abs(o) <= tol) return false;
+      const int s = (o > 0) ? 1 : -1;
+      const real_t o1 = orient2d(a, b, p);
+      const real_t o2 = orient2d(b, c, p);
+      const real_t o3 = orient2d(c, a, p);
+      if (s > 0) {
+        return (o1 >= -tol) && (o2 >= -tol) && (o3 >= -tol);
+      }
+      return (o1 <= tol) && (o2 <= tol) && (o3 <= tol);
+    }
+
+    inline bool ear_clip_triangulate_2d(const std::vector<std::array<real_t,2>>& pts,
+                                        std::vector<index_t> idx,
+                                        std::vector<std::array<index_t,3>>& triangles,
+                                        real_t tol) {
+      triangles.clear();
+      if (idx.size() < 3) return false;
+
+      // Signed area (twice).
+      real_t area2 = 0.0;
+      for (size_t i = 0; i < idx.size(); ++i) {
+        const size_t j = (i + 1) % idx.size();
+        const auto& a = pts[static_cast<size_t>(idx[i])];
+        const auto& b = pts[static_cast<size_t>(idx[j])];
+        area2 += (a[0] * b[1] - b[0] * a[1]);
+      }
+      if (std::abs(area2) <= tol) return false;
+      const int poly_sign = (area2 > 0) ? 1 : -1;
+
+      const size_t n0 = idx.size();
+      triangles.reserve(n0 - 2);
+
+      size_t guard = 0;
+      while (idx.size() > 3 && guard++ < 10000) {
+        bool found = false;
+        const size_t n = idx.size();
+        for (size_t pos = 0; pos < n; ++pos) {
+          const size_t ip = (pos + n - 1) % n;
+          const size_t in = (pos + 1) % n;
+          const index_t a = idx[ip];
+          const index_t b = idx[pos];
+          const index_t c = idx[in];
+
+          const real_t o = orient2d(pts[static_cast<size_t>(a)],
+                                    pts[static_cast<size_t>(b)],
+                                    pts[static_cast<size_t>(c)]);
+          if (!(poly_sign * o > tol)) continue; // reflex or nearly collinear
+
+          bool contains = false;
+          for (size_t k = 0; k < n; ++k) {
+            const index_t p = idx[k];
+            if (p == a || p == b || p == c) continue;
+            if (point_in_triangle_2d(pts[static_cast<size_t>(p)],
+                                     pts[static_cast<size_t>(a)],
+                                     pts[static_cast<size_t>(b)],
+                                     pts[static_cast<size_t>(c)], tol)) {
+              contains = true;
+              break;
+            }
+          }
+          if (contains) continue;
+
+          triangles.push_back({a, b, c});
+          idx.erase(idx.begin() + static_cast<std::vector<index_t>::difference_type>(pos));
+          found = true;
+          break;
+        }
+
+        if (!found) {
+          // Try to remove a nearly collinear vertex to make progress.
+          bool removed = false;
+          const size_t n = idx.size();
+          for (size_t pos = 0; pos < n; ++pos) {
+            const size_t ip = (pos + n - 1) % n;
+            const size_t in = (pos + 1) % n;
+            const index_t a = idx[ip];
+            const index_t b = idx[pos];
+            const index_t c = idx[in];
+            const real_t o = orient2d(pts[static_cast<size_t>(a)],
+                                      pts[static_cast<size_t>(b)],
+                                      pts[static_cast<size_t>(c)]);
+            if (std::abs(o) <= tol) {
+              idx.erase(idx.begin() + static_cast<std::vector<index_t>::difference_type>(pos));
+              removed = true;
+              break;
+            }
+          }
+          if (!removed) return false;
+        }
+      }
+
+      if (idx.size() == 3) triangles.push_back({idx[0], idx[1], idx[2]});
+      return triangles.size() >= 1;
+    }
 	}
 
 // -------------------
@@ -167,26 +350,28 @@ std::array<real_t,3> PolyGeometry::polygon_centroid(const std::vector<std::array
   if (m == 1) return verts[0];
   if (m == 2) return make_vec((verts[0][0]+verts[1][0])/2.0, (verts[0][1]+verts[1][1])/2.0, (verts[0][2]+verts[1][2])/2.0);
 
-  // Triangle fan around verts[0]
-  const auto& v0 = verts[0];
-  real_t area_sum = 0.0;
-  std::array<real_t,3> weighted_sum = {0.0, 0.0, 0.0};
+  const auto n = newell_normal(verts);
+  const int drop = dominant_axis(n);
 
-  for (size_t i = 1; i + 1 < m; ++i) {
-    auto u = sub(verts[i], v0);
-    auto v = sub(verts[i+1], v0);
-    auto cr = cross(u, v);
-    real_t tri_area = static_cast<real_t>(0.5) * norm(cr);
-    if (tri_area <= GeometryConfig::area_epsilon()) continue;
+  std::vector<std::array<real_t,2>> p2;
+  p2.reserve(m);
+  for (const auto& p : verts) p2.push_back(project2(p, drop));
 
-    auto tri_c = make_vec((v0[0] + verts[i][0] + verts[i+1][0]) / 3.0,
-                          (v0[1] + verts[i][1] + verts[i+1][1]) / 3.0,
-                          (v0[2] + verts[i][2] + verts[i+1][2]) / 3.0);
-    weighted_sum = add(weighted_sum, make_vec(tri_c[0] * tri_area, tri_c[1] * tri_area, tri_c[2] * tri_area));
-    area_sum += tri_area;
+  // Projected (signed) area and centroid in 2D.
+  real_t area2 = 0.0;
+  real_t cx = 0.0;
+  real_t cy = 0.0;
+  for (size_t i = 0; i < m; ++i) {
+    const size_t j = (i + 1) % m;
+    const auto& a = p2[i];
+    const auto& b = p2[j];
+    const real_t cr = (a[0] * b[1] - b[0] * a[1]);
+    area2 += cr;
+    cx += (a[0] + b[0]) * cr;
+    cy += (a[1] + b[1]) * cr;
   }
 
-  if (area_sum <= GeometryConfig::area_epsilon()) {
+  if (std::abs(area2) <= GeometryConfig::area_epsilon()) {
     // Fallback: average of vertices
     for (const auto& p : verts) {
       c[0] += p[0]; c[1] += p[1]; c[2] += p[2];
@@ -197,10 +382,82 @@ std::array<real_t,3> PolyGeometry::polygon_centroid(const std::vector<std::array
     return c;
   }
 
-  c[0] = weighted_sum[0] / area_sum;
-  c[1] = weighted_sum[1] / area_sum;
-  c[2] = weighted_sum[2] / area_sum;
+  const real_t inv = static_cast<real_t>(1.0) / (static_cast<real_t>(3.0) * area2);
+  const real_t u = cx * inv;
+  const real_t v = cy * inv;
+
+  const auto& p0 = verts[0];
+  if (drop == 0) {
+    c[1] = u;
+    c[2] = v;
+    if (std::abs(n[0]) <= GeometryConfig::normal_epsilon()) return p0;
+    c[0] = p0[0] - (n[1] * (c[1] - p0[1]) + n[2] * (c[2] - p0[2])) / n[0];
+  } else if (drop == 1) {
+    c[0] = u;
+    c[2] = v;
+    if (std::abs(n[1]) <= GeometryConfig::normal_epsilon()) return p0;
+    c[1] = p0[1] - (n[0] * (c[0] - p0[0]) + n[2] * (c[2] - p0[2])) / n[1];
+  } else {
+    c[0] = u;
+    c[1] = v;
+    if (std::abs(n[2]) <= GeometryConfig::normal_epsilon()) return p0;
+    c[2] = p0[2] - (n[0] * (c[0] - p0[0]) + n[1] * (c[1] - p0[1])) / n[2];
+  }
+
   return c;
+}
+
+bool PolyGeometry::triangulate_planar_polygon(const std::vector<std::array<real_t,3>>& verts,
+                                              std::vector<std::array<index_t,3>>& triangles) {
+  triangles.clear();
+  const size_t n = verts.size();
+  if (n < 3) return false;
+  if (n == 3) {
+    triangles.push_back({0, 1, 2});
+    return true;
+  }
+
+  const auto nrm = newell_normal(verts);
+  const real_t nmag = norm(nrm);
+  if (!(nmag > GeometryConfig::normal_epsilon())) return false;
+
+  const int drop = dominant_axis(nrm);
+  std::vector<std::array<real_t,2>> p2;
+  p2.reserve(n);
+  for (const auto& p : verts) p2.push_back(project2(p, drop));
+
+  // Index list with a light duplicate cleanup (consecutive duplicates).
+  const real_t tol = GeometryConfig::length_epsilon();
+  std::vector<index_t> idx;
+  idx.reserve(n);
+
+  auto dist2 = [&](const std::array<real_t,2>& a, const std::array<real_t,2>& b) -> real_t {
+    const real_t dx = a[0] - b[0];
+    const real_t dy = a[1] - b[1];
+    return dx * dx + dy * dy;
+  };
+
+  const real_t tol2 = tol * tol;
+  for (index_t i = 0; i < static_cast<index_t>(n); ++i) {
+    if (!idx.empty()) {
+      if (dist2(p2[static_cast<size_t>(i)], p2[static_cast<size_t>(idx.back())]) <= tol2) continue;
+    }
+    idx.push_back(i);
+  }
+  if (idx.size() >= 2 &&
+      dist2(p2[static_cast<size_t>(idx.front())], p2[static_cast<size_t>(idx.back())]) <= tol2) {
+    idx.pop_back();
+  }
+
+  if (idx.size() < 3) return false;
+  if (idx.size() == 3) {
+    triangles.push_back({idx[0], idx[1], idx[2]});
+    return true;
+  }
+
+  if (!is_simple_polygon_2d(p2, idx, tol)) return false;
+
+  return ear_clip_triangulate_2d(p2, std::move(idx), triangles, GeometryConfig::area_epsilon());
 }
 
 // -------------------
@@ -231,6 +488,16 @@ std::array<real_t,3> PolyGeometry::polygon_centroid(const MeshBase& mesh,
   pts.reserve(vertices.size());
   for (auto vid : vertices) pts.push_back(get_vertex(mesh, vid, cfg));
   return polygon_centroid(pts);
+}
+
+bool PolyGeometry::triangulate_planar_polygon(const MeshBase& mesh,
+                                              const std::vector<index_t>& vertices,
+                                              std::vector<std::array<index_t,3>>& triangles,
+                                              Configuration cfg) {
+  std::vector<std::array<real_t,3>> pts;
+  pts.reserve(vertices.size());
+  for (auto vid : vertices) pts.push_back(get_vertex(mesh, vid, cfg));
+  return triangulate_planar_polygon(pts, triangles);
 }
 
 real_t PolyGeometry::polyhedron_volume(const MeshBase& mesh,
@@ -401,10 +668,17 @@ PolyGeometry::PolyhedronMassProperties PolyGeometry::polyhedron_mass_properties(
     auto verts = fdata[fi].verts;
     if (flip[fi] < 0) std::reverse(verts.begin(), verts.end());
 
-    const auto p0 = sub3(get_vertex(mesh, verts[0], cfg), origin);
-    for (size_t i = 1; i + 1 < verts.size(); ++i) {
-      const auto p1 = sub3(get_vertex(mesh, verts[i], cfg), origin);
-      const auto p2 = sub3(get_vertex(mesh, verts[i + 1], cfg), origin);
+    std::vector<std::array<real_t,3>> face_pts;
+    face_pts.reserve(verts.size());
+    for (index_t v : verts) face_pts.push_back(sub3(get_vertex(mesh, v, cfg), origin));
+
+    std::vector<std::array<index_t,3>> tris;
+    if (!triangulate_planar_polygon(face_pts, tris)) return out;
+
+    for (const auto& t : tris) {
+      const auto& p0 = face_pts[static_cast<size_t>(t[0])];
+      const auto& p1 = face_pts[static_cast<size_t>(t[1])];
+      const auto& p2 = face_pts[static_cast<size_t>(t[2])];
       const real_t d = dot(p0, cross(p1, p2));
       vol6 += d;
       const auto sum = add3(add3(p0, p1), p2);

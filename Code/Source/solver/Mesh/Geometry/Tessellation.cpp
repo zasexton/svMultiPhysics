@@ -34,6 +34,7 @@
 #include "../Topology/CellTopology.h"
 #include "../Topology/FaceEmbedding.h"
 #include "CurvilinearEval.h"
+#include "PolyGeometry.h"
 
 #include <algorithm>
 #include <cmath>
@@ -223,6 +224,10 @@ real_t segment_chord_error(const MapFn& map, const TessParamPoint& A, const Tess
     const auto xlin = scale3(add3(x0, x1), static_cast<real_t>(0.5));
     const real_t denom = std::max(norm3(sub3(x1, x0)), eps);
     return norm3(sub3(xm, xlin)) / denom;
+}
+
+inline real_t orient2d_param(const TessParamPoint& a, const TessParamPoint& b, const TessParamPoint& c) {
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
 }
 
 int adaptive_refinement_level_for_cell(const MeshBase& mesh, index_t cell, const TessellationConfig& cfg) {
@@ -506,7 +511,8 @@ TessellatedCell Tessellator::tessellate_cell(
                 const int level = adaptive_refinement_level_for_cell(mesh, cell, config);
                 grid = subdivide_quad(level);
             }
-            out.sub_element_shape = linear_shape(CellFamily::Quad);
+            // Local adaptive quads output conforming triangles.
+            out.sub_element_shape = config.local_adaptive ? linear_shape(CellFamily::Triangle) : linear_shape(CellFamily::Quad);
             break;
         case CellFamily::Tetra:
         {
@@ -566,7 +572,7 @@ TessellatedFace Tessellator::tessellate_face(
     auto [verts, n_nodes] = mesh.face_vertices_span(face);
     if (n_nodes == 0) return out;
 
-    // Polygon faces: keep a simple triangle-fan fallback for now.
+    // Polygon faces: triangulate via PolyGeometry (concave-safe) with a fan fallback.
     if (out.face_shape.family == CellFamily::Polygon) {
         const auto& X = coords_for(mesh, config.configuration);
         const int dim = mesh.dim();
@@ -581,11 +587,21 @@ TessellatedFace Tessellator::tessellate_face(
 
         out.sub_element_shape = linear_shape(CellFamily::Triangle);
         out.offsets.push_back(0);
-        for (size_t i = 1; i + 1 < n_nodes; ++i) {
-            out.connectivity.push_back(0);
-            out.connectivity.push_back(static_cast<index_t>(i));
-            out.connectivity.push_back(static_cast<index_t>(i + 1));
-            out.offsets.push_back(static_cast<int>(out.connectivity.size()));
+        std::vector<std::array<index_t,3>> tris;
+        if (PolyGeometry::triangulate_planar_polygon(out.vertices, tris)) {
+            for (const auto& t : tris) {
+                out.connectivity.push_back(t[0]);
+                out.connectivity.push_back(t[1]);
+                out.connectivity.push_back(t[2]);
+                out.offsets.push_back(static_cast<int>(out.connectivity.size()));
+            }
+        } else {
+            for (size_t i = 1; i + 1 < n_nodes; ++i) {
+                out.connectivity.push_back(0);
+                out.connectivity.push_back(static_cast<index_t>(i));
+                out.connectivity.push_back(static_cast<index_t>(i + 1));
+                out.offsets.push_back(static_cast<int>(out.connectivity.size()));
+            }
         }
         return out;
     }
@@ -631,7 +647,8 @@ TessellatedFace Tessellator::tessellate_face(
                 const int level = adaptive_refinement_level_for_face(mesh, face, config);
                 grid = subdivide_quad(level);
             }
-            out.sub_element_shape = linear_shape(CellFamily::Quad);
+            // Local adaptive quads output conforming triangles.
+            out.sub_element_shape = config.local_adaptive ? linear_shape(CellFamily::Triangle) : linear_shape(CellFamily::Quad);
             break;
         default:
             throw std::runtime_error("Tessellator::tessellate_face: unsupported face family");
@@ -1009,8 +1026,35 @@ Tessellator::SubdivisionGrid Tessellator::subdivide_quad_local_adaptive(
 
     base_level = std::max(0, base_level);
     max_level = std::max(base_level, max_level);
+    auto triangulate_uniform = [&](int level) -> SubdivisionGrid {
+        const SubdivisionGrid quad = subdivide_quad(level);
+        SubdivisionGrid tri;
+        tri.points = quad.points;
+        tri.connectivity.reserve(static_cast<size_t>(quad.n_sub_elements()) * 6u);
+        tri.offsets.reserve(static_cast<size_t>(quad.n_sub_elements()) * 2u + 1u);
+        tri.offsets.push_back(0);
+        for (int qi = 0; qi < quad.n_sub_elements(); ++qi) {
+            const int b = quad.offsets[static_cast<size_t>(qi)];
+            const int e = quad.offsets[static_cast<size_t>(qi + 1)];
+            if (e - b != 4) continue;
+            const index_t a = quad.connectivity[static_cast<size_t>(b + 0)];
+            const index_t b0 = quad.connectivity[static_cast<size_t>(b + 1)];
+            const index_t c = quad.connectivity[static_cast<size_t>(b + 2)];
+            const index_t d = quad.connectivity[static_cast<size_t>(b + 3)];
+            tri.connectivity.push_back(a);
+            tri.connectivity.push_back(b0);
+            tri.connectivity.push_back(c);
+            tri.offsets.push_back(static_cast<int>(tri.connectivity.size()));
+            tri.connectivity.push_back(a);
+            tri.connectivity.push_back(c);
+            tri.connectivity.push_back(d);
+            tri.offsets.push_back(static_cast<int>(tri.connectivity.size()));
+        }
+        return tri;
+    };
+
     if (max_level == base_level || curvature_threshold <= 0 || !map) {
-        return subdivide_quad(base_level);
+        return triangulate_uniform(base_level);
     }
 
     const int N = pow2(max_level);
@@ -1076,8 +1120,6 @@ Tessellator::SubdivisionGrid Tessellator::subdivide_quad_local_adaptive(
     }
 
     SubdivisionGrid grid;
-    grid.connectivity.reserve(leaves.size() * 4);
-    grid.offsets.reserve(leaves.size() + 1);
 
     auto pack = [](int i, int j) -> long long {
         return (static_cast<long long>(i) << 32) | static_cast<unsigned int>(j);
@@ -1096,17 +1138,184 @@ Tessellator::SubdivisionGrid Tessellator::subdivide_quad_local_adaptive(
         return id;
     };
 
+    auto build_owner = [&](const std::vector<Quad>& qs) -> std::vector<int> {
+        std::vector<int> owner(static_cast<size_t>(N * N), -1);
+        for (int qid = 0; qid < static_cast<int>(qs.size()); ++qid) {
+            const auto& q = qs[static_cast<size_t>(qid)];
+            for (int j = q.j0; j < q.j1; ++j) {
+                for (int i = q.i0; i < q.i1; ++i) {
+                    owner[static_cast<size_t>(j * N + i)] = qid;
+                }
+            }
+        }
+        return owner;
+    };
+
+    // 2:1 balance (difference of at most 1 level between neighbors).
+    for (;;) {
+        const std::vector<int> owner = build_owner(leaves);
+        std::vector<char> refine_flag(leaves.size(), 0);
+
+        // Vertical boundaries.
+        for (int j = 0; j < N; ++j) {
+            for (int i = 1; i < N; ++i) {
+                const int L = owner[static_cast<size_t>(j * N + (i - 1))];
+                const int R = owner[static_cast<size_t>(j * N + i)];
+                if (L < 0 || R < 0 || L == R) continue;
+                const int dl = leaves[static_cast<size_t>(L)].level;
+                const int dr = leaves[static_cast<size_t>(R)].level;
+                if (dl + 1 < dr) refine_flag[static_cast<size_t>(L)] = 1;
+                if (dr + 1 < dl) refine_flag[static_cast<size_t>(R)] = 1;
+            }
+        }
+
+        // Horizontal boundaries.
+        for (int j = 1; j < N; ++j) {
+            for (int i = 0; i < N; ++i) {
+                const int B = owner[static_cast<size_t>((j - 1) * N + i)];
+                const int T = owner[static_cast<size_t>(j * N + i)];
+                if (B < 0 || T < 0 || B == T) continue;
+                const int db = leaves[static_cast<size_t>(B)].level;
+                const int dt = leaves[static_cast<size_t>(T)].level;
+                if (db + 1 < dt) refine_flag[static_cast<size_t>(B)] = 1;
+                if (dt + 1 < db) refine_flag[static_cast<size_t>(T)] = 1;
+            }
+        }
+
+        bool any = false;
+        for (char f : refine_flag) {
+            if (f) { any = true; break; }
+        }
+        if (!any) break;
+
+        std::vector<Quad> next;
+        next.reserve(leaves.size() * 2);
+        for (size_t qid = 0; qid < leaves.size(); ++qid) {
+            const auto& q = leaves[qid];
+            if (!refine_flag[qid] || q.level >= max_level || (q.i1 - q.i0) <= 1 || (q.j1 - q.j0) <= 1) {
+                next.push_back(q);
+                continue;
+            }
+            const int im = (q.i0 + q.i1) / 2;
+            const int jm = (q.j0 + q.j1) / 2;
+            next.push_back({q.i0, im, q.j0, jm, q.level + 1});
+            next.push_back({im, q.i1, q.j0, jm, q.level + 1});
+            next.push_back({im, q.i1, jm, q.j1, q.level + 1});
+            next.push_back({q.i0, im, jm, q.j1, q.level + 1});
+        }
+        leaves.swap(next);
+    }
+
+    const std::vector<int> owner = build_owner(leaves);
+
+    // Emit conforming triangles by inserting shared mid-edge points when a coarse quad
+    // is adjacent to finer neighbors. Triangle fans are constructed around a vertex
+    // that avoids degenerate (collinear) triangles in parametric space.
+    grid.connectivity.reserve(leaves.size() * 12);
+    grid.offsets.reserve(leaves.size() * 4 + 1);
     grid.offsets.push_back(0);
+
+    auto is_edge_split = [&](const Quad& q, int edge) -> bool {
+        // edge: 0=bottom,1=right,2=top,3=left
+        if (edge == 0) {
+            if (q.j0 == 0) return false;
+            for (int i = q.i0; i < q.i1; ++i) {
+                const int nb = owner[static_cast<size_t>((q.j0 - 1) * N + i)];
+                if (nb >= 0 && leaves[static_cast<size_t>(nb)].level > q.level) return true;
+            }
+        } else if (edge == 2) {
+            if (q.j1 == N) return false;
+            for (int i = q.i0; i < q.i1; ++i) {
+                const int nb = owner[static_cast<size_t>(q.j1 * N + i)];
+                if (nb >= 0 && leaves[static_cast<size_t>(nb)].level > q.level) return true;
+            }
+        } else if (edge == 3) {
+            if (q.i0 == 0) return false;
+            for (int j = q.j0; j < q.j1; ++j) {
+                const int nb = owner[static_cast<size_t>(j * N + (q.i0 - 1))];
+                if (nb >= 0 && leaves[static_cast<size_t>(nb)].level > q.level) return true;
+            }
+        } else if (edge == 1) {
+            if (q.i1 == N) return false;
+            for (int j = q.j0; j < q.j1; ++j) {
+                const int nb = owner[static_cast<size_t>(j * N + q.i1)];
+                if (nb >= 0 && leaves[static_cast<size_t>(nb)].level > q.level) return true;
+            }
+        }
+        return false;
+    };
+
     for (const auto& q : leaves) {
+        const int im = (q.i0 + q.i1) / 2;
+        const int jm = (q.j0 + q.j1) / 2;
+
         const index_t a = point(q.i0, q.j0);
         const index_t b = point(q.i1, q.j0);
         const index_t c = point(q.i1, q.j1);
         const index_t d = point(q.i0, q.j1);
-        grid.connectivity.push_back(a);
-        grid.connectivity.push_back(b);
-        grid.connectivity.push_back(c);
-        grid.connectivity.push_back(d);
-        grid.offsets.push_back(static_cast<int>(grid.connectivity.size()));
+
+        const bool s0 = is_edge_split(q, 0);
+        const bool s1 = is_edge_split(q, 1);
+        const bool s2 = is_edge_split(q, 2);
+        const bool s3 = is_edge_split(q, 3);
+
+        std::vector<index_t> poly;
+        poly.reserve(8);
+        poly.push_back(a);
+        if (s0) poly.push_back(point(im, q.j0));
+        poly.push_back(b);
+        if (s1) poly.push_back(point(q.i1, jm));
+        poly.push_back(c);
+        if (s2) poly.push_back(point(im, q.j1));
+        poly.push_back(d);
+        if (s3) poly.push_back(point(q.i0, jm));
+
+        const size_t n = poly.size();
+        if (n < 3) continue;
+
+        size_t root = 0;
+        if (n > 4) {
+            root = n;
+            for (size_t r = 0; r < n; ++r) {
+                bool ok = true;
+                for (size_t k = 1; k + 1 < n; ++k) {
+                    const index_t v0 = poly[r];
+                    const index_t v1 = poly[(r + k) % n];
+                    const index_t v2 = poly[(r + k + 1) % n];
+                    const real_t a2 = std::abs(orient2d_param(grid.points[static_cast<size_t>(v0)],
+                                                              grid.points[static_cast<size_t>(v1)],
+                                                              grid.points[static_cast<size_t>(v2)]));
+                    if (!(a2 > static_cast<real_t>(1e-14))) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok) { root = r; break; }
+            }
+            if (root == n) {
+                // Fallback: add a center point and fan around it.
+                const index_t center = point(im, jm);
+                for (size_t k = 0; k < n; ++k) {
+                    const index_t v1 = poly[k];
+                    const index_t v2 = poly[(k + 1) % n];
+                    grid.connectivity.push_back(center);
+                    grid.connectivity.push_back(v1);
+                    grid.connectivity.push_back(v2);
+                    grid.offsets.push_back(static_cast<int>(grid.connectivity.size()));
+                }
+                continue;
+            }
+        }
+
+        for (size_t k = 1; k + 1 < n; ++k) {
+            const index_t v0 = poly[root];
+            const index_t v1 = poly[(root + k) % n];
+            const index_t v2 = poly[(root + k + 1) % n];
+            grid.connectivity.push_back(v0);
+            grid.connectivity.push_back(v1);
+            grid.connectivity.push_back(v2);
+            grid.offsets.push_back(static_cast<int>(grid.connectivity.size()));
+        }
     }
 
     return grid;

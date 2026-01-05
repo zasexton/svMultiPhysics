@@ -76,7 +76,7 @@ struct TessellationConfig {
     int refinement_level{0};                 // 0 = minimal
     bool adaptive{false};                    // if true, increase refinement_level until chord error <= curvature_threshold
     real_t curvature_threshold{0.1};         // relative chord-error threshold used when adaptive=true
-    bool local_adaptive{false};              // if true, perform per-subcell adaptive refinement (line/quad supported)
+    bool local_adaptive{false};              // if true, perform per-subcell adaptive refinement (line/quad supported; quads emit triangles)
     int min_refinement_level{0};             // minimum refinement level when adaptive/local_adaptive is enabled
     int max_refinement_level{8};             // maximum refinement level when adaptive/local_adaptive is enabled
 
