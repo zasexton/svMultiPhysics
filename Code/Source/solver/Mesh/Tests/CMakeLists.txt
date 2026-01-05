@@ -23,8 +23,18 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/EnableGTest.cmake)
 set(MESH_TEST_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 set(MESH_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
+# When VTK is fetched via FetchContent it is built as shared libraries in
+# `_deps/vtk-build/lib`. Tests are in `${CMAKE_BINARY_DIR}/Tests`, so use a
+# relative `$ORIGIN` RPATH to make them runnable without manual env vars.
+set(_svmp_test_build_rpath "")
+if(MESH_ENABLE_VTK AND VTK_FOUND AND NOT USE_SYSTEM_VTK)
+  set(_svmp_test_build_rpath "$ORIGIN/../_deps/vtk-build/lib")
+endif()
+
 # Collect all test source files recursively
-file(GLOB_RECURSE ALL_TEST_SOURCES
+# Use CONFIGURE_DEPENDS so newly-added tests are picked up without requiring
+# a manual CMake reconfigure.
+file(GLOB_RECURSE ALL_TEST_SOURCES CONFIGURE_DEPENDS
      RELATIVE ${MESH_TEST_ROOT}
      ${MESH_TEST_ROOT}/Unit/*/test_*.cpp)
 
@@ -47,6 +57,34 @@ foreach(src_rel IN LISTS ALL_TEST_SOURCES)
   get_filename_component(_src_dir ${src_abs} DIRECTORY)
   get_filename_component(_category ${_src_dir} NAME)
 
+  # Skip Adaptivity tests unless the module is enabled.
+  if(_category STREQUAL "Adaptivity" AND NOT MESH_ENABLE_ADAPTIVITY)
+    message(STATUS "Skipping ${src_rel} (Adaptivity not enabled)")
+    continue()
+  endif()
+
+  # Special-case: a lightweight public API compile test lives under Unit/Core,
+  # but should build and run in both serial and MPI configurations (without
+  # requiring mpiexec).
+  if(_category STREQUAL "Core" AND test_name STREQUAL "test_MeshPublicApi")
+    add_executable(${test_name} ${src_abs})
+    target_link_libraries(${test_name} PRIVATE svmesh)
+    target_compile_features(${test_name} PRIVATE cxx_std_17)
+    target_include_directories(${test_name} PRIVATE ${MESH_ROOT_DIR})
+    if(_svmp_test_build_rpath)
+      set_target_properties(${test_name} PROPERTIES BUILD_RPATH "${_svmp_test_build_rpath}")
+    else()
+      set_target_properties(${test_name} PROPERTIES SKIP_BUILD_RPATH TRUE BUILD_RPATH "")
+    endif()
+
+    add_test(NAME ${test_name} COMMAND ${test_name})
+    set_tests_properties(${test_name} PROPERTIES LABELS "unit;mesh;PublicApi")
+
+    list(APPEND _built_tests ${test_name})
+    message(STATUS "Enabling ${src_rel} [public-api]")
+    continue()
+  endif()
+
   # Special handling for MPI tests in Unit/Core
   if(_category STREQUAL "Core")
     if(MESH_ENABLE_MPI AND MPI_FOUND)
@@ -57,7 +95,11 @@ foreach(src_rel IN LISTS ALL_TEST_SOURCES)
       endif()
       target_compile_features(${test_name} PRIVATE cxx_std_17)
       target_include_directories(${test_name} PRIVATE ${MESH_ROOT_DIR})
-      set_target_properties(${test_name} PROPERTIES SKIP_BUILD_RPATH TRUE BUILD_RPATH "")
+      if(_svmp_test_build_rpath)
+        set_target_properties(${test_name} PROPERTIES BUILD_RPATH "${_svmp_test_build_rpath}")
+      else()
+        set_target_properties(${test_name} PROPERTIES SKIP_BUILD_RPATH TRUE BUILD_RPATH "")
+      endif()
 
       # Register MPI tests (2 and 4 ranks)
       if(MPIEXEC_EXECUTABLE)
@@ -128,7 +170,11 @@ foreach(src_rel IN LISTS ALL_TEST_SOURCES)
   endif()
   target_compile_features(${test_name} PRIVATE cxx_std_17)
   target_include_directories(${test_name} PRIVATE ${MESH_ROOT_DIR})
-  set_target_properties(${test_name} PROPERTIES SKIP_BUILD_RPATH TRUE BUILD_RPATH "")
+  if(_svmp_test_build_rpath)
+    set_target_properties(${test_name} PROPERTIES BUILD_RPATH "${_svmp_test_build_rpath}")
+  else()
+    set_target_properties(${test_name} PROPERTIES SKIP_BUILD_RPATH TRUE BUILD_RPATH "")
+  endif()
 
   add_test(NAME ${test_name} COMMAND ${test_name})
   set_tests_properties(${test_name} PROPERTIES LABELS "unit;mesh;${_category}")

@@ -223,13 +223,13 @@ if(MESH_ENABLE_VTK)
             if((NEED_VTK_FETCH OR NEED_VTK_BUILD) AND VTK_FETCH_APPROVED)
                 if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.14")
                     # Modern API - handles both fetch and configure
-                    if(NEED_VTK_FETCH)
-                        message(STATUS "Fetching VTK ${VTK_GIT_TAG} (this will take a few minutes)...")
-                    endif()
-                    FetchContent_MakeAvailable(vtk)
-                    if(NEED_VTK_FETCH)
-                        message(STATUS "VTK source fetched successfully")
-                    endif()
+                if(NEED_VTK_FETCH)
+                    message(STATUS "Fetching VTK ${VTK_GIT_TAG} (this will take a few minutes)...")
+                endif()
+                FetchContent_MakeAvailable(vtk)
+                if(NEED_VTK_FETCH)
+                    message(STATUS "VTK source fetched successfully")
+                endif()
                 else()
                     # Fallback for CMake 3.11-3.13
                     if(NEED_VTK_FETCH)
@@ -248,6 +248,23 @@ if(MESH_ENABLE_VTK)
             if(VTK_FETCH_APPROVED)
                 # VTK is now available - set up VTK libraries
                 set(VTK_FOUND TRUE)
+
+                # ------------------------------------------------------------------
+                # VTK build workaround (CMake >= 4 + VTK 9.2.x)
+                #
+                # VTK's CommonCore compiles `vtkInformationDataObjectKey.cxx`, which includes
+                # `../DataModel/vtkDataObject.h`. That header in turn includes the generated
+                # `vtkCommonDataModelModule.h`. Some VTK build configurations do not propagate
+                # the CommonDataModel build include directory to CommonCore, which causes
+                # build failures like:
+                #   fatal error: vtkCommonDataModelModule.h: No such file or directory
+                #
+                # Ensure CommonCore sees CommonDataModel's build interface include dirs.
+                # ------------------------------------------------------------------
+                if(TARGET CommonCore AND TARGET CommonDataModel)
+                    target_include_directories(CommonCore PRIVATE
+                        $<TARGET_PROPERTY:CommonDataModel,INTERFACE_INCLUDE_DIRECTORIES>)
+                endif()
 
                 # Set VTK_LIBRARIES to the modules we need for I/O
                 set(VTK_LIBRARIES

@@ -75,6 +75,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 # Options for optional features
 option(MESH_ENABLE_MPI "Enable MPI support for distributed meshes" ON)
+option(MESH_ENABLE_METIS "Enable METIS graph partitioning (required for efficient MPI distribution)" ON)
+option(MESH_ENABLE_PARMETIS "Enable ParMETIS parallel partitioning (required when MPI is enabled)" ON)
 option(MESH_ENABLE_VTK "Enable VTK I/O support" ON)
 option(USE_SYSTEM_VTK "Use system VTK instead of fetching via FetchContent" OFF)
 # VTK fetch/build options (applied when MESH_ENABLE_VTK=ON and USE_SYSTEM_VTK=OFF)
@@ -106,16 +108,71 @@ endif()
 # Find dependencies
 #------------------------------------------------------------------------------
 
-# MPI (optional, only needed for DistributedMesh)
+# MPI (optional, enables parallel features in DistributedMesh)
 if(MESH_ENABLE_MPI)
-    find_package(MPI)
-    if(MPI_FOUND)
-        message(STATUS "MPI found - enabling distributed mesh support")
-        include_directories(${MPI_CXX_INCLUDE_DIRS})
+    # Work around a FindMPI quirk (observed with some CMake/OpenMPI combinations) where
+    # wrapper-reported include directories may be recorded with a leading "-I", which CMake
+    # then treats as a relative path and fails configuration.
+    if(DEFINED MPI_CXX_COMPILER_INCLUDE_DIRS)
+        set(_svmp_mpi_inc_fixed "")
+        foreach(_d IN LISTS MPI_CXX_COMPILER_INCLUDE_DIRS)
+            if(_d MATCHES "^-I(.+)")
+                list(APPEND _svmp_mpi_inc_fixed "${CMAKE_MATCH_1}")
+            elseif(_d MATCHES ".*/-I(/.+)")
+                # Some FindMPI versions mistakenly treat "-I/path" as a path and make it absolute.
+                list(APPEND _svmp_mpi_inc_fixed "${CMAKE_MATCH_1}")
+            else()
+                list(APPEND _svmp_mpi_inc_fixed "${_d}")
+            endif()
+        endforeach()
+        if(_svmp_mpi_inc_fixed AND NOT _svmp_mpi_inc_fixed STREQUAL MPI_CXX_COMPILER_INCLUDE_DIRS)
+            set(MPI_CXX_COMPILER_INCLUDE_DIRS "${_svmp_mpi_inc_fixed}"
+                CACHE STRING "MPI CXX compiler wrapper include directories" FORCE)
+        endif()
+        unset(_svmp_mpi_inc_fixed)
     else()
-        message(WARNING "MPI not found - distributed mesh features will be disabled")
-        set(MESH_ENABLE_MPI OFF)
+        find_program(_svmp_mpicxx NAMES mpicxx mpic++)
+        if(_svmp_mpicxx)
+            execute_process(
+                COMMAND ${_svmp_mpicxx} --showme:compile
+                OUTPUT_VARIABLE _svmp_mpi_compile
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET)
+            if(_svmp_mpi_compile)
+                separate_arguments(_svmp_mpi_compile_args UNIX_COMMAND "${_svmp_mpi_compile}")
+                set(_svmp_mpi_inc "")
+                foreach(_arg IN LISTS _svmp_mpi_compile_args)
+                    if(_arg MATCHES "^-I(.+)")
+                        list(APPEND _svmp_mpi_inc "${CMAKE_MATCH_1}")
+                    endif()
+                endforeach()
+                if(_svmp_mpi_inc)
+                    list(REMOVE_DUPLICATES _svmp_mpi_inc)
+                    set(MPI_CXX_COMPILER_INCLUDE_DIRS "${_svmp_mpi_inc}"
+                        CACHE STRING "MPI CXX compiler wrapper include directories" FORCE)
+                endif()
+                unset(_svmp_mpi_compile_args)
+                unset(_svmp_mpi_inc)
+            endif()
+            unset(_svmp_mpi_compile)
+        endif()
+        unset(_svmp_mpicxx)
     endif()
+
+	    find_package(MPI)
+	    if(MPI_FOUND)
+	        message(STATUS "MPI found - enabling distributed mesh support")
+	        include_directories(${MPI_CXX_INCLUDE_DIRS})
+	        if(NOT MESH_ENABLE_PARMETIS)
+	            message(FATAL_ERROR "MESH_ENABLE_PARMETIS=OFF but MPI is enabled. ParMETIS is required for production-quality distributed partitioning.")
+	        endif()
+	        if(NOT MESH_ENABLE_METIS)
+	            message(FATAL_ERROR "MESH_ENABLE_METIS=OFF but MPI is enabled. METIS is required (ParMETIS depends on METIS/GKlib).")
+	        endif()
+	    else()
+	        message(WARNING "MPI not found - distributed mesh features will be disabled")
+	        set(MESH_ENABLE_MPI OFF)
+	    endif()
 else()
     message(STATUS "MPI support disabled")
 endif()
@@ -187,20 +244,18 @@ endif()
 #------------------------------------------------------------------------------
 
 # Core components
+# Note: DistributedMesh is always included. When MPI is not available,
+# the header provides a serial stub implementation using composition,
+# and the cpp compiles to an empty translation unit.
 set(MESH_CORE_SOURCES
     Core/MeshTypes.h
+    Core/MeshComm.h
     Core/MeshBase.h
     Core/MeshBase.cpp
     Core/InterfaceMesh.h
+    Core/DistributedMesh.h
+    Core/DistributedMesh.cpp
 )
-
-# Add DistributedMesh only if MPI is available
-if(MESH_ENABLE_MPI)
-    list(APPEND MESH_CORE_SOURCES
-        Core/DistributedMesh.h
-        Core/DistributedMesh.cpp
-    )
-endif()
 
 # Topology
 set(MESH_TOPOLOGY_SOURCES
@@ -210,6 +265,10 @@ set(MESH_TOPOLOGY_SOURCES
     Topology/CellTopology.cpp
     Topology/MeshTopology.h
     Topology/MeshTopology.cpp
+    Topology/PartitionTopology.h
+    Topology/PartitionTopology.cpp
+    Topology/DistributedTopology.h
+    Topology/DistributedTopology.cpp
     Topology/FaceEmbedding.h
     Topology/FaceEmbedding.cpp
     Topology/NodeOrdering.h
@@ -329,8 +388,10 @@ set(MESH_MOTION_SOURCES
 # I/O (basic, always included)
 set(MESH_IO_SOURCES
     IO/MeshIO.h
-    # Note: MeshIO.cpp is excluded due to interface mismatch - work in progress
-    # IO/MeshIO.cpp
+    IO/GmshReader.h
+    IO/GmshReader.cpp
+    IO/MFEMReader.h
+    IO/MFEMReader.cpp
 )
 
 # VTK I/O (only if VTK is available)
@@ -456,6 +517,77 @@ if(MESH_ENABLE_MPI AND MPI_FOUND)
     target_link_libraries(svmesh PUBLIC ${MPI_CXX_LIBRARIES})
 endif()
 
+#------------------------------------------------------------------------------
+# Optional internal graph partitioning libraries (METIS / ParMETIS)
+#------------------------------------------------------------------------------
+
+set(_svmp_mesh_use_internal_metis ${MESH_ENABLE_METIS})
+if(MESH_ENABLE_MPI AND MPI_FOUND AND MESH_ENABLE_PARMETIS)
+    # ParMETIS depends on METIS+GKlib in the bundled ThirdParty stack.
+    set(_svmp_mesh_use_internal_metis ON)
+endif()
+
+if(_svmp_mesh_use_internal_metis)
+    enable_language(C)
+
+    set(_svmp_mesh_thirdparty_dir "${CMAKE_CURRENT_SOURCE_DIR}/../../../ThirdParty")
+
+    if(NOT GKLIB_INTERNAL_LIBRARY_NAME)
+        set(GKLIB_INTERNAL_LIBRARY_NAME gklib_internal)
+    endif()
+    if(NOT METIS_INTERNAL_LIBRARY_NAME)
+        set(METIS_INTERNAL_LIBRARY_NAME metis_internal)
+    endif()
+    if(NOT PARMETIS_INTERNAL_LIBRARY_NAME)
+        set(PARMETIS_INTERNAL_LIBRARY_NAME parmetis_internal)
+    endif()
+
+    # Legacy ThirdParty CMake expects MPI_C_INCLUDE_PATH; map it from FindMPI when needed.
+    if(MESH_ENABLE_MPI AND MPI_FOUND AND (NOT DEFINED MPI_C_INCLUDE_PATH OR MPI_C_INCLUDE_PATH STREQUAL ""))
+        if(DEFINED MPI_CXX_INCLUDE_DIRS)
+            set(MPI_C_INCLUDE_PATH "${MPI_CXX_INCLUDE_DIRS}")
+        endif()
+    endif()
+
+    if(NOT TARGET ${GKLIB_INTERNAL_LIBRARY_NAME})
+        add_subdirectory(
+            "${_svmp_mesh_thirdparty_dir}/gklib_internal/simvascular_gklib_internal"
+            "${CMAKE_BINARY_DIR}/thirdparty/gklib_internal"
+        )
+    endif()
+
+    if(NOT TARGET ${METIS_INTERNAL_LIBRARY_NAME})
+        add_subdirectory(
+            "${_svmp_mesh_thirdparty_dir}/metis_internal/simvascular_metis_internal"
+            "${CMAKE_BINARY_DIR}/thirdparty/metis_internal"
+        )
+    endif()
+
+    # METIS depends on GKlib symbols; expose dependencies so consumers of the static
+    # svmesh library link the required objects as well (order matters for static libs).
+    target_link_libraries(svmesh PUBLIC ${METIS_INTERNAL_LIBRARY_NAME} ${GKLIB_INTERNAL_LIBRARY_NAME})
+    target_include_directories(svmesh PRIVATE
+        "${_svmp_mesh_thirdparty_dir}/metis_internal/simvascular_metis_internal/METISLib"
+    )
+    target_compile_definitions(svmesh PUBLIC SVMP_HAS_METIS)
+
+    if(MESH_ENABLE_MPI AND MPI_FOUND AND MESH_ENABLE_PARMETIS)
+        if(NOT TARGET ${PARMETIS_INTERNAL_LIBRARY_NAME})
+            add_subdirectory(
+                "${_svmp_mesh_thirdparty_dir}/parmetis_internal/simvascular_parmetis_internal"
+                "${CMAKE_BINARY_DIR}/thirdparty/parmetis_internal"
+            )
+        endif()
+
+        # ParMETIS is required for scalable parallel repartitioning.
+        target_link_libraries(svmesh PUBLIC ${PARMETIS_INTERNAL_LIBRARY_NAME})
+        target_include_directories(svmesh PRIVATE
+            "${_svmp_mesh_thirdparty_dir}/parmetis_internal/simvascular_parmetis_internal/ParMETISLib"
+        )
+        target_compile_definitions(svmesh PUBLIC SVMP_HAS_PARMETIS)
+    endif()
+endif()
+
 if(MESH_ENABLE_VTK AND VTK_FOUND)
     target_link_libraries(svmesh PUBLIC ${VTK_LIBRARIES})
 
@@ -498,6 +630,30 @@ if(MESH_STANDALONE_BUILD)
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/svmesh
     )
+
+    # When linking against bundled graph partitioners, install/export them alongside svmesh so
+    # `install(EXPORT ...)` remains valid and downstream consumers can link a static svmesh.
+    if(_svmp_mesh_use_internal_metis)
+        set(_svmp_mesh_partition_targets ${GKLIB_INTERNAL_LIBRARY_NAME} ${METIS_INTERNAL_LIBRARY_NAME})
+        if(MESH_ENABLE_MPI AND MPI_FOUND AND MESH_ENABLE_PARMETIS)
+            list(APPEND _svmp_mesh_partition_targets ${PARMETIS_INTERNAL_LIBRARY_NAME})
+        endif()
+
+        foreach(_tgt IN LISTS _svmp_mesh_partition_targets)
+            if(TARGET ${_tgt})
+                # These bundled targets are link-only dependencies; avoid exporting build-tree
+                # include paths in the installed package.
+                set_target_properties(${_tgt} PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "")
+
+                install(TARGETS ${_tgt}
+                    EXPORT svmeshTargets
+                    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+                )
+            endif()
+        endforeach()
+    endif()
 
     # Install headers
     install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
