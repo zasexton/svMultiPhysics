@@ -77,28 +77,38 @@ step-size/order interface (`TimeStepping::StepController`).
 
 ## Known limitations / expectations
 
-- **Structural dynamics (`temporalOrder()==2`) requires consistent `(u̇,ü)` initial conditions.**
+- **Structural dynamics (`temporalOrder()==2`) expects consistent `(u̇,ü)` initial conditions.**
   - `TimeHistory` stores `uDot` and `uDDot` for Newmark-β, structural generalized-α, and second-order
     collocation runs.
-  - If `(u̇,ü)` storage is missing, `TimeLoop` allocates it and will attempt to initialize it by
-    differentiating the displacement history; production structural problems should still provide
-    physically meaningful initial velocity/acceleration.
-- **High-stage collocation can be expensive.**
-  - The monolithic solve couples all stages, producing a block matrix with dense stage coupling; cost
-    grows quickly with degree/stage count.
+  - If `(u̇,ü)` storage is missing, `TimeLoop` allocates it and initializes it from displacement history
+    (finite differences on `dtHistory()`), enforcing homogeneous constraints on `(u̇,ü)`.
+  - If `ü` is required and cannot be inferred from history, `TimeLoop` falls back to a residual-based
+    acceleration initialization (`M ü = -other`) and throws if the acceleration is still undefined.
+- **High-stage collocation can be expensive, but a cheaper solve strategy is available.**
+  - The default monolithic solve couples all stages, producing a block matrix with dense stage coupling;
+    cost grows quickly with degree/stage count.
+  - `TimeLoopOptions::collocation_solve = StageGaussSeidel` performs a nonlinear block Gauss–Seidel sweep
+    over stages (supported for `temporalOrder()==1` and `==2`) and avoids assembling/solving the block
+    Jacobian. Convergence is controlled by `collocation_max_outer_iterations` and
+    `collocation_outer_tolerance`.
   - Degree is clamped to `<= 10` by `TimeLoopOptions::{dg_degree,cg_degree}`.
 - **State providers follow end-of-step commits.**
   - `TimeLoop` calls `FESystem::beginTimeStep()` before each transient assemble to reset work buffers.
   - For methods whose nonlinear solve occurs at an intermediate time (e.g., generalized-α stage solve,
     Gauss collocation), `TimeLoop` performs an end-of-step assembly at `t_{n+1}` before calling
     `commitTimeStep()` so material/global-kernel state reflects the accepted end state.
-- **VSVO-BDF is practical but not a full Nordsieck implementation.**
-  - PI control and `dt(u,2)` support are implemented, but the error estimate is still based on a
-    predictor–corrector difference rather than a full Nordsieck/LTE-constant/cost-model controller.
-- **Restart requires consistent histories.**
-  - Variable-step schemes assume the provided displacement history and `dt_history` match the last
-    accepted step(s). `TimeLoop` primes unset `dt_history` entries from `dtPrev()`, but cannot infer
-    true past step sizes from an artificial history.
+- **VSVO-BDF uses an LTE-based estimate and cost-model order selection.**
+  - The step error estimate is based on the BDF local truncation error (divided differences / Nordsieck
+    equivalent) rather than a raw predictor–corrector difference; the first step still uses an embedded
+    reference solve to bootstrap the estimate.
+  - `VSVO_BDF_Controller` consumes the current-order estimate plus optional adjacent-order estimates to
+    choose `(dt,order)` via a simple efficiency model, with PI-based dt control when history is available.
+- **Restart requires consistent histories (now validated for VSVO-BDF).**
+  - Variable-step schemes assume the provided displacement history and `dtHistory()` match the last
+    accepted step(s).
+  - `TimeHistory::setDtHistory()` enables injecting a restart `dtHistory()`. For `SchemeKind::VSVO_BDF`
+    restarts (`history.stepIndex()>0`), `TimeLoop` validates that the required `dtHistory()` prefix is
+    present rather than silently fabricating missing entries.
 
 ## Pointers
 
@@ -108,4 +118,4 @@ step-size/order interface (`TimeStepping::StepController`).
 - VSVO controller: `TimeStepping/VSVO_BDF_Controller.{h,cpp}`
 - Variable-order BDF integrator: `Systems/TimeIntegrator.{h,cpp}` (`systems::BDFIntegrator`)
 - History storage: `TimeStepping/TimeHistory.{h,cpp}`
-- Unit tests: `Tests/Unit/TimeStepping/test_TimeLoopConvergence.cpp`
+- Unit tests: `Tests/Unit/TimeStepping/` (convergence, stability, history/utils, controllers, multistage, integrators)

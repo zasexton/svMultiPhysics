@@ -192,6 +192,14 @@ TimeLoop::TimeLoop(TimeLoopOptions options)
         FE_THROW_IF(options_.cg_degree > 10, InvalidArgumentException,
                     "TimeLoop: cg_degree too large (max 10)");
     }
+    if (options_.scheme == SchemeKind::DG1 || options_.scheme == SchemeKind::DG ||
+        options_.scheme == SchemeKind::CG2 || options_.scheme == SchemeKind::CG) {
+        FE_THROW_IF(options_.collocation_max_outer_iterations <= 0, InvalidArgumentException,
+                    "TimeLoop: collocation_max_outer_iterations must be > 0");
+        FE_THROW_IF(options_.collocation_outer_tolerance < 0.0 || !std::isfinite(options_.collocation_outer_tolerance),
+                    InvalidArgumentException,
+                    "TimeLoop: collocation_outer_tolerance must be finite and >= 0");
+    }
     if (options_.scheme == SchemeKind::VSVO_BDF) {
         FE_THROW_IF(!options_.step_controller, InvalidArgumentException,
                     "TimeLoop: VSVO_BDF requires a step_controller");
@@ -220,7 +228,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 .alpha_m = ga1_params->alpha_m,
                 .alpha_f = ga1_params->alpha_f,
                 .gamma = ga1_params->gamma,
-                .history_rate_order = 2});
+                .history_rate_order = 0});
     }
     if (options_.scheme == SchemeKind::Newmark) {
         newmark_beta = std::make_shared<const NewmarkBetaIntegrator>(NewmarkBetaIntegratorOptions{
@@ -249,6 +257,15 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     // For backends like FSILS, vectors created before any matrix exists may not share
     // the matrix's internal ordering, which would corrupt updates like u <- u - du.
     history.repack(factory);
+
+    if (options_.scheme == SchemeKind::VSVO_BDF && history.stepIndex() > 0) {
+        // Restart sanity check: variable-step schemes require dtHistory() to match the provided
+        // displacement history. Avoid silently fabricating older dt values via primeDtHistory().
+        const int required_dt_history = std::min(history.stepIndex(), history.historyDepth());
+        FE_THROW_IF(!history.dtHistoryIsValid(required_dt_history),
+                    InvalidArgumentException,
+                    "TimeLoop: VSVO_BDF restart requires a consistent dtHistory() (use TimeHistory::setDtHistory)");
+    }
     history.primeDtHistory(history.dtPrev() > 0.0 ? history.dtPrev() : history.dt());
 
     auto scratch_vec0 = factory.createVector(n_dofs);
@@ -257,6 +274,152 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     FE_CHECK_NOT_NULL(scratch_vec0.get(), "TimeLoop scratch_vec0");
     FE_CHECK_NOT_NULL(scratch_vec1.get(), "TimeLoop scratch_vec1");
     FE_CHECK_NOT_NULL(scratch_vec2.get(), "TimeLoop scratch_vec2");
+
+    auto dt12_nohistory = std::make_shared<const Dt12NoHistoryIntegrator>();
+
+    auto ensureSecondOrderKinematics = [&](bool overwrite_u_dot, bool overwrite_u_ddot, bool require_u_ddot) {
+        if (!overwrite_u_dot && !overwrite_u_ddot) {
+            return;
+        }
+
+        history.ensureSecondOrderState(factory);
+
+        const auto init = utils::initializeSecondOrderStateFromDisplacementHistory(
+            history,
+            history.uDot().localSpan(),
+            history.uDDot().localSpan(),
+            /*overwrite_u_dot=*/overwrite_u_dot,
+            /*overwrite_u_ddot=*/overwrite_u_ddot);
+        bool acceleration_initialized = init.initialized_acceleration;
+
+        auto& sys = transient.system();
+        const auto& constraints = sys.constraints();
+
+        if (overwrite_u_ddot && !acceleration_initialized) {
+            // Fall back to a residual-based acceleration initialization at the current time:
+            //   M a_n + other(u_n, v_n, t_n) = 0  =>  M a_n = -other
+            //
+            // This is intended as a robust restart path when only displacement (and optionally velocity)
+            // history is available.
+            const double dt = (history.dtPrev() > 0.0 && std::isfinite(history.dtPrev()))
+                ? history.dtPrev()
+                : history.dt();
+            FE_THROW_IF(!(dt > 0.0) || !std::isfinite(dt), systems::InvalidStateException,
+                        "TimeLoop: cannot initialize (uDot,uDDot) with invalid dt");
+
+            FE_THROW_IF(!workspace.isAllocated(), systems::InvalidStateException,
+                        "TimeLoop: Newton workspace not allocated for (uDot,uDDot) initialization");
+            FE_CHECK_NOT_NULL(dt12_nohistory.get(), "TimeLoop: dt12_nohistory integrator");
+
+            auto& mass = *workspace.jacobian;
+            auto& rhs = *workspace.residual;
+            auto& u_prev_scratch = *workspace.delta;
+
+            const auto u_n = history.uPrevSpan();
+            const auto v_n = history.uDotSpan();
+            auto u_prev = u_prev_scratch.localSpan();
+            FE_CHECK_ARG(u_prev.size() == u_n.size() && v_n.size() == u_n.size(),
+                         "TimeLoop: size mismatch in (uDot,uDDot) initialization");
+
+            for (std::size_t i = 0; i < u_prev.size(); ++i) {
+                u_prev[i] = u_n[i] - static_cast<Real>(dt) * v_n[i];
+            }
+            if (!constraints.empty()) {
+                constraints.distributeHomogeneous(reinterpret_cast<double*>(u_prev.data()),
+                                                  static_cast<GlobalIndex>(u_prev.size()));
+            }
+
+            rhs.zero();
+            auto rhs_view = rhs.createAssemblyView();
+            FE_CHECK_NOT_NULL(rhs_view.get(), "TimeLoop: initialization rhs assembly view");
+
+            systems::SystemStateView state;
+            state.time = history.time();
+            state.dt = dt;
+            state.dt_prev = history.dtPrev();
+            state.u = u_n;
+            state.u_prev = std::span<const Real>(u_prev.data(), u_prev.size());
+            state.u_prev2 = u_n; // satisfies validation; dt2 terms are disabled below.
+
+            auto other_integrator = std::make_shared<const DerivativeWeightedIntegrator>(
+                bdf1,
+                /*time_derivative_weight=*/static_cast<Real>(1.0),
+                /*non_time_derivative_weight=*/static_cast<Real>(1.0),
+                /*dt1_term_weight=*/static_cast<Real>(1.0),
+                /*dt2_term_weight=*/static_cast<Real>(0.0));
+            systems::TransientSystem transient_other(sys, other_integrator);
+            systems::AssemblyRequest req_other;
+            req_other.op = options_.newton.residual_op;
+            req_other.want_vector = true;
+            req_other.zero_outputs = true;
+
+            transient_other.system().beginTimeStep();
+            (void)transient_other.assemble(req_other, state, nullptr, rhs_view.get());
+
+            auto b = rhs.localSpan();
+            for (auto& v : b) {
+                v = -v;
+            }
+
+            mass.zero();
+            auto mass_view = mass.createAssemblyView();
+            FE_CHECK_NOT_NULL(mass_view.get(), "TimeLoop: initialization mass assembly view");
+
+            auto mass_integrator = std::make_shared<const DerivativeWeightedIntegrator>(
+                dt12_nohistory,
+                /*time_derivative_weight=*/static_cast<Real>(1.0),
+                /*non_time_derivative_weight=*/static_cast<Real>(0.0),
+                /*dt1_term_weight=*/static_cast<Real>(0.0),
+                // Dt12NoHistory provides dt(u,2) with coeff 1/dt^2; scale so dt(u,2) is interpreted as "a".
+                /*dt2_term_weight=*/static_cast<Real>(dt * dt));
+            systems::TransientSystem transient_mass(sys, mass_integrator);
+            systems::AssemblyRequest req_mass;
+            req_mass.op = options_.newton.jacobian_op;
+            req_mass.want_matrix = true;
+            req_mass.zero_outputs = true;
+
+            systems::SystemStateView state_mass;
+            state_mass.time = history.time();
+            state_mass.dt = dt;
+            state_mass.dt_prev = history.dtPrev();
+            state_mass.u = u_n;
+
+            transient_mass.system().beginTimeStep();
+            (void)transient_mass.assemble(req_mass, state_mass, mass_view.get(), nullptr);
+
+            history.uDDot().zero();
+            const auto solve_rep = linear.solve(mass, history.uDDot(), rhs);
+            if (!solve_rep.converged) {
+                if (require_u_ddot) {
+                    FE_THROW(systems::InvalidStateException,
+                             "TimeLoop: failed to initialize uDDot from residual (linear solve did not converge)");
+                }
+                history.uDDot().zero();
+            } else {
+                acceleration_initialized = true;
+            }
+        }
+
+        if (!constraints.empty()) {
+            if (overwrite_u_dot) {
+                auto v = history.uDotSpan();
+                constraints.distributeHomogeneous(reinterpret_cast<double*>(v.data()),
+                                                  static_cast<GlobalIndex>(v.size()));
+            }
+            if (overwrite_u_ddot) {
+                auto a = history.uDDotSpan();
+                constraints.distributeHomogeneous(reinterpret_cast<double*>(a.data()),
+                                                  static_cast<GlobalIndex>(a.size()));
+            }
+        }
+
+        if (require_u_ddot && overwrite_u_ddot && !acceleration_initialized) {
+            // If we got here, the residual-based fallback did not throw but also didn't
+            // manage to establish a usable acceleration. Do not proceed silently.
+            FE_THROW(systems::InvalidStateException,
+                     "TimeLoop: missing initial uDDot for 2nd-order scheme; provide TimeHistory::uDDot or displacement history >= 3");
+        }
+    };
 
     auto solveThetaStep = [&](double theta, double solve_time, double dt) -> NewtonReport {
         ImplicitStageSpec stage;
@@ -908,55 +1071,65 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
     CollocationWorkspace collocation{};
 
-    auto ensureCollocationWorkspace = [&](int stages_needed) {
-        if (collocation.jacobian && collocation.residual && collocation.delta &&
+    auto ensureCollocationWorkspace = [&](int stages_needed, bool need_block_system) {
+        const bool stage_ok =
             collocation.stage_values && collocation.stage_combination && collocation.dv0 &&
-            collocation.stages == stages_needed) {
+            collocation.stages == stages_needed;
+        const bool block_ok =
+            collocation.jacobian && collocation.residual && collocation.delta;
+
+        if (stage_ok && (!need_block_system || block_ok)) {
             return;
         }
 
-        collocation = {};
-        collocation.stages = stages_needed;
-        collocation.dt_integrator = std::make_shared<const Dt12NoHistoryIntegrator>();
+        CollocationWorkspace next{};
+        next.stages = stages_needed;
+        next.dt_integrator = std::make_shared<const Dt12NoHistoryIntegrator>();
+        next.stage_values = factory.createVector(static_cast<GlobalIndex>(stages_needed) * n_dofs);
+        next.stage_combination = factory.createVector(n_dofs);
+        next.dv0 = factory.createVector(n_dofs);
 
-        const auto& base_pattern = transient.system().sparsity(options_.newton.jacobian_op);
-        sparsity::SparsityPattern block_pattern(static_cast<GlobalIndex>(stages_needed) * n_dofs,
-                                                static_cast<GlobalIndex>(stages_needed) * n_dofs);
+        FE_CHECK_NOT_NULL(next.stage_values.get(), "TimeLoop: collocation stage_values");
+        FE_CHECK_NOT_NULL(next.stage_combination.get(), "TimeLoop: collocation stage_combination");
+        FE_CHECK_NOT_NULL(next.dv0.get(), "TimeLoop: collocation dv0");
 
-        for (int bi = 0; bi < stages_needed; ++bi) {
-            const GlobalIndex row_offset = static_cast<GlobalIndex>(bi) * n_dofs;
-            for (GlobalIndex r = 0; r < n_dofs; ++r) {
-                const auto cols = base_pattern.getRowSpan(r);
-                for (int bj = 0; bj < stages_needed; ++bj) {
-                    const GlobalIndex col_offset = static_cast<GlobalIndex>(bj) * n_dofs;
-                    for (const GlobalIndex c : cols) {
-                        block_pattern.addEntry(row_offset + r, col_offset + c);
+        if (need_block_system) {
+            const auto& base_pattern = transient.system().sparsity(options_.newton.jacobian_op);
+            sparsity::SparsityPattern block_pattern(static_cast<GlobalIndex>(stages_needed) * n_dofs,
+                                                    static_cast<GlobalIndex>(stages_needed) * n_dofs);
+
+            for (int bi = 0; bi < stages_needed; ++bi) {
+                const GlobalIndex row_offset = static_cast<GlobalIndex>(bi) * n_dofs;
+                for (GlobalIndex r = 0; r < n_dofs; ++r) {
+                    const auto cols = base_pattern.getRowSpan(r);
+                    for (int bj = 0; bj < stages_needed; ++bj) {
+                        const GlobalIndex col_offset = static_cast<GlobalIndex>(bj) * n_dofs;
+                        for (const GlobalIndex c : cols) {
+                            block_pattern.addEntry(row_offset + r, col_offset + c);
+                        }
                     }
                 }
             }
+            block_pattern.finalize();
+
+            next.jacobian = factory.createMatrix(block_pattern);
+            next.residual = factory.createVector(static_cast<GlobalIndex>(stages_needed) * n_dofs);
+            next.delta = factory.createVector(static_cast<GlobalIndex>(stages_needed) * n_dofs);
+
+            FE_CHECK_NOT_NULL(next.jacobian.get(), "TimeLoop: collocation jacobian");
+            FE_CHECK_NOT_NULL(next.residual.get(), "TimeLoop: collocation residual");
+            FE_CHECK_NOT_NULL(next.delta.get(), "TimeLoop: collocation delta");
+
+            next.jacobian->zero();
+            next.residual->zero();
+            next.delta->zero();
         }
-        block_pattern.finalize();
 
-        collocation.jacobian = factory.createMatrix(block_pattern);
-        collocation.residual = factory.createVector(static_cast<GlobalIndex>(stages_needed) * n_dofs);
-        collocation.delta = factory.createVector(static_cast<GlobalIndex>(stages_needed) * n_dofs);
-        collocation.stage_values = factory.createVector(static_cast<GlobalIndex>(stages_needed) * n_dofs);
-        collocation.stage_combination = factory.createVector(n_dofs);
-        collocation.dv0 = factory.createVector(n_dofs);
+        next.stage_values->zero();
+        next.stage_combination->zero();
+        next.dv0->zero();
 
-        FE_CHECK_NOT_NULL(collocation.jacobian.get(), "TimeLoop: collocation jacobian");
-        FE_CHECK_NOT_NULL(collocation.residual.get(), "TimeLoop: collocation residual");
-        FE_CHECK_NOT_NULL(collocation.delta.get(), "TimeLoop: collocation delta");
-        FE_CHECK_NOT_NULL(collocation.stage_values.get(), "TimeLoop: collocation stage_values");
-        FE_CHECK_NOT_NULL(collocation.stage_combination.get(), "TimeLoop: collocation stage_combination");
-        FE_CHECK_NOT_NULL(collocation.dv0.get(), "TimeLoop: collocation dv0");
-
-        collocation.jacobian->zero();
-        collocation.residual->zero();
-        collocation.delta->zero();
-        collocation.stage_values->zero();
-        collocation.stage_combination->zero();
-        collocation.dv0->zero();
+        collocation = std::move(next);
     };
 
     auto solveCollocationStep = [&](const CollocationMethod& method,
@@ -977,7 +1150,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
         FE_THROW_IF(temporal_order != 1 && temporal_order != 2, NotImplementedException,
                     "TimeLoop: cG/dG collocation supports temporal order 1 (dt(u)) or 2 (dt(u,2))");
 
-        ensureCollocationWorkspace(method.stages);
+        const bool use_stage_gauss_seidel =
+            (options_.collocation_solve == CollocationSolveStrategy::StageGaussSeidel);
+
+        ensureCollocationWorkspace(method.stages, /*need_block_system=*/!use_stage_gauss_seidel);
 
         auto& sys = transient.system();
         const auto& constraints = sys.constraints();
@@ -990,16 +1166,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
         if (temporal_order == 2) {
             const bool had_u_dot = history.hasUDotState();
-            history.ensureSecondOrderState(factory);
-
-            if (!had_u_dot) {
-                (void)utils::initializeSecondOrderStateFromDisplacementHistory(
-                    history,
-                    history.uDot().localSpan(),
-                    history.uDDot().localSpan(),
-                    /*overwrite_u_dot=*/true,
-                    /*overwrite_u_ddot=*/false);
-            }
+            ensureSecondOrderKinematics(/*overwrite_u_dot=*/!had_u_dot,
+                                        /*overwrite_u_ddot=*/false,
+                                        /*require_u_ddot=*/false);
         }
 
         history.updateGhosts();
@@ -1036,8 +1205,215 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
         NewtonReport rep;
 
-        const int max_it = options_.newton.max_iterations;
-        for (int it = 0; it < max_it; ++it) {
+        if (use_stage_gauss_seidel) {
+            rep.converged = true;
+            rep.iterations = 0;
+            rep.residual_norm0 = 0.0;
+            rep.residual_norm = 0.0;
+
+            const int max_outer = options_.collocation_max_outer_iterations;
+            const double user_tol = options_.collocation_outer_tolerance;
+            const double u_scale = std::max(1.0, history.uPrev().norm());
+            const double tiny_tol = 10.0 * std::numeric_limits<double>::epsilon() * u_scale;
+
+            systems::AssemblyRequest req_dt;
+            req_dt.op = options_.newton.residual_op;
+            req_dt.want_vector = true;
+            req_dt.zero_outputs = false; // we explicitly clear scratch vectors
+
+            auto dt1_only = std::make_shared<const DerivativeWeightedIntegrator>(
+                collocation.dt_integrator,
+                /*time_derivative_weight=*/static_cast<Real>(1.0),
+                /*non_time_derivative_weight=*/static_cast<Real>(0.0),
+                /*dt1_term_weight=*/static_cast<Real>(1.0),
+                /*dt2_term_weight=*/static_cast<Real>(0.0));
+            auto transient_dt1 = std::make_unique<systems::TransientSystem>(sys, dt1_only);
+            FE_CHECK_NOT_NULL(transient_dt1.get(), "TimeLoop: collocation transient_dt1");
+
+            std::unique_ptr<systems::TransientSystem> transient_dt2{};
+            if (temporal_order == 2) {
+                FE_CHECK_NOT_NULL(so_data, "TimeLoop: collocation second-order data");
+                auto dt2_only = std::make_shared<const DerivativeWeightedIntegrator>(
+                    collocation.dt_integrator,
+                    /*time_derivative_weight=*/static_cast<Real>(1.0),
+                    /*non_time_derivative_weight=*/static_cast<Real>(0.0),
+                    /*dt1_term_weight=*/static_cast<Real>(0.0),
+                    /*dt2_term_weight=*/static_cast<Real>(1.0));
+                transient_dt2 = std::make_unique<systems::TransientSystem>(sys, dt2_only);
+                FE_CHECK_NOT_NULL(transient_dt2.get(), "TimeLoop: collocation transient_dt2");
+            }
+
+            auto stage_old = scratch_vec2->localSpan();
+            FE_CHECK_ARG(stage_old.size() == u_n.size(), "TimeLoop: collocation stage_old size mismatch");
+
+            double last_update = 0.0;
+            for (int outer = 0; outer < max_outer; ++outer) {
+                double max_update = 0.0;
+                double max_res = 0.0;
+                bool all_converged = true;
+
+                for (int i = 0; i < method.stages; ++i) {
+                    const double stage_time = t_step + method.c[static_cast<std::size_t>(i)] * dt_step;
+                    auto Ui = U_all.subspan(static_cast<std::size_t>(i) * static_cast<std::size_t>(n_dofs),
+                                            static_cast<std::size_t>(n_dofs));
+                    FE_CHECK_ARG(Ui.size() == stage_old.size(), "TimeLoop: collocation stage size mismatch");
+
+                    std::copy(Ui.begin(), Ui.end(), stage_old.begin());
+
+                    auto u_guess = history.uSpan();
+                    FE_CHECK_ARG(u_guess.size() == Ui.size(), "TimeLoop: collocation history.u size mismatch");
+                    std::copy(Ui.begin(), Ui.end(), u_guess.begin());
+
+                    scratch_vec0->zero();
+                    auto add_view = scratch_vec0->createAssemblyView();
+                    FE_CHECK_NOT_NULL(add_view.get(), "TimeLoop: collocation GS residual-add view");
+
+                    systems::SystemStateView add_state;
+                    add_state.time = stage_time;
+                    add_state.dt = dt_step;
+                    add_state.dt_prev = history.dtPrev();
+
+                    Real dt1_coeff = static_cast<Real>(0.0);
+                    Real dt2_coeff = static_cast<Real>(0.0);
+
+                    auto w = collocation.stage_combination->localSpan();
+                    if (temporal_order == 1) {
+                        std::fill(w.begin(), w.end(), static_cast<Real>(0.0));
+                        for (int j = 0; j < method.stages; ++j) {
+                            if (j == i) continue;
+                            const double a = method.ainv[static_cast<std::size_t>(i * method.stages + j)];
+                            const auto Uj = U_all.subspan(static_cast<std::size_t>(j) * static_cast<std::size_t>(n_dofs),
+                                                          static_cast<std::size_t>(n_dofs));
+                            for (std::size_t k = 0; k < w.size(); ++k) {
+                                w[k] += static_cast<Real>(a) * Uj[k];
+                            }
+                        }
+                        const double ssum = method.row_sums[static_cast<std::size_t>(i)];
+                        for (std::size_t k = 0; k < w.size(); ++k) {
+                            w[k] -= static_cast<Real>(ssum) * u_n[k];
+                        }
+                        if (!constraints.empty()) {
+                            constraints.distributeHomogeneous(reinterpret_cast<double*>(w.data()),
+                                                              static_cast<GlobalIndex>(w.size()));
+                        }
+
+                        add_state.u = std::span<const Real>(w.data(), w.size());
+                        transient_dt1->system().beginTimeStep();
+                        (void)transient_dt1->assemble(req_dt, add_state, nullptr, add_view.get());
+
+                        const double aii = method.ainv[static_cast<std::size_t>(i * method.stages + i)];
+                        dt1_coeff = static_cast<Real>(aii);
+                        dt2_coeff = static_cast<Real>(0.0);
+                    } else {
+                        FE_CHECK_NOT_NULL(so_data, "TimeLoop: collocation second-order data");
+                        FE_CHECK_NOT_NULL(transient_dt2.get(), "TimeLoop: collocation transient_dt2");
+                        const auto dv0 = collocation.dv0->localSpan();
+
+                        // Constant part for dt(u).
+                        std::fill(w.begin(), w.end(), static_cast<Real>(0.0));
+                        const double c1_u0 = so_data->d1_u0[static_cast<std::size_t>(i)];
+                        const double c1_dv0 = so_data->d1_dv0[static_cast<std::size_t>(i)];
+                        for (std::size_t k = 0; k < w.size(); ++k) {
+                            w[k] += static_cast<Real>(c1_u0) * u_n[k] + static_cast<Real>(c1_dv0) * dv0[k];
+                        }
+                        for (int j = 0; j < method.stages; ++j) {
+                            if (j == i) continue;
+                            const double a1 = so_data->d1[static_cast<std::size_t>(i * method.stages + j)];
+                            const auto Uj = U_all.subspan(static_cast<std::size_t>(j) * static_cast<std::size_t>(n_dofs),
+                                                          static_cast<std::size_t>(n_dofs));
+                            for (std::size_t k = 0; k < w.size(); ++k) {
+                                w[k] += static_cast<Real>(a1) * Uj[k];
+                            }
+                        }
+                        if (!constraints.empty()) {
+                            constraints.distributeHomogeneous(reinterpret_cast<double*>(w.data()),
+                                                              static_cast<GlobalIndex>(w.size()));
+                        }
+
+                        add_state.u = std::span<const Real>(w.data(), w.size());
+                        transient_dt1->system().beginTimeStep();
+                        (void)transient_dt1->assemble(req_dt, add_state, nullptr, add_view.get());
+
+                        // Constant part for dt(u,2) added into the same residual-add vector.
+                        std::fill(w.begin(), w.end(), static_cast<Real>(0.0));
+                        const double c2_u0 = so_data->d2_u0[static_cast<std::size_t>(i)];
+                        const double c2_dv0 = so_data->d2_dv0[static_cast<std::size_t>(i)];
+                        for (std::size_t k = 0; k < w.size(); ++k) {
+                            w[k] += static_cast<Real>(c2_u0) * u_n[k] + static_cast<Real>(c2_dv0) * dv0[k];
+                        }
+                        for (int j = 0; j < method.stages; ++j) {
+                            if (j == i) continue;
+                            const double a2 = so_data->d2[static_cast<std::size_t>(i * method.stages + j)];
+                            const auto Uj = U_all.subspan(static_cast<std::size_t>(j) * static_cast<std::size_t>(n_dofs),
+                                                          static_cast<std::size_t>(n_dofs));
+                            for (std::size_t k = 0; k < w.size(); ++k) {
+                                w[k] += static_cast<Real>(a2) * Uj[k];
+                            }
+                        }
+                        if (!constraints.empty()) {
+                            constraints.distributeHomogeneous(reinterpret_cast<double*>(w.data()),
+                                                              static_cast<GlobalIndex>(w.size()));
+                        }
+
+                        add_state.u = std::span<const Real>(w.data(), w.size());
+                        transient_dt2->system().beginTimeStep();
+                        (void)transient_dt2->assemble(req_dt, add_state, nullptr, add_view.get());
+
+                        const double a1ii = so_data->d1[static_cast<std::size_t>(i * method.stages + i)];
+                        const double a2ii = so_data->d2[static_cast<std::size_t>(i * method.stages + i)];
+                        dt1_coeff = static_cast<Real>(a1ii);
+                        dt2_coeff = static_cast<Real>(a2ii);
+                    }
+
+                    auto stage_integrator = std::make_shared<const DerivativeWeightedIntegrator>(
+                        collocation.dt_integrator,
+                        /*time_derivative_weight=*/static_cast<Real>(1.0),
+                        /*non_time_derivative_weight=*/static_cast<Real>(1.0),
+                        /*dt1_term_weight=*/dt1_coeff,
+                        /*dt2_term_weight=*/dt2_coeff);
+                    systems::TransientSystem transient_stage(sys, stage_integrator);
+                    const auto nr_i = newton.solveStep(transient_stage, linear, stage_time, history, workspace, scratch_vec0.get());
+
+                    rep.iterations += nr_i.iterations;
+                    rep.linear = nr_i.linear;
+                    max_res = std::max(max_res, nr_i.residual_norm);
+                    if (outer == 0) {
+                        rep.residual_norm0 = std::max(rep.residual_norm0, nr_i.residual_norm0);
+                    }
+                    all_converged = all_converged && nr_i.converged;
+
+                    auto u_new = history.uSpan();
+                    std::copy(u_new.begin(), u_new.end(), Ui.begin());
+
+                    double diff2 = 0.0;
+                    for (std::size_t k = 0; k < u_new.size(); ++k) {
+                        const double diff = static_cast<double>(u_new[k] - stage_old[k]);
+                        diff2 += diff * diff;
+                    }
+                    max_update = std::max(max_update, std::sqrt(diff2));
+                }
+
+                rep.residual_norm = max_res;
+                last_update = max_update;
+
+                if (!all_converged) {
+                    rep.converged = false;
+                    return rep;
+                }
+
+                const double tol = (user_tol > 0.0) ? user_tol : tiny_tol;
+                if (max_update <= tol) {
+                    break;
+                }
+            }
+
+            if (user_tol > 0.0 && last_update > user_tol) {
+                rep.converged = false;
+                return rep;
+            }
+        } else {
+            const int max_it = options_.newton.max_iterations;
+            for (int it = 0; it < max_it; ++it) {
             collocation.jacobian->zero();
             collocation.residual->zero();
 
@@ -1368,6 +1744,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             rep.iterations = options_.newton.max_iterations;
             return rep;
         }
+        }
 
         // Write u_{n+1} to history.u so TimeHistory::acceptStep shifts correctly.
         if (temporal_order == 1) {
@@ -1444,25 +1821,29 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     const int max_retries = adaptive ? std::max(0, options_.step_controller->maxRetries()) : 0;
     double dt_next = options_.dt;
 
-    if (options_.scheme == SchemeKind::VSVO_BDF) {
-        FE_THROW_IF(!adaptive, InvalidArgumentException,
-                    "TimeLoop: VSVO_BDF scheme requires a step_controller");
-        vsvo_controller = dynamic_cast<const VSVO_BDF_Controller*>(options_.step_controller.get());
-        FE_THROW_IF(vsvo_controller == nullptr, InvalidArgumentException,
-                    "TimeLoop: VSVO_BDF scheme requires a VSVO_BDF_Controller");
-        FE_THROW_IF(history.historyDepth() < vsvo_controller->maxOrder() + 1, InvalidArgumentException,
-                    "TimeLoop: VSVO_BDF requires history depth >= max_order + 1");
+	    if (options_.scheme == SchemeKind::VSVO_BDF) {
+	        FE_THROW_IF(!adaptive, InvalidArgumentException,
+	                    "TimeLoop: VSVO_BDF scheme requires a step_controller");
+	        vsvo_controller = dynamic_cast<const VSVO_BDF_Controller*>(options_.step_controller.get());
+	        FE_THROW_IF(vsvo_controller == nullptr, InvalidArgumentException,
+	                    "TimeLoop: VSVO_BDF scheme requires a VSVO_BDF_Controller");
+	        const int system_temporal_order = transient.system().temporalOrder();
+	        FE_THROW_IF(system_temporal_order > 2, NotImplementedException,
+	                    "TimeLoop: VSVO_BDF supports temporal order <= 2");
+	        const int deriv_order = (system_temporal_order >= 2) ? 2 : 1;
+	        FE_THROW_IF(history.historyDepth() < vsvo_controller->maxOrder() + deriv_order, InvalidArgumentException,
+	                    "TimeLoop: VSVO_BDF requires history depth >= max_order + temporal_order");
 
-        const int max_order = vsvo_controller->maxOrder();
-        vsvo_integrators.resize(static_cast<std::size_t>(max_order + 1));
-        for (int p = 1; p <= max_order; ++p) {
-            vsvo_integrators[static_cast<std::size_t>(p)] = std::make_shared<const systems::BDFIntegrator>(p);
+	        const int max_order = vsvo_controller->maxOrder();
+	        vsvo_integrators.resize(static_cast<std::size_t>(max_order + 1));
+	        for (int p = 1; p <= max_order; ++p) {
+	            vsvo_integrators[static_cast<std::size_t>(p)] = std::make_shared<const systems::BDFIntegrator>(p);
         }
 
-        vsvo_pred = factory.createVector(n_dofs);
-        FE_CHECK_NOT_NULL(vsvo_pred.get(), "TimeLoop: vsvo_pred");
-        order_next = vsvo_controller->initialOrder();
-    }
+	        vsvo_pred = factory.createVector(n_dofs);
+	        FE_CHECK_NOT_NULL(vsvo_pred.get(), "TimeLoop: vsvo_pred");
+	        order_next = vsvo_controller->initialOrder();
+	    }
 
     for (int step = 0; step < options_.max_steps; ++step) {
         const double t = history.time();
@@ -1524,6 +1905,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
             int scheme_order = 0;
             double error_norm = -1.0;
+            double error_norm_low = -1.0;
+            double error_norm_high = -1.0;
             bool used_collocation = false;
             CollocationFamily collocation_family_used = CollocationFamily::Gauss;
             int collocation_stages_used = 0;
@@ -1551,18 +1934,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         FE_CHECK_NOT_NULL(newmark_beta.get(), "TimeLoop: NewmarkBeta integrator");
                         const bool had_u_dot = history.hasUDotState();
                         const bool had_u_ddot = history.hasUDDotState();
-                        history.ensureSecondOrderState(factory);
-
-                        // If (u̇,ü) storage is missing (e.g., restart without second-order state),
-                        // initialize from displacement history when possible.
-                        if (!had_u_dot || !had_u_ddot) {
-                            (void)utils::initializeSecondOrderStateFromDisplacementHistory(
-                                history,
-                                history.uDot().localSpan(),
-                                history.uDDot().localSpan(),
-                                /*overwrite_u_dot=*/!had_u_dot,
-                                /*overwrite_u_ddot=*/!had_u_ddot);
-                        }
+                        ensureSecondOrderKinematics(/*overwrite_u_dot=*/!had_u_dot,
+                                                    /*overwrite_u_ddot=*/!had_u_ddot,
+                                                    /*require_u_ddot=*/!had_u_ddot);
 
                         // Ensure (u_n, v_n, a_n) values are ghost-consistent before constructing constants.
                         history.updateGhosts();
@@ -1644,6 +2018,45 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         FE_CHECK_NOT_NULL(generalized_alpha_fo.get(), "TimeLoop: generalized-alpha(1st-order) integrator");
                         FE_THROW_IF(!ga1_params.has_value(), systems::InvalidStateException,
                                     "TimeLoop: generalized-alpha parameters not initialized");
+
+                        // Ensure uDot storage exists and is initialized before the stage solve.
+                        const bool had_u_dot = history.hasUDotState();
+                        history.ensureSecondOrderState(factory);
+                        if (!had_u_dot) {
+                            (void)utils::initializeSecondOrderStateFromDisplacementHistory(
+                                history,
+                                history.uDot().localSpan(),
+                                history.uDDot().localSpan(),
+                                /*overwrite_u_dot=*/true,
+                                /*overwrite_u_ddot=*/false);
+                        }
+                        const auto& constraints = transient.system().constraints();
+                        if (!constraints.empty()) {
+                            auto v = history.uDotSpan();
+                            constraints.distributeHomogeneous(reinterpret_cast<double*>(v.data()),
+                                                              static_cast<GlobalIndex>(v.size()));
+                        }
+
+                        // Ensure (u_n, uDot_n) values are ghost-consistent before constructing constants.
+                        history.updateGhosts();
+
+                        // Save displacement history (u^{n-1}) since we overwrite uPrev2 with uDot^n
+                        // for the stage solve.
+                        copyVector(*scratch_vec2, history.uPrev2());
+
+                        struct RestoreGuard {
+                            TimeHistory& history;
+                            backends::GenericVector& saved_prev2;
+                            ~RestoreGuard()
+                            {
+                                copyVector(history.uPrev2(), saved_prev2);
+                            }
+                        } restore{history, *scratch_vec2};
+
+                        // Inject uDot^n into the u^{n-1} history slot; the integrator uses it via
+                        // history_rate_order==0 to keep generalized-α one-step in (u,uDot).
+                        copyVector(history.uPrev2(), history.uDot());
+
                         systems::TransientSystem transient_stage(transient.system(), generalized_alpha_fo);
                         const double stage_time = t + ga1_params->alpha_f * dt;
                         nr = newton.solveStep(transient_stage, linear, stage_time, history, workspace);
@@ -1655,6 +2068,23 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             FE_CHECK_ARG(cur.size() == prev.size(), "TimeLoop: generalized-alpha size mismatch");
                             for (std::size_t i = 0; i < cur.size(); ++i) {
                                 cur[i] = static_cast<Real>(inv_af) * cur[i] + static_cast<Real>(c_prev) * prev[i];
+                            }
+
+                            // Update uDot_{n+1} (stored as TimeHistory::uDot) for use by later stages
+                            // and end-of-step finalization.
+                            const double gamma = ga1_params->gamma;
+                            const double inv_gamma_dt = 1.0 / (gamma * dt);
+                            const double c_old = (1.0 - gamma) / gamma;
+                            auto v = history.uDotSpan();
+                            FE_CHECK_ARG(v.size() == cur.size(), "TimeLoop: generalized-alpha uDot size mismatch");
+                            for (std::size_t i = 0; i < cur.size(); ++i) {
+                                const Real v_n = v[i];
+                                v[i] = static_cast<Real>(inv_gamma_dt) * (cur[i] - prev[i]) -
+                                    static_cast<Real>(c_old) * v_n;
+                            }
+                            if (!constraints.empty()) {
+                                constraints.distributeHomogeneous(reinterpret_cast<double*>(v.data()),
+                                                                  static_cast<GlobalIndex>(v.size()));
                             }
                         }
                     } else if (temporal_order == 2) {
@@ -1671,16 +2101,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         FE_CHECK_NOT_NULL(generalized_alpha_so.get(), "TimeLoop: generalized-alpha(2nd-order) integrator");
                         const bool had_u_dot = history.hasUDotState();
                         const bool had_u_ddot = history.hasUDDotState();
-                        history.ensureSecondOrderState(factory);
-
-                        if (!had_u_dot || !had_u_ddot) {
-                            (void)utils::initializeSecondOrderStateFromDisplacementHistory(
-                                history,
-                                history.uDot().localSpan(),
-                                history.uDDot().localSpan(),
-                                /*overwrite_u_dot=*/!had_u_dot,
-                                /*overwrite_u_ddot=*/!had_u_ddot);
-                        }
+                        ensureSecondOrderKinematics(/*overwrite_u_dot=*/!had_u_dot,
+                                                    /*overwrite_u_ddot=*/!had_u_ddot,
+                                                    /*require_u_ddot=*/!had_u_ddot);
 
                         // Ensure (u_n, v_n, a_n) values are ghost-consistent before constructing constants.
                         history.updateGhosts();
@@ -1731,44 +2154,47 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     } else {
                         FE_THROW(NotImplementedException, "TimeLoop: GeneralizedAlpha supports temporal order <= 2");
                     }
-                } else if (options_.scheme == SchemeKind::VSVO_BDF) {
-                    FE_CHECK_NOT_NULL(vsvo_controller, "TimeLoop: VSVO_BDF controller");
-                    FE_CHECK_NOT_NULL(vsvo_pred.get(), "TimeLoop: VSVO_BDF predictor");
+	                } else if (options_.scheme == SchemeKind::VSVO_BDF) {
+	                    FE_CHECK_NOT_NULL(vsvo_controller, "TimeLoop: VSVO_BDF controller");
+	                    FE_CHECK_NOT_NULL(vsvo_pred.get(), "TimeLoop: VSVO_BDF predictor");
+	                    const int system_temporal_order = transient.system().temporalOrder();
 
-                    order = std::max(vsvo_controller->minOrder(), std::min(order, vsvo_controller->maxOrder()));
-                    // Starter: restrict order to the amount of "real" history available.
-                    order = std::max(1, std::min(order, history.stepIndex() + 1));
-                    scheme_order = order;
+	                    order = std::max(vsvo_controller->minOrder(), std::min(order, vsvo_controller->maxOrder()));
+	                    if (system_temporal_order == 2) {
+	                        // VSVO_BDF is primarily intended for first-order systems. For dt(·,2) problems,
+	                        // restrict to order 1 and rely on the embedded Newmark reference for error control.
+	                        order = 1;
+	                    }
+	                    // Starter ramp: for LTE-based control, order p needs "real" history through u^{n-p}.
+	                    const int max_order_by_history = std::max(1, history.stepIndex());
+	                    order = std::max(vsvo_controller->minOrder(),
+	                                     std::min(order, std::min(vsvo_controller->maxOrder(), max_order_by_history)));
+	                    scheme_order = order;
 
-                    const bool need_startup_reference = (history.stepIndex() == 0 && order == 1);
-                    bool have_reference_solution = false;
-                    if (need_startup_reference) {
+	                    const bool need_startup_reference =
+	                        (order == 1) &&
+	                        ((system_temporal_order <= 1 && history.stepIndex() == 0) || system_temporal_order == 2);
+	                    bool have_reference_solution = false;
+	                    if (need_startup_reference) {
                         // Bootstrap VSVO error estimation on the very first step. With no "real" history
                         // yet, extrapolation-based predictors reduce to u_pred = u^n and the correction
                         // u^{n+1} - u_pred measures solution change (O(dt)), not the local truncation
                         // error (O(dt^2) for BDF1). Use an embedded pair (BE vs CN) to obtain an
                         // O(dt^2) error estimate without requiring additional history.
                         NewtonReport nr_ref;
-                        const int temporal_order = transient.system().temporalOrder();
-                        if (temporal_order <= 1) {
-                            nr_ref = solveThetaStep(/*theta=*/0.5, solve_time, dt);
-                        } else if (temporal_order == 2) {
-                            auto newmark_ref = std::make_shared<const NewmarkBetaIntegrator>(NewmarkBetaIntegratorOptions{
-                                .beta = options_.newmark_beta,
-                                .gamma = options_.newmark_gamma,
-                            });
+	                        if (system_temporal_order <= 1) {
+	                            nr_ref = solveThetaStep(/*theta=*/0.5, solve_time, dt);
+	                        } else if (system_temporal_order == 2) {
+	                            auto newmark_ref = std::make_shared<const NewmarkBetaIntegrator>(NewmarkBetaIntegratorOptions{
+	                                .beta = options_.newmark_beta,
+	                                .gamma = options_.newmark_gamma,
+	                            });
 
                             const bool had_u_dot = history.hasUDotState();
                             const bool had_u_ddot = history.hasUDDotState();
-                            history.ensureSecondOrderState(factory);
-                            if (!had_u_dot || !had_u_ddot) {
-                                (void)utils::initializeSecondOrderStateFromDisplacementHistory(
-                                    history,
-                                    history.uDot().localSpan(),
-                                    history.uDDot().localSpan(),
-                                    /*overwrite_u_dot=*/!had_u_dot,
-                                    /*overwrite_u_ddot=*/!had_u_ddot);
-                            }
+                            ensureSecondOrderKinematics(/*overwrite_u_dot=*/!had_u_dot,
+                                                        /*overwrite_u_ddot=*/!had_u_ddot,
+                                                        /*require_u_ddot=*/!had_u_ddot);
 
                             history.updateGhosts();
 
@@ -1803,9 +2229,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
                             systems::TransientSystem transient_ref(transient.system(), newmark_ref);
                             nr_ref = newton.solveStep(transient_ref, linear, solve_time, history, workspace);
-                        } else {
-                            FE_THROW(NotImplementedException, "TimeLoop: VSVO_BDF supports temporal order <= 2");
-                        }
+	                        } else {
+	                            FE_THROW(NotImplementedException, "TimeLoop: VSVO_BDF supports temporal order <= 2");
+	                        }
                         if (nr_ref.converged) {
                             copyVector(*scratch_vec1, history.u());
                             have_reference_solution = true;
@@ -1827,6 +2253,131 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         // controller can reduce dt and retry.
                         // `nr` already holds the reference report.
                     } else {
+                    auto powInt = [](double x, int p) -> double {
+                        double out = 1.0;
+                        for (int i = 0; i < p; ++i) {
+                            out *= x;
+                        }
+                        return out;
+                    };
+
+                    auto factorial = [](int n) -> double {
+                        double out = 1.0;
+                        for (int i = 2; i <= n; ++i) {
+                            out *= static_cast<double>(i);
+                        }
+                        return out;
+                    };
+
+	                    auto computeLTENorm = [&](int p, double dt_step) -> double {
+	                        if (p < vsvo_controller->minOrder() || p > vsvo_controller->maxOrder()) {
+	                            return -1.0;
+	                        }
+	                        const int deriv_order = (system_temporal_order >= 2) ? 2 : 1;
+	                        const int p1 = p + deriv_order;
+	                        const int required_step_index = p + deriv_order - 1;
+	                        const int required_history_depth = p + deriv_order;
+	                        // Need `required_history_depth` "real" past states to form dd_{p1}.
+	                        if (history.stepIndex() < required_step_index) {
+	                            return -1.0;
+	                        }
+	                        if (history.historyDepth() < required_history_depth) {
+	                            return -1.0;
+	                        }
+
+                        FE_THROW_IF(!(dt_step > 0.0) || !std::isfinite(dt_step),
+                                    systems::InvalidStateException,
+                                    "TimeLoop: VSVO_BDF invalid dt for LTE estimate");
+
+                        const auto dt_hist = history.dtHistory();
+                        const double dt_prev = (history.dtPrev() > 0.0 && std::isfinite(history.dtPrev()))
+                            ? history.dtPrev()
+                            : dt_step;
+
+                        auto historyDt = [&](int idx) -> double {
+                            if (idx < 0 || idx >= static_cast<int>(dt_hist.size())) {
+                                return dt_prev;
+                            }
+                            const double v = dt_hist[static_cast<std::size_t>(idx)];
+                            if (v > 0.0 && std::isfinite(v)) {
+                                return v;
+                            }
+                            return dt_prev;
+                        };
+
+	                        // Nodes for the derivative stencil at t_{n+1} shifted by t_{n+1}.
+	                        const int method_points = p + deriv_order;
+	                        const int dd_points = method_points + 1;
+	                        std::vector<double> nodes_method;
+	                        nodes_method.reserve(static_cast<std::size_t>(method_points));
+	                        nodes_method.push_back(0.0);
+	                        double accum = 0.0;
+	                        for (int j = 1; j < method_points; ++j) {
+	                            accum += (j == 1) ? dt_step : historyDt(j - 2);
+	                            nodes_method.push_back(-accum);
+	                        }
+
+	                        const auto a = math::finiteDifferenceWeights(/*derivative_order=*/deriv_order,
+	                                                                     /*x0=*/0.0,
+	                                                                     nodes_method);
+	                        FE_THROW_IF(static_cast<int>(a.size()) != method_points, systems::InvalidStateException,
+	                                    "TimeLoop: VSVO_BDF LTE weight size mismatch (method)");
+
+	                        // Error constant for the derivative approximation on the polynomial t^{p1}.
+	                        double c = 0.0;
+	                        for (int j = 0; j < method_points; ++j) {
+	                            c += a[static_cast<std::size_t>(j)] * powInt(nodes_method[static_cast<std::size_t>(j)], p1);
+	                        }
+
+	                        // dd_{p1} from dd_points states {u^{n+1}, u^n, ...}.
+	                        std::vector<double> nodes_dd;
+	                        nodes_dd.reserve(static_cast<std::size_t>(dd_points));
+	                        nodes_dd.push_back(0.0);
+	                        accum = 0.0;
+	                        for (int j = 1; j < dd_points; ++j) {
+	                            accum += (j == 1) ? dt_step : historyDt(j - 2);
+	                            nodes_dd.push_back(-accum);
+	                        }
+
+	                        const auto w = math::finiteDifferenceWeights(/*derivative_order=*/p1, /*x0=*/0.0, nodes_dd);
+	                        FE_THROW_IF(static_cast<int>(w.size()) != dd_points, systems::InvalidStateException,
+	                                    "TimeLoop: VSVO_BDF LTE weight size mismatch (dd)");
+
+	                        const double denom = factorial(p1);
+                        FE_THROW_IF(!(denom > 0.0) || !std::isfinite(denom),
+                                    systems::InvalidStateException,
+                                    "TimeLoop: VSVO_BDF invalid factorial for LTE estimate");
+	                        double dt_scale = dt_step;
+	                        if (deriv_order >= 2) {
+	                            dt_scale *= dt_step;
+	                        }
+	                        const double fac = dt_scale * c / denom;
+
+                        const double atol = vsvo_controller->absTol();
+                        const double rtol = vsvo_controller->relTol();
+                        const auto u_np1 = history.uSpan();
+                        FE_CHECK_ARG(u_np1.size() == history.uPrevSpan().size(), "TimeLoop: VSVO_BDF LTE size mismatch");
+
+	                        double sum = 0.0;
+	                        for (std::size_t i = 0; i < u_np1.size(); ++i) {
+	                            // u^{n+1} coefficient
+	                            double deriv = w[0] * static_cast<double>(u_np1[i]);
+
+	                            // u^n .. history span(s)
+	                            for (int j = 1; j < dd_points; ++j) {
+	                                const auto uj = history.uPrevKSpan(j);
+	                                deriv += w[static_cast<std::size_t>(j)] * static_cast<double>(uj[i]);
+	                            }
+
+                            const double lte = fac * deriv;
+                            const double scale = atol + rtol * std::abs(static_cast<double>(u_np1[i]));
+                            const double r = lte / scale;
+                            sum += r * r;
+                        }
+                        const double n = (u_np1.empty() ? 1.0 : static_cast<double>(u_np1.size()));
+                        return std::sqrt(sum / n);
+                    };
+
                     auto computePredictor = [&](int p, double dt_step) {
                         auto dst = vsvo_pred->localSpan();
                         std::fill(dst.begin(), dst.end(), static_cast<Real>(0.0));
@@ -1881,21 +2432,28 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     nr = newton.solveStep(transient_step, linear, solve_time, history, workspace);
 
                     if (nr.converged) {
-                        const double atol = vsvo_controller->absTol();
-                        const double rtol = vsvo_controller->relTol();
+                        if (have_reference_solution) {
+                            // Embedded reference estimate (first step only).
+                            const double atol = vsvo_controller->absTol();
+                            const double rtol = vsvo_controller->relTol();
 
-                        const auto u = history.uSpan();
-                        const auto ref = have_reference_solution ? scratch_vec1->localSpan() : vsvo_pred->localSpan();
-                        FE_CHECK_ARG(u.size() == ref.size(), "TimeLoop: VSVO_BDF size mismatch");
+                            const auto u = history.uSpan();
+                            const auto ref = scratch_vec1->localSpan();
+                            FE_CHECK_ARG(u.size() == ref.size(), "TimeLoop: VSVO_BDF size mismatch");
 
-                        double sum = 0.0;
-                        for (std::size_t i = 0; i < u.size(); ++i) {
-                            const double scale = atol + rtol * std::abs(static_cast<double>(u[i]));
-                            const double e = static_cast<double>(u[i] - ref[i]);
-                            sum += (e / scale) * (e / scale);
+                            double sum = 0.0;
+                            for (std::size_t i = 0; i < u.size(); ++i) {
+                                const double scale = atol + rtol * std::abs(static_cast<double>(u[i]));
+                                const double e = static_cast<double>(u[i] - ref[i]);
+                                sum += (e / scale) * (e / scale);
+                            }
+                            const double denom = (u.empty() ? 1.0 : static_cast<double>(u.size()));
+                            error_norm = std::sqrt(sum / denom);
+                        } else {
+                            error_norm = computeLTENorm(order, dt);
+                            error_norm_low = computeLTENorm(order - 1, dt);
+                            error_norm_high = computeLTENorm(order + 1, dt);
                         }
-                        const double denom = (u.empty() ? 1.0 : static_cast<double>(u.size()));
-                        error_norm = std::sqrt(sum / denom);
                     }
                     }
                 } else if (options_.scheme == SchemeKind::TRBDF2) {
@@ -2001,19 +2559,29 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     info.nonlinear_converged = true;
                     info.newton = nr;
                     info.error_norm = error_norm;
+                    info.error_norm_low = error_norm_low;
+                    info.error_norm_high = error_norm_high;
 
-                    const auto decision = options_.step_controller->onAccepted(info);
-                    if (!decision.accept) {
-                        if (callbacks.on_step_rejected) {
-                            callbacks.on_step_rejected(history, StepRejectReason::ErrorTooLarge, nr);
-                        }
-                        if (!decision.retry) {
-                            report.success = false;
-                            report.steps_taken = step;
-                            report.final_time = history.time();
-                            report.message = decision.message.empty() ? "TimeLoop: step rejected" : decision.message;
-                            return report;
-                        }
+	                    const auto decision = options_.step_controller->onAccepted(info);
+	                    if (!decision.accept) {
+	                        if (callbacks.on_step_rejected) {
+	                            callbacks.on_step_rejected(history, StepRejectReason::ErrorTooLarge, nr);
+	                        }
+	                        if (!decision.retry) {
+	                            report.success = false;
+	                            report.steps_taken = step;
+	                            report.final_time = history.time();
+	                            const std::string base = decision.message.empty() ? "TimeLoop: step rejected" : decision.message;
+	                            if (info.error_norm > 0.0 && std::isfinite(info.error_norm)) {
+	                                report.message = base + " (dt=" + std::to_string(info.dt) +
+	                                    ", order=" + std::to_string(info.scheme_order) +
+	                                    ", error_norm=" + std::to_string(info.error_norm) + ")";
+	                            } else {
+	                                report.message = base + " (dt=" + std::to_string(info.dt) +
+	                                    ", order=" + std::to_string(info.scheme_order) + ")";
+	                            }
+	                            return report;
+	                        }
 
                         const double new_dt = decision.next_dt;
                         FE_THROW_IF(!(new_dt > 0.0) || !std::isfinite(new_dt), systems::InvalidStateException,
@@ -2201,63 +2769,14 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         std::fill(dt_u_dot.begin(), dt_u_dot.end(), static_cast<Real>(0.0));
 
                         if (options_.scheme == SchemeKind::GeneralizedAlpha) {
-                            FE_THROW_IF(!ga1_params.has_value(), systems::InvalidStateException,
-                                        "TimeLoop: generalized-alpha parameters not initialized");
-
-                            // Reconstruct u̇_n from displacement history using the same weights as the integrator.
-                            const int available_history = history.historyDepth();
-                            const int q_max = std::max(1, available_history - 1);
-                            const int q = std::max(1, std::min(2, q_max));
-
-                            const auto dt_hist = history.dtHistory();
-                            const double dt_prev = (history.dtPrev() > 0.0 && std::isfinite(history.dtPrev()))
-                                ? history.dtPrev()
-                                : dt;
-
-                            auto historyDt = [&](int idx) -> double {
-                                if (idx < 0 || idx >= static_cast<int>(dt_hist.size())) {
-                                    return dt_prev;
-                                }
-                                const double v = dt_hist[static_cast<std::size_t>(idx)];
-                                if (v > 0.0 && std::isfinite(v)) {
-                                    return v;
-                                }
-                                return dt_prev;
-                            };
-
-                            std::vector<double> nodes;
-                            nodes.reserve(static_cast<std::size_t>(q + 1));
-                            nodes.push_back(0.0);
-                            double accum = 0.0;
-                            for (int j = 1; j <= q; ++j) {
-                                accum += historyDt(j - 1);
-                                nodes.push_back(-accum);
-                            }
-
-                            const auto w = math::finiteDifferenceWeights(/*derivative_order=*/1, /*x0=*/0.0, nodes);
-                            FE_THROW_IF(static_cast<int>(w.size()) != q + 1, systems::InvalidStateException,
-                                        "TimeLoop: generalized-alpha history weight mismatch");
-
-                            // u̇_n
-                            std::fill(dt_u_dot.begin(), dt_u_dot.end(), static_cast<Real>(0.0));
-                            for (int j = 0; j <= q; ++j) {
-                                const auto uj = history.uPrevKSpan(j + 1);
-                                FE_CHECK_ARG(uj.size() == dt_u_dot.size(), "TimeLoop: generalized-alpha history size mismatch");
-                                const double alpha = w[static_cast<std::size_t>(j)];
-                                for (std::size_t k = 0; k < dt_u_dot.size(); ++k) {
-                                    dt_u_dot[k] += static_cast<Real>(alpha) * uj[k];
-                                }
-                            }
-
-                            // dt*u̇_{n+1} = (u_{n+1} - u_n)/gamma - dt*((1-gamma)/gamma)*u̇_n
-                            const double gamma = ga1_params->gamma;
-                            const double inv_gamma = 1.0 / gamma;
-                            const double c_hist = -dt * (1.0 - gamma) * inv_gamma;
-                            const auto u_n = history.uPrevSpan();
-                            FE_CHECK_ARG(u_n.size() == u_np1.size(), "TimeLoop: generalized-alpha u_n size mismatch");
+                            // Use the stored uDot_{n+1} to build a BDF1-consistent end-state history:
+                            // dt(u) = (u_{n+1} - u_prev)/dt  =>  u_prev = u_{n+1} - dt*uDot_{n+1}.
+                            FE_THROW_IF(!history.hasUDotState(), systems::InvalidStateException,
+                                        "TimeLoop: missing uDot for generalized-alpha final-state commit");
+                            const auto v_np1 = history.uDotSpan();
+                            FE_CHECK_ARG(v_np1.size() == dt_u_dot.size(), "TimeLoop: generalized-alpha uDot size mismatch");
                             for (std::size_t k = 0; k < dt_u_dot.size(); ++k) {
-                                dt_u_dot[k] = static_cast<Real>(inv_gamma) * (u_np1[k] - u_n[k]) +
-                                    static_cast<Real>(c_hist) * dt_u_dot[k];
+                                dt_u_dot[k] = static_cast<Real>(dt) * v_np1[k];
                             }
                         } else if (used_collocation && collocation_family_used == CollocationFamily::Gauss) {
                             const auto& method = getCollocationMethod(collocation_family_used, collocation_stages_used);
@@ -2338,11 +2857,28 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     (void)transient_finalize.assemble(req_finalize, state, nullptr, out_view.get());
                 }
 
-                transient.system().commitTimeStep();
-                history.acceptStep(dt);
-                if (callbacks.on_step_accepted) {
-                    callbacks.on_step_accepted(history);
-                }
+	                transient.system().commitTimeStep();
+	                history.acceptStep(dt);
+	                if (temporal_order == 2 && options_.scheme == SchemeKind::VSVO_BDF && history.hasSecondOrderState()) {
+	                    (void)utils::initializeSecondOrderStateFromDisplacementHistory(
+	                        history,
+	                        history.uDot().localSpan(),
+	                        history.uDDot().localSpan(),
+	                        /*overwrite_u_dot=*/true,
+	                        /*overwrite_u_ddot=*/true);
+	                    const auto& constraints = transient.system().constraints();
+	                    if (!constraints.empty()) {
+	                        auto v = history.uDotSpan();
+	                        constraints.distributeHomogeneous(reinterpret_cast<double*>(v.data()),
+	                                                          static_cast<GlobalIndex>(v.size()));
+	                        auto a = history.uDDotSpan();
+	                        constraints.distributeHomogeneous(reinterpret_cast<double*>(a.data()),
+	                                                          static_cast<GlobalIndex>(a.size()));
+	                    }
+	                }
+	                if (callbacks.on_step_accepted) {
+	                    callbacks.on_step_accepted(history);
+	                }
 
                 accepted = true;
                 break;
@@ -2368,6 +2904,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             info.nonlinear_converged = false;
             info.newton = nr;
             info.error_norm = error_norm;
+            info.error_norm_low = error_norm_low;
+            info.error_norm_high = error_norm_high;
 
             const auto decision = options_.step_controller->onRejected(info, StepRejectReason::NonlinearSolveFailed);
             if (!decision.retry) {

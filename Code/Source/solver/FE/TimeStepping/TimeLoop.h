@@ -39,6 +39,14 @@ enum class SchemeKind : std::uint8_t {
     CG
 };
 
+enum class CollocationSolveStrategy : std::uint8_t {
+    // Assemble and solve the full block system (stages * n_dofs unknowns).
+    Monolithic,
+    // Nonlinear block Gauss–Seidel over stages (avoids the block Jacobian).
+    // Supported for temporalOrder()==1 and temporalOrder()==2 collocation.
+    StageGaussSeidel
+};
+
 struct TimeLoopOptions {
     double t0{0.0};
     double t_end{0.0};
@@ -69,6 +77,9 @@ struct TimeLoopOptions {
     // For SchemeKind::CG: degree k => k-stage Gauss collocation (order 2k).
     int dg_degree{1};
     int cg_degree{2};
+    CollocationSolveStrategy collocation_solve{CollocationSolveStrategy::Monolithic};
+    int collocation_max_outer_iterations{4};
+    double collocation_outer_tolerance{0.0}; // 0 disables convergence-based early exit
 
     NewtonOptions newton{};
 
