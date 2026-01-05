@@ -29,7 +29,6 @@
  */
 
 #include "MFEMReader.h"
-#include "MeshIO.h"
 #include <algorithm>
 #include <sstream>
 #include <stdexcept>
@@ -44,8 +43,10 @@ MFEMReader::MFEMReader() = default;
 MFEMReader::~MFEMReader() = default;
 
 MeshBase MFEMReader::read(const MeshIOOptions& options) {
-    std::string filename = options.path.empty() ? options.filename : options.path;
-    return read(filename);
+    if (options.path.empty()) {
+        throw std::runtime_error("MFEMReader::read: options.path is empty");
+    }
+    return read(options.path);
 }
 
 MeshBase MFEMReader::read(const std::string& filename) {
@@ -79,26 +80,11 @@ MeshBase MFEMReader::read(const std::string& filename) {
 }
 
 void MFEMReader::register_with_mesh_io() {
-    // Register MFEM reader
-    MeshIO::register_reader("mfem", [](const MeshIOOptions& opts) -> std::unique_ptr<MeshBase> {
-        MeshBase mesh = MFEMReader::read(opts);
-        return std::make_unique<MeshBase>(std::move(mesh));
-    });
-
-    // Register capabilities
-    MeshIO::FormatCapabilities caps;
-    caps.supports_3d = true;
-    caps.supports_2d = true;
-    caps.supports_1d = true;
-    caps.supports_mixed_cells = true;
-    caps.supports_high_order = false;  // Basic reader doesn't handle high-order
-    caps.supports_fields = false;
-    caps.supports_labels = true;  // Attributes become labels
-    caps.supports_binary = false;
-    caps.supports_ascii = true;
-    caps.supports_compression = false;
-
-    MeshIO::register_capabilities("mfem", caps);
+    // Register MFEM reader with MeshBase's I/O registry.
+    //
+    // Note: `.mesh` is used by multiple ecosystems; for now it is treated as MFEM.
+    MeshBase::register_reader("mfem", [](const MeshIOOptions& opts) { return MFEMReader::read(opts); });
+    MeshBase::register_reader("mesh", [](const MeshIOOptions& opts) { return MFEMReader::read(opts); });
 }
 
 bool MFEMReader::is_mfem_file(const std::string& filename) {

@@ -81,7 +81,7 @@ public:
   static MeshBase read(const std::string& filename);
 
   /**
-   * @brief Register Gmsh reader with MeshIO registry
+   * @brief Register Gmsh reader with MeshBase I/O registry
    *
    * Registers reader for "gmsh" and "msh" formats
    */
@@ -127,9 +127,25 @@ private:
   static MeshBase read_msh2(std::ifstream& file, const std::string& filename);
 
   /**
+   * @brief Read MSH 2.x binary format file
+   */
+  static MeshBase read_msh2_binary(std::ifstream& file,
+                                   const std::string& filename,
+                                   int data_size,
+                                   bool swap_endian);
+
+  /**
    * @brief Read MSH 4.x format file
    */
   static MeshBase read_msh4(std::ifstream& file, const std::string& filename);
+
+  /**
+   * @brief Read MSH 4.x binary format file
+   */
+  static MeshBase read_msh4_binary(std::ifstream& file,
+                                   const std::string& filename,
+                                   int data_size,
+                                   bool swap_endian);
 
   /**
    * @brief Parse $Nodes section (MSH 2.x)
@@ -139,11 +155,29 @@ private:
                              std::unordered_map<size_t, size_t>& node_id_map);
 
   /**
+   * @brief Parse $Nodes section (MSH 2.x binary)
+   */
+  static void parse_nodes_v2_binary(std::ifstream& file,
+                                    std::vector<real_t>& coords,
+                                    std::unordered_map<size_t, size_t>& node_id_map,
+                                    int data_size,
+                                    bool swap_endian);
+
+  /**
    * @brief Parse $Nodes section (MSH 4.x)
    */
   static void parse_nodes_v4(std::ifstream& file,
                              std::vector<real_t>& coords,
                              std::unordered_map<size_t, size_t>& node_id_map);
+
+  /**
+   * @brief Parse $Nodes section (MSH 4.x binary)
+   */
+  static void parse_nodes_v4_binary(std::ifstream& file,
+                                    std::vector<real_t>& coords,
+                                    std::unordered_map<size_t, size_t>& node_id_map,
+                                    int data_size,
+                                    bool swap_endian);
 
   /**
    * @brief Parse $Elements section (MSH 2.x)
@@ -152,10 +186,25 @@ private:
                                 std::vector<GmshElement>& elements);
 
   /**
+   * @brief Parse $Elements section (MSH 2.x binary)
+   */
+  static void parse_elements_v2_binary(std::ifstream& file,
+                                       std::vector<GmshElement>& elements,
+                                       bool swap_endian);
+
+  /**
    * @brief Parse $Elements section (MSH 4.x)
    */
   static void parse_elements_v4(std::ifstream& file,
                                 std::vector<GmshElement>& elements);
+
+  /**
+   * @brief Parse $Elements section (MSH 4.x binary)
+   */
+  static void parse_elements_v4_binary(std::ifstream& file,
+                                       std::vector<GmshElement>& elements,
+                                       int data_size,
+                                       bool swap_endian);
 
   /**
    * @brief Parse $PhysicalNames section

@@ -29,9 +29,11 @@
  */
 
 #include "GmshReader.h"
-#include "MeshIO.h"
 #include "../Topology/NodeOrdering.h"
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <iostream>
@@ -41,16 +43,98 @@
 
 namespace svmp {
 
+namespace {
+
+template <typename T>
+T byteswap_value(T v);
+
+template <>
+inline uint32_t byteswap_value<uint32_t>(uint32_t v) {
+    return ((v & 0x000000FFu) << 24) |
+           ((v & 0x0000FF00u) << 8) |
+           ((v & 0x00FF0000u) >> 8) |
+           ((v & 0xFF000000u) >> 24);
+}
+
+template <>
+inline uint64_t byteswap_value<uint64_t>(uint64_t v) {
+    return ((v & 0x00000000000000FFull) << 56) |
+           ((v & 0x000000000000FF00ull) << 40) |
+           ((v & 0x0000000000FF0000ull) << 24) |
+           ((v & 0x00000000FF000000ull) << 8) |
+           ((v & 0x000000FF00000000ull) >> 8) |
+           ((v & 0x0000FF0000000000ull) >> 24) |
+           ((v & 0x00FF000000000000ull) >> 40) |
+           ((v & 0xFF00000000000000ull) >> 56);
+}
+
+template <typename T>
+T read_binary(std::ifstream& file, bool swap_endian) {
+    T value{};
+    file.read(reinterpret_cast<char*>(&value), sizeof(T));
+    if (!file) {
+        throw std::runtime_error("GmshReader: Unexpected EOF while reading binary data");
+    }
+    if (!swap_endian) {
+        return value;
+    }
+
+    if constexpr (sizeof(T) == sizeof(uint32_t)) {
+        uint32_t tmp{};
+        std::memcpy(&tmp, &value, sizeof(uint32_t));
+        tmp = byteswap_value<uint32_t>(tmp);
+        std::memcpy(&value, &tmp, sizeof(uint32_t));
+        return value;
+    } else if constexpr (sizeof(T) == sizeof(uint64_t)) {
+        uint64_t tmp{};
+        std::memcpy(&tmp, &value, sizeof(uint64_t));
+        tmp = byteswap_value<uint64_t>(tmp);
+        std::memcpy(&value, &tmp, sizeof(uint64_t));
+        return value;
+    } else {
+        static_assert(sizeof(T) == 4 || sizeof(T) == 8, "Unsupported binary swap size");
+        return value;
+    }
+}
+
+double read_binary_real(std::ifstream& file, int data_size, bool swap_endian) {
+    if (data_size == 8) {
+        const double v = read_binary<double>(file, swap_endian);
+        return v;
+    }
+    if (data_size == 4) {
+        const float v = read_binary<float>(file, swap_endian);
+        return static_cast<double>(v);
+    }
+    throw std::runtime_error("GmshReader: Unsupported binary real size " + std::to_string(data_size));
+}
+
+size_t read_binary_tag(std::ifstream& file, int data_size, bool swap_endian) {
+    if (data_size == 8) {
+        const uint64_t v = read_binary<uint64_t>(file, swap_endian);
+        return static_cast<size_t>(v);
+    }
+    if (data_size == 4) {
+        const uint32_t v = read_binary<uint32_t>(file, swap_endian);
+        return static_cast<size_t>(v);
+    }
+    throw std::runtime_error("GmshReader: Unsupported binary tag size " + std::to_string(data_size));
+}
+
+} // namespace
+
 GmshReader::GmshReader() = default;
 GmshReader::~GmshReader() = default;
 
 MeshBase GmshReader::read(const MeshIOOptions& options) {
-    std::string filename = options.path.empty() ? options.filename : options.path;
-    return read(filename);
+    if (options.path.empty()) {
+        throw std::runtime_error("GmshReader::read: options.path is empty");
+    }
+    return read(options.path);
 }
 
 MeshBase GmshReader::read(const std::string& filename) {
-    std::ifstream file(filename);
+    std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) {
         throw std::runtime_error("GmshReader: Cannot open file: " + filename);
     }
@@ -87,17 +171,33 @@ MeshBase GmshReader::read(const std::string& filename) {
     std::istringstream iss(line);
     iss >> version >> file_type >> data_size;
 
-    // Check for binary format
+    bool swap_endian = false;
     if (file_type != 0) {
-        throw std::runtime_error("GmshReader: Binary format not yet supported. "
-                               "Please save as ASCII format in Gmsh.");
+        if (file_type != 1) {
+            throw std::runtime_error("GmshReader: Unsupported file_type " + std::to_string(file_type) +
+                                     " in " + filename);
+        }
+
+        // Binary: read endianness check integer and set swap flag if needed.
+        const uint32_t one = read_binary<uint32_t>(file, /*swap_endian=*/false);
+        if (one != 1u) {
+            if (byteswap_value<uint32_t>(one) == 1u) {
+                swap_endian = true;
+            } else {
+                throw std::runtime_error("GmshReader: Invalid binary endianness marker in " + filename);
+            }
+        }
+        // Consume remainder of the line after the marker (usually just newline).
+        std::getline(file, line);
     }
 
     // Route to appropriate parser based on version
     if (version >= 4.0) {
-        return read_msh4(file, filename);
+        return (file_type == 0) ? read_msh4(file, filename)
+                                : read_msh4_binary(file, filename, data_size, swap_endian);
     } else if (version >= 2.0) {
-        return read_msh2(file, filename);
+        return (file_type == 0) ? read_msh2(file, filename)
+                                : read_msh2_binary(file, filename, data_size, swap_endian);
     } else {
         throw std::runtime_error("GmshReader: Unsupported MSH version " +
                                std::to_string(version) + " in file: " + filename);
@@ -105,32 +205,9 @@ MeshBase GmshReader::read(const std::string& filename) {
 }
 
 void GmshReader::register_with_mesh_io() {
-    // Register reader function
-    auto reader = [](const MeshIOOptions& opts) -> std::unique_ptr<MeshBase> {
-        auto mesh = std::make_unique<MeshBase>();
-        *mesh = GmshReader::read(opts);
-        return mesh;
-    };
-
-    MeshIO::register_reader("gmsh", reader);
-    MeshIO::register_reader("msh", reader);
-
-    // Register format capabilities
-    MeshIO::FormatCapabilities caps;
-    caps.supports_3d = true;
-    caps.supports_2d = true;
-    caps.supports_1d = true;
-    caps.supports_mixed_cells = true;
-    caps.supports_high_order = true;
-    caps.supports_parallel = false;
-    caps.supports_fields = false;  // Gmsh MSH doesn't store field data
-    caps.supports_labels = true;   // Physical groups
-    caps.supports_compression = false;
-    caps.supports_binary = false;  // We only support ASCII currently
-    caps.supports_ascii = true;
-
-    MeshIO::register_capabilities("gmsh", caps);
-    MeshIO::register_capabilities("msh", caps);
+    // Register Gmsh reader with MeshBase's I/O registry.
+    MeshBase::register_reader("gmsh", [](const MeshIOOptions& opts) { return GmshReader::read(opts); });
+    MeshBase::register_reader("msh", [](const MeshIOOptions& opts) { return GmshReader::read(opts); });
 }
 
 bool GmshReader::is_gmsh_file(const std::string& filename) {
@@ -208,6 +285,36 @@ MeshBase GmshReader::read_msh2(std::ifstream& file, const std::string& filename)
     return build_mesh(coords, elements, physical_groups, node_id_map);
 }
 
+MeshBase GmshReader::read_msh2_binary(std::ifstream& file,
+                                      const std::string& filename,
+                                      int data_size,
+                                      bool swap_endian) {
+    std::vector<real_t> coords;
+    std::vector<GmshElement> elements;
+    std::vector<PhysicalGroup> physical_groups;
+    std::unordered_map<size_t, size_t> node_id_map;
+
+    std::string line;
+
+    // Skip to $EndMeshFormat
+    while (std::getline(file, line)) {
+        if (line.find("$EndMeshFormat") != std::string::npos) break;
+    }
+
+    while (std::getline(file, line)) {
+        if (line.find("$PhysicalNames") != std::string::npos) {
+            parse_physical_names(file, physical_groups);
+        } else if (line.find("$Nodes") != std::string::npos) {
+            parse_nodes_v2_binary(file, coords, node_id_map, data_size, swap_endian);
+        } else if (line.find("$Elements") != std::string::npos) {
+            parse_elements_v2_binary(file, elements, swap_endian);
+        }
+        // Skip other sections
+    }
+
+    return build_mesh(coords, elements, physical_groups, node_id_map);
+}
+
 void GmshReader::parse_nodes_v2(std::ifstream& file,
                                 std::vector<real_t>& coords,
                                 std::unordered_map<size_t, size_t>& node_id_map) {
@@ -240,8 +347,42 @@ void GmshReader::parse_nodes_v2(std::ifstream& file,
     std::getline(file, line);
 }
 
+void GmshReader::parse_nodes_v2_binary(std::ifstream& file,
+                                       std::vector<real_t>& coords,
+                                       std::unordered_map<size_t, size_t>& node_id_map,
+                                       int data_size,
+                                       bool swap_endian) {
+    std::string line;
+    if (!std::getline(file, line)) {
+        throw std::runtime_error("GmshReader: Unexpected EOF while reading $Nodes header");
+    }
+
+    size_t num_nodes = 0;
+    {
+        std::istringstream iss(line);
+        iss >> num_nodes;
+    }
+
+    coords.reserve(num_nodes * 3);
+
+    for (size_t i = 0; i < num_nodes; ++i) {
+        const int32_t node_tag = read_binary<int32_t>(file, swap_endian);
+        const double x = read_binary_real(file, data_size, swap_endian);
+        const double y = read_binary_real(file, data_size, swap_endian);
+        const double z = read_binary_real(file, data_size, swap_endian);
+
+        node_id_map[static_cast<size_t>(node_tag)] = coords.size() / 3;
+        coords.push_back(static_cast<real_t>(x));
+        coords.push_back(static_cast<real_t>(y));
+        coords.push_back(static_cast<real_t>(z));
+    }
+
+    // Skip to $EndNodes (there is typically a newline before the tag).
+    skip_section(file, "$EndNodes");
+}
+
 void GmshReader::parse_elements_v2(std::ifstream& file,
-                                   std::vector<GmshElement>& elements) {
+                                std::vector<GmshElement>& elements) {
     std::string line;
     std::getline(file, line);
 
@@ -288,6 +429,66 @@ void GmshReader::parse_elements_v2(std::ifstream& file,
     std::getline(file, line);
 }
 
+void GmshReader::parse_elements_v2_binary(std::ifstream& file,
+                                          std::vector<GmshElement>& elements,
+                                          bool swap_endian) {
+    std::string line;
+    if (!std::getline(file, line)) {
+        throw std::runtime_error("GmshReader: Unexpected EOF while reading $Elements header");
+    }
+
+    size_t num_elements = 0;
+    {
+        std::istringstream iss(line);
+        iss >> num_elements;
+    }
+
+    elements.clear();
+    elements.reserve(num_elements);
+
+    size_t remaining = num_elements;
+    while (remaining > 0) {
+        const int32_t elem_type = read_binary<int32_t>(file, swap_endian);
+        const int32_t block_count = read_binary<int32_t>(file, swap_endian);
+        const int32_t num_tags = read_binary<int32_t>(file, swap_endian);
+
+        if (block_count <= 0 || static_cast<size_t>(block_count) > remaining) {
+            throw std::runtime_error("GmshReader: Invalid binary element block count");
+        }
+
+        const int nn = gmsh_element_num_nodes(elem_type);
+
+        for (int32_t i = 0; i < block_count; ++i) {
+            // Element number (unused)
+            (void)read_binary<int32_t>(file, swap_endian);
+
+            std::vector<int32_t> tags;
+            tags.resize(static_cast<size_t>(std::max<int32_t>(0, num_tags)));
+            for (int32_t t = 0; t < num_tags; ++t) {
+                tags[static_cast<size_t>(t)] = read_binary<int32_t>(file, swap_endian);
+            }
+
+            GmshElement elem;
+            elem.type = elem_type;
+            elem.physical_tag = (num_tags >= 1) ? tags[0] : 0;
+            elem.entity_tag = (num_tags >= 2) ? tags[1] : elem.physical_tag;
+
+            elem.nodes.resize(static_cast<size_t>(nn));
+            for (int n = 0; n < nn; ++n) {
+                const int32_t node_tag = read_binary<int32_t>(file, swap_endian);
+                elem.nodes[static_cast<size_t>(n)] = static_cast<size_t>(node_tag);
+            }
+
+            elements.push_back(std::move(elem));
+        }
+
+        remaining -= static_cast<size_t>(block_count);
+    }
+
+    // Skip to $EndElements (there is typically a newline before the tag).
+    skip_section(file, "$EndElements");
+}
+
 // ==========================================
 // MSH 4.x Format Parser
 // ==========================================
@@ -313,6 +514,36 @@ MeshBase GmshReader::read_msh4(std::ifstream& file, const std::string& filename)
             parse_nodes_v4(file, coords, node_id_map);
         } else if (line.find("$Elements") != std::string::npos) {
             parse_elements_v4(file, elements);
+        }
+        // Skip other sections
+    }
+
+    return build_mesh(coords, elements, physical_groups, node_id_map);
+}
+
+MeshBase GmshReader::read_msh4_binary(std::ifstream& file,
+                                      const std::string& filename,
+                                      int data_size,
+                                      bool swap_endian) {
+    std::vector<real_t> coords;
+    std::vector<GmshElement> elements;
+    std::vector<PhysicalGroup> physical_groups;
+    std::unordered_map<size_t, size_t> node_id_map;
+
+    std::string line;
+
+    // Skip to $EndMeshFormat
+    while (std::getline(file, line)) {
+        if (line.find("$EndMeshFormat") != std::string::npos) break;
+    }
+
+    while (std::getline(file, line)) {
+        if (line.find("$PhysicalNames") != std::string::npos) {
+            parse_physical_names(file, physical_groups);
+        } else if (line.find("$Nodes") != std::string::npos) {
+            parse_nodes_v4_binary(file, coords, node_id_map, data_size, swap_endian);
+        } else if (line.find("$Elements") != std::string::npos) {
+            parse_elements_v4_binary(file, elements, data_size, swap_endian);
         }
         // Skip other sections
     }
@@ -368,6 +599,73 @@ void GmshReader::parse_nodes_v4(std::ifstream& file,
     std::getline(file, line);
 }
 
+void GmshReader::parse_nodes_v4_binary(std::ifstream& file,
+                                       std::vector<real_t>& coords,
+                                       std::unordered_map<size_t, size_t>& node_id_map,
+                                       int data_size,
+                                       bool swap_endian) {
+    std::string line;
+    if (!std::getline(file, line)) {
+        throw std::runtime_error("GmshReader: Unexpected EOF while reading $Nodes header");
+    }
+
+    // Header: numEntityBlocks numNodes minNodeTag maxNodeTag
+    size_t num_entity_blocks = 0;
+    size_t num_nodes = 0;
+    size_t min_tag = 0;
+    size_t max_tag = 0;
+    {
+        std::istringstream iss(line);
+        iss >> num_entity_blocks >> num_nodes >> min_tag >> max_tag;
+    }
+    (void)min_tag;
+    (void)max_tag;
+
+    coords.reserve(num_nodes * 3);
+
+    for (size_t block = 0; block < num_entity_blocks; ++block) {
+        if (!std::getline(file, line)) {
+            throw std::runtime_error("GmshReader: Unexpected EOF while reading $Nodes block header");
+        }
+
+        int entity_dim = 0;
+        int entity_tag = 0;
+        int parametric = 0;
+        size_t num_nodes_in_block = 0;
+        {
+            std::istringstream iss(line);
+            iss >> entity_dim >> entity_tag >> parametric >> num_nodes_in_block;
+        }
+
+        std::vector<size_t> node_tags(num_nodes_in_block);
+        for (size_t i = 0; i < num_nodes_in_block; ++i) {
+            node_tags[i] = read_binary_tag(file, data_size, swap_endian);
+        }
+
+        for (size_t i = 0; i < num_nodes_in_block; ++i) {
+            const double x = read_binary_real(file, data_size, swap_endian);
+            const double y = read_binary_real(file, data_size, swap_endian);
+            const double z = read_binary_real(file, data_size, swap_endian);
+
+            node_id_map[node_tags[i]] = coords.size() / 3;
+            coords.push_back(static_cast<real_t>(x));
+            coords.push_back(static_cast<real_t>(y));
+            coords.push_back(static_cast<real_t>(z));
+        }
+
+        // Optional parametric coordinates: ignore (read and discard).
+        if (parametric) {
+            for (size_t i = 0; i < num_nodes_in_block; ++i) {
+                for (int d = 0; d < entity_dim; ++d) {
+                    (void)read_binary_real(file, data_size, swap_endian);
+                }
+            }
+        }
+    }
+
+    skip_section(file, "$EndNodes");
+}
+
 void GmshReader::parse_elements_v4(std::ifstream& file,
                                    std::vector<GmshElement>& elements) {
     std::string line;
@@ -413,6 +711,66 @@ void GmshReader::parse_elements_v4(std::ifstream& file,
 
     // Read $EndElements
     std::getline(file, line);
+}
+
+void GmshReader::parse_elements_v4_binary(std::ifstream& file,
+                                          std::vector<GmshElement>& elements,
+                                          int data_size,
+                                          bool swap_endian) {
+    std::string line;
+    if (!std::getline(file, line)) {
+        throw std::runtime_error("GmshReader: Unexpected EOF while reading $Elements header");
+    }
+
+    size_t num_entity_blocks = 0;
+    size_t num_elements = 0;
+    size_t min_tag = 0;
+    size_t max_tag = 0;
+    {
+        std::istringstream iss(line);
+        iss >> num_entity_blocks >> num_elements >> min_tag >> max_tag;
+    }
+    (void)min_tag;
+    (void)max_tag;
+
+    elements.clear();
+    elements.reserve(num_elements);
+
+    for (size_t block = 0; block < num_entity_blocks; ++block) {
+        if (!std::getline(file, line)) {
+            throw std::runtime_error("GmshReader: Unexpected EOF while reading $Elements block header");
+        }
+
+        int entity_dim = 0;
+        int entity_tag = 0;
+        int elem_type = 0;
+        size_t num_elements_in_block = 0;
+        {
+            std::istringstream iss(line);
+            iss >> entity_dim >> entity_tag >> elem_type >> num_elements_in_block;
+        }
+        (void)entity_dim;
+
+        const int num_nodes = gmsh_element_num_nodes(elem_type);
+        for (size_t i = 0; i < num_elements_in_block; ++i) {
+            // Element tag (unused)
+            (void)read_binary_tag(file, data_size, swap_endian);
+
+            GmshElement elem;
+            elem.type = elem_type;
+            elem.entity_tag = entity_tag;
+            elem.physical_tag = entity_tag; // best-effort; $Entities not parsed
+
+            elem.nodes.resize(static_cast<size_t>(num_nodes));
+            for (int n = 0; n < num_nodes; ++n) {
+                elem.nodes[static_cast<size_t>(n)] = read_binary_tag(file, data_size, swap_endian);
+            }
+
+            elements.push_back(std::move(elem));
+        }
+    }
+
+    skip_section(file, "$EndElements");
 }
 
 void GmshReader::parse_physical_names(std::ifstream& file,

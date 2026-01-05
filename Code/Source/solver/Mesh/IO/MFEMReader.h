@@ -83,9 +83,9 @@ public:
     static MeshBase read(const std::string& filename);
 
     /**
-     * @brief Register MFEM reader with MeshIO registry
+     * @brief Register MFEM reader with MeshBase I/O registry
      *
-     * Registers reader for "mfem" and "mesh" formats
+     * Registers readers for "mfem" and "mesh" formats
      */
     static void register_with_mesh_io();
 
