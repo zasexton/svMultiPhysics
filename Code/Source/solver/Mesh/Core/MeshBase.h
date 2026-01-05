@@ -70,7 +70,7 @@ public:
   // ---- Lifecycle ----
   MeshBase();
   explicit MeshBase(int spatial_dim);
-  ~MeshBase() = default;
+  ~MeshBase();
 
   // Copy and move constructors
   MeshBase(const MeshBase&) = delete;

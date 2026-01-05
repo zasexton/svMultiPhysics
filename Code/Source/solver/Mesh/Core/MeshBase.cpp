@@ -38,10 +38,18 @@
 #include "../Labels/MeshLabels.h"
 #include "../Fields/MeshFields.h"
 #include "../Boundary/BoundaryKey.h"
+#include "../IO/GmshReader.h"
+#include "../IO/MFEMReader.h"
+
+#ifdef MESH_HAS_VTK
+#include "../IO/VTKReader.h"
+#include "../IO/VTKWriter.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <numeric>
 #include <iostream>
 #include <sstream>
@@ -105,6 +113,10 @@ MeshBase::MeshBase(int spatial_dim)
         throw std::invalid_argument("MeshBase: spatial dimension must be 0, 1, 2, or 3");
     }
     event_bus_.subscribe(std::make_shared<SearchAccelInvalidator>(search_accel_.get()));
+}
+
+MeshBase::~MeshBase() {
+  MeshLabels::clear_refinement_provenance(*this);
 }
 
 // ==========================================
@@ -463,6 +475,16 @@ void MeshBase::finalize() {
                     }
                 }
 
+                // CellTopology provides canonical (sorted) face definitions and oriented face
+                // definitions, but their ordering is not guaranteed to match (e.g., tetrahedra).
+                // Build a mapping so the oriented definition used for connectivity corresponds to
+                // the same canonical face key.
+                std::unordered_map<BoundaryKey, int, BoundaryKey::Hash> oriented_face_id;
+                oriented_face_id.reserve(oriented_defs.size());
+                for (int oi = 0; oi < static_cast<int>(oriented_defs.size()); ++oi) {
+                    oriented_face_id.emplace(BoundaryKey(oriented_defs[static_cast<size_t>(oi)]), oi);
+                }
+
                 for (size_t i = 0; i < face_defs.size(); ++i) {
                     // Canonical key (sorted vertices)
                     std::vector<index_t> face_vertices;
@@ -470,14 +492,26 @@ void MeshBase::finalize() {
                     for (index_t li : face_defs[i]) face_vertices.push_back(vertices_ptr[li]);
                     BoundaryKey key(face_vertices);
 
+                    int oriented_face = static_cast<int>(i);
+                    {
+                        const auto it = oriented_face_id.find(BoundaryKey(face_defs[i]));
+                        if (it != oriented_face_id.end()) {
+                            oriented_face = it->second;
+                        }
+                    }
+
                     // Oriented face nodes (corners + high-order nodes when p>1).
                     std::vector<index_t> orn;
                     if (p <= 1) {
-                        orn.reserve(oriented_defs[i].size());
-                        for (index_t li : oriented_defs[i]) orn.push_back(vertices_ptr[li]);
+                        const auto& odef = (oriented_face >= 0 &&
+                                            oriented_face < static_cast<int>(oriented_defs.size()))
+                                               ? oriented_defs[static_cast<size_t>(oriented_face)]
+                                               : face_defs[i];
+                        orn.reserve(odef.size());
+                        for (index_t li : odef) orn.push_back(vertices_ptr[li]);
                     } else {
                         const auto local = CellTopology::high_order_face_local_nodes(cshape.family, p,
-                                                                                      static_cast<int>(i), kind);
+                                                                                      oriented_face, kind);
                         orn.reserve(local.size());
                         for (index_t li : local) {
                             const size_t idx = static_cast<size_t>(li);
@@ -573,8 +607,22 @@ void MeshBase::finalize() {
 
     // Build edge connectivity for 2D/3D meshes if not provided
     if (edge2vertex_.empty() && spatial_dim_ >= 2 && !cell_shape_.empty()) {
-        auto edges = MeshTopology::extract_edges(*this);
-        set_edges_from_arrays(edges);
+        bool polyhedron_requires_faces = false;
+        for (index_t c = 0; c < static_cast<index_t>(cell_shape_.size()); ++c) {
+            if (cell_shape_[static_cast<size_t>(c)].family != CellFamily::Polyhedron) {
+                continue;
+            }
+            // For generic polyhedra, edges are not well-defined without explicit face lists.
+            if (cell_faces(c).empty()) {
+                polyhedron_requires_faces = true;
+                break;
+            }
+        }
+
+        if (!polyhedron_requires_faces) {
+            auto edges = MeshTopology::extract_edges(*this);
+            set_edges_from_arrays(edges);
+        }
     }
 
     // Validate basic mesh consistency
@@ -726,6 +774,7 @@ std::pair<const int8_t*, size_t> MeshBase::cell_face_senses_span(index_t c) cons
     }
 	    // IDs
 	    vertex_gid_.push_back(id);
+      global2local_vertex_[id] = static_cast<index_t>(vertex_gid_.size() - 1);
 
 	    // Keep vertex labels in sync with vertices (default = INVALID_LABEL)
 	    if (vertex_label_id_.size() < n_vertices()) {
@@ -750,6 +799,7 @@ void MeshBase::add_cell(index_t id, CellFamily family, const std::vector<index_t
     shape.num_corners = static_cast<int>(vertices.size());
     cell_shape_.push_back(shape);
     cell_gid_.push_back(id);
+    global2local_cell_[id] = static_cast<index_t>(cell_gid_.size() - 1);
 
     // Keep region labels in sync with cells (default region = 0)
     if (cell_region_id_.size() < cell_shape_.size()) {
@@ -775,6 +825,7 @@ void MeshBase::add_boundary_face(index_t id, const std::vector<index_t>& vertice
     fshape.num_corners = static_cast<int>(vertices.size());
     face_shape_.push_back(fshape);
     face_gid_.push_back(id);
+    global2local_face_[id] = static_cast<index_t>(face_gid_.size() - 1);
     // Mark as boundary by setting second incident to INVALID_INDEX
     face2cell_.push_back({INVALID_INDEX, INVALID_INDEX});
 
@@ -1902,6 +1953,20 @@ std::unordered_map<std::string, MeshBase::SaveFn>& MeshBase::writers_() {
     return registry;
 }
 
+namespace {
+void ensure_meshbase_io_registered() {
+    static std::once_flag once;
+    std::call_once(once, []() {
+#ifdef MESH_HAS_VTK
+        VTKReader::register_with_mesh();
+        VTKWriter::register_with_mesh();
+#endif
+        GmshReader::register_with_mesh_io();
+        MFEMReader::register_with_mesh_io();
+    });
+}
+} // namespace
+
 void MeshBase::register_reader(const std::string& format, LoadFn fn) {
     readers_()[format] = fn;
 }
@@ -1911,6 +1976,7 @@ void MeshBase::register_writer(const std::string& format, SaveFn fn) {
 }
 
 MeshBase MeshBase::load(const MeshIOOptions& opts) {
+    ensure_meshbase_io_registered();
     auto it = readers_().find(opts.format);
     if (it == readers_().end()) {
         throw std::runtime_error("MeshBase::load: no reader for format '" + opts.format + "'");
@@ -1919,6 +1985,7 @@ MeshBase MeshBase::load(const MeshIOOptions& opts) {
 }
 
 void MeshBase::save(const MeshIOOptions& opts) const {
+    ensure_meshbase_io_registered();
     auto it = writers_().find(opts.format);
     if (it == writers_().end()) {
         throw std::runtime_error("MeshBase::save: no writer for format '" + opts.format + "'");
@@ -1927,6 +1994,7 @@ void MeshBase::save(const MeshIOOptions& opts) const {
 }
 
 std::vector<std::string> MeshBase::registered_readers() {
+    ensure_meshbase_io_registered();
     std::vector<std::string> formats;
     for (const auto& [format, fn] : readers_()) {
         formats.push_back(format);
@@ -1936,6 +2004,7 @@ std::vector<std::string> MeshBase::registered_readers() {
 }
 
 std::vector<std::string> MeshBase::registered_writers() {
+    ensure_meshbase_io_registered();
     std::vector<std::string> formats;
     for (const auto& [format, fn] : writers_()) {
         formats.push_back(format);
