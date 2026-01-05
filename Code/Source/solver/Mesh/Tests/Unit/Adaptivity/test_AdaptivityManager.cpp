@@ -520,6 +520,20 @@ TEST_F(AdaptivityManagerTest, AdaptivityUtilsUniformRefinement) {
   EXPECT_TRUE(result.success);
 }
 
+// Test 25: AdaptivityUtils uniform coarsening (round-trip after refinement)
+TEST_F(AdaptivityManagerTest, AdaptivityUtilsUniformCoarseningRoundTrip) {
+  auto mesh = create_2d_quad_mesh(1, 1);  // 1 quad
+  const size_t initial_cells = mesh->n_cells();
+
+  auto refined = AdaptivityUtils::uniform_refinement(*mesh, 1, nullptr);
+  ASSERT_TRUE(refined.success);
+  ASSERT_GT(mesh->n_cells(), initial_cells);
+
+  auto coarsened = AdaptivityUtils::uniform_coarsening(*mesh, 1, nullptr);
+  EXPECT_TRUE(coarsened.success);
+  EXPECT_EQ(mesh->n_cells(), initial_cells);
+}
+
 // Test 25: AdaptivityUtils level statistics
 TEST_F(AdaptivityManagerTest, AdaptivityUtilsLevelStatistics) {
   auto mesh = create_2d_quad_mesh(2, 2);
@@ -530,6 +544,31 @@ TEST_F(AdaptivityManagerTest, AdaptivityUtilsLevelStatistics) {
   EXPECT_GE(stats.min_level, 0);
   EXPECT_GE(stats.max_level, stats.min_level);
   EXPECT_GE(stats.cell_count_per_level.size(), 0);
+}
+
+// Test 26: AdaptivityUtils is_adapted
+TEST_F(AdaptivityManagerTest, AdaptivityUtilsIsAdapted) {
+  auto mesh = create_2d_quad_mesh(1, 1);
+  EXPECT_FALSE(AdaptivityUtils::is_adapted(*mesh));
+
+  auto refined = AdaptivityUtils::uniform_refinement(*mesh, 1, nullptr);
+  ASSERT_TRUE(refined.success);
+  EXPECT_TRUE(AdaptivityUtils::is_adapted(*mesh));
+}
+
+// Test 27: AdaptivityUtils local refinement
+TEST_F(AdaptivityManagerTest, AdaptivityUtilsLocalRefinement) {
+  auto mesh = create_2d_quad_mesh(2, 2);
+  const size_t initial_cells = mesh->n_cells();
+
+  auto result = AdaptivityUtils::local_refinement(
+      *mesh,
+      [](const std::array<double, 3>& x) { return x[0] < 1.0; },
+      1,
+      nullptr);
+
+  EXPECT_TRUE(result.success);
+  EXPECT_GT(mesh->n_cells(), initial_cells);
 }
 
 } // namespace test
