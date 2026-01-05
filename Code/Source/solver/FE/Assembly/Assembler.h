@@ -290,6 +290,12 @@ public:
     /// Get element type for a cell
     [[nodiscard]] virtual ElementType getCellType(GlobalIndex cell_id) const = 0;
 
+    /// Get domain/subdomain label for a cell (used for multi-domain/multiphysics setups)
+    ///
+    /// Default implementation returns 0 for all cells, allowing mesh adapters
+    /// that do not support domain labels to remain valid.
+    [[nodiscard]] virtual int getCellDomainId(GlobalIndex /*cell_id*/) const { return 0; }
+
     /// Get node indices for a cell
     /// @param cell_id Cell identifier
     /// @param nodes Output vector to fill with node indices

@@ -171,6 +171,15 @@ ElementType MeshAccess::getCellType(GlobalIndex cell_id) const {
     return element_type_from_mesh_cell(mesh_.base(), cell_id);
 }
 
+int MeshAccess::getCellDomainId(GlobalIndex cell_id) const {
+    if (cell_id < 0 || cell_id >= numCells()) {
+        throw FEException("MeshAccess: cell_id out of range",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+    const auto c = static_cast<svmp::index_t>(cell_id);
+    return static_cast<int>(mesh_.region_label(c));
+}
+
 void MeshAccess::getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const {
     if (cell_id < 0 || cell_id >= numCells()) {
         throw FEException("MeshAccess: cell_id out of range",
@@ -354,4 +363,3 @@ void MeshAccess::forEachInteriorFace(
 } // namespace svmp
 
 #endif // defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-

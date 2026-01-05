@@ -46,6 +46,7 @@ public:
 
     [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override;
     [[nodiscard]] ElementType getCellType(GlobalIndex cell_id) const override;
+    [[nodiscard]] int getCellDomainId(GlobalIndex cell_id) const override;
 
     void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override;
 
@@ -90,4 +91,3 @@ private:
 #endif // defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 
 #endif // SVMP_FE_ASSEMBLY_MESHACCESS_H
-
