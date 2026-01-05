@@ -47,6 +47,8 @@
 
 namespace svmp {
 
+class DistributedMesh;
+
 /**
  * @brief Topological boundary detection for finite cell complexes
  *
@@ -153,6 +155,15 @@ public:
      * @return Boundary information including faces, vertices, and components
      */
     BoundaryInfo detect_boundary();
+
+    /**
+     * @brief Detect the true domain boundary on a distributed mesh (MPI collective in MPI builds).
+     *
+     * Unlike `detect_boundary()` on a rank-local partition, this routine classifies codim-1
+     * entities using *global* incidence counts over owned cells, so partition interfaces are
+     * not misclassified as physical boundaries even when no ghost layer is present.
+     */
+    static BoundaryInfo detect_boundary_global(const DistributedMesh& mesh);
 
     /**
      * @brief Detect boundary using chain complex approach (mod 2)
