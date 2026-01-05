@@ -35,6 +35,7 @@
 #include "ErrorEstimator.h"
 #include "Marker.h"
 #include "RefinementDelta.h"
+#include "HighOrderEmbedding.h"
 #include <chrono>
 #include <memory>
 #include <string>
@@ -337,6 +338,7 @@ private:
   std::unique_ptr<QualityChecker> quality_checker_;
   std::unique_ptr<ConformityEnforcer> conformity_enforcer_;
   std::shared_ptr<AdaptivityFEInterface> fe_interface_;
+  HighOrderEmbeddingCache high_order_embedding_cache_;
 
   // Cached data from last adaptation
   std::vector<double> last_indicators_;
