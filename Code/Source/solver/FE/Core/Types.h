@@ -42,18 +42,8 @@
  */
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-#  if defined(__has_include)
-#    if __has_include("../../Mesh/Core/MeshTypes.h")
-#      include "../../Mesh/Core/MeshTypes.h"
-#      define SVMP_FE_HAS_MESH_TYPES 1
-#    else
-#      define SVMP_FE_HAS_MESH_TYPES 0
-#    endif
-#  else
-// Fallback for toolchains without __has_include: default to no Mesh types to
-// keep the FE library buildable without the Mesh library.
-#    define SVMP_FE_HAS_MESH_TYPES 0
-#  endif
+#  include "Mesh/Core/MeshTypes.h"
+#  define SVMP_FE_HAS_MESH_TYPES 1
 #else
 // Build FE without Mesh types unless explicitly enabled.
 #  define SVMP_FE_HAS_MESH_TYPES 0
