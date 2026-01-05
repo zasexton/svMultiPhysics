@@ -33,7 +33,7 @@
 
 /**
  * @file MeshMotion.h
- * @brief High-level controller for mesh motion on MeshBase / DistributedMesh.
+ * @brief High-level controller for mesh motion on the unified runtime Mesh.
  *
  * MeshMotion provides a backend-agnostic interface for advancing mesh
  * coordinates in time. Motion models, weak forms, and solver choices are
@@ -52,16 +52,15 @@
 namespace svmp {
 
 class MeshBase;
-class DistributedMesh;
 
 namespace motion {
 
 /**
  * @brief High-level mesh-motion controller.
  *
- * This class wraps either a MeshBase (serial) or a DistributedMesh
- * (parallel) instance and provides a uniform interface to advance
- * the mesh coordinates via configured motion models.
+ * This class wraps a Mesh instance (serial or MPI-distributed) and provides a
+ * uniform interface to advance the mesh coordinates via configured motion
+ * models.
  *
  * MeshMotion is intentionally FE-agnostic: it owns the mesh-side geometry
  * and field plumbing and delegates the computation of motion fields
@@ -74,11 +73,8 @@ namespace motion {
  */
 class MeshMotion {
 public:
-  /// Construct a MeshMotion wrapper around a serial mesh.
-  explicit MeshMotion(MeshBase& mesh);
-
-  /// Construct a MeshMotion wrapper around a distributed mesh.
-  explicit MeshMotion(DistributedMesh& dmesh);
+  /// Construct a MeshMotion wrapper around the unified runtime mesh.
+  explicit MeshMotion(Mesh& mesh);
 
   /// Set the configuration for mesh motion.
   void set_config(const MotionConfig& cfg) { cfg_ = cfg; }
@@ -101,13 +97,6 @@ public:
   /// distributed meshes). This always returns a valid reference.
   MeshBase& mesh();
   const MeshBase& mesh() const;
-
-  /// Return true if this controller wraps a DistributedMesh.
-  bool has_distributed_mesh() const noexcept { return dmesh_ != nullptr; }
-
-  /// Access the underlying DistributedMesh, if any (may be null).
-  DistributedMesh*       distributed_mesh()       noexcept { return dmesh_; }
-  const DistributedMesh* distributed_mesh() const noexcept { return dmesh_; }
 
   /**
    * @brief Advance the mesh coordinates by a time increment dt.
@@ -141,11 +130,8 @@ public:
   void reset_to_reference();
 
 private:
-  // Non-owning pointers to the underlying mesh objects. Exactly one of
-  // mesh_ or dmesh_ is non-null, depending on how this controller was
-  // constructed.
-  MeshBase*        mesh_  = nullptr;
-  DistributedMesh* dmesh_ = nullptr;
+  // Non-owning pointer to the underlying runtime mesh.
+  Mesh* mesh_ = nullptr;
 
   MotionConfig cfg_;
   std::shared_ptr<IMotionBackend> backend_;

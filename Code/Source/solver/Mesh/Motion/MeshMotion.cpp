@@ -50,22 +50,19 @@ namespace motion {
 
 namespace {
 
-bool all_ranks_success(const DistributedMesh* dmesh, bool local_success)
+bool all_ranks_success(const Mesh& mesh, bool local_success)
 {
 #ifdef MESH_HAS_MPI
-  if (!dmesh) {
-    return local_success;
-  }
-  if (dmesh->world_size() <= 1) {
+  if (mesh.world_size() <= 1) {
     return local_success;
   }
 
   const int local = local_success ? 1 : 0;
   int global = 0;
-  MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MIN, dmesh->mpi_comm());
+  MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MIN, mesh.mpi_comm());
   return global != 0;
 #else
-  (void)dmesh;
+  (void)mesh;
   return local_success;
 #endif
 }
@@ -115,30 +112,19 @@ void add_displacement_to_current_coords(MeshBase& mesh,
 
 } // namespace
 
-MeshMotion::MeshMotion(MeshBase& mesh)
-  : mesh_(&mesh), dmesh_(nullptr)
-{
-}
-
-MeshMotion::MeshMotion(DistributedMesh& dmesh)
-  : mesh_(nullptr), dmesh_(&dmesh)
+MeshMotion::MeshMotion(Mesh& mesh)
+  : mesh_(&mesh)
 {
 }
 
 MeshBase& MeshMotion::mesh()
 {
-  if (dmesh_) {
-    return dmesh_->local_mesh();
-  }
-  return *mesh_;
+  return mesh_->local_mesh();
 }
 
 const MeshBase& MeshMotion::mesh() const
 {
-  if (dmesh_) {
-    return dmesh_->local_mesh();
-  }
-  return *mesh_;
+  return mesh_->local_mesh();
 }
 
 bool MeshMotion::advance(double dt)
@@ -157,8 +143,8 @@ bool MeshMotion::advance(double dt)
 
   // In distributed meshes, synchronize ghost vertex coordinates before the
   // solve so substep increments are applied on a consistent base geometry.
-  if (dmesh_) {
-    dmesh_->update_exchange_ghost_coordinates(Configuration::Current);
+  if (mesh_->world_size() > 1) {
+    mesh_->update_exchange_ghost_coordinates(Configuration::Current);
   }
 
   // Attach / lookup motion fields.
@@ -236,7 +222,7 @@ bool MeshMotion::advance(double dt)
 
   std::vector<FieldHandle> exchange_disp;
   std::vector<FieldHandle> exchange_motion;
-  if (dmesh_) {
+  if (mesh_->world_size() > 1) {
     exchange_disp = {hnd.displacement};
     exchange_motion = {hnd.displacement, hnd.velocity};
   }
@@ -264,8 +250,7 @@ bool MeshMotion::advance(double dt)
     zero_motion_fields();
 
     const MotionSolveRequest req{
-        mb,
-        dmesh_,
+        *mesh_,
         cfg_,
         dt,
         step_scale,
@@ -277,7 +262,7 @@ bool MeshMotion::advance(double dt)
     const MotionSolveResult result = backend_->solve(req);
     ++backend_calls;
 
-    if (!all_ranks_success(dmesh_, result.success)) {
+    if (!all_ranks_success(*mesh_, result.success)) {
       restore_entry_state();
       return false;
     }
@@ -286,8 +271,8 @@ bool MeshMotion::advance(double dt)
 
     // In distributed meshes, synchronize the displacement increment so owned
     // values propagate to ghost/shared vertices before coordinates are updated.
-    if (dmesh_ && !exchange_disp.empty()) {
-      dmesh_->update_ghosts(exchange_disp);
+    if (mesh_->world_size() > 1 && !exchange_disp.empty()) {
+      mesh_->update_ghosts(exchange_disp);
     }
 
     // Apply displacement increment to current coordinates.
@@ -295,9 +280,8 @@ bool MeshMotion::advance(double dt)
 
     // Quality gating / backtracking.
     if (cfg_.enable_quality_guard) {
-      const MotionQualityReport report = dmesh_
-          ? evaluate_motion_quality(*dmesh_, Configuration::Current)
-          : evaluate_motion_quality(mb, Configuration::Current);
+      const MotionQualityReport report =
+          evaluate_motion_quality(*mesh_, Configuration::Current);
       const real_t suggested = suggested_step_scale(
           report,
           static_cast<real_t>(step_scale),
@@ -353,11 +337,11 @@ bool MeshMotion::advance(double dt)
 
   // In distributed meshes, ensure ghost fields are synchronized according to
   // their ghost policies and exchange ghost vertex coordinates.
-  if (dmesh_) {
+  if (mesh_->world_size() > 1) {
     if (!exchange_motion.empty()) {
-      dmesh_->update_ghosts(exchange_motion);
+      mesh_->update_ghosts(exchange_motion);
     }
-    dmesh_->update_exchange_ghost_coordinates(Configuration::Current);
+    mesh_->update_exchange_ghost_coordinates(Configuration::Current);
   }
 
   return true;

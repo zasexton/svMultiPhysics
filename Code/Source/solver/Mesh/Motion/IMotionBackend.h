@@ -51,8 +51,10 @@
 
 namespace svmp {
 
-class MeshBase;
 class DistributedMesh;
+// Phase 5 (UNIFY_MESH): prefer the unified runtime mesh type name.
+// In the Mesh library, `Mesh` is currently an alias of `DistributedMesh`.
+using Mesh = DistributedMesh;
 
 namespace motion {
 
@@ -87,8 +89,7 @@ struct MotionDirichletBC {
  * @brief Inputs to a mesh-motion solve (typically: compute displacement and optionally velocity).
  */
 struct MotionSolveRequest {
-  MeshBase& mesh;
-  DistributedMesh* dmesh;     ///< Optional (nullptr for serial meshes).
+  Mesh& mesh;
   const MotionConfig& config; ///< Mesh motion configuration.
 
   double dt = 0.0;         ///< Caller time step size (typically the full step requested by MeshMotion::advance()).

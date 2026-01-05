@@ -47,6 +47,9 @@ namespace svmp {
 
 class MeshBase;
 class DistributedMesh;
+// Phase 5 (UNIFY_MESH): prefer the unified runtime mesh type name.
+// In the Mesh library, `Mesh` is currently an alias of `DistributedMesh`.
+using Mesh = DistributedMesh;
 
 namespace motion {
 
@@ -76,9 +79,9 @@ struct MotionQualityReport {
  *  - Minimum angle
  *  - Skewness
  *
- * Note: this overload operates on a single MeshBase instance. For distributed
- * meshes (MPI) prefer the DistributedMesh overload, which filters to owned
- * cells and performs MPI reductions.
+ * Note: this overload operates on a single MeshBase instance. For MPI meshes
+ * prefer the Mesh overload, which filters to owned cells and performs MPI
+ * reductions.
  *
  * The configuration @p cfg indicates whether quality is evaluated in
  * the reference or current configuration; for motion gating it is
@@ -97,7 +100,7 @@ MotionQualityReport evaluate_motion_quality(const MeshBase& mesh,
  * The report is computed over owned cells only and, when MPI is enabled,
  * reduced across ranks to produce global min/max values.
  */
-MotionQualityReport evaluate_motion_quality(const DistributedMesh& dmesh,
+MotionQualityReport evaluate_motion_quality(const Mesh& mesh,
                                             Configuration cfg = Configuration::Current);
 
 /**

@@ -90,14 +90,14 @@ MotionQualityReport evaluate_motion_quality(const MeshBase& mesh,
   return report;
 }
 
-MotionQualityReport evaluate_motion_quality(const DistributedMesh& dmesh,
+MotionQualityReport evaluate_motion_quality(const Mesh& mesh,
                                             Configuration cfg)
 {
-  const MeshBase& mesh = dmesh.local_mesh();
+  const MeshBase& local_mesh = mesh.local_mesh();
 
   MotionQualityReport report{};
 
-  if (mesh.n_cells() == 0) {
+  if (local_mesh.n_cells() == 0) {
     report.has_inverted_cells = false;
     return report;
   }
@@ -113,25 +113,25 @@ MotionQualityReport evaluate_motion_quality(const DistributedMesh& dmesh,
 
   bool any_owned = false;
 
-  for (size_t c = 0; c < mesh.n_cells(); ++c) {
+  for (size_t c = 0; c < local_mesh.n_cells(); ++c) {
     const auto cell = static_cast<index_t>(c);
-    if (!dmesh.is_owned_cell(cell)) {
+    if (!mesh.is_owned_cell(cell)) {
       continue;
     }
     any_owned = true;
 
-    const real_t jac = MQ::compute(mesh, cell, MQ::Metric::Jacobian, cfg);
+    const real_t jac = MQ::compute(local_mesh, cell, MQ::Metric::Jacobian, cfg);
     min_jacobian = std::min(min_jacobian, jac);
     max_jacobian = std::max(max_jacobian, jac);
 
-    const real_t sj = MQ::compute(mesh, cell, MQ::Metric::ScaledJacobian, cfg);
+    const real_t sj = MQ::compute(local_mesh, cell, MQ::Metric::ScaledJacobian, cfg);
     min_scaled_jacobian = std::min(min_scaled_jacobian, sj);
     max_scaled_jacobian = std::max(max_scaled_jacobian, sj);
 
-    const real_t ang = MQ::compute(mesh, cell, MQ::Metric::MinAngle, cfg);
+    const real_t ang = MQ::compute(local_mesh, cell, MQ::Metric::MinAngle, cfg);
     min_angle_deg = std::min(min_angle_deg, ang);
 
-    const real_t skew = MQ::compute(mesh, cell, MQ::Metric::Skewness, cfg);
+    const real_t skew = MQ::compute(local_mesh, cell, MQ::Metric::Skewness, cfg);
     max_skewness = std::max(max_skewness, skew);
   }
 
@@ -146,8 +146,8 @@ MotionQualityReport evaluate_motion_quality(const DistributedMesh& dmesh,
   }
 
 #ifdef MESH_HAS_MPI
-  if (dmesh.world_size() > 1) {
-    MPI_Comm comm = dmesh.mpi_comm();
+  if (mesh.world_size() > 1) {
+    MPI_Comm comm = mesh.mpi_comm();
 
     real_t tmp = min_jacobian;
     MPI_Allreduce(&tmp, &min_jacobian, 1, MPI_DOUBLE, MPI_MIN, comm);
