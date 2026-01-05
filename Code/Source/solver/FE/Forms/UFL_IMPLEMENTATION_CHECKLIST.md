@@ -102,8 +102,10 @@ Notes:
 - [x] `Jump` (`jump(u)` / `[[u]]`)
 - [x] `Average` (`avg(u)` / `{u}`)
 - [x] Trace restrictions: `u.minus()` / `u.plus()`
-- [ ] `WeightedAverage`, `UpwindValue`, `DownwindValue` as first-class ops (planned; helpers exist for upwind/downwind)
-- [ ] `Penalty`, `NumericalFlux`, `InteriorPenalty`, `NitschePenalty` (planned as helpers; some basic helpers exist)
+- [ ] `WeightedAverage` (planned)
+- [x] `UpwindValue`, `DownwindValue` (implemented as helpers `upwindValue(u,beta)` / `downwindValue(u,beta)` in `FE/Forms/Vocabulary.h`)
+- [x] Basic interior-penalty scaling helper `interiorPenaltyCoefficient(eta,p)` (in `FE/Forms/Vocabulary.h`)
+- [ ] `Penalty`, `NumericalFlux`, `NitschePenalty` higher-level helpers (planned)
 
 ## 10. Algebraic Operators
 
