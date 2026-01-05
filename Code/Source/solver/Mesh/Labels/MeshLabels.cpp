@@ -36,6 +36,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <cstdint>
+#include <unordered_map>
 
 namespace svmp {
 
@@ -151,6 +152,71 @@ void register_split_component_names(
     used_names.insert(unique);
     mesh.register_label(unique, new_label);
   }
+}
+
+} // namespace
+
+namespace {
+
+struct ParentCellSnapshot {
+  CellShape shape{};
+  std::vector<gid_t> node_gids;
+  label_t region_label = INVALID_LABEL;
+  size_t refinement_level = 0;
+};
+
+struct RefinementTracking {
+  std::unordered_map<gid_t, gid_t> parent_by_child_gid;
+  std::unordered_map<gid_t, std::vector<gid_t>> children_by_parent_gid;
+  std::unordered_map<gid_t, int> refinement_pattern_by_child_gid;
+  std::unordered_map<gid_t, ParentCellSnapshot> parent_snapshot_by_gid;
+  std::unordered_map<gid_t, std::vector<std::pair<gid_t, double>>> vertex_provenance_by_gid;
+};
+
+std::unordered_map<const MeshBase*, RefinementTracking>& refinement_registry() {
+  static std::unordered_map<const MeshBase*, RefinementTracking> registry;
+  return registry;
+}
+
+RefinementTracking& tracking_for(MeshBase& mesh) {
+  return refinement_registry()[&mesh];
+}
+
+const RefinementTracking* tracking_for(const MeshBase& mesh) {
+  auto& reg = refinement_registry();
+  auto it = reg.find(&mesh);
+  if (it == reg.end()) return nullptr;
+  return &it->second;
+}
+
+std::vector<std::pair<gid_t, double>> flatten_vertex_recursive(
+    const MeshBase& mesh,
+    const RefinementTracking& tracking,
+    gid_t vertex_gid,
+    std::unordered_set<gid_t>& visiting) {
+  if (vertex_gid == INVALID_GID) return {};
+  if (visiting.count(vertex_gid) > 0) {
+    // Cycle (should not happen); treat as root to avoid infinite recursion.
+    return {{vertex_gid, 1.0}};
+  }
+
+  const auto it = tracking.vertex_provenance_by_gid.find(vertex_gid);
+  if (it == tracking.vertex_provenance_by_gid.end()) {
+    return {{vertex_gid, 1.0}};
+  }
+
+  visiting.insert(vertex_gid);
+  std::vector<std::pair<gid_t, double>> flat;
+  for (const auto& pw : it->second) {
+    const gid_t parent_gid = pw.first;
+    const double w = pw.second;
+    auto rec = flatten_vertex_recursive(mesh, tracking, parent_gid, visiting);
+    for (const auto& kv : rec) {
+      flat.push_back({kv.first, w * kv.second});
+    }
+  }
+  visiting.erase(vertex_gid);
+  return flat;
 }
 
 } // namespace
@@ -1058,70 +1124,198 @@ void MeshLabels::import_labels(MeshBase& mesh, EntityKind kind,
 // ---- Adaptivity provenance / refinement tracking ----
 
 void MeshLabels::clear_refinement_tracking(MeshBase& mesh) {
-  (void)mesh;
+  refinement_registry().erase(&mesh);
 }
 
 std::vector<index_t> MeshLabels::get_children_cells(const MeshBase& mesh, index_t parent_cell_id) {
-  (void)mesh;
-  (void)parent_cell_id;
-  return {};
+  if (parent_cell_id < 0) return {};
+  const auto* tracking = tracking_for(mesh);
+  if (!tracking) return {};
+
+  const gid_t parent_gid = static_cast<gid_t>(parent_cell_id);
+  const auto it = tracking->children_by_parent_gid.find(parent_gid);
+  if (it == tracking->children_by_parent_gid.end()) return {};
+
+  std::vector<index_t> children;
+  children.reserve(it->second.size());
+  for (gid_t cg : it->second) {
+    const index_t local = mesh.global_to_local_cell(cg);
+    if (local != INVALID_INDEX) {
+      children.push_back(local);
+    }
+  }
+  return children;
 }
 
 index_t MeshLabels::get_parent_cell(const MeshBase& mesh, index_t child_cell) {
-  (void)mesh;
-  (void)child_cell;
-  return INVALID_INDEX;
+  if (child_cell < 0 || static_cast<size_t>(child_cell) >= mesh.n_cells()) {
+    return INVALID_INDEX;
+  }
+  const gid_t child_gid = mesh.cell_gids().at(static_cast<size_t>(child_cell));
+  const gid_t parent_gid = get_parent_cell_gid(mesh, child_gid);
+  if (parent_gid == INVALID_GID) return INVALID_INDEX;
+  return static_cast<index_t>(parent_gid);
 }
 
 gid_t MeshLabels::get_parent_cell_gid(const MeshBase& mesh, gid_t child_cell_gid) {
-  (void)mesh;
-  (void)child_cell_gid;
-  return INVALID_GID;
+  const auto* tracking = tracking_for(mesh);
+  if (!tracking) return INVALID_GID;
+  const auto it = tracking->parent_by_child_gid.find(child_cell_gid);
+  if (it == tracking->parent_by_child_gid.end()) return INVALID_GID;
+  return it->second;
 }
 
 std::vector<gid_t> MeshLabels::get_children_cells_gid(const MeshBase& mesh, gid_t parent_cell_gid) {
-  (void)mesh;
-  (void)parent_cell_gid;
-  return {};
+  const auto* tracking = tracking_for(mesh);
+  if (!tracking) return {};
+  const auto it = tracking->children_by_parent_gid.find(parent_cell_gid);
+  if (it == tracking->children_by_parent_gid.end()) return {};
+  return it->second;
 }
 
 size_t MeshLabels::refinement_level(const MeshBase& mesh, index_t cell) {
-  (void)mesh;
-  (void)cell;
-  return 0;
+  if (cell < 0 || static_cast<size_t>(cell) >= mesh.n_cells()) {
+    return 0;
+  }
+  return mesh.refinement_level(cell);
 }
 
 int MeshLabels::get_refinement_pattern(const MeshBase& mesh, index_t cell) {
-  (void)mesh;
-  (void)cell;
-  return 0;
+  if (cell < 0 || static_cast<size_t>(cell) >= mesh.n_cells()) {
+    return -1;
+  }
+  const auto* tracking = tracking_for(mesh);
+  if (!tracking) return -1;
+  const gid_t cell_gid = mesh.cell_gids().at(static_cast<size_t>(cell));
+  const auto it = tracking->refinement_pattern_by_child_gid.find(cell_gid);
+  if (it == tracking->refinement_pattern_by_child_gid.end()) return -1;
+  return it->second;
 }
 
 size_t MeshLabels::get_sibling_count(const MeshBase& mesh, index_t cell) {
-  (void)mesh;
-  (void)cell;
-  return 0;
+  if (cell < 0 || static_cast<size_t>(cell) >= mesh.n_cells()) {
+    return 0;
+  }
+  const auto* tracking = tracking_for(mesh);
+  if (!tracking) return 0;
+
+  const gid_t cell_gid = mesh.cell_gids().at(static_cast<size_t>(cell));
+  const gid_t parent_gid = get_parent_cell_gid(mesh, cell_gid);
+  if (parent_gid == INVALID_GID) return 0;
+
+  const auto it = tracking->children_by_parent_gid.find(parent_gid);
+  if (it == tracking->children_by_parent_gid.end()) return 0;
+  return it->second.size();
 }
 
 std::map<index_t, std::vector<index_t>> MeshLabels::group_siblings_by_parent(const MeshBase& mesh) {
-  (void)mesh;
-  return {};
+  std::map<index_t, std::vector<index_t>> groups;
+  const auto* tracking = tracking_for(mesh);
+  if (!tracking) return groups;
+
+  for (index_t c = 0; c < static_cast<index_t>(mesh.n_cells()); ++c) {
+    const gid_t cg = mesh.cell_gids().at(static_cast<size_t>(c));
+    const gid_t pg = get_parent_cell_gid(mesh, cg);
+    if (pg == INVALID_GID) continue;
+    groups[static_cast<index_t>(pg)].push_back(c);
+  }
+
+  return groups;
 }
 
 bool MeshLabels::is_sibling_group_complete(const MeshBase& mesh,
                                            index_t parent_cell_id,
                                            const std::vector<bool>& coarsen_marks) {
-  (void)mesh;
-  (void)parent_cell_id;
-  (void)coarsen_marks;
-  return false;
+  if (parent_cell_id < 0) return false;
+  const auto* tracking = tracking_for(mesh);
+  if (!tracking) return false;
+
+  const gid_t parent_gid = static_cast<gid_t>(parent_cell_id);
+  const auto it = tracking->children_by_parent_gid.find(parent_gid);
+  if (it == tracking->children_by_parent_gid.end()) return false;
+
+  for (gid_t cg : it->second) {
+    const index_t local = mesh.global_to_local_cell(cg);
+    if (local == INVALID_INDEX) return false;
+    const size_t idx = static_cast<size_t>(local);
+    if (idx >= coarsen_marks.size()) return false;
+    if (!coarsen_marks[idx]) return false;
+  }
+  return true;
 }
 
 std::vector<std::pair<gid_t, double>> MeshLabels::flatten_vertex_provenance_gid(
     const MeshBase& mesh, gid_t vertex_gid) {
-  (void)mesh;
-  (void)vertex_gid;
-  return {};
+  const auto* tracking = tracking_for(mesh);
+  if (!tracking) {
+    return {{vertex_gid, 1.0}};
+  }
+
+  std::unordered_set<gid_t> visiting;
+  return flatten_vertex_recursive(mesh, *tracking, vertex_gid, visiting);
+}
+
+bool MeshLabels::has_refinement_provenance(const MeshBase& mesh) {
+  const auto* tracking = tracking_for(mesh);
+  if (!tracking) return false;
+  return !tracking->parent_by_child_gid.empty() ||
+         !tracking->children_by_parent_gid.empty() ||
+         !tracking->vertex_provenance_by_gid.empty();
+}
+
+void MeshLabels::clear_refinement_provenance(const MeshBase& mesh) {
+  refinement_registry().erase(&mesh);
+}
+
+void MeshLabels::record_cell_refinement_gid(MeshBase& mesh,
+                                            gid_t parent_cell_gid,
+                                            const CellShape& parent_shape,
+                                            const std::vector<gid_t>& parent_node_gids,
+                                            label_t parent_region_label,
+                                            size_t parent_refinement_level,
+                                            const std::vector<gid_t>& child_cell_gids,
+                                            int refinement_pattern) {
+  auto& tracking = tracking_for(mesh);
+
+  ParentCellSnapshot snap;
+  snap.shape = parent_shape;
+  snap.node_gids = parent_node_gids;
+  snap.region_label = parent_region_label;
+  snap.refinement_level = parent_refinement_level;
+  tracking.parent_snapshot_by_gid[parent_cell_gid] = std::move(snap);
+
+  tracking.children_by_parent_gid[parent_cell_gid] = child_cell_gids;
+  for (gid_t cg : child_cell_gids) {
+    tracking.parent_by_child_gid[cg] = parent_cell_gid;
+    tracking.refinement_pattern_by_child_gid[cg] = refinement_pattern;
+  }
+}
+
+void MeshLabels::record_vertex_provenance_gid(
+    MeshBase& mesh,
+    gid_t vertex_gid,
+    const std::vector<std::pair<gid_t, double>>& parent_vertex_weights) {
+  if (vertex_gid == INVALID_GID) return;
+  auto& tracking = tracking_for(mesh);
+  tracking.vertex_provenance_by_gid[vertex_gid] = parent_vertex_weights;
+}
+
+bool MeshLabels::get_parent_cell_snapshot_gid(const MeshBase& mesh,
+                                             gid_t parent_cell_gid,
+                                             CellShape& parent_shape,
+                                             std::vector<gid_t>& parent_node_gids,
+                                             label_t& parent_region_label,
+                                             size_t& parent_refinement_level) {
+  const auto* tracking = tracking_for(mesh);
+  if (!tracking) return false;
+  const auto it = tracking->parent_snapshot_by_gid.find(parent_cell_gid);
+  if (it == tracking->parent_snapshot_by_gid.end()) return false;
+
+  parent_shape = it->second.shape;
+  parent_node_gids = it->second.node_gids;
+  parent_region_label = it->second.region_label;
+  parent_refinement_level = it->second.refinement_level;
+  return true;
 }
 
 } // namespace svmp

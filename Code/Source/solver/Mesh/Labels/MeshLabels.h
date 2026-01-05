@@ -32,6 +32,7 @@
 #define SVMP_MESH_LABELS_H
 
 #include "../Core/MeshTypes.h"
+#include "../Topology/CellShape.h"
 #include <map>
 #include <utility>
 #include <vector>
@@ -249,6 +250,58 @@ public:
    */
   static std::vector<std::pair<gid_t, double>> flatten_vertex_provenance_gid(
       const MeshBase& mesh, gid_t vertex_gid);
+
+  // ---- Internal: provenance recording (used by AdaptivityManager) ----
+
+  /**
+   * @brief Return true if refinement provenance exists for this mesh instance.
+   */
+  static bool has_refinement_provenance(const MeshBase& mesh);
+
+  /**
+   * @brief Clear all refinement provenance associated with this mesh instance.
+   *
+   * This is primarily used to avoid stale pointer-keyed provenance when MeshBase
+   * objects are destroyed and their addresses are later reused.
+   */
+  static void clear_refinement_provenance(const MeshBase& mesh);
+
+  /**
+   * @brief Record one parent->children refinement relationship (GID-based).
+   *
+   * This persists even if the parent cell no longer exists in the current mesh.
+   */
+  static void record_cell_refinement_gid(MeshBase& mesh,
+                                         gid_t parent_cell_gid,
+                                         const CellShape& parent_shape,
+                                         const std::vector<gid_t>& parent_node_gids,
+                                         label_t parent_region_label,
+                                         size_t parent_refinement_level,
+                                         const std::vector<gid_t>& child_cell_gids,
+                                         int refinement_pattern);
+
+  /**
+   * @brief Record immediate vertex provenance for a newly created vertex (GID-based).
+   *
+   * Parent weights are expressed in terms of existing vertex GIDs from the
+   * mesh state that generated this vertex.
+   */
+  static void record_vertex_provenance_gid(
+      MeshBase& mesh,
+      gid_t vertex_gid,
+      const std::vector<std::pair<gid_t, double>>& parent_vertex_weights);
+
+  /**
+   * @brief Retrieve stored parent-cell snapshot data needed for coarsening.
+   *
+   * @return true if snapshot exists for this parent GID.
+   */
+  static bool get_parent_cell_snapshot_gid(const MeshBase& mesh,
+                                          gid_t parent_cell_gid,
+                                          CellShape& parent_shape,
+                                          std::vector<gid_t>& parent_node_gids,
+                                          label_t& parent_region_label,
+                                          size_t& parent_refinement_level);
 
   // ---- Named sets ----
 
