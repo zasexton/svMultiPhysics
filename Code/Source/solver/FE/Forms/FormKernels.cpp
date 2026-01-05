@@ -1,0 +1,4993 @@
+/* Copyright (c) Stanford University, The Regents of the University of California, and others.
+ *
+ * All Rights Reserved.
+ *
+ * See Copyright-SimVascular.txt for additional details.
+ */
+
+#include "Forms/FormKernels.h"
+
+#include "Constitutive/StateLayout.h"
+
+#include "Core/FEException.h"
+#include "Forms/ConstitutiveModel.h"
+#include "Forms/Dual.h"
+#include "Forms/Value.h"
+
+#include "Assembly/AssemblyContext.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cmath>
+#include <stdexcept>
+#include <unordered_map>
+
+namespace svmp {
+namespace FE {
+namespace forms {
+
+struct ConstitutiveStateLayout {
+    struct Block {
+        const ConstitutiveModel* model{nullptr};
+        std::size_t offset_bytes{0};
+        std::size_t bytes{0};
+        std::size_t alignment{1};
+    };
+
+    std::vector<Block> blocks{};
+    std::size_t bytes_per_qpt{0};
+    std::size_t alignment{alignof(std::max_align_t)};
+
+    [[nodiscard]] bool empty() const noexcept { return bytes_per_qpt == 0u; }
+
+    [[nodiscard]] const Block* find(const ConstitutiveModel* model) const noexcept
+    {
+        for (const auto& b : blocks) {
+            if (b.model == model) return &b;
+        }
+        return nullptr;
+    }
+};
+
+namespace {
+
+enum class Side : std::uint8_t { Minus, Plus };
+
+const assembly::AssemblyContext& ctxForSide(const assembly::AssemblyContext& ctx_minus,
+                                            const assembly::AssemblyContext* ctx_plus,
+                                            Side side)
+{
+    if (side == Side::Minus) return ctx_minus;
+    if (!ctx_plus) {
+        throw FEException("Forms: requested plus-side context in non-DG evaluation",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+    return *ctx_plus;
+}
+
+template<typename Scalar>
+using EvalValue = Value<Scalar>;
+
+template<typename Scalar>
+constexpr bool isScalarKind(typename EvalValue<Scalar>::Kind k) noexcept
+{
+    return k == EvalValue<Scalar>::Kind::Scalar;
+}
+
+template<typename Scalar>
+constexpr bool isVectorKind(typename EvalValue<Scalar>::Kind k) noexcept
+{
+    return k == EvalValue<Scalar>::Kind::Vector;
+}
+
+template<typename Scalar>
+constexpr bool isMatrixKind(typename EvalValue<Scalar>::Kind k) noexcept
+{
+    return k == EvalValue<Scalar>::Kind::Matrix ||
+           k == EvalValue<Scalar>::Kind::SymmetricMatrix ||
+           k == EvalValue<Scalar>::Kind::SkewMatrix;
+}
+
+template<typename Scalar>
+constexpr bool isTensor4Kind(typename EvalValue<Scalar>::Kind k) noexcept
+{
+    return k == EvalValue<Scalar>::Kind::Tensor4;
+}
+
+template<typename Scalar>
+constexpr bool sameCategory(typename EvalValue<Scalar>::Kind a,
+                            typename EvalValue<Scalar>::Kind b) noexcept
+{
+    return (isScalarKind<Scalar>(a) && isScalarKind<Scalar>(b)) ||
+           (isVectorKind<Scalar>(a) && isVectorKind<Scalar>(b)) ||
+           (isMatrixKind<Scalar>(a) && isMatrixKind<Scalar>(b)) ||
+           (isTensor4Kind<Scalar>(a) && isTensor4Kind<Scalar>(b));
+}
+
+template<typename Scalar>
+constexpr typename EvalValue<Scalar>::Kind addSubResultKind(typename EvalValue<Scalar>::Kind a,
+                                                            typename EvalValue<Scalar>::Kind b) noexcept
+{
+    if (a == b) return a;
+    if (isMatrixKind<Scalar>(a) && isMatrixKind<Scalar>(b)) {
+        return EvalValue<Scalar>::Kind::Matrix;
+    }
+    if (isTensor4Kind<Scalar>(a) && isTensor4Kind<Scalar>(b)) {
+        return EvalValue<Scalar>::Kind::Tensor4;
+    }
+    return a;
+}
+
+constexpr std::size_t idx4(int i, int j, int k, int l) noexcept
+{
+    return static_cast<std::size_t>((((i * 3) + j) * 3 + k) * 3 + l);
+}
+
+[[nodiscard]] bool isPowerOfTwo(std::size_t x) noexcept
+{
+    return x != 0u && (x & (x - 1u)) == 0u;
+}
+
+[[nodiscard]] std::size_t alignUp(std::size_t value, std::size_t alignment)
+{
+    FE_THROW_IF(alignment == 0u, InvalidArgumentException, "Forms: alignUp alignment must be non-zero");
+    FE_THROW_IF(!isPowerOfTwo(alignment), InvalidArgumentException, "Forms: alignUp alignment must be power-of-two");
+    return (value + alignment - 1u) & ~(alignment - 1u);
+}
+
+void gatherConstitutiveModels(const FormExprNode& node, std::vector<const ConstitutiveModel*>& models)
+{
+    if (node.type() == FormExprType::Constitutive) {
+        if (const auto* model = node.constitutiveModel(); model != nullptr) {
+            const bool seen = std::any_of(models.begin(), models.end(),
+                                          [&](const ConstitutiveModel* m) { return m == model; });
+            if (!seen) models.push_back(model);
+        }
+    }
+
+    for (const auto& child : node.childrenShared()) {
+        if (child) gatherConstitutiveModels(*child, models);
+    }
+}
+
+[[nodiscard]] std::shared_ptr<const ConstitutiveStateLayout> buildConstitutiveStateLayout(
+    const FormIR& ir,
+    assembly::MaterialStateSpec& spec_out)
+{
+    spec_out = {};
+
+    std::vector<const ConstitutiveModel*> models;
+    for (const auto& term : ir.terms()) {
+        const auto* root = term.integrand.node();
+        if (!root) continue;
+        gatherConstitutiveModels(*root, models);
+    }
+
+    auto layout = std::make_shared<ConstitutiveStateLayout>();
+
+    std::size_t cursor = 0;
+    std::size_t max_align = alignof(std::max_align_t);
+    for (const auto* model : models) {
+        auto ss = model->stateSpec();
+        const auto* state_layout = model->stateLayout();
+
+        if (ss.empty()) {
+            if (state_layout == nullptr || state_layout->empty()) continue;
+            ss.bytes_per_qpt = state_layout->bytesPerPoint();
+            ss.alignment = state_layout->alignment();
+        } else if (state_layout != nullptr && !state_layout->empty()) {
+            FE_THROW_IF(ss.bytes_per_qpt != state_layout->bytesPerPoint(), InvalidArgumentException,
+                        "Forms: ConstitutiveModel stateSpec bytes_per_qpt does not match stateLayout bytesPerPoint");
+            FE_THROW_IF(ss.alignment != state_layout->alignment(), InvalidArgumentException,
+                        "Forms: ConstitutiveModel stateSpec alignment does not match stateLayout alignment");
+        }
+
+        FE_THROW_IF(ss.alignment == 0u, InvalidArgumentException, "Forms: ConstitutiveModel stateSpec alignment must be > 0");
+        FE_THROW_IF(!isPowerOfTwo(ss.alignment), InvalidArgumentException,
+                    "Forms: ConstitutiveModel stateSpec alignment must be power-of-two");
+
+        cursor = alignUp(cursor, ss.alignment);
+        layout->blocks.push_back(ConstitutiveStateLayout::Block{
+            model,
+            cursor,
+            ss.bytes_per_qpt,
+            ss.alignment,
+        });
+        cursor += ss.bytes_per_qpt;
+        max_align = std::max(max_align, ss.alignment);
+    }
+
+    if (cursor == 0u) {
+        return nullptr;
+    }
+
+    layout->bytes_per_qpt = cursor;
+    layout->alignment = max_align;
+
+    spec_out.bytes_per_qpt = layout->bytes_per_qpt;
+    spec_out.alignment = layout->alignment;
+    return layout;
+}
+
+// ============================================================================
+// Numeric helpers for coefficient derivatives (finite differences)
+// ============================================================================
+
+inline constexpr Real kCoeffFDStep = 1e-7;
+inline constexpr Real kCoeffFDStep2 = 1e-5;
+
+std::array<Real, 3> fdGradScalar(const ScalarCoefficient& f, const std::array<Real, 3>& x, int dim)
+{
+    std::array<Real, 3> g{0.0, 0.0, 0.0};
+    const Real h = kCoeffFDStep;
+    for (int d = 0; d < dim; ++d) {
+        auto xp = x;
+        auto xm = x;
+        xp[static_cast<std::size_t>(d)] += h;
+        xm[static_cast<std::size_t>(d)] -= h;
+        const Real fp = f(xp[0], xp[1], xp[2]);
+        const Real fm = f(xm[0], xm[1], xm[2]);
+        g[static_cast<std::size_t>(d)] = (fp - fm) / (2.0 * h);
+    }
+    return g;
+}
+
+std::array<std::array<Real, 3>, 3> fdHessScalar(const ScalarCoefficient& f, const std::array<Real, 3>& x, int dim)
+{
+    std::array<std::array<Real, 3>, 3> H{};
+    const Real h = kCoeffFDStep2;
+    const Real f0 = f(x[0], x[1], x[2]);
+
+    // Diagonal second derivatives
+    for (int i = 0; i < dim; ++i) {
+        auto xp = x;
+        auto xm = x;
+        xp[static_cast<std::size_t>(i)] += h;
+        xm[static_cast<std::size_t>(i)] -= h;
+        const Real fp = f(xp[0], xp[1], xp[2]);
+        const Real fm = f(xm[0], xm[1], xm[2]);
+        H[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] = (fp - 2.0 * f0 + fm) / (h * h);
+    }
+
+    // Mixed second derivatives (symmetric)
+    for (int i = 0; i < dim; ++i) {
+        for (int j = i + 1; j < dim; ++j) {
+            auto xpp = x;
+            auto xpm = x;
+            auto xmp = x;
+            auto xmm = x;
+
+            xpp[static_cast<std::size_t>(i)] += h;
+            xpp[static_cast<std::size_t>(j)] += h;
+
+            xpm[static_cast<std::size_t>(i)] += h;
+            xpm[static_cast<std::size_t>(j)] -= h;
+
+            xmp[static_cast<std::size_t>(i)] -= h;
+            xmp[static_cast<std::size_t>(j)] += h;
+
+            xmm[static_cast<std::size_t>(i)] -= h;
+            xmm[static_cast<std::size_t>(j)] -= h;
+
+            const Real fpp = f(xpp[0], xpp[1], xpp[2]);
+            const Real fpm = f(xpm[0], xpm[1], xpm[2]);
+            const Real fmp = f(xmp[0], xmp[1], xmp[2]);
+            const Real fmm = f(xmm[0], xmm[1], xmm[2]);
+
+            const Real val = (fpp - fpm - fmp + fmm) / (4.0 * h * h);
+            H[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = val;
+            H[static_cast<std::size_t>(j)][static_cast<std::size_t>(i)] = val;
+        }
+    }
+
+    return H;
+}
+
+Real fdDivVector(const VectorCoefficient& f, const std::array<Real, 3>& x, int dim)
+{
+    const Real h = kCoeffFDStep;
+    Real div = 0.0;
+    for (int d = 0; d < dim; ++d) {
+        auto xp = x;
+        auto xm = x;
+        xp[static_cast<std::size_t>(d)] += h;
+        xm[static_cast<std::size_t>(d)] -= h;
+        const auto vp = f(xp[0], xp[1], xp[2]);
+        const auto vm = f(xm[0], xm[1], xm[2]);
+        div += (vp[static_cast<std::size_t>(d)] - vm[static_cast<std::size_t>(d)]) / (2.0 * h);
+    }
+    return div;
+}
+
+std::array<Real, 3> fdCurlVector(const VectorCoefficient& f, const std::array<Real, 3>& x, int dim)
+{
+    // curl(v) = [dVz/dy - dVy/dz, dVx/dz - dVz/dx, dVy/dx - dVx/dy]
+    const Real h = kCoeffFDStep;
+
+    auto d = [&](int comp, int wrt) -> Real {
+        auto xp = x;
+        auto xm = x;
+        xp[static_cast<std::size_t>(wrt)] += h;
+        xm[static_cast<std::size_t>(wrt)] -= h;
+        const auto vp = f(xp[0], xp[1], xp[2]);
+        const auto vm = f(xm[0], xm[1], xm[2]);
+        return (vp[static_cast<std::size_t>(comp)] - vm[static_cast<std::size_t>(comp)]) / (2.0 * h);
+    };
+
+    std::array<Real, 3> c{0.0, 0.0, 0.0};
+    if (dim == 2) {
+        // 2D: return curl in z component
+        c[2] = d(1, 0) - d(0, 1);
+        return c;
+    }
+
+    c[0] = d(2, 1) - d(1, 2);
+    c[1] = d(0, 2) - d(2, 0);
+    c[2] = d(1, 0) - d(0, 1);
+    return c;
+}
+
+// ============================================================================
+// Real (variational) evaluation
+// ============================================================================
+
+struct ConstitutiveCallCacheReal;
+
+struct EvalEnvReal {
+    const assembly::AssemblyContext& minus;
+    const assembly::AssemblyContext* plus{nullptr};
+    FormKind kind{FormKind::Linear};
+    Side test_active{Side::Minus};
+    Side trial_active{Side::Minus};
+    LocalIndex i{0};
+    LocalIndex j{0};
+    const ConstitutiveStateLayout* constitutive_state{nullptr};
+    ConstitutiveCallCacheReal* constitutive_cache{nullptr};
+};
+
+EvalValue<Real> evalReal(const FormExprNode& node,
+                         const EvalEnvReal& env,
+                         Side side,
+                         LocalIndex q);
+
+struct ConstitutiveCallKey {
+    const FormExprNode* node{nullptr};
+    Side side{Side::Minus};
+    LocalIndex q{0};
+    LocalIndex i{0};
+    LocalIndex j{0};
+
+    [[nodiscard]] bool operator==(const ConstitutiveCallKey& other) const noexcept
+    {
+        return node == other.node &&
+               side == other.side &&
+               q == other.q &&
+               i == other.i &&
+               j == other.j;
+    }
+};
+
+struct ConstitutiveCallKeyHash {
+    [[nodiscard]] std::size_t operator()(const ConstitutiveCallKey& key) const noexcept
+    {
+        std::size_t h = std::hash<const FormExprNode*>{}(key.node);
+        auto mix = [&](std::size_t v) {
+            h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+        };
+
+        mix(static_cast<std::size_t>(key.side));
+        mix(static_cast<std::size_t>(key.q));
+        mix(static_cast<std::size_t>(key.i));
+        mix(static_cast<std::size_t>(key.j));
+        return h;
+    }
+};
+
+struct ConstitutiveCallCacheReal {
+    std::unordered_map<ConstitutiveCallKey,
+                       std::vector<EvalValue<Real>>,
+                       ConstitutiveCallKeyHash> values{};
+};
+
+EvalValue<Real> evalRealUnary(const FormExprNode& node,
+                              const EvalEnvReal& env,
+                              Side side,
+                              LocalIndex q)
+{
+    const auto kids = node.childrenShared();
+    if (kids.size() != 1 || !kids[0]) {
+        throw std::logic_error("Forms: unary node must have exactly 1 child");
+    }
+    return evalReal(*kids[0], env, side, q);
+}
+
+EvalValue<Real> evalConstitutiveOutputReal(const FormExprNode& call_node,
+                                           const EvalEnvReal& env,
+                                           Side side,
+                                           LocalIndex q,
+                                           std::size_t output_index)
+{
+    if (call_node.type() != FormExprType::Constitutive) {
+        throw FEException("Forms: evalConstitutiveOutputReal called on non-constitutive node",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+
+    const auto* model = call_node.constitutiveModel();
+    if (!model) {
+        throw FEException("Forms: Constitutive node has no model",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+
+    const auto n_outputs = model->outputCount();
+    if (output_index >= n_outputs) {
+        throw FEException("Forms: constitutive output index out of range",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+
+    if (env.constitutive_cache != nullptr) {
+        ConstitutiveCallKey key{&call_node, side, q, env.i, env.j};
+        auto it = env.constitutive_cache->values.find(key);
+        if (it != env.constitutive_cache->values.end()) {
+            if (it->second.size() != n_outputs) {
+                throw FEException("Forms: constitutive cache output size mismatch",
+                                  __FILE__, __LINE__, __func__, FEStatus::Unknown);
+            }
+            return it->second[output_index];
+        }
+    }
+
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+
+    ConstitutiveEvalContext mctx;
+    mctx.domain = [&]() {
+        switch (ctx.contextType()) {
+            case assembly::ContextType::Cell:
+                return ConstitutiveEvalContext::Domain::Cell;
+            case assembly::ContextType::BoundaryFace:
+                return ConstitutiveEvalContext::Domain::BoundaryFace;
+            case assembly::ContextType::InteriorFace:
+                return ConstitutiveEvalContext::Domain::InteriorFace;
+            default:
+                return ConstitutiveEvalContext::Domain::Cell;
+        }
+    }();
+    mctx.side = (side == Side::Plus) ? ConstitutiveEvalContext::TraceSide::Plus
+                                     : ConstitutiveEvalContext::TraceSide::Minus;
+    mctx.dim = dim;
+    mctx.x = ctx.physicalPoint(q);
+    mctx.time = ctx.time();
+    mctx.dt = ctx.timeStep();
+    mctx.cell_id = ctx.cellId();
+    mctx.face_id = ctx.faceId();
+    mctx.local_face_id = ctx.localFaceId();
+    mctx.boundary_marker = ctx.boundaryMarker();
+    mctx.q = q;
+    mctx.num_qpts = ctx.numQuadraturePoints();
+    mctx.get_real_param = ctx.realParameterGetter();
+    mctx.get_param = ctx.parameterGetter();
+    mctx.user_data = ctx.userData();
+
+    std::size_t state_offset_bytes = 0u;
+    std::size_t state_bytes = 0u;
+
+    if (env.constitutive_state != nullptr) {
+        if (const auto* block = env.constitutive_state->find(model); block != nullptr && block->bytes > 0u) {
+            if (!ctx.hasMaterialState()) {
+                throw FEException("Forms: Constitutive node requires material state but no state is bound in this context",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto state_old = ctx.materialStateOld(q);
+            const auto state_work = ctx.materialStateWork(q);
+            const auto need = block->offset_bytes + block->bytes;
+            if (state_old.size() < need || state_work.size() < need) {
+                throw FEException("Forms: bound material state buffer is smaller than required by constitutive state layout",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            state_offset_bytes = block->offset_bytes;
+            state_bytes = block->bytes;
+            mctx.state_old = state_old.subspan(block->offset_bytes, block->bytes);
+            mctx.state_work = state_work.subspan(block->offset_bytes, block->bytes);
+        }
+    }
+
+    const auto kids = call_node.childrenShared();
+    if (kids.empty()) {
+        throw FEException("Forms: Constitutive node must have at least 1 child",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+
+    struct NonlocalRealCtx {
+        const EvalEnvReal* env{nullptr};
+        Side eval_side{Side::Minus};
+        const std::vector<std::shared_ptr<FormExprNode>>* inputs{nullptr};
+        const assembly::AssemblyContext* ctx{nullptr};
+        std::size_t state_offset_bytes{0u};
+        std::size_t state_bytes{0u};
+    };
+
+    ConstitutiveEvalContext::NonlocalAccess nonlocal{};
+    NonlocalRealCtx nonlocal_ctx{&env, side, &kids, &ctx, state_offset_bytes, state_bytes};
+    nonlocal.self = &nonlocal_ctx;
+    nonlocal.input_real = +[](const void* self, std::size_t input_index, LocalIndex qpt) -> EvalValue<Real> {
+        const auto& s = *static_cast<const NonlocalRealCtx*>(self);
+        FE_THROW_IF(s.ctx == nullptr, FEException,
+                    "Forms: nonlocal input_real missing context");
+        FE_THROW_IF(s.inputs == nullptr, FEException,
+                    "Forms: nonlocal input_real missing inputs");
+        FE_THROW_IF(qpt >= s.ctx->numQuadraturePoints(), InvalidArgumentException,
+                    "Forms: nonlocal input_real qpt out of range");
+        FE_THROW_IF(input_index >= s.inputs->size(), InvalidArgumentException,
+                    "Forms: nonlocal input_real input_index out of range");
+        const auto& child = (*s.inputs)[input_index];
+        FE_THROW_IF(!child, InvalidArgumentException,
+                    "Forms: nonlocal input_real input node is null");
+        FE_THROW_IF(s.env == nullptr, FEException,
+                    "Forms: nonlocal input_real missing eval environment");
+        return evalReal(*child, *s.env, s.eval_side, qpt);
+    };
+    nonlocal.state_old = +[](const void* self, LocalIndex qpt) -> std::span<const std::byte> {
+        const auto& s = *static_cast<const NonlocalRealCtx*>(self);
+        if (s.state_bytes == 0u) return {};
+        FE_THROW_IF(s.ctx == nullptr, FEException,
+                    "Forms: nonlocal state_old missing context");
+        FE_THROW_IF(!s.ctx->hasMaterialState(), InvalidArgumentException,
+                    "Forms: nonlocal state_old requires bound material state");
+        FE_THROW_IF(qpt >= s.ctx->numQuadraturePoints(), InvalidArgumentException,
+                    "Forms: nonlocal state_old qpt out of range");
+        const auto state = s.ctx->materialStateOld(qpt);
+        const auto need = s.state_offset_bytes + s.state_bytes;
+        FE_THROW_IF(state.size() < need, InvalidArgumentException,
+                    "Forms: nonlocal state_old buffer smaller than required");
+        return state.subspan(s.state_offset_bytes, s.state_bytes);
+    };
+    nonlocal.state_work = +[](const void* self, LocalIndex qpt) -> std::span<std::byte> {
+        const auto& s = *static_cast<const NonlocalRealCtx*>(self);
+        if (s.state_bytes == 0u) return {};
+        FE_THROW_IF(s.ctx == nullptr, FEException,
+                    "Forms: nonlocal state_work missing context");
+        FE_THROW_IF(!s.ctx->hasMaterialState(), InvalidArgumentException,
+                    "Forms: nonlocal state_work requires bound material state");
+        FE_THROW_IF(qpt >= s.ctx->numQuadraturePoints(), InvalidArgumentException,
+                    "Forms: nonlocal state_work qpt out of range");
+        const auto state = s.ctx->materialStateWork(qpt);
+        const auto need = s.state_offset_bytes + s.state_bytes;
+        FE_THROW_IF(state.size() < need, InvalidArgumentException,
+                    "Forms: nonlocal state_work buffer smaller than required");
+        return state.subspan(s.state_offset_bytes, s.state_bytes);
+    };
+    nonlocal.physical_point = +[](const void* self, LocalIndex qpt) -> std::array<Real, 3> {
+        const auto& s = *static_cast<const NonlocalRealCtx*>(self);
+        FE_THROW_IF(s.ctx == nullptr, FEException,
+                    "Forms: nonlocal physical_point missing context");
+        FE_THROW_IF(qpt >= s.ctx->numQuadraturePoints(), InvalidArgumentException,
+                    "Forms: nonlocal physical_point qpt out of range");
+        return s.ctx->physicalPoint(qpt);
+    };
+    nonlocal.integration_weight = +[](const void* self, LocalIndex qpt) -> Real {
+        const auto& s = *static_cast<const NonlocalRealCtx*>(self);
+        FE_THROW_IF(s.ctx == nullptr, FEException,
+                    "Forms: nonlocal integration_weight missing context");
+        FE_THROW_IF(qpt >= s.ctx->numQuadraturePoints(), InvalidArgumentException,
+                    "Forms: nonlocal integration_weight qpt out of range");
+        return s.ctx->integrationWeight(qpt);
+    };
+
+    mctx.nonlocal = &nonlocal;
+
+    std::vector<EvalValue<Real>> inputs;
+    inputs.reserve(kids.size());
+    for (const auto& child : kids) {
+        if (!child) {
+            throw FEException("Forms: Constitutive node has a null child",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        }
+        inputs.push_back(evalReal(*child, env, side, q));
+    }
+
+    std::vector<EvalValue<Real>> outputs(n_outputs);
+    model->evaluateNaryOutputs({inputs.data(), inputs.size()}, mctx, {outputs.data(), outputs.size()});
+
+    if (env.constitutive_cache != nullptr) {
+        ConstitutiveCallKey key{&call_node, side, q, env.i, env.j};
+        auto [it, inserted] = env.constitutive_cache->values.emplace(key, std::move(outputs));
+        (void)inserted;
+        return it->second[output_index];
+    }
+
+    return outputs[output_index];
+}
+
+EvalValue<Real> evalReal(const FormExprNode& node,
+                         const EvalEnvReal& env,
+                         Side side,
+                         LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+
+    switch (node.type()) {
+        case FormExprType::Constant: {
+            const Real v = node.constantValue().value_or(0.0);
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, v};
+        }
+        case FormExprType::Coordinate: {
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Vector;
+            out.v = ctx.physicalPoint(q);
+            out.vector_size = dim;
+            return out;
+        }
+        case FormExprType::ReferenceCoordinate: {
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Vector;
+            out.v = ctx.quadraturePoint(q);
+            out.vector_size = dim;
+            return out;
+        }
+        case FormExprType::Identity: {
+            const int idim = node.identityDim().value_or(dim);
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Matrix;
+            if (idim > 0) {
+                out.resizeMatrix(static_cast<std::size_t>(idim), static_cast<std::size_t>(idim));
+                for (int a = 0; a < idim; ++a) {
+                    out.matrixAt(static_cast<std::size_t>(a), static_cast<std::size_t>(a)) = 1.0;
+                }
+            }
+            return out;
+        }
+        case FormExprType::Jacobian: {
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Matrix;
+            out.m = ctx.jacobian(q);
+            out.matrix_rows = dim;
+            out.matrix_cols = dim;
+            return out;
+        }
+        case FormExprType::JacobianInverse: {
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Matrix;
+            out.m = ctx.inverseJacobian(q);
+            out.matrix_rows = dim;
+            out.matrix_cols = dim;
+            return out;
+        }
+        case FormExprType::JacobianDeterminant: {
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.jacobianDet(q)};
+        }
+        case FormExprType::Normal: {
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Vector;
+            out.v = ctx.normal(q);
+            out.vector_size = dim;
+            return out;
+        }
+        case FormExprType::CellDiameter: {
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.cellDiameter()};
+        }
+        case FormExprType::CellVolume: {
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.cellVolume()};
+        }
+        case FormExprType::FacetArea: {
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.facetArea()};
+        }
+        case FormExprType::Coefficient: {
+            if (const auto* f = node.scalarCoefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, (*f)(x[0], x[1], x[2])};
+            }
+            if (const auto* f = node.vectorCoefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                out.v = (*f)(x[0], x[1], x[2]);
+                out.vector_size = dim;
+                return out;
+            }
+            if (const auto* f = node.matrixCoefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Matrix;
+                out.m = (*f)(x[0], x[1], x[2]);
+                out.matrix_rows = dim;
+                out.matrix_cols = dim;
+                return out;
+            }
+            if (const auto* f = node.tensor4Coefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Tensor4;
+                out.t4 = (*f)(x[0], x[1], x[2]);
+                return out;
+            }
+            throw FEException("Forms: coefficient node has no callable",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        }
+        case FormExprType::Constitutive:
+            return evalConstitutiveOutputReal(node, env, side, q, 0u);
+        case FormExprType::ConstitutiveOutput: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1u || !kids[0]) {
+                throw FEException("Forms: ConstitutiveOutput node must have exactly 1 child",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto out_idx = node.constitutiveOutputIndex().value_or(0);
+            FE_THROW_IF(out_idx < 0, InvalidArgumentException,
+                        "Forms: ConstitutiveOutput node has negative output index");
+            return evalConstitutiveOutputReal(*kids[0], env, side, q, static_cast<std::size_t>(out_idx));
+        }
+        case FormExprType::TestFunction: {
+            const auto* sig = node.spaceSignature();
+            if (!sig) {
+                throw FEException("Forms: TestFunction must be bound to a FunctionSpace",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            if (sig->field_type == FieldType::Scalar) {
+                if (env.test_active != side) {
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, 0.0};
+                }
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.basisValue(env.i, q)};
+            }
+
+            if (sig->field_type == FieldType::Vector) {
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                out.vector_size = sig->value_dimension;
+                if (env.test_active != side) {
+                    return out;
+                }
+
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: TestFunction vector value_dimension must be 1..3",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex n_test = ctx.numTestDofs();
+                if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
+                    throw FEException("Forms: vector TestFunction DOF count is not divisible by value_dimension",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex dofs_per_component =
+                    static_cast<LocalIndex>(n_test / static_cast<LocalIndex>(vd));
+                const int comp = static_cast<int>(env.i / dofs_per_component);
+                if (comp < 0 || comp >= vd) {
+                    throw FEException("Forms: TestFunction vector DOF index out of range for its value_dimension",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                out.v[static_cast<std::size_t>(comp)] = ctx.basisValue(env.i, q);
+                return out;
+            }
+
+            throw FEException("Forms: TestFunction field type not supported",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::TrialFunction: {
+            if (env.kind == FormKind::Residual) {
+                // Residual forms should be evaluated by NonlinearFormKernel.
+                throw FEException("Forms: TrialFunction in residual form evaluated in variational mode",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto* sig = node.spaceSignature();
+            if (!sig) {
+                throw FEException("Forms: TrialFunction must be bound to a FunctionSpace",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            if (sig->field_type == FieldType::Scalar) {
+                if (env.trial_active != side) {
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, 0.0};
+                }
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.trialBasisValue(env.j, q)};
+            }
+
+            if (sig->field_type == FieldType::Vector) {
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                out.vector_size = sig->value_dimension;
+                if (env.trial_active != side) {
+                    return out;
+                }
+
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: TrialFunction vector value_dimension must be 1..3",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex n_trial = ctx.numTrialDofs();
+                if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+                    throw FEException("Forms: vector TrialFunction DOF count is not divisible by value_dimension",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex dofs_per_component =
+                    static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+                const int comp = static_cast<int>(env.j / dofs_per_component);
+                if (comp < 0 || comp >= vd) {
+                    throw FEException("Forms: TrialFunction vector DOF index out of range for its value_dimension",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                out.v[static_cast<std::size_t>(comp)] = ctx.trialBasisValue(env.j, q);
+                return out;
+            }
+
+            throw FEException("Forms: TrialFunction field type not supported",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::Gradient: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("grad must have 1 child");
+            const auto& child = *kids[0];
+
+            // Only support gradients of terminals in the initial implementation.
+            if (child.type() == FormExprType::TestFunction) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: grad(TestFunction) requires a bound FunctionSpace",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                if (sig->field_type == FieldType::Scalar) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Vector;
+                    out.vector_size = dim;
+                    if (env.test_active == side) {
+                        out.v = ctx.physicalGradient(env.i, q);
+                    }
+                    return out;
+                }
+
+                if (sig->field_type == FieldType::Vector) {
+                    const int vd = sig->value_dimension;
+                    if (vd <= 0 || vd > 3) {
+                        throw FEException("Forms: grad(TestFunction) vector value_dimension must be 1..3",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Matrix;
+                    out.matrix_rows = vd;
+                    out.matrix_cols = dim;
+                    if (env.test_active != side) {
+                        return out;
+                    }
+                    const LocalIndex n_test = ctx.numTestDofs();
+                    if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
+                        throw FEException("Forms: grad(TestFunction) DOF count is not divisible by value_dimension",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const LocalIndex dofs_per_component =
+                        static_cast<LocalIndex>(n_test / static_cast<LocalIndex>(vd));
+                    const int comp = static_cast<int>(env.i / dofs_per_component);
+                    if (comp < 0 || comp >= vd) {
+                        throw FEException("Forms: grad(TestFunction) vector DOF index out of range",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const auto g = ctx.physicalGradient(env.i, q);
+                    for (int c = 0; c < dim; ++c) {
+                        out.m[static_cast<std::size_t>(comp)][static_cast<std::size_t>(c)] = g[static_cast<std::size_t>(c)];
+                    }
+                    return out;
+                }
+
+                throw FEException("Forms: grad(TestFunction) field type not supported",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            if (child.type() == FormExprType::TrialFunction) {
+                if (env.kind == FormKind::Residual) {
+                    throw FEException("Forms: grad(TrialFunction) in residual form evaluated in variational mode",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: grad(TrialFunction) requires a bound FunctionSpace",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                if (sig->field_type == FieldType::Scalar) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Vector;
+                    out.vector_size = dim;
+                    if (env.trial_active == side) {
+                        out.v = ctx.trialPhysicalGradient(env.j, q);
+                    }
+                    return out;
+                }
+
+                if (sig->field_type == FieldType::Vector) {
+                    const int vd = sig->value_dimension;
+                    if (vd <= 0 || vd > 3) {
+                        throw FEException("Forms: grad(TrialFunction) vector value_dimension must be 1..3",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Matrix;
+                    out.matrix_rows = vd;
+                    out.matrix_cols = dim;
+                    if (env.trial_active != side) {
+                        return out;
+                    }
+                    const LocalIndex n_trial = ctx.numTrialDofs();
+                    if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+                        throw FEException("Forms: grad(TrialFunction) DOF count is not divisible by value_dimension",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const LocalIndex dofs_per_component =
+                        static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+                    const int comp = static_cast<int>(env.j / dofs_per_component);
+                    if (comp < 0 || comp >= vd) {
+                        throw FEException("Forms: grad(TrialFunction) vector DOF index out of range",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const auto g = ctx.trialPhysicalGradient(env.j, q);
+                    for (int c = 0; c < dim; ++c) {
+                        out.m[static_cast<std::size_t>(comp)][static_cast<std::size_t>(c)] = g[static_cast<std::size_t>(c)];
+                    }
+                    return out;
+                }
+
+                throw FEException("Forms: grad(TrialFunction) field type not supported",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            if (child.type() == FormExprType::Constant) {
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                out.vector_size = dim;
+                return out;
+            }
+            if (child.type() == FormExprType::Coefficient && child.scalarCoefficient()) {
+                const auto x = ctx.physicalPoint(q);
+                const auto g = fdGradScalar(*child.scalarCoefficient(), x, dim);
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                out.v = g;
+                out.vector_size = dim;
+                return out;
+            }
+
+            throw FEException("Forms: grad() currently supports TestFunction, TrialFunction, Constant, and scalar Coefficient only",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::Hessian: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("H() must have 1 child");
+            const auto& child = *kids[0];
+
+            if (child.type() == FormExprType::TestFunction) {
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Matrix;
+                out.matrix_rows = dim;
+                out.matrix_cols = dim;
+                if (env.test_active == side) {
+                    out.m = ctx.physicalHessian(env.i, q);
+                }
+                return out;
+            }
+            if (child.type() == FormExprType::TrialFunction) {
+                if (env.kind == FormKind::Residual) {
+                    throw FEException("Forms: H(TrialFunction) in residual form evaluated in variational mode",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Matrix;
+                out.matrix_rows = dim;
+                out.matrix_cols = dim;
+                if (env.trial_active == side) {
+                    out.m = ctx.trialPhysicalHessian(env.j, q);
+                }
+                return out;
+            }
+            if (child.type() == FormExprType::Constant) {
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Matrix;
+                out.matrix_rows = dim;
+                out.matrix_cols = dim;
+                return out;
+            }
+            if (child.type() == FormExprType::Coefficient && child.scalarCoefficient()) {
+                const auto x = ctx.physicalPoint(q);
+                const auto H = fdHessScalar(*child.scalarCoefficient(), x, dim);
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Matrix;
+                out.m = H;
+                out.matrix_rows = dim;
+                out.matrix_cols = dim;
+                return out;
+            }
+
+            throw FEException("Forms: H() currently supports TestFunction, TrialFunction, Constant, and scalar Coefficient only",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::TimeDerivative: {
+            const int order = node.timeDerivativeOrder().value_or(1);
+            if (order <= 0) {
+                throw FEException("Forms: dt(·,k) requires k >= 1",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            const auto* time_ctx = ctx.timeIntegrationContext();
+            if (!time_ctx) {
+                throw FEException("dt(...) operator requires a transient time-integration context",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            const auto* stencil = time_ctx->stencil(order);
+            if (!stencil) {
+                throw FEException("Forms: dt(·," + std::to_string(order) + ") is not supported by time integrator '" +
+                                      time_ctx->integrator_name + "'",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            // Bilinear forms contribute only the "current" coefficient (history belongs to Systems).
+            const Real scale = stencil->coeff(0);
+            const auto val = evalRealUnary(node, env, side, q);
+            if (val.kind == EvalValue<Real>::Kind::Scalar) {
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, scale * val.s};
+            }
+            if (val.kind == EvalValue<Real>::Kind::Vector) {
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                out.resizeVector(val.vectorSize());
+                for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                    out.vectorAt(d) = scale * val.vectorAt(d);
+                }
+                return out;
+            }
+            throw FEException("Forms: dt() operand did not evaluate to a scalar or vector",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        }
+        case FormExprType::Divergence: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("div must have 1 child");
+            const auto& child = *kids[0];
+            if (child.type() == FormExprType::TestFunction) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: div(TestFunction) requires a bound FunctionSpace",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Vector) {
+                    throw FEException("Forms: div(TestFunction) requires a vector-valued TestFunction",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (env.test_active != side) {
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, 0.0};
+                }
+
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: div(TestFunction) vector value_dimension must be 1..3",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex n_test = ctx.numTestDofs();
+                if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
+                    throw FEException("Forms: div(TestFunction) DOF count is not divisible by value_dimension",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex dofs_per_component =
+                    static_cast<LocalIndex>(n_test / static_cast<LocalIndex>(vd));
+                const int comp = static_cast<int>(env.i / dofs_per_component);
+                if (comp < 0 || comp >= vd) {
+                    throw FEException("Forms: div(TestFunction) vector DOF index out of range",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto g = ctx.physicalGradient(env.i, q);
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, g[static_cast<std::size_t>(comp)]};
+            }
+            if (child.type() == FormExprType::TrialFunction) {
+                if (env.kind == FormKind::Residual) {
+                    throw FEException("Forms: div(TrialFunction) in residual form evaluated in variational mode",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: div(TrialFunction) requires a bound FunctionSpace",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Vector) {
+                    throw FEException("Forms: div(TrialFunction) requires a vector-valued TrialFunction",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (env.trial_active != side) {
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, 0.0};
+                }
+
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: div(TrialFunction) vector value_dimension must be 1..3",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex n_trial = ctx.numTrialDofs();
+                if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+                    throw FEException("Forms: div(TrialFunction) DOF count is not divisible by value_dimension",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex dofs_per_component =
+                    static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+                const int comp = static_cast<int>(env.j / dofs_per_component);
+                if (comp < 0 || comp >= vd) {
+                    throw FEException("Forms: div(TrialFunction) vector DOF index out of range",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto g = ctx.trialPhysicalGradient(env.j, q);
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, g[static_cast<std::size_t>(comp)]};
+            }
+            if (child.type() == FormExprType::Coefficient && child.vectorCoefficient()) {
+                const auto x = ctx.physicalPoint(q);
+                const Real div = fdDivVector(*child.vectorCoefficient(), x, dim);
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, div};
+            }
+            if (child.type() == FormExprType::Constant) {
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, 0.0};
+            }
+            throw FEException("Forms: div() currently supports vector TestFunction/TrialFunction and vector Coefficient only",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::Curl: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("curl must have 1 child");
+            const auto& child = *kids[0];
+            if (child.type() == FormExprType::TestFunction) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: curl(TestFunction) requires a bound FunctionSpace",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Vector) {
+                    throw FEException("Forms: curl(TestFunction) requires a vector-valued TestFunction",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                if (env.test_active != side) {
+                    return out;
+                }
+
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: curl(TestFunction) vector value_dimension must be 1..3",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex n_test = ctx.numTestDofs();
+                if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
+                    throw FEException("Forms: curl(TestFunction) DOF count is not divisible by value_dimension",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex dofs_per_component =
+                    static_cast<LocalIndex>(n_test / static_cast<LocalIndex>(vd));
+                const int comp = static_cast<int>(env.i / dofs_per_component);
+                if (comp < 0 || comp >= vd) {
+                    throw FEException("Forms: curl(TestFunction) vector DOF index out of range",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                const auto g = ctx.physicalGradient(env.i, q);
+                if (dim == 2) {
+                    if (comp == 0) out.v[2] = -g[1];
+                    else if (comp == 1) out.v[2] = g[0];
+                    return out;
+                }
+                if (comp == 0) {
+                    out.v[1] = g[2];
+                    out.v[2] = -g[1];
+                } else if (comp == 1) {
+                    out.v[0] = -g[2];
+                    out.v[2] = g[0];
+                } else if (comp == 2) {
+                    out.v[0] = g[1];
+                    out.v[1] = -g[0];
+                }
+                return out;
+            }
+            if (child.type() == FormExprType::TrialFunction) {
+                if (env.kind == FormKind::Residual) {
+                    throw FEException("Forms: curl(TrialFunction) in residual form evaluated in variational mode",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: curl(TrialFunction) requires a bound FunctionSpace",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Vector) {
+                    throw FEException("Forms: curl(TrialFunction) requires a vector-valued TrialFunction",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                if (env.trial_active != side) {
+                    return out;
+                }
+
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: curl(TrialFunction) vector value_dimension must be 1..3",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex n_trial = ctx.numTrialDofs();
+                if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+                    throw FEException("Forms: curl(TrialFunction) DOF count is not divisible by value_dimension",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex dofs_per_component =
+                    static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+                const int comp = static_cast<int>(env.j / dofs_per_component);
+                if (comp < 0 || comp >= vd) {
+                    throw FEException("Forms: curl(TrialFunction) vector DOF index out of range",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                const auto g = ctx.trialPhysicalGradient(env.j, q);
+                if (dim == 2) {
+                    if (comp == 0) out.v[2] = -g[1];
+                    else if (comp == 1) out.v[2] = g[0];
+                    return out;
+                }
+                if (comp == 0) {
+                    out.v[1] = g[2];
+                    out.v[2] = -g[1];
+                } else if (comp == 1) {
+                    out.v[0] = -g[2];
+                    out.v[2] = g[0];
+                } else if (comp == 2) {
+                    out.v[0] = g[1];
+                    out.v[1] = -g[0];
+                }
+                return out;
+            }
+            if (child.type() == FormExprType::Coefficient && child.vectorCoefficient()) {
+                const auto x = ctx.physicalPoint(q);
+                const auto c = fdCurlVector(*child.vectorCoefficient(), x, dim);
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                out.v = c;
+                return out;
+            }
+            if (child.type() == FormExprType::Constant) {
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                return out;
+            }
+            throw FEException("Forms: curl() currently supports vector TestFunction/TrialFunction and vector Coefficient only",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::RestrictMinus: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("(-) must have 1 child");
+            return evalReal(*kids[0], env, Side::Minus, q);
+        }
+        case FormExprType::RestrictPlus: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("(+) must have 1 child");
+            return evalReal(*kids[0], env, Side::Plus, q);
+        }
+        case FormExprType::Jump: {
+            if (!env.plus) {
+                throw FEException("Forms: jump() used outside interior-face integral",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("jump must have 1 child");
+            const auto& child = *kids[0];
+            const auto a = evalReal(child, env, Side::Minus, q);
+            const auto b = evalReal(child, env, Side::Plus, q);
+
+            if (a.kind != b.kind) {
+                throw FEException("Forms: jump() operand has inconsistent kinds across sides",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (isVectorKind<Real>(a.kind) && a.vectorSize() != b.vectorSize()) {
+                throw FEException("Forms: jump() operand has inconsistent vector sizes across sides",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (isMatrixKind<Real>(a.kind) && (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols())) {
+                throw FEException("Forms: jump() operand has inconsistent matrix shapes across sides",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            EvalValue<Real> out;
+            out.kind = a.kind;
+            if (a.kind == EvalValue<Real>::Kind::Scalar) out.s = a.s - b.s;
+            else if (a.kind == EvalValue<Real>::Kind::Vector) {
+                out.resizeVector(a.vectorSize());
+                for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                    out.vectorAt(d) = a.vectorAt(d) - b.vectorAt(d);
+                }
+            } else if (isMatrixKind<Real>(a.kind)) {
+                out.resizeMatrix(a.matrixRows(), a.matrixCols());
+                for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                    for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                        out.matrixAt(r, c) = a.matrixAt(r, c) - b.matrixAt(r, c);
+                    }
+                }
+            } else if (isTensor4Kind<Real>(a.kind)) {
+                for (std::size_t k = 0; k < out.t4.size(); ++k) {
+                    out.t4[k] = a.t4[k] - b.t4[k];
+                }
+            }
+            return out;
+        }
+        case FormExprType::Average: {
+            if (!env.plus) {
+                throw FEException("Forms: avg() used outside interior-face integral",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("avg must have 1 child");
+            const auto& child = *kids[0];
+            const auto a = evalReal(child, env, Side::Minus, q);
+            const auto b = evalReal(child, env, Side::Plus, q);
+            if (a.kind != b.kind) {
+                throw FEException("Forms: avg() operand has inconsistent kinds across sides",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (isVectorKind<Real>(a.kind) && a.vectorSize() != b.vectorSize()) {
+                throw FEException("Forms: avg() operand has inconsistent vector sizes across sides",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (isMatrixKind<Real>(a.kind) && (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols())) {
+                throw FEException("Forms: avg() operand has inconsistent matrix shapes across sides",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            EvalValue<Real> out;
+            out.kind = a.kind;
+            if (isScalarKind<Real>(a.kind)) out.s = 0.5 * (a.s + b.s);
+            else if (isVectorKind<Real>(a.kind)) {
+                out.resizeVector(a.vectorSize());
+                for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                    out.vectorAt(d) = 0.5 * (a.vectorAt(d) + b.vectorAt(d));
+                }
+            } else if (isMatrixKind<Real>(a.kind)) {
+                out.resizeMatrix(a.matrixRows(), a.matrixCols());
+                for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                    for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                        out.matrixAt(r, c) = 0.5 * (a.matrixAt(r, c) + b.matrixAt(r, c));
+                    }
+                }
+            } else {
+                for (std::size_t k = 0; k < out.t4.size(); ++k) {
+                    out.t4[k] = 0.5 * (a.t4[k] + b.t4[k]);
+                }
+            }
+            return out;
+        }
+        case FormExprType::Negate: {
+            const auto a = evalRealUnary(node, env, side, q);
+            EvalValue<Real> out = a;
+            if (isScalarKind<Real>(a.kind)) out.s = -a.s;
+            else if (isVectorKind<Real>(a.kind)) {
+                for (std::size_t d = 0; d < out.vectorSize(); ++d) out.vectorAt(d) = -a.vectorAt(d);
+            } else if (isMatrixKind<Real>(a.kind)) {
+                for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                    for (std::size_t c = 0; c < out.matrixCols(); ++c) out.matrixAt(r, c) = -a.matrixAt(r, c);
+                }
+            } else {
+                for (std::size_t k = 0; k < out.t4.size(); ++k) {
+                    out.t4[k] = -a.t4[k];
+                }
+            }
+            return out;
+        }
+        case FormExprType::Transpose: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (!isMatrixKind<Real>(a.kind)) {
+                throw FEException("Forms: transpose() expects a matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            EvalValue<Real> out;
+            out.kind = (rows == cols) ? a.kind : EvalValue<Real>::Kind::Matrix;
+            out.resizeMatrix(cols, rows);
+            for (std::size_t r = 0; r < cols; ++r) {
+                for (std::size_t c = 0; c < rows; ++c) {
+                    out.matrixAt(r, c) = a.matrixAt(c, r);
+                }
+            }
+            return out;
+        }
+        case FormExprType::Trace: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (!isMatrixKind<Real>(a.kind)) {
+                throw FEException("Forms: trace() expects a matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || rows == 0u) {
+                throw FEException("Forms: trace() expects a square matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            Real tr = 0.0;
+            for (std::size_t d = 0; d < rows; ++d) tr += a.matrixAt(d, d);
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, tr};
+        }
+        case FormExprType::Determinant: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (!isMatrixKind<Real>(a.kind)) {
+                throw FEException("Forms: det() expects a matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || rows == 0u) {
+                throw FEException("Forms: det() expects a square matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            Real detA = 0.0;
+            if (rows == 1u) {
+                detA = a.matrixAt(0, 0);
+            } else if (rows == 2u) {
+                detA = a.matrixAt(0, 0) * a.matrixAt(1, 1) - a.matrixAt(0, 1) * a.matrixAt(1, 0);
+            } else if (rows == 3u) {
+                detA =
+                    a.matrixAt(0, 0) * (a.matrixAt(1, 1) * a.matrixAt(2, 2) - a.matrixAt(1, 2) * a.matrixAt(2, 1)) -
+                    a.matrixAt(0, 1) * (a.matrixAt(1, 0) * a.matrixAt(2, 2) - a.matrixAt(1, 2) * a.matrixAt(2, 0)) +
+                    a.matrixAt(0, 2) * (a.matrixAt(1, 0) * a.matrixAt(2, 1) - a.matrixAt(1, 1) * a.matrixAt(2, 0));
+            } else {
+                throw FEException("Forms: det() is implemented only for 1x1, 2x2, and 3x3 matrices",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, detA};
+        }
+        case FormExprType::Cofactor:
+        case FormExprType::Inverse: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (!isMatrixKind<Real>(a.kind)) {
+                throw FEException("Forms: inv()/cofactor() expects a matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || rows == 0u) {
+                throw FEException("Forms: inv()/cofactor() expects a square matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (rows > 3u) {
+                throw FEException("Forms: inv()/cofactor() is implemented only for 1x1, 2x2, and 3x3 matrices",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            EvalValue<Real> cof;
+            cof.kind = EvalValue<Real>::Kind::Matrix;
+            cof.resizeMatrix(rows, cols);
+            if (rows == 1u) {
+                cof.matrixAt(0, 0) = 1.0;
+            } else if (rows == 2u) {
+                cof.matrixAt(0, 0) = a.matrixAt(1, 1);
+                cof.matrixAt(0, 1) = -a.matrixAt(1, 0);
+                cof.matrixAt(1, 0) = -a.matrixAt(0, 1);
+                cof.matrixAt(1, 1) = a.matrixAt(0, 0);
+            } else {
+                cof.matrixAt(0, 0) = a.matrixAt(1, 1) * a.matrixAt(2, 2) - a.matrixAt(1, 2) * a.matrixAt(2, 1);
+                cof.matrixAt(0, 1) = -(a.matrixAt(1, 0) * a.matrixAt(2, 2) - a.matrixAt(1, 2) * a.matrixAt(2, 0));
+                cof.matrixAt(0, 2) = a.matrixAt(1, 0) * a.matrixAt(2, 1) - a.matrixAt(1, 1) * a.matrixAt(2, 0);
+
+                cof.matrixAt(1, 0) = -(a.matrixAt(0, 1) * a.matrixAt(2, 2) - a.matrixAt(0, 2) * a.matrixAt(2, 1));
+                cof.matrixAt(1, 1) = a.matrixAt(0, 0) * a.matrixAt(2, 2) - a.matrixAt(0, 2) * a.matrixAt(2, 0);
+                cof.matrixAt(1, 2) = -(a.matrixAt(0, 0) * a.matrixAt(2, 1) - a.matrixAt(0, 1) * a.matrixAt(2, 0));
+
+                cof.matrixAt(2, 0) = a.matrixAt(0, 1) * a.matrixAt(1, 2) - a.matrixAt(0, 2) * a.matrixAt(1, 1);
+                cof.matrixAt(2, 1) = -(a.matrixAt(0, 0) * a.matrixAt(1, 2) - a.matrixAt(0, 2) * a.matrixAt(1, 0));
+                cof.matrixAt(2, 2) = a.matrixAt(0, 0) * a.matrixAt(1, 1) - a.matrixAt(0, 1) * a.matrixAt(1, 0);
+            }
+
+            if (node.type() == FormExprType::Cofactor) {
+                return cof;
+            }
+
+            Real detA = 0.0;
+            if (rows == 1u) {
+                detA = a.matrixAt(0, 0);
+            } else if (rows == 2u) {
+                detA = a.matrixAt(0, 0) * a.matrixAt(1, 1) - a.matrixAt(0, 1) * a.matrixAt(1, 0);
+            } else {
+                detA = a.matrixAt(0, 0) * cof.matrixAt(0, 0) +
+                       a.matrixAt(0, 1) * cof.matrixAt(0, 1) +
+                       a.matrixAt(0, 2) * cof.matrixAt(0, 2);
+            }
+            if (detA == 0.0) {
+                throw FEException("Forms: inv() encountered singular matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            EvalValue<Real> invA;
+            invA.kind = EvalValue<Real>::Kind::Matrix;
+            invA.resizeMatrix(rows, cols);
+            for (std::size_t r = 0; r < rows; ++r) {
+                for (std::size_t c = 0; c < cols; ++c) {
+                    invA.matrixAt(r, c) = cof.matrixAt(c, r) / detA;
+                }
+            }
+            return invA;
+        }
+        case FormExprType::SymmetricPart:
+        case FormExprType::SkewPart: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (!isMatrixKind<Real>(a.kind)) {
+                throw FEException("Forms: sym()/skew() expects a matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols) {
+                throw FEException("Forms: sym()/skew() expects a square matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            EvalValue<Real> out;
+            out.kind = (node.type() == FormExprType::SymmetricPart)
+                ? EvalValue<Real>::Kind::SymmetricMatrix
+                : EvalValue<Real>::Kind::SkewMatrix;
+            out.resizeMatrix(rows, cols);
+            for (std::size_t r = 0; r < rows; ++r) {
+                for (std::size_t c = 0; c < cols; ++c) {
+                    const Real art = a.matrixAt(r, c);
+                    const Real atr = a.matrixAt(c, r);
+                    out.matrixAt(r, c) = (node.type() == FormExprType::SymmetricPart) ? (0.5 * (art + atr))
+                                                                                      : (0.5 * (art - atr));
+                }
+            }
+            return out;
+        }
+        case FormExprType::Deviator: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (!isMatrixKind<Real>(a.kind)) {
+                throw FEException("Forms: dev() expects a matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            Real tr = 0.0;
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || rows == 0u) {
+                throw FEException("Forms: dev() expects a square matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            for (std::size_t d = 0; d < rows; ++d) tr += a.matrixAt(d, d);
+            const Real mean = tr / static_cast<Real>(rows);
+
+            EvalValue<Real> out = a;
+            out.kind = isMatrixKind<Real>(a.kind) ? a.kind : EvalValue<Real>::Kind::Matrix;
+            for (std::size_t d = 0; d < rows; ++d) out.matrixAt(d, d) -= mean;
+            return out;
+        }
+        case FormExprType::Norm: {
+            const auto a = evalRealUnary(node, env, side, q);
+            Real nrm = 0.0;
+            if (isScalarKind<Real>(a.kind)) {
+                nrm = std::abs(a.s);
+            } else if (isVectorKind<Real>(a.kind)) {
+                for (std::size_t d = 0; d < a.vectorSize(); ++d) nrm += a.vectorAt(d) * a.vectorAt(d);
+                nrm = std::sqrt(nrm);
+            } else if (isMatrixKind<Real>(a.kind)) {
+                for (std::size_t r = 0; r < a.matrixRows(); ++r) {
+                    for (std::size_t c = 0; c < a.matrixCols(); ++c) {
+                        const Real v = a.matrixAt(r, c);
+                        nrm += v * v;
+                    }
+                }
+                nrm = std::sqrt(nrm);
+            } else {
+                for (std::size_t k = 0; k < a.t4.size(); ++k) {
+                    nrm += a.t4[k] * a.t4[k];
+                }
+                nrm = std::sqrt(nrm);
+            }
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, nrm};
+        }
+        case FormExprType::Normalize: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (!isVectorKind<Real>(a.kind)) {
+                throw FEException("Forms: normalize() expects a vector",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            Real nrm = 0.0;
+            for (std::size_t d = 0; d < a.vectorSize(); ++d) nrm += a.vectorAt(d) * a.vectorAt(d);
+            nrm = std::sqrt(nrm);
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Vector;
+            out.resizeVector(a.vectorSize());
+            if (nrm == 0.0) return out;
+            for (std::size_t d = 0; d < out.vectorSize(); ++d) out.vectorAt(d) = a.vectorAt(d) / nrm;
+            return out;
+        }
+        case FormExprType::AbsoluteValue: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (a.kind != EvalValue<Real>::Kind::Scalar) {
+                throw FEException("Forms: abs() expects a scalar",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, std::abs(a.s)};
+        }
+        case FormExprType::Sign: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (a.kind != EvalValue<Real>::Kind::Scalar) {
+                throw FEException("Forms: sign() expects a scalar",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const Real s = (a.s > 0.0) ? 1.0 : ((a.s < 0.0) ? -1.0 : 0.0);
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, s};
+        }
+        case FormExprType::Sqrt:
+        case FormExprType::Exp:
+        case FormExprType::Log: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (a.kind != EvalValue<Real>::Kind::Scalar) {
+                throw FEException("Forms: sqrt/exp/log expects a scalar",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const Real v = (node.type() == FormExprType::Sqrt) ? std::sqrt(a.s)
+                         : (node.type() == FormExprType::Exp)  ? std::exp(a.s)
+                                                              : std::log(a.s);
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, v};
+        }
+        case FormExprType::Add:
+        case FormExprType::Subtract:
+        case FormExprType::Multiply:
+        case FormExprType::Divide:
+        case FormExprType::InnerProduct:
+        case FormExprType::DoubleContraction:
+        case FormExprType::OuterProduct:
+        case FormExprType::CrossProduct:
+        case FormExprType::Power:
+        case FormExprType::Minimum:
+        case FormExprType::Maximum:
+        case FormExprType::Less:
+        case FormExprType::LessEqual:
+        case FormExprType::Greater:
+        case FormExprType::GreaterEqual:
+        case FormExprType::Equal:
+        case FormExprType::NotEqual: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 2 || !kids[0] || !kids[1]) {
+                throw std::logic_error("Forms: binary node must have 2 children");
+            }
+            const auto a = evalReal(*kids[0], env, side, q);
+            const auto b = evalReal(*kids[1], env, side, q);
+
+            if (node.type() == FormExprType::Add || node.type() == FormExprType::Subtract) {
+                if (!sameCategory<Real>(a.kind, b.kind)) {
+                    throw FEException("Forms: add/sub kind mismatch",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (isVectorKind<Real>(a.kind) && a.vectorSize() != b.vectorSize()) {
+                    throw FEException("Forms: add/sub vector size mismatch",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (isMatrixKind<Real>(a.kind) && (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols())) {
+                    throw FEException("Forms: add/sub matrix shape mismatch",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                EvalValue<Real> out;
+                out.kind = addSubResultKind<Real>(a.kind, b.kind);
+                const Real sgn = (node.type() == FormExprType::Add) ? 1.0 : -1.0;
+                if (isScalarKind<Real>(a.kind)) out.s = a.s + sgn * b.s;
+                else if (isVectorKind<Real>(a.kind)) {
+                    out.resizeVector(a.vectorSize());
+                    for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                        out.vectorAt(d) = a.vectorAt(d) + sgn * b.vectorAt(d);
+                    }
+                } else if (isMatrixKind<Real>(a.kind)) {
+                    out.resizeMatrix(a.matrixRows(), a.matrixCols());
+                    for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                            out.matrixAt(r, c) = a.matrixAt(r, c) + sgn * b.matrixAt(r, c);
+                        }
+                    }
+                } else {
+                    for (std::size_t k = 0; k < out.t4.size(); ++k) {
+                        out.t4[k] = a.t4[k] + sgn * b.t4[k];
+                    }
+                }
+                return out;
+            }
+
+            if (node.type() == FormExprType::Multiply) {
+                // Scalar * Scalar / Scalar * Vector / Scalar * Matrix
+                if (isScalarKind<Real>(a.kind) && isScalarKind<Real>(b.kind)) {
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, a.s * b.s};
+                }
+                if (isScalarKind<Real>(a.kind) && isVectorKind<Real>(b.kind)) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Vector;
+                    out.resizeVector(b.vectorSize());
+                    for (std::size_t d = 0; d < out.vectorSize(); ++d) out.vectorAt(d) = a.s * b.vectorAt(d);
+                    return out;
+                }
+                if (isVectorKind<Real>(a.kind) && isScalarKind<Real>(b.kind)) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Vector;
+                    out.resizeVector(a.vectorSize());
+                    for (std::size_t d = 0; d < out.vectorSize(); ++d) out.vectorAt(d) = a.vectorAt(d) * b.s;
+                    return out;
+                }
+                if (isScalarKind<Real>(a.kind) && isMatrixKind<Real>(b.kind)) {
+                    EvalValue<Real> out;
+                    out.kind = b.kind;
+                    out.resizeMatrix(b.matrixRows(), b.matrixCols());
+                    for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                            out.matrixAt(r, c) = a.s * b.matrixAt(r, c);
+                        }
+                    }
+                    return out;
+                }
+                if (isMatrixKind<Real>(a.kind) && isScalarKind<Real>(b.kind)) {
+                    EvalValue<Real> out;
+                    out.kind = a.kind;
+                    out.resizeMatrix(a.matrixRows(), a.matrixCols());
+                    for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                            out.matrixAt(r, c) = a.matrixAt(r, c) * b.s;
+                        }
+                    }
+                    return out;
+                }
+                // Matrix * Vector / Vector * Matrix / Matrix * Matrix
+                if (isMatrixKind<Real>(a.kind) && isVectorKind<Real>(b.kind)) {
+                    const auto rows = a.matrixRows();
+                    const auto cols = a.matrixCols();
+                    if (b.vectorSize() != cols) {
+                        throw FEException("Forms: matrix-vector multiplication shape mismatch",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Vector;
+                    out.resizeVector(rows);
+                    for (std::size_t r = 0; r < rows; ++r) {
+                        Real sum = 0.0;
+                        for (std::size_t c = 0; c < cols; ++c) {
+                            sum += a.matrixAt(r, c) * b.vectorAt(c);
+                        }
+                        out.vectorAt(r) = sum;
+                    }
+                    return out;
+                }
+                if (isVectorKind<Real>(a.kind) && isMatrixKind<Real>(b.kind)) {
+                    const auto rows = b.matrixRows();
+                    const auto cols = b.matrixCols();
+                    if (a.vectorSize() != rows) {
+                        throw FEException("Forms: vector-matrix multiplication shape mismatch",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Vector;
+                    out.resizeVector(cols);
+                    for (std::size_t c = 0; c < cols; ++c) {
+                        Real sum = 0.0;
+                        for (std::size_t r = 0; r < rows; ++r) {
+                            sum += a.vectorAt(r) * b.matrixAt(r, c);
+                        }
+                        out.vectorAt(c) = sum;
+                    }
+                    return out;
+                }
+                if (isMatrixKind<Real>(a.kind) && isMatrixKind<Real>(b.kind)) {
+                    const auto rows = a.matrixRows();
+                    const auto inner_dim = a.matrixCols();
+                    const auto cols = b.matrixCols();
+                    if (b.matrixRows() != inner_dim) {
+                        throw FEException("Forms: matrix-matrix multiplication shape mismatch",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Matrix;
+                    out.resizeMatrix(rows, cols);
+                    for (std::size_t r = 0; r < rows; ++r) {
+                        for (std::size_t c = 0; c < cols; ++c) {
+                            Real sum = 0.0;
+                            for (std::size_t k = 0; k < inner_dim; ++k) {
+                                sum += a.matrixAt(r, k) * b.matrixAt(k, c);
+                            }
+                            out.matrixAt(r, c) = sum;
+                        }
+                    }
+                    return out;
+                }
+                if (isScalarKind<Real>(a.kind) && isTensor4Kind<Real>(b.kind)) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Tensor4;
+                    for (std::size_t k = 0; k < out.t4.size(); ++k) {
+                        out.t4[k] = a.s * b.t4[k];
+                    }
+                    return out;
+                }
+                if (isTensor4Kind<Real>(a.kind) && isScalarKind<Real>(b.kind)) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Tensor4;
+                    for (std::size_t k = 0; k < out.t4.size(); ++k) {
+                        out.t4[k] = a.t4[k] * b.s;
+                    }
+                    return out;
+                }
+                throw FEException("Forms: unsupported multiplication kinds",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            if (node.type() == FormExprType::Divide) {
+                if (!isScalarKind<Real>(b.kind)) {
+                    throw FEException("Forms: division denominator must be scalar",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (isScalarKind<Real>(a.kind)) {
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, a.s / b.s};
+                }
+                if (isVectorKind<Real>(a.kind)) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Vector;
+                    out.resizeVector(a.vectorSize());
+                    for (std::size_t d = 0; d < out.vectorSize(); ++d) out.vectorAt(d) = a.vectorAt(d) / b.s;
+                    return out;
+                }
+                if (isMatrixKind<Real>(a.kind)) {
+                    EvalValue<Real> out;
+                    out.kind = a.kind;
+                    out.resizeMatrix(a.matrixRows(), a.matrixCols());
+                    for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                            out.matrixAt(r, c) = a.matrixAt(r, c) / b.s;
+                        }
+                    }
+                    return out;
+                }
+                if (isTensor4Kind<Real>(a.kind)) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Tensor4;
+                    for (std::size_t k = 0; k < out.t4.size(); ++k) {
+                        out.t4[k] = a.t4[k] / b.s;
+                    }
+                    return out;
+                }
+                throw FEException("Forms: unsupported division kinds",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            if (node.type() == FormExprType::InnerProduct) {
+                if (isScalarKind<Real>(a.kind) && isScalarKind<Real>(b.kind)) {
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, a.s * b.s};
+                }
+                if (isVectorKind<Real>(a.kind) && isVectorKind<Real>(b.kind)) {
+                    if (a.vectorSize() != b.vectorSize()) {
+                        throw FEException("Forms: inner(vector,vector) size mismatch",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    Real dot = 0.0;
+                    for (std::size_t d = 0; d < a.vectorSize(); ++d) {
+                        dot += a.vectorAt(d) * b.vectorAt(d);
+                    }
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, dot};
+                }
+                if (isMatrixKind<Real>(a.kind) && isMatrixKind<Real>(b.kind)) {
+                    if (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols()) {
+                        throw FEException("Forms: inner(matrix,matrix) shape mismatch",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    Real sum = 0.0;
+                    for (std::size_t r = 0; r < a.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < a.matrixCols(); ++c) {
+                            sum += a.matrixAt(r, c) * b.matrixAt(r, c);
+                        }
+                    }
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, sum};
+                }
+                if (isTensor4Kind<Real>(a.kind) && isTensor4Kind<Real>(b.kind)) {
+                    Real sum = 0.0;
+                    for (std::size_t k = 0; k < a.t4.size(); ++k) {
+                        sum += a.t4[k] * b.t4[k];
+                    }
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, sum};
+                }
+                throw FEException("Forms: unsupported inner() kinds",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+	            if (node.type() == FormExprType::DoubleContraction) {
+	                if (isTensor4Kind<Real>(a.kind) && isMatrixKind<Real>(b.kind)) {
+	                    EvalValue<Real> out;
+	                    out.kind = EvalValue<Real>::Kind::Matrix;
+	                    out.resizeMatrix(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim));
+	                    for (int i = 0; i < dim; ++i) {
+	                        for (int j = 0; j < dim; ++j) {
+	                            Real sum = 0.0;
+	                            for (int k = 0; k < dim; ++k) {
+	                                for (int l = 0; l < dim; ++l) {
+	                                    sum += a.t4[idx4(i, j, k, l)] *
+	                                           b.matrixAt(static_cast<std::size_t>(k), static_cast<std::size_t>(l));
+	                                }
+	                            }
+	                            out.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)) = sum;
+	                        }
+	                    }
+	                    return out;
+	                }
+
+	                if (isMatrixKind<Real>(a.kind) && isTensor4Kind<Real>(b.kind)) {
+	                    EvalValue<Real> out;
+	                    out.kind = EvalValue<Real>::Kind::Matrix;
+	                    out.resizeMatrix(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim));
+	                    for (int k = 0; k < dim; ++k) {
+	                        for (int l = 0; l < dim; ++l) {
+	                            Real sum = 0.0;
+	                            for (int i = 0; i < dim; ++i) {
+	                                for (int j = 0; j < dim; ++j) {
+	                                    sum += a.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)) *
+	                                           b.t4[idx4(i, j, k, l)];
+	                                }
+	                            }
+	                            out.matrixAt(static_cast<std::size_t>(k), static_cast<std::size_t>(l)) = sum;
+	                        }
+	                    }
+	                    return out;
+	                }
+
+                // Fall back to full contraction for matching shapes.
+                if (isScalarKind<Real>(a.kind) && isScalarKind<Real>(b.kind)) {
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, a.s * b.s};
+                }
+                if (isVectorKind<Real>(a.kind) && isVectorKind<Real>(b.kind)) {
+                    if (a.vectorSize() != b.vectorSize()) {
+                        throw FEException("Forms: doubleContraction(vector,vector) size mismatch",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    Real dot = 0.0;
+                    for (std::size_t d = 0; d < a.vectorSize(); ++d) {
+                        dot += a.vectorAt(d) * b.vectorAt(d);
+                    }
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, dot};
+                }
+                if (isMatrixKind<Real>(a.kind) && isMatrixKind<Real>(b.kind)) {
+                    if (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols()) {
+                        throw FEException("Forms: doubleContraction(matrix,matrix) shape mismatch",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    Real sum = 0.0;
+                    for (std::size_t r = 0; r < a.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < a.matrixCols(); ++c) {
+                            sum += a.matrixAt(r, c) * b.matrixAt(r, c);
+                        }
+                    }
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, sum};
+                }
+                if (isTensor4Kind<Real>(a.kind) && isTensor4Kind<Real>(b.kind)) {
+                    Real sum = 0.0;
+                    for (std::size_t k = 0; k < a.t4.size(); ++k) {
+                        sum += a.t4[k] * b.t4[k];
+                    }
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, sum};
+                }
+
+                throw FEException("Forms: unsupported doubleContraction() kinds",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            if (node.type() == FormExprType::OuterProduct) {
+                if (a.kind == EvalValue<Real>::Kind::Vector && b.kind == EvalValue<Real>::Kind::Vector) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Matrix;
+                    const auto rows = a.vectorSize();
+                    const auto cols = b.vectorSize();
+                    out.resizeMatrix(rows, cols);
+                    for (std::size_t r = 0; r < rows; ++r) {
+                        for (std::size_t c = 0; c < cols; ++c) {
+                            out.matrixAt(r, c) = a.vectorAt(r) * b.vectorAt(c);
+                        }
+                    }
+                    return out;
+                }
+                throw FEException("Forms: outer() currently supports vector-vector only",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            if (node.type() == FormExprType::CrossProduct) {
+                if (a.kind != EvalValue<Real>::Kind::Vector || b.kind != EvalValue<Real>::Kind::Vector) {
+                    throw FEException("Forms: cross() expects vector arguments",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                const Real ax = a.v[0], ay = a.v[1], az = a.v[2];
+                const Real bx = b.v[0], by = b.v[1], bz = b.v[2];
+                out.v[0] = ay * bz - az * by;
+                out.v[1] = az * bx - ax * bz;
+                out.v[2] = ax * by - ay * bx;
+                return out;
+            }
+
+            if (node.type() == FormExprType::Power) {
+                if (a.kind != EvalValue<Real>::Kind::Scalar || b.kind != EvalValue<Real>::Kind::Scalar) {
+                    throw FEException("Forms: pow() expects scalar arguments",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, std::pow(a.s, b.s)};
+            }
+
+            if (node.type() == FormExprType::Minimum || node.type() == FormExprType::Maximum) {
+                if (a.kind != EvalValue<Real>::Kind::Scalar || b.kind != EvalValue<Real>::Kind::Scalar) {
+                    throw FEException("Forms: min/max expects scalar arguments",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const Real v = (node.type() == FormExprType::Minimum) ? std::min(a.s, b.s) : std::max(a.s, b.s);
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, v};
+            }
+
+            if (node.type() == FormExprType::Less || node.type() == FormExprType::LessEqual ||
+                node.type() == FormExprType::Greater || node.type() == FormExprType::GreaterEqual ||
+                node.type() == FormExprType::Equal || node.type() == FormExprType::NotEqual) {
+                if (a.kind != EvalValue<Real>::Kind::Scalar || b.kind != EvalValue<Real>::Kind::Scalar) {
+                    throw FEException("Forms: comparisons expect scalar arguments",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                bool truth = false;
+                switch (node.type()) {
+                    case FormExprType::Less: truth = (a.s < b.s); break;
+                    case FormExprType::LessEqual: truth = (a.s <= b.s); break;
+                    case FormExprType::Greater: truth = (a.s > b.s); break;
+                    case FormExprType::GreaterEqual: truth = (a.s >= b.s); break;
+                    case FormExprType::Equal: truth = (a.s == b.s); break;
+                    case FormExprType::NotEqual: truth = (a.s != b.s); break;
+                    default: break;
+                }
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, truth ? 1.0 : 0.0};
+            }
+
+            throw FEException("Forms: unreachable binary operation",
+                              __FILE__, __LINE__, __func__, FEStatus::Unknown);
+        }
+        case FormExprType::Conditional: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 3 || !kids[0] || !kids[1] || !kids[2]) {
+                throw std::logic_error("Forms: conditional must have 3 children");
+            }
+            const auto cond = evalReal(*kids[0], env, side, q);
+            if (cond.kind != EvalValue<Real>::Kind::Scalar) {
+                throw FEException("Forms: conditional condition must be scalar",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto a = evalReal(*kids[1], env, side, q);
+            const auto b = evalReal(*kids[2], env, side, q);
+            if (!sameCategory<Real>(a.kind, b.kind)) {
+                throw FEException("Forms: conditional branch kind mismatch",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (a.kind == b.kind) {
+                return (cond.s > 0.0) ? a : b;
+            }
+            // Matrix sub-kinds: return as a generic matrix to keep downstream typing stable.
+            if (isMatrixKind<Real>(a.kind) && isMatrixKind<Real>(b.kind)) {
+                auto out = (cond.s > 0.0) ? a : b;
+                out.kind = EvalValue<Real>::Kind::Matrix;
+                return out;
+            }
+            return (cond.s > 0.0) ? a : b;
+        }
+        case FormExprType::AsVector: {
+            const auto kids = node.childrenShared();
+            if (kids.empty()) {
+                throw FEException("Forms: as_vector expects at least 1 scalar component",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Vector;
+            out.resizeVector(kids.size());
+            for (std::size_t c = 0; c < kids.size(); ++c) {
+                if (!kids[c]) throw std::logic_error("Forms: as_vector has null child");
+                const auto v = evalReal(*kids[c], env, side, q);
+                if (v.kind != EvalValue<Real>::Kind::Scalar) {
+                    throw FEException("Forms: as_vector components must be scalar",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                out.vectorAt(c) = v.s;
+            }
+            return out;
+        }
+        case FormExprType::AsTensor: {
+            const auto rows = node.tensorRows().value_or(0);
+            const auto cols = node.tensorCols().value_or(0);
+            if (rows <= 0 || cols <= 0) {
+                throw FEException("Forms: as_tensor requires explicit shape with rows,cols >= 1",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto kids = node.childrenShared();
+            if (kids.size() != static_cast<std::size_t>(rows * cols)) {
+                throw FEException("Forms: as_tensor child count does not match rows*cols",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Matrix;
+            out.resizeMatrix(static_cast<std::size_t>(rows), static_cast<std::size_t>(cols));
+            for (int r = 0; r < rows; ++r) {
+                for (int c = 0; c < cols; ++c) {
+                    const auto idx = static_cast<std::size_t>(r * cols + c);
+                    if (!kids[idx]) throw std::logic_error("Forms: as_tensor has null child");
+                    const auto v = evalReal(*kids[idx], env, side, q);
+                    if (v.kind != EvalValue<Real>::Kind::Scalar) {
+                        throw FEException("Forms: as_tensor entries must be scalar",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    out.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) = v.s;
+                }
+            }
+            return out;
+        }
+        case FormExprType::Component: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("component() must have 1 child");
+            const auto a = evalReal(*kids[0], env, side, q);
+            const int i = node.componentIndex0().value_or(0);
+            const int j = node.componentIndex1().value_or(-1);
+            if (isScalarKind<Real>(a.kind)) {
+                if (i != 0 || j >= 0) {
+                    throw FEException("Forms: component() invalid indices for scalar",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                return a;
+            }
+            if (isVectorKind<Real>(a.kind)) {
+                if (j >= 0) {
+                    throw FEException("Forms: component(v,i,j) invalid for vector",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto n = a.vectorSize();
+                if (i < 0 || static_cast<std::size_t>(i) >= n) {
+                    throw FEException("Forms: component(v,i) index out of range",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, a.vectorAt(static_cast<std::size_t>(i))};
+            }
+            if (!isMatrixKind<Real>(a.kind)) {
+                throw FEException("Forms: component() is not defined for this operand kind",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            // Matrix
+            if (j < 0) {
+                throw FEException("Forms: component(A,i) missing column index for matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (i < 0 || static_cast<std::size_t>(i) >= rows || j < 0 || static_cast<std::size_t>(j) >= cols) {
+                throw FEException("Forms: component(A,i,j) index out of range",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar,
+                                   a.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j))};
+        }
+        case FormExprType::IndexedAccess:
+            throw FEException("Forms: indexed access must be lowered via forms::einsum(...) before compilation/evaluation",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        case FormExprType::CellIntegral:
+        case FormExprType::BoundaryIntegral:
+        case FormExprType::InteriorFaceIntegral:
+            break;
+    }
+
+    throw FEException("Forms: unsupported expression node in evaluation",
+                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+}
+
+// ============================================================================
+// Dual (residual/Jacobian) evaluation
+// ============================================================================
+
+struct ConstitutiveCallCacheDual;
+
+struct EvalEnvDual {
+    const assembly::AssemblyContext& minus;
+    const assembly::AssemblyContext* plus{nullptr};
+    Side test_active{Side::Minus};
+    Side trial_active{Side::Minus};
+    LocalIndex i{0};
+    std::size_t n_trial_dofs{0};
+    DualWorkspace* ws{nullptr};
+    const ConstitutiveStateLayout* constitutive_state{nullptr};
+    ConstitutiveCallCacheDual* constitutive_cache{nullptr};
+};
+
+EvalValue<Dual> evalDual(const FormExprNode& node,
+                         const EvalEnvDual& env,
+                         Side side,
+                         LocalIndex q);
+
+struct ConstitutiveCallCacheDual {
+    std::unordered_map<ConstitutiveCallKey,
+                       std::vector<EvalValue<Dual>>,
+                       ConstitutiveCallKeyHash> values{};
+};
+
+EvalValue<Dual> evalDualUnary(const FormExprNode& node,
+                              const EvalEnvDual& env,
+                              Side side,
+                              LocalIndex q)
+{
+    const auto kids = node.childrenShared();
+    if (kids.size() != 1 || !kids[0]) {
+        throw std::logic_error("Forms: unary node must have exactly 1 child");
+    }
+    return evalDual(*kids[0], env, side, q);
+}
+
+EvalValue<Dual> evalConstitutiveOutputDual(const FormExprNode& call_node,
+                                           const EvalEnvDual& env,
+                                           Side side,
+                                           LocalIndex q,
+                                           std::size_t output_index)
+{
+    if (call_node.type() != FormExprType::Constitutive) {
+        throw FEException("Forms: evalConstitutiveOutputDual called on non-constitutive node",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+
+    const auto* model = call_node.constitutiveModel();
+    if (!model) {
+        throw FEException("Forms: Constitutive node has no model (dual)",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+
+    const auto n_outputs = model->outputCount();
+    if (output_index >= n_outputs) {
+        throw FEException("Forms: constitutive output index out of range (dual)",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+
+    FE_CHECK_NOT_NULL(env.ws, "Forms: evalConstitutiveOutputDual: workspace");
+
+    if (env.constitutive_cache != nullptr) {
+        ConstitutiveCallKey key{&call_node, side, q, env.i, 0};
+        auto it = env.constitutive_cache->values.find(key);
+        if (it != env.constitutive_cache->values.end()) {
+            if (it->second.size() != n_outputs) {
+                throw FEException("Forms: constitutive cache output size mismatch (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::Unknown);
+            }
+            return it->second[output_index];
+        }
+    }
+
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+
+    ConstitutiveEvalContext mctx;
+    mctx.domain = [&]() {
+        switch (ctx.contextType()) {
+            case assembly::ContextType::Cell:
+                return ConstitutiveEvalContext::Domain::Cell;
+            case assembly::ContextType::BoundaryFace:
+                return ConstitutiveEvalContext::Domain::BoundaryFace;
+            case assembly::ContextType::InteriorFace:
+                return ConstitutiveEvalContext::Domain::InteriorFace;
+            default:
+                return ConstitutiveEvalContext::Domain::Cell;
+        }
+    }();
+    mctx.side = (side == Side::Plus) ? ConstitutiveEvalContext::TraceSide::Plus
+                                     : ConstitutiveEvalContext::TraceSide::Minus;
+    mctx.dim = dim;
+    mctx.x = ctx.physicalPoint(q);
+    mctx.time = ctx.time();
+    mctx.dt = ctx.timeStep();
+    mctx.cell_id = ctx.cellId();
+    mctx.face_id = ctx.faceId();
+    mctx.local_face_id = ctx.localFaceId();
+    mctx.boundary_marker = ctx.boundaryMarker();
+    mctx.q = q;
+    mctx.num_qpts = ctx.numQuadraturePoints();
+    mctx.get_real_param = ctx.realParameterGetter();
+    mctx.get_param = ctx.parameterGetter();
+    mctx.user_data = ctx.userData();
+
+    std::size_t state_offset_bytes = 0u;
+    std::size_t state_bytes = 0u;
+
+    if (env.constitutive_state != nullptr) {
+        if (const auto* block = env.constitutive_state->find(model); block != nullptr && block->bytes > 0u) {
+            if (!ctx.hasMaterialState()) {
+                throw FEException("Forms: Constitutive node requires material state but no state is bound in this context (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto state_old = ctx.materialStateOld(q);
+            const auto state_work = ctx.materialStateWork(q);
+            const auto need = block->offset_bytes + block->bytes;
+            if (state_old.size() < need || state_work.size() < need) {
+                throw FEException("Forms: bound material state buffer is smaller than required by constitutive state layout (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            state_offset_bytes = block->offset_bytes;
+            state_bytes = block->bytes;
+            mctx.state_old = state_old.subspan(block->offset_bytes, block->bytes);
+            mctx.state_work = state_work.subspan(block->offset_bytes, block->bytes);
+        }
+    }
+
+    const auto kids = call_node.childrenShared();
+    if (kids.empty()) {
+        throw FEException("Forms: Constitutive node must have at least 1 child (dual)",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+
+    struct NonlocalDualCtx {
+        const EvalEnvDual* env{nullptr};
+        Side eval_side{Side::Minus};
+        const std::vector<std::shared_ptr<FormExprNode>>* inputs{nullptr};
+        const assembly::AssemblyContext* ctx{nullptr};
+        std::size_t state_offset_bytes{0u};
+        std::size_t state_bytes{0u};
+    };
+
+    ConstitutiveEvalContext::NonlocalAccess nonlocal{};
+    NonlocalDualCtx nonlocal_ctx{&env, side, &kids, &ctx, state_offset_bytes, state_bytes};
+    nonlocal.self = &nonlocal_ctx;
+    nonlocal.input_dual = +[](const void* self,
+                              std::size_t input_index,
+                              LocalIndex qpt,
+                              DualWorkspace& workspace) -> EvalValue<Dual> {
+        const auto& s = *static_cast<const NonlocalDualCtx*>(self);
+        FE_THROW_IF(s.ctx == nullptr, FEException,
+                    "Forms: nonlocal input_dual missing context");
+        FE_THROW_IF(s.inputs == nullptr, FEException,
+                    "Forms: nonlocal input_dual missing inputs");
+        FE_THROW_IF(qpt >= s.ctx->numQuadraturePoints(), InvalidArgumentException,
+                    "Forms: nonlocal input_dual qpt out of range");
+        FE_THROW_IF(input_index >= s.inputs->size(), InvalidArgumentException,
+                    "Forms: nonlocal input_dual input_index out of range");
+        const auto& child = (*s.inputs)[input_index];
+        FE_THROW_IF(!child, InvalidArgumentException,
+                    "Forms: nonlocal input_dual input node is null");
+        FE_THROW_IF(s.env == nullptr, FEException,
+                    "Forms: nonlocal input_dual missing eval environment");
+        FE_THROW_IF(s.env->ws == nullptr, FEException,
+                    "Forms: nonlocal input_dual missing workspace pointer");
+        FE_THROW_IF(&workspace != s.env->ws, InvalidArgumentException,
+                    "Forms: nonlocal input_dual workspace mismatch");
+        return evalDual(*child, *s.env, s.eval_side, qpt);
+    };
+    nonlocal.state_old = +[](const void* self, LocalIndex qpt) -> std::span<const std::byte> {
+        const auto& s = *static_cast<const NonlocalDualCtx*>(self);
+        if (s.state_bytes == 0u) return {};
+        FE_THROW_IF(s.ctx == nullptr, FEException,
+                    "Forms: nonlocal state_old missing context (dual)");
+        FE_THROW_IF(!s.ctx->hasMaterialState(), InvalidArgumentException,
+                    "Forms: nonlocal state_old requires bound material state (dual)");
+        FE_THROW_IF(qpt >= s.ctx->numQuadraturePoints(), InvalidArgumentException,
+                    "Forms: nonlocal state_old qpt out of range (dual)");
+        const auto state = s.ctx->materialStateOld(qpt);
+        const auto need = s.state_offset_bytes + s.state_bytes;
+        FE_THROW_IF(state.size() < need, InvalidArgumentException,
+                    "Forms: nonlocal state_old buffer smaller than required (dual)");
+        return state.subspan(s.state_offset_bytes, s.state_bytes);
+    };
+    nonlocal.state_work = +[](const void* self, LocalIndex qpt) -> std::span<std::byte> {
+        const auto& s = *static_cast<const NonlocalDualCtx*>(self);
+        if (s.state_bytes == 0u) return {};
+        FE_THROW_IF(s.ctx == nullptr, FEException,
+                    "Forms: nonlocal state_work missing context (dual)");
+        FE_THROW_IF(!s.ctx->hasMaterialState(), InvalidArgumentException,
+                    "Forms: nonlocal state_work requires bound material state (dual)");
+        FE_THROW_IF(qpt >= s.ctx->numQuadraturePoints(), InvalidArgumentException,
+                    "Forms: nonlocal state_work qpt out of range (dual)");
+        const auto state = s.ctx->materialStateWork(qpt);
+        const auto need = s.state_offset_bytes + s.state_bytes;
+        FE_THROW_IF(state.size() < need, InvalidArgumentException,
+                    "Forms: nonlocal state_work buffer smaller than required (dual)");
+        return state.subspan(s.state_offset_bytes, s.state_bytes);
+    };
+    nonlocal.physical_point = +[](const void* self, LocalIndex qpt) -> std::array<Real, 3> {
+        const auto& s = *static_cast<const NonlocalDualCtx*>(self);
+        FE_THROW_IF(s.ctx == nullptr, FEException,
+                    "Forms: nonlocal physical_point missing context (dual)");
+        FE_THROW_IF(qpt >= s.ctx->numQuadraturePoints(), InvalidArgumentException,
+                    "Forms: nonlocal physical_point qpt out of range (dual)");
+        return s.ctx->physicalPoint(qpt);
+    };
+    nonlocal.integration_weight = +[](const void* self, LocalIndex qpt) -> Real {
+        const auto& s = *static_cast<const NonlocalDualCtx*>(self);
+        FE_THROW_IF(s.ctx == nullptr, FEException,
+                    "Forms: nonlocal integration_weight missing context (dual)");
+        FE_THROW_IF(qpt >= s.ctx->numQuadraturePoints(), InvalidArgumentException,
+                    "Forms: nonlocal integration_weight qpt out of range (dual)");
+        return s.ctx->integrationWeight(qpt);
+    };
+
+    mctx.nonlocal = &nonlocal;
+
+    std::vector<EvalValue<Dual>> inputs;
+    inputs.reserve(kids.size());
+    for (const auto& child : kids) {
+        if (!child) {
+            throw FEException("Forms: Constitutive node has a null child (dual)",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        }
+        inputs.push_back(evalDual(*child, env, side, q));
+    }
+
+    std::vector<EvalValue<Dual>> outputs(n_outputs);
+    model->evaluateNaryOutputs({inputs.data(), inputs.size()}, mctx, *env.ws, {outputs.data(), outputs.size()});
+
+    if (env.constitutive_cache != nullptr) {
+        ConstitutiveCallKey key{&call_node, side, q, env.i, 0};
+        auto [it, inserted] = env.constitutive_cache->values.emplace(key, std::move(outputs));
+        (void)inserted;
+        return it->second[output_index];
+    }
+
+    return outputs[output_index];
+}
+
+EvalValue<Dual> evalDual(const FormExprNode& node,
+                         const EvalEnvDual& env,
+                         Side side,
+                         LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+
+    switch (node.type()) {
+        case FormExprType::Constant: {
+            const Real v = node.constantValue().value_or(0.0);
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(v, env.ws->alloc());
+            return out;
+        }
+        case FormExprType::Coordinate: {
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Vector;
+            out.vector_size = dim;
+            const auto x = ctx.physicalPoint(q);
+            for (int d = 0; d < 3; ++d) {
+                out.v[static_cast<std::size_t>(d)] = makeDualConstant(x[static_cast<std::size_t>(d)], env.ws->alloc());
+            }
+            return out;
+        }
+        case FormExprType::ReferenceCoordinate: {
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Vector;
+            out.vector_size = dim;
+            const auto X = ctx.quadraturePoint(q);
+            for (int d = 0; d < 3; ++d) {
+                out.v[static_cast<std::size_t>(d)] = makeDualConstant(X[static_cast<std::size_t>(d)], env.ws->alloc());
+            }
+            return out;
+        }
+        case FormExprType::Identity: {
+            const int idim = node.identityDim().value_or(dim);
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Matrix;
+            if (idim > 0) {
+                out.resizeMatrix(static_cast<std::size_t>(idim), static_cast<std::size_t>(idim));
+                for (int r = 0; r < idim; ++r) {
+                    for (int c = 0; c < idim; ++c) {
+                        out.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) =
+                            makeDualConstant((r == c) ? 1.0 : 0.0, env.ws->alloc());
+                    }
+                }
+            }
+            return out;
+        }
+        case FormExprType::Jacobian: {
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Matrix;
+            out.matrix_rows = dim;
+            out.matrix_cols = dim;
+            const auto J = ctx.jacobian(q);
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                        makeDualConstant(J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+                }
+            }
+            return out;
+        }
+        case FormExprType::JacobianInverse: {
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Matrix;
+            out.matrix_rows = dim;
+            out.matrix_cols = dim;
+            const auto Jinv = ctx.inverseJacobian(q);
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                        makeDualConstant(Jinv[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+                }
+            }
+            return out;
+        }
+        case FormExprType::JacobianDeterminant: {
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(ctx.jacobianDet(q), env.ws->alloc());
+            return out;
+        }
+        case FormExprType::CellDiameter: {
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(ctx.cellDiameter(), env.ws->alloc());
+            return out;
+        }
+        case FormExprType::CellVolume: {
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(ctx.cellVolume(), env.ws->alloc());
+            return out;
+        }
+        case FormExprType::FacetArea: {
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(ctx.facetArea(), env.ws->alloc());
+            return out;
+        }
+        case FormExprType::TestFunction: {
+            const auto* sig = node.spaceSignature();
+            if (!sig) {
+                throw FEException("Forms: TestFunction must be bound to a FunctionSpace",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            if (sig->field_type == FieldType::Scalar) {
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Scalar;
+                const Real v = (env.test_active == side) ? ctx.basisValue(env.i, q) : 0.0;
+                out.s = makeDualConstant(v, env.ws->alloc());
+                return out;
+            }
+
+            if (sig->field_type == FieldType::Vector) {
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+                out.vector_size = sig->value_dimension;
+                for (int d = 0; d < 3; ++d) {
+                    out.v[static_cast<std::size_t>(d)] = makeDualConstant(0.0, env.ws->alloc());
+                }
+                if (env.test_active != side) {
+                    return out;
+                }
+
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: TestFunction vector value_dimension must be 1..3 (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex n_test = ctx.numTestDofs();
+                if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
+                    throw FEException("Forms: vector TestFunction DOF count is not divisible by value_dimension (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex dofs_per_component =
+                    static_cast<LocalIndex>(n_test / static_cast<LocalIndex>(vd));
+                const int comp = static_cast<int>(env.i / dofs_per_component);
+                if (comp < 0 || comp >= vd) {
+                    throw FEException("Forms: TestFunction vector DOF index out of range for its value_dimension (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                out.v[static_cast<std::size_t>(comp)].value = ctx.basisValue(env.i, q);
+                return out;
+            }
+
+            throw FEException("Forms: TestFunction field type not supported (dual)",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::TrialFunction: {
+            const auto* sig = node.spaceSignature();
+            if (!sig) {
+                throw FEException("Forms: TrialFunction must be bound to a FunctionSpace",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            if (sig->field_type == FieldType::Scalar) {
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Scalar;
+                const Real val = ctx.solutionValue(q);
+                Dual u = makeDualConstant(val, env.ws->alloc());
+                if (env.trial_active == side) {
+                    // Seed du/dU_j = phi_j at this quadrature point
+                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                        u.deriv[j] = ctx.trialBasisValue(static_cast<LocalIndex>(j), q);
+                    }
+                }
+                out.s = u;
+                return out;
+            }
+
+            if (sig->field_type == FieldType::Vector) {
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: TrialFunction vector value_dimension must be 1..3 (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                const LocalIndex n_trial = ctx.numTrialDofs();
+                if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+                    throw FEException("Forms: vector TrialFunction DOF count is not divisible by value_dimension (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex dofs_per_component =
+                    static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+
+                out.vector_size = vd;
+                const auto u_val = ctx.solutionVectorValue(q);
+                for (int c = 0; c < 3; ++c) {
+                    out.v[static_cast<std::size_t>(c)] = makeDualConstant(u_val[static_cast<std::size_t>(c)], env.ws->alloc());
+                }
+
+                if (env.trial_active == side) {
+                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                        const int comp_j = static_cast<int>(static_cast<LocalIndex>(j) / dofs_per_component);
+                        if (comp_j < 0 || comp_j >= vd) {
+                            throw FEException("Forms: TrialFunction derivative seeding index out of range (dual)",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        out.v[static_cast<std::size_t>(comp_j)].deriv[j] =
+                            ctx.trialBasisValue(static_cast<LocalIndex>(j), q);
+                    }
+                }
+
+                // Zero unused components above value_dimension.
+                for (int c = vd; c < 3; ++c) {
+                    out.v[static_cast<std::size_t>(c)].value = 0.0;
+                }
+                return out;
+            }
+
+            throw FEException("Forms: TrialFunction field type not supported (dual)",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::Coefficient: {
+            if (const auto* f = node.scalarCoefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Scalar;
+                out.s = makeDualConstant((*f)(x[0], x[1], x[2]), env.ws->alloc());
+                return out;
+            }
+            if (const auto* f = node.vectorCoefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                const auto vv = (*f)(x[0], x[1], x[2]);
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+                out.vector_size = dim;
+                for (int d = 0; d < 3; ++d) {
+                    out.v[static_cast<std::size_t>(d)] = makeDualConstant(vv[static_cast<std::size_t>(d)], env.ws->alloc());
+                }
+                return out;
+            }
+            if (const auto* f = node.matrixCoefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                const auto mm = (*f)(x[0], x[1], x[2]);
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Matrix;
+                out.matrix_rows = dim;
+                out.matrix_cols = dim;
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                            makeDualConstant(mm[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+                    }
+                }
+                return out;
+            }
+            if (const auto* f = node.tensor4Coefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                const auto vv = (*f)(x[0], x[1], x[2]);
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Tensor4;
+                for (std::size_t i = 0; i < vv.size(); ++i) {
+                    out.t4[i] = makeDualConstant(vv[i], env.ws->alloc());
+                }
+                return out;
+            }
+            throw FEException("Forms: coefficient node has no callable",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        }
+        case FormExprType::Constitutive:
+            return evalConstitutiveOutputDual(node, env, side, q, 0u);
+        case FormExprType::ConstitutiveOutput: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1u || !kids[0]) {
+                throw FEException("Forms: ConstitutiveOutput node must have exactly 1 child (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto out_idx = node.constitutiveOutputIndex().value_or(0);
+            FE_THROW_IF(out_idx < 0, InvalidArgumentException,
+                        "Forms: ConstitutiveOutput node has negative output index (dual)");
+            return evalConstitutiveOutputDual(*kids[0], env, side, q, static_cast<std::size_t>(out_idx));
+        }
+        case FormExprType::Normal: {
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Vector;
+            out.vector_size = dim;
+            const auto n = ctx.normal(q);
+            for (int d = 0; d < 3; ++d) {
+                out.v[static_cast<std::size_t>(d)] = makeDualConstant(n[static_cast<std::size_t>(d)], env.ws->alloc());
+            }
+            return out;
+        }
+        case FormExprType::Gradient: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("grad must have 1 child");
+            const auto& child = *kids[0];
+
+            if (child.type() == FormExprType::TestFunction) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: grad(TestFunction) requires a bound FunctionSpace (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                if (sig->field_type == FieldType::Scalar) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Vector;
+                    out.vector_size = dim;
+                    const auto g = (env.test_active == side) ? ctx.physicalGradient(env.i, q)
+                                                             : assembly::AssemblyContext::Vector3D{0.0, 0.0, 0.0};
+                    for (int d = 0; d < 3; ++d) {
+                        out.v[static_cast<std::size_t>(d)] = makeDualConstant(g[static_cast<std::size_t>(d)], env.ws->alloc());
+                    }
+                    return out;
+                }
+
+                if (sig->field_type == FieldType::Vector) {
+                    const int vd = sig->value_dimension;
+                    if (vd <= 0 || vd > 3) {
+                        throw FEException("Forms: grad(TestFunction) vector value_dimension must be 1..3 (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Matrix;
+                    out.matrix_rows = vd;
+                    out.matrix_cols = dim;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                makeDualConstant(0.0, env.ws->alloc());
+                        }
+                    }
+                    if (env.test_active != side) {
+                        return out;
+                    }
+                    const LocalIndex n_test = ctx.numTestDofs();
+                    if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
+                        throw FEException("Forms: grad(TestFunction) DOF count is not divisible by value_dimension (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const LocalIndex dofs_per_component =
+                        static_cast<LocalIndex>(n_test / static_cast<LocalIndex>(vd));
+                    const int comp = static_cast<int>(env.i / dofs_per_component);
+                    if (comp < 0 || comp >= vd) {
+                        throw FEException("Forms: grad(TestFunction) vector DOF index out of range (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const auto g = ctx.physicalGradient(env.i, q);
+                    for (int c = 0; c < dim; ++c) {
+                        out.m[static_cast<std::size_t>(comp)][static_cast<std::size_t>(c)].value = g[static_cast<std::size_t>(c)];
+                    }
+                    return out;
+                }
+
+                throw FEException("Forms: grad(TestFunction) field type not supported (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            if (child.type() == FormExprType::TrialFunction) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: grad(TrialFunction) requires a bound FunctionSpace (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                if (sig->field_type == FieldType::Scalar) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Vector;
+                    out.vector_size = dim;
+                    const auto gval = ctx.solutionGradient(q);
+
+                    for (int d = 0; d < 3; ++d) {
+                        Dual g = makeDualConstant(gval[static_cast<std::size_t>(d)], env.ws->alloc());
+                        if (env.trial_active == side) {
+                            for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                                const auto grad_j = ctx.trialPhysicalGradient(static_cast<LocalIndex>(j), q);
+                                g.deriv[j] = grad_j[static_cast<std::size_t>(d)];
+                            }
+                        }
+                        out.v[static_cast<std::size_t>(d)] = g;
+                    }
+                    return out;
+                }
+
+                if (sig->field_type == FieldType::Vector) {
+                    const int vd = sig->value_dimension;
+                    if (vd <= 0 || vd > 3) {
+                        throw FEException("Forms: grad(TrialFunction) vector value_dimension must be 1..3 (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Matrix;
+                    out.matrix_rows = vd;
+                    out.matrix_cols = dim;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                makeDualConstant(0.0, env.ws->alloc());
+                        }
+                    }
+                    if (env.trial_active != side) {
+                        return out;
+                    }
+                    const LocalIndex n_trial = ctx.numTrialDofs();
+                    if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+                        throw FEException("Forms: grad(TrialFunction) DOF count is not divisible by value_dimension (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const LocalIndex dofs_per_component =
+                        static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+
+                    const auto Jval = ctx.solutionJacobian(q);
+                    for (int r = 0; r < vd; ++r) {
+                        for (int c = 0; c < dim; ++c) {
+                            Dual Jij = makeDualConstant(Jval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)],
+                                                        env.ws->alloc());
+                            for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                                const int comp_j = static_cast<int>(static_cast<LocalIndex>(j) / dofs_per_component);
+                                if (comp_j == r) {
+                                    const auto grad_j = ctx.trialPhysicalGradient(static_cast<LocalIndex>(j), q);
+                                    Jij.deriv[j] = grad_j[static_cast<std::size_t>(c)];
+                                }
+                            }
+                            out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = Jij;
+                        }
+                    }
+                    return out;
+                }
+
+                throw FEException("Forms: grad(TrialFunction) field type not supported (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            if (child.type() == FormExprType::Constant) {
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+                out.vector_size = dim;
+                for (int d = 0; d < 3; ++d) out.v[static_cast<std::size_t>(d)] = makeDualConstant(0.0, env.ws->alloc());
+                return out;
+            }
+
+            if (child.type() == FormExprType::Coefficient && child.scalarCoefficient()) {
+                const auto x = ctx.physicalPoint(q);
+                const auto g = fdGradScalar(*child.scalarCoefficient(), x, dim);
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+                out.vector_size = dim;
+                for (int d = 0; d < 3; ++d) out.v[static_cast<std::size_t>(d)] = makeDualConstant(g[static_cast<std::size_t>(d)], env.ws->alloc());
+                return out;
+            }
+
+            throw FEException("Forms: grad() currently supports TestFunction, TrialFunction, Constant, and scalar Coefficient only",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::Hessian: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("H() must have 1 child (dual)");
+            const auto& child = *kids[0];
+
+            if (child.type() == FormExprType::TestFunction) {
+                const auto H = (env.test_active == side) ? ctx.physicalHessian(env.i, q) : assembly::AssemblyContext::Matrix3x3{};
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Matrix;
+                out.matrix_rows = dim;
+                out.matrix_cols = dim;
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                            makeDualConstant(H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+                    }
+                }
+                return out;
+            }
+
+            if (child.type() == FormExprType::TrialFunction) {
+                const auto Hval = ctx.solutionHessian(q);
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Matrix;
+                out.matrix_rows = dim;
+                out.matrix_cols = dim;
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        Dual h = makeDualConstant(Hval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+                        if (env.trial_active == side) {
+                            for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                                const auto Hj = ctx.trialPhysicalHessian(static_cast<LocalIndex>(j), q);
+                                h.deriv[j] = Hj[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                            }
+                        }
+                        out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = h;
+                    }
+                }
+                return out;
+            }
+
+            if (child.type() == FormExprType::Constant) {
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Matrix;
+                out.matrix_rows = dim;
+                out.matrix_cols = dim;
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                            makeDualConstant(0.0, env.ws->alloc());
+                    }
+                }
+                return out;
+            }
+
+            if (child.type() == FormExprType::Coefficient && child.scalarCoefficient()) {
+                const auto x = ctx.physicalPoint(q);
+                const auto H = fdHessScalar(*child.scalarCoefficient(), x, dim);
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Matrix;
+                out.matrix_rows = dim;
+                out.matrix_cols = dim;
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                            makeDualConstant(H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+                    }
+                }
+                return out;
+            }
+
+            throw FEException("Forms: H() currently supports TestFunction, TrialFunction, Constant, and scalar Coefficient only (dual)",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::TimeDerivative: {
+            const int order = node.timeDerivativeOrder().value_or(1);
+            if (order <= 0) {
+                throw FEException("Forms: dt(·,k) requires k >= 1 (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            const auto* time_ctx = ctx.timeIntegrationContext();
+            if (!time_ctx) {
+                throw FEException("dt(...) operator requires a transient time-integration context",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            const auto* stencil = time_ctx->stencil(order);
+            if (!stencil) {
+                throw FEException("Forms: dt(·," + std::to_string(order) + ") is not supported by time integrator '" +
+                                      time_ctx->integrator_name + "' (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            const auto current = evalDualUnary(node, env, side, q);
+            if (current.kind == EvalValue<Dual>::Kind::Scalar) {
+                Dual result = makeDualConstant(0.0, env.ws->alloc());
+                result = mul(current.s, stencil->coeff(0), result);
+
+                const int required = stencil->requiredHistoryStates();
+                for (int k = 1; k <= required; ++k) {
+                    Dual prev = makeDualConstant(ctx.previousSolutionValue(q, k), env.ws->alloc());
+                    prev = mul(prev, stencil->coeff(k), prev);
+                    result = add(result, prev, result);
+                }
+
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Scalar;
+                out.s = result;
+                return out;
+            }
+
+            if (current.kind == EvalValue<Dual>::Kind::Vector) {
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+                out.vector_size = static_cast<int>(current.vectorSize());
+                const int required = stencil->requiredHistoryStates();
+                std::vector<assembly::AssemblyContext::Vector3D> prev_vals;
+                prev_vals.reserve(static_cast<std::size_t>(std::max(0, required)));
+                for (int k = 1; k <= required; ++k) {
+                    prev_vals.push_back(ctx.previousSolutionVectorValue(q, k));
+                }
+
+                for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                    Dual result = makeDualConstant(0.0, env.ws->alloc());
+                    result = mul(current.vectorAt(d), stencil->coeff(0), result);
+
+                    for (int k = 1; k <= required; ++k) {
+                        const auto prev_v = prev_vals[static_cast<std::size_t>(k - 1)];
+                        Dual prev = makeDualConstant(prev_v[d], env.ws->alloc());
+                        prev = mul(prev, stencil->coeff(k), prev);
+                        result = add(result, prev, result);
+                    }
+                    out.v[d] = result;
+                }
+                return out;
+            }
+
+            throw FEException("Forms: dt() operand did not evaluate to a scalar or vector (dual)",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        }
+        case FormExprType::Divergence: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("div must have 1 child (dual)");
+            const auto& child = *kids[0];
+            if (child.type() == FormExprType::TestFunction) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: div(TestFunction) requires a bound FunctionSpace (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Vector) {
+                    throw FEException("Forms: div(TestFunction) requires a vector-valued TestFunction (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: div(TestFunction) vector value_dimension must be 1..3 (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex n_test = ctx.numTestDofs();
+                if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
+                    throw FEException("Forms: div(TestFunction) DOF count is not divisible by value_dimension (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex dofs_per_component =
+                    static_cast<LocalIndex>(n_test / static_cast<LocalIndex>(vd));
+                const int comp = static_cast<int>(env.i / dofs_per_component);
+                if (comp < 0 || comp >= vd) {
+                    throw FEException("Forms: div(TestFunction) vector DOF index out of range (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                const Real div = (env.test_active == side)
+                    ? ctx.physicalGradient(env.i, q)[static_cast<std::size_t>(comp)]
+                    : 0.0;
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Scalar;
+                out.s = makeDualConstant(div, env.ws->alloc());
+                return out;
+            }
+            if (child.type() == FormExprType::TrialFunction) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: div(TrialFunction) requires a bound FunctionSpace (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Vector) {
+                    throw FEException("Forms: div(TrialFunction) requires a vector-valued TrialFunction (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: div(TrialFunction) vector value_dimension must be 1..3 (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex n_trial = ctx.numTrialDofs();
+                if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+                    throw FEException("Forms: div(TrialFunction) DOF count is not divisible by value_dimension (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex dofs_per_component =
+                    static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+
+                Dual divu = makeDualConstant(0.0, env.ws->alloc());
+                if (env.trial_active == side) {
+                    const auto J = ctx.solutionJacobian(q);
+                    const int n = std::min(vd, dim);
+                    for (int d = 0; d < n; ++d) {
+                        divu.value += J[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
+                    }
+                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                        const int comp_j = static_cast<int>(static_cast<LocalIndex>(j) / dofs_per_component);
+                        if (comp_j >= 0 && comp_j < n) {
+                            const auto grad_j = ctx.trialPhysicalGradient(static_cast<LocalIndex>(j), q);
+                            divu.deriv[j] = grad_j[static_cast<std::size_t>(comp_j)];
+                        }
+                    }
+                }
+
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Scalar;
+                out.s = divu;
+                return out;
+            }
+            if (child.type() == FormExprType::Coefficient && child.vectorCoefficient()) {
+                const auto x = ctx.physicalPoint(q);
+                const Real div = fdDivVector(*child.vectorCoefficient(), x, dim);
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Scalar;
+                out.s = makeDualConstant(div, env.ws->alloc());
+                return out;
+            }
+            if (child.type() == FormExprType::Constant) {
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Scalar;
+                out.s = makeDualConstant(0.0, env.ws->alloc());
+                return out;
+            }
+            throw FEException("Forms: div() currently supports vector TestFunction/TrialFunction and vector Coefficient only (dual)",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::Curl: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("curl must have 1 child (dual)");
+            const auto& child = *kids[0];
+            if (child.type() == FormExprType::TestFunction) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: curl(TestFunction) requires a bound FunctionSpace (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Vector) {
+                    throw FEException("Forms: curl(TestFunction) requires a vector-valued TestFunction (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+                for (int d = 0; d < 3; ++d) {
+                    out.v[static_cast<std::size_t>(d)] = makeDualConstant(0.0, env.ws->alloc());
+                }
+                if (env.test_active != side) {
+                    return out;
+                }
+
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: curl(TestFunction) vector value_dimension must be 1..3 (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex n_test = ctx.numTestDofs();
+                if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
+                    throw FEException("Forms: curl(TestFunction) DOF count is not divisible by value_dimension (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex dofs_per_component =
+                    static_cast<LocalIndex>(n_test / static_cast<LocalIndex>(vd));
+                const int comp = static_cast<int>(env.i / dofs_per_component);
+                if (comp < 0 || comp >= vd) {
+                    throw FEException("Forms: curl(TestFunction) vector DOF index out of range (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                const auto g = ctx.physicalGradient(env.i, q);
+                if (dim == 2) {
+                    const Real cz = (comp == 0) ? -g[1] : (comp == 1) ? g[0] : 0.0;
+                    out.v[2].value = cz;
+                    return out;
+                }
+
+                if (comp == 0) {
+                    out.v[1].value = g[2];
+                    out.v[2].value = -g[1];
+                } else if (comp == 1) {
+                    out.v[0].value = -g[2];
+                    out.v[2].value = g[0];
+                } else if (comp == 2) {
+                    out.v[0].value = g[1];
+                    out.v[1].value = -g[0];
+                }
+                return out;
+            }
+            if (child.type() == FormExprType::TrialFunction) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: curl(TrialFunction) requires a bound FunctionSpace (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Vector) {
+                    throw FEException("Forms: curl(TrialFunction) requires a vector-valued TrialFunction (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: curl(TrialFunction) vector value_dimension must be 1..3 (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex n_trial = ctx.numTrialDofs();
+                if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+                    throw FEException("Forms: curl(TrialFunction) DOF count is not divisible by value_dimension (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex dofs_per_component =
+                    static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+                for (int d = 0; d < 3; ++d) {
+                    out.v[static_cast<std::size_t>(d)] = makeDualConstant(0.0, env.ws->alloc());
+                }
+                if (env.trial_active != side) {
+                    return out;
+                }
+
+                const auto J = ctx.solutionJacobian(q);
+                if (dim == 2) {
+                    // curl_z = du_y/dx - du_x/dy
+                    out.v[2].value =
+                        J[1][0] - J[0][1];
+                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                        const int comp_j = static_cast<int>(static_cast<LocalIndex>(j) / dofs_per_component);
+                        const auto grad_j = ctx.trialPhysicalGradient(static_cast<LocalIndex>(j), q);
+                        if (comp_j == 1) {
+                            out.v[2].deriv[j] = grad_j[0];
+                        } else if (comp_j == 0) {
+                            out.v[2].deriv[j] = -grad_j[1];
+                        }
+                    }
+                    return out;
+                }
+
+                // 3D curl(u) = [dUz/dy - dUy/dz, dUx/dz - dUz/dx, dUy/dx - dUx/dy]
+                out.v[0].value = J[2][1] - J[1][2];
+                out.v[1].value = J[0][2] - J[2][0];
+                out.v[2].value = J[1][0] - J[0][1];
+
+                for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                    const int comp_j = static_cast<int>(static_cast<LocalIndex>(j) / dofs_per_component);
+                    const auto grad_j = ctx.trialPhysicalGradient(static_cast<LocalIndex>(j), q);
+
+                    if (comp_j == 2) {
+                        out.v[0].deriv[j] = grad_j[1];
+                        out.v[1].deriv[j] = -grad_j[0];
+                    } else if (comp_j == 1) {
+                        out.v[0].deriv[j] = -grad_j[2];
+                        out.v[2].deriv[j] = grad_j[0];
+                    } else if (comp_j == 0) {
+                        out.v[1].deriv[j] = grad_j[2];
+                        out.v[2].deriv[j] = -grad_j[1];
+                    }
+                }
+                return out;
+            }
+            if (child.type() == FormExprType::Coefficient && child.vectorCoefficient()) {
+                const auto x = ctx.physicalPoint(q);
+                const auto c = fdCurlVector(*child.vectorCoefficient(), x, dim);
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+                for (int d = 0; d < 3; ++d) {
+                    out.v[static_cast<std::size_t>(d)] =
+                        makeDualConstant(c[static_cast<std::size_t>(d)], env.ws->alloc());
+                }
+                return out;
+            }
+            if (child.type() == FormExprType::Constant) {
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+                for (int d = 0; d < 3; ++d) {
+                    out.v[static_cast<std::size_t>(d)] = makeDualConstant(0.0, env.ws->alloc());
+                }
+                return out;
+            }
+            throw FEException("Forms: curl() currently supports vector TestFunction/TrialFunction and vector Coefficient only (dual)",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::RestrictMinus: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("(-) must have 1 child");
+            return evalDual(*kids[0], env, Side::Minus, q);
+        }
+        case FormExprType::RestrictPlus: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("(+) must have 1 child");
+            return evalDual(*kids[0], env, Side::Plus, q);
+        }
+        case FormExprType::Jump: {
+            if (!env.plus) {
+                throw FEException("Forms: jump() used outside interior-face integral",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("jump must have 1 child");
+            const auto& child = *kids[0];
+            const auto a = evalDual(child, env, Side::Minus, q);
+            const auto b = evalDual(child, env, Side::Plus, q);
+            if (a.kind != b.kind) {
+                throw FEException("Forms: jump() operand has inconsistent kinds across sides",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (isVectorKind<Dual>(a.kind) && a.vectorSize() != b.vectorSize()) {
+                throw FEException("Forms: jump() operand has inconsistent vector sizes across sides",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (isMatrixKind<Dual>(a.kind) && (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols())) {
+                throw FEException("Forms: jump() operand has inconsistent matrix shapes across sides",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            EvalValue<Dual> out;
+            out.kind = a.kind;
+            if (a.kind == EvalValue<Dual>::Kind::Scalar) {
+                out.s = sub(a.s, b.s, makeDualConstant(0.0, env.ws->alloc()));
+            } else if (a.kind == EvalValue<Dual>::Kind::Vector) {
+                out.resizeVector(a.vectorSize());
+                for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                    out.vectorAt(d) = sub(a.vectorAt(d), b.vectorAt(d), makeDualConstant(0.0, env.ws->alloc()));
+                }
+            } else if (isMatrixKind<Dual>(a.kind)) {
+                out.resizeMatrix(a.matrixRows(), a.matrixCols());
+                for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                    for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                        out.matrixAt(r, c) = sub(a.matrixAt(r, c), b.matrixAt(r, c), makeDualConstant(0.0, env.ws->alloc()));
+                    }
+                }
+            } else if (isTensor4Kind<Dual>(a.kind)) {
+                for (std::size_t k = 0; k < out.t4.size(); ++k) {
+                    out.t4[k] = sub(a.t4[k], b.t4[k], makeDualConstant(0.0, env.ws->alloc()));
+                }
+            }
+            return out;
+        }
+        case FormExprType::Average: {
+            if (!env.plus) {
+                throw FEException("Forms: avg() used outside interior-face integral",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("avg must have 1 child");
+            const auto& child = *kids[0];
+            const auto a = evalDual(child, env, Side::Minus, q);
+            const auto b = evalDual(child, env, Side::Plus, q);
+            if (a.kind != b.kind) {
+                throw FEException("Forms: avg() operand has inconsistent kinds across sides",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (isVectorKind<Dual>(a.kind) && a.vectorSize() != b.vectorSize()) {
+                throw FEException("Forms: avg() operand has inconsistent vector sizes across sides",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (isMatrixKind<Dual>(a.kind) && (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols())) {
+                throw FEException("Forms: avg() operand has inconsistent matrix shapes across sides",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            EvalValue<Dual> out;
+            out.kind = a.kind;
+            if (isScalarKind<Dual>(a.kind)) {
+                auto tmp = add(a.s, b.s, makeDualConstant(0.0, env.ws->alloc()));
+                out.s = mul(tmp, 0.5, makeDualConstant(0.0, env.ws->alloc()));
+            } else if (isVectorKind<Dual>(a.kind)) {
+                out.resizeVector(a.vectorSize());
+                for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                    auto tmp = add(a.vectorAt(d), b.vectorAt(d), makeDualConstant(0.0, env.ws->alloc()));
+                    out.vectorAt(d) = mul(tmp, 0.5, makeDualConstant(0.0, env.ws->alloc()));
+                }
+            } else if (isMatrixKind<Dual>(a.kind)) {
+                out.resizeMatrix(a.matrixRows(), a.matrixCols());
+                for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                    for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                        auto tmp = add(a.matrixAt(r, c), b.matrixAt(r, c), makeDualConstant(0.0, env.ws->alloc()));
+                        out.matrixAt(r, c) = mul(tmp, 0.5, makeDualConstant(0.0, env.ws->alloc()));
+                    }
+                }
+            } else {
+                for (std::size_t k = 0; k < out.t4.size(); ++k) {
+                    auto tmp = add(a.t4[k], b.t4[k], makeDualConstant(0.0, env.ws->alloc()));
+                    out.t4[k] = mul(tmp, 0.5, makeDualConstant(0.0, env.ws->alloc()));
+                }
+            }
+            return out;
+        }
+        case FormExprType::Negate: {
+            const auto a = evalDualUnary(node, env, side, q);
+            EvalValue<Dual> out = a;
+            if (isScalarKind<Dual>(a.kind)) out.s = neg(a.s, makeDualConstant(0.0, env.ws->alloc()));
+            else if (isVectorKind<Dual>(a.kind)) {
+                for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                    out.vectorAt(d) = neg(a.vectorAt(d), makeDualConstant(0.0, env.ws->alloc()));
+                }
+            } else if (isMatrixKind<Dual>(a.kind)) {
+                for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                    for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                        out.matrixAt(r, c) = neg(a.matrixAt(r, c), makeDualConstant(0.0, env.ws->alloc()));
+                    }
+                }
+            } else {
+                for (std::size_t k = 0; k < out.t4.size(); ++k) {
+                    out.t4[k] = neg(a.t4[k], makeDualConstant(0.0, env.ws->alloc()));
+                }
+            }
+            return out;
+        }
+        case FormExprType::Transpose: {
+            const auto a = evalDualUnary(node, env, side, q);
+            if (!isMatrixKind<Dual>(a.kind)) {
+                throw FEException("Forms: transpose() expects a matrix (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            EvalValue<Dual> out;
+            out.kind = (rows == cols) ? a.kind : EvalValue<Dual>::Kind::Matrix;
+            out.resizeMatrix(cols, rows);
+            for (std::size_t r = 0; r < cols; ++r) {
+                for (std::size_t c = 0; c < rows; ++c) {
+                    out.matrixAt(r, c) = a.matrixAt(c, r);
+                }
+            }
+            return out;
+        }
+        case FormExprType::Trace: {
+            const auto a = evalDualUnary(node, env, side, q);
+            if (!isMatrixKind<Dual>(a.kind)) {
+                throw FEException("Forms: trace() expects a matrix (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || rows == 0u) {
+                throw FEException("Forms: trace() expects a square matrix (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            Dual tr = makeDualConstant(0.0, env.ws->alloc());
+            for (std::size_t d = 0; d < rows; ++d) {
+                tr = add(tr, a.matrixAt(d, d), tr);
+            }
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = tr;
+            return out;
+        }
+        case FormExprType::Determinant: {
+            const auto a = evalDualUnary(node, env, side, q);
+            if (!isMatrixKind<Dual>(a.kind)) {
+                throw FEException("Forms: det() expects a matrix (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || rows == 0u) {
+                throw FEException("Forms: det() expects a square matrix (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (rows > 3u) {
+                throw FEException("Forms: det() is implemented only for 1x1, 2x2, and 3x3 matrices (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            Dual detA = makeDualConstant(0.0, env.ws->alloc());
+            if (rows == 1u) {
+                detA = copy(a.matrixAt(0, 0), detA);
+            } else if (rows == 2u) {
+                auto t0 = mul(a.matrixAt(0, 0), a.matrixAt(1, 1), makeDualConstant(0.0, env.ws->alloc()));
+                auto t1 = mul(a.matrixAt(0, 1), a.matrixAt(1, 0), makeDualConstant(0.0, env.ws->alloc()));
+                detA = sub(t0, t1, detA);
+            } else {
+                auto m11m22 = mul(a.matrixAt(1, 1), a.matrixAt(2, 2), makeDualConstant(0.0, env.ws->alloc()));
+                auto m12m21 = mul(a.matrixAt(1, 2), a.matrixAt(2, 1), makeDualConstant(0.0, env.ws->alloc()));
+                auto minor0 = sub(m11m22, m12m21, makeDualConstant(0.0, env.ws->alloc()));
+                auto t0 = mul(a.matrixAt(0, 0), minor0, makeDualConstant(0.0, env.ws->alloc()));
+
+                auto m10m22 = mul(a.matrixAt(1, 0), a.matrixAt(2, 2), makeDualConstant(0.0, env.ws->alloc()));
+                auto m12m20 = mul(a.matrixAt(1, 2), a.matrixAt(2, 0), makeDualConstant(0.0, env.ws->alloc()));
+                auto minor1 = sub(m10m22, m12m20, makeDualConstant(0.0, env.ws->alloc()));
+                auto t1 = mul(a.matrixAt(0, 1), minor1, makeDualConstant(0.0, env.ws->alloc()));
+
+                auto m10m21 = mul(a.matrixAt(1, 0), a.matrixAt(2, 1), makeDualConstant(0.0, env.ws->alloc()));
+                auto m11m20 = mul(a.matrixAt(1, 1), a.matrixAt(2, 0), makeDualConstant(0.0, env.ws->alloc()));
+                auto minor2 = sub(m10m21, m11m20, makeDualConstant(0.0, env.ws->alloc()));
+                auto t2 = mul(a.matrixAt(0, 2), minor2, makeDualConstant(0.0, env.ws->alloc()));
+
+                auto tmp = sub(t0, t1, makeDualConstant(0.0, env.ws->alloc()));
+                detA = add(tmp, t2, detA);
+            }
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = detA;
+            return out;
+        }
+        case FormExprType::Cofactor:
+        case FormExprType::Inverse: {
+            const auto a = evalDualUnary(node, env, side, q);
+            if (!isMatrixKind<Dual>(a.kind)) {
+                throw FEException("Forms: inv()/cofactor() expects a matrix (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || rows == 0u) {
+                throw FEException("Forms: inv()/cofactor() expects a square matrix (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (rows > 3u) {
+                throw FEException("Forms: inv()/cofactor() is implemented only for 1x1, 2x2, and 3x3 matrices (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            EvalValue<Dual> cof;
+            cof.kind = EvalValue<Dual>::Kind::Matrix;
+            cof.resizeMatrix(rows, cols);
+            for (std::size_t r = 0; r < rows; ++r) {
+                for (std::size_t c = 0; c < cols; ++c) {
+                    cof.matrixAt(r, c) = makeDualConstant(0.0, env.ws->alloc());
+                }
+            }
+
+            if (rows == 1u) {
+                cof.matrixAt(0, 0) = makeDualConstant(1.0, env.ws->alloc());
+            } else if (rows == 2u) {
+                cof.matrixAt(0, 0) = copy(a.matrixAt(1, 1), cof.matrixAt(0, 0));
+                cof.matrixAt(0, 1) = neg(a.matrixAt(1, 0), cof.matrixAt(0, 1));
+                cof.matrixAt(1, 0) = neg(a.matrixAt(0, 1), cof.matrixAt(1, 0));
+                cof.matrixAt(1, 1) = copy(a.matrixAt(0, 0), cof.matrixAt(1, 1));
+            } else {
+                cof.matrixAt(0, 0) = sub(mul(a.matrixAt(1, 1), a.matrixAt(2, 2), makeDualConstant(0.0, env.ws->alloc())),
+                                         mul(a.matrixAt(1, 2), a.matrixAt(2, 1), makeDualConstant(0.0, env.ws->alloc())),
+                                         cof.matrixAt(0, 0));
+                cof.matrixAt(0, 1) = neg(sub(mul(a.matrixAt(1, 0), a.matrixAt(2, 2), makeDualConstant(0.0, env.ws->alloc())),
+                                             mul(a.matrixAt(1, 2), a.matrixAt(2, 0), makeDualConstant(0.0, env.ws->alloc())),
+                                             makeDualConstant(0.0, env.ws->alloc())),
+                                         cof.matrixAt(0, 1));
+                cof.matrixAt(0, 2) = sub(mul(a.matrixAt(1, 0), a.matrixAt(2, 1), makeDualConstant(0.0, env.ws->alloc())),
+                                         mul(a.matrixAt(1, 1), a.matrixAt(2, 0), makeDualConstant(0.0, env.ws->alloc())),
+                                         cof.matrixAt(0, 2));
+
+                cof.matrixAt(1, 0) = neg(sub(mul(a.matrixAt(0, 1), a.matrixAt(2, 2), makeDualConstant(0.0, env.ws->alloc())),
+                                             mul(a.matrixAt(0, 2), a.matrixAt(2, 1), makeDualConstant(0.0, env.ws->alloc())),
+                                             makeDualConstant(0.0, env.ws->alloc())),
+                                         cof.matrixAt(1, 0));
+                cof.matrixAt(1, 1) = sub(mul(a.matrixAt(0, 0), a.matrixAt(2, 2), makeDualConstant(0.0, env.ws->alloc())),
+                                         mul(a.matrixAt(0, 2), a.matrixAt(2, 0), makeDualConstant(0.0, env.ws->alloc())),
+                                         cof.matrixAt(1, 1));
+                cof.matrixAt(1, 2) = neg(sub(mul(a.matrixAt(0, 0), a.matrixAt(2, 1), makeDualConstant(0.0, env.ws->alloc())),
+                                             mul(a.matrixAt(0, 1), a.matrixAt(2, 0), makeDualConstant(0.0, env.ws->alloc())),
+                                             makeDualConstant(0.0, env.ws->alloc())),
+                                         cof.matrixAt(1, 2));
+
+                cof.matrixAt(2, 0) = sub(mul(a.matrixAt(0, 1), a.matrixAt(1, 2), makeDualConstant(0.0, env.ws->alloc())),
+                                         mul(a.matrixAt(0, 2), a.matrixAt(1, 1), makeDualConstant(0.0, env.ws->alloc())),
+                                         cof.matrixAt(2, 0));
+                cof.matrixAt(2, 1) = neg(sub(mul(a.matrixAt(0, 0), a.matrixAt(1, 2), makeDualConstant(0.0, env.ws->alloc())),
+                                             mul(a.matrixAt(0, 2), a.matrixAt(1, 0), makeDualConstant(0.0, env.ws->alloc())),
+                                             makeDualConstant(0.0, env.ws->alloc())),
+                                         cof.matrixAt(2, 1));
+                cof.matrixAt(2, 2) = sub(mul(a.matrixAt(0, 0), a.matrixAt(1, 1), makeDualConstant(0.0, env.ws->alloc())),
+                                         mul(a.matrixAt(0, 1), a.matrixAt(1, 0), makeDualConstant(0.0, env.ws->alloc())),
+                                         cof.matrixAt(2, 2));
+            }
+
+            if (node.type() == FormExprType::Cofactor) {
+                return cof;
+            }
+
+            // det = first row dot cof first row
+            Dual detA = makeDualConstant(0.0, env.ws->alloc());
+            for (std::size_t c = 0; c < cols; ++c) {
+                auto prod = mul(a.matrixAt(0, c), cof.matrixAt(0, c), makeDualConstant(0.0, env.ws->alloc()));
+                detA = add(detA, prod, detA);
+            }
+
+            EvalValue<Dual> invA;
+            invA.kind = EvalValue<Dual>::Kind::Matrix;
+            invA.resizeMatrix(rows, cols);
+            for (std::size_t r = 0; r < rows; ++r) {
+                for (std::size_t c = 0; c < cols; ++c) {
+                    invA.matrixAt(r, c) = makeDualConstant(0.0, env.ws->alloc());
+                }
+            }
+            for (std::size_t r = 0; r < rows; ++r) {
+                for (std::size_t c = 0; c < cols; ++c) {
+                    invA.matrixAt(r, c) = div(cof.matrixAt(c, r), detA, makeDualConstant(0.0, env.ws->alloc()));
+                }
+            }
+            return invA;
+        }
+        case FormExprType::SymmetricPart:
+        case FormExprType::SkewPart: {
+            const auto a = evalDualUnary(node, env, side, q);
+            if (!isMatrixKind<Dual>(a.kind)) {
+                throw FEException("Forms: sym()/skew() expects a matrix (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols) {
+                throw FEException("Forms: sym()/skew() expects a square matrix (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            EvalValue<Dual> out;
+            out.kind = (node.type() == FormExprType::SymmetricPart)
+                ? EvalValue<Dual>::Kind::SymmetricMatrix
+                : EvalValue<Dual>::Kind::SkewMatrix;
+            out.resizeMatrix(rows, cols);
+            for (std::size_t r = 0; r < rows; ++r) {
+                for (std::size_t c = 0; c < cols; ++c) {
+                    auto tmp = (node.type() == FormExprType::SymmetricPart)
+                        ? add(a.matrixAt(r, c),
+                              a.matrixAt(c, r),
+                              makeDualConstant(0.0, env.ws->alloc()))
+                        : sub(a.matrixAt(r, c),
+                              a.matrixAt(c, r),
+                              makeDualConstant(0.0, env.ws->alloc()));
+                    out.matrixAt(r, c) =
+                        mul(tmp, 0.5, makeDualConstant(0.0, env.ws->alloc()));
+                }
+            }
+            return out;
+        }
+        case FormExprType::Deviator: {
+            const auto a = evalDualUnary(node, env, side, q);
+            if (!isMatrixKind<Dual>(a.kind)) {
+                throw FEException("Forms: dev() expects a matrix (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || rows == 0u) {
+                throw FEException("Forms: dev() expects a square matrix (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            Dual tr = makeDualConstant(0.0, env.ws->alloc());
+            for (std::size_t d = 0; d < rows; ++d) tr = add(tr, a.matrixAt(d, d), tr);
+            Dual mean = div(tr, static_cast<Real>(rows), makeDualConstant(0.0, env.ws->alloc()));
+
+            EvalValue<Dual> out = a;
+            out.kind = isMatrixKind<Dual>(a.kind) ? a.kind : EvalValue<Dual>::Kind::Matrix;
+            for (std::size_t d = 0; d < rows; ++d) {
+                out.matrixAt(d, d) = sub(a.matrixAt(d, d), mean, makeDualConstant(0.0, env.ws->alloc()));
+            }
+            return out;
+        }
+        case FormExprType::Norm: {
+            const auto a = evalDualUnary(node, env, side, q);
+            Dual sum = makeDualConstant(0.0, env.ws->alloc());
+            if (isScalarKind<Dual>(a.kind)) {
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Scalar;
+                out.s = abs(a.s, makeDualConstant(0.0, env.ws->alloc()));
+                return out;
+            }
+            if (isVectorKind<Dual>(a.kind)) {
+                for (std::size_t d = 0; d < a.vectorSize(); ++d) {
+                    auto prod = mul(a.vectorAt(d),
+                                    a.vectorAt(d),
+                                    makeDualConstant(0.0, env.ws->alloc()));
+                    sum = add(sum, prod, sum);
+                }
+            } else if (isMatrixKind<Dual>(a.kind)) {
+                for (std::size_t r = 0; r < a.matrixRows(); ++r) {
+                    for (std::size_t c = 0; c < a.matrixCols(); ++c) {
+                        auto prod = mul(a.matrixAt(r, c),
+                                        a.matrixAt(r, c),
+                                        makeDualConstant(0.0, env.ws->alloc()));
+                        sum = add(sum, prod, sum);
+                    }
+                }
+            } else {
+                for (std::size_t k = 0; k < a.t4.size(); ++k) {
+                    auto prod = mul(a.t4[k], a.t4[k], makeDualConstant(0.0, env.ws->alloc()));
+                    sum = add(sum, prod, sum);
+                }
+            }
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = sqrt(sum, makeDualConstant(0.0, env.ws->alloc()));
+            return out;
+        }
+        case FormExprType::Normalize: {
+            const auto a = evalDualUnary(node, env, side, q);
+            if (!isVectorKind<Dual>(a.kind)) {
+                throw FEException("Forms: normalize() expects a vector (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            Dual sum = makeDualConstant(0.0, env.ws->alloc());
+            for (std::size_t d = 0; d < a.vectorSize(); ++d) {
+                auto prod = mul(a.vectorAt(d),
+                                a.vectorAt(d),
+                                makeDualConstant(0.0, env.ws->alloc()));
+                sum = add(sum, prod, sum);
+            }
+            Dual nrm = sqrt(sum, makeDualConstant(0.0, env.ws->alloc()));
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Vector;
+            out.resizeVector(a.vectorSize());
+            if (nrm.value == 0.0) {
+                for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                    out.vectorAt(d) = makeDualConstant(0.0, env.ws->alloc());
+                }
+                return out;
+            }
+            for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                out.vectorAt(d) = div(a.vectorAt(d), nrm, makeDualConstant(0.0, env.ws->alloc()));
+            }
+            return out;
+        }
+        case FormExprType::AbsoluteValue: {
+            const auto a = evalDualUnary(node, env, side, q);
+            if (a.kind != EvalValue<Dual>::Kind::Scalar) {
+                throw FEException("Forms: abs() expects a scalar (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = abs(a.s, makeDualConstant(0.0, env.ws->alloc()));
+            return out;
+        }
+        case FormExprType::Sign: {
+            const auto a = evalDualUnary(node, env, side, q);
+            if (a.kind != EvalValue<Dual>::Kind::Scalar) {
+                throw FEException("Forms: sign() expects a scalar (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = sign(a.s, makeDualConstant(0.0, env.ws->alloc()));
+            return out;
+        }
+        case FormExprType::Sqrt:
+        case FormExprType::Exp:
+        case FormExprType::Log: {
+            const auto a = evalDualUnary(node, env, side, q);
+            if (a.kind != EvalValue<Dual>::Kind::Scalar) {
+                throw FEException("Forms: sqrt/exp/log expects a scalar (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            if (node.type() == FormExprType::Sqrt) out.s = sqrt(a.s, makeDualConstant(0.0, env.ws->alloc()));
+            else if (node.type() == FormExprType::Exp) out.s = exp(a.s, makeDualConstant(0.0, env.ws->alloc()));
+            else out.s = log(a.s, makeDualConstant(0.0, env.ws->alloc()));
+            return out;
+        }
+        case FormExprType::Add:
+        case FormExprType::Subtract:
+        case FormExprType::Multiply:
+        case FormExprType::Divide:
+        case FormExprType::InnerProduct:
+        case FormExprType::DoubleContraction:
+        case FormExprType::OuterProduct:
+        case FormExprType::CrossProduct:
+        case FormExprType::Power:
+        case FormExprType::Minimum:
+        case FormExprType::Maximum:
+        case FormExprType::Less:
+        case FormExprType::LessEqual:
+        case FormExprType::Greater:
+        case FormExprType::GreaterEqual:
+        case FormExprType::Equal:
+        case FormExprType::NotEqual: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 2 || !kids[0] || !kids[1]) {
+                throw std::logic_error("Forms: binary node must have 2 children");
+            }
+            const auto a = evalDual(*kids[0], env, side, q);
+            const auto b = evalDual(*kids[1], env, side, q);
+
+            if (node.type() == FormExprType::Add || node.type() == FormExprType::Subtract) {
+                if (!sameCategory<Dual>(a.kind, b.kind)) {
+                    throw FEException("Forms: add/sub kind mismatch",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (isVectorKind<Dual>(a.kind) && a.vectorSize() != b.vectorSize()) {
+                    throw FEException("Forms: add/sub vector size mismatch (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (isMatrixKind<Dual>(a.kind) && (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols())) {
+                    throw FEException("Forms: add/sub matrix shape mismatch (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                EvalValue<Dual> out;
+                out.kind = addSubResultKind<Dual>(a.kind, b.kind);
+                if (isScalarKind<Dual>(a.kind)) {
+                    out.s = (node.type() == FormExprType::Add)
+                        ? add(a.s, b.s, makeDualConstant(0.0, env.ws->alloc()))
+                        : sub(a.s, b.s, makeDualConstant(0.0, env.ws->alloc()));
+                } else if (isVectorKind<Dual>(a.kind)) {
+                    out.resizeVector(a.vectorSize());
+                    for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                        out.vectorAt(d) = (node.type() == FormExprType::Add)
+                            ? add(a.vectorAt(d), b.vectorAt(d), makeDualConstant(0.0, env.ws->alloc()))
+                            : sub(a.vectorAt(d), b.vectorAt(d), makeDualConstant(0.0, env.ws->alloc()));
+                    }
+                } else if (isMatrixKind<Dual>(a.kind)) {
+                    out.resizeMatrix(a.matrixRows(), a.matrixCols());
+                    for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                            out.matrixAt(r, c) = (node.type() == FormExprType::Add)
+                                ? add(a.matrixAt(r, c), b.matrixAt(r, c), makeDualConstant(0.0, env.ws->alloc()))
+                                : sub(a.matrixAt(r, c), b.matrixAt(r, c), makeDualConstant(0.0, env.ws->alloc()));
+                        }
+                    }
+                } else {
+                    for (std::size_t k = 0; k < out.t4.size(); ++k) {
+                        out.t4[k] = (node.type() == FormExprType::Add)
+                            ? add(a.t4[k], b.t4[k], makeDualConstant(0.0, env.ws->alloc()))
+                            : sub(a.t4[k], b.t4[k], makeDualConstant(0.0, env.ws->alloc()));
+                    }
+                }
+                return out;
+            }
+
+            if (node.type() == FormExprType::Multiply) {
+                if (isScalarKind<Dual>(a.kind) && isScalarKind<Dual>(b.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = mul(a.s, b.s, makeDualConstant(0.0, env.ws->alloc()));
+                    return out;
+                }
+                if (isScalarKind<Dual>(a.kind) && isVectorKind<Dual>(b.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Vector;
+                    out.resizeVector(b.vectorSize());
+                    for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                        out.vectorAt(d) = mul(a.s, b.vectorAt(d), makeDualConstant(0.0, env.ws->alloc()));
+                    }
+                    return out;
+                }
+                if (isVectorKind<Dual>(a.kind) && isScalarKind<Dual>(b.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Vector;
+                    out.resizeVector(a.vectorSize());
+                    for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                        out.vectorAt(d) = mul(a.vectorAt(d), b.s, makeDualConstant(0.0, env.ws->alloc()));
+                    }
+                    return out;
+                }
+                if (isScalarKind<Dual>(a.kind) && isMatrixKind<Dual>(b.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = b.kind;
+                    out.resizeMatrix(b.matrixRows(), b.matrixCols());
+                    for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                            out.matrixAt(r, c) = mul(a.s, b.matrixAt(r, c), makeDualConstant(0.0, env.ws->alloc()));
+                        }
+                    }
+                    return out;
+                }
+                if (isMatrixKind<Dual>(a.kind) && isScalarKind<Dual>(b.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = a.kind;
+                    out.resizeMatrix(a.matrixRows(), a.matrixCols());
+                    for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                            out.matrixAt(r, c) = mul(a.matrixAt(r, c), b.s, makeDualConstant(0.0, env.ws->alloc()));
+                        }
+                    }
+                    return out;
+                }
+                if (isMatrixKind<Dual>(a.kind) && isVectorKind<Dual>(b.kind)) {
+                    const auto rows = a.matrixRows();
+                    const auto cols = a.matrixCols();
+                    if (b.vectorSize() != cols) {
+                        throw FEException("Forms: matrix-vector multiplication shape mismatch (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Vector;
+                    out.resizeVector(rows);
+                    for (std::size_t r = 0; r < rows; ++r) {
+                        Dual sum = makeDualConstant(0.0, env.ws->alloc());
+                        for (std::size_t c = 0; c < cols; ++c) {
+                            auto prod = mul(a.matrixAt(r, c), b.vectorAt(c), makeDualConstant(0.0, env.ws->alloc()));
+                            sum = add(sum, prod, sum);
+                        }
+                        out.vectorAt(r) = sum;
+                    }
+                    return out;
+                }
+                if (isVectorKind<Dual>(a.kind) && isMatrixKind<Dual>(b.kind)) {
+                    const auto rows = b.matrixRows();
+                    const auto cols = b.matrixCols();
+                    if (a.vectorSize() != rows) {
+                        throw FEException("Forms: vector-matrix multiplication shape mismatch (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Vector;
+                    out.resizeVector(cols);
+                    for (std::size_t c = 0; c < cols; ++c) {
+                        Dual sum = makeDualConstant(0.0, env.ws->alloc());
+                        for (std::size_t r = 0; r < rows; ++r) {
+                            auto prod = mul(a.vectorAt(r), b.matrixAt(r, c), makeDualConstant(0.0, env.ws->alloc()));
+                            sum = add(sum, prod, sum);
+                        }
+                        out.vectorAt(c) = sum;
+                    }
+                    return out;
+                }
+                if (isMatrixKind<Dual>(a.kind) && isMatrixKind<Dual>(b.kind)) {
+                    const auto rows = a.matrixRows();
+                    const auto inner_dim = a.matrixCols();
+                    const auto cols = b.matrixCols();
+                    if (b.matrixRows() != inner_dim) {
+                        throw FEException("Forms: matrix-matrix multiplication shape mismatch (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Matrix;
+                    out.resizeMatrix(rows, cols);
+                    for (std::size_t r = 0; r < rows; ++r) {
+                        for (std::size_t c = 0; c < cols; ++c) {
+                            Dual sum = makeDualConstant(0.0, env.ws->alloc());
+                            for (std::size_t k = 0; k < inner_dim; ++k) {
+                                auto prod = mul(a.matrixAt(r, k), b.matrixAt(k, c), makeDualConstant(0.0, env.ws->alloc()));
+                                sum = add(sum, prod, sum);
+                            }
+                            out.matrixAt(r, c) = sum;
+                        }
+                    }
+                    return out;
+                }
+                if (isScalarKind<Dual>(a.kind) && isTensor4Kind<Dual>(b.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Tensor4;
+                    for (std::size_t k = 0; k < out.t4.size(); ++k) {
+                        out.t4[k] = mul(a.s, b.t4[k], makeDualConstant(0.0, env.ws->alloc()));
+                    }
+                    return out;
+                }
+                if (isTensor4Kind<Dual>(a.kind) && isScalarKind<Dual>(b.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Tensor4;
+                    for (std::size_t k = 0; k < out.t4.size(); ++k) {
+                        out.t4[k] = mul(a.t4[k], b.s, makeDualConstant(0.0, env.ws->alloc()));
+                    }
+                    return out;
+                }
+                throw FEException("Forms: unsupported multiplication kinds (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            if (node.type() == FormExprType::Divide) {
+                if (!isScalarKind<Dual>(b.kind)) {
+                    throw FEException("Forms: division denominator must be scalar (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (isScalarKind<Dual>(a.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = div(a.s, b.s, makeDualConstant(0.0, env.ws->alloc()));
+                    return out;
+                }
+                if (isVectorKind<Dual>(a.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Vector;
+                    out.resizeVector(a.vectorSize());
+                    for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                        out.vectorAt(d) = div(a.vectorAt(d), b.s, makeDualConstant(0.0, env.ws->alloc()));
+                    }
+                    return out;
+                }
+                if (isMatrixKind<Dual>(a.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = a.kind;
+                    out.resizeMatrix(a.matrixRows(), a.matrixCols());
+                    for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                            out.matrixAt(r, c) = div(a.matrixAt(r, c), b.s, makeDualConstant(0.0, env.ws->alloc()));
+                        }
+                    }
+                    return out;
+                }
+                if (isTensor4Kind<Dual>(a.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Tensor4;
+                    for (std::size_t k = 0; k < out.t4.size(); ++k) {
+                        out.t4[k] = div(a.t4[k], b.s, makeDualConstant(0.0, env.ws->alloc()));
+                    }
+                    return out;
+                }
+                throw FEException("Forms: unsupported division kinds (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            if (node.type() == FormExprType::InnerProduct) {
+                if (isScalarKind<Dual>(a.kind) && isScalarKind<Dual>(b.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = mul(a.s, b.s, makeDualConstant(0.0, env.ws->alloc()));
+                    return out;
+                }
+                if (isVectorKind<Dual>(a.kind) && isVectorKind<Dual>(b.kind)) {
+                    Dual sum = makeDualConstant(0.0, env.ws->alloc());
+                    if (a.vectorSize() != b.vectorSize()) {
+                        throw FEException("Forms: inner(vector,vector) size mismatch (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    for (std::size_t d = 0; d < a.vectorSize(); ++d) {
+                        auto prod = mul(a.vectorAt(d),
+                                        b.vectorAt(d),
+                                        makeDualConstant(0.0, env.ws->alloc()));
+                        sum = add(sum, prod, sum);
+                    }
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = sum;
+                    return out;
+                }
+                if (isMatrixKind<Dual>(a.kind) && isMatrixKind<Dual>(b.kind)) {
+                    Dual sum = makeDualConstant(0.0, env.ws->alloc());
+                    if (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols()) {
+                        throw FEException("Forms: inner(matrix,matrix) shape mismatch (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    for (std::size_t r = 0; r < a.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < a.matrixCols(); ++c) {
+                            auto prod = mul(a.matrixAt(r, c),
+                                            b.matrixAt(r, c),
+                                            makeDualConstant(0.0, env.ws->alloc()));
+                            sum = add(sum, prod, sum);
+                        }
+                    }
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = sum;
+                    return out;
+                }
+                if (isTensor4Kind<Dual>(a.kind) && isTensor4Kind<Dual>(b.kind)) {
+                    Dual sum = makeDualConstant(0.0, env.ws->alloc());
+                    for (std::size_t k = 0; k < a.t4.size(); ++k) {
+                        auto prod = mul(a.t4[k], b.t4[k], makeDualConstant(0.0, env.ws->alloc()));
+                        sum = add(sum, prod, sum);
+                    }
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = sum;
+                    return out;
+                }
+                throw FEException("Forms: unsupported inner() kinds (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            if (node.type() == FormExprType::DoubleContraction) {
+                if (isTensor4Kind<Dual>(a.kind) && isMatrixKind<Dual>(b.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Matrix;
+                    out.resizeMatrix(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim));
+                    for (int i = 0; i < dim; ++i) {
+                        for (int j = 0; j < dim; ++j) {
+                            Dual sum = makeDualConstant(0.0, env.ws->alloc());
+                            for (int k = 0; k < dim; ++k) {
+                                for (int l = 0; l < dim; ++l) {
+                                    auto prod = mul(
+                                        a.t4[idx4(i, j, k, l)],
+                                        b.matrixAt(static_cast<std::size_t>(k), static_cast<std::size_t>(l)),
+                                        makeDualConstant(0.0, env.ws->alloc()));
+                                    sum = add(sum, prod, sum);
+                                }
+                            }
+                            out.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)) = sum;
+                        }
+                    }
+                    return out;
+                }
+
+                if (isMatrixKind<Dual>(a.kind) && isTensor4Kind<Dual>(b.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Matrix;
+                    out.resizeMatrix(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim));
+                    for (int k = 0; k < dim; ++k) {
+                        for (int l = 0; l < dim; ++l) {
+                            Dual sum = makeDualConstant(0.0, env.ws->alloc());
+                            for (int i = 0; i < dim; ++i) {
+                                for (int j = 0; j < dim; ++j) {
+                                    auto prod = mul(
+                                        a.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)),
+                                        b.t4[idx4(i, j, k, l)],
+                                        makeDualConstant(0.0, env.ws->alloc()));
+                                    sum = add(sum, prod, sum);
+                                }
+                            }
+                            out.matrixAt(static_cast<std::size_t>(k), static_cast<std::size_t>(l)) = sum;
+                        }
+                    }
+                    return out;
+                }
+
+                // Fall back to full contraction for matching shapes.
+                if (isScalarKind<Dual>(a.kind) && isScalarKind<Dual>(b.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = mul(a.s, b.s, makeDualConstant(0.0, env.ws->alloc()));
+                    return out;
+                }
+                if (isVectorKind<Dual>(a.kind) && isVectorKind<Dual>(b.kind)) {
+                    Dual sum = makeDualConstant(0.0, env.ws->alloc());
+                    if (a.vectorSize() != b.vectorSize()) {
+                        throw FEException("Forms: doubleContraction(vector,vector) size mismatch (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    for (std::size_t d = 0; d < a.vectorSize(); ++d) {
+                        auto prod = mul(a.vectorAt(d),
+                                        b.vectorAt(d),
+                                        makeDualConstant(0.0, env.ws->alloc()));
+                        sum = add(sum, prod, sum);
+                    }
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = sum;
+                    return out;
+                }
+                if (isMatrixKind<Dual>(a.kind) && isMatrixKind<Dual>(b.kind)) {
+                    Dual sum = makeDualConstant(0.0, env.ws->alloc());
+                    if (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols()) {
+                        throw FEException("Forms: doubleContraction(matrix,matrix) shape mismatch (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    for (std::size_t r = 0; r < a.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < a.matrixCols(); ++c) {
+                            auto prod = mul(a.matrixAt(r, c),
+                                            b.matrixAt(r, c),
+                                            makeDualConstant(0.0, env.ws->alloc()));
+                            sum = add(sum, prod, sum);
+                        }
+                    }
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = sum;
+                    return out;
+                }
+                if (isTensor4Kind<Dual>(a.kind) && isTensor4Kind<Dual>(b.kind)) {
+                    Dual sum = makeDualConstant(0.0, env.ws->alloc());
+                    for (std::size_t k = 0; k < a.t4.size(); ++k) {
+                        auto prod = mul(a.t4[k], b.t4[k], makeDualConstant(0.0, env.ws->alloc()));
+                        sum = add(sum, prod, sum);
+                    }
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = sum;
+                    return out;
+                }
+
+                throw FEException("Forms: unsupported doubleContraction() kinds (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            if (node.type() == FormExprType::OuterProduct) {
+                if (a.kind == EvalValue<Dual>::Kind::Vector && b.kind == EvalValue<Dual>::Kind::Vector) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Matrix;
+                    const auto rows = a.vectorSize();
+                    const auto cols = b.vectorSize();
+                    out.resizeMatrix(rows, cols);
+                    for (std::size_t r = 0; r < rows; ++r) {
+                        for (std::size_t c = 0; c < cols; ++c) {
+                            out.matrixAt(r, c) = mul(a.vectorAt(r), b.vectorAt(c), makeDualConstant(0.0, env.ws->alloc()));
+                        }
+                    }
+                    return out;
+                }
+                throw FEException("Forms: outer() currently supports vector-vector only",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            if (node.type() == FormExprType::CrossProduct) {
+                if (a.kind != EvalValue<Dual>::Kind::Vector || b.kind != EvalValue<Dual>::Kind::Vector) {
+                    throw FEException("Forms: cross() expects vector arguments (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (a.vectorSize() > 3u || b.vectorSize() > 3u) {
+                    throw FEException("Forms: cross() supports vectors up to 3 components (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+
+                auto ax = (a.vectorSize() > 0u) ? a.vectorAt(0) : makeDualConstant(0.0, env.ws->alloc());
+                auto ay = (a.vectorSize() > 1u) ? a.vectorAt(1) : makeDualConstant(0.0, env.ws->alloc());
+                auto az = (a.vectorSize() > 2u) ? a.vectorAt(2) : makeDualConstant(0.0, env.ws->alloc());
+
+                auto bx = (b.vectorSize() > 0u) ? b.vectorAt(0) : makeDualConstant(0.0, env.ws->alloc());
+                auto by = (b.vectorSize() > 1u) ? b.vectorAt(1) : makeDualConstant(0.0, env.ws->alloc());
+                auto bz = (b.vectorSize() > 2u) ? b.vectorAt(2) : makeDualConstant(0.0, env.ws->alloc());
+
+                out.resizeVector(3u);
+                auto aybz = mul(ay, bz, makeDualConstant(0.0, env.ws->alloc()));
+                auto azby = mul(az, by, makeDualConstant(0.0, env.ws->alloc()));
+                out.vectorAt(0) = sub(aybz, azby, makeDualConstant(0.0, env.ws->alloc()));
+
+                auto azbx = mul(az, bx, makeDualConstant(0.0, env.ws->alloc()));
+                auto axbz = mul(ax, bz, makeDualConstant(0.0, env.ws->alloc()));
+                out.vectorAt(1) = sub(azbx, axbz, makeDualConstant(0.0, env.ws->alloc()));
+
+                auto axby = mul(ax, by, makeDualConstant(0.0, env.ws->alloc()));
+                auto aybx = mul(ay, bx, makeDualConstant(0.0, env.ws->alloc()));
+                out.vectorAt(2) = sub(axby, aybx, makeDualConstant(0.0, env.ws->alloc()));
+                return out;
+            }
+
+            if (node.type() == FormExprType::Power) {
+                if (a.kind != EvalValue<Dual>::Kind::Scalar || b.kind != EvalValue<Dual>::Kind::Scalar) {
+                    throw FEException("Forms: pow() expects scalar arguments (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const bool exponent_is_constant = (kids[1] && kids[1]->type() == FormExprType::Constant);
+                const Real exponent_value = exponent_is_constant ? kids[1]->constantValue().value_or(b.s.value) : b.s.value;
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Scalar;
+                out.s = exponent_is_constant
+                    ? pow(a.s, exponent_value, makeDualConstant(0.0, env.ws->alloc()))
+                    : pow(a.s, b.s, makeDualConstant(0.0, env.ws->alloc()));
+                return out;
+            }
+
+            if (node.type() == FormExprType::Minimum || node.type() == FormExprType::Maximum) {
+                if (a.kind != EvalValue<Dual>::Kind::Scalar || b.kind != EvalValue<Dual>::Kind::Scalar) {
+                    throw FEException("Forms: min/max expects scalar arguments (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                return (node.type() == FormExprType::Minimum)
+                    ? ((a.s.value <= b.s.value) ? a : b)
+                    : ((a.s.value >= b.s.value) ? a : b);
+            }
+
+            if (node.type() == FormExprType::Less || node.type() == FormExprType::LessEqual ||
+                node.type() == FormExprType::Greater || node.type() == FormExprType::GreaterEqual ||
+                node.type() == FormExprType::Equal || node.type() == FormExprType::NotEqual) {
+                if (a.kind != EvalValue<Dual>::Kind::Scalar || b.kind != EvalValue<Dual>::Kind::Scalar) {
+                    throw FEException("Forms: comparisons expect scalar arguments (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                bool truth = false;
+                switch (node.type()) {
+                    case FormExprType::Less: truth = (a.s.value < b.s.value); break;
+                    case FormExprType::LessEqual: truth = (a.s.value <= b.s.value); break;
+                    case FormExprType::Greater: truth = (a.s.value > b.s.value); break;
+                    case FormExprType::GreaterEqual: truth = (a.s.value >= b.s.value); break;
+                    case FormExprType::Equal: truth = (a.s.value == b.s.value); break;
+                    case FormExprType::NotEqual: truth = (a.s.value != b.s.value); break;
+                    default: break;
+                }
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Scalar;
+                out.s = makeDualConstant(truth ? 1.0 : 0.0, env.ws->alloc());
+                return out;
+            }
+
+            throw FEException("Forms: unreachable binary operation (dual)",
+                              __FILE__, __LINE__, __func__, FEStatus::Unknown);
+        }
+        case FormExprType::Conditional: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 3 || !kids[0] || !kids[1] || !kids[2]) {
+                throw std::logic_error("Forms: conditional must have 3 children");
+            }
+            const auto cond = evalDual(*kids[0], env, side, q);
+            if (cond.kind != EvalValue<Dual>::Kind::Scalar) {
+                throw FEException("Forms: conditional condition must be scalar (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto a = evalDual(*kids[1], env, side, q);
+            const auto b = evalDual(*kids[2], env, side, q);
+            if (!sameCategory<Dual>(a.kind, b.kind)) {
+                throw FEException("Forms: conditional branch kind mismatch (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (a.kind == b.kind) {
+                return (cond.s.value > 0.0) ? a : b;
+            }
+            if (isMatrixKind<Dual>(a.kind) && isMatrixKind<Dual>(b.kind)) {
+                auto out = (cond.s.value > 0.0) ? a : b;
+                out.kind = EvalValue<Dual>::Kind::Matrix;
+                return out;
+            }
+            return (cond.s.value > 0.0) ? a : b;
+        }
+        case FormExprType::AsVector: {
+            const auto kids = node.childrenShared();
+            if (kids.empty()) {
+                throw FEException("Forms: as_vector expects at least 1 scalar component (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Vector;
+            out.resizeVector(kids.size());
+            for (std::size_t c = 0; c < kids.size(); ++c) {
+                if (!kids[c]) throw std::logic_error("Forms: as_vector has null child (dual)");
+                const auto v = evalDual(*kids[c], env, side, q);
+                if (v.kind != EvalValue<Dual>::Kind::Scalar) {
+                    throw FEException("Forms: as_vector components must be scalar (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                out.vectorAt(c) = v.s;
+            }
+            return out;
+        }
+        case FormExprType::AsTensor: {
+            const auto rows = node.tensorRows().value_or(0);
+            const auto cols = node.tensorCols().value_or(0);
+            if (rows <= 0 || cols <= 0) {
+                throw FEException("Forms: as_tensor requires explicit shape with rows,cols >= 1 (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto kids = node.childrenShared();
+            if (kids.size() != static_cast<std::size_t>(rows * cols)) {
+                throw FEException("Forms: as_tensor child count does not match rows*cols (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Matrix;
+            out.resizeMatrix(static_cast<std::size_t>(rows), static_cast<std::size_t>(cols));
+            for (int r = 0; r < rows; ++r) {
+                for (int c = 0; c < cols; ++c) {
+                    const auto idx = static_cast<std::size_t>(r * cols + c);
+                    if (!kids[idx]) throw std::logic_error("Forms: as_tensor has null child (dual)");
+                    const auto v = evalDual(*kids[idx], env, side, q);
+                    if (v.kind != EvalValue<Dual>::Kind::Scalar) {
+                        throw FEException("Forms: as_tensor entries must be scalar (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    out.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) = v.s;
+                }
+            }
+            return out;
+        }
+        case FormExprType::Component: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) throw std::logic_error("component() must have 1 child");
+            const auto a = evalDual(*kids[0], env, side, q);
+            const int i = node.componentIndex0().value_or(0);
+            const int j = node.componentIndex1().value_or(-1);
+
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            if (isScalarKind<Dual>(a.kind)) {
+                if (i != 0 || j >= 0) {
+                    throw FEException("Forms: component() invalid indices for scalar (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                out.s = a.s;
+                return out;
+            }
+            if (isVectorKind<Dual>(a.kind)) {
+                if (j >= 0) {
+                    throw FEException("Forms: component(v,i,j) invalid for vector (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto n = a.vectorSize();
+                if (i < 0 || static_cast<std::size_t>(i) >= n) {
+                    throw FEException("Forms: component(v,i) index out of range (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                out.s = a.vectorAt(static_cast<std::size_t>(i));
+                return out;
+            }
+            if (!isMatrixKind<Dual>(a.kind)) {
+                throw FEException("Forms: component() is not defined for this operand kind (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            if (j < 0) {
+                throw FEException("Forms: component(A,i) missing column index for matrix (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (i < 0 || static_cast<std::size_t>(i) >= rows || j < 0 || static_cast<std::size_t>(j) >= cols) {
+                throw FEException("Forms: component(A,i,j) index out of range (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            out.s = a.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j));
+            return out;
+        }
+        case FormExprType::IndexedAccess:
+            throw FEException("Forms: indexed access must be lowered via forms::einsum(...) before compilation/evaluation (dual)",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        case FormExprType::CellIntegral:
+        case FormExprType::BoundaryIntegral:
+        case FormExprType::InteriorFaceIntegral:
+            break;
+    }
+
+    throw FEException("Forms: unsupported expression node in dual evaluation",
+                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+}
+
+} // namespace
+
+// ============================================================================
+// FormKernel
+// ============================================================================
+
+FormKernel::FormKernel(FormIR ir)
+    : ir_(std::move(ir))
+{
+    if (!ir_.isCompiled()) {
+        throw std::invalid_argument("FormKernel: IR is not compiled");
+    }
+    if (ir_.kind() == FormKind::Residual) {
+        throw std::invalid_argument("FormKernel: residual IR must be used with NonlinearFormKernel");
+    }
+
+    constitutive_state_ = buildConstitutiveStateLayout(ir_, material_state_spec_);
+}
+
+FormKernel::~FormKernel() = default;
+FormKernel::FormKernel(FormKernel&&) noexcept = default;
+FormKernel& FormKernel::operator=(FormKernel&&) noexcept = default;
+
+assembly::RequiredData FormKernel::getRequiredData() const noexcept
+{
+    auto req = ir_.requiredData();
+    if (material_state_spec_.bytes_per_qpt > 0u) {
+        req |= assembly::RequiredData::MaterialState;
+    }
+    return req;
+}
+
+assembly::MaterialStateSpec FormKernel::materialStateSpec() const noexcept
+{
+    return material_state_spec_;
+}
+
+std::vector<params::Spec> FormKernel::parameterSpecs() const
+{
+    std::vector<const ConstitutiveModel*> models;
+    for (const auto& term : ir_.terms()) {
+        const auto* root = term.integrand.node();
+        if (!root) continue;
+        gatherConstitutiveModels(*root, models);
+    }
+
+    std::vector<params::Spec> out;
+    for (const auto* m : models) {
+        if (!m) continue;
+        auto specs = m->parameterSpecs();
+        out.insert(out.end(), specs.begin(), specs.end());
+    }
+    return out;
+}
+
+bool FormKernel::hasCell() const noexcept { return ir_.hasCellTerms(); }
+bool FormKernel::hasBoundaryFace() const noexcept { return ir_.hasBoundaryTerms(); }
+bool FormKernel::hasInteriorFace() const noexcept { return ir_.hasInteriorFaceTerms(); }
+
+void FormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::KernelOutput& output)
+{
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+
+    const bool want_matrix = (ir_.kind() == FormKind::Bilinear);
+    const bool want_vector = (ir_.kind() == FormKind::Linear);
+
+    output.reserve(n_test, n_trial, want_matrix, want_vector);
+    output.clear();
+
+    const auto n_qpts = ctx.numQuadraturePoints();
+    const auto* time_ctx = ctx.timeIntegrationContext();
+
+    ConstitutiveCallCacheReal constitutive_cache;
+    EvalEnvReal env{ctx, nullptr, ir_.kind(), Side::Minus, Side::Minus, 0, 0, constitutive_state_.get(), &constitutive_cache};
+
+    for (const auto& term : ir_.terms()) {
+        if (term.domain != IntegralDomain::Cell) continue;
+        Real term_weight = 1.0;
+        if (time_ctx) {
+            if (term.time_derivative_order == 1) {
+                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+            } else if (term.time_derivative_order == 2) {
+                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+            } else if (term.time_derivative_order > 0) {
+                term_weight = time_ctx->time_derivative_term_weight;
+            } else {
+                term_weight = time_ctx->non_time_derivative_term_weight;
+            }
+        }
+        if (term_weight == 0.0) continue;
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
+
+            if (want_matrix) {
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    env.i = i;
+                    for (LocalIndex j = 0; j < n_trial; ++j) {
+                        env.j = j;
+                        const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                            throw FEException("Forms: cell bilinear integrand did not evaluate to scalar",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        output.matrixEntry(i, j) += (term_weight * w) * val.s;
+                    }
+                }
+            } else if (want_vector) {
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    env.i = i;
+                    const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                    if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                        throw FEException("Forms: cell linear integrand did not evaluate to scalar",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    output.vectorEntry(i) += (term_weight * w) * val.s;
+                }
+            }
+        }
+    }
+
+    output.has_matrix = want_matrix;
+    output.has_vector = want_vector;
+}
+
+void FormKernel::computeBoundaryFace(
+    const assembly::AssemblyContext& ctx,
+    int boundary_marker,
+    assembly::KernelOutput& output)
+{
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+
+    const bool want_matrix = (ir_.kind() == FormKind::Bilinear);
+    const bool want_vector = (ir_.kind() == FormKind::Linear);
+
+    output.reserve(n_test, n_trial, want_matrix, want_vector);
+    output.clear();
+
+    const auto n_qpts = ctx.numQuadraturePoints();
+    const auto* time_ctx = ctx.timeIntegrationContext();
+    ConstitutiveCallCacheReal constitutive_cache;
+    EvalEnvReal env{ctx, nullptr, ir_.kind(), Side::Minus, Side::Minus, 0, 0, constitutive_state_.get(), &constitutive_cache};
+
+    for (const auto& term : ir_.terms()) {
+        if (term.domain != IntegralDomain::Boundary) continue;
+        if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
+        Real term_weight = 1.0;
+        if (time_ctx) {
+            if (term.time_derivative_order == 1) {
+                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+            } else if (term.time_derivative_order == 2) {
+                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+            } else if (term.time_derivative_order > 0) {
+                term_weight = time_ctx->time_derivative_term_weight;
+            } else {
+                term_weight = time_ctx->non_time_derivative_term_weight;
+            }
+        }
+        if (term_weight == 0.0) continue;
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
+
+            if (want_matrix) {
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    env.i = i;
+                    for (LocalIndex j = 0; j < n_trial; ++j) {
+                        env.j = j;
+                        const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                            throw FEException("Forms: boundary bilinear integrand did not evaluate to scalar",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        output.matrixEntry(i, j) += (term_weight * w) * val.s;
+                    }
+                }
+            } else if (want_vector) {
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    env.i = i;
+                    const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                    if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                        throw FEException("Forms: boundary linear integrand did not evaluate to scalar",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    output.vectorEntry(i) += (term_weight * w) * val.s;
+                }
+            }
+        }
+    }
+
+    output.has_matrix = want_matrix;
+    output.has_vector = want_vector;
+}
+
+void FormKernel::computeInteriorFace(
+    const assembly::AssemblyContext& ctx_minus,
+    const assembly::AssemblyContext& ctx_plus,
+    assembly::KernelOutput& output_minus,
+    assembly::KernelOutput& output_plus,
+    assembly::KernelOutput& coupling_mp,
+    assembly::KernelOutput& coupling_pm)
+{
+    if (ir_.kind() != FormKind::Bilinear) {
+        // Interior face assembly is currently defined only for bilinear forms in FormKernel.
+        output_minus.clear();
+        output_plus.clear();
+        coupling_mp.clear();
+        coupling_pm.clear();
+        return;
+    }
+
+    const auto n_test_minus = ctx_minus.numTestDofs();
+    const auto n_trial_minus = ctx_minus.numTrialDofs();
+    const auto n_test_plus = ctx_plus.numTestDofs();
+    const auto n_trial_plus = ctx_plus.numTrialDofs();
+
+    output_minus.reserve(n_test_minus, n_trial_minus, true, false);
+    output_plus.reserve(n_test_plus, n_trial_plus, true, false);
+    coupling_mp.reserve(n_test_minus, n_trial_plus, true, false);
+    coupling_pm.reserve(n_test_plus, n_trial_minus, true, false);
+
+    output_minus.clear();
+    output_plus.clear();
+    coupling_mp.clear();
+    coupling_pm.clear();
+
+    const auto n_qpts = ctx_minus.numQuadraturePoints();
+
+    auto assembleBlock = [&](Side eval_side,
+                             Side test_active,
+                             Side trial_active,
+                             assembly::KernelOutput& out,
+                             LocalIndex n_test,
+                             LocalIndex n_trial) {
+        ConstitutiveCallCacheReal constitutive_cache;
+        EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Bilinear, test_active, trial_active, 0, 0,
+                        constitutive_state_.get(), &constitutive_cache};
+
+        for (const auto& term : ir_.terms()) {
+            if (term.domain != IntegralDomain::InteriorFace) continue;
+            const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
+            const auto* time_ctx = ctx_eval.timeIntegrationContext();
+            Real term_weight = 1.0;
+            if (time_ctx) {
+                if (term.time_derivative_order == 1) {
+                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                } else if (term.time_derivative_order == 2) {
+                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                } else if (term.time_derivative_order > 0) {
+                    term_weight = time_ctx->time_derivative_term_weight;
+                } else {
+                    term_weight = time_ctx->non_time_derivative_term_weight;
+                }
+            }
+            if (term_weight == 0.0) continue;
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const Real w = ctx_eval.integrationWeight(q);
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    env.i = i;
+                    for (LocalIndex j = 0; j < n_trial; ++j) {
+                        env.j = j;
+                        const auto val = evalReal(*term.integrand.node(), env, eval_side, q);
+                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                            throw FEException("Forms: interior-face bilinear integrand did not evaluate to scalar",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        out.matrixEntry(i, j) += (term_weight * w) * val.s;
+                    }
+                }
+            }
+        }
+        out.has_matrix = true;
+        out.has_vector = false;
+    };
+
+    // minus-minus (evaluate on minus side)
+    assembleBlock(Side::Minus, Side::Minus, Side::Minus,
+                  output_minus, n_test_minus, n_trial_minus);
+
+    // plus-plus (evaluate on plus side)
+    assembleBlock(Side::Plus, Side::Plus, Side::Plus,
+                  output_plus, n_test_plus, n_trial_plus);
+
+    // minus-plus coupling (evaluate on minus side; trial active on plus)
+    assembleBlock(Side::Minus, Side::Minus, Side::Plus,
+                  coupling_mp, n_test_minus, n_trial_plus);
+
+    // plus-minus coupling (evaluate on plus side; trial active on minus)
+    assembleBlock(Side::Plus, Side::Plus, Side::Minus,
+                  coupling_pm, n_test_plus, n_trial_minus);
+}
+
+// ============================================================================
+// NonlinearFormKernel
+// ============================================================================
+
+NonlinearFormKernel::NonlinearFormKernel(FormIR residual_ir, ADMode ad_mode)
+    : residual_ir_(std::move(residual_ir))
+    , ad_mode_(ad_mode)
+{
+    if (!residual_ir_.isCompiled()) {
+        throw std::invalid_argument("NonlinearFormKernel: residual IR is not compiled");
+    }
+    if (residual_ir_.kind() != FormKind::Residual) {
+        throw std::invalid_argument("NonlinearFormKernel: IR kind must be Residual");
+    }
+
+    constitutive_state_ = buildConstitutiveStateLayout(residual_ir_, material_state_spec_);
+}
+
+NonlinearFormKernel::~NonlinearFormKernel() = default;
+NonlinearFormKernel::NonlinearFormKernel(NonlinearFormKernel&&) noexcept = default;
+NonlinearFormKernel& NonlinearFormKernel::operator=(NonlinearFormKernel&&) noexcept = default;
+
+assembly::RequiredData NonlinearFormKernel::getRequiredData() const noexcept
+{
+    // Require solution data so the assembler sets per-cell coefficients and caches u_h, grad(u_h).
+    auto req = residual_ir_.requiredData() |
+               assembly::RequiredData::SolutionValues |
+               assembly::RequiredData::SolutionGradients;
+    if (material_state_spec_.bytes_per_qpt > 0u) {
+        req |= assembly::RequiredData::MaterialState;
+    }
+    return req;
+}
+
+assembly::MaterialStateSpec NonlinearFormKernel::materialStateSpec() const noexcept
+{
+    return material_state_spec_;
+}
+
+std::vector<params::Spec> NonlinearFormKernel::parameterSpecs() const
+{
+    std::vector<const ConstitutiveModel*> models;
+    for (const auto& term : residual_ir_.terms()) {
+        const auto* root = term.integrand.node();
+        if (!root) continue;
+        gatherConstitutiveModels(*root, models);
+    }
+
+    std::vector<params::Spec> out;
+    for (const auto* m : models) {
+        if (!m) continue;
+        auto specs = m->parameterSpecs();
+        out.insert(out.end(), specs.begin(), specs.end());
+    }
+    return out;
+}
+
+bool NonlinearFormKernel::hasCell() const noexcept { return residual_ir_.hasCellTerms(); }
+bool NonlinearFormKernel::hasBoundaryFace() const noexcept { return residual_ir_.hasBoundaryTerms(); }
+bool NonlinearFormKernel::hasInteriorFace() const noexcept { return residual_ir_.hasInteriorFaceTerms(); }
+
+void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::KernelOutput& output)
+{
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+
+    output.reserve(n_test, n_trial, true, true);
+    output.clear();
+
+    const auto n_qpts = ctx.numQuadraturePoints();
+    const auto* time_ctx = ctx.timeIntegrationContext();
+
+    thread_local DualWorkspace ws;
+
+    for (LocalIndex i = 0; i < n_test; ++i) {
+        auto row = std::span<Real>(
+            output.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
+            static_cast<std::size_t>(n_trial));
+        std::fill(row.begin(), row.end(), 0.0);
+
+        Dual residual_i;
+        residual_i.value = 0.0;
+        residual_i.deriv = row;
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
+
+            // Reset workspace for this quadrature evaluation.
+            ws.reset(static_cast<std::size_t>(n_trial));
+
+            ConstitutiveCallCacheDual constitutive_cache;
+            EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, static_cast<std::size_t>(n_trial), &ws,
+                            constitutive_state_.get(), &constitutive_cache};
+
+            Dual sum_q = makeDualConstant(0.0, ws.alloc());
+
+            for (const auto& term : residual_ir_.terms()) {
+                if (term.domain != IntegralDomain::Cell) continue;
+                Real term_weight = 1.0;
+                if (time_ctx) {
+                    if (term.time_derivative_order == 1) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                    } else if (term.time_derivative_order == 2) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                    } else if (term.time_derivative_order > 0) {
+                        term_weight = time_ctx->time_derivative_term_weight;
+                    } else {
+                        term_weight = time_ctx->non_time_derivative_term_weight;
+                    }
+                }
+                if (term_weight == 0.0) continue;
+                const auto val = evalDual(*term.integrand.node(), env, Side::Minus, q);
+                if (val.kind != EvalValue<Dual>::Kind::Scalar) {
+                    throw FEException("Forms: residual cell integrand did not evaluate to scalar",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                sum_q.value += term_weight * val.s.value;
+                for (std::size_t j = 0; j < sum_q.deriv.size(); ++j) {
+                    sum_q.deriv[j] += term_weight * val.s.deriv[j];
+                }
+            }
+
+            residual_i.value += w * sum_q.value;
+            for (std::size_t j = 0; j < residual_i.deriv.size(); ++j) {
+                residual_i.deriv[j] += w * sum_q.deriv[j];
+            }
+        }
+
+        output.local_vector[static_cast<std::size_t>(i)] = residual_i.value;
+    }
+
+    output.has_matrix = true;
+    output.has_vector = true;
+}
+
+void NonlinearFormKernel::computeBoundaryFace(
+    const assembly::AssemblyContext& ctx,
+    int boundary_marker,
+    assembly::KernelOutput& output)
+{
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+
+    output.reserve(n_test, n_trial, true, true);
+    output.clear();
+
+    const auto n_qpts = ctx.numQuadraturePoints();
+    const auto* time_ctx = ctx.timeIntegrationContext();
+    thread_local DualWorkspace ws;
+
+    for (LocalIndex i = 0; i < n_test; ++i) {
+        auto row = std::span<Real>(
+            output.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
+            static_cast<std::size_t>(n_trial));
+        std::fill(row.begin(), row.end(), 0.0);
+
+        Dual residual_i;
+        residual_i.value = 0.0;
+        residual_i.deriv = row;
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
+            ws.reset(static_cast<std::size_t>(n_trial));
+
+            ConstitutiveCallCacheDual constitutive_cache;
+            EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, static_cast<std::size_t>(n_trial), &ws,
+                            constitutive_state_.get(), &constitutive_cache};
+            Dual sum_q = makeDualConstant(0.0, ws.alloc());
+
+            for (const auto& term : residual_ir_.terms()) {
+                if (term.domain != IntegralDomain::Boundary) continue;
+                if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
+                Real term_weight = 1.0;
+                if (time_ctx) {
+                    if (term.time_derivative_order == 1) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                    } else if (term.time_derivative_order == 2) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                    } else if (term.time_derivative_order > 0) {
+                        term_weight = time_ctx->time_derivative_term_weight;
+                    } else {
+                        term_weight = time_ctx->non_time_derivative_term_weight;
+                    }
+                }
+                if (term_weight == 0.0) continue;
+                const auto val = evalDual(*term.integrand.node(), env, Side::Minus, q);
+                if (val.kind != EvalValue<Dual>::Kind::Scalar) {
+                    throw FEException("Forms: residual boundary integrand did not evaluate to scalar",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                sum_q.value += term_weight * val.s.value;
+                for (std::size_t j = 0; j < sum_q.deriv.size(); ++j) {
+                    sum_q.deriv[j] += term_weight * val.s.deriv[j];
+                }
+            }
+
+            residual_i.value += w * sum_q.value;
+            for (std::size_t j = 0; j < residual_i.deriv.size(); ++j) {
+                residual_i.deriv[j] += w * sum_q.deriv[j];
+            }
+        }
+
+        output.local_vector[static_cast<std::size_t>(i)] = residual_i.value;
+    }
+
+    output.has_matrix = true;
+    output.has_vector = true;
+}
+
+void NonlinearFormKernel::computeInteriorFace(
+    const assembly::AssemblyContext& ctx_minus,
+    const assembly::AssemblyContext& ctx_plus,
+    assembly::KernelOutput& output_minus,
+    assembly::KernelOutput& output_plus,
+    assembly::KernelOutput& coupling_mp,
+    assembly::KernelOutput& coupling_pm)
+{
+    const auto n_test_minus = ctx_minus.numTestDofs();
+    const auto n_trial_minus = ctx_minus.numTrialDofs();
+    const auto n_test_plus = ctx_plus.numTestDofs();
+    const auto n_trial_plus = ctx_plus.numTrialDofs();
+
+    output_minus.reserve(n_test_minus, n_trial_minus, true, true);
+    output_plus.reserve(n_test_plus, n_trial_plus, true, true);
+    coupling_mp.reserve(n_test_minus, n_trial_plus, true, false);
+    coupling_pm.reserve(n_test_plus, n_trial_minus, true, false);
+
+    output_minus.clear();
+    output_plus.clear();
+    coupling_mp.clear();
+    coupling_pm.clear();
+
+    const auto n_qpts = ctx_minus.numQuadraturePoints();
+    thread_local DualWorkspace ws;
+
+    auto assembleResidualJacBlock = [&](Side eval_side,
+                                        Side test_active,
+                                        Side trial_active,
+                                        const assembly::AssemblyContext& ctx_eval,
+                                        const assembly::AssemblyContext& ctx_other,
+                                        assembly::KernelOutput& out,
+                                        LocalIndex n_test,
+                                        LocalIndex n_trial,
+                                        bool want_vector) {
+        const auto* time_ctx = ctx_eval.timeIntegrationContext();
+        for (LocalIndex i = 0; i < n_test; ++i) {
+            auto row = std::span<Real>(
+                out.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
+                static_cast<std::size_t>(n_trial));
+            std::fill(row.begin(), row.end(), 0.0);
+
+            Dual residual_i;
+            residual_i.value = 0.0;
+            residual_i.deriv = row;
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const Real w = ctx_eval.integrationWeight(q);
+                ws.reset(static_cast<std::size_t>(n_trial));
+
+                ConstitutiveCallCacheDual constitutive_cache;
+                EvalEnvDual env{ctx_eval, &ctx_other, test_active, trial_active, i,
+                                static_cast<std::size_t>(n_trial), &ws, constitutive_state_.get(), &constitutive_cache};
+
+                Dual sum_q = makeDualConstant(0.0, ws.alloc());
+                for (const auto& term : residual_ir_.terms()) {
+                    if (term.domain != IntegralDomain::InteriorFace) continue;
+                    Real term_weight = 1.0;
+                    if (time_ctx) {
+                        if (term.time_derivative_order == 1) {
+                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                        } else if (term.time_derivative_order == 2) {
+                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                        } else if (term.time_derivative_order > 0) {
+                            term_weight = time_ctx->time_derivative_term_weight;
+                        } else {
+                            term_weight = time_ctx->non_time_derivative_term_weight;
+                        }
+                    }
+                    if (term_weight == 0.0) continue;
+                    const auto val = evalDual(*term.integrand.node(), env, eval_side, q);
+                    if (val.kind != EvalValue<Dual>::Kind::Scalar) {
+                        throw FEException("Forms: residual interior-face integrand did not evaluate to scalar",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    sum_q.value += term_weight * val.s.value;
+                    for (std::size_t j = 0; j < sum_q.deriv.size(); ++j) {
+                        sum_q.deriv[j] += term_weight * val.s.deriv[j];
+                    }
+                }
+
+                residual_i.value += w * sum_q.value;
+                for (std::size_t j = 0; j < residual_i.deriv.size(); ++j) {
+                    residual_i.deriv[j] += w * sum_q.deriv[j];
+                }
+            }
+
+            if (want_vector) {
+                out.local_vector[static_cast<std::size_t>(i)] = residual_i.value;
+            }
+        }
+
+        out.has_matrix = true;
+        out.has_vector = want_vector;
+    };
+
+    // minus equations, derivatives w.r.t minus dofs (residual + minus-minus block)
+    assembleResidualJacBlock(Side::Minus, Side::Minus, Side::Minus,
+                             ctx_minus, ctx_plus,
+                             output_minus, n_test_minus, n_trial_minus, true);
+
+    // minus equations, derivatives w.r.t plus dofs (minus-plus coupling)
+    assembleResidualJacBlock(Side::Minus, Side::Minus, Side::Plus,
+                             ctx_minus, ctx_plus,
+                             coupling_mp, n_test_minus, n_trial_plus, false);
+
+    // plus equations, derivatives w.r.t plus dofs (residual + plus-plus block)
+    assembleResidualJacBlock(Side::Plus, Side::Plus, Side::Plus,
+                             ctx_plus, ctx_minus,
+                             output_plus, n_test_plus, n_trial_plus, true);
+
+    // plus equations, derivatives w.r.t minus dofs (plus-minus coupling)
+    assembleResidualJacBlock(Side::Plus, Side::Plus, Side::Minus,
+                             ctx_plus, ctx_minus,
+                             coupling_pm, n_test_plus, n_trial_minus, false);
+}
+
+} // namespace forms
+} // namespace FE
+} // namespace svmp
