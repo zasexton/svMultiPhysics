@@ -73,7 +73,7 @@ public:
   /**
    * @brief Register VTK reader with MeshBase IO registry
    *
-   * Registers readers for "vtk", "vtu", and "vtp" formats
+   * Registers readers for "vtk", "vtu", "vtp", and parallel XML formats ("pvtu", "pvtp")
    */
   static void register_with_mesh();
 
@@ -91,6 +91,21 @@ public:
    * @brief Read mesh from VTP (XML PolyData) file
    */
   static MeshBase read_vtp(const std::string& filename);
+
+  /**
+   * @brief Read mesh from PVTU (parallel XML UnstructuredGrid) file
+   *
+   * In serial this loads and assembles all pieces into a single mesh.
+   * For scalable MPI loading, prefer DistributedMesh::load_parallel().
+   */
+  static MeshBase read_pvtu(const std::string& filename);
+
+  /**
+   * @brief Read mesh from PVTP (parallel XML PolyData) file
+   *
+   * In serial this loads and assembles all pieces into a single mesh.
+   */
+  static MeshBase read_pvtp(const std::string& filename);
 
 private:
   /**
