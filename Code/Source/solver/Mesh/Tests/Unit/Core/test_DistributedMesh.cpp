@@ -644,27 +644,49 @@ public:
         auto local_mesh = create_test_mesh_2d(4, 4, rank_ * 4);
         DistributedMesh dmesh(local_mesh, MPI_COMM_WORLD);
 
-        // Test point location
-        // Note: The test point needs to be within one of the rank's domains
-        // Since we create meshes with x_offset = rank_ * 4, we adjust the test point
-        std::array<real_t, 3> test_point = {rank_ * 4.0 + 2.5, 2.5, 0.0};
+        // Case 1: local-only point location (each rank queries its own local mesh).
+        std::array<real_t, 3> local_point = {rank_ * 4.0 + 2.5, 2.5, 0.0};
+        auto local_result = dmesh.locate_point(local_point);
+        ASSERT(local_result.found);
+        ASSERT_GE(local_result.cell_id, 0);
 
-        auto result = dmesh.locate_point_global(test_point);
+        // Parametric coordinates should be in [0,1] when found locally.
+        for (int i = 0; i < 3; ++i) {
+            ASSERT_GE(local_result.xi[i], -1e-10);
+            ASSERT_LE(local_result.xi[i], 1.0 + 1e-10);
+        }
 
-        // Someone should find the point if it's in the global domain
-        bool found_locally = result.found;
-        bool found_globally;
-        MPI_Allreduce(&found_locally, &found_globally, 1, MPI_C_BOOL, MPI_LOR, comm_);
+        // Case 2: point only inside rank-0 mesh (other ranks must still participate).
+        std::array<real_t, 3> rank0_point = {2.5, 2.5, 0.0};
+        auto global_result = dmesh.locate_point_global(rank0_point);
+        ASSERT(global_result.found);
+        if (rank_ == 0) {
+            ASSERT_GE(global_result.cell_id, 0);
+        } else {
+            ASSERT_EQ(global_result.cell_id, INVALID_INDEX);
+        }
 
-        // Note: The locate_point_global implementation may not be complete
-        // We just test that it doesn't crash and returns reasonable results
+        // Case 3: batch point location (one collective for all points).
+        if (world_size_ >= 2) {
+            std::vector<std::array<real_t, 3>> points;
+            points.push_back({2.5, 2.5, 0.0});   // inside rank 0 mesh
+            points.push_back({6.5, 2.5, 0.0});   // inside rank 1 mesh (x_offset=4)
 
-        // Result should be valid if found locally
-        if (result.found && result.cell_id >= 0) {
-            // Parametric coordinates should be in [0,1]
-            for (int i = 0; i < 3; ++i) {
-                ASSERT_GE(result.xi[i], -1e-10);
-                ASSERT_LE(result.xi[i], 1.0 + 1e-10);
+            auto batch = dmesh.locate_points_global(points);
+            ASSERT_EQ(batch.size(), points.size());
+
+            ASSERT(batch[0].found);
+            if (rank_ == 0) {
+                ASSERT_GE(batch[0].cell_id, 0);
+            } else {
+                ASSERT_EQ(batch[0].cell_id, INVALID_INDEX);
+            }
+
+            ASSERT(batch[1].found);
+            if (rank_ == 1) {
+                ASSERT_GE(batch[1].cell_id, 0);
+            } else {
+                ASSERT_EQ(batch[1].cell_id, INVALID_INDEX);
             }
         }
 

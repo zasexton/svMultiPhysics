@@ -724,14 +724,37 @@ public:
             }
         }
 
-        // Test with all ranks having identical meshes (no actual sharing)
-        auto identical_mesh = MeshGenerator::create_overlapping_mesh_2d(3, 3, 0, 1);
-        DistributedMesh dmesh_identical(identical_mesh, MPI_COMM_WORLD);
+        // Test with all ranks having independent meshes (no shared GIDs -> no sharing)
+        auto disjoint_mesh = MeshGenerator::create_overlapping_mesh_2d(3, 3, rank_, world_size_, 0.0);
+        {
+            // Ensure uniqueness across ranks even if coordinates line up at partition boundaries.
+            const gid_t base = static_cast<gid_t>(rank_) * 1000000000LL;
 
-        dmesh_identical.build_exchange_patterns();  // This internally gathers shared entities
+            std::vector<gid_t> vertex_gids(disjoint_mesh->vertex_gids().size());
+            for (index_t v = 0; v < static_cast<index_t>(vertex_gids.size()); ++v) {
+                vertex_gids[static_cast<size_t>(v)] = base + v;
+            }
+            disjoint_mesh->set_vertex_gids(std::move(vertex_gids));
+
+            std::vector<gid_t> cell_gids(disjoint_mesh->cell_gids().size());
+            for (index_t c = 0; c < static_cast<index_t>(cell_gids.size()); ++c) {
+                cell_gids[static_cast<size_t>(c)] = base + c;
+            }
+            disjoint_mesh->set_cell_gids(std::move(cell_gids));
+
+            std::vector<gid_t> face_gids(disjoint_mesh->face_gids().size());
+            for (index_t f = 0; f < static_cast<index_t>(face_gids.size()); ++f) {
+                face_gids[static_cast<size_t>(f)] = base + f;
+            }
+            disjoint_mesh->set_face_gids(std::move(face_gids));
+        }
+
+        DistributedMesh dmesh_disjoint(disjoint_mesh, MPI_COMM_WORLD);
+
+        dmesh_disjoint.build_exchange_patterns();  // This internally gathers shared entities
 
         // No neighbors expected (meshes don't actually overlap)
-        ASSERT_EQ(dmesh_identical.neighbor_ranks().size(), 0);
+        ASSERT_EQ(dmesh_disjoint.neighbor_ranks().size(), 0);
 
         print_rank_0("  ✓ Boundary condition tests passed");
     }

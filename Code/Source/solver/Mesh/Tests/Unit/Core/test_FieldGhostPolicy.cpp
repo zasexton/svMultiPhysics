@@ -130,6 +130,11 @@ static void test_exchange_policy_updates_ghosts(int rank, int world_size) {
   MeshFields::attach_field_with_descriptor(dmesh.local_mesh(), EntityKind::Volume, "c_exchange",
                                            FieldScalarType::Float64, cdesc);
 
+  FieldDescriptor edesc = FieldDescriptor::scalar(EntityKind::Edge);
+  edesc.ghost_policy = FieldGhostPolicy::Exchange;
+  MeshFields::attach_field_with_descriptor(dmesh.local_mesh(), EntityKind::Edge, "e_exchange",
+                                           FieldScalarType::Float64, edesc);
+
   FieldDescriptor vlocal = FieldDescriptor::scalar(EntityKind::Vertex);
   vlocal.ghost_policy = FieldGhostPolicy::None;
   MeshFields::attach_field_with_descriptor(dmesh.local_mesh(), EntityKind::Vertex, "v_local",
@@ -150,6 +155,12 @@ static void test_exchange_policy_updates_ghosts(int rank, int world_size) {
   ASSERT(cdesc_after != nullptr);
   ASSERT(cdesc_after->ghost_policy == FieldGhostPolicy::Exchange);
 
+  const auto eh = dmesh.local_mesh().field_handle(EntityKind::Edge, "e_exchange");
+  ASSERT(eh.id != 0);
+  const auto* edesc_after = dmesh.local_mesh().field_descriptor(eh);
+  ASSERT(edesc_after != nullptr);
+  ASSERT(edesc_after->ghost_policy == FieldGhostPolicy::Exchange);
+
   // Initialize values: owned entities = rank, non-owned = sentinel.
   constexpr real_t sentinel = static_cast<real_t>(-12345.0);
 
@@ -165,6 +176,13 @@ static void test_exchange_policy_updates_ghosts(int rank, int world_size) {
   for (index_t c = 0; c < static_cast<index_t>(dmesh.local_mesh().n_cells()); ++c) {
     const rank_t owner = dmesh.owner_rank_cell(c);
     c_exchange[c] = (owner == rank) ? static_cast<real_t>(rank) : sentinel;
+  }
+
+  auto* e_exchange = dmesh.local_mesh().field_data_as<real_t>(eh);
+  ASSERT(e_exchange != nullptr);
+  for (index_t e = 0; e < static_cast<index_t>(dmesh.local_mesh().n_edges()); ++e) {
+    const rank_t owner = dmesh.owner_rank_edge(e);
+    e_exchange[e] = (owner == rank) ? static_cast<real_t>(rank) : sentinel;
   }
 
   const auto vlocal_h = dmesh.local_mesh().field_handle(EntityKind::Vertex, "v_local");
@@ -187,6 +205,11 @@ static void test_exchange_policy_updates_ghosts(int rank, int world_size) {
   }
   ASSERT(ghost_cells > 0);
   ASSERT(ghost_verts > 0);
+  int ghost_edges = 0;
+  for (index_t e = 0; e < static_cast<index_t>(dmesh.local_mesh().n_edges()); ++e) {
+    if (dmesh.is_ghost_edge(e)) ghost_edges++;
+  }
+  ASSERT(ghost_edges > 0);
 
   dmesh.update_exchange_ghost_fields();
 
@@ -201,6 +224,12 @@ static void test_exchange_policy_updates_ghosts(int rank, int world_size) {
     const rank_t owner = dmesh.owner_rank_cell(c);
     ASSERT(owner >= 0);
     ASSERT_NEAR(c_exchange[c], static_cast<real_t>(owner), 1e-12);
+  }
+
+  for (index_t e = 0; e < static_cast<index_t>(dmesh.local_mesh().n_edges()); ++e) {
+    const rank_t owner = dmesh.owner_rank_edge(e);
+    ASSERT(owner >= 0);
+    ASSERT_NEAR(e_exchange[e], static_cast<real_t>(owner), 1e-12);
   }
 
   // Non-exchange fields should remain unchanged on non-owned entities.
@@ -230,4 +259,3 @@ int main(int argc, char** argv) {
   MPI_Finalize();
   return 0;
 }
-

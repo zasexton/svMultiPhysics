@@ -20,7 +20,7 @@ TEST(DistributedMeshStubEventsTest, EmitsPartitionAndFieldEvents) {
 #else
   DistributedMesh dm;
 
-  // Build a minimal mesh (one tet).
+  // Build a minimal mesh (one tet) via the MeshBase-like forwarders.
   std::vector<real_t> X_ref = {
       0.0, 0.0, 0.0,
       1.0, 0.0, 0.0,
@@ -35,7 +35,7 @@ TEST(DistributedMeshStubEventsTest, EmitsPartitionAndFieldEvents) {
   shapes[0].num_corners = 4;
   dm.build_from_arrays(3, X_ref, offs, conn, shapes);
 
-  auto counter = ObserverRegistry::attach_event_counter(dm.local_mesh());
+  auto counter = ObserverRegistry::attach_event_counter(dm.event_bus());
   counter->reset();
 
   dm.set_ownership(0, EntityKind::Volume, Ownership::Owned, 0);
@@ -57,4 +57,3 @@ TEST(DistributedMeshStubEventsTest, EmitsPartitionAndFieldEvents) {
 
 } // namespace test
 } // namespace svmp
-

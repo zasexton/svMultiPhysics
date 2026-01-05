@@ -203,8 +203,9 @@ public:
     void test_mesh_serialization() {
         print_once("=== Testing Mesh Serialization/Deserialization ===");
 
-        // Create a test mesh
-        auto original_mesh = create_test_mesh_3d(2, 2, 2);
+        // Create a test mesh with per-rank unique global IDs so migration preserves
+        // the global cell count deterministically.
+        auto original_mesh = create_test_mesh_3d(2, 2, 2, rank_ * 2);
 
         // Test the internal serialization functions
         // Note: In real implementation, we'd need friend access or test hooks
@@ -224,7 +225,7 @@ public:
             dmesh.migrate(new_owners);
 
             // Verify mesh integrity after migration
-            size_t global_cells_before = 8 * world_size_;  // Each rank started with 8 cells
+            size_t global_cells_before = 8 * world_size_;  // Each rank started with 8 unique cells
             size_t global_cells_after;
             size_t local_cells = dmesh.local_mesh().n_cells();
             MPI_Allreduce(&local_cells, &global_cells_after, 1, MPI_UNSIGNED_LONG,
@@ -395,9 +396,12 @@ public:
         // Note: MPI_COMM_NULL handling would need careful testing
         // as it might crash MPI
 
-        // Test 4: Invalid entity kind
-        dmesh.set_ownership(0, EntityKind::Edge, Ownership::Ghost, 0);
-        // Should be silently ignored since edges not implemented
+        // Test 4: Edge ownership update
+        if (dmesh.local_mesh().n_edges() > 0) {
+            dmesh.set_ownership(0, EntityKind::Edge, Ownership::Ghost, 0);
+            ASSERT(dmesh.is_ghost_edge(0));
+            ASSERT_EQ(dmesh.owner_rank_edge(0), 0);
+        }
 
         // Test 5: Empty mesh operations
         auto empty_mesh = std::make_shared<MeshBase>();
@@ -671,15 +675,14 @@ public:
         // Set up some face ownership to test exchange patterns
         size_t n_faces = dmesh.local_mesh().n_faces();
 
-        // Mark every 4th face as shared with next rank
-        // Mark every 5th face as ghost from previous rank
-        for (index_t f = 0; f < static_cast<index_t>(n_faces); ++f) {
-            if (f % 4 == 0) {
-                rank_t next_rank = (rank_ + 1) % world_size_;
-                dmesh.set_ownership(f, EntityKind::Face, Ownership::Shared, rank_);
-            } else if (f % 5 == 0 && rank_ > 0) {
-                rank_t prev_rank = (rank_ - 1 + world_size_) % world_size_;
-                dmesh.set_ownership(f, EntityKind::Face, Ownership::Ghost, prev_rank);
+        // Mark a subset of faces on rank 1 as ghosts owned by rank 0 so we
+        // exercise the face exchange path deterministically in both 2-rank and
+        // 4-rank test runs.
+        if (rank_ == 1) {
+            for (index_t f = 0; f < static_cast<index_t>(n_faces); ++f) {
+                if (f % 5 == 0) {
+                    dmesh.set_ownership(f, EntityKind::Face, Ownership::Ghost, 0);
+                }
             }
         }
 
@@ -714,7 +717,8 @@ public:
             for (index_t face_idx : face_pattern.send_lists[i]) {
                 ASSERT_GE(face_idx, 0);
                 ASSERT_LT(face_idx, static_cast<index_t>(n_faces));
-                ASSERT(dmesh.is_shared_face(face_idx));
+                ASSERT(!dmesh.is_ghost_face(face_idx));
+                ASSERT_EQ(dmesh.owner_rank_face(face_idx), rank_);
             }
         }
 
@@ -723,7 +727,8 @@ public:
             for (index_t face_idx : face_pattern.recv_lists[i]) {
                 ASSERT_GE(face_idx, 0);
                 ASSERT_LT(face_idx, static_cast<index_t>(n_faces));
-                ASSERT(dmesh.is_ghost_face(face_idx));
+                // Recv lists contain non-owned entities (ghost or shared) that need owner values.
+                ASSERT(!dmesh.is_owned_face(face_idx));
             }
         }
 
