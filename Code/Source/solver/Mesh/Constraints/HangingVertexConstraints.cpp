@@ -30,15 +30,49 @@
 
 #include "HangingVertexConstraints.h"
 #include "../Core/MeshBase.h"
+#include "../Core/DistributedMesh.h"
 #include "../Fields/MeshFields.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <numeric>
 #include <queue>
 #include <stdexcept>
+#include <unordered_map>
+#include <utility>
+
+#ifdef MESH_HAS_MPI
+#include <mpi.h>
+#endif
 
 namespace svmp {
+
+namespace {
+
+struct ConstraintWire {
+  int64_t ints[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  double weights[4] = {0.0, 0.0, 0.0, 0.0};
+};
+
+static_assert(sizeof(ConstraintWire) == 96, "ConstraintWire size must be 96 bytes");
+
+bool wires_match(const ConstraintWire& a, const ConstraintWire& b, real_t tol) {
+  for (int i = 0; i < 8; ++i) {
+    if (a.ints[i] != b.ints[i]) {
+      return false;
+    }
+  }
+  for (int i = 0; i < 4; ++i) {
+    if (std::abs(a.weights[i] - b.weights[i]) > tol) {
+      return false;
+    }
+  }
+  return true;
+}
+
+} // namespace
 
 // Simplified helper functions to get topological edges/facets based on cell family.
 // IMPORTANT: MeshBase::dim() is the spatial embedding dimension (often 3),
@@ -180,6 +214,297 @@ void HangingVertexConstraints::detect_hanging_vertices(
 
   // Update internal maps
   update_maps();
+}
+
+void HangingVertexConstraints::detect_hanging_vertices(
+    const DistributedMesh& mesh,
+    const std::vector<size_t>* refinement_levels) {
+  detect_hanging_vertices(mesh.local_mesh(), refinement_levels);
+  synchronize(mesh);
+}
+
+bool HangingVertexConstraints::synchronize(const DistributedMesh& mesh, real_t weight_tolerance) {
+  if (mesh.world_size() <= 1) {
+    return true;
+  }
+
+#ifdef MESH_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (!initialized || mesh.mpi_comm() == MPI_COMM_NULL) {
+    return false;
+  }
+
+  MPI_Comm comm = mesh.mpi_comm();
+  int my_rank = 0;
+  int world = 1;
+  MPI_Comm_rank(comm, &my_rank);
+  MPI_Comm_size(comm, &world);
+
+  const auto& vertex_gids = mesh.local_mesh().vertex_gids();
+
+  std::vector<std::vector<ConstraintWire>> send_by_owner(static_cast<size_t>(world));
+  bool local_ok = true;
+
+  for (const auto& kv : constraints_) {
+    const HangingVertexConstraint& c = kv.second;
+    if (!c.is_valid()) {
+      local_ok = false;
+      continue;
+    }
+
+    const index_t local_constrained = c.constrained_vertex;
+    if (local_constrained < 0 || static_cast<size_t>(local_constrained) >= vertex_gids.size()) {
+      local_ok = false;
+      continue;
+    }
+
+    const rank_t owner = mesh.owner_rank_vertex(local_constrained);
+    if (owner < 0 || owner >= world) {
+      local_ok = false;
+      continue;
+    }
+
+    ConstraintWire wire;
+    wire.ints[0] = static_cast<int64_t>(vertex_gids[static_cast<size_t>(local_constrained)]);
+    wire.ints[1] = static_cast<int64_t>(
+        c.parent_type == ConstraintParentType::Edge ? 0 : (c.parent_type == ConstraintParentType::Face ? 1 : -1));
+
+    const size_t n_parents = c.parent_vertices.size();
+    if (n_parents < 2 || n_parents > 4 || c.weights.size() != n_parents) {
+      local_ok = false;
+      continue;
+    }
+    wire.ints[2] = static_cast<int64_t>(n_parents);
+    wire.ints[7] = static_cast<int64_t>(c.refinement_level);
+
+    std::vector<std::pair<gid_t, real_t>> parents;
+    parents.reserve(n_parents);
+    for (size_t i = 0; i < n_parents; ++i) {
+      const index_t pv = c.parent_vertices[i];
+      if (pv < 0 || static_cast<size_t>(pv) >= vertex_gids.size()) {
+        local_ok = false;
+        parents.clear();
+        break;
+      }
+      parents.emplace_back(vertex_gids[static_cast<size_t>(pv)], c.weights[i]);
+    }
+    if (parents.empty()) {
+      continue;
+    }
+
+    std::sort(parents.begin(), parents.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (size_t i = 0; i < parents.size(); ++i) {
+      wire.ints[3 + static_cast<int>(i)] = static_cast<int64_t>(parents[i].first);
+      wire.weights[i] = static_cast<double>(parents[i].second);
+    }
+    for (size_t i = parents.size(); i < 4; ++i) {
+      wire.ints[3 + static_cast<int>(i)] = static_cast<int64_t>(INVALID_GID);
+      wire.weights[i] = 0.0;
+    }
+
+    send_by_owner[static_cast<size_t>(owner)].push_back(wire);
+  }
+
+  // Send proposed constraints to the owner rank of each constrained vertex.
+  std::vector<int> send_counts(world, 0);
+  for (int r = 0; r < world; ++r) {
+    send_counts[r] = static_cast<int>(send_by_owner[static_cast<size_t>(r)].size() * sizeof(ConstraintWire));
+  }
+
+  std::vector<int> recv_counts(world, 0);
+  MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, comm);
+
+  std::vector<int> send_displs(world + 1, 0);
+  std::vector<int> recv_displs(world + 1, 0);
+  for (int r = 0; r < world; ++r) {
+    send_displs[r + 1] = send_displs[r] + send_counts[r];
+    recv_displs[r + 1] = recv_displs[r] + recv_counts[r];
+  }
+
+  std::vector<char> send_buf(static_cast<size_t>(send_displs[world]));
+  for (int r = 0; r < world; ++r) {
+    const auto& vec = send_by_owner[static_cast<size_t>(r)];
+    if (vec.empty()) {
+      continue;
+    }
+    const size_t bytes = vec.size() * sizeof(ConstraintWire);
+    std::memcpy(send_buf.data() + send_displs[r], vec.data(), bytes);
+  }
+
+  std::vector<char> recv_buf(static_cast<size_t>(recv_displs[world]));
+  MPI_Alltoallv(send_buf.data(),
+                send_counts.data(),
+                send_displs.data(),
+                MPI_BYTE,
+                recv_buf.data(),
+                recv_counts.data(),
+                recv_displs.data(),
+                MPI_BYTE,
+                comm);
+
+  struct Proposal {
+    ConstraintWire wire;
+    int src_rank = -1;
+  };
+
+  std::unordered_map<gid_t, std::vector<Proposal>> proposals;
+  proposals.reserve(static_cast<size_t>(recv_displs[world] / static_cast<int>(sizeof(ConstraintWire)) + 8));
+
+  for (int src = 0; src < world; ++src) {
+    const int begin = recv_displs[src];
+    const int end = recv_displs[src + 1];
+    if (begin == end) {
+      continue;
+    }
+    for (int off = begin; off + static_cast<int>(sizeof(ConstraintWire)) <= end;
+         off += static_cast<int>(sizeof(ConstraintWire))) {
+      ConstraintWire w;
+      std::memcpy(&w, recv_buf.data() + off, sizeof(ConstraintWire));
+      const gid_t constrained_gid = static_cast<gid_t>(w.ints[0]);
+      proposals[constrained_gid].push_back(Proposal{w, src});
+    }
+  }
+
+  // Owner ranks select a canonical constraint for their owned constrained vertices.
+  std::vector<ConstraintWire> owned_canonical;
+  owned_canonical.reserve(proposals.size());
+  bool local_conflict = false;
+
+  for (auto& kv : proposals) {
+    const gid_t constrained_gid = kv.first;
+    const index_t local_v = mesh.global_to_local_vertex(constrained_gid);
+    if (local_v == INVALID_INDEX || !mesh.is_owned_vertex(local_v)) {
+      continue;
+    }
+
+    auto& vec = kv.second;
+    if (vec.empty()) {
+      continue;
+    }
+
+    size_t best = 0;
+    for (size_t i = 0; i < vec.size(); ++i) {
+      if (vec[i].src_rank == my_rank) {
+        best = i;
+        break;
+      }
+      if (vec[i].src_rank < vec[best].src_rank) {
+        best = i;
+      }
+    }
+
+    const ConstraintWire& chosen = vec[best].wire;
+    for (const auto& p : vec) {
+      if (!wires_match(chosen, p.wire, weight_tolerance)) {
+        local_conflict = true;
+        break;
+      }
+    }
+
+    owned_canonical.push_back(chosen);
+  }
+
+  // Broadcast canonical constraints: all ranks receive all owner-defined constraints,
+  // and keep only those for vertices they have locally.
+  int local_n = static_cast<int>(owned_canonical.size());
+  std::vector<int> n_by_rank(world, 0);
+  MPI_Allgather(&local_n, 1, MPI_INT, n_by_rank.data(), 1, MPI_INT, comm);
+
+  std::vector<int> disp(world + 1, 0);
+  for (int r = 0; r < world; ++r) {
+    disp[r + 1] = disp[r] + n_by_rank[r];
+  }
+
+  std::vector<int> n_by_rank_bytes(world, 0);
+  std::vector<int> disp_bytes(world, 0);
+  for (int r = 0; r < world; ++r) {
+    n_by_rank_bytes[r] = n_by_rank[r] * static_cast<int>(sizeof(ConstraintWire));
+    disp_bytes[r] = disp[r] * static_cast<int>(sizeof(ConstraintWire));
+  }
+
+  std::vector<ConstraintWire> all(static_cast<size_t>(disp[world]));
+  MPI_Allgatherv(owned_canonical.data(),
+                 local_n * static_cast<int>(sizeof(ConstraintWire)),
+                 MPI_BYTE,
+                 all.data(),
+                 n_by_rank_bytes.data(),
+                 disp_bytes.data(),
+                 MPI_BYTE,
+                 comm);
+
+  std::unordered_map<index_t, HangingVertexConstraint> next;
+  next.reserve(all.size());
+
+  bool missing_parents = false;
+
+  for (const auto& w : all) {
+    const gid_t constrained_gid = static_cast<gid_t>(w.ints[0]);
+    const index_t local_constrained = mesh.global_to_local_vertex(constrained_gid);
+    if (local_constrained == INVALID_INDEX) {
+      continue;
+    }
+
+    const int64_t parent_type_tag = w.ints[1];
+    ConstraintParentType parent_type =
+        (parent_type_tag == 0) ? ConstraintParentType::Edge
+                               : (parent_type_tag == 1) ? ConstraintParentType::Face : ConstraintParentType::Invalid;
+
+    const int64_t n_parents = w.ints[2];
+    if (n_parents < 2 || n_parents > 4) {
+      missing_parents = true;
+      continue;
+    }
+
+    std::vector<index_t> parents;
+    std::vector<real_t> weights;
+    parents.reserve(static_cast<size_t>(n_parents));
+    weights.reserve(static_cast<size_t>(n_parents));
+
+    bool have_all = true;
+    for (int i = 0; i < n_parents; ++i) {
+      const gid_t pgid = static_cast<gid_t>(w.ints[3 + i]);
+      const index_t pl = mesh.global_to_local_vertex(pgid);
+      if (pl == INVALID_INDEX) {
+        have_all = false;
+        break;
+      }
+      parents.push_back(pl);
+      weights.push_back(static_cast<real_t>(w.weights[i]));
+    }
+    if (!have_all) {
+      missing_parents = true;
+      continue;
+    }
+
+    HangingVertexConstraint c;
+    c.constrained_vertex = local_constrained;
+    c.parent_type = parent_type;
+    c.parent_vertices = std::move(parents);
+    c.weights = std::move(weights);
+    c.refinement_level = static_cast<size_t>(w.ints[7]);
+
+    // Preserve local adjacency info if it exists on this rank.
+    auto it_old = constraints_.find(local_constrained);
+    if (it_old != constraints_.end()) {
+      c.adjacent_cells = it_old->second.adjacent_cells;
+    }
+
+    next[local_constrained] = std::move(c);
+  }
+
+  constraints_ = std::move(next);
+  update_maps();
+
+  const int ok_int = (local_ok && !missing_parents && !local_conflict) ? 1 : 0;
+  int global_ok = 1;
+  MPI_Allreduce(&ok_int, &global_ok, 1, MPI_INT, MPI_MIN, comm);
+  return global_ok == 1;
+#else
+  (void)mesh;
+  (void)weight_tolerance;
+  return true;
+#endif
 }
 
 // Detect hanging vertices on edges

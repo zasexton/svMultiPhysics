@@ -43,6 +43,7 @@ namespace svmp {
 
 // Forward declarations
 class MeshBase;
+class DistributedMesh;
 
 /**
  * @brief Entity kind for constraint parent
@@ -127,6 +128,27 @@ public:
    */
   void detect_hanging_vertices(const MeshBase& mesh,
                                const std::vector<size_t>* refinement_levels = nullptr);
+
+  /**
+   * @brief Detect hanging vertices on a distributed mesh (local + MPI sync).
+   *
+   * This runs local detection on the rank-local mesh partition (including any
+   * ghost entities present), then synchronizes constraints across ranks so that
+   * all ranks with a copy of a constrained vertex store the same constraint.
+   */
+  void detect_hanging_vertices(const DistributedMesh& mesh,
+                               const std::vector<size_t>* refinement_levels = nullptr);
+
+  /**
+   * @brief Synchronize constraints across ranks.
+   *
+   * In MPI builds, this is a collective over the mesh communicator. Constraints
+   * are treated as owned by the owner rank of the constrained vertex (as defined
+   * by DistributedMesh ownership metadata).
+   *
+   * @return true if synchronization succeeded on all ranks
+   */
+  bool synchronize(const DistributedMesh& mesh, real_t weight_tolerance = 1e-12);
 
   /**
    * @brief Add a hanging vertex constraint manually
