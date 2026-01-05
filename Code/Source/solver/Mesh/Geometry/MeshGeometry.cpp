@@ -32,6 +32,7 @@
 #include "PolyGeometry.h"
 #include "GeometryConfig.h"
 #include "../Core/MeshBase.h"
+#include "../Core/DistributedMesh.h"
 #include <cmath>
 #include <algorithm>
 
@@ -831,12 +832,65 @@ real_t MeshGeometry::total_volume(const MeshBase& mesh, Configuration cfg) {
   return total;
 }
 
+real_t MeshGeometry::total_volume_global(const DistributedMesh& mesh, Configuration cfg) {
+  const auto& local = mesh.local_mesh();
+  real_t local_total = 0.0;
+
+  const index_t n_cells = static_cast<index_t>(local.n_cells());
+  for (index_t c = 0; c < n_cells; ++c) {
+    if (!mesh.is_owned_cell(c)) {
+      continue;
+    }
+    local_total += cell_measure(local, c, cfg);
+  }
+
+#ifdef MESH_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (!initialized || mesh.mpi_comm() == MPI_COMM_NULL || mesh.world_size() <= 1) {
+    return local_total;
+  }
+
+  real_t global_total = 0.0;
+  MPI_Allreduce(&local_total, &global_total, 1, MPI_DOUBLE, MPI_SUM, mesh.mpi_comm());
+  return global_total;
+#else
+  return local_total;
+#endif
+}
+
 real_t MeshGeometry::boundary_area(const MeshBase& mesh, Configuration cfg) {
   real_t total = 0.0;
   for (index_t f : mesh.boundary_faces()) {
     total += face_area(mesh, f, cfg);
   }
   return total;
+}
+
+real_t MeshGeometry::boundary_area_global(const DistributedMesh& mesh, Configuration cfg) {
+  const auto& local = mesh.local_mesh();
+  real_t local_total = 0.0;
+
+  for (const index_t f : local.boundary_faces()) {
+    if (!mesh.is_owned_face(f)) {
+      continue;
+    }
+    local_total += face_area(local, f, cfg);
+  }
+
+#ifdef MESH_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (!initialized || mesh.mpi_comm() == MPI_COMM_NULL || mesh.world_size() <= 1) {
+    return local_total;
+  }
+
+  real_t global_total = 0.0;
+  MPI_Allreduce(&local_total, &global_total, 1, MPI_DOUBLE, MPI_SUM, mesh.mpi_comm());
+  return global_total;
+#else
+  return local_total;
+#endif
 }
 
 real_t MeshGeometry::angle(const std::array<real_t,3>& p1,

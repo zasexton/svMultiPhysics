@@ -223,6 +223,15 @@ static std::vector<ParametricPoint> reference_sample_points(const CellShape& sha
 
 static std::vector<ParametricPoint> quality_sample_points(const CellShape& shape, size_t n_nodes) {
   std::vector<ParametricPoint> pts = reference_sample_points(shape);
+
+  if (shape.family == CellFamily::Pyramid) {
+    // The collapsed pyramid reference domain has a singular apex (z=1) where x/y cannot vary.
+    // Avoid Jacobian-based metrics sampling at that point to prevent false "degenerate" reports.
+    pts.erase(std::remove_if(pts.begin(), pts.end(),
+                             [](const ParametricPoint& q) { return q[2] >= 1.0 - 1e-12; }),
+              pts.end());
+  }
+
   const int p = std::max(1, CurvilinearEvaluator::deduce_order(shape, n_nodes));
   if (p <= 1) return pts;
 

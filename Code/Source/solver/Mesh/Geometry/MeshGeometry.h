@@ -40,6 +40,7 @@ namespace svmp {
 
 // Forward declaration
 class MeshBase;
+class DistributedMesh;
 
 /**
  * @brief Mesh geometry computations
@@ -198,6 +199,17 @@ public:
                            Configuration cfg = Configuration::Reference);
 
   /**
+   * @brief Compute the global total mesh volume (or area in 2D) across ranks.
+   *
+   * Notes:
+   * - This is a collective operation in MPI builds when `mesh.world_size() > 1`.
+   * - The sum is taken over owned entities only (ghosts are excluded).
+   * - In serial builds, this is equivalent to `total_volume(mesh.local_mesh(), ...)`.
+   */
+  static real_t total_volume_global(const DistributedMesh& mesh,
+                                   Configuration cfg = Configuration::Reference);
+
+  /**
    * @brief Compute total surface area of boundary faces
    * @param mesh The mesh
    * @param cfg Reference or current configuration
@@ -205,6 +217,17 @@ public:
    */
   static real_t boundary_area(const MeshBase& mesh,
                             Configuration cfg = Configuration::Reference);
+
+  /**
+   * @brief Compute the global total boundary area across ranks.
+   *
+   * Notes:
+   * - This is a collective operation in MPI builds when `mesh.world_size() > 1`.
+   * - The sum is taken over owned boundary faces only (ghosts are excluded).
+   * - In serial builds, this is equivalent to `boundary_area(mesh.local_mesh(), ...)`.
+   */
+  static real_t boundary_area_global(const DistributedMesh& mesh,
+                                    Configuration cfg = Configuration::Reference);
 
   // ---- Boundary-specific geometry ----
 
