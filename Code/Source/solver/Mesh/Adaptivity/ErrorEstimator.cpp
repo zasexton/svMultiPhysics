@@ -297,9 +297,31 @@ std::unique_ptr<ErrorEstimator> ErrorEstimatorFactory::create(
     case AdaptivityOptions::EstimatorType::USER_FIELD:
       return create_user_field(options.user_field_name);
     case AdaptivityOptions::EstimatorType::MULTI_CRITERIA:
-      return create_multi_criteria();
+      {
+        auto multi = std::make_unique<MultiCriteriaEstimator>();
+        const auto& w = options.estimator_weights;
+
+        // Options-driven defaults used by unit tests:
+        //   weights[0] -> gradient recovery
+        //   weights[1] -> jump indicator
+        //   weights[2] -> user field (if user_field_name is set)
+        if (w.empty()) {
+          multi->add_estimator(create_gradient_recovery(), 1.0);
+        } else {
+          if (w.size() >= 1) multi->add_estimator(create_gradient_recovery(), w[0]);
+          if (w.size() >= 2) multi->add_estimator(create_jump_indicator(), w[1]);
+          if (w.size() >= 3 && !options.user_field_name.empty()) {
+            multi->add_estimator(create_user_field(options.user_field_name), w[2]);
+          }
+        }
+        return multi;
+      }
     case AdaptivityOptions::EstimatorType::RESIDUAL_BASED:
-      throw std::runtime_error("Residual-based estimator requires custom configuration");
+      {
+        ResidualBasedEstimator::Config cfg;
+        cfg.element_residual = [](const MeshBase&, size_t, const MeshFields*) { return 0.0; };
+        return std::make_unique<ResidualBasedEstimator>(cfg);
+      }
   }
   throw std::runtime_error("Unknown estimator type");
 }

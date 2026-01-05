@@ -32,6 +32,7 @@
 #include "../Core/MeshBase.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 
@@ -58,24 +59,28 @@ std::vector<MarkType> FixedFractionMarker::mark(
     const std::vector<double>& indicators,
     const MeshBase& mesh,
     const AdaptivityOptions& options) const {
+  (void)mesh;
+
+  last_stats_ = {};
 
   size_t num_elems = indicators.size();
   std::vector<MarkType> marks(num_elems, MarkType::NONE);
 
   if (num_elems == 0) return marks;
 
-  // Get actual fractions from config or options
-  double refine_frac = options.enable_refinement ?
-      (options.refine_fraction > 0 ? options.refine_fraction : config_.refine_fraction) : 0.0;
-  double coarsen_frac = options.enable_coarsening ?
-      (options.coarsen_fraction > 0 ? options.coarsen_fraction : config_.coarsen_fraction) : 0.0;
+  // This marker is configured at construction time; options gate whether refine/coarsen
+  // is enabled, but do not override the configured fractions.
+  const double refine_frac = options.enable_refinement ? config_.refine_fraction : 0.0;
+  const double coarsen_frac = options.enable_coarsening ? config_.coarsen_fraction : 0.0;
+  const bool do_refine = refine_frac > 0.0;
+  const bool do_coarsen = coarsen_frac > 0.0;
 
   // Compute thresholds
   std::pair<double, double> thresholds;
   if (config_.use_doerfler) {
-    thresholds = compute_doerfler_thresholds(indicators);
+    thresholds = compute_doerfler_thresholds(indicators, refine_frac, coarsen_frac);
   } else {
-    thresholds = compute_fraction_thresholds(indicators);
+    thresholds = compute_fraction_thresholds(indicators, refine_frac, coarsen_frac);
   }
 
   last_stats_.refine_threshold = thresholds.first;
@@ -83,10 +88,10 @@ std::vector<MarkType> FixedFractionMarker::mark(
 
   // Apply marking
   for (size_t i = 0; i < num_elems; ++i) {
-    if (indicators[i] >= thresholds.first && indicators[i] >= config_.min_refine_indicator) {
+    if (do_refine && indicators[i] >= thresholds.first && indicators[i] >= config_.min_refine_indicator) {
       marks[i] = MarkType::REFINE;
       last_stats_.num_marked_refine++;
-    } else if (indicators[i] <= thresholds.second && indicators[i] <= config_.max_coarsen_indicator) {
+    } else if (do_coarsen && indicators[i] <= thresholds.second && indicators[i] <= config_.max_coarsen_indicator) {
       marks[i] = MarkType::COARSEN;
       last_stats_.num_marked_coarsen++;
     } else {
@@ -98,7 +103,9 @@ std::vector<MarkType> FixedFractionMarker::mark(
 }
 
 std::pair<double, double> FixedFractionMarker::compute_doerfler_thresholds(
-    const std::vector<double>& indicators) const {
+    const std::vector<double>& indicators,
+    double refine_fraction,
+    double coarsen_fraction) const {
 
   // Dörfler marking: mark smallest set of elements that contribute
   // a fraction theta of the total error
@@ -119,9 +126,9 @@ std::pair<double, double> FixedFractionMarker::compute_doerfler_thresholds(
   total_error = std::sqrt(total_error);
 
   // Find refinement threshold (Dörfler marking)
-  double refine_threshold = 0.0;
-  if (config_.refine_fraction > 0.0 && total_error > 0.0) {
-    double target_error = config_.refine_fraction * total_error;
+  double refine_threshold = std::numeric_limits<double>::infinity();
+  if (refine_fraction > 0.0 && total_error > 0.0) {
+    double target_error = refine_fraction * total_error;
     double accumulated_error = 0.0;
 
     for (size_t idx : sorted_indices) {
@@ -134,9 +141,9 @@ std::pair<double, double> FixedFractionMarker::compute_doerfler_thresholds(
   }
 
   // Find coarsening threshold (mark elements with smallest errors)
-  double coarsen_threshold = std::numeric_limits<double>::max();
-  if (config_.coarsen_fraction > 0.0) {
-    size_t num_to_coarsen = static_cast<size_t>(config_.coarsen_fraction * indicators.size());
+  double coarsen_threshold = -std::numeric_limits<double>::infinity();
+  if (coarsen_fraction > 0.0) {
+    size_t num_to_coarsen = static_cast<size_t>(coarsen_fraction * indicators.size());
     if (num_to_coarsen > 0 && num_to_coarsen <= indicators.size()) {
       size_t coarsen_idx = indicators.size() - num_to_coarsen;
       coarsen_threshold = indicators[sorted_indices[coarsen_idx]];
@@ -147,29 +154,31 @@ std::pair<double, double> FixedFractionMarker::compute_doerfler_thresholds(
 }
 
 std::pair<double, double> FixedFractionMarker::compute_fraction_thresholds(
-    const std::vector<double>& indicators) const {
+    const std::vector<double>& indicators,
+    double refine_fraction,
+    double coarsen_fraction) const {
 
   // Simple fraction-based marking
   std::vector<double> sorted = indicators;
   std::sort(sorted.begin(), sorted.end(), std::greater<double>());
 
-  double refine_threshold = 0.0;
-  double coarsen_threshold = std::numeric_limits<double>::max();
+  double refine_threshold = std::numeric_limits<double>::infinity();
+  double coarsen_threshold = -std::numeric_limits<double>::infinity();
 
   // Refinement threshold
-  if (config_.refine_fraction > 0.0) {
-    size_t refine_idx = static_cast<size_t>(config_.refine_fraction * sorted.size());
+  if (refine_fraction > 0.0) {
+    size_t refine_idx = static_cast<size_t>(refine_fraction * sorted.size());
     if (refine_idx > 0 && refine_idx <= sorted.size()) {
       refine_threshold = sorted[refine_idx - 1];
     }
   }
 
   // Coarsening threshold
-  if (config_.coarsen_fraction > 0.0) {
-    size_t coarsen_idx = sorted.size() -
-        static_cast<size_t>(config_.coarsen_fraction * sorted.size());
-    if (coarsen_idx < sorted.size()) {
-      coarsen_threshold = sorted[coarsen_idx];
+  if (coarsen_fraction > 0.0) {
+    const size_t num_to_coarsen = static_cast<size_t>(coarsen_fraction * sorted.size());
+    if (num_to_coarsen > 0 && num_to_coarsen <= sorted.size()) {
+      const size_t idx = sorted.size() - num_to_coarsen;
+      coarsen_threshold = sorted[idx];
     }
   }
 
@@ -769,20 +778,13 @@ void MarkerUtils::smooth_marking(
     std::vector<MarkType> new_marks = marks;
 
     for (size_t i = 0; i < marks.size(); ++i) {
-      auto neighbors = mesh.cell_neighbors(static_cast<index_t>(i));
-
-      int refine_neighbors = 0;
-      for (index_t neighbor : neighbors) {
-        if (neighbor >= 0 && static_cast<size_t>(neighbor) < marks.size()
-            && marks[static_cast<size_t>(neighbor)] == MarkType::REFINE) {
-          refine_neighbors++;
-        }
-      }
-
-      // If most neighbors are marked for refinement, mark this one too
-      if (refine_neighbors > static_cast<int>(neighbors.size()) / 2) {
-        if (marks[i] == MarkType::NONE) {
-          new_marks[i] = MarkType::REFINE;
+      if (marks[i] != MarkType::REFINE) continue;
+      for (index_t neighbor : mesh.cell_neighbors(static_cast<index_t>(i))) {
+        if (neighbor < 0) continue;
+        const size_t ni = static_cast<size_t>(neighbor);
+        if (ni >= new_marks.size()) continue;
+        if (new_marks[ni] == MarkType::NONE) {
+          new_marks[ni] = MarkType::REFINE;
         }
       }
     }

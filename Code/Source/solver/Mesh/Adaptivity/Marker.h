@@ -137,11 +137,15 @@ private:
 
   /** Compute thresholds using Dörfler marking */
   std::pair<double, double> compute_doerfler_thresholds(
-      const std::vector<double>& indicators) const;
+      const std::vector<double>& indicators,
+      double refine_fraction,
+      double coarsen_fraction) const;
 
   /** Compute thresholds using simple fraction */
   std::pair<double, double> compute_fraction_thresholds(
-      const std::vector<double>& indicators) const;
+      const std::vector<double>& indicators,
+      double refine_fraction,
+      double coarsen_fraction) const;
 };
 
 /**
