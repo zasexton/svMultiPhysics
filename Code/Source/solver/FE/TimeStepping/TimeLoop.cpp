@@ -12,6 +12,7 @@
 #include "Sparsity/SparsityPattern.h"
 #include "Systems/SystemsExceptions.h"
 #include "TimeStepping/GeneralizedAlpha.h"
+#include "TimeStepping/CollocationMethods.h"
 #include "TimeStepping/MultiStageScheme.h"
 #include "TimeStepping/NewmarkBeta.h"
 #include "TimeStepping/TimeSteppingUtils.h"
@@ -625,436 +626,46 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             inner_->zero();
         }
 
-    private:
-        assembly::GlobalSystemView* inner_{nullptr};
-        GlobalIndex row_offset_{0};
-        GlobalIndex col_offset_{0};
-        std::vector<GlobalIndex> shifted_rows_{};
-        std::vector<GlobalIndex> shifted_cols_{};
-    };
+	    private:
+	        assembly::GlobalSystemView* inner_{nullptr};
+	        GlobalIndex row_offset_{0};
+	        GlobalIndex col_offset_{0};
+	        std::vector<GlobalIndex> shifted_rows_{};
+	        std::vector<GlobalIndex> shifted_cols_{};
+	    };
 
-    struct CollocationMethod {
-        int stages{0};
-        int order{0};
-        std::vector<double> c{};
-        std::vector<double> ainv{};     // row-major (stages x stages)
-        std::vector<double> row_sums{}; // sum_j ainv[i,j]
-        std::vector<double> final_w{};  // u_{n+1} = u_n + sum_j final_w[j] * (U_j - u_n)
+	    using CollocationMethod = collocation::CollocationMethod;
+	    using CollocationFamily = collocation::CollocationFamily;
+	    using SecondOrderCollocationData = collocation::SecondOrderCollocationData;
 
-        bool stiffly_accurate{false};
-        int final_stage{0};
-    };
+	    std::unordered_map<int, CollocationMethod> collocation_gauss{};
+	    std::unordered_map<int, CollocationMethod> collocation_radau{};
 
-    enum class CollocationFamily : std::uint8_t {
-        RadauIIA,
-        Gauss
-    };
+	    auto getCollocationMethod = [&](CollocationFamily family, int stages) -> const CollocationMethod& {
+	        auto& cache = (family == CollocationFamily::Gauss) ? collocation_gauss : collocation_radau;
+	        auto it = cache.find(stages);
+	        if (it != cache.end()) {
+	            return it->second;
+	        }
+	        auto [ins_it, inserted] = cache.emplace(stages, collocation::buildCollocationMethod(family, stages));
+	        FE_CHECK_ARG(inserted, "TimeLoop: failed to cache collocation method");
+	        return ins_it->second;
+	    };
 
-    auto legendreWithDerivative = [](int n, double x) -> std::pair<double, double> {
-        double p0 = 1.0;
-        double p1 = x;
+	    std::unordered_map<int, SecondOrderCollocationData> collocation_so_gauss{};
+	    std::unordered_map<int, SecondOrderCollocationData> collocation_so_radau{};
 
-        if (n == 0) {
-            return {p0, 0.0};
-        }
-        if (n == 1) {
-            return {p1, p0};
-        }
-
-        for (int k = 2; k <= n; ++k) {
-            const double pk = ((2.0 * k - 1.0) * x * p1 - (k - 1.0) * p0) / static_cast<double>(k);
-            p0 = p1;
-            p1 = pk;
-        }
-
-        const double denom = 1.0 - x * x;
-        FE_THROW_IF(denom == 0.0, InvalidArgumentException,
-                    "TimeLoop: Legendre derivative singularity at |x|=1");
-        const double dp = static_cast<double>(n) / denom * (p0 - x * p1);
-        return {p1, dp};
-    };
-
-    auto gaussNodesMinusOneOne = [&](int n) -> std::vector<double> {
-        FE_THROW_IF(n <= 0, InvalidArgumentException, "TimeLoop: Gauss nodes require n > 0");
-        FE_THROW_IF(n > 64, InvalidArgumentException, "TimeLoop: Gauss nodes n too large (max 64)");
-
-        const int m = (n + 1) / 2;
-        std::vector<double> nodes(static_cast<std::size_t>(n), 0.0);
-
-        const double pi = std::acos(-1.0);
-        constexpr double tol = 1e-14;
-        for (int i = 0; i < m; ++i) {
-            double z = std::cos(pi * (static_cast<double>(i) + 0.75) / (static_cast<double>(n) + 0.5));
-            double z_prev = std::numeric_limits<double>::max();
-            for (int it = 0; it < 64; ++it) {
-                if (std::abs(z - z_prev) <= tol) {
-                    break;
-                }
-                z_prev = z;
-                const auto [P, dP] = legendreWithDerivative(n, z);
-                FE_THROW_IF(dP == 0.0, InvalidArgumentException, "TimeLoop: Gauss node Newton derivative is zero");
-                z = z_prev - P / dP;
-            }
-
-            nodes[static_cast<std::size_t>(i)] = -z;
-            nodes[static_cast<std::size_t>(n - 1 - i)] = z;
-        }
-
-        std::sort(nodes.begin(), nodes.end());
-        return nodes;
-    };
-
-    auto gaussNodesUnit = [&](int stages) -> std::vector<double> {
-        const auto x = gaussNodesMinusOneOne(stages);
-        std::vector<double> c;
-        c.reserve(x.size());
-        for (double xi : x) {
-            c.push_back(0.5 * (xi + 1.0));
-        }
-        return c;
-    };
-
-    auto radauIIANodesUnit = [&](int stages) -> std::vector<double> {
-        FE_THROW_IF(stages <= 0, InvalidArgumentException, "TimeLoop: Radau IIA requires stages > 0");
-        if (stages == 1) {
-            return {1.0};
-        }
-
-        const auto guesses = gaussNodesMinusOneOne(stages - 1);
-        std::vector<double> roots;
-        roots.reserve(static_cast<std::size_t>(stages));
-
-        constexpr double tol = 1e-14;
-        for (double z0 : guesses) {
-            double z = z0;
-            double z_prev = std::numeric_limits<double>::max();
-            for (int it = 0; it < 64; ++it) {
-                if (std::abs(z - z_prev) <= tol) {
-                    break;
-                }
-                z_prev = z;
-                const auto [Ps, dPs] = legendreWithDerivative(stages, z);
-                const auto [Ps1, dPs1] = legendreWithDerivative(stages - 1, z);
-                const double f = Ps - Ps1;
-                const double df = dPs - dPs1;
-                FE_THROW_IF(df == 0.0, InvalidArgumentException, "TimeLoop: Radau node Newton derivative is zero");
-                z = z_prev - f / df;
-            }
-            roots.push_back(z);
-        }
-        std::sort(roots.begin(), roots.end());
-        roots.push_back(1.0);
-
-        std::vector<double> c;
-        c.reserve(roots.size());
-        for (double xi : roots) {
-            c.push_back(0.5 * (xi + 1.0));
-        }
-        return c;
-    };
-
-    auto invertDenseMatrix = [&](const std::vector<double>& A, int n) -> std::vector<double> {
-        FE_THROW_IF(n <= 0, InvalidArgumentException, "TimeLoop: invalid dense matrix size");
-        FE_THROW_IF(static_cast<int>(A.size()) != n * n, InvalidArgumentException,
-                    "TimeLoop: dense matrix size mismatch");
-
-        std::vector<double> M = A;
-        std::vector<double> inv(static_cast<std::size_t>(n) * static_cast<std::size_t>(n), 0.0);
-        for (int i = 0; i < n; ++i) {
-            inv[static_cast<std::size_t>(i * n + i)] = 1.0;
-        }
-
-        auto rowSwap = [&](std::vector<double>& mat, int r1, int r2) {
-            for (int j = 0; j < n; ++j) {
-                std::swap(mat[static_cast<std::size_t>(r1 * n + j)],
-                          mat[static_cast<std::size_t>(r2 * n + j)]);
-            }
-        };
-
-        for (int k = 0; k < n; ++k) {
-            int piv = k;
-            double piv_abs = std::abs(M[static_cast<std::size_t>(k * n + k)]);
-            for (int r = k + 1; r < n; ++r) {
-                const double a = std::abs(M[static_cast<std::size_t>(r * n + k)]);
-                if (a > piv_abs) {
-                    piv_abs = a;
-                    piv = r;
-                }
-            }
-            FE_THROW_IF(piv_abs == 0.0, InvalidArgumentException, "TimeLoop: singular dense matrix");
-            if (piv != k) {
-                rowSwap(M, piv, k);
-                rowSwap(inv, piv, k);
-            }
-
-            const double diag = M[static_cast<std::size_t>(k * n + k)];
-            const double inv_diag = 1.0 / diag;
-            for (int j = 0; j < n; ++j) {
-                M[static_cast<std::size_t>(k * n + j)] *= inv_diag;
-                inv[static_cast<std::size_t>(k * n + j)] *= inv_diag;
-            }
-
-            for (int r = 0; r < n; ++r) {
-                if (r == k) continue;
-                const double fac = M[static_cast<std::size_t>(r * n + k)];
-                if (fac == 0.0) continue;
-                for (int j = 0; j < n; ++j) {
-                    M[static_cast<std::size_t>(r * n + j)] -= fac * M[static_cast<std::size_t>(k * n + j)];
-                    inv[static_cast<std::size_t>(r * n + j)] -= fac * inv[static_cast<std::size_t>(k * n + j)];
-                }
-            }
-        }
-
-        return inv;
-    };
-
-    auto buildCollocationMethod = [&](CollocationFamily family, int stages) -> CollocationMethod {
-        FE_THROW_IF(stages <= 0, InvalidArgumentException, "TimeLoop: invalid collocation stage count");
-
-        CollocationMethod method;
-        method.stages = stages;
-        method.order = (family == CollocationFamily::Gauss) ? 2 * stages : 2 * stages - 1;
-        method.stiffly_accurate = (family == CollocationFamily::RadauIIA);
-        method.final_stage = (family == CollocationFamily::RadauIIA) ? (stages - 1) : 0;
-
-        method.c = (family == CollocationFamily::Gauss)
-            ? gaussNodesUnit(stages)
-            : radauIIANodesUnit(stages);
-
-        auto lagrangeCoeff = [&](int j) -> std::vector<double> {
-            std::vector<double> coeff(static_cast<std::size_t>(stages), 0.0);
-            coeff[0] = 1.0;
-            int deg = 0;
-            const double cj = method.c[static_cast<std::size_t>(j)];
-
-            for (int m = 0; m < stages; ++m) {
-                if (m == j) continue;
-                const double cm = method.c[static_cast<std::size_t>(m)];
-                const double denom = cj - cm;
-                FE_THROW_IF(denom == 0.0, InvalidArgumentException, "TimeLoop: duplicate collocation nodes");
-
-                std::vector<double> next(static_cast<std::size_t>(stages), 0.0);
-                for (int k = 0; k <= deg; ++k) {
-                    next[static_cast<std::size_t>(k)] += (-cm / denom) * coeff[static_cast<std::size_t>(k)];
-                    next[static_cast<std::size_t>(k + 1)] += (1.0 / denom) * coeff[static_cast<std::size_t>(k)];
-                }
-                coeff = std::move(next);
-                ++deg;
-            }
-            return coeff;
-        };
-
-        std::vector<double> A(static_cast<std::size_t>(stages) * static_cast<std::size_t>(stages), 0.0);
-        std::vector<double> b(static_cast<std::size_t>(stages), 0.0);
-
-        for (int j = 0; j < stages; ++j) {
-            const auto coeff = lagrangeCoeff(j);
-
-            auto integratePoly = [&](double x) -> double {
-                double sum = 0.0;
-                double xpow = x;
-                for (int k = 0; k < stages; ++k) {
-                    sum += coeff[static_cast<std::size_t>(k)] * xpow / static_cast<double>(k + 1);
-                    xpow *= x;
-                }
-                return sum;
-            };
-
-            b[static_cast<std::size_t>(j)] = integratePoly(1.0);
-            for (int i = 0; i < stages; ++i) {
-                const double ci = method.c[static_cast<std::size_t>(i)];
-                A[static_cast<std::size_t>(i * stages + j)] = integratePoly(ci);
-            }
-        }
-
-        method.ainv = invertDenseMatrix(A, stages);
-        method.row_sums.resize(static_cast<std::size_t>(stages), 0.0);
-        for (int i = 0; i < stages; ++i) {
-            double sum = 0.0;
-            for (int j = 0; j < stages; ++j) {
-                sum += method.ainv[static_cast<std::size_t>(i * stages + j)];
-            }
-            method.row_sums[static_cast<std::size_t>(i)] = sum;
-        }
-
-        if (!method.stiffly_accurate) {
-            method.final_w.resize(static_cast<std::size_t>(stages), 0.0);
-            for (int j = 0; j < stages; ++j) {
-                double sum = 0.0;
-                for (int i = 0; i < stages; ++i) {
-                    sum += b[static_cast<std::size_t>(i)] * method.ainv[static_cast<std::size_t>(i * stages + j)];
-                }
-                method.final_w[static_cast<std::size_t>(j)] = sum;
-            }
-        }
-
-        return method;
-    };
-
-    std::unordered_map<int, CollocationMethod> collocation_gauss{};
-    std::unordered_map<int, CollocationMethod> collocation_radau{};
-
-    auto getCollocationMethod = [&](CollocationFamily family, int stages) -> const CollocationMethod& {
-        auto& cache = (family == CollocationFamily::Gauss) ? collocation_gauss : collocation_radau;
-        auto it = cache.find(stages);
-        if (it != cache.end()) {
-            return it->second;
-        }
-        auto [ins_it, inserted] = cache.emplace(stages, buildCollocationMethod(family, stages));
-        FE_CHECK_ARG(inserted, "TimeLoop: failed to cache collocation method");
-        return ins_it->second;
-    };
-
-    struct SecondOrderCollocationData {
-        int stages{0};
-        int n_constraints{0}; // stages + 2 (u(0), u'(0), stage values)
-
-        // p'(c_i) and p''(c_i) (derivatives in τ-space) as linear combinations of constraints:
-        //   y = [u(0), dt*u'(0), U_0, ..., U_{s-1}]
-        //   p'(c_i)  = d1_u0[i] * y0 + d1_dv0[i] * y1 + sum_j d1[i,j] * U_j
-        //   p''(c_i) = d2_u0[i] * y0 + d2_dv0[i] * y1 + sum_j d2[i,j] * U_j
-        std::vector<double> d1{}; // size stages*stages
-        std::vector<double> d2{}; // size stages*stages
-        std::vector<double> d1_u0{};  // size stages
-        std::vector<double> d1_dv0{}; // size stages
-        std::vector<double> d2_u0{};  // size stages
-        std::vector<double> d2_dv0{}; // size stages
-
-        // p(1), p'(1), p''(1) in τ-space as linear combinations of constraints y.
-        std::vector<double> u1{};   // coefficients on U_j (size stages)
-        std::vector<double> du1{};  // coefficients on U_j (size stages)
-        std::vector<double> ddu1{}; // coefficients on U_j (size stages)
-        double u1_u0{0.0};
-        double u1_dv0{0.0};
-        double du1_u0{0.0};
-        double du1_dv0{0.0};
-        double ddu1_u0{0.0};
-        double ddu1_dv0{0.0};
-    };
-
-    auto buildSecondOrderCollocationData = [&](const CollocationMethod& method) -> SecondOrderCollocationData {
-        SecondOrderCollocationData data;
-        data.stages = method.stages;
-        data.n_constraints = method.stages + 2;
-        const int s = method.stages;
-        const int n = data.n_constraints;
-
-        std::vector<double> V(static_cast<std::size_t>(n) * static_cast<std::size_t>(n), 0.0);
-        V[0] = 1.0;                         // u(0)
-        V[static_cast<std::size_t>(n + 1)] = 1.0; // u'(0)
-
-        for (int j = 0; j < s; ++j) {
-            const double cj = method.c[static_cast<std::size_t>(j)];
-            double pow = 1.0;
-            const int row = 2 + j;
-            for (int k = 0; k < n; ++k) {
-                V[static_cast<std::size_t>(row * n + k)] = pow;
-                pow *= cj;
-            }
-        }
-
-        const auto Vinv = invertDenseMatrix(V, n);
-
-        auto evalRow = [&](double tau, int deriv) -> std::vector<double> {
-            std::vector<double> row(static_cast<std::size_t>(n), 0.0);
-            if (deriv == 0) {
-                double pow = 1.0;
-                for (int k = 0; k < n; ++k) {
-                    row[static_cast<std::size_t>(k)] = pow;
-                    pow *= tau;
-                }
-                return row;
-            }
-            if (deriv == 1) {
-                double pow = 1.0;
-                for (int k = 1; k < n; ++k) {
-                    row[static_cast<std::size_t>(k)] = static_cast<double>(k) * pow;
-                    pow *= tau;
-                }
-                return row;
-            }
-            FE_THROW_IF(deriv != 2, InvalidArgumentException, "TimeLoop: invalid Hermite derivative order");
-            double pow = 1.0;
-            for (int k = 2; k < n; ++k) {
-                row[static_cast<std::size_t>(k)] = static_cast<double>(k) * static_cast<double>(k - 1) * pow;
-                pow *= tau;
-            }
-            return row;
-        };
-
-        auto applyMap = [&](std::span<const double> row) -> std::vector<double> {
-            FE_CHECK_ARG(static_cast<int>(row.size()) == n, "TimeLoop: Hermite row size mismatch");
-            std::vector<double> coeff(static_cast<std::size_t>(n), 0.0);
-            for (int col = 0; col < n; ++col) {
-                double sum = 0.0;
-                for (int k = 0; k < n; ++k) {
-                    sum += row[static_cast<std::size_t>(k)] * Vinv[static_cast<std::size_t>(k * n + col)];
-                }
-                coeff[static_cast<std::size_t>(col)] = sum;
-            }
-            return coeff;
-        };
-
-        data.d1.resize(static_cast<std::size_t>(s) * static_cast<std::size_t>(s), 0.0);
-        data.d2.resize(static_cast<std::size_t>(s) * static_cast<std::size_t>(s), 0.0);
-        data.d1_u0.resize(static_cast<std::size_t>(s), 0.0);
-        data.d1_dv0.resize(static_cast<std::size_t>(s), 0.0);
-        data.d2_u0.resize(static_cast<std::size_t>(s), 0.0);
-        data.d2_dv0.resize(static_cast<std::size_t>(s), 0.0);
-
-        for (int i = 0; i < s; ++i) {
-            const double ci = method.c[static_cast<std::size_t>(i)];
-            const auto c1 = applyMap(evalRow(ci, 1));
-            const auto c2 = applyMap(evalRow(ci, 2));
-
-            data.d1_u0[static_cast<std::size_t>(i)] = c1[0];
-            data.d1_dv0[static_cast<std::size_t>(i)] = c1[1];
-            data.d2_u0[static_cast<std::size_t>(i)] = c2[0];
-            data.d2_dv0[static_cast<std::size_t>(i)] = c2[1];
-
-            for (int j = 0; j < s; ++j) {
-                data.d1[static_cast<std::size_t>(i * s + j)] = c1[static_cast<std::size_t>(2 + j)];
-                data.d2[static_cast<std::size_t>(i * s + j)] = c2[static_cast<std::size_t>(2 + j)];
-            }
-        }
-
-        const auto u1c = applyMap(evalRow(1.0, 0));
-        const auto du1c = applyMap(evalRow(1.0, 1));
-        const auto ddu1c = applyMap(evalRow(1.0, 2));
-
-        data.u1_u0 = u1c[0];
-        data.u1_dv0 = u1c[1];
-        data.du1_u0 = du1c[0];
-        data.du1_dv0 = du1c[1];
-        data.ddu1_u0 = ddu1c[0];
-        data.ddu1_dv0 = ddu1c[1];
-
-        data.u1.resize(static_cast<std::size_t>(s), 0.0);
-        data.du1.resize(static_cast<std::size_t>(s), 0.0);
-        data.ddu1.resize(static_cast<std::size_t>(s), 0.0);
-        for (int j = 0; j < s; ++j) {
-            data.u1[static_cast<std::size_t>(j)] = u1c[static_cast<std::size_t>(2 + j)];
-            data.du1[static_cast<std::size_t>(j)] = du1c[static_cast<std::size_t>(2 + j)];
-            data.ddu1[static_cast<std::size_t>(j)] = ddu1c[static_cast<std::size_t>(2 + j)];
-        }
-
-        return data;
-    };
-
-    std::unordered_map<int, SecondOrderCollocationData> collocation_so_gauss{};
-    std::unordered_map<int, SecondOrderCollocationData> collocation_so_radau{};
-
-    auto getSecondOrderCollocationData = [&](CollocationFamily family, int stages) -> const SecondOrderCollocationData& {
-        auto& cache = (family == CollocationFamily::Gauss) ? collocation_so_gauss : collocation_so_radau;
-        auto it = cache.find(stages);
-        if (it != cache.end()) {
-            return it->second;
-        }
-        const auto& method = getCollocationMethod(family, stages);
-        auto [ins_it, inserted] = cache.emplace(stages, buildSecondOrderCollocationData(method));
-        FE_CHECK_ARG(inserted, "TimeLoop: failed to cache collocation second-order data");
-        return ins_it->second;
-    };
+	    auto getSecondOrderCollocationData = [&](CollocationFamily family, int stages) -> const SecondOrderCollocationData& {
+	        auto& cache = (family == CollocationFamily::Gauss) ? collocation_so_gauss : collocation_so_radau;
+	        auto it = cache.find(stages);
+	        if (it != cache.end()) {
+	            return it->second;
+	        }
+	        const auto& method = getCollocationMethod(family, stages);
+	        auto [ins_it, inserted] = cache.emplace(stages, collocation::buildSecondOrderCollocationData(method));
+	        FE_CHECK_ARG(inserted, "TimeLoop: failed to cache collocation second-order data");
+	        return ins_it->second;
+	    };
 
     struct CollocationWorkspace {
         int stages{0};
@@ -1814,7 +1425,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     std::unique_ptr<backends::GenericVector> vsvo_pred{};
     int order_next = 0;
 
-    const double time_tol = 10.0 * std::numeric_limits<double>::epsilon()
+    const double time_tol = 100.0 * std::numeric_limits<double>::epsilon()
         * std::max(1.0, std::abs(t_end));
 
     const bool adaptive = static_cast<bool>(options_.step_controller);
@@ -2463,13 +2074,30 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     copyVector(*scratch_vec2, history.uPrev2());
 
                     bool restore_on_exit = true;
-                    auto restore = [&]() {
-                        history.setDt(dt_saved);
-                        history.setPrevDt(dt_prev_saved);
-                        copyVector(history.uPrev(), *scratch_vec1);
-                        copyVector(history.uPrev2(), *scratch_vec2);
-                        history.resetCurrentToPrevious();
-                    };
+                    struct RestoreGuard {
+                        TimeHistory& history;
+                        double dt_saved;
+                        double dt_prev_saved;
+                        backends::GenericVector& saved_prev;
+                        backends::GenericVector& saved_prev2;
+                        bool& restore_on_exit;
+
+                        ~RestoreGuard() noexcept
+                        {
+                            if (!restore_on_exit) {
+                                return;
+                            }
+                            try {
+                                history.setDt(dt_saved);
+                                history.setPrevDt(dt_prev_saved);
+                                copyVector(history.uPrev(), saved_prev);
+                                copyVector(history.uPrev2(), saved_prev2);
+                                history.resetCurrentToPrevious();
+                            } catch (...) {
+                                // Best-effort restoration: never throw from destructor.
+                            }
+                        }
+                    } restore_guard{history, dt_saved, dt_prev_saved, *scratch_vec1, *scratch_vec2, restore_on_exit};
 
                     const double gamma = options_.trbdf2_gamma;
                     const double dt1 = gamma * dt;
@@ -2528,10 +2156,6 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         // Restore dt so acceptStep advances the full step.
                         history.setDt(dt_saved);
                         restore_on_exit = false;
-                    }
-
-                    if (restore_on_exit) {
-                        restore();
                     }
                 } else {
                     FE_THROW(NotImplementedException, "TimeLoop: unsupported scheme");
@@ -2937,9 +2561,20 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
         }
     }
 
+    // If the loop exits because step == max_steps, the final accepted step may
+    // have advanced time exactly to t_end. Handle that edge case explicitly.
+    const double t = history.time();
+    if (t + time_tol >= t_end) {
+        report.success = true;
+        report.steps_taken = options_.max_steps;
+        report.final_time = t_end;
+        history.setTime(t_end);
+        return report;
+    }
+
     report.success = false;
     report.steps_taken = options_.max_steps;
-    report.final_time = history.time();
+    report.final_time = t;
     report.message = "TimeLoop: max_steps exceeded";
     return report;
 }

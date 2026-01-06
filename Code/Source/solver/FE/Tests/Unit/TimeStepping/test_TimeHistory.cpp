@@ -151,3 +151,86 @@ TEST(TimeHistory, ResetCurrentToPreviousCopiesMostRecentHistory)
     EXPECT_EQ(ts_test::getVectorByDof(h.u()), u_prev);
 }
 
+TEST(TimeHistory, DtHistoryIsValidDetectsMixedValidAndInvalidEntries)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeHistory tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto factory = ts_test::createTestFactory();
+    ASSERT_NE(factory.get(), nullptr);
+
+    auto h = svmp::FE::timestepping::TimeHistory::allocate(*factory, 4, /*history_depth=*/3);
+    h.setDtHistory(std::vector<double>{0.1, 0.0, 0.1});
+
+    EXPECT_TRUE(h.dtHistoryIsValid(1));
+    EXPECT_FALSE(h.dtHistoryIsValid(2));
+    EXPECT_FALSE(h.dtHistoryIsValid(3));
+}
+
+TEST(TimeHistory, UpdateGhostsDoesNotChangeVectorValuesInSerial)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeHistory tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto factory = ts_test::createTestFactory();
+    ASSERT_NE(factory.get(), nullptr);
+
+    auto h = svmp::FE::timestepping::TimeHistory::allocate(*factory, 4, /*history_depth=*/3, /*allocate_second_order_state=*/true);
+
+    const std::vector<svmp::FE::Real> u = {0.1, 0.2, 0.3, 0.4};
+    const std::vector<svmp::FE::Real> u_prev = {1.0, 2.0, 3.0, 4.0};
+    const std::vector<svmp::FE::Real> u_prev2 = {-1.0, -2.0, -3.0, -4.0};
+    const std::vector<svmp::FE::Real> u_prev3 = {9.0, 8.0, 7.0, 6.0};
+    const std::vector<svmp::FE::Real> v = {5.0, 6.0, 7.0, 8.0};
+    const std::vector<svmp::FE::Real> a = {-5.0, -6.0, -7.0, -8.0};
+
+    ts_test::setVectorByDof(h.u(), u);
+    ts_test::setVectorByDof(h.uPrev(), u_prev);
+    ts_test::setVectorByDof(h.uPrev2(), u_prev2);
+    ts_test::setVectorByDof(h.uPrevK(3), u_prev3);
+    ts_test::setVectorByDof(h.uDot(), v);
+    ts_test::setVectorByDof(h.uDDot(), a);
+
+    h.updateGhosts();
+
+    EXPECT_EQ(ts_test::getVectorByDof(h.u()), u);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uPrev()), u_prev);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uPrev2()), u_prev2);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uPrevK(3)), u_prev3);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uDot()), v);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uDDot()), a);
+}
+
+TEST(TimeHistory, RepackPreservesValues)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeHistory tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto factory = ts_test::createTestFactory();
+    ASSERT_NE(factory.get(), nullptr);
+
+    auto h = svmp::FE::timestepping::TimeHistory::allocate(*factory, 4, /*history_depth=*/3, /*allocate_second_order_state=*/true);
+
+    const std::vector<svmp::FE::Real> u = {0.1, 0.2, 0.3, 0.4};
+    const std::vector<svmp::FE::Real> u_prev = {1.0, 2.0, 3.0, 4.0};
+    const std::vector<svmp::FE::Real> u_prev2 = {-1.0, -2.0, -3.0, -4.0};
+    const std::vector<svmp::FE::Real> u_prev3 = {9.0, 8.0, 7.0, 6.0};
+    const std::vector<svmp::FE::Real> v = {5.0, 6.0, 7.0, 8.0};
+    const std::vector<svmp::FE::Real> a = {-5.0, -6.0, -7.0, -8.0};
+
+    ts_test::setVectorByDof(h.u(), u);
+    ts_test::setVectorByDof(h.uPrev(), u_prev);
+    ts_test::setVectorByDof(h.uPrev2(), u_prev2);
+    ts_test::setVectorByDof(h.uPrevK(3), u_prev3);
+    ts_test::setVectorByDof(h.uDot(), v);
+    ts_test::setVectorByDof(h.uDDot(), a);
+
+    h.repack(*factory);
+
+    EXPECT_EQ(ts_test::getVectorByDof(h.u()), u);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uPrev()), u_prev);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uPrev2()), u_prev2);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uPrevK(3)), u_prev3);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uDot()), v);
+    EXPECT_EQ(ts_test::getVectorByDof(h.uDDot()), a);
+}

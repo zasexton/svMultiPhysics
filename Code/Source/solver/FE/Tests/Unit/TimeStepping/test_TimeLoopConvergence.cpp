@@ -114,7 +114,10 @@ std::vector<Real> runReactionProblem(svmp::FE::timestepping::SchemeKind scheme,
                                      int collocation_max_outer_iterations = 4,
                                      double collocation_outer_tolerance = 0.0,
                                      bool exact_initial_history = false,
-                                     double theta = 0.5)
+                                     double theta = 0.5,
+                                     int newton_max_iterations = 8,
+                                     double newton_abs_tolerance = 1e-12,
+                                     double newton_rel_tolerance = 0.0)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
     auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
@@ -193,9 +196,9 @@ std::vector<Real> runReactionProblem(svmp::FE::timestepping::SchemeKind scheme,
     opts.collocation_outer_tolerance = collocation_outer_tolerance;
     opts.newton.residual_op = "op";
     opts.newton.jacobian_op = "op";
-    opts.newton.max_iterations = 8;
-    opts.newton.abs_tolerance = 1e-12;
-    opts.newton.rel_tolerance = 0.0;
+    opts.newton.max_iterations = newton_max_iterations;
+    opts.newton.abs_tolerance = newton_abs_tolerance;
+    opts.newton.rel_tolerance = newton_rel_tolerance;
     opts.step_controller = std::move(controller);
 
     svmp::FE::timestepping::TimeLoop loop(opts);
@@ -395,6 +398,28 @@ makeFixedVsvoBdfController(int order, double dt)
 
     return std::make_shared<svmp::FE::timestepping::VSVO_BDF_Controller>(ctrl_opts);
 }
+
+class RecordingVsvoBdfController final : public svmp::FE::timestepping::VSVO_BDF_Controller {
+public:
+    explicit RecordingVsvoBdfController(svmp::FE::timestepping::VSVO_BDF_ControllerOptions options)
+        : svmp::FE::timestepping::VSVO_BDF_Controller(std::move(options))
+    {
+    }
+
+    std::vector<svmp::FE::timestepping::StepAttemptInfo> accepted{};
+
+    svmp::FE::timestepping::StepDecision onAccepted(const svmp::FE::timestepping::StepAttemptInfo& info) override
+    {
+        accepted.push_back(info);
+        return svmp::FE::timestepping::VSVO_BDF_Controller::onAccepted(info);
+    }
+
+    svmp::FE::timestepping::StepDecision onRejected(const svmp::FE::timestepping::StepAttemptInfo& info,
+                                                    svmp::FE::timestepping::StepRejectReason reason) override
+    {
+        return svmp::FE::timestepping::VSVO_BDF_Controller::onRejected(info, reason);
+    }
+};
 
 std::vector<Real> runLogisticProblem(svmp::FE::timestepping::SchemeKind scheme,
                                      double dt,
@@ -2577,9 +2602,164 @@ TEST(TimeLoopEquivalences, ThetaMethod_Theta1_MatchesBackwardEulerOnReaction)
 	        /*collocation_outer_tolerance=*/0.0);
 	    ASSERT_EQ(u_monolithic.size(), u_gs.size());
 
-	    const double e = relativeL2Error(u_gs, u_monolithic);
-	    EXPECT_LT(e, 1e-5);
+		    const double e = relativeL2Error(u_gs, u_monolithic);
+		    EXPECT_LT(e, 1e-5);
+		}
+
+TEST(TimeLoopEquivalences, DG1_StageGaussSeidelMatchesMonolithicOnReactionWhenConverged)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    const double lambda = 1.0;
+    const double t_end = 0.2;
+    const double dt = 0.1;
+
+    const auto u_monolithic = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::DG1,
+        dt,
+        t_end,
+        lambda,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic);
+    const auto u_gs = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::DG1,
+        dt,
+        t_end,
+        lambda,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+	        /*dg_degree=*/1,
+	        /*cg_degree=*/2,
+	        svmp::FE::timestepping::CollocationSolveStrategy::StageGaussSeidel,
+	        /*collocation_max_outer_iterations=*/80,
+	        /*collocation_outer_tolerance=*/1e-10);
+
+	    ASSERT_EQ(u_monolithic.size(), u_gs.size());
+	    EXPECT_LT(relativeL2Error(u_gs, u_monolithic), 1e-10);
 	}
+
+TEST(TimeLoopEquivalences, DG2_StageGaussSeidelMatchesMonolithicOnReactionWhenConverged)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    // For 3-stage Radau IIA (dG2), the stage-wise Gauss–Seidel iteration is not
+    // guaranteed to converge for weakly damped problems. Use a sufficiently
+    // stiff decay (large lambda) so both strategies converge and can be compared.
+    const double lambda = 20.0;
+    const double t_end = 0.2;
+    const double dt = 0.1;
+
+    const auto u_monolithic = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::DG,
+	        dt,
+	        t_end,
+	        lambda,
+	        /*history_depth=*/3,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/2,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic);
+		    const auto u_gs = runReactionProblem(
+		        svmp::FE::timestepping::SchemeKind::DG,
+		        dt,
+		        t_end,
+	        lambda,
+	        /*history_depth=*/3,
+	        /*controller=*/{},
+	        /*generalized_alpha_rho_inf=*/1.0,
+		        /*dg_degree=*/2,
+		        /*cg_degree=*/2,
+		        svmp::FE::timestepping::CollocationSolveStrategy::StageGaussSeidel,
+		        /*collocation_max_outer_iterations=*/200,
+		        /*collocation_outer_tolerance=*/1e-10);
+
+		    ASSERT_EQ(u_monolithic.size(), u_gs.size());
+		    EXPECT_LT(relativeL2Error(u_gs, u_monolithic), 1e-9);
+		}
+
+TEST(TimeLoopEquivalences, CG2_StageGaussSeidelMatchesMonolithicOnReactionWhenConverged)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    const double lambda = 1.0;
+    const double t_end = 0.2;
+    const double dt = 0.1;
+
+    const auto u_monolithic = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::CG2,
+        dt,
+        t_end,
+        lambda,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic);
+	    const auto u_gs = runReactionProblem(
+	        svmp::FE::timestepping::SchemeKind::CG2,
+	        dt,
+	        t_end,
+        lambda,
+        /*history_depth=*/2,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+	        /*dg_degree=*/1,
+	        /*cg_degree=*/2,
+	        svmp::FE::timestepping::CollocationSolveStrategy::StageGaussSeidel,
+	        /*collocation_max_outer_iterations=*/80,
+	        /*collocation_outer_tolerance=*/1e-10);
+
+	    ASSERT_EQ(u_monolithic.size(), u_gs.size());
+	    EXPECT_LT(relativeL2Error(u_gs, u_monolithic), 1e-10);
+	}
+
+TEST(TimeLoopEquivalences, StageGaussSeidelOuterToleranceCanExitEarlyAndDifferFromMonolithic)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    const double lambda = 50.0;
+    const double t_end = 0.1;
+    const double dt = 0.1;
+
+    const auto u_monolithic = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::DG,
+        dt,
+        t_end,
+        lambda,
+        /*history_depth=*/3,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/2,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic);
+    const auto u_gs_early = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::DG,
+        dt,
+        t_end,
+        lambda,
+        /*history_depth=*/3,
+        /*controller=*/{},
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/2,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::StageGaussSeidel,
+        /*collocation_max_outer_iterations=*/200,
+        /*collocation_outer_tolerance=*/1e6);
+
+    const double e = relativeL2Error(u_gs_early, u_monolithic);
+    EXPECT_GT(e, 1e-10);
+}
 
 	TEST(TimeLoopVSVO_BDF, AdaptsDtOnReaction)
 	{
@@ -2891,6 +3071,70 @@ TEST(TimeLoopVSVO_BDF, RestartMatchesContinuousRunOnReaction)
     EXPECT_LT(err_restart, 1e-5);
 }
 
+TEST(TimeLoopVSVO_BDF, LTENormScalesLikeDtSquaredForOrder1OnReaction)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    const double lambda = 1.0;
+    const double t_end = 0.2;
+
+    auto runAndGetLastErrorNorm = [&](double dt) -> double {
+        svmp::FE::timestepping::VSVO_BDF_ControllerOptions ctrl_opts;
+        ctrl_opts.abs_tol = 1.0;
+        ctrl_opts.rel_tol = 0.0;
+        ctrl_opts.min_order = 1;
+        ctrl_opts.max_order = 1;
+        ctrl_opts.initial_order = 1;
+        ctrl_opts.max_retries = 0;
+        ctrl_opts.safety = 1.0;
+        ctrl_opts.min_factor = 1.0;
+        ctrl_opts.max_factor = 1.0;
+        ctrl_opts.min_dt = dt;
+        ctrl_opts.max_dt = dt;
+        ctrl_opts.pi_alpha = 0.0;
+	        ctrl_opts.pi_beta = 0.0;
+	        ctrl_opts.increase_order_threshold = 0.0;
+
+	        auto controller = std::make_shared<RecordingVsvoBdfController>(ctrl_opts);
+	        if (!controller) {
+	            return -1.0;
+	        }
+
+        (void)runReactionProblem(svmp::FE::timestepping::SchemeKind::VSVO_BDF,
+                                 dt,
+                                 t_end,
+                                 lambda,
+                                 /*history_depth=*/2,
+                                 controller,
+                                 /*generalized_alpha_rho_inf=*/1.0,
+                                 /*dg_degree=*/1,
+                                 /*cg_degree=*/2,
+                                 svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+                                 /*collocation_max_outer_iterations=*/4,
+                                 /*collocation_outer_tolerance=*/0.0,
+                                 /*exact_initial_history=*/true,
+                                 /*theta=*/0.5);
+
+        double err = -1.0;
+        for (const auto& info : controller->accepted) {
+            const double t1 = info.time + info.dt;
+            if (std::abs(t1 - t_end) <= 1e-12 && (info.error_norm > 0.0) && std::isfinite(info.error_norm)) {
+                err = info.error_norm;
+            }
+        }
+        return err;
+    };
+
+    const double err_dt1 = runAndGetLastErrorNorm(/*dt=*/0.1);
+    const double err_dt2 = runAndGetLastErrorNorm(/*dt=*/0.05);
+    ASSERT_GT(err_dt1, 0.0);
+    ASSERT_GT(err_dt2, 0.0);
+
+    const double ratio = err_dt1 / err_dt2;
+    EXPECT_NEAR(ratio, 4.0, 1.0);
+}
+
 TEST(TimeLoopVSVO_BDF, AdaptsDtOnDt2Oscillator)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
@@ -3025,4 +3269,336 @@ TEST(TimeLoopVSVO_BDF, AdaptsDtOnDt2Oscillator)
     const auto approx = getVectorByDof(history.uPrev());
     const double err = relativeL2Error(approx, exact);
     EXPECT_LT(err, 0.1);
+}
+
+TEST(TimeLoopTRBDF2, RestoresHistoryOnThrownExceptionInStage2)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr double lambda = 2.0;
+    constexpr double dt0 = 0.2;
+
+    class FailOnNthSolveLinearSolver final : public svmp::FE::backends::LinearSolver {
+    public:
+        FailOnNthSolveLinearSolver(svmp::FE::backends::LinearSolver& inner, int fail_on_call)
+            : inner_(inner)
+            , fail_on_call_(fail_on_call)
+        {
+        }
+
+        [[nodiscard]] svmp::FE::backends::BackendKind backendKind() const noexcept override
+        {
+            return inner_.backendKind();
+        }
+
+        void setOptions(const svmp::FE::backends::SolverOptions& options) override
+        {
+            inner_.setOptions(options);
+        }
+
+        [[nodiscard]] const svmp::FE::backends::SolverOptions& getOptions() const noexcept override
+        {
+            return inner_.getOptions();
+        }
+
+        [[nodiscard]] svmp::FE::backends::SolverReport solve(const svmp::FE::backends::GenericMatrix& A,
+                                                              svmp::FE::backends::GenericVector& x,
+                                                              const svmp::FE::backends::GenericVector& b) override
+        {
+            calls_ += 1;
+            if (calls_ == fail_on_call_) {
+                svmp::FE::backends::SolverReport rep;
+                rep.converged = false;
+                rep.iterations = 0;
+                rep.message = "forced failure for TRBDF2 restore test";
+                return rep;
+            }
+            return inner_.solve(A, x, b);
+        }
+
+    private:
+        svmp::FE::backends::LinearSolver& inner_;
+        int fail_on_call_{1};
+        int calls_{0};
+    };
+
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto form = (svmp::FE::forms::dt(u) * v + (u * v) * static_cast<Real>(lambda)).dx();
+
+    svmp::FE::forms::FormCompiler compiler;
+    auto ir = compiler.compileResidual(form);
+    auto kernel = std::make_shared<svmp::FE::forms::NonlinearFormKernel>(std::move(ir), svmp::FE::forms::ADMode::Forward);
+    sys.addCellKernel("op", u_field, u_field, kernel);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(sys, integrator);
+
+    auto factory = createTestFactory();
+    ASSERT_NE(factory.get(), nullptr);
+    auto inner = factory->createLinearSolver(directSolve());
+    ASSERT_NE(inner.get(), nullptr);
+    FailOnNthSolveLinearSolver linear(*inner, /*fail_on_call=*/2);
+
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    auto history = svmp::FE::timestepping::TimeHistory::allocate(*factory, n_dofs, /*history_depth=*/2);
+    const std::vector<Real> u_prev = {1.0, -2.0, 3.0, -4.0};
+    const std::vector<Real> u_prev2 = {-4.0, 3.0, -2.0, 1.0};
+    setVectorByDof(history.uPrev(), u_prev);
+    setVectorByDof(history.uPrev2(), u_prev2);
+    history.resetCurrentToPrevious();
+    history.setDt(dt0);
+    history.setPrevDt(dt0);
+    history.primeDtHistory(dt0);
+
+    svmp::FE::timestepping::TimeLoopOptions opts;
+    opts.t0 = 0.0;
+    opts.t_end = dt0;
+    opts.dt = dt0;
+    opts.scheme = svmp::FE::timestepping::SchemeKind::TRBDF2;
+    opts.newton.residual_op = "op";
+    opts.newton.jacobian_op = "op";
+    opts.newton.max_iterations = 8;
+    opts.newton.abs_tolerance = 1e-12;
+    opts.newton.rel_tolerance = 0.0;
+
+    svmp::FE::timestepping::TimeLoop loop(opts);
+    EXPECT_THROW((void)loop.run(transient, *factory, linear, history), svmp::FE::FEException);
+
+    // Ensure TRBDF2 substep manipulations didn't leak into user-visible history.
+    EXPECT_EQ(getVectorByDof(history.uPrev()), u_prev);
+    EXPECT_EQ(getVectorByDof(history.uPrev2()), u_prev2);
+    EXPECT_EQ(getVectorByDof(history.u()), u_prev);
+    EXPECT_NEAR(history.dt(), dt0, 1e-15);
+    EXPECT_NEAR(history.dtPrev(), dt0, 1e-15);
+}
+
+TEST(TimeLoopSecondOrderInit, NewmarkInitializesVelocityAndFallsBackForAcceleration)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr double omega = 2.0;
+    constexpr double dt0 = 0.1;
+
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto form =
+        (svmp::FE::forms::dt(u, 2) * v + (u * v) * static_cast<Real>(omega * omega)).dx();
+
+    svmp::FE::forms::FormCompiler compiler;
+    auto ir = compiler.compileResidual(form);
+    auto kernel = std::make_shared<svmp::FE::forms::NonlinearFormKernel>(std::move(ir), svmp::FE::forms::ADMode::Forward);
+    sys.addCellKernel("op", u_field, u_field, kernel);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(sys, integrator);
+
+    auto factory = createTestFactory();
+    ASSERT_NE(factory.get(), nullptr);
+    auto linear = factory->createLinearSolver(directSolve());
+    ASSERT_NE(linear.get(), nullptr);
+
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    auto history = svmp::FE::timestepping::TimeHistory::allocate(*factory,
+                                                                 n_dofs,
+                                                                 /*history_depth=*/2,
+                                                                 /*allocate_second_order_state=*/false);
+
+    const std::vector<Real> u0 = {1.0, 2.0, -0.5, 0.25};
+    ASSERT_EQ(u0.size(), static_cast<std::size_t>(n_dofs));
+
+    // u(t) = u0 * (cos(omega t) + sin(omega t)) => u(-dt) = u0*(cos(omega dt) - sin(omega dt)).
+    const double c = std::cos(omega * dt0);
+    const double s = std::sin(omega * dt0);
+    std::vector<Real> u_minus_dt(u0.size(), 0.0);
+    for (std::size_t i = 0; i < u0.size(); ++i) {
+        u_minus_dt[i] = static_cast<Real>(static_cast<double>(u0[i]) * (c - s));
+    }
+
+    setVectorByDof(history.uPrev(), u0);
+    setVectorByDof(history.uPrev2(), u_minus_dt);
+    history.resetCurrentToPrevious();
+    history.setDt(dt0);
+    history.setPrevDt(dt0);
+    history.primeDtHistory(dt0);
+
+    std::vector<Real> init_v;
+    std::vector<Real> init_a;
+    int nonlinear_calls = 0;
+
+    svmp::FE::timestepping::TimeLoopCallbacks cb;
+    cb.on_nonlinear_done = [&init_v, &init_a, &nonlinear_calls](const svmp::FE::timestepping::TimeHistory& h,
+                                                                const svmp::FE::timestepping::NewtonReport&) {
+        nonlinear_calls += 1;
+        if (nonlinear_calls > 1) {
+            return;
+        }
+        const auto v = h.uDotSpan();
+        const auto a = h.uDDotSpan();
+        init_v.assign(v.begin(), v.end());
+        init_a.assign(a.begin(), a.end());
+    };
+
+    svmp::FE::timestepping::TimeLoopOptions opts;
+    opts.t0 = 0.0;
+    opts.t_end = dt0;
+    opts.dt = dt0;
+    opts.scheme = svmp::FE::timestepping::SchemeKind::Newmark;
+    opts.newton.residual_op = "op";
+    opts.newton.jacobian_op = "op";
+    opts.newton.max_iterations = 12;
+    opts.newton.abs_tolerance = 1e-12;
+    opts.newton.rel_tolerance = 0.0;
+
+    svmp::FE::timestepping::TimeLoop loop(opts);
+    const auto rep = loop.run(transient, *factory, *linear, history, cb);
+    EXPECT_TRUE(rep.success) << rep.message;
+    EXPECT_GE(nonlinear_calls, 1);
+
+    ASSERT_EQ(init_v.size(), u0.size());
+    ASSERT_EQ(init_a.size(), u0.size());
+
+    for (std::size_t i = 0; i < u0.size(); ++i) {
+        const double expected_v = (static_cast<double>(u0[i]) - static_cast<double>(u_minus_dt[i])) / dt0;
+        const double expected_a = -omega * omega * static_cast<double>(u0[i]);
+        EXPECT_NEAR(static_cast<double>(init_v[i]), expected_v, 1e-12);
+        EXPECT_NEAR(static_cast<double>(init_a[i]), expected_a, 1e-10);
+    }
+}
+
+TEST(TimeLoopSecondOrderInit, NewmarkThrowsWhenAccelerationFallbackSolveFails)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    constexpr double omega = 2.0;
+    constexpr double dt0 = 0.1;
+
+    class AlwaysFailLinearSolver final : public svmp::FE::backends::LinearSolver {
+    public:
+        explicit AlwaysFailLinearSolver(svmp::FE::backends::LinearSolver& inner)
+            : inner_(inner)
+        {
+        }
+
+        [[nodiscard]] svmp::FE::backends::BackendKind backendKind() const noexcept override
+        {
+            return inner_.backendKind();
+        }
+
+        void setOptions(const svmp::FE::backends::SolverOptions& options) override
+        {
+            inner_.setOptions(options);
+        }
+
+        [[nodiscard]] const svmp::FE::backends::SolverOptions& getOptions() const noexcept override
+        {
+            return inner_.getOptions();
+        }
+
+        [[nodiscard]] svmp::FE::backends::SolverReport solve(const svmp::FE::backends::GenericMatrix&,
+                                                              svmp::FE::backends::GenericVector&,
+                                                              const svmp::FE::backends::GenericVector&) override
+        {
+            svmp::FE::backends::SolverReport rep;
+            rep.converged = false;
+            rep.iterations = 0;
+            rep.message = "forced failure";
+            return rep;
+        }
+
+    private:
+        svmp::FE::backends::LinearSolver& inner_;
+    };
+
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto form =
+        (svmp::FE::forms::dt(u, 2) * v + (u * v) * static_cast<Real>(omega * omega)).dx();
+
+    svmp::FE::forms::FormCompiler compiler;
+    auto ir = compiler.compileResidual(form);
+    auto kernel = std::make_shared<svmp::FE::forms::NonlinearFormKernel>(std::move(ir), svmp::FE::forms::ADMode::Forward);
+    sys.addCellKernel("op", u_field, u_field, kernel);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(sys, integrator);
+
+    auto factory = createTestFactory();
+    ASSERT_NE(factory.get(), nullptr);
+    auto inner = factory->createLinearSolver(directSolve());
+    ASSERT_NE(inner.get(), nullptr);
+    AlwaysFailLinearSolver linear(*inner);
+
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    auto history = svmp::FE::timestepping::TimeHistory::allocate(*factory,
+                                                                 n_dofs,
+                                                                 /*history_depth=*/2,
+                                                                 /*allocate_second_order_state=*/false);
+
+    const std::vector<Real> u0 = {1.0, 2.0, -0.5, 0.25};
+    ASSERT_EQ(u0.size(), static_cast<std::size_t>(n_dofs));
+
+    const double c = std::cos(omega * dt0);
+    const double s = std::sin(omega * dt0);
+    std::vector<Real> u_minus_dt(u0.size(), 0.0);
+    for (std::size_t i = 0; i < u0.size(); ++i) {
+        u_minus_dt[i] = static_cast<Real>(static_cast<double>(u0[i]) * (c - s));
+    }
+
+    setVectorByDof(history.uPrev(), u0);
+    setVectorByDof(history.uPrev2(), u_minus_dt);
+    history.resetCurrentToPrevious();
+    history.setDt(dt0);
+    history.setPrevDt(dt0);
+    history.primeDtHistory(dt0);
+
+    svmp::FE::timestepping::TimeLoopOptions opts;
+    opts.t0 = 0.0;
+    opts.t_end = dt0;
+    opts.dt = dt0;
+    opts.scheme = svmp::FE::timestepping::SchemeKind::Newmark;
+    opts.newton.residual_op = "op";
+    opts.newton.jacobian_op = "op";
+    opts.newton.max_iterations = 12;
+    opts.newton.abs_tolerance = 1e-12;
+    opts.newton.rel_tolerance = 0.0;
+
+    svmp::FE::timestepping::TimeLoop loop(opts);
+    EXPECT_THROW((void)loop.run(transient, *factory, linear, history), svmp::FE::FEException);
 }

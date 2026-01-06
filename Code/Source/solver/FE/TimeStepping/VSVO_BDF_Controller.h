@@ -51,7 +51,7 @@ struct VSVO_BDF_ControllerOptions {
  * `p-1` and `p+1` may be provided in `error_norm_low` / `error_norm_high`,
  * enabling a simple efficiency-based order selection.
  */
-class VSVO_BDF_Controller final : public StepController {
+class VSVO_BDF_Controller : public StepController {
 public:
     explicit VSVO_BDF_Controller(VSVO_BDF_ControllerOptions options);
 

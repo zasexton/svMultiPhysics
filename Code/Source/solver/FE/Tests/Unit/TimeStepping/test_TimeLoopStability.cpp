@@ -25,6 +25,7 @@
 
 #include "TimeStepping/TimeHistory.h"
 #include "TimeStepping/TimeLoop.h"
+#include "TimeStepping/VSVO_BDF_Controller.h"
 
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
@@ -40,7 +41,8 @@ std::vector<double> runReactionNorms(svmp::FE::timestepping::SchemeKind scheme,
                                      double dt,
                                      double t_end,
                                      double lambda,
-                                     double generalized_alpha_rho_inf = 1.0)
+                                     double generalized_alpha_rho_inf = 1.0,
+                                     std::shared_ptr<svmp::FE::timestepping::StepController> step_controller = {})
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
     auto space = std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Tetra4, 1);
@@ -103,6 +105,7 @@ std::vector<double> runReactionNorms(svmp::FE::timestepping::SchemeKind scheme,
     opts.scheme = scheme;
     opts.theta = 0.5;
     opts.generalized_alpha_rho_inf = generalized_alpha_rho_inf;
+    opts.step_controller = std::move(step_controller);
 	    opts.newton.residual_op = "op";
 	    opts.newton.jacobian_op = "op";
 	    opts.newton.max_iterations = 12;
@@ -124,6 +127,27 @@ std::vector<double> runReactionNorms(svmp::FE::timestepping::SchemeKind scheme,
     return norms;
 }
 
+std::shared_ptr<svmp::FE::timestepping::VSVO_BDF_Controller> makeFixedVsvoBdfController(int order, double dt)
+{
+    svmp::FE::timestepping::VSVO_BDF_ControllerOptions o;
+    // Use a very loose tolerance so stiff-decay tests focus on stability, not accuracy.
+    o.abs_tol = 1e6;
+    o.rel_tol = 0.0;
+    o.min_order = order;
+    o.max_order = order;
+    o.initial_order = order;
+    o.max_retries = 0;
+    o.safety = 1.0;
+    o.min_factor = 1.0;
+    o.max_factor = 1.0;
+    o.min_dt = dt;
+    o.max_dt = dt;
+    o.pi_alpha = 0.0;
+    o.pi_beta = 0.0;
+    o.increase_order_threshold = 0.0;
+    return std::make_shared<svmp::FE::timestepping::VSVO_BDF_Controller>(o);
+}
+
 } // namespace
 
 TEST(TimeLoopStability, StiffDecayMatchesLiteratureExpectations)
@@ -143,6 +167,14 @@ TEST(TimeLoopStability, StiffDecayMatchesLiteratureExpectations)
     const auto norms_be = runReactionNorms(svmp::FE::timestepping::SchemeKind::BackwardEuler, dt, t_end, lambda);
     const auto norms_trbdf2 = runReactionNorms(svmp::FE::timestepping::SchemeKind::TRBDF2, dt, t_end, lambda);
     const auto norms_cn = runReactionNorms(svmp::FE::timestepping::SchemeKind::ThetaMethod, dt, t_end, lambda);
+    const auto norms_vsvo_be = runReactionNorms(svmp::FE::timestepping::SchemeKind::VSVO_BDF,
+                                                dt,
+                                                t_end,
+                                                lambda,
+                                                /*generalized_alpha_rho_inf=*/1.0,
+                                                makeFixedVsvoBdfController(/*order=*/1, dt));
+    const auto norms_dg1 = runReactionNorms(svmp::FE::timestepping::SchemeKind::DG1, dt, t_end, lambda);
+    const auto norms_cg2 = runReactionNorms(svmp::FE::timestepping::SchemeKind::CG2, dt, t_end, lambda);
     const std::vector<double> rho_values = {0.0, 0.2, 0.5, 0.9, 1.0};
     std::vector<std::vector<double>> norms_ga;
     norms_ga.reserve(rho_values.size());
@@ -153,6 +185,9 @@ TEST(TimeLoopStability, StiffDecayMatchesLiteratureExpectations)
     ASSERT_GE(norms_be.size(), 2u);
     ASSERT_GE(norms_trbdf2.size(), 2u);
     ASSERT_GE(norms_cn.size(), 2u);
+    ASSERT_GE(norms_vsvo_be.size(), 2u);
+    ASSERT_GE(norms_dg1.size(), 2u);
+    ASSERT_GE(norms_cg2.size(), 2u);
     for (std::size_t i = 0; i < norms_ga.size(); ++i) {
         ASSERT_GE(norms_ga[i].size(), 2u) << "rho_inf=" << rho_values[i];
     }
@@ -169,13 +204,19 @@ TEST(TimeLoopStability, StiffDecayMatchesLiteratureExpectations)
     const double ratio_be = ratioAt(norms_be, 2);
     const double ratio_trbdf2 = ratioAt(norms_trbdf2, 2);
     const double ratio_cn = ratioAt(norms_cn, 2);
+    const double ratio_vsvo_be = ratioAt(norms_vsvo_be, 2);
+    const double ratio_dg1 = ratioAt(norms_dg1, 2);
+    const double ratio_cg2 = ratioAt(norms_cg2, 2);
 
     // Backward Euler and TRBDF2 are (stiffly) strongly damping for stiff decay.
     EXPECT_LT(ratio_be, 1e-3);
     EXPECT_LT(ratio_trbdf2, 1e-2);
+    EXPECT_LT(ratio_vsvo_be, 1e-3);
+    EXPECT_LT(ratio_dg1, 1e-2);
 
     // Crank–Nicolson (theta=0.5) is A-stable but not L-stable; stiff modes are not damped.
     EXPECT_GT(ratio_cn, 0.9);
+    EXPECT_GT(ratio_cg2, 0.9);
 
     // Generalized-α controls high-frequency damping via ρ∞; decreasing ρ∞ increases damping.
     const std::size_t sample_idx = 4;

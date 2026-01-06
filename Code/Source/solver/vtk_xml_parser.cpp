@@ -329,6 +329,7 @@ void store_element_conn(vtkSmartPointer<vtkPolyData> vtk_polydata, faceType& fac
   // Allocate connectivity array.
   auto num_elems = vtk_polydata->GetNumberOfCells();
   face.nEl = num_elems;
+  face.gnEl = num_elems;
   face.eNoN = np_elem; 
   face.IEN = Array<int>(np_elem, num_elems);
 
@@ -351,6 +352,7 @@ void store_element_conn(vtkSmartPointer<vtkUnstructuredGrid> vtk_ugrid, faceType
 
   auto num_elems = vtk_ugrid->GetNumberOfCells();
   face.nEl = num_elems;
+  face.gnEl = num_elems;
   face.eNoN = np_elem; 
   face.IEN = Array<int>(np_elem, num_elems);
 
@@ -481,9 +483,8 @@ void store_element_ids(vtkSmartPointer<vtkUnstructuredGrid> vtk_ugrid, mshType& 
 //
 void store_element_ids(vtkSmartPointer<vtkPolyData> vtk_polydata, faceType& face)
 {
-  auto elem_ids = vtkIntArray::SafeDownCast(vtk_polydata->GetCellData()->GetArray(ELEMENT_IDS_NAME.c_str()));
+  auto elem_ids = vtkDataArray::SafeDownCast(vtk_polydata->GetCellData()->GetArray(ELEMENT_IDS_NAME.c_str()));
   if (elem_ids == nullptr) {
-    throw std::runtime_error("No '" + ELEMENT_IDS_NAME + "' data of type Int32 found in VTK mesh.");
     return;
   }
   #ifdef debug_store_element_ids
@@ -494,7 +495,7 @@ void store_element_ids(vtkSmartPointer<vtkPolyData> vtk_polydata, faceType& face
   // [NOTE] It is not clear how these IDs are used but if they
   // index into arrays or vectors then they need to be offset by -1.
   for (int i = 0; i < num_elem_ids; i++) {
-    face.gE(i) = elem_ids->GetValue(i) - 1;
+    face.gE(i) = static_cast<int>(elem_ids->GetTuple1(i)) - 1;
   }
 }
 
@@ -505,9 +506,8 @@ void store_element_ids(vtkSmartPointer<vtkPolyData> vtk_polydata, faceType& face
 //
 void store_element_ids(vtkSmartPointer<vtkUnstructuredGrid> vtk_ugrid, faceType& face)
 {
-  auto elem_ids = vtkIntArray::SafeDownCast(vtk_ugrid->GetCellData()->GetArray(ELEMENT_IDS_NAME.c_str()));
+  auto elem_ids = vtkDataArray::SafeDownCast(vtk_ugrid->GetCellData()->GetArray(ELEMENT_IDS_NAME.c_str()));
   if (elem_ids == nullptr) {
-    throw std::runtime_error("No '" + ELEMENT_IDS_NAME + "' data of type Int32 found in VTK mesh.");
     return;
   }
   #ifdef debug_store_element_ids
@@ -518,7 +518,7 @@ void store_element_ids(vtkSmartPointer<vtkUnstructuredGrid> vtk_ugrid, faceType&
   // [NOTE] It is not clear how these IDs are used but if they
   // index into arrays or vectors then they need to be offset by -1.
   for (int i = 0; i < num_elem_ids; i++) {
-    face.gE(i) = elem_ids->GetValue(i) - 1;
+    face.gE(i) = static_cast<int>(elem_ids->GetTuple1(i)) - 1;
   }
 }
 
@@ -1007,4 +1007,3 @@ void load_time_varying_field_vtu(const std::string file_name, const std::string 
     }
 }
 } // namespace vtk_utils
-

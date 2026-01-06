@@ -627,24 +627,26 @@ set(FE_FORMS_SOURCES
 )
 
 # TimeStepping sources (requires FE/Systems + FE/Assembly + FE/Backends)
-set(FE_TIMESTEPPING_HEADERS
-    TimeStepping/TimeHistory.h
-    TimeStepping/MultiStageScheme.h
-    TimeStepping/NewtonSolver.h
-    TimeStepping/StepController.h
-    TimeStepping/VSVO_BDF_Controller.h
+	set(FE_TIMESTEPPING_HEADERS
+	    TimeStepping/CollocationMethods.h
+	    TimeStepping/TimeHistory.h
+	    TimeStepping/MultiStageScheme.h
+	    TimeStepping/NewtonSolver.h
+	    TimeStepping/StepController.h
+	    TimeStepping/VSVO_BDF_Controller.h
     TimeStepping/GeneralizedAlpha.h
     TimeStepping/NewmarkBeta.h
     TimeStepping/TimeSteppingUtils.h
     TimeStepping/TimeLoop.h
 )
 
-set(FE_TIMESTEPPING_SOURCES
-    TimeStepping/TimeHistory.cpp
-    TimeStepping/MultiStageScheme.cpp
-    TimeStepping/NewtonSolver.cpp
-    TimeStepping/StepController.cpp
-    TimeStepping/VSVO_BDF_Controller.cpp
+	set(FE_TIMESTEPPING_SOURCES
+	    TimeStepping/CollocationMethods.cpp
+	    TimeStepping/TimeHistory.cpp
+	    TimeStepping/MultiStageScheme.cpp
+	    TimeStepping/NewtonSolver.cpp
+	    TimeStepping/StepController.cpp
+	    TimeStepping/VSVO_BDF_Controller.cpp
     TimeStepping/GeneralizedAlpha.cpp
     TimeStepping/NewmarkBeta.cpp
     TimeStepping/TimeLoop.cpp
@@ -1655,15 +1657,19 @@ if(FE_BUILD_TESTS)
 
         # TimeStepping module tests (depends on Systems + Forms + Backends; no Mesh required)
 	        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/TimeStepping/test_main.cpp)
-	            set(FE_TIMESTEPPING_TEST_SOURCES
-	                Tests/Unit/TimeStepping/test_TimeHistory.cpp
-	                Tests/Unit/TimeStepping/test_TimeIntegrators.cpp
-	                Tests/Unit/TimeStepping/test_TimeLoopStability.cpp
-	                Tests/Unit/TimeStepping/test_TimeSteppingUtils.cpp
-	                Tests/Unit/TimeStepping/test_StepControllers.cpp
-	                Tests/Unit/TimeStepping/test_MultiStageScheme.cpp
-	                Tests/Unit/TimeStepping/test_StepController.cpp
-	                Tests/Unit/TimeStepping/test_TimeLoopConvergence.cpp
+		            set(FE_TIMESTEPPING_TEST_SOURCES
+		                Tests/Unit/TimeStepping/test_TimeHistory.cpp
+		                Tests/Unit/TimeStepping/test_TimeIntegrators.cpp
+		                Tests/Unit/TimeStepping/test_CollocationMethods.cpp
+		                Tests/Unit/TimeStepping/test_TimeLoopStability.cpp
+		                Tests/Unit/TimeStepping/test_TimeSteppingUtils.cpp
+		                Tests/Unit/TimeStepping/test_StepControllers.cpp
+		                Tests/Unit/TimeStepping/test_MultiStageScheme.cpp
+		                Tests/Unit/TimeStepping/test_StepController.cpp
+		                Tests/Unit/TimeStepping/test_TimeLoopStageTimes.cpp
+		                Tests/Unit/TimeStepping/test_TimeLoopConvergence.cpp
+		                Tests/Unit/TimeStepping/test_TimeLoopDissipation.cpp
+	                Tests/Unit/TimeStepping/test_TimeLoopPerformance.cpp
 	                Tests/Unit/TimeStepping/test_main.cpp
 	            )
             add_executable(test_fe_timestepping ${FE_TIMESTEPPING_TEST_SOURCES})
