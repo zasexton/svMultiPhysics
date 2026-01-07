@@ -80,6 +80,7 @@ public:
     [[nodiscard]] bool isCompiled() const noexcept;
     [[nodiscard]] FormKind kind() const noexcept;
     [[nodiscard]] assembly::RequiredData requiredData() const noexcept;
+    [[nodiscard]] const std::vector<assembly::FieldRequirement>& fieldRequirements() const noexcept;
     [[nodiscard]] const std::optional<FormExprNode::SpaceSignature>& testSpace() const noexcept;
     [[nodiscard]] const std::optional<FormExprNode::SpaceSignature>& trialSpace() const noexcept;
     [[nodiscard]] int maxTimeDerivativeOrder() const noexcept;
@@ -99,6 +100,7 @@ private:
     void setCompiled(bool compiled);
     void setKind(FormKind kind);
     void setRequiredData(assembly::RequiredData required);
+    void setFieldRequirements(std::vector<assembly::FieldRequirement> reqs);
     void setTestSpace(std::optional<FormExprNode::SpaceSignature> sig);
     void setTrialSpace(std::optional<FormExprNode::SpaceSignature> sig);
     void setMaxTimeDerivativeOrder(int order);

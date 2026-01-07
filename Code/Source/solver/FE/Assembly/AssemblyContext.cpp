@@ -65,11 +65,13 @@ void AssemblyContext::reserve(LocalIndex max_dofs, LocalIndex max_qpts, int dim)
     solution_coefficients_.reserve(n_dofs);
     solution_values_.reserve(n_qpts);
     solution_vector_values_.reserve(n_qpts);
-    solution_gradients_.reserve(n_qpts);
-    solution_jacobians_.reserve(n_qpts);
-    solution_hessians_.reserve(n_qpts);
-    solution_laplacians_.reserve(n_qpts);
-}
+	    solution_gradients_.reserve(n_qpts);
+	    solution_jacobians_.reserve(n_qpts);
+	    solution_hessians_.reserve(n_qpts);
+	    solution_laplacians_.reserve(n_qpts);
+	    solution_component_hessians_.reserve(n_qpts * 3u);
+	    solution_component_laplacians_.reserve(n_qpts * 3u);
+	}
 
 void AssemblyContext::configure(
     GlobalIndex cell_id,
@@ -104,11 +106,14 @@ void AssemblyContext::configure(
 
     test_ref_hessians_.clear();
     test_phys_hessians_.clear();
-    trial_ref_hessians_.clear();
-    trial_phys_hessians_.clear();
+	    trial_ref_hessians_.clear();
+	    trial_phys_hessians_.clear();
 
     solution_hessians_.clear();
     solution_laplacians_.clear();
+    solution_component_hessians_.clear();
+    solution_component_laplacians_.clear();
+    field_solution_data_.clear();
 }
 
 void AssemblyContext::configure(
@@ -286,10 +291,13 @@ void AssemblyContext::clear()
 
     test_ref_hessians_.clear();
     test_phys_hessians_.clear();
-    trial_ref_hessians_.clear();
-    trial_phys_hessians_.clear();
+	    trial_ref_hessians_.clear();
+	    trial_phys_hessians_.clear();
     solution_hessians_.clear();
     solution_laplacians_.clear();
+    solution_component_hessians_.clear();
+    solution_component_laplacians_.clear();
+    field_solution_data_.clear();
 }
 
 bool AssemblyContext::hasPreviousSolutionData() const noexcept
@@ -321,6 +329,8 @@ void AssemblyContext::clearPreviousSolutionDataK(int k) noexcept
     data.vector_values.clear();
     data.gradients.clear();
     data.jacobians.clear();
+    data.component_hessians.clear();
+    data.component_laplacians.clear();
 }
 
 void AssemblyContext::clearAllPreviousSolutionData() noexcept
@@ -649,10 +659,6 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
     const bool need_hessians = hasFlag(required_data_, RequiredData::SolutionHessians) ||
                                hasFlag(required_data_, RequiredData::SolutionLaplacians);
     if (need_hessians) {
-        if (trial_field_type_ != FieldType::Scalar) {
-            throw FEException("AssemblyContext::setSolutionCoefficients: solution Hessians are only implemented for scalar fields",
-                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
-        }
         if (trial_is_test_) {
             if (test_phys_hessians_.empty()) {
                 throw std::logic_error(
@@ -665,37 +671,99 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
             }
         }
 
-        solution_hessians_.resize(static_cast<std::size_t>(n_qpts_), Matrix3x3{});
-        for (LocalIndex q = 0; q < n_qpts_; ++q) {
-            Matrix3x3 H{};
-            for (LocalIndex j = 0; j < n_trial_dofs_; ++j) {
-                const auto Hj = trialPhysicalHessian(j, q);
-                const Real coef = solution_coefficients_[static_cast<std::size_t>(j)];
-                for (int r = 0; r < 3; ++r) {
-                    for (int c = 0; c < 3; ++c) {
-                        H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
-                            coef * Hj[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+        if (trial_field_type_ == FieldType::Scalar) {
+            solution_component_hessians_.clear();
+            solution_component_laplacians_.clear();
+
+            solution_hessians_.resize(static_cast<std::size_t>(n_qpts_), Matrix3x3{});
+            for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                Matrix3x3 H{};
+                for (LocalIndex j = 0; j < n_trial_dofs_; ++j) {
+                    const auto Hj = trialPhysicalHessian(j, q);
+                    const Real coef = solution_coefficients_[static_cast<std::size_t>(j)];
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
+                                coef * Hj[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                        }
+                    }
+                }
+                solution_hessians_[static_cast<std::size_t>(q)] = H;
+            }
+
+            if (hasFlag(required_data_, RequiredData::SolutionLaplacians)) {
+                solution_laplacians_.resize(static_cast<std::size_t>(n_qpts_), 0.0);
+                const int dim = dim_;
+                for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                    Real lap = 0.0;
+                    const auto& H = solution_hessians_[static_cast<std::size_t>(q)];
+                    for (int d = 0; d < dim; ++d) {
+                        lap += H[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
+                    }
+                    solution_laplacians_[static_cast<std::size_t>(q)] = lap;
+                }
+            } else {
+                solution_laplacians_.clear();
+            }
+        } else if (trial_field_type_ == FieldType::Vector) {
+            solution_hessians_.clear();
+            solution_laplacians_.clear();
+
+            FE_CHECK_ARG(trial_value_dim_ > 0 && trial_value_dim_ <= 3,
+                         "AssemblyContext::setSolutionCoefficients: invalid trial value dimension");
+            FE_CHECK_ARG((n_trial_dofs_ % static_cast<LocalIndex>(trial_value_dim_)) == 0,
+                         "AssemblyContext::setSolutionCoefficients: trial DOFs not divisible by value_dimension");
+
+            const LocalIndex dofs_per_component =
+                static_cast<LocalIndex>(n_trial_dofs_ / static_cast<LocalIndex>(trial_value_dim_));
+            const auto total = static_cast<std::size_t>(n_qpts_) * static_cast<std::size_t>(trial_value_dim_);
+
+            solution_component_hessians_.resize(total, Matrix3x3{});
+            if (hasFlag(required_data_, RequiredData::SolutionLaplacians)) {
+                solution_component_laplacians_.resize(total, 0.0);
+            } else {
+                solution_component_laplacians_.clear();
+            }
+
+            const int dim = dim_;
+            for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                const auto q_base = static_cast<std::size_t>(q) * static_cast<std::size_t>(trial_value_dim_);
+                for (int comp = 0; comp < trial_value_dim_; ++comp) {
+                    Matrix3x3 H{};
+                    const LocalIndex base = static_cast<LocalIndex>(comp) * dofs_per_component;
+                    for (LocalIndex j = 0; j < dofs_per_component; ++j) {
+                        const LocalIndex jj = base + j;
+                        const auto Hj = trialPhysicalHessian(jj, q);
+                        const Real coef = solution_coefficients_[static_cast<std::size_t>(jj)];
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
+                                    coef * Hj[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                            }
+                        }
+                    }
+
+                    const auto idx = q_base + static_cast<std::size_t>(comp);
+                    solution_component_hessians_[idx] = H;
+
+                    if (!solution_component_laplacians_.empty()) {
+                        Real lap = 0.0;
+                        for (int d = 0; d < dim; ++d) {
+                            lap += H[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
+                        }
+                        solution_component_laplacians_[idx] = lap;
                     }
                 }
             }
-            solution_hessians_[static_cast<std::size_t>(q)] = H;
-        }
-
-        if (hasFlag(required_data_, RequiredData::SolutionLaplacians)) {
-            solution_laplacians_.resize(static_cast<std::size_t>(n_qpts_), 0.0);
-            const int dim = dim_;
-            for (LocalIndex q = 0; q < n_qpts_; ++q) {
-                Real lap = 0.0;
-                const auto& H = solution_hessians_[static_cast<std::size_t>(q)];
-                for (int d = 0; d < dim; ++d) {
-                    lap += H[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
-                }
-                solution_laplacians_[static_cast<std::size_t>(q)] = lap;
-            }
+        } else {
+            throw FEException("AssemblyContext::setSolutionCoefficients: solution Hessians are only implemented for scalar and vector fields",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
         }
     } else {
         solution_hessians_.clear();
         solution_laplacians_.clear();
+        solution_component_hessians_.clear();
+        solution_component_laplacians_.clear();
     }
 }
 
@@ -729,6 +797,8 @@ void AssemblyContext::setPreviousSolutionCoefficientsK(int k, std::span<const Re
     if (trial_field_type_ == FieldType::Scalar) {
         dst.vector_values.clear();
         dst.jacobians.clear();
+        dst.component_hessians.clear();
+        dst.component_laplacians.clear();
 
         dst.values.resize(static_cast<std::size_t>(n_qpts_), 0.0);
         for (LocalIndex q = 0; q < n_qpts_; ++q) {
@@ -762,6 +832,8 @@ void AssemblyContext::setPreviousSolutionCoefficientsK(int k, std::span<const Re
 
         dst.values.clear();
         dst.gradients.clear();
+        dst.component_hessians.clear();
+        dst.component_laplacians.clear();
 
         dst.vector_values.resize(static_cast<std::size_t>(n_qpts_), Vector3D{0.0, 0.0, 0.0});
         for (LocalIndex q = 0; q < n_qpts_; ++q) {
@@ -975,6 +1047,28 @@ AssemblyContext::Matrix3x3 AssemblyContext::solutionHessian(LocalIndex q) const
     return solution_hessians_[static_cast<std::size_t>(q)];
 }
 
+AssemblyContext::Matrix3x3 AssemblyContext::solutionComponentHessian(LocalIndex q, int component) const
+{
+    if (trial_field_type_ != FieldType::Vector) {
+        throw std::logic_error("AssemblyContext::solutionComponentHessian: trial field is not vector-valued");
+    }
+    if (solution_component_hessians_.empty()) {
+        throw std::logic_error("AssemblyContext::solutionComponentHessian: solution component Hessian data not set");
+    }
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::solutionComponentHessian: index out of range");
+    }
+    if (component < 0 || component >= trial_value_dim_) {
+        throw std::out_of_range("AssemblyContext::solutionComponentHessian: component index out of range");
+    }
+    const auto idx = static_cast<std::size_t>(q) * static_cast<std::size_t>(trial_value_dim_) +
+                     static_cast<std::size_t>(component);
+    if (idx >= solution_component_hessians_.size()) {
+        throw std::out_of_range("AssemblyContext::solutionComponentHessian: component indexing out of range");
+    }
+    return solution_component_hessians_[idx];
+}
+
 Real AssemblyContext::solutionLaplacian(LocalIndex q) const
 {
     if (solution_laplacians_.empty()) {
@@ -984,6 +1078,304 @@ Real AssemblyContext::solutionLaplacian(LocalIndex q) const
         throw std::out_of_range("AssemblyContext::solutionLaplacian: index out of range");
     }
     return solution_laplacians_[static_cast<std::size_t>(q)];
+}
+
+Real AssemblyContext::solutionComponentLaplacian(LocalIndex q, int component) const
+{
+    if (trial_field_type_ != FieldType::Vector) {
+        throw std::logic_error("AssemblyContext::solutionComponentLaplacian: trial field is not vector-valued");
+    }
+    if (solution_component_laplacians_.empty()) {
+        throw std::logic_error("AssemblyContext::solutionComponentLaplacian: solution component Laplacian data not set");
+    }
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::solutionComponentLaplacian: index out of range");
+    }
+    if (component < 0 || component >= trial_value_dim_) {
+        throw std::out_of_range("AssemblyContext::solutionComponentLaplacian: component index out of range");
+    }
+    const auto idx = static_cast<std::size_t>(q) * static_cast<std::size_t>(trial_value_dim_) +
+                     static_cast<std::size_t>(component);
+    if (idx >= solution_component_laplacians_.size()) {
+        throw std::out_of_range("AssemblyContext::solutionComponentLaplacian: component indexing out of range");
+    }
+    return solution_component_laplacians_[idx];
+}
+
+void AssemblyContext::clearFieldSolutionData() noexcept
+{
+    field_solution_data_.clear();
+}
+
+void AssemblyContext::setFieldSolutionScalar(FieldId field,
+                                             std::span<const Real> values,
+                                             std::span<const Vector3D> gradients,
+                                             std::span<const Matrix3x3> hessians,
+                                             std::span<const Real> laplacians)
+{
+    FE_THROW_IF(field == INVALID_FIELD_ID, InvalidArgumentException,
+                "AssemblyContext::setFieldSolutionScalar: invalid FieldId");
+    if (!values.empty() && values.size() != static_cast<std::size_t>(n_qpts_)) {
+        throw std::invalid_argument("AssemblyContext::setFieldSolutionScalar: values size does not match quadrature points");
+    }
+    if (!gradients.empty() && gradients.size() != static_cast<std::size_t>(n_qpts_)) {
+        throw std::invalid_argument("AssemblyContext::setFieldSolutionScalar: gradients size does not match quadrature points");
+    }
+    if (!hessians.empty() && hessians.size() != static_cast<std::size_t>(n_qpts_)) {
+        throw std::invalid_argument("AssemblyContext::setFieldSolutionScalar: hessians size does not match quadrature points");
+    }
+    if (!laplacians.empty() && laplacians.size() != static_cast<std::size_t>(n_qpts_)) {
+        throw std::invalid_argument("AssemblyContext::setFieldSolutionScalar: laplacians size does not match quadrature points");
+    }
+
+    auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                           [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == field_solution_data_.end()) {
+        field_solution_data_.push_back(FieldSolutionData{});
+        it = std::prev(field_solution_data_.end());
+        it->id = field;
+    }
+    if (it->field_type != FieldType::Scalar) {
+        throw std::logic_error("AssemblyContext::setFieldSolutionScalar: field is already bound as vector-valued");
+    }
+    it->value_dim = 1;
+
+    it->values.assign(values.begin(), values.end());
+    it->gradients.assign(gradients.begin(), gradients.end());
+    it->hessians.assign(hessians.begin(), hessians.end());
+    it->laplacians.assign(laplacians.begin(), laplacians.end());
+
+    it->vector_values.clear();
+    it->jacobians.clear();
+    it->component_hessians.clear();
+    it->component_laplacians.clear();
+}
+
+void AssemblyContext::setFieldSolutionVector(FieldId field,
+                                             int value_dimension,
+                                             std::span<const Vector3D> values,
+                                             std::span<const Matrix3x3> jacobians,
+                                             std::span<const Matrix3x3> component_hessians,
+                                             std::span<const Real> component_laplacians)
+{
+    FE_THROW_IF(field == INVALID_FIELD_ID, InvalidArgumentException,
+                "AssemblyContext::setFieldSolutionVector: invalid FieldId");
+    FE_THROW_IF(value_dimension <= 0 || value_dimension > 3, InvalidArgumentException,
+                "AssemblyContext::setFieldSolutionVector: value_dimension must be 1..3");
+
+    if (!values.empty() && values.size() != static_cast<std::size_t>(n_qpts_)) {
+        throw std::invalid_argument("AssemblyContext::setFieldSolutionVector: values size does not match quadrature points");
+    }
+    if (!jacobians.empty() && jacobians.size() != static_cast<std::size_t>(n_qpts_)) {
+        throw std::invalid_argument("AssemblyContext::setFieldSolutionVector: jacobians size does not match quadrature points");
+    }
+    const auto expected_components = static_cast<std::size_t>(n_qpts_) * static_cast<std::size_t>(value_dimension);
+    if (!component_hessians.empty() && component_hessians.size() != expected_components) {
+        throw std::invalid_argument(
+            "AssemblyContext::setFieldSolutionVector: component_hessians size does not match quadrature points * value_dimension");
+    }
+    if (!component_laplacians.empty() && component_laplacians.size() != expected_components) {
+        throw std::invalid_argument(
+            "AssemblyContext::setFieldSolutionVector: component_laplacians size does not match quadrature points * value_dimension");
+    }
+
+    auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                           [&](const FieldSolutionData& d) { return d.id == field; });
+    const bool inserted = (it == field_solution_data_.end());
+    if (it == field_solution_data_.end()) {
+        field_solution_data_.push_back(FieldSolutionData{});
+        it = std::prev(field_solution_data_.end());
+        it->id = field;
+        it->field_type = FieldType::Vector;
+    }
+    if (it->field_type != FieldType::Vector) {
+        if (inserted) {
+            throw std::logic_error("AssemblyContext::setFieldSolutionVector: internal field type mismatch after insertion");
+        }
+        throw std::logic_error("AssemblyContext::setFieldSolutionVector: field is already bound as scalar-valued");
+    }
+    it->value_dim = value_dimension;
+
+    it->vector_values.assign(values.begin(), values.end());
+    it->jacobians.assign(jacobians.begin(), jacobians.end());
+    it->component_hessians.assign(component_hessians.begin(), component_hessians.end());
+    it->component_laplacians.assign(component_laplacians.begin(), component_laplacians.end());
+
+    it->values.clear();
+    it->gradients.clear();
+    it->hessians.clear();
+    it->laplacians.clear();
+}
+
+bool AssemblyContext::hasFieldSolutionData(FieldId field) const noexcept
+{
+    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    return it != field_solution_data_.end();
+}
+
+FieldType AssemblyContext::fieldSolutionFieldType(FieldId field) const
+{
+    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == field_solution_data_.end()) {
+        throw std::logic_error("AssemblyContext::fieldSolutionFieldType: field solution data not set");
+    }
+    return it->field_type;
+}
+
+int AssemblyContext::fieldSolutionValueDimension(FieldId field) const
+{
+    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == field_solution_data_.end()) {
+        throw std::logic_error("AssemblyContext::fieldSolutionValueDimension: field solution data not set");
+    }
+    return it->value_dim;
+}
+
+Real AssemblyContext::fieldValue(FieldId field, LocalIndex q) const
+{
+    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == field_solution_data_.end() || it->values.empty()) {
+        throw std::logic_error("AssemblyContext::fieldValue: field value data not set");
+    }
+    if (it->field_type != FieldType::Scalar) {
+        throw std::logic_error("AssemblyContext::fieldValue: field is not scalar-valued");
+    }
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::fieldValue: index out of range");
+    }
+    return it->values[static_cast<std::size_t>(q)];
+}
+
+AssemblyContext::Vector3D AssemblyContext::fieldVectorValue(FieldId field, LocalIndex q) const
+{
+    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == field_solution_data_.end() || it->vector_values.empty()) {
+        throw std::logic_error("AssemblyContext::fieldVectorValue: field vector value data not set");
+    }
+    if (it->field_type != FieldType::Vector) {
+        throw std::logic_error("AssemblyContext::fieldVectorValue: field is not vector-valued");
+    }
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::fieldVectorValue: index out of range");
+    }
+    return it->vector_values[static_cast<std::size_t>(q)];
+}
+
+AssemblyContext::Vector3D AssemblyContext::fieldGradient(FieldId field, LocalIndex q) const
+{
+    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == field_solution_data_.end() || it->gradients.empty()) {
+        throw std::logic_error("AssemblyContext::fieldGradient: field gradient data not set");
+    }
+    if (it->field_type != FieldType::Scalar) {
+        throw std::logic_error("AssemblyContext::fieldGradient: field is not scalar-valued");
+    }
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::fieldGradient: index out of range");
+    }
+    return it->gradients[static_cast<std::size_t>(q)];
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::fieldJacobian(FieldId field, LocalIndex q) const
+{
+    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == field_solution_data_.end() || it->jacobians.empty()) {
+        throw std::logic_error("AssemblyContext::fieldJacobian: field Jacobian data not set");
+    }
+    if (it->field_type != FieldType::Vector) {
+        throw std::logic_error("AssemblyContext::fieldJacobian: field is not vector-valued");
+    }
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::fieldJacobian: index out of range");
+    }
+    return it->jacobians[static_cast<std::size_t>(q)];
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::fieldHessian(FieldId field, LocalIndex q) const
+{
+    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == field_solution_data_.end() || it->hessians.empty()) {
+        throw std::logic_error("AssemblyContext::fieldHessian: field Hessian data not set");
+    }
+    if (it->field_type != FieldType::Scalar) {
+        throw std::logic_error("AssemblyContext::fieldHessian: field is not scalar-valued");
+    }
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::fieldHessian: index out of range");
+    }
+    return it->hessians[static_cast<std::size_t>(q)];
+}
+
+Real AssemblyContext::fieldLaplacian(FieldId field, LocalIndex q) const
+{
+    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == field_solution_data_.end() || it->laplacians.empty()) {
+        throw std::logic_error("AssemblyContext::fieldLaplacian: field Laplacian data not set");
+    }
+    if (it->field_type != FieldType::Scalar) {
+        throw std::logic_error("AssemblyContext::fieldLaplacian: field is not scalar-valued");
+    }
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::fieldLaplacian: index out of range");
+    }
+    return it->laplacians[static_cast<std::size_t>(q)];
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::fieldComponentHessian(FieldId field, LocalIndex q, int component) const
+{
+    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == field_solution_data_.end() || it->component_hessians.empty()) {
+        throw std::logic_error("AssemblyContext::fieldComponentHessian: field component Hessian data not set");
+    }
+    if (it->field_type != FieldType::Vector) {
+        throw std::logic_error("AssemblyContext::fieldComponentHessian: field is not vector-valued");
+    }
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::fieldComponentHessian: index out of range");
+    }
+    if (component < 0 || component >= it->value_dim) {
+        throw std::out_of_range("AssemblyContext::fieldComponentHessian: component index out of range");
+    }
+    const auto idx = static_cast<std::size_t>(q) * static_cast<std::size_t>(it->value_dim) +
+                     static_cast<std::size_t>(component);
+    if (idx >= it->component_hessians.size()) {
+        throw std::out_of_range("AssemblyContext::fieldComponentHessian: component indexing out of range");
+    }
+    return it->component_hessians[idx];
+}
+
+Real AssemblyContext::fieldComponentLaplacian(FieldId field, LocalIndex q, int component) const
+{
+    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == field_solution_data_.end() || it->component_laplacians.empty()) {
+        throw std::logic_error("AssemblyContext::fieldComponentLaplacian: field component Laplacian data not set");
+    }
+    if (it->field_type != FieldType::Vector) {
+        throw std::logic_error("AssemblyContext::fieldComponentLaplacian: field is not vector-valued");
+    }
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::fieldComponentLaplacian: index out of range");
+    }
+    if (component < 0 || component >= it->value_dim) {
+        throw std::out_of_range("AssemblyContext::fieldComponentLaplacian: component index out of range");
+    }
+    const auto idx = static_cast<std::size_t>(q) * static_cast<std::size_t>(it->value_dim) +
+                     static_cast<std::size_t>(component);
+    if (idx >= it->component_laplacians.size()) {
+        throw std::out_of_range("AssemblyContext::fieldComponentLaplacian: component indexing out of range");
+    }
+    return it->component_laplacians[idx];
 }
 
 // ============================================================================

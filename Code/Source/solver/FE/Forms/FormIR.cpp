@@ -17,6 +17,7 @@ struct FormIR::Impl {
     bool compiled{false};
     FormKind kind{FormKind::Linear};
     assembly::RequiredData required{assembly::RequiredData::None};
+    std::vector<assembly::FieldRequirement> field_requirements{};
     std::optional<FormExprNode::SpaceSignature> test_space{};
     std::optional<FormExprNode::SpaceSignature> trial_space{};
     int max_time_derivative_order{0};
@@ -33,6 +34,7 @@ FormIR& FormIR::operator=(FormIR&&) noexcept = default;
 bool FormIR::isCompiled() const noexcept { return impl_->compiled; }
 FormKind FormIR::kind() const noexcept { return impl_->kind; }
 assembly::RequiredData FormIR::requiredData() const noexcept { return impl_->required; }
+const std::vector<assembly::FieldRequirement>& FormIR::fieldRequirements() const noexcept { return impl_->field_requirements; }
 const std::optional<FormExprNode::SpaceSignature>& FormIR::testSpace() const noexcept { return impl_->test_space; }
 const std::optional<FormExprNode::SpaceSignature>& FormIR::trialSpace() const noexcept { return impl_->trial_space; }
 int FormIR::maxTimeDerivativeOrder() const noexcept { return impl_->max_time_derivative_order; }
@@ -67,6 +69,7 @@ std::string FormIR::dump() const { return impl_->dump; }
 void FormIR::setCompiled(bool compiled) { impl_->compiled = compiled; }
 void FormIR::setKind(FormKind kind) { impl_->kind = kind; }
 void FormIR::setRequiredData(assembly::RequiredData required) { impl_->required = required; }
+void FormIR::setFieldRequirements(std::vector<assembly::FieldRequirement> reqs) { impl_->field_requirements = std::move(reqs); }
 void FormIR::setTestSpace(std::optional<FormExprNode::SpaceSignature> sig) { impl_->test_space = std::move(sig); }
 void FormIR::setTrialSpace(std::optional<FormExprNode::SpaceSignature> sig) { impl_->trial_space = std::move(sig); }
 void FormIR::setMaxTimeDerivativeOrder(int order) { impl_->max_time_derivative_order = order; }

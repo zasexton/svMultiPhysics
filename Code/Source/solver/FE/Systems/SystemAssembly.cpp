@@ -89,6 +89,25 @@ assembly::AssemblyResult assembleOperator(
 
     auto& assembler = *system.assembler_;
     assembler.setCurrentSolution(state.u);
+    {
+        std::vector<assembly::FieldSolutionAccess> access;
+        access.reserve(system.field_registry_.size());
+        for (const auto& rec : system.field_registry_.records()) {
+            FE_CHECK_NOT_NULL(rec.space.get(), "assembleOperator: field space");
+            const auto idx = static_cast<std::size_t>(rec.id);
+            FE_THROW_IF(idx >= system.field_dof_handlers_.size(), InvalidStateException,
+                        "assembleOperator: invalid field DOF handler index for field '" + rec.name + "'");
+            FE_THROW_IF(idx >= system.field_dof_offsets_.size(), InvalidStateException,
+                        "assembleOperator: invalid field DOF offset index for field '" + rec.name + "'");
+            access.push_back(assembly::FieldSolutionAccess{
+                rec.id,
+                rec.space.get(),
+                &system.field_dof_handlers_[idx].getDofMap(),
+                system.field_dof_offsets_[idx],
+            });
+        }
+        assembler.setFieldSolutionAccess(access);
+    }
     assembler.setTimeIntegrationContext(state.time_integration);
 
     int required_history = 0;

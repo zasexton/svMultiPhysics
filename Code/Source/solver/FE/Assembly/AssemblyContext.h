@@ -619,11 +619,73 @@ public:
     [[nodiscard]] Matrix3x3 solutionHessian(LocalIndex q) const;
 
     /**
+     * @brief Get Hessian of a component of a vector-valued solution at quadrature point
+     *
+     * Only valid when the trial space is vector-valued (e.g. ProductSpace) and
+     * RequiredData::SolutionHessians was requested.
+     */
+    [[nodiscard]] Matrix3x3 solutionComponentHessian(LocalIndex q, int component) const;
+
+    /**
      * @brief Get solution Laplacian at quadrature point
      *
      * Only available when RequiredData::SolutionLaplacians was requested.
      */
     [[nodiscard]] Real solutionLaplacian(LocalIndex q) const;
+
+    /**
+     * @brief Get Laplacian of a component of a vector-valued solution at quadrature point
+     *
+     * Only valid when the trial space is vector-valued (e.g. ProductSpace) and
+     * RequiredData::SolutionLaplacians was requested.
+     */
+    [[nodiscard]] Real solutionComponentLaplacian(LocalIndex q, int component) const;
+
+    // =========================================================================
+    // Multi-field Discrete Solution Data (optional)
+    // =========================================================================
+
+    /**
+     * @brief Clear all stored auxiliary field solution data
+     */
+    void clearFieldSolutionData() noexcept;
+
+    /**
+     * @brief Bind scalar field data (values and optional derivatives) at quadrature points
+     *
+     * The provided arrays must be sized to numQuadraturePoints().
+     */
+    void setFieldSolutionScalar(FieldId field,
+                                std::span<const Real> values,
+                                std::span<const Vector3D> gradients = {},
+                                std::span<const Matrix3x3> hessians = {},
+                                std::span<const Real> laplacians = {});
+
+    /**
+     * @brief Bind vector field data (values and optional derivatives) at quadrature points
+     *
+     * The provided arrays must be sized to numQuadraturePoints() for values/jacobians and
+     * numQuadraturePoints()*value_dimension for component_hessians/component_laplacians.
+     */
+    void setFieldSolutionVector(FieldId field,
+                                int value_dimension,
+                                std::span<const Vector3D> values,
+                                std::span<const Matrix3x3> jacobians = {},
+                                std::span<const Matrix3x3> component_hessians = {},
+                                std::span<const Real> component_laplacians = {});
+
+    [[nodiscard]] bool hasFieldSolutionData(FieldId field) const noexcept;
+    [[nodiscard]] FieldType fieldSolutionFieldType(FieldId field) const;
+    [[nodiscard]] int fieldSolutionValueDimension(FieldId field) const;
+
+    [[nodiscard]] Real fieldValue(FieldId field, LocalIndex q) const;
+    [[nodiscard]] Vector3D fieldVectorValue(FieldId field, LocalIndex q) const;
+    [[nodiscard]] Vector3D fieldGradient(FieldId field, LocalIndex q) const;
+    [[nodiscard]] Matrix3x3 fieldJacobian(FieldId field, LocalIndex q) const;
+    [[nodiscard]] Matrix3x3 fieldHessian(FieldId field, LocalIndex q) const;
+    [[nodiscard]] Real fieldLaplacian(FieldId field, LocalIndex q) const;
+    [[nodiscard]] Matrix3x3 fieldComponentHessian(FieldId field, LocalIndex q, int component) const;
+    [[nodiscard]] Real fieldComponentLaplacian(FieldId field, LocalIndex q, int component) const;
 
     /**
      * @brief Check if solution data is available
@@ -913,6 +975,25 @@ private:
     std::vector<Matrix3x3> solution_jacobians_;
     std::vector<Matrix3x3> solution_hessians_;
     std::vector<Real> solution_laplacians_;
+    std::vector<Matrix3x3> solution_component_hessians_;  // [q * trial_value_dim + c]
+    std::vector<Real> solution_component_laplacians_;     // [q * trial_value_dim + c]
+
+    struct FieldSolutionData {
+        FieldId id{INVALID_FIELD_ID};
+        FieldType field_type{FieldType::Scalar};
+        int value_dim{1};
+
+        std::vector<Real> values{};
+        std::vector<Vector3D> vector_values{};
+        std::vector<Vector3D> gradients{};
+        std::vector<Matrix3x3> jacobians{};
+        std::vector<Matrix3x3> hessians{};
+        std::vector<Real> laplacians{};
+        std::vector<Matrix3x3> component_hessians{};  // [q * value_dim + c]
+        std::vector<Real> component_laplacians{};     // [q * value_dim + c]
+    };
+
+    std::vector<FieldSolutionData> field_solution_data_{};
 
     // Transient history solution data (optional)
     struct HistorySolutionData {
@@ -921,6 +1002,8 @@ private:
         std::vector<Vector3D> vector_values{};
         std::vector<Vector3D> gradients{};
         std::vector<Matrix3x3> jacobians{};
+        std::vector<Matrix3x3> component_hessians{};  // [q * value_dim + c]
+        std::vector<Real> component_laplacians{};     // [q * value_dim + c]
     };
 
     // Indexing: history_solution_data_[k-1] corresponds to u^{n-k}, k >= 1.

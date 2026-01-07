@@ -69,9 +69,31 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
     const forms::BlockBilinearForm& blocks,
     const FormInstallOptions& options = {});
 
+struct CoupledResidualKernels {
+    std::vector<KernelPtr> residual;                      // one per test field
+    std::vector<std::vector<KernelPtr>> jacobian_blocks;  // [test][trial]
+};
+
+/**
+ * @brief Install a coupled multi-field residual without double-counting the RHS
+ *
+ * The input is a block vector of residual forms (one per test field) that may
+ * reference multiple state fields via `forms::FormExpr::stateField(FieldId, ...)`.
+ *
+ * This helper registers:
+ * - vector-only residual kernels (one per test field, trial field paired by index),
+ * - matrix-only Jacobian kernels for every (test,trial) block.
+ */
+CoupledResidualKernels installCoupledResidual(
+    FESystem& system,
+    const OperatorTag& op,
+    std::span<const FieldId> test_fields,
+    std::span<const FieldId> trial_fields,
+    const forms::BlockLinearForm& residual_blocks,
+    const FormInstallOptions& options = {});
+
 } // namespace systems
 } // namespace FE
 } // namespace svmp
 
 #endif // SVMP_FE_SYSTEMS_FORMSINSTALLER_H
-

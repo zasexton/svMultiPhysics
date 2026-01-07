@@ -85,6 +85,28 @@ math::Matrix<Real, 3, 3> IsoparametricMapping::jacobian(const math::Vector<Real,
     return J;
 }
 
+GeometryMapping::MappingHessian IsoparametricMapping::mapping_hessian(const math::Vector<Real, 3>& xi) const
+{
+    std::vector<basis::Hessian> hessians;
+    basis_->evaluate_hessians(xi, hessians);
+
+    MappingHessian H{};
+    const int dim = basis_->dimension();
+
+    for (std::size_t a = 0; a < hessians.size(); ++a) {
+        for (int i = 0; i < dim; ++i) {
+            for (int j = 0; j < dim; ++j) {
+                const Real d2N = hessians[a](static_cast<std::size_t>(i), static_cast<std::size_t>(j));
+                for (std::size_t m = 0; m < 3; ++m) {
+                    H[m](static_cast<std::size_t>(i), static_cast<std::size_t>(j)) += nodes_[a][m] * d2N;
+                }
+            }
+        }
+    }
+
+    return H;
+}
+
 math::Vector<Real, 3> IsoparametricMapping::map_to_reference(const math::Vector<Real, 3>& x_phys,
                                                             const math::Vector<Real, 3>& initial_guess) const {
     return InverseMapping::solve(*this, x_phys, initial_guess);

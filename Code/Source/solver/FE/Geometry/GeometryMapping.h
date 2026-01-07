@@ -17,6 +17,7 @@
 #include "Core/FEException.h"
 #include "Math/Matrix.h"
 #include "Math/Vector.h"
+#include <array>
 #include <vector>
 
 namespace svmp {
@@ -41,6 +42,9 @@ class GeometryMapping {
 public:
     virtual ~GeometryMapping() = default;
 
+    /// Mapping Hessian type: for each physical component x_m, store d^2 x_m / d xi_i d xi_j
+    using MappingHessian = std::array<math::Matrix<Real, 3, 3>, 3>;
+
     /// Reference element type
     virtual ElementType element_type() const noexcept = 0;
 
@@ -62,6 +66,18 @@ public:
 
     /// Jacobian matrix d x / d xi at reference point
     virtual math::Matrix<Real, 3, 3> jacobian(const math::Vector<Real, 3>& xi) const = 0;
+
+    /**
+     * @brief Second derivatives of the mapping x(xi): d^2 x / d xi^2
+     *
+     * Returns a 3-component tensor where entry [m](i,j) is:
+     *   d^2 x_m / d xi_i d xi_j
+     *
+     * For lower-dimensional embedded mappings (dimension() < 3), only the leading
+     * dim×dim block is meaningful; other entries should be zero. The default
+     * implementation returns all zeros (affine/linear mapping).
+     */
+    virtual MappingHessian mapping_hessian(const math::Vector<Real, 3>& /*xi*/) const { return {}; }
 
     /// Inverse Jacobian at reference point (throws if singular)
     virtual math::Matrix<Real, 3, 3> jacobian_inverse(const math::Vector<Real, 3>& xi) const;

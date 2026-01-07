@@ -121,6 +121,21 @@ struct MaterialStateView {
 };
 
 /**
+ * @brief Mapping information for accessing a field's solution coefficients in a global state vector
+ *
+ * This describes how a field identified by FieldId is embedded into the global
+ * system state (typically a block-structured vector). Assemblers that support
+ * multi-field workflows can use this to gather per-cell coefficients for
+ * additional fields requested by kernels.
+ */
+struct FieldSolutionAccess {
+    FieldId field{INVALID_FIELD_ID};
+    const spaces::FunctionSpace* space{nullptr};
+    const dofs::DofMap* dof_map{nullptr};
+    GlobalIndex dof_offset{0};
+};
+
+/**
  * @brief Provider interface for per-cell material state
  *
  * Implemented by higher-level orchestration layers (typically FE/Systems)
@@ -459,6 +474,15 @@ public:
      * still fail unless the concrete assembler provides it.
      */
     virtual void setCurrentSolution(std::span<const Real> /*solution*/) {}
+
+    /**
+     * @brief Provide accessors for multi-field discrete solution data
+     *
+     * Default implementation is a no-op. Assemblers that support kernels using
+     * additional discrete FE fields should override this and use the provided
+     * registry to populate AssemblyContext field data.
+     */
+    virtual void setFieldSolutionAccess(std::span<const FieldSolutionAccess> /*fields*/) {}
 
     /**
      * @brief Set the previous-step solution vector (u^{n-1}) for transient assembly

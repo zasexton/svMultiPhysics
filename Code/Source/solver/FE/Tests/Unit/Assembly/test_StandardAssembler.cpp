@@ -26,8 +26,10 @@
 #include "Assembly/Assembler.h"
 #include "Dofs/DofMap.h"
 #include "Spaces/FunctionSpace.h"
+#include "Spaces/H1Space.h"
 #include "Constraints/AffineConstraints.h"
 #include "Elements/LagrangeElement.h"
+#include "Geometry/MappingFactory.h"
 
 #include <cmath>
 #include <vector>
@@ -145,6 +147,197 @@ private:
     std::vector<std::array<Real, 3>> nodes_;
     std::vector<std::vector<GlobalIndex>> cells_;
     std::vector<ElementType> cell_types_;
+};
+
+/**
+ * @brief Single non-affine Quad4 mesh for Hessian transform regression tests
+ */
+class SingleQuadMeshAccess final : public IMeshAccess {
+public:
+    SingleQuadMeshAccess()
+    {
+        nodes_ = {
+            {0.0, 0.0, 0.0},  // 0
+            {1.0, 0.0, 0.0},  // 1
+            {1.0, 1.0, 0.0},  // 2
+            {0.0, 2.0, 0.0},  // 3 (non-parallelogram)
+        };
+        cell_ = {0, 1, 2, 3};
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override
+    {
+        return ElementType::Quad4;
+    }
+
+    void getCellNodes(GlobalIndex /*cell_id*/, std::vector<GlobalIndex>& nodes) const override
+    {
+        nodes.assign(cell_.begin(), cell_.end());
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords.resize(cell_.size());
+        for (std::size_t i = 0; i < cell_.size(); ++i) {
+            coords[i] = nodes_.at(static_cast<std::size_t>(cell_[i]));
+        }
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/,
+                                               GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return -1; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex>
+    getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachBoundaryFace(int /*marker*/,
+                             std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+private:
+    std::vector<std::array<Real, 3>> nodes_{};
+    std::array<GlobalIndex, 4> cell_{};
+};
+
+/**
+ * @brief Kernel used to validate physical basis Hessians for non-affine mappings
+ */
+class BasisHessianTransformKernel final : public LinearFormKernel {
+public:
+    BasisHessianTransformKernel(std::shared_ptr<geometry::GeometryMapping> mapping,
+                                const basis::BasisFunction& basis,
+                                LocalIndex basis_index,
+                                LocalIndex q_index,
+                                Real eps,
+                                Real tol)
+        : mapping_(std::move(mapping)),
+          basis_(&basis),
+          basis_index_(basis_index),
+          q_index_(q_index),
+          eps_(eps),
+          tol_(tol)
+    {
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::Standard | RequiredData::BasisHessians | RequiredData::QuadraturePoints;
+    }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& out) override
+    {
+        const auto n_test = ctx.numTestDofs();
+        out.reserve(n_test, ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/true);
+
+        const auto n_qpts = ctx.numQuadraturePoints();
+        ASSERT_GT(n_qpts, 0);
+        ASSERT_LT(q_index_, n_qpts);
+        ASSERT_NE(mapping_.get(), nullptr);
+        ASSERT_NE(basis_, nullptr);
+
+        const int dim = mapping_->dimension();
+        ASSERT_EQ(dim, 2);
+
+        const auto xi_arr = ctx.quadraturePoint(q_index_);
+        const math::Vector<Real, 3> xi{xi_arr[0], xi_arr[1], xi_arr[2]};
+
+        const auto x_arr = ctx.physicalPoint(q_index_);
+        const math::Vector<Real, 3> x0{x_arr[0], x_arr[1], x_arr[2]};
+
+        std::vector<basis::Gradient> grads;
+        grads.reserve(static_cast<std::size_t>(n_test));
+
+        auto grad_phys_at = [&](const math::Vector<Real, 3>& xi_eval) -> math::Vector<Real, 3> {
+            basis_->evaluate_gradients(xi_eval, grads);
+            if (grads.size() <= static_cast<std::size_t>(basis_index_)) {
+                ADD_FAILURE() << "BasisHessianTransformKernel: basis gradient index out of range";
+                return {};
+            }
+            return mapping_->transform_gradient(grads[static_cast<std::size_t>(basis_index_)], xi_eval);
+        };
+
+        const auto H_ctx = ctx.physicalHessian(basis_index_, q_index_);
+
+        // Compute Hessian via finite differences of the physical gradient.
+        math::Matrix<Real, 3, 3> H_fd{};
+        for (int c = 0; c < dim; ++c) {
+            auto x_plus = x0;
+            auto x_minus = x0;
+            x_plus[static_cast<std::size_t>(c)] += eps_;
+            x_minus[static_cast<std::size_t>(c)] -= eps_;
+
+            const auto xi_plus = mapping_->map_to_reference(x_plus, xi);
+            const auto xi_minus = mapping_->map_to_reference(x_minus, xi);
+
+            const auto g_plus = grad_phys_at(xi_plus);
+            const auto g_minus = grad_phys_at(xi_minus);
+
+            for (int r = 0; r < dim; ++r) {
+                H_fd(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) =
+                    (g_plus[static_cast<std::size_t>(r)] - g_minus[static_cast<std::size_t>(r)]) / (2.0 * eps_);
+            }
+        }
+
+        for (int r = 0; r < dim; ++r) {
+            for (int c = 0; c < dim; ++c) {
+                EXPECT_NEAR(H_ctx[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)],
+                            H_fd(static_cast<std::size_t>(r), static_cast<std::size_t>(c)),
+                            tol_);
+            }
+        }
+
+        // Populate output with zeros (this kernel is used for verification only).
+        for (LocalIndex i = 0; i < n_test; ++i) {
+            out.vectorEntry(i) = 0.0;
+        }
+    }
+
+    [[nodiscard]] std::string name() const override { return "BasisHessianTransformKernel"; }
+
+private:
+    std::shared_ptr<geometry::GeometryMapping> mapping_{};
+    const basis::BasisFunction* basis_{nullptr};
+    LocalIndex basis_index_{0};
+    LocalIndex q_index_{0};
+    Real eps_{1e-6};
+    Real tol_{1e-6};
 };
 
 /**
@@ -1171,6 +1364,51 @@ TEST_F(StandardAssemblerTest, SharedDofsReceiveMultipleContributions) {
     EXPECT_NEAR(mat[1 * 5 + 1], 2.0, 1e-12);
     EXPECT_NEAR(mat[2 * 5 + 2], 2.0, 1e-12);
     EXPECT_NEAR(mat[3 * 5 + 3], 2.0, 1e-12);
+}
+
+TEST(StandardAssemblerHessianTest, PhysicalBasisHessiansMatchFiniteDifferenceGradient_NonAffineQuad)
+{
+    // Regression: for non-affine mappings, the physical Hessian transform must
+    // include the inverse-mapping Hessian term (chain rule).
+    SingleQuadMeshAccess mesh;
+    spaces::H1Space space(ElementType::Quad4, 1);
+
+    dofs::DofMap dof_map(1, /*num_dofs=*/4, /*max_dofs_per_cell=*/4);
+    std::vector<GlobalIndex> cell_dofs = {0, 1, 2, 3};
+    dof_map.setCellDofs(0, cell_dofs);
+    dof_map.setNumDofs(4);
+    dof_map.setNumLocalDofs(4);
+    dof_map.finalize();
+
+    // Create a mapping consistent with StandardAssembler's Quad4 geometry selection.
+    std::vector<std::array<Real, 3>> coords;
+    mesh.getCellCoordinates(0, coords);
+    std::vector<math::Vector<Real, 3>> nodes;
+    nodes.reserve(coords.size());
+    for (const auto& c : coords) {
+        nodes.push_back(math::Vector<Real, 3>{c[0], c[1], c[2]});
+    }
+
+    geometry::MappingRequest req;
+    req.element_type = ElementType::Quad4;
+    req.geometry_order = 1;
+    req.use_affine = true;
+    auto mapping = geometry::MappingFactory::create(req, nodes);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    DenseVectorView vec(4);
+    vec.zero();
+
+    BasisHessianTransformKernel kernel(mapping, space.element().basis(),
+                                       /*basis_index=*/0,
+                                       /*q_index=*/0,
+                                       /*eps=*/1e-6,
+                                       /*tol=*/5e-5);
+
+    const auto result = assembler.assembleVector(mesh, space, kernel, vec);
+    EXPECT_TRUE(result.success);
 }
 
 // ============================================================================

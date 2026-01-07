@@ -814,6 +814,38 @@ EvalValue<Real> evalReal(const FormExprNode& node,
             throw FEException("Forms: TrialFunction field type not supported",
                               __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
         }
+        case FormExprType::DiscreteField:
+        case FormExprType::StateField: {
+            const auto* sig = node.spaceSignature();
+            if (!sig) {
+                throw FEException("Forms: DiscreteField must be bound to a FunctionSpace",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto fid = node.fieldId();
+            if (!fid || *fid == INVALID_FIELD_ID) {
+                throw FEException("Forms: DiscreteField node missing a valid FieldId",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            if (sig->field_type == FieldType::Scalar) {
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.fieldValue(*fid, q)};
+            }
+            if (sig->field_type == FieldType::Vector) {
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: DiscreteField vector value_dimension must be 1..3",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                out.vector_size = vd;
+                out.v = ctx.fieldVectorValue(*fid, q);
+                return out;
+            }
+
+            throw FEException("Forms: DiscreteField field type not supported",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
         case FormExprType::Gradient: {
             const auto kids = node.childrenShared();
             if (kids.size() != 1 || !kids[0]) throw std::logic_error("grad must have 1 child");
@@ -928,6 +960,42 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 throw FEException("Forms: grad(TrialFunction) field type not supported",
                                   __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
             }
+            if (child.type() == FormExprType::DiscreteField || child.type() == FormExprType::StateField) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: grad(DiscreteField) requires a bound FunctionSpace",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto fid = child.fieldId();
+                if (!fid || *fid == INVALID_FIELD_ID) {
+                    throw FEException("Forms: grad(DiscreteField) missing a valid FieldId",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                if (sig->field_type == FieldType::Scalar) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Vector;
+                    out.vector_size = dim;
+                    out.v = ctx.fieldGradient(*fid, q);
+                    return out;
+                }
+                if (sig->field_type == FieldType::Vector) {
+                    const int vd = sig->value_dimension;
+                    if (vd <= 0 || vd > 3) {
+                        throw FEException("Forms: grad(DiscreteField) vector value_dimension must be 1..3",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Matrix;
+                    out.matrix_rows = vd;
+                    out.matrix_cols = dim;
+                    out.m = ctx.fieldJacobian(*fid, q);
+                    return out;
+                }
+
+                throw FEException("Forms: grad(DiscreteField) field type not supported",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
             if (child.type() == FormExprType::Constant) {
                 EvalValue<Real> out;
                 out.kind = EvalValue<Real>::Kind::Vector;
@@ -952,7 +1020,195 @@ EvalValue<Real> evalReal(const FormExprNode& node,
             if (kids.size() != 1 || !kids[0]) throw std::logic_error("H() must have 1 child");
             const auto& child = *kids[0];
 
+            if (child.type() == FormExprType::Component) {
+                const auto ckids = child.childrenShared();
+                if (ckids.size() != 1 || !ckids[0]) throw std::logic_error("component() must have 1 child");
+                const auto& base = *ckids[0];
+                const int comp = child.componentIndex0().value_or(0);
+                const int col = child.componentIndex1().value_or(-1);
+                if (col >= 0) {
+                    throw FEException("Forms: H(component(A,i,j)) is not supported",
+                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                }
+
+                if (base.type() == FormExprType::TestFunction) {
+                    const auto* sig = base.spaceSignature();
+                    if (!sig) {
+                        throw FEException("Forms: H(component(TestFunction,i)) requires a bound FunctionSpace",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    if (sig->field_type == FieldType::Scalar) {
+                        if (comp != 0) {
+                            throw FEException("Forms: H(component(TestFunction,i)) invalid component index for scalar-valued TestFunction",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        EvalValue<Real> out;
+                        out.kind = EvalValue<Real>::Kind::Matrix;
+                        out.matrix_rows = dim;
+                        out.matrix_cols = dim;
+                        if (env.test_active == side) {
+                            out.m = ctx.physicalHessian(env.i, q);
+                        }
+                        return out;
+                    }
+                    if (sig->field_type != FieldType::Vector) {
+                        throw FEException("Forms: H(component(TestFunction,i)) field type not supported",
+                                          __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                    }
+
+                    const int vd = sig->value_dimension;
+                    if (vd <= 0 || vd > 3) {
+                        throw FEException("Forms: H(component(TestFunction,i)) vector value_dimension must be 1..3",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    if (comp < 0 || comp >= vd) {
+                        throw FEException("Forms: H(component(TestFunction,i)) component index out of range",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Matrix;
+                    out.matrix_rows = dim;
+                    out.matrix_cols = dim;
+                    if (env.test_active != side) {
+                        return out;
+                    }
+
+                    const LocalIndex n_test = ctx.numTestDofs();
+                    if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
+                        throw FEException("Forms: H(component(TestFunction,i)) DOF count is not divisible by value_dimension",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const LocalIndex dofs_per_component =
+                        static_cast<LocalIndex>(n_test / static_cast<LocalIndex>(vd));
+                    const int comp_i = static_cast<int>(env.i / dofs_per_component);
+                    if (comp_i == comp) {
+                        out.m = ctx.physicalHessian(env.i, q);
+                    }
+                    return out;
+                }
+
+	                if (base.type() == FormExprType::TrialFunction) {
+	                    if (env.kind == FormKind::Residual) {
+	                        throw FEException("Forms: H(component(TrialFunction,i)) in residual form evaluated in variational mode",
+	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                    }
+                    const auto* sig = base.spaceSignature();
+                    if (!sig) {
+                        throw FEException("Forms: H(component(TrialFunction,i)) requires a bound FunctionSpace",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    if (sig->field_type == FieldType::Scalar) {
+                        if (comp != 0) {
+                            throw FEException("Forms: H(component(TrialFunction,i)) invalid component index for scalar-valued TrialFunction",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        EvalValue<Real> out;
+                        out.kind = EvalValue<Real>::Kind::Matrix;
+                        out.matrix_rows = dim;
+                        out.matrix_cols = dim;
+                        if (env.trial_active == side) {
+                            out.m = ctx.trialPhysicalHessian(env.j, q);
+                        }
+                        return out;
+                    }
+                    if (sig->field_type != FieldType::Vector) {
+                        throw FEException("Forms: H(component(TrialFunction,i)) field type not supported",
+                                          __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                    }
+
+                    const int vd = sig->value_dimension;
+                    if (vd <= 0 || vd > 3) {
+                        throw FEException("Forms: H(component(TrialFunction,i)) vector value_dimension must be 1..3",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    if (comp < 0 || comp >= vd) {
+                        throw FEException("Forms: H(component(TrialFunction,i)) component index out of range",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Matrix;
+                    out.matrix_rows = dim;
+                    out.matrix_cols = dim;
+                    if (env.trial_active != side) {
+                        return out;
+                    }
+
+                    const LocalIndex n_trial = ctx.numTrialDofs();
+                    if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+                        throw FEException("Forms: H(component(TrialFunction,i)) DOF count is not divisible by value_dimension",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const LocalIndex dofs_per_component =
+                        static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+                    const int comp_j = static_cast<int>(env.j / dofs_per_component);
+                    if (comp_j == comp) {
+                        out.m = ctx.trialPhysicalHessian(env.j, q);
+                    }
+	                    return out;
+	                }
+
+	                if (base.type() == FormExprType::DiscreteField || base.type() == FormExprType::StateField) {
+	                    const auto* sig = base.spaceSignature();
+	                    if (!sig) {
+	                        throw FEException("Forms: H(component(DiscreteField,i)) requires a bound FunctionSpace",
+	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                    }
+	                    const auto fid = base.fieldId();
+	                    if (!fid || *fid == INVALID_FIELD_ID) {
+	                        throw FEException("Forms: H(component(DiscreteField,i)) missing a valid FieldId",
+	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                    }
+	                    if (sig->field_type == FieldType::Scalar) {
+	                        if (comp != 0) {
+	                            throw FEException("Forms: H(component(DiscreteField,i)) invalid component index for scalar-valued DiscreteField",
+	                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                        }
+	                        EvalValue<Real> out;
+	                        out.kind = EvalValue<Real>::Kind::Matrix;
+	                        out.matrix_rows = dim;
+	                        out.matrix_cols = dim;
+	                        out.m = ctx.fieldHessian(*fid, q);
+	                        return out;
+	                    }
+	                    if (sig->field_type != FieldType::Vector) {
+	                        throw FEException("Forms: H(component(DiscreteField,i)) field type not supported",
+	                                          __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	                    }
+	
+	                    const int vd = sig->value_dimension;
+	                    if (vd <= 0 || vd > 3) {
+	                        throw FEException("Forms: H(component(DiscreteField,i)) vector value_dimension must be 1..3",
+	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                    }
+	                    if (comp < 0 || comp >= vd) {
+	                        throw FEException("Forms: H(component(DiscreteField,i)) component index out of range",
+	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                    }
+	
+	                    EvalValue<Real> out;
+	                    out.kind = EvalValue<Real>::Kind::Matrix;
+	                    out.matrix_rows = dim;
+	                    out.matrix_cols = dim;
+	                    out.m = ctx.fieldComponentHessian(*fid, q, comp);
+	                    return out;
+	                }
+
+	                throw FEException("Forms: H(component(...)) currently supports TestFunction, TrialFunction, and DiscreteField only",
+	                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	            }
+
             if (child.type() == FormExprType::TestFunction) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: H(TestFunction) requires a bound FunctionSpace",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Scalar) {
+                    throw FEException("Forms: H(TestFunction) requires a scalar-valued TestFunction; use H(component(v,i)) for vector-valued spaces",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
                 EvalValue<Real> out;
                 out.kind = EvalValue<Real>::Kind::Matrix;
                 out.matrix_rows = dim;
@@ -962,9 +1218,18 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 }
                 return out;
             }
-            if (child.type() == FormExprType::TrialFunction) {
-                if (env.kind == FormKind::Residual) {
-                    throw FEException("Forms: H(TrialFunction) in residual form evaluated in variational mode",
+	            if (child.type() == FormExprType::TrialFunction) {
+	                if (env.kind == FormKind::Residual) {
+	                    throw FEException("Forms: H(TrialFunction) in residual form evaluated in variational mode",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: H(TrialFunction) requires a bound FunctionSpace",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Scalar) {
+                    throw FEException("Forms: H(TrialFunction) requires a scalar-valued TrialFunction; use H(component(u,i)) for vector-valued spaces",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 EvalValue<Real> out;
@@ -973,13 +1238,35 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 out.matrix_cols = dim;
                 if (env.trial_active == side) {
                     out.m = ctx.trialPhysicalHessian(env.j, q);
-                }
-                return out;
-            }
-            if (child.type() == FormExprType::Constant) {
-                EvalValue<Real> out;
-                out.kind = EvalValue<Real>::Kind::Matrix;
-                out.matrix_rows = dim;
+	                }
+	                return out;
+	            }
+	            if (child.type() == FormExprType::DiscreteField || child.type() == FormExprType::StateField) {
+	                const auto* sig = child.spaceSignature();
+	                if (!sig) {
+	                    throw FEException("Forms: H(DiscreteField) requires a bound FunctionSpace",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                const auto fid = child.fieldId();
+	                if (!fid || *fid == INVALID_FIELD_ID) {
+	                    throw FEException("Forms: H(DiscreteField) missing a valid FieldId",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                if (sig->field_type != FieldType::Scalar) {
+	                    throw FEException("Forms: H(DiscreteField) requires a scalar-valued DiscreteField; use H(component(u,i)) for vector-valued spaces",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                EvalValue<Real> out;
+	                out.kind = EvalValue<Real>::Kind::Matrix;
+	                out.matrix_rows = dim;
+	                out.matrix_cols = dim;
+	                out.m = ctx.fieldHessian(*fid, q);
+	                return out;
+	            }
+	            if (child.type() == FormExprType::Constant) {
+	                EvalValue<Real> out;
+	                out.kind = EvalValue<Real>::Kind::Matrix;
+	                out.matrix_rows = dim;
                 out.matrix_cols = dim;
                 return out;
             }
@@ -991,12 +1278,12 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 out.m = H;
                 out.matrix_rows = dim;
                 out.matrix_cols = dim;
-                return out;
-            }
+	                return out;
+	            }
 
-            throw FEException("Forms: H() currently supports TestFunction, TrialFunction, Constant, and scalar Coefficient only",
-                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
-        }
+	            throw FEException("Forms: H() currently supports TestFunction, TrialFunction, DiscreteField, Constant, and scalar Coefficient only",
+	                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	        }
         case FormExprType::TimeDerivative: {
             const int order = node.timeDerivativeOrder().value_or(1);
             if (order <= 0) {
@@ -1110,6 +1397,35 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 }
                 const auto g = ctx.trialPhysicalGradient(env.j, q);
                 return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, g[static_cast<std::size_t>(comp)]};
+            }
+            if (child.type() == FormExprType::DiscreteField || child.type() == FormExprType::StateField) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: div(DiscreteField) requires a bound FunctionSpace",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Vector) {
+                    throw FEException("Forms: div(DiscreteField) requires a vector-valued DiscreteField",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto fid = child.fieldId();
+                if (!fid || *fid == INVALID_FIELD_ID) {
+                    throw FEException("Forms: div(DiscreteField) missing a valid FieldId",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: div(DiscreteField) vector value_dimension must be 1..3",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto J = ctx.fieldJacobian(*fid, q);
+                Real div = 0.0;
+                const int n = std::min(dim, vd);
+                for (int d = 0; d < n; ++d) {
+                    div += J[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
+                }
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, div};
             }
             if (child.type() == FormExprType::Coefficient && child.vectorCoefficient()) {
                 const auto x = ctx.physicalPoint(q);
@@ -1232,6 +1548,45 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                     out.v[0] = g[1];
                     out.v[1] = -g[0];
                 }
+                return out;
+            }
+            if (child.type() == FormExprType::DiscreteField || child.type() == FormExprType::StateField) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: curl(DiscreteField) requires a bound FunctionSpace",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Vector) {
+                    throw FEException("Forms: curl(DiscreteField) requires a vector-valued DiscreteField",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto fid = child.fieldId();
+                if (!fid || *fid == INVALID_FIELD_ID) {
+                    throw FEException("Forms: curl(DiscreteField) missing a valid FieldId",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: curl(DiscreteField) vector value_dimension must be 1..3",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                const auto J = ctx.fieldJacobian(*fid, q);
+                auto d = [&](int comp, int wrt) -> Real {
+                    if (comp < 0 || comp >= vd) return 0.0;
+                    if (wrt < 0 || wrt >= dim) return 0.0;
+                    return J[static_cast<std::size_t>(comp)][static_cast<std::size_t>(wrt)];
+                };
+
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                if (dim == 2) {
+                    out.v[2] = d(1, 0) - d(0, 1);
+                    return out;
+                }
+                out.v[0] = d(2, 1) - d(1, 2);
+                out.v[1] = d(0, 2) - d(2, 0);
+                out.v[2] = d(1, 0) - d(0, 1);
                 return out;
             }
             if (child.type() == FormExprType::Coefficient && child.vectorCoefficient()) {
@@ -2630,6 +2985,48 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
             throw FEException("Forms: TrialFunction field type not supported (dual)",
                               __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
         }
+        case FormExprType::DiscreteField:
+        case FormExprType::StateField: {
+            const auto* sig = node.spaceSignature();
+            if (!sig) {
+                throw FEException("Forms: DiscreteField must be bound to a FunctionSpace (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto fid = node.fieldId();
+            if (!fid || *fid == INVALID_FIELD_ID) {
+                throw FEException("Forms: DiscreteField node missing a valid FieldId (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            if (sig->field_type == FieldType::Scalar) {
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Scalar;
+                out.s = makeDualConstant(ctx.fieldValue(*fid, q), env.ws->alloc());
+                return out;
+            }
+
+            if (sig->field_type == FieldType::Vector) {
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: DiscreteField vector value_dimension must be 1..3 (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto u_val = ctx.fieldVectorValue(*fid, q);
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+                out.vector_size = vd;
+                for (int c = 0; c < 3; ++c) {
+                    out.v[static_cast<std::size_t>(c)] = makeDualConstant(u_val[static_cast<std::size_t>(c)], env.ws->alloc());
+                }
+                for (int c = vd; c < 3; ++c) {
+                    out.v[static_cast<std::size_t>(c)].value = 0.0;
+                }
+                return out;
+            }
+
+            throw FEException("Forms: DiscreteField field type not supported (dual)",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
         case FormExprType::Coefficient: {
             if (const auto* f = node.scalarCoefficient(); f) {
                 const auto x = ctx.physicalPoint(q);
@@ -2841,6 +3238,53 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                                   __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
             }
 
+            if (child.type() == FormExprType::DiscreteField || child.type() == FormExprType::StateField) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: grad(DiscreteField) requires a bound FunctionSpace (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto fid = child.fieldId();
+                if (!fid || *fid == INVALID_FIELD_ID) {
+                    throw FEException("Forms: grad(DiscreteField) missing a valid FieldId (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                if (sig->field_type == FieldType::Scalar) {
+                    const auto gval = ctx.fieldGradient(*fid, q);
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Vector;
+                    out.vector_size = dim;
+                    for (int d = 0; d < 3; ++d) {
+                        out.v[static_cast<std::size_t>(d)] = makeDualConstant(gval[static_cast<std::size_t>(d)], env.ws->alloc());
+                    }
+                    return out;
+                }
+
+                if (sig->field_type == FieldType::Vector) {
+                    const int vd = sig->value_dimension;
+                    if (vd <= 0 || vd > 3) {
+                        throw FEException("Forms: grad(DiscreteField) vector value_dimension must be 1..3 (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const auto Jval = ctx.fieldJacobian(*fid, q);
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Matrix;
+                    out.matrix_rows = vd;
+                    out.matrix_cols = dim;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                makeDualConstant(Jval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+                        }
+                    }
+                    return out;
+                }
+
+                throw FEException("Forms: grad(DiscreteField) field type not supported (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
             if (child.type() == FormExprType::Constant) {
                 EvalValue<Dual> out;
                 out.kind = EvalValue<Dual>::Kind::Vector;
@@ -2867,7 +3311,225 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
             if (kids.size() != 1 || !kids[0]) throw std::logic_error("H() must have 1 child (dual)");
             const auto& child = *kids[0];
 
+            if (child.type() == FormExprType::Component) {
+                const auto ckids = child.childrenShared();
+                if (ckids.size() != 1 || !ckids[0]) throw std::logic_error("component() must have 1 child (dual)");
+                const auto& base = *ckids[0];
+                const int comp = child.componentIndex0().value_or(0);
+                const int col = child.componentIndex1().value_or(-1);
+                if (col >= 0) {
+                    throw FEException("Forms: H(component(A,i,j)) is not supported (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                }
+
+                if (base.type() == FormExprType::TestFunction) {
+                    const auto* sig = base.spaceSignature();
+                    if (!sig) {
+                        throw FEException("Forms: H(component(TestFunction,i)) requires a bound FunctionSpace (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+
+                    assembly::AssemblyContext::Matrix3x3 H{};
+                    if (sig->field_type == FieldType::Scalar) {
+                        if (comp != 0) {
+                            throw FEException("Forms: H(component(TestFunction,i)) invalid component index for scalar-valued TestFunction (dual)",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        if (env.test_active == side) {
+                            H = ctx.physicalHessian(env.i, q);
+                        }
+                    } else if (sig->field_type == FieldType::Vector) {
+                        const int vd = sig->value_dimension;
+                        if (vd <= 0 || vd > 3) {
+                            throw FEException("Forms: H(component(TestFunction,i)) vector value_dimension must be 1..3 (dual)",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        if (comp < 0 || comp >= vd) {
+                            throw FEException("Forms: H(component(TestFunction,i)) component index out of range (dual)",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        if (env.test_active == side) {
+                            const LocalIndex n_test = ctx.numTestDofs();
+                            if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
+                                throw FEException("Forms: H(component(TestFunction,i)) DOF count is not divisible by value_dimension (dual)",
+                                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                            }
+                            const LocalIndex dofs_per_component =
+                                static_cast<LocalIndex>(n_test / static_cast<LocalIndex>(vd));
+                            const int comp_i = static_cast<int>(env.i / dofs_per_component);
+                            if (comp_i == comp) {
+                                H = ctx.physicalHessian(env.i, q);
+                            }
+                        }
+                    } else {
+                        throw FEException("Forms: H(component(TestFunction,i)) field type not supported (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                    }
+
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Matrix;
+                    out.matrix_rows = dim;
+                    out.matrix_cols = dim;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                makeDualConstant(H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+                        }
+                    }
+                    return out;
+                }
+
+                if (base.type() == FormExprType::TrialFunction) {
+                    const auto* sig = base.spaceSignature();
+                    if (!sig) {
+                        throw FEException("Forms: H(component(TrialFunction,i)) requires a bound FunctionSpace (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+
+                    if (sig->field_type == FieldType::Scalar) {
+                        if (comp != 0) {
+                            throw FEException("Forms: H(component(TrialFunction,i)) invalid component index for scalar-valued TrialFunction (dual)",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+
+                        const auto Hval = ctx.solutionHessian(q);
+                        EvalValue<Dual> out;
+                        out.kind = EvalValue<Dual>::Kind::Matrix;
+                        out.matrix_rows = dim;
+                        out.matrix_cols = dim;
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                Dual h = makeDualConstant(Hval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+                                if (env.trial_active == side) {
+                                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                                        const auto Hj = ctx.trialPhysicalHessian(static_cast<LocalIndex>(j), q);
+                                        h.deriv[j] = Hj[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                                    }
+                                }
+                                out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = h;
+                            }
+                        }
+                        return out;
+                    }
+
+                    if (sig->field_type == FieldType::Vector) {
+                        const int vd = sig->value_dimension;
+                        if (vd <= 0 || vd > 3) {
+                            throw FEException("Forms: H(component(TrialFunction,i)) vector value_dimension must be 1..3 (dual)",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        if (comp < 0 || comp >= vd) {
+                            throw FEException("Forms: H(component(TrialFunction,i)) component index out of range (dual)",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        const LocalIndex n_trial = ctx.numTrialDofs();
+                        if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+                            throw FEException("Forms: H(component(TrialFunction,i)) DOF count is not divisible by value_dimension (dual)",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        const LocalIndex dofs_per_component =
+                            static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+
+                        const auto Hval = ctx.solutionComponentHessian(q, comp);
+                        EvalValue<Dual> out;
+                        out.kind = EvalValue<Dual>::Kind::Matrix;
+                        out.matrix_rows = dim;
+                        out.matrix_cols = dim;
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                Dual h = makeDualConstant(Hval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+                                if (env.trial_active == side) {
+                                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                                        const int comp_j = static_cast<int>(static_cast<LocalIndex>(j) / dofs_per_component);
+                                        if (comp_j == comp) {
+                                            const auto Hj = ctx.trialPhysicalHessian(static_cast<LocalIndex>(j), q);
+                                            h.deriv[j] = Hj[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                                        }
+                                    }
+                                }
+                                out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = h;
+                            }
+                        }
+                        return out;
+                    }
+
+	                    throw FEException("Forms: H(component(TrialFunction,i)) field type not supported (dual)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	                }
+
+	                if (base.type() == FormExprType::DiscreteField || base.type() == FormExprType::StateField) {
+	                    const auto* sig = base.spaceSignature();
+	                    if (!sig) {
+	                        throw FEException("Forms: H(component(DiscreteField,i)) requires a bound FunctionSpace (dual)",
+	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                    }
+	                    const auto fid = base.fieldId();
+	                    if (!fid || *fid == INVALID_FIELD_ID) {
+	                        throw FEException("Forms: H(component(DiscreteField,i)) missing a valid FieldId (dual)",
+	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                    }
+	
+	                    if (sig->field_type == FieldType::Scalar) {
+	                        if (comp != 0) {
+	                            throw FEException("Forms: H(component(DiscreteField,i)) invalid component index for scalar-valued DiscreteField (dual)",
+	                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                        }
+	                        const auto Hval = ctx.fieldHessian(*fid, q);
+	                        EvalValue<Dual> out;
+	                        out.kind = EvalValue<Dual>::Kind::Matrix;
+	                        out.matrix_rows = dim;
+	                        out.matrix_cols = dim;
+	                        for (int r = 0; r < 3; ++r) {
+	                            for (int c = 0; c < 3; ++c) {
+	                                out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+	                                    makeDualConstant(Hval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+	                            }
+	                        }
+	                        return out;
+	                    }
+	
+	                    if (sig->field_type == FieldType::Vector) {
+	                        const int vd = sig->value_dimension;
+	                        if (vd <= 0 || vd > 3) {
+	                            throw FEException("Forms: H(component(DiscreteField,i)) vector value_dimension must be 1..3 (dual)",
+	                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                        }
+	                        if (comp < 0 || comp >= vd) {
+	                            throw FEException("Forms: H(component(DiscreteField,i)) component index out of range (dual)",
+	                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                        }
+	                        const auto Hval = ctx.fieldComponentHessian(*fid, q, comp);
+	                        EvalValue<Dual> out;
+	                        out.kind = EvalValue<Dual>::Kind::Matrix;
+	                        out.matrix_rows = dim;
+	                        out.matrix_cols = dim;
+	                        for (int r = 0; r < 3; ++r) {
+	                            for (int c = 0; c < 3; ++c) {
+	                                out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+	                                    makeDualConstant(Hval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+	                            }
+	                        }
+	                        return out;
+	                    }
+	
+	                    throw FEException("Forms: H(component(DiscreteField,i)) field type not supported (dual)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	                }
+
+	                throw FEException("Forms: H(component(...)) currently supports TestFunction, TrialFunction, and DiscreteField only (dual)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	            }
+
             if (child.type() == FormExprType::TestFunction) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: H(TestFunction) requires a bound FunctionSpace (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Scalar) {
+                    throw FEException("Forms: H(TestFunction) requires a scalar-valued TestFunction; use H(component(v,i)) for vector-valued spaces (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
                 const auto H = (env.test_active == side) ? ctx.physicalHessian(env.i, q) : assembly::AssemblyContext::Matrix3x3{};
                 EvalValue<Dual> out;
                 out.kind = EvalValue<Dual>::Kind::Matrix;
@@ -2882,7 +3544,16 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 return out;
             }
 
-            if (child.type() == FormExprType::TrialFunction) {
+	            if (child.type() == FormExprType::TrialFunction) {
+	                const auto* sig = child.spaceSignature();
+	                if (!sig) {
+	                    throw FEException("Forms: H(TrialFunction) requires a bound FunctionSpace (dual)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Scalar) {
+                    throw FEException("Forms: H(TrialFunction) requires a scalar-valued TrialFunction; use H(component(u,i)) for vector-valued spaces (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
                 const auto Hval = ctx.solutionHessian(q);
                 EvalValue<Dual> out;
                 out.kind = EvalValue<Dual>::Kind::Matrix;
@@ -2899,13 +3570,42 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                         }
                         out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = h;
                     }
-                }
-                return out;
-            }
+	                }
+	                return out;
+	            }
+	
+	            if (child.type() == FormExprType::DiscreteField || child.type() == FormExprType::StateField) {
+	                const auto* sig = child.spaceSignature();
+	                if (!sig) {
+	                    throw FEException("Forms: H(DiscreteField) requires a bound FunctionSpace (dual)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                const auto fid = child.fieldId();
+	                if (!fid || *fid == INVALID_FIELD_ID) {
+	                    throw FEException("Forms: H(DiscreteField) missing a valid FieldId (dual)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                if (sig->field_type != FieldType::Scalar) {
+	                    throw FEException("Forms: H(DiscreteField) requires a scalar-valued DiscreteField; use H(component(u,i)) for vector-valued spaces (dual)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                const auto Hval = ctx.fieldHessian(*fid, q);
+	                EvalValue<Dual> out;
+	                out.kind = EvalValue<Dual>::Kind::Matrix;
+	                out.matrix_rows = dim;
+	                out.matrix_cols = dim;
+	                for (int r = 0; r < 3; ++r) {
+	                    for (int c = 0; c < 3; ++c) {
+	                        out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+	                            makeDualConstant(Hval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+	                    }
+	                }
+	                return out;
+	            }
 
-            if (child.type() == FormExprType::Constant) {
-                EvalValue<Dual> out;
-                out.kind = EvalValue<Dual>::Kind::Matrix;
+	            if (child.type() == FormExprType::Constant) {
+	                EvalValue<Dual> out;
+	                out.kind = EvalValue<Dual>::Kind::Matrix;
                 out.matrix_rows = dim;
                 out.matrix_cols = dim;
                 for (int r = 0; r < 3; ++r) {
@@ -2930,12 +3630,12 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                             makeDualConstant(H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
                     }
                 }
-                return out;
-            }
+	                return out;
+	            }
 
-            throw FEException("Forms: H() currently supports TestFunction, TrialFunction, Constant, and scalar Coefficient only (dual)",
-                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
-        }
+	            throw FEException("Forms: H() currently supports TestFunction, TrialFunction, DiscreteField, Constant, and scalar Coefficient only (dual)",
+	                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	        }
         case FormExprType::TimeDerivative: {
             const int order = node.timeDerivativeOrder().value_or(1);
             if (order <= 0) {
@@ -3089,6 +3789,38 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 out.s = divu;
                 return out;
             }
+            if (child.type() == FormExprType::DiscreteField || child.type() == FormExprType::StateField) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: div(DiscreteField) requires a bound FunctionSpace (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Vector) {
+                    throw FEException("Forms: div(DiscreteField) requires a vector-valued DiscreteField (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto fid = child.fieldId();
+                if (!fid || *fid == INVALID_FIELD_ID) {
+                    throw FEException("Forms: div(DiscreteField) missing a valid FieldId (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: div(DiscreteField) vector value_dimension must be 1..3 (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto J = ctx.fieldJacobian(*fid, q);
+                Real div = 0.0;
+                const int n = std::min(vd, dim);
+                for (int d = 0; d < n; ++d) {
+                    div += J[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
+                }
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Scalar;
+                out.s = makeDualConstant(div, env.ws->alloc());
+                return out;
+            }
             if (child.type() == FormExprType::Coefficient && child.vectorCoefficient()) {
                 const auto x = ctx.physicalPoint(q);
                 const Real div = fdDivVector(*child.vectorCoefficient(), x, dim);
@@ -3236,6 +3968,48 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                         out.v[2].deriv[j] = -grad_j[1];
                     }
                 }
+                return out;
+            }
+            if (child.type() == FormExprType::DiscreteField || child.type() == FormExprType::StateField) {
+                const auto* sig = child.spaceSignature();
+                if (!sig) {
+                    throw FEException("Forms: curl(DiscreteField) requires a bound FunctionSpace (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (sig->field_type != FieldType::Vector) {
+                    throw FEException("Forms: curl(DiscreteField) requires a vector-valued DiscreteField (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto fid = child.fieldId();
+                if (!fid || *fid == INVALID_FIELD_ID) {
+                    throw FEException("Forms: curl(DiscreteField) missing a valid FieldId (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: curl(DiscreteField) vector value_dimension must be 1..3 (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                const auto J = ctx.fieldJacobian(*fid, q);
+                auto d = [&](int comp, int wrt) -> Real {
+                    if (comp < 0 || comp >= vd) return 0.0;
+                    if (wrt < 0 || wrt >= dim) return 0.0;
+                    return J[static_cast<std::size_t>(comp)][static_cast<std::size_t>(wrt)];
+                };
+
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+                for (int dcomp = 0; dcomp < 3; ++dcomp) {
+                    out.v[static_cast<std::size_t>(dcomp)] = makeDualConstant(0.0, env.ws->alloc());
+                }
+                if (dim == 2) {
+                    out.v[2].value = d(1, 0) - d(0, 1);
+                    return out;
+                }
+                out.v[0].value = d(2, 1) - d(1, 2);
+                out.v[1].value = d(0, 2) - d(2, 0);
+                out.v[2].value = d(1, 0) - d(0, 1);
                 return out;
             }
             if (child.type() == FormExprType::Coefficient && child.vectorCoefficient()) {
@@ -4399,6 +5173,11 @@ assembly::RequiredData FormKernel::getRequiredData() const noexcept
     return req;
 }
 
+std::vector<assembly::FieldRequirement> FormKernel::fieldRequirements() const
+{
+    return ir_.fieldRequirements();
+}
+
 assembly::MaterialStateSpec FormKernel::materialStateSpec() const noexcept
 {
     return material_state_spec_;
@@ -4666,9 +5445,10 @@ void FormKernel::computeInteriorFace(
 // NonlinearFormKernel
 // ============================================================================
 
-NonlinearFormKernel::NonlinearFormKernel(FormIR residual_ir, ADMode ad_mode)
+NonlinearFormKernel::NonlinearFormKernel(FormIR residual_ir, ADMode ad_mode, NonlinearKernelOutput output)
     : residual_ir_(std::move(residual_ir))
     , ad_mode_(ad_mode)
+    , output_(output)
 {
     if (!residual_ir_.isCompiled()) {
         throw std::invalid_argument("NonlinearFormKernel: residual IR is not compiled");
@@ -4694,6 +5474,11 @@ assembly::RequiredData NonlinearFormKernel::getRequiredData() const noexcept
         req |= assembly::RequiredData::MaterialState;
     }
     return req;
+}
+
+std::vector<assembly::FieldRequirement> NonlinearFormKernel::fieldRequirements() const
+{
+    return residual_ir_.fieldRequirements();
 }
 
 assembly::MaterialStateSpec NonlinearFormKernel::materialStateSpec() const noexcept
@@ -4728,8 +5513,9 @@ void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, asse
     const auto n_test = ctx.numTestDofs();
     const auto n_trial = ctx.numTrialDofs();
 
-    output.reserve(n_test, n_trial, true, true);
-    output.clear();
+    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
+    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    output.reserve(n_test, n_trial, want_matrix, want_vector);
 
     const auto n_qpts = ctx.numQuadraturePoints();
     const auto* time_ctx = ctx.timeIntegrationContext();
@@ -4737,10 +5523,12 @@ void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, asse
     thread_local DualWorkspace ws;
 
     for (LocalIndex i = 0; i < n_test; ++i) {
-        auto row = std::span<Real>(
-            output.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
-            static_cast<std::size_t>(n_trial));
-        std::fill(row.begin(), row.end(), 0.0);
+        std::span<Real> row{};
+        if (want_matrix) {
+            row = std::span<Real>(
+                output.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
+                static_cast<std::size_t>(n_trial));
+        }
 
         Dual residual_i;
         residual_i.value = 0.0;
@@ -4750,10 +5538,11 @@ void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, asse
             const Real w = ctx.integrationWeight(q);
 
             // Reset workspace for this quadrature evaluation.
-            ws.reset(static_cast<std::size_t>(n_trial));
+            const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
+            ws.reset(n_trial_ad);
 
             ConstitutiveCallCacheDual constitutive_cache;
-            EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, static_cast<std::size_t>(n_trial), &ws,
+            EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, n_trial_ad, &ws,
                             constitutive_state_.get(), &constitutive_cache};
 
             Dual sum_q = makeDualConstant(0.0, ws.alloc());
@@ -4790,11 +5579,10 @@ void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, asse
             }
         }
 
-        output.local_vector[static_cast<std::size_t>(i)] = residual_i.value;
+        if (want_vector) {
+            output.local_vector[static_cast<std::size_t>(i)] = residual_i.value;
+        }
     }
-
-    output.has_matrix = true;
-    output.has_vector = true;
 }
 
 void NonlinearFormKernel::computeBoundaryFace(
@@ -4805,18 +5593,21 @@ void NonlinearFormKernel::computeBoundaryFace(
     const auto n_test = ctx.numTestDofs();
     const auto n_trial = ctx.numTrialDofs();
 
-    output.reserve(n_test, n_trial, true, true);
-    output.clear();
+    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
+    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    output.reserve(n_test, n_trial, want_matrix, want_vector);
 
     const auto n_qpts = ctx.numQuadraturePoints();
     const auto* time_ctx = ctx.timeIntegrationContext();
     thread_local DualWorkspace ws;
 
     for (LocalIndex i = 0; i < n_test; ++i) {
-        auto row = std::span<Real>(
-            output.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
-            static_cast<std::size_t>(n_trial));
-        std::fill(row.begin(), row.end(), 0.0);
+        std::span<Real> row{};
+        if (want_matrix) {
+            row = std::span<Real>(
+                output.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
+                static_cast<std::size_t>(n_trial));
+        }
 
         Dual residual_i;
         residual_i.value = 0.0;
@@ -4824,10 +5615,11 @@ void NonlinearFormKernel::computeBoundaryFace(
 
         for (LocalIndex q = 0; q < n_qpts; ++q) {
             const Real w = ctx.integrationWeight(q);
-            ws.reset(static_cast<std::size_t>(n_trial));
+            const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
+            ws.reset(n_trial_ad);
 
             ConstitutiveCallCacheDual constitutive_cache;
-            EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, static_cast<std::size_t>(n_trial), &ws,
+            EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, n_trial_ad, &ws,
                             constitutive_state_.get(), &constitutive_cache};
             Dual sum_q = makeDualConstant(0.0, ws.alloc());
 
@@ -4864,11 +5656,10 @@ void NonlinearFormKernel::computeBoundaryFace(
             }
         }
 
-        output.local_vector[static_cast<std::size_t>(i)] = residual_i.value;
+        if (want_vector) {
+            output.local_vector[static_cast<std::size_t>(i)] = residual_i.value;
+        }
     }
-
-    output.has_matrix = true;
-    output.has_vector = true;
 }
 
 void NonlinearFormKernel::computeInteriorFace(
@@ -4884,15 +5675,20 @@ void NonlinearFormKernel::computeInteriorFace(
     const auto n_test_plus = ctx_plus.numTestDofs();
     const auto n_trial_plus = ctx_plus.numTrialDofs();
 
-    output_minus.reserve(n_test_minus, n_trial_minus, true, true);
-    output_plus.reserve(n_test_plus, n_trial_plus, true, true);
-    coupling_mp.reserve(n_test_minus, n_trial_plus, true, false);
-    coupling_pm.reserve(n_test_plus, n_trial_minus, true, false);
+    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
+    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
 
-    output_minus.clear();
-    output_plus.clear();
-    coupling_mp.clear();
-    coupling_pm.clear();
+    output_minus.reserve(n_test_minus, n_trial_minus, want_matrix, want_vector);
+    output_plus.reserve(n_test_plus, n_trial_plus, want_matrix, want_vector);
+    coupling_mp.reserve(n_test_minus, n_trial_plus, want_matrix, /*need_vector=*/false);
+    coupling_pm.reserve(n_test_plus, n_trial_minus, want_matrix, /*need_vector=*/false);
+
+    const bool want_minus_matrix = output_minus.has_matrix;
+    const bool want_minus_vector = output_minus.has_vector;
+    const bool want_plus_matrix = output_plus.has_matrix;
+    const bool want_plus_vector = output_plus.has_vector;
+    const bool want_mp_matrix = coupling_mp.has_matrix;
+    const bool want_pm_matrix = coupling_pm.has_matrix;
 
     const auto n_qpts = ctx_minus.numQuadraturePoints();
     thread_local DualWorkspace ws;
@@ -4904,14 +5700,21 @@ void NonlinearFormKernel::computeInteriorFace(
                                         const assembly::AssemblyContext& ctx_other,
                                         assembly::KernelOutput& out,
                                         LocalIndex n_test,
-                                        LocalIndex n_trial,
-                                        bool want_vector) {
+                                        LocalIndex n_trial) {
+        const bool want_matrix = out.has_matrix;
+        const bool want_vector = out.has_vector;
+        if (!want_matrix && !want_vector) {
+            return;
+        }
         const auto* time_ctx = ctx_eval.timeIntegrationContext();
         for (LocalIndex i = 0; i < n_test; ++i) {
-            auto row = std::span<Real>(
-                out.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
-                static_cast<std::size_t>(n_trial));
-            std::fill(row.begin(), row.end(), 0.0);
+            std::span<Real> row{};
+            if (want_matrix) {
+                row = std::span<Real>(
+                    out.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
+                    static_cast<std::size_t>(n_trial));
+                std::fill(row.begin(), row.end(), 0.0);
+            }
 
             Dual residual_i;
             residual_i.value = 0.0;
@@ -4919,11 +5722,12 @@ void NonlinearFormKernel::computeInteriorFace(
 
             for (LocalIndex q = 0; q < n_qpts; ++q) {
                 const Real w = ctx_eval.integrationWeight(q);
-                ws.reset(static_cast<std::size_t>(n_trial));
+                const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
+                ws.reset(n_trial_ad);
 
                 ConstitutiveCallCacheDual constitutive_cache;
                 EvalEnvDual env{ctx_eval, &ctx_other, test_active, trial_active, i,
-                                static_cast<std::size_t>(n_trial), &ws, constitutive_state_.get(), &constitutive_cache};
+                                n_trial_ad, &ws, constitutive_state_.get(), &constitutive_cache};
 
                 Dual sum_q = makeDualConstant(0.0, ws.alloc());
                 for (const auto& term : residual_ir_.terms()) {
@@ -4963,29 +5767,35 @@ void NonlinearFormKernel::computeInteriorFace(
             }
         }
 
-        out.has_matrix = true;
-        out.has_vector = want_vector;
     };
 
-    // minus equations, derivatives w.r.t minus dofs (residual + minus-minus block)
-    assembleResidualJacBlock(Side::Minus, Side::Minus, Side::Minus,
-                             ctx_minus, ctx_plus,
-                             output_minus, n_test_minus, n_trial_minus, true);
+    if (want_minus_matrix || want_minus_vector) {
+        // minus equations, derivatives w.r.t minus dofs (residual + minus-minus block)
+        assembleResidualJacBlock(Side::Minus, Side::Minus, Side::Minus,
+                                 ctx_minus, ctx_plus,
+                                 output_minus, n_test_minus, n_trial_minus);
+    }
 
-    // minus equations, derivatives w.r.t plus dofs (minus-plus coupling)
-    assembleResidualJacBlock(Side::Minus, Side::Minus, Side::Plus,
-                             ctx_minus, ctx_plus,
-                             coupling_mp, n_test_minus, n_trial_plus, false);
+    if (want_mp_matrix) {
+        // minus equations, derivatives w.r.t plus dofs (minus-plus coupling)
+        assembleResidualJacBlock(Side::Minus, Side::Minus, Side::Plus,
+                                 ctx_minus, ctx_plus,
+                                 coupling_mp, n_test_minus, n_trial_plus);
+    }
 
-    // plus equations, derivatives w.r.t plus dofs (residual + plus-plus block)
-    assembleResidualJacBlock(Side::Plus, Side::Plus, Side::Plus,
-                             ctx_plus, ctx_minus,
-                             output_plus, n_test_plus, n_trial_plus, true);
+    if (want_plus_matrix || want_plus_vector) {
+        // plus equations, derivatives w.r.t plus dofs (residual + plus-plus block)
+        assembleResidualJacBlock(Side::Plus, Side::Plus, Side::Plus,
+                                 ctx_plus, ctx_minus,
+                                 output_plus, n_test_plus, n_trial_plus);
+    }
 
-    // plus equations, derivatives w.r.t minus dofs (plus-minus coupling)
-    assembleResidualJacBlock(Side::Plus, Side::Plus, Side::Minus,
-                             ctx_plus, ctx_minus,
-                             coupling_pm, n_test_plus, n_trial_minus, false);
+    if (want_pm_matrix) {
+        // plus equations, derivatives w.r.t minus dofs (plus-minus coupling)
+        assembleResidualJacBlock(Side::Plus, Side::Plus, Side::Minus,
+                                 ctx_plus, ctx_minus,
+                                 coupling_pm, n_test_plus, n_trial_minus);
+    }
 }
 
 } // namespace forms

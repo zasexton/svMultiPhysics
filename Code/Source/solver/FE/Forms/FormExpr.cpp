@@ -58,6 +58,44 @@ private:
     std::string name_;
 };
 
+class DiscreteFieldNode final : public FormExprNode {
+public:
+    DiscreteFieldNode(FieldId field, SpaceSignature signature, std::string name)
+        : field_(field), signature_(std::move(signature)), name_(std::move(name))
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::DiscreteField; }
+    [[nodiscard]] std::string toString() const override { return name_; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] const SpaceSignature* spaceSignature() const override { return &signature_; }
+    [[nodiscard]] std::optional<FieldId> fieldId() const override { return field_; }
+
+private:
+    FieldId field_{INVALID_FIELD_ID};
+    SpaceSignature signature_{};
+    std::string name_;
+};
+
+class StateFieldNode final : public FormExprNode {
+public:
+    StateFieldNode(FieldId field, SpaceSignature signature, std::string name)
+        : field_(field), signature_(std::move(signature)), name_(std::move(name))
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::StateField; }
+    [[nodiscard]] std::string toString() const override { return name_; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] const SpaceSignature* spaceSignature() const override { return &signature_; }
+    [[nodiscard]] std::optional<FieldId> fieldId() const override { return field_; }
+
+private:
+    FieldId field_{INVALID_FIELD_ID};
+    SpaceSignature signature_{};
+    std::string name_;
+};
+
 class ConstantNode final : public FormExprNode {
 public:
     explicit ConstantNode(Real value) : value_(value) {}
@@ -675,6 +713,19 @@ public:
         names_[1] = j.name();
     }
 
+    IndexedAccessNode(std::shared_ptr<FormExprNode> child,
+                      int rank,
+                      std::array<int, 4> ids,
+                      std::array<int, 4> extents,
+                      std::array<std::string, 4> names)
+        : UnaryNode(std::move(child))
+        , rank_(rank)
+        , ids_(std::move(ids))
+        , extents_(std::move(extents))
+        , names_(std::move(names))
+    {
+    }
+
     [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::IndexedAccess; }
 
     [[nodiscard]] std::string toString() const override
@@ -1033,6 +1084,22 @@ FormExpr FormExpr::testFunction(const spaces::FunctionSpace& space, std::string 
 FormExpr FormExpr::trialFunction(const spaces::FunctionSpace& space, std::string name)
 {
     return FormExpr(std::make_shared<TrialFunctionNode>(makeSpaceSignature(space), std::move(name)));
+}
+
+FormExpr FormExpr::discreteField(FieldId field, const spaces::FunctionSpace& space, std::string name)
+{
+    if (field == INVALID_FIELD_ID) {
+        throw std::invalid_argument("FormExpr::discreteField: invalid FieldId");
+    }
+    return FormExpr(std::make_shared<DiscreteFieldNode>(field, makeSpaceSignature(space), std::move(name)));
+}
+
+FormExpr FormExpr::stateField(FieldId field, const spaces::FunctionSpace& space, std::string name)
+{
+    if (field == INVALID_FIELD_ID) {
+        throw std::invalid_argument("FormExpr::stateField: invalid FieldId");
+    }
+    return FormExpr(std::make_shared<StateFieldNode>(field, makeSpaceSignature(space), std::move(name)));
 }
 
 FormExpr FormExpr::coefficient(std::string name, ScalarCoefficient func)
@@ -1489,6 +1556,172 @@ FormExpr FormExpr::dS() const
 {
     if (!node_) return {};
     return FormExpr(std::make_shared<InteriorFaceIntegralNode>(node_));
+}
+
+namespace {
+
+std::shared_ptr<FormExprNode> transformNodeShared(
+    const std::shared_ptr<FormExprNode>& node,
+    const FormExpr::NodeTransform& transform)
+{
+    if (!node) {
+        return {};
+    }
+
+    if (transform) {
+        auto replacement = transform(*node);
+        if (replacement.has_value()) {
+            if (!replacement->isValid()) {
+                throw std::invalid_argument("FormExpr::transformNodes: transform returned an invalid FormExpr");
+            }
+            return replacement->nodeShared();
+        }
+    }
+
+    const auto kids = node->childrenShared();
+    if (kids.empty()) {
+        return node;
+    }
+
+    std::vector<std::shared_ptr<FormExprNode>> new_kids;
+    new_kids.reserve(kids.size());
+    bool changed = false;
+    for (const auto& k : kids) {
+        auto new_k = transformNodeShared(k, transform);
+        if (new_k != k) {
+            changed = true;
+        }
+        new_kids.push_back(std::move(new_k));
+    }
+    if (!changed) {
+        return node;
+    }
+
+    switch (node->type()) {
+        // Unary operators
+        case FormExprType::Negate: return std::make_shared<NegateNode>(new_kids[0]);
+        case FormExprType::Gradient: return std::make_shared<GradientNode>(new_kids[0]);
+        case FormExprType::Divergence: return std::make_shared<DivergenceNode>(new_kids[0]);
+        case FormExprType::Curl: return std::make_shared<CurlNode>(new_kids[0]);
+        case FormExprType::Hessian: return std::make_shared<HessianNode>(new_kids[0]);
+        case FormExprType::TimeDerivative: {
+            const int order = node->timeDerivativeOrder().value_or(1);
+            return std::make_shared<TimeDerivativeNode>(new_kids[0], order);
+        }
+        case FormExprType::RestrictMinus: return std::make_shared<RestrictMinusNode>(new_kids[0]);
+        case FormExprType::RestrictPlus: return std::make_shared<RestrictPlusNode>(new_kids[0]);
+        case FormExprType::Jump: return std::make_shared<JumpNode>(new_kids[0]);
+        case FormExprType::Average: return std::make_shared<AverageNode>(new_kids[0]);
+
+        case FormExprType::Component: {
+            const int i = node->componentIndex0().value_or(0);
+            const int j = node->componentIndex1().value_or(-1);
+            return std::make_shared<ComponentNode>(new_kids[0], i, j);
+        }
+        case FormExprType::IndexedAccess: {
+            const int rank = node->indexRank().value_or(0);
+            const auto ids_opt = node->indexIds();
+            const auto ext_opt = node->indexExtents();
+            if (!ids_opt || !ext_opt) {
+                throw std::logic_error("FormExpr::transformNodes: IndexedAccess missing index metadata");
+            }
+            std::array<std::string, 4> names{};
+            for (std::size_t k = 0; k < names.size(); ++k) {
+                const int id = (*ids_opt)[k];
+                names[k] = (id >= 0) ? ("i" + std::to_string(id)) : std::string{};
+            }
+            return std::make_shared<IndexedAccessNode>(new_kids[0], rank, *ids_opt, *ext_opt, std::move(names));
+        }
+
+        case FormExprType::Transpose: return std::make_shared<TransposeNode>(new_kids[0]);
+        case FormExprType::Trace: return std::make_shared<TraceNode>(new_kids[0]);
+        case FormExprType::Determinant: return std::make_shared<DeterminantNode>(new_kids[0]);
+        case FormExprType::Inverse: return std::make_shared<InverseNode>(new_kids[0]);
+        case FormExprType::Cofactor: return std::make_shared<CofactorNode>(new_kids[0]);
+        case FormExprType::Deviator: return std::make_shared<DeviatorNode>(new_kids[0]);
+        case FormExprType::SymmetricPart: return std::make_shared<SymmetricPartNode>(new_kids[0]);
+        case FormExprType::SkewPart: return std::make_shared<SkewPartNode>(new_kids[0]);
+        case FormExprType::Norm: return std::make_shared<NormNode>(new_kids[0]);
+        case FormExprType::Normalize: return std::make_shared<NormalizeNode>(new_kids[0]);
+        case FormExprType::AbsoluteValue: return std::make_shared<AbsoluteValueNode>(new_kids[0]);
+        case FormExprType::Sign: return std::make_shared<SignNode>(new_kids[0]);
+        case FormExprType::Sqrt: return std::make_shared<SqrtNode>(new_kids[0]);
+        case FormExprType::Exp: return std::make_shared<ExpNode>(new_kids[0]);
+        case FormExprType::Log: return std::make_shared<LogNode>(new_kids[0]);
+
+        case FormExprType::CellIntegral: return std::make_shared<CellIntegralNode>(new_kids[0]);
+        case FormExprType::BoundaryIntegral: {
+            const int marker = node->boundaryMarker().value_or(-1);
+            return std::make_shared<BoundaryIntegralNode>(new_kids[0], marker);
+        }
+        case FormExprType::InteriorFaceIntegral: return std::make_shared<InteriorFaceIntegralNode>(new_kids[0]);
+
+        case FormExprType::Constitutive: {
+            auto model = node->constitutiveModelShared();
+            if (!model) {
+                throw std::logic_error("FormExpr::transformNodes: Constitutive node missing model");
+            }
+            return std::make_shared<ConstitutiveNode>(std::move(model), std::move(new_kids));
+        }
+        case FormExprType::ConstitutiveOutput: {
+            const auto idx = node->constitutiveOutputIndex();
+            if (!idx || *idx < 0) {
+                throw std::logic_error("FormExpr::transformNodes: ConstitutiveOutput missing output index");
+            }
+            return std::make_shared<ConstitutiveOutputNode>(new_kids[0], static_cast<std::size_t>(*idx));
+        }
+
+        // Binary operators
+        case FormExprType::Add: return std::make_shared<AddNode>(new_kids[0], new_kids[1]);
+        case FormExprType::Subtract: return std::make_shared<SubtractNode>(new_kids[0], new_kids[1]);
+        case FormExprType::Multiply: return std::make_shared<MultiplyNode>(new_kids[0], new_kids[1]);
+        case FormExprType::Divide: return std::make_shared<DivideNode>(new_kids[0], new_kids[1]);
+        case FormExprType::InnerProduct: return std::make_shared<InnerProductNode>(new_kids[0], new_kids[1]);
+        case FormExprType::DoubleContraction: return std::make_shared<DoubleContractionNode>(new_kids[0], new_kids[1]);
+        case FormExprType::OuterProduct: return std::make_shared<OuterProductNode>(new_kids[0], new_kids[1]);
+        case FormExprType::CrossProduct: return std::make_shared<CrossProductNode>(new_kids[0], new_kids[1]);
+        case FormExprType::Power: return std::make_shared<PowerNode>(new_kids[0], new_kids[1]);
+        case FormExprType::Minimum: return std::make_shared<MinimumNode>(new_kids[0], new_kids[1]);
+        case FormExprType::Maximum: return std::make_shared<MaximumNode>(new_kids[0], new_kids[1]);
+
+        case FormExprType::Less:
+        case FormExprType::LessEqual:
+        case FormExprType::Greater:
+        case FormExprType::GreaterEqual:
+        case FormExprType::Equal:
+        case FormExprType::NotEqual:
+            return std::make_shared<ComparisonNode>(node->type(), new_kids[0], new_kids[1]);
+
+        // Ternary
+        case FormExprType::Conditional:
+            return std::make_shared<ConditionalNode>(new_kids[0], new_kids[1], new_kids[2]);
+
+        // Packing
+        case FormExprType::AsVector:
+            return std::make_shared<AsVectorNode>(std::move(new_kids));
+        case FormExprType::AsTensor: {
+            const int rows = node->tensorRows().value_or(0);
+            const int cols = node->tensorCols().value_or(0);
+            return std::make_shared<AsTensorNode>(rows, cols, std::move(new_kids));
+        }
+
+        default:
+            // Terminals and other leaf nodes should have no children.
+            throw std::logic_error("FormExpr::transformNodes: cannot rebuild node type");
+    }
+}
+
+} // namespace
+
+FormExpr FormExpr::transformNodes(const NodeTransform& transform) const
+{
+    if (!node_) {
+        return {};
+    }
+    if (!transform) {
+        return *this;
+    }
+    return FormExpr(transformNodeShared(node_, transform));
 }
 
 std::string FormExpr::toString() const

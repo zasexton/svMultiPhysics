@@ -173,6 +173,7 @@ public:
     void setSparsityPattern(const sparsity::SparsityPattern* sparsity) override;
     void setOptions(const AssemblyOptions& options) override;
     void setCurrentSolution(std::span<const Real> solution) override;
+    void setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields) override;
     void setPreviousSolution(std::span<const Real> solution) override;
     void setPreviousSolution2(std::span<const Real> solution) override;
     void setPreviousSolutionK(int k, std::span<const Real> solution) override;
@@ -321,6 +322,14 @@ private:
         ContextType type,
         std::span<const LocalIndex> align_facet_to_reference = {});
 
+    const FieldSolutionAccess* findFieldSolutionAccess(FieldId field) const noexcept;
+
+    void populateFieldSolutionData(
+        AssemblyContext& context,
+        const IMeshAccess& mesh,
+        GlobalIndex cell_id,
+        const std::vector<FieldRequirement>& requirements);
+
     /**
      * @brief Insert local contributions into global system
      */
@@ -451,6 +460,8 @@ private:
     const TimeIntegrationContext* time_integration_{nullptr};
     IMaterialStateProvider* material_state_provider_{nullptr};
     bool initialized_{false};
+
+    std::vector<FieldSolutionAccess> field_solution_access_{};
 };
 
 // ============================================================================

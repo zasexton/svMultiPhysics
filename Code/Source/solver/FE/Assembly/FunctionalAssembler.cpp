@@ -31,6 +31,26 @@ namespace assembly {
 
 namespace {
 
+int defaultGeometryOrder(ElementType element_type) noexcept
+{
+    switch (element_type) {
+        case ElementType::Line3:
+        case ElementType::Triangle6:
+        case ElementType::Quad8:
+        case ElementType::Quad9:
+        case ElementType::Tetra10:
+        case ElementType::Hex20:
+        case ElementType::Hex27:
+        case ElementType::Wedge15:
+        case ElementType::Wedge18:
+        case ElementType::Pyramid13:
+        case ElementType::Pyramid14:
+            return 2;
+        default:
+            return 1;
+    }
+}
+
 struct CellContextScratch {
     std::vector<std::array<Real, 3>> cell_coords;
 
@@ -88,8 +108,8 @@ void prepareCellContext(AssemblyContext& context,
 
     geometry::MappingRequest map_request;
     map_request.element_type = cell_type;
-    map_request.geometry_order = 1;
-    map_request.use_affine = true;
+    map_request.geometry_order = defaultGeometryOrder(cell_type);
+    map_request.use_affine = (map_request.geometry_order <= 1);
     auto mapping = geometry::MappingFactory::create(map_request, node_coords);
 
     scratch.quad_points.resize(n_qpts);

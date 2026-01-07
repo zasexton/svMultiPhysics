@@ -17,6 +17,7 @@
 #include "Forms/FormKernels.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/L2Space.h"
+#include "Spaces/ProductSpace.h"
 #include "Systems/FESystem.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
@@ -178,6 +179,25 @@ TEST(FormCompilerTest, HessianSetsRequiredDataFlags)
     EXPECT_FALSE(assembly::hasFlag(ir_bilinear.requiredData(), assembly::RequiredData::SolutionHessians));
 
     const auto ir_residual = compiler.compileResidual(inner(u.hessian(), v.hessian()).dx());
+    EXPECT_TRUE(assembly::hasFlag(ir_residual.requiredData(), assembly::RequiredData::BasisHessians));
+    EXPECT_TRUE(assembly::hasFlag(ir_residual.requiredData(), assembly::RequiredData::SolutionHessians));
+}
+
+TEST(FormCompilerTest, ComponentHessianOfVectorTrialSetsRequiredDataFlags)
+{
+    FormCompiler compiler;
+    auto scalar = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 2);
+    spaces::ProductSpace vec(scalar, /*components=*/2);
+    const auto u = FormExpr::trialFunction(vec, "u");
+    const auto v = FormExpr::testFunction(vec, "v");
+
+    const auto expr = inner(component(u, 0).hessian(), component(v, 0).hessian()).dx();
+
+    const auto ir_bilinear = compiler.compileBilinear(expr);
+    EXPECT_TRUE(assembly::hasFlag(ir_bilinear.requiredData(), assembly::RequiredData::BasisHessians));
+    EXPECT_FALSE(assembly::hasFlag(ir_bilinear.requiredData(), assembly::RequiredData::SolutionHessians));
+
+    const auto ir_residual = compiler.compileResidual(expr);
     EXPECT_TRUE(assembly::hasFlag(ir_residual.requiredData(), assembly::RequiredData::BasisHessians));
     EXPECT_TRUE(assembly::hasFlag(ir_residual.requiredData(), assembly::RequiredData::SolutionHessians));
 }

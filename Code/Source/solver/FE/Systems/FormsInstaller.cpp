@@ -15,6 +15,7 @@
 #include "Systems/FESystem.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace svmp {
 namespace FE {
@@ -79,6 +80,49 @@ void registerKernel(
     if (dispatch.has_interior) {
         system.addInteriorFaceKernel(op, test_field, trial_field, kernel);
     }
+}
+
+std::unordered_set<FieldId> gatherStateFields(const forms::FormExprNode& node)
+{
+    std::unordered_set<FieldId> out;
+    const auto visit = [&](const auto& self, const forms::FormExprNode& n) -> void {
+        if (n.type() == forms::FormExprType::StateField) {
+            const auto fid = n.fieldId();
+            FE_THROW_IF(!fid || *fid == INVALID_FIELD_ID, InvalidArgumentException,
+                        "installCoupledResidual: encountered StateField with invalid FieldId");
+            out.insert(*fid);
+        }
+        for (const auto& child : n.childrenShared()) {
+            if (child) self(self, *child);
+        }
+    };
+    visit(visit, node);
+    return out;
+}
+
+forms::FormExpr lowerStateFields(
+    const forms::FormExpr& expr,
+    FieldId active_trial_field,
+    const FESystem& system)
+{
+    return expr.transformNodes([&](const forms::FormExprNode& n) -> std::optional<forms::FormExpr> {
+        if (n.type() != forms::FormExprType::StateField) {
+            return std::nullopt;
+        }
+
+        const auto fid = n.fieldId();
+        FE_THROW_IF(!fid || *fid == INVALID_FIELD_ID, InvalidArgumentException,
+                    "installCoupledResidual: StateField node missing FieldId");
+
+        const auto& rec = system.fieldRecord(*fid);
+        FE_CHECK_NOT_NULL(rec.space.get(), "installCoupledResidual: field space");
+
+        const std::string sym = n.toString();
+        if (*fid == active_trial_field) {
+            return forms::FormExpr::trialFunction(*rec.space, sym);
+        }
+        return forms::FormExpr::discreteField(*fid, *rec.space, sym);
+    });
 }
 
 } // namespace
@@ -156,7 +200,98 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
     return installResidualBlocks(system, op, test_span, trial_span, blocks, options);
 }
 
+CoupledResidualKernels installCoupledResidual(
+    FESystem& system,
+    const OperatorTag& op,
+    std::span<const FieldId> test_fields,
+    std::span<const FieldId> trial_fields,
+    const forms::BlockLinearForm& residual_blocks,
+    const FormInstallOptions& options)
+{
+    FE_THROW_IF(test_fields.size() != residual_blocks.numTestFields(), InvalidArgumentException,
+                "installCoupledResidual: test_fields size does not match residual_blocks.numTestFields()");
+    FE_THROW_IF(test_fields.empty(), InvalidArgumentException,
+                "installCoupledResidual: empty test field list");
+    FE_THROW_IF(trial_fields.empty(), InvalidArgumentException,
+                "installCoupledResidual: empty trial field list");
+
+    forms::FormCompiler compiler(options.compiler_options);
+
+    CoupledResidualKernels out;
+    out.residual.resize(residual_blocks.numTestFields());
+    out.jacobian_blocks.resize(residual_blocks.numTestFields());
+    for (auto& row : out.jacobian_blocks) {
+        row.resize(trial_fields.size());
+    }
+
+    for (std::size_t i = 0; i < residual_blocks.numTestFields(); ++i) {
+        if (!residual_blocks.hasBlock(i)) {
+            continue;
+        }
+
+        const auto& base_expr = residual_blocks.block(i);
+        FE_THROW_IF(!base_expr.hasTest(), InvalidArgumentException,
+                    "installCoupledResidual: residual block has no test function");
+
+        // Determine which state fields are referenced by this residual component.
+        const auto* root = base_expr.node();
+        FE_CHECK_NOT_NULL(root, "installCoupledResidual: residual block root");
+        const auto state_fields = gatherStateFields(*root);
+
+        // Choose an active trial field so the residual can be compiled as a Residual form.
+        FieldId active_trial = INVALID_FIELD_ID;
+        if (i < trial_fields.size() && state_fields.contains(trial_fields[i])) {
+            active_trial = trial_fields[i];
+        } else {
+            for (FieldId fid : trial_fields) {
+                if (state_fields.contains(fid)) {
+                    active_trial = fid;
+                    break;
+                }
+            }
+        }
+
+        FE_THROW_IF(active_trial == INVALID_FIELD_ID, InvalidArgumentException,
+                    "installCoupledResidual: residual block does not reference any StateField; cannot determine active trial field");
+
+        // Install residual kernel (vector-only).
+        {
+            const auto lowered = lowerStateFields(base_expr, active_trial, system);
+            auto ir = compiler.compileResidual(lowered);
+
+            const auto dispatch = analyzeDispatch(ir);
+            FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && dispatch.boundary_markers.empty(), InvalidArgumentException,
+                        "installCoupledResidual: compiled residual has no integral terms");
+
+            auto kernel = std::make_shared<forms::NonlinearFormKernel>(
+                std::move(ir), options.ad_mode, forms::NonlinearKernelOutput::VectorOnly);
+            registerKernel(system, op, test_fields[i], active_trial, dispatch, kernel);
+            out.residual[i] = std::move(kernel);
+        }
+
+        // Install Jacobian blocks (matrix-only) for every referenced trial field.
+        for (std::size_t j = 0; j < trial_fields.size(); ++j) {
+            const FieldId trial = trial_fields[j];
+            if (!state_fields.contains(trial)) {
+                continue; // dR/d(trial) == 0
+            }
+
+            const auto lowered = lowerStateFields(base_expr, trial, system);
+            auto ir = compiler.compileResidual(lowered);
+            const auto dispatch = analyzeDispatch(ir);
+            FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && dispatch.boundary_markers.empty(), InvalidArgumentException,
+                        "installCoupledResidual: compiled Jacobian block has no integral terms");
+
+            auto kernel = std::make_shared<forms::NonlinearFormKernel>(
+                std::move(ir), options.ad_mode, forms::NonlinearKernelOutput::MatrixOnly);
+            registerKernel(system, op, test_fields[i], trial, dispatch, kernel);
+            out.jacobian_blocks[i][j] = std::move(kernel);
+        }
+    }
+
+    return out;
+}
+
 } // namespace systems
 } // namespace FE
 } // namespace svmp
-

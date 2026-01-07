@@ -177,6 +177,29 @@ struct MaterialStateSpec {
 };
 
 // ============================================================================
+// Multi-field Solution Requirements (optional)
+// ============================================================================
+
+/**
+ * @brief Requirement for accessing an additional FE field as a discrete coefficient
+ *
+ * Kernels can declare that they need values and/or derivatives of other fields
+ * (identified by FieldId) at the current quadrature points. The assembler is
+ * responsible for gathering the requested field data and binding it into the
+ * AssemblyContext before kernel evaluation.
+ *
+ * Only solution-related bits in RequiredData are meaningful here:
+ * - SolutionValues
+ * - SolutionGradients (scalar gradients / vector Jacobians)
+ * - SolutionHessians (scalar Hessians / vector component Hessians)
+ * - SolutionLaplacians (scalar Laplacians / vector component Laplacians)
+ */
+struct FieldRequirement {
+    FieldId field{INVALID_FIELD_ID};
+    RequiredData required{RequiredData::None};
+};
+
+// ============================================================================
 // Kernel Result Structure
 // ============================================================================
 
@@ -327,6 +350,15 @@ public:
      * @return Bitfield of RequiredData flags
      */
     [[nodiscard]] virtual RequiredData getRequiredData() const = 0;
+
+    /**
+     * @brief Optional multi-field (discrete-coefficient) requirements
+     *
+     * Kernels may override this to request access to other FE fields beyond the
+     * current test/trial spaces. The default implementation requests no
+     * additional fields.
+     */
+    [[nodiscard]] virtual std::vector<FieldRequirement> fieldRequirements() const { return {}; }
 
     /**
      * @brief Optional per-integration-point state requirement

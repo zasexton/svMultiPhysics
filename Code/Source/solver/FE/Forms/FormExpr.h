@@ -78,6 +78,8 @@ enum class FormExprType : std::uint16_t {
     // Terminals
     TestFunction,
     TrialFunction,
+    DiscreteField,
+    StateField,
     Coefficient,
     Constant,
     Coordinate,
@@ -209,6 +211,7 @@ public:
     [[nodiscard]] virtual std::optional<int> constitutiveOutputIndex() const { return std::nullopt; }
     [[nodiscard]] virtual const SpaceSignature* spaceSignature() const { return nullptr; }
     [[nodiscard]] virtual std::optional<int> timeDerivativeOrder() const { return std::nullopt; }
+    [[nodiscard]] virtual std::optional<FieldId> fieldId() const { return std::nullopt; }
 
     [[nodiscard]] virtual const ScalarCoefficient* scalarCoefficient() const { return nullptr; }
     [[nodiscard]] virtual const VectorCoefficient* vectorCoefficient() const { return nullptr; }
@@ -247,6 +250,8 @@ public:
     // ---- Terminals ----
     static FormExpr testFunction(const spaces::FunctionSpace& space, std::string name = "v");
     static FormExpr trialFunction(const spaces::FunctionSpace& space, std::string name = "u");
+    static FormExpr discreteField(FieldId field, const spaces::FunctionSpace& space, std::string name = "u");
+    static FormExpr stateField(FieldId field, const spaces::FunctionSpace& space, std::string name = "u");
 
     static FormExpr coefficient(std::string name, ScalarCoefficient func);
     static FormExpr coefficient(std::string name, VectorCoefficient func);
@@ -348,6 +353,9 @@ public:
     [[nodiscard]] std::string toString() const;
     [[nodiscard]] bool hasTest() const noexcept;
     [[nodiscard]] bool hasTrial() const noexcept;
+
+    using NodeTransform = std::function<std::optional<FormExpr>(const FormExprNode&)>;
+    [[nodiscard]] FormExpr transformNodes(const NodeTransform& transform) const;
 
 private:
     std::shared_ptr<FormExprNode> node_;

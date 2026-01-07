@@ -14,6 +14,7 @@
 #include <chrono>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace svmp {
 namespace FE {
@@ -211,8 +212,16 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
                 required |= RequiredData::BasisHessians;
                 if (kind == FormKind::Residual) {
                     const auto kids = n.childrenShared();
-                    if (!kids.empty() && kids[0] && kids[0]->type() == FormExprType::TrialFunction) {
-                        required |= RequiredData::SolutionHessians;
+                    if (!kids.empty() && kids[0]) {
+                        const auto* child = kids[0].get();
+                        if (child->type() == FormExprType::TrialFunction) {
+                            required |= RequiredData::SolutionHessians;
+                        } else if (child->type() == FormExprType::Component) {
+                            const auto gkids = child->childrenShared();
+                            if (!gkids.empty() && gkids[0] && gkids[0]->type() == FormExprType::TrialFunction) {
+                                required |= RequiredData::SolutionHessians;
+                            }
+                        }
                     }
                 }
                 break;
@@ -233,6 +242,97 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
     // Always need quadrature/integration weights for any integral evaluation.
     required |= RequiredData::IntegrationWeights;
     return required;
+}
+
+std::vector<assembly::FieldRequirement> analyzeFieldRequirements(const FormExprNode& node)
+{
+    using assembly::FieldRequirement;
+    using assembly::RequiredData;
+
+    std::unordered_map<FieldId, RequiredData> req_by_field;
+
+    const auto add = [&](FieldId id, RequiredData bits) {
+        if (id == INVALID_FIELD_ID) {
+            throw std::invalid_argument("FormCompiler: DiscreteField node has invalid FieldId");
+        }
+        req_by_field[id] |= bits;
+    };
+
+    const auto visit = [&](const auto& self, const FormExprNode& n) -> void {
+        switch (n.type()) {
+            case FormExprType::DiscreteField: {
+                const auto fid = n.fieldId();
+                if (!fid) {
+                    throw std::logic_error("FormCompiler: DiscreteField node missing fieldId()");
+                }
+                add(*fid, RequiredData::SolutionValues);
+                break;
+            }
+            case FormExprType::StateField: {
+                const auto fid = n.fieldId();
+                if (!fid) {
+                    throw std::logic_error("FormCompiler: StateField node missing fieldId()");
+                }
+                add(*fid, RequiredData::SolutionValues);
+                break;
+            }
+            case FormExprType::Gradient:
+            case FormExprType::Divergence:
+            case FormExprType::Curl: {
+                const auto kids = n.childrenShared();
+                if (!kids.empty() && kids[0] &&
+                    (kids[0]->type() == FormExprType::DiscreteField || kids[0]->type() == FormExprType::StateField)) {
+                    const auto fid = kids[0]->fieldId();
+                    if (!fid) {
+                        throw std::logic_error("FormCompiler: DiscreteField node missing fieldId()");
+                    }
+                    add(*fid, RequiredData::SolutionValues | RequiredData::SolutionGradients);
+                }
+                break;
+            }
+            case FormExprType::Hessian: {
+                const auto kids = n.childrenShared();
+                if (!kids.empty() && kids[0]) {
+                    const auto& child = *kids[0];
+                    if (child.type() == FormExprType::DiscreteField || child.type() == FormExprType::StateField) {
+                        const auto fid = child.fieldId();
+                        if (!fid) {
+                            throw std::logic_error("FormCompiler: DiscreteField node missing fieldId()");
+                        }
+                        add(*fid, RequiredData::SolutionValues | RequiredData::SolutionHessians);
+                    } else if (child.type() == FormExprType::Component) {
+                        const auto ckids = child.childrenShared();
+                        if (!ckids.empty() && ckids[0] &&
+                            (ckids[0]->type() == FormExprType::DiscreteField || ckids[0]->type() == FormExprType::StateField)) {
+                            const auto fid = ckids[0]->fieldId();
+                            if (!fid) {
+                                throw std::logic_error("FormCompiler: DiscreteField node missing fieldId()");
+                            }
+                            add(*fid, RequiredData::SolutionValues | RequiredData::SolutionHessians);
+                        }
+                    }
+                }
+                break;
+            }
+            default:
+                break;
+        }
+
+        for (const auto& child : n.childrenShared()) {
+            if (child) self(self, *child);
+        }
+    };
+
+    visit(visit, node);
+
+    std::vector<FieldRequirement> out;
+    out.reserve(req_by_field.size());
+    for (const auto& kv : req_by_field) {
+        out.push_back(FieldRequirement{kv.first, kv.second});
+    }
+    std::sort(out.begin(), out.end(),
+              [](const FieldRequirement& a, const FieldRequirement& b) { return a.field < b.field; });
+    return out;
 }
 
 int analyzeTimeDerivativeOrder(const FormExprNode& node)
@@ -410,12 +510,16 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
     detail::collectIntegralTerms(form, /*sign=*/+1, terms);
 
     assembly::RequiredData required = assembly::RequiredData::None;
+    std::unordered_map<FieldId, assembly::RequiredData> field_required{};
     int max_time_order = 0;
     for (auto& t : terms) {
         t.time_derivative_order = detail::analyzeTimeDerivativeOrder(*t.integrand.node());
         max_time_order = std::max(max_time_order, t.time_derivative_order);
 
         t.required_data = detail::analyzeRequiredData(*t.integrand.node(), kind);
+        for (const auto& fr : detail::analyzeFieldRequirements(*t.integrand.node())) {
+            field_required[fr.field] |= fr.required;
+        }
 
         // Face terms require face geometry context (surface measure, normals).
         if (t.domain == IntegralDomain::Boundary || t.domain == IntegralDomain::InteriorFace) {
@@ -431,8 +535,17 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
         required |= t.required_data;
     }
 
+    std::vector<assembly::FieldRequirement> field_requirements;
+    field_requirements.reserve(field_required.size());
+    for (const auto& kv : field_required) {
+        field_requirements.push_back(assembly::FieldRequirement{kv.first, kv.second});
+    }
+    std::sort(field_requirements.begin(), field_requirements.end(),
+              [](const assembly::FieldRequirement& a, const assembly::FieldRequirement& b) { return a.field < b.field; });
+
     ir.setTerms(std::move(terms));
     ir.setRequiredData(required);
+    ir.setFieldRequirements(std::move(field_requirements));
     ir.setMaxTimeDerivativeOrder(max_time_order);
     ir.setCompiled(true);
 
