@@ -11,8 +11,10 @@
 
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/AffineAnalysis.h"
 
 #include "Systems/FESystem.h"
+#include "Systems/StrongDirichletConstraint.h"
 
 #include <algorithm>
 #include <unordered_set>
@@ -142,8 +144,57 @@ KernelPtr installResidualForm(
     FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && dispatch.boundary_markers.empty(), InvalidArgumentException,
                 "installResidualForm: compiled residual has no integral terms");
 
-    auto kernel = std::make_shared<forms::NonlinearFormKernel>(std::move(ir), options.ad_mode);
+    // Attempt an affine split R(u;v) = a(u,v) + L(v). If successful, install a LinearFormKernel
+    // that assembles the Jacobian from `a` and the residual vector from `K*u + L`.
+    std::string reason;
+    auto split = forms::trySplitAffineResidual(
+        residual_form,
+        forms::AffineResidualOptions{.allow_time_derivatives = false, .allow_interior_face_terms = false},
+        &reason);
+
+    KernelPtr kernel{};
+    if (split.has_value()) {
+        auto bilinear_ir = compiler.compileBilinear(split->bilinear);
+        std::optional<forms::FormIR> linear_ir;
+        if (split->linear.isValid()) {
+            linear_ir = compiler.compileLinear(split->linear);
+        }
+        kernel = std::make_shared<forms::LinearFormKernel>(
+            std::move(bilinear_ir),
+            std::move(linear_ir),
+            forms::LinearKernelOutput::Both);
+    } else {
+        (void)reason; // reserved for future diagnostics/telemetry
+        kernel = std::make_shared<forms::NonlinearFormKernel>(std::move(ir), options.ad_mode);
+    }
+
     registerKernel(system, op, test_field, trial_field, dispatch, kernel);
+    return kernel;
+}
+
+void installStrongDirichlet(FESystem& system, std::span<const forms::bc::StrongDirichlet> bcs)
+{
+    for (const auto& bc : bcs) {
+        FE_THROW_IF(!bc.isValid(), InvalidArgumentException,
+                    "installStrongDirichlet: invalid StrongDirichlet declaration");
+        FE_THROW_IF(bc.value.hasTest() || bc.value.hasTrial(), InvalidArgumentException,
+                    "installStrongDirichlet: StrongDirichlet value must not contain test/trial functions");
+        system.addSystemConstraint(
+            std::make_unique<StrongDirichletConstraint>(bc.field, bc.boundary_marker, bc.value));
+    }
+}
+
+KernelPtr installResidualForm(
+    FESystem& system,
+    const OperatorTag& op,
+    FieldId test_field,
+    FieldId trial_field,
+    const forms::FormExpr& residual_form,
+    std::span<const forms::bc::StrongDirichlet> bcs,
+    const FormInstallOptions& options)
+{
+    auto kernel = installResidualForm(system, op, test_field, trial_field, residual_form, options);
+    installStrongDirichlet(system, bcs);
     return kernel;
 }
 

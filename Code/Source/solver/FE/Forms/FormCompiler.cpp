@@ -72,6 +72,24 @@ void requireNoIndexedAccess(const FormExprNode& node)
     visit(visit, node);
 }
 
+void requireNoCoupledPlaceholders(const FormExprNode& node)
+{
+    const auto visit = [&](const auto& self, const FormExprNode& n) -> void {
+        if (n.type() == FormExprType::BoundaryFunctionalSymbol ||
+            n.type() == FormExprType::BoundaryIntegralSymbol ||
+            n.type() == FormExprType::AuxiliaryStateSymbol) {
+            throw std::invalid_argument(
+                "FormCompiler: detected coupled placeholder terminal. "
+                "Resolve coupled expressions via FE/Systems coupled-BC helpers "
+                "(e.g., systems::bc::applyCoupledNeumann/applyCoupledRobin) before compilation.");
+        }
+        for (const auto& child : n.childrenShared()) {
+            if (child) self(self, *child);
+        }
+    };
+    visit(visit, node);
+}
+
 bool spaceSignatureEqual(const FormExprNode::SpaceSignature& a,
                          const FormExprNode::SpaceSignature& b) noexcept
 {
@@ -497,6 +515,7 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
     }
 
     detail::requireNoIndexedAccess(*form.node());
+    detail::requireNoCoupledPlaceholders(*form.node());
 
     FormIR ir;
     ir.setCompiled(false);

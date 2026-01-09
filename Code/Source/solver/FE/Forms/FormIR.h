@@ -94,6 +94,14 @@ public:
 
     [[nodiscard]] std::string dump() const;
 
+    /**
+     * @brief Apply a node-level transformation to every term integrand
+     *
+     * This is intended for setup-time rewrites (e.g., resolving ParameterSymbol
+     * terminals to ParameterRef slots). It is not used on the assembly hot path.
+     */
+    void transformIntegrands(const FormExpr::NodeTransform& transform);
+
 private:
     friend class FormCompiler;
 

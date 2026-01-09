@@ -266,6 +266,13 @@ public:
     [[nodiscard]] bool isConfigured() const noexcept override;
     [[nodiscard]] bool supportsRectangular() const noexcept override { return true; }
     [[nodiscard]] bool supportsDG() const noexcept override { return true; }
+    [[nodiscard]] bool supportsFullContext() const noexcept override { return false; }
+    [[nodiscard]] bool supportsSolution() const noexcept override { return false; }
+    [[nodiscard]] bool supportsSolutionHistory() const noexcept override { return false; }
+    [[nodiscard]] bool supportsTimeIntegrationContext() const noexcept override { return false; }
+    [[nodiscard]] bool supportsDofOffsets() const noexcept override { return false; }
+    [[nodiscard]] bool supportsFieldRequirements() const noexcept override { return false; }
+    [[nodiscard]] bool supportsMaterialState() const noexcept override { return false; }
     [[nodiscard]] bool isThreadSafe() const noexcept override { return false; }
 
     /**

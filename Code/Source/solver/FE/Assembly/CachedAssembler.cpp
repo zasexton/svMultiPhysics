@@ -7,21 +7,10 @@
 
 #include "CachedAssembler.h"
 #include "StandardAssembler.h"
-#include "Dofs/DofMap.h"
-#include "Dofs/DofHandler.h"
-#include "Constraints/AffineConstraints.h"
-#include "Constraints/ConstraintDistributor.h"
-#include "Sparsity/SparsityPattern.h"
 #include "Spaces/FunctionSpace.h"
-#include "Elements/Element.h"
 
-#include <chrono>
 #include <algorithm>
-#include <stdexcept>
-
-#ifdef _OPENMP
-#include <omp.h>
-#endif
+#include <limits>
 
 namespace svmp {
 namespace FE {
@@ -76,31 +65,37 @@ bool ElementMatrixCache::insert(GlobalIndex cell_id, CachedElementData data)
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    const auto existing_it = cache_.find(cell_id);
+    const bool has_existing = existing_it != cache_.end();
+    const std::size_t old_bytes = has_existing ? existing_it->second.memoryBytes() : 0u;
+
+    data.last_access = access_counter_.fetch_add(1);
+    data.insertion_order = insertion_counter_.fetch_add(1);
+    const std::size_t new_bytes = data.memoryBytes();
+
     // Check memory limit
     if (options_.max_memory_bytes > 0) {
-        std::size_t new_bytes = data.memoryBytes();
-        while (stats_.memory_bytes + new_bytes > options_.max_memory_bytes &&
+        while (stats_.memory_bytes - old_bytes + new_bytes > options_.max_memory_bytes &&
                !cache_.empty()) {
             evictOne();
         }
 
-        if (stats_.memory_bytes + new_bytes > options_.max_memory_bytes) {
+        if (stats_.memory_bytes - old_bytes + new_bytes > options_.max_memory_bytes) {
             return false;  // Cannot fit even after eviction
         }
     }
 
     // Check element count limit
-    if (options_.max_elements > 0 && cache_.size() >= options_.max_elements) {
+    if (options_.max_elements > 0 && !has_existing && cache_.size() >= options_.max_elements) {
         evictOne();
     }
 
-    data.last_access = access_counter_.fetch_add(1);
-    std::size_t bytes = data.memoryBytes();
-
     auto result = cache_.insert_or_assign(cell_id, std::move(data));
     if (result.second) {  // New insertion
-        stats_.memory_bytes += bytes;
+        stats_.memory_bytes += new_bytes;
         stats_.total_elements = cache_.size();
+    } else if (has_existing) {
+        stats_.memory_bytes = stats_.memory_bytes - old_bytes + new_bytes;
     }
 
     return true;
@@ -162,6 +157,10 @@ void ElementMatrixCache::evictToLimit()
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    if (options_.eviction == EvictionPolicy::None) {
+        return;
+    }
+
     if (options_.max_memory_bytes > 0) {
         while (stats_.memory_bytes > options_.max_memory_bytes && !cache_.empty()) {
             evictOne();
@@ -205,8 +204,14 @@ void ElementMatrixCache::evictOne()
         }
 
         case EvictionPolicy::FIFO: {
-            // First element (arbitrary for unordered_map, but consistent)
-            victim = cache_.begin()->first;
+            // Evict first inserted entry.
+            std::size_t min_order = std::numeric_limits<std::size_t>::max();
+            for (const auto& [id, data] : cache_) {
+                if (data.insertion_order < min_order) {
+                    min_order = data.insertion_order;
+                    victim = id;
+                }
+            }
             break;
         }
 
@@ -229,80 +234,208 @@ void ElementMatrixCache::evictOne()
 // CachedAssembler Construction
 // ============================================================================
 
+namespace {
+
+class NullSystemView final : public GlobalSystemView {
+public:
+    explicit NullSystemView(bool has_matrix = true, bool has_vector = true) noexcept
+        : has_matrix_(has_matrix), has_vector_(has_vector)
+    {
+    }
+
+    void addMatrixEntries(std::span<const GlobalIndex> /*dofs*/,
+                          std::span<const Real> /*local_matrix*/,
+                          AddMode /*mode*/ = AddMode::Add) override
+    {
+    }
+
+    void addMatrixEntries(std::span<const GlobalIndex> /*row_dofs*/,
+                          std::span<const GlobalIndex> /*col_dofs*/,
+                          std::span<const Real> /*local_matrix*/,
+                          AddMode /*mode*/ = AddMode::Add) override
+    {
+    }
+
+    void addMatrixEntry(GlobalIndex /*row*/, GlobalIndex /*col*/, Real /*value*/,
+                        AddMode /*mode*/ = AddMode::Add) override
+    {
+    }
+
+    void setDiagonal(std::span<const GlobalIndex> /*dofs*/,
+                     std::span<const Real> /*values*/) override
+    {
+    }
+
+    void setDiagonal(GlobalIndex /*dof*/, Real /*value*/) override {}
+
+    void zeroRows(std::span<const GlobalIndex> /*rows*/, bool /*set_diagonal*/ = true) override {}
+
+    void addVectorEntries(std::span<const GlobalIndex> /*dofs*/,
+                          std::span<const Real> /*local_vector*/,
+                          AddMode /*mode*/ = AddMode::Add) override
+    {
+    }
+
+    void addVectorEntry(GlobalIndex /*dof*/, Real /*value*/, AddMode /*mode*/ = AddMode::Add) override {}
+
+    void setVectorEntries(std::span<const GlobalIndex> /*dofs*/,
+                          std::span<const Real> /*values*/) override
+    {
+    }
+
+    void zeroVectorEntries(std::span<const GlobalIndex> /*dofs*/) override {}
+
+    void beginAssemblyPhase() override { phase_ = AssemblyPhase::Building; }
+    void endAssemblyPhase() override { phase_ = AssemblyPhase::Flushing; }
+    void finalizeAssembly() override { phase_ = AssemblyPhase::Finalized; }
+
+    [[nodiscard]] AssemblyPhase getPhase() const noexcept override { return phase_; }
+
+    [[nodiscard]] bool hasMatrix() const noexcept override { return has_matrix_; }
+    [[nodiscard]] bool hasVector() const noexcept override { return has_vector_; }
+    [[nodiscard]] GlobalIndex numRows() const noexcept override { return 0; }
+    [[nodiscard]] GlobalIndex numCols() const noexcept override { return 0; }
+    [[nodiscard]] std::string backendName() const override { return "NullSystemView"; }
+
+    void zero() override {}
+
+private:
+    bool has_matrix_{true};
+    bool has_vector_{true};
+    AssemblyPhase phase_{AssemblyPhase::NotStarted};
+};
+
+class CachedKernel final : public AssemblyKernel {
+public:
+    CachedKernel(AssemblyKernel& inner,
+                 ElementMatrixCache& cache,
+                 bool want_matrix,
+                 bool want_vector,
+                 bool populate_cache)
+        : inner_(inner),
+          cache_(cache),
+          populate_cache_(populate_cache),
+          want_matrix_(want_matrix),
+          want_vector_(want_vector)
+    {
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override { return inner_.getRequiredData(); }
+    [[nodiscard]] std::vector<FieldRequirement> fieldRequirements() const override { return inner_.fieldRequirements(); }
+    [[nodiscard]] MaterialStateSpec materialStateSpec() const noexcept override { return inner_.materialStateSpec(); }
+    [[nodiscard]] std::vector<params::Spec> parameterSpecs() const override { return inner_.parameterSpecs(); }
+
+    [[nodiscard]] bool hasCell() const noexcept override { return inner_.hasCell(); }
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return inner_.hasBoundaryFace(); }
+    [[nodiscard]] bool hasInteriorFace() const noexcept override { return inner_.hasInteriorFace(); }
+
+    [[nodiscard]] std::string name() const override { return inner_.name(); }
+    [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override { return inner_.maxTemporalDerivativeOrder(); }
+    [[nodiscard]] bool isSymmetric() const noexcept override { return inner_.isSymmetric(); }
+    [[nodiscard]] bool isMatrixOnly() const noexcept override { return inner_.isMatrixOnly(); }
+    [[nodiscard]] bool isVectorOnly() const noexcept override { return inner_.isVectorOnly(); }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& out) override
+    {
+        const GlobalIndex cell_id = ctx.cellId();
+        const CachedElementData* cached = cache_.get(cell_id);
+
+        if (cached != nullptr &&
+            (!want_matrix_ || cached->has_matrix) &&
+            (!want_vector_ || cached->has_vector)) {
+            out.reserve(ctx.numTestDofs(), ctx.numTrialDofs(),
+                        /*need_matrix=*/want_matrix_,
+                        /*need_vector=*/want_vector_);
+
+            if (want_matrix_) {
+                out.local_matrix = cached->local_matrix;
+            }
+            if (want_vector_) {
+                out.local_vector = cached->local_vector;
+            }
+            return;
+        }
+
+        inner_.computeCell(ctx, out);
+
+        if (!populate_cache_) {
+            return;
+        }
+
+        if (!out.has_matrix && !out.has_vector) {
+            return;
+        }
+
+        CachedElementData data;
+        if (out.has_matrix) {
+            data.local_matrix = out.local_matrix;
+            data.has_matrix = true;
+        }
+        if (out.has_vector) {
+            data.local_vector = out.local_vector;
+            data.has_vector = true;
+        }
+
+        (void)cache_.insert(cell_id, std::move(data));
+    }
+
+    void computeBoundaryFace(const AssemblyContext& ctx, int boundary_marker, KernelOutput& out) override
+    {
+        inner_.computeBoundaryFace(ctx, boundary_marker, out);
+    }
+
+    void computeInteriorFace(const AssemblyContext& ctx_minus,
+                             const AssemblyContext& ctx_plus,
+                             KernelOutput& out_minus,
+                             KernelOutput& out_plus,
+                             KernelOutput& coupling_mp,
+                             KernelOutput& coupling_pm) override
+    {
+        inner_.computeInteriorFace(ctx_minus, ctx_plus, out_minus, out_plus, coupling_mp, coupling_pm);
+    }
+
+private:
+    AssemblyKernel& inner_;
+    ElementMatrixCache& cache_;
+    bool populate_cache_{true};
+    bool want_matrix_{true};
+    bool want_vector_{false};
+};
+
+} // namespace
+
 CachedAssembler::CachedAssembler()
-    : cache_(std::make_unique<ElementMatrixCache>()),
-      standard_assembler_(std::make_unique<StandardAssembler>())
+    : DecoratorAssembler(createStandardAssembler()),
+      cache_(std::make_unique<ElementMatrixCache>())
 {
 }
 
 CachedAssembler::CachedAssembler(const CacheOptions& options)
-    : cache_options_(options),
-      cache_(std::make_unique<ElementMatrixCache>(options)),
-      standard_assembler_(std::make_unique<StandardAssembler>())
+    : DecoratorAssembler(createStandardAssembler()),
+      cache_options_(options),
+      cache_(std::make_unique<ElementMatrixCache>(options))
+{
+}
+
+CachedAssembler::CachedAssembler(std::unique_ptr<Assembler> base, const CacheOptions& options)
+    : DecoratorAssembler(std::move(base)),
+      cache_options_(options),
+      cache_(std::make_unique<ElementMatrixCache>(options))
 {
 }
 
 CachedAssembler::~CachedAssembler() = default;
-
 CachedAssembler::CachedAssembler(CachedAssembler&& other) noexcept = default;
-
 CachedAssembler& CachedAssembler::operator=(CachedAssembler&& other) noexcept = default;
-
-// ============================================================================
-// Configuration
-// ============================================================================
-
-void CachedAssembler::setDofMap(const dofs::DofMap& dof_map)
-{
-    dof_map_ = &dof_map;
-    standard_assembler_->setDofMap(dof_map);
-}
-
-void CachedAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
-{
-    dof_handler_ = &dof_handler;
-    dof_map_ = &dof_handler.getDofMap();
-    standard_assembler_->setDofHandler(dof_handler);
-}
-
-void CachedAssembler::setConstraints(const constraints::AffineConstraints* constraints)
-{
-    constraints_ = constraints;
-    standard_assembler_->setConstraints(constraints);
-
-    if (constraints_ && constraints_->isClosed()) {
-        constraint_distributor_ = std::make_unique<constraints::ConstraintDistributor>(*constraints_);
-    } else {
-        constraint_distributor_.reset();
-    }
-}
-
-void CachedAssembler::setSparsityPattern(const sparsity::SparsityPattern* sparsity)
-{
-    sparsity_ = sparsity;
-    standard_assembler_->setSparsityPattern(sparsity);
-}
-
-void CachedAssembler::setOptions(const AssemblyOptions& options)
-{
-    options_ = options;
-    standard_assembler_->setOptions(options);
-}
-
-const AssemblyOptions& CachedAssembler::getOptions() const noexcept
-{
-    return options_;
-}
-
-bool CachedAssembler::isConfigured() const noexcept
-{
-    return dof_map_ != nullptr;
-}
 
 void CachedAssembler::setCacheOptions(const CacheOptions& options)
 {
     cache_options_ = options;
     cache_->setOptions(options);
+    if (options.eviction != EvictionPolicy::None) {
+        cache_->evictToLimit();
+    }
+    cache_populated_ = cache_->getStats().total_elements > 0;
 }
 
 const CacheOptions& CachedAssembler::getCacheOptions() const noexcept
@@ -320,36 +453,12 @@ void CachedAssembler::resetCacheStats()
     cache_->resetStats();
 }
 
-// ============================================================================
-// Lifecycle
-// ============================================================================
-
-void CachedAssembler::initialize()
-{
-    if (!isConfigured()) {
-        throw std::runtime_error("CachedAssembler::initialize: not configured");
-    }
-
-    standard_assembler_->initialize();
-    initialized_ = true;
-}
-
-void CachedAssembler::finalize(GlobalSystemView* matrix_view, GlobalSystemView* vector_view)
-{
-    standard_assembler_->finalize(matrix_view, vector_view);
-}
-
 void CachedAssembler::reset()
 {
-    standard_assembler_->reset();
+    base().reset();
     cache_->clear();
     cache_populated_ = false;
-    initialized_ = false;
 }
-
-// ============================================================================
-// Assembly Operations
-// ============================================================================
 
 AssemblyResult CachedAssembler::assembleMatrix(
     const IMeshAccess& mesh,
@@ -359,12 +468,13 @@ AssemblyResult CachedAssembler::assembleMatrix(
     GlobalSystemView& matrix_view)
 {
     if (cache_options_.strategy == CacheStrategy::None) {
-        return standard_assembler_->assembleMatrix(mesh, test_space, trial_space,
-                                                   kernel, matrix_view);
+        return base().assembleMatrix(mesh, test_space, trial_space, kernel, matrix_view);
     }
 
-    return assembleCellsCore(mesh, test_space, trial_space, kernel,
-                             &matrix_view, nullptr, true, false, true);
+    CachedKernel cached_kernel(kernel, *cache_, /*want_matrix=*/true, /*want_vector=*/false, /*populate_cache=*/true);
+    auto result = base().assembleMatrix(mesh, test_space, trial_space, cached_kernel, matrix_view);
+    cache_populated_ = cache_->getStats().total_elements > 0;
+    return result;
 }
 
 AssemblyResult CachedAssembler::assembleVector(
@@ -373,8 +483,7 @@ AssemblyResult CachedAssembler::assembleVector(
     AssemblyKernel& kernel,
     GlobalSystemView& vector_view)
 {
-    // Vector assembly typically depends on time-varying data, so don't cache
-    return standard_assembler_->assembleVector(mesh, space, kernel, vector_view);
+    return base().assembleVector(mesh, space, kernel, vector_view);
 }
 
 AssemblyResult CachedAssembler::assembleBoth(
@@ -386,12 +495,13 @@ AssemblyResult CachedAssembler::assembleBoth(
     GlobalSystemView& vector_view)
 {
     if (cache_options_.strategy == CacheStrategy::None) {
-        return standard_assembler_->assembleBoth(mesh, test_space, trial_space,
-                                                 kernel, matrix_view, vector_view);
+        return base().assembleBoth(mesh, test_space, trial_space, kernel, matrix_view, vector_view);
     }
 
-    return assembleCellsCore(mesh, test_space, trial_space, kernel,
-                             &matrix_view, &vector_view, true, true, true);
+    CachedKernel cached_kernel(kernel, *cache_, /*want_matrix=*/true, /*want_vector=*/true, /*populate_cache=*/true);
+    auto result = base().assembleBoth(mesh, test_space, trial_space, cached_kernel, matrix_view, vector_view);
+    cache_populated_ = cache_->getStats().total_elements > 0;
+    return result;
 }
 
 AssemblyResult CachedAssembler::assembleBoundaryFaces(
@@ -402,9 +512,7 @@ AssemblyResult CachedAssembler::assembleBoundaryFaces(
     GlobalSystemView* matrix_view,
     GlobalSystemView* vector_view)
 {
-    // Boundary face assembly - delegate to standard assembler
-    return standard_assembler_->assembleBoundaryFaces(mesh, boundary_marker, space,
-                                                      kernel, matrix_view, vector_view);
+    return base().assembleBoundaryFaces(mesh, boundary_marker, space, kernel, matrix_view, vector_view);
 }
 
 AssemblyResult CachedAssembler::assembleInteriorFaces(
@@ -415,14 +523,8 @@ AssemblyResult CachedAssembler::assembleInteriorFaces(
     GlobalSystemView& matrix_view,
     GlobalSystemView* vector_view)
 {
-    // Interior face assembly - delegate to standard assembler
-    return standard_assembler_->assembleInteriorFaces(mesh, test_space, trial_space,
-                                                      kernel, matrix_view, vector_view);
+    return base().assembleInteriorFaces(mesh, test_space, trial_space, kernel, matrix_view, vector_view);
 }
-
-// ============================================================================
-// Cache-Specific Assembly
-// ============================================================================
 
 AssemblyResult CachedAssembler::populateCache(
     const IMeshAccess& mesh,
@@ -430,36 +532,22 @@ AssemblyResult CachedAssembler::populateCache(
     const spaces::FunctionSpace& trial_space,
     AssemblyKernel& kernel)
 {
-    // Assemble without inserting into any global system
-    return assembleCellsCore(mesh, test_space, trial_space, kernel,
-                             nullptr, nullptr, true, false, true);
-}
-
-AssemblyResult CachedAssembler::assembleMatrixFromCache(GlobalSystemView& matrix_view)
-{
-    AssemblyResult result;
-    auto start_time = std::chrono::steady_clock::now();
-
-    if (!cache_populated_) {
-        throw std::runtime_error("CachedAssembler::assembleMatrixFromCache: cache not populated");
+    if (cache_options_.strategy == CacheStrategy::None) {
+        return {};
     }
 
-    matrix_view.beginAssemblyPhase();
-
-    auto stats = cache_->getStats();
-    result.elements_assembled = static_cast<GlobalIndex>(stats.total_elements);
-
-    // Iterate over all cached elements
-    // Note: This requires iterating the cache, which is not exposed directly
-    // In practice, we'd store the cell IDs or iterate over mesh
-
-    // For now, rely on the fact that cache is populated for all mesh cells
-    // and use assembleMatrixHybrid which handles both cases
-
-    auto end_time = std::chrono::steady_clock::now();
-    result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
-
+    NullSystemView null_matrix(/*has_matrix=*/true, /*has_vector=*/false);
+    CachedKernel cached_kernel(kernel, *cache_, /*want_matrix=*/true, /*want_vector=*/false, /*populate_cache=*/true);
+    auto result = base().assembleMatrix(mesh, test_space, trial_space, cached_kernel, null_matrix);
+    cache_populated_ = cache_->getStats().total_elements > 0;
     return result;
+}
+
+AssemblyResult CachedAssembler::assembleMatrixFromCache(GlobalSystemView& /*matrix_view*/)
+{
+    FE_THROW_IF(!cache_populated_, FEException, "CachedAssembler::assembleMatrixFromCache: cache not populated");
+    FE_THROW(FEException,
+             "CachedAssembler::assembleMatrixFromCache: not implemented (requires mesh/space/kernel context)");
 }
 
 AssemblyResult CachedAssembler::assembleMatrixHybrid(
@@ -469,13 +557,8 @@ AssemblyResult CachedAssembler::assembleMatrixHybrid(
     AssemblyKernel& kernel,
     GlobalSystemView& matrix_view)
 {
-    return assembleCellsCore(mesh, test_space, trial_space, kernel,
-                             &matrix_view, nullptr, true, false, true);
+    return assembleMatrix(mesh, test_space, trial_space, kernel, matrix_view);
 }
-
-// ============================================================================
-// Cache Management
-// ============================================================================
 
 void CachedAssembler::invalidateCache()
 {
@@ -491,6 +574,7 @@ void CachedAssembler::invalidateElements(std::span<const GlobalIndex> cell_ids)
             invalidation_callback_(id);
         }
     }
+    cache_populated_ = cache_->getStats().total_elements > 0;
 }
 
 bool CachedAssembler::isCachePopulated() const noexcept
@@ -512,136 +596,6 @@ void CachedAssembler::setInvalidationCallback(std::function<void(GlobalIndex)> c
 {
     invalidation_callback_ = std::move(callback);
 }
-
-// ============================================================================
-// Internal Methods
-// ============================================================================
-
-AssemblyResult CachedAssembler::assembleCellsCore(
-    const IMeshAccess& mesh,
-    const spaces::FunctionSpace& test_space,
-    const spaces::FunctionSpace& trial_space,
-    AssemblyKernel& kernel,
-    GlobalSystemView* matrix_view,
-    GlobalSystemView* vector_view,
-    bool assemble_matrix,
-    bool assemble_vector,
-    bool populate_cache)
-{
-    AssemblyResult result;
-    auto start_time = std::chrono::steady_clock::now();
-
-    if (!initialized_) {
-        initialize();
-    }
-
-    if (matrix_view && assemble_matrix) {
-        matrix_view->beginAssemblyPhase();
-    }
-    if (vector_view && assemble_vector && vector_view != matrix_view) {
-        vector_view->beginAssemblyPhase();
-    }
-
-    const RequiredData required_data = kernel.getRequiredData();
-    const bool is_rectangular = (&test_space != &trial_space);
-
-    // Reserve cache capacity
-    if (populate_cache) {
-        cache_->reserve(static_cast<std::size_t>(mesh.numCells()));
-    }
-
-    // Context for computing elements (when cache miss)
-    AssemblyContext context;
-    context.reserve(dof_map_->getMaxDofsPerCell(), 27, mesh.dimension());
-    KernelOutput kernel_output;
-
-    mesh.forEachCell([&](GlobalIndex cell_id) {
-        // Try cache first
-        const CachedElementData* cached = cache_->get(cell_id);
-
-        if (cached != nullptr) {
-            // Cache hit - use cached data
-            insertFromCache(*cached, matrix_view, vector_view);
-            result.elements_assembled++;
-            return;
-        }
-
-        // Cache miss - compute element contributions
-        auto test_dofs = dof_map_->getCellDofs(cell_id);
-        std::vector<GlobalIndex> row_dofs(test_dofs.begin(), test_dofs.end());
-        std::vector<GlobalIndex> col_dofs = row_dofs;
-
-        if (is_rectangular) {
-            // Handle rectangular assembly (different test/trial spaces)
-            // For now, use same DOFs
-        }
-
-        // Prepare context
-        ElementType cell_type = mesh.getCellType(cell_id);
-        const auto& test_element = test_space.getElement(cell_type, cell_id);
-        const auto& trial_element = trial_space.getElement(cell_type, cell_id);
-        context.configure(cell_id, test_element, trial_element, required_data);
-
-        // Compute
-        kernel_output.clear();
-        kernel.computeCell(context, kernel_output);
-
-        // Insert into global system
-        if (matrix_view && kernel_output.has_matrix) {
-            matrix_view->addMatrixEntries(row_dofs, col_dofs, kernel_output.local_matrix);
-        }
-        if (vector_view && kernel_output.has_vector) {
-            vector_view->addVectorEntries(row_dofs, kernel_output.local_vector);
-        }
-
-        // Populate cache
-        if (populate_cache && assemble_matrix && kernel_output.has_matrix) {
-            CachedElementData data;
-            data.local_matrix = kernel_output.local_matrix;
-            data.row_dofs = std::move(row_dofs);
-            data.col_dofs = std::move(col_dofs);
-            data.element_type = cell_type;
-            data.has_matrix = true;
-            data.has_vector = false;
-
-            if (assemble_vector && kernel_output.has_vector) {
-                data.local_vector = kernel_output.local_vector;
-                data.has_vector = true;
-            }
-
-            cache_->insert(cell_id, std::move(data));
-        }
-
-        result.elements_assembled++;
-    });
-
-    if (populate_cache) {
-        cache_populated_ = true;
-    }
-
-    auto end_time = std::chrono::steady_clock::now();
-    result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
-
-    return result;
-}
-
-void CachedAssembler::insertFromCache(
-    const CachedElementData& cached,
-    GlobalSystemView* matrix_view,
-    GlobalSystemView* vector_view)
-{
-    if (matrix_view && cached.has_matrix) {
-        matrix_view->addMatrixEntries(cached.row_dofs, cached.col_dofs, cached.local_matrix);
-    }
-
-    if (vector_view && cached.has_vector) {
-        vector_view->addVectorEntries(cached.row_dofs, cached.local_vector);
-    }
-}
-
-// ============================================================================
-// Factory Functions
-// ============================================================================
 
 std::unique_ptr<Assembler> createCachedAssembler()
 {

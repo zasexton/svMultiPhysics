@@ -66,6 +66,22 @@ bool FormIR::hasInteriorFaceTerms() const noexcept
 const std::vector<IntegralTerm>& FormIR::terms() const noexcept { return impl_->terms; }
 std::string FormIR::dump() const { return impl_->dump; }
 
+void FormIR::transformIntegrands(const FormExpr::NodeTransform& transform)
+{
+    if (!transform) {
+        return;
+    }
+    for (auto& term : impl_->terms) {
+        if (!term.integrand.isValid()) {
+            continue;
+        }
+        term.integrand = term.integrand.transformNodes(transform);
+        term.debug_string = term.integrand.toString();
+    }
+    // Any cached dump is now stale (term strings may have changed).
+    impl_->dump.clear();
+}
+
 void FormIR::setCompiled(bool compiled) { impl_->compiled = compiled; }
 void FormIR::setKind(FormKind kind) { impl_->kind = kind; }
 void FormIR::setRequiredData(assembly::RequiredData required) { impl_->required = required; }

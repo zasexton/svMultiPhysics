@@ -212,6 +212,18 @@ enum class ThreadingStrategy : std::uint8_t {
 };
 
 /**
+ * @brief Policy level for `assembler_name="Auto"` selection
+ *
+ * Conservative is the default and only policy that may be enabled implicitly.
+ * More aggressive policies should remain explicitly opt-in.
+ */
+enum class AutoSelectionPolicy : std::uint8_t {
+    Conservative,
+    Performance,
+    Experimental
+};
+
+/**
  * @brief Ghost contribution policy for parallel assembly
  */
 enum class GhostPolicy : std::uint8_t {
@@ -244,8 +256,16 @@ struct AssemblyOptions {
     int batch_size{32};                  ///< Elements per batch
     bool cache_element_data{false};      ///< Cache geometry/basis evaluations
 
+    // Scheduling / locality (decorator opt-in)
+    bool schedule_elements{false};       ///< Reorder element traversal (cache/locality)
+    int schedule_strategy{0};            ///< 0=Natural,1=Hilbert,2=Morton,3=RCM,4=Complexity,5=CacheBlocked
+
+    // Auto-selection policy (used only when assembler_name="Auto")
+    AutoSelectionPolicy auto_policy{AutoSelectionPolicy::Conservative};
+
     // Debugging
     bool check_sparsity{false};          ///< Verify insertions match sparsity pattern
+    bool check_finite_values{false};     ///< Throw if local output contains NaN/Inf
     bool verbose{false};                 ///< Print assembly progress
 };
 
@@ -573,6 +593,23 @@ public:
     virtual void setUserData(const void* /*user_data*/) noexcept {}
 
     /**
+     * @brief Bind a flat array of Real-valued parameter slots for JIT-friendly kernels.
+     *
+     * Default implementation is a no-op.
+     */
+    virtual void setJITConstants(std::span<const Real> /*constants*/) noexcept {}
+
+    /**
+     * @brief Bind coupled boundary-condition scalar arrays (integrals + auxiliary state).
+     *
+     * Default implementation is a no-op.
+     */
+    virtual void setCoupledValues(std::span<const Real> /*integrals*/,
+                                  std::span<const Real> /*aux_state*/) noexcept
+    {
+    }
+
+    /**
      * @brief Provide per-cell state storage for kernels requesting RequiredData::MaterialState
      *
      * Default implementation is a no-op. Assemblers that support state (e.g.
@@ -804,6 +841,50 @@ public:
     [[nodiscard]] virtual bool supportsDG() const noexcept { return false; }
 
     /**
+     * @brief Check if assembler populates full FE context data (quad/geometry/basis)
+     *
+     * Assemblers that only call `AssemblyContext::configure(...)` without filling
+     * quadrature/basis/geometry buffers should return false.
+     */
+    [[nodiscard]] virtual bool supportsFullContext() const noexcept { return false; }
+
+    /**
+     * @brief Check if assembler supports solution-dependent kernels
+     *
+     * This implies honoring `setCurrentSolution(...)` and binding solution
+     * coefficients/values/derivatives into `AssemblyContext` as requested by
+     * `AssemblyKernel::getRequiredData()`.
+     */
+    [[nodiscard]] virtual bool supportsSolution() const noexcept { return false; }
+
+    /**
+     * @brief Check if assembler supports transient (history) data
+     *
+     * This implies honoring `setPreviousSolutionK(...)`.
+     */
+    [[nodiscard]] virtual bool supportsSolutionHistory() const noexcept { return false; }
+
+    /**
+     * @brief Check if assembler supports attaching `TimeIntegrationContext`
+     */
+    [[nodiscard]] virtual bool supportsTimeIntegrationContext() const noexcept { return false; }
+
+    /**
+     * @brief Check if assembler supports multi-field offsets via setRowDofMap/setColDofMap
+     */
+    [[nodiscard]] virtual bool supportsDofOffsets() const noexcept { return false; }
+
+    /**
+     * @brief Check if assembler supports kernels requiring additional discrete fields
+     */
+    [[nodiscard]] virtual bool supportsFieldRequirements() const noexcept { return false; }
+
+    /**
+     * @brief Check if assembler supports kernels requiring per-integration-point state
+     */
+    [[nodiscard]] virtual bool supportsMaterialState() const noexcept { return false; }
+
+    /**
      * @brief Check if assembler is thread-safe
      */
     [[nodiscard]] virtual bool isThreadSafe() const noexcept { return false; }
@@ -812,6 +893,10 @@ public:
 // ============================================================================
 // Assembler Factory
 // ============================================================================
+
+// Forward declarations for selection-aware factory overload.
+struct FormCharacteristics;
+struct SystemCharacteristics;
 
 /**
  * @brief Create an assembler with the specified strategy
@@ -828,6 +913,28 @@ std::unique_ptr<Assembler> createAssembler(ThreadingStrategy strategy);
  * @return Unique pointer to the created assembler
  */
 std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options);
+
+/**
+ * @brief Create an assembler using a name + form/system characteristics (opt-in)
+ *
+ * This overload enables rule-based selection (e.g., `assembler_name="Auto"`)
+ * and decorator composition (caching/scheduling/vectorization).
+ *
+ * DG incompatibility is a hard error (no fallback).
+ */
+std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options,
+                                           std::string_view assembler_name,
+                                           const FormCharacteristics& form,
+                                           const SystemCharacteristics& system);
+
+/**
+ * @brief Create an assembler and optionally emit a human-readable selection report
+ */
+std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options,
+                                           std::string_view assembler_name,
+                                           const FormCharacteristics& form,
+                                           const SystemCharacteristics& system,
+                                           std::string* selection_report);
 
 } // namespace assembly
 } // namespace FE

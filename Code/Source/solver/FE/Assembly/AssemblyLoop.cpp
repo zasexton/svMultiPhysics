@@ -30,6 +30,8 @@
 
 #include "AssemblyLoop.h"
 #include "Core/FEException.h"
+#include "Dofs/DofMap.h"
+#include "Spaces/FunctionSpace.h"
 
 #include <chrono>
 #include <algorithm>
@@ -222,11 +224,23 @@ void AssemblyLoop::cellLoopSequential(
     last_stats_ = LoopStatistics{};
     last_stats_.num_threads_used = 1;
 
-    for (const auto& cell : items) {
+    for (std::size_t idx = 0; idx < items.size(); ++idx) {
+        const auto& cell = items[idx];
         if (options_.skip_ghost_cells && !cell.is_owned) {
             ++last_stats_.skipped_iterations;
             continue;
         }
+
+#if (defined(__GNUC__) || defined(__clang__))
+        if (options_.prefetch_next && (idx + 1) < items.size()) {
+            const auto& next_cell = items[idx + 1];
+            const auto next_dofs = dof_map_->getCellDofs(next_cell.cell_id);
+            if (!next_dofs.empty()) {
+                __builtin_prefetch(next_dofs.data(), 0, 1);
+                ++last_stats_.prefetch_hints;
+            }
+        }
+#endif
 
         // Prepare context
         prepareContext(context, cell, test_space, trial_space, required_data);
@@ -790,47 +804,32 @@ void AssemblyLoop::buildInteriorFaceWorkItems(std::vector<InteriorFaceWorkItem>&
 }
 
 void AssemblyLoop::prepareContext(
-    AssemblyContext& /*context*/,
-    const CellWorkItem& /*cell*/,
-    const spaces::FunctionSpace& /*test_space*/,
-    const spaces::FunctionSpace& /*trial_space*/,
-    RequiredData /*required_data*/)
+    AssemblyContext& context,
+    const CellWorkItem& cell,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
+    RequiredData required_data)
 {
-    // Context preparation would involve:
-    // 1. Getting element from space
-    // 2. Evaluating basis functions at quadrature points
-    // 3. Computing geometry (Jacobians, physical points)
-    // 4. Storing data in context
-
-    // This is a placeholder - full implementation requires FunctionSpace and Element APIs
-    // The actual implementation would call:
-    // - space.getElement(cell_type)
-    // - element.evaluateBasis(...)
-    // - mapping.computeJacobian(...)
-    // - context.setTestBasisData(...)
-    // etc.
+    context.configure(cell.cell_id, test_space, trial_space, required_data);
 }
 
 void AssemblyLoop::prepareContextFace(
-    AssemblyContext& /*context*/,
-    const BoundaryFaceWorkItem& /*face*/,
-    const spaces::FunctionSpace& /*space*/,
-    RequiredData /*required_data*/)
+    AssemblyContext& context,
+    const BoundaryFaceWorkItem& face,
+    const spaces::FunctionSpace& space,
+    RequiredData required_data)
 {
-    // Similar to prepareContext but for face quadrature
-    // Would compute face normals, surface quadrature, etc.
+    context.configureFace(face.face_id, face.cell_id, face.local_face_id,
+                         space, space, required_data, ContextType::BoundaryFace);
 }
 
 void AssemblyLoop::getCellDofs(
-    GlobalIndex /*cell_id*/,
+    GlobalIndex cell_id,
     const spaces::FunctionSpace& /*space*/,
     std::vector<GlobalIndex>& dofs)
 {
-    // This would use DofMap to get DOFs for the cell
-    // dof_map_->getCellDofs(cell_id, space, dofs);
-
-    // Placeholder - return empty for now
-    dofs.clear();
+    const auto cell_dofs = dof_map_->getCellDofs(cell_id);
+    dofs.assign(cell_dofs.begin(), cell_dofs.end());
 }
 
 // ============================================================================
@@ -870,7 +869,7 @@ void forEachInteriorFace(
 
 int computeElementColoring(
     const IMeshAccess& mesh,
-    const dofs::DofMap& /*dof_map*/,
+    const dofs::DofMap& dof_map,
     std::vector<int>& colors)
 {
     GlobalIndex num_cells = mesh.numCells();
@@ -880,29 +879,44 @@ int computeElementColoring(
         return 0;
     }
 
-    // Build element connectivity graph
-    // Two elements are connected if they share DOFs
+    // Build element connectivity graph:
+    // Two elements are connected if they share at least one DOF.
+    std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> dof_to_cells;
+    dof_to_cells.reserve(static_cast<std::size_t>(num_cells) * 8u);
 
-    // For now, use a simple greedy coloring
-    // A full implementation would build the actual connectivity
+    mesh.forEachCell([&](GlobalIndex cell_id) {
+        const auto dofs = dof_map.getCellDofs(cell_id);
+        for (GlobalIndex dof : dofs) {
+            dof_to_cells[dof].push_back(cell_id);
+        }
+    });
 
-    std::vector<std::unordered_set<int>> neighbor_colors(static_cast<std::size_t>(num_cells));
-    int max_color = 0;
-
-    mesh.forEachCell([&colors, &neighbor_colors, &max_color](GlobalIndex cell_id) {
-        auto idx = static_cast<std::size_t>(cell_id);
-
-        // Find smallest available color
-        int color = 0;
-        while (neighbor_colors[idx].count(color) > 0) {
-            ++color;
+    int max_color = -1;
+    mesh.forEachCell([&](GlobalIndex cell_id) {
+        std::unordered_set<int> used_colors;
+        const auto dofs = dof_map.getCellDofs(cell_id);
+        for (GlobalIndex dof : dofs) {
+            const auto it = dof_to_cells.find(dof);
+            if (it == dof_to_cells.end()) {
+                continue;
+            }
+            for (GlobalIndex other_cell : it->second) {
+                if (other_cell == cell_id) {
+                    continue;
+                }
+                const int c = colors[static_cast<std::size_t>(other_cell)];
+                if (c >= 0) {
+                    used_colors.insert(c);
+                }
+            }
         }
 
-        colors[idx] = color;
+        int color = 0;
+        while (used_colors.count(color) > 0) {
+            ++color;
+        }
+        colors[static_cast<std::size_t>(cell_id)] = color;
         max_color = std::max(max_color, color);
-
-        // In a full implementation, we would update neighbor_colors
-        // for all neighboring elements. This requires connectivity info.
     });
 
     return max_color + 1;

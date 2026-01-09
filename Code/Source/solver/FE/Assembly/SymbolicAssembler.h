@@ -42,7 +42,7 @@
  * - delegates execution to `StandardAssembler`.
  */
 
-#include "Assembly/Assembler.h"
+#include "Assembly/DecoratorAssembler.h"
 #include "Forms/Forms.h"
 
 #include <memory>
@@ -55,10 +55,12 @@ namespace assembly {
 /**
  * @brief Assembler using FE/Forms symbolic expressions
  */
-class SymbolicAssembler : public Assembler {
+class SymbolicAssembler : public DecoratorAssembler {
 public:
     SymbolicAssembler();
     explicit SymbolicAssembler(const forms::SymbolicOptions& options);
+    explicit SymbolicAssembler(std::unique_ptr<Assembler> base);
+    SymbolicAssembler(std::unique_ptr<Assembler> base, const forms::SymbolicOptions& options);
     ~SymbolicAssembler() override;
 
     SymbolicAssembler(SymbolicAssembler&& other) noexcept;
@@ -67,64 +69,7 @@ public:
     SymbolicAssembler(const SymbolicAssembler&) = delete;
     SymbolicAssembler& operator=(const SymbolicAssembler&) = delete;
 
-    // ---- Assembler configuration ----
-    void setDofMap(const dofs::DofMap& dof_map) override;
-    void setDofHandler(const dofs::DofHandler& dof_handler) override;
-    void setConstraints(const constraints::AffineConstraints* constraints) override;
-    void setSparsityPattern(const sparsity::SparsityPattern* sparsity) override;
-    void setOptions(const AssemblyOptions& options) override;
-    void setCurrentSolution(std::span<const Real> solution) override;
-    void setPreviousSolution(std::span<const Real> solution) override;
-    void setPreviousSolution2(std::span<const Real> solution) override;
-    void setPreviousSolutionK(int k, std::span<const Real> solution) override;
-    void setTimeIntegrationContext(const TimeIntegrationContext* ctx) override;
-
-    [[nodiscard]] const AssemblyOptions& getOptions() const noexcept override;
-    [[nodiscard]] bool isConfigured() const noexcept override;
-    [[nodiscard]] std::string name() const override { return "SymbolicAssembler"; }
-
-    // Bring base-class overloads into scope (avoid -Woverloaded-virtual)
-    using Assembler::assembleMatrix;
-    using Assembler::assembleBoth;
-    using Assembler::assembleBoundaryFaces;
-
-    // ---- Lifecycle ----
-    void initialize() override;
-    void finalize(GlobalSystemView* matrix_view, GlobalSystemView* vector_view) override;
-    void reset() override;
-
-    // ---- Standard assembly (delegate) ----
-    AssemblyResult assembleMatrix(const IMeshAccess& mesh,
-                                  const spaces::FunctionSpace& test_space,
-                                  const spaces::FunctionSpace& trial_space,
-                                  AssemblyKernel& kernel,
-                                  GlobalSystemView& matrix_view) override;
-
-    AssemblyResult assembleVector(const IMeshAccess& mesh,
-                                  const spaces::FunctionSpace& space,
-                                  AssemblyKernel& kernel,
-                                  GlobalSystemView& vector_view) override;
-
-    AssemblyResult assembleBoth(const IMeshAccess& mesh,
-                                const spaces::FunctionSpace& test_space,
-                                const spaces::FunctionSpace& trial_space,
-                                AssemblyKernel& kernel,
-                                GlobalSystemView& matrix_view,
-                                GlobalSystemView& vector_view) override;
-
-    AssemblyResult assembleBoundaryFaces(const IMeshAccess& mesh,
-                                         int boundary_marker,
-                                         const spaces::FunctionSpace& space,
-                                         AssemblyKernel& kernel,
-                                         GlobalSystemView* matrix_view,
-                                         GlobalSystemView* vector_view) override;
-
-    AssemblyResult assembleInteriorFaces(const IMeshAccess& mesh,
-                                         const spaces::FunctionSpace& test_space,
-                                         const spaces::FunctionSpace& trial_space,
-                                         AssemblyKernel& kernel,
-                                         GlobalSystemView& matrix_view,
-                                         GlobalSystemView* vector_view) override;
+    [[nodiscard]] std::string name() const override { return "Symbolic(" + base().name() + ")"; }
 
     // ---- Forms assembly convenience ----
     AssemblyResult assembleForm(const forms::FormExpr& bilinear_form,

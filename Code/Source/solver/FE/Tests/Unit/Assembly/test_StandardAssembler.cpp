@@ -35,6 +35,7 @@
 #include <vector>
 #include <memory>
 #include <numeric>
+#include <limits>
 
 namespace svmp {
 namespace FE {
@@ -1409,6 +1410,510 @@ TEST(StandardAssemblerHessianTest, PhysicalBasisHessiansMatchFiniteDifferenceGra
 
     const auto result = assembler.assembleVector(mesh, space, kernel, vec);
     EXPECT_TRUE(result.success);
+}
+
+// ============================================================================
+// StandardAssembler Edge Case Tests (UNIT_TEST_CHECKLIST.md)
+// ============================================================================
+
+namespace {
+
+class EmptyMeshAccess final : public IMeshAccess {
+public:
+    [[nodiscard]] GlobalIndex numCells() const override { return 0; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 0; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return false; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Unknown; }
+
+    void getCellNodes(GlobalIndex /*cell_id*/, std::vector<GlobalIndex>& nodes) const override { nodes.clear(); }
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex /*node_id*/) const override { return {0.0, 0.0, 0.0}; }
+    void getCellCoordinates(GlobalIndex /*cell_id*/, std::vector<std::array<Real, 3>>& coords) const override { coords.clear(); }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/,
+                                               GlobalIndex /*cell_id*/) const override {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return 0; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex>
+    getInteriorFaceCells(GlobalIndex /*face_id*/) const override {
+        return {-1, -1};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> /*callback*/) const override {}
+    void forEachOwnedCell(std::function<void(GlobalIndex)> /*callback*/) const override {}
+    void forEachBoundaryFace(int /*marker*/,
+                             std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override {}
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override {}
+};
+
+class ConfigurableSingleTetraMeshAccess final : public IMeshAccess {
+public:
+    ConfigurableSingleTetraMeshAccess(std::array<std::array<Real, 3>, 4> nodes,
+                                      std::array<GlobalIndex, 4> cell_nodes)
+        : nodes_(std::move(nodes))
+        , cell_nodes_(std::move(cell_nodes))
+    {
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Tetra4; }
+
+    void getCellNodes(GlobalIndex /*cell_id*/, std::vector<GlobalIndex>& nodes) const override {
+        nodes.assign(cell_nodes_.begin(), cell_nodes_.end());
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/,
+                            std::vector<std::array<Real, 3>>& coords) const override {
+        coords.resize(4);
+        for (std::size_t i = 0; i < 4; ++i) {
+            coords[i] = nodes_.at(static_cast<std::size_t>(cell_nodes_[i]));
+        }
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/,
+                                               GlobalIndex /*cell_id*/) const override {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return 0; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex>
+    getInteriorFaceCells(GlobalIndex /*face_id*/) const override {
+        return {-1, -1};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+    void forEachBoundaryFace(int /*marker*/,
+                             std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override {}
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override {}
+
+private:
+    std::array<std::array<Real, 3>, 4> nodes_{};
+    std::array<GlobalIndex, 4> cell_nodes_{};
+};
+
+class SinglePointMeshAccess final : public IMeshAccess {
+public:
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Point1; }
+
+    void getCellNodes(GlobalIndex /*cell_id*/, std::vector<GlobalIndex>& nodes) const override {
+        nodes.assign({0});
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex /*node_id*/) const override {
+        return {0.0, 0.0, 0.0};
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/,
+                            std::vector<std::array<Real, 3>>& coords) const override {
+        coords.assign({{0.0, 0.0, 0.0}});
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/,
+                                               GlobalIndex /*cell_id*/) const override {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return 0; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex>
+    getInteriorFaceCells(GlobalIndex /*face_id*/) const override {
+        return {-1, -1};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+    void forEachBoundaryFace(int /*marker*/,
+                             std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override {}
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override {}
+};
+
+class EmptyOutputKernel final : public AssemblyKernel {
+public:
+    void computeCell(const AssemblyContext& /*ctx*/, KernelOutput& /*output*/) override {}
+    [[nodiscard]] RequiredData getRequiredData() const noexcept override { return RequiredData::None; }
+    [[nodiscard]] bool isMatrixOnly() const noexcept override { return true; }
+};
+
+class NaNKernel final : public AssemblyKernel {
+public:
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override {
+        const LocalIndex n = ctx.numTestDofs();
+        output.local_matrix.assign(static_cast<std::size_t>(n) * static_cast<std::size_t>(n),
+                                   std::numeric_limits<Real>::quiet_NaN());
+        output.has_matrix = true;
+        output.has_vector = false;
+    }
+    [[nodiscard]] RequiredData getRequiredData() const noexcept override { return RequiredData::None; }
+    [[nodiscard]] bool isMatrixOnly() const noexcept override { return true; }
+};
+
+class InfKernel final : public AssemblyKernel {
+public:
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override {
+        const LocalIndex n = ctx.numTestDofs();
+        output.local_matrix.assign(static_cast<std::size_t>(n) * static_cast<std::size_t>(n),
+                                   std::numeric_limits<Real>::infinity());
+        output.has_matrix = true;
+        output.has_vector = false;
+    }
+    [[nodiscard]] RequiredData getRequiredData() const noexcept override { return RequiredData::None; }
+    [[nodiscard]] bool isMatrixOnly() const noexcept override { return true; }
+};
+
+} // namespace
+
+TEST(StandardAssemblerEdgeCases, EmptyMeshNoCrashAndNoInsertions) {
+    EmptyMeshAccess mesh;
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    dofs::DofMap dof_map(0, 0, 0);
+    dof_map.setNumDofs(0);
+    dof_map.setNumLocalDofs(0);
+    dof_map.finalize();
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    DenseMatrixView A(0);
+    IdentityKernel kernel;
+
+    const auto result = assembler.assembleMatrix(mesh, space, space, kernel, A);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.elements_assembled, 0);
+    EXPECT_EQ(A.numRows(), 0);
+}
+
+TEST(StandardAssemblerEdgeCases, SingleElementMeshAssemblesIdentity) {
+    const std::array<std::array<Real, 3>, 4> nodes = {{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0},
+    }};
+    ConfigurableSingleTetraMeshAccess mesh(nodes, /*cell_nodes=*/{0, 1, 2, 3});
+
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    dofs::DofMap dof_map(1, 4, 4);
+    const std::array<GlobalIndex, 4> dofs = {0, 1, 2, 3};
+    dof_map.setCellDofs(0, dofs);
+    dof_map.setNumDofs(4);
+    dof_map.setNumLocalDofs(4);
+    dof_map.finalize();
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    DenseMatrixView A(4);
+    IdentityKernel kernel;
+    const auto result = assembler.assembleMatrix(mesh, space, space, kernel, A);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.elements_assembled, 1);
+
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            const Real expected = (i == j) ? 1.0 : 0.0;
+            EXPECT_DOUBLE_EQ(A.getMatrixEntry(i, j), expected);
+        }
+    }
+}
+
+TEST(StandardAssemblerEdgeCases, SingleNodePoint1IfSupported) {
+    try {
+        SinglePointMeshAccess mesh;
+        spaces::H1Space space(ElementType::Point1, /*order=*/1);
+
+        dofs::DofMap dof_map(1, 1, 1);
+        const std::array<GlobalIndex, 1> dofs = {0};
+        dof_map.setCellDofs(0, dofs);
+        dof_map.setNumDofs(1);
+        dof_map.setNumLocalDofs(1);
+        dof_map.finalize();
+
+        StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+
+        DenseMatrixView A(1);
+        IdentityKernel kernel;
+        const auto result = assembler.assembleMatrix(mesh, space, space, kernel, A);
+        EXPECT_TRUE(result.success);
+        EXPECT_DOUBLE_EQ(A.getMatrixEntry(0, 0), 1.0);
+    } catch (const std::exception& e) {
+        GTEST_SKIP() << "Point1 element path not supported: " << e.what();
+    }
+}
+
+TEST(StandardAssemblerEdgeCases, RectangularAssemblyWithOffsets) {
+    const std::array<std::array<Real, 3>, 4> nodes = {{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0},
+    }};
+    ConfigurableSingleTetraMeshAccess mesh(nodes, /*cell_nodes=*/{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    dofs::DofMap dof_map(1, 4, 4);
+    const std::array<GlobalIndex, 4> dofs = {0, 1, 2, 3};
+    dof_map.setCellDofs(0, dofs);
+    dof_map.setNumDofs(4);
+    dof_map.setNumLocalDofs(4);
+    dof_map.finalize();
+
+    IdentityKernel kernel;
+
+    // Row offset only.
+    {
+        StandardAssembler assembler;
+        assembler.setRowDofMap(dof_map, /*row_offset=*/2);
+        assembler.setColDofMap(dof_map, /*col_offset=*/0);
+        DenseMatrixView A(/*rows=*/6, /*cols=*/4);
+        assembler.assembleMatrix(mesh, space, space, kernel, A);
+        EXPECT_DOUBLE_EQ(A.getMatrixEntry(2, 0), 1.0);
+        EXPECT_DOUBLE_EQ(A.getMatrixEntry(0, 0), 0.0);
+    }
+
+    // Col offset only.
+    {
+        StandardAssembler assembler;
+        assembler.setRowDofMap(dof_map, /*row_offset=*/0);
+        assembler.setColDofMap(dof_map, /*col_offset=*/3);
+        DenseMatrixView A(/*rows=*/4, /*cols=*/7);
+        assembler.assembleMatrix(mesh, space, space, kernel, A);
+        EXPECT_DOUBLE_EQ(A.getMatrixEntry(0, 3), 1.0);
+        EXPECT_DOUBLE_EQ(A.getMatrixEntry(0, 0), 0.0);
+    }
+
+    // Both offsets.
+    {
+        StandardAssembler assembler;
+        assembler.setRowDofMap(dof_map, /*row_offset=*/2);
+        assembler.setColDofMap(dof_map, /*col_offset=*/3);
+        DenseMatrixView A(/*rows=*/6, /*cols=*/7);
+        assembler.assembleMatrix(mesh, space, space, kernel, A);
+        EXPECT_DOUBLE_EQ(A.getMatrixEntry(2, 3), 1.0);
+        EXPECT_DOUBLE_EQ(A.getMatrixEntry(0, 0), 0.0);
+    }
+}
+
+TEST(StandardAssemblerEdgeCases, KernelReturnsEmptyOutputNoInsertions) {
+    const std::array<std::array<Real, 3>, 4> nodes = {{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0},
+    }};
+    ConfigurableSingleTetraMeshAccess mesh(nodes, /*cell_nodes=*/{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    dofs::DofMap dof_map(1, 4, 4);
+    const std::array<GlobalIndex, 4> dofs = {0, 1, 2, 3};
+    dof_map.setCellDofs(0, dofs);
+    dof_map.setNumDofs(4);
+    dof_map.setNumLocalDofs(4);
+    dof_map.finalize();
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    DenseMatrixView A(4);
+    EmptyOutputKernel kernel;
+    const auto result = assembler.assembleMatrix(mesh, space, space, kernel, A);
+    EXPECT_TRUE(result.success);
+
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        EXPECT_DOUBLE_EQ(A.getMatrixEntry(i, i), 0.0);
+    }
+}
+
+TEST(StandardAssemblerEdgeCases, KernelReturnsNaNThrowsWhenEnabled) {
+    const std::array<std::array<Real, 3>, 4> nodes = {{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0},
+    }};
+    ConfigurableSingleTetraMeshAccess mesh(nodes, /*cell_nodes=*/{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    dofs::DofMap dof_map(1, 4, 4);
+    const std::array<GlobalIndex, 4> dofs = {0, 1, 2, 3};
+    dof_map.setCellDofs(0, dofs);
+    dof_map.setNumDofs(4);
+    dof_map.setNumLocalDofs(4);
+    dof_map.finalize();
+
+    AssemblyOptions opts;
+    opts.check_finite_values = true;
+    StandardAssembler assembler(opts);
+    assembler.setDofMap(dof_map);
+
+    DenseMatrixView A(4);
+    NaNKernel kernel;
+    EXPECT_THROW(assembler.assembleMatrix(mesh, space, space, kernel, A), std::runtime_error);
+}
+
+TEST(StandardAssemblerEdgeCases, KernelReturnsInfThrowsWhenEnabled) {
+    const std::array<std::array<Real, 3>, 4> nodes = {{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0},
+    }};
+    ConfigurableSingleTetraMeshAccess mesh(nodes, /*cell_nodes=*/{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    dofs::DofMap dof_map(1, 4, 4);
+    const std::array<GlobalIndex, 4> dofs = {0, 1, 2, 3};
+    dof_map.setCellDofs(0, dofs);
+    dof_map.setNumDofs(4);
+    dof_map.setNumLocalDofs(4);
+    dof_map.finalize();
+
+    AssemblyOptions opts;
+    opts.check_finite_values = true;
+    StandardAssembler assembler(opts);
+    assembler.setDofMap(dof_map);
+
+    DenseMatrixView A(4);
+    InfKernel kernel;
+    EXPECT_THROW(assembler.assembleMatrix(mesh, space, space, kernel, A), std::runtime_error);
+}
+
+TEST(StandardAssemblerEdgeCases, NearZeroJacobianProducesSmallMassMatrix) {
+    constexpr Real eps = 1e-12;
+    const std::array<std::array<Real, 3>, 4> nodes = {{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, eps},
+    }};
+    ConfigurableSingleTetraMeshAccess mesh(nodes, /*cell_nodes=*/{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    dofs::DofMap dof_map(1, 4, 4);
+    const std::array<GlobalIndex, 4> dofs = {0, 1, 2, 3};
+    dof_map.setCellDofs(0, dofs);
+    dof_map.setNumDofs(4);
+    dof_map.setNumLocalDofs(4);
+    dof_map.finalize();
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    DenseMatrixView A(4);
+    MassKernel kernel;
+    assembler.assembleMatrix(mesh, space, space, kernel, A);
+
+    const Real volume = eps / 6.0;
+    const Real expected_m00 = volume / 10.0;  // P1 tetra mass matrix diag = V/10
+
+    EXPECT_NEAR(A.getMatrixEntry(0, 0), expected_m00, expected_m00 * 1e-6 + 1e-18);
+}
+
+TEST(StandardAssemblerEdgeCases, InvertedElementMassMatrixMatchesNonInverted) {
+    const std::array<std::array<Real, 3>, 4> nodes = {{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0},
+    }};
+    ConfigurableSingleTetraMeshAccess mesh_a(nodes, /*cell_nodes=*/{0, 1, 2, 3});
+    ConfigurableSingleTetraMeshAccess mesh_b(nodes, /*cell_nodes=*/{1, 0, 2, 3});  // inverted orientation
+
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    dofs::DofMap dof_map(1, 4, 4);
+    const std::array<GlobalIndex, 4> dofs = {0, 1, 2, 3};
+    dof_map.setCellDofs(0, dofs);
+    dof_map.setNumDofs(4);
+    dof_map.setNumLocalDofs(4);
+    dof_map.finalize();
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    MassKernel kernel;
+    DenseMatrixView A(4);
+    DenseMatrixView B(4);
+    assembler.assembleMatrix(mesh_a, space, space, kernel, A);
+    assembler.assembleMatrix(mesh_b, space, space, kernel, B);
+
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            EXPECT_NEAR(A.getMatrixEntry(i, j), B.getMatrixEntry(i, j), 1e-12);
+        }
+    }
+}
+
+TEST(StandardAssemblerEdgeCases, ConstraintChainDistributesToMasters) {
+    const std::array<std::array<Real, 3>, 4> nodes = {{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0},
+    }};
+    ConfigurableSingleTetraMeshAccess mesh(nodes, /*cell_nodes=*/{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    dofs::DofMap dof_map(1, 4, 4);
+    const std::array<GlobalIndex, 4> dofs = {0, 1, 2, 3};
+    dof_map.setCellDofs(0, dofs);
+    dof_map.setNumDofs(4);
+    dof_map.setNumLocalDofs(4);
+    dof_map.finalize();
+
+    constraints::AffineConstraints constraints;
+    constraints.addLine(0);
+    constraints.addEntry(0, 1, 1.0);
+    constraints.addLine(1);
+    constraints.addEntry(1, 2, 1.0);
+    constraints.close();  // resolves chain 0 -> 2
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setConstraints(&constraints);
+
+    DenseSystemView sys(4);
+    IdentityKernel kernel;
+    assembler.assembleBoth(mesh, space, space, kernel, sys, sys);
+
+    // Identity local matrix and RHS:
+    // dof0 and dof1 are constrained and distribute to master dof2.
+    EXPECT_DOUBLE_EQ(sys.getMatrixEntry(2, 2), 3.0);
+    EXPECT_DOUBLE_EQ(sys.getVectorEntry(2), 3.0);
+
+    // Constrained rows are not populated by distribution.
+    EXPECT_DOUBLE_EQ(sys.getMatrixEntry(0, 0), 0.0);
+    EXPECT_DOUBLE_EQ(sys.getMatrixEntry(1, 1), 0.0);
 }
 
 // ============================================================================

@@ -14,8 +14,12 @@
 
 #include "Assembly/CachedAssembler.h"
 #include "Assembly/AssemblyContext.h"
+#include "Assembly/GlobalSystemView.h"
+#include "Dofs/DofMap.h"
+#include "Spaces/H1Space.h"
 
 #include <cmath>
+#include <array>
 #include <thread>
 #include <atomic>
 #include <stdexcept>
@@ -24,6 +28,133 @@ namespace svmp {
 namespace FE {
 namespace assembly {
 namespace test {
+
+namespace {
+
+class SimpleMeshAccess final : public IMeshAccess {
+public:
+    explicit SimpleMeshAccess(GlobalIndex num_cells) : num_cells_(num_cells) {}
+
+    [[nodiscard]] GlobalIndex numCells() const override { return num_cells_; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return num_cells_; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Tetra4; }
+
+    void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override {
+        nodes.resize(4);
+        const GlobalIndex base = static_cast<GlobalIndex>(cell_id * 4);
+        nodes[0] = base + 0;
+        nodes[1] = base + 1;
+        nodes[2] = base + 2;
+        nodes[3] = base + 3;
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override {
+        const GlobalIndex cell_id = node_id / 4;
+        const GlobalIndex local_id = node_id % 4;
+        const Real offset = static_cast<Real>(cell_id) * 2.0;
+        switch (local_id) {
+        case 0:
+            return {offset, 0.0, 0.0};
+        case 1:
+            return {offset + 1.0, 0.0, 0.0};
+        case 2:
+            return {offset, 1.0, 0.0};
+        default:
+            return {offset, 0.0, 1.0};
+        }
+    }
+
+    void getCellCoordinates(GlobalIndex cell_id, std::vector<std::array<Real, 3>>& coords) const override {
+        coords.resize(4);
+        const Real offset = static_cast<Real>(cell_id) * 2.0;
+        coords[0] = {offset, 0.0, 0.0};
+        coords[1] = {offset + 1.0, 0.0, 0.0};
+        coords[2] = {offset, 1.0, 0.0};
+        coords[3] = {offset, 0.0, 1.0};
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/,
+                                               GlobalIndex /*cell_id*/) const override {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return 0; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex>
+    getInteriorFaceCells(GlobalIndex /*face_id*/) const override {
+        return {-1, -1};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override {
+        for (GlobalIndex c = 0; c < num_cells_; ++c) {
+            callback(c);
+        }
+    }
+
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override {
+        forEachCell(std::move(callback));
+    }
+
+    void forEachBoundaryFace(int /*marker*/,
+                             std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+private:
+    GlobalIndex num_cells_{0};
+};
+
+static dofs::DofMap buildDisjointTetra4DofMap(GlobalIndex num_cells)
+{
+    dofs::DofMap dof_map(num_cells, /*n_dofs_total=*/num_cells * 4, /*dofs_per_cell=*/4);
+    for (GlobalIndex cell = 0; cell < num_cells; ++cell) {
+        const std::array<GlobalIndex, 4> dofs = {
+            cell * 4 + 0,
+            cell * 4 + 1,
+            cell * 4 + 2,
+            cell * 4 + 3,
+        };
+        dof_map.setCellDofs(cell, dofs);
+    }
+    dof_map.setNumDofs(num_cells * 4);
+    dof_map.setNumLocalDofs(num_cells * 4);
+    dof_map.finalize();
+    return dof_map;
+}
+
+class CountingIdentityKernel final : public AssemblyKernel {
+public:
+    void computeCell(const AssemblyContext& ctx, KernelOutput& out) override
+    {
+        ++compute_calls_;
+        const LocalIndex n = ctx.numTestDofs();
+        out.reserve(n, n, /*want_matrix=*/true, /*want_vector=*/false);
+        out.clear();
+        for (LocalIndex i = 0; i < n; ++i) {
+            out.matrixEntry(i, i) = 1.0;
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const noexcept override { return RequiredData::None; }
+    [[nodiscard]] bool isMatrixOnly() const noexcept override { return true; }
+
+    int computeCalls() const noexcept { return compute_calls_.load(); }
+
+private:
+    std::atomic<int> compute_calls_{0};
+};
+
+} // namespace
 
 // ============================================================================
 // CacheStrategy Tests
@@ -336,6 +467,98 @@ TEST(ElementMatrixCacheTest, ResetStats) {
     EXPECT_EQ(stats.cache_misses, 0u);
 }
 
+TEST(ElementMatrixCacheTest, LRUEvictionEvictsLeastRecentlyUsed) {
+    CacheOptions options;
+    options.max_elements = 2;
+    options.eviction = EvictionPolicy::LRU;
+
+    ElementMatrixCache cache(options);
+
+    CachedElementData data;
+    data.local_matrix.resize(16, 1.0);
+    data.has_matrix = true;
+
+    ASSERT_TRUE(cache.insert(0, data));
+    ASSERT_TRUE(cache.insert(1, data));
+
+    // Touch element 0 so element 1 becomes least recently used.
+    ASSERT_NE(cache.get(0), nullptr);
+
+    ASSERT_TRUE(cache.insert(2, data));
+
+    EXPECT_TRUE(cache.contains(0));
+    EXPECT_FALSE(cache.contains(1));
+    EXPECT_TRUE(cache.contains(2));
+}
+
+TEST(ElementMatrixCacheTest, FIFOEvictionEvictsFirstInserted) {
+    CacheOptions options;
+    options.max_elements = 2;
+    options.eviction = EvictionPolicy::FIFO;
+
+    ElementMatrixCache cache(options);
+
+    CachedElementData data;
+    data.local_matrix.resize(16, 1.0);
+    data.has_matrix = true;
+
+    ASSERT_TRUE(cache.insert(0, data));
+    ASSERT_TRUE(cache.insert(1, data));
+
+    // Touches should not affect FIFO.
+    ASSERT_NE(cache.get(0), nullptr);
+
+    ASSERT_TRUE(cache.insert(2, data));
+
+    EXPECT_FALSE(cache.contains(0));
+    EXPECT_TRUE(cache.contains(1));
+    EXPECT_TRUE(cache.contains(2));
+}
+
+TEST(ElementMatrixCacheTest, MemoryLimitEnforcementRejectsTooLargeElement) {
+    CachedElementData data;
+    data.local_matrix.resize(64 * 64, 1.0);
+    data.has_matrix = true;
+    data.local_matrix.shrink_to_fit();
+
+    CacheOptions options;
+    options.max_memory_bytes = data.memoryBytes() - 1u;
+    options.eviction = EvictionPolicy::LRU;
+
+    ElementMatrixCache cache(options);
+
+    EXPECT_FALSE(cache.insert(0, data));
+    EXPECT_EQ(cache.memoryUsage(), 0u);
+}
+
+TEST(ElementMatrixCacheTest, MemoryLimitEnforcementEvictsToStayWithinLimit) {
+    CachedElementData data;
+    data.local_matrix.resize(64, 1.0);
+    data.has_matrix = true;
+    data.local_matrix.shrink_to_fit();
+
+    const std::size_t element_bytes = data.memoryBytes();
+
+    CacheOptions options;
+    options.max_memory_bytes = element_bytes * 2u;
+    options.eviction = EvictionPolicy::LRU;
+
+    ElementMatrixCache cache(options);
+
+    ASSERT_TRUE(cache.insert(0, data));
+    ASSERT_TRUE(cache.insert(1, data));
+    EXPECT_LE(cache.memoryUsage(), options.max_memory_bytes);
+
+    auto before = cache.getStats();
+    ASSERT_TRUE(cache.insert(2, data));
+    auto after = cache.getStats();
+
+    EXPECT_LE(cache.memoryUsage(), options.max_memory_bytes);
+    EXPECT_GE(after.evictions, before.evictions + 1u);
+    EXPECT_TRUE(cache.contains(1));
+    EXPECT_TRUE(cache.contains(2));
+}
+
 // ============================================================================
 // CachedAssembler Tests
 // ============================================================================
@@ -395,6 +618,207 @@ TEST(CachedAssemblerTest, ResetCacheStats) {
 
     CacheStats stats = assembler.getCacheStats();
     EXPECT_EQ(stats.cache_hits, 0u);
+}
+
+TEST(CachedAssemblerCachingTest, CacheHitAvoidsKernelRecompute) {
+    const GlobalIndex n_cells = 3;
+    SimpleMeshAccess mesh(n_cells);
+    auto dof_map = buildDisjointTetra4DofMap(n_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    CacheOptions cache_opts;
+    cache_opts.strategy = CacheStrategy::FullMatrix;
+    CachedAssembler assembler(cache_opts);
+    assembler.setDofMap(dof_map);
+
+    CountingIdentityKernel kernel;
+
+    DenseMatrixView A1(dof_map.getNumDofs());
+    assembler.resetCacheStats();
+    assembler.assembleMatrix(mesh, space, space, kernel, A1);
+
+    EXPECT_TRUE(assembler.isCachePopulated());
+    EXPECT_EQ(kernel.computeCalls(), static_cast<int>(n_cells));
+
+    auto stats1 = assembler.getCacheStats();
+    EXPECT_EQ(stats1.cache_hits, 0u);
+    EXPECT_EQ(stats1.cache_misses, static_cast<std::size_t>(n_cells));
+    EXPECT_DOUBLE_EQ(stats1.hit_rate, 0.0);
+
+    DenseMatrixView A2(dof_map.getNumDofs());
+    assembler.resetCacheStats();
+    assembler.assembleMatrix(mesh, space, space, kernel, A2);
+
+    // Second assembly should use cached element matrices only.
+    EXPECT_EQ(kernel.computeCalls(), static_cast<int>(n_cells));
+
+    auto stats2 = assembler.getCacheStats();
+    EXPECT_EQ(stats2.cache_hits, static_cast<std::size_t>(n_cells));
+    EXPECT_EQ(stats2.cache_misses, 0u);
+    EXPECT_DOUBLE_EQ(stats2.hit_rate, 1.0);
+
+    EXPECT_DOUBLE_EQ(A2.getMatrixEntry(0, 0), 1.0);
+    EXPECT_DOUBLE_EQ(A2.getMatrixEntry(5, 5), 1.0);
+}
+
+TEST(CachedAssemblerCachingTest, CacheEvictedWhenMaxElementsReduced) {
+    const GlobalIndex n_cells = 5;
+    SimpleMeshAccess mesh(n_cells);
+    auto dof_map = buildDisjointTetra4DofMap(n_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    CacheOptions cache_opts;
+    cache_opts.strategy = CacheStrategy::FullMatrix;
+    cache_opts.max_elements = 0u;
+    cache_opts.eviction = EvictionPolicy::LRU;
+
+    CachedAssembler assembler(cache_opts);
+    assembler.setDofMap(dof_map);
+
+    CountingIdentityKernel kernel;
+    DenseMatrixView A(dof_map.getNumDofs());
+    assembler.assembleMatrix(mesh, space, space, kernel, A);
+
+    EXPECT_TRUE(assembler.isCachePopulated());
+    EXPECT_EQ(assembler.numCachedElements(), static_cast<std::size_t>(n_cells));
+
+    CacheOptions reduced = cache_opts;
+    reduced.max_elements = 2u;
+    assembler.setCacheOptions(reduced);
+
+    EXPECT_LE(assembler.numCachedElements(), 2u);
+}
+
+TEST(CachedAssemblerCachingTest, CacheEvictedWhenMaxMemoryBytesReduced) {
+    const GlobalIndex n_cells = 5;
+    SimpleMeshAccess mesh(n_cells);
+    auto dof_map = buildDisjointTetra4DofMap(n_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    CacheOptions cache_opts;
+    cache_opts.strategy = CacheStrategy::FullMatrix;
+    cache_opts.max_memory_bytes = 0u;
+    cache_opts.eviction = EvictionPolicy::LRU;
+
+    CachedAssembler assembler(cache_opts);
+    assembler.setDofMap(dof_map);
+
+    CountingIdentityKernel kernel;
+    DenseMatrixView A(dof_map.getNumDofs());
+    assembler.assembleMatrix(mesh, space, space, kernel, A);
+
+    ASSERT_TRUE(assembler.isCachePopulated());
+    const std::size_t before_bytes = assembler.cacheMemoryUsage();
+    ASSERT_GT(before_bytes, 0u);
+
+    CacheOptions reduced = cache_opts;
+    reduced.max_memory_bytes = before_bytes / 2u;
+    assembler.setCacheOptions(reduced);
+
+    EXPECT_LE(assembler.cacheMemoryUsage(), reduced.max_memory_bytes);
+    EXPECT_LT(assembler.numCachedElements(), static_cast<std::size_t>(n_cells));
+}
+
+TEST(CachedAssemblerCachingTest, StrategyReferenceElementCaches) {
+    const GlobalIndex n_cells = 3;
+    SimpleMeshAccess mesh(n_cells);
+    auto dof_map = buildDisjointTetra4DofMap(n_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    CacheOptions cache_opts;
+    cache_opts.strategy = CacheStrategy::ReferenceElement;
+    CachedAssembler assembler(cache_opts);
+    assembler.setDofMap(dof_map);
+
+    CountingIdentityKernel kernel;
+    DenseMatrixView A1(dof_map.getNumDofs());
+    assembler.resetCacheStats();
+    assembler.assembleMatrix(mesh, space, space, kernel, A1);
+    EXPECT_EQ(kernel.computeCalls(), static_cast<int>(n_cells));
+
+    DenseMatrixView A2(dof_map.getNumDofs());
+    assembler.resetCacheStats();
+    assembler.assembleMatrix(mesh, space, space, kernel, A2);
+
+    EXPECT_EQ(kernel.computeCalls(), static_cast<int>(n_cells));
+    auto stats = assembler.getCacheStats();
+    EXPECT_EQ(stats.cache_hits, static_cast<std::size_t>(n_cells));
+}
+
+TEST(CachedAssemblerCachingTest, StrategyGeometricFactorsCaches) {
+    const GlobalIndex n_cells = 3;
+    SimpleMeshAccess mesh(n_cells);
+    auto dof_map = buildDisjointTetra4DofMap(n_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    CacheOptions cache_opts;
+    cache_opts.strategy = CacheStrategy::GeometricFactors;
+    CachedAssembler assembler(cache_opts);
+    assembler.setDofMap(dof_map);
+
+    CountingIdentityKernel kernel;
+    DenseMatrixView A1(dof_map.getNumDofs());
+    assembler.resetCacheStats();
+    assembler.assembleMatrix(mesh, space, space, kernel, A1);
+    EXPECT_EQ(kernel.computeCalls(), static_cast<int>(n_cells));
+
+    DenseMatrixView A2(dof_map.getNumDofs());
+    assembler.resetCacheStats();
+    assembler.assembleMatrix(mesh, space, space, kernel, A2);
+
+    EXPECT_EQ(kernel.computeCalls(), static_cast<int>(n_cells));
+    auto stats = assembler.getCacheStats();
+    EXPECT_EQ(stats.cache_hits, static_cast<std::size_t>(n_cells));
+}
+
+TEST(CachedAssemblerCachingTest, SelectiveInvalidationRecomputesOnlyInvalidatedCells) {
+    const GlobalIndex n_cells = 4;
+    SimpleMeshAccess mesh(n_cells);
+    auto dof_map = buildDisjointTetra4DofMap(n_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    CacheOptions cache_opts;
+    cache_opts.strategy = CacheStrategy::FullMatrix;
+    CachedAssembler assembler(cache_opts);
+    assembler.setDofMap(dof_map);
+
+    CountingIdentityKernel kernel;
+    DenseMatrixView A1(dof_map.getNumDofs());
+    assembler.assembleMatrix(mesh, space, space, kernel, A1);
+    EXPECT_EQ(kernel.computeCalls(), static_cast<int>(n_cells));
+
+    // Invalidate one element and reassemble.
+    const std::array<GlobalIndex, 1> ids = {2};
+    assembler.invalidateElements(ids);
+
+    DenseMatrixView A2(dof_map.getNumDofs());
+    assembler.resetCacheStats();
+    assembler.assembleMatrix(mesh, space, space, kernel, A2);
+
+    // Only invalidated element should trigger a recompute.
+    EXPECT_EQ(kernel.computeCalls(), static_cast<int>(n_cells + 1));
+
+    auto stats = assembler.getCacheStats();
+    EXPECT_EQ(stats.cache_hits, static_cast<std::size_t>(n_cells - 1));
+    EXPECT_EQ(stats.cache_misses, 1u);
+}
+
+TEST(CachedAssemblerCachingTest, StrategyNoneDisablesCaching) {
+    const GlobalIndex n_cells = 2;
+    SimpleMeshAccess mesh(n_cells);
+    auto dof_map = buildDisjointTetra4DofMap(n_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    CacheOptions cache_opts;
+    cache_opts.strategy = CacheStrategy::None;
+    CachedAssembler assembler(cache_opts);
+    assembler.setDofMap(dof_map);
+
+    CountingIdentityKernel kernel;
+    DenseMatrixView A(dof_map.getNumDofs());
+    assembler.assembleMatrix(mesh, space, space, kernel, A);
+
+    EXPECT_FALSE(assembler.isCachePopulated());
 }
 
 TEST(CachedAssemblerTest, InvalidateCache) {

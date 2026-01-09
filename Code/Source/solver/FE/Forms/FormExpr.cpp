@@ -117,6 +117,62 @@ private:
     Real value_{0.0};
 };
 
+class BoundaryFunctionalSymbolNode final : public FormExprNode {
+public:
+    BoundaryFunctionalSymbolNode(std::shared_ptr<FormExprNode> integrand,
+                                 int boundary_marker,
+                                 std::string name)
+        : integrand_(std::move(integrand))
+        , boundary_marker_(boundary_marker)
+        , name_(std::move(name))
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::BoundaryFunctionalSymbol; }
+    [[nodiscard]] std::string toString() const override
+    {
+        const std::string inner = integrand_ ? integrand_->toString() : "<empty>";
+        return "boundaryIntegral(" + name_ + ", " + std::to_string(boundary_marker_) + ", " + inner + ")";
+    }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+
+    [[nodiscard]] std::optional<int> boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] std::optional<std::string_view> symbolName() const override { return name_; }
+
+    [[nodiscard]] std::vector<std::shared_ptr<FormExprNode>> childrenShared() const override
+    {
+        return integrand_ ? std::vector<std::shared_ptr<FormExprNode>>{integrand_}
+                          : std::vector<std::shared_ptr<FormExprNode>>{};
+    }
+
+    [[nodiscard]] std::vector<const FormExprNode*> children() const override
+    {
+        return integrand_ ? std::vector<const FormExprNode*>{integrand_.get()}
+                          : std::vector<const FormExprNode*>{};
+    }
+
+private:
+    std::shared_ptr<FormExprNode> integrand_{};
+    int boundary_marker_{-1};
+    std::string name_{};
+};
+
+class AuxiliaryStateSymbolNode final : public FormExprNode {
+public:
+    explicit AuxiliaryStateSymbolNode(std::string name)
+        : name_(std::move(name))
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::AuxiliaryStateSymbol; }
+    [[nodiscard]] std::string toString() const override { return "aux(" + name_ + ")"; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] std::optional<std::string_view> symbolName() const override { return name_; }
+
+private:
+    std::string name_{};
+};
+
 class CoordinateNode final : public FormExprNode {
 public:
     [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::Coordinate; }
@@ -129,6 +185,22 @@ class ReferenceCoordinateNode final : public FormExprNode {
 public:
     [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::ReferenceCoordinate; }
     [[nodiscard]] std::string toString() const override { return "X"; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+};
+
+class TimeNode final : public FormExprNode {
+public:
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::Time; }
+    [[nodiscard]] std::string toString() const override { return "t"; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+};
+
+class TimeStepNode final : public FormExprNode {
+public:
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::TimeStep; }
+    [[nodiscard]] std::string toString() const override { return "dt"; }
     [[nodiscard]] bool hasTest() const noexcept override { return false; }
     [[nodiscard]] bool hasTrial() const noexcept override { return false; }
 };
@@ -215,6 +287,11 @@ public:
     {
     }
 
+    explicit CoefficientNode(std::string name, TimeScalarCoefficient func)
+        : name_(std::move(name)), time_scalar_func_(std::move(func))
+    {
+    }
+
     explicit CoefficientNode(std::string name, VectorCoefficient func)
         : name_(std::move(name)), vector_func_(std::move(func))
     {
@@ -239,6 +316,10 @@ public:
         return scalar_func_ ? &scalar_func_ : nullptr;
     }
 
+    [[nodiscard]] const TimeScalarCoefficient* timeScalarCoefficient() const override {
+        return time_scalar_func_ ? &time_scalar_func_ : nullptr;
+    }
+
     [[nodiscard]] const VectorCoefficient* vectorCoefficient() const override {
         return vector_func_ ? &vector_func_ : nullptr;
     }
@@ -252,11 +333,13 @@ public:
     }
 
     [[nodiscard]] bool isScalar() const noexcept { return static_cast<bool>(scalar_func_); }
+    [[nodiscard]] bool isTimeScalar() const noexcept { return static_cast<bool>(time_scalar_func_); }
     [[nodiscard]] bool isVector() const noexcept { return static_cast<bool>(vector_func_); }
     [[nodiscard]] bool isMatrix() const noexcept { return static_cast<bool>(matrix_func_); }
     [[nodiscard]] bool isTensor4() const noexcept { return static_cast<bool>(tensor4_func_); }
 
     [[nodiscard]] const ScalarCoefficient& scalarFunc() const { return scalar_func_; }
+    [[nodiscard]] const TimeScalarCoefficient& timeScalarFunc() const { return time_scalar_func_; }
     [[nodiscard]] const VectorCoefficient& vectorFunc() const { return vector_func_; }
     [[nodiscard]] const MatrixCoefficient& matrixFunc() const { return matrix_func_; }
     [[nodiscard]] const Tensor4Coefficient& tensor4Func() const { return tensor4_func_; }
@@ -264,9 +347,118 @@ public:
 private:
     std::string name_;
     ScalarCoefficient scalar_func_{};
+    TimeScalarCoefficient time_scalar_func_{};
     VectorCoefficient vector_func_{};
     MatrixCoefficient matrix_func_{};
     Tensor4Coefficient tensor4_func_{};
+};
+
+class ParameterSymbolNode final : public FormExprNode {
+public:
+    explicit ParameterSymbolNode(std::string name)
+        : name_(std::move(name))
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::ParameterSymbol; }
+    [[nodiscard]] std::string toString() const override { return "param(" + name_ + ")"; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] std::optional<std::string_view> symbolName() const override { return name_; }
+
+private:
+    std::string name_{};
+};
+
+class ParameterRefNode final : public FormExprNode {
+public:
+    explicit ParameterRefNode(std::uint32_t slot)
+        : slot_(slot)
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::ParameterRef; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "param[" + std::to_string(slot_) + "]";
+    }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] std::optional<std::uint32_t> slotIndex() const override { return slot_; }
+
+private:
+    std::uint32_t slot_{0u};
+};
+
+class BoundaryIntegralSymbolNode final : public FormExprNode {
+public:
+    explicit BoundaryIntegralSymbolNode(std::string name)
+        : name_(std::move(name))
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::BoundaryIntegralSymbol; }
+    [[nodiscard]] std::string toString() const override { return "integral(" + name_ + ")"; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] std::optional<std::string_view> symbolName() const override { return name_; }
+
+private:
+    std::string name_{};
+};
+
+class BoundaryIntegralRefNode final : public FormExprNode {
+public:
+    explicit BoundaryIntegralRefNode(std::uint32_t slot)
+        : slot_(slot)
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::BoundaryIntegralRef; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "integral[" + std::to_string(slot_) + "]";
+    }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] std::optional<std::uint32_t> slotIndex() const override { return slot_; }
+
+private:
+    std::uint32_t slot_{0u};
+};
+
+class AuxiliaryStateRefNode final : public FormExprNode {
+public:
+    explicit AuxiliaryStateRefNode(std::uint32_t slot)
+        : slot_(slot)
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::AuxiliaryStateRef; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "aux[" + std::to_string(slot_) + "]";
+    }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] std::optional<std::uint32_t> slotIndex() const override { return slot_; }
+
+private:
+    std::uint32_t slot_{0u};
+};
+
+class PreviousSolutionRefNode final : public FormExprNode {
+public:
+    explicit PreviousSolutionRefNode(int steps_back)
+        : steps_back_(steps_back)
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::PreviousSolutionRef; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "u_prev(" + std::to_string(steps_back_) + ")";
+    }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] std::optional<int> historyIndex() const override { return steps_back_; }
+
+private:
+    int steps_back_{1};
 };
 
 // ============================================================================
@@ -1107,6 +1299,11 @@ FormExpr FormExpr::coefficient(std::string name, ScalarCoefficient func)
     return FormExpr(std::make_shared<CoefficientNode>(std::move(name), std::move(func)));
 }
 
+FormExpr FormExpr::coefficient(std::string name, TimeScalarCoefficient func)
+{
+    return FormExpr(std::make_shared<CoefficientNode>(std::move(name), std::move(func)));
+}
+
 FormExpr FormExpr::coefficient(std::string name, VectorCoefficient func)
 {
     return FormExpr(std::make_shared<CoefficientNode>(std::move(name), std::move(func)));
@@ -1122,9 +1319,72 @@ FormExpr FormExpr::coefficient(std::string name, Tensor4Coefficient func)
     return FormExpr(std::make_shared<CoefficientNode>(std::move(name), std::move(func)));
 }
 
+FormExpr FormExpr::parameter(std::string name)
+{
+    if (name.empty()) {
+        throw std::invalid_argument("FormExpr::parameter: empty name");
+    }
+    return FormExpr(std::make_shared<ParameterSymbolNode>(std::move(name)));
+}
+
+FormExpr FormExpr::parameterRef(std::uint32_t slot)
+{
+    return FormExpr(std::make_shared<ParameterRefNode>(slot));
+}
+
 FormExpr FormExpr::constant(Real value)
 {
     return FormExpr(std::make_shared<ConstantNode>(value));
+}
+
+FormExpr FormExpr::boundaryIntegral(FormExpr integrand, int boundary_marker, std::string name)
+{
+    if (!integrand.isValid()) {
+        throw std::invalid_argument("FormExpr::boundaryIntegral: invalid integrand");
+    }
+    if (boundary_marker < 0) {
+        throw std::invalid_argument("FormExpr::boundaryIntegral: boundary_marker must be >= 0");
+    }
+    if (name.empty()) {
+        throw std::invalid_argument("FormExpr::boundaryIntegral: empty name");
+    }
+    return FormExpr(std::make_shared<BoundaryFunctionalSymbolNode>(integrand.nodeShared(),
+                                                                   boundary_marker,
+                                                                   std::move(name)));
+}
+
+FormExpr FormExpr::boundaryIntegralValue(std::string name)
+{
+    if (name.empty()) {
+        throw std::invalid_argument("FormExpr::boundaryIntegralValue: empty name");
+    }
+    return FormExpr(std::make_shared<BoundaryIntegralSymbolNode>(std::move(name)));
+}
+
+FormExpr FormExpr::boundaryIntegralRef(std::uint32_t slot)
+{
+    return FormExpr(std::make_shared<BoundaryIntegralRefNode>(slot));
+}
+
+FormExpr FormExpr::auxiliaryState(std::string name)
+{
+    if (name.empty()) {
+        throw std::invalid_argument("FormExpr::auxiliaryState: empty name");
+    }
+    return FormExpr(std::make_shared<AuxiliaryStateSymbolNode>(std::move(name)));
+}
+
+FormExpr FormExpr::auxiliaryStateRef(std::uint32_t slot)
+{
+    return FormExpr(std::make_shared<AuxiliaryStateRefNode>(slot));
+}
+
+FormExpr FormExpr::previousSolution(int steps_back)
+{
+    if (steps_back <= 0) {
+        throw std::invalid_argument("FormExpr::previousSolution: steps_back must be >= 1");
+    }
+    return FormExpr(std::make_shared<PreviousSolutionRefNode>(steps_back));
 }
 
 FormExpr FormExpr::coordinate()
@@ -1135,6 +1395,16 @@ FormExpr FormExpr::coordinate()
 FormExpr FormExpr::referenceCoordinate()
 {
     return FormExpr(std::make_shared<ReferenceCoordinateNode>());
+}
+
+FormExpr FormExpr::time()
+{
+    return FormExpr(std::make_shared<TimeNode>());
+}
+
+FormExpr FormExpr::timeStep()
+{
+    return FormExpr(std::make_shared<TimeStepNode>());
 }
 
 FormExpr FormExpr::identity(int dim)
@@ -1607,6 +1877,14 @@ std::shared_ptr<FormExprNode> transformNodeShared(
         case FormExprType::TimeDerivative: {
             const int order = node->timeDerivativeOrder().value_or(1);
             return std::make_shared<TimeDerivativeNode>(new_kids[0], order);
+        }
+        case FormExprType::BoundaryFunctionalSymbol: {
+            const int marker = node->boundaryMarker().value_or(-1);
+            const auto name = node->symbolName();
+            if (marker < 0 || !name) {
+                throw std::logic_error("FormExpr::transformNodes: BoundaryFunctionalSymbol missing metadata");
+            }
+            return std::make_shared<BoundaryFunctionalSymbolNode>(new_kids[0], marker, std::string(*name));
         }
         case FormExprType::RestrictMinus: return std::make_shared<RestrictMinusNode>(new_kids[0]);
         case FormExprType::RestrictPlus: return std::make_shared<RestrictPlusNode>(new_kids[0]);

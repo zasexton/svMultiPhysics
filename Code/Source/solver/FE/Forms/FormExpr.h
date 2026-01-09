@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -81,9 +82,19 @@ enum class FormExprType : std::uint16_t {
     DiscreteField,
     StateField,
     Coefficient,
+    ParameterSymbol,          ///< Runtime scalar parameter by name (setup-time identifier)
+    ParameterRef,             ///< Runtime scalar parameter by slot (JIT-friendly)
     Constant,
+    BoundaryFunctionalSymbol,
+    BoundaryIntegralSymbol,   ///< Coupled boundary-integral value by name (requires Systems registration)
+    BoundaryIntegralRef,      ///< Coupled boundary-integral value by slot (JIT-friendly)
+    AuxiliaryStateSymbol,
+    AuxiliaryStateRef,        ///< Coupled auxiliary-state value by slot (JIT-friendly)
+    PreviousSolutionRef,      ///< Previous solution value u^{n-k} by history index k>=1
     Coordinate,
     ReferenceCoordinate,
+    Time,
+    TimeStep,
     Identity,
     Jacobian,
     JacobianInverse,
@@ -171,6 +182,7 @@ enum class FormExprType : std::uint16_t {
 class FormExpr;
 
 using ScalarCoefficient = std::function<Real(Real, Real, Real)>;
+using TimeScalarCoefficient = std::function<Real(Real, Real, Real, Real)>;
 using VectorCoefficient = std::function<std::array<Real, 3>(Real, Real, Real)>;
 using MatrixCoefficient = std::function<std::array<std::array<Real, 3>, 3>(Real, Real, Real)>;
 using Tensor4Coefficient = std::function<std::array<Real, 81>(Real, Real, Real)>;
@@ -212,8 +224,12 @@ public:
     [[nodiscard]] virtual const SpaceSignature* spaceSignature() const { return nullptr; }
     [[nodiscard]] virtual std::optional<int> timeDerivativeOrder() const { return std::nullopt; }
     [[nodiscard]] virtual std::optional<FieldId> fieldId() const { return std::nullopt; }
+    [[nodiscard]] virtual std::optional<std::string_view> symbolName() const { return std::nullopt; }
+    [[nodiscard]] virtual std::optional<std::uint32_t> slotIndex() const { return std::nullopt; }
+    [[nodiscard]] virtual std::optional<int> historyIndex() const { return std::nullopt; }
 
     [[nodiscard]] virtual const ScalarCoefficient* scalarCoefficient() const { return nullptr; }
+    [[nodiscard]] virtual const TimeScalarCoefficient* timeScalarCoefficient() const { return nullptr; }
     [[nodiscard]] virtual const VectorCoefficient* vectorCoefficient() const { return nullptr; }
     [[nodiscard]] virtual const MatrixCoefficient* matrixCoefficient() const { return nullptr; }
     [[nodiscard]] virtual const Tensor4Coefficient* tensor4Coefficient() const { return nullptr; }
@@ -253,14 +269,28 @@ public:
     static FormExpr discreteField(FieldId field, const spaces::FunctionSpace& space, std::string name = "u");
     static FormExpr stateField(FieldId field, const spaces::FunctionSpace& space, std::string name = "u");
 
+    // NOTE: Callback-based coefficients are supported for interpreter/fallback paths,
+    // but are not "JIT-fast" (opaque call boundary; no inlining/vectorization).
     static FormExpr coefficient(std::string name, ScalarCoefficient func);
+    static FormExpr coefficient(std::string name, TimeScalarCoefficient func);
     static FormExpr coefficient(std::string name, VectorCoefficient func);
     static FormExpr coefficient(std::string name, MatrixCoefficient func);
     static FormExpr coefficient(std::string name, Tensor4Coefficient func);
 
+    static FormExpr parameter(std::string name);
+    static FormExpr parameterRef(std::uint32_t slot);
+
     static FormExpr constant(Real value);
+    static FormExpr boundaryIntegral(FormExpr integrand, int boundary_marker, std::string name);
+    static FormExpr boundaryIntegralValue(std::string name);
+    static FormExpr boundaryIntegralRef(std::uint32_t slot);
+    static FormExpr auxiliaryState(std::string name);
+    static FormExpr auxiliaryStateRef(std::uint32_t slot);
+    static FormExpr previousSolution(int steps_back = 1);
     static FormExpr coordinate();
     static FormExpr referenceCoordinate();
+    static FormExpr time();
+    static FormExpr timeStep();
     static FormExpr identity(int dim);
     static FormExpr jacobian();
     static FormExpr jacobianInverse();

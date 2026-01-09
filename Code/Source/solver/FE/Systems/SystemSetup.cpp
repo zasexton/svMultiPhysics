@@ -6,11 +6,15 @@
  */
 
 #include "Systems/FESystem.h"
+#include "Systems/CoupledBoundaryManager.h"
 #include "Systems/GlobalKernelStateProvider.h"
 #include "Systems/MaterialStateProvider.h"
+#include "Systems/OperatorBackends.h"
 
 #include "Assembly/Assembler.h"
 #include "Assembly/AssemblyKernel.h"
+#include "Assembly/AssemblerSelection.h"
+#include "Assembly/MatrixFreeAssembler.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #include "Assembly/MeshAccess.h"
@@ -31,8 +35,15 @@
 
 #include "Quadrature/QuadratureFactory.h"
 
+#include "Core/FEConfig.h"
+
 #include <algorithm>
+#include <thread>
 #include <tuple>
+
+#if FE_HAS_MPI
+#  include <mpi.h>
+#endif
 
 namespace svmp {
 namespace FE {
@@ -502,6 +513,10 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     // Constraints
     // ---------------------------------------------------------------------
     affine_constraints_.clear();
+    for (auto& c : system_constraint_defs_) {
+        FE_CHECK_NOT_NULL(c.get(), "FESystem::setup: system constraint");
+        c->apply(*this, affine_constraints_);
+    }
     for (const auto& c : constraint_defs_) {
         FE_CHECK_NOT_NULL(c.get(), "FESystem::setup: constraint");
         c->apply(affine_constraints_);
@@ -899,12 +914,114 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                 parameter_registry_.addAll(kernel->parameterSpecs(), kernel->name());
             }
         }
+
+        if (coupled_boundary_) {
+            parameter_registry_.addAll(coupled_boundary_->parameterSpecs(), "CoupledBoundaryManager");
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Resolve FE/Forms ParameterSymbol -> ParameterRef(slot) (setup-time)
+    // ---------------------------------------------------------------------
+    {
+        const auto slot_of_real_param = [&](std::string_view key) -> std::optional<std::uint32_t> {
+            return parameter_registry_.slotOf(key);
+        };
+
+        for (const auto& tag : operator_registry_.list()) {
+            const auto& def = operator_registry_.get(tag);
+
+            for (const auto& term : def.cells) {
+                if (term.kernel) {
+                    term.kernel->resolveParameterSlots(slot_of_real_param);
+                }
+            }
+            for (const auto& term : def.boundary) {
+                if (term.kernel) {
+                    term.kernel->resolveParameterSlots(slot_of_real_param);
+                }
+            }
+            for (const auto& term : def.interior) {
+                if (term.kernel) {
+                    term.kernel->resolveParameterSlots(slot_of_real_param);
+                }
+            }
+        }
+
+        if (coupled_boundary_) {
+            coupled_boundary_->resolveParameterSlots(slot_of_real_param);
+        }
     }
 
     // ---------------------------------------------------------------------
     // Assembler configuration
     // ---------------------------------------------------------------------
-    assembler_ = assembly::createAssembler(opts.assembly_options);
+    assembly::FormCharacteristics form_chars{};
+    {
+        for (const auto& tag : operator_registry_.list()) {
+            const auto& def = operator_registry_.get(tag);
+
+            form_chars.has_cell_terms = form_chars.has_cell_terms || !def.cells.empty();
+            form_chars.has_boundary_terms = form_chars.has_boundary_terms || !def.boundary.empty();
+            form_chars.has_interior_face_terms = form_chars.has_interior_face_terms || !def.interior.empty();
+            form_chars.has_global_terms = form_chars.has_global_terms || !def.global.empty();
+
+            const auto mergeKernelMeta = [&](const std::shared_ptr<assembly::AssemblyKernel>& k) {
+                if (!k) return;
+                form_chars.required_data |= k->getRequiredData();
+                form_chars.max_time_derivative_order =
+                    std::max(form_chars.max_time_derivative_order, k->maxTemporalDerivativeOrder());
+                form_chars.has_field_requirements = form_chars.has_field_requirements || !k->fieldRequirements().empty();
+                form_chars.has_parameter_specs = form_chars.has_parameter_specs || !k->parameterSpecs().empty();
+            };
+
+            for (const auto& term : def.cells) {
+                mergeKernelMeta(term.kernel);
+            }
+            for (const auto& term : def.boundary) {
+                mergeKernelMeta(term.kernel);
+            }
+            for (const auto& term : def.interior) {
+                mergeKernelMeta(term.kernel);
+            }
+            for (const auto& k : def.global) {
+                if (!k) continue;
+                form_chars.has_parameter_specs = form_chars.has_parameter_specs || !k->parameterSpecs().empty();
+            }
+        }
+    }
+
+    assembly::SystemCharacteristics sys_chars{};
+    sys_chars.num_fields = field_registry_.size();
+    sys_chars.num_cells = meshAccess().numCells();
+    sys_chars.dimension = meshAccess().dimension();
+    sys_chars.num_dofs_total = dof_handler_.getDofMap().getNumDofs();
+    sys_chars.max_dofs_per_cell = dof_handler_.getDofMap().getMaxDofsPerCell();
+
+    for (const auto& rec : field_registry_.records()) {
+        if (!rec.space) continue;
+        sys_chars.max_polynomial_order = std::max(sys_chars.max_polynomial_order, rec.space->polynomial_order());
+    }
+
+    // Resolve thread count for reporting/heuristics (0 means "auto").
+    sys_chars.num_threads = opts.assembly_options.num_threads;
+    if (sys_chars.num_threads <= 0) {
+        const auto hw = std::max(1u, std::thread::hardware_concurrency());
+        sys_chars.num_threads = static_cast<int>(hw);
+    }
+
+    sys_chars.mpi_world_size = 1;
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        MPI_Comm_size(MPI_COMM_WORLD, &sys_chars.mpi_world_size);
+    }
+#endif
+
+    assembler_selection_report_.clear();
+    assembler_ = assembly::createAssembler(opts.assembly_options, opts.assembler_name,
+                                           form_chars, sys_chars, &assembler_selection_report_);
     FE_CHECK_NOT_NULL(assembler_.get(), "FESystem::setup: assembler");
     assembler_->setDofHandler(dof_handler_);
 
@@ -917,6 +1034,68 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     assembler_->setMaterialStateProvider(material_state_provider_.get());
     assembler_->setOptions(opts.assembly_options);
     assembler_->initialize();
+
+    // ---------------------------------------------------------------------
+    // Optional: Auto-register matrix-free operators (explicit opt-in)
+    // ---------------------------------------------------------------------
+    if (opts.auto_register_matrix_free) {
+        FE_CHECK_NOT_NULL(operator_backends_.get(), "FESystem::setup: operator_backends");
+        FE_THROW_IF(field_registry_.size() != 1u, NotImplementedException,
+                    "FESystem::setup: auto_register_matrix_free currently requires a single-field system");
+
+        std::size_t registered = 0;
+        for (const auto& tag : operator_registry_.list()) {
+            if (operator_backends_->hasMatrixFree(tag)) {
+                continue; // Respect explicit user registration.
+            }
+
+            const auto& def = operator_registry_.get(tag);
+            if (def.cells.empty()) continue;
+            if (!def.boundary.empty() || !def.interior.empty() || !def.global.empty()) {
+                continue; // Cell-only operators only (initial conservative scope).
+            }
+
+            // Build a (possibly composite) cell kernel for this operator.
+            std::shared_ptr<assembly::AssemblyKernel> kernel_to_wrap;
+            if (def.cells.size() == 1u) {
+                kernel_to_wrap = def.cells.front().kernel;
+            } else {
+                auto composite = std::make_shared<assembly::CompositeKernel>();
+                for (const auto& term : def.cells) {
+                    if (!term.kernel) continue;
+                    composite->addKernel(term.kernel);
+                }
+                kernel_to_wrap = std::move(composite);
+            }
+
+            if (!kernel_to_wrap) continue;
+
+            // Conservative eligibility: linear, steady, cell-only.
+            const auto required = kernel_to_wrap->getRequiredData();
+            if (assembly::hasFlag(required, assembly::RequiredData::SolutionCoefficients) ||
+                assembly::hasFlag(required, assembly::RequiredData::SolutionValues) ||
+                assembly::hasFlag(required, assembly::RequiredData::SolutionGradients) ||
+                assembly::hasFlag(required, assembly::RequiredData::SolutionHessians) ||
+                assembly::hasFlag(required, assembly::RequiredData::SolutionLaplacians) ||
+                assembly::hasFlag(required, assembly::RequiredData::MaterialState) ||
+                kernel_to_wrap->maxTemporalDerivativeOrder() > 0) {
+                continue;
+            }
+
+            auto mf_unique = assembly::wrapAsMatrixFreeKernel(kernel_to_wrap);
+            std::shared_ptr<assembly::IMatrixFreeKernel> mf_kernel = std::move(mf_unique);
+            operator_backends_->registerMatrixFree(tag, std::move(mf_kernel));
+            ++registered;
+        }
+
+        if (registered > 0u) {
+            if (!assembler_selection_report_.empty()) {
+                assembler_selection_report_.append("\n");
+            }
+            assembler_selection_report_.append("Auto-registered matrix-free operators: ");
+            assembler_selection_report_.append(std::to_string(registered));
+        }
+    }
 
     is_setup_ = true;
 }

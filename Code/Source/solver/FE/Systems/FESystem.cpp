@@ -9,6 +9,7 @@
 
 #include "Systems/SystemAssembly.h"
 #include "Systems/OperatorBackends.h"
+#include "Systems/CoupledBoundaryManager.h"
 #include "Systems/SystemsExceptions.h"
 
 #include "Assembly/AssemblyKernel.h"
@@ -52,6 +53,7 @@ void FESystem::invalidateSetup() noexcept
 {
     is_setup_ = false;
     assembler_.reset();
+    assembler_selection_report_.clear();
     material_state_provider_.reset();
     global_kernel_state_provider_.reset();
     sparsity_by_op_.clear();
@@ -97,6 +99,13 @@ void FESystem::addConstraint(std::unique_ptr<constraints::Constraint> c)
     invalidateSetup();
     FE_CHECK_NOT_NULL(c.get(), "FESystem::addConstraint: constraint");
     constraint_defs_.push_back(std::move(c));
+}
+
+void FESystem::addSystemConstraint(std::unique_ptr<ISystemConstraint> c)
+{
+    invalidateSetup();
+    FE_CHECK_NOT_NULL(c.get(), "FESystem::addSystemConstraint: constraint");
+    system_constraint_defs_.push_back(std::move(c));
 }
 
 void FESystem::addOperator(OperatorTag name)
@@ -220,10 +229,34 @@ Real FESystem::evaluateBoundaryFunctional(const std::string& tag,
     return operator_backends_->evaluateBoundaryFunctional(*this, tag, boundary_marker, state);
 }
 
+CoupledBoundaryManager& FESystem::coupledBoundaryManager(FieldId primary_field)
+{
+    if (!coupled_boundary_) {
+        coupled_boundary_ = std::make_unique<CoupledBoundaryManager>(*this, primary_field);
+        return *coupled_boundary_;
+    }
+    FE_THROW_IF(coupled_boundary_->primaryField() != primary_field, InvalidArgumentException,
+                "FESystem::coupledBoundaryManager: manager already initialized with a different primary field");
+    return *coupled_boundary_;
+}
+
 const assembly::IMeshAccess& FESystem::meshAccess() const
 {
     FE_CHECK_NOT_NULL(mesh_access_.get(), "FESystem::meshAccess");
     return *mesh_access_;
+}
+
+std::string FESystem::assemblerName() const
+{
+    if (!assembler_) {
+        return {};
+    }
+    return assembler_->name();
+}
+
+std::string FESystem::assemblerSelectionReport() const
+{
+    return assembler_selection_report_;
 }
 
 ISearchAccess::PointLocation FESystem::locatePoint(const std::array<Real, 3>& point,
@@ -404,6 +437,9 @@ void FESystem::beginTimeStep()
     if (global_kernel_state_provider_) {
         global_kernel_state_provider_->beginTimeStep();
     }
+    if (coupled_boundary_) {
+        coupled_boundary_->beginTimeStep();
+    }
 }
 
 void FESystem::commitTimeStep()
@@ -414,6 +450,28 @@ void FESystem::commitTimeStep()
     }
     if (global_kernel_state_provider_) {
         global_kernel_state_provider_->commitTimeStep();
+    }
+    if (coupled_boundary_) {
+        coupled_boundary_->commitTimeStep();
+    }
+}
+
+void FESystem::updateConstraints(double time, double dt)
+{
+    requireSetup();
+
+    for (const auto& c : constraint_defs_) {
+        FE_CHECK_NOT_NULL(c.get(), "FESystem::updateConstraints: constraint");
+        if (c->isTimeDependent()) {
+            (void)c->updateValues(affine_constraints_, time);
+        }
+    }
+
+    for (auto& c : system_constraint_defs_) {
+        FE_CHECK_NOT_NULL(c.get(), "FESystem::updateConstraints: system constraint");
+        if (c->isTimeDependent()) {
+            (void)c->updateValues(*this, affine_constraints_, time, dt);
+        }
     }
 }
 

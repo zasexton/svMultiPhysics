@@ -14,8 +14,11 @@
 
 #include "Assembly/DeviceAssembler.h"
 #include "Assembly/AssemblyContext.h"
+#include "Dofs/DofMap.h"
+#include "Spaces/H1Space.h"
 
 #include <cmath>
+#include <array>
 #include <vector>
 #include <stdexcept>
 
@@ -23,6 +26,142 @@ namespace svmp {
 namespace FE {
 namespace assembly {
 namespace test {
+
+namespace {
+
+class TrivialMeshAccess final : public IMeshAccess {
+public:
+    explicit TrivialMeshAccess(GlobalIndex num_cells) : num_cells_(num_cells) {}
+
+    [[nodiscard]] GlobalIndex numCells() const override { return num_cells_; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return num_cells_; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Tetra4; }
+
+    void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override {
+        nodes.resize(4);
+        const GlobalIndex base = cell_id * 4;
+        nodes[0] = base + 0;
+        nodes[1] = base + 1;
+        nodes[2] = base + 2;
+        nodes[3] = base + 3;
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex /*node_id*/) const override {
+        return {0.0, 0.0, 0.0};
+    }
+
+    void getCellCoordinates(GlobalIndex cell_id, std::vector<std::array<Real, 3>>& coords) const override {
+        std::vector<GlobalIndex> nodes;
+        getCellNodes(cell_id, nodes);
+        coords.resize(nodes.size());
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            coords[i] = getNodeCoordinates(nodes[i]);
+        }
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/, GlobalIndex /*cell_id*/) const override {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return -1; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex /*face_id*/) const override {
+        return {-1, -1};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override {
+        for (GlobalIndex c = 0; c < num_cells_; ++c) {
+            callback(c);
+        }
+    }
+
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override {
+        forEachCell(std::move(callback));
+    }
+
+    void forEachBoundaryFace(int /*marker*/, std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+private:
+    GlobalIndex num_cells_{0};
+};
+
+static dofs::DofMap buildDisjointTetra4DofMap(GlobalIndex num_cells)
+{
+    dofs::DofMap dof_map(num_cells, /*n_dofs_total=*/num_cells * 4, /*dofs_per_cell=*/4);
+    for (GlobalIndex cell = 0; cell < num_cells; ++cell) {
+        const std::array<GlobalIndex, 4> dofs = {
+            cell * 4 + 0,
+            cell * 4 + 1,
+            cell * 4 + 2,
+            cell * 4 + 3,
+        };
+        dof_map.setCellDofs(cell, dofs);
+    }
+    dof_map.setNumDofs(num_cells * 4);
+    dof_map.setNumLocalDofs(num_cells * 4);
+    dof_map.finalize();
+    return dof_map;
+}
+
+class ScalingDeviceKernel final : public DeviceKernel {
+public:
+    explicit ScalingDeviceKernel(Real scale, std::size_t num_dofs)
+        : scale_(scale), num_dofs_(num_dofs)
+    {
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const noexcept override { return RequiredData::None; }
+
+    void setup(std::size_t num_elements, const void* /*element_data*/, void* qpt_data) override
+    {
+        ++setup_calls_;
+        last_setup_elements_ = num_elements;
+        auto* q = static_cast<Real*>(qpt_data);
+        if (q != nullptr) {
+            q[0] = scale_;
+        }
+    }
+
+    void apply(std::size_t num_elements, const void* qpt_data, const Real* x, Real* y) override
+    {
+        ++apply_calls_;
+        last_apply_elements_ = num_elements;
+        const auto* q = static_cast<const Real*>(qpt_data);
+        const Real scale = (q != nullptr) ? q[0] : scale_;
+        for (std::size_t i = 0; i < num_dofs_; ++i) {
+            y[i] = scale * x[i];
+        }
+    }
+
+    [[nodiscard]] std::size_t qptDataSize() const noexcept override { return sizeof(Real); }
+
+    [[nodiscard]] int setupCalls() const noexcept { return setup_calls_; }
+    [[nodiscard]] int applyCalls() const noexcept { return apply_calls_; }
+    [[nodiscard]] std::size_t lastSetupElements() const noexcept { return last_setup_elements_; }
+    [[nodiscard]] std::size_t lastApplyElements() const noexcept { return last_apply_elements_; }
+
+private:
+    Real scale_{1.0};
+    std::size_t num_dofs_{0};
+    int setup_calls_{0};
+    int apply_calls_{0};
+    std::size_t last_setup_elements_{0};
+    std::size_t last_apply_elements_{0};
+};
+
+} // namespace
 
 // ============================================================================
 // DeviceBackend Tests
@@ -581,6 +720,116 @@ TEST(DeviceAssemblerIntegrationTest, MultipleAllocations) {
         EXPECT_TRUE(vec.isAllocated());
         EXPECT_EQ(vec.size(), 100u);
     }
+}
+
+// ============================================================================
+// Partial Assembly Interface Tests (CPU Fallback)
+// ============================================================================
+
+TEST(DeviceAssemblerPartialAssemblyTest, ApplyThrowsWithoutSetup) {
+    DeviceAssembler assembler;
+    std::vector<Real> x(1, 1.0);
+    std::vector<Real> y(1, 0.0);
+    EXPECT_THROW(assembler.apply(x, y), std::runtime_error);
+}
+
+TEST(DeviceAssemblerPartialAssemblyTest, SetupAndApplyCallsDeviceKernel) {
+    const GlobalIndex n_cells = 2;
+    TrivialMeshAccess mesh(n_cells);
+    auto dof_map = buildDisjointTetra4DofMap(n_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    DeviceOptions options;
+    options.backend = DeviceBackend::CPU;
+    options.assembly_level = DeviceAssemblyLevel::Partial;
+
+    DeviceAssembler assembler(options);
+    assembler.setDofMap(dof_map);
+
+    const std::size_t num_dofs = static_cast<std::size_t>(dof_map.getNumLocalDofs());
+    ScalingDeviceKernel kernel(/*scale=*/2.0, num_dofs);
+
+    assembler.setup(mesh, space, kernel);
+    EXPECT_TRUE(assembler.isSetup());
+    EXPECT_EQ(kernel.setupCalls(), 1);
+    EXPECT_EQ(kernel.lastSetupElements(), static_cast<std::size_t>(n_cells));
+
+    std::vector<Real> x(num_dofs, 0.0);
+    for (std::size_t i = 0; i < num_dofs; ++i) {
+        x[i] = static_cast<Real>(i + 1);
+    }
+    std::vector<Real> y(num_dofs, 0.0);
+
+    assembler.apply(x, y);
+
+    EXPECT_EQ(kernel.applyCalls(), 1);
+    EXPECT_EQ(kernel.lastApplyElements(), static_cast<std::size_t>(n_cells));
+    for (std::size_t i = 0; i < num_dofs; ++i) {
+        EXPECT_DOUBLE_EQ(y[i], 2.0 * x[i]);
+    }
+
+    const auto& stats = assembler.getLastStats();
+    EXPECT_EQ(stats.host_to_device_bytes, num_dofs * sizeof(Real));
+    EXPECT_EQ(stats.device_to_host_bytes, num_dofs * sizeof(Real));
+}
+
+TEST(DeviceAssemblerPartialAssemblyTest, ApplySizeMismatchThrows) {
+    const GlobalIndex n_cells = 1;
+    TrivialMeshAccess mesh(n_cells);
+    auto dof_map = buildDisjointTetra4DofMap(n_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    DeviceOptions options;
+    options.backend = DeviceBackend::CPU;
+    options.assembly_level = DeviceAssemblyLevel::Partial;
+
+    DeviceAssembler assembler(options);
+    assembler.setDofMap(dof_map);
+
+    const std::size_t num_dofs = static_cast<std::size_t>(dof_map.getNumLocalDofs());
+    ScalingDeviceKernel kernel(/*scale=*/1.0, num_dofs);
+    assembler.setup(mesh, space, kernel);
+
+    std::vector<Real> x(num_dofs + 1, 1.0);
+    std::vector<Real> y(num_dofs, 0.0);
+    EXPECT_THROW(assembler.apply(x, y), std::invalid_argument);
+}
+
+// ============================================================================
+// Conditional GPU Backend Tests (skipped unless supported + available)
+// ============================================================================
+
+TEST(DeviceAssemblerGPUTest, CUDABackendKernelLaunchIfAvailable) {
+#if defined(SVMP_HAS_CUDA)
+    if (!DeviceAssembler::isGPUAvailable()) {
+        GTEST_SKIP() << "No GPU available at runtime";
+    }
+    GTEST_SKIP() << "CUDA backend kernel launch not implemented in this build";
+#else
+    GTEST_SKIP() << "CUDA backend not compiled";
+#endif
+}
+
+TEST(DeviceAssemblerGPUTest, HIPBackendKernelLaunchIfAvailable) {
+#if defined(SVMP_HAS_HIP)
+    if (!DeviceAssembler::isGPUAvailable()) {
+        GTEST_SKIP() << "No GPU available at runtime";
+    }
+    GTEST_SKIP() << "HIP backend kernel launch not implemented in this build";
+#else
+    GTEST_SKIP() << "HIP backend not compiled";
+#endif
+}
+
+TEST(DeviceAssemblerGPUTest, SYCLBackendKernelLaunchIfAvailable) {
+#if defined(SVMP_HAS_SYCL)
+    if (!DeviceAssembler::isGPUAvailable()) {
+        GTEST_SKIP() << "No GPU available at runtime";
+    }
+    GTEST_SKIP() << "SYCL backend kernel launch not implemented in this build";
+#else
+    GTEST_SKIP() << "SYCL backend not compiled";
+#endif
 }
 
 } // namespace test

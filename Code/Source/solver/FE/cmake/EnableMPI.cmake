@@ -7,22 +7,44 @@ if(FE_ENABLE_MPI)
 
     # CMake's FindMPI module merges stderr into stdout for wrapper interrogation.
     # In sandboxed environments, OpenMPI can emit warnings (e.g. opal_ifinit socket failures)
-    # that then break FindMPI's parsing of include directories. Detect that case and fall back
-    # to a manual wrapper-based configuration path.
+    # that break FindMPI's parsing of include directories (sometimes producing entries like
+    # "-I/usr/include/..." in INTERFACE_INCLUDE_DIRECTORIES). Prefer a manual wrapper-based
+    # configuration path when the MPI wrapper supports `-showme:*` interrogation.
     find_program(FE_MPI_CXX_WRAPPER
         NAMES mpicxx mpic++ mpiCC
     )
 
     set(_fe_mpi_use_manual OFF)
     if(FE_MPI_CXX_WRAPPER)
+        # Probe wrapper capabilities: if `-showme:*` commands work, use the manual path.
         execute_process(
-            COMMAND ${FE_MPI_CXX_WRAPPER} -showme:compile
-            OUTPUT_VARIABLE _fe_mpi_showme_out OUTPUT_STRIP_TRAILING_WHITESPACE
-            ERROR_VARIABLE  _fe_mpi_showme_err OUTPUT_STRIP_TRAILING_WHITESPACE
-            RESULT_VARIABLE _fe_mpi_showme_rc
+            COMMAND ${FE_MPI_CXX_WRAPPER} -showme:incdirs
+            OUTPUT_VARIABLE _fe_mpi_probe_incdirs_out OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_VARIABLE  _fe_mpi_probe_incdirs_err OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE _fe_mpi_probe_incdirs_rc
         )
-        if(_fe_mpi_showme_err MATCHES "opal_ifinit: socket\\(\\) failed" OR
-           _fe_mpi_showme_out MATCHES "opal_ifinit: socket\\(\\) failed") # defensive
+        execute_process(
+            COMMAND ${FE_MPI_CXX_WRAPPER} -showme:libdirs
+            OUTPUT_VARIABLE _fe_mpi_probe_libdirs_out OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_VARIABLE  _fe_mpi_probe_libdirs_err OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE _fe_mpi_probe_libdirs_rc
+        )
+        execute_process(
+            COMMAND ${FE_MPI_CXX_WRAPPER} -showme:libs
+            OUTPUT_VARIABLE _fe_mpi_probe_libs_out OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_VARIABLE  _fe_mpi_probe_libs_err OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE _fe_mpi_probe_libs_rc
+        )
+
+        if(_fe_mpi_probe_incdirs_rc EQUAL 0 AND NOT _fe_mpi_probe_incdirs_out STREQUAL "" AND
+           _fe_mpi_probe_libdirs_rc EQUAL 0 AND NOT _fe_mpi_probe_libdirs_out STREQUAL "" AND
+           _fe_mpi_probe_libs_rc EQUAL 0 AND NOT _fe_mpi_probe_libs_out STREQUAL "")
+            set(_fe_mpi_use_manual ON)
+            message(STATUS "FE: Using manual MPI configuration via wrapper interrogation (bypassing FindMPI).")
+        elseif(_fe_mpi_probe_incdirs_err MATCHES "opal_ifinit: socket\\(\\) failed" OR
+               _fe_mpi_probe_libdirs_err MATCHES "opal_ifinit: socket\\(\\) failed" OR
+               _fe_mpi_probe_libs_err MATCHES "opal_ifinit: socket\\(\\) failed")
+            # Defensive fallback: even if probes are incomplete, avoid FindMPI when wrapper emits warnings.
             set(_fe_mpi_use_manual ON)
             message(WARNING "FE: OpenMPI wrapper emitted warnings; using manual MPI configuration (bypassing FindMPI).")
         endif()

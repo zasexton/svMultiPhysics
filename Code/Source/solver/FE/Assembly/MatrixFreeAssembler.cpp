@@ -138,6 +138,45 @@ private:
     mutable KernelOutput output_;
 };
 
+class OwningWrappedMatrixFreeKernel : public IMatrixFreeKernel {
+public:
+    explicit OwningWrappedMatrixFreeKernel(std::shared_ptr<AssemblyKernel> kernel)
+        : kernel_(std::move(kernel))
+    {
+        FE_CHECK_NOT_NULL(kernel_.get(), "OwningWrappedMatrixFreeKernel: kernel");
+    }
+
+    void applyLocal(
+        const AssemblyContext& context,
+        std::span<const Real> x_local,
+        std::span<Real> y_local) override
+    {
+        LocalIndex n_dofs = context.numTestDofs();
+
+        output_.clear();
+        output_.reserve(n_dofs, n_dofs, true, false);
+
+        kernel_->computeCell(const_cast<AssemblyContext&>(context), output_);
+
+        auto n = static_cast<std::size_t>(n_dofs);
+        std::fill(y_local.begin(), y_local.end(), Real(0));
+
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = 0; j < n; ++j) {
+                y_local[i] += output_.local_matrix[i * n + j] * x_local[j];
+            }
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const noexcept override {
+        return kernel_->getRequiredData();
+    }
+
+private:
+    std::shared_ptr<AssemblyKernel> kernel_;
+    mutable KernelOutput output_;
+};
+
 namespace {
 
 int defaultGeometryOrder(ElementType element_type) noexcept
@@ -726,6 +765,10 @@ void MatrixFreeAssembler::applyDirect(std::span<const Real> x, std::span<Real> y
 void MatrixFreeAssembler::getDiagonal(std::span<Real> diag) {
     FE_THROW_IF(!isConfigured(), "MatrixFreeAssembler not configured");
 
+    if (!is_setup_) {
+        setup();
+    }
+
     std::fill(diag.begin(), diag.end(), Real(0));
 
     // Compute diagonal by applying to unit vectors
@@ -835,6 +878,12 @@ std::unique_ptr<IMatrixFreeKernel> wrapAsMatrixFreeKernel(
     AssemblyKernel& kernel)
 {
     return std::make_unique<WrappedMatrixFreeKernel>(kernel);
+}
+
+std::unique_ptr<IMatrixFreeKernel> wrapAsMatrixFreeKernel(
+    std::shared_ptr<AssemblyKernel> kernel)
+{
+    return std::make_unique<OwningWrappedMatrixFreeKernel>(std::move(kernel));
 }
 
 } // namespace assembly

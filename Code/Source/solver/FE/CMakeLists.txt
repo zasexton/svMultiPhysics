@@ -424,6 +424,9 @@ set(FE_DOFS_SOURCES
 set(FE_CONSTRAINTS_HEADERS
     Constraints/AffineConstraints.h
     Constraints/Constraint.h
+    Constraints/CoupledBCContext.h
+    Constraints/CoupledNeumannBC.h
+    Constraints/CoupledRobinBC.h
     Constraints/DirichletBC.h
     Constraints/NeumannBC.h
     Constraints/PeriodicBC.h
@@ -462,9 +465,11 @@ set(FE_CONSTRAINTS_SOURCES
 set(FE_ASSEMBLY_HEADERS
     # Phase 1: CORE
     Assembly/Assembler.h
+    Assembly/AssemblerSelection.h
     Assembly/GlobalSystemView.h
     Assembly/AssemblyKernel.h
     Assembly/AssemblyContext.h
+    Assembly/JIT/KernelArgs.h
     Assembly/TimeIntegrationContext.h
     Assembly/StandardAssembler.h
     Assembly/ParallelAssembler.h
@@ -480,6 +485,9 @@ set(FE_ASSEMBLY_HEADERS
     Assembly/FunctionalAssembler.h
     Assembly/WorkStreamAssembler.h
     Assembly/CachedAssembler.h
+    Assembly/DecoratorAssembler.h
+    Assembly/ScheduledAssembler.h
+    Assembly/VectorizedAssembler.h
     Assembly/VectorizationHelper.h
     Assembly/SymbolicAssembler.h
     Assembly/DeviceAssembler.h
@@ -494,6 +502,7 @@ set(FE_ASSEMBLY_SOURCES
     Assembly/AssemblyKernel.cpp
     Assembly/AssemblyContext.cpp
     Assembly/StandardAssembler.cpp
+    Assembly/AssemblerFactory.cpp
     Assembly/ParallelAssembler.cpp
     Assembly/GhostContributionManager.cpp
     # Phase 2: HIGH priority
@@ -560,6 +569,11 @@ set(FE_GEOMETRY_SOURCES
 # Systems sources (requires FE/Assembly)
 set(FE_SYSTEMS_HEADERS
     Systems/ContactPenaltyKernel.h
+    Systems/AuxiliaryState.h
+    Systems/AuxiliaryStateBuilder.h
+    Systems/ODEIntegrator.h
+    Systems/CoupledBoundaryConditions.h
+    Systems/CoupledBoundaryManager.h
     Systems/FESystem.h
     Systems/FormsInstaller.h
     Systems/FieldRegistry.h
@@ -573,9 +587,11 @@ set(FE_SYSTEMS_HEADERS
     Systems/SearchAccess.h
     Systems/SurfaceContactKernel.h
     Systems/SystemAssembly.h
+    Systems/SystemConstraint.h
     Systems/SystemConstraints.h
     Systems/SystemSetup.h
     Systems/SystemState.h
+    Systems/StrongDirichletConstraint.h
     Systems/TimeIntegrator.h
     Systems/TransientSystem.h
     Systems/SystemsExceptions.h
@@ -596,13 +612,19 @@ set(FE_SYSTEMS_SOURCES
     Systems/SystemAssembly.cpp
     Systems/SystemConstraints.cpp
     Systems/SystemSetup.cpp
+    Systems/StrongDirichletConstraint.cpp
     Systems/TimeIntegrator.cpp
+    Systems/CoupledBoundaryManager.cpp
+    Systems/ODEIntegrator.cpp
     Systems/TransientSystem.cpp
 )
 
 # Forms sources (requires FE/Assembly; used by SymbolicAssembler)
 set(FE_FORMS_HEADERS
     Forms/Forms.h
+    Forms/BoundaryConditions.h
+    Forms/BoundaryFunctional.h
+    Forms/AffineAnalysis.h
     Forms/FormExpr.h
     Forms/Index.h
     Forms/Einsum.h
@@ -613,9 +635,12 @@ set(FE_FORMS_HEADERS
     Forms/Value.h
     Forms/ConstitutiveModel.h
     Forms/BlockForm.h
-    Forms/Complex.h
-    Forms/Vocabulary.h
-)
+	    Forms/Complex.h
+	    Forms/PointEvaluator.h
+	    Forms/JIT/KernelIR.h
+	    Forms/JIT/JITValidation.h
+	    Forms/Vocabulary.h
+	)
 
 set(FE_FORMS_SOURCES
     Forms/FormExpr.cpp
@@ -623,8 +648,13 @@ set(FE_FORMS_SOURCES
     Forms/Einsum.cpp
     Forms/FormIR.cpp
     Forms/FormCompiler.cpp
-    Forms/FormKernels.cpp
-)
+    Forms/AffineAnalysis.cpp
+	    Forms/BoundaryFunctional.cpp
+	    Forms/FormKernels.cpp
+	    Forms/PointEvaluator.cpp
+	    Forms/JIT/KernelIR.cpp
+	    Forms/JIT/JITValidation.cpp
+	)
 
 # TimeStepping sources (requires FE/Systems + FE/Assembly + FE/Backends)
 	set(FE_TIMESTEPPING_HEADERS
@@ -1541,9 +1571,13 @@ if(FE_BUILD_TESTS)
 
         # Forms module tests (depends on Assembly)
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Forms/test_main.cpp)
-	            set(FE_FORMS_TEST_SOURCES
-	                Tests/Unit/Forms/test_FormExpr.cpp
-	                Tests/Unit/Forms/test_FormCompiler.cpp
+		            set(FE_FORMS_TEST_SOURCES
+		                Tests/Unit/Forms/test_FormExpr.cpp
+	                    Tests/Unit/Forms/test_CoupledTerminals.cpp
+	                    Tests/Unit/Forms/test_JITValidation.cpp
+	                    Tests/Unit/Forms/test_PointEvaluator.cpp
+		                Tests/Unit/Forms/test_BoundaryConditionHelpers.cpp
+		                Tests/Unit/Forms/test_FormCompiler.cpp
 	                Tests/Unit/Forms/test_Dual.cpp
 	                Tests/Unit/Forms/test_DynamicValueShapes.cpp
 	                Tests/Unit/Forms/test_FormKernel_Cell.cpp
@@ -1592,7 +1626,9 @@ if(FE_BUILD_TESTS)
             Tests/Unit/Assembly/test_GlobalSystemView.cpp
             Tests/Unit/Assembly/test_AssemblyKernel.cpp
             Tests/Unit/Assembly/test_AssemblyContext.cpp
+            Tests/Unit/Assembly/test_JITKernelArgsPacking.cpp
             Tests/Unit/Assembly/test_StandardAssembler.cpp
+            Tests/Unit/Assembly/test_AssemblerSelection.cpp
             Tests/Unit/Assembly/test_ParallelAssembler.cpp
             Tests/Unit/Assembly/test_GhostContributionManager.cpp
             # Phase 2: HIGH priority tests
@@ -1639,9 +1675,15 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Systems/test_ParameterRegistry.cpp
                 Tests/Unit/Systems/test_FieldEvaluation.cpp
                 Tests/Unit/Systems/test_FESystem.cpp
+                Tests/Unit/Systems/test_AssemblerSelection.cpp
                 Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp
                 Tests/Unit/Systems/test_NavierStokesCoupled.cpp
                 Tests/Unit/Systems/test_SystemConstraints.cpp
+                Tests/Unit/Systems/test_StrongDirichletConstraint.cpp
+                Tests/Unit/Systems/test_CoupledBoundaryManager.cpp
+                Tests/Unit/Systems/test_CoupledBoundaryConditionHelpers.cpp
+                Tests/Unit/Systems/test_AuxiliaryStateBuilder.cpp
+                Tests/Unit/Systems/test_ODEIntegrator.cpp
                 Tests/Unit/Systems/test_OperatorBackends.cpp
                 Tests/Unit/Systems/test_TransientDt.cpp
                 Tests/Unit/Systems/test_main.cpp
@@ -1787,12 +1829,18 @@ if(FE_STANDALONE_BUILD)
         )
     endif()
 
-    # If FE was built with bundled METIS/ParMETIS support, export/install the
-    # internal ThirdParty libraries as part of the standalone FE package.
-    foreach(_fe_tp_target IN ITEMS
-            ${GKLIB_INTERNAL_LIBRARY_NAME}
-            ${METIS_INTERNAL_LIBRARY_NAME}
-            ${PARMETIS_INTERNAL_LIBRARY_NAME})
+    # If Mesh (svmesh) pulled in bundled METIS/ParMETIS targets, ensure they are
+    # part of the same export set so `install(EXPORT ...)` remains consistent.
+    set(_fe_tp_targets
+        ${GKLIB_INTERNAL_LIBRARY_NAME}
+        ${METIS_INTERNAL_LIBRARY_NAME}
+        ${PARMETIS_INTERNAL_LIBRARY_NAME}
+        gklib_internal
+        metis_internal
+        parmetis_internal
+    )
+    list(REMOVE_DUPLICATES _fe_tp_targets)
+    foreach(_fe_tp_target IN LISTS _fe_tp_targets)
         if(_fe_tp_target AND TARGET ${_fe_tp_target})
             install(TARGETS ${_fe_tp_target}
                 EXPORT svfeTargets

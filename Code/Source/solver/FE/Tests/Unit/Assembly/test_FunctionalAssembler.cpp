@@ -15,13 +15,45 @@
 #include "Assembly/FunctionalAssembler.h"
 #include "Assembly/AssemblyContext.h"
 
+#include "Forms/BoundaryFunctional.h"
+#include "Forms/FormExpr.h"
+#include "Spaces/H1Space.h"
+#include "Tests/Unit/Forms/FormsTestHelpers.h"
+
 #include <cmath>
 #include <functional>
+#include <vector>
 
 namespace svmp {
 namespace FE {
 namespace assembly {
 namespace test {
+
+namespace {
+
+class BoundaryMeasureKernel final : public FunctionalKernel {
+public:
+    [[nodiscard]] RequiredData getRequiredData() const noexcept override
+    {
+        return RequiredData::IntegrationWeights;
+    }
+
+    [[nodiscard]] bool hasCell() const noexcept override { return false; }
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+
+    [[nodiscard]] Real evaluateCell(const AssemblyContext& /*ctx*/, LocalIndex /*q*/) override { return 0.0; }
+
+    [[nodiscard]] Real evaluateBoundaryFace(const AssemblyContext& /*ctx*/,
+                                           LocalIndex /*q*/,
+                                           int /*boundary_marker*/) override
+    {
+        return 1.0;
+    }
+
+    [[nodiscard]] std::string name() const override { return "BoundaryMeasureKernel"; }
+};
+
+} // namespace
 
 // ============================================================================
 // FunctionalKernel Tests
@@ -229,6 +261,97 @@ TEST(KahanSummationTest, Precision) {
 
     EXPECT_NE(assembler_std, nullptr);
     EXPECT_NE(assembler_kahan, nullptr);
+}
+
+// ============================================================================
+// Boundary Functional Assembly (Regression/Integration)
+// ============================================================================
+
+TEST(FunctionalAssemblerBoundaryTest, IntegrateConstantOverBoundaryFace)
+{
+    forms::test::SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+    auto dof_map = forms::test::createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    FunctionalAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setDofMap(dof_map);
+    assembler.setSpace(space);
+
+    BoundaryMeasureKernel kernel;
+    const Real area = assembler.assembleBoundaryScalar(kernel, /*boundary_marker=*/2);
+    EXPECT_NEAR(area, 0.5, 1e-12);
+}
+
+TEST(FunctionalAssemblerBoundaryTest, BoundaryFluxUsesElementLocalCoefficients)
+{
+    forms::test::SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+
+    // Cell DOFs are not 0..3 to ensure the assembler gathers element-local coefficients correctly.
+    dofs::DofMap dof_map(/*n_cells=*/1, /*n_dofs_total=*/10, /*dofs_per_cell=*/4);
+    const std::array<GlobalIndex, 4> cell_dofs = {5, 6, 7, 8};
+    dof_map.setCellDofs(0, cell_dofs);
+    dof_map.setNumDofs(10);
+    dof_map.setNumLocalDofs(10);
+    dof_map.finalize();
+
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    // Linear field u=z on the reference tetra:
+    // nodes (0,1,2) have z=0, node 3 has z=1.
+    std::vector<Real> u(10, 100.0);
+    u[5] = 0.0;
+    u[6] = 0.0;
+    u[7] = 0.0;
+    u[8] = 1.0;
+
+    FunctionalAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setDofMap(dof_map);
+    assembler.setSpace(space);
+    assembler.setSolution(u);
+
+    BoundaryFluxKernel kernel;
+    const Real flux = assembler.assembleBoundaryScalar(kernel, /*boundary_marker=*/2);
+
+    // On face {0,1,2} (z=0 plane), outward normal is -e_z and grad(z)=+e_z.
+    // So ∫ grad(u)·n ds = ∫ (-1) ds = -area = -0.5.
+    EXPECT_NEAR(flux, -0.5, 1e-12);
+}
+
+TEST(FunctionalAssemblerBoundaryTest, FormsBoundaryFunctionalKernelEvaluatesDiscreteField)
+{
+    constexpr FieldId field = 0;
+
+    forms::test::SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+
+    dofs::DofMap dof_map(/*n_cells=*/1, /*n_dofs_total=*/10, /*dofs_per_cell=*/4);
+    const std::array<GlobalIndex, 4> cell_dofs = {5, 6, 7, 8};
+    dof_map.setCellDofs(0, cell_dofs);
+    dof_map.setNumDofs(10);
+    dof_map.setNumLocalDofs(10);
+    dof_map.finalize();
+
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    std::vector<Real> u(10, 123.0);
+    u[5] = 1.0;
+    u[6] = 1.0;
+    u[7] = 1.0;
+    u[8] = 1.0;
+
+    const auto integrand = forms::FormExpr::discreteField(field, space, "u");
+    auto kernel = forms::compileBoundaryFunctionalKernel(integrand, /*boundary_marker=*/2);
+
+    FunctionalAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setDofMap(dof_map);
+    assembler.setSpace(space);
+    assembler.setPrimaryField(field);
+    assembler.setSolution(u);
+
+    const Real Q = assembler.assembleBoundaryScalar(*kernel, /*boundary_marker=*/2);
+    EXPECT_NEAR(Q, 0.5, 1e-12);
 }
 
 } // namespace test

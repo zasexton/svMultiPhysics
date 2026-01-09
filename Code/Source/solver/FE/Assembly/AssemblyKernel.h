@@ -119,6 +119,7 @@ enum class RequiredData : std::uint32_t {
     IntegrationWeights  = 1 << 18,  ///< Weights * |J| (ready for integration)
 
     // Solution data (for nonlinear problems)
+    SolutionCoefficients= 1 << 19,  ///< Element-local DOF coefficients for the current solution
     SolutionValues      = 1 << 20,  ///< Solution values at quadrature points
     SolutionGradients   = 1 << 21,  ///< Solution gradients at quadrature points
     SolutionHessians    = 1 << 22,  ///< Solution Hessians
@@ -376,6 +377,26 @@ public:
 	     * interpret these values directly.
 	     */
 	    [[nodiscard]] virtual std::vector<params::Spec> parameterSpecs() const { return {}; }
+
+	    /**
+	     * @brief Optional setup-time resolution of parameter symbols to slot refs
+	     *
+	     * FE/Forms expressions can reference scalar parameters by name
+	     * (FormExprType::ParameterSymbol). For JIT-friendly evaluation, Systems can
+	     * resolve those names to stable integer slots and bind a flat constants
+	     * array into the AssemblyContext (see AssemblyContext::jitConstants()).
+	     *
+	     * Kernels that contain ParameterSymbol nodes may override this hook to
+	     * rewrite their internal representation to use ParameterRef(slot) nodes.
+	     * The default implementation is a no-op.
+	     *
+	     * @param slot_of_real_param Mapping from parameter key -> slot index.
+	     */
+	    virtual void resolveParameterSlots(
+	        const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
+	    {
+	        (void)slot_of_real_param;
+	    }
 
 	    // =========================================================================
 	    // Cell (Volume) Integration

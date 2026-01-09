@@ -13,6 +13,7 @@
 #include "Systems/SystemState.h"
 
 #include <functional>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -42,6 +43,31 @@ public:
 
     [[nodiscard]] const std::vector<params::Spec>& specs() const noexcept { return specs_; }
     [[nodiscard]] const params::Spec* find(std::string_view key) const noexcept;
+
+    // ---------------------------------------------------------------------
+    // Slot layout (JIT-friendly constant array)
+    // ---------------------------------------------------------------------
+
+    /**
+     * @brief Return number of parameter slots in the current registry.
+     *
+     * Slots are assigned deterministically (sorted by key) so that kernels can
+     * reference parameters by integer index instead of string lookup.
+     */
+    [[nodiscard]] std::size_t slotCount() const;
+
+    /**
+     * @brief Return slot index for a parameter key, if present.
+     */
+    [[nodiscard]] std::optional<std::uint32_t> slotOf(std::string_view key) const;
+
+    /**
+     * @brief Evaluate all Real-valued parameter slots for the provided state.
+     *
+     * Missing values are satisfied by defaults in the registry. If a required
+     * parameter is missing and has no default, this throws.
+     */
+    [[nodiscard]] std::vector<Real> evaluateRealSlots(const SystemStateView& state) const;
 
     /**
      * @brief Validate that the provided SystemStateView can satisfy required parameters.
@@ -77,6 +103,13 @@ private:
 
     std::vector<params::Spec> specs_{};
     std::unordered_map<std::string, Entry> by_key_{};
+
+    // Cached deterministic slot layout (key-sorted).
+    mutable bool slot_cache_valid_{false};
+    mutable std::vector<std::string> slot_keys_{};
+    mutable std::unordered_map<std::string, std::uint32_t> key_to_slot_{};
+
+    void rebuildSlotCache() const;
 };
 
 } // namespace systems
@@ -84,4 +117,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_SYSTEMS_PARAMETERREGISTRY_H
-

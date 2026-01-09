@@ -13,6 +13,7 @@
 #include "Assembly/MatrixFreeAssembler.h"
 #include "Assembly/FunctionalAssembler.h"
 
+#include <functional>
 #include <unordered_map>
 #include <utility>
 
@@ -85,6 +86,14 @@ void OperatorBackends::registerMatrixFree(OperatorTag tag,
     entry.assembler.reset();
 }
 
+bool OperatorBackends::hasMatrixFree(const OperatorTag& tag) const noexcept
+{
+    if (!impl_) {
+        return false;
+    }
+    return impl_->matrix_free.find(tag) != impl_->matrix_free.end();
+}
+
 std::shared_ptr<assembly::MatrixFreeOperator>
 OperatorBackends::matrixFreeOperator(const FESystem& system, const OperatorTag& tag) const
 {
@@ -150,13 +159,50 @@ Real OperatorBackends::evaluateFunctional(const FESystem& system,
                 "OperatorBackends::evaluateFunctional: unknown functional '" + tag + "'");
 
     auto& kernel = *it->second;
-    const auto& space = *system.field_registry_.records().front().space;
+    const auto& field = system.field_registry_.records().front();
+    const auto& space = *field.space;
 
     assembly::FunctionalAssembler assembler;
     assembler.setMesh(system.meshAccess());
     assembler.setDofMap(system.dof_handler_.getDofMap());
     assembler.setSpace(space);
+    assembler.setPrimaryField(field.id);
     assembler.setSolution(state.u);
+    assembler.setTimeIntegrationContext(state.time_integration);
+    assembler.setTime(static_cast<Real>(state.time));
+    assembler.setTimeStep(static_cast<Real>(state.dt));
+    const auto& preg = system.parameterRegistry();
+    const bool have_param_contracts = !preg.specs().empty();
+    std::function<std::optional<Real>(std::string_view)> get_real_param_wrapped{};
+    std::function<std::optional<params::Value>(std::string_view)> get_param_wrapped{};
+    if (have_param_contracts) {
+        get_real_param_wrapped = preg.makeRealGetter(state);
+        get_param_wrapped = preg.makeParamGetter(state);
+    }
+    assembler.setRealParameterGetter(have_param_contracts
+                                         ? &get_real_param_wrapped
+                                         : (state.getRealParam ? &state.getRealParam : nullptr));
+    assembler.setParameterGetter(have_param_contracts
+                                     ? &get_param_wrapped
+                                     : (state.getParam ? &state.getParam : nullptr));
+    assembler.setUserData(state.user_data);
+    std::vector<Real> jit_constants;
+    if (have_param_contracts && preg.slotCount() > 0u) {
+        jit_constants = preg.evaluateRealSlots(state);
+        assembler.setJITConstants(jit_constants);
+    } else {
+        assembler.setJITConstants({});
+    }
+    assembler.setCoupledValues({}, {});
+
+    if (!state.u_history.empty()) {
+        for (std::size_t k = 0; k < state.u_history.size(); ++k) {
+            assembler.setPreviousSolutionK(static_cast<int>(k + 1), state.u_history[k]);
+        }
+    } else {
+        assembler.setPreviousSolution(state.u_prev);
+        assembler.setPreviousSolution2(state.u_prev2);
+    }
     return assembler.assembleScalar(kernel);
 }
 
@@ -175,13 +221,50 @@ Real OperatorBackends::evaluateBoundaryFunctional(const FESystem& system,
                 "OperatorBackends::evaluateBoundaryFunctional: unknown functional '" + tag + "'");
 
     auto& kernel = *it->second;
-    const auto& space = *system.field_registry_.records().front().space;
+    const auto& field = system.field_registry_.records().front();
+    const auto& space = *field.space;
 
     assembly::FunctionalAssembler assembler;
     assembler.setMesh(system.meshAccess());
     assembler.setDofMap(system.dof_handler_.getDofMap());
     assembler.setSpace(space);
+    assembler.setPrimaryField(field.id);
     assembler.setSolution(state.u);
+    assembler.setTimeIntegrationContext(state.time_integration);
+    assembler.setTime(static_cast<Real>(state.time));
+    assembler.setTimeStep(static_cast<Real>(state.dt));
+    const auto& preg = system.parameterRegistry();
+    const bool have_param_contracts = !preg.specs().empty();
+    std::function<std::optional<Real>(std::string_view)> get_real_param_wrapped{};
+    std::function<std::optional<params::Value>(std::string_view)> get_param_wrapped{};
+    if (have_param_contracts) {
+        get_real_param_wrapped = preg.makeRealGetter(state);
+        get_param_wrapped = preg.makeParamGetter(state);
+    }
+    assembler.setRealParameterGetter(have_param_contracts
+                                         ? &get_real_param_wrapped
+                                         : (state.getRealParam ? &state.getRealParam : nullptr));
+    assembler.setParameterGetter(have_param_contracts
+                                     ? &get_param_wrapped
+                                     : (state.getParam ? &state.getParam : nullptr));
+    assembler.setUserData(state.user_data);
+    std::vector<Real> jit_constants;
+    if (have_param_contracts && preg.slotCount() > 0u) {
+        jit_constants = preg.evaluateRealSlots(state);
+        assembler.setJITConstants(jit_constants);
+    } else {
+        assembler.setJITConstants({});
+    }
+    assembler.setCoupledValues({}, {});
+
+    if (!state.u_history.empty()) {
+        for (std::size_t k = 0; k < state.u_history.size(); ++k) {
+            assembler.setPreviousSolutionK(static_cast<int>(k + 1), state.u_history[k]);
+        }
+    } else {
+        assembler.setPreviousSolution(state.u_prev);
+        assembler.setPreviousSolution2(state.u_prev2);
+    }
     return assembler.assembleBoundaryScalar(kernel, boundary_marker);
 }
 

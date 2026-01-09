@@ -131,6 +131,7 @@ struct LoopStatistics {
     double kernel_seconds{0.0};           ///< Time in kernel computation
     double insert_seconds{0.0};           ///< Time in global insertion
     int num_threads_used{1};              ///< Actual threads used
+    std::size_t prefetch_hints{0};        ///< Number of prefetch hints issued
 };
 
 // ============================================================================

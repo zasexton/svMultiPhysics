@@ -28,6 +28,13 @@
 #include <memory>
 #include <algorithm>
 #include <numeric>
+#include <cstdlib>
+#include <string>
+#include <array>
+
+#if FE_HAS_MPI
+#include <mpi.h>
+#endif
 
 namespace svmp {
 namespace FE {
@@ -65,6 +72,28 @@ inline dofs::DofMap createDofMapWithOwnership(GlobalIndex total_dofs,
     // Set ownership function
     dof_map.setDofOwnership([owned_begin, owned_end](GlobalIndex dof) -> int {
         return (dof >= owned_begin && dof < owned_end) ? 0 : 1;
+    });
+
+    dof_map.finalize();
+    return dof_map;
+}
+
+inline dofs::DofMap createDofMapWithScatteredOwnership(GlobalIndex total_dofs)
+{
+    // Two cells with 4 DOFs each.
+    dofs::DofMap dof_map(2, total_dofs, 4);
+    dof_map.setCellDofs(0, std::array<GlobalIndex, 4>{0, 1, 2, 3});
+    dof_map.setCellDofs(1, std::array<GlobalIndex, 4>{4, 5, 6, 7});
+
+    dof_map.setNumDofs(total_dofs);
+
+    // Disable contiguous ownership heuristic in GhostContributionManager.
+    dof_map.setNumLocalDofs(0);
+    dof_map.setMyRank(0);
+
+    // Even DOFs owned by rank 0, odd DOFs owned by rank 1.
+    dof_map.setDofOwnership([](GlobalIndex dof) -> int {
+        return (dof % 2 == 0) ? 0 : 1;
     });
 
     dof_map.finalize();
@@ -459,6 +488,196 @@ TEST_F(GhostContributionManagerTest, LargeContribution) {
     // 5 ghost rows x 10 cols = 50 contributions
     EXPECT_EQ(manager_->numBufferedMatrixContributions(), 50u);
 }
+
+TEST(GhostContributionManagerBufferTest, NonContiguousDofRangesBufferedCorrectly) {
+    auto dof_map = createDofMapWithScatteredOwnership(8);
+    GhostContributionManager manager(dof_map);
+    manager.setPolicy(GhostPolicy::ReverseScatter);
+    manager.initialize();
+
+    ASSERT_EQ(manager.numNeighbors(), 1);
+    ASSERT_EQ(manager.getNeighborRanks().size(), 1u);
+    EXPECT_EQ(manager.getNeighborRanks()[0], 1);
+
+    // Even rows are owned, odd rows are ghost.
+    EXPECT_TRUE(manager.addMatrixContribution(/*row=*/0, /*col=*/0, /*value=*/1.0));
+    EXPECT_FALSE(manager.addMatrixContribution(/*row=*/1, /*col=*/0, /*value=*/2.0));
+
+    EXPECT_EQ(manager.numBufferedMatrixContributions(), 1u);
+
+    manager.clearSendBuffers();
+    EXPECT_EQ(manager.numBufferedMatrixContributions(), 0u);
+
+    // Reuse buffers across cycles.
+    EXPECT_FALSE(manager.addMatrixContribution(/*row=*/3, /*col=*/2, /*value=*/3.0));
+    EXPECT_EQ(manager.numBufferedMatrixContributions(), 1u);
+}
+
+#if FE_HAS_MPI
+TEST(GhostContributionManagerMPITest, TwoRankGhostExchange) {
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "Run with 2 MPI ranks to enable this test";
+    }
+
+    constexpr GlobalIndex total_dofs = 20;
+    dofs::DofMap dof_map(2, total_dofs, 4);
+
+    if (rank == 0) {
+        dof_map.setCellDofs(0, std::array<GlobalIndex, 4>{0, 1, 2, 3});
+        dof_map.setCellDofs(1, std::array<GlobalIndex, 4>{5, 6, 10, 11});  // includes ghosts 10,11
+    } else {
+        dof_map.setCellDofs(0, std::array<GlobalIndex, 4>{10, 11, 12, 13});
+        dof_map.setCellDofs(1, std::array<GlobalIndex, 4>{8, 9, 14, 15});  // includes ghosts 8,9
+    }
+
+    dof_map.setNumDofs(total_dofs);
+    dof_map.setNumLocalDofs(0);  // disable contiguous heuristic
+    dof_map.setMyRank(rank);
+    dof_map.setDofOwnership([](GlobalIndex dof) -> int {
+        return (dof < 10) ? 0 : 1;
+    });
+    dof_map.finalize();
+
+    GhostContributionManager manager(dof_map, MPI_COMM_WORLD);
+    manager.setPolicy(GhostPolicy::ReverseScatter);
+    manager.setDeterministic(true);
+    manager.initialize();
+
+    if (rank == 0) {
+        EXPECT_FALSE(manager.addMatrixContribution(/*row=*/10, /*col=*/0, /*value=*/2.0));
+    } else {
+        EXPECT_FALSE(manager.addMatrixContribution(/*row=*/8, /*col=*/10, /*value=*/3.0));
+    }
+
+    manager.exchangeContributions();
+
+    const auto received = manager.getReceivedMatrixContributions();
+    if (rank == 0) {
+        bool found = false;
+        for (const auto& e : received) {
+            if (e.global_row == 8 && e.global_col == 10 && e.value == 3.0) {
+                found = true;
+            }
+        }
+        EXPECT_TRUE(found);
+    } else {
+        bool found = false;
+        for (const auto& e : received) {
+            if (e.global_row == 10 && e.global_col == 0 && e.value == 2.0) {
+                found = true;
+            }
+        }
+        EXPECT_TRUE(found);
+    }
+}
+
+TEST(GhostContributionManagerMPITest, MultiRankGhostExchange) {
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size < 4) {
+        GTEST_SKIP() << "Run with 4+ MPI ranks to enable this test";
+    }
+
+    constexpr GlobalIndex dofs_per_rank = 10;
+    const GlobalIndex total_dofs = static_cast<GlobalIndex>(size) * dofs_per_rank;
+
+    dofs::DofMap dof_map(2, total_dofs, 4);
+
+    const int next = (rank + 1) % size;
+    const int prev = (rank - 1 + size) % size;
+    const GlobalIndex owned_base = static_cast<GlobalIndex>(rank) * dofs_per_rank;
+
+    dof_map.setCellDofs(
+        0, std::array<GlobalIndex, 4>{owned_base + 0, owned_base + 1, owned_base + 2,
+                                      static_cast<GlobalIndex>(next) * dofs_per_rank});
+    dof_map.setCellDofs(
+        1, std::array<GlobalIndex, 4>{owned_base + 3, owned_base + 4, owned_base + 5,
+                                      static_cast<GlobalIndex>(prev) * dofs_per_rank});
+
+    dof_map.setNumDofs(total_dofs);
+    dof_map.setNumLocalDofs(0);  // disable contiguous heuristic
+    dof_map.setMyRank(rank);
+    dof_map.setDofOwnership([dofs_per_rank](GlobalIndex dof) -> int {
+        return static_cast<int>(dof / dofs_per_rank);
+    });
+    dof_map.finalize();
+
+    GhostContributionManager manager(dof_map, MPI_COMM_WORLD);
+    manager.setPolicy(GhostPolicy::ReverseScatter);
+    manager.setDeterministic(true);
+    manager.initialize();
+
+    const GlobalIndex row = static_cast<GlobalIndex>(next) * dofs_per_rank;
+    const GlobalIndex col = owned_base;
+    const Real value = static_cast<Real>(rank + 1);
+
+    EXPECT_FALSE(manager.addMatrixContribution(row, col, value));
+    manager.exchangeContributions();
+
+    const int expected_sender = prev;
+    const GlobalIndex expected_row = owned_base;
+    const GlobalIndex expected_col = static_cast<GlobalIndex>(expected_sender) * dofs_per_rank;
+    const Real expected_value = static_cast<Real>(expected_sender + 1);
+
+    bool found = false;
+    for (const auto& e : manager.getReceivedMatrixContributions()) {
+        if (e.global_row == expected_row && e.global_col == expected_col && e.value == expected_value) {
+            found = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST(GhostContributionManagerMPITest, LargeMessageHandling) {
+    int size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size < 2) {
+        GTEST_SKIP() << "Run with 2+ MPI ranks to enable this test";
+    }
+
+    const char* env = std::getenv("SVMP_FE_RUN_STRESS_TESTS");
+    if (env == nullptr || std::string(env) != "1") {
+        GTEST_SKIP() << "Set SVMP_FE_RUN_STRESS_TESTS=1 to enable large-message exchange";
+    }
+
+    // This is a smoke/stress test: verify exchange completes for a large buffer.
+    // Exact contents depend on partitioning and are not asserted here.
+    constexpr GlobalIndex total_dofs = 2000;
+    dofs::DofMap dof_map(1, total_dofs, 4);
+    dof_map.setCellDofs(0, std::array<GlobalIndex, 4>{0, 1, 2, 3});
+    dof_map.setNumDofs(total_dofs);
+    dof_map.setNumLocalDofs(0);
+
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    dof_map.setMyRank(rank);
+    dof_map.setDofOwnership([&](GlobalIndex dof) -> int {
+        return static_cast<int>(dof % size);
+    });
+    dof_map.finalize();
+
+    GhostContributionManager manager(dof_map, MPI_COMM_WORLD);
+    manager.setPolicy(GhostPolicy::ReverseScatter);
+    manager.initialize();
+
+    // Add many contributions to ghost rows to create a sizable message.
+    for (GlobalIndex i = 0; i < 50000; ++i) {
+        const GlobalIndex row = static_cast<GlobalIndex>(rank + 1);  // owned by (rank+1)%size via owner func
+        (void)manager.addMatrixContribution(row, /*col=*/0, /*value=*/1.0);
+    }
+
+    EXPECT_NO_THROW(manager.exchangeContributions());
+}
+#endif
 
 // ============================================================================
 // Move Semantics Tests

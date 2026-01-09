@@ -92,6 +92,8 @@ namespace spaces {
 
 namespace assembly {
 
+struct TimeIntegrationContext;
+
 // ============================================================================
 // Functional Kernel Interface
 // ============================================================================
@@ -131,6 +133,17 @@ public:
     [[nodiscard]] virtual RequiredData getRequiredData() const noexcept {
         return RequiredData::Standard | RequiredData::SolutionValues;
     }
+
+    /**
+     * @brief Optional multi-field requirements
+     *
+     * For functionals defined using FE/Forms, this can be used to request that
+     * additional field values/derivatives be bound into the AssemblyContext
+     * (see AssemblyContext::setFieldSolutionScalar/Vector).
+     *
+     * Default: no extra fields.
+     */
+    [[nodiscard]] virtual std::vector<FieldRequirement> fieldRequirements() const { return {}; }
 
     // =========================================================================
     // Cell (Volume) Integration
@@ -550,11 +563,65 @@ public:
     void setSpace(const spaces::FunctionSpace& space);
 
     /**
+     * @brief Specify which FieldId the configured space/solution represent
+     *
+     * This enables FE/Forms-driven functional kernels (which use DiscreteField /
+     * StateField nodes) to access the current solution through the
+     * AssemblyContext field-solution API.
+     *
+     * Current limitation: only the primary field is supported (multi-field
+     * functional evaluation is not yet implemented here).
+     */
+    void setPrimaryField(FieldId field) noexcept;
+
+    /**
      * @brief Set current solution for evaluation
      *
      * @param solution Solution vector (coefficients)
      */
     void setSolution(std::span<const Real> solution);
+
+    /**
+     * @brief Set previous-step solution coefficients (u^{n-1})
+     */
+    void setPreviousSolution(std::span<const Real> solution);
+
+    /**
+     * @brief Set previous-previous solution coefficients (u^{n-2})
+     */
+    void setPreviousSolution2(std::span<const Real> solution);
+
+    /**
+     * @brief Set k-th previous solution coefficients (u^{n-k}, k>=1)
+     */
+    void setPreviousSolutionK(int k, std::span<const Real> solution);
+
+    /**
+     * @brief Attach a transient time-integration context for `dt(·,k)` lowering
+     */
+    void setTimeIntegrationContext(const TimeIntegrationContext* ctx) noexcept;
+
+    void setTime(Real time) noexcept;
+    void setTimeStep(Real dt) noexcept;
+
+    void setRealParameterGetter(
+        const std::function<std::optional<Real>(std::string_view)>* get_real_param) noexcept;
+
+    void setParameterGetter(
+        const std::function<std::optional<params::Value>(std::string_view)>* get_param) noexcept;
+
+    void setUserData(const void* user_data) noexcept;
+
+    /**
+     * @brief Bind a flat array of Real-valued parameter slots for JIT-friendly kernels.
+     */
+    void setJITConstants(std::span<const Real> constants) noexcept;
+
+    /**
+     * @brief Bind coupled boundary-condition scalar arrays (integrals + auxiliary state).
+     */
+    void setCoupledValues(std::span<const Real> integrals,
+                          std::span<const Real> aux_state) noexcept;
 
     /**
      * @brief Set options
@@ -686,6 +753,8 @@ private:
     // Internal Implementation
     // =========================================================================
 
+    void bindFieldSolutionData(AssemblyContext& context, std::span<const FieldRequirement> reqs);
+
     /**
      * @brief Core assembly loop for cells
      */
@@ -736,7 +805,19 @@ private:
     const IMeshAccess* mesh_{nullptr};
     const dofs::DofMap* dof_map_{nullptr};
     const spaces::FunctionSpace* space_{nullptr};
+    FieldId primary_field_{INVALID_FIELD_ID};
     std::vector<Real> solution_;
+    std::vector<std::vector<Real>> previous_solutions_{};
+
+    const TimeIntegrationContext* time_integration_{nullptr};
+    Real time_{0.0};
+    Real dt_{0.0};
+    const std::function<std::optional<Real>(std::string_view)>* get_real_param_{nullptr};
+    const std::function<std::optional<params::Value>(std::string_view)>* get_param_{nullptr};
+    const void* user_data_{nullptr};
+    std::span<const Real> jit_constants_{};
+    std::span<const Real> coupled_integrals_{};
+    std::span<const Real> coupled_aux_state_{};
 
     // Working storage
     AssemblyContext context_;

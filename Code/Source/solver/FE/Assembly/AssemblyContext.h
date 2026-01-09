@@ -318,7 +318,7 @@ public:
      * @brief Get all reference quadrature points
      */
     [[nodiscard]] std::span<const Point3D> quadraturePoints() const noexcept {
-        return {quad_points_.data(), static_cast<std::size_t>(n_qpts_)};
+        return quad_points_;
     }
 
     /**
@@ -328,6 +328,11 @@ public:
      * @return Quadrature weight
      */
     [[nodiscard]] Real quadratureWeight(LocalIndex q) const;
+
+    /**
+     * @brief Get all quadrature weights (reference element)
+     */
+    [[nodiscard]] std::span<const Real> quadratureWeights() const noexcept { return quad_weights_; }
 
     /**
      * @brief Get integration weight (includes Jacobian determinant)
@@ -343,7 +348,7 @@ public:
      * @brief Get all integration weights
      */
     [[nodiscard]] std::span<const Real> integrationWeights() const noexcept {
-        return {integration_weights_.data(), static_cast<std::size_t>(n_qpts_)};
+        return integration_weights_;
     }
 
     // =========================================================================
@@ -362,7 +367,7 @@ public:
      * @brief Get all physical points
      */
     [[nodiscard]] std::span<const Point3D> physicalPoints() const noexcept {
-        return {physical_points_.data(), static_cast<std::size_t>(n_qpts_)};
+        return physical_points_;
     }
 
     /**
@@ -384,6 +389,13 @@ public:
     [[nodiscard]] Matrix3x3 jacobian(LocalIndex q) const;
 
     /**
+     * @brief Get all Jacobian matrices (one per quadrature point)
+     */
+    [[nodiscard]] std::span<const Matrix3x3> jacobians() const noexcept {
+        return jacobians_;
+    }
+
+    /**
      * @brief Get inverse Jacobian matrix at quadrature point
      *
      * @param q Quadrature point index
@@ -392,12 +404,33 @@ public:
     [[nodiscard]] Matrix3x3 inverseJacobian(LocalIndex q) const;
 
     /**
+     * @brief Get all inverse Jacobians (one per quadrature point)
+     */
+    [[nodiscard]] std::span<const Matrix3x3> inverseJacobians() const noexcept {
+        return inverse_jacobians_;
+    }
+
+    /**
+     * @brief Get all Jacobian determinants (one per quadrature point)
+     */
+    [[nodiscard]] std::span<const Real> jacobianDets() const noexcept {
+        return jacobian_dets_;
+    }
+
+    /**
      * @brief Get surface normal at quadrature point (face contexts only)
      *
      * @param q Quadrature point index
      * @return Outward unit normal vector
      */
     [[nodiscard]] Vector3D normal(LocalIndex q) const;
+
+    /**
+     * @brief Get all surface normals (face contexts only)
+     */
+    [[nodiscard]] std::span<const Vector3D> normals() const noexcept {
+        return normals_;
+    }
 
     // =========================================================================
     // Entity Measures (optional; prepared if RequiredData::EntityMeasures)
@@ -447,6 +480,15 @@ public:
     [[nodiscard]] std::span<const Real> basisValues(LocalIndex i) const;
 
     /**
+     * @brief Raw test basis values storage (layout: [i * n_qpts + q])
+     *
+     * Intended for JIT/kernel ABI packing. Empty when BasisValues were not requested.
+     */
+    [[nodiscard]] std::span<const Real> testBasisValuesRaw() const noexcept {
+        return test_basis_values_;
+    }
+
+    /**
      * @brief Get reference gradient of test basis function
      *
      * @param i Test basis function index
@@ -466,6 +508,15 @@ public:
      */
     [[nodiscard]] Vector3D physicalGradient(LocalIndex i, LocalIndex q) const;
 
+    /**
+     * @brief Raw test physical gradients storage (layout: [i * n_qpts + q])
+     *
+     * Intended for JIT/kernel ABI packing. Empty when PhysicalGradients were not requested.
+     */
+    [[nodiscard]] std::span<const Vector3D> testPhysicalGradientsRaw() const noexcept {
+        return test_phys_gradients_;
+    }
+
     // =========================================================================
     // Basis Hessians (optional; prepared if RequiredData::BasisHessians)
     // =========================================================================
@@ -482,6 +533,16 @@ public:
      */
     [[nodiscard]] Matrix3x3 physicalHessian(LocalIndex i, LocalIndex q) const;
 
+    /**
+     * @brief Raw test physical Hessians storage (layout: [i * n_qpts + q])
+     *
+     * Intended for JIT/kernel ABI packing. Empty when BasisHessians were not requested.
+     */
+    [[nodiscard]] std::span<const Matrix3x3> testPhysicalHessiansRaw() const noexcept
+    {
+        return test_phys_hessians_;
+    }
+
     // =========================================================================
     // Trial Basis Function Data (for rectangular assembly)
     // =========================================================================
@@ -496,6 +557,15 @@ public:
     [[nodiscard]] Real trialBasisValue(LocalIndex j, LocalIndex q) const;
 
     /**
+     * @brief Raw trial basis values storage (layout: [j * n_qpts + q])
+     *
+     * When the trial space aliases the test space, this returns the test storage.
+     */
+    [[nodiscard]] std::span<const Real> trialBasisValuesRaw() const noexcept {
+        return trial_is_test_ ? std::span<const Real>(test_basis_values_) : std::span<const Real>(trial_basis_values_);
+    }
+
+    /**
      * @brief Get physical gradient of trial basis function
      *
      * @param j Trial basis function index
@@ -503,6 +573,15 @@ public:
      * @return grad_x(psi_j)
      */
     [[nodiscard]] Vector3D trialPhysicalGradient(LocalIndex j, LocalIndex q) const;
+
+    /**
+     * @brief Raw trial physical gradients storage (layout: [j * n_qpts + q])
+     *
+     * When the trial space aliases the test space, this returns the test storage.
+     */
+    [[nodiscard]] std::span<const Vector3D> trialPhysicalGradientsRaw() const noexcept {
+        return trial_is_test_ ? std::span<const Vector3D>(test_phys_gradients_) : std::span<const Vector3D>(trial_phys_gradients_);
+    }
 
     /**
      * @brief Get reference Hessian of trial basis function (d^2 psi / dxi^2)
@@ -514,6 +593,17 @@ public:
      */
     [[nodiscard]] Matrix3x3 trialPhysicalHessian(LocalIndex j, LocalIndex q) const;
 
+    /**
+     * @brief Raw trial physical Hessians storage (layout: [j * n_qpts + q])
+     *
+     * When the trial space aliases the test space, this returns the test storage.
+     */
+    [[nodiscard]] std::span<const Matrix3x3> trialPhysicalHessiansRaw() const noexcept
+    {
+        return trial_is_test_ ? std::span<const Matrix3x3>(test_phys_hessians_)
+                              : std::span<const Matrix3x3>(trial_phys_hessians_);
+    }
+
     // =========================================================================
     // Solution Data (for nonlinear problems)
     // =========================================================================
@@ -524,6 +614,15 @@ public:
      * @param coefficients DOF coefficients for current solution
      */
     void setSolutionCoefficients(std::span<const Real> coefficients);
+
+    /**
+     * @brief Access element-local solution coefficients (DOF values)
+     *
+     * Size is `numTrialDofs()` for the active context.
+     */
+    [[nodiscard]] std::span<const Real> solutionCoefficients() const noexcept { return solution_coefficients_; }
+
+    [[nodiscard]] bool hasSolutionCoefficients() const noexcept { return !solution_coefficients_.empty(); }
 
     /**
      * @brief Set previous-step solution coefficients (u^{n-1}) for transient forms
@@ -697,6 +796,30 @@ public:
     [[nodiscard]] bool hasPreviousSolutionData() const noexcept;
     [[nodiscard]] bool hasPreviousSolution2Data() const noexcept;
 
+    /**
+     * @brief Number of stored previous solution states (history depth)
+     *
+     * Indexing convention: k=1 is u^{n-1}, so history count is the max valid k.
+     */
+    [[nodiscard]] std::size_t previousSolutionHistoryCount() const noexcept
+    {
+        return history_solution_data_.size();
+    }
+
+    /**
+     * @brief Element-local coefficients for u^{n-k} (k>=1)
+     *
+     * Intended for JIT/kernel ABI packing. Returns an empty span if k is out
+     * of range or the coefficients were not set.
+     */
+    [[nodiscard]] std::span<const Real> previousSolutionCoefficientsRaw(int k) const noexcept
+    {
+        if (k <= 0) return {};
+        const auto idx = static_cast<std::size_t>(k - 1);
+        if (idx >= history_solution_data_.size()) return {};
+        return history_solution_data_[idx].coefficients;
+    }
+
     void clearPreviousSolutionData() noexcept
     {
         clearPreviousSolutionDataK(1);
@@ -733,6 +856,9 @@ public:
     [[nodiscard]] bool hasMaterialState() const noexcept { return material_state_work_base_ != nullptr; }
     [[nodiscard]] std::size_t materialStateBytesPerQpt() const noexcept { return material_state_bytes_per_qpt_; }
     [[nodiscard]] std::size_t materialStateStrideBytes() const noexcept { return material_state_stride_bytes_; }
+
+    [[nodiscard]] const std::byte* materialStateOldBase() const noexcept { return material_state_old_base_; }
+    [[nodiscard]] std::byte* materialStateWorkBase() const noexcept { return material_state_work_base_; }
 
     /**
      * @brief Access the state block for a single integration point
@@ -798,6 +924,35 @@ public:
 
     void setUserData(const void* user_data) noexcept { user_data_ = user_data; }
     [[nodiscard]] const void* userData() const noexcept { return user_data_; }
+
+    // =========================================================================
+    // JIT / Coupled scalar slot views (optional)
+    // =========================================================================
+
+    /**
+     * @brief Bind a flat array of Real-valued parameter slots for JIT-friendly access.
+     *
+     * When set, Forms terminals like ParameterRef(slot) can load the value
+     * without name-based lookup.
+     */
+    void setJITConstants(std::span<const Real> constants) noexcept { jit_constants_ = constants; }
+    [[nodiscard]] std::span<const Real> jitConstants() const noexcept { return jit_constants_; }
+
+    /**
+     * @brief Bind coupled boundary-condition scalar arrays (integrals + aux state).
+     *
+     * When set, Forms terminals like BoundaryIntegralRef(slot) and
+     * AuxiliaryStateRef(slot) can load values directly.
+     */
+    void setCoupledValues(std::span<const Real> integrals,
+                          std::span<const Real> aux_state) noexcept
+    {
+        coupled_integrals_ = integrals;
+        coupled_aux_state_ = aux_state;
+    }
+
+    [[nodiscard]] std::span<const Real> coupledIntegrals() const noexcept { return coupled_integrals_; }
+    [[nodiscard]] std::span<const Real> coupledAuxState() const noexcept { return coupled_aux_state_; }
 
     // =========================================================================
     // Face-Specific Data
@@ -1021,6 +1176,11 @@ private:
     const std::function<std::optional<Real>(std::string_view)>* get_real_param_{nullptr};
     const std::function<std::optional<params::Value>(std::string_view)>* get_param_{nullptr};
     const void* user_data_{nullptr};
+
+    // Optional pre-resolved scalar slot arrays (owned externally; stable during a kernel call)
+    std::span<const Real> jit_constants_{};
+    std::span<const Real> coupled_integrals_{};
+    std::span<const Real> coupled_aux_state_{};
 
     // Optional transient time integration context (owned by Systems/TimeStepping)
     const TimeIntegrationContext* time_integration_{nullptr};

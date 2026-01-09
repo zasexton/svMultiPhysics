@@ -122,6 +122,104 @@ public:
     }
 };
 
+namespace {
+
+class DummyBilinearKernel final : public BilinearFormKernel {
+public:
+    [[nodiscard]] RequiredData getRequiredData() const override { return RequiredData::None; }
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
+        output.clear();
+    }
+};
+
+class DummyLinearKernel final : public LinearFormKernel {
+public:
+    [[nodiscard]] RequiredData getRequiredData() const override { return RequiredData::None; }
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/true);
+        output.clear();
+    }
+};
+
+class DualFaceKernel final : public AssemblyKernel {
+public:
+    [[nodiscard]] RequiredData getRequiredData() const override { return RequiredData::None; }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/false);
+        output.clear();
+    }
+
+    void computeBoundaryFace(const AssemblyContext& ctx, int /*boundary_marker*/, KernelOutput& output) override
+    {
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
+        output.clear();
+        if (ctx.numTestDofs() > 0 && ctx.numTrialDofs() > 0) {
+            output.matrixEntry(0, 0) = 1.0;
+        }
+    }
+
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+
+    void computeInteriorFace(const AssemblyContext& ctx_minus,
+                             const AssemblyContext& /*ctx_plus*/,
+                             KernelOutput& out_minus,
+                             KernelOutput& out_plus,
+                             KernelOutput& coupling_minus_plus,
+                             KernelOutput& coupling_plus_minus) override
+    {
+        out_minus.reserve(ctx_minus.numTestDofs(), ctx_minus.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
+        out_plus.reserve(ctx_minus.numTestDofs(), ctx_minus.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
+        coupling_minus_plus.reserve(ctx_minus.numTestDofs(), ctx_minus.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
+        coupling_plus_minus.reserve(ctx_minus.numTestDofs(), ctx_minus.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
+        out_minus.clear();
+        out_plus.clear();
+        coupling_minus_plus.clear();
+        coupling_plus_minus.clear();
+    }
+
+    [[nodiscard]] bool hasInteriorFace() const noexcept override { return true; }
+};
+
+class MaterialStateKernel final : public AssemblyKernel {
+public:
+    explicit MaterialStateKernel(MaterialStateSpec spec) : spec_(spec) {}
+
+    [[nodiscard]] RequiredData getRequiredData() const override { return RequiredData::MaterialState; }
+    [[nodiscard]] MaterialStateSpec materialStateSpec() const noexcept override { return spec_; }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/false);
+        output.clear();
+    }
+
+private:
+    MaterialStateSpec spec_{};
+};
+
+class TemporalOrderKernel final : public AssemblyKernel {
+public:
+    explicit TemporalOrderKernel(int order) : order_(order) {}
+    [[nodiscard]] RequiredData getRequiredData() const override { return RequiredData::None; }
+    [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override { return order_; }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/false);
+        output.clear();
+    }
+
+private:
+    int order_{0};
+};
+
+} // namespace
+
 // ============================================================================
 // KernelOutput Tests
 // ============================================================================
@@ -442,6 +540,38 @@ TEST(CompositeKernelTest, CombineMassAndStiffness) {
     EXPECT_TRUE(hasFlag(required, RequiredData::IntegrationWeights));
 }
 
+TEST(CompositeKernelTest, ThreeSubKernelsMassStiffnessSource) {
+    AssemblyContext ctx;
+    ctx.reserve(10, 10, 2);
+    TestContextHelper::setupUnitSquareP1(ctx);
+
+    auto mass = std::make_shared<MassKernel>(1.0);
+    auto stiffness = std::make_shared<StiffnessKernel>(1.0);
+    auto source = std::make_shared<SourceKernel>(1.0);
+
+    CompositeKernel composite;
+    composite.addKernel(mass, 1.0);
+    composite.addKernel(stiffness, 1.0);
+    composite.addKernel(source, 1.0);
+
+    KernelOutput out_mass, out_stiff, out_src, out_comp;
+    mass->computeCell(ctx, out_mass);
+    stiffness->computeCell(ctx, out_stiff);
+    source->computeCell(ctx, out_src);
+    composite.computeCell(ctx, out_comp);
+
+    ASSERT_TRUE(out_comp.has_matrix);
+    ASSERT_TRUE(out_comp.has_vector);
+
+    for (LocalIndex i = 0; i < out_comp.n_test_dofs; ++i) {
+        for (LocalIndex j = 0; j < out_comp.n_trial_dofs; ++j) {
+            const Real expected = out_mass.matrixEntry(i, j) + out_stiff.matrixEntry(i, j);
+            EXPECT_NEAR(out_comp.matrixEntry(i, j), expected, 1e-12);
+        }
+        EXPECT_NEAR(out_comp.vectorEntry(i), out_src.vectorEntry(i), 1e-12);
+    }
+}
+
 TEST(CompositeKernelTest, ScaledCombination) {
     AssemblyContext ctx;
     ctx.reserve(10, 10, 2);
@@ -463,6 +593,98 @@ TEST(CompositeKernelTest, ScaledCombination) {
                         2.0 * mass_output.matrixEntry(i, j), 1e-12);
         }
     }
+}
+
+TEST(CompositeKernelTest, ZeroScalingProducesZeroContribution) {
+    AssemblyContext ctx;
+    ctx.reserve(10, 10, 2);
+    TestContextHelper::setupUnitSquareP1(ctx);
+
+    auto mass = std::make_shared<MassKernel>(1.0);
+    CompositeKernel composite;
+    composite.addKernel(mass, 0.0);
+
+    KernelOutput out;
+    composite.computeCell(ctx, out);
+    ASSERT_TRUE(out.has_matrix);
+    for (LocalIndex i = 0; i < out.n_test_dofs; ++i) {
+        for (LocalIndex j = 0; j < out.n_trial_dofs; ++j) {
+            EXPECT_NEAR(out.matrixEntry(i, j), 0.0, 1e-12);
+        }
+    }
+}
+
+TEST(CompositeKernelTest, NegativeScalingSubtracts) {
+    AssemblyContext ctx;
+    ctx.reserve(10, 10, 2);
+    TestContextHelper::setupUnitSquareP1(ctx);
+
+    auto mass = std::make_shared<MassKernel>(1.0);
+    CompositeKernel composite;
+    composite.addKernel(mass, -1.0);
+
+    KernelOutput out_mass, out_comp;
+    mass->computeCell(ctx, out_mass);
+    composite.computeCell(ctx, out_comp);
+
+    for (LocalIndex i = 0; i < out_comp.n_test_dofs; ++i) {
+        for (LocalIndex j = 0; j < out_comp.n_trial_dofs; ++j) {
+            EXPECT_NEAR(out_comp.matrixEntry(i, j), -out_mass.matrixEntry(i, j), 1e-12);
+        }
+    }
+}
+
+TEST(AssemblyKernelFaceSupport, KernelWithBoundaryAndInteriorFaces) {
+    AssemblyContext ctx;
+    ctx.reserve(4, 4, 1);
+    TestContextHelper::setupUnitSquareP1(ctx);
+
+    DualFaceKernel kernel;
+    EXPECT_TRUE(kernel.hasBoundaryFace());
+    EXPECT_TRUE(kernel.hasInteriorFace());
+
+    KernelOutput out;
+    kernel.computeBoundaryFace(ctx, /*boundary_marker=*/1, out);
+    EXPECT_TRUE(out.has_matrix);
+}
+
+TEST(AssemblyKernelBaseClasses, BilinearAndLinearDefaults) {
+    AssemblyContext ctx;
+    ctx.reserve(4, 4, 1);
+    TestContextHelper::setupUnitSquareP1(ctx);
+
+    DummyBilinearKernel bilinear;
+    EXPECT_TRUE(bilinear.isMatrixOnly());
+    EXPECT_FALSE(bilinear.isVectorOnly());
+
+    DummyLinearKernel linear;
+    EXPECT_FALSE(linear.isMatrixOnly());
+    EXPECT_TRUE(linear.isVectorOnly());
+
+    KernelOutput out_b, out_l;
+    bilinear.computeCell(ctx, out_b);
+    linear.computeCell(ctx, out_l);
+    EXPECT_TRUE(out_b.has_matrix);
+    EXPECT_FALSE(out_b.has_vector);
+    EXPECT_FALSE(out_l.has_matrix);
+    EXPECT_TRUE(out_l.has_vector);
+}
+
+TEST(AssemblyKernelMaterialState, MaterialStateSpecNonTrivialAndAligned) {
+    MaterialStateKernel kernel(MaterialStateSpec{64u, 32u});
+    EXPECT_TRUE(hasFlag(kernel.getRequiredData(), RequiredData::MaterialState));
+    EXPECT_EQ(kernel.materialStateSpec().bytes_per_qpt, 64u);
+    EXPECT_EQ(kernel.materialStateSpec().alignment, 32u);
+}
+
+TEST(AssemblyKernelQuery, MaxTemporalDerivativeOrder) {
+    TemporalOrderKernel dt0(0);
+    TemporalOrderKernel dt1(1);
+    TemporalOrderKernel dt2(2);
+
+    EXPECT_EQ(dt0.maxTemporalDerivativeOrder(), 0);
+    EXPECT_EQ(dt1.maxTemporalDerivativeOrder(), 1);
+    EXPECT_EQ(dt2.maxTemporalDerivativeOrder(), 2);
 }
 
 } // namespace test

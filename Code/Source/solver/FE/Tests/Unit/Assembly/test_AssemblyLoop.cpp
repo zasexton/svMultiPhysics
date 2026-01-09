@@ -12,11 +12,17 @@
 
 #include <gtest/gtest.h>
 #include "Assembly/AssemblyLoop.h"
+#include "Assembly/GlobalSystemView.h"
 #include "Core/Types.h"
+#include "Dofs/DofMap.h"
+#include "Spaces/H1Space.h"
 
 #include <vector>
 #include <memory>
 #include <cmath>
+#include <array>
+#include <algorithm>
+#include <unordered_map>
 
 namespace svmp {
 namespace FE {
@@ -132,6 +138,85 @@ private:
     GlobalIndex num_cells_;
     std::vector<std::array<Real, 3>> node_coords_;
 };
+
+static dofs::DofMap buildSharedChainDofMap(GlobalIndex num_cells)
+{
+    // Chain: each cell shares one DOF with the next.
+    // cell i: [3*i, 3*i+1, 3*i+2, 3*i+3]
+    // Shared DOF between i and i+1 is 3*i+3.
+    const GlobalIndex n_dofs = num_cells * 3 + 1;
+    dofs::DofMap dof_map(num_cells, n_dofs, 4);
+
+    for (GlobalIndex cell = 0; cell < num_cells; ++cell) {
+        const std::array<GlobalIndex, 4> dofs = {
+            3 * cell + 0,
+            3 * cell + 1,
+            3 * cell + 2,
+            3 * cell + 3,
+        };
+        dof_map.setCellDofs(cell, dofs);
+    }
+
+    dof_map.setNumDofs(n_dofs);
+    dof_map.setNumLocalDofs(n_dofs);
+    dof_map.finalize();
+    return dof_map;
+}
+
+static std::vector<Real> runCellLoopAccumulateOnDofs(
+    const IMeshAccess& mesh,
+    const dofs::DofMap& dof_map,
+    const spaces::FunctionSpace& space,
+    LoopMode mode,
+    bool deterministic,
+    bool prefetch_next,
+    std::span<const int> colors,
+    int num_colors,
+    LoopStatistics* out_stats = nullptr)
+{
+    AssemblyLoop loop;
+    loop.setMesh(mesh);
+    loop.setDofMap(dof_map);
+
+    LoopOptions opts;
+    opts.mode = mode;
+    opts.num_threads = 4;
+    opts.deterministic = deterministic;
+    opts.prefetch_next = prefetch_next;
+    loop.setOptions(opts);
+
+    if (mode == LoopMode::Colored) {
+        loop.setColoring(colors, num_colors);
+    }
+
+    const GlobalIndex n = dof_map.getNumDofs();
+    std::vector<Real> y(static_cast<std::size_t>(n), 0.0);
+
+    const auto stats = loop.cellLoop(
+        space, space, RequiredData::None,
+        [](const CellWorkItem& /*cell*/, AssemblyContext& ctx, KernelOutput& out) {
+            const LocalIndex n_dofs = ctx.numTestDofs();
+            out.reserve(n_dofs, n_dofs, /*want_matrix=*/false, /*want_vector=*/true);
+            out.clear();
+            for (LocalIndex i = 0; i < n_dofs; ++i) {
+                out.vectorEntry(i) = 1.0;
+            }
+        },
+        [&y](const CellWorkItem& /*cell*/,
+             const KernelOutput& out,
+             std::span<const GlobalIndex> row_dofs,
+             std::span<const GlobalIndex> /*col_dofs*/) {
+            for (std::size_t i = 0; i < row_dofs.size(); ++i) {
+                y[static_cast<std::size_t>(row_dofs[i])] += out.local_vector[i];
+            }
+        });
+
+    if (out_stats != nullptr) {
+        *out_stats = stats;
+    }
+
+    return y;
+}
 
 } // namespace
 
@@ -262,6 +347,7 @@ TEST_F(AssemblyLoopTest, LoopStatisticsDefaults) {
     EXPECT_DOUBLE_EQ(stats.kernel_seconds, 0.0);
     EXPECT_DOUBLE_EQ(stats.insert_seconds, 0.0);
     EXPECT_EQ(stats.num_threads_used, 1);
+    EXPECT_EQ(stats.prefetch_hints, 0u);
 }
 
 // ============================================================================
@@ -284,6 +370,67 @@ TEST_F(AssemblyLoopTest, SetColoring) {
 TEST_F(AssemblyLoopTest, NoColoringByDefault) {
     AssemblyLoop loop;
     EXPECT_FALSE(loop.hasColoring());
+}
+
+TEST_F(AssemblyLoopTest, ComputeElementColoringProducesValidColoring) {
+    const GlobalIndex n_cells = 16;
+    MockMeshAccess mesh(n_cells);
+    auto dof_map = buildSharedChainDofMap(n_cells);
+
+    std::vector<int> colors;
+    const int num_colors = computeElementColoring(mesh, dof_map, colors);
+
+    ASSERT_EQ(colors.size(), static_cast<std::size_t>(n_cells));
+    EXPECT_GT(num_colors, 0);
+    EXPECT_LT(num_colors, 20);  // "reasonable" for small meshes
+
+    // Verify: for every DOF shared by multiple cells, all incident cells have different colors.
+    std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> dof_to_cells;
+    for (GlobalIndex cell = 0; cell < n_cells; ++cell) {
+        for (GlobalIndex dof : dof_map.getCellDofs(cell)) {
+            dof_to_cells[dof].push_back(cell);
+        }
+    }
+
+    for (const auto& [dof, cells] : dof_to_cells) {
+        (void)dof;
+        if (cells.size() < 2) {
+            continue;
+        }
+        for (std::size_t i = 0; i < cells.size(); ++i) {
+            for (std::size_t j = i + 1; j < cells.size(); ++j) {
+                EXPECT_NE(colors[static_cast<std::size_t>(cells[i])],
+                          colors[static_cast<std::size_t>(cells[j])]);
+            }
+        }
+    }
+
+    // Coloring quality metric (max/min elements per color).
+    std::vector<int> counts(static_cast<std::size_t>(num_colors), 0);
+    for (int c : colors) {
+        ASSERT_GE(c, 0);
+        ASSERT_LT(c, num_colors);
+        counts[static_cast<std::size_t>(c)]++;
+    }
+    const auto [min_it, max_it] = std::minmax_element(counts.begin(), counts.end());
+    ASSERT_NE(*min_it, 0);
+    const double imbalance = static_cast<double>(*max_it) / static_cast<double>(*min_it);
+    EXPECT_LE(imbalance, 2.0);
+}
+
+TEST_F(AssemblyLoopTest, ComputeOptimizedColoringDoesNotIncreaseColors) {
+    const GlobalIndex n_cells = 25;
+    MockMeshAccess mesh(n_cells);
+    auto dof_map = buildSharedChainDofMap(n_cells);
+
+    std::vector<int> greedy_colors;
+    const int greedy = computeElementColoring(mesh, dof_map, greedy_colors);
+
+    std::vector<int> opt_colors;
+    const int opt = computeOptimizedColoring(mesh, dof_map, opt_colors, /*max_iterations=*/20);
+
+    EXPECT_LE(opt, greedy);
+    EXPECT_EQ(opt_colors.size(), static_cast<std::size_t>(n_cells));
 }
 
 // ============================================================================
@@ -334,13 +481,238 @@ TEST_F(AssemblyLoopTest, ForEachInteriorFaceFunction) {
 }
 
 // ============================================================================
-// Element Graph Coloring Tests
+// Parallel Correctness Tests
 // ============================================================================
 
-TEST_F(AssemblyLoopTest, ComputeElementColoring) {
-    // Note: Full test requires DofMap implementation
-    // This is a placeholder test
-    EXPECT_TRUE(true);
+TEST_F(AssemblyLoopTest, CellLoopOpenMPProducesSameResultAsSequential) {
+#ifdef _OPENMP
+    const GlobalIndex n_cells = 64;
+    MockMeshAccess mesh(n_cells);
+    auto dof_map = buildSharedChainDofMap(n_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto y_seq = runCellLoopAccumulateOnDofs(
+        mesh, dof_map, space, LoopMode::Sequential,
+        /*deterministic=*/true, /*prefetch_next=*/false,
+        std::span<const int>{}, 0);
+
+    const auto y_omp = runCellLoopAccumulateOnDofs(
+        mesh, dof_map, space, LoopMode::OpenMP,
+        /*deterministic=*/true, /*prefetch_next=*/false,
+        std::span<const int>{}, 0);
+
+    EXPECT_EQ(y_omp, y_seq);
+#else
+    GTEST_SKIP() << "OpenMP not enabled";
+#endif
+}
+
+TEST_F(AssemblyLoopTest, CellLoopColoredProducesSameResultAsSequential) {
+#ifdef _OPENMP
+    const GlobalIndex n_cells = 64;
+    MockMeshAccess mesh(n_cells);
+    auto dof_map = buildSharedChainDofMap(n_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    std::vector<int> colors;
+    const int num_colors = computeElementColoring(mesh, dof_map, colors);
+
+    const auto y_seq = runCellLoopAccumulateOnDofs(
+        mesh, dof_map, space, LoopMode::Sequential,
+        /*deterministic=*/true, /*prefetch_next=*/false,
+        std::span<const int>{}, 0);
+
+    const auto y_colored = runCellLoopAccumulateOnDofs(
+        mesh, dof_map, space, LoopMode::Colored,
+        /*deterministic=*/true, /*prefetch_next=*/false,
+        std::span<const int>(colors.data(), colors.size()), num_colors);
+
+    EXPECT_EQ(y_colored, y_seq);
+#else
+    GTEST_SKIP() << "OpenMP not enabled";
+#endif
+}
+
+TEST_F(AssemblyLoopTest, DeterministicParallelAssemblyIsReproducible) {
+#ifdef _OPENMP
+    const GlobalIndex n_cells = 64;
+    MockMeshAccess mesh(n_cells);
+    auto dof_map = buildSharedChainDofMap(n_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto y1 = runCellLoopAccumulateOnDofs(
+        mesh, dof_map, space, LoopMode::OpenMP,
+        /*deterministic=*/true, /*prefetch_next=*/false,
+        std::span<const int>{}, 0);
+    const auto y2 = runCellLoopAccumulateOnDofs(
+        mesh, dof_map, space, LoopMode::OpenMP,
+        /*deterministic=*/true, /*prefetch_next=*/false,
+        std::span<const int>{}, 0);
+
+    EXPECT_EQ(y1, y2);
+#else
+    GTEST_SKIP() << "OpenMP not enabled";
+#endif
+}
+
+// ============================================================================
+// Unified Loop Tests
+// ============================================================================
+
+namespace {
+
+class UnifiedKernel final : public AssemblyKernel {
+public:
+    [[nodiscard]] bool isMatrixOnly() const noexcept override { return true; }
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+    [[nodiscard]] bool hasInteriorFace() const noexcept override { return true; }
+    [[nodiscard]] RequiredData getRequiredData() const noexcept override { return RequiredData::None; }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& out) override {
+        const LocalIndex n = ctx.numTestDofs();
+        out.reserve(n, n, /*want_matrix=*/true, /*want_vector=*/false);
+        out.clear();
+        for (LocalIndex i = 0; i < n; ++i) {
+            out.matrixEntry(i, i) = 1.0;
+        }
+    }
+
+    void computeBoundaryFace(const AssemblyContext& ctx, int /*marker*/, KernelOutput& out) override {
+        const LocalIndex n = ctx.numTestDofs();
+        out.reserve(n, n, /*want_matrix=*/true, /*want_vector=*/false);
+        out.clear();
+        for (LocalIndex i = 0; i < n; ++i) {
+            out.matrixEntry(i, i) = 10.0;
+        }
+    }
+
+    void computeInteriorFace(const AssemblyContext& ctx_minus,
+                             const AssemblyContext& ctx_plus,
+                             KernelOutput& out_minus,
+                             KernelOutput& out_plus,
+                             KernelOutput& coupling_mp,
+                             KernelOutput& coupling_pm) override {
+        const LocalIndex nm = ctx_minus.numTestDofs();
+        const LocalIndex np = ctx_plus.numTestDofs();
+
+        out_minus.reserve(nm, nm, /*want_matrix=*/true, /*want_vector=*/false);
+        out_plus.reserve(np, np, /*want_matrix=*/true, /*want_vector=*/false);
+        coupling_mp.reserve(nm, np, /*want_matrix=*/true, /*want_vector=*/false);
+        coupling_pm.reserve(np, nm, /*want_matrix=*/true, /*want_vector=*/false);
+
+        out_minus.clear();
+        out_plus.clear();
+        coupling_mp.clear();
+        coupling_pm.clear();
+
+        for (LocalIndex i = 0; i < nm; ++i) {
+            out_minus.matrixEntry(i, i) = 100.0;
+        }
+        for (LocalIndex i = 0; i < np; ++i) {
+            out_plus.matrixEntry(i, i) = 100.0;
+        }
+
+        if (nm > 0 && np > 0) {
+            coupling_mp.matrixEntry(0, 0) = 0.5;
+            coupling_pm.matrixEntry(0, 0) = 0.5;
+        }
+    }
+};
+
+} // namespace
+
+TEST_F(AssemblyLoopTest, UnifiedLoopCellAndBoundaryAssemblesContributions) {
+    const GlobalIndex n_cells = 100;
+    MockMeshAccess mesh(n_cells);
+    auto dof_map = buildSharedChainDofMap(n_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    DenseMatrixView A(dof_map.getNumDofs());
+    UnifiedKernel kernel;
+    const std::array<int, 1> boundary_markers = {1};
+
+    AssemblyLoop loop;
+    loop.setMesh(mesh);
+    loop.setDofMap(dof_map);
+
+    LoopOptions opts;
+    opts.mode = LoopMode::Sequential;
+    loop.setOptions(opts);
+
+    loop.unifiedLoop(space, space, kernel, /*boundary_markers=*/boundary_markers,
+                     /*include_interior_faces=*/false, &A, nullptr);
+
+    // Cell 0 has a boundary face in this mock => diagonal includes 1 + 10.
+    EXPECT_DOUBLE_EQ(A.getMatrixEntry(0, 0), 11.0);
+
+    // Interior coupling should not be present.
+    EXPECT_DOUBLE_EQ(A.getMatrixEntry(0, 3), 0.0);
+}
+
+TEST_F(AssemblyLoopTest, UnifiedLoopCellBoundaryAndInteriorAssemblesDGContributions) {
+    const GlobalIndex n_cells = 100;
+    MockMeshAccess mesh(n_cells);
+
+    // Use disjoint DOFs for predictable global indexing in the DG coupling checks.
+    dofs::DofMap dof_map(n_cells, n_cells * 4, 4);
+    for (GlobalIndex cell = 0; cell < n_cells; ++cell) {
+        const std::array<GlobalIndex, 4> dofs = {
+            4 * cell + 0,
+            4 * cell + 1,
+            4 * cell + 2,
+            4 * cell + 3,
+        };
+        dof_map.setCellDofs(cell, dofs);
+    }
+    dof_map.setNumDofs(n_cells * 4);
+    dof_map.setNumLocalDofs(n_cells * 4);
+    dof_map.finalize();
+
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+    DenseMatrixView A(dof_map.getNumDofs());
+    UnifiedKernel kernel;
+    const std::array<int, 1> boundary_markers = {1};
+
+    AssemblyLoop loop;
+    loop.setMesh(mesh);
+    loop.setDofMap(dof_map);
+    LoopOptions opts;
+    opts.mode = LoopMode::Sequential;
+    loop.setOptions(opts);
+
+    loop.unifiedLoop(space, space, kernel, /*boundary_markers=*/boundary_markers,
+                     /*include_interior_faces=*/true, &A, nullptr);
+
+    // Cell 0 appears in 3 interior faces in this mock (minus twice, plus once):
+    // diag = cell(1) + boundary(10) + 3 * 100
+    EXPECT_DOUBLE_EQ(A.getMatrixEntry(0, 0), 311.0);
+
+    // Cell 50 has the same number of interior contributions but no boundary face:
+    // diag = 1 + 3 * 100
+    EXPECT_DOUBLE_EQ(A.getMatrixEntry(200, 200), 301.0);
+
+    // Coupling between cell 0 and cell 1 happens twice (faces 0 and 100).
+    EXPECT_DOUBLE_EQ(A.getMatrixEntry(0, 4), 1.0);
+    EXPECT_DOUBLE_EQ(A.getMatrixEntry(4, 0), 1.0);
+}
+
+// ============================================================================
+// Prefetch Tests
+// ============================================================================
+
+TEST_F(AssemblyLoopTest, PrefetchHintGenerationInSequentialLoop) {
+    const GlobalIndex n_cells = 32;
+    MockMeshAccess mesh(n_cells);
+    auto dof_map = buildSharedChainDofMap(n_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    LoopStatistics stats{};
+    (void)runCellLoopAccumulateOnDofs(
+        mesh, dof_map, space, LoopMode::Sequential,
+        /*deterministic=*/true, /*prefetch_next=*/true,
+        std::span<const int>{}, 0, &stats);
+
+    EXPECT_GT(stats.prefetch_hints, 0u);
 }
 
 } // namespace testing

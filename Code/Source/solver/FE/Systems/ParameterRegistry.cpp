@@ -27,6 +27,9 @@ void ParameterRegistry::clear()
 {
     specs_.clear();
     by_key_.clear();
+    slot_cache_valid_ = false;
+    slot_keys_.clear();
+    key_to_slot_.clear();
 }
 
 const params::Spec* ParameterRegistry::find(std::string_view key) const noexcept
@@ -88,6 +91,7 @@ void ParameterRegistry::add(params::Spec spec, std::string source)
         entry.source = std::move(source);
         specs_.push_back(entry.spec);
         by_key_.emplace(specs_.back().key, std::move(entry));
+        slot_cache_valid_ = false;
         return;
     }
 
@@ -102,6 +106,8 @@ void ParameterRegistry::add(params::Spec spec, std::string source)
             break;
         }
     }
+
+    slot_cache_valid_ = false;
 }
 
 void ParameterRegistry::addAll(const std::vector<params::Spec>& specs, std::string source)
@@ -188,7 +194,68 @@ ParameterRegistry::makeRealGetter(const SystemStateView& state) const
     };
 }
 
+void ParameterRegistry::rebuildSlotCache() const
+{
+    slot_keys_.clear();
+    slot_keys_.reserve(by_key_.size());
+    for (const auto& kv : by_key_) {
+        if (kv.second.spec.type != params::ValueType::Real) {
+            continue;
+        }
+        slot_keys_.push_back(kv.first);
+    }
+    std::sort(slot_keys_.begin(), slot_keys_.end());
+
+    key_to_slot_.clear();
+    key_to_slot_.reserve(slot_keys_.size());
+    for (std::size_t i = 0; i < slot_keys_.size(); ++i) {
+        key_to_slot_.emplace(slot_keys_[i], static_cast<std::uint32_t>(i));
+    }
+
+    slot_cache_valid_ = true;
+}
+
+std::size_t ParameterRegistry::slotCount() const
+{
+    if (!slot_cache_valid_) {
+        rebuildSlotCache();
+    }
+    return slot_keys_.size();
+}
+
+std::optional<std::uint32_t> ParameterRegistry::slotOf(std::string_view key) const
+{
+    if (!slot_cache_valid_) {
+        rebuildSlotCache();
+    }
+    const auto it = key_to_slot_.find(std::string(key));
+    if (it == key_to_slot_.end()) return std::nullopt;
+    return it->second;
+}
+
+std::vector<Real> ParameterRegistry::evaluateRealSlots(const SystemStateView& state) const
+{
+    if (!slot_cache_valid_) {
+        rebuildSlotCache();
+    }
+
+    // Validate required-ness and types first so evaluation has clear diagnostics.
+    validate(state);
+
+    auto getter = makeRealGetter(state);
+
+    std::vector<Real> out;
+    out.resize(slot_keys_.size(), 0.0);
+    for (std::size_t i = 0; i < slot_keys_.size(); ++i) {
+        const auto& key = slot_keys_[i];
+        const auto v = getter(key);
+        FE_THROW_IF(!v.has_value(), InvalidArgumentException,
+                    "ParameterRegistry: missing Real value for parameter '" + key + "'");
+        out[i] = *v;
+    }
+    return out;
+}
+
 } // namespace systems
 } // namespace FE
 } // namespace svmp
-

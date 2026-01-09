@@ -198,6 +198,16 @@ void DeviceAssembler::setDofMap(const dofs::DofMap& dof_map)
     impl_->cpu_assembler->setDofMap(dof_map);
 }
 
+void DeviceAssembler::setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset)
+{
+    impl_->cpu_assembler->setRowDofMap(dof_map, row_offset);
+}
+
+void DeviceAssembler::setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset)
+{
+    impl_->cpu_assembler->setColDofMap(dof_map, col_offset);
+}
+
 void DeviceAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
 {
     impl_->dof_handler = &dof_handler;
@@ -223,6 +233,79 @@ void DeviceAssembler::setOptions(const AssemblyOptions& options)
     impl_->cpu_assembler->setOptions(options);
 }
 
+void DeviceAssembler::setCurrentSolution(std::span<const Real> solution)
+{
+    impl_->cpu_assembler->setCurrentSolution(solution);
+}
+
+void DeviceAssembler::setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields)
+{
+    impl_->cpu_assembler->setFieldSolutionAccess(fields);
+}
+
+void DeviceAssembler::setPreviousSolution(std::span<const Real> solution)
+{
+    impl_->cpu_assembler->setPreviousSolution(solution);
+}
+
+void DeviceAssembler::setPreviousSolution2(std::span<const Real> solution)
+{
+    impl_->cpu_assembler->setPreviousSolution2(solution);
+}
+
+void DeviceAssembler::setPreviousSolutionK(int k, std::span<const Real> solution)
+{
+    impl_->cpu_assembler->setPreviousSolutionK(k, solution);
+}
+
+void DeviceAssembler::setTimeIntegrationContext(const TimeIntegrationContext* ctx)
+{
+    impl_->cpu_assembler->setTimeIntegrationContext(ctx);
+}
+
+void DeviceAssembler::setTime(Real time)
+{
+    impl_->cpu_assembler->setTime(time);
+}
+
+void DeviceAssembler::setTimeStep(Real dt)
+{
+    impl_->cpu_assembler->setTimeStep(dt);
+}
+
+void DeviceAssembler::setRealParameterGetter(
+    const std::function<std::optional<Real>(std::string_view)>* get_real_param) noexcept
+{
+    impl_->cpu_assembler->setRealParameterGetter(get_real_param);
+}
+
+void DeviceAssembler::setParameterGetter(
+    const std::function<std::optional<params::Value>(std::string_view)>* get_param) noexcept
+{
+    impl_->cpu_assembler->setParameterGetter(get_param);
+}
+
+void DeviceAssembler::setUserData(const void* user_data) noexcept
+{
+    impl_->cpu_assembler->setUserData(user_data);
+}
+
+void DeviceAssembler::setJITConstants(std::span<const Real> constants) noexcept
+{
+    impl_->cpu_assembler->setJITConstants(constants);
+}
+
+void DeviceAssembler::setCoupledValues(std::span<const Real> integrals,
+                                      std::span<const Real> aux_state) noexcept
+{
+    impl_->cpu_assembler->setCoupledValues(integrals, aux_state);
+}
+
+void DeviceAssembler::setMaterialStateProvider(IMaterialStateProvider* provider) noexcept
+{
+    impl_->cpu_assembler->setMaterialStateProvider(provider);
+}
+
 const AssemblyOptions& DeviceAssembler::getOptions() const noexcept
 {
     return impl_->options;
@@ -231,6 +314,11 @@ const AssemblyOptions& DeviceAssembler::getOptions() const noexcept
 bool DeviceAssembler::isConfigured() const noexcept
 {
     return impl_->dof_map != nullptr;
+}
+
+bool DeviceAssembler::supportsDG() const noexcept
+{
+    return impl_ && impl_->cpu_assembler && impl_->cpu_assembler->supportsDG();
 }
 
 void DeviceAssembler::setDeviceOptions(const DeviceOptions& options)

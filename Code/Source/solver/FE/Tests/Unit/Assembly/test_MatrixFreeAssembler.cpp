@@ -12,11 +12,16 @@
 
 #include <gtest/gtest.h>
 #include "Assembly/MatrixFreeAssembler.h"
+#include "Assembly/GlobalSystemView.h"
+#include "Assembly/StandardAssembler.h"
 #include "Core/Types.h"
+#include "Dofs/DofMap.h"
+#include "Spaces/H1Space.h"
 
 #include <vector>
 #include <memory>
 #include <cmath>
+#include <array>
 
 namespace svmp {
 namespace FE {
@@ -190,6 +195,112 @@ private:
     int setup_count_{0};
 };
 
+class ValidTetraMeshAccess final : public IMeshAccess {
+public:
+    explicit ValidTetraMeshAccess(GlobalIndex num_cells) : num_cells_(num_cells) {}
+
+    [[nodiscard]] GlobalIndex numCells() const override { return num_cells_; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return num_cells_; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Tetra4; }
+
+    void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override
+    {
+        nodes.resize(4);
+        const GlobalIndex base = cell_id * 4;
+        nodes[0] = base + 0;
+        nodes[1] = base + 1;
+        nodes[2] = base + 2;
+        nodes[3] = base + 3;
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        const GlobalIndex cell_id = node_id / 4;
+        const GlobalIndex local_id = node_id % 4;
+        const Real offset = static_cast<Real>(cell_id) * 2.0;
+        switch (local_id) {
+        case 0:
+            return {offset, 0.0, 0.0};
+        case 1:
+            return {offset + 1.0, 0.0, 0.0};
+        case 2:
+            return {offset, 1.0, 0.0};
+        default:
+            return {offset, 0.0, 1.0};
+        }
+    }
+
+    void getCellCoordinates(GlobalIndex cell_id, std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords.resize(4);
+        const Real offset = static_cast<Real>(cell_id) * 2.0;
+        coords[0] = {offset, 0.0, 0.0};
+        coords[1] = {offset + 1.0, 0.0, 0.0};
+        coords[2] = {offset, 1.0, 0.0};
+        coords[3] = {offset, 0.0, 1.0};
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/, GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return 0; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {-1, -1};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        for (GlobalIndex c = 0; c < num_cells_; ++c) {
+            callback(c);
+        }
+    }
+
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        forEachCell(std::move(callback));
+    }
+
+    void forEachBoundaryFace(int /*marker*/,
+                             std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+private:
+    GlobalIndex num_cells_{0};
+};
+
+static dofs::DofMap buildDisjointTetra4DofMap(GlobalIndex num_cells)
+{
+    dofs::DofMap dof_map(num_cells, /*n_dofs_total=*/num_cells * 4, /*dofs_per_cell=*/4);
+    for (GlobalIndex cell = 0; cell < num_cells; ++cell) {
+        const std::array<GlobalIndex, 4> dofs = {
+            cell * 4 + 0,
+            cell * 4 + 1,
+            cell * 4 + 2,
+            cell * 4 + 3,
+        };
+        dof_map.setCellDofs(cell, dofs);
+    }
+    dof_map.setNumDofs(num_cells * 4);
+    dof_map.setNumLocalDofs(num_cells * 4);
+    dof_map.finalize();
+    return dof_map;
+}
+
 } // namespace
 
 // ============================================================================
@@ -348,6 +459,149 @@ TEST_F(MatrixFreeAssemblerTest, DimensionsBeforeConfiguration) {
     // Before configuration, dimensions should be 0
     EXPECT_EQ(assembler.numRows(), 0);
     EXPECT_EQ(assembler.numCols(), 0);
+}
+
+// ============================================================================
+// Actual Operation Tests
+// ============================================================================
+
+TEST(MatrixFreeAssemblerOperationTest, ApplyIdentityOperatorDisjointDofs) {
+    const GlobalIndex num_cells = 3;
+    ValidTetraMeshAccess mesh(num_cells);
+    auto dof_map = buildDisjointTetra4DofMap(num_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    MockMatrixFreeKernel kernel;
+    MatrixFreeAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setDofMap(dof_map);
+    assembler.setSpace(space);
+    assembler.setKernel(kernel);
+
+    std::vector<Real> x(static_cast<std::size_t>(dof_map.getNumDofs()));
+    std::vector<Real> y(x.size(), 0.0);
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        x[i] = static_cast<Real>(i + 1);
+    }
+
+    assembler.apply(x, y);
+
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        EXPECT_DOUBLE_EQ(y[i], x[i]);
+    }
+}
+
+TEST(MatrixFreeAssemblerOperationTest, ApplyScalingOperatorDisjointDofs) {
+    const GlobalIndex num_cells = 2;
+    ValidTetraMeshAccess mesh(num_cells);
+    auto dof_map = buildDisjointTetra4DofMap(num_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    MockCachingKernel kernel;
+    MatrixFreeAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setDofMap(dof_map);
+    assembler.setSpace(space);
+    assembler.setKernel(kernel);
+
+    std::vector<Real> x(static_cast<std::size_t>(dof_map.getNumDofs()));
+    std::vector<Real> y(x.size(), 0.0);
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        x[i] = static_cast<Real>(1.0 + 0.25 * static_cast<Real>(i));
+    }
+
+    assembler.apply(x, y);
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        EXPECT_NEAR(y[i], 2.0 * x[i], 1e-12);
+    }
+}
+
+TEST(MatrixFreeAssemblerOperationTest, ApplyDirectMatchesApply) {
+    const GlobalIndex num_cells = 2;
+    ValidTetraMeshAccess mesh(num_cells);
+    auto dof_map = buildDisjointTetra4DofMap(num_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    MockMatrixFreeKernel kernel;
+    MatrixFreeAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setDofMap(dof_map);
+    assembler.setSpace(space);
+    assembler.setKernel(kernel);
+
+    std::vector<Real> x(static_cast<std::size_t>(dof_map.getNumDofs()), 1.0);
+    std::vector<Real> y(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0);
+    std::vector<Real> y_direct(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0);
+
+    assembler.apply(x, y);
+    assembler.applyDirect(x, y_direct);
+
+    for (std::size_t i = 0; i < y.size(); ++i) {
+        EXPECT_NEAR(y_direct[i], y[i], 1e-12);
+    }
+}
+
+TEST(MatrixFreeAssemblerOperationTest, GetDiagonalIdentity) {
+    const GlobalIndex num_cells = 1;
+    ValidTetraMeshAccess mesh(num_cells);
+    auto dof_map = buildDisjointTetra4DofMap(num_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    MockMatrixFreeKernel kernel;
+    MatrixFreeAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setDofMap(dof_map);
+    assembler.setSpace(space);
+    assembler.setKernel(kernel);
+
+    std::vector<Real> diag(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0);
+    assembler.getDiagonal(diag);
+
+    for (Real v : diag) {
+        EXPECT_NEAR(v, 1.0, 1e-12);
+    }
+}
+
+TEST(MatrixFreeAssemblerOperationTest, ApplyMatchesExplicitStiffnessAssemblySingleCell) {
+    const GlobalIndex num_cells = 1;
+    ValidTetraMeshAccess mesh(num_cells);
+    auto dof_map = buildDisjointTetra4DofMap(num_cells);
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    StiffnessKernel stiffness_kernel(1.0);
+    auto wrapped = wrapAsMatrixFreeKernel(stiffness_kernel);
+
+    MatrixFreeAssembler mf;
+    mf.setMesh(mesh);
+    mf.setDofMap(dof_map);
+    mf.setSpace(space);
+    mf.setKernel(*wrapped);
+
+    DenseMatrixView A(dof_map.getNumDofs());
+    StandardAssembler explicit_asm;
+    explicit_asm.setDofMap(dof_map);
+    explicit_asm.assembleMatrix(mesh, space, space, stiffness_kernel, A);
+
+    std::vector<Real> x(static_cast<std::size_t>(dof_map.getNumDofs()));
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        x[i] = static_cast<Real>(i + 1);
+    }
+
+    std::vector<Real> y_mf(x.size(), 0.0);
+    std::vector<Real> y_exp(x.size(), 0.0);
+    mf.apply(x, y_mf);
+
+    for (GlobalIndex i = 0; i < dof_map.getNumDofs(); ++i) {
+        Real sum = 0.0;
+        for (GlobalIndex j = 0; j < dof_map.getNumDofs(); ++j) {
+            sum += A.getMatrixEntry(i, j) * x[static_cast<std::size_t>(j)];
+        }
+        y_exp[static_cast<std::size_t>(i)] = sum;
+    }
+
+    for (std::size_t i = 0; i < y_mf.size(); ++i) {
+        EXPECT_NEAR(y_mf[i], y_exp[i], 1e-10);
+    }
 }
 
 // ============================================================================

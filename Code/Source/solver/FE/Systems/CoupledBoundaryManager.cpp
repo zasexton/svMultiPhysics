@@ -1,0 +1,457 @@
+/* Copyright (c) Stanford University, The Regents of the University of California, and others.
+ *
+ * All Rights Reserved.
+ *
+ * See Copyright-SimVascular.txt for additional details.
+ */
+
+#include "Systems/CoupledBoundaryManager.h"
+
+#include "Assembly/FunctionalAssembler.h"
+#include "Forms/BoundaryFunctional.h"
+#include "Systems/FESystem.h"
+#include "Systems/SystemsExceptions.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <string>
+#include <utility>
+
+namespace svmp {
+namespace FE {
+namespace systems {
+
+namespace {
+
+class BoundaryMeasureKernel final : public assembly::FunctionalKernel {
+public:
+    [[nodiscard]] assembly::RequiredData getRequiredData() const noexcept override
+    {
+        return assembly::RequiredData::IntegrationWeights;
+    }
+
+    [[nodiscard]] bool hasCell() const noexcept override { return false; }
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+
+    [[nodiscard]] Real evaluateCell(const assembly::AssemblyContext& /*ctx*/, LocalIndex /*q*/) override
+    {
+        return 0.0;
+    }
+
+    [[nodiscard]] Real evaluateBoundaryFace(const assembly::AssemblyContext& /*ctx*/,
+                                            LocalIndex /*q*/,
+                                            int /*boundary_marker*/) override
+    {
+        return 1.0;
+    }
+
+    [[nodiscard]] std::string name() const override { return "BoundaryMeasure"; }
+};
+
+void gatherParameterSymbols(const forms::FormExprNode& node, std::vector<std::string_view>& names)
+{
+    if (node.type() == forms::FormExprType::ParameterSymbol) {
+        const auto nm = node.symbolName();
+        if (nm && !nm->empty()) {
+            names.push_back(*nm);
+        }
+    }
+
+    for (const auto& child : node.childrenShared()) {
+        if (child) gatherParameterSymbols(*child, names);
+    }
+}
+
+} // namespace
+
+CoupledBoundaryManager::CoupledBoundaryManager(FESystem& system, FieldId primary_field)
+    : system_(system)
+    , primary_field_(primary_field)
+{
+    FE_THROW_IF(primary_field_ == INVALID_FIELD_ID, InvalidArgumentException,
+                "CoupledBoundaryManager: primary_field is invalid");
+}
+
+CoupledBoundaryManager::~CoupledBoundaryManager() = default;
+
+void CoupledBoundaryManager::requireSetup() const
+{
+    FE_THROW_IF(!system_.isSetup(), InvalidArgumentException,
+                "CoupledBoundaryManager: system.setup() has not been called");
+}
+
+void CoupledBoundaryManager::addBoundaryFunctional(forms::BoundaryFunctional functional)
+{
+    FE_THROW_IF(functional.name.empty(), InvalidArgumentException,
+                "CoupledBoundaryManager::addBoundaryFunctional: empty name");
+    FE_THROW_IF(!functional.integrand.isValid(), InvalidArgumentException,
+                "CoupledBoundaryManager::addBoundaryFunctional: invalid integrand");
+
+    auto it = name_to_functional_.find(functional.name);
+    if (it != name_to_functional_.end()) {
+        const auto& existing = functionals_.at(it->second).def;
+        FE_THROW_IF(existing.boundary_marker != functional.boundary_marker, InvalidArgumentException,
+                    "CoupledBoundaryManager::addBoundaryFunctional: name '" + functional.name + "' already registered with different boundary_marker");
+        FE_THROW_IF(existing.reduction != functional.reduction, InvalidArgumentException,
+                    "CoupledBoundaryManager::addBoundaryFunctional: name '" + functional.name + "' already registered with different reduction");
+        FE_THROW_IF(existing.integrand.toString() != functional.integrand.toString(), InvalidArgumentException,
+                    "CoupledBoundaryManager::addBoundaryFunctional: name '" + functional.name + "' already registered with different integrand");
+        return;
+    }
+
+    const auto idx = functionals_.size();
+    functionals_.push_back(CompiledFunctional{std::move(functional), nullptr});
+    name_to_functional_.emplace(functionals_.back().def.name, idx);
+
+    // Pre-register the name in the results container so the index is stable.
+    integrals_.set(functionals_.back().def.name, 0.0);
+}
+
+void CoupledBoundaryManager::addCoupledNeumannBC(constraints::CoupledNeumannBC bc)
+{
+    for (const auto& f : bc.requiredIntegrals()) {
+        addBoundaryFunctional(f);
+    }
+    coupled_neumann_.push_back(std::move(bc));
+}
+
+void CoupledBoundaryManager::addCoupledRobinBC(constraints::CoupledRobinBC bc)
+{
+    for (const auto& f : bc.requiredIntegrals()) {
+        addBoundaryFunctional(f);
+    }
+    coupled_robin_.push_back(std::move(bc));
+}
+
+void CoupledBoundaryManager::addAuxiliaryState(AuxiliaryStateRegistration registration)
+{
+    for (const auto& f : registration.required_integrals) {
+        addBoundaryFunctional(f);
+    }
+
+    FE_THROW_IF(!registration.rhs.isValid(), InvalidArgumentException,
+                "CoupledBoundaryManager::addAuxiliaryState: RHS expression is invalid");
+    FE_THROW_IF(registration.spec.size != 1, NotImplementedException,
+                "CoupledBoundaryManager: auxiliary state spec.size != 1 is not supported yet");
+
+    // Allow repeated registration (common when multiple coupled helpers are called),
+    // but do not duplicate storage or integrate twice.
+    for (const auto& existing : aux_registrations_) {
+        if (existing.spec.name == registration.spec.name) {
+            return;
+        }
+    }
+
+    aux_state_.registerState(registration.spec, registration.initial_values);
+
+    // Resolve this variable's slot now (stable after registerState).
+    const auto slot_u = aux_state_.indexOf(registration.spec.name);
+    FE_THROW_IF(slot_u > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()),
+                InvalidArgumentException,
+                "CoupledBoundaryManager::addAuxiliaryState: auxiliary slot overflow");
+    registration.slot = static_cast<std::uint32_t>(slot_u);
+
+    // Resolve coupled placeholders in RHS/Jacobian to slot-based terminals.
+    auto resolve_expr = [&](const forms::FormExpr& expr) -> forms::FormExpr {
+        return expr.transformNodes([&](const forms::FormExprNode& n) -> std::optional<forms::FormExpr> {
+            if (n.type() == forms::FormExprType::AuxiliaryStateSymbol) {
+                const auto nm = n.symbolName();
+                FE_THROW_IF(!nm || nm->empty(), InvalidArgumentException,
+                            "CoupledBoundaryManager: auxiliaryState(...) missing name in ODE expression");
+                const auto idx = aux_state_.indexOf(*nm);
+                FE_THROW_IF(idx > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()),
+                            InvalidArgumentException,
+                            "CoupledBoundaryManager: auxiliary slot overflow in ODE expression");
+                return forms::FormExpr::auxiliaryStateRef(static_cast<std::uint32_t>(idx));
+            }
+
+            if (n.type() == forms::FormExprType::BoundaryFunctionalSymbol ||
+                n.type() == forms::FormExprType::BoundaryIntegralSymbol) {
+                const auto nm = n.symbolName();
+                FE_THROW_IF(!nm || nm->empty(), InvalidArgumentException,
+                            "CoupledBoundaryManager: boundary integral symbol missing name in ODE expression");
+                const auto idx = integrals_.indexOf(*nm);
+                FE_THROW_IF(idx > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()),
+                            InvalidArgumentException,
+                            "CoupledBoundaryManager: boundary integral slot overflow in ODE expression");
+                return forms::FormExpr::boundaryIntegralRef(static_cast<std::uint32_t>(idx));
+            }
+
+            return std::nullopt;
+        });
+    };
+
+    registration.rhs = resolve_expr(registration.rhs);
+    if (registration.d_rhs_dX && registration.d_rhs_dX->isValid()) {
+        registration.d_rhs_dX = resolve_expr(*registration.d_rhs_dX);
+    }
+
+    aux_registrations_.push_back(std::move(registration));
+}
+
+std::vector<params::Spec> CoupledBoundaryManager::parameterSpecs() const
+{
+    std::vector<std::string_view> param_names;
+
+    for (const auto& entry : functionals_) {
+        const auto* root = entry.def.integrand.node();
+        if (!root) continue;
+        gatherParameterSymbols(*root, param_names);
+    }
+
+    for (const auto& reg : aux_registrations_) {
+        if (reg.rhs.isValid()) {
+            if (const auto* root = reg.rhs.node()) {
+                gatherParameterSymbols(*root, param_names);
+            }
+        }
+        if (reg.d_rhs_dX && reg.d_rhs_dX->isValid()) {
+            if (const auto* root = reg.d_rhs_dX->node()) {
+                gatherParameterSymbols(*root, param_names);
+            }
+        }
+    }
+
+    if (param_names.empty()) {
+        return {};
+    }
+
+    std::vector<std::string> keys;
+    keys.reserve(param_names.size());
+    for (const auto nm : param_names) {
+        keys.emplace_back(nm);
+    }
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+
+    std::vector<params::Spec> out;
+    out.reserve(keys.size());
+    for (auto& key : keys) {
+        out.push_back(params::Spec{.key = std::move(key),
+                                   .type = params::ValueType::Real,
+                                   .required = true});
+    }
+    return out;
+}
+
+void CoupledBoundaryManager::resolveParameterSlots(
+    const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
+{
+    auto resolve_expr = [&](forms::FormExpr expr, std::string_view where) -> forms::FormExpr {
+        if (!expr.isValid()) {
+            return expr;
+        }
+
+        return expr.transformNodes([&](const forms::FormExprNode& n) -> std::optional<forms::FormExpr> {
+            if (n.type() != forms::FormExprType::ParameterSymbol) {
+                return std::nullopt;
+            }
+            const auto key = n.symbolName();
+            FE_THROW_IF(!key || key->empty(), InvalidArgumentException,
+                        std::string(where) + ": ParameterSymbol node missing name");
+            const auto slot = slot_of_real_param(*key);
+            FE_THROW_IF(!slot.has_value(), InvalidArgumentException,
+                        std::string(where) + ": could not resolve parameter slot for '" + std::string(*key) + "'");
+            return forms::FormExpr::parameterRef(*slot);
+        });
+    };
+
+    for (auto& entry : functionals_) {
+        entry.def.integrand = resolve_expr(entry.def.integrand, "CoupledBoundaryManager::functionals");
+    }
+    for (auto& reg : aux_registrations_) {
+        reg.rhs = resolve_expr(reg.rhs, "CoupledBoundaryManager::aux_state_rhs");
+        if (reg.d_rhs_dX && reg.d_rhs_dX->isValid()) {
+            reg.d_rhs_dX = resolve_expr(*reg.d_rhs_dX, "CoupledBoundaryManager::aux_state_jacobian");
+        }
+    }
+}
+
+void CoupledBoundaryManager::compileFunctionalIfNeeded(const forms::BoundaryFunctional& functional)
+{
+    auto it = name_to_functional_.find(functional.name);
+    FE_THROW_IF(it == name_to_functional_.end(), InvalidArgumentException,
+                "CoupledBoundaryManager: unknown boundary functional '" + functional.name + "'");
+    auto& entry = functionals_.at(it->second);
+    if (entry.kernel) return;
+    entry.kernel = forms::compileBoundaryFunctionalKernel(entry.def);
+}
+
+Real CoupledBoundaryManager::boundaryMeasure(int boundary_marker, const SystemStateView& state)
+{
+    auto it = boundary_measure_cache_.find(boundary_marker);
+    if (it != boundary_measure_cache_.end()) {
+        return it->second;
+    }
+
+    requireSetup();
+
+    const auto& rec = system_.fieldRecord(primary_field_);
+    FE_CHECK_NOT_NULL(rec.space.get(), "CoupledBoundaryManager::boundaryMeasure: field space");
+
+    assembly::FunctionalAssembler assembler;
+    assembler.setMesh(system_.meshAccess());
+    assembler.setDofMap(system_.dofHandler().getDofMap());
+    assembler.setSpace(*rec.space);
+    assembler.setPrimaryField(primary_field_);
+    assembler.setTimeIntegrationContext(state.time_integration);
+    assembler.setTime(static_cast<Real>(state.time));
+    assembler.setTimeStep(static_cast<Real>(state.dt));
+    const auto& preg = system_.parameterRegistry();
+    const bool have_param_contracts = !preg.specs().empty();
+    std::function<std::optional<Real>(std::string_view)> get_real_param_wrapped{};
+    std::function<std::optional<params::Value>(std::string_view)> get_param_wrapped{};
+    if (have_param_contracts) {
+        get_real_param_wrapped = preg.makeRealGetter(state);
+        get_param_wrapped = preg.makeParamGetter(state);
+    }
+    assembler.setRealParameterGetter(have_param_contracts
+                                         ? &get_real_param_wrapped
+                                         : (state.getRealParam ? &state.getRealParam : nullptr));
+    assembler.setParameterGetter(have_param_contracts
+                                     ? &get_param_wrapped
+                                     : (state.getParam ? &state.getParam : nullptr));
+    assembler.setUserData(state.user_data);
+    std::vector<Real> jit_constants;
+    if (have_param_contracts && preg.slotCount() > 0u) {
+        jit_constants = preg.evaluateRealSlots(state);
+        assembler.setJITConstants(jit_constants);
+    } else {
+        assembler.setJITConstants({});
+    }
+    assembler.setCoupledValues({}, {});
+
+    BoundaryMeasureKernel measure_kernel;
+    const Real area = assembler.assembleBoundaryScalar(measure_kernel, boundary_marker);
+    boundary_measure_cache_.emplace(boundary_marker, area);
+    return area;
+}
+
+Real CoupledBoundaryManager::evaluateFunctional(const CompiledFunctional& entry, const SystemStateView& state)
+{
+    requireSetup();
+    FE_CHECK_NOT_NULL(entry.kernel.get(), "CoupledBoundaryManager::evaluateFunctional: kernel");
+
+    const auto& rec = system_.fieldRecord(primary_field_);
+    FE_CHECK_NOT_NULL(rec.space.get(), "CoupledBoundaryManager::evaluateFunctional: field space");
+
+    assembly::FunctionalAssembler assembler;
+    assembler.setMesh(system_.meshAccess());
+    assembler.setDofMap(system_.dofHandler().getDofMap());
+    assembler.setSpace(*rec.space);
+    assembler.setPrimaryField(primary_field_);
+    assembler.setSolution(state.u);
+    assembler.setTimeIntegrationContext(state.time_integration);
+    assembler.setTime(static_cast<Real>(state.time));
+    assembler.setTimeStep(static_cast<Real>(state.dt));
+    const auto& preg = system_.parameterRegistry();
+    const bool have_param_contracts = !preg.specs().empty();
+    std::function<std::optional<Real>(std::string_view)> get_real_param_wrapped{};
+    std::function<std::optional<params::Value>(std::string_view)> get_param_wrapped{};
+    if (have_param_contracts) {
+        get_real_param_wrapped = preg.makeRealGetter(state);
+        get_param_wrapped = preg.makeParamGetter(state);
+    }
+    assembler.setRealParameterGetter(have_param_contracts
+                                         ? &get_real_param_wrapped
+                                         : (state.getRealParam ? &state.getRealParam : nullptr));
+    assembler.setParameterGetter(have_param_contracts
+                                     ? &get_param_wrapped
+                                     : (state.getParam ? &state.getParam : nullptr));
+    assembler.setUserData(state.user_data);
+    std::vector<Real> jit_constants;
+    if (have_param_contracts && preg.slotCount() > 0u) {
+        jit_constants = preg.evaluateRealSlots(state);
+        assembler.setJITConstants(jit_constants);
+    } else {
+        assembler.setJITConstants({});
+    }
+    assembler.setCoupledValues({}, {});
+
+    if (!state.u_history.empty()) {
+        for (std::size_t k = 0; k < state.u_history.size(); ++k) {
+            assembler.setPreviousSolutionK(static_cast<int>(k + 1), state.u_history[k]);
+        }
+    } else {
+        assembler.setPreviousSolution(state.u_prev);
+        assembler.setPreviousSolution2(state.u_prev2);
+    }
+
+    Real raw = assembler.assembleBoundaryScalar(*entry.kernel, entry.def.boundary_marker);
+
+    switch (entry.def.reduction) {
+        case forms::BoundaryFunctional::Reduction::Sum:
+            return raw;
+        case forms::BoundaryFunctional::Reduction::Average: {
+            const Real area = boundaryMeasure(entry.def.boundary_marker, state);
+            FE_THROW_IF(std::abs(area) < 1e-14, InvalidArgumentException,
+                        "CoupledBoundaryManager: boundary measure is near zero for Average reduction");
+            return raw / area;
+        }
+        case forms::BoundaryFunctional::Reduction::Max:
+        case forms::BoundaryFunctional::Reduction::Min:
+            FE_THROW(NotImplementedException,
+                     "CoupledBoundaryManager: Max/Min reductions are not implemented");
+    }
+
+    return raw;
+}
+
+void CoupledBoundaryManager::prepareForAssembly(const SystemStateView& state)
+{
+    requireSetup();
+
+    ctx_.t = static_cast<Real>(state.time);
+    ctx_.dt = static_cast<Real>(state.dt);
+
+    aux_state_.resetToCommitted();
+
+    for (auto& entry : functionals_) {
+        if (!entry.kernel) {
+            compileFunctionalIfNeeded(entry.def);
+        }
+        const Real v = evaluateFunctional(entry, state);
+        integrals_.set(entry.def.name, v);
+    }
+
+    for (auto& reg : aux_registrations_) {
+        FE_THROW_IF(!reg.rhs.isValid(), InvalidArgumentException,
+                    "CoupledBoundaryManager::prepareForAssembly: invalid RHS expression");
+        FE_THROW_IF(reg.slot == AuxiliaryStateRegistration::kInvalidSlot, InvalidStateException,
+                    "CoupledBoundaryManager::prepareForAssembly: auxiliary slot is not resolved");
+
+        // Real-valued parameter slots (optional).
+        std::vector<Real> jit_constants;
+        const auto& preg = system_.parameterRegistry();
+        const bool have_param_contracts = !preg.specs().empty();
+        if (have_param_contracts && preg.slotCount() > 0u) {
+            jit_constants = preg.evaluateRealSlots(state);
+        }
+
+        ODEIntegrator::advance(reg.integrator,
+                               reg.slot,
+                               aux_state_,
+                               reg.rhs,
+                               reg.d_rhs_dX,
+                               integrals_.all(),
+                               jit_constants,
+                               ctx_.t,
+                               ctx_.dt);
+    }
+}
+
+void CoupledBoundaryManager::beginTimeStep()
+{
+    aux_state_.resetToCommitted();
+}
+
+void CoupledBoundaryManager::commitTimeStep()
+{
+    aux_state_.commitTimeStep();
+}
+
+} // namespace systems
+} // namespace FE
+} // namespace svmp

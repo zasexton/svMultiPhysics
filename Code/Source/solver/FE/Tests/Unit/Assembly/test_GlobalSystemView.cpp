@@ -13,9 +13,13 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/GlobalSystemView.h"
+#include "Assembly/RemappedSystemView.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <numeric>
+#include <string_view>
+#include <thread>
 
 namespace svmp {
 namespace FE {
@@ -76,6 +80,105 @@ TEST_F(DenseMatrixViewTest, AddModeInsert) {
     matrix_->endAssemblyPhase();
 
     EXPECT_DOUBLE_EQ((*matrix_)(1, 1), 2.0);
+}
+
+TEST_F(DenseMatrixViewTest, AddModeMax) {
+    matrix_->beginAssemblyPhase();
+    matrix_->addMatrixEntry(1, 1, 5.0, AddMode::Insert);
+    matrix_->addMatrixEntry(1, 1, 3.0, AddMode::Max);
+    matrix_->addMatrixEntry(1, 1, 7.0, AddMode::Max);
+    matrix_->endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ((*matrix_)(1, 1), 7.0);
+}
+
+TEST_F(DenseMatrixViewTest, AddModeMin) {
+    matrix_->beginAssemblyPhase();
+    matrix_->addMatrixEntry(1, 1, 5.0, AddMode::Insert);
+    matrix_->addMatrixEntry(1, 1, 3.0, AddMode::Min);
+    matrix_->addMatrixEntry(1, 1, 7.0, AddMode::Min);
+    matrix_->endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ((*matrix_)(1, 1), 3.0);
+}
+
+TEST_F(DenseMatrixViewTest, AddModeTransitionsAddInsertAdd) {
+    matrix_->beginAssemblyPhase();
+    matrix_->addMatrixEntry(0, 0, 1.0, AddMode::Add);
+    matrix_->addMatrixEntry(0, 0, 10.0, AddMode::Insert);
+    matrix_->addMatrixEntry(0, 0, 2.0, AddMode::Add);
+    matrix_->endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ((*matrix_)(0, 0), 12.0);
+}
+
+TEST_F(DenseMatrixViewTest, AddMatrixEntriesEmptySpansNoOp) {
+    const std::vector<GlobalIndex> empty;
+    const std::vector<Real> empty_vals;
+
+    matrix_->beginAssemblyPhase();
+    EXPECT_NO_THROW(matrix_->addMatrixEntries(empty, empty, empty_vals));
+    EXPECT_NO_THROW(matrix_->addMatrixEntries(std::vector<GlobalIndex>{0, 1}, empty, empty_vals));
+    matrix_->endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ((*matrix_)(0, 0), 0.0);
+    EXPECT_DOUBLE_EQ((*matrix_)(1, 1), 0.0);
+}
+
+TEST_F(DenseMatrixViewTest, AddMatrixEntriesMismatchedSizesThrows) {
+    const std::vector<GlobalIndex> dofs = {0, 1};
+    const std::vector<Real> wrong = {1.0, 2.0, 3.0};
+
+    matrix_->beginAssemblyPhase();
+    EXPECT_THROW(matrix_->addMatrixEntries(dofs, wrong), std::invalid_argument);
+    matrix_->endAssemblyPhase();
+}
+
+TEST_F(DenseMatrixViewTest, IsDistributedFalseForDenseViews) {
+    EXPECT_FALSE(matrix_->isDistributed());
+}
+
+TEST(DenseMatrixViewThreadSafety, ConcurrentAddsToDifferentLocations) {
+    DenseMatrixView matrix(200);
+    matrix.beginAssemblyPhase();
+
+    auto worker = [&matrix](GlobalIndex base) {
+        for (GlobalIndex i = 0; i < 50; ++i) {
+            const GlobalIndex idx = base + i;
+            matrix.addMatrixEntry(idx, idx, 1.0, AddMode::Add);
+        }
+    };
+
+    std::thread t0(worker, 0);
+    std::thread t1(worker, 50);
+    std::thread t2(worker, 100);
+    std::thread t3(worker, 150);
+
+    t0.join();
+    t1.join();
+    t2.join();
+    t3.join();
+
+    matrix.endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ(matrix.getMatrixEntry(0, 0), 1.0);
+    EXPECT_DOUBLE_EQ(matrix.getMatrixEntry(199, 199), 1.0);
+    EXPECT_DOUBLE_EQ(matrix.getMatrixEntry(75, 75), 1.0);
+}
+
+TEST(DenseMatrixViewStress, VeryLargeMatrixConstructionOptional) {
+    const char* v = std::getenv("SVMP_FE_RUN_STRESS_TESTS");
+    if (v == nullptr || std::string_view(v) != "1") {
+        GTEST_SKIP() << "Set SVMP_FE_RUN_STRESS_TESTS=1 to enable";
+    }
+
+    try {
+        DenseMatrixView matrix(10000, 10000);
+        EXPECT_EQ(matrix.numRows(), 10000);
+        EXPECT_EQ(matrix.numCols(), 10000);
+    } catch (const std::bad_alloc&) {
+        GTEST_SKIP() << "Insufficient memory for 10000x10000 DenseMatrixView";
+    }
 }
 
 TEST_F(DenseMatrixViewTest, AddSquareBlock) {
@@ -368,6 +471,295 @@ TEST(GlobalSystemViewEdgeCases, ZeroSizeConstruction) {
     DenseMatrixView matrix(0);
     EXPECT_EQ(matrix.numRows(), 0);
     EXPECT_EQ(matrix.data().size(), 0);
+}
+
+// ============================================================================
+// DofRemapTable / RemappedSystemView Tests
+// ============================================================================
+
+TEST(DofRemapTableTest, SetAndMapBasic) {
+    DofRemapTable table;
+    table.set(5, 10);
+
+    EXPECT_EQ(table.map(5).value_or(-1), 10);
+    EXPECT_FALSE(table.map(3).has_value());
+}
+
+TEST(DofRemapTableTest, MultipleMappings) {
+    DofRemapTable table;
+    table.set(0, 10);
+    table.set(1, 11);
+    table.set(2, 12);
+
+    EXPECT_EQ(table.map(0).value_or(-1), 10);
+    EXPECT_EQ(table.map(1).value_or(-1), 11);
+    EXPECT_EQ(table.map(2).value_or(-1), 12);
+    EXPECT_FALSE(table.map(3).has_value());
+}
+
+TEST(DofRemapTableTest, SelfMapping) {
+    DofRemapTable table;
+    table.set(5, 5);
+    EXPECT_EQ(table.map(5).value_or(-1), 5);
+}
+
+TEST(DofRemapTableTest, NegativeTargetStored) {
+    DofRemapTable table;
+    table.set(5, -1);
+    EXPECT_EQ(table.map(5).value_or(0), -1);
+}
+
+TEST(DofRemapTableTest, OverwriteExistingMapping) {
+    DofRemapTable table;
+    table.set(5, 10);
+    table.set(5, 20);
+    EXPECT_EQ(table.map(5).value_or(-1), 20);
+}
+
+TEST(RemappedSystemViewTest, ConstructionDelegatesProperties) {
+    DenseSystemView base(12);
+    DofRemapTable table;
+    RemappedSystemView view(base, table);
+
+    EXPECT_TRUE(view.hasMatrix());
+    EXPECT_TRUE(view.hasVector());
+    EXPECT_EQ(view.numRows(), base.numRows());
+    EXPECT_EQ(view.numCols(), base.numCols());
+    EXPECT_EQ(view.backendName(), base.backendName());
+}
+
+TEST(RemappedSystemViewTest, AddMatrixEntryUnmappedPassthroughOnly) {
+    DenseSystemView base(12);
+    DofRemapTable table;
+    RemappedSystemView view(base, table);
+
+    view.beginAssemblyPhase();
+    view.addMatrixEntry(0, 0, 3.0);
+    view.endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(0, 0), 3.0);
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(5, 0), 0.0);
+}
+
+TEST(RemappedSystemViewTest, AddMatrixEntryMappedRowDuplicates) {
+    DenseSystemView base(12);
+    DofRemapTable table;
+    table.set(1, 5);
+    RemappedSystemView view(base, table);
+
+    view.beginAssemblyPhase();
+    view.addMatrixEntry(1, 2, 3.0);
+    view.endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(1, 2), 3.0);
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(5, 2), 3.0);
+}
+
+TEST(RemappedSystemViewTest, AddMatrixEntryMappedRowAndColumnUsesMappedColumn) {
+    DenseSystemView base(12);
+    DofRemapTable table;
+    table.set(1, 5);
+    table.set(2, 6);
+    RemappedSystemView view(base, table);
+
+    view.beginAssemblyPhase();
+    view.addMatrixEntry(1, 2, 4.0);
+    view.endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(1, 2), 4.0);
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(5, 6), 4.0);
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(5, 2), 0.0);
+}
+
+TEST(RemappedSystemViewTest, AddMatrixEntrySelfMappedRowDoesNotDuplicate) {
+    DenseSystemView base(12);
+    DofRemapTable table;
+    table.set(5, 5);
+    RemappedSystemView view(base, table);
+
+    view.beginAssemblyPhase();
+    view.addMatrixEntry(5, 3, 1.0, AddMode::Add);
+    view.endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(5, 3), 1.0);
+}
+
+TEST(RemappedSystemViewTest, AddMatrixEntryNegativeMappedRowSkipped) {
+    DenseSystemView base(12);
+    DofRemapTable table;
+    table.set(1, -1);
+    RemappedSystemView view(base, table);
+
+    view.beginAssemblyPhase();
+    view.addMatrixEntry(1, 2, 3.0);
+    view.endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(1, 2), 3.0);
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(0, 0), 0.0);
+}
+
+TEST(RemappedSystemViewTest, AddMatrixEntriesBatchMixedMappings) {
+    DenseSystemView base(20);
+    DofRemapTable table;
+    table.set(1, 10);   // mapped row
+    table.set(3, 11);   // mapped column
+    RemappedSystemView view(base, table);
+
+    const std::vector<GlobalIndex> row_dofs = {0, 1};
+    const std::vector<GlobalIndex> col_dofs = {2, 3};
+    const std::vector<Real> local = {
+        1.0, 2.0,   // row 0
+        3.0, 4.0    // row 1
+    };
+
+    view.beginAssemblyPhase();
+    view.addMatrixEntries(row_dofs, col_dofs, local);
+    view.endAssemblyPhase();
+
+    // Original contribution
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(0, 2), 1.0);
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(0, 3), 2.0);
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(1, 2), 3.0);
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(1, 3), 4.0);
+
+    // Duplicated mapped row (1 -> 10), with mapped column (3 -> 11)
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(10, 2), 3.0);
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(10, 11), 4.0);
+}
+
+TEST(RemappedSystemViewTest, AddVectorEntryMappedDuplicates) {
+    DenseSystemView base(20);
+    DofRemapTable table;
+    table.set(2, 7);
+    RemappedSystemView view(base, table);
+
+    view.beginAssemblyPhase();
+    view.addVectorEntry(2, 5.0);
+    view.endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ(base.getVectorEntry(2), 5.0);
+    EXPECT_DOUBLE_EQ(base.getVectorEntry(7), 5.0);
+}
+
+TEST(RemappedSystemViewTest, AddVectorEntriesBatchDuplicatesMappedOnly) {
+    DenseSystemView base(20);
+    DofRemapTable table;
+    table.set(2, 7);
+    table.set(3, 8);
+    RemappedSystemView view(base, table);
+
+    const std::vector<GlobalIndex> dofs = {1, 2, 3};
+    const std::vector<Real> values = {1.0, 2.0, 3.0};
+
+    view.beginAssemblyPhase();
+    view.addVectorEntries(dofs, values);
+    view.endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ(base.getVectorEntry(1), 1.0);
+    EXPECT_DOUBLE_EQ(base.getVectorEntry(2), 2.0);
+    EXPECT_DOUBLE_EQ(base.getVectorEntry(3), 3.0);
+    EXPECT_DOUBLE_EQ(base.getVectorEntry(7), 2.0);
+    EXPECT_DOUBLE_EQ(base.getVectorEntry(8), 3.0);
+}
+
+TEST(RemappedSystemViewTest, SetDiagonalPassthroughNoDuplication) {
+    DenseSystemView base(20);
+    DofRemapTable table;
+    table.set(2, 7);
+    RemappedSystemView view(base, table);
+
+    view.beginAssemblyPhase();
+    view.setDiagonal(2, 5.0);
+    view.endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(2, 2), 5.0);
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(7, 7), 0.0);
+}
+
+TEST(RemappedSystemViewTest, ZeroRowsPassthroughDoesNotAffectMappedRow) {
+    DenseSystemView base(20);
+    DofRemapTable table;
+    table.set(1, 10);
+    RemappedSystemView view(base, table);
+
+    base.beginAssemblyPhase();
+    base.addMatrixEntry(1, 0, 2.0);
+    base.addMatrixEntry(10, 0, 3.0);
+    base.endAssemblyPhase();
+
+    view.beginAssemblyPhase();
+    const std::vector<GlobalIndex> rows = {1};
+    view.zeroRows(rows, true);
+    view.endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(1, 0), 0.0);
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(1, 1), 1.0);
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(10, 0), 3.0);
+}
+
+TEST(RemappedSystemViewTest, LifecycleDelegatesAndPhaseMatchesBase) {
+    DenseSystemView base(5);
+    DofRemapTable table;
+    RemappedSystemView view(base, table);
+
+    EXPECT_EQ(view.getPhase(), AssemblyPhase::NotStarted);
+    view.beginAssemblyPhase();
+    EXPECT_EQ(view.getPhase(), AssemblyPhase::Building);
+    view.endAssemblyPhase();
+    EXPECT_EQ(view.getPhase(), AssemblyPhase::Flushing);
+    view.finalizeAssembly();
+    EXPECT_EQ(view.getPhase(), AssemblyPhase::Finalized);
+}
+
+TEST(RemappedSystemViewTest, NullBasePropertiesAreSafeAfterMove) {
+    DenseSystemView base(5);
+    DofRemapTable table;
+    RemappedSystemView view(base, table);
+
+    RemappedSystemView moved(std::move(view));
+
+    EXPECT_FALSE(view.hasMatrix());
+    EXPECT_FALSE(view.hasVector());
+    EXPECT_EQ(view.numRows(), 0);
+    EXPECT_EQ(view.numCols(), 0);
+    EXPECT_EQ(view.backendName(), "RemappedSystem");
+    EXPECT_EQ(view.getPhase(), AssemblyPhase::NotStarted);
+
+    EXPECT_TRUE(moved.hasMatrix());
+    EXPECT_TRUE(moved.hasVector());
+}
+
+TEST(RemappedSystemViewTest, ZeroDelegates) {
+    DenseSystemView base(10);
+    DofRemapTable table;
+    RemappedSystemView view(base, table);
+
+    base.beginAssemblyPhase();
+    base.addMatrixEntry(2, 3, 4.0);
+    base.addVectorEntry(2, 5.0);
+    base.endAssemblyPhase();
+
+    view.zero();
+
+    EXPECT_DOUBLE_EQ(base.getMatrixEntry(2, 3), 0.0);
+    EXPECT_DOUBLE_EQ(base.getVectorEntry(2), 0.0);
+}
+
+TEST(RemappedSystemViewTest, GetEntryDelegatesToBase) {
+    DenseSystemView base(10);
+    DofRemapTable table;
+    table.set(1, 5);
+    RemappedSystemView view(base, table);
+
+    view.beginAssemblyPhase();
+    view.addMatrixEntry(1, 2, 3.0);
+    view.addVectorEntry(1, 4.0);
+    view.endAssemblyPhase();
+
+    EXPECT_DOUBLE_EQ(view.getMatrixEntry(1, 2), 3.0);
+    EXPECT_DOUBLE_EQ(view.getMatrixEntry(5, 2), 3.0);
+    EXPECT_DOUBLE_EQ(view.getVectorEntry(1), 4.0);
+    EXPECT_DOUBLE_EQ(view.getVectorEntry(5), 4.0);
 }
 
 } // namespace test

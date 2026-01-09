@@ -1,0 +1,22 @@
+# svphysicsConfig.cmake - Configuration file for svMultiPhysics Physics library
+#
+# This file is used when the Physics library is installed and consumed by external projects.
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(svfe)
+
+if(@PHYSICS_WITH_MESH@)
+    find_dependency(svmesh)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/svphysicsTargets.cmake")
+
+set(SVPHYSICS_INCLUDE_DIRS "@CMAKE_INSTALL_INCLUDEDIR@/svphysics")
+set(SVPHYSICS_LIBRARIES svphysics::svphysics)
+set(SVPHYSICS_VERSION @PROJECT_VERSION@)
+
+check_required_components(svphysics)
+

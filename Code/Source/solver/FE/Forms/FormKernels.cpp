@@ -80,6 +80,19 @@ constexpr bool isVectorKind(typename EvalValue<Scalar>::Kind k) noexcept
     return k == EvalValue<Scalar>::Kind::Vector;
 }
 
+bool containsTestOrTrial(const FormExprNode& node)
+{
+    if (node.type() == FormExprType::TestFunction || node.type() == FormExprType::TrialFunction) {
+        return true;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsTestOrTrial(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 template<typename Scalar>
 constexpr bool isMatrixKind(typename EvalValue<Scalar>::Kind k) noexcept
 {
@@ -147,6 +160,20 @@ void gatherConstitutiveModels(const FormExprNode& node, std::vector<const Consti
 
     for (const auto& child : node.childrenShared()) {
         if (child) gatherConstitutiveModels(*child, models);
+    }
+}
+
+void gatherParameterSymbols(const FormExprNode& node, std::vector<std::string_view>& names)
+{
+    if (node.type() == FormExprType::ParameterSymbol) {
+        const auto nm = node.symbolName();
+        if (nm && !nm->empty()) {
+            names.push_back(*nm);
+        }
+    }
+
+    for (const auto& child : node.childrenShared()) {
+        if (child) gatherParameterSymbols(*child, names);
     }
 }
 
@@ -232,6 +259,25 @@ std::array<Real, 3> fdGradScalar(const ScalarCoefficient& f, const std::array<Re
     return g;
 }
 
+std::array<Real, 3> fdGradScalarTime(const TimeScalarCoefficient& f,
+                                     const std::array<Real, 3>& x,
+                                     Real t,
+                                     int dim)
+{
+    std::array<Real, 3> g{0.0, 0.0, 0.0};
+    const Real h = kCoeffFDStep;
+    for (int d = 0; d < dim; ++d) {
+        auto xp = x;
+        auto xm = x;
+        xp[static_cast<std::size_t>(d)] += h;
+        xm[static_cast<std::size_t>(d)] -= h;
+        const Real fp = f(xp[0], xp[1], xp[2], t);
+        const Real fm = f(xm[0], xm[1], xm[2], t);
+        g[static_cast<std::size_t>(d)] = (fp - fm) / (2.0 * h);
+    }
+    return g;
+}
+
 std::array<std::array<Real, 3>, 3> fdHessScalar(const ScalarCoefficient& f, const std::array<Real, 3>& x, int dim)
 {
     std::array<std::array<Real, 3>, 3> H{};
@@ -273,6 +319,60 @@ std::array<std::array<Real, 3>, 3> fdHessScalar(const ScalarCoefficient& f, cons
             const Real fpm = f(xpm[0], xpm[1], xpm[2]);
             const Real fmp = f(xmp[0], xmp[1], xmp[2]);
             const Real fmm = f(xmm[0], xmm[1], xmm[2]);
+
+            const Real val = (fpp - fpm - fmp + fmm) / (4.0 * h * h);
+            H[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = val;
+            H[static_cast<std::size_t>(j)][static_cast<std::size_t>(i)] = val;
+        }
+    }
+
+    return H;
+}
+
+std::array<std::array<Real, 3>, 3> fdHessScalarTime(const TimeScalarCoefficient& f,
+                                                    const std::array<Real, 3>& x,
+                                                    Real t,
+                                                    int dim)
+{
+    std::array<std::array<Real, 3>, 3> H{};
+    const Real h = kCoeffFDStep2;
+    const Real f0 = f(x[0], x[1], x[2], t);
+
+    // Diagonal second derivatives
+    for (int i = 0; i < dim; ++i) {
+        auto xp = x;
+        auto xm = x;
+        xp[static_cast<std::size_t>(i)] += h;
+        xm[static_cast<std::size_t>(i)] -= h;
+        const Real fp = f(xp[0], xp[1], xp[2], t);
+        const Real fm = f(xm[0], xm[1], xm[2], t);
+        H[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] = (fp - 2.0 * f0 + fm) / (h * h);
+    }
+
+    // Mixed second derivatives (symmetric)
+    for (int i = 0; i < dim; ++i) {
+        for (int j = i + 1; j < dim; ++j) {
+            auto xpp = x;
+            auto xpm = x;
+            auto xmp = x;
+            auto xmm = x;
+
+            xpp[static_cast<std::size_t>(i)] += h;
+            xpp[static_cast<std::size_t>(j)] += h;
+
+            xpm[static_cast<std::size_t>(i)] += h;
+            xpm[static_cast<std::size_t>(j)] -= h;
+
+            xmp[static_cast<std::size_t>(i)] -= h;
+            xmp[static_cast<std::size_t>(j)] += h;
+
+            xmm[static_cast<std::size_t>(i)] -= h;
+            xmm[static_cast<std::size_t>(j)] -= h;
+
+            const Real fpp = f(xpp[0], xpp[1], xpp[2], t);
+            const Real fpm = f(xpm[0], xpm[1], xpm[2], t);
+            const Real fmp = f(xmp[0], xmp[1], xmp[2], t);
+            const Real fmm = f(xmm[0], xmm[1], xmm[2], t);
 
             const Real val = (fpp - fpm - fmp + fmm) / (4.0 * h * h);
             H[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = val;
@@ -611,6 +711,10 @@ EvalValue<Real> evalReal(const FormExprNode& node,
             const Real v = node.constantValue().value_or(0.0);
             return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, v};
         }
+        case FormExprType::Time:
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.time()};
+        case FormExprType::TimeStep:
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.timeStep()};
         case FormExprType::Coordinate: {
             EvalValue<Real> out;
             out.kind = EvalValue<Real>::Kind::Vector;
@@ -672,7 +776,63 @@ EvalValue<Real> evalReal(const FormExprNode& node,
         case FormExprType::FacetArea: {
             return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.facetArea()};
         }
+        case FormExprType::ParameterSymbol: {
+            const auto nm = node.symbolName();
+            FE_THROW_IF(!nm || nm->empty(), InvalidArgumentException,
+                        "Forms: ParameterSymbol node missing name");
+            const auto* get = ctx.realParameterGetter();
+            FE_THROW_IF(get == nullptr || !static_cast<bool>(*get), InvalidArgumentException,
+                        "Forms: ParameterSymbol requires a real parameter getter in AssemblyContext");
+            const auto v = (*get)(*nm);
+            FE_THROW_IF(!v.has_value(), InvalidArgumentException,
+                        "Forms: missing required parameter '" + std::string(*nm) + "'");
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, *v};
+        }
+        case FormExprType::ParameterRef: {
+            const auto slot = node.slotIndex().value_or(0u);
+            const auto vals = ctx.jitConstants();
+            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+                        "Forms: ParameterRef requires AssemblyContext::jitConstants()");
+            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+                        "Forms: ParameterRef slot out of range");
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, vals[slot]};
+        }
+        case FormExprType::BoundaryIntegralRef: {
+            const auto slot = node.slotIndex().value_or(0u);
+            const auto vals = ctx.coupledIntegrals();
+            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+                        "Forms: BoundaryIntegralRef requires coupled integrals in AssemblyContext");
+            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+                        "Forms: BoundaryIntegralRef slot out of range");
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, vals[slot]};
+        }
+        case FormExprType::AuxiliaryStateRef: {
+            const auto slot = node.slotIndex().value_or(0u);
+            const auto vals = ctx.coupledAuxState();
+            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+                        "Forms: AuxiliaryStateRef requires coupled auxiliary state in AssemblyContext");
+            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+                        "Forms: AuxiliaryStateRef slot out of range");
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, vals[slot]};
+        }
+        case FormExprType::PreviousSolutionRef: {
+            const int k = node.historyIndex().value_or(1);
+            FE_THROW_IF(k <= 0, InvalidArgumentException,
+                        "Forms: PreviousSolutionRef requires k >= 1");
+            if (ctx.trialFieldType() == FieldType::Vector) {
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                out.vector_size = ctx.trialValueDimension();
+                out.v = ctx.previousSolutionVectorValue(q, k);
+                return out;
+            }
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.previousSolutionValue(q, k)};
+        }
         case FormExprType::Coefficient: {
+            if (const auto* f = node.timeScalarCoefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, (*f)(x[0], x[1], x[2], ctx.time())};
+            }
             if (const auto* f = node.scalarCoefficient(); f) {
                 const auto x = ctx.physicalPoint(q);
                 return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, (*f)(x[0], x[1], x[2])};
@@ -1011,6 +1171,15 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 out.vector_size = dim;
                 return out;
             }
+            if (child.type() == FormExprType::Coefficient && child.timeScalarCoefficient()) {
+                const auto x = ctx.physicalPoint(q);
+                const auto g = fdGradScalarTime(*child.timeScalarCoefficient(), x, ctx.time(), dim);
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                out.v = g;
+                out.vector_size = dim;
+                return out;
+            }
 
             throw FEException("Forms: grad() currently supports TestFunction, TrialFunction, Constant, and scalar Coefficient only",
                               __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
@@ -1280,6 +1449,16 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 out.matrix_cols = dim;
 	                return out;
 	            }
+            if (child.type() == FormExprType::Coefficient && child.timeScalarCoefficient()) {
+                const auto x = ctx.physicalPoint(q);
+                const auto H = fdHessScalarTime(*child.timeScalarCoefficient(), x, ctx.time(), dim);
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Matrix;
+                out.m = H;
+                out.matrix_rows = dim;
+                out.matrix_cols = dim;
+                return out;
+            }
 
 	            throw FEException("Forms: H() currently supports TestFunction, TrialFunction, DiscreteField, Constant, and scalar Coefficient only",
 	                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
@@ -2780,6 +2959,18 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
             out.s = makeDualConstant(v, env.ws->alloc());
             return out;
         }
+        case FormExprType::Time: {
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(ctx.time(), env.ws->alloc());
+            return out;
+        }
+        case FormExprType::TimeStep: {
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(ctx.timeStep(), env.ws->alloc());
+            return out;
+        }
         case FormExprType::Coordinate: {
             EvalValue<Dual> out;
             out.kind = EvalValue<Dual>::Kind::Vector;
@@ -3027,7 +3218,84 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
             throw FEException("Forms: DiscreteField field type not supported (dual)",
                               __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
         }
+        case FormExprType::ParameterSymbol: {
+            const auto nm = node.symbolName();
+            FE_THROW_IF(!nm || nm->empty(), InvalidArgumentException,
+                        "Forms: ParameterSymbol node missing name (dual)");
+            const auto* get = ctx.realParameterGetter();
+            FE_THROW_IF(get == nullptr || !static_cast<bool>(*get), InvalidArgumentException,
+                        "Forms: ParameterSymbol requires a real parameter getter in AssemblyContext (dual)");
+            const auto v = (*get)(*nm);
+            FE_THROW_IF(!v.has_value(), InvalidArgumentException,
+                        "Forms: missing required parameter '" + std::string(*nm) + "' (dual)");
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(*v, env.ws->alloc());
+            return out;
+        }
+        case FormExprType::ParameterRef: {
+            const auto slot = node.slotIndex().value_or(0u);
+            const auto vals = ctx.jitConstants();
+            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+                        "Forms: ParameterRef requires AssemblyContext::jitConstants() (dual)");
+            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+                        "Forms: ParameterRef slot out of range (dual)");
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(vals[slot], env.ws->alloc());
+            return out;
+        }
+        case FormExprType::BoundaryIntegralRef: {
+            const auto slot = node.slotIndex().value_or(0u);
+            const auto vals = ctx.coupledIntegrals();
+            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+                        "Forms: BoundaryIntegralRef requires coupled integrals in AssemblyContext (dual)");
+            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+                        "Forms: BoundaryIntegralRef slot out of range (dual)");
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(vals[slot], env.ws->alloc());
+            return out;
+        }
+        case FormExprType::AuxiliaryStateRef: {
+            const auto slot = node.slotIndex().value_or(0u);
+            const auto vals = ctx.coupledAuxState();
+            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+                        "Forms: AuxiliaryStateRef requires coupled auxiliary state in AssemblyContext (dual)");
+            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+                        "Forms: AuxiliaryStateRef slot out of range (dual)");
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(vals[slot], env.ws->alloc());
+            return out;
+        }
+        case FormExprType::PreviousSolutionRef: {
+            const int k = node.historyIndex().value_or(1);
+            FE_THROW_IF(k <= 0, InvalidArgumentException,
+                        "Forms: PreviousSolutionRef requires k >= 1 (dual)");
+            if (ctx.trialFieldType() == FieldType::Vector) {
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+                out.vector_size = ctx.trialValueDimension();
+                const auto u_val = ctx.previousSolutionVectorValue(q, k);
+                for (int c = 0; c < 3; ++c) {
+                    out.v[static_cast<std::size_t>(c)] = makeDualConstant(u_val[static_cast<std::size_t>(c)], env.ws->alloc());
+                }
+                return out;
+            }
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(ctx.previousSolutionValue(q, k), env.ws->alloc());
+            return out;
+        }
         case FormExprType::Coefficient: {
+            if (const auto* f = node.timeScalarCoefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Scalar;
+                out.s = makeDualConstant((*f)(x[0], x[1], x[2], ctx.time()), env.ws->alloc());
+                return out;
+            }
             if (const auto* f = node.scalarCoefficient(); f) {
                 const auto x = ctx.physicalPoint(q);
                 EvalValue<Dual> out;
@@ -3300,6 +3568,17 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 out.kind = EvalValue<Dual>::Kind::Vector;
                 out.vector_size = dim;
                 for (int d = 0; d < 3; ++d) out.v[static_cast<std::size_t>(d)] = makeDualConstant(g[static_cast<std::size_t>(d)], env.ws->alloc());
+                return out;
+            }
+            if (child.type() == FormExprType::Coefficient && child.timeScalarCoefficient()) {
+                const auto x = ctx.physicalPoint(q);
+                const auto g = fdGradScalarTime(*child.timeScalarCoefficient(), x, ctx.time(), dim);
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Vector;
+                out.vector_size = dim;
+                for (int d = 0; d < 3; ++d) {
+                    out.v[static_cast<std::size_t>(d)] = makeDualConstant(g[static_cast<std::size_t>(d)], env.ws->alloc());
+                }
                 return out;
             }
 
@@ -3632,6 +3911,21 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 }
 	                return out;
 	            }
+            if (child.type() == FormExprType::Coefficient && child.timeScalarCoefficient()) {
+                const auto x = ctx.physicalPoint(q);
+                const auto H = fdHessScalarTime(*child.timeScalarCoefficient(), x, ctx.time(), dim);
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Matrix;
+                out.matrix_rows = dim;
+                out.matrix_cols = dim;
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                            makeDualConstant(H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+                    }
+                }
+                return out;
+            }
 
 	            throw FEException("Forms: H() currently supports TestFunction, TrialFunction, DiscreteField, Constant, and scalar Coefficient only (dual)",
 	                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
@@ -5186,10 +5480,12 @@ assembly::MaterialStateSpec FormKernel::materialStateSpec() const noexcept
 std::vector<params::Spec> FormKernel::parameterSpecs() const
 {
     std::vector<const ConstitutiveModel*> models;
+    std::vector<std::string_view> param_names;
     for (const auto& term : ir_.terms()) {
         const auto* root = term.integrand.node();
         if (!root) continue;
         gatherConstitutiveModels(*root, models);
+        gatherParameterSymbols(*root, param_names);
     }
 
     std::vector<params::Spec> out;
@@ -5198,7 +5494,40 @@ std::vector<params::Spec> FormKernel::parameterSpecs() const
         auto specs = m->parameterSpecs();
         out.insert(out.end(), specs.begin(), specs.end());
     }
+
+    if (!param_names.empty()) {
+        std::vector<std::string> keys;
+        keys.reserve(param_names.size());
+        for (const auto nm : param_names) {
+            keys.emplace_back(nm);
+        }
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+
+        for (auto& key : keys) {
+            out.push_back(params::Spec{.key = std::move(key),
+                                       .type = params::ValueType::Real,
+                                       .required = true});
+        }
+    }
     return out;
+}
+
+void FormKernel::resolveParameterSlots(
+    const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
+{
+    ir_.transformIntegrands([&](const FormExprNode& n) -> std::optional<FormExpr> {
+        if (n.type() != FormExprType::ParameterSymbol) {
+            return std::nullopt;
+        }
+        const auto key = n.symbolName();
+        FE_THROW_IF(!key || key->empty(), InvalidArgumentException,
+                    "Forms::FormKernel: ParameterSymbol node missing name");
+        const auto slot = slot_of_real_param(*key);
+        FE_THROW_IF(!slot.has_value(), InvalidArgumentException,
+                    "Forms::FormKernel: could not resolve parameter slot for '" + std::string(*key) + "'");
+        return FormExpr::parameterRef(*slot);
+    });
 }
 
 bool FormKernel::hasCell() const noexcept { return ir_.hasCellTerms(); }
@@ -5442,6 +5771,521 @@ void FormKernel::computeInteriorFace(
 }
 
 // ============================================================================
+// LinearFormKernel (affine residuals)
+// ============================================================================
+
+namespace {
+
+[[nodiscard]] std::vector<assembly::FieldRequirement> mergeFieldRequirements(
+    const std::vector<assembly::FieldRequirement>& a,
+    const std::vector<assembly::FieldRequirement>& b)
+{
+    std::vector<assembly::FieldRequirement> out;
+    out.reserve(a.size() + b.size());
+
+    std::size_t i = 0;
+    std::size_t j = 0;
+    while (i < a.size() && j < b.size()) {
+        if (a[i].field == b[j].field) {
+            out.push_back(assembly::FieldRequirement{
+                a[i].field,
+                a[i].required | b[j].required,
+            });
+            ++i;
+            ++j;
+        } else if (a[i].field < b[j].field) {
+            out.push_back(a[i]);
+            ++i;
+        } else {
+            out.push_back(b[j]);
+            ++j;
+        }
+    }
+
+    for (; i < a.size(); ++i) out.push_back(a[i]);
+    for (; j < b.size(); ++j) out.push_back(b[j]);
+    return out;
+}
+
+} // namespace
+
+LinearFormKernel::LinearFormKernel(FormIR bilinear_ir,
+                                   std::optional<FormIR> linear_ir,
+                                   LinearKernelOutput output)
+    : bilinear_ir_(std::move(bilinear_ir))
+    , linear_ir_(std::move(linear_ir))
+    , output_(output)
+{
+    if (!bilinear_ir_.isCompiled()) {
+        throw std::invalid_argument("LinearFormKernel: bilinear IR is not compiled");
+    }
+    if (bilinear_ir_.kind() != FormKind::Bilinear) {
+        throw std::invalid_argument("LinearFormKernel: bilinear IR kind must be Bilinear");
+    }
+
+    if (linear_ir_.has_value()) {
+        if (!linear_ir_->isCompiled()) {
+            throw std::invalid_argument("LinearFormKernel: linear IR is not compiled");
+        }
+        if (linear_ir_->kind() != FormKind::Linear) {
+            throw std::invalid_argument("LinearFormKernel: linear IR kind must be Linear");
+        }
+
+        field_requirements_ = mergeFieldRequirements(bilinear_ir_.fieldRequirements(),
+                                                     linear_ir_->fieldRequirements());
+    } else {
+        field_requirements_ = bilinear_ir_.fieldRequirements();
+    }
+
+    // NOTE: Constitutive calls are currently not expected in affine residuals (the affine splitter
+    // rejects Constitutive nodes). We still build state layout from the bilinear part for safety.
+    constitutive_state_ = buildConstitutiveStateLayout(bilinear_ir_, material_state_spec_);
+}
+
+LinearFormKernel::~LinearFormKernel() = default;
+LinearFormKernel::LinearFormKernel(LinearFormKernel&&) noexcept = default;
+LinearFormKernel& LinearFormKernel::operator=(LinearFormKernel&&) noexcept = default;
+
+assembly::RequiredData LinearFormKernel::getRequiredData() const noexcept
+{
+    auto req = bilinear_ir_.requiredData();
+    if (linear_ir_.has_value()) {
+        req |= linear_ir_->requiredData();
+    }
+
+    // Residual vector requires access to element-local DOF coefficients (but not u_h values/gradients).
+    if (output_ != LinearKernelOutput::MatrixOnly) {
+        req |= assembly::RequiredData::SolutionCoefficients;
+    }
+
+    if (material_state_spec_.bytes_per_qpt > 0u) {
+        req |= assembly::RequiredData::MaterialState;
+    }
+    return req;
+}
+
+std::vector<assembly::FieldRequirement> LinearFormKernel::fieldRequirements() const
+{
+    return field_requirements_;
+}
+
+assembly::MaterialStateSpec LinearFormKernel::materialStateSpec() const noexcept
+{
+    return material_state_spec_;
+}
+
+std::vector<params::Spec> LinearFormKernel::parameterSpecs() const
+{
+    std::vector<const ConstitutiveModel*> models;
+    std::vector<std::string_view> param_names;
+    for (const auto& term : bilinear_ir_.terms()) {
+        const auto* root = term.integrand.node();
+        if (!root) continue;
+        gatherConstitutiveModels(*root, models);
+        gatherParameterSymbols(*root, param_names);
+    }
+    if (linear_ir_.has_value()) {
+        for (const auto& term : linear_ir_->terms()) {
+            const auto* root = term.integrand.node();
+            if (!root) continue;
+            gatherConstitutiveModels(*root, models);
+            gatherParameterSymbols(*root, param_names);
+        }
+    }
+
+    std::vector<params::Spec> out;
+    for (const auto* m : models) {
+        if (!m) continue;
+        auto specs = m->parameterSpecs();
+        out.insert(out.end(), specs.begin(), specs.end());
+    }
+
+    if (!param_names.empty()) {
+        std::vector<std::string> keys;
+        keys.reserve(param_names.size());
+        for (const auto nm : param_names) {
+            keys.emplace_back(nm);
+        }
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+
+        for (auto& key : keys) {
+            out.push_back(params::Spec{.key = std::move(key),
+                                       .type = params::ValueType::Real,
+                                       .required = true});
+        }
+    }
+    return out;
+}
+
+void LinearFormKernel::resolveParameterSlots(
+    const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
+{
+    auto rewrite = [&](FormIR& ir, std::string_view where) {
+        ir.transformIntegrands([&](const FormExprNode& n) -> std::optional<FormExpr> {
+            if (n.type() != FormExprType::ParameterSymbol) {
+                return std::nullopt;
+            }
+            const auto key = n.symbolName();
+            FE_THROW_IF(!key || key->empty(), InvalidArgumentException,
+                        std::string(where) + ": ParameterSymbol node missing name");
+            const auto slot = slot_of_real_param(*key);
+            FE_THROW_IF(!slot.has_value(), InvalidArgumentException,
+                        std::string(where) + ": could not resolve parameter slot for '" + std::string(*key) + "'");
+            return FormExpr::parameterRef(*slot);
+        });
+    };
+
+    rewrite(bilinear_ir_, "Forms::LinearFormKernel(bilinear)");
+    if (linear_ir_.has_value()) {
+        rewrite(*linear_ir_, "Forms::LinearFormKernel(linear)");
+    }
+}
+
+int LinearFormKernel::maxTemporalDerivativeOrder() const noexcept
+{
+    const int a = bilinear_ir_.maxTimeDerivativeOrder();
+    const int b = linear_ir_.has_value() ? linear_ir_->maxTimeDerivativeOrder() : 0;
+    return std::max(a, b);
+}
+
+bool LinearFormKernel::hasCell() const noexcept
+{
+    return bilinear_ir_.hasCellTerms() || (linear_ir_.has_value() && linear_ir_->hasCellTerms());
+}
+
+bool LinearFormKernel::hasBoundaryFace() const noexcept
+{
+    return bilinear_ir_.hasBoundaryTerms() || (linear_ir_.has_value() && linear_ir_->hasBoundaryTerms());
+}
+
+bool LinearFormKernel::hasInteriorFace() const noexcept
+{
+    return bilinear_ir_.hasInteriorFaceTerms() || (linear_ir_.has_value() && linear_ir_->hasInteriorFaceTerms());
+}
+
+void LinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::KernelOutput& output)
+{
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+
+    const bool want_matrix = (output_ != LinearKernelOutput::VectorOnly);
+    const bool want_vector = (output_ != LinearKernelOutput::MatrixOnly);
+    output.reserve(n_test, n_trial, want_matrix, want_vector);
+    output.clear();
+
+    const auto n_qpts = ctx.numQuadraturePoints();
+    const auto* time_ctx = ctx.timeIntegrationContext();
+
+    ConstitutiveCallCacheReal constitutive_cache;
+
+    // 1) Assemble Jacobian (bilinear part) if requested.
+    if (want_matrix) {
+        EvalEnvReal env{ctx, nullptr, FormKind::Bilinear, Side::Minus, Side::Minus, 0, 0,
+                        constitutive_state_.get(), &constitutive_cache};
+
+        for (const auto& term : bilinear_ir_.terms()) {
+            if (term.domain != IntegralDomain::Cell) continue;
+
+            Real term_weight = 1.0;
+            if (time_ctx) {
+                if (term.time_derivative_order == 1) {
+                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                } else if (term.time_derivative_order == 2) {
+                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                } else if (term.time_derivative_order > 0) {
+                    term_weight = time_ctx->time_derivative_term_weight;
+                } else {
+                    term_weight = time_ctx->non_time_derivative_term_weight;
+                }
+            }
+            if (term_weight == 0.0) continue;
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const Real w = ctx.integrationWeight(q);
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    env.i = i;
+                    for (LocalIndex j = 0; j < n_trial; ++j) {
+                        env.j = j;
+                        const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                            throw FEException("Forms: cell bilinear integrand did not evaluate to scalar",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        output.matrixEntry(i, j) += (term_weight * w) * val.s;
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) Assemble residual vector if requested.
+    if (want_vector) {
+        const auto coeffs = ctx.solutionCoefficients();
+        FE_THROW_IF(coeffs.size() < static_cast<std::size_t>(n_trial), InvalidArgumentException,
+                    "LinearFormKernel::computeCell: missing solution coefficients (need SolutionCoefficients)");
+
+        // 2a) Add linear (trial-independent) contributions.
+        if (linear_ir_.has_value()) {
+            EvalEnvReal env{ctx, nullptr, FormKind::Linear, Side::Minus, Side::Minus, 0, 0,
+                            constitutive_state_.get(), &constitutive_cache};
+
+            for (const auto& term : linear_ir_->terms()) {
+                if (term.domain != IntegralDomain::Cell) continue;
+
+                Real term_weight = 1.0;
+                if (time_ctx) {
+                    if (term.time_derivative_order == 1) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                    } else if (term.time_derivative_order == 2) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                    } else if (term.time_derivative_order > 0) {
+                        term_weight = time_ctx->time_derivative_term_weight;
+                    } else {
+                        term_weight = time_ctx->non_time_derivative_term_weight;
+                    }
+                }
+                if (term_weight == 0.0) continue;
+
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    const Real w = ctx.integrationWeight(q);
+                    for (LocalIndex i = 0; i < n_test; ++i) {
+                        env.i = i;
+                        const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                            throw FEException("Forms: cell linear integrand did not evaluate to scalar",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        output.vectorEntry(i) += (term_weight * w) * val.s;
+                    }
+                }
+            }
+        }
+
+        // 2b) Add bilinear contribution applied to coefficients (K*u).
+        if (want_matrix) {
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                Real sum = 0.0;
+                for (LocalIndex j = 0; j < n_trial; ++j) {
+                    sum += output.matrixEntry(i, j) * coeffs[static_cast<std::size_t>(j)];
+                }
+                output.vectorEntry(i) += sum;
+            }
+        } else {
+            EvalEnvReal env{ctx, nullptr, FormKind::Bilinear, Side::Minus, Side::Minus, 0, 0,
+                            constitutive_state_.get(), &constitutive_cache};
+
+            for (const auto& term : bilinear_ir_.terms()) {
+                if (term.domain != IntegralDomain::Cell) continue;
+
+                Real term_weight = 1.0;
+                if (time_ctx) {
+                    if (term.time_derivative_order == 1) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                    } else if (term.time_derivative_order == 2) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                    } else if (term.time_derivative_order > 0) {
+                        term_weight = time_ctx->time_derivative_term_weight;
+                    } else {
+                        term_weight = time_ctx->non_time_derivative_term_weight;
+                    }
+                }
+                if (term_weight == 0.0) continue;
+
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    const Real w = ctx.integrationWeight(q);
+                    for (LocalIndex i = 0; i < n_test; ++i) {
+                        env.i = i;
+                        Real sum = 0.0;
+                        for (LocalIndex j = 0; j < n_trial; ++j) {
+                            env.j = j;
+                            const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                            if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                                throw FEException("Forms: cell bilinear integrand did not evaluate to scalar",
+                                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                            }
+                            sum += val.s * coeffs[static_cast<std::size_t>(j)];
+                        }
+                        output.vectorEntry(i) += (term_weight * w) * sum;
+                    }
+                }
+            }
+        }
+    }
+}
+
+void LinearFormKernel::computeBoundaryFace(
+    const assembly::AssemblyContext& ctx,
+    int boundary_marker,
+    assembly::KernelOutput& output)
+{
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+
+    const bool want_matrix = (output_ != LinearKernelOutput::VectorOnly);
+    const bool want_vector = (output_ != LinearKernelOutput::MatrixOnly);
+    output.reserve(n_test, n_trial, want_matrix, want_vector);
+    output.clear();
+
+    const auto n_qpts = ctx.numQuadraturePoints();
+    const auto* time_ctx = ctx.timeIntegrationContext();
+
+    ConstitutiveCallCacheReal constitutive_cache;
+
+    // 1) Assemble Jacobian (bilinear boundary part) if requested.
+    if (want_matrix) {
+        EvalEnvReal env{ctx, nullptr, FormKind::Bilinear, Side::Minus, Side::Minus, 0, 0,
+                        constitutive_state_.get(), &constitutive_cache};
+
+        for (const auto& term : bilinear_ir_.terms()) {
+            if (term.domain != IntegralDomain::Boundary) continue;
+            if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
+
+            Real term_weight = 1.0;
+            if (time_ctx) {
+                if (term.time_derivative_order == 1) {
+                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                } else if (term.time_derivative_order == 2) {
+                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                } else if (term.time_derivative_order > 0) {
+                    term_weight = time_ctx->time_derivative_term_weight;
+                } else {
+                    term_weight = time_ctx->non_time_derivative_term_weight;
+                }
+            }
+            if (term_weight == 0.0) continue;
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const Real w = ctx.integrationWeight(q);
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    env.i = i;
+                    for (LocalIndex j = 0; j < n_trial; ++j) {
+                        env.j = j;
+                        const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                            throw FEException("Forms: boundary bilinear integrand did not evaluate to scalar",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        output.matrixEntry(i, j) += (term_weight * w) * val.s;
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) Assemble residual vector if requested.
+    if (want_vector) {
+        const auto coeffs = ctx.solutionCoefficients();
+        FE_THROW_IF(coeffs.size() < static_cast<std::size_t>(n_trial), InvalidArgumentException,
+                    "LinearFormKernel::computeBoundaryFace: missing solution coefficients (need SolutionCoefficients)");
+
+        // 2a) Add linear (trial-independent) boundary contributions.
+        if (linear_ir_.has_value()) {
+            EvalEnvReal env{ctx, nullptr, FormKind::Linear, Side::Minus, Side::Minus, 0, 0,
+                            constitutive_state_.get(), &constitutive_cache};
+
+            for (const auto& term : linear_ir_->terms()) {
+                if (term.domain != IntegralDomain::Boundary) continue;
+                if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
+
+                Real term_weight = 1.0;
+                if (time_ctx) {
+                    if (term.time_derivative_order == 1) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                    } else if (term.time_derivative_order == 2) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                    } else if (term.time_derivative_order > 0) {
+                        term_weight = time_ctx->time_derivative_term_weight;
+                    } else {
+                        term_weight = time_ctx->non_time_derivative_term_weight;
+                    }
+                }
+                if (term_weight == 0.0) continue;
+
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    const Real w = ctx.integrationWeight(q);
+                    for (LocalIndex i = 0; i < n_test; ++i) {
+                        env.i = i;
+                        const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                            throw FEException("Forms: boundary linear integrand did not evaluate to scalar",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        output.vectorEntry(i) += (term_weight * w) * val.s;
+                    }
+                }
+            }
+        }
+
+        // 2b) Add bilinear boundary contribution applied to coefficients (K*u).
+        if (want_matrix) {
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                Real sum = 0.0;
+                for (LocalIndex j = 0; j < n_trial; ++j) {
+                    sum += output.matrixEntry(i, j) * coeffs[static_cast<std::size_t>(j)];
+                }
+                output.vectorEntry(i) += sum;
+            }
+        } else {
+            EvalEnvReal env{ctx, nullptr, FormKind::Bilinear, Side::Minus, Side::Minus, 0, 0,
+                            constitutive_state_.get(), &constitutive_cache};
+
+            for (const auto& term : bilinear_ir_.terms()) {
+                if (term.domain != IntegralDomain::Boundary) continue;
+                if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
+
+                Real term_weight = 1.0;
+                if (time_ctx) {
+                    if (term.time_derivative_order == 1) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                    } else if (term.time_derivative_order == 2) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                    } else if (term.time_derivative_order > 0) {
+                        term_weight = time_ctx->time_derivative_term_weight;
+                    } else {
+                        term_weight = time_ctx->non_time_derivative_term_weight;
+                    }
+                }
+                if (term_weight == 0.0) continue;
+
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    const Real w = ctx.integrationWeight(q);
+                    for (LocalIndex i = 0; i < n_test; ++i) {
+                        env.i = i;
+                        Real sum = 0.0;
+                        for (LocalIndex j = 0; j < n_trial; ++j) {
+                            env.j = j;
+                            const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                            if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                                throw FEException("Forms: boundary bilinear integrand did not evaluate to scalar",
+                                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                            }
+                            sum += val.s * coeffs[static_cast<std::size_t>(j)];
+                        }
+                        output.vectorEntry(i) += (term_weight * w) * sum;
+                    }
+                }
+            }
+        }
+    }
+}
+
+void LinearFormKernel::computeInteriorFace(
+    const assembly::AssemblyContext& /*ctx_minus*/,
+    const assembly::AssemblyContext& /*ctx_plus*/,
+    assembly::KernelOutput& output_minus,
+    assembly::KernelOutput& output_plus,
+    assembly::KernelOutput& coupling_mp,
+    assembly::KernelOutput& coupling_pm)
+{
+    // Affine optimization currently does not cover interior-face (DG) residual assembly.
+    output_minus.reserve(0, 0, false, false);
+    output_plus.reserve(0, 0, false, false);
+    coupling_mp.reserve(0, 0, false, false);
+    coupling_pm.reserve(0, 0, false, false);
+}
+
+// ============================================================================
 // NonlinearFormKernel
 // ============================================================================
 
@@ -5489,10 +6333,12 @@ assembly::MaterialStateSpec NonlinearFormKernel::materialStateSpec() const noexc
 std::vector<params::Spec> NonlinearFormKernel::parameterSpecs() const
 {
     std::vector<const ConstitutiveModel*> models;
+    std::vector<std::string_view> param_names;
     for (const auto& term : residual_ir_.terms()) {
         const auto* root = term.integrand.node();
         if (!root) continue;
         gatherConstitutiveModels(*root, models);
+        gatherParameterSymbols(*root, param_names);
     }
 
     std::vector<params::Spec> out;
@@ -5501,7 +6347,40 @@ std::vector<params::Spec> NonlinearFormKernel::parameterSpecs() const
         auto specs = m->parameterSpecs();
         out.insert(out.end(), specs.begin(), specs.end());
     }
+
+    if (!param_names.empty()) {
+        std::vector<std::string> keys;
+        keys.reserve(param_names.size());
+        for (const auto nm : param_names) {
+            keys.emplace_back(nm);
+        }
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+
+        for (auto& key : keys) {
+            out.push_back(params::Spec{.key = std::move(key),
+                                       .type = params::ValueType::Real,
+                                       .required = true});
+        }
+    }
     return out;
+}
+
+void NonlinearFormKernel::resolveParameterSlots(
+    const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
+{
+    residual_ir_.transformIntegrands([&](const FormExprNode& n) -> std::optional<FormExpr> {
+        if (n.type() != FormExprType::ParameterSymbol) {
+            return std::nullopt;
+        }
+        const auto key = n.symbolName();
+        FE_THROW_IF(!key || key->empty(), InvalidArgumentException,
+                    "Forms::NonlinearFormKernel: ParameterSymbol node missing name");
+        const auto slot = slot_of_real_param(*key);
+        FE_THROW_IF(!slot.has_value(), InvalidArgumentException,
+                    "Forms::NonlinearFormKernel: could not resolve parameter slot for '" + std::string(*key) + "'");
+        return FormExpr::parameterRef(*slot);
+    });
 }
 
 bool NonlinearFormKernel::hasCell() const noexcept { return residual_ir_.hasCellTerms(); }
@@ -5796,6 +6675,76 @@ void NonlinearFormKernel::computeInteriorFace(
                                  ctx_plus, ctx_minus,
                                  coupling_pm, n_test_plus, n_trial_minus);
     }
+}
+
+// ============================================================================
+// FunctionalFormKernel (FE/Forms -> FE/Assembly functionals)
+// ============================================================================
+
+FunctionalFormKernel::FunctionalFormKernel(
+    FormExpr integrand,
+    Domain domain,
+    assembly::RequiredData required,
+    std::vector<assembly::FieldRequirement> field_requirements)
+    : integrand_(std::move(integrand))
+    , domain_(domain)
+    , required_data_(required)
+    , field_requirements_(std::move(field_requirements))
+{
+    FE_THROW_IF(!integrand_.isValid(), InvalidArgumentException,
+                "Forms::FunctionalFormKernel: invalid integrand");
+    FE_THROW_IF(containsTestOrTrial(*integrand_.node()), InvalidArgumentException,
+                "Forms::FunctionalFormKernel: integrand must not contain TestFunction/TrialFunction (use DiscreteField/StateField instead)");
+}
+
+Real FunctionalFormKernel::evaluateCell(const assembly::AssemblyContext& ctx, LocalIndex q)
+{
+    if (domain_ != Domain::Cell) {
+        return 0.0;
+    }
+
+    EvalEnvReal env{
+        /*minus=*/ctx,
+        /*plus=*/nullptr,
+        /*kind=*/FormKind::Linear,
+        /*test_active=*/Side::Minus,
+        /*trial_active=*/Side::Minus,
+        /*i=*/0,
+        /*j=*/0,
+        /*constitutive_state=*/nullptr,
+        /*constitutive_cache=*/nullptr,
+    };
+
+    const auto v = evalReal(*integrand_.node(), env, Side::Minus, q);
+    FE_THROW_IF(v.kind != EvalValue<Real>::Kind::Scalar, InvalidArgumentException,
+                "Forms::FunctionalFormKernel: integrand did not evaluate to a scalar");
+    return v.s;
+}
+
+Real FunctionalFormKernel::evaluateBoundaryFace(const assembly::AssemblyContext& ctx,
+                                                LocalIndex q,
+                                                int /*boundary_marker*/)
+{
+    if (domain_ != Domain::BoundaryFace) {
+        return 0.0;
+    }
+
+    EvalEnvReal env{
+        /*minus=*/ctx,
+        /*plus=*/nullptr,
+        /*kind=*/FormKind::Linear,
+        /*test_active=*/Side::Minus,
+        /*trial_active=*/Side::Minus,
+        /*i=*/0,
+        /*j=*/0,
+        /*constitutive_state=*/nullptr,
+        /*constitutive_cache=*/nullptr,
+    };
+
+    const auto v = evalReal(*integrand_.node(), env, Side::Minus, q);
+    FE_THROW_IF(v.kind != EvalValue<Real>::Kind::Scalar, InvalidArgumentException,
+                "Forms::FunctionalFormKernel: integrand did not evaluate to a scalar");
+    return v.s;
 }
 
 } // namespace forms

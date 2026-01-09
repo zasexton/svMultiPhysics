@@ -8,6 +8,7 @@
 #include "Systems/SystemAssembly.h"
 
 #include "Systems/FESystem.h"
+#include "Systems/CoupledBoundaryManager.h"
 #include "Systems/GlobalKernel.h"
 #include "Systems/SystemsExceptions.h"
 
@@ -66,6 +67,13 @@ assembly::AssemblyResult assembleOperator(
                 "assembleOperator: nothing requested (want_matrix=false and want_vector=false)");
 
     FE_CHECK_NOT_NULL(system.assembler_.get(), "FESystem::assembler");
+
+    // Coupled boundary-condition orchestration (boundary integrals + auxiliary state).
+    // Per design, this runs immediately before PDE assembly so coupled coefficients
+    // can read a consistent, up-to-date context during kernel evaluation.
+    if (system.coupled_boundary_) {
+        system.coupled_boundary_->prepareForAssembly(state);
+    }
 
     if (request.zero_outputs) {
         if (request.want_matrix) {
@@ -161,6 +169,22 @@ assembly::AssemblyResult assembleOperator(
                                      ? &get_param_wrapped
                                      : (state.getParam ? &state.getParam : nullptr));
     assembler.setUserData(state.user_data);
+
+    // JIT-friendly constant slots (Real-valued parameters resolved to stable indices).
+    std::vector<Real> jit_constants;
+    if (have_param_contracts && system.parameter_registry_.slotCount() > 0u) {
+        jit_constants = system.parameter_registry_.evaluateRealSlots(state);
+        assembler.setJITConstants(jit_constants);
+    } else {
+        assembler.setJITConstants({});
+    }
+
+    if (system.coupled_boundary_) {
+        assembler.setCoupledValues(system.coupled_boundary_->integrals().all(),
+                                   system.coupled_boundary_->auxiliaryState().values());
+    } else {
+        assembler.setCoupledValues({}, {});
+    }
     const auto& mesh = system.meshAccess();
 
     const auto& def = system.operator_registry_.get(request.op);

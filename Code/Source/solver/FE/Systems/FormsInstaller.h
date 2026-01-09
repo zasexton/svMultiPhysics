@@ -16,6 +16,7 @@
 #include "Core/Types.h"
 
 #include "Forms/BlockForm.h"
+#include "Forms/BoundaryConditions.h"
 #include "Systems/OperatorRegistry.h"
 
 #include <initializer_list>
@@ -51,6 +52,19 @@ KernelPtr installResidualForm(
     FieldId test_field,
     FieldId trial_field,
     const forms::FormExpr& residual_form,
+    const FormInstallOptions& options = {});
+
+void installStrongDirichlet(
+    FESystem& system,
+    std::span<const forms::bc::StrongDirichlet> bcs);
+
+KernelPtr installResidualForm(
+    FESystem& system,
+    const OperatorTag& op,
+    FieldId test_field,
+    FieldId trial_field,
+    const forms::FormExpr& residual_form,
+    std::span<const forms::bc::StrongDirichlet> bcs,
     const FormInstallOptions& options = {});
 
 std::vector<std::vector<KernelPtr>> installResidualBlocks(

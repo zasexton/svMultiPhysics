@@ -185,6 +185,9 @@ public:
     void setParameterGetter(
         const std::function<std::optional<params::Value>(std::string_view)>* get_param) noexcept override;
     void setUserData(const void* user_data) noexcept override;
+    void setJITConstants(std::span<const Real> constants) noexcept override;
+    void setCoupledValues(std::span<const Real> integrals,
+                          std::span<const Real> aux_state) noexcept override;
     void setMaterialStateProvider(IMaterialStateProvider* provider) noexcept override;
     [[nodiscard]] const AssemblyOptions& getOptions() const noexcept override;
 
@@ -266,6 +269,13 @@ public:
     [[nodiscard]] bool isConfigured() const noexcept override;
     [[nodiscard]] bool supportsRectangular() const noexcept override { return true; }
     [[nodiscard]] bool supportsDG() const noexcept override { return true; }
+    [[nodiscard]] bool supportsFullContext() const noexcept override { return true; }
+    [[nodiscard]] bool supportsSolution() const noexcept override { return true; }
+    [[nodiscard]] bool supportsSolutionHistory() const noexcept override { return true; }
+    [[nodiscard]] bool supportsTimeIntegrationContext() const noexcept override { return true; }
+    [[nodiscard]] bool supportsDofOffsets() const noexcept override { return true; }
+    [[nodiscard]] bool supportsFieldRequirements() const noexcept override { return true; }
+    [[nodiscard]] bool supportsMaterialState() const noexcept override { return true; }
     [[nodiscard]] bool isThreadSafe() const noexcept override { return false; }
 
 private:
@@ -457,6 +467,9 @@ private:
     const std::function<std::optional<Real>(std::string_view)>* get_real_param_{nullptr};
     const std::function<std::optional<params::Value>(std::string_view)>* get_param_{nullptr};
     const void* user_data_{nullptr};
+    std::span<const Real> jit_constants_{};
+    std::span<const Real> coupled_integrals_{};
+    std::span<const Real> coupled_aux_state_{};
     const TimeIntegrationContext* time_integration_{nullptr};
     IMaterialStateProvider* material_state_provider_{nullptr};
     bool initialized_{false};

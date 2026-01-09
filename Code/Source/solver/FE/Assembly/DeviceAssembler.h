@@ -517,14 +517,41 @@ public:
     // =========================================================================
 
     void setDofMap(const dofs::DofMap& dof_map) override;
+    void setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset) override;
+    void setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset) override;
     void setDofHandler(const dofs::DofHandler& dof_handler) override;
     void setConstraints(const constraints::AffineConstraints* constraints) override;
     void setSparsityPattern(const sparsity::SparsityPattern* sparsity) override;
     void setOptions(const AssemblyOptions& options) override;
+    void setCurrentSolution(std::span<const Real> solution) override;
+    void setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields) override;
+    void setPreviousSolution(std::span<const Real> solution) override;
+    void setPreviousSolution2(std::span<const Real> solution) override;
+    void setPreviousSolutionK(int k, std::span<const Real> solution) override;
+    void setTimeIntegrationContext(const TimeIntegrationContext* ctx) override;
+    void setTime(Real time) override;
+    void setTimeStep(Real dt) override;
+    void setRealParameterGetter(
+        const std::function<std::optional<Real>(std::string_view)>* get_real_param) noexcept override;
+    void setParameterGetter(
+        const std::function<std::optional<params::Value>(std::string_view)>* get_param) noexcept override;
+    void setUserData(const void* user_data) noexcept override;
+    void setJITConstants(std::span<const Real> constants) noexcept override;
+    void setCoupledValues(std::span<const Real> integrals,
+                          std::span<const Real> aux_state) noexcept override;
+    void setMaterialStateProvider(IMaterialStateProvider* provider) noexcept override;
 
     [[nodiscard]] const AssemblyOptions& getOptions() const noexcept override;
     [[nodiscard]] bool isConfigured() const noexcept override;
     [[nodiscard]] std::string name() const override { return "DeviceAssembler"; }
+    [[nodiscard]] bool supportsDG() const noexcept override;
+    [[nodiscard]] bool supportsFullContext() const noexcept override { return true; }
+    [[nodiscard]] bool supportsSolution() const noexcept override { return true; }
+    [[nodiscard]] bool supportsSolutionHistory() const noexcept override { return true; }
+    [[nodiscard]] bool supportsTimeIntegrationContext() const noexcept override { return true; }
+    [[nodiscard]] bool supportsDofOffsets() const noexcept override { return true; }
+    [[nodiscard]] bool supportsFieldRequirements() const noexcept override { return true; }
+    [[nodiscard]] bool supportsMaterialState() const noexcept override { return true; }
 
     // =========================================================================
     // Device-Specific Configuration

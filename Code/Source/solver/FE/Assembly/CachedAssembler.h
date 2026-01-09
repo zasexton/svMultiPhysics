@@ -77,11 +77,9 @@
  */
 
 #include "Core/Types.h"
-#include "Assembler.h"
-#include "StandardAssembler.h"
-#include "AssemblyKernel.h"
-#include "AssemblyContext.h"
-#include "GlobalSystemView.h"
+#include "Assembly/DecoratorAssembler.h"
+#include "Assembly/AssemblyKernel.h"
+#include "Assembly/GlobalSystemView.h"
 
 #include <vector>
 #include <unordered_map>
@@ -282,6 +280,11 @@ struct CachedElementData {
     std::size_t last_access{0};
 
     /**
+     * @brief Monotonic insertion order (for FIFO eviction)
+     */
+    std::size_t insertion_order{0};
+
+    /**
      * @brief Estimated memory usage in bytes
      */
     [[nodiscard]] std::size_t memoryBytes() const {
@@ -400,6 +403,7 @@ private:
     mutable std::mutex mutex_;
     mutable CacheStats stats_;
     std::atomic<std::size_t> access_counter_{0};
+    std::atomic<std::size_t> insertion_counter_{0};
 };
 
 // ============================================================================
@@ -452,7 +456,7 @@ private:
  *   }
  * @endcode
  */
-class CachedAssembler : public Assembler {
+class CachedAssembler : public DecoratorAssembler {
 public:
     // =========================================================================
     // Construction
@@ -460,6 +464,8 @@ public:
 
     CachedAssembler();
     explicit CachedAssembler(const CacheOptions& options);
+    explicit CachedAssembler(std::unique_ptr<Assembler> base,
+                             const CacheOptions& options = {});
     ~CachedAssembler() override;
 
     CachedAssembler(CachedAssembler&& other) noexcept;
@@ -469,19 +475,7 @@ public:
     CachedAssembler(const CachedAssembler&) = delete;
     CachedAssembler& operator=(const CachedAssembler&) = delete;
 
-    // =========================================================================
-    // Configuration (Assembler interface)
-    // =========================================================================
-
-    void setDofMap(const dofs::DofMap& dof_map) override;
-    void setDofHandler(const dofs::DofHandler& dof_handler) override;
-    void setConstraints(const constraints::AffineConstraints* constraints) override;
-    void setSparsityPattern(const sparsity::SparsityPattern* sparsity) override;
-    void setOptions(const AssemblyOptions& options) override;
-
-    [[nodiscard]] const AssemblyOptions& getOptions() const noexcept override;
-    [[nodiscard]] bool isConfigured() const noexcept override;
-    [[nodiscard]] std::string name() const override { return "CachedAssembler"; }
+    [[nodiscard]] std::string name() const override { return "Cached(" + base().name() + ")"; }
 
     // =========================================================================
     // Cache-Specific Configuration
@@ -511,8 +505,6 @@ public:
     // Lifecycle
     // =========================================================================
 
-    void initialize() override;
-    void finalize(GlobalSystemView* matrix_view, GlobalSystemView* vector_view) override;
     void reset() override;
 
     // =========================================================================
@@ -623,51 +615,10 @@ public:
     void setInvalidationCallback(std::function<void(GlobalIndex)> callback);
 
 private:
-    // =========================================================================
-    // Internal Methods
-    // =========================================================================
-
-    /**
-     * @brief Core assembly with caching
-     */
-    AssemblyResult assembleCellsCore(
-        const IMeshAccess& mesh,
-        const spaces::FunctionSpace& test_space,
-        const spaces::FunctionSpace& trial_space,
-        AssemblyKernel& kernel,
-        GlobalSystemView* matrix_view,
-        GlobalSystemView* vector_view,
-        bool assemble_matrix,
-        bool assemble_vector,
-        bool populate_cache);
-
-    /**
-     * @brief Insert cached element into global system
-     */
-    void insertFromCache(
-        const CachedElementData& cached,
-        GlobalSystemView* matrix_view,
-        GlobalSystemView* vector_view);
-
-    // =========================================================================
-    // Data Members
-    // =========================================================================
-
     CacheOptions cache_options_;
-    AssemblyOptions options_;
     std::unique_ptr<ElementMatrixCache> cache_;
-    std::unique_ptr<StandardAssembler> standard_assembler_;
-
-    const dofs::DofMap* dof_map_{nullptr};
-    const dofs::DofHandler* dof_handler_{nullptr};
-    const constraints::AffineConstraints* constraints_{nullptr};
-    const sparsity::SparsityPattern* sparsity_{nullptr};
-    std::unique_ptr<constraints::ConstraintDistributor> constraint_distributor_;
-
-    std::function<void(GlobalIndex)> invalidation_callback_;
-
-    bool initialized_{false};
     bool cache_populated_{false};
+    std::function<void(GlobalIndex)> invalidation_callback_;
 };
 
 // ============================================================================

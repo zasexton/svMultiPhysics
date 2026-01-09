@@ -17,6 +17,8 @@
 #include "Forms/ConstitutiveModel.h"
 #include "Forms/BlockForm.h"
 #include "Forms/Complex.h"
+#include "Forms/BoundaryConditions.h"
+#include "Forms/BoundaryFunctional.h"
 #include "Forms/Vocabulary.h"
 
 #endif // SVMP_FE_FORMS_FORMS_H

@@ -65,6 +65,8 @@ public:
                             std::shared_ptr<assembly::IMatrixFreeKernel> kernel,
                             const assembly::MatrixFreeOptions& options);
 
+    [[nodiscard]] bool hasMatrixFree(const OperatorTag& tag) const noexcept;
+
     [[nodiscard]] std::shared_ptr<assembly::MatrixFreeOperator>
     matrixFreeOperator(const FESystem& system, const OperatorTag& tag) const;
 

@@ -17,6 +17,7 @@
 #include "Systems/OperatorRegistry.h"
 #include "Systems/ParameterRegistry.h"
 #include "Systems/SearchAccess.h"
+#include "Systems/SystemConstraint.h"
 #include "Systems/SystemState.h"
 #include "Systems/SystemSetup.h"
 
@@ -56,6 +57,7 @@ namespace systems {
 
 using BoundaryId = int;
 class OperatorBackends;
+class CoupledBoundaryManager;
 
 struct SetupOptions {
     dofs::DofDistributionOptions dof_options{};
@@ -68,6 +70,9 @@ struct SetupOptions {
     std::vector<sparsity::FieldCoupling> custom_couplings{};
 
     bool use_constraints_in_assembly{true};
+
+    // Iterative-solver leverage (explicit opt-in): auto-register eligible matrix-free operators.
+    bool auto_register_matrix_free{false};
 };
 
 struct AssemblyRequest {
@@ -99,6 +104,7 @@ public:
     // ---- Definition phase ----
     FieldId addField(FieldSpec spec);
     void addConstraint(std::unique_ptr<constraints::Constraint> c);
+    void addSystemConstraint(std::unique_ptr<ISystemConstraint> c);
 
     void addOperator(OperatorTag name);
 
@@ -137,8 +143,22 @@ public:
                                                   int boundary_marker,
                                                   const SystemStateView& state) const;
 
+    /**
+     * @brief Enable coupled boundary-condition infrastructure for a primary field
+     *
+     * This creates (or returns) a CoupledBoundaryManager used to orchestrate
+     * boundary functionals and auxiliary (0D) state updates. The primary field
+     * is used as the discrete solution source for BoundaryFunctional evaluation.
+     */
+    CoupledBoundaryManager& coupledBoundaryManager(FieldId primary_field);
+    [[nodiscard]] CoupledBoundaryManager* coupledBoundaryManager() noexcept { return coupled_boundary_.get(); }
+    [[nodiscard]] const CoupledBoundaryManager* coupledBoundaryManager() const noexcept { return coupled_boundary_.get(); }
+
     // ---- Setup phase ----
     void setup(const SetupOptions& opts = {}, const SetupInputs& inputs = {});
+
+    // ---- Constraints lifecycle ----
+    void updateConstraints(double time, double dt = 0.0);
 
     // ---- Assembly phase ----
     assembly::AssemblyResult assemble(
@@ -163,8 +183,10 @@ public:
     void beginTimeStep();
     void commitTimeStep();
 
-    // ---- Accessors ----
+	    // ---- Accessors ----
 	    [[nodiscard]] const assembly::IMeshAccess& meshAccess() const;
+	    [[nodiscard]] std::string assemblerName() const;
+	    [[nodiscard]] std::string assemblerSelectionReport() const;
 	    [[nodiscard]] const ISearchAccess* searchAccess() const noexcept { return search_access_.get(); }
 	    void setSearchAccess(std::shared_ptr<const ISearchAccess> access) { search_access_ = std::move(access); }
 
@@ -216,7 +238,7 @@ public:
 	    // ---- Parameter requirements (optional) ----
 	    [[nodiscard]] const ParameterRegistry& parameterRegistry() const noexcept { return parameter_registry_; }
 
-	private:
+private:
     friend assembly::AssemblyResult assembleOperator(
         FESystem& system,
         const AssemblyRequest& request,
@@ -242,6 +264,7 @@ public:
     FieldRegistry field_registry_;
     OperatorRegistry operator_registry_;
     std::vector<std::unique_ptr<constraints::Constraint>> constraint_defs_;
+    std::vector<std::unique_ptr<ISystemConstraint>> system_constraint_defs_;
 
     dofs::DofHandler dof_handler_{};
     std::vector<dofs::DofHandler> field_dof_handlers_{};
@@ -253,9 +276,11 @@ public:
     std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>> sparsity_by_op_{};
 
 	    std::unique_ptr<assembly::Assembler> assembler_{};
+	    std::string assembler_selection_report_{};
 	    std::unique_ptr<assembly::IMaterialStateProvider> material_state_provider_{};
 	    std::unique_ptr<GlobalKernelStateProvider> global_kernel_state_provider_{};
-	    std::unique_ptr<OperatorBackends> operator_backends_{};
+    std::unique_ptr<OperatorBackends> operator_backends_{};
+    std::unique_ptr<CoupledBoundaryManager> coupled_boundary_{};
 	    ParameterRegistry parameter_registry_{};
 
 	    bool is_setup_{false};

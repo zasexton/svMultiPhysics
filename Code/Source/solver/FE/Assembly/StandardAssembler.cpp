@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <cmath>
+#include <cmath>
 
 namespace svmp {
 namespace FE {
@@ -203,6 +204,18 @@ void StandardAssembler::setUserData(const void* user_data) noexcept
     user_data_ = user_data;
 }
 
+void StandardAssembler::setJITConstants(std::span<const Real> constants) noexcept
+{
+    jit_constants_ = constants;
+}
+
+void StandardAssembler::setCoupledValues(std::span<const Real> integrals,
+                                        std::span<const Real> aux_state) noexcept
+{
+    coupled_integrals_ = integrals;
+    coupled_aux_state_ = aux_state;
+}
+
 void StandardAssembler::setMaterialStateProvider(IMaterialStateProvider* provider) noexcept
 {
     material_state_provider_ = provider;
@@ -366,6 +379,7 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
     const auto field_requirements = kernel.fieldRequirements();
     const bool need_field_solutions = !field_requirements.empty();
     const bool need_solution =
+        hasFlag(required_data, RequiredData::SolutionCoefficients) ||
         hasFlag(required_data, RequiredData::SolutionValues) ||
         hasFlag(required_data, RequiredData::SolutionGradients) ||
         hasFlag(required_data, RequiredData::SolutionHessians) ||
@@ -415,6 +429,8 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
             context_.setRealParameterGetter(get_real_param_);
             context_.setParameterGetter(get_param_);
             context_.setUserData(user_data_);
+            context_.setJITConstants(jit_constants_);
+            context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
             context_.clearAllPreviousSolutionData();
             context_.setBoundaryMarker(boundary_marker);
 
@@ -525,6 +541,7 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     const auto field_requirements = kernel.fieldRequirements();
     const bool need_field_solutions = !field_requirements.empty();
     const bool need_solution =
+        hasFlag(required_data, RequiredData::SolutionCoefficients) ||
         hasFlag(required_data, RequiredData::SolutionValues) ||
         hasFlag(required_data, RequiredData::SolutionGradients) ||
         hasFlag(required_data, RequiredData::SolutionHessians) ||
@@ -602,6 +619,8 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_.setRealParameterGetter(get_real_param_);
             context_.setParameterGetter(get_param_);
             context_.setUserData(user_data_);
+            context_.setJITConstants(jit_constants_);
+            context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
             context_.clearAllPreviousSolutionData();
 
             std::array<LocalIndex, 4> align_plus_storage{};
@@ -655,6 +674,8 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_plus.setRealParameterGetter(get_real_param_);
             context_plus.setParameterGetter(get_param_);
             context_plus.setUserData(user_data_);
+            context_plus.setJITConstants(jit_constants_);
+            context_plus.setCoupledValues(coupled_integrals_, coupled_aux_state_);
             context_plus.clearAllPreviousSolutionData();
 
             if (need_solution) {
@@ -821,6 +842,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
     const auto field_requirements = kernel.fieldRequirements();
     const bool need_field_solutions = !field_requirements.empty();
     const bool need_solution =
+        hasFlag(required_data, RequiredData::SolutionCoefficients) ||
         hasFlag(required_data, RequiredData::SolutionValues) ||
         hasFlag(required_data, RequiredData::SolutionGradients) ||
         hasFlag(required_data, RequiredData::SolutionHessians) ||
@@ -867,6 +889,8 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         context_.setRealParameterGetter(get_real_param_);
         context_.setParameterGetter(get_param_);
         context_.setUserData(user_data_);
+        context_.setJITConstants(jit_constants_);
+        context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
         context_.clearAllPreviousSolutionData();
         FE_THROW_IF(row_dofs_.size() != static_cast<std::size_t>(context_.numTestDofs()), FEException,
                     "StandardAssembler::assembleCellsCore: row DOF count does not match test space element DOFs");
@@ -2180,6 +2204,24 @@ void StandardAssembler::insertLocal(
     GlobalSystemView* matrix_view,
     GlobalSystemView* vector_view)
 {
+    if (options_.check_finite_values) {
+        auto check_finite = [](std::span<const Real> values, const char* what) {
+            for (Real v : values) {
+                if (!std::isfinite(v)) {
+                    throw std::runtime_error(
+                        std::string("StandardAssembler: ") + what + " contains NaN/Inf");
+                }
+            }
+        };
+
+        if (output.has_matrix) {
+            check_finite(output.local_matrix, "local matrix");
+        }
+        if (output.has_vector) {
+            check_finite(output.local_vector, "local vector");
+        }
+    }
+
     // Insert matrix entries
     if (matrix_view && output.has_matrix) {
         matrix_view->addMatrixEntries(row_dofs, col_dofs, output.local_matrix);
@@ -2198,6 +2240,24 @@ void StandardAssembler::insertLocalConstrained(
     GlobalSystemView* matrix_view,
     GlobalSystemView* vector_view)
 {
+    if (options_.check_finite_values) {
+        auto check_finite = [](std::span<const Real> values, const char* what) {
+            for (Real v : values) {
+                if (!std::isfinite(v)) {
+                    throw std::runtime_error(
+                        std::string("StandardAssembler: ") + what + " contains NaN/Inf");
+                }
+            }
+        };
+
+        if (output.has_matrix) {
+            check_finite(output.local_matrix, "local matrix");
+        }
+        if (output.has_vector) {
+            check_finite(output.local_vector, "local vector");
+        }
+    }
+
     // Check if any DOFs are constrained
     if (!constraints_->hasConstrainedDofs(row_dofs) &&
         !constraints_->hasConstrainedDofs(col_dofs)) {

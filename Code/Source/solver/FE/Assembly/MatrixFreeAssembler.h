@@ -695,6 +695,12 @@ std::unique_ptr<MatrixFreeAssembler> createMatrixFreeAssembler(
 std::unique_ptr<IMatrixFreeKernel> wrapAsMatrixFreeKernel(
     AssemblyKernel& kernel);
 
+/**
+ * @brief Create matrix-free operator from a shared kernel (owns lifetime)
+ */
+std::unique_ptr<IMatrixFreeKernel> wrapAsMatrixFreeKernel(
+    std::shared_ptr<AssemblyKernel> kernel);
+
 } // namespace assembly
 } // namespace FE
 } // namespace svmp

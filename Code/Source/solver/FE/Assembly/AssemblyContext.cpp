@@ -566,6 +566,25 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
     solution_coefficients_.assign(coefficients.begin(),
                                   coefficients.begin() + static_cast<std::size_t>(n_trial_dofs_));
 
+    const bool coefficients_only =
+        hasFlag(required_data_, RequiredData::SolutionCoefficients) &&
+        !hasFlag(required_data_, RequiredData::SolutionValues) &&
+        !hasFlag(required_data_, RequiredData::SolutionGradients) &&
+        !hasFlag(required_data_, RequiredData::SolutionHessians) &&
+        !hasFlag(required_data_, RequiredData::SolutionLaplacians);
+
+    if (coefficients_only) {
+        solution_values_.clear();
+        solution_vector_values_.clear();
+        solution_gradients_.clear();
+        solution_jacobians_.clear();
+        solution_hessians_.clear();
+        solution_laplacians_.clear();
+        solution_component_hessians_.clear();
+        solution_component_laplacians_.clear();
+        return;
+    }
+
     const bool have_trial_phys_gradients =
         trial_is_test_ ? !test_phys_gradients_.empty() : !trial_phys_gradients_.empty();
     const bool need_gradients = hasFlag(required_data_, RequiredData::SolutionGradients) ||

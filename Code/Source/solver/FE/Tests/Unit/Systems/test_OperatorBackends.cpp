@@ -117,6 +117,44 @@ TEST(OperatorBackends, MatrixFreeMatchesAssembledForMassKernel)
     }
 }
 
+TEST(OperatorBackends, AutoRegistersMatrixFreeForEligibleCellOnlyOperator)
+{
+    auto mesh = build_single_quad_mesh();
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    auto mass_kernel = std::make_shared<MassKernel>(1.0);
+
+    FESystem sys(mesh);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, mass_kernel);
+
+    svmp::FE::systems::SetupOptions opts;
+    opts.auto_register_matrix_free = true;
+    sys.setup(opts);
+
+    DenseMatrixView assembled(sys.dofHandler().getNumDofs());
+    SystemStateView state;
+    sys.assembleMass(state, assembled);
+
+    auto op = sys.matrixFreeOperator("mass");
+    ASSERT_TRUE(op);
+    EXPECT_EQ(op->numRows(), assembled.numRows());
+
+    std::vector<Real> x(static_cast<std::size_t>(assembled.numRows()), 0.0);
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        x[i] = static_cast<Real>(i + 1);
+    }
+
+    std::vector<Real> y(static_cast<std::size_t>(assembled.numRows()), 0.0);
+    op->apply(x, y);
+
+    auto y_ref = applyDense(assembled, x);
+    for (std::size_t i = 0; i < y.size(); ++i) {
+        EXPECT_NEAR(y[i], y_ref[i], 1e-12);
+    }
+}
+
 TEST(OperatorBackends, FunctionalL2NormOfConstantOneIsOne)
 {
     auto mesh = build_single_quad_mesh();
@@ -135,4 +173,3 @@ TEST(OperatorBackends, FunctionalL2NormOfConstantOneIsOne)
     const Real value = sys.evaluateFunctional("qoi:l2", state);
     EXPECT_NEAR(value, 1.0, 1e-12);
 }
-
