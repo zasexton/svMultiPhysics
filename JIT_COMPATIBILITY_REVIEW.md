@@ -196,10 +196,52 @@ Align with the planned ABI in `LLVM_JIT_IMPLEMENTATION_PLAN.md`:
 
 - [x] Decide/encode an initial JIT lowering rule for `FormExprType::Constitutive`:
   - [x] **External-call only** in relaxed mode (`AllowExternalCalls`; non-cacheable),
-  - [ ] **Inlinable model** lowering (future).
+  - [x] **Inlinable model** lowering.
 - [ ] Eliminate string-keyed parameter lookup on the hot path:
   - [ ] resolve model parameters to slots and pass via `KernelArgs` constants,
   - [ ] keep string lookup only in setup/validation.
+
+#### Phase G.1 — Concrete steps for “inlinable” constitutive models (JIT-fast)
+
+Goal: allow `FormExpr::constitutive(model, input)` to disappear as a virtual call boundary in strict JIT mode by rewriting it into a lowerable, cacheable, slot-based representation.
+
+- [x] Define an explicit **inlinable constitutive contract** (opt-in):
+  - [x] new interface (e.g., `forms::InlinableConstitutiveModel`) or hook on `forms::ConstitutiveModel` that can:
+    - [x] build output expressions from symbolic inputs (`FormExpr`),
+    - [x] declare whether it is **pure** (no state writes) vs **stateful** (updates `state_work`),
+    - [x] expose a stable **model kind id** for caching/hashing (not pointer identity).
+- [x] Add a setup-time **constitutive lowering pass** (like parameter/coupled resolution):
+  - [x] traverse each integrand and detect `FormExprType::Constitutive`,
+  - [x] if the model is inlinable: rewrite the subtree into plain `FormExpr` (no `Constitutive` node remains),
+  - [x] if not inlinable:
+    - [x] strict JIT mode rejects it,
+    - [x] relaxed mode keeps it as an external call (existing behavior).
+- [x] Make model parameters **slot-based** in the inlined representation:
+  - [x] require models to declare `parameterSpecs()` (already supported),
+  - [x] resolve keys → slots at `systems::FESystem::setup()` using `systems::ParameterRegistry`,
+  - [x] forbid `ConstitutiveEvalContext::param("key")` usage in JIT-fast mode (string lookup),
+  - [x] ensure inlined laws reference parameters only through `FormExpr::parameterRef(slot)` (or compile-time constants).
+- [x] Decide how to represent **material state** for inlinable models:
+  - [x] Milestone 1 (recommended): only **pure/stateless** models are inlinable (no state reads/writes).
+  - [x] Milestone 2: enable **state reads** via fixed-offset loads:
+    - [x] require `stateLayout()` (preferred) or a fixed `StateSpec` with documented offsets,
+    - [x] add explicit, lowerable terminals for state access (e.g., `MaterialStateOldRef(offset_bytes, kind, count)`).
+  - [x] Milestone 3: enable **state writes** as explicit stores:
+    - [x] define a “state update IR” (separate from `FormExpr`, since writes are side effects),
+    - [x] lower/execute state updates inside the kernel using `KernelArgs.material_state_*` pointers (see `Code/Source/solver/FE/Assembly/JIT/KernelArgs.h`).
+- [x] Support **multi-output constitutive calls** (required for realistic models):
+  - [x] implement `outputCount() > 1` + `evaluateNaryOutputs` for models that need it,
+  - [x] make `FormExprType::ConstitutiveOutput` fully lowerable by inlining outputs (no runtime dispatch).
+- [x] Define the **derivative strategy** for nonlinear assembly:
+  - [x] Option A (first implementation): JIT emits a Dual-valued kernel path (mirrors current interpreter AD).
+  - [ ] Option B (performance): models provide explicit tangent/derivative expressions and JIT emits a Real-only kernel + tangent.
+- [ ] Make inlinable models **cacheable**:
+  - [x] update `forms::jit::KernelIR` hashing so inlined constitutive expansions hash structurally (no node address usage),
+  - [ ] include model kind id + state layout signature + resolved parameter slots in the cache key.
+- [x] Add validation + tests:
+  - [x] extend `forms::jit::canCompile` strict mode to accept inlinable constitutive expansions,
+  - [x] add unit tests comparing interpreter vs inlined expansion for at least one pure model (e.g., NeoHookean or linear elastic),
+  - [x] add tests that non-inlinable models are rejected in strict mode and accepted (non-cacheable) in relaxed mode.
 
 ### Phase H — Validation, fallback, and tests
 

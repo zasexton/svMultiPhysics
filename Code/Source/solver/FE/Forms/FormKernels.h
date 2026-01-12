@@ -12,12 +12,41 @@
 
 #include <memory>
 #include <optional>
+#include <unordered_map>
 
 namespace svmp {
 namespace FE {
 namespace forms {
 
 struct ConstitutiveStateLayout;
+
+struct MaterialStateUpdate {
+    std::uint32_t offset_bytes{0u};
+    FormExpr value{};
+};
+
+struct InlinedMaterialStateUpdateProgram {
+    std::vector<MaterialStateUpdate> cell{};
+    std::vector<MaterialStateUpdate> boundary_all{};
+    std::unordered_map<int, std::vector<MaterialStateUpdate>> boundary_by_marker{};
+    std::vector<MaterialStateUpdate> interior_face{};
+
+    [[nodiscard]] bool empty() const noexcept
+    {
+        return cell.empty() &&
+               boundary_all.empty() &&
+               boundary_by_marker.empty() &&
+               interior_face.empty();
+    }
+
+    void clear()
+    {
+        cell.clear();
+        boundary_all.clear();
+        boundary_by_marker.clear();
+        interior_face.clear();
+    }
+};
 
 /**
  * @brief Output mode for nonlinear (residual) kernels
@@ -59,6 +88,7 @@ public:
     [[nodiscard]] std::vector<assembly::FieldRequirement> fieldRequirements() const override;
     [[nodiscard]] assembly::MaterialStateSpec materialStateSpec() const noexcept override;
     [[nodiscard]] std::vector<params::Spec> parameterSpecs() const override;
+    void resolveInlinableConstitutives() override;
     void resolveParameterSlots(
         const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param) override;
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override { return ir_.maxTimeDerivativeOrder(); }
@@ -82,11 +112,14 @@ public:
                              assembly::KernelOutput& coupling_pm) override;
 
     [[nodiscard]] std::string name() const override { return "Forms::FormKernel"; }
+    [[nodiscard]] const FormIR& ir() const noexcept { return ir_; }
 
 private:
     FormIR ir_;
+    std::vector<params::Spec> parameter_specs_{};
     std::shared_ptr<const ConstitutiveStateLayout> constitutive_state_{};
     assembly::MaterialStateSpec material_state_spec_{};
+    InlinedMaterialStateUpdateProgram inlined_state_updates_{};
 };
 
 /**
@@ -116,6 +149,7 @@ public:
     [[nodiscard]] std::vector<assembly::FieldRequirement> fieldRequirements() const override;
     [[nodiscard]] assembly::MaterialStateSpec materialStateSpec() const noexcept override;
     [[nodiscard]] std::vector<params::Spec> parameterSpecs() const override;
+    void resolveInlinableConstitutives() override;
     void resolveParameterSlots(
         const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param) override;
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override;
@@ -141,14 +175,18 @@ public:
     [[nodiscard]] std::string name() const override { return "Forms::LinearFormKernel"; }
     [[nodiscard]] bool isMatrixOnly() const noexcept override { return output_ == LinearKernelOutput::MatrixOnly; }
     [[nodiscard]] bool isVectorOnly() const noexcept override { return output_ == LinearKernelOutput::VectorOnly; }
+    [[nodiscard]] const FormIR& bilinearIR() const noexcept { return bilinear_ir_; }
+    [[nodiscard]] const std::optional<FormIR>& linearIR() const noexcept { return linear_ir_; }
 
 private:
     FormIR bilinear_ir_;
     std::optional<FormIR> linear_ir_{};
     LinearKernelOutput output_{LinearKernelOutput::Both};
     std::vector<assembly::FieldRequirement> field_requirements_{};
+    std::vector<params::Spec> parameter_specs_{};
     std::shared_ptr<const ConstitutiveStateLayout> constitutive_state_{};
     assembly::MaterialStateSpec material_state_spec_{};
+    InlinedMaterialStateUpdateProgram inlined_state_updates_{};
 };
 
 /**
@@ -176,6 +214,7 @@ public:
     [[nodiscard]] std::vector<assembly::FieldRequirement> fieldRequirements() const override;
     [[nodiscard]] assembly::MaterialStateSpec materialStateSpec() const noexcept override;
     [[nodiscard]] std::vector<params::Spec> parameterSpecs() const override;
+    void resolveInlinableConstitutives() override;
     void resolveParameterSlots(
         const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param) override;
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override {
@@ -203,13 +242,16 @@ public:
     [[nodiscard]] std::string name() const override { return "Forms::NonlinearFormKernel"; }
     [[nodiscard]] bool isMatrixOnly() const noexcept override { return output_ == NonlinearKernelOutput::MatrixOnly; }
     [[nodiscard]] bool isVectorOnly() const noexcept override { return output_ == NonlinearKernelOutput::VectorOnly; }
+    [[nodiscard]] const FormIR& residualIR() const noexcept { return residual_ir_; }
 
 private:
     FormIR residual_ir_;
     ADMode ad_mode_{ADMode::Forward};
     NonlinearKernelOutput output_{NonlinearKernelOutput::Both};
+    std::vector<params::Spec> parameter_specs_{};
     std::shared_ptr<const ConstitutiveStateLayout> constitutive_state_{};
     assembly::MaterialStateSpec material_state_spec_{};
+    InlinedMaterialStateUpdateProgram inlined_state_updates_{};
 };
 
 /**

@@ -36,6 +36,8 @@ class StateLayout;
 
 namespace forms {
 
+class InlinableConstitutiveModel;
+
 struct ConstitutiveEvalContext {
     enum class Domain : std::uint8_t {
         Cell,
@@ -208,6 +210,15 @@ public:
     };
 
     virtual ~ConstitutiveModel() = default;
+
+    /**
+     * @brief Optional hook: return inlinable interface for JIT-fast lowering
+     *
+     * Models that support setup-time symbolic expansion should override this to
+     * return a non-null pointer (typically `return this;` if also implementing
+     * InlinableConstitutiveModel).
+     */
+    [[nodiscard]] virtual const InlinableConstitutiveModel* inlinable() const noexcept { return nullptr; }
 
     [[nodiscard]] virtual Value<Real> evaluate(const Value<Real>& input, int dim) const = 0;
 

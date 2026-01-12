@@ -82,6 +82,24 @@ void FormIR::transformIntegrands(const FormExpr::NodeTransform& transform)
     impl_->dump.clear();
 }
 
+void FormIR::transformIntegrands(const TermTransform& transform)
+{
+    if (!transform) {
+        return;
+    }
+    for (auto& term : impl_->terms) {
+        if (!term.integrand.isValid()) {
+            continue;
+        }
+        const auto per_term = [&](const FormExprNode& n) -> std::optional<FormExpr> {
+            return transform(n, term);
+        };
+        term.integrand = term.integrand.transformNodes(per_term);
+        term.debug_string = term.integrand.toString();
+    }
+    impl_->dump.clear();
+}
+
 void FormIR::setCompiled(bool compiled) { impl_->compiled = compiled; }
 void FormIR::setKind(FormKind kind) { impl_->kind = kind; }
 void FormIR::setRequiredData(assembly::RequiredData required) { impl_->required = required; }

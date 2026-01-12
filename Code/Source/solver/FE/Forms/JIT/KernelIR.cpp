@@ -104,6 +104,16 @@ struct ImmPayload {
             return out;
         }
 
+        case FormExprType::MaterialStateOldRef:
+        case FormExprType::MaterialStateWorkRef: {
+            const auto off = node.stateOffsetBytes();
+            if (!off) {
+                throw std::invalid_argument("KernelIR: material-state ref node missing offset");
+            }
+            out.imm0 = static_cast<std::uint64_t>(*off);
+            return out;
+        }
+
         case FormExprType::PreviousSolutionRef: {
             const auto k = node.historyIndex();
             if (!k) {

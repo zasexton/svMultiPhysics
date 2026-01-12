@@ -12,6 +12,7 @@
 #include "Core/FEException.h"
 #include "Forms/ConstitutiveModel.h"
 #include "Forms/Dual.h"
+#include "Forms/JIT/InlinableConstitutiveModel.h"
 #include "Forms/Value.h"
 
 #include "Assembly/AssemblyContext.h"
@@ -19,8 +20,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <cmath>
+#include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace svmp {
 namespace FE {
@@ -89,6 +93,28 @@ bool containsTestOrTrial(const FormExprNode& node)
         if (child && containsTestOrTrial(*child)) {
             return true;
         }
+    }
+    return false;
+}
+
+bool containsTestFunction(const FormExprNode& node)
+{
+    if (node.type() == FormExprType::TestFunction) {
+        return true;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsTestFunction(*child)) return true;
+    }
+    return false;
+}
+
+bool containsTrialFunction(const FormExprNode& node)
+{
+    if (node.type() == FormExprType::TrialFunction) {
+        return true;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsTrialFunction(*child)) return true;
     }
     return false;
 }
@@ -177,6 +203,48 @@ void gatherParameterSymbols(const FormExprNode& node, std::vector<std::string_vi
     }
 }
 
+[[nodiscard]] std::vector<params::Spec> computeParameterSpecs(std::span<const FormIR* const> irs)
+{
+    std::vector<const ConstitutiveModel*> models;
+    std::vector<std::string_view> param_names;
+
+    for (const auto* ir : irs) {
+        if (ir == nullptr) continue;
+        for (const auto& term : ir->terms()) {
+            const auto* root = term.integrand.node();
+            if (!root) continue;
+            gatherConstitutiveModels(*root, models);
+            gatherParameterSymbols(*root, param_names);
+        }
+    }
+
+    std::vector<params::Spec> out;
+
+    for (const auto* m : models) {
+        if (!m) continue;
+        auto specs = m->parameterSpecs();
+        out.insert(out.end(), specs.begin(), specs.end());
+    }
+
+    if (!param_names.empty()) {
+        std::vector<std::string> keys;
+        keys.reserve(param_names.size());
+        for (const auto nm : param_names) {
+            keys.emplace_back(nm);
+        }
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+
+        for (auto& key : keys) {
+            out.push_back(params::Spec{.key = std::move(key),
+                                       .type = params::ValueType::Real,
+                                       .required = true});
+        }
+    }
+
+    return out;
+}
+
 [[nodiscard]] std::shared_ptr<const ConstitutiveStateLayout> buildConstitutiveStateLayout(
     const FormIR& ir,
     assembly::MaterialStateSpec& spec_out)
@@ -234,6 +302,287 @@ void gatherParameterSymbols(const FormExprNode& node, std::vector<std::string_vi
     spec_out.bytes_per_qpt = layout->bytes_per_qpt;
     spec_out.alignment = layout->alignment;
     return layout;
+}
+
+[[nodiscard]] int inferTopologicalDim(const FormIR& ir) noexcept
+{
+    if (const auto& ts = ir.testSpace(); ts.has_value()) {
+        return ts->topological_dimension;
+    }
+    if (const auto& tr = ir.trialSpace(); tr.has_value()) {
+        return tr->topological_dimension;
+    }
+    return 0;
+}
+
+struct InlinedConstitutiveCall {
+    std::vector<FormExpr> outputs{};
+    std::vector<MaterialStateUpdate> updates{};
+    std::vector<const FormExprNode*> dependencies{};
+    std::uint64_t kind_id{0u};
+    MaterialStateAccess state_access{MaterialStateAccess::None};
+};
+
+void inlineInlinableConstitutives(std::span<FormIR*> irs,
+                                  const ConstitutiveStateLayout* state_layout,
+                                  const assembly::MaterialStateSpec& state_spec,
+                                  InlinedMaterialStateUpdateProgram& state_updates_out)
+{
+    state_updates_out.clear();
+
+    std::unordered_map<const FormExprNode*, InlinedConstitutiveCall> memo;
+    std::unordered_map<const FormExprNode*, std::vector<const FormExprNode*>> deps_by_call;
+    std::vector<const FormExprNode*> expansion_stack;
+
+    struct EmittedKey {
+        const FormExprNode* call{nullptr};
+        IntegralDomain domain{IntegralDomain::Cell};
+        int boundary_marker{-1};
+
+        [[nodiscard]] bool operator==(const EmittedKey& other) const noexcept
+        {
+            return call == other.call &&
+                   domain == other.domain &&
+                   boundary_marker == other.boundary_marker;
+        }
+    };
+
+    struct EmittedKeyHash {
+        [[nodiscard]] std::size_t operator()(const EmittedKey& k) const noexcept
+        {
+            std::size_t h = std::hash<const FormExprNode*>{}(k.call);
+            auto mix = [&](std::size_t v) {
+                h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            };
+            mix(static_cast<std::size_t>(k.domain));
+            mix(static_cast<std::size_t>(static_cast<std::uint32_t>(k.boundary_marker)));
+            return h;
+        }
+    };
+
+    std::unordered_set<EmittedKey, EmittedKeyHash> emitted;
+
+    int dim_hint = 0;
+    bool allow_trial_in_updates = false;
+    for (auto* ir : irs) {
+        if (ir != nullptr) {
+            dim_hint = std::max(dim_hint, inferTopologicalDim(*ir));
+            allow_trial_in_updates = allow_trial_in_updates || (ir->kind() == FormKind::Residual);
+        }
+    }
+
+    const auto appendUpdatesForTerm = [&](const std::vector<MaterialStateUpdate>& updates,
+                                          const IntegralTerm& term) {
+        if (updates.empty()) {
+            return;
+        }
+        switch (term.domain) {
+            case IntegralDomain::Cell:
+                state_updates_out.cell.insert(state_updates_out.cell.end(), updates.begin(), updates.end());
+                return;
+            case IntegralDomain::Boundary:
+                if (term.boundary_marker < 0) {
+                    state_updates_out.boundary_all.insert(state_updates_out.boundary_all.end(), updates.begin(), updates.end());
+                } else {
+                    auto& bucket = state_updates_out.boundary_by_marker[term.boundary_marker];
+                    bucket.insert(bucket.end(), updates.begin(), updates.end());
+                }
+                return;
+            case IntegralDomain::InteriorFace:
+                state_updates_out.interior_face.insert(state_updates_out.interior_face.end(), updates.begin(), updates.end());
+                return;
+        }
+    };
+
+    std::function<void(const FormExprNode*, const IntegralTerm&)> emitUpdatesForCall;
+    emitUpdatesForCall = [&](const FormExprNode* call_ptr, const IntegralTerm& term) -> void {
+        if (call_ptr == nullptr) return;
+        const auto it = memo.find(call_ptr);
+        if (it == memo.end()) return;
+
+        const EmittedKey key{call_ptr, term.domain, (term.domain == IntegralDomain::Boundary) ? term.boundary_marker : -1};
+        if (!it->second.updates.empty()) {
+            if (emitted.insert(key).second) {
+                appendUpdatesForTerm(it->second.updates, term);
+            }
+        }
+
+        for (const auto* dep : it->second.dependencies) {
+            emitUpdatesForCall(dep, term);
+        }
+    };
+
+    const auto recordDependency = [&](const FormExprNode* callee) {
+        if (callee == nullptr || expansion_stack.empty()) {
+            return;
+        }
+        const auto* parent = expansion_stack.back();
+        if (parent == nullptr) {
+            return;
+        }
+        auto& deps = deps_by_call[parent];
+        const bool seen = std::any_of(deps.begin(), deps.end(),
+                                      [&](const FormExprNode* p) { return p == callee; });
+        if (!seen) deps.push_back(callee);
+    };
+
+    std::function<std::optional<FormExpr>(const FormExprNode&, const IntegralTerm&)> term_transform;
+
+    const auto get_or_inline = [&](const FormExprNode& call_node,
+                                   const IntegralTerm& term,
+                                   const std::function<std::optional<FormExpr>(const FormExprNode&)>& node_transform)
+        -> const InlinedConstitutiveCall* {
+        if (call_node.type() != FormExprType::Constitutive) {
+            return nullptr;
+        }
+
+        if (auto it = memo.find(&call_node); it != memo.end()) {
+            emitUpdatesForCall(&call_node, term);
+            return &it->second;
+        }
+
+        const auto* model = call_node.constitutiveModel();
+        if (!model) {
+            throw FEException("Forms: Constitutive node missing model during inlining",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        }
+
+        const auto* inlinable = model->inlinable();
+        if (!inlinable) {
+            return nullptr;
+        }
+
+        const auto kids = call_node.childrenShared();
+        FE_THROW_IF(kids.empty(), InvalidArgumentException,
+                    "Forms: Constitutive node must have at least 1 input for inlining");
+
+        std::vector<FormExpr> inputs;
+        inputs.reserve(kids.size());
+        for (const auto& k : kids) {
+            FE_THROW_IF(!k, InvalidArgumentException,
+                        "Forms: Constitutive node has null input");
+            inputs.emplace_back(k);
+        }
+
+        // Recursively inline nested constitutive calls inside inputs.
+        expansion_stack.push_back(&call_node);
+        deps_by_call[&call_node].clear();
+        for (auto& in : inputs) {
+            in = in.transformNodes(node_transform);
+        }
+
+        std::uint32_t base_offset_u32 = 0u;
+        std::size_t model_bytes = 0u;
+
+        if (state_layout != nullptr) {
+            if (const auto* block = state_layout->find(model); block != nullptr) {
+                FE_THROW_IF(block->offset_bytes > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()),
+                            InvalidArgumentException,
+                            "Forms: constitutive state base offset overflows u32");
+                base_offset_u32 = static_cast<std::uint32_t>(block->offset_bytes);
+                model_bytes = block->bytes;
+            }
+        }
+
+        const auto access = inlinable->stateAccess();
+        if (access != MaterialStateAccess::None) {
+            FE_THROW_IF(state_spec.bytes_per_qpt == 0u, InvalidArgumentException,
+                        "Forms: inlinable constitutive model requests material state but kernel has no materialStateSpec");
+            FE_THROW_IF(model_bytes == 0u, InvalidArgumentException,
+                        "Forms: inlinable constitutive model requests material state but provides no stateSpec/stateLayout");
+        }
+
+        InlinableConstitutiveContext ctx;
+        ctx.dim = dim_hint;
+        ctx.state_base_offset_bytes = base_offset_u32;
+        ctx.state_layout = model->stateLayout();
+
+        auto expansion = inlinable->inlineExpand(inputs, ctx);
+
+        const auto n_outputs = model->outputCount();
+        FE_THROW_IF(expansion.outputs.size() != n_outputs, InvalidArgumentException,
+                    "Forms: inlinable constitutive expansion outputs.size() does not match model->outputCount()");
+
+        // Inline nested calls within expansion outputs + update expressions.
+        for (auto& out : expansion.outputs) {
+            out = out.transformNodes(node_transform);
+        }
+        for (auto& op : expansion.state_updates) {
+            FE_THROW_IF(!op.value.isValid(), InvalidArgumentException,
+                        "Forms: inlinable constitutive state update has invalid value expression");
+            op.value = op.value.transformNodes(node_transform);
+        }
+
+        InlinedConstitutiveCall stored;
+        stored.kind_id = inlinable->kindId();
+        stored.state_access = access;
+        stored.outputs = std::move(expansion.outputs);
+
+        stored.updates.reserve(expansion.state_updates.size());
+        for (const auto& op : expansion.state_updates) {
+            FE_THROW_IF(containsTestFunction(*op.value.node()), InvalidArgumentException,
+                        "Forms: inlinable constitutive state update must not depend on TestFunction");
+            FE_THROW_IF(!allow_trial_in_updates && containsTrialFunction(*op.value.node()), InvalidArgumentException,
+                        "Forms: inlinable constitutive state update must not depend on TrialFunction outside residual kernels");
+
+            const std::size_t off = static_cast<std::size_t>(op.offset_bytes);
+            FE_THROW_IF(off + sizeof(Real) > state_spec.bytes_per_qpt, InvalidArgumentException,
+                        "Forms: inlinable constitutive state update offset out of bounds");
+            stored.updates.push_back(MaterialStateUpdate{op.offset_bytes, op.value});
+        }
+
+        stored.dependencies = std::move(deps_by_call[&call_node]);
+        expansion_stack.pop_back();
+
+        auto [it, inserted] = memo.emplace(&call_node, std::move(stored));
+        (void)inserted;
+        emitUpdatesForCall(&call_node, term);
+
+        return &it->second;
+    };
+
+    term_transform = [&](const FormExprNode& n, const IntegralTerm& term) -> std::optional<FormExpr> {
+        const auto node_transform = [&](const FormExprNode& nn) -> std::optional<FormExpr> {
+            return term_transform(nn, term);
+        };
+
+        if (n.type() == FormExprType::ConstitutiveOutput) {
+            const auto kids = n.childrenShared();
+            FE_THROW_IF(kids.size() != 1u || !kids[0], InvalidArgumentException,
+                        "Forms: ConstitutiveOutput node must have exactly 1 child");
+
+            const auto out_idx = n.constitutiveOutputIndex().value_or(0);
+            FE_THROW_IF(out_idx < 0, InvalidArgumentException,
+                        "Forms: ConstitutiveOutput node has negative output index");
+
+            recordDependency(kids[0].get());
+            const auto* call = get_or_inline(*kids[0], term, node_transform);
+            if (!call) {
+                return std::nullopt;
+            }
+            const auto idx = static_cast<std::size_t>(out_idx);
+            FE_THROW_IF(idx >= call->outputs.size(), InvalidArgumentException,
+                        "Forms: ConstitutiveOutput index out of range after inlining");
+            return call->outputs[idx];
+        }
+
+        if (n.type() == FormExprType::Constitutive) {
+            recordDependency(&n);
+            const auto* call = get_or_inline(n, term, node_transform);
+            if (!call) {
+                return std::nullopt;
+            }
+            FE_THROW_IF(call->outputs.empty(), InvalidArgumentException,
+                        "Forms: inlinable constitutive expansion produced no outputs");
+            return call->outputs[0];
+        }
+
+        return std::nullopt;
+    };
+
+    for (auto* ir : irs) {
+        if (ir != nullptr) ir->transformIntegrands(term_transform);
+    }
 }
 
 // ============================================================================
@@ -814,6 +1163,34 @@ EvalValue<Real> evalReal(const FormExprNode& node,
             FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
                         "Forms: AuxiliaryStateRef slot out of range");
             return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, vals[slot]};
+        }
+        case FormExprType::MaterialStateOldRef: {
+            const auto off = node.stateOffsetBytes();
+            FE_THROW_IF(!off.has_value(), InvalidArgumentException,
+                        "Forms: MaterialStateOldRef node missing offset");
+            FE_THROW_IF(!ctx.hasMaterialState(), InvalidArgumentException,
+                        "Forms: MaterialStateOldRef requires material state in AssemblyContext");
+            const auto state = ctx.materialStateOld(q);
+            const auto offset = static_cast<std::size_t>(*off);
+            FE_THROW_IF(offset + sizeof(Real) > state.size(), InvalidArgumentException,
+                        "Forms: MaterialStateOldRef offset out of range");
+            Real v = 0.0;
+            std::memcpy(&v, state.data() + offset, sizeof(Real));
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, v};
+        }
+        case FormExprType::MaterialStateWorkRef: {
+            const auto off = node.stateOffsetBytes();
+            FE_THROW_IF(!off.has_value(), InvalidArgumentException,
+                        "Forms: MaterialStateWorkRef node missing offset");
+            FE_THROW_IF(!ctx.hasMaterialState(), InvalidArgumentException,
+                        "Forms: MaterialStateWorkRef requires material state in AssemblyContext");
+            const auto state = ctx.materialStateWork(q);
+            const auto offset = static_cast<std::size_t>(*off);
+            FE_THROW_IF(offset + sizeof(Real) > state.size(), InvalidArgumentException,
+                        "Forms: MaterialStateWorkRef offset out of range");
+            Real v = 0.0;
+            std::memcpy(&v, state.data() + offset, sizeof(Real));
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, v};
         }
         case FormExprType::PreviousSolutionRef: {
             const int k = node.historyIndex().value_or(1);
@@ -3269,6 +3646,40 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
             out.s = makeDualConstant(vals[slot], env.ws->alloc());
             return out;
         }
+        case FormExprType::MaterialStateOldRef: {
+            const auto off = node.stateOffsetBytes();
+            FE_THROW_IF(!off.has_value(), InvalidArgumentException,
+                        "Forms: MaterialStateOldRef node missing offset (dual)");
+            FE_THROW_IF(!ctx.hasMaterialState(), InvalidArgumentException,
+                        "Forms: MaterialStateOldRef requires material state in AssemblyContext (dual)");
+            const auto state = ctx.materialStateOld(q);
+            const auto offset = static_cast<std::size_t>(*off);
+            FE_THROW_IF(offset + sizeof(Real) > state.size(), InvalidArgumentException,
+                        "Forms: MaterialStateOldRef offset out of range (dual)");
+            Real v = 0.0;
+            std::memcpy(&v, state.data() + offset, sizeof(Real));
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(v, env.ws->alloc());
+            return out;
+        }
+        case FormExprType::MaterialStateWorkRef: {
+            const auto off = node.stateOffsetBytes();
+            FE_THROW_IF(!off.has_value(), InvalidArgumentException,
+                        "Forms: MaterialStateWorkRef node missing offset (dual)");
+            FE_THROW_IF(!ctx.hasMaterialState(), InvalidArgumentException,
+                        "Forms: MaterialStateWorkRef requires material state in AssemblyContext (dual)");
+            const auto state = ctx.materialStateWork(q);
+            const auto offset = static_cast<std::size_t>(*off);
+            FE_THROW_IF(offset + sizeof(Real) > state.size(), InvalidArgumentException,
+                        "Forms: MaterialStateWorkRef offset out of range (dual)");
+            Real v = 0.0;
+            std::memcpy(&v, state.data() + offset, sizeof(Real));
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(v, env.ws->alloc());
+            return out;
+        }
         case FormExprType::PreviousSolutionRef: {
             const int k = node.historyIndex().value_or(1);
             FE_THROW_IF(k <= 0, InvalidArgumentException,
@@ -5435,6 +5846,78 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                       __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
 }
 
+void applyInlinedMaterialStateUpdatesReal(const assembly::AssemblyContext& ctx_minus,
+                                          const assembly::AssemblyContext* ctx_plus,
+                                          FormKind kind,
+                                          const ConstitutiveStateLayout* constitutive_state,
+                                          const std::vector<MaterialStateUpdate>& updates,
+                                          Side side,
+                                          LocalIndex q)
+{
+    if (updates.empty()) {
+        return;
+    }
+
+    const auto& ctx = ctxForSide(ctx_minus, ctx_plus, side);
+    FE_THROW_IF(!ctx.hasMaterialState(), InvalidArgumentException,
+                "Forms: inlined material-state updates require AssemblyContext material state");
+    auto state = ctx.materialStateWork(q);
+
+    ConstitutiveCallCacheReal constitutive_cache;
+    EvalEnvReal env{ctx_minus, ctx_plus, kind, Side::Minus, Side::Minus, 0, 0, constitutive_state, &constitutive_cache};
+
+    for (const auto& op : updates) {
+        FE_THROW_IF(!op.value.isValid() || op.value.node() == nullptr, InvalidArgumentException,
+                    "Forms: inlined material-state update has invalid expression");
+        const auto v = evalReal(*op.value.node(), env, side, q);
+        FE_THROW_IF(v.kind != EvalValue<Real>::Kind::Scalar, InvalidArgumentException,
+                    "Forms: inlined material-state update did not evaluate to scalar");
+
+        const auto offset = static_cast<std::size_t>(op.offset_bytes);
+        FE_THROW_IF(offset + sizeof(Real) > state.size(), InvalidArgumentException,
+                    "Forms: inlined material-state update offset out of bounds for bound state buffer");
+        std::memcpy(state.data() + offset, &v.s, sizeof(Real));
+    }
+}
+
+void applyInlinedMaterialStateUpdatesDual(const assembly::AssemblyContext& ctx_minus,
+                                          const assembly::AssemblyContext* ctx_plus,
+                                          const ConstitutiveStateLayout* constitutive_state,
+                                          const std::vector<MaterialStateUpdate>& updates,
+                                          Side side,
+                                          LocalIndex q)
+{
+    if (updates.empty()) {
+        return;
+    }
+
+    const auto& ctx = ctxForSide(ctx_minus, ctx_plus, side);
+    FE_THROW_IF(!ctx.hasMaterialState(), InvalidArgumentException,
+                "Forms: inlined material-state updates require AssemblyContext material state (dual)");
+    auto state = ctx.materialStateWork(q);
+
+    thread_local DualWorkspace ws;
+    ws.reset(/*num_dofs=*/0u);
+
+    ConstitutiveCallCacheDual constitutive_cache;
+    EvalEnvDual env{ctx_minus, ctx_plus, Side::Minus, Side::Minus, /*i=*/0, /*n_trial_dofs=*/0u, &ws,
+                    constitutive_state, &constitutive_cache};
+
+    for (const auto& op : updates) {
+        FE_THROW_IF(!op.value.isValid() || op.value.node() == nullptr, InvalidArgumentException,
+                    "Forms: inlined material-state update has invalid expression (dual)");
+        const auto v = evalDual(*op.value.node(), env, side, q);
+        FE_THROW_IF(v.kind != EvalValue<Dual>::Kind::Scalar, InvalidArgumentException,
+                    "Forms: inlined material-state update did not evaluate to scalar (dual)");
+
+        const Real value = v.s.value;
+        const auto offset = static_cast<std::size_t>(op.offset_bytes);
+        FE_THROW_IF(offset + sizeof(Real) > state.size(), InvalidArgumentException,
+                    "Forms: inlined material-state update offset out of bounds for bound state buffer (dual)");
+        std::memcpy(state.data() + offset, &value, sizeof(Real));
+    }
+}
+
 } // namespace
 
 // ============================================================================
@@ -5450,6 +5933,9 @@ FormKernel::FormKernel(FormIR ir)
     if (ir_.kind() == FormKind::Residual) {
         throw std::invalid_argument("FormKernel: residual IR must be used with NonlinearFormKernel");
     }
+
+    const FormIR* irs[] = {&ir_};
+    parameter_specs_ = computeParameterSpecs(std::span<const FormIR* const>{irs});
 
     constitutive_state_ = buildConstitutiveStateLayout(ir_, material_state_spec_);
 }
@@ -5479,44 +5965,22 @@ assembly::MaterialStateSpec FormKernel::materialStateSpec() const noexcept
 
 std::vector<params::Spec> FormKernel::parameterSpecs() const
 {
-    std::vector<const ConstitutiveModel*> models;
-    std::vector<std::string_view> param_names;
-    for (const auto& term : ir_.terms()) {
-        const auto* root = term.integrand.node();
-        if (!root) continue;
-        gatherConstitutiveModels(*root, models);
-        gatherParameterSymbols(*root, param_names);
-    }
+    return parameter_specs_;
+}
 
-    std::vector<params::Spec> out;
-    for (const auto* m : models) {
-        if (!m) continue;
-        auto specs = m->parameterSpecs();
-        out.insert(out.end(), specs.begin(), specs.end());
-    }
-
-    if (!param_names.empty()) {
-        std::vector<std::string> keys;
-        keys.reserve(param_names.size());
-        for (const auto nm : param_names) {
-            keys.emplace_back(nm);
-        }
-        std::sort(keys.begin(), keys.end());
-        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-
-        for (auto& key : keys) {
-            out.push_back(params::Spec{.key = std::move(key),
-                                       .type = params::ValueType::Real,
-                                       .required = true});
-        }
-    }
-    return out;
+void FormKernel::resolveInlinableConstitutives()
+{
+    FormIR* irs[] = {&ir_};
+    inlineInlinableConstitutives(std::span<FormIR*>{irs},
+                                 constitutive_state_.get(),
+                                 material_state_spec_,
+                                 inlined_state_updates_);
 }
 
 void FormKernel::resolveParameterSlots(
     const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
 {
-    ir_.transformIntegrands([&](const FormExprNode& n) -> std::optional<FormExpr> {
+    const auto transform = [&](const FormExprNode& n) -> std::optional<FormExpr> {
         if (n.type() != FormExprType::ParameterSymbol) {
             return std::nullopt;
         }
@@ -5527,7 +5991,20 @@ void FormKernel::resolveParameterSlots(
         FE_THROW_IF(!slot.has_value(), InvalidArgumentException,
                     "Forms::FormKernel: could not resolve parameter slot for '" + std::string(*key) + "'");
         return FormExpr::parameterRef(*slot);
-    });
+    };
+
+    ir_.transformIntegrands(transform);
+    const auto rewrite_updates = [&](std::vector<MaterialStateUpdate>& updates) {
+        for (auto& op : updates) {
+            op.value = op.value.transformNodes(transform);
+        }
+    };
+    rewrite_updates(inlined_state_updates_.cell);
+    rewrite_updates(inlined_state_updates_.boundary_all);
+    for (auto& kv : inlined_state_updates_.boundary_by_marker) {
+        rewrite_updates(kv.second);
+    }
+    rewrite_updates(inlined_state_updates_.interior_face);
 }
 
 bool FormKernel::hasCell() const noexcept { return ir_.hasCellTerms(); }
@@ -5547,6 +6024,15 @@ void FormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::Ker
 
     const auto n_qpts = ctx.numQuadraturePoints();
     const auto* time_ctx = ctx.timeIntegrationContext();
+
+    if (!inlined_state_updates_.cell.empty()) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            applyInlinedMaterialStateUpdatesReal(ctx, nullptr, ir_.kind(),
+                                                 constitutive_state_.get(),
+                                                 inlined_state_updates_.cell,
+                                                 Side::Minus, q);
+        }
+    }
 
     ConstitutiveCallCacheReal constitutive_cache;
     EvalEnvReal env{ctx, nullptr, ir_.kind(), Side::Minus, Side::Minus, 0, 0, constitutive_state_.get(), &constitutive_cache};
@@ -5617,6 +6103,32 @@ void FormKernel::computeBoundaryFace(
 
     const auto n_qpts = ctx.numQuadraturePoints();
     const auto* time_ctx = ctx.timeIntegrationContext();
+
+    const auto* boundary_marker_updates = [&]() -> const std::vector<MaterialStateUpdate>* {
+        const auto it = inlined_state_updates_.boundary_by_marker.find(boundary_marker);
+        if (it == inlined_state_updates_.boundary_by_marker.end()) {
+            return nullptr;
+        }
+        return &it->second;
+    }();
+
+    if (!inlined_state_updates_.boundary_all.empty() || boundary_marker_updates != nullptr) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            if (!inlined_state_updates_.boundary_all.empty()) {
+                applyInlinedMaterialStateUpdatesReal(ctx, nullptr, ir_.kind(),
+                                                     constitutive_state_.get(),
+                                                     inlined_state_updates_.boundary_all,
+                                                     Side::Minus, q);
+            }
+            if (boundary_marker_updates != nullptr && !boundary_marker_updates->empty()) {
+                applyInlinedMaterialStateUpdatesReal(ctx, nullptr, ir_.kind(),
+                                                     constitutive_state_.get(),
+                                                     *boundary_marker_updates,
+                                                     Side::Minus, q);
+            }
+        }
+    }
+
     ConstitutiveCallCacheReal constitutive_cache;
     EvalEnvReal env{ctx, nullptr, ir_.kind(), Side::Minus, Side::Minus, 0, 0, constitutive_state_.get(), &constitutive_cache};
 
@@ -5704,6 +6216,24 @@ void FormKernel::computeInteriorFace(
     coupling_pm.clear();
 
     const auto n_qpts = ctx_minus.numQuadraturePoints();
+
+    if (!inlined_state_updates_.interior_face.empty()) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
+                                                 constitutive_state_.get(),
+                                                 inlined_state_updates_.interior_face,
+                                                 Side::Minus, q);
+
+            const auto* base_minus = ctx_minus.materialStateWorkBase();
+            const auto* base_plus = ctx_plus.materialStateWorkBase();
+            if (base_plus != nullptr && base_plus != base_minus) {
+                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
+                                                     constitutive_state_.get(),
+                                                     inlined_state_updates_.interior_face,
+                                                     Side::Plus, q);
+            }
+        }
+    }
 
     auto assembleBlock = [&](Side eval_side,
                              Side test_active,
@@ -5837,6 +6367,9 @@ LinearFormKernel::LinearFormKernel(FormIR bilinear_ir,
         field_requirements_ = bilinear_ir_.fieldRequirements();
     }
 
+    const FormIR* irs[2] = {&bilinear_ir_, linear_ir_.has_value() ? &(*linear_ir_) : nullptr};
+    parameter_specs_ = computeParameterSpecs(std::span<const FormIR* const>{irs});
+
     // NOTE: Constitutive calls are currently not expected in affine residuals (the affine splitter
     // rejects Constitutive nodes). We still build state layout from the bilinear part for safety.
     constitutive_state_ = buildConstitutiveStateLayout(bilinear_ir_, material_state_spec_);
@@ -5876,53 +6409,23 @@ assembly::MaterialStateSpec LinearFormKernel::materialStateSpec() const noexcept
 
 std::vector<params::Spec> LinearFormKernel::parameterSpecs() const
 {
-    std::vector<const ConstitutiveModel*> models;
-    std::vector<std::string_view> param_names;
-    for (const auto& term : bilinear_ir_.terms()) {
-        const auto* root = term.integrand.node();
-        if (!root) continue;
-        gatherConstitutiveModels(*root, models);
-        gatherParameterSymbols(*root, param_names);
-    }
-    if (linear_ir_.has_value()) {
-        for (const auto& term : linear_ir_->terms()) {
-            const auto* root = term.integrand.node();
-            if (!root) continue;
-            gatherConstitutiveModels(*root, models);
-            gatherParameterSymbols(*root, param_names);
-        }
-    }
+    return parameter_specs_;
+}
 
-    std::vector<params::Spec> out;
-    for (const auto* m : models) {
-        if (!m) continue;
-        auto specs = m->parameterSpecs();
-        out.insert(out.end(), specs.begin(), specs.end());
-    }
-
-    if (!param_names.empty()) {
-        std::vector<std::string> keys;
-        keys.reserve(param_names.size());
-        for (const auto nm : param_names) {
-            keys.emplace_back(nm);
-        }
-        std::sort(keys.begin(), keys.end());
-        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-
-        for (auto& key : keys) {
-            out.push_back(params::Spec{.key = std::move(key),
-                                       .type = params::ValueType::Real,
-                                       .required = true});
-        }
-    }
-    return out;
+void LinearFormKernel::resolveInlinableConstitutives()
+{
+    FormIR* irs[2] = {&bilinear_ir_, linear_ir_.has_value() ? &(*linear_ir_) : nullptr};
+    inlineInlinableConstitutives(std::span<FormIR*>{irs},
+                                 constitutive_state_.get(),
+                                 material_state_spec_,
+                                 inlined_state_updates_);
 }
 
 void LinearFormKernel::resolveParameterSlots(
     const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
 {
     auto rewrite = [&](FormIR& ir, std::string_view where) {
-        ir.transformIntegrands([&](const FormExprNode& n) -> std::optional<FormExpr> {
+        const auto transform = [&](const FormExprNode& n) -> std::optional<FormExpr> {
             if (n.type() != FormExprType::ParameterSymbol) {
                 return std::nullopt;
             }
@@ -5933,7 +6436,19 @@ void LinearFormKernel::resolveParameterSlots(
             FE_THROW_IF(!slot.has_value(), InvalidArgumentException,
                         std::string(where) + ": could not resolve parameter slot for '" + std::string(*key) + "'");
             return FormExpr::parameterRef(*slot);
-        });
+        };
+        ir.transformIntegrands(transform);
+        const auto rewrite_updates = [&](std::vector<MaterialStateUpdate>& updates) {
+            for (auto& op : updates) {
+                op.value = op.value.transformNodes(transform);
+            }
+        };
+        rewrite_updates(inlined_state_updates_.cell);
+        rewrite_updates(inlined_state_updates_.boundary_all);
+        for (auto& kv : inlined_state_updates_.boundary_by_marker) {
+            rewrite_updates(kv.second);
+        }
+        rewrite_updates(inlined_state_updates_.interior_face);
     };
 
     rewrite(bilinear_ir_, "Forms::LinearFormKernel(bilinear)");
@@ -5976,6 +6491,15 @@ void LinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembl
 
     const auto n_qpts = ctx.numQuadraturePoints();
     const auto* time_ctx = ctx.timeIntegrationContext();
+
+    if (!inlined_state_updates_.cell.empty()) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            applyInlinedMaterialStateUpdatesReal(ctx, nullptr, FormKind::Bilinear,
+                                                 constitutive_state_.get(),
+                                                 inlined_state_updates_.cell,
+                                                 Side::Minus, q);
+        }
+    }
 
     ConstitutiveCallCacheReal constitutive_cache;
 
@@ -6129,6 +6653,31 @@ void LinearFormKernel::computeBoundaryFace(
 
     const auto n_qpts = ctx.numQuadraturePoints();
     const auto* time_ctx = ctx.timeIntegrationContext();
+
+    const auto* boundary_marker_updates = [&]() -> const std::vector<MaterialStateUpdate>* {
+        const auto it = inlined_state_updates_.boundary_by_marker.find(boundary_marker);
+        if (it == inlined_state_updates_.boundary_by_marker.end()) {
+            return nullptr;
+        }
+        return &it->second;
+    }();
+
+    if (!inlined_state_updates_.boundary_all.empty() || boundary_marker_updates != nullptr) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            if (!inlined_state_updates_.boundary_all.empty()) {
+                applyInlinedMaterialStateUpdatesReal(ctx, nullptr, FormKind::Bilinear,
+                                                     constitutive_state_.get(),
+                                                     inlined_state_updates_.boundary_all,
+                                                     Side::Minus, q);
+            }
+            if (boundary_marker_updates != nullptr && !boundary_marker_updates->empty()) {
+                applyInlinedMaterialStateUpdatesReal(ctx, nullptr, FormKind::Bilinear,
+                                                     constitutive_state_.get(),
+                                                     *boundary_marker_updates,
+                                                     Side::Minus, q);
+            }
+        }
+    }
 
     ConstitutiveCallCacheReal constitutive_cache;
 
@@ -6301,6 +6850,9 @@ NonlinearFormKernel::NonlinearFormKernel(FormIR residual_ir, ADMode ad_mode, Non
         throw std::invalid_argument("NonlinearFormKernel: IR kind must be Residual");
     }
 
+    const FormIR* irs[] = {&residual_ir_};
+    parameter_specs_ = computeParameterSpecs(std::span<const FormIR* const>{irs});
+
     constitutive_state_ = buildConstitutiveStateLayout(residual_ir_, material_state_spec_);
 }
 
@@ -6332,44 +6884,22 @@ assembly::MaterialStateSpec NonlinearFormKernel::materialStateSpec() const noexc
 
 std::vector<params::Spec> NonlinearFormKernel::parameterSpecs() const
 {
-    std::vector<const ConstitutiveModel*> models;
-    std::vector<std::string_view> param_names;
-    for (const auto& term : residual_ir_.terms()) {
-        const auto* root = term.integrand.node();
-        if (!root) continue;
-        gatherConstitutiveModels(*root, models);
-        gatherParameterSymbols(*root, param_names);
-    }
+    return parameter_specs_;
+}
 
-    std::vector<params::Spec> out;
-    for (const auto* m : models) {
-        if (!m) continue;
-        auto specs = m->parameterSpecs();
-        out.insert(out.end(), specs.begin(), specs.end());
-    }
-
-    if (!param_names.empty()) {
-        std::vector<std::string> keys;
-        keys.reserve(param_names.size());
-        for (const auto nm : param_names) {
-            keys.emplace_back(nm);
-        }
-        std::sort(keys.begin(), keys.end());
-        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-
-        for (auto& key : keys) {
-            out.push_back(params::Spec{.key = std::move(key),
-                                       .type = params::ValueType::Real,
-                                       .required = true});
-        }
-    }
-    return out;
+void NonlinearFormKernel::resolveInlinableConstitutives()
+{
+    FormIR* irs[] = {&residual_ir_};
+    inlineInlinableConstitutives(std::span<FormIR*>{irs},
+                                 constitutive_state_.get(),
+                                 material_state_spec_,
+                                 inlined_state_updates_);
 }
 
 void NonlinearFormKernel::resolveParameterSlots(
     const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
 {
-    residual_ir_.transformIntegrands([&](const FormExprNode& n) -> std::optional<FormExpr> {
+    const auto transform = [&](const FormExprNode& n) -> std::optional<FormExpr> {
         if (n.type() != FormExprType::ParameterSymbol) {
             return std::nullopt;
         }
@@ -6380,7 +6910,19 @@ void NonlinearFormKernel::resolveParameterSlots(
         FE_THROW_IF(!slot.has_value(), InvalidArgumentException,
                     "Forms::NonlinearFormKernel: could not resolve parameter slot for '" + std::string(*key) + "'");
         return FormExpr::parameterRef(*slot);
-    });
+    };
+    residual_ir_.transformIntegrands(transform);
+    const auto rewrite_updates = [&](std::vector<MaterialStateUpdate>& updates) {
+        for (auto& op : updates) {
+            op.value = op.value.transformNodes(transform);
+        }
+    };
+    rewrite_updates(inlined_state_updates_.cell);
+    rewrite_updates(inlined_state_updates_.boundary_all);
+    for (auto& kv : inlined_state_updates_.boundary_by_marker) {
+        rewrite_updates(kv.second);
+    }
+    rewrite_updates(inlined_state_updates_.interior_face);
 }
 
 bool NonlinearFormKernel::hasCell() const noexcept { return residual_ir_.hasCellTerms(); }
@@ -6398,6 +6940,15 @@ void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, asse
 
     const auto n_qpts = ctx.numQuadraturePoints();
     const auto* time_ctx = ctx.timeIntegrationContext();
+
+    if (!inlined_state_updates_.cell.empty()) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            applyInlinedMaterialStateUpdatesDual(ctx, nullptr,
+                                                 constitutive_state_.get(),
+                                                 inlined_state_updates_.cell,
+                                                 Side::Minus, q);
+        }
+    }
 
     thread_local DualWorkspace ws;
 
@@ -6478,6 +7029,32 @@ void NonlinearFormKernel::computeBoundaryFace(
 
     const auto n_qpts = ctx.numQuadraturePoints();
     const auto* time_ctx = ctx.timeIntegrationContext();
+
+    const auto* boundary_marker_updates = [&]() -> const std::vector<MaterialStateUpdate>* {
+        const auto it = inlined_state_updates_.boundary_by_marker.find(boundary_marker);
+        if (it == inlined_state_updates_.boundary_by_marker.end()) {
+            return nullptr;
+        }
+        return &it->second;
+    }();
+
+    if (!inlined_state_updates_.boundary_all.empty() || boundary_marker_updates != nullptr) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            if (!inlined_state_updates_.boundary_all.empty()) {
+                applyInlinedMaterialStateUpdatesDual(ctx, nullptr,
+                                                     constitutive_state_.get(),
+                                                     inlined_state_updates_.boundary_all,
+                                                     Side::Minus, q);
+            }
+            if (boundary_marker_updates != nullptr && !boundary_marker_updates->empty()) {
+                applyInlinedMaterialStateUpdatesDual(ctx, nullptr,
+                                                     constitutive_state_.get(),
+                                                     *boundary_marker_updates,
+                                                     Side::Minus, q);
+            }
+        }
+    }
+
     thread_local DualWorkspace ws;
 
     for (LocalIndex i = 0; i < n_test; ++i) {
@@ -6570,6 +7147,25 @@ void NonlinearFormKernel::computeInteriorFace(
     const bool want_pm_matrix = coupling_pm.has_matrix;
 
     const auto n_qpts = ctx_minus.numQuadraturePoints();
+
+    if (!inlined_state_updates_.interior_face.empty()) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            applyInlinedMaterialStateUpdatesDual(ctx_minus, &ctx_plus,
+                                                 constitutive_state_.get(),
+                                                 inlined_state_updates_.interior_face,
+                                                 Side::Minus, q);
+
+            const auto* base_minus = ctx_minus.materialStateWorkBase();
+            const auto* base_plus = ctx_plus.materialStateWorkBase();
+            if (base_plus != nullptr && base_plus != base_minus) {
+                applyInlinedMaterialStateUpdatesDual(ctx_minus, &ctx_plus,
+                                                     constitutive_state_.get(),
+                                                     inlined_state_updates_.interior_face,
+                                                     Side::Plus, q);
+            }
+        }
+    }
+
     thread_local DualWorkspace ws;
 
     auto assembleResidualJacBlock = [&](Side eval_side,

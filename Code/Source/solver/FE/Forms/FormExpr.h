@@ -90,6 +90,8 @@ enum class FormExprType : std::uint16_t {
     BoundaryIntegralRef,      ///< Coupled boundary-integral value by slot (JIT-friendly)
     AuxiliaryStateSymbol,
     AuxiliaryStateRef,        ///< Coupled auxiliary-state value by slot (JIT-friendly)
+    MaterialStateOldRef,      ///< Per-qpt material state load (old) by byte offset
+    MaterialStateWorkRef,     ///< Per-qpt material state load (work/current) by byte offset
     PreviousSolutionRef,      ///< Previous solution value u^{n-k} by history index k>=1
     Coordinate,
     ReferenceCoordinate,
@@ -227,6 +229,7 @@ public:
     [[nodiscard]] virtual std::optional<std::string_view> symbolName() const { return std::nullopt; }
     [[nodiscard]] virtual std::optional<std::uint32_t> slotIndex() const { return std::nullopt; }
     [[nodiscard]] virtual std::optional<int> historyIndex() const { return std::nullopt; }
+    [[nodiscard]] virtual std::optional<std::uint32_t> stateOffsetBytes() const { return std::nullopt; }
 
     [[nodiscard]] virtual const ScalarCoefficient* scalarCoefficient() const { return nullptr; }
     [[nodiscard]] virtual const TimeScalarCoefficient* timeScalarCoefficient() const { return nullptr; }
@@ -286,11 +289,14 @@ public:
     static FormExpr boundaryIntegralRef(std::uint32_t slot);
     static FormExpr auxiliaryState(std::string name);
     static FormExpr auxiliaryStateRef(std::uint32_t slot);
+    static FormExpr materialStateOldRef(std::uint32_t offset_bytes);
+    static FormExpr materialStateWorkRef(std::uint32_t offset_bytes);
     static FormExpr previousSolution(int steps_back = 1);
     static FormExpr coordinate();
     static FormExpr referenceCoordinate();
     static FormExpr time();
     static FormExpr timeStep();
+    static FormExpr identity();
     static FormExpr identity(int dim);
     static FormExpr jacobian();
     static FormExpr jacobianInverse();

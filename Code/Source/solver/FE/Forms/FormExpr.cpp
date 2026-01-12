@@ -207,21 +207,23 @@ public:
 
 class IdentityNode final : public FormExprNode {
 public:
+    IdentityNode() = default;
     explicit IdentityNode(int dim) : dim_(dim) {}
 
     [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::Identity; }
     [[nodiscard]] std::string toString() const override {
-        return "I(" + std::to_string(dim_) + ")";
+        if (!dim_) {
+            return "I";
+        }
+        return "I(" + std::to_string(*dim_) + ")";
     }
     [[nodiscard]] bool hasTest() const noexcept override { return false; }
     [[nodiscard]] bool hasTrial() const noexcept override { return false; }
 
     [[nodiscard]] std::optional<int> identityDim() const override { return dim_; }
 
-    [[nodiscard]] int dim() const noexcept { return dim_; }
-
 private:
-    int dim_{3};
+    std::optional<int> dim_{};
 };
 
 class JacobianNode final : public FormExprNode {
@@ -440,6 +442,44 @@ public:
 
 private:
     std::uint32_t slot_{0u};
+};
+
+class MaterialStateOldRefNode final : public FormExprNode {
+public:
+    explicit MaterialStateOldRefNode(std::uint32_t offset_bytes)
+        : offset_bytes_(offset_bytes)
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::MaterialStateOldRef; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "state_old[" + std::to_string(offset_bytes_) + "]";
+    }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] std::optional<std::uint32_t> stateOffsetBytes() const override { return offset_bytes_; }
+
+private:
+    std::uint32_t offset_bytes_{0u};
+};
+
+class MaterialStateWorkRefNode final : public FormExprNode {
+public:
+    explicit MaterialStateWorkRefNode(std::uint32_t offset_bytes)
+        : offset_bytes_(offset_bytes)
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::MaterialStateWorkRef; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "state[" + std::to_string(offset_bytes_) + "]";
+    }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] std::optional<std::uint32_t> stateOffsetBytes() const override { return offset_bytes_; }
+
+private:
+    std::uint32_t offset_bytes_{0u};
 };
 
 class PreviousSolutionRefNode final : public FormExprNode {
@@ -1379,6 +1419,16 @@ FormExpr FormExpr::auxiliaryStateRef(std::uint32_t slot)
     return FormExpr(std::make_shared<AuxiliaryStateRefNode>(slot));
 }
 
+FormExpr FormExpr::materialStateOldRef(std::uint32_t offset_bytes)
+{
+    return FormExpr(std::make_shared<MaterialStateOldRefNode>(offset_bytes));
+}
+
+FormExpr FormExpr::materialStateWorkRef(std::uint32_t offset_bytes)
+{
+    return FormExpr(std::make_shared<MaterialStateWorkRefNode>(offset_bytes));
+}
+
 FormExpr FormExpr::previousSolution(int steps_back)
 {
     if (steps_back <= 0) {
@@ -1405,6 +1455,11 @@ FormExpr FormExpr::time()
 FormExpr FormExpr::timeStep()
 {
     return FormExpr(std::make_shared<TimeStepNode>());
+}
+
+FormExpr FormExpr::identity()
+{
+    return FormExpr(std::make_shared<IdentityNode>());
 }
 
 FormExpr FormExpr::identity(int dim)

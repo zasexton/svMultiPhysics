@@ -20,6 +20,8 @@
 #include "Forms/ConstitutiveModel.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/JIT/InlinableConstitutiveModel.h"
+#include "Forms/JIT/JITValidation.h"
 #include "Forms/Vocabulary.h"
 #include "Quadrature/QuadratureFactory.h"
 #include "Quadrature/QuadratureRule.h"
@@ -551,6 +553,168 @@ public:
 
         (void)ctx.integrationWeightAt(ctx.q);
         return input;
+    }
+};
+
+class InlinableScaleByParamModel final : public ConstitutiveModel, public InlinableConstitutiveModel {
+public:
+    [[nodiscard]] Value<Real> evaluate(const Value<Real>& /*input*/, int /*dim*/) const override
+    {
+        throw std::logic_error("InlinableScaleByParamModel: unary evaluate() should not be called");
+    }
+
+    [[nodiscard]] Value<Dual> evaluate(const Value<Dual>& /*input*/,
+                                       int /*dim*/,
+                                       DualWorkspace& /*ws*/) const override
+    {
+        throw std::logic_error("InlinableScaleByParamModel: unary evaluate() should not be called (dual)");
+    }
+
+    [[nodiscard]] Value<Real> evaluate(const Value<Real>& input, const ConstitutiveEvalContext& ctx) const override
+    {
+        if (input.kind != Value<Real>::Kind::Scalar) {
+            throw std::invalid_argument("InlinableScaleByParamModel: expected scalar input");
+        }
+        const Real k = ctx.requireParamAs<Real>("k");
+        ++real_calls;
+        return Value<Real>{Value<Real>::Kind::Scalar, k * input.s};
+    }
+
+    [[nodiscard]] Value<Dual> evaluate(const Value<Dual>& input,
+                                       const ConstitutiveEvalContext& ctx,
+                                       DualWorkspace& ws) const override
+    {
+        if (input.kind != Value<Dual>::Kind::Scalar) {
+            throw std::invalid_argument("InlinableScaleByParamModel: expected scalar input (dual)");
+        }
+        const Real k = ctx.requireParamAs<Real>("k");
+        ++dual_calls;
+
+        Value<Dual> out;
+        out.kind = Value<Dual>::Kind::Scalar;
+        out.s = mul(input.s, k, makeDualConstant(0.0, ws.alloc()));
+        return out;
+    }
+
+    [[nodiscard]] std::vector<params::Spec> parameterSpecs() const override
+    {
+        return {params::Spec{.key = "k", .type = params::ValueType::Real, .required = true}};
+    }
+
+    [[nodiscard]] const InlinableConstitutiveModel* inlinable() const noexcept override { return this; }
+
+    [[nodiscard]] std::uint64_t kindId() const noexcept override
+    {
+        return InlinableConstitutiveModel::fnv1a64("InlinableScaleByParamModel");
+    }
+
+    [[nodiscard]] MaterialStateAccess stateAccess() const noexcept override { return MaterialStateAccess::None; }
+
+    [[nodiscard]] InlinedConstitutiveExpansion inlineExpand(std::span<const FormExpr> inputs,
+                                                            const InlinableConstitutiveContext& /*ctx*/) const override
+    {
+        FE_THROW_IF(inputs.size() != 1u, InvalidArgumentException,
+                    "InlinableScaleByParamModel: expected exactly 1 input");
+        InlinedConstitutiveExpansion out;
+        out.outputs.push_back(inputs[0] * FormExpr::parameter("k"));
+        return out;
+    }
+
+    mutable std::size_t real_calls{0};
+    mutable std::size_t dual_calls{0};
+};
+
+class InlinableTwoOutputParamModel final : public ConstitutiveModel, public InlinableConstitutiveModel {
+public:
+    [[nodiscard]] Value<Real> evaluate(const Value<Real>& /*input*/, int /*dim*/) const override
+    {
+        throw std::logic_error("InlinableTwoOutputParamModel: evaluate() should not be called after inlining");
+    }
+
+    [[nodiscard]] Value<Dual> evaluate(const Value<Dual>& /*input*/,
+                                       int /*dim*/,
+                                       DualWorkspace& /*ws*/) const override
+    {
+        throw std::logic_error("InlinableTwoOutputParamModel: evaluate() should not be called after inlining (dual)");
+    }
+
+    [[nodiscard]] std::size_t outputCount() const noexcept override { return 2u; }
+
+    [[nodiscard]] std::vector<params::Spec> parameterSpecs() const override
+    {
+        return {params::Spec{.key = "k", .type = params::ValueType::Real, .required = true}};
+    }
+
+    [[nodiscard]] const InlinableConstitutiveModel* inlinable() const noexcept override { return this; }
+
+    [[nodiscard]] std::uint64_t kindId() const noexcept override
+    {
+        return InlinableConstitutiveModel::fnv1a64("InlinableTwoOutputParamModel");
+    }
+
+    [[nodiscard]] MaterialStateAccess stateAccess() const noexcept override { return MaterialStateAccess::None; }
+
+    [[nodiscard]] InlinedConstitutiveExpansion inlineExpand(std::span<const FormExpr> inputs,
+                                                            const InlinableConstitutiveContext& /*ctx*/) const override
+    {
+        FE_THROW_IF(inputs.size() != 1u, InvalidArgumentException,
+                    "InlinableTwoOutputParamModel: expected exactly 1 input");
+        InlinedConstitutiveExpansion out;
+        out.outputs.push_back(inputs[0]);
+        out.outputs.push_back(inputs[0] * FormExpr::parameter("k"));
+        return out;
+    }
+};
+
+class InlinableStatefulWriteModel final : public ConstitutiveModel, public InlinableConstitutiveModel {
+public:
+    [[nodiscard]] Value<Real> evaluate(const Value<Real>& /*input*/, int /*dim*/) const override
+    {
+        throw std::logic_error("InlinableStatefulWriteModel: evaluate() should not be called after inlining");
+    }
+
+    [[nodiscard]] Value<Dual> evaluate(const Value<Dual>& /*input*/,
+                                       int /*dim*/,
+                                       DualWorkspace& /*ws*/) const override
+    {
+        throw std::logic_error("InlinableStatefulWriteModel: evaluate() should not be called after inlining (dual)");
+    }
+
+    [[nodiscard]] StateSpec stateSpec() const noexcept override
+    {
+        StateSpec s;
+        s.bytes_per_qpt = sizeof(Real);
+        s.alignment = alignof(Real);
+        return s;
+    }
+
+    [[nodiscard]] std::vector<params::Spec> parameterSpecs() const override
+    {
+        return {params::Spec{.key = "k", .type = params::ValueType::Real, .required = true}};
+    }
+
+    [[nodiscard]] const InlinableConstitutiveModel* inlinable() const noexcept override { return this; }
+
+    [[nodiscard]] std::uint64_t kindId() const noexcept override
+    {
+        return InlinableConstitutiveModel::fnv1a64("InlinableStatefulWriteModel");
+    }
+
+    [[nodiscard]] MaterialStateAccess stateAccess() const noexcept override { return MaterialStateAccess::ReadWrite; }
+
+    [[nodiscard]] InlinedConstitutiveExpansion inlineExpand(std::span<const FormExpr> inputs,
+                                                            const InlinableConstitutiveContext& ctx) const override
+    {
+        FE_THROW_IF(inputs.size() != 1u, InvalidArgumentException,
+                    "InlinableStatefulWriteModel: expected exactly 1 input");
+
+        const std::uint32_t state_off = ctx.state_base_offset_bytes;
+        const auto state_value = inputs[0] * FormExpr::parameter("k");
+
+        InlinedConstitutiveExpansion out;
+        out.state_updates.push_back(MaterialStateUpdateOp{.offset_bytes = state_off, .value = state_value});
+        out.outputs.push_back(FormExpr::materialStateWorkRef(state_off));
+        return out;
     }
 };
 
@@ -1097,6 +1261,160 @@ TEST(ConstitutiveModelTest, ResidualAndJacobianScalingOfMassMatrix)
         }
         EXPECT_NEAR(R.getVectorEntry(i), expected, 1e-12);
     }
+}
+
+TEST(ConstitutiveModelTest, NonInlinableConstitutiveRejectedInStrictButAllowedInRelaxedMode)
+{
+    auto model = std::make_shared<ScaleScalarModel>(Real(2.0));
+    const auto expr = FormExpr::constitutive(model, FormExpr::constant(Real(1.0)));
+
+    const auto strict = jit::canCompile(expr, jit::ValidationOptions{.strictness = jit::Strictness::Strict});
+    EXPECT_FALSE(strict.ok);
+    ASSERT_TRUE(strict.first_issue.has_value());
+    EXPECT_EQ(strict.first_issue->type, FormExprType::Constitutive);
+
+    const auto relaxed =
+        jit::canCompile(expr, jit::ValidationOptions{.strictness = jit::Strictness::AllowExternalCalls});
+    EXPECT_TRUE(relaxed.ok);
+    EXPECT_FALSE(relaxed.cacheable);
+}
+
+TEST(ConstitutiveModelTest, InlinableConstitutiveMatchesInterpreterAndAvoidsVirtualCalls)
+{
+    SingleTetraMeshAccess mesh;
+    auto dof_map = createSingleTetraP0DofMap();
+    spaces::L2Space space(ElementType::Tetra4, 0);
+
+    auto model = std::make_shared<InlinableScaleByParamModel>();
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto K = FormExpr::constitutive(model, FormExpr::constant(2.0));
+    const auto form = (K * u * v).dx();
+
+    // Interpreter baseline: model called with string parameter getter.
+    auto ir_baseline = compiler.compileBilinear(form);
+    FormKernel baseline_kernel(std::move(ir_baseline));
+
+    std::function<std::optional<Real>(std::string_view)> get_real_param =
+        [](std::string_view key) -> std::optional<Real> {
+        if (key == "k") return Real(3.0);
+        return std::nullopt;
+    };
+
+    assembly::StandardAssembler baseline_assembler;
+    baseline_assembler.setDofMap(dof_map);
+    baseline_assembler.setRealParameterGetter(&get_real_param);
+
+    assembly::DenseMatrixView mat_baseline(1);
+    mat_baseline.zero();
+    (void)baseline_assembler.assembleMatrix(mesh, space, space, baseline_kernel, mat_baseline);
+
+    const auto calls_after_baseline = model->real_calls;
+    EXPECT_GT(calls_after_baseline, 0u);
+
+    // Inlined + slot-resolved: no virtual call, no string lookup.
+    auto ir_inlined = compiler.compileBilinear(form);
+    FormKernel inlined_kernel(std::move(ir_inlined));
+    inlined_kernel.resolveInlinableConstitutives();
+    inlined_kernel.resolveParameterSlots([](std::string_view key) -> std::optional<std::uint32_t> {
+        if (key == "k") return 0u;
+        return std::nullopt;
+    });
+
+    assembly::StandardAssembler inlined_assembler;
+    inlined_assembler.setDofMap(dof_map);
+    const std::vector<Real> inlined_constants = {Real(3.0)};
+    inlined_assembler.setJITConstants(inlined_constants);
+
+    assembly::DenseMatrixView mat_inlined(1);
+    mat_inlined.zero();
+    (void)inlined_assembler.assembleMatrix(mesh, space, space, inlined_kernel, mat_inlined);
+
+    EXPECT_NEAR(mat_inlined.getMatrixEntry(0, 0), mat_baseline.getMatrixEntry(0, 0), 1e-12);
+    EXPECT_EQ(model->real_calls, calls_after_baseline);
+}
+
+TEST(ConstitutiveModelTest, InlinableConstitutiveOutputInlinesAndPassesStrictJITValidation)
+{
+    spaces::L2Space space(ElementType::Tetra4, 0);
+    auto model = std::make_shared<InlinableTwoOutputParamModel>();
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    const auto call = constitutive(model, FormExpr::constant(2.0));
+    const auto K = call.out(1);
+    const auto form = (K * u * v).dx();
+
+    auto ir = compiler.compileBilinear(form);
+    FormKernel kernel(std::move(ir));
+
+    {
+        const auto r = jit::canCompile(kernel.ir(), jit::ValidationOptions{.strictness = jit::Strictness::Strict});
+        EXPECT_FALSE(r.ok);
+        ASSERT_TRUE(r.first_issue.has_value());
+        EXPECT_EQ(r.first_issue->type, FormExprType::Constitutive);
+    }
+
+    kernel.resolveInlinableConstitutives();
+    kernel.resolveParameterSlots([](std::string_view key) -> std::optional<std::uint32_t> {
+        if (key == "k") return 0u;
+        return std::nullopt;
+    });
+
+    const auto r = jit::canCompile(kernel.ir(), jit::ValidationOptions{.strictness = jit::Strictness::Strict});
+    EXPECT_TRUE(r.ok);
+    EXPECT_TRUE(r.cacheable);
+}
+
+TEST(ConstitutiveModelTest, InlinableStatefulConstitutiveWritesStateAndUsesSlotParameters)
+{
+    SingleTetraMeshAccess mesh;
+    auto dof_map = createSingleTetraP0DofMap();
+    spaces::L2Space space(ElementType::Tetra4, 0);
+
+    auto model = std::make_shared<InlinableStatefulWriteModel>();
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    const auto K = FormExpr::constitutive(model, FormExpr::constant(2.0));
+    const auto form = (K * u * v).dx();
+
+    auto ir = compiler.compileBilinear(form);
+    FormKernel kernel(std::move(ir));
+
+    kernel.resolveInlinableConstitutives();
+    kernel.resolveParameterSlots([](std::string_view key) -> std::optional<std::uint32_t> {
+        if (key == "k") return 0u;
+        return std::nullopt;
+    });
+
+    const auto jit_check =
+        jit::canCompile(kernel.ir(), jit::ValidationOptions{.strictness = jit::Strictness::Strict});
+    EXPECT_TRUE(jit_check.ok);
+    EXPECT_TRUE(jit_check.cacheable);
+
+    systems::MaterialStateProvider provider(/*num_cells=*/mesh.numCells());
+    provider.addKernel(kernel, kernel.materialStateSpec(), /*max_qpts=*/64);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setMaterialStateProvider(&provider);
+
+    const std::vector<Real> constants = {3.0};
+    assembler.setJITConstants(constants);
+
+    assembly::DenseMatrixView mat(1);
+    mat.zero();
+    (void)assembler.assembleMatrix(mesh, space, space, kernel, mat);
+
+    // input=2, k=3 => state=6. For a unit tetra: V=1/6 => entry=6*V=1.
+    EXPECT_NEAR(mat.getMatrixEntry(0, 0), 1.0, 1e-12);
 }
 
 } // namespace test

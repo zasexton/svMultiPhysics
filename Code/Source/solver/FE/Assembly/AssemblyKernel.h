@@ -398,6 +398,20 @@ public:
 	        (void)slot_of_real_param;
 	    }
 
+	    /**
+	     * @brief Optional setup-time lowering of inlinable constitutive calls
+	     *
+	     * FE/Forms supports `FormExprType::Constitutive` as a type-erased bridge to
+	     * material-point operators. In "JIT-fast" mode, models may opt in to a
+	     * symbolic expansion that rewrites constitutive calls into plain FormExpr
+	     * (no virtual dispatch in the hot path) plus explicit material-state
+	     * reads/writes.
+	     *
+	     * Kernels that embed FE/Forms expressions may override this hook to apply
+	     * that lowering during system setup. The default implementation is a no-op.
+	     */
+	    virtual void resolveInlinableConstitutives() {}
+
 	    // =========================================================================
 	    // Cell (Volume) Integration
 	    // =========================================================================

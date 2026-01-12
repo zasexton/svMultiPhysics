@@ -102,6 +102,17 @@ public:
      */
     void transformIntegrands(const FormExpr::NodeTransform& transform);
 
+    using TermTransform = std::function<std::optional<FormExpr>(const FormExprNode&, const IntegralTerm&)>;
+
+    /**
+     * @brief Apply a node-level transformation to every term integrand, with term context
+     *
+     * This overload provides access to the current IntegralTerm (domain, marker, etc.)
+     * while rewriting. It is intended for setup-time rewrites that need domain-aware
+     * bookkeeping (e.g., inlinable constitutive state-update programs).
+     */
+    void transformIntegrands(const TermTransform& transform);
+
 private:
     friend class FormCompiler;
 

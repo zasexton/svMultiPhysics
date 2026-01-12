@@ -921,6 +921,31 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     }
 
     // ---------------------------------------------------------------------
+    // Resolve FE/Forms constitutive calls for JIT-fast mode (setup-time)
+    // ---------------------------------------------------------------------
+    {
+        for (const auto& tag : operator_registry_.list()) {
+            const auto& def = operator_registry_.get(tag);
+
+            for (const auto& term : def.cells) {
+                if (term.kernel) {
+                    term.kernel->resolveInlinableConstitutives();
+                }
+            }
+            for (const auto& term : def.boundary) {
+                if (term.kernel) {
+                    term.kernel->resolveInlinableConstitutives();
+                }
+            }
+            for (const auto& term : def.interior) {
+                if (term.kernel) {
+                    term.kernel->resolveInlinableConstitutives();
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // Resolve FE/Forms ParameterSymbol -> ParameterRef(slot) (setup-time)
     // ---------------------------------------------------------------------
     {
