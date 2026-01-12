@@ -109,6 +109,36 @@ TEST(ConstraintTransformTest, ProjectionWithInhomogeneity) {
     EXPECT_DOUBLE_EQ(u[2], 3.0);
 }
 
+TEST(ConstraintTransformTest, ProjectionIsIdempotent) {
+    AffineConstraints constraints;
+    // u_0 = u_1 and u_2 = 5
+    constraints.addLine(0);
+    constraints.addEntry(0, 1, 1.0);
+    constraints.addLine(2);
+    constraints.setInhomogeneity(2, 5.0);
+    constraints.close();
+
+    ConstraintTransform transform(constraints, /*n_dofs=*/4);
+
+    // Reduced DOFs are full 1 and 3.
+    std::vector<double> z = {2.5, -1.0};
+    std::vector<double> u(4, 0.0);
+    transform.applyProjection(z, u);
+
+    // Restrict + expand should be identity on a vector already in the constrained space.
+    auto z2 = transform.restrictVector(u);
+    EXPECT_EQ(z2.size(), z.size());
+    for (std::size_t i = 0; i < z.size(); ++i) {
+        EXPECT_DOUBLE_EQ(z2[i], z[i]);
+    }
+
+    auto u2 = transform.expandSolution(z2);
+    EXPECT_EQ(u2.size(), u.size());
+    for (std::size_t i = 0; i < u.size(); ++i) {
+        EXPECT_DOUBLE_EQ(u2[i], u[i]);
+    }
+}
+
 TEST(ConstraintTransformTest, ApplyTranspose) {
     AffineConstraints constraints;
     // u_0 = 0.5 * u_1 + 0.5 * u_2 (hanging node)

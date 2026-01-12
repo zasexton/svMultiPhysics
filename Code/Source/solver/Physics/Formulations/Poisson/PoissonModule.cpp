@@ -136,19 +136,17 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
                     flux);
             } else {
                 // ODE: dX/dt = (Q - (X - Pd)/Rd) / C
+                const auto Xsym = FormExpr::auxiliaryState(x_name);
+                const auto rhs = (Qsym - (Xsym - FormExpr::constant(Pd)) / FormExpr::constant(Rd)) / FormExpr::constant(C);
+                const auto d_rhs_dX = FormExpr::constant(-1.0 / (Rd * C));
+
                 auto reg = FE::systems::auxiliaryODE(x_name, bc.X0)
                                .requiresIntegral(Q)
-                               .withRHS([q_name, x_name, C, Rd, Pd](const FE::systems::AuxiliaryState& state,
-                                                                   const FE::forms::BoundaryFunctionalResults& integrals,
-                                                                   FE::Real /*t*/) -> FE::Real {
-                                   const FE::Real Qv = integrals.get(q_name);
-                                   const FE::Real X = state[x_name];
-                                   return (Qv - (X - Pd) / Rd) / C;
-                               })
+                               .withRHS(rhs)
+                               .withJacobian(d_rhs_dX)
                                .withIntegrator(FE::systems::ODEMethod::BackwardEuler)
                                .build();
 
-                const auto Xsym = FormExpr::auxiliaryState(x_name);
                 const auto flux = Xsym + FormExpr::constant(Rp) * Qsym;
 
                 residual = FE::systems::bc::applyCoupledNeumann(

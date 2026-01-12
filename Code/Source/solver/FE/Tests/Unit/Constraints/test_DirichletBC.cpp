@@ -14,6 +14,7 @@
 #include "Constraints/DirichletBC.h"
 #include "Constraints/AffineConstraints.h"
 
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -148,6 +149,99 @@ TEST(DirichletBCTest, HomogeneousFactory) {
         EXPECT_TRUE(constraints.isConstrained(d));
         EXPECT_DOUBLE_EQ(constraints.getConstraint(d)->inhomogeneity, 0.0);
     }
+}
+
+TEST(DirichletBCTest, ComponentWiseDirichletVector) {
+    // Component selection is represented via ComponentMask metadata; actual component->DOF
+    // selection is handled upstream (e.g., by DofTools).
+    std::vector<GlobalIndex> x_component_dofs = {0, 3, 6};  // interleaved layout (u_x,u_y,u_z)
+    DirichletBC bc = DirichletBC::singleComponent(x_component_dofs, /*value=*/1.23,
+                                                  /*component=*/0, /*total_components=*/3);
+
+    const auto& mask = bc.getComponentMask();
+    EXPECT_FALSE(mask.allSelected());
+    EXPECT_EQ(mask.size(), 3u);
+    EXPECT_TRUE(mask[0]);
+    EXPECT_FALSE(mask[1]);
+    EXPECT_FALSE(mask[2]);
+
+    AffineConstraints constraints;
+    bc.apply(constraints);
+    constraints.close();
+
+    EXPECT_TRUE(constraints.isConstrained(0));
+    EXPECT_TRUE(constraints.isConstrained(3));
+    EXPECT_TRUE(constraints.isConstrained(6));
+    EXPECT_FALSE(constraints.isConstrained(1));
+    EXPECT_FALSE(constraints.isConstrained(2));
+    EXPECT_FALSE(constraints.isConstrained(4));
+    EXPECT_FALSE(constraints.isConstrained(5));
+}
+
+TEST(DirichletBCTest, TimeDependentRampFunction) {
+    std::vector<GlobalIndex> dofs = {0};
+    std::vector<std::array<double, 3>> coords = {{{0.0, 0.0, 0.0}}};
+
+    // g(t) = t for t in [0,1], g(t) = 1 for t > 1
+    auto ramp = [](double /*x*/, double /*y*/, double /*z*/, double t) {
+        return (t <= 1.0) ? t : 1.0;
+    };
+
+    DirichletBC bc(dofs, coords, ramp, /*initial_time=*/0.0);
+
+    AffineConstraints constraints;
+    bc.apply(constraints);
+    constraints.close();
+
+    EXPECT_DOUBLE_EQ(constraints.getConstraint(0)->inhomogeneity, 0.0);
+
+    EXPECT_TRUE(bc.updateValues(constraints, 0.5));
+    EXPECT_DOUBLE_EQ(constraints.getConstraint(0)->inhomogeneity, 0.5);
+
+    EXPECT_TRUE(bc.updateValues(constraints, 1.0));
+    EXPECT_DOUBLE_EQ(constraints.getConstraint(0)->inhomogeneity, 1.0);
+
+    EXPECT_TRUE(bc.updateValues(constraints, 2.0));
+    EXPECT_DOUBLE_EQ(constraints.getConstraint(0)->inhomogeneity, 1.0);
+}
+
+TEST(DirichletBCTest, TimeDependentSinusoidalFunction) {
+    std::vector<GlobalIndex> dofs = {0};
+    std::vector<std::array<double, 3>> coords = {{{0.0, 0.0, 0.0}}};
+
+    const double omega = 2.0;
+    auto sinusoid = [omega](double /*x*/, double /*y*/, double /*z*/, double t) {
+        return std::sin(omega * t);
+    };
+
+    DirichletBC bc(dofs, coords, sinusoid, /*initial_time=*/0.0);
+
+    AffineConstraints constraints;
+    bc.apply(constraints);
+    constraints.close();
+
+    const double pi = std::acos(-1.0);
+
+    EXPECT_TRUE(bc.updateValues(constraints, 0.0));
+    EXPECT_NEAR(constraints.getConstraint(0)->inhomogeneity, 0.0, 1e-14);
+
+    EXPECT_TRUE(bc.updateValues(constraints, pi / (2.0 * omega)));
+    EXPECT_NEAR(constraints.getConstraint(0)->inhomogeneity, 1.0, 1e-14);
+
+    EXPECT_TRUE(bc.updateValues(constraints, pi / omega));
+    EXPECT_NEAR(constraints.getConstraint(0)->inhomogeneity, 0.0, 1e-14);
+
+    EXPECT_TRUE(bc.updateValues(constraints, 3.0 * pi / (2.0 * omega)));
+    EXPECT_NEAR(constraints.getConstraint(0)->inhomogeneity, -1.0, 1e-14);
+}
+
+TEST(DirichletBCTest, ConflictingDirichletDetection) {
+    DirichletBC bc1(5, 1.0);
+    DirichletBC bc2(5, 2.0);
+
+    AffineConstraints constraints;
+    bc1.apply(constraints);
+    EXPECT_THROW(bc2.apply(constraints), ConstraintException);
 }
 
 }  // namespace test

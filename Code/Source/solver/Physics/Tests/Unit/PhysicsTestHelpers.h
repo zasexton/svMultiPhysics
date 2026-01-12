@@ -7,10 +7,16 @@
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/SystemSetup.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -187,34 +193,221 @@ inline void expectJacobianMatchesCentralFD(FE::systems::FESystem& system,
     return std::filesystem::path(__FILE__).parent_path() / "Data";
 }
 
-[[nodiscard]] inline std::filesystem::path squareTriMeshVtpPath()
+[[nodiscard]] inline std::filesystem::path squareMeshVtuPath()
 {
-    return unitTestDataDir() / "Square" / "square.vtp";
+    return unitTestDataDir() / "Square" / "mesh" / "mesh-complete.mesh.vtu";
+}
+
+[[nodiscard]] inline std::filesystem::path squareMeshSurfacesDir()
+{
+    return unitTestDataDir() / "Square" / "mesh" / "mesh-surfaces";
+}
+
+[[nodiscard]] inline std::filesystem::path squareMeshSurfaceVtpPath(std::string_view surface_name)
+{
+    return squareMeshSurfacesDir() / (std::string(surface_name) + ".vtp");
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+inline constexpr svmp::label_t kSquareBoundaryLeft = 1;
+inline constexpr svmp::label_t kSquareBoundaryRight = 2;
+inline constexpr svmp::label_t kSquareBoundaryBottom = 3;
+inline constexpr svmp::label_t kSquareBoundaryTop = 4;
+
 /**
- * @brief Load the square triangular mesh from a VTP file using Mesh + VTK IO.
+ * @brief Mark boundary faces on a 2D volume mesh using a VTP surface mesh.
+ *
+ * The surface mesh is expected to contain line segments (2-node cells) that
+ * coincide with boundary faces (edges) of the volume mesh.
+ */
+inline void mark2DBoundaryFacesFromVtp(svmp::MeshBase& volume_mesh,
+                                       const std::filesystem::path& surface_vtp_path,
+                                       svmp::label_t marker)
+{
+#  if !defined(MESH_HAS_VTK)
+    (void)volume_mesh;
+    (void)surface_vtp_path;
+    (void)marker;
+    throw std::runtime_error("mark2DBoundaryFacesFromVtp: Mesh was built without VTK support (MESH_HAS_VTK not defined)");
+#  else
+    if (volume_mesh.dim() != 2) {
+        throw std::runtime_error("mark2DBoundaryFacesFromVtp: expected a 2D volume mesh");
+    }
+    if (marker < 0) {
+        throw std::runtime_error("mark2DBoundaryFacesFromVtp: marker must be non-negative");
+    }
+    if (!std::filesystem::exists(surface_vtp_path)) {
+        throw std::runtime_error("mark2DBoundaryFacesFromVtp: missing surface file: " + surface_vtp_path.string());
+    }
+
+    svmp::MeshIOOptions surf_opts;
+    surf_opts.format = "vtp";
+    surf_opts.path = surface_vtp_path.string();
+    const svmp::MeshBase surface_mesh = svmp::MeshBase::load(surf_opts);
+
+    if (surface_mesh.dim() != volume_mesh.dim()) {
+        throw std::runtime_error("mark2DBoundaryFacesFromVtp: surface/volume dimension mismatch");
+    }
+
+    // Build a coordinate->vertex lookup for the volume mesh (exact for grid-aligned test meshes,
+    // tolerant for general VTK float data).
+    struct CoordKey {
+        std::int64_t x;
+        std::int64_t y;
+    };
+    struct CoordKeyHash {
+        std::size_t operator()(const CoordKey& k) const noexcept
+        {
+            std::size_t h = 1469598103934665603ull;
+            const auto mix = [&](std::int64_t v) {
+                h ^= std::hash<std::int64_t>{}(v) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+            };
+            mix(k.x);
+            mix(k.y);
+            return h;
+        }
+    };
+    struct CoordKeyEq {
+        bool operator()(const CoordKey& a, const CoordKey& b) const noexcept { return a.x == b.x && a.y == b.y; }
+    };
+
+    auto make_key = [](const std::array<svmp::real_t, 3>& xyz) -> CoordKey {
+        constexpr double kKeyScale = 1e12;
+        return CoordKey{static_cast<std::int64_t>(std::llround(static_cast<double>(xyz[0]) * kKeyScale)),
+                        static_cast<std::int64_t>(std::llround(static_cast<double>(xyz[1]) * kKeyScale))};
+    };
+
+    std::unordered_map<CoordKey, svmp::index_t, CoordKeyHash, CoordKeyEq> volume_vertex_by_xy;
+    volume_vertex_by_xy.reserve(volume_mesh.n_vertices());
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(volume_mesh.n_vertices()); ++v) {
+        volume_vertex_by_xy.emplace(make_key(volume_mesh.get_vertex_coords(v)), v);
+    }
+
+    // Build a canonical-vertex-list -> face lookup for the volume mesh.
+    struct IndexVecHash {
+        std::size_t operator()(const std::vector<svmp::index_t>& v) const noexcept
+        {
+            std::size_t h = 1469598103934665603ull;
+            for (svmp::index_t x : v) {
+                const std::size_t k = std::hash<svmp::index_t>{}(x);
+                h ^= k + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+            }
+            return h;
+        }
+    };
+
+    std::unordered_map<std::vector<svmp::index_t>, svmp::index_t, IndexVecHash> face_by_vertices;
+    face_by_vertices.reserve(volume_mesh.n_faces());
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(volume_mesh.n_faces()); ++f) {
+        auto verts = volume_mesh.face_vertices(f);
+        std::sort(verts.begin(), verts.end());
+        face_by_vertices.emplace(std::move(verts), f);
+    }
+
+    // Map surface vertices -> volume vertices by coordinates.
+    std::vector<svmp::index_t> surf2vol(surface_mesh.n_vertices(), svmp::INVALID_INDEX);
+    for (svmp::index_t sv = 0; sv < static_cast<svmp::index_t>(surface_mesh.n_vertices()); ++sv) {
+        const auto sxyz = surface_mesh.get_vertex_coords(sv);
+        const auto key = make_key(sxyz);
+        const auto it = volume_vertex_by_xy.find(key);
+        if (it != volume_vertex_by_xy.end()) {
+            surf2vol[static_cast<std::size_t>(sv)] = it->second;
+            continue;
+        }
+
+        // Fallback: nearest-neighbor match (tolerant to float32 IO differences).
+        constexpr double kTol = 1e-6;
+        constexpr double kTol2 = kTol * kTol;
+        svmp::index_t best = svmp::INVALID_INDEX;
+        double best2 = std::numeric_limits<double>::infinity();
+        for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(volume_mesh.n_vertices()); ++v) {
+            const auto vxyz = volume_mesh.get_vertex_coords(v);
+            const double dx = static_cast<double>(vxyz[0]) - static_cast<double>(sxyz[0]);
+            const double dy = static_cast<double>(vxyz[1]) - static_cast<double>(sxyz[1]);
+            const double d2 = dx * dx + dy * dy;
+            if (d2 < best2) {
+                best2 = d2;
+                best = v;
+            }
+        }
+        if (!(best2 <= kTol2) || best == svmp::INVALID_INDEX) {
+            throw std::runtime_error("mark2DBoundaryFacesFromVtp: surface vertex not found in volume mesh (by XY key or NN)");
+        }
+        surf2vol[static_cast<std::size_t>(sv)] = best;
+    }
+
+    // Mark boundary faces by matching surface cells to volume faces via vertex sets.
+    for (svmp::index_t c = 0; c < static_cast<svmp::index_t>(surface_mesh.n_cells()); ++c) {
+        auto [cell_ptr, n_cell_verts] = surface_mesh.cell_vertices_span(c);
+        if (n_cell_verts < 2) {
+            throw std::runtime_error("mark2DBoundaryFacesFromVtp: surface cell has <2 vertices");
+        }
+
+        std::vector<svmp::index_t> vol_face_verts;
+        vol_face_verts.reserve(n_cell_verts);
+        for (std::size_t i = 0; i < n_cell_verts; ++i) {
+            const auto sv = cell_ptr[i];
+            if (sv < 0 || static_cast<std::size_t>(sv) >= surf2vol.size()) {
+                throw std::runtime_error("mark2DBoundaryFacesFromVtp: surface cell references invalid vertex index");
+            }
+            const auto vv = surf2vol[static_cast<std::size_t>(sv)];
+            if (vv == svmp::INVALID_INDEX) {
+                throw std::runtime_error("mark2DBoundaryFacesFromVtp: unmapped surface vertex");
+            }
+            vol_face_verts.push_back(vv);
+        }
+        std::sort(vol_face_verts.begin(), vol_face_verts.end());
+
+        const auto fit = face_by_vertices.find(vol_face_verts);
+        if (fit == face_by_vertices.end()) {
+            throw std::runtime_error("mark2DBoundaryFacesFromVtp: surface cell does not match any face in volume mesh");
+        }
+        volume_mesh.set_boundary_label(fit->second, marker);
+    }
+#  endif
+}
+
+/**
+ * @brief Load the square mesh (VTU) and label its boundary faces using per-side VTP files.
  *
  * Requires:
  * - FE built with Mesh integration (`FE_WITH_MESH=ON` -> `SVMP_FE_WITH_MESH=1`)
  * - Mesh built with VTK enabled (`MESH_ENABLE_VTK=ON` -> `MESH_HAS_VTK` defined)
  */
-[[nodiscard]] inline std::shared_ptr<const svmp::Mesh> loadSquareTriMeshFromVtp()
+[[nodiscard]] inline std::shared_ptr<const svmp::Mesh> loadSquareMeshWithMarkedBoundaries()
 {
 #  if !defined(MESH_HAS_VTK)
-    throw std::runtime_error("loadSquareTriMeshFromVtp: Mesh was built without VTK support (MESH_HAS_VTK not defined)");
+    throw std::runtime_error("loadSquareMeshWithMarkedBoundaries: Mesh was built without VTK support (MESH_HAS_VTK not defined)");
 #  else
-    const auto vtp_path = squareTriMeshVtpPath();
-    if (!std::filesystem::exists(vtp_path)) {
-        throw std::runtime_error("loadSquareTriMeshFromVtp: missing test mesh file: " + vtp_path.string());
+    const auto vtu_path = squareMeshVtuPath();
+    if (!std::filesystem::exists(vtu_path)) {
+        throw std::runtime_error("loadSquareMeshWithMarkedBoundaries: missing test mesh file: " + vtu_path.string());
     }
 
     svmp::MeshIOOptions opts;
-    opts.format = "vtp";
-    opts.path = vtp_path.string();
+    opts.format = "vtu";
+    opts.path = vtu_path.string();
 
     auto base = std::make_shared<svmp::MeshBase>(svmp::MeshBase::load(opts));
+
+    // Register human-readable names for test convenience.
+    base->register_label("left", kSquareBoundaryLeft);
+    base->register_label("right", kSquareBoundaryRight);
+    base->register_label("bottom", kSquareBoundaryBottom);
+    base->register_label("top", kSquareBoundaryTop);
+
+    mark2DBoundaryFacesFromVtp(*base, squareMeshSurfaceVtpPath("left"), kSquareBoundaryLeft);
+    mark2DBoundaryFacesFromVtp(*base, squareMeshSurfaceVtpPath("right"), kSquareBoundaryRight);
+    mark2DBoundaryFacesFromVtp(*base, squareMeshSurfaceVtpPath("bottom"), kSquareBoundaryBottom);
+    mark2DBoundaryFacesFromVtp(*base, squareMeshSurfaceVtpPath("top"), kSquareBoundaryTop);
+
+    // Sanity: every boundary face should have a marker now.
+    for (const auto f : base->boundary_faces()) {
+        const auto lbl = base->boundary_label(f);
+        if (lbl == svmp::INVALID_LABEL) {
+            throw std::runtime_error("loadSquareMeshWithMarkedBoundaries: found unlabeled boundary face");
+        }
+    }
     return svmp::create_mesh(std::move(base));
 #  endif
 }

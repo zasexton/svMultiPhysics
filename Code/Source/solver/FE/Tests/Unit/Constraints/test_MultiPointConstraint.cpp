@@ -15,6 +15,7 @@
 #include "Constraints/AffineConstraints.h"
 
 #include <cmath>
+#include <numeric>
 #include <vector>
 
 namespace svmp {
@@ -144,6 +145,62 @@ TEST(MultiPointConstraintTest, EquationWithRhs) {
     EXPECT_EQ(c->entries[0].master_dof, 1);
     EXPECT_DOUBLE_EQ(c->entries[0].weight, 1.0);
     EXPECT_DOUBLE_EQ(c->inhomogeneity, 3.0);
+}
+
+TEST(MultiPointConstraintTest, AveragingConstraintDirichlet) {
+    MultiPointConstraint mpc;
+
+    // Constrain average of DOFs 1..10 to equal 5.0:
+    // (1/10) * sum_{i=1}^{10} u_i = 5  <=>  sum_{i=1}^{10} u_i = 50
+    std::vector<GlobalIndex> dofs;
+    std::vector<double> coeffs;
+    for (GlobalIndex i = 1; i <= 10; ++i) {
+        dofs.push_back(i);
+        coeffs.push_back(1.0);
+    }
+
+    mpc.addEquation(dofs, coeffs, /*rhs=*/50.0);
+
+    AffineConstraints aff;
+    mpc.apply(aff);
+    aff.close();
+
+    // Populate u_2..u_10 arbitrarily; distribute should set u_1 to satisfy the constraint.
+    std::vector<double> u(11, 0.0);
+    for (GlobalIndex i = 2; i <= 10; ++i) {
+        u[static_cast<std::size_t>(i)] = static_cast<double>(i);
+    }
+
+    aff.distribute(u);
+
+    const double sum = std::accumulate(u.begin() + 1, u.begin() + 11, 0.0);
+    EXPECT_NEAR(sum / 10.0, 5.0, 1e-14);
+}
+
+TEST(MultiPointConstraintTest, EquationFormSlaveSelection) {
+    MultiPointConstraint mpc;
+
+    // Equation: 1e-10*u_0 + 1.0*u_1 + 0.5*u_2 = 0
+    // With prefer_largest_coefficient, slave should be u_1.
+    MPCEquation eq;
+    eq.addTerm(0, 1e-10);
+    eq.addTerm(1, 1.0);
+    eq.addTerm(2, 0.5);
+    eq.rhs = 0.0;
+
+    mpc.addEquation(eq);
+
+    AffineConstraints aff;
+    mpc.apply(aff);
+    aff.close();
+
+    EXPECT_TRUE(aff.isConstrained(1));
+    EXPECT_FALSE(aff.isConstrained(0));
+    EXPECT_FALSE(aff.isConstrained(2));
+
+    auto c1 = aff.getConstraint(1);
+    ASSERT_TRUE(c1.has_value());
+    EXPECT_EQ(c1->entries.size(), 2u);
 }
 
 // ============================================================================

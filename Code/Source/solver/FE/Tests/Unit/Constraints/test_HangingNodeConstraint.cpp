@@ -60,6 +60,22 @@ TEST(HangingNodeConstraintTest, SimpleEdgeMidpoint) {
     EXPECT_DOUBLE_EQ(sum, 1.0);
 }
 
+TEST(HangingNodeConstraintTest, P1EdgeMidpointExact) {
+    // Linear field u(x)=x on parents at x=0 and x=1 should reproduce u(0.5)=0.5 exactly.
+    HangingNodeConstraint constraint({2}, {0}, {1});
+
+    AffineConstraints aff;
+    constraint.apply(aff);
+    aff.close();
+
+    std::vector<double> u = {0.0, 1.0, 123.0};
+    aff.distribute(u);
+
+    EXPECT_DOUBLE_EQ(u[0], 0.0);
+    EXPECT_DOUBLE_EQ(u[1], 1.0);
+    EXPECT_DOUBLE_EQ(u[2], 0.5);
+}
+
 TEST(HangingNodeConstraintTest, MultipleHangingNodes) {
     std::vector<HangingNodeData> nodes;
 
@@ -90,6 +106,54 @@ TEST(HangingNodeConstraintTest, MultipleHangingNodes) {
     EXPECT_TRUE(aff.isConstrained(10));
     EXPECT_TRUE(aff.isConstrained(11));
     EXPECT_EQ(aff.numConstraints(), 2);
+}
+
+TEST(HangingNodeConstraintTest, HangingNodeChainResolution) {
+    // Multi-level refinement can create chains where one hanging DOF depends on another.
+    // u_2 = 0.5*u_0 + 0.5*u_1
+    // u_3 = 0.5*u_2 + 0.5*u_1
+    // After closure: u_3 = 0.25*u_0 + 0.75*u_1
+    std::vector<HangingNodeData> nodes;
+
+    HangingNodeData n2;
+    n2.hanging_dof = 2;
+    n2.parent_dofs = {0, 1};
+    n2.weights = {0.5, 0.5};
+    n2.dimension = 1;
+    nodes.push_back(n2);
+
+    HangingNodeData n3;
+    n3.hanging_dof = 3;
+    n3.parent_dofs = {2, 1};
+    n3.weights = {0.5, 0.5};
+    n3.dimension = 1;
+    nodes.push_back(n3);
+
+    HangingNodeConstraint constraint(std::move(nodes));
+
+    AffineConstraints aff;
+    constraint.apply(aff);
+    aff.close();
+
+    auto c3 = aff.getConstraint(3);
+    ASSERT_TRUE(c3.has_value());
+    ASSERT_EQ(c3->entries.size(), 2u);
+
+    bool has_0 = false;
+    bool has_1 = false;
+    for (const auto& e : c3->entries) {
+        if (e.master_dof == 0) {
+            has_0 = true;
+            EXPECT_NEAR(e.weight, 0.25, 1e-14);
+        }
+        if (e.master_dof == 1) {
+            has_1 = true;
+            EXPECT_NEAR(e.weight, 0.75, 1e-14);
+        }
+        EXPECT_TRUE(e.master_dof == 0 || e.master_dof == 1);
+    }
+    EXPECT_TRUE(has_0);
+    EXPECT_TRUE(has_1);
 }
 
 // ============================================================================
@@ -237,6 +301,30 @@ TEST(HangingNodeConstraintTest, ComputeP2EdgeWeights) {
     EXPECT_NEAR(weights[0], 0.0, 1e-14);
     EXPECT_NEAR(weights[1], 1.0, 1e-14);
     EXPECT_NEAR(weights[2], 0.0, 1e-14);
+}
+
+TEST(HangingNodeConstraintTest, P2EdgeThirdPoints) {
+    // Quadratic edge shape functions on [0,1]:
+    // N0 = (1-t)(1-2t), N1 = 4t(1-t), N2 = t(2t-1)
+    {
+        const double t = 1.0 / 3.0;
+        auto w = computeP2EdgeWeights(t);
+        ASSERT_EQ(w.size(), 3u);
+        EXPECT_NEAR(w[0], 2.0 / 9.0, 1e-14);
+        EXPECT_NEAR(w[1], 8.0 / 9.0, 1e-14);
+        EXPECT_NEAR(w[2], -1.0 / 9.0, 1e-14);
+        EXPECT_NEAR(w[0] + w[1] + w[2], 1.0, 1e-14);
+    }
+
+    {
+        const double t = 2.0 / 3.0;
+        auto w = computeP2EdgeWeights(t);
+        ASSERT_EQ(w.size(), 3u);
+        EXPECT_NEAR(w[0], -1.0 / 9.0, 1e-14);
+        EXPECT_NEAR(w[1], 8.0 / 9.0, 1e-14);
+        EXPECT_NEAR(w[2], 2.0 / 9.0, 1e-14);
+        EXPECT_NEAR(w[0] + w[1] + w[2], 1.0, 1e-14);
+    }
 }
 
 TEST(HangingNodeConstraintTest, ComputeQ1FaceWeights) {

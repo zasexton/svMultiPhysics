@@ -147,6 +147,40 @@ TEST(ConstraintDistributorTest, DistributeLocalToGlobal_Dirichlet) {
     EXPECT_DOUBLE_EQ(global_rhs[1], 6.0);
 }
 
+TEST(ConstraintDistributorTest, SymmetricEliminationPreservesSymmetry) {
+    // Apply a Dirichlet constraint to a symmetric element matrix and ensure the distributed
+    // global matrix remains symmetric.
+    AffineConstraints constraints;
+    constraints.addLine(0);
+    constraints.setInhomogeneity(0, 0.0);
+    constraints.close();
+
+    DistributorOptions opts;
+    opts.symmetric = true;
+    opts.constrained_diagonal = 1.0;
+    ConstraintDistributor distributor(constraints, opts);
+
+    DenseMatrixOps global_matrix(2, 2);
+    DenseVectorOps global_rhs(2);
+
+    // Symmetric element matrix.
+    std::vector<double> elem_mat = makeElemMat(1.0, 2.0, 2.0, 4.0);
+    std::vector<double> elem_rhs = makeElemRhs(5.0, 6.0);
+    std::vector<GlobalIndex> dofs = {0, 1};
+
+    distributor.distributeLocalToGlobal(elem_mat, elem_rhs, dofs, global_matrix, global_rhs);
+
+    EXPECT_NEAR(global_matrix(0, 1), global_matrix(1, 0), 1e-14);
+    EXPECT_DOUBLE_EQ(global_matrix(0, 1), 0.0);
+    EXPECT_DOUBLE_EQ(global_matrix(1, 0), 0.0);
+    EXPECT_DOUBLE_EQ(global_matrix(0, 0), 1.0);
+    EXPECT_DOUBLE_EQ(global_matrix(1, 1), 4.0);
+
+    // u_0 pinned to 0, so RHS for DOF 1 remains the element value.
+    EXPECT_DOUBLE_EQ(global_rhs[0], 0.0);
+    EXPECT_DOUBLE_EQ(global_rhs[1], 6.0);
+}
+
 TEST(ConstraintDistributorTest, DistributeLocalToGlobal_InhomogeneousDirichlet) {
     // Constraint: u_0 = 10.0
     // Matrix: [1 2; 3 4], RHS: [5; 6]

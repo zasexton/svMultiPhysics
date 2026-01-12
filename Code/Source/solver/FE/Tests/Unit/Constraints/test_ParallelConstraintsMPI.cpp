@@ -100,8 +100,71 @@ TEST(ParallelConstraintsMPITest, OwnerWinsResolvesGhostConflicts) {
     EXPECT_EQ(stats.n_ghost_constraints, my_rank > 0 ? 1 : 0);
 }
 
+TEST(ParallelConstraintsMPITest, SmallestRankResolvesConflictsEvenAgainstOwner) {
+    int my_rank = 0;
+    int n_ranks = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &n_ranks);
+
+    if (n_ranks < 2) {
+        GTEST_SKIP() << "Requires at least 2 MPI ranks";
+    }
+
+    // Each rank owns [2r, 2r+2) and ghosts neighbor ranges.
+    const GlobalIndex owned_begin = static_cast<GlobalIndex>(2 * my_rank);
+    const GlobalIndex owned_end = owned_begin + 2;
+    const GlobalIndex n_global = static_cast<GlobalIndex>(2 * n_ranks);
+
+    std::vector<GlobalIndex> ghosts;
+    if (my_rank > 0) {
+        ghosts.push_back(owned_begin - 2);
+        ghosts.push_back(owned_begin - 1);
+    }
+    if (my_rank + 1 < n_ranks) {
+        ghosts.push_back(owned_end);
+        ghosts.push_back(owned_end + 1);
+    }
+
+    dofs::DofPartition partition(owned_begin, owned_end, ghosts);
+    partition.setGlobalSize(n_global);
+
+    // Create a conflict for DOF b_owned on its owner rank, and a different definition
+    // on rank 0 via its ghost copy. SmallestRank should pick rank 0's definition.
+    AffineConstraints constraints;
+
+    if (my_rank + 1 < n_ranks) {
+        const GlobalIndex a_other = owned_end;
+        const GlobalIndex b_other = owned_end + 1;
+        constraints.addLine(b_other);
+        constraints.addEntry(b_other, a_other, 2.0);  // smaller rank prefers weight 2
+    }
+
+    if (my_rank > 0) {
+        const GlobalIndex a_owned = owned_begin;
+        const GlobalIndex b_owned = owned_begin + 1;
+        constraints.addLine(b_owned);
+        constraints.addEntry(b_owned, a_owned, 1.0);  // owner defines weight 1
+    }
+
+    ParallelConstraints parallel(MPI_COMM_WORLD, partition);
+    ParallelConstraintOptions opts;
+    opts.conflict_resolution = ParallelConstraintOptions::ConflictResolution::SmallestRank;
+    parallel.setOptions(opts);
+
+    parallel.synchronize(constraints);
+
+    if (my_rank > 0) {
+        const GlobalIndex a_owned = owned_begin;
+        const GlobalIndex b_owned = owned_begin + 1;
+        auto line = constraints.getConstraint(b_owned);
+        ASSERT_TRUE(line.has_value());
+        ASSERT_EQ(line->entries.size(), 1u);
+        EXPECT_EQ(line->entries[0].master_dof, a_owned);
+        EXPECT_DOUBLE_EQ(line->entries[0].weight, 2.0);
+    }
+}
+
 } // namespace test
 } // namespace constraints
 } // namespace FE
 } // namespace svmp
-

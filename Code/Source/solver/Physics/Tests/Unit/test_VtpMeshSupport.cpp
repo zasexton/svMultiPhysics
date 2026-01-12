@@ -29,20 +29,37 @@ TEST(VtpMeshSupport, RequiresFeWithMesh)
 
 #else
 
-TEST(VtpMeshSupport, LoadsSquareTriMeshAndAssemblesPoisson)
+TEST(VtpMeshSupport, LoadsSquareMeshAndAssemblesPoisson)
 {
 #  if !defined(MESH_HAS_VTK)
     GTEST_SKIP() << "Requires Mesh built with VTK support (MESH_ENABLE_VTK=ON).";
 #  else
-    const auto mesh = loadSquareTriMeshFromVtp();
+    const auto mesh = loadSquareMeshWithMarkedBoundaries();
     ASSERT_TRUE(mesh);
     EXPECT_EQ(mesh->dim(), 2);
     EXPECT_GT(mesh->n_cells(), 0u);
     EXPECT_GT(mesh->n_vertices(), 0u);
+    EXPECT_GT(mesh->n_faces(), 0u);
+
+    const auto& base = mesh->base();
+    const auto left = base.label_from_name("left");
+    const auto right = base.label_from_name("right");
+    const auto bottom = base.label_from_name("bottom");
+    const auto top = base.label_from_name("top");
+
+    ASSERT_NE(left, svmp::INVALID_LABEL);
+    ASSERT_NE(right, svmp::INVALID_LABEL);
+    ASSERT_NE(bottom, svmp::INVALID_LABEL);
+    ASSERT_NE(top, svmp::INVALID_LABEL);
+
+    EXPECT_EQ(base.faces_with_label(left).size(), 64u);
+    EXPECT_EQ(base.faces_with_label(right).size(), 64u);
+    EXPECT_EQ(base.faces_with_label(bottom).size(), 64u);
+    EXPECT_EQ(base.faces_with_label(top).size(), 64u);
 
     FE::systems::FESystem system(mesh);
 
-    auto space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Triangle3, /*order=*/1);
+    auto space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4, /*order=*/1);
 
     FE::systems::FieldSpec spec;
     spec.name = "u";

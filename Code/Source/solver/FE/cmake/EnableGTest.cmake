@@ -7,10 +7,33 @@ if(FE_BUILD_TESTS)
 
     if(FE_USE_SYSTEM_GTEST)
         # Try to find system-installed Google Test
-        find_package(GTest QUIET)
+        # Prefer CMake's FindGTest module over environment-provided CONFIG packages
+        # (e.g., Conda), which can inject incompatible libraries/RUNPATHs.
+        if(DEFINED GTest_DIR AND (GTest_DIR MATCHES "miniconda" OR GTest_DIR MATCHES "conda"))
+            message(STATUS "FE: Ignoring Conda-provided GTest package at ${GTest_DIR}")
+            unset(GTest_DIR CACHE)
+        endif()
+
+        set(_fe_saved_ignore_prefix_path "${CMAKE_IGNORE_PREFIX_PATH}")
+        set(_fe_saved_ignore_path "${CMAKE_IGNORE_PATH}")
+        if(DEFINED ENV{CONDA_PREFIX} AND EXISTS "$ENV{CONDA_PREFIX}")
+            list(APPEND CMAKE_IGNORE_PREFIX_PATH "$ENV{CONDA_PREFIX}")
+            list(APPEND CMAKE_IGNORE_PATH "$ENV{CONDA_PREFIX}/lib" "$ENV{CONDA_PREFIX}/include")
+        endif()
+
+        find_package(GTest QUIET MODULE)
+
+        set(CMAKE_IGNORE_PREFIX_PATH "${_fe_saved_ignore_prefix_path}")
+        set(CMAKE_IGNORE_PATH "${_fe_saved_ignore_path}")
 
         if(GTest_FOUND)
             message(STATUS "FE: Found system Google Test")
+            # Normalize to a consistent variable used throughout the FE build.
+            if(TARGET GTest::gtest AND TARGET GTest::gtest_main)
+                set(GTEST_LIBRARIES GTest::gtest GTest::gtest_main)
+            elseif(TARGET GTest::gtest)
+                set(GTEST_LIBRARIES GTest::gtest)
+            endif()
         else()
             message(WARNING "FE: System Google Test not found, will fetch from GitHub")
             set(FE_USE_SYSTEM_GTEST OFF)

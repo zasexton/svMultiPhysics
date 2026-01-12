@@ -108,6 +108,51 @@ TEST(PeriodicBCTest, CoordinateMatching) {
     EXPECT_EQ(c1->entries[0].master_dof, 11);
 }
 
+TEST(PeriodicBCTest, NonMatchingPeriodicMeshTolerance) {
+    std::vector<GlobalIndex> left_dofs = {0, 1};
+    std::vector<std::array<double, 3>> left_coords = {
+        {{0.0, 0.0, 0.0}},
+        {{0.0, 0.5 + 1e-10, 0.0}}
+    };
+
+    std::vector<GlobalIndex> right_dofs = {10, 11};
+    std::vector<std::array<double, 3>> right_coords = {
+        {{1.0, 0.0, 0.0}},
+        {{1.0, 0.5, 0.0}}
+    };
+
+    std::array<double, 3> translation = {{1.0, 0.0, 0.0}};
+
+    PeriodicBCOptions opts;
+    opts.matching_tolerance = 1e-9;
+
+    PeriodicBC bc(left_dofs, left_coords, right_dofs, right_coords, translation, opts);
+    EXPECT_EQ(bc.numPairs(), 2);
+
+    AffineConstraints aff;
+    bc.apply(aff);
+    aff.close();
+
+    auto c1 = aff.getConstraint(1);
+    ASSERT_TRUE(c1.has_value());
+    EXPECT_EQ(c1->entries[0].master_dof, 11);
+}
+
+TEST(PeriodicBCTest, PeriodicConstraintChainResolution) {
+    // Chain: u_0 = u_1, u_1 = u_2 -> after closure u_0 = u_2.
+    PeriodicBC bc({0, 1}, {1, 2});
+
+    AffineConstraints aff;
+    bc.apply(aff);
+    aff.close();
+
+    auto c0 = aff.getConstraint(0);
+    ASSERT_TRUE(c0.has_value());
+    ASSERT_EQ(c0->entries.size(), 1u);
+    EXPECT_EQ(c0->entries[0].master_dof, 2);
+    EXPECT_DOUBLE_EQ(c0->entries[0].weight, 1.0);
+}
+
 // ============================================================================
 // Factory method tests
 // ============================================================================

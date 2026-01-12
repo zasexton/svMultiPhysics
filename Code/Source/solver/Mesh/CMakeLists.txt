@@ -566,7 +566,7 @@ if(_svmp_mesh_use_internal_metis)
     # METIS depends on GKlib symbols; expose dependencies so consumers of the static
     # svmesh library link the required objects as well (order matters for static libs).
     target_link_libraries(svmesh PUBLIC ${METIS_INTERNAL_LIBRARY_NAME} ${GKLIB_INTERNAL_LIBRARY_NAME})
-    target_include_directories(svmesh PUBLIC
+    target_include_directories(svmesh PRIVATE
         "${_svmp_mesh_thirdparty_dir}/metis_internal/simvascular_metis_internal/METISLib"
     )
     target_compile_definitions(svmesh PUBLIC SVMP_HAS_METIS)
@@ -581,7 +581,7 @@ if(_svmp_mesh_use_internal_metis)
 
         # ParMETIS is required for scalable parallel repartitioning.
         target_link_libraries(svmesh PUBLIC ${PARMETIS_INTERNAL_LIBRARY_NAME})
-        target_include_directories(svmesh PUBLIC
+        target_include_directories(svmesh PRIVATE
             "${_svmp_mesh_thirdparty_dir}/parmetis_internal/simvascular_parmetis_internal/ParMETISLib"
         )
         target_compile_definitions(svmesh PUBLIC SVMP_HAS_PARMETIS)

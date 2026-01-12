@@ -82,6 +82,31 @@ TEST(LagrangeMultiplierTest, CSRExportAndResidual) {
     EXPECT_NEAR(residual[0], 0.0, 1e-12);
 }
 
+TEST(LagrangeMultiplierTest, MultiplierExtraction) {
+    AffineConstraints constraints;
+    constraints.addLine(0);
+    constraints.addEntry(0, 1, 2.0);
+    constraints.setInhomogeneity(0, 3.0);
+    constraints.close();
+
+    LagrangeMultiplier lagrange(constraints);
+
+    const GlobalIndex n_primal = 2;
+    ASSERT_EQ(lagrange.numMultipliers(), 1);
+
+    // Combined solution is [u; lambda].
+    std::vector<double> combined = {7.0, 2.0, 5.0};
+
+    auto u = lagrange.extractPrimal(combined, n_primal);
+    ASSERT_EQ(u.size(), 2u);
+    EXPECT_DOUBLE_EQ(u[0], 7.0);
+    EXPECT_DOUBLE_EQ(u[1], 2.0);
+
+    auto lambda = lagrange.extractMultipliers(combined, n_primal);
+    ASSERT_EQ(lambda.size(), 1u);
+    EXPECT_DOUBLE_EQ(lambda[0], 5.0);
+}
+
 TEST(LagrangeMultiplierTest, ConstraintForcesEqualTranspose) {
     AffineConstraints constraints;
     constraints.addLine(0);
@@ -96,6 +121,45 @@ TEST(LagrangeMultiplierTest, ConstraintForcesEqualTranspose) {
     ASSERT_EQ(forces.size(), 2u);
     EXPECT_DOUBLE_EQ(forces[0], 5.0);
     EXPECT_DOUBLE_EQ(forces[1], -10.0);
+}
+
+TEST(LagrangeMultiplierTest, TransposeOperatorSymmetry) {
+    AffineConstraints constraints;
+    constraints.addLine(0);
+    constraints.addEntry(0, 1, 2.0);
+    constraints.setInhomogeneity(0, 3.0);
+    constraints.close();
+
+    LagrangeMultiplier lagrange(constraints);
+
+    std::vector<GlobalIndex> row_offsets;
+    std::vector<GlobalIndex> col_indices;
+    std::vector<double> values;
+    lagrange.getConstraintMatrixCSR(row_offsets, col_indices, values);
+
+    // x in primal space, y in multiplier space.
+    const std::vector<double> x = {7.0, 2.0};
+    const std::vector<double> y = {5.0};
+
+    // Compute Bx using CSR.
+    std::vector<double> Bx(1, 0.0);
+    for (GlobalIndex row = 0; row + 1 < static_cast<GlobalIndex>(row_offsets.size()); ++row) {
+        const GlobalIndex begin = row_offsets[static_cast<std::size_t>(row)];
+        const GlobalIndex end = row_offsets[static_cast<std::size_t>(row + 1)];
+        double sum = 0.0;
+        for (GlobalIndex k = begin; k < end; ++k) {
+            sum += values[static_cast<std::size_t>(k)] *
+                   x[static_cast<std::size_t>(col_indices[static_cast<std::size_t>(k)])];
+        }
+        Bx[static_cast<std::size_t>(row)] = sum;
+    }
+
+    const auto BTy = lagrange.computeConstraintForces(y);
+
+    // Verify (Bx, y) == (x, B^T y).
+    const double left = Bx[0] * y[0];
+    const double right = x[0] * BTy[0] + x[1] * BTy[1];
+    EXPECT_DOUBLE_EQ(left, right);
 }
 
 TEST(LagrangeMultiplierTest, SaddlePointOperatorApplication) {
@@ -134,4 +198,3 @@ TEST(LagrangeMultiplierTest, SaddlePointOperatorApplication) {
 } // namespace constraints
 } // namespace FE
 } // namespace svmp
-

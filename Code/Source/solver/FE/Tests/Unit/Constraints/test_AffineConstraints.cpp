@@ -14,6 +14,7 @@
 #include "Constraints/AffineConstraints.h"
 
 #include <cmath>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -384,6 +385,227 @@ TEST(AffineConstraintsTest, DeterministicOrdering) {
         // Note: entry ordering within a constraint may differ, but
         // the set of (master, weight) pairs should be the same
     }
+}
+
+TEST(AffineConstraintsTest, TransitiveClosureLongChain) {
+    AffineConstraints constraints;
+
+    // Chain: u_0 = u_1 = u_2 = u_3 = u_4 = u_5 = u_6
+    for (GlobalIndex i = 0; i < 6; ++i) {
+        constraints.addLine(i);
+        constraints.addEntry(i, i + 1, 1.0);
+    }
+
+    constraints.close();
+
+    for (GlobalIndex i = 0; i < 6; ++i) {
+        auto c = constraints.getConstraint(i);
+        ASSERT_TRUE(c.has_value());
+        ASSERT_EQ(c->entries.size(), 1u);
+        EXPECT_EQ(c->entries[0].master_dof, 6);
+        EXPECT_DOUBLE_EQ(c->entries[0].weight, 1.0);
+    }
+}
+
+TEST(AffineConstraintsTest, TransitiveClosureDiamondPattern) {
+    AffineConstraints constraints;
+
+    // u_0 = 0.5*u_1 + 0.5*u_2, u_1 = u_3, u_2 = u_3 -> u_0 = u_3
+    constraints.addLine(0);
+    constraints.addEntry(0, 1, 0.5);
+    constraints.addEntry(0, 2, 0.5);
+
+    constraints.addLine(1);
+    constraints.addEntry(1, 3, 1.0);
+
+    constraints.addLine(2);
+    constraints.addEntry(2, 3, 1.0);
+
+    constraints.close();
+
+    auto c0 = constraints.getConstraint(0);
+    ASSERT_TRUE(c0.has_value());
+    ASSERT_EQ(c0->entries.size(), 1u);
+    EXPECT_EQ(c0->entries[0].master_dof, 3);
+    EXPECT_DOUBLE_EQ(c0->entries[0].weight, 1.0);
+}
+
+TEST(AffineConstraintsTest, TransitiveClosureWeightAccumulation) {
+    AffineConstraints constraints;
+
+    // u_0 = 0.7*u_1, u_1 = 0.3*u_2 + 0.7*u_3 -> u_0 = 0.21*u_2 + 0.49*u_3
+    constraints.addLine(0);
+    constraints.addEntry(0, 1, 0.7);
+
+    constraints.addLine(1);
+    constraints.addEntry(1, 2, 0.3);
+    constraints.addEntry(1, 3, 0.7);
+
+    constraints.close();
+
+    auto c0 = constraints.getConstraint(0);
+    ASSERT_TRUE(c0.has_value());
+    ASSERT_EQ(c0->entries.size(), 2u);
+
+    bool has_2 = false;
+    bool has_3 = false;
+    for (const auto& e : c0->entries) {
+        if (e.master_dof == 2) {
+            has_2 = true;
+            EXPECT_NEAR(e.weight, 0.21, 1e-14);
+        }
+        if (e.master_dof == 3) {
+            has_3 = true;
+            EXPECT_NEAR(e.weight, 0.49, 1e-14);
+        }
+    }
+    EXPECT_TRUE(has_2);
+    EXPECT_TRUE(has_3);
+}
+
+TEST(AffineConstraintsTest, CycleDetectionSelfReference) {
+    AffineConstraints constraints;
+    constraints.addLine(0);
+    EXPECT_THROW(constraints.addEntry(0, 0, 1.0), ConstraintException);
+}
+
+TEST(AffineConstraintsTest, CycleDetectionLongCycle) {
+    AffineConstraints constraints;
+
+    constraints.addLine(0);
+    constraints.addEntry(0, 1, 1.0);
+    constraints.addLine(1);
+    constraints.addEntry(1, 2, 1.0);
+    constraints.addLine(2);
+    constraints.addEntry(2, 3, 1.0);
+    constraints.addLine(3);
+    constraints.addEntry(3, 0, 1.0);
+
+    EXPECT_THROW(constraints.close(), ConstraintCycleException);
+}
+
+TEST(AffineConstraintsTest, NearZeroWeightElimination) {
+    {
+        AffineConstraints constraints;
+        constraints.addLine(0);
+        constraints.addEntry(0, 1, 1e-16);
+        constraints.close();
+
+        auto c0 = constraints.getConstraint(0);
+        ASSERT_TRUE(c0.has_value());
+        EXPECT_TRUE(c0->entries.empty());
+    }
+
+    {
+        AffineConstraints constraints;
+        constraints.addLine(0);
+        constraints.addEntry(0, 1, 1e-14);
+        constraints.close();
+
+        auto c0 = constraints.getConstraint(0);
+        ASSERT_TRUE(c0.has_value());
+        ASSERT_EQ(c0->entries.size(), 1u);
+        EXPECT_EQ(c0->entries[0].master_dof, 1);
+        EXPECT_DOUBLE_EQ(c0->entries[0].weight, 1e-14);
+    }
+}
+
+TEST(AffineConstraintsTest, InhomogeneityOnlyUpdate) {
+    AffineConstraints constraints;
+
+    constraints.addLine(0);
+    constraints.addEntry(0, 1, 1.0);
+    constraints.setInhomogeneity(0, 1.0);
+    constraints.close();
+
+    std::vector<double> vec = {0.0, 2.0};
+    constraints.distribute(vec);
+    EXPECT_DOUBLE_EQ(vec[0], 3.0);
+
+    constraints.updateInhomogeneity(0, 5.0);
+
+    auto c0 = constraints.getConstraint(0);
+    ASSERT_TRUE(c0.has_value());
+    ASSERT_EQ(c0->entries.size(), 1u);
+    EXPECT_EQ(c0->entries[0].master_dof, 1);
+    EXPECT_DOUBLE_EQ(c0->entries[0].weight, 1.0);
+    EXPECT_DOUBLE_EQ(c0->inhomogeneity, 5.0);
+
+    vec = {0.0, 2.0};
+    constraints.distribute(vec);
+    EXPECT_DOUBLE_EQ(vec[0], 7.0);
+}
+
+TEST(AffineConstraintsTest, CopyAndMoveSemantics) {
+    AffineConstraints original;
+    original.addLine(0);
+    original.addEntry(0, 1, 1.0);
+    original.setInhomogeneity(0, 2.0);
+    original.addLine(2);
+    original.addEntry(2, 3, 0.5);
+    original.close();
+
+    AffineConstraints copy = original;
+
+    original.updateInhomogeneity(0, 10.0);
+    EXPECT_DOUBLE_EQ(original.getConstraint(0)->inhomogeneity, 10.0);
+    EXPECT_DOUBLE_EQ(copy.getConstraint(0)->inhomogeneity, 2.0);
+
+    AffineConstraints moved = std::move(original);
+    EXPECT_TRUE(moved.isClosed());
+    EXPECT_TRUE(moved.isConstrained(0));
+    EXPECT_TRUE(moved.isConstrained(2));
+
+    EXPECT_EQ(original.numConstraints(), 0u);
+    EXPECT_FALSE(original.isConstrained(0));
+
+    original.clear();
+    original.addDirichlet(5, 1.0);
+    original.close();
+    EXPECT_TRUE(original.isConstrained(5));
+    EXPECT_DOUBLE_EQ(original.getConstraint(5)->inhomogeneity, 1.0);
+}
+
+TEST(AffineConstraintsTest, MergeConstraintSets) {
+    AffineConstraints a;
+    a.addLine(0);
+    a.addEntry(0, 1, 1.0);
+
+    AffineConstraints b;
+    b.addLine(2);
+    b.addEntry(2, 3, 2.0);
+
+    a.merge(b);
+    a.close();
+
+    EXPECT_TRUE(a.isConstrained(0));
+    EXPECT_TRUE(a.isConstrained(2));
+
+    auto c2 = a.getConstraint(2);
+    ASSERT_TRUE(c2.has_value());
+    ASSERT_EQ(c2->entries.size(), 1u);
+    EXPECT_EQ(c2->entries[0].master_dof, 3);
+    EXPECT_DOUBLE_EQ(c2->entries[0].weight, 2.0);
+}
+
+TEST(AffineConstraintsTest, MergeConstraintSetsConflict) {
+    AffineConstraints a;
+    a.addLine(0);
+    a.addEntry(0, 1, 1.0);
+
+    AffineConstraints b;
+    b.addLine(0);
+    b.addEntry(0, 2, 1.0);
+
+    EXPECT_THROW(a.merge(b), ConstraintException);
+
+    a.merge(b, /*overwrite=*/true);
+    a.close();
+
+    auto c0 = a.getConstraint(0);
+    ASSERT_TRUE(c0.has_value());
+    ASSERT_EQ(c0->entries.size(), 1u);
+    EXPECT_EQ(c0->entries[0].master_dof, 2);
 }
 
 }  // namespace test
