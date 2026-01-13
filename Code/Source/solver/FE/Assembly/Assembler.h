@@ -496,6 +496,19 @@ public:
     virtual void setCurrentSolution(std::span<const Real> /*solution*/) {}
 
     /**
+     * @brief Set the current solution vector via a global-indexed view
+     *
+     * This supports backends whose local storage is not directly indexable by
+     * global DOF (e.g., distributed/ghosted vectors). The provided view must
+     * implement getVectorEntry(dof) for any global DOF queried by the assembler.
+     *
+     * Default implementation is a no-op.
+     *
+     * @param solution_view Global-indexed vector view (nullable to clear)
+     */
+    virtual void setCurrentSolutionView(const GlobalSystemView* /*solution_view*/) {}
+
+    /**
      * @brief Provide accessors for multi-field discrete solution data
      *
      * Default implementation is a no-op. Assemblers that support kernels using

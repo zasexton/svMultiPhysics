@@ -288,6 +288,52 @@ void FsilsVector::updateGhosts()
     }
 }
 
+void FsilsVector::accumulateOverlap()
+{
+    if (!shared_) {
+        return;
+    }
+
+    const auto& lhs = shared_->lhs;
+    if (lhs.commu.nTasks == 1) {
+        return;
+    }
+
+    const int dof = shared_->dof;
+    const int nNo = lhs.nNo;
+
+    FE_THROW_IF(dof <= 0, InvalidArgumentException, "FsilsVector::accumulateOverlap: invalid dof");
+    FE_THROW_IF(nNo < 0, InvalidArgumentException, "FsilsVector::accumulateOverlap: invalid local node count");
+    FE_THROW_IF(static_cast<int>(data_.size()) != dof * nNo,
+                InvalidArgumentException, "FsilsVector::accumulateOverlap: local size mismatch");
+
+    std::vector<double> u_internal(static_cast<std::size_t>(dof) * static_cast<std::size_t>(nNo), 0.0);
+    for (int old = 0; old < nNo; ++old) {
+        const int internal = lhs.map(old);
+        for (int c = 0; c < dof; ++c) {
+            const std::size_t old_idx = static_cast<std::size_t>(c) +
+                                        static_cast<std::size_t>(old) * static_cast<std::size_t>(dof);
+            const std::size_t int_idx = static_cast<std::size_t>(c) +
+                                        static_cast<std::size_t>(internal) * static_cast<std::size_t>(dof);
+            u_internal[int_idx] = data_[old_idx];
+        }
+    }
+
+    Array<double> U(dof, nNo, u_internal.data());
+    fsi_linear_solver::fsils_commuv(lhs, dof, U);
+
+    for (int old = 0; old < nNo; ++old) {
+        const int internal = lhs.map(old);
+        for (int c = 0; c < dof; ++c) {
+            const std::size_t old_idx = static_cast<std::size_t>(c) +
+                                        static_cast<std::size_t>(old) * static_cast<std::size_t>(dof);
+            const std::size_t int_idx = static_cast<std::size_t>(c) +
+                                        static_cast<std::size_t>(internal) * static_cast<std::size_t>(dof);
+            data_[old_idx] = u_internal[int_idx];
+        }
+    }
+}
+
 std::unique_ptr<assembly::GlobalSystemView> FsilsVector::createAssemblyView()
 {
     return std::make_unique<FsilsVectorView>(*this);

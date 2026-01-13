@@ -13,6 +13,7 @@
 
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/WeakForm.h"
 
 #include "Spaces/H1Space.h"
 
@@ -191,6 +192,60 @@ TEST(FormsInstaller, FormsInstaller_InstallResidualForm_AffineWithRHS_UsesLinear
             expected += mass.getMatrixEntry(i, j) * U[static_cast<std::size_t>(j)];
         }
         EXPECT_NEAR(out.getVectorEntry(i), expected, 1e-12);
+    }
+}
+
+TEST(FormsInstaller, FormsInstaller_InstallWeakForm_MultiOpInstallsConstraintsOnce)
+{
+    const int marker = 5;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto residual_form = (u * v).dx();
+
+    svmp::FE::forms::WeakForm form;
+    form.residual = residual_form;
+    form.strong_constraints.push_back(
+        svmp::FE::forms::bc::strongDirichlet(u_field, marker, svmp::FE::forms::FormExpr::constant(2.5), "u"));
+
+    (void)svmp::FE::systems::installWeakForm(sys, {"op", "op2"}, u_field, u_field, form);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    EXPECT_TRUE(sys.constraints().isConstrained(0));
+    EXPECT_TRUE(sys.constraints().isConstrained(1));
+    EXPECT_TRUE(sys.constraints().isConstrained(2));
+    EXPECT_FALSE(sys.constraints().isConstrained(3));
+
+    for (svmp::FE::GlobalIndex dof : {0, 1, 2}) {
+        EXPECT_NEAR(sys.constraints().getInhomogeneity(dof), 2.5, 1e-15);
+    }
+
+    std::vector<Real> U = {0.1, 0.2, 0.3, 0.4};
+    svmp::FE::systems::SystemStateView state;
+    state.u = U;
+
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+
+    svmp::FE::assembly::DenseMatrixView mat(sys.dofHandler().getNumDofs());
+    mat.zero();
+    (void)sys.assemble(req, state, &mat, nullptr);
+
+    for (svmp::FE::GlobalIndex dof : {0, 1, 2}) {
+        EXPECT_NEAR(mat.getMatrixEntry(dof, dof), 1.0, 1e-12);
+        for (svmp::FE::GlobalIndex j = 0; j < mat.numCols(); ++j) {
+            if (j == dof) continue;
+            EXPECT_NEAR(mat.getMatrixEntry(dof, j), 0.0, 1e-12);
+        }
     }
 }
 

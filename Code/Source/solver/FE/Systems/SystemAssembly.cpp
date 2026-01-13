@@ -16,6 +16,8 @@
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/TimeIntegrationContext.h"
 
+#include "Backends/Interfaces/GenericVector.h"
+
 #include <algorithm>
 
 namespace svmp {
@@ -97,6 +99,13 @@ assembly::AssemblyResult assembleOperator(
 
     auto& assembler = *system.assembler_;
     assembler.setCurrentSolution(state.u);
+    std::unique_ptr<assembly::GlobalSystemView> current_solution_view;
+    if (state.u_vector != nullptr) {
+        // `createAssemblyView()` is non-const for historical reasons; treat this as read-only use.
+        auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
+        current_solution_view = vec->createAssemblyView();
+    }
+    assembler.setCurrentSolutionView(current_solution_view.get());
     {
         std::vector<assembly::FieldSolutionAccess> access;
         access.reserve(system.field_registry_.size());

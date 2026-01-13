@@ -92,6 +92,11 @@ public:
 
     void setCurrentSolution(std::span<const Real> solution) override { base_->setCurrentSolution(solution); }
 
+    void setCurrentSolutionView(const GlobalSystemView* solution_view) override
+    {
+        base_->setCurrentSolutionView(solution_view);
+    }
+
     void setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields) override
     {
         base_->setFieldSolutionAccess(fields);

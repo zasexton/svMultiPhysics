@@ -173,6 +173,7 @@ public:
     void setSparsityPattern(const sparsity::SparsityPattern* sparsity) override;
     void setOptions(const AssemblyOptions& options) override;
     void setCurrentSolution(std::span<const Real> solution) override;
+    void setCurrentSolutionView(const GlobalSystemView* solution_view) override;
     void setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields) override;
     void setPreviousSolution(std::span<const Real> solution) override;
     void setPreviousSolution2(std::span<const Real> solution) override;
@@ -459,6 +460,7 @@ private:
 
     // State
     std::span<const Real> current_solution_{};
+    const GlobalSystemView* current_solution_view_{nullptr};
     std::vector<std::span<const Real>> previous_solutions_{};
     std::vector<Real> local_solution_coeffs_{};
     std::vector<std::vector<Real>> local_prev_solution_coeffs_{};

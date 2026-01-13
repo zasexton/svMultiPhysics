@@ -212,6 +212,37 @@ TEST(FunctionSpaces, MortarSpaceWrapsInterfaceSpace) {
     EXPECT_NEAR(val_mortar[0], val_iface[0], 1e-14);
 }
 
+TEST(FunctionSpaces, MortarSpaceDelegatesInterpolation) {
+    auto iface = std::make_shared<L2Space>(ElementType::Triangle3, 1);
+    MortarSpace mortar(iface);
+
+    FunctionSpace::ValueFunction f = [](const FunctionSpace::Value& xi) {
+        FunctionSpace::Value out{};
+        out[0] = Real(1) + xi[0] + Real(2) * xi[1];
+        return out;
+    };
+
+    std::vector<Real> coeff_iface;
+    std::vector<Real> coeff_mortar;
+    iface->interpolate(f, coeff_iface);
+    mortar.interpolate(f, coeff_mortar);
+
+    ASSERT_EQ(coeff_mortar.size(), coeff_iface.size());
+    for (std::size_t i = 0; i < coeff_iface.size(); ++i) {
+        EXPECT_NEAR(coeff_mortar[i], coeff_iface[i], 1e-14);
+    }
+
+    // Sanity: both coefficient vectors evaluate the same through the wrapper.
+    auto quad = iface->element().quadrature();
+    ASSERT_TRUE(quad);
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        auto xi = quad->point(q);
+        const auto v_iface  = iface->evaluate(xi, coeff_iface);
+        const auto v_mortar = mortar.evaluate(xi, coeff_mortar);
+        EXPECT_NEAR(v_mortar[0], v_iface[0], 1e-14);
+    }
+}
+
 TEST(FunctionSpaces, EnrichedSpaceCombinesBaseAndEnrichment) {
     auto base = std::make_shared<H1Space>(ElementType::Line2, 1);
     auto enr  = std::make_shared<L2Space>(ElementType::Line2, 1);

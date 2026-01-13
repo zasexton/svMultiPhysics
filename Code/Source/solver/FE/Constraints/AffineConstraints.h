@@ -52,6 +52,11 @@
 
 namespace svmp {
 namespace FE {
+
+namespace backends {
+class GenericVector;
+} // namespace backends
+
 namespace constraints {
 
 // Forward declarations
@@ -466,6 +471,14 @@ public:
     }
 
     /**
+     * @brief Distribute constraints to a backend-defined vector
+     *
+     * Uses the vector's assembly view to set constrained entries by global DOF
+     * index. This supports distributed vectors (e.g., FSILS, PETSc).
+     */
+    void distribute(backends::GenericVector& vec) const;
+
+    /**
      * @brief Distribute constraints to a vector, treating inhomogeneities as zero.
      *
      * Enforces the homogeneous form:
@@ -485,6 +498,11 @@ public:
     }
 
     /**
+     * @brief Distribute constraints to a backend-defined vector (homogeneous form)
+     */
+    void distributeHomogeneous(backends::GenericVector& vec) const;
+
+    /**
      * @brief Set constrained DOF values in vector (just inhomogeneities)
      *
      * Sets vec[slave] = inhomogeneity for each constrained DOF.
@@ -501,6 +519,11 @@ public:
     void setConstrainedValues(std::vector<double>& vec) const {
         setConstrainedValues(vec.data(), static_cast<GlobalIndex>(vec.size()));
     }
+
+    /**
+     * @brief Set constrained DOF values (inhomogeneities only) in a backend-defined vector
+     */
+    void setConstrainedValues(backends::GenericVector& vec) const;
 
     // =========================================================================
     // Inhomogeneity updates (for time-dependent BCs)

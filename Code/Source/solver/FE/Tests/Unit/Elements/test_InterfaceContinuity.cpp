@@ -528,6 +528,54 @@ TEST_F(InterfaceContinuityTest, ReferenceFacetNormalsHex) {
 }
 
 // =============================================================================
+// Facet Vertices Tests
+// =============================================================================
+
+TEST_F(InterfaceContinuityTest, FacetVerticesTriangle) {
+    // Verify `facet_vertices()` returns the correct vertex indices and reference
+    // coordinates for each Triangle3 edge.
+
+    {
+        auto [ids, coords] = ElementTransform::facet_vertices(ElementType::Triangle3, 0);
+        ASSERT_EQ(ids.size(), 2u);
+        EXPECT_EQ(ids[0], 0);
+        EXPECT_EQ(ids[1], 1);
+
+        ASSERT_EQ(coords.size(), 2u);
+        EXPECT_NEAR(coords[0][0], Real(0), kTolerance);
+        EXPECT_NEAR(coords[0][1], Real(0), kTolerance);
+        EXPECT_NEAR(coords[1][0], Real(1), kTolerance);
+        EXPECT_NEAR(coords[1][1], Real(0), kTolerance);
+    }
+
+    {
+        auto [ids, coords] = ElementTransform::facet_vertices(ElementType::Triangle3, 1);
+        ASSERT_EQ(ids.size(), 2u);
+        EXPECT_EQ(ids[0], 1);
+        EXPECT_EQ(ids[1], 2);
+
+        ASSERT_EQ(coords.size(), 2u);
+        EXPECT_NEAR(coords[0][0], Real(1), kTolerance);
+        EXPECT_NEAR(coords[0][1], Real(0), kTolerance);
+        EXPECT_NEAR(coords[1][0], Real(0), kTolerance);
+        EXPECT_NEAR(coords[1][1], Real(1), kTolerance);
+    }
+
+    {
+        auto [ids, coords] = ElementTransform::facet_vertices(ElementType::Triangle3, 2);
+        ASSERT_EQ(ids.size(), 2u);
+        EXPECT_EQ(ids[0], 2);
+        EXPECT_EQ(ids[1], 0);
+
+        ASSERT_EQ(coords.size(), 2u);
+        EXPECT_NEAR(coords[0][0], Real(0), kTolerance);
+        EXPECT_NEAR(coords[0][1], Real(1), kTolerance);
+        EXPECT_NEAR(coords[1][0], Real(0), kTolerance);
+        EXPECT_NEAR(coords[1][1], Real(0), kTolerance);
+    }
+}
+
+// =============================================================================
 // Facet-to-Reference Mapping Tests
 // =============================================================================
 
@@ -648,4 +696,3 @@ TEST_F(InterfaceContinuityTest, HcurlTangentialTrace3D) {
     EXPECT_NEAR(traces[2][1], Real(0), kTolerance);
     EXPECT_NEAR(traces[2][2], Real(0), kTolerance);
 }
-

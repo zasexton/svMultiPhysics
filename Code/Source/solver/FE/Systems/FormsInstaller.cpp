@@ -11,6 +11,7 @@
 
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/WeakForm.h"
 #include "Forms/AffineAnalysis.h"
 
 #include "Systems/FESystem.h"
@@ -196,6 +197,40 @@ KernelPtr installResidualForm(
     auto kernel = installResidualForm(system, op, test_field, trial_field, residual_form, options);
     installStrongDirichlet(system, bcs);
     return kernel;
+}
+
+KernelPtr installWeakForm(
+    FESystem& system,
+    const OperatorTag& op,
+    FieldId test_field,
+    FieldId trial_field,
+    const forms::WeakForm& form,
+    const FormInstallOptions& options)
+{
+    const std::span<const forms::bc::StrongDirichlet> bcs(form.strong_constraints.data(),
+                                                          form.strong_constraints.size());
+    return installResidualForm(system, op, test_field, trial_field, form.residual, bcs, options);
+}
+
+std::vector<KernelPtr> installWeakForm(
+    FESystem& system,
+    std::initializer_list<OperatorTag> ops,
+    FieldId test_field,
+    FieldId trial_field,
+    const forms::WeakForm& form,
+    const FormInstallOptions& options)
+{
+    std::vector<KernelPtr> kernels;
+    kernels.reserve(ops.size());
+
+    for (const auto& op : ops) {
+        kernels.push_back(installResidualForm(system, op, test_field, trial_field, form.residual, options));
+    }
+
+    const std::span<const forms::bc::StrongDirichlet> bcs(form.strong_constraints.data(),
+                                                          form.strong_constraints.size());
+    installStrongDirichlet(system, bcs);
+    return kernels;
 }
 
 std::vector<std::vector<KernelPtr>> installResidualBlocks(

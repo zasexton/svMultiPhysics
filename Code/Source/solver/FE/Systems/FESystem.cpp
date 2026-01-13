@@ -16,6 +16,7 @@
 #include "Assembly/GlobalSystemView.h"
 
 #include "Spaces/FunctionSpace.h"
+#include "Sparsity/DistributedSparsityPattern.h"
 
 #include <algorithm>
 
@@ -57,6 +58,7 @@ void FESystem::invalidateSetup() noexcept
     material_state_provider_.reset();
     global_kernel_state_provider_.reset();
     sparsity_by_op_.clear();
+    distributed_sparsity_by_op_.clear();
     parameter_registry_.clear();
     if (operator_backends_) {
         operator_backends_->invalidateCache();
@@ -351,6 +353,19 @@ const sparsity::SparsityPattern& FESystem::sparsity(const OperatorTag& op) const
     FE_THROW_IF(it == sparsity_by_op_.end() || !it->second, InvalidArgumentException,
                 "FESystem::sparsity: no sparsity pattern for operator '" + op + "'");
     return *it->second;
+}
+
+const sparsity::DistributedSparsityPattern*
+FESystem::distributedSparsityIfAvailable(const OperatorTag& op) const noexcept
+{
+    if (!is_setup_) {
+        return nullptr;
+    }
+    auto it = distributed_sparsity_by_op_.find(op);
+    if (it == distributed_sparsity_by_op_.end()) {
+        return nullptr;
+    }
+    return it->second.get();
 }
 
 int FESystem::temporalOrder() const noexcept

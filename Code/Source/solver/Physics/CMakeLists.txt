@@ -189,6 +189,23 @@ if(PHYSICS_BUILD_TESTS)
     add_executable(test_physics ${PHYSICS_TEST_SOURCES})
     target_link_libraries(test_physics PRIVATE svphysics ${GTEST_LIBRARIES})
     add_test(NAME Physics_Tests COMMAND test_physics)
+
+    # Optional MPI-launched tests (requires mpiexec and building with MPI-enabled deps).
+    find_program(MPIEXEC_EXECUTABLE NAMES mpiexec mpirun)
+    if(MPIEXEC_EXECUTABLE)
+        add_test(
+            NAME Physics_Tests_MPI_2
+            COMMAND ${MPIEXEC_EXECUTABLE} -np 2 $<TARGET_FILE:test_physics>
+                    --gtest_filter=PoissonSquareSteadyMPI.*
+        )
+        set_tests_properties(Physics_Tests_MPI_2 PROPERTIES
+            TIMEOUT 180
+            PROCESSORS 2
+            LABELS "MPI;physics"
+        )
+    else()
+        message(STATUS "Physics: MPI executor not found; MPI tests will not be registered")
+    endif()
 endif()
 
 #------------------------------------------------------------------------------

@@ -546,18 +546,21 @@ std::vector<real_t> VTKReader::extract_coordinates(vtkPoints* points, int& spati
   points->GetBounds(bounds);
 
   const double tol = 1e-10;
-  bool x_varies = (bounds[1] - bounds[0]) > tol;
-  bool y_varies = (bounds[3] - bounds[2]) > tol;
   bool z_varies = (bounds[5] - bounds[4]) > tol;
+  bool x_or_y_varies = ((bounds[1] - bounds[0]) > tol) || ((bounds[3] - bounds[2]) > tol);
 
+  // VTK always stores points as (x,y,z), but svmesh can store planar meshes in 2D by dropping Z.
+  //
+  // Important: do not reduce to 1D based on coordinate variation alone. For example, a line
+  // segment at y=1 has no Y-variation, but dropping Y would shift the geometry and break
+  // workflows that rely on absolute coordinates (e.g., matching boundary meshes back to a 2D
+  // volume mesh).
   if (z_varies) {
     spatial_dim = 3;
-  } else if (y_varies) {
+  } else if (x_or_y_varies) {
     spatial_dim = 2;
-  } else if (x_varies) {
-    spatial_dim = 1;
   } else {
-    spatial_dim = 3; // Default to 3D for single point
+    spatial_dim = 3; // Default to 3D for a single point / degenerate bounds
   }
 
   // Extract coordinates

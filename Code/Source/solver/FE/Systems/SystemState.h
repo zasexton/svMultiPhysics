@@ -19,6 +19,10 @@
 namespace svmp {
 namespace FE {
 
+namespace backends {
+class GenericVector;
+} // namespace backends
+
 namespace assembly {
 struct TimeIntegrationContext;
 }
@@ -33,6 +37,13 @@ struct SystemStateView {
     std::span<const Real> u{};
     std::span<const Real> u_prev{};
     std::span<const Real> u_prev2{};
+
+    // Optional backend vectors backing the spans above.
+    // When provided, assemblers may use these to access global-indexed entries
+    // even when the underlying local storage is not global-indexable (e.g., MPI layouts).
+    const backends::GenericVector* u_vector{nullptr};
+    const backends::GenericVector* u_prev_vector{nullptr};
+    const backends::GenericVector* u_prev2_vector{nullptr};
 
     // Optional full history view for multistep methods.
     // Convention: u_history[k-1] corresponds to u^{n-k} (k=1 is u_prev).

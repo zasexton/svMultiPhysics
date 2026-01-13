@@ -7,6 +7,8 @@
 
 #include "AffineConstraints.h"
 
+#include "Backends/Interfaces/GenericVector.h"
+
 #include <algorithm>
 #include <numeric>
 #include <cmath>
@@ -555,6 +557,39 @@ void AffineConstraints::distribute(double* vec, GlobalIndex vec_size) const {
     }
 }
 
+void AffineConstraints::distribute(backends::GenericVector& vec) const
+{
+    if (!is_closed_) {
+        CONSTRAINT_THROW("Cannot distribute: constraints not closed");
+    }
+
+    auto view = vec.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "AffineConstraints::distribute: vector view");
+
+    view->beginAssemblyPhase();
+    for (std::size_t i = 0; i < slave_dofs_.size(); ++i) {
+        const GlobalIndex slave = slave_dofs_[i];
+        if (slave < 0 || slave >= vec.size()) {
+            continue;
+        }
+
+        const auto begin_offset = static_cast<std::size_t>(entry_offsets_[i]);
+        const auto end_offset = static_cast<std::size_t>(entry_offsets_[i + 1]);
+
+        Real value = static_cast<Real>(inhomogeneities_[i]);
+        for (std::size_t j = begin_offset; j < end_offset; ++j) {
+            const GlobalIndex master = entries_[j].master_dof;
+            if (master < 0 || master >= vec.size()) {
+                continue;
+            }
+            value += static_cast<Real>(entries_[j].weight) * view->getVectorEntry(master);
+        }
+
+        view->addVectorEntry(slave, value, assembly::AddMode::Insert);
+    }
+    view->finalizeAssembly();
+}
+
 void AffineConstraints::distributeHomogeneous(double* vec, GlobalIndex vec_size) const
 {
     if (!is_closed_) {
@@ -579,6 +614,39 @@ void AffineConstraints::distributeHomogeneous(double* vec, GlobalIndex vec_size)
     }
 }
 
+void AffineConstraints::distributeHomogeneous(backends::GenericVector& vec) const
+{
+    if (!is_closed_) {
+        CONSTRAINT_THROW("Cannot distributeHomogeneous: constraints not closed");
+    }
+
+    auto view = vec.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "AffineConstraints::distributeHomogeneous: vector view");
+
+    view->beginAssemblyPhase();
+    for (std::size_t i = 0; i < slave_dofs_.size(); ++i) {
+        const GlobalIndex slave = slave_dofs_[i];
+        if (slave < 0 || slave >= vec.size()) {
+            continue;
+        }
+
+        const auto begin_offset = static_cast<std::size_t>(entry_offsets_[i]);
+        const auto end_offset = static_cast<std::size_t>(entry_offsets_[i + 1]);
+
+        Real value = 0.0;
+        for (std::size_t j = begin_offset; j < end_offset; ++j) {
+            const GlobalIndex master = entries_[j].master_dof;
+            if (master < 0 || master >= vec.size()) {
+                continue;
+            }
+            value += static_cast<Real>(entries_[j].weight) * view->getVectorEntry(master);
+        }
+
+        view->addVectorEntry(slave, value, assembly::AddMode::Insert);
+    }
+    view->finalizeAssembly();
+}
+
 void AffineConstraints::setConstrainedValues(double* vec, GlobalIndex vec_size) const {
     if (!is_closed_) {
         CONSTRAINT_THROW("Cannot set constrained values: constraints not closed");
@@ -590,6 +658,26 @@ void AffineConstraints::setConstrainedValues(double* vec, GlobalIndex vec_size) 
             vec[slave] = inhomogeneities_[i];
         }
     }
+}
+
+void AffineConstraints::setConstrainedValues(backends::GenericVector& vec) const
+{
+    if (!is_closed_) {
+        CONSTRAINT_THROW("Cannot set constrained values: constraints not closed");
+    }
+
+    auto view = vec.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "AffineConstraints::setConstrainedValues: vector view");
+
+    view->beginAssemblyPhase();
+    for (std::size_t i = 0; i < slave_dofs_.size(); ++i) {
+        const GlobalIndex slave = slave_dofs_[i];
+        if (slave < 0 || slave >= vec.size()) {
+            continue;
+        }
+        view->addVectorEntry(slave, static_cast<Real>(inhomogeneities_[i]), assembly::AddMode::Insert);
+    }
+    view->finalizeAssembly();
 }
 
 // ============================================================================

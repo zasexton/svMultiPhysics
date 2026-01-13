@@ -1351,6 +1351,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Basis/test_LagrangeBasis.cpp
         Tests/Unit/Basis/test_HierarchicalSpectralBasis.cpp
         Tests/Unit/Basis/test_BernsteinBasis.cpp
+        Tests/Unit/Basis/test_BSplineBasis.cpp
         Tests/Unit/Basis/test_VectorBases.cpp
         Tests/Unit/Basis/test_RT_MinimalSimplex.cpp
         Tests/Unit/Basis/test_SerendipityTensorModal.cpp
@@ -1686,6 +1687,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Systems/test_NavierStokesCoupled.cpp
                 Tests/Unit/Systems/test_SystemConstraints.cpp
                 Tests/Unit/Systems/test_StrongDirichletConstraint.cpp
+                Tests/Unit/Systems/test_FormsInstaller.cpp
                 Tests/Unit/Systems/test_CoupledBoundaryManager.cpp
                 Tests/Unit/Systems/test_CoupledBoundaryConditionHelpers.cpp
                 Tests/Unit/Systems/test_AuxiliaryStateBuilder.cpp

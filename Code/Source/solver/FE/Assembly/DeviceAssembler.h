@@ -524,6 +524,7 @@ public:
     void setSparsityPattern(const sparsity::SparsityPattern* sparsity) override;
     void setOptions(const AssemblyOptions& options) override;
     void setCurrentSolution(std::span<const Real> solution) override;
+    void setCurrentSolutionView(const GlobalSystemView* solution_view) override;
     void setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields) override;
     void setPreviousSolution(std::span<const Real> solution) override;
     void setPreviousSolution2(std::span<const Real> solution) override;

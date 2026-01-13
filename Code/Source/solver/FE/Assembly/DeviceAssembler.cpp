@@ -238,6 +238,11 @@ void DeviceAssembler::setCurrentSolution(std::span<const Real> solution)
     impl_->cpu_assembler->setCurrentSolution(solution);
 }
 
+void DeviceAssembler::setCurrentSolutionView(const GlobalSystemView* solution_view)
+{
+    impl_->cpu_assembler->setCurrentSolutionView(solution_view);
+}
+
 void DeviceAssembler::setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields)
 {
     impl_->cpu_assembler->setFieldSolutionAccess(fields);

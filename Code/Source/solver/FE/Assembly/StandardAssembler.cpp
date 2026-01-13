@@ -25,6 +25,7 @@
 
 #include <chrono>
 #include <algorithm>
+#include <utility>
 #include <stdexcept>
 #include <cmath>
 #include <cmath>
@@ -146,6 +147,12 @@ void StandardAssembler::setOptions(const AssemblyOptions& options)
 void StandardAssembler::setCurrentSolution(std::span<const Real> solution)
 {
     current_solution_ = solution;
+    current_solution_view_ = nullptr;
+}
+
+void StandardAssembler::setCurrentSolutionView(const GlobalSystemView* solution_view)
+{
+    current_solution_view_ = solution_view;
 }
 
 void StandardAssembler::setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields)
@@ -434,17 +441,28 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
             context_.clearAllPreviousSolutionData();
             context_.setBoundaryMarker(boundary_marker);
 
-            if (need_solution) {
-                FE_THROW_IF(current_solution_.empty(), FEException,
-                            "StandardAssembler::assembleBoundaryFaces: kernel requires solution but no solution was set");
-                local_solution_coeffs_.resize(col_dofs_.size());
-                for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
-                    const auto dof = col_dofs_[i];
-                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-                                "StandardAssembler::assembleBoundaryFaces: solution vector too small for DOF " + std::to_string(dof));
-                    local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
-                }
-                context_.setSolutionCoefficients(local_solution_coeffs_);
+	            if (need_solution) {
+	                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+	                            "StandardAssembler::assembleBoundaryFaces: kernel requires solution but no solution was set");
+	                local_solution_coeffs_.resize(col_dofs_.size());
+	                if (current_solution_view_ != nullptr) {
+	                    for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
+	                        const auto dof = col_dofs_[i];
+	                        if (dof < 0) {
+	                            FE_THROW(FEException, "StandardAssembler::assembleBoundaryFaces: negative DOF index");
+	                        }
+	                        local_solution_coeffs_[i] = current_solution_view_->getVectorEntry(dof);
+	                    }
+	                } else {
+	                    for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
+	                        const auto dof = col_dofs_[i];
+	                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+	                                    "StandardAssembler::assembleBoundaryFaces: solution vector too small for DOF " +
+	                                        std::to_string(dof));
+	                        local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
+	                    }
+	                }
+	                context_.setSolutionCoefficients(local_solution_coeffs_);
 
                 if (time_integration_ != nullptr) {
                     const int required = requiredHistoryStates(time_integration_);
@@ -678,27 +696,49 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_plus.setCoupledValues(coupled_integrals_, coupled_aux_state_);
             context_plus.clearAllPreviousSolutionData();
 
-            if (need_solution) {
-                FE_THROW_IF(current_solution_.empty(), FEException,
-                            "StandardAssembler::assembleInteriorFaces: kernel requires solution but no solution was set");
-
-                local_solution_coeffs_.resize(minus_col_dofs.size());
-                for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
-                    const auto dof = minus_col_dofs[i];
-                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-                                "StandardAssembler::assembleInteriorFaces: solution vector too small for DOF " + std::to_string(dof));
-                    local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
-                }
-                context_.setSolutionCoefficients(local_solution_coeffs_);
-
-                plus_solution_coeffs.resize(plus_col_dofs.size());
-                for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
-                    const auto dof = plus_col_dofs[i];
-                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-                                "StandardAssembler::assembleInteriorFaces: solution vector too small for DOF " + std::to_string(dof));
-                    plus_solution_coeffs[i] = current_solution_[static_cast<std::size_t>(dof)];
-                }
-                context_plus.setSolutionCoefficients(plus_solution_coeffs);
+	            if (need_solution) {
+	                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+	                            "StandardAssembler::assembleInteriorFaces: kernel requires solution but no solution was set");
+	
+	                local_solution_coeffs_.resize(minus_col_dofs.size());
+	                if (current_solution_view_ != nullptr) {
+	                    for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
+	                        const auto dof = minus_col_dofs[i];
+	                        if (dof < 0) {
+	                            FE_THROW(FEException, "StandardAssembler::assembleInteriorFaces: negative DOF index");
+	                        }
+	                        local_solution_coeffs_[i] = current_solution_view_->getVectorEntry(dof);
+	                    }
+	                } else {
+	                    for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
+	                        const auto dof = minus_col_dofs[i];
+	                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+	                                    "StandardAssembler::assembleInteriorFaces: solution vector too small for DOF " +
+	                                        std::to_string(dof));
+	                        local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
+	                    }
+	                }
+	                context_.setSolutionCoefficients(local_solution_coeffs_);
+	
+	                plus_solution_coeffs.resize(plus_col_dofs.size());
+	                if (current_solution_view_ != nullptr) {
+	                    for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
+	                        const auto dof = plus_col_dofs[i];
+	                        if (dof < 0) {
+	                            FE_THROW(FEException, "StandardAssembler::assembleInteriorFaces: negative DOF index");
+	                        }
+	                        plus_solution_coeffs[i] = current_solution_view_->getVectorEntry(dof);
+	                    }
+	                } else {
+	                    for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
+	                        const auto dof = plus_col_dofs[i];
+	                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+	                                    "StandardAssembler::assembleInteriorFaces: solution vector too small for DOF " +
+	                                        std::to_string(dof));
+	                        plus_solution_coeffs[i] = current_solution_[static_cast<std::size_t>(dof)];
+	                    }
+	                }
+	                context_plus.setSolutionCoefficients(plus_solution_coeffs);
 
                 if (time_integration_ != nullptr) {
                     const int required = requiredHistoryStates(time_integration_);
@@ -864,8 +904,18 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         col_dof_offset_ = row_dof_offset_;
     }
 
+    auto for_each_cell = [&](auto&& callback) {
+        if (options_.ghost_policy == GhostPolicy::OwnedRowsOnly) {
+            mesh.forEachCell(std::forward<decltype(callback)>(callback));
+        } else {
+            // Default behavior for distributed meshes: assemble each cell exactly once to avoid
+            // double-counting contributions from ghost layers.
+            mesh.forEachOwnedCell(std::forward<decltype(callback)>(callback));
+        }
+    };
+
     // Iterate over cells
-    mesh.forEachCell([&](GlobalIndex cell_id) {
+    for_each_cell([&](GlobalIndex cell_id) {
         // Get element DOFs (rows/cols may differ)
         auto row_local = row_dof_map_->getCellDofs(cell_id);
         auto col_local = col_dof_map_->getCellDofs(cell_id);
@@ -897,17 +947,28 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         FE_THROW_IF(col_dofs_.size() != static_cast<std::size_t>(context_.numTrialDofs()), FEException,
                     "StandardAssembler::assembleCellsCore: column DOF count does not match trial space element DOFs");
 
-        if (need_solution) {
-            FE_THROW_IF(current_solution_.empty(), FEException,
-                        "StandardAssembler::assembleCellsCore: kernel requires solution but no solution was set");
-            local_solution_coeffs_.resize(col_dofs_.size());
-            for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
-                const auto dof = col_dofs_[i];
-                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-                            "StandardAssembler::assembleCellsCore: solution vector too small for DOF " + std::to_string(dof));
-                local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
-            }
-            context_.setSolutionCoefficients(local_solution_coeffs_);
+	        if (need_solution) {
+	            FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+	                        "StandardAssembler::assembleCellsCore: kernel requires solution but no solution was set");
+	            local_solution_coeffs_.resize(col_dofs_.size());
+	            if (current_solution_view_ != nullptr) {
+	                for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
+	                    const auto dof = col_dofs_[i];
+	                    if (dof < 0) {
+	                        FE_THROW(FEException, "StandardAssembler::assembleCellsCore: negative DOF index");
+	                    }
+	                    local_solution_coeffs_[i] = current_solution_view_->getVectorEntry(dof);
+	                }
+	            } else {
+	                for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
+	                    const auto dof = col_dofs_[i];
+	                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+	                                "StandardAssembler::assembleCellsCore: solution vector too small for DOF " +
+	                                    std::to_string(dof));
+	                    local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
+	                }
+	            }
+	            context_.setSolutionCoefficients(local_solution_coeffs_);
 
             if (time_integration_ != nullptr) {
                 const int required = requiredHistoryStates(time_integration_);
@@ -1882,8 +1943,8 @@ void StandardAssembler::populateFieldSolutionData(
         return;
     }
 
-    FE_THROW_IF(current_solution_.empty(), FEException,
-                "StandardAssembler::populateFieldSolutionData: no current solution vector was set");
+    FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+	                "StandardAssembler::populateFieldSolutionData: no current solution vector was set");
 
     const ElementType cell_type = mesh.getCellType(cell_id);
     const int dim = mesh.dimension();
@@ -1935,14 +1996,21 @@ void StandardAssembler::populateFieldSolutionData(
         FE_THROW_IF(cell_dofs.size() != static_cast<std::size_t>(n_dofs), FEException,
                     "StandardAssembler::populateFieldSolutionData: field DOF count does not match its space DOFs");
 
-        local_coeffs.resize(cell_dofs.size());
-        for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
-            const auto dof = cell_dofs[i] + access->dof_offset;
-            FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-                        "StandardAssembler::populateFieldSolutionData: solution vector too small for DOF " +
-                            std::to_string(dof));
-            local_coeffs[i] = current_solution_[static_cast<std::size_t>(dof)];
-        }
+	        local_coeffs.resize(cell_dofs.size());
+	        for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+	            const auto dof = cell_dofs[i] + access->dof_offset;
+	            if (dof < 0) {
+	                FE_THROW(FEException, "StandardAssembler::populateFieldSolutionData: negative DOF index");
+	            }
+	            if (current_solution_view_ != nullptr) {
+	                local_coeffs[i] = current_solution_view_->getVectorEntry(dof);
+	            } else {
+	                FE_THROW_IF(static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+	                            "StandardAssembler::populateFieldSolutionData: solution vector too small for DOF " +
+	                                std::to_string(dof));
+	                local_coeffs[i] = current_solution_[static_cast<std::size_t>(dof)];
+	            }
+	        }
 
         if (space.field_type() == FieldType::Scalar) {
             FE_THROW_IF(is_product, FEException,

@@ -10,6 +10,7 @@
 #include "FE/Forms/BoundaryConditions.h"
 #include "FE/Forms/BoundaryFunctional.h"
 #include "FE/Forms/Vocabulary.h"
+#include "FE/Forms/WeakForm.h"
 #include "FE/Systems/AuxiliaryStateBuilder.h"
 #include "FE/Systems/CoupledBoundaryConditions.h"
 #include "FE/Systems/CoupledBoundaryManager.h"
@@ -191,22 +192,15 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
         "poisson_dirichlet",
         options_.field_name);
 
-    // Register the same residual form on both operator tags used by FESystem.
+    FE::forms::WeakForm weak_form;
+    weak_form.residual = residual;
+    weak_form.strong_constraints = dirichlet_bcs;
+
+    // Register the same weak form on both operator tags used by FESystem.
     // The underlying kernel can produce either vector or matrix outputs
     // depending on the AssemblyRequest (and may auto-select an optimized
     // LinearFormKernel when the residual is affine in the TrialFunction).
-    if (dirichlet_bcs.empty()) {
-        FE::systems::installResidualForm(system, "residual", u_id, u_id, residual);
-    } else {
-        FE::systems::installResidualForm(
-            system,
-            "residual",
-            u_id,
-            u_id,
-            residual,
-            std::span<const FE::forms::bc::StrongDirichlet>(dirichlet_bcs.data(), dirichlet_bcs.size()));
-    }
-    FE::systems::installResidualForm(system, "jacobian", u_id, u_id, residual);
+    FE::systems::installWeakForm(system, {"residual", "jacobian"}, u_id, u_id, weak_form);
 }
 
 } // namespace poisson

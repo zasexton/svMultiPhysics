@@ -24,6 +24,7 @@
 #include "Constraints/ParallelConstraints.h"
 
 #include "Sparsity/ConstraintSparsityAugmenter.h"
+#include "Sparsity/DistributedSparsityPattern.h"
 
 #include "Systems/SystemsExceptions.h"
 
@@ -534,15 +535,35 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     // Sparsity
     // ---------------------------------------------------------------------
     sparsity_by_op_.clear();
+    distributed_sparsity_by_op_.clear();
     const auto op_tags = operator_registry_.list();
     const auto n_total_dofs = dof_handler_.getNumDofs();
     const auto n_cells_sparsity = meshAccess().numCells();
 
-	    for (const auto& tag : op_tags) {
-	        auto pattern = std::make_unique<sparsity::SparsityPattern>(
-	            n_total_dofs, n_total_dofs);
+    const auto& partition = dof_handler_.getPartition();
+    const auto owned_iv_opt = partition.locallyOwned().contiguousRange();
+    const bool build_distributed =
+        (partition.globalSize() > 0) &&
+        (partition.globalSize() > partition.localOwnedSize()) &&
+        owned_iv_opt.has_value();
+    const sparsity::IndexRange owned_range = build_distributed
+                                                ? sparsity::IndexRange{owned_iv_opt->begin, owned_iv_opt->end}
+                                                : sparsity::IndexRange{};
+    const auto& ghost_set = partition.ghost();
+    const auto& relevant_set = partition.locallyRelevant();
 
-	        const auto& def = operator_registry_.get(tag);
+		    for (const auto& tag : op_tags) {
+		        auto pattern = std::make_unique<sparsity::SparsityPattern>(
+		            n_total_dofs, n_total_dofs);
+
+		        std::unique_ptr<sparsity::DistributedSparsityPattern> dist_pattern;
+		        std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> ghost_row_cols;
+		        if (build_distributed) {
+		            dist_pattern = std::make_unique<sparsity::DistributedSparsityPattern>(
+		                owned_range, owned_range, n_total_dofs, n_total_dofs);
+		        }
+
+		        const auto& def = operator_registry_.get(tag);
 
 	        std::vector<std::pair<FieldId, FieldId>> cell_pairs;
 	        std::vector<std::tuple<int, FieldId, FieldId>> boundary_pairs;
@@ -598,12 +619,40 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 	        std::sort(interior_pairs.begin(), interior_pairs.end());
 	        interior_pairs.erase(std::unique(interior_pairs.begin(), interior_pairs.end()), interior_pairs.end());
 
-	        std::vector<GlobalIndex> row_dofs;
-	        std::vector<GlobalIndex> col_dofs;
+		        std::vector<GlobalIndex> row_dofs;
+		        std::vector<GlobalIndex> col_dofs;
 
-	        auto add_cell_couplings = [&](GlobalIndex cell_id,
-	                                      const dofs::DofMap& row_map,
-	                                      const dofs::DofMap& col_map,
+		        auto add_element_couplings = [&](std::span<const GlobalIndex> rows,
+		                                         std::span<const GlobalIndex> cols) {
+		            pattern->addElementCouplings(rows, cols);
+		            if (!dist_pattern) {
+		                return;
+		            }
+
+		            for (const auto global_row : rows) {
+		                if (owned_range.contains(global_row)) {
+		                    for (const auto global_col : cols) {
+		                        dist_pattern->addEntry(global_row, global_col);
+		                    }
+		                    continue;
+		                }
+
+		                if (!ghost_set.contains(global_row)) {
+		                    continue;
+		                }
+
+		                auto& cols_for_row = ghost_row_cols[global_row];
+		                for (const auto global_col : cols) {
+		                    if (relevant_set.contains(global_col)) {
+		                        cols_for_row.push_back(global_col);
+		                    }
+		                }
+		            }
+		        };
+
+		        auto add_cell_couplings = [&](GlobalIndex cell_id,
+		                                      const dofs::DofMap& row_map,
+		                                      const dofs::DofMap& col_map,
 	                                      GlobalIndex row_offset,
 	                                      GlobalIndex col_offset) {
 	            auto row_local = row_map.getCellDofs(cell_id);
@@ -619,8 +668,8 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 	                col_dofs[j] = col_local[j] + col_offset;
 	            }
 
-	            pattern->addElementCouplings(row_dofs, col_dofs);
-	        };
+		            add_element_couplings(row_dofs, col_dofs);
+		        };
 
 	        // Cell terms: all cells participate.
 	        for (const auto& [test_field, trial_field] : cell_pairs) {
@@ -712,12 +761,12 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 	                        col_dofs_plus[j] = plus_col_local[j] + col_offset;
 	                    }
 
-	                    pattern->addElementCouplings(row_dofs_minus, col_dofs_minus);
-	                    pattern->addElementCouplings(row_dofs_plus, col_dofs_plus);
-	                    pattern->addElementCouplings(row_dofs_minus, col_dofs_plus);
-	                    pattern->addElementCouplings(row_dofs_plus, col_dofs_minus);
-	                });
-	        }
+		                    add_element_couplings(row_dofs_minus, col_dofs_minus);
+		                    add_element_couplings(row_dofs_plus, col_dofs_plus);
+		                    add_element_couplings(row_dofs_minus, col_dofs_plus);
+		                    add_element_couplings(row_dofs_plus, col_dofs_minus);
+		                });
+		        }
 
         // Global terms: allow kernels to conservatively augment sparsity.
         for (const auto& kernel : def.global) {
@@ -726,29 +775,107 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
             }
         }
 
+		        if (opts.sparsity_options.ensure_diagonal) {
+		            pattern->ensureDiagonal();
+		        }
+	        if (opts.sparsity_options.ensure_non_empty_rows) {
+	            pattern->ensureNonEmptyRows();
+	        }
+	        if (dist_pattern) {
+	            if (opts.sparsity_options.ensure_diagonal) {
+	                dist_pattern->ensureDiagonal();
+	            }
+	            if (opts.sparsity_options.ensure_non_empty_rows) {
+	                dist_pattern->ensureNonEmptyRows();
+	            }
+	        }
+	
+	        if (opts.use_constraints_in_assembly && !affine_constraints_.empty()) {
+	            auto query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
+	            sparsity::ConstraintSparsityAugmenter augmenter(std::move(query));
+	            augmenter.augment(*pattern, sparsity::AugmentationMode::EliminationFill);
+	            if (dist_pattern) {
+	                augmenter.augment(*dist_pattern, sparsity::AugmentationMode::EliminationFill);
+	            }
+	        }
+	
 	        if (opts.sparsity_options.ensure_diagonal) {
 	            pattern->ensureDiagonal();
 	        }
-        if (opts.sparsity_options.ensure_non_empty_rows) {
-            pattern->ensureNonEmptyRows();
-        }
+	        if (opts.sparsity_options.ensure_non_empty_rows) {
+	            pattern->ensureNonEmptyRows();
+	        }
+	        if (dist_pattern) {
+	            if (opts.sparsity_options.ensure_diagonal) {
+	                dist_pattern->ensureDiagonal();
+	            }
+	            if (opts.sparsity_options.ensure_non_empty_rows) {
+	                dist_pattern->ensureNonEmptyRows();
+	            }
+	        }
+	
+	        pattern->finalize();
+	        sparsity_by_op_.emplace(tag, std::move(pattern));
 
-        if (opts.use_constraints_in_assembly && !affine_constraints_.empty()) {
-            auto query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
-            sparsity::ConstraintSparsityAugmenter augmenter(std::move(query));
-            augmenter.augment(*pattern, sparsity::AugmentationMode::EliminationFill);
-        }
+	        if (dist_pattern) {
+	            dist_pattern->finalize();
 
-        if (opts.sparsity_options.ensure_diagonal) {
-            pattern->ensureDiagonal();
-        }
-        if (opts.sparsity_options.ensure_non_empty_rows) {
-            pattern->ensureNonEmptyRows();
-        }
+	            // Store optional ghost-row sparsity using the locally relevant (owned+ghost) overlap.
+	            // This is required by overlap-style MPI backends (e.g., FSILS) so all column nodes
+	            // referenced by owned rows are present locally.
+	            auto ghost_rows_all = ghost_set.toVector();
+	            std::vector<GlobalIndex> ghost_row_map;
+	            ghost_row_map.reserve(ghost_rows_all.size());
+	            for (const auto row : ghost_rows_all) {
+	                if (row < 0 || row >= n_total_dofs) {
+	                    continue;
+	                }
+	                if (owned_range.contains(row)) {
+	                    continue;
+	                }
+	                ghost_row_map.push_back(row);
+	            }
 
-        pattern->finalize();
-        sparsity_by_op_.emplace(tag, std::move(pattern));
-    }
+	            if (!ghost_row_map.empty()) {
+	                // ghost_set.toVector() is already sorted/unique; keep it that way after filtering.
+	                std::vector<GlobalIndex> ghost_row_ptr;
+	                std::vector<GlobalIndex> ghost_row_cols_flat;
+	                ghost_row_ptr.reserve(ghost_row_map.size() + 1);
+	                ghost_row_ptr.push_back(0);
+
+	                for (const auto row : ghost_row_map) {
+	                    auto cols_it = ghost_row_cols.find(row);
+	                    std::vector<GlobalIndex> cols_vec;
+	                    if (cols_it != ghost_row_cols.end()) {
+	                        cols_vec = cols_it->second;
+	                    }
+	                    cols_vec.push_back(row); // ensure diagonal
+
+	                    // Only store columns that are locally present (owned+ghost) so overlap backends can map them.
+	                    cols_vec.erase(std::remove_if(cols_vec.begin(),
+	                                                 cols_vec.end(),
+	                                                 [&](GlobalIndex col) {
+	                                                     return (col < 0) || (col >= n_total_dofs) || !relevant_set.contains(col);
+	                                                 }),
+	                                   cols_vec.end());
+
+	                    std::sort(cols_vec.begin(), cols_vec.end());
+	                    cols_vec.erase(std::unique(cols_vec.begin(), cols_vec.end()), cols_vec.end());
+
+	                    ghost_row_cols_flat.insert(ghost_row_cols_flat.end(), cols_vec.begin(), cols_vec.end());
+	                    ghost_row_ptr.push_back(static_cast<GlobalIndex>(ghost_row_cols_flat.size()));
+	                }
+
+	                dist_pattern->setGhostRows(std::move(ghost_row_map),
+	                                          std::move(ghost_row_ptr),
+	                                          std::move(ghost_row_cols_flat));
+	            } else {
+	                dist_pattern->clearGhostRows();
+	            }
+
+	            distributed_sparsity_by_op_.emplace(tag, std::move(dist_pattern));
+	        }
+	    }
 
     // ---------------------------------------------------------------------
     // Per-cell material state storage (optional; for RequiredData::MaterialState)

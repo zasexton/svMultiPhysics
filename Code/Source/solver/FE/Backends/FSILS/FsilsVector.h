@@ -36,6 +36,18 @@ public:
 
     void updateGhosts() override;
 
+    /**
+     * @brief Sum overlap contributions on shared nodes (additive communication).
+     *
+     * FSILS uses additive overlap exchange (`fsils_commuv`). This helper applies
+     * that exchange to the current vector values so that each rank holds the
+     * summed value for shared nodes.
+     *
+     * This is intentionally separate from updateGhosts(), which implements an
+     * owner->ghost synchronization used for solution/state vectors.
+     */
+    void accumulateOverlap();
+
     [[nodiscard]] std::unique_ptr<assembly::GlobalSystemView> createAssemblyView() override;
 
     [[nodiscard]] std::span<Real> localSpan() override;

@@ -374,7 +374,8 @@ inline void mark2DBoundaryFacesFromVtp(svmp::MeshBase& volume_mesh,
  * - FE built with Mesh integration (`FE_WITH_MESH=ON` -> `SVMP_FE_WITH_MESH=1`)
  * - Mesh built with VTK enabled (`MESH_ENABLE_VTK=ON` -> `MESH_HAS_VTK` defined)
  */
-[[nodiscard]] inline std::shared_ptr<const svmp::Mesh> loadSquareMeshWithMarkedBoundaries()
+[[nodiscard]] inline std::shared_ptr<const svmp::Mesh>
+loadSquareMeshWithMarkedBoundaries(svmp::MeshComm comm = svmp::MeshComm::world())
 {
 #  if !defined(MESH_HAS_VTK)
     throw std::runtime_error("loadSquareMeshWithMarkedBoundaries: Mesh was built without VTK support (MESH_HAS_VTK not defined)");
@@ -387,6 +388,92 @@ inline void mark2DBoundaryFacesFromVtp(svmp::MeshBase& volume_mesh,
     svmp::MeshIOOptions opts;
     opts.format = "vtu";
     opts.path = vtu_path.string();
+
+    // In MPI runs we need a truly distributed mesh (partitioned cells + ghost layer),
+    // otherwise each rank would assemble and solve the full serial problem.
+    if (comm.is_parallel()) {
+        // Ensure partition interfaces are not treated as physical boundaries by FE boundary iteration.
+        opts.kv["ghost_layers"] = "1";
+        // Deterministic partitioning for unit tests.
+        opts.kv["partition_method"] = "block";
+
+        auto mesh = svmp::load_mesh(opts, comm);
+        auto& base = mesh->base();
+
+        base.register_label("left", kSquareBoundaryLeft);
+        base.register_label("right", kSquareBoundaryRight);
+        base.register_label("bottom", kSquareBoundaryBottom);
+        base.register_label("top", kSquareBoundaryTop);
+
+        const auto bbox = mesh->global_bounding_box();
+        const double xmin = static_cast<double>(bbox.min[0]);
+        const double xmax = static_cast<double>(bbox.max[0]);
+        const double ymin = static_cast<double>(bbox.min[1]);
+        const double ymax = static_cast<double>(bbox.max[1]);
+        const double tol = 1e-10;
+
+        const auto& f2c = base.face2cell();
+        for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(f2c.size()); ++f) {
+            const auto& fc = f2c[static_cast<std::size_t>(f)];
+            const bool c0_valid = (fc[0] != svmp::INVALID_INDEX);
+            const bool c1_valid = (fc[1] != svmp::INVALID_INDEX);
+            if (c0_valid == c1_valid) {
+                continue;
+            }
+            const auto adj_cell = static_cast<svmp::index_t>(c0_valid ? fc[0] : fc[1]);
+            if (!mesh->is_owned_cell(adj_cell)) {
+                continue;
+            }
+
+            const auto fv = base.face_vertices(f);
+            if (fv.empty()) {
+                continue;
+            }
+            double cx = 0.0;
+            double cy = 0.0;
+            for (const auto v : fv) {
+                const auto xyz = base.get_vertex_coords(v);
+                cx += static_cast<double>(xyz[0]);
+                cy += static_cast<double>(xyz[1]);
+            }
+            cx /= static_cast<double>(fv.size());
+            cy /= static_cast<double>(fv.size());
+
+            svmp::label_t marker = svmp::INVALID_LABEL;
+            if (std::abs(cx - xmin) <= tol) {
+                marker = kSquareBoundaryLeft;
+            } else if (std::abs(cx - xmax) <= tol) {
+                marker = kSquareBoundaryRight;
+            } else if (std::abs(cy - ymin) <= tol) {
+                marker = kSquareBoundaryBottom;
+            } else if (std::abs(cy - ymax) <= tol) {
+                marker = kSquareBoundaryTop;
+            }
+            if (marker != svmp::INVALID_LABEL) {
+                base.set_boundary_label(f, marker);
+            }
+        }
+
+        // Sanity: every boundary face adjacent to an owned cell should have a marker now.
+        for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(f2c.size()); ++f) {
+            const auto& fc = f2c[static_cast<std::size_t>(f)];
+            const bool c0_valid = (fc[0] != svmp::INVALID_INDEX);
+            const bool c1_valid = (fc[1] != svmp::INVALID_INDEX);
+            if (c0_valid == c1_valid) {
+                continue;
+            }
+            const auto adj_cell = static_cast<svmp::index_t>(c0_valid ? fc[0] : fc[1]);
+            if (!mesh->is_owned_cell(adj_cell)) {
+                continue;
+            }
+            const auto lbl = base.boundary_label(f);
+            if (lbl == svmp::INVALID_LABEL) {
+                throw std::runtime_error("loadSquareMeshWithMarkedBoundaries: found unlabeled boundary face on owned partition");
+            }
+        }
+
+        return mesh;
+    }
 
     auto base = std::make_shared<svmp::MeshBase>(svmp::MeshBase::load(opts));
 
@@ -408,7 +495,7 @@ inline void mark2DBoundaryFacesFromVtp(svmp::MeshBase& volume_mesh,
             throw std::runtime_error("loadSquareMeshWithMarkedBoundaries: found unlabeled boundary face");
         }
     }
-    return svmp::create_mesh(std::move(base));
+    return svmp::create_mesh(std::move(base), comm);
 #  endif
 }
 

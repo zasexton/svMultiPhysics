@@ -45,6 +45,10 @@
 namespace svmp {
 namespace FE {
 
+namespace sparsity {
+class DistributedSparsityPattern;
+} // namespace sparsity
+
 namespace assembly {
 class GlobalSystemView;
 struct MatrixFreeOptions;
@@ -230,10 +234,11 @@ public:
     [[nodiscard]] const dofs::BlockDofMap* blockMap() const noexcept { return block_map_.get(); }
     [[nodiscard]] const constraints::AffineConstraints& constraints() const noexcept { return affine_constraints_; }
     [[nodiscard]] const sparsity::SparsityPattern& sparsity(const OperatorTag& op) const;
+    [[nodiscard]] const sparsity::DistributedSparsityPattern* distributedSparsityIfAvailable(const OperatorTag& op) const noexcept;
 
-	    [[nodiscard]] bool isSetup() const noexcept { return is_setup_; }
-	    [[nodiscard]] int temporalOrder() const noexcept;
-	    [[nodiscard]] bool isTransient() const noexcept { return temporalOrder() > 0; }
+		    [[nodiscard]] bool isSetup() const noexcept { return is_setup_; }
+		    [[nodiscard]] int temporalOrder() const noexcept;
+		    [[nodiscard]] bool isTransient() const noexcept { return temporalOrder() > 0; }
 
 	    // ---- Parameter requirements (optional) ----
 	    [[nodiscard]] const ParameterRegistry& parameterRegistry() const noexcept { return parameter_registry_; }
@@ -271,13 +276,14 @@ private:
     std::vector<GlobalIndex> field_dof_offsets_{};
     dofs::FieldDofMap field_map_{};
     std::unique_ptr<dofs::BlockDofMap> block_map_{};
-    constraints::AffineConstraints affine_constraints_{};
+	    constraints::AffineConstraints affine_constraints_{};
 
-    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>> sparsity_by_op_{};
+	    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>> sparsity_by_op_{};
+	    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::DistributedSparsityPattern>> distributed_sparsity_by_op_{};
 
-	    std::unique_ptr<assembly::Assembler> assembler_{};
-	    std::string assembler_selection_report_{};
-	    std::unique_ptr<assembly::IMaterialStateProvider> material_state_provider_{};
+		    std::unique_ptr<assembly::Assembler> assembler_{};
+		    std::string assembler_selection_report_{};
+		    std::unique_ptr<assembly::IMaterialStateProvider> material_state_provider_{};
 	    std::unique_ptr<GlobalKernelStateProvider> global_kernel_state_provider_{};
     std::unique_ptr<OperatorBackends> operator_backends_{};
     std::unique_ptr<CoupledBoundaryManager> coupled_boundary_{};
