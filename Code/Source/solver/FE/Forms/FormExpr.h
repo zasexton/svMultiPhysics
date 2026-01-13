@@ -187,6 +187,7 @@ using ScalarCoefficient = std::function<Real(Real, Real, Real)>;
 using TimeScalarCoefficient = std::function<Real(Real, Real, Real, Real)>;
 using VectorCoefficient = std::function<std::array<Real, 3>(Real, Real, Real)>;
 using MatrixCoefficient = std::function<std::array<std::array<Real, 3>, 3>(Real, Real, Real)>;
+using Tensor3Coefficient = std::function<std::array<Real, 27>(Real, Real, Real)>;
 using Tensor4Coefficient = std::function<std::array<Real, 81>(Real, Real, Real)>;
 
 /**
@@ -235,6 +236,7 @@ public:
     [[nodiscard]] virtual const TimeScalarCoefficient* timeScalarCoefficient() const { return nullptr; }
     [[nodiscard]] virtual const VectorCoefficient* vectorCoefficient() const { return nullptr; }
     [[nodiscard]] virtual const MatrixCoefficient* matrixCoefficient() const { return nullptr; }
+    [[nodiscard]] virtual const Tensor3Coefficient* tensor3Coefficient() const { return nullptr; }
     [[nodiscard]] virtual const Tensor4Coefficient* tensor4Coefficient() const { return nullptr; }
     [[nodiscard]] virtual const ConstitutiveModel* constitutiveModel() const { return nullptr; }
     [[nodiscard]] virtual std::shared_ptr<const ConstitutiveModel> constitutiveModelShared() const { return {}; }
@@ -278,6 +280,7 @@ public:
     static FormExpr coefficient(std::string name, TimeScalarCoefficient func);
     static FormExpr coefficient(std::string name, VectorCoefficient func);
     static FormExpr coefficient(std::string name, MatrixCoefficient func);
+    static FormExpr coefficient(std::string name, Tensor3Coefficient func);
     static FormExpr coefficient(std::string name, Tensor4Coefficient func);
 
     static FormExpr parameter(std::string name);

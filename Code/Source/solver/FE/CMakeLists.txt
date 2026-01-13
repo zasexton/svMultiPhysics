@@ -1580,21 +1580,22 @@ if(FE_BUILD_TESTS)
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Forms/test_main.cpp)
 		            set(FE_FORMS_TEST_SOURCES
 		                Tests/Unit/Forms/test_FormExpr.cpp
-	                    Tests/Unit/Forms/test_CoupledTerminals.cpp
-	                    Tests/Unit/Forms/test_JITValidation.cpp
-	                    Tests/Unit/Forms/test_PointEvaluator.cpp
+		                    Tests/Unit/Forms/test_CoupledTerminals.cpp
+		                    Tests/Unit/Forms/test_JITValidation.cpp
+		                    Tests/Unit/Forms/test_PointEvaluator.cpp
 		                Tests/Unit/Forms/test_BoundaryConditionHelpers.cpp
 		                Tests/Unit/Forms/test_FormCompiler.cpp
-	                Tests/Unit/Forms/test_Dual.cpp
-	                Tests/Unit/Forms/test_DynamicValueShapes.cpp
-	                Tests/Unit/Forms/test_FormKernel_Cell.cpp
-	                Tests/Unit/Forms/test_FormKernel_Boundary.cpp
-	                Tests/Unit/Forms/test_FormKernel_DG.cpp
-	                Tests/Unit/Forms/test_FormVocabulary.cpp
-                Tests/Unit/Forms/test_MixedSpaceVocabulary.cpp
-                Tests/Unit/Forms/test_Einsum.cpp
-                Tests/Unit/Forms/test_NonlinearFormKernel.cpp
-                Tests/Unit/Forms/test_ConstitutiveModel.cpp
+		                Tests/Unit/Forms/test_Dual.cpp
+		                Tests/Unit/Forms/test_DynamicValueShapes.cpp
+		                Tests/Unit/Forms/test_FormKernel_Cell.cpp
+		                Tests/Unit/Forms/test_FormKernel_Boundary.cpp
+		                Tests/Unit/Forms/test_FormKernel_DG.cpp
+		                Tests/Unit/Forms/test_FormSpatialDerivatives.cpp
+		                Tests/Unit/Forms/test_FormVocabulary.cpp
+	                Tests/Unit/Forms/test_MixedSpaceVocabulary.cpp
+	                Tests/Unit/Forms/test_Einsum.cpp
+	                Tests/Unit/Forms/test_NonlinearFormKernel.cpp
+	                Tests/Unit/Forms/test_ConstitutiveModel.cpp
                 Tests/Unit/Forms/test_PrimitiveTypes.cpp
                 Tests/Unit/Forms/test_main.cpp
             )

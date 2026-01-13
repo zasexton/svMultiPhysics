@@ -304,6 +304,11 @@ public:
     {
     }
 
+    explicit CoefficientNode(std::string name, Tensor3Coefficient func)
+        : name_(std::move(name)), tensor3_func_(std::move(func))
+    {
+    }
+
     explicit CoefficientNode(std::string name, Tensor4Coefficient func)
         : name_(std::move(name)), tensor4_func_(std::move(func))
     {
@@ -330,6 +335,10 @@ public:
         return matrix_func_ ? &matrix_func_ : nullptr;
     }
 
+    [[nodiscard]] const Tensor3Coefficient* tensor3Coefficient() const override {
+        return tensor3_func_ ? &tensor3_func_ : nullptr;
+    }
+
     [[nodiscard]] const Tensor4Coefficient* tensor4Coefficient() const override {
         return tensor4_func_ ? &tensor4_func_ : nullptr;
     }
@@ -338,12 +347,14 @@ public:
     [[nodiscard]] bool isTimeScalar() const noexcept { return static_cast<bool>(time_scalar_func_); }
     [[nodiscard]] bool isVector() const noexcept { return static_cast<bool>(vector_func_); }
     [[nodiscard]] bool isMatrix() const noexcept { return static_cast<bool>(matrix_func_); }
+    [[nodiscard]] bool isTensor3() const noexcept { return static_cast<bool>(tensor3_func_); }
     [[nodiscard]] bool isTensor4() const noexcept { return static_cast<bool>(tensor4_func_); }
 
     [[nodiscard]] const ScalarCoefficient& scalarFunc() const { return scalar_func_; }
     [[nodiscard]] const TimeScalarCoefficient& timeScalarFunc() const { return time_scalar_func_; }
     [[nodiscard]] const VectorCoefficient& vectorFunc() const { return vector_func_; }
     [[nodiscard]] const MatrixCoefficient& matrixFunc() const { return matrix_func_; }
+    [[nodiscard]] const Tensor3Coefficient& tensor3Func() const { return tensor3_func_; }
     [[nodiscard]] const Tensor4Coefficient& tensor4Func() const { return tensor4_func_; }
 
 private:
@@ -352,6 +363,7 @@ private:
     TimeScalarCoefficient time_scalar_func_{};
     VectorCoefficient vector_func_{};
     MatrixCoefficient matrix_func_{};
+    Tensor3Coefficient tensor3_func_{};
     Tensor4Coefficient tensor4_func_{};
 };
 
@@ -1350,6 +1362,11 @@ FormExpr FormExpr::coefficient(std::string name, VectorCoefficient func)
 }
 
 FormExpr FormExpr::coefficient(std::string name, MatrixCoefficient func)
+{
+    return FormExpr(std::make_shared<CoefficientNode>(std::move(name), std::move(func)));
+}
+
+FormExpr FormExpr::coefficient(std::string name, Tensor3Coefficient func)
 {
     return FormExpr(std::make_shared<CoefficientNode>(std::move(name), std::move(func)));
 }

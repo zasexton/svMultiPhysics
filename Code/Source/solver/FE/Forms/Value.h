@@ -23,6 +23,7 @@ struct Value {
         Matrix,
         SymmetricMatrix,
         SkewMatrix,
+        Tensor3,
         Tensor4
     };
 
@@ -30,17 +31,22 @@ struct Value {
     T s{};
     std::array<T, 3> v{};
     std::array<std::array<T, 3>, 3> m{};
+    std::array<T, 27> t3{};
     std::array<T, 81> t4{};
 
     // Optional dynamic payloads for shapes that exceed the inline storage.
     std::vector<T> v_dyn{};
     std::vector<T> m_dyn{};
+    std::vector<T> t3_dyn{};
 
     // Optional shape metadata. When unset (== 0), callers may assume the legacy
     // 3-component / 3×3 conventions.
     int vector_size{0};
     int matrix_rows{0};
     int matrix_cols{0};
+    int tensor3_dim0{0};
+    int tensor3_dim1{0};
+    int tensor3_dim2{0};
 
     [[nodiscard]] std::size_t vectorSize() const noexcept
     {
@@ -61,6 +67,33 @@ struct Value {
         if (kind != Kind::Matrix && kind != Kind::SymmetricMatrix && kind != Kind::SkewMatrix) return 0u;
         if (matrix_cols > 0) return static_cast<std::size_t>(matrix_cols);
         return 3u;
+    }
+
+    [[nodiscard]] std::size_t tensor3Dim0() const noexcept
+    {
+        if (kind != Kind::Tensor3) return 0u;
+        if (tensor3_dim0 > 0) return static_cast<std::size_t>(tensor3_dim0);
+        return 3u;
+    }
+
+    [[nodiscard]] std::size_t tensor3Dim1() const noexcept
+    {
+        if (kind != Kind::Tensor3) return 0u;
+        if (tensor3_dim1 > 0) return static_cast<std::size_t>(tensor3_dim1);
+        return 3u;
+    }
+
+    [[nodiscard]] std::size_t tensor3Dim2() const noexcept
+    {
+        if (kind != Kind::Tensor3) return 0u;
+        if (tensor3_dim2 > 0) return static_cast<std::size_t>(tensor3_dim2);
+        return 3u;
+    }
+
+    [[nodiscard]] std::size_t tensor3Size() const noexcept
+    {
+        if (kind != Kind::Tensor3) return 0u;
+        return tensor3Dim0() * tensor3Dim1() * tensor3Dim2();
     }
 
     void resizeVector(std::size_t n)
@@ -86,6 +119,21 @@ struct Value {
         }
         m_dyn.assign(rows * cols, T{});
         m = {};
+    }
+
+    void resizeTensor3(std::size_t d0, std::size_t d1, std::size_t d2)
+    {
+        tensor3_dim0 = static_cast<int>(d0);
+        tensor3_dim1 = static_cast<int>(d1);
+        tensor3_dim2 = static_cast<int>(d2);
+
+        if (d0 <= 3u && d1 <= 3u && d2 <= 3u) {
+            t3_dyn.clear();
+            t3 = {};
+            return;
+        }
+        t3_dyn.assign(d0 * d1 * d2, T{});
+        t3 = {};
     }
 
     [[nodiscard]] std::span<T> vectorSpan()
@@ -130,6 +178,22 @@ struct Value {
             return m[r][c];
         }
         return m_dyn[r * static_cast<std::size_t>(matrix_cols) + c];
+    }
+
+    [[nodiscard]] T& tensor3At(std::size_t i, std::size_t j, std::size_t k)
+    {
+        if (tensor3_dim0 <= 3 && tensor3_dim1 <= 3 && tensor3_dim2 <= 3 && t3_dyn.empty()) {
+            return t3[(i * 3u + j) * 3u + k];
+        }
+        return t3_dyn[(i * static_cast<std::size_t>(tensor3_dim1) + j) * static_cast<std::size_t>(tensor3_dim2) + k];
+    }
+
+    [[nodiscard]] const T& tensor3At(std::size_t i, std::size_t j, std::size_t k) const
+    {
+        if (tensor3_dim0 <= 3 && tensor3_dim1 <= 3 && tensor3_dim2 <= 3 && t3_dyn.empty()) {
+            return t3[(i * 3u + j) * 3u + k];
+        }
+        return t3_dyn[(i * static_cast<std::size_t>(tensor3_dim1) + j) * static_cast<std::size_t>(tensor3_dim2) + k];
     }
 };
 

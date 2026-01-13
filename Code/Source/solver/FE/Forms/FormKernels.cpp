@@ -23,6 +23,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -134,12 +135,19 @@ constexpr bool isTensor4Kind(typename EvalValue<Scalar>::Kind k) noexcept
 }
 
 template<typename Scalar>
+constexpr bool isTensor3Kind(typename EvalValue<Scalar>::Kind k) noexcept
+{
+    return k == EvalValue<Scalar>::Kind::Tensor3;
+}
+
+template<typename Scalar>
 constexpr bool sameCategory(typename EvalValue<Scalar>::Kind a,
                             typename EvalValue<Scalar>::Kind b) noexcept
 {
     return (isScalarKind<Scalar>(a) && isScalarKind<Scalar>(b)) ||
            (isVectorKind<Scalar>(a) && isVectorKind<Scalar>(b)) ||
            (isMatrixKind<Scalar>(a) && isMatrixKind<Scalar>(b)) ||
+           (isTensor3Kind<Scalar>(a) && isTensor3Kind<Scalar>(b)) ||
            (isTensor4Kind<Scalar>(a) && isTensor4Kind<Scalar>(b));
 }
 
@@ -150,6 +158,9 @@ constexpr typename EvalValue<Scalar>::Kind addSubResultKind(typename EvalValue<S
     if (a == b) return a;
     if (isMatrixKind<Scalar>(a) && isMatrixKind<Scalar>(b)) {
         return EvalValue<Scalar>::Kind::Matrix;
+    }
+    if (isTensor3Kind<Scalar>(a) && isTensor3Kind<Scalar>(b)) {
+        return EvalValue<Scalar>::Kind::Tensor3;
     }
     if (isTensor4Kind<Scalar>(a) && isTensor4Kind<Scalar>(b)) {
         return EvalValue<Scalar>::Kind::Tensor4;
@@ -627,6 +638,49 @@ std::array<Real, 3> fdGradScalarTime(const TimeScalarCoefficient& f,
     return g;
 }
 
+std::array<std::array<Real, 3>, 3> fdGradVector(const VectorCoefficient& f, const std::array<Real, 3>& x, int dim)
+{
+    std::array<std::array<Real, 3>, 3> J{};
+    const Real h = kCoeffFDStep;
+    for (int d = 0; d < dim; ++d) {
+        auto xp = x;
+        auto xm = x;
+        xp[static_cast<std::size_t>(d)] += h;
+        xm[static_cast<std::size_t>(d)] -= h;
+        const auto vp = f(xp[0], xp[1], xp[2]);
+        const auto vm = f(xm[0], xm[1], xm[2]);
+        for (int comp = 0; comp < 3; ++comp) {
+            J[static_cast<std::size_t>(comp)][static_cast<std::size_t>(d)] =
+                (vp[static_cast<std::size_t>(comp)] - vm[static_cast<std::size_t>(comp)]) / (2.0 * h);
+        }
+    }
+    return J;
+}
+
+std::array<Real, 27> fdGradMatrix(const MatrixCoefficient& f, const std::array<Real, 3>& x, int dim)
+{
+    // Return (dA_{ij}/dx_k) stored as (i,j,k) with stride-3 packing.
+    std::array<Real, 27> G{};
+    const Real h = kCoeffFDStep;
+    for (int k = 0; k < dim; ++k) {
+        auto xp = x;
+        auto xm = x;
+        xp[static_cast<std::size_t>(k)] += h;
+        xm[static_cast<std::size_t>(k)] -= h;
+        const auto Ap = f(xp[0], xp[1], xp[2]);
+        const auto Am = f(xm[0], xm[1], xm[2]);
+        for (int i = 0; i < dim; ++i) {
+            for (int j = 0; j < dim; ++j) {
+                const std::size_t idx = static_cast<std::size_t>((i * 3 + j) * 3 + k);
+                G[idx] = (Ap[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] -
+                          Am[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)]) /
+                         (2.0 * h);
+            }
+        }
+    }
+    return G;
+}
+
 std::array<std::array<Real, 3>, 3> fdHessScalar(const ScalarCoefficient& f, const std::array<Real, 3>& x, int dim)
 {
     std::array<std::array<Real, 3>, 3> H{};
@@ -672,6 +726,69 @@ std::array<std::array<Real, 3>, 3> fdHessScalar(const ScalarCoefficient& f, cons
             const Real val = (fpp - fpm - fmp + fmm) / (4.0 * h * h);
             H[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = val;
             H[static_cast<std::size_t>(j)][static_cast<std::size_t>(i)] = val;
+        }
+    }
+
+    return H;
+}
+
+std::array<Real, 27> fdHessVector(const VectorCoefficient& f, const std::array<Real, 3>& x, int dim)
+{
+    std::array<Real, 27> H{};
+    const Real h = kCoeffFDStep2;
+    const auto f0 = f(x[0], x[1], x[2]);
+
+    // Diagonal second derivatives
+    for (int i = 0; i < dim; ++i) {
+        auto xp = x;
+        auto xm = x;
+        xp[static_cast<std::size_t>(i)] += h;
+        xm[static_cast<std::size_t>(i)] -= h;
+        const auto fp = f(xp[0], xp[1], xp[2]);
+        const auto fm = f(xm[0], xm[1], xm[2]);
+        for (int comp = 0; comp < 3; ++comp) {
+            const std::size_t idx = static_cast<std::size_t>((comp * 3 + i) * 3 + i);
+            H[idx] = (fp[static_cast<std::size_t>(comp)] - 2.0 * f0[static_cast<std::size_t>(comp)] +
+                      fm[static_cast<std::size_t>(comp)]) /
+                     (h * h);
+        }
+    }
+
+    // Mixed second derivatives (symmetric)
+    for (int i = 0; i < dim; ++i) {
+        for (int j = i + 1; j < dim; ++j) {
+            auto xpp = x;
+            auto xpm = x;
+            auto xmp = x;
+            auto xmm = x;
+
+            xpp[static_cast<std::size_t>(i)] += h;
+            xpp[static_cast<std::size_t>(j)] += h;
+
+            xpm[static_cast<std::size_t>(i)] += h;
+            xpm[static_cast<std::size_t>(j)] -= h;
+
+            xmp[static_cast<std::size_t>(i)] -= h;
+            xmp[static_cast<std::size_t>(j)] += h;
+
+            xmm[static_cast<std::size_t>(i)] -= h;
+            xmm[static_cast<std::size_t>(j)] -= h;
+
+            const auto fpp = f(xpp[0], xpp[1], xpp[2]);
+            const auto fpm = f(xpm[0], xpm[1], xpm[2]);
+            const auto fmp = f(xmp[0], xmp[1], xmp[2]);
+            const auto fmm = f(xmm[0], xmm[1], xmm[2]);
+
+            for (int comp = 0; comp < 3; ++comp) {
+                const Real val =
+                    (fpp[static_cast<std::size_t>(comp)] - fpm[static_cast<std::size_t>(comp)] -
+                     fmp[static_cast<std::size_t>(comp)] + fmm[static_cast<std::size_t>(comp)]) /
+                    (4.0 * h * h);
+                const std::size_t idx_ij = static_cast<std::size_t>((comp * 3 + i) * 3 + j);
+                const std::size_t idx_ji = static_cast<std::size_t>((comp * 3 + j) * 3 + i);
+                H[idx_ij] = val;
+                H[idx_ji] = val;
+            }
         }
     }
 
@@ -774,6 +891,2880 @@ std::array<Real, 3> fdCurlVector(const VectorCoefficient& f, const std::array<Re
     c[1] = d(0, 2) - d(2, 0);
     c[2] = d(1, 0) - d(0, 1);
     return c;
+}
+
+// ============================================================================
+// Spatial jets (value + spatial derivatives via chain rule)
+// ============================================================================
+
+struct EvalEnvReal;
+struct EvalEnvDual;
+
+template<typename Scalar, typename Env>
+Scalar makeScalarConstant(Real value, const Env& env)
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        (void)env;
+        return value;
+    } else {
+        return makeDualConstant(value, env.ws->alloc());
+    }
+}
+
+template<typename Scalar>
+Real scalarNumericValue(const Scalar& v) noexcept
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        return v;
+    } else {
+        return v.value;
+    }
+}
+
+template<typename Scalar, typename Env>
+Scalar s_add(const Scalar& a, const Scalar& b, const Env& env)
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        (void)env;
+        return a + b;
+    } else {
+        return add(a, b, makeDualConstant(0.0, env.ws->alloc()));
+    }
+}
+
+template<typename Scalar, typename Env>
+Scalar s_sub(const Scalar& a, const Scalar& b, const Env& env)
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        (void)env;
+        return a - b;
+    } else {
+        return sub(a, b, makeDualConstant(0.0, env.ws->alloc()));
+    }
+}
+
+template<typename Scalar, typename Env>
+Scalar s_mul(const Scalar& a, const Scalar& b, const Env& env)
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        (void)env;
+        return a * b;
+    } else {
+        return mul(a, b, makeDualConstant(0.0, env.ws->alloc()));
+    }
+}
+
+template<typename Scalar, typename Env, std::enable_if_t<!std::is_same_v<Scalar, Real>, int> = 0>
+Scalar s_mul(const Scalar& a, Real b, const Env& env)
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        (void)env;
+        return a * b;
+    } else {
+        return mul(a, b, makeDualConstant(0.0, env.ws->alloc()));
+    }
+}
+
+template<typename Scalar, typename Env, std::enable_if_t<!std::is_same_v<Scalar, Real>, int> = 0>
+Scalar s_mul(Real a, const Scalar& b, const Env& env)
+{
+    return s_mul(b, a, env);
+}
+
+template<typename Scalar, typename Env>
+Scalar s_div(const Scalar& a, const Scalar& b, const Env& env)
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        (void)env;
+        return a / b;
+    } else {
+        return div(a, b, makeDualConstant(0.0, env.ws->alloc()));
+    }
+}
+
+template<typename Scalar, typename Env, std::enable_if_t<!std::is_same_v<Scalar, Real>, int> = 0>
+Scalar s_div(const Scalar& a, Real b, const Env& env)
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        (void)env;
+        return a / b;
+    } else {
+        return div(a, b, makeDualConstant(0.0, env.ws->alloc()));
+    }
+}
+
+template<typename Scalar, typename Env>
+Scalar s_neg(const Scalar& a, const Env& env)
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        (void)env;
+        return -a;
+    } else {
+        return neg(a, makeDualConstant(0.0, env.ws->alloc()));
+    }
+}
+
+template<typename Scalar, typename Env>
+Scalar s_sqrt(const Scalar& a, const Env& env)
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        (void)env;
+        return std::sqrt(a);
+    } else {
+        return sqrt(a, makeDualConstant(0.0, env.ws->alloc()));
+    }
+}
+
+template<typename Scalar, typename Env>
+Scalar s_exp(const Scalar& a, const Env& env)
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        (void)env;
+        return std::exp(a);
+    } else {
+        return exp(a, makeDualConstant(0.0, env.ws->alloc()));
+    }
+}
+
+template<typename Scalar, typename Env>
+Scalar s_log(const Scalar& a, const Env& env)
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        (void)env;
+        return std::log(a);
+    } else {
+        return log(a, makeDualConstant(0.0, env.ws->alloc()));
+    }
+}
+
+template<typename Scalar, typename Env>
+Scalar s_pow(const Scalar& a, const Scalar& b, const Env& env)
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        (void)env;
+        return std::pow(a, b);
+    } else {
+        return pow(a, b, makeDualConstant(0.0, env.ws->alloc()));
+    }
+}
+
+template<typename Scalar, typename Env>
+Scalar s_abs(const Scalar& a, const Env& env)
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        (void)env;
+        return std::abs(a);
+    } else {
+        return abs(a, makeDualConstant(0.0, env.ws->alloc()));
+    }
+}
+
+template<typename Scalar, typename Env>
+Scalar s_sign(const Scalar& a, const Env& env)
+{
+    if constexpr (std::is_same_v<Scalar, Real>) {
+        (void)env;
+        return (a > 0.0) ? 1.0 : ((a < 0.0) ? -1.0 : 0.0);
+    } else {
+        return sign(a, makeDualConstant(0.0, env.ws->alloc()));
+    }
+}
+
+template<typename Scalar, typename Env>
+EvalValue<Scalar> zeroVector(std::size_t n, const Env& env)
+{
+    EvalValue<Scalar> out;
+    out.kind = EvalValue<Scalar>::Kind::Vector;
+    out.resizeVector(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        out.vectorAt(i) = makeScalarConstant<Scalar>(0.0, env);
+    }
+    return out;
+}
+
+template<typename Scalar, typename Env>
+EvalValue<Scalar> zeroMatrix(std::size_t rows, std::size_t cols, const Env& env)
+{
+    EvalValue<Scalar> out;
+    out.kind = EvalValue<Scalar>::Kind::Matrix;
+    out.resizeMatrix(rows, cols);
+    for (std::size_t r = 0; r < rows; ++r) {
+        for (std::size_t c = 0; c < cols; ++c) {
+            out.matrixAt(r, c) = makeScalarConstant<Scalar>(0.0, env);
+        }
+    }
+    return out;
+}
+
+template<typename Scalar, typename Env>
+EvalValue<Scalar> zeroTensor3(std::size_t d0, std::size_t d1, std::size_t d2, const Env& env)
+{
+    EvalValue<Scalar> out;
+    out.kind = EvalValue<Scalar>::Kind::Tensor3;
+    out.resizeTensor3(d0, d1, d2);
+    for (std::size_t i = 0; i < d0; ++i) {
+        for (std::size_t j = 0; j < d1; ++j) {
+            for (std::size_t k = 0; k < d2; ++k) {
+                out.tensor3At(i, j, k) = makeScalarConstant<Scalar>(0.0, env);
+            }
+        }
+    }
+    return out;
+}
+
+template<typename Scalar>
+struct SpatialJet {
+    EvalValue<Scalar> value{};
+    EvalValue<Scalar> grad{};
+    EvalValue<Scalar> hess{};
+    bool has_grad{false};
+    bool has_hess{false};
+};
+
+template<typename Scalar, typename Env>
+EvalValue<Scalar> addSubValue(const EvalValue<Scalar>& a, const EvalValue<Scalar>& b, bool add, const Env& env)
+{
+    if (!sameCategory<Scalar>(a.kind, b.kind)) {
+        throw FEException("Forms: spatial jet add/sub kind mismatch",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+    if (isVectorKind<Scalar>(a.kind) && a.vectorSize() != b.vectorSize()) {
+        throw FEException("Forms: spatial jet add/sub vector size mismatch",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+    if (isMatrixKind<Scalar>(a.kind) && (a.matrixRows() != b.matrixRows() || a.matrixCols() != b.matrixCols())) {
+        throw FEException("Forms: spatial jet add/sub matrix shape mismatch",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+    if (isTensor3Kind<Scalar>(a.kind) &&
+        (a.tensor3Dim0() != b.tensor3Dim0() ||
+         a.tensor3Dim1() != b.tensor3Dim1() ||
+         a.tensor3Dim2() != b.tensor3Dim2())) {
+        throw FEException("Forms: spatial jet add/sub tensor3 shape mismatch",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+
+    EvalValue<Scalar> out;
+    out.kind = addSubResultKind<Scalar>(a.kind, b.kind);
+
+    if (isScalarKind<Scalar>(a.kind)) {
+        out.s = add ? s_add(a.s, b.s, env) : s_sub(a.s, b.s, env);
+        return out;
+    }
+
+    if (isVectorKind<Scalar>(a.kind)) {
+        out.resizeVector(a.vectorSize());
+        for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+            out.vectorAt(d) = add ? s_add(a.vectorAt(d), b.vectorAt(d), env)
+                                  : s_sub(a.vectorAt(d), b.vectorAt(d), env);
+        }
+        return out;
+    }
+
+    if (isMatrixKind<Scalar>(a.kind)) {
+        out.kind = EvalValue<Scalar>::Kind::Matrix;
+        out.resizeMatrix(a.matrixRows(), a.matrixCols());
+        for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+            for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                out.matrixAt(r, c) = add ? s_add(a.matrixAt(r, c), b.matrixAt(r, c), env)
+                                         : s_sub(a.matrixAt(r, c), b.matrixAt(r, c), env);
+            }
+        }
+        return out;
+    }
+
+    if (isTensor3Kind<Scalar>(a.kind)) {
+        out.resizeTensor3(a.tensor3Dim0(), a.tensor3Dim1(), a.tensor3Dim2());
+        for (std::size_t i = 0; i < a.tensor3Dim0(); ++i) {
+            for (std::size_t j = 0; j < a.tensor3Dim1(); ++j) {
+                for (std::size_t k = 0; k < a.tensor3Dim2(); ++k) {
+                    out.tensor3At(i, j, k) = add ? s_add(a.tensor3At(i, j, k), b.tensor3At(i, j, k), env)
+                                                 : s_sub(a.tensor3At(i, j, k), b.tensor3At(i, j, k), env);
+                }
+            }
+        }
+        return out;
+    }
+
+    throw FEException("Forms: spatial jet add/sub unsupported kind",
+                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+}
+
+template<typename Scalar, typename Env>
+SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
+                                  const Env& env,
+                                  Side side,
+                                  LocalIndex q,
+                                  int order)
+{
+    FE_THROW_IF(order < 0 || order > 2, InvalidArgumentException,
+                "Forms: spatial jet supports order 0..2 only");
+
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+
+    SpatialJet<Scalar> out;
+    out.has_grad = (order >= 1);
+    out.has_hess = (order >= 2);
+
+    switch (node.type()) {
+        case FormExprType::Constant: {
+            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+            out.value.s = makeScalarConstant<Scalar>(node.constantValue().value_or(0.0), env);
+            if (out.has_grad) {
+                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+            }
+            if (out.has_hess) {
+                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+            }
+            return out;
+        }
+        case FormExprType::Time: {
+            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+            out.value.s = makeScalarConstant<Scalar>(ctx.time(), env);
+            if (out.has_grad) {
+                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+            }
+            if (out.has_hess) {
+                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+            }
+            return out;
+        }
+	        case FormExprType::TimeStep: {
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(ctx.timeStep(), env);
+	            if (out.has_grad) {
+	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            return out;
+	        }
+	        case FormExprType::CellDiameter: {
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(ctx.cellDiameter(), env);
+	            if (out.has_grad) {
+	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            return out;
+	        }
+	        case FormExprType::CellVolume: {
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(ctx.cellVolume(), env);
+	            if (out.has_grad) {
+	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            return out;
+	        }
+	        case FormExprType::FacetArea: {
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(ctx.facetArea(), env);
+	            if (out.has_grad) {
+	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            return out;
+	        }
+	        case FormExprType::Normal: {
+	            out.value.kind = EvalValue<Scalar>::Kind::Vector;
+	            out.value.vector_size = dim;
+	            const auto n = ctx.normal(q);
+	            for (int d = 0; d < 3; ++d) {
+	                out.value.v[static_cast<std::size_t>(d)] =
+	                    makeScalarConstant<Scalar>(n[static_cast<std::size_t>(d)], env);
+	            }
+	            if (out.has_grad) {
+	                out.grad = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroTensor3<Scalar>(static_cast<std::size_t>(dim),
+	                                               static_cast<std::size_t>(dim),
+	                                               static_cast<std::size_t>(dim),
+	                                               env);
+	            }
+	            return out;
+	        }
+	        case FormExprType::ParameterSymbol: {
+	            const auto nm = node.symbolName();
+	            FE_THROW_IF(!nm || nm->empty(), InvalidArgumentException,
+	                        "Forms: ParameterSymbol node missing name (jet)");
+	            const auto* get = ctx.realParameterGetter();
+	            FE_THROW_IF(get == nullptr || !static_cast<bool>(*get), InvalidArgumentException,
+	                        "Forms: ParameterSymbol requires a real parameter getter in AssemblyContext (jet)");
+	            const auto v = (*get)(*nm);
+	            FE_THROW_IF(!v.has_value(), InvalidArgumentException,
+	                        "Forms: missing required parameter '" + std::string(*nm) + "' (jet)");
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(*v, env);
+	            if (out.has_grad) {
+	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            return out;
+	        }
+	        case FormExprType::ParameterRef: {
+	            const auto slot = node.slotIndex().value_or(0u);
+	            const auto vals = ctx.jitConstants();
+	            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+	                        "Forms: ParameterRef requires AssemblyContext::jitConstants() (jet)");
+	            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+	                        "Forms: ParameterRef slot out of range (jet)");
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(vals[slot], env);
+	            if (out.has_grad) {
+	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            return out;
+	        }
+	        case FormExprType::BoundaryIntegralRef: {
+	            const auto slot = node.slotIndex().value_or(0u);
+	            const auto vals = ctx.coupledIntegrals();
+	            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+	                        "Forms: BoundaryIntegralRef requires coupled integrals in AssemblyContext (jet)");
+	            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+	                        "Forms: BoundaryIntegralRef slot out of range (jet)");
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(vals[slot], env);
+	            if (out.has_grad) {
+	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            return out;
+	        }
+	        case FormExprType::AuxiliaryStateRef: {
+	            const auto slot = node.slotIndex().value_or(0u);
+	            const auto vals = ctx.coupledAuxState();
+	            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+	                        "Forms: AuxiliaryStateRef requires coupled auxiliary state in AssemblyContext (jet)");
+	            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+	                        "Forms: AuxiliaryStateRef slot out of range (jet)");
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(vals[slot], env);
+	            if (out.has_grad) {
+	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            return out;
+	        }
+	        case FormExprType::MaterialStateOldRef: {
+	            const auto off = node.stateOffsetBytes();
+	            FE_THROW_IF(!off.has_value(), InvalidArgumentException,
+	                        "Forms: MaterialStateOldRef node missing offset (jet)");
+	            FE_THROW_IF(!ctx.hasMaterialState(), InvalidArgumentException,
+	                        "Forms: MaterialStateOldRef requires material state in AssemblyContext (jet)");
+	            const auto state = ctx.materialStateOld(q);
+	            const auto offset = static_cast<std::size_t>(*off);
+	            FE_THROW_IF(offset + sizeof(Real) > state.size(), InvalidArgumentException,
+	                        "Forms: MaterialStateOldRef offset out of range (jet)");
+	            Real v = 0.0;
+	            std::memcpy(&v, state.data() + offset, sizeof(Real));
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(v, env);
+	            if (out.has_grad) {
+	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            return out;
+	        }
+	        case FormExprType::MaterialStateWorkRef: {
+	            const auto off = node.stateOffsetBytes();
+	            FE_THROW_IF(!off.has_value(), InvalidArgumentException,
+	                        "Forms: MaterialStateWorkRef node missing offset (jet)");
+	            FE_THROW_IF(!ctx.hasMaterialState(), InvalidArgumentException,
+	                        "Forms: MaterialStateWorkRef requires material state in AssemblyContext (jet)");
+	            const auto state = ctx.materialStateWork(q);
+	            const auto offset = static_cast<std::size_t>(*off);
+	            FE_THROW_IF(offset + sizeof(Real) > state.size(), InvalidArgumentException,
+	                        "Forms: MaterialStateWorkRef offset out of range (jet)");
+	            Real v = 0.0;
+	            std::memcpy(&v, state.data() + offset, sizeof(Real));
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(v, env);
+	            if (out.has_grad) {
+	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            return out;
+	        }
+	        case FormExprType::PreviousSolutionRef: {
+	            const int k = node.historyIndex().value_or(1);
+	            FE_THROW_IF(k <= 0, InvalidArgumentException,
+	                        "Forms: PreviousSolutionRef requires k >= 1 (jet)");
+	
+	            const auto coeffs = ctx.previousSolutionCoefficientsRaw(k);
+	            FE_THROW_IF(coeffs.empty(), InvalidArgumentException,
+	                        "Forms: PreviousSolutionRef coefficients not available (jet)");
+	
+	            if (ctx.trialFieldType() == FieldType::Vector) {
+	                const int vd = ctx.trialValueDimension();
+	                FE_THROW_IF(vd <= 0 || vd > 3, InvalidArgumentException,
+	                            "Forms: PreviousSolutionRef vector value_dimension must be 1..3 (jet)");
+	
+	                out.value.kind = EvalValue<Scalar>::Kind::Vector;
+	                out.value.vector_size = vd;
+	                const auto u_val = ctx.previousSolutionVectorValue(q, k);
+	                for (int c = 0; c < 3; ++c) {
+	                    out.value.v[static_cast<std::size_t>(c)] =
+	                        makeScalarConstant<Scalar>(u_val[static_cast<std::size_t>(c)], env);
+	                }
+	
+	                const LocalIndex n_trial = ctx.numTrialDofs();
+	                FE_THROW_IF((n_trial % static_cast<LocalIndex>(vd)) != 0, InvalidArgumentException,
+	                            "Forms: PreviousSolutionRef trial DOF count not divisible by value_dimension (jet)");
+	                const LocalIndex dofs_per_component =
+	                    static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+	
+	                if (out.has_grad) {
+	                    out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+	                    out.grad.matrix_rows = vd;
+	                    out.grad.matrix_cols = dim;
+	                    for (int r = 0; r < 3; ++r) {
+	                        for (int c = 0; c < 3; ++c) {
+	                            out.grad.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+	                                makeScalarConstant<Scalar>(0.0, env);
+	                        }
+	                    }
+	                    for (int comp = 0; comp < vd; ++comp) {
+	                        const LocalIndex base = static_cast<LocalIndex>(comp) * dofs_per_component;
+	                        for (LocalIndex jj = 0; jj < dofs_per_component; ++jj) {
+	                            const LocalIndex j = base + jj;
+	                            const auto grad_j = ctx.trialPhysicalGradient(j, q);
+	                            const Real coef = coeffs[static_cast<std::size_t>(j)];
+	                            for (int d = 0; d < dim; ++d) {
+	                                out.grad.m[static_cast<std::size_t>(comp)][static_cast<std::size_t>(d)] =
+	                                    s_add(out.grad.m[static_cast<std::size_t>(comp)][static_cast<std::size_t>(d)],
+	                                          makeScalarConstant<Scalar>(coef * grad_j[static_cast<std::size_t>(d)], env),
+	                                          env);
+	                            }
+	                        }
+	                    }
+	                }
+	
+	                if (out.has_hess) {
+	                    out.hess.kind = EvalValue<Scalar>::Kind::Tensor3;
+	                    out.hess.tensor3_dim0 = vd;
+	                    out.hess.tensor3_dim1 = dim;
+	                    out.hess.tensor3_dim2 = dim;
+	                    for (std::size_t idx = 0; idx < out.hess.t3.size(); ++idx) {
+	                        out.hess.t3[idx] = makeScalarConstant<Scalar>(0.0, env);
+	                    }
+	
+	                    for (int comp = 0; comp < vd; ++comp) {
+	                        const LocalIndex base = static_cast<LocalIndex>(comp) * dofs_per_component;
+	                        for (LocalIndex jj = 0; jj < dofs_per_component; ++jj) {
+	                            const LocalIndex j = base + jj;
+	                            const auto Hj = ctx.trialPhysicalHessian(j, q);
+	                            const Real coef = coeffs[static_cast<std::size_t>(j)];
+	                            for (int i = 0; i < dim; ++i) {
+	                                for (int j2 = 0; j2 < dim; ++j2) {
+	                                    const std::size_t ii = static_cast<std::size_t>(i);
+	                                    const std::size_t jj2 = static_cast<std::size_t>(j2);
+	                                    out.hess.tensor3At(static_cast<std::size_t>(comp), ii, jj2) =
+	                                        s_add(out.hess.tensor3At(static_cast<std::size_t>(comp), ii, jj2),
+	                                              makeScalarConstant<Scalar>(coef * Hj[ii][jj2], env),
+	                                              env);
+	                                }
+	                            }
+	                        }
+	                    }
+	                }
+	
+	                return out;
+	            }
+	
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(ctx.previousSolutionValue(q, k), env);
+	            if (out.has_grad) {
+	                out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+	                out.grad.vector_size = dim;
+	                for (int d = 0; d < 3; ++d) {
+	                    out.grad.v[static_cast<std::size_t>(d)] = makeScalarConstant<Scalar>(0.0, env);
+	                }
+	                for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+	                    const auto grad_j = ctx.trialPhysicalGradient(j, q);
+	                    const Real coef = coeffs[static_cast<std::size_t>(j)];
+	                    for (int d = 0; d < dim; ++d) {
+	                        out.grad.v[static_cast<std::size_t>(d)] =
+	                            s_add(out.grad.v[static_cast<std::size_t>(d)],
+	                                  makeScalarConstant<Scalar>(coef * grad_j[static_cast<std::size_t>(d)], env),
+	                                  env);
+	                    }
+	                }
+	            }
+	            if (out.has_hess) {
+	                out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+	                out.hess.matrix_rows = dim;
+	                out.hess.matrix_cols = dim;
+	                for (int r = 0; r < 3; ++r) {
+	                    for (int c = 0; c < 3; ++c) {
+	                        out.hess.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+	                            makeScalarConstant<Scalar>(0.0, env);
+	                    }
+	                }
+	                for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+	                    const auto Hj = ctx.trialPhysicalHessian(j, q);
+	                    const Real coef = coeffs[static_cast<std::size_t>(j)];
+	                    for (int r = 0; r < dim; ++r) {
+	                        for (int c = 0; c < dim; ++c) {
+	                            const std::size_t rr = static_cast<std::size_t>(r);
+	                            const std::size_t cc = static_cast<std::size_t>(c);
+	                            out.hess.m[rr][cc] =
+	                                s_add(out.hess.m[rr][cc],
+	                                      makeScalarConstant<Scalar>(coef * Hj[rr][cc], env),
+	                                      env);
+	                        }
+	                    }
+	                }
+	            }
+	            return out;
+	        }
+	        case FormExprType::Coordinate: {
+	            out.value.kind = EvalValue<Scalar>::Kind::Vector;
+	            out.value.vector_size = dim;
+	            const auto x = ctx.physicalPoint(q);
+            for (int d = 0; d < 3; ++d) {
+                out.value.v[static_cast<std::size_t>(d)] = makeScalarConstant<Scalar>(x[static_cast<std::size_t>(d)], env);
+            }
+            if (out.has_grad) {
+                out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                out.grad.matrix_rows = dim;
+                out.grad.matrix_cols = dim;
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        out.grad.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                            makeScalarConstant<Scalar>((r < dim && c < dim && r == c) ? 1.0 : 0.0, env);
+                    }
+                }
+            }
+            if (out.has_hess) {
+                out.hess = zeroTensor3<Scalar>(static_cast<std::size_t>(dim),
+                                               static_cast<std::size_t>(dim),
+                                               static_cast<std::size_t>(dim),
+                                               env);
+            }
+            return out;
+        }
+        case FormExprType::Identity: {
+            const int idim = node.identityDim().value_or(dim);
+            FE_THROW_IF(idim <= 0, InvalidArgumentException, "Forms: identity dimension must be positive (jet)");
+            out.value.kind = EvalValue<Scalar>::Kind::Matrix;
+            out.value.resizeMatrix(static_cast<std::size_t>(idim), static_cast<std::size_t>(idim));
+            for (int r = 0; r < idim; ++r) {
+                for (int c = 0; c < idim; ++c) {
+                    out.value.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) =
+                        makeScalarConstant<Scalar>((r == c) ? 1.0 : 0.0, env);
+                }
+            }
+            if (out.has_grad) {
+                out.grad = zeroTensor3<Scalar>(static_cast<std::size_t>(idim),
+                                               static_cast<std::size_t>(idim),
+                                               static_cast<std::size_t>(dim),
+                                               env);
+            }
+            if (out.has_hess) {
+                throw FEException("Forms: H(identity) / second derivatives of matrix-valued constants are not supported",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            return out;
+        }
+        case FormExprType::Coefficient: {
+            if (const auto* f = node.timeScalarCoefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+                out.value.s = makeScalarConstant<Scalar>((*f)(x[0], x[1], x[2], ctx.time()), env);
+                if (out.has_grad) {
+                    const auto g = fdGradScalarTime(*f, x, ctx.time(), dim);
+                    out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+                    out.grad.vector_size = dim;
+                    for (int d = 0; d < 3; ++d) {
+                        out.grad.v[static_cast<std::size_t>(d)] = makeScalarConstant<Scalar>(g[static_cast<std::size_t>(d)], env);
+                    }
+                }
+                if (out.has_hess) {
+                    const auto H = fdHessScalarTime(*f, x, ctx.time(), dim);
+                    out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+                    out.hess.matrix_rows = dim;
+                    out.hess.matrix_cols = dim;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            out.hess.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                makeScalarConstant<Scalar>(H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env);
+                        }
+                    }
+                }
+                return out;
+            }
+            if (const auto* f = node.scalarCoefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+                out.value.s = makeScalarConstant<Scalar>((*f)(x[0], x[1], x[2]), env);
+                if (out.has_grad) {
+                    const auto g = fdGradScalar(*f, x, dim);
+                    out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+                    out.grad.vector_size = dim;
+                    for (int d = 0; d < 3; ++d) {
+                        out.grad.v[static_cast<std::size_t>(d)] = makeScalarConstant<Scalar>(g[static_cast<std::size_t>(d)], env);
+                    }
+                }
+                if (out.has_hess) {
+                    const auto H = fdHessScalar(*f, x, dim);
+                    out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+                    out.hess.matrix_rows = dim;
+                    out.hess.matrix_cols = dim;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            out.hess.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                makeScalarConstant<Scalar>(H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env);
+                        }
+                    }
+                }
+                return out;
+            }
+            if (const auto* f = node.vectorCoefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                const auto v = (*f)(x[0], x[1], x[2]);
+                out.value.kind = EvalValue<Scalar>::Kind::Vector;
+                out.value.vector_size = dim;
+                for (int c = 0; c < 3; ++c) {
+                    out.value.v[static_cast<std::size_t>(c)] = makeScalarConstant<Scalar>(v[static_cast<std::size_t>(c)], env);
+                }
+                if (out.has_grad) {
+                    const auto J = fdGradVector(*f, x, dim);
+                    out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                    out.grad.matrix_rows = dim;
+                    out.grad.matrix_cols = dim;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            out.grad.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                makeScalarConstant<Scalar>(J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env);
+                        }
+                    }
+                }
+                if (out.has_hess) {
+                    const auto H = fdHessVector(*f, x, dim);
+                    out.hess.kind = EvalValue<Scalar>::Kind::Tensor3;
+                    out.hess.tensor3_dim0 = dim;
+                    out.hess.tensor3_dim1 = dim;
+                    out.hess.tensor3_dim2 = dim;
+                    for (std::size_t idx = 0; idx < H.size(); ++idx) {
+                        out.hess.t3[idx] = makeScalarConstant<Scalar>(H[idx], env);
+                    }
+                }
+                return out;
+            }
+            if (const auto* f = node.matrixCoefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                const auto A = (*f)(x[0], x[1], x[2]);
+                out.value.kind = EvalValue<Scalar>::Kind::Matrix;
+                out.value.matrix_rows = dim;
+                out.value.matrix_cols = dim;
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        out.value.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                            makeScalarConstant<Scalar>(A[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env);
+                    }
+                }
+                if (out.has_grad) {
+                    const auto G = fdGradMatrix(*f, x, dim);
+                    out.grad.kind = EvalValue<Scalar>::Kind::Tensor3;
+                    out.grad.tensor3_dim0 = dim;
+                    out.grad.tensor3_dim1 = dim;
+                    out.grad.tensor3_dim2 = dim;
+                    for (std::size_t idx = 0; idx < G.size(); ++idx) {
+                        out.grad.t3[idx] = makeScalarConstant<Scalar>(G[idx], env);
+                    }
+                }
+                if (out.has_hess) {
+                    throw FEException("Forms: H(matrix coefficient) is not supported (requires rank-4 tensor)",
+                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                }
+                return out;
+            }
+            if (const auto* f = node.tensor3Coefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                const auto T = (*f)(x[0], x[1], x[2]);
+                out.value.kind = EvalValue<Scalar>::Kind::Tensor3;
+                out.value.tensor3_dim0 = dim;
+                out.value.tensor3_dim1 = dim;
+                out.value.tensor3_dim2 = dim;
+                for (std::size_t idx = 0; idx < T.size(); ++idx) {
+                    out.value.t3[idx] = makeScalarConstant<Scalar>(T[idx], env);
+                }
+                if (out.has_grad || out.has_hess) {
+                    throw FEException("Forms: spatial derivatives of Tensor3Coefficient are not supported (requires rank-4)",
+                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                }
+                return out;
+            }
+            throw FEException("Forms: coefficient node has no callable (jet)",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        }
+        case FormExprType::TestFunction: {
+            const auto* sig = node.spaceSignature();
+            if (!sig) {
+                throw FEException("Forms: TestFunction must be bound to a FunctionSpace (jet)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (sig->field_type == FieldType::Scalar) {
+                out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+                const Real phi = (env.test_active == side) ? ctx.basisValue(env.i, q) : 0.0;
+                out.value.s = makeScalarConstant<Scalar>(phi, env);
+                if (out.has_grad) {
+                    out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+                    out.grad.vector_size = dim;
+                    const auto g = (env.test_active == side) ? ctx.physicalGradient(env.i, q)
+                                                             : assembly::AssemblyContext::Vector3D{0.0, 0.0, 0.0};
+                    for (int d = 0; d < 3; ++d) {
+                        out.grad.v[static_cast<std::size_t>(d)] = makeScalarConstant<Scalar>(g[static_cast<std::size_t>(d)], env);
+                    }
+                }
+                if (out.has_hess) {
+                    out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+                    out.hess.matrix_rows = dim;
+                    out.hess.matrix_cols = dim;
+                    const auto H = (env.test_active == side) ? ctx.physicalHessian(env.i, q)
+                                                             : assembly::AssemblyContext::Matrix3x3{};
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            out.hess.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                makeScalarConstant<Scalar>(H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env);
+                        }
+                    }
+                }
+                return out;
+            }
+            if (sig->field_type == FieldType::Vector) {
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: TestFunction vector value_dimension must be 1..3 (jet)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex n_test = ctx.numTestDofs();
+                if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
+                    throw FEException("Forms: vector TestFunction DOF count not divisible by value_dimension (jet)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const LocalIndex dofs_per_component =
+                    static_cast<LocalIndex>(n_test / static_cast<LocalIndex>(vd));
+                const int comp = static_cast<int>(env.i / dofs_per_component);
+                if (comp < 0 || comp >= vd) {
+                    throw FEException("Forms: TestFunction vector DOF index out of range (jet)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                out.value.kind = EvalValue<Scalar>::Kind::Vector;
+                out.value.vector_size = vd;
+                for (int c = 0; c < 3; ++c) {
+                    out.value.v[static_cast<std::size_t>(c)] = makeScalarConstant<Scalar>(0.0, env);
+                }
+                if (env.test_active == side) {
+                    out.value.v[static_cast<std::size_t>(comp)] = makeScalarConstant<Scalar>(ctx.basisValue(env.i, q), env);
+                }
+
+                if (out.has_grad) {
+                    out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                    out.grad.matrix_rows = vd;
+                    out.grad.matrix_cols = dim;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            out.grad.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = makeScalarConstant<Scalar>(0.0, env);
+                        }
+                    }
+                    if (env.test_active == side) {
+                        const auto g = ctx.physicalGradient(env.i, q);
+                        for (int d = 0; d < dim; ++d) {
+                            out.grad.m[static_cast<std::size_t>(comp)][static_cast<std::size_t>(d)] =
+                                makeScalarConstant<Scalar>(g[static_cast<std::size_t>(d)], env);
+                        }
+                    }
+                }
+
+                if (out.has_hess) {
+                    out.hess.kind = EvalValue<Scalar>::Kind::Tensor3;
+                    out.hess.tensor3_dim0 = vd;
+                    out.hess.tensor3_dim1 = dim;
+                    out.hess.tensor3_dim2 = dim;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int i = 0; i < 3; ++i) {
+                            for (int j = 0; j < 3; ++j) {
+                                out.hess.tensor3At(static_cast<std::size_t>(r),
+                                                   static_cast<std::size_t>(i),
+                                                   static_cast<std::size_t>(j)) = makeScalarConstant<Scalar>(0.0, env);
+                            }
+                        }
+                    }
+                    if (env.test_active == side) {
+                        const auto H = ctx.physicalHessian(env.i, q);
+                        for (int i = 0; i < dim; ++i) {
+                            for (int j = 0; j < dim; ++j) {
+                                out.hess.tensor3At(static_cast<std::size_t>(comp),
+                                                   static_cast<std::size_t>(i),
+                                                   static_cast<std::size_t>(j)) =
+                                    makeScalarConstant<Scalar>(H[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)], env);
+                            }
+                        }
+                    }
+                }
+                return out;
+            }
+
+            throw FEException("Forms: TestFunction field type not supported (jet)",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::TrialFunction: {
+            const auto* sig = node.spaceSignature();
+            if (!sig) {
+                throw FEException("Forms: TrialFunction must be bound to a FunctionSpace (jet)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            if constexpr (std::is_same_v<Scalar, Real>) {
+                if constexpr (std::is_same_v<Env, EvalEnvReal>) {
+                    if (env.kind == FormKind::Residual) {
+                        throw FEException("Forms: TrialFunction in residual form evaluated in variational mode (jet)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                }
+            }
+
+            if constexpr (std::is_same_v<Scalar, Real>) {
+                // Variational: TrialFunction is a basis function indexed by env.j.
+                if (sig->field_type == FieldType::Scalar) {
+                    out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+                    const Real phi = (env.trial_active == side) ? ctx.trialBasisValue(env.j, q) : 0.0;
+                    out.value.s = phi;
+                    if (out.has_grad) {
+                        out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+                        out.grad.vector_size = dim;
+                        const auto g = (env.trial_active == side) ? ctx.trialPhysicalGradient(env.j, q)
+                                                                  : assembly::AssemblyContext::Vector3D{0.0, 0.0, 0.0};
+                        out.grad.v = g;
+                        out.grad.vector_size = dim;
+                    }
+                    if (out.has_hess) {
+                        out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+                        out.hess.matrix_rows = dim;
+                        out.hess.matrix_cols = dim;
+                        if (env.trial_active == side) {
+                            out.hess.m = ctx.trialPhysicalHessian(env.j, q);
+                        }
+                    }
+                    return out;
+                }
+
+                if (sig->field_type == FieldType::Vector) {
+                    const int vd = sig->value_dimension;
+                    if (vd <= 0 || vd > 3) {
+                        throw FEException("Forms: TrialFunction vector value_dimension must be 1..3 (jet)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    out.value.kind = EvalValue<Scalar>::Kind::Vector;
+                    out.value.vector_size = vd;
+                    if (env.trial_active != side) {
+                        if (out.has_grad) {
+                            out.grad = zeroMatrix<Scalar>(static_cast<std::size_t>(vd), static_cast<std::size_t>(dim), env);
+                        }
+                        if (out.has_hess) {
+                            out.hess = zeroTensor3<Scalar>(static_cast<std::size_t>(vd),
+                                                           static_cast<std::size_t>(dim),
+                                                           static_cast<std::size_t>(dim),
+                                                           env);
+                        }
+                        return out;
+                    }
+                    const LocalIndex n_trial = ctx.numTrialDofs();
+                    if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+                        throw FEException("Forms: vector TrialFunction DOF count not divisible by value_dimension (jet)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const LocalIndex dofs_per_component =
+                        static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+                    const int comp = static_cast<int>(env.j / dofs_per_component);
+                    if (comp < 0 || comp >= vd) {
+                        throw FEException("Forms: TrialFunction vector DOF index out of range (jet)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    out.value.v[static_cast<std::size_t>(comp)] = ctx.trialBasisValue(env.j, q);
+
+                    if (out.has_grad) {
+                        out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                        out.grad.matrix_rows = vd;
+                        out.grad.matrix_cols = dim;
+                        const auto g = ctx.trialPhysicalGradient(env.j, q);
+                        for (int d = 0; d < dim; ++d) {
+                            out.grad.m[static_cast<std::size_t>(comp)][static_cast<std::size_t>(d)] =
+                                g[static_cast<std::size_t>(d)];
+                        }
+                    }
+
+                    if (out.has_hess) {
+                        out.hess.kind = EvalValue<Scalar>::Kind::Tensor3;
+                        out.hess.tensor3_dim0 = vd;
+                        out.hess.tensor3_dim1 = dim;
+                        out.hess.tensor3_dim2 = dim;
+                        const auto H = ctx.trialPhysicalHessian(env.j, q);
+                        for (int i = 0; i < dim; ++i) {
+                            for (int j = 0; j < dim; ++j) {
+                                out.hess.tensor3At(static_cast<std::size_t>(comp),
+                                                   static_cast<std::size_t>(i),
+                                                   static_cast<std::size_t>(j)) =
+                                    H[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)];
+                            }
+                        }
+                    }
+                    return out;
+                }
+
+                throw FEException("Forms: TrialFunction field type not supported (jet)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            } else {
+                // Residual/Jacobian: TrialFunction is the solution, seeded w.r.t trial DOFs.
+                if (sig->field_type == FieldType::Scalar) {
+                    out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+                    Dual u = makeDualConstant(ctx.solutionValue(q), env.ws->alloc());
+                    if (env.trial_active == side) {
+                        for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                            u.deriv[j] = ctx.trialBasisValue(static_cast<LocalIndex>(j), q);
+                        }
+                    }
+                    out.value.s = u;
+                    if (out.has_grad) {
+                        const auto gval = ctx.solutionGradient(q);
+                        out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+                        out.grad.vector_size = dim;
+                        for (int d = 0; d < 3; ++d) {
+                            Dual g = makeDualConstant(gval[static_cast<std::size_t>(d)], env.ws->alloc());
+                            if (env.trial_active == side) {
+                                for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                                    const auto grad_j = ctx.trialPhysicalGradient(static_cast<LocalIndex>(j), q);
+                                    g.deriv[j] = grad_j[static_cast<std::size_t>(d)];
+                                }
+                            }
+                            out.grad.v[static_cast<std::size_t>(d)] = g;
+                        }
+                    }
+                    if (out.has_hess) {
+                        const auto Hval = ctx.solutionHessian(q);
+                        out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+                        out.hess.matrix_rows = dim;
+                        out.hess.matrix_cols = dim;
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                Dual h = makeDualConstant(Hval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+                                if (env.trial_active == side) {
+                                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                                        const auto Hj = ctx.trialPhysicalHessian(static_cast<LocalIndex>(j), q);
+                                        h.deriv[j] = Hj[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                                    }
+                                }
+                                out.hess.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = h;
+                            }
+                        }
+                    }
+                    return out;
+                }
+
+                if (sig->field_type == FieldType::Vector) {
+                    const int vd = sig->value_dimension;
+                    if (vd <= 0 || vd > 3) {
+                        throw FEException("Forms: TrialFunction vector value_dimension must be 1..3 (jet)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    out.value.kind = EvalValue<Scalar>::Kind::Vector;
+                    out.value.vector_size = vd;
+                    const auto u_val = ctx.solutionVectorValue(q);
+                    for (int c = 0; c < 3; ++c) {
+                        out.value.v[static_cast<std::size_t>(c)] = makeDualConstant(u_val[static_cast<std::size_t>(c)], env.ws->alloc());
+                    }
+
+                    const LocalIndex n_trial = ctx.numTrialDofs();
+                    if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+                        throw FEException("Forms: TrialFunction DOF count not divisible by value_dimension (jet)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const LocalIndex dofs_per_component =
+                        static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+
+                    if (env.trial_active == side) {
+                        for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                            const int comp_j = static_cast<int>(static_cast<LocalIndex>(j) / dofs_per_component);
+                            out.value.v[static_cast<std::size_t>(comp_j)].deriv[j] =
+                                ctx.trialBasisValue(static_cast<LocalIndex>(j), q);
+                        }
+                    }
+
+                    if (out.has_grad) {
+                        const auto Jval = ctx.solutionJacobian(q);
+                        out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                        out.grad.matrix_rows = vd;
+                        out.grad.matrix_cols = dim;
+                        for (int r = 0; r < vd; ++r) {
+                            for (int c = 0; c < dim; ++c) {
+                                Dual Jij = makeDualConstant(Jval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)],
+                                                            env.ws->alloc());
+                                if (env.trial_active == side) {
+                                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                                        const int comp_j = static_cast<int>(static_cast<LocalIndex>(j) / dofs_per_component);
+                                        if (comp_j == r) {
+                                            const auto grad_j = ctx.trialPhysicalGradient(static_cast<LocalIndex>(j), q);
+                                            Jij.deriv[j] = grad_j[static_cast<std::size_t>(c)];
+                                        }
+                                    }
+                                }
+                                out.grad.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = Jij;
+                            }
+                        }
+                    }
+
+                    if (out.has_hess) {
+                        out.hess.kind = EvalValue<Scalar>::Kind::Tensor3;
+                        out.hess.tensor3_dim0 = vd;
+                        out.hess.tensor3_dim1 = dim;
+                        out.hess.tensor3_dim2 = dim;
+                        for (int comp = 0; comp < vd; ++comp) {
+                            const auto Hc = ctx.solutionComponentHessian(q, comp);
+                            for (int i = 0; i < dim; ++i) {
+                                for (int j = 0; j < dim; ++j) {
+                                    Dual h = makeDualConstant(Hc[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)], env.ws->alloc());
+                                    if (env.trial_active == side) {
+                                        for (std::size_t dof = 0; dof < env.n_trial_dofs; ++dof) {
+                                            const int comp_j = static_cast<int>(static_cast<LocalIndex>(dof) / dofs_per_component);
+                                            if (comp_j == comp) {
+                                                const auto Hj = ctx.trialPhysicalHessian(static_cast<LocalIndex>(dof), q);
+                                                h.deriv[dof] = Hj[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)];
+                                            }
+                                        }
+                                    }
+                                    out.hess.tensor3At(static_cast<std::size_t>(comp),
+                                                       static_cast<std::size_t>(i),
+                                                       static_cast<std::size_t>(j)) = h;
+                                }
+                            }
+                        }
+                    }
+
+                    return out;
+                }
+
+                throw FEException("Forms: TrialFunction field type not supported (jet)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+        }
+        case FormExprType::DiscreteField:
+        case FormExprType::StateField: {
+            const auto* sig = node.spaceSignature();
+            if (!sig) {
+                throw FEException("Forms: DiscreteField must be bound to a FunctionSpace (jet)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto fid = node.fieldId();
+            if (!fid || *fid == INVALID_FIELD_ID) {
+                throw FEException("Forms: DiscreteField node missing a valid FieldId (jet)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            if (sig->field_type == FieldType::Scalar) {
+                out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+                out.value.s = makeScalarConstant<Scalar>(ctx.fieldValue(*fid, q), env);
+                if (out.has_grad) {
+                    const auto g = ctx.fieldGradient(*fid, q);
+                    out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+                    out.grad.vector_size = dim;
+                    for (int d = 0; d < 3; ++d) {
+                        out.grad.v[static_cast<std::size_t>(d)] = makeScalarConstant<Scalar>(g[static_cast<std::size_t>(d)], env);
+                    }
+                }
+                if (out.has_hess) {
+                    const auto H = ctx.fieldHessian(*fid, q);
+                    out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+                    out.hess.matrix_rows = dim;
+                    out.hess.matrix_cols = dim;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            out.hess.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                makeScalarConstant<Scalar>(H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env);
+                        }
+                    }
+                }
+                return out;
+            }
+
+            if (sig->field_type == FieldType::Vector) {
+                const int vd = sig->value_dimension;
+                if (vd <= 0 || vd > 3) {
+                    throw FEException("Forms: DiscreteField vector value_dimension must be 1..3 (jet)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto v = ctx.fieldVectorValue(*fid, q);
+                out.value.kind = EvalValue<Scalar>::Kind::Vector;
+                out.value.vector_size = vd;
+                for (int c = 0; c < 3; ++c) {
+                    out.value.v[static_cast<std::size_t>(c)] = makeScalarConstant<Scalar>(v[static_cast<std::size_t>(c)], env);
+                }
+                if (out.has_grad) {
+                    const auto J = ctx.fieldJacobian(*fid, q);
+                    out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                    out.grad.matrix_rows = vd;
+                    out.grad.matrix_cols = dim;
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            out.grad.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                makeScalarConstant<Scalar>(J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env);
+                        }
+                    }
+                }
+                if (out.has_hess) {
+                    out.hess.kind = EvalValue<Scalar>::Kind::Tensor3;
+                    out.hess.tensor3_dim0 = vd;
+                    out.hess.tensor3_dim1 = dim;
+                    out.hess.tensor3_dim2 = dim;
+                    for (int comp = 0; comp < vd; ++comp) {
+                        const auto Hc = ctx.fieldComponentHessian(*fid, q, comp);
+                        for (int i = 0; i < dim; ++i) {
+                            for (int j = 0; j < dim; ++j) {
+                                out.hess.tensor3At(static_cast<std::size_t>(comp),
+                                                   static_cast<std::size_t>(i),
+                                                   static_cast<std::size_t>(j)) =
+                                    makeScalarConstant<Scalar>(Hc[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)], env);
+                            }
+                        }
+                    }
+                }
+                return out;
+            }
+
+            throw FEException("Forms: DiscreteField field type not supported (jet)",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::Negate: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1u || !kids[0]) {
+                throw std::logic_error("Forms: negate must have 1 child (jet)");
+            }
+            auto a = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+
+            if (isScalarKind<Scalar>(a.value.kind)) {
+                a.value.s = s_neg(a.value.s, env);
+            } else if (isVectorKind<Scalar>(a.value.kind)) {
+                for (std::size_t i = 0; i < a.value.vectorSize(); ++i) {
+                    a.value.vectorAt(i) = s_neg(a.value.vectorAt(i), env);
+                }
+            } else if (isMatrixKind<Scalar>(a.value.kind)) {
+                for (std::size_t r = 0; r < a.value.matrixRows(); ++r) {
+                    for (std::size_t c = 0; c < a.value.matrixCols(); ++c) {
+                        a.value.matrixAt(r, c) = s_neg(a.value.matrixAt(r, c), env);
+                    }
+                }
+            } else if (isTensor3Kind<Scalar>(a.value.kind)) {
+                for (std::size_t i = 0; i < a.value.tensor3Dim0(); ++i) {
+                    for (std::size_t j = 0; j < a.value.tensor3Dim1(); ++j) {
+                        for (std::size_t k = 0; k < a.value.tensor3Dim2(); ++k) {
+                            a.value.tensor3At(i, j, k) = s_neg(a.value.tensor3At(i, j, k), env);
+                        }
+                    }
+                }
+            } else {
+                throw FEException("Forms: negate() kind not supported in spatial jets",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            if (a.has_grad) {
+                if (isVectorKind<Scalar>(a.grad.kind)) {
+                    for (std::size_t i = 0; i < a.grad.vectorSize(); ++i) {
+                        a.grad.vectorAt(i) = s_neg(a.grad.vectorAt(i), env);
+                    }
+                } else if (isMatrixKind<Scalar>(a.grad.kind)) {
+                    for (std::size_t r = 0; r < a.grad.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < a.grad.matrixCols(); ++c) {
+                            a.grad.matrixAt(r, c) = s_neg(a.grad.matrixAt(r, c), env);
+                        }
+                    }
+                } else if (isTensor3Kind<Scalar>(a.grad.kind)) {
+                    for (std::size_t i = 0; i < a.grad.tensor3Dim0(); ++i) {
+                        for (std::size_t j = 0; j < a.grad.tensor3Dim1(); ++j) {
+                            for (std::size_t k = 0; k < a.grad.tensor3Dim2(); ++k) {
+                                a.grad.tensor3At(i, j, k) = s_neg(a.grad.tensor3At(i, j, k), env);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (a.has_hess) {
+                if (isMatrixKind<Scalar>(a.hess.kind)) {
+                    for (std::size_t r = 0; r < a.hess.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < a.hess.matrixCols(); ++c) {
+                            a.hess.matrixAt(r, c) = s_neg(a.hess.matrixAt(r, c), env);
+                        }
+                    }
+                } else if (isTensor3Kind<Scalar>(a.hess.kind)) {
+                    for (std::size_t i = 0; i < a.hess.tensor3Dim0(); ++i) {
+                        for (std::size_t j = 0; j < a.hess.tensor3Dim1(); ++j) {
+                            for (std::size_t k = 0; k < a.hess.tensor3Dim2(); ++k) {
+                                a.hess.tensor3At(i, j, k) = s_neg(a.hess.tensor3At(i, j, k), env);
+                            }
+                        }
+                    }
+                }
+            }
+
+            return a;
+        }
+        case FormExprType::Add:
+        case FormExprType::Subtract: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+                throw std::logic_error("Forms: add/sub must have 2 children (jet)");
+            }
+            const auto a = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+            const auto b = evalSpatialJet<Scalar>(*kids[1], env, side, q, order);
+            const bool add = (node.type() == FormExprType::Add);
+            out.value = addSubValue<Scalar>(a.value, b.value, add, env);
+            if (out.has_grad) {
+                out.grad = addSubValue<Scalar>(a.grad, b.grad, add, env);
+            }
+            if (out.has_hess) {
+                out.hess = addSubValue<Scalar>(a.hess, b.hess, add, env);
+            }
+            return out;
+        }
+        case FormExprType::Multiply: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+                throw std::logic_error("Forms: multiply must have 2 children (jet)");
+            }
+            const auto a = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+            const auto b = evalSpatialJet<Scalar>(*kids[1], env, side, q, order);
+
+            // Scalar * Scalar
+            if (isScalarKind<Scalar>(a.value.kind) && isScalarKind<Scalar>(b.value.kind)) {
+                out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+                out.value.s = s_mul(a.value.s, b.value.s, env);
+
+                if (out.has_grad) {
+                    out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+                    out.grad.vector_size = dim;
+                    for (int d = 0; d < dim; ++d) {
+                        const Scalar term1 = s_mul(a.grad.vectorAt(static_cast<std::size_t>(d)), b.value.s, env);
+                        const Scalar term2 = s_mul(a.value.s, b.grad.vectorAt(static_cast<std::size_t>(d)), env);
+                        out.grad.v[static_cast<std::size_t>(d)] = s_add(term1, term2, env);
+                    }
+                }
+
+                if (out.has_hess) {
+                    out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+                    out.hess.matrix_rows = dim;
+                    out.hess.matrix_cols = dim;
+                    for (int i = 0; i < dim; ++i) {
+                        for (int j = 0; j < dim; ++j) {
+                            Scalar Hij = makeScalarConstant<Scalar>(0.0, env);
+                            Hij = s_add(Hij,
+                                        s_mul(a.hess.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)),
+                                              b.value.s, env),
+                                        env);
+                            Hij = s_add(Hij,
+                                        s_mul(b.hess.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)),
+                                              a.value.s, env),
+                                        env);
+                            Hij = s_add(Hij,
+                                        s_mul(a.grad.vectorAt(static_cast<std::size_t>(i)),
+                                              b.grad.vectorAt(static_cast<std::size_t>(j)), env),
+                                        env);
+                            Hij = s_add(Hij,
+                                        s_mul(a.grad.vectorAt(static_cast<std::size_t>(j)),
+                                              b.grad.vectorAt(static_cast<std::size_t>(i)), env),
+                                        env);
+                            out.hess.m[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = Hij;
+                        }
+                    }
+                }
+                return out;
+            }
+
+            // Scalar * Vector or Vector * Scalar
+            if ((isScalarKind<Scalar>(a.value.kind) && isVectorKind<Scalar>(b.value.kind)) ||
+                (isVectorKind<Scalar>(a.value.kind) && isScalarKind<Scalar>(b.value.kind))) {
+                const bool scalar_left = isScalarKind<Scalar>(a.value.kind);
+                const auto& s = scalar_left ? a : b;
+                const auto& v = scalar_left ? b : a;
+
+                out.value.kind = EvalValue<Scalar>::Kind::Vector;
+                out.value.resizeVector(v.value.vectorSize());
+                for (std::size_t comp = 0; comp < v.value.vectorSize(); ++comp) {
+                    out.value.vectorAt(comp) = s_mul(s.value.s, v.value.vectorAt(comp), env);
+                }
+
+                if (out.has_grad) {
+                    out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                    out.grad.resizeMatrix(v.value.vectorSize(), static_cast<std::size_t>(dim));
+                    for (std::size_t comp = 0; comp < v.value.vectorSize(); ++comp) {
+                        for (int d = 0; d < dim; ++d) {
+                            const Scalar term1 = s_mul(v.grad.matrixAt(comp, static_cast<std::size_t>(d)), s.value.s, env);
+                            const Scalar term2 = s_mul(v.value.vectorAt(comp), s.grad.vectorAt(static_cast<std::size_t>(d)), env);
+                            out.grad.matrixAt(comp, static_cast<std::size_t>(d)) = s_add(term1, term2, env);
+                        }
+                    }
+                }
+
+                if (out.has_hess) {
+                    out.hess.kind = EvalValue<Scalar>::Kind::Tensor3;
+                    out.hess.resizeTensor3(v.value.vectorSize(),
+                                           static_cast<std::size_t>(dim),
+                                           static_cast<std::size_t>(dim));
+                    for (std::size_t comp = 0; comp < v.value.vectorSize(); ++comp) {
+                        for (int i = 0; i < dim; ++i) {
+                            for (int j = 0; j < dim; ++j) {
+                                Scalar Hij = makeScalarConstant<Scalar>(0.0, env);
+                                Hij = s_add(Hij,
+                                            s_mul(v.hess.tensor3At(comp, static_cast<std::size_t>(i), static_cast<std::size_t>(j)),
+                                                  s.value.s, env),
+                                            env);
+                                Hij = s_add(Hij,
+                                            s_mul(v.grad.matrixAt(comp, static_cast<std::size_t>(i)),
+                                                  s.grad.vectorAt(static_cast<std::size_t>(j)), env),
+                                            env);
+                                Hij = s_add(Hij,
+                                            s_mul(v.grad.matrixAt(comp, static_cast<std::size_t>(j)),
+                                                  s.grad.vectorAt(static_cast<std::size_t>(i)), env),
+                                            env);
+                                Hij = s_add(Hij,
+                                            s_mul(v.value.vectorAt(comp),
+                                                  s.hess.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)), env),
+                                            env);
+                                out.hess.tensor3At(comp, static_cast<std::size_t>(i), static_cast<std::size_t>(j)) = Hij;
+                            }
+                        }
+                    }
+                }
+                return out;
+            }
+
+            // Scalar * Matrix or Matrix * Scalar (order <= 1 only)
+            if ((isScalarKind<Scalar>(a.value.kind) && isMatrixKind<Scalar>(b.value.kind)) ||
+                (isMatrixKind<Scalar>(a.value.kind) && isScalarKind<Scalar>(b.value.kind))) {
+                if (out.has_hess) {
+                    throw FEException("Forms: Hessian of matrix-valued product is not supported (requires rank-4)",
+                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                }
+                const bool scalar_left = isScalarKind<Scalar>(a.value.kind);
+                const auto& s = scalar_left ? a : b;
+                const auto& A = scalar_left ? b : a;
+
+                out.value.kind = EvalValue<Scalar>::Kind::Matrix;
+                out.value.resizeMatrix(A.value.matrixRows(), A.value.matrixCols());
+                for (std::size_t r = 0; r < A.value.matrixRows(); ++r) {
+                    for (std::size_t c = 0; c < A.value.matrixCols(); ++c) {
+                        out.value.matrixAt(r, c) = s_mul(s.value.s, A.value.matrixAt(r, c), env);
+                    }
+                }
+
+                if (out.has_grad) {
+                    out.grad.kind = EvalValue<Scalar>::Kind::Tensor3;
+                    out.grad.resizeTensor3(A.value.matrixRows(), A.value.matrixCols(), static_cast<std::size_t>(dim));
+                    for (std::size_t r = 0; r < A.value.matrixRows(); ++r) {
+                        for (std::size_t c = 0; c < A.value.matrixCols(); ++c) {
+                            for (int d = 0; d < dim; ++d) {
+                                const Scalar term1 = s_mul(A.grad.tensor3At(r, c, static_cast<std::size_t>(d)), s.value.s, env);
+                                const Scalar term2 = s_mul(A.value.matrixAt(r, c), s.grad.vectorAt(static_cast<std::size_t>(d)), env);
+                                out.grad.tensor3At(r, c, static_cast<std::size_t>(d)) = s_add(term1, term2, env);
+                            }
+                        }
+                    }
+                }
+                return out;
+            }
+
+            // Matrix * Vector (order <= 1 only)
+            if (isMatrixKind<Scalar>(a.value.kind) && isVectorKind<Scalar>(b.value.kind)) {
+                if (out.has_hess) {
+                    throw FEException("Forms: Hessian of matrix-vector product is not supported in spatial jets",
+                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                }
+                const auto rows = a.value.matrixRows();
+                const auto cols = a.value.matrixCols();
+                if (b.value.vectorSize() != cols) {
+                    throw FEException("Forms: spatial jet matrix-vector multiplication shape mismatch",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                out.value.kind = EvalValue<Scalar>::Kind::Vector;
+                out.value.resizeVector(rows);
+                for (std::size_t r = 0; r < rows; ++r) {
+                    Scalar sum = makeScalarConstant<Scalar>(0.0, env);
+                    for (std::size_t c = 0; c < cols; ++c) {
+                        sum = s_add(sum, s_mul(a.value.matrixAt(r, c), b.value.vectorAt(c), env), env);
+                    }
+                    out.value.vectorAt(r) = sum;
+                }
+                if (out.has_grad) {
+                    out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                    out.grad.resizeMatrix(rows, static_cast<std::size_t>(dim));
+                    for (std::size_t r = 0; r < rows; ++r) {
+                        for (int d = 0; d < dim; ++d) {
+                            Scalar sum = makeScalarConstant<Scalar>(0.0, env);
+                            for (std::size_t c = 0; c < cols; ++c) {
+                                sum = s_add(sum, s_mul(a.grad.tensor3At(r, c, static_cast<std::size_t>(d)), b.value.vectorAt(c), env), env);
+                                sum = s_add(sum, s_mul(a.value.matrixAt(r, c), b.grad.matrixAt(c, static_cast<std::size_t>(d)), env), env);
+                            }
+                            out.grad.matrixAt(r, static_cast<std::size_t>(d)) = sum;
+                        }
+                    }
+                }
+                return out;
+            }
+
+            // Vector * Matrix (order <= 1 only)
+            if (isVectorKind<Scalar>(a.value.kind) && isMatrixKind<Scalar>(b.value.kind)) {
+                if (out.has_hess) {
+                    throw FEException("Forms: Hessian of vector-matrix product is not supported in spatial jets",
+                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                }
+                const auto rows = b.value.matrixRows();
+                const auto cols = b.value.matrixCols();
+                if (a.value.vectorSize() != rows) {
+                    throw FEException("Forms: spatial jet vector-matrix multiplication shape mismatch",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                out.value.kind = EvalValue<Scalar>::Kind::Vector;
+                out.value.resizeVector(cols);
+                for (std::size_t c = 0; c < cols; ++c) {
+                    Scalar sum = makeScalarConstant<Scalar>(0.0, env);
+                    for (std::size_t r = 0; r < rows; ++r) {
+                        sum = s_add(sum, s_mul(a.value.vectorAt(r), b.value.matrixAt(r, c), env), env);
+                    }
+                    out.value.vectorAt(c) = sum;
+                }
+                if (out.has_grad) {
+                    out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                    out.grad.resizeMatrix(cols, static_cast<std::size_t>(dim));
+                    for (std::size_t c = 0; c < cols; ++c) {
+                        for (int d = 0; d < dim; ++d) {
+                            Scalar sum = makeScalarConstant<Scalar>(0.0, env);
+                            for (std::size_t r = 0; r < rows; ++r) {
+                                sum = s_add(sum, s_mul(a.grad.matrixAt(r, static_cast<std::size_t>(d)), b.value.matrixAt(r, c), env), env);
+                                sum = s_add(sum, s_mul(a.value.vectorAt(r), b.grad.tensor3At(r, c, static_cast<std::size_t>(d)), env), env);
+                            }
+                            out.grad.matrixAt(c, static_cast<std::size_t>(d)) = sum;
+                        }
+                    }
+                }
+                return out;
+            }
+
+            // Matrix * Matrix (order <= 1 only)
+            if (isMatrixKind<Scalar>(a.value.kind) && isMatrixKind<Scalar>(b.value.kind)) {
+                if (out.has_hess) {
+                    throw FEException("Forms: Hessian of matrix-matrix product is not supported (requires rank-4)",
+                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                }
+                const auto rows = a.value.matrixRows();
+                const auto inner_dim = a.value.matrixCols();
+                const auto cols = b.value.matrixCols();
+                if (b.value.matrixRows() != inner_dim) {
+                    throw FEException("Forms: spatial jet matrix-matrix multiplication shape mismatch",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                out.value.kind = EvalValue<Scalar>::Kind::Matrix;
+                out.value.resizeMatrix(rows, cols);
+                for (std::size_t r = 0; r < rows; ++r) {
+                    for (std::size_t c = 0; c < cols; ++c) {
+                        Scalar sum = makeScalarConstant<Scalar>(0.0, env);
+                        for (std::size_t k = 0; k < inner_dim; ++k) {
+                            sum = s_add(sum, s_mul(a.value.matrixAt(r, k), b.value.matrixAt(k, c), env), env);
+                        }
+                        out.value.matrixAt(r, c) = sum;
+                    }
+                }
+                if (out.has_grad) {
+                    out.grad.kind = EvalValue<Scalar>::Kind::Tensor3;
+                    out.grad.resizeTensor3(rows, cols, static_cast<std::size_t>(dim));
+                    for (std::size_t r = 0; r < rows; ++r) {
+                        for (std::size_t c = 0; c < cols; ++c) {
+                            for (int d = 0; d < dim; ++d) {
+                                Scalar sum = makeScalarConstant<Scalar>(0.0, env);
+                                for (std::size_t k = 0; k < inner_dim; ++k) {
+                                    sum = s_add(sum, s_mul(a.grad.tensor3At(r, k, static_cast<std::size_t>(d)), b.value.matrixAt(k, c), env), env);
+                                    sum = s_add(sum, s_mul(a.value.matrixAt(r, k), b.grad.tensor3At(k, c, static_cast<std::size_t>(d)), env), env);
+                                }
+                                out.grad.tensor3At(r, c, static_cast<std::size_t>(d)) = sum;
+                            }
+                        }
+                    }
+                }
+                return out;
+            }
+
+            throw FEException("Forms: unsupported multiplication kinds in spatial jets",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::Divide: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+                throw std::logic_error("Forms: divide must have 2 children (jet)");
+            }
+            const auto a = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+            const auto b = evalSpatialJet<Scalar>(*kids[1], env, side, q, order);
+            if (!isScalarKind<Scalar>(b.value.kind)) {
+                throw FEException("Forms: spatial jet division denominator must be scalar",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            // Reciprocal r = 1/b
+            SpatialJet<Scalar> r;
+            r.has_grad = out.has_grad;
+            r.has_hess = out.has_hess;
+            r.value.kind = EvalValue<Scalar>::Kind::Scalar;
+            r.value.s = s_div(makeScalarConstant<Scalar>(1.0, env), b.value.s, env);
+            if (out.has_grad) {
+                r.grad.kind = EvalValue<Scalar>::Kind::Vector;
+                r.grad.vector_size = dim;
+                const Scalar inv_b2 = s_div(makeScalarConstant<Scalar>(1.0, env),
+                                            s_mul(b.value.s, b.value.s, env),
+                                            env);
+                for (int d = 0; d < dim; ++d) {
+                    r.grad.v[static_cast<std::size_t>(d)] =
+                        s_neg(s_mul(b.grad.vectorAt(static_cast<std::size_t>(d)), inv_b2, env), env);
+                }
+            }
+            if (out.has_hess) {
+                r.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+                r.hess.matrix_rows = dim;
+                r.hess.matrix_cols = dim;
+                const Scalar inv_b2 = s_div(makeScalarConstant<Scalar>(1.0, env),
+                                            s_mul(b.value.s, b.value.s, env),
+                                            env);
+                const Scalar inv_b3 = s_div(inv_b2, b.value.s, env);
+                for (int i = 0; i < dim; ++i) {
+                    for (int j = 0; j < dim; ++j) {
+                        const Scalar term1 = s_mul(2.0,
+                                                   s_mul(b.grad.vectorAt(static_cast<std::size_t>(i)),
+                                                         b.grad.vectorAt(static_cast<std::size_t>(j)), env),
+                                                   env);
+                        const Scalar t1 = s_mul(term1, inv_b3, env);
+                        const Scalar t2 = s_mul(b.hess.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)),
+                                                inv_b2, env);
+                        r.hess.m[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = s_sub(t1, t2, env);
+                    }
+                }
+            }
+
+            // Multiply numerator by reciprocal.
+            if (isScalarKind<Scalar>(a.value.kind)) {
+                out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+                out.value.s = s_mul(a.value.s, r.value.s, env);
+                if (out.has_grad) {
+                    out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+                    out.grad.vector_size = dim;
+                    for (int d = 0; d < dim; ++d) {
+                        const Scalar term1 = s_mul(a.grad.vectorAt(static_cast<std::size_t>(d)), r.value.s, env);
+                        const Scalar term2 = s_mul(a.value.s, r.grad.vectorAt(static_cast<std::size_t>(d)), env);
+                        out.grad.v[static_cast<std::size_t>(d)] = s_add(term1, term2, env);
+                    }
+                }
+                if (out.has_hess) {
+                    out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+                    out.hess.matrix_rows = dim;
+                    out.hess.matrix_cols = dim;
+                    for (int i = 0; i < dim; ++i) {
+                        for (int j = 0; j < dim; ++j) {
+                            Scalar Hij = makeScalarConstant<Scalar>(0.0, env);
+                            Hij = s_add(Hij,
+                                        s_mul(a.hess.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)),
+                                              r.value.s, env),
+                                        env);
+                            Hij = s_add(Hij,
+                                        s_mul(r.hess.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)),
+                                              a.value.s, env),
+                                        env);
+                            Hij = s_add(Hij,
+                                        s_mul(a.grad.vectorAt(static_cast<std::size_t>(i)),
+                                              r.grad.vectorAt(static_cast<std::size_t>(j)), env),
+                                        env);
+                            Hij = s_add(Hij,
+                                        s_mul(a.grad.vectorAt(static_cast<std::size_t>(j)),
+                                              r.grad.vectorAt(static_cast<std::size_t>(i)), env),
+                                        env);
+                            out.hess.m[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = Hij;
+                        }
+                    }
+                }
+                return out;
+            }
+            if (isVectorKind<Scalar>(a.value.kind)) {
+                out.value.kind = EvalValue<Scalar>::Kind::Vector;
+                out.value.resizeVector(a.value.vectorSize());
+                for (std::size_t comp = 0; comp < a.value.vectorSize(); ++comp) {
+                    out.value.vectorAt(comp) = s_mul(a.value.vectorAt(comp), r.value.s, env);
+                }
+                if (out.has_grad) {
+                    out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                    out.grad.resizeMatrix(a.value.vectorSize(), static_cast<std::size_t>(dim));
+                    for (std::size_t comp = 0; comp < a.value.vectorSize(); ++comp) {
+                        for (int d = 0; d < dim; ++d) {
+                            const Scalar term1 = s_mul(a.grad.matrixAt(comp, static_cast<std::size_t>(d)), r.value.s, env);
+                            const Scalar term2 = s_mul(a.value.vectorAt(comp), r.grad.vectorAt(static_cast<std::size_t>(d)), env);
+                            out.grad.matrixAt(comp, static_cast<std::size_t>(d)) = s_add(term1, term2, env);
+                        }
+                    }
+                }
+                if (out.has_hess) {
+                    out.hess.kind = EvalValue<Scalar>::Kind::Tensor3;
+                    out.hess.resizeTensor3(a.value.vectorSize(),
+                                           static_cast<std::size_t>(dim),
+                                           static_cast<std::size_t>(dim));
+                    for (std::size_t comp = 0; comp < a.value.vectorSize(); ++comp) {
+                        for (int i = 0; i < dim; ++i) {
+                            for (int j = 0; j < dim; ++j) {
+                                Scalar Hij = makeScalarConstant<Scalar>(0.0, env);
+                                Hij = s_add(Hij,
+                                            s_mul(a.hess.tensor3At(comp, static_cast<std::size_t>(i), static_cast<std::size_t>(j)),
+                                                  r.value.s, env),
+                                            env);
+                                Hij = s_add(Hij,
+                                            s_mul(a.grad.matrixAt(comp, static_cast<std::size_t>(i)),
+                                                  r.grad.vectorAt(static_cast<std::size_t>(j)), env),
+                                            env);
+                                Hij = s_add(Hij,
+                                            s_mul(a.grad.matrixAt(comp, static_cast<std::size_t>(j)),
+                                                  r.grad.vectorAt(static_cast<std::size_t>(i)), env),
+                                            env);
+                                Hij = s_add(Hij,
+                                            s_mul(a.value.vectorAt(comp),
+                                                  r.hess.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)), env),
+                                            env);
+                                out.hess.tensor3At(comp, static_cast<std::size_t>(i), static_cast<std::size_t>(j)) = Hij;
+                            }
+                        }
+                    }
+                }
+                return out;
+            }
+
+            if (isMatrixKind<Scalar>(a.value.kind)) {
+                if (out.has_hess) {
+                    throw FEException("Forms: Hessian of matrix/scalar division is not supported (requires rank-4)",
+                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                }
+                out.value.kind = EvalValue<Scalar>::Kind::Matrix;
+                out.value.resizeMatrix(a.value.matrixRows(), a.value.matrixCols());
+                for (std::size_t r0 = 0; r0 < a.value.matrixRows(); ++r0) {
+                    for (std::size_t c0 = 0; c0 < a.value.matrixCols(); ++c0) {
+                        out.value.matrixAt(r0, c0) = s_mul(a.value.matrixAt(r0, c0), r.value.s, env);
+                    }
+                }
+                if (out.has_grad) {
+                    out.grad.kind = EvalValue<Scalar>::Kind::Tensor3;
+                    out.grad.resizeTensor3(a.value.matrixRows(), a.value.matrixCols(), static_cast<std::size_t>(dim));
+                    for (std::size_t r0 = 0; r0 < a.value.matrixRows(); ++r0) {
+                        for (std::size_t c0 = 0; c0 < a.value.matrixCols(); ++c0) {
+                            for (int d = 0; d < dim; ++d) {
+                                const Scalar term1 = s_mul(a.grad.tensor3At(r0, c0, static_cast<std::size_t>(d)), r.value.s, env);
+                                const Scalar term2 = s_mul(a.value.matrixAt(r0, c0), r.grad.vectorAt(static_cast<std::size_t>(d)), env);
+                                out.grad.tensor3At(r0, c0, static_cast<std::size_t>(d)) = s_add(term1, term2, env);
+                            }
+                        }
+                    }
+                }
+                return out;
+            }
+
+	            throw FEException("Forms: unsupported division numerator kind in spatial jets",
+	                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	        }
+	        case FormExprType::InnerProduct:
+	        case FormExprType::DoubleContraction: {
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+	                throw std::logic_error("Forms: inner/doubleContraction must have 2 children (jet)");
+	            }
+	            const auto a = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+	            const auto b = evalSpatialJet<Scalar>(*kids[1], env, side, q, order);
+	
+	            // Scalar · Scalar
+	            if (isScalarKind<Scalar>(a.value.kind) && isScalarKind<Scalar>(b.value.kind)) {
+	                out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	                out.value.s = s_mul(a.value.s, b.value.s, env);
+	                if (out.has_grad) {
+	                    out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+	                    out.grad.vector_size = dim;
+	                    for (int d = 0; d < dim; ++d) {
+	                        const Scalar term1 = s_mul(a.grad.vectorAt(static_cast<std::size_t>(d)), b.value.s, env);
+	                        const Scalar term2 = s_mul(a.value.s, b.grad.vectorAt(static_cast<std::size_t>(d)), env);
+	                        out.grad.v[static_cast<std::size_t>(d)] = s_add(term1, term2, env);
+	                    }
+	                }
+	                if (out.has_hess) {
+	                    out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+	                    out.hess.matrix_rows = dim;
+	                    out.hess.matrix_cols = dim;
+	                    for (int i = 0; i < dim; ++i) {
+	                        for (int j = 0; j < dim; ++j) {
+	                            Scalar Hij = makeScalarConstant<Scalar>(0.0, env);
+	                            Hij = s_add(Hij,
+	                                        s_mul(a.hess.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)),
+	                                              b.value.s, env),
+	                                        env);
+	                            Hij = s_add(Hij,
+	                                        s_mul(b.hess.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)),
+	                                              a.value.s, env),
+	                                        env);
+	                            Hij = s_add(Hij,
+	                                        s_mul(a.grad.vectorAt(static_cast<std::size_t>(i)),
+	                                              b.grad.vectorAt(static_cast<std::size_t>(j)), env),
+	                                        env);
+	                            Hij = s_add(Hij,
+	                                        s_mul(a.grad.vectorAt(static_cast<std::size_t>(j)),
+	                                              b.grad.vectorAt(static_cast<std::size_t>(i)), env),
+	                                        env);
+	                            out.hess.m[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = Hij;
+	                        }
+	                    }
+	                }
+	                return out;
+	            }
+	
+	            // Vector · Vector
+	            if (isVectorKind<Scalar>(a.value.kind) && isVectorKind<Scalar>(b.value.kind)) {
+	                if (a.value.vectorSize() != b.value.vectorSize()) {
+	                    throw FEException("Forms: inner(vector,vector) size mismatch (jet)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                const auto n = a.value.vectorSize();
+	                out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	                Scalar sum = makeScalarConstant<Scalar>(0.0, env);
+	                for (std::size_t k = 0; k < n; ++k) {
+	                    sum = s_add(sum, s_mul(a.value.vectorAt(k), b.value.vectorAt(k), env), env);
+	                }
+	                out.value.s = sum;
+	
+	                if (out.has_grad) {
+	                    out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+	                    out.grad.vector_size = dim;
+	                    for (int d = 0; d < dim; ++d) {
+	                        Scalar gd = makeScalarConstant<Scalar>(0.0, env);
+	                        for (std::size_t k = 0; k < n; ++k) {
+	                            gd = s_add(gd,
+	                                       s_mul(a.grad.matrixAt(k, static_cast<std::size_t>(d)), b.value.vectorAt(k), env),
+	                                       env);
+	                            gd = s_add(gd,
+	                                       s_mul(a.value.vectorAt(k), b.grad.matrixAt(k, static_cast<std::size_t>(d)), env),
+	                                       env);
+	                        }
+	                        out.grad.v[static_cast<std::size_t>(d)] = gd;
+	                    }
+	                }
+	
+	                if (out.has_hess) {
+	                    out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+	                    out.hess.matrix_rows = dim;
+	                    out.hess.matrix_cols = dim;
+	                    for (int i = 0; i < dim; ++i) {
+	                        for (int j = 0; j < dim; ++j) {
+	                            Scalar Hij = makeScalarConstant<Scalar>(0.0, env);
+	                            for (std::size_t k = 0; k < n; ++k) {
+	                                Hij = s_add(Hij,
+	                                            s_mul(a.hess.tensor3At(k, static_cast<std::size_t>(i), static_cast<std::size_t>(j)),
+	                                                  b.value.vectorAt(k), env),
+	                                            env);
+	                                Hij = s_add(Hij,
+	                                            s_mul(b.hess.tensor3At(k, static_cast<std::size_t>(i), static_cast<std::size_t>(j)),
+	                                                  a.value.vectorAt(k), env),
+	                                            env);
+	                                Hij = s_add(Hij,
+	                                            s_mul(a.grad.matrixAt(k, static_cast<std::size_t>(i)),
+	                                                  b.grad.matrixAt(k, static_cast<std::size_t>(j)), env),
+	                                            env);
+	                                Hij = s_add(Hij,
+	                                            s_mul(a.grad.matrixAt(k, static_cast<std::size_t>(j)),
+	                                                  b.grad.matrixAt(k, static_cast<std::size_t>(i)), env),
+	                                            env);
+	                            }
+	                            out.hess.m[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = Hij;
+	                        }
+	                    }
+	                }
+	                return out;
+	            }
+	
+	            // Matrix : Matrix (Frobenius)
+	            if (isMatrixKind<Scalar>(a.value.kind) && isMatrixKind<Scalar>(b.value.kind)) {
+	                if (a.value.matrixRows() != b.value.matrixRows() || a.value.matrixCols() != b.value.matrixCols()) {
+	                    throw FEException("Forms: inner(matrix,matrix) shape mismatch (jet)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                if (out.has_hess) {
+	                    throw FEException("Forms: Hessian of inner(matrix,matrix) is not supported (requires rank-4)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	                }
+	                out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	                Scalar sum = makeScalarConstant<Scalar>(0.0, env);
+	                for (std::size_t r = 0; r < a.value.matrixRows(); ++r) {
+	                    for (std::size_t c = 0; c < a.value.matrixCols(); ++c) {
+	                        sum = s_add(sum, s_mul(a.value.matrixAt(r, c), b.value.matrixAt(r, c), env), env);
+	                    }
+	                }
+	                out.value.s = sum;
+	                if (out.has_grad) {
+	                    out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+	                    out.grad.vector_size = dim;
+	                    for (int d = 0; d < dim; ++d) {
+	                        Scalar gd = makeScalarConstant<Scalar>(0.0, env);
+	                        for (std::size_t r = 0; r < a.value.matrixRows(); ++r) {
+	                            for (std::size_t c = 0; c < a.value.matrixCols(); ++c) {
+	                                gd = s_add(gd,
+	                                           s_mul(a.grad.tensor3At(r, c, static_cast<std::size_t>(d)),
+	                                                 b.value.matrixAt(r, c), env),
+	                                           env);
+	                                gd = s_add(gd,
+	                                           s_mul(a.value.matrixAt(r, c),
+	                                                 b.grad.tensor3At(r, c, static_cast<std::size_t>(d)), env),
+	                                           env);
+	                            }
+	                        }
+	                        out.grad.v[static_cast<std::size_t>(d)] = gd;
+	                    }
+	                }
+	                return out;
+	            }
+	
+	            throw FEException("Forms: inner/doubleContraction operand kind not supported in spatial jets",
+	                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	        }
+	        case FormExprType::Power: {
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+	                throw std::logic_error("Forms: pow must have 2 children (jet)");
+	            }
+	            const auto a = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+	            const auto b = evalSpatialJet<Scalar>(*kids[1], env, side, q, order);
+	            if (!isScalarKind<Scalar>(a.value.kind) || !isScalarKind<Scalar>(b.value.kind)) {
+	                throw FEException("Forms: pow() in spatial jets expects scalar arguments",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = s_pow(a.value.s, b.value.s, env);
+	
+	            if (out.has_grad || out.has_hess) {
+	                const Scalar loga = s_log(a.value.s, env);
+	                const Scalar inv_a = s_div(makeScalarConstant<Scalar>(1.0, env), a.value.s, env);
+	
+	                if (out.has_grad) {
+	                    out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+	                    out.grad.vector_size = dim;
+	                    for (int d = 0; d < dim; ++d) {
+	                        const Scalar g1 = s_mul(b.grad.vectorAt(static_cast<std::size_t>(d)), loga, env);
+	                        const Scalar g2 = s_mul(b.value.s,
+	                                                s_mul(a.grad.vectorAt(static_cast<std::size_t>(d)), inv_a, env),
+	                                                env);
+	                        const Scalar gd = s_add(g1, g2, env);
+	                        out.grad.v[static_cast<std::size_t>(d)] = s_mul(out.value.s, gd, env);
+	                    }
+	                }
+	
+	                if (out.has_hess) {
+	                    out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+	                    out.hess.matrix_rows = dim;
+	                    out.hess.matrix_cols = dim;
+	
+	                    const Scalar inv_a2 = s_mul(inv_a, inv_a, env);
+	                    std::array<Scalar, 3> grad_l{};
+	                    for (int d = 0; d < dim; ++d) {
+	                        grad_l[static_cast<std::size_t>(d)] =
+	                            s_mul(a.grad.vectorAt(static_cast<std::size_t>(d)), inv_a, env);
+	                    }
+	
+	                    for (int i = 0; i < dim; ++i) {
+	                        for (int j = 0; j < dim; ++j) {
+	                            const auto ii = static_cast<std::size_t>(i);
+	                            const auto jj = static_cast<std::size_t>(j);
+	
+	                            const Scalar Hess_l =
+	                                s_sub(s_mul(a.hess.matrixAt(ii, jj), inv_a, env),
+	                                      s_mul(s_mul(a.grad.vectorAt(ii), a.grad.vectorAt(jj), env), inv_a2, env),
+	                                      env);
+	
+	                            const Scalar Hess_b = s_mul(b.hess.matrixAt(ii, jj), loga, env);
+	                            const Scalar cross1 = s_mul(b.grad.vectorAt(ii), grad_l[jj], env);
+	                            const Scalar cross2 = s_mul(b.grad.vectorAt(jj), grad_l[ii], env);
+	                            const Scalar Hess_g =
+	                                s_add(s_add(Hess_b, s_add(cross1, cross2, env), env),
+	                                      s_mul(b.value.s, Hess_l, env),
+	                                      env);
+	
+	                            const Scalar gi =
+	                                s_add(s_mul(b.grad.vectorAt(ii), loga, env),
+	                                      s_mul(b.value.s, grad_l[ii], env),
+	                                      env);
+	                            const Scalar gj =
+	                                s_add(s_mul(b.grad.vectorAt(jj), loga, env),
+	                                      s_mul(b.value.s, grad_l[jj], env),
+	                                      env);
+	
+	                            out.hess.m[ii][jj] =
+	                                s_mul(out.value.s, s_add(Hess_g, s_mul(gi, gj, env), env), env);
+	                        }
+	                    }
+	                }
+	            }
+	
+	            return out;
+	        }
+	        case FormExprType::Minimum:
+	        case FormExprType::Maximum: {
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+	                throw std::logic_error("Forms: min/max must have 2 children (jet)");
+	            }
+	            const auto a = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+	            const auto b = evalSpatialJet<Scalar>(*kids[1], env, side, q, order);
+	            if (!isScalarKind<Scalar>(a.value.kind) || !isScalarKind<Scalar>(b.value.kind)) {
+	                throw FEException("Forms: min/max in spatial jets expects scalar arguments",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            const Real av = scalarNumericValue(a.value.s);
+	            const Real bv = scalarNumericValue(b.value.s);
+	            const bool pick_a = (node.type() == FormExprType::Minimum) ? (av <= bv) : (av >= bv);
+	            return pick_a ? a : b;
+	        }
+	        case FormExprType::Less:
+	        case FormExprType::LessEqual:
+	        case FormExprType::Greater:
+	        case FormExprType::GreaterEqual:
+	        case FormExprType::Equal:
+	        case FormExprType::NotEqual: {
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+	                throw std::logic_error("Forms: comparison must have 2 children (jet)");
+	            }
+	            const auto a = evalSpatialJet<Scalar>(*kids[0], env, side, q, 0);
+	            const auto b = evalSpatialJet<Scalar>(*kids[1], env, side, q, 0);
+	            if (!isScalarKind<Scalar>(a.value.kind) || !isScalarKind<Scalar>(b.value.kind)) {
+	                throw FEException("Forms: comparisons in spatial jets expect scalar arguments",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            const Real av = scalarNumericValue(a.value.s);
+	            const Real bv = scalarNumericValue(b.value.s);
+	            bool truth = false;
+	            switch (node.type()) {
+	                case FormExprType::Less: truth = (av < bv); break;
+	                case FormExprType::LessEqual: truth = (av <= bv); break;
+	                case FormExprType::Greater: truth = (av > bv); break;
+	                case FormExprType::GreaterEqual: truth = (av >= bv); break;
+	                case FormExprType::Equal: truth = (av == bv); break;
+	                case FormExprType::NotEqual: truth = (av != bv); break;
+	                default: break;
+	            }
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(truth ? 1.0 : 0.0, env);
+	            if (out.has_grad) {
+	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            return out;
+	        }
+	        case FormExprType::Conditional: {
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 3u || !kids[0] || !kids[1] || !kids[2]) {
+	                throw std::logic_error("Forms: conditional must have 3 children (jet)");
+	            }
+	            const auto cond = evalSpatialJet<Scalar>(*kids[0], env, side, q, 0);
+	            if (!isScalarKind<Scalar>(cond.value.kind)) {
+	                throw FEException("Forms: conditional condition must be scalar (jet)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            const auto a = evalSpatialJet<Scalar>(*kids[1], env, side, q, order);
+	            const auto b = evalSpatialJet<Scalar>(*kids[2], env, side, q, order);
+	            const bool take_a = scalarNumericValue(cond.value.s) > 0.0;
+	            SpatialJet<Scalar> res = take_a ? a : b;
+	            if (a.value.kind == b.value.kind) {
+	                return res;
+	            }
+	            if (isMatrixKind<Scalar>(a.value.kind) && isMatrixKind<Scalar>(b.value.kind)) {
+	                res.value.kind = EvalValue<Scalar>::Kind::Matrix;
+	                return res;
+	            }
+	            return res;
+	        }
+	        case FormExprType::AsVector: {
+	            const auto kids = node.childrenShared();
+	            if (kids.empty()) {
+	                throw FEException("Forms: as_vector expects at least 1 scalar component (jet)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            out.value.kind = EvalValue<Scalar>::Kind::Vector;
+	            out.value.resizeVector(kids.size());
+	            if (out.has_grad) {
+	                out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+	                out.grad.resizeMatrix(kids.size(), static_cast<std::size_t>(dim));
+	            }
+	            if (out.has_hess) {
+	                out.hess.kind = EvalValue<Scalar>::Kind::Tensor3;
+	                out.hess.resizeTensor3(kids.size(),
+	                                       static_cast<std::size_t>(dim),
+	                                       static_cast<std::size_t>(dim));
+	            }
+	            for (std::size_t c = 0; c < kids.size(); ++c) {
+	                if (!kids[c]) throw std::logic_error("Forms: as_vector has null child (jet)");
+	                const auto v = evalSpatialJet<Scalar>(*kids[c], env, side, q, order);
+	                if (!isScalarKind<Scalar>(v.value.kind)) {
+	                    throw FEException("Forms: as_vector components must be scalar (jet)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                out.value.vectorAt(c) = v.value.s;
+	                if (out.has_grad) {
+	                    for (int d = 0; d < dim; ++d) {
+	                        out.grad.matrixAt(c, static_cast<std::size_t>(d)) = v.grad.vectorAt(static_cast<std::size_t>(d));
+	                    }
+	                }
+	                if (out.has_hess) {
+	                    for (int i = 0; i < dim; ++i) {
+	                        for (int j = 0; j < dim; ++j) {
+	                            out.hess.tensor3At(c, static_cast<std::size_t>(i), static_cast<std::size_t>(j)) =
+	                                v.hess.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j));
+	                        }
+	                    }
+	                }
+	            }
+	            return out;
+	        }
+	        case FormExprType::AsTensor: {
+	            if (out.has_hess) {
+	                throw FEException("Forms: Hessian of as_tensor is not supported (requires rank-4)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	            }
+	            const auto rows = node.tensorRows().value_or(0);
+	            const auto cols = node.tensorCols().value_or(0);
+	            if (rows <= 0 || cols <= 0) {
+	                throw FEException("Forms: as_tensor requires explicit shape with rows,cols >= 1 (jet)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != static_cast<std::size_t>(rows * cols)) {
+	                throw FEException("Forms: as_tensor child count does not match rows*cols (jet)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            out.value.kind = EvalValue<Scalar>::Kind::Matrix;
+	            out.value.resizeMatrix(static_cast<std::size_t>(rows), static_cast<std::size_t>(cols));
+	            if (out.has_grad) {
+	                out.grad.kind = EvalValue<Scalar>::Kind::Tensor3;
+	                out.grad.resizeTensor3(static_cast<std::size_t>(rows),
+	                                       static_cast<std::size_t>(cols),
+	                                       static_cast<std::size_t>(dim));
+	            }
+	            for (int r = 0; r < rows; ++r) {
+	                for (int c = 0; c < cols; ++c) {
+	                    const auto idx = static_cast<std::size_t>(r * cols + c);
+	                    if (!kids[idx]) throw std::logic_error("Forms: as_tensor has null child (jet)");
+	                    const auto v = evalSpatialJet<Scalar>(*kids[idx], env, side, q, order);
+	                    if (!isScalarKind<Scalar>(v.value.kind)) {
+	                        throw FEException("Forms: as_tensor entries must be scalar (jet)",
+	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                    }
+	                    out.value.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) = v.value.s;
+	                    if (out.has_grad) {
+	                        for (int d = 0; d < dim; ++d) {
+	                            out.grad.tensor3At(static_cast<std::size_t>(r),
+	                                               static_cast<std::size_t>(c),
+	                                               static_cast<std::size_t>(d)) =
+	                                v.grad.vectorAt(static_cast<std::size_t>(d));
+	                        }
+	                    }
+	                }
+	            }
+	            return out;
+	        }
+	        case FormExprType::Component: {
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 1u || !kids[0]) {
+	                throw std::logic_error("Forms: component must have 1 child (jet)");
+	            }
+	            const auto a = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+	            const int i = node.componentIndex0().value_or(0);
+	            const int j = node.componentIndex1().value_or(-1);
+	            if (isScalarKind<Scalar>(a.value.kind)) {
+	                if (i != 0 || j >= 0) {
+	                    throw FEException("Forms: component() invalid indices for scalar (jet)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                return a;
+	            }
+	            if (isVectorKind<Scalar>(a.value.kind)) {
+	                if (j >= 0) {
+	                    throw FEException("Forms: component(v,i,j) invalid for vector (jet)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                const auto n = a.value.vectorSize();
+	                if (i < 0 || static_cast<std::size_t>(i) >= n) {
+	                    throw FEException("Forms: component(v,i) index out of range (jet)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	                out.value.s = a.value.vectorAt(static_cast<std::size_t>(i));
+	                if (out.has_grad) {
+	                    out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+	                    out.grad.vector_size = dim;
+	                    for (int d = 0; d < dim; ++d) {
+	                        out.grad.v[static_cast<std::size_t>(d)] =
+	                            a.grad.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(d));
+	                    }
+	                }
+	                if (out.has_hess) {
+	                    out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+	                    out.hess.matrix_rows = dim;
+	                    out.hess.matrix_cols = dim;
+	                    for (int r = 0; r < dim; ++r) {
+	                        for (int c = 0; c < dim; ++c) {
+	                            out.hess.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+	                                a.hess.tensor3At(static_cast<std::size_t>(i),
+	                                                 static_cast<std::size_t>(r),
+	                                                 static_cast<std::size_t>(c));
+	                        }
+	                    }
+	                }
+	                return out;
+	            }
+	            if (isMatrixKind<Scalar>(a.value.kind)) {
+	                if (j < 0) {
+	                    throw FEException("Forms: component(A,i) missing column index for matrix (jet)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                if (out.has_hess) {
+	                    throw FEException("Forms: Hessian of component(matrix,i,j) is not supported (requires rank-4)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	                }
+	                const auto rows = a.value.matrixRows();
+	                const auto cols = a.value.matrixCols();
+	                if (i < 0 || static_cast<std::size_t>(i) >= rows || j < 0 || static_cast<std::size_t>(j) >= cols) {
+	                    throw FEException("Forms: component(A,i,j) index out of range (jet)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	                out.value.s = a.value.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j));
+	                if (out.has_grad) {
+	                    out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+	                    out.grad.vector_size = dim;
+	                    for (int d = 0; d < dim; ++d) {
+	                        out.grad.v[static_cast<std::size_t>(d)] =
+	                            a.grad.tensor3At(static_cast<std::size_t>(i),
+	                                             static_cast<std::size_t>(j),
+	                                             static_cast<std::size_t>(d));
+	                    }
+	                }
+	                return out;
+	            }
+	            throw FEException("Forms: component() operand kind not supported in spatial jets",
+	                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	        }
+	        case FormExprType::Transpose: {
+	            if (out.has_hess) {
+	                throw FEException("Forms: Hessian of transpose(A) is not supported (requires rank-4)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	            }
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 1u || !kids[0]) {
+	                throw std::logic_error("Forms: transpose must have 1 child (jet)");
+	            }
+	            const auto A = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+	            if (!isMatrixKind<Scalar>(A.value.kind)) {
+	                throw FEException("Forms: transpose() expects a matrix (jet)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            const auto rows = A.value.matrixRows();
+	            const auto cols = A.value.matrixCols();
+	            out.value.kind = (rows == cols) ? A.value.kind : EvalValue<Scalar>::Kind::Matrix;
+	            out.value.resizeMatrix(cols, rows);
+	            for (std::size_t r = 0; r < cols; ++r) {
+	                for (std::size_t c = 0; c < rows; ++c) {
+	                    out.value.matrixAt(r, c) = A.value.matrixAt(c, r);
+	                }
+	            }
+	            if (out.has_grad) {
+	                out.grad.kind = EvalValue<Scalar>::Kind::Tensor3;
+	                out.grad.resizeTensor3(cols, rows, static_cast<std::size_t>(dim));
+	                for (std::size_t r = 0; r < cols; ++r) {
+	                    for (std::size_t c = 0; c < rows; ++c) {
+	                        for (int d = 0; d < dim; ++d) {
+	                            out.grad.tensor3At(r, c, static_cast<std::size_t>(d)) =
+	                                A.grad.tensor3At(c, r, static_cast<std::size_t>(d));
+	                        }
+	                    }
+	                }
+	            }
+	            return out;
+	        }
+	        case FormExprType::Trace: {
+	            if (out.has_hess) {
+	                throw FEException("Forms: Hessian of trace(A) is not supported (requires rank-4)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	            }
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 1u || !kids[0]) {
+	                throw std::logic_error("Forms: trace must have 1 child (jet)");
+	            }
+	            const auto A = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+	            if (!isMatrixKind<Scalar>(A.value.kind)) {
+	                throw FEException("Forms: trace() expects a matrix (jet)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            const auto rows = A.value.matrixRows();
+	            const auto cols = A.value.matrixCols();
+	            if (rows != cols || rows == 0u) {
+	                throw FEException("Forms: trace() expects a square matrix (jet)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            Scalar tr = makeScalarConstant<Scalar>(0.0, env);
+	            for (std::size_t d = 0; d < rows; ++d) {
+	                tr = s_add(tr, A.value.matrixAt(d, d), env);
+	            }
+	            out.value.s = tr;
+	            if (out.has_grad) {
+	                out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+	                out.grad.vector_size = dim;
+	                for (int d = 0; d < dim; ++d) {
+	                    Scalar gd = makeScalarConstant<Scalar>(0.0, env);
+	                    for (std::size_t k = 0; k < rows; ++k) {
+	                        gd = s_add(gd, A.grad.tensor3At(k, k, static_cast<std::size_t>(d)), env);
+	                    }
+	                    out.grad.v[static_cast<std::size_t>(d)] = gd;
+	                }
+	            }
+	            return out;
+	        }
+	        case FormExprType::SymmetricPart:
+	        case FormExprType::SkewPart: {
+	            if (out.has_hess) {
+	                throw FEException("Forms: Hessian of sym(A)/skew(A) is not supported (requires rank-4)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	            }
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 1u || !kids[0]) {
+	                throw std::logic_error("Forms: sym/skew must have 1 child (jet)");
+	            }
+	            const auto A = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+	            if (!isMatrixKind<Scalar>(A.value.kind)) {
+	                throw FEException("Forms: sym/skew expects a matrix (jet)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            const auto rows = A.value.matrixRows();
+	            const auto cols = A.value.matrixCols();
+	            if (rows != cols) {
+	                throw FEException("Forms: sym/skew expects a square matrix (jet)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            out.value.kind = (node.type() == FormExprType::SymmetricPart)
+	                ? EvalValue<Scalar>::Kind::SymmetricMatrix
+	                : EvalValue<Scalar>::Kind::SkewMatrix;
+	            out.value.resizeMatrix(rows, cols);
+	            for (std::size_t r = 0; r < rows; ++r) {
+	                for (std::size_t c = 0; c < cols; ++c) {
+	                    const Scalar art = A.value.matrixAt(r, c);
+	                    const Scalar atr = A.value.matrixAt(c, r);
+	                    out.value.matrixAt(r, c) =
+	                        (node.type() == FormExprType::SymmetricPart)
+	                            ? s_mul(0.5, s_add(art, atr, env), env)
+	                            : s_mul(0.5, s_sub(art, atr, env), env);
+	                }
+	            }
+	            if (out.has_grad) {
+	                out.grad.kind = EvalValue<Scalar>::Kind::Tensor3;
+	                out.grad.resizeTensor3(rows, cols, static_cast<std::size_t>(dim));
+	                for (std::size_t r = 0; r < rows; ++r) {
+	                    for (std::size_t c = 0; c < cols; ++c) {
+	                        for (int d = 0; d < dim; ++d) {
+	                            const Scalar grc = A.grad.tensor3At(r, c, static_cast<std::size_t>(d));
+	                            const Scalar gcr = A.grad.tensor3At(c, r, static_cast<std::size_t>(d));
+	                            out.grad.tensor3At(r, c, static_cast<std::size_t>(d)) =
+	                                (node.type() == FormExprType::SymmetricPart)
+	                                    ? s_mul(0.5, s_add(grc, gcr, env), env)
+	                                    : s_mul(0.5, s_sub(grc, gcr, env), env);
+	                        }
+	                    }
+	                }
+	            }
+	            return out;
+	        }
+	        case FormExprType::Deviator: {
+	            if (out.has_hess) {
+	                throw FEException("Forms: Hessian of dev(A) is not supported (requires rank-4)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	            }
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 1u || !kids[0]) {
+	                throw std::logic_error("Forms: dev must have 1 child (jet)");
+	            }
+	            const auto A = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+	            if (!isMatrixKind<Scalar>(A.value.kind)) {
+	                throw FEException("Forms: dev() expects a matrix (jet)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            const auto rows = A.value.matrixRows();
+	            const auto cols = A.value.matrixCols();
+	            if (rows != cols || rows == 0u) {
+	                throw FEException("Forms: dev() expects a square matrix (jet)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            Scalar tr = makeScalarConstant<Scalar>(0.0, env);
+	            for (std::size_t d = 0; d < rows; ++d) tr = s_add(tr, A.value.matrixAt(d, d), env);
+	            const Scalar mean = s_mul(tr,
+	                                      makeScalarConstant<Scalar>(1.0 / static_cast<Real>(rows), env),
+	                                      env);
+	
+	            out.value = A.value;
+	            out.value.kind = A.value.kind;
+	            for (std::size_t d = 0; d < rows; ++d) {
+	                out.value.matrixAt(d, d) = s_sub(out.value.matrixAt(d, d), mean, env);
+	            }
+	            if (out.has_grad) {
+	                out.grad = A.grad;
+	                for (int k = 0; k < dim; ++k) {
+	                    Scalar gmean = makeScalarConstant<Scalar>(0.0, env);
+	                    for (std::size_t d = 0; d < rows; ++d) {
+	                        gmean = s_add(gmean, A.grad.tensor3At(d, d, static_cast<std::size_t>(k)), env);
+	                    }
+	                    gmean = s_mul(gmean,
+	                                  makeScalarConstant<Scalar>(1.0 / static_cast<Real>(rows), env),
+	                                  env);
+	                    for (std::size_t d = 0; d < rows; ++d) {
+	                        out.grad.tensor3At(d, d, static_cast<std::size_t>(k)) =
+	                            s_sub(out.grad.tensor3At(d, d, static_cast<std::size_t>(k)), gmean, env);
+	                    }
+	                }
+	            }
+	            return out;
+	        }
+	        case FormExprType::AbsoluteValue: {
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 1u || !kids[0]) {
+	                throw std::logic_error("Forms: abs must have 1 child (jet)");
+	            }
+	            const auto a = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+	            if (!isScalarKind<Scalar>(a.value.kind)) {
+	                throw FEException("Forms: abs() in spatial jets expects a scalar operand",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            const Real av = scalarNumericValue(a.value.s);
+	            const Real sgn = (av > 0.0) ? 1.0 : ((av < 0.0) ? -1.0 : 0.0);
+	            const Scalar sgn_s = makeScalarConstant<Scalar>(sgn, env);
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = s_abs(a.value.s, env);
+	            if (out.has_grad) {
+	                out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+	                out.grad.vector_size = dim;
+	                for (int d = 0; d < dim; ++d) {
+	                    out.grad.v[static_cast<std::size_t>(d)] =
+	                        s_mul(sgn_s, a.grad.vectorAt(static_cast<std::size_t>(d)), env);
+	                }
+	            }
+	            if (out.has_hess) {
+	                out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+	                out.hess.matrix_rows = dim;
+	                out.hess.matrix_cols = dim;
+	                for (int i = 0; i < dim; ++i) {
+	                    for (int j = 0; j < dim; ++j) {
+	                        out.hess.m[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] =
+	                            s_mul(sgn_s, a.hess.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)), env);
+	                    }
+	                }
+	            }
+	            return out;
+	        }
+	        case FormExprType::Sign: {
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 1u || !kids[0]) {
+	                throw std::logic_error("Forms: sign must have 1 child (jet)");
+	            }
+	            const auto a = evalSpatialJet<Scalar>(*kids[0], env, side, q, 0);
+	            if (!isScalarKind<Scalar>(a.value.kind)) {
+	                throw FEException("Forms: sign() in spatial jets expects a scalar operand",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = s_sign(a.value.s, env);
+	            if (out.has_grad) {
+	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            return out;
+	        }
+	        case FormExprType::Sqrt:
+	        case FormExprType::Exp:
+	        case FormExprType::Log: {
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 1u || !kids[0]) {
+                throw std::logic_error("Forms: unary op must have 1 child (jet)");
+            }
+            const auto u = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+            if (!isScalarKind<Scalar>(u.value.kind)) {
+                throw FEException("Forms: sqrt/exp/log in spatial jets expects a scalar operand",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+            if (node.type() == FormExprType::Sqrt) out.value.s = s_sqrt(u.value.s, env);
+            else if (node.type() == FormExprType::Exp) out.value.s = s_exp(u.value.s, env);
+            else out.value.s = s_log(u.value.s, env);
+
+            if (out.has_grad) {
+                out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+                out.grad.vector_size = dim;
+
+                Scalar fp = makeScalarConstant<Scalar>(0.0, env);
+                if (node.type() == FormExprType::Sqrt) {
+                    fp = s_div(makeScalarConstant<Scalar>(0.5, env), out.value.s, env);
+                } else if (node.type() == FormExprType::Exp) {
+                    fp = out.value.s;
+                } else {
+                    fp = s_div(makeScalarConstant<Scalar>(1.0, env), u.value.s, env);
+                }
+
+                for (int d = 0; d < dim; ++d) {
+                    out.grad.v[static_cast<std::size_t>(d)] =
+                        s_mul(fp, u.grad.vectorAt(static_cast<std::size_t>(d)), env);
+                }
+            }
+
+            if (out.has_hess) {
+                out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+                out.hess.matrix_rows = dim;
+                out.hess.matrix_cols = dim;
+
+                Scalar fp = makeScalarConstant<Scalar>(0.0, env);
+                Scalar fpp = makeScalarConstant<Scalar>(0.0, env);
+                if (node.type() == FormExprType::Sqrt) {
+                    fp = s_div(makeScalarConstant<Scalar>(0.5, env), out.value.s, env);
+                    const Scalar denom = s_mul(s_mul(out.value.s, out.value.s, env), out.value.s, env);
+                    fpp = s_div(makeScalarConstant<Scalar>(-0.25, env), denom, env);
+                } else if (node.type() == FormExprType::Exp) {
+                    fp = out.value.s;
+                    fpp = out.value.s;
+                } else {
+                    fp = s_div(makeScalarConstant<Scalar>(1.0, env), u.value.s, env);
+                    const Scalar denom = s_mul(u.value.s, u.value.s, env);
+                    fpp = s_div(makeScalarConstant<Scalar>(-1.0, env), denom, env);
+                }
+
+                for (int i = 0; i < dim; ++i) {
+                    for (int j = 0; j < dim; ++j) {
+                        const Scalar term1 =
+                            s_mul(fp, u.hess.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)), env);
+                        const Scalar term2 =
+                            s_mul(fpp,
+                                  s_mul(u.grad.vectorAt(static_cast<std::size_t>(i)),
+                                        u.grad.vectorAt(static_cast<std::size_t>(j)), env),
+                                  env);
+                        out.hess.m[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = s_add(term1, term2, env);
+                    }
+                }
+            }
+
+            return out;
+        }
+        case FormExprType::Norm: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1u || !kids[0]) {
+                throw std::logic_error("Forms: norm must have 1 child (jet)");
+            }
+            const auto a = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+
+            if (isVectorKind<Scalar>(a.value.kind)) {
+                // s = sum_i a_i^2
+                Scalar s0 = makeScalarConstant<Scalar>(0.0, env);
+                for (std::size_t i = 0; i < a.value.vectorSize(); ++i) {
+                    s0 = s_add(s0, s_mul(a.value.vectorAt(i), a.value.vectorAt(i), env), env);
+                }
+
+                // grad(s) and H(s) if needed
+                EvalValue<Scalar> s_grad{};
+                EvalValue<Scalar> s_hess{};
+                if (out.has_grad) {
+                    s_grad.kind = EvalValue<Scalar>::Kind::Vector;
+                    s_grad.vector_size = dim;
+                    for (int d = 0; d < dim; ++d) {
+                        Scalar g = makeScalarConstant<Scalar>(0.0, env);
+                        for (std::size_t i = 0; i < a.value.vectorSize(); ++i) {
+                            g = s_add(g,
+                                      s_mul(2.0,
+                                            s_mul(a.value.vectorAt(i), a.grad.matrixAt(i, static_cast<std::size_t>(d)), env),
+                                            env),
+                                      env);
+                        }
+                        s_grad.v[static_cast<std::size_t>(d)] = g;
+                    }
+                }
+                if (out.has_hess) {
+                    s_hess.kind = EvalValue<Scalar>::Kind::Matrix;
+                    s_hess.matrix_rows = dim;
+                    s_hess.matrix_cols = dim;
+                    for (int i = 0; i < dim; ++i) {
+                        for (int j = 0; j < dim; ++j) {
+                            Scalar Hij = makeScalarConstant<Scalar>(0.0, env);
+                            for (std::size_t comp = 0; comp < a.value.vectorSize(); ++comp) {
+                                Hij = s_add(Hij,
+                                            s_mul(2.0,
+                                                  s_mul(a.grad.matrixAt(comp, static_cast<std::size_t>(i)),
+                                                        a.grad.matrixAt(comp, static_cast<std::size_t>(j)), env),
+                                                  env),
+                                            env);
+                                Hij = s_add(Hij,
+                                            s_mul(2.0,
+                                                  s_mul(a.value.vectorAt(comp),
+                                                        a.hess.tensor3At(comp, static_cast<std::size_t>(i), static_cast<std::size_t>(j)), env),
+                                                  env),
+                                            env);
+                            }
+                            s_hess.m[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = Hij;
+                        }
+                    }
+                }
+
+                // norm = sqrt(s)
+                out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+                out.value.s = s_sqrt(s0, env);
+
+                if (out.has_grad) {
+                    out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+                    out.grad.vector_size = dim;
+                    const Scalar fp = s_div(makeScalarConstant<Scalar>(0.5, env), out.value.s, env);
+                    for (int d = 0; d < dim; ++d) {
+                        out.grad.v[static_cast<std::size_t>(d)] = s_mul(fp, s_grad.vectorAt(static_cast<std::size_t>(d)), env);
+                    }
+                }
+                if (out.has_hess) {
+                    out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+                    out.hess.matrix_rows = dim;
+                    out.hess.matrix_cols = dim;
+                    const Scalar fp = s_div(makeScalarConstant<Scalar>(0.5, env), out.value.s, env);
+                    const Scalar denom = s_mul(s_mul(out.value.s, out.value.s, env), out.value.s, env);
+                    const Scalar fpp = s_div(makeScalarConstant<Scalar>(-0.25, env), denom, env);
+                    for (int i = 0; i < dim; ++i) {
+                        for (int j = 0; j < dim; ++j) {
+                            const Scalar term1 = s_mul(fp, s_hess.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)), env);
+                            const Scalar term2 = s_mul(fpp,
+                                                       s_mul(s_grad.vectorAt(static_cast<std::size_t>(i)),
+                                                             s_grad.vectorAt(static_cast<std::size_t>(j)), env),
+                                                       env);
+                            out.hess.m[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = s_add(term1, term2, env);
+                        }
+                    }
+                }
+                return out;
+            }
+
+            if (isMatrixKind<Scalar>(a.value.kind)) {
+                // Only support first derivatives (no rank-4 support).
+                if (out.has_hess) {
+                    throw FEException("Forms: Hessian of norm(matrix) is not supported (requires rank-4)",
+                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                }
+                Scalar s0 = makeScalarConstant<Scalar>(0.0, env);
+                for (std::size_t r = 0; r < a.value.matrixRows(); ++r) {
+                    for (std::size_t c = 0; c < a.value.matrixCols(); ++c) {
+                        s0 = s_add(s0, s_mul(a.value.matrixAt(r, c), a.value.matrixAt(r, c), env), env);
+                    }
+                }
+                out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+                out.value.s = s_sqrt(s0, env);
+                if (out.has_grad) {
+                    out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+                    out.grad.vector_size = dim;
+                    const Scalar inv_n = s_div(makeScalarConstant<Scalar>(1.0, env), out.value.s, env);
+                    for (int d = 0; d < dim; ++d) {
+                        Scalar g = makeScalarConstant<Scalar>(0.0, env);
+                        for (std::size_t r = 0; r < a.value.matrixRows(); ++r) {
+                            for (std::size_t c = 0; c < a.value.matrixCols(); ++c) {
+                                g = s_add(g,
+                                          s_mul(a.value.matrixAt(r, c),
+                                                a.grad.tensor3At(r, c, static_cast<std::size_t>(d)), env),
+                                          env);
+                            }
+                        }
+                        out.grad.v[static_cast<std::size_t>(d)] = s_mul(inv_n, g, env);
+                    }
+                }
+                return out;
+            }
+
+            throw FEException("Forms: norm() kind not supported in spatial jets",
+                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+        }
+        case FormExprType::OuterProduct: {
+            if (out.has_hess) {
+                throw FEException("Forms: Hessian of outer(vector,vector) is not supported (requires rank-4)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            const auto kids = node.childrenShared();
+            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+                throw std::logic_error("Forms: outer must have 2 children (jet)");
+            }
+            const auto a = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
+            const auto b = evalSpatialJet<Scalar>(*kids[1], env, side, q, order);
+            if (!isVectorKind<Scalar>(a.value.kind) || !isVectorKind<Scalar>(b.value.kind)) {
+                throw FEException("Forms: outer() in spatial jets supports vector-vector only",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            out.value.kind = EvalValue<Scalar>::Kind::Matrix;
+            out.value.resizeMatrix(a.value.vectorSize(), b.value.vectorSize());
+            for (std::size_t r = 0; r < a.value.vectorSize(); ++r) {
+                for (std::size_t c = 0; c < b.value.vectorSize(); ++c) {
+                    out.value.matrixAt(r, c) = s_mul(a.value.vectorAt(r), b.value.vectorAt(c), env);
+                }
+            }
+
+            if (out.has_grad) {
+                out.grad.kind = EvalValue<Scalar>::Kind::Tensor3;
+                out.grad.resizeTensor3(a.value.vectorSize(), b.value.vectorSize(), static_cast<std::size_t>(dim));
+                for (std::size_t r = 0; r < a.value.vectorSize(); ++r) {
+                    for (std::size_t c = 0; c < b.value.vectorSize(); ++c) {
+                        for (int d = 0; d < dim; ++d) {
+                            const Scalar term1 =
+                                s_mul(a.grad.matrixAt(r, static_cast<std::size_t>(d)), b.value.vectorAt(c), env);
+                            const Scalar term2 =
+                                s_mul(a.value.vectorAt(r), b.grad.matrixAt(c, static_cast<std::size_t>(d)), env);
+                            out.grad.tensor3At(r, c, static_cast<std::size_t>(d)) = s_add(term1, term2, env);
+                        }
+                    }
+                }
+            }
+
+            return out;
+        }
+        case FormExprType::Gradient: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1u || !kids[0]) {
+                throw std::logic_error("Forms: grad must have 1 child (jet)");
+            }
+            if (order >= 2) {
+                throw FEException("Forms: spatial jet does not support second derivatives of grad(·) (would require 3rd derivatives)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            const int child_order = order + 1;
+            const auto u = evalSpatialJet<Scalar>(*kids[0], env, side, q, child_order);
+            SpatialJet<Scalar> res;
+            res.has_grad = (order >= 1);
+            res.has_hess = false;
+            res.value = u.grad;
+            if (order >= 1) {
+                res.grad = u.hess;
+            }
+            return res;
+        }
+        case FormExprType::Divergence: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1u || !kids[0]) {
+                throw std::logic_error("Forms: div must have 1 child (jet)");
+            }
+            if (order >= 2) {
+                throw FEException("Forms: spatial jet does not support second derivatives of div(·) (would require 3rd derivatives)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            const int child_order = order + 1;
+            const auto u = evalSpatialJet<Scalar>(*kids[0], env, side, q, child_order);
+
+            if (isVectorKind<Scalar>(u.value.kind)) {
+                SpatialJet<Scalar> res;
+                res.has_grad = (order >= 1);
+                res.has_hess = false;
+                res.value.kind = EvalValue<Scalar>::Kind::Scalar;
+                Scalar divu = makeScalarConstant<Scalar>(0.0, env);
+                const int n = std::min(dim, static_cast<int>(u.value.vectorSize()));
+                for (int d = 0; d < n; ++d) {
+                    divu = s_add(divu, u.grad.matrixAt(static_cast<std::size_t>(d), static_cast<std::size_t>(d)), env);
+                }
+                res.value.s = divu;
+
+                if (order >= 1) {
+                    res.grad.kind = EvalValue<Scalar>::Kind::Vector;
+                    res.grad.vector_size = dim;
+                    for (int k = 0; k < dim; ++k) {
+                        Scalar gk = makeScalarConstant<Scalar>(0.0, env);
+                        for (int d = 0; d < n; ++d) {
+                            gk = s_add(gk,
+                                       u.hess.tensor3At(static_cast<std::size_t>(d),
+                                                        static_cast<std::size_t>(k),
+                                                        static_cast<std::size_t>(d)),
+                                       env);
+                        }
+                        res.grad.v[static_cast<std::size_t>(k)] = gk;
+                    }
+                }
+                return res;
+            }
+
+            if (isMatrixKind<Scalar>(u.value.kind)) {
+                SpatialJet<Scalar> res;
+                res.has_grad = false;
+                res.has_hess = false;
+                res.value.kind = EvalValue<Scalar>::Kind::Vector;
+                res.value.resizeVector(u.value.matrixRows());
+                const int cols = static_cast<int>(u.value.matrixCols());
+                const int n = std::min(dim, cols);
+                for (std::size_t r = 0; r < u.value.matrixRows(); ++r) {
+                    Scalar sum = makeScalarConstant<Scalar>(0.0, env);
+                    for (int d = 0; d < n; ++d) {
+                        sum = s_add(sum, u.grad.tensor3At(r, static_cast<std::size_t>(d), static_cast<std::size_t>(d)), env);
+                    }
+                    res.value.vectorAt(r) = sum;
+                }
+                if (order >= 1) {
+                    throw FEException("Forms: grad(div(matrix)) is not supported (requires rank-4)",
+                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                }
+                return res;
+            }
+
+            throw FEException("Forms: div() operand kind not supported in spatial jets",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        }
+        case FormExprType::Hessian: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1u || !kids[0]) {
+                throw std::logic_error("Forms: H must have 1 child (jet)");
+            }
+            if (order > 0) {
+                throw FEException("Forms: spatial jet does not support derivatives of H(·) (would require 3rd derivatives)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            const auto u = evalSpatialJet<Scalar>(*kids[0], env, side, q, 2);
+            SpatialJet<Scalar> res;
+            res.has_grad = false;
+            res.has_hess = false;
+            res.value = u.hess;
+            return res;
+        }
+        default:
+            break;
+    }
+
+    throw FEException("Forms: spatial jet does not support this node type",
+                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
 }
 
 // ============================================================================
@@ -1231,6 +4222,16 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 out.matrix_cols = dim;
                 return out;
             }
+            if (const auto* f = node.tensor3Coefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Tensor3;
+                out.t3 = (*f)(x[0], x[1], x[2]);
+                out.tensor3_dim0 = dim;
+                out.tensor3_dim1 = dim;
+                out.tensor3_dim2 = dim;
+                return out;
+            }
             if (const auto* f = node.tensor4Coefficient(); f) {
                 const auto x = ctx.physicalPoint(q);
                 EvalValue<Real> out;
@@ -1382,11 +4383,12 @@ EvalValue<Real> evalReal(const FormExprNode& node,
 
             throw FEException("Forms: DiscreteField field type not supported",
                               __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
-        }
-        case FormExprType::Gradient: {
-            const auto kids = node.childrenShared();
-            if (kids.size() != 1 || !kids[0]) throw std::logic_error("grad must have 1 child");
-            const auto& child = *kids[0];
+	        }
+	        case FormExprType::Gradient: {
+	            return evalSpatialJet<Real>(node, env, side, q, 0).value;
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 1 || !kids[0]) throw std::logic_error("grad must have 1 child");
+	            const auto& child = *kids[0];
 
             // Only support gradients of terminals in the initial implementation.
             if (child.type() == FormExprType::TestFunction) {
@@ -1560,11 +4562,12 @@ EvalValue<Real> evalReal(const FormExprNode& node,
 
             throw FEException("Forms: grad() currently supports TestFunction, TrialFunction, Constant, and scalar Coefficient only",
                               __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
-        }
-        case FormExprType::Hessian: {
-            const auto kids = node.childrenShared();
-            if (kids.size() != 1 || !kids[0]) throw std::logic_error("H() must have 1 child");
-            const auto& child = *kids[0];
+	        }
+	        case FormExprType::Hessian: {
+	            return evalSpatialJet<Real>(node, env, side, q, 0).value;
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 1 || !kids[0]) throw std::logic_error("H() must have 1 child");
+	            const auto& child = *kids[0];
 
             if (child.type() == FormExprType::Component) {
                 const auto ckids = child.childrenShared();
@@ -1877,11 +4880,12 @@ EvalValue<Real> evalReal(const FormExprNode& node,
             }
             throw FEException("Forms: dt() operand did not evaluate to a scalar or vector",
                               __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-        }
-        case FormExprType::Divergence: {
-            const auto kids = node.childrenShared();
-            if (kids.size() != 1 || !kids[0]) throw std::logic_error("div must have 1 child");
-            const auto& child = *kids[0];
+	        }
+	        case FormExprType::Divergence: {
+	            return evalSpatialJet<Real>(node, env, side, q, 0).value;
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 1 || !kids[0]) throw std::logic_error("div must have 1 child");
+	            const auto& child = *kids[0];
             if (child.type() == FormExprType::TestFunction) {
                 const auto* sig = child.spaceSignature();
                 if (!sig) {
@@ -2475,6 +5479,16 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                     }
                 }
                 nrm = std::sqrt(nrm);
+            } else if (isTensor3Kind<Real>(a.kind)) {
+                for (std::size_t i = 0; i < a.tensor3Dim0(); ++i) {
+                    for (std::size_t j = 0; j < a.tensor3Dim1(); ++j) {
+                        for (std::size_t k = 0; k < a.tensor3Dim2(); ++k) {
+                            const Real v = a.tensor3At(i, j, k);
+                            nrm += v * v;
+                        }
+                    }
+                }
+                nrm = std::sqrt(nrm);
             } else {
                 for (std::size_t k = 0; k < a.t4.size(); ++k) {
                     nrm += a.t4[k] * a.t4[k];
@@ -2566,6 +5580,13 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                     throw FEException("Forms: add/sub matrix shape mismatch",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
+                if (isTensor3Kind<Real>(a.kind) &&
+                    (a.tensor3Dim0() != b.tensor3Dim0() ||
+                     a.tensor3Dim1() != b.tensor3Dim1() ||
+                     a.tensor3Dim2() != b.tensor3Dim2())) {
+                    throw FEException("Forms: add/sub tensor3 shape mismatch",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
                 EvalValue<Real> out;
                 out.kind = addSubResultKind<Real>(a.kind, b.kind);
                 const Real sgn = (node.type() == FormExprType::Add) ? 1.0 : -1.0;
@@ -2580,6 +5601,15 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                     for (std::size_t r = 0; r < out.matrixRows(); ++r) {
                         for (std::size_t c = 0; c < out.matrixCols(); ++c) {
                             out.matrixAt(r, c) = a.matrixAt(r, c) + sgn * b.matrixAt(r, c);
+                        }
+                    }
+                } else if (isTensor3Kind<Real>(a.kind)) {
+                    out.resizeTensor3(a.tensor3Dim0(), a.tensor3Dim1(), a.tensor3Dim2());
+                    for (std::size_t i = 0; i < a.tensor3Dim0(); ++i) {
+                        for (std::size_t j = 0; j < a.tensor3Dim1(); ++j) {
+                            for (std::size_t k = 0; k < a.tensor3Dim2(); ++k) {
+                                out.tensor3At(i, j, k) = a.tensor3At(i, j, k) + sgn * b.tensor3At(i, j, k);
+                            }
                         }
                     }
                 } else {
@@ -2692,6 +5722,32 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                     }
                     return out;
                 }
+                if (isScalarKind<Real>(a.kind) && isTensor3Kind<Real>(b.kind)) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Tensor3;
+                    out.resizeTensor3(b.tensor3Dim0(), b.tensor3Dim1(), b.tensor3Dim2());
+                    for (std::size_t i = 0; i < b.tensor3Dim0(); ++i) {
+                        for (std::size_t j = 0; j < b.tensor3Dim1(); ++j) {
+                            for (std::size_t k = 0; k < b.tensor3Dim2(); ++k) {
+                                out.tensor3At(i, j, k) = a.s * b.tensor3At(i, j, k);
+                            }
+                        }
+                    }
+                    return out;
+                }
+                if (isTensor3Kind<Real>(a.kind) && isScalarKind<Real>(b.kind)) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Tensor3;
+                    out.resizeTensor3(a.tensor3Dim0(), a.tensor3Dim1(), a.tensor3Dim2());
+                    for (std::size_t i = 0; i < a.tensor3Dim0(); ++i) {
+                        for (std::size_t j = 0; j < a.tensor3Dim1(); ++j) {
+                            for (std::size_t k = 0; k < a.tensor3Dim2(); ++k) {
+                                out.tensor3At(i, j, k) = a.tensor3At(i, j, k) * b.s;
+                            }
+                        }
+                    }
+                    return out;
+                }
                 if (isScalarKind<Real>(a.kind) && isTensor4Kind<Real>(b.kind)) {
                     EvalValue<Real> out;
                     out.kind = EvalValue<Real>::Kind::Tensor4;
@@ -2738,6 +5794,19 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                     }
                     return out;
                 }
+                if (isTensor3Kind<Real>(a.kind)) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Tensor3;
+                    out.resizeTensor3(a.tensor3Dim0(), a.tensor3Dim1(), a.tensor3Dim2());
+                    for (std::size_t i = 0; i < a.tensor3Dim0(); ++i) {
+                        for (std::size_t j = 0; j < a.tensor3Dim1(); ++j) {
+                            for (std::size_t k = 0; k < a.tensor3Dim2(); ++k) {
+                                out.tensor3At(i, j, k) = a.tensor3At(i, j, k) / b.s;
+                            }
+                        }
+                    }
+                    return out;
+                }
                 if (isTensor4Kind<Real>(a.kind)) {
                     EvalValue<Real> out;
                     out.kind = EvalValue<Real>::Kind::Tensor4;
@@ -2774,6 +5843,23 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                     for (std::size_t r = 0; r < a.matrixRows(); ++r) {
                         for (std::size_t c = 0; c < a.matrixCols(); ++c) {
                             sum += a.matrixAt(r, c) * b.matrixAt(r, c);
+                        }
+                    }
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, sum};
+                }
+                if (isTensor3Kind<Real>(a.kind) && isTensor3Kind<Real>(b.kind)) {
+                    if (a.tensor3Dim0() != b.tensor3Dim0() ||
+                        a.tensor3Dim1() != b.tensor3Dim1() ||
+                        a.tensor3Dim2() != b.tensor3Dim2()) {
+                        throw FEException("Forms: inner(tensor3,tensor3) shape mismatch",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    Real sum = 0.0;
+                    for (std::size_t i = 0; i < a.tensor3Dim0(); ++i) {
+                        for (std::size_t j = 0; j < a.tensor3Dim1(); ++j) {
+                            for (std::size_t k = 0; k < a.tensor3Dim2(); ++k) {
+                                sum += a.tensor3At(i, j, k) * b.tensor3At(i, j, k);
+                            }
                         }
                     }
                     return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, sum};
@@ -3740,6 +6826,19 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 }
                 return out;
             }
+            if (const auto* f = node.tensor3Coefficient(); f) {
+                const auto x = ctx.physicalPoint(q);
+                const auto tt = (*f)(x[0], x[1], x[2]);
+                EvalValue<Dual> out;
+                out.kind = EvalValue<Dual>::Kind::Tensor3;
+                out.tensor3_dim0 = dim;
+                out.tensor3_dim1 = dim;
+                out.tensor3_dim2 = dim;
+                for (std::size_t i = 0; i < tt.size(); ++i) {
+                    out.t3[i] = makeDualConstant(tt[i], env.ws->alloc());
+                }
+                return out;
+            }
             if (const auto* f = node.tensor4Coefficient(); f) {
                 const auto x = ctx.physicalPoint(q);
                 const auto vv = (*f)(x[0], x[1], x[2]);
@@ -3775,11 +6874,12 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 out.v[static_cast<std::size_t>(d)] = makeDualConstant(n[static_cast<std::size_t>(d)], env.ws->alloc());
             }
             return out;
-        }
-        case FormExprType::Gradient: {
-            const auto kids = node.childrenShared();
-            if (kids.size() != 1 || !kids[0]) throw std::logic_error("grad must have 1 child");
-            const auto& child = *kids[0];
+	        }
+	        case FormExprType::Gradient: {
+	            return evalSpatialJet<Dual>(node, env, side, q, 0).value;
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 1 || !kids[0]) throw std::logic_error("grad must have 1 child");
+	            const auto& child = *kids[0];
 
             if (child.type() == FormExprType::TestFunction) {
                 const auto* sig = child.spaceSignature();
@@ -3995,11 +7095,12 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
 
             throw FEException("Forms: grad() currently supports TestFunction, TrialFunction, Constant, and scalar Coefficient only",
                               __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
-        }
-        case FormExprType::Hessian: {
-            const auto kids = node.childrenShared();
-            if (kids.size() != 1 || !kids[0]) throw std::logic_error("H() must have 1 child (dual)");
-            const auto& child = *kids[0];
+	        }
+	        case FormExprType::Hessian: {
+	            return evalSpatialJet<Dual>(node, env, side, q, 0).value;
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 1 || !kids[0]) throw std::logic_error("H() must have 1 child (dual)");
+	            const auto& child = *kids[0];
 
             if (child.type() == FormExprType::Component) {
                 const auto ckids = child.childrenShared();
@@ -4407,11 +7508,12 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
 
             throw FEException("Forms: dt() operand did not evaluate to a scalar or vector (dual)",
                               __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-        }
-        case FormExprType::Divergence: {
-            const auto kids = node.childrenShared();
-            if (kids.size() != 1 || !kids[0]) throw std::logic_error("div must have 1 child (dual)");
-            const auto& child = *kids[0];
+	        }
+	        case FormExprType::Divergence: {
+	            return evalSpatialJet<Dual>(node, env, side, q, 0).value;
+	            const auto kids = node.childrenShared();
+	            if (kids.size() != 1 || !kids[0]) throw std::logic_error("div must have 1 child (dual)");
+	            const auto& child = *kids[0];
             if (child.type() == FormExprType::TestFunction) {
                 const auto* sig = child.spaceSignature();
                 if (!sig) {
@@ -5127,6 +8229,17 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                         sum = add(sum, prod, sum);
                     }
                 }
+            } else if (isTensor3Kind<Dual>(a.kind)) {
+                for (std::size_t i = 0; i < a.tensor3Dim0(); ++i) {
+                    for (std::size_t j = 0; j < a.tensor3Dim1(); ++j) {
+                        for (std::size_t k = 0; k < a.tensor3Dim2(); ++k) {
+                            auto prod = mul(a.tensor3At(i, j, k),
+                                            a.tensor3At(i, j, k),
+                                            makeDualConstant(0.0, env.ws->alloc()));
+                            sum = add(sum, prod, sum);
+                        }
+                    }
+                }
             } else {
                 for (std::size_t k = 0; k < a.t4.size(); ++k) {
                     auto prod = mul(a.t4[k], a.t4[k], makeDualConstant(0.0, env.ws->alloc()));
@@ -5240,6 +8353,13 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                     throw FEException("Forms: add/sub matrix shape mismatch (dual)",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
+                if (isTensor3Kind<Dual>(a.kind) &&
+                    (a.tensor3Dim0() != b.tensor3Dim0() ||
+                     a.tensor3Dim1() != b.tensor3Dim1() ||
+                     a.tensor3Dim2() != b.tensor3Dim2())) {
+                    throw FEException("Forms: add/sub tensor3 shape mismatch (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
                 EvalValue<Dual> out;
                 out.kind = addSubResultKind<Dual>(a.kind, b.kind);
                 if (isScalarKind<Dual>(a.kind)) {
@@ -5260,6 +8380,17 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                             out.matrixAt(r, c) = (node.type() == FormExprType::Add)
                                 ? add(a.matrixAt(r, c), b.matrixAt(r, c), makeDualConstant(0.0, env.ws->alloc()))
                                 : sub(a.matrixAt(r, c), b.matrixAt(r, c), makeDualConstant(0.0, env.ws->alloc()));
+                        }
+                    }
+                } else if (isTensor3Kind<Dual>(a.kind)) {
+                    out.resizeTensor3(a.tensor3Dim0(), a.tensor3Dim1(), a.tensor3Dim2());
+                    for (std::size_t i = 0; i < a.tensor3Dim0(); ++i) {
+                        for (std::size_t j = 0; j < a.tensor3Dim1(); ++j) {
+                            for (std::size_t k = 0; k < a.tensor3Dim2(); ++k) {
+                                out.tensor3At(i, j, k) = (node.type() == FormExprType::Add)
+                                    ? add(a.tensor3At(i, j, k), b.tensor3At(i, j, k), makeDualConstant(0.0, env.ws->alloc()))
+                                    : sub(a.tensor3At(i, j, k), b.tensor3At(i, j, k), makeDualConstant(0.0, env.ws->alloc()));
+                            }
                         }
                     }
                 } else {
@@ -5382,6 +8513,32 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                     }
                     return out;
                 }
+                if (isScalarKind<Dual>(a.kind) && isTensor3Kind<Dual>(b.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Tensor3;
+                    out.resizeTensor3(b.tensor3Dim0(), b.tensor3Dim1(), b.tensor3Dim2());
+                    for (std::size_t i = 0; i < b.tensor3Dim0(); ++i) {
+                        for (std::size_t j = 0; j < b.tensor3Dim1(); ++j) {
+                            for (std::size_t k = 0; k < b.tensor3Dim2(); ++k) {
+                                out.tensor3At(i, j, k) = mul(a.s, b.tensor3At(i, j, k), makeDualConstant(0.0, env.ws->alloc()));
+                            }
+                        }
+                    }
+                    return out;
+                }
+                if (isTensor3Kind<Dual>(a.kind) && isScalarKind<Dual>(b.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Tensor3;
+                    out.resizeTensor3(a.tensor3Dim0(), a.tensor3Dim1(), a.tensor3Dim2());
+                    for (std::size_t i = 0; i < a.tensor3Dim0(); ++i) {
+                        for (std::size_t j = 0; j < a.tensor3Dim1(); ++j) {
+                            for (std::size_t k = 0; k < a.tensor3Dim2(); ++k) {
+                                out.tensor3At(i, j, k) = mul(a.tensor3At(i, j, k), b.s, makeDualConstant(0.0, env.ws->alloc()));
+                            }
+                        }
+                    }
+                    return out;
+                }
                 if (isScalarKind<Dual>(a.kind) && isTensor4Kind<Dual>(b.kind)) {
                     EvalValue<Dual> out;
                     out.kind = EvalValue<Dual>::Kind::Tensor4;
@@ -5429,6 +8586,19 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                     for (std::size_t r = 0; r < out.matrixRows(); ++r) {
                         for (std::size_t c = 0; c < out.matrixCols(); ++c) {
                             out.matrixAt(r, c) = div(a.matrixAt(r, c), b.s, makeDualConstant(0.0, env.ws->alloc()));
+                        }
+                    }
+                    return out;
+                }
+                if (isTensor3Kind<Dual>(a.kind)) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Tensor3;
+                    out.resizeTensor3(a.tensor3Dim0(), a.tensor3Dim1(), a.tensor3Dim2());
+                    for (std::size_t i = 0; i < a.tensor3Dim0(); ++i) {
+                        for (std::size_t j = 0; j < a.tensor3Dim1(); ++j) {
+                            for (std::size_t k = 0; k < a.tensor3Dim2(); ++k) {
+                                out.tensor3At(i, j, k) = div(a.tensor3At(i, j, k), b.s, makeDualConstant(0.0, env.ws->alloc()));
+                            }
                         }
                     }
                     return out;
@@ -5481,6 +8651,29 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                                             b.matrixAt(r, c),
                                             makeDualConstant(0.0, env.ws->alloc()));
                             sum = add(sum, prod, sum);
+                        }
+                    }
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = sum;
+                    return out;
+                }
+                if (isTensor3Kind<Dual>(a.kind) && isTensor3Kind<Dual>(b.kind)) {
+                    if (a.tensor3Dim0() != b.tensor3Dim0() ||
+                        a.tensor3Dim1() != b.tensor3Dim1() ||
+                        a.tensor3Dim2() != b.tensor3Dim2()) {
+                        throw FEException("Forms: inner(tensor3,tensor3) shape mismatch (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    Dual sum = makeDualConstant(0.0, env.ws->alloc());
+                    for (std::size_t i = 0; i < a.tensor3Dim0(); ++i) {
+                        for (std::size_t j = 0; j < a.tensor3Dim1(); ++j) {
+                            for (std::size_t k = 0; k < a.tensor3Dim2(); ++k) {
+                                auto prod = mul(a.tensor3At(i, j, k),
+                                                b.tensor3At(i, j, k),
+                                                makeDualConstant(0.0, env.ws->alloc()));
+                                sum = add(sum, prod, sum);
+                            }
                         }
                     }
                     EvalValue<Dual> out;

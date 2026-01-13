@@ -93,7 +93,7 @@ TEST(FormSpatialDerivativesTest, GradCompositeMatchesFiniteDifferences)
     EXPECT_LT(err_int, 1e-12);
 }
 
-TEST(FormSpatialDerivativesTest, GradCosCompositeMatchesFiniteDifferences)
+TEST(FormSpatialDerivativesTest, GradPowCompositeMatchesFiniteDifferences)
 {
     constexpr Real h = 1e-7;
 
@@ -102,11 +102,14 @@ TEST(FormSpatialDerivativesTest, GradCosCompositeMatchesFiniteDifferences)
     };
 
     const auto u = FormExpr::coefficient("u", u_fn);
-    const auto g = cos(u);
+    const auto base = FormExpr::constant(1.0) + u * u;
+    const auto exponent = FormExpr::constant(1.25);
+    const auto g = pow(base, exponent);
 
     VectorCoefficient grad_fd_fn = [=](Real x, Real y, Real z) {
         auto eval = [&](Real X, Real Y, Real Z) -> Real {
-            return std::cos(u_fn(X, Y, Z));
+            const Real uu = u_fn(X, Y, Z);
+            return std::pow(1.0 + uu * uu, 1.25);
         };
         std::array<Real, 3> grad{0.0, 0.0, 0.0};
         grad[0] = (eval(x + h, y, z) - eval(x - h, y, z)) / (2.0 * h);
@@ -123,7 +126,7 @@ TEST(FormSpatialDerivativesTest, GradCosCompositeMatchesFiniteDifferences)
     EXPECT_LT(err_int, 1e-12);
 }
 
-TEST(FormSpatialDerivativesTest, URISCosineMollifierMatchesReference)
+TEST(FormSpatialDerivativesTest, URISExponentialMollifierMatchesReference)
 {
     constexpr Real pi = 3.14159265358979323846;
     constexpr Real eps = 0.2;
@@ -140,7 +143,7 @@ TEST(FormSpatialDerivativesTest, URISCosineMollifierMatchesReference)
     ScalarCoefficient ddir_ref_fn = [=](Real x, Real y, Real z) {
         const Real dist = dist_eval(x, y, z);
         if (dist <= eps) {
-            return (1.0 + std::cos(pi * dist / eps)) / (2.0 * eps * eps);
+            return (1.0 + std::exp(-pi * dist / eps)) / (2.0 * eps * eps);
         }
         return 0.0;
     };
@@ -155,7 +158,7 @@ TEST(FormSpatialDerivativesTest, URISCosineMollifierMatchesReference)
     const auto pi_c = FormExpr::constant(pi);
 
     const auto arg = pi_c * dist / eps_c;
-    const auto ddir_inside = (one + cos(arg)) / (two * eps_c * eps_c);
+    const auto ddir_inside = (one + exp(-arg)) / (two * eps_c * eps_c);
     const auto ddir = conditional(le(dist, eps_c), ddir_inside, zero);
 
     const auto diff = ddir - ddir_ref;

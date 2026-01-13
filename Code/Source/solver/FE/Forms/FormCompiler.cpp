@@ -167,21 +167,39 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
 
     RequiredData required = RequiredData::None;
 
-    const auto visit = [&](const auto& self, const FormExprNode& n) -> void {
+    const auto visit = [&](const auto& self, const FormExprNode& n, int order) -> void {
+        order = std::clamp(order, 0, 2);
+
         switch (n.type()) {
             case FormExprType::TestFunction:
                 required |= RequiredData::BasisValues;
+                if (order >= 1) required |= RequiredData::PhysicalGradients;
+                if (order >= 2) required |= RequiredData::BasisHessians;
                 break;
             case FormExprType::TrialFunction:
                 if (kind == FormKind::Residual) {
                     required |= RequiredData::SolutionValues;
+                    required |= RequiredData::BasisValues; // Needed for AD seeding via trialBasisValue().
+                    if (order >= 1) {
+                        required |= RequiredData::SolutionGradients;
+                        required |= RequiredData::PhysicalGradients; // Needed for AD seeding via trialPhysicalGradient().
+                    }
+                    if (order >= 2) {
+                        required |= RequiredData::SolutionHessians;
+                        required |= RequiredData::BasisHessians; // Needed for AD seeding via trialPhysicalHessian().
+                    }
                 } else {
                     required |= RequiredData::BasisValues;
+                    if (order >= 1) required |= RequiredData::PhysicalGradients;
+                    if (order >= 2) required |= RequiredData::BasisHessians;
                 }
                 break;
-            case FormExprType::Coefficient:
-                required |= RequiredData::PhysicalPoints;
+            case FormExprType::PreviousSolutionRef:
+                required |= RequiredData::BasisValues;
+                if (order >= 1) required |= RequiredData::PhysicalGradients;
+                if (order >= 2) required |= RequiredData::BasisHessians;
                 break;
+            case FormExprType::Coefficient:
             case FormExprType::Coordinate:
                 required |= RequiredData::PhysicalPoints;
                 break;
@@ -205,57 +223,56 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
             case FormExprType::FacetArea:
                 required |= RequiredData::EntityMeasures;
                 break;
+            case FormExprType::MaterialStateOldRef:
+            case FormExprType::MaterialStateWorkRef:
+                required |= RequiredData::MaterialState;
+                break;
             case FormExprType::Gradient:
-                required |= RequiredData::PhysicalGradients;
-                if (kind == FormKind::Residual) {
-                    const auto kids = n.childrenShared();
-                    if (!kids.empty() && kids[0] && kids[0]->type() == FormExprType::TrialFunction) {
-                        required |= RequiredData::SolutionGradients;
-                    }
-                }
-                break;
             case FormExprType::Divergence:
-            case FormExprType::Curl:
-                // div/curl require physical gradients of basis functions; for residuals involving
-                // TrialFunction operands, we also need solution gradients (scalar) / Jacobians (vector).
-                required |= RequiredData::PhysicalGradients;
-                if (kind == FormKind::Residual) {
-                    const auto kids = n.childrenShared();
-                    if (!kids.empty() && kids[0] && kids[0]->type() == FormExprType::TrialFunction) {
-                        required |= RequiredData::SolutionGradients;
-                    }
+            case FormExprType::Curl: {
+                const auto kids = n.childrenShared();
+                if (!kids.empty() && kids[0]) self(self, *kids[0], order + 1);
+                return;
+            }
+            case FormExprType::Hessian: {
+                const auto kids = n.childrenShared();
+                if (!kids.empty() && kids[0]) self(self, *kids[0], order + 2);
+                return;
+            }
+            case FormExprType::Conditional: {
+                const auto kids = n.childrenShared();
+                if (kids.size() != 3u || !kids[0] || !kids[1] || !kids[2]) {
+                    throw std::invalid_argument("FormCompiler: conditional expects 3 operands");
                 }
-                break;
-            case FormExprType::Hessian:
-                required |= RequiredData::BasisHessians;
-                if (kind == FormKind::Residual) {
-                    const auto kids = n.childrenShared();
-                    if (!kids.empty() && kids[0]) {
-                        const auto* child = kids[0].get();
-                        if (child->type() == FormExprType::TrialFunction) {
-                            required |= RequiredData::SolutionHessians;
-                        } else if (child->type() == FormExprType::Component) {
-                            const auto gkids = child->childrenShared();
-                            if (!gkids.empty() && gkids[0] && gkids[0]->type() == FormExprType::TrialFunction) {
-                                required |= RequiredData::SolutionHessians;
-                            }
-                        }
-                    }
+                self(self, *kids[0], 0);
+                self(self, *kids[1], order);
+                self(self, *kids[2], order);
+                return;
+            }
+            case FormExprType::Less:
+            case FormExprType::LessEqual:
+            case FormExprType::Greater:
+            case FormExprType::GreaterEqual:
+            case FormExprType::Equal:
+            case FormExprType::NotEqual: {
+                const auto kids = n.childrenShared();
+                if (kids.size() != 2u || !kids[0] || !kids[1]) {
+                    throw std::invalid_argument("FormCompiler: comparison expects 2 operands");
                 }
-                break;
-            case FormExprType::BoundaryIntegral:
-                required |= RequiredData::Normals;
-                break;
+                self(self, *kids[0], 0);
+                self(self, *kids[1], 0);
+                return;
+            }
             default:
                 break;
         }
 
         for (const auto& child : n.childrenShared()) {
-            if (child) self(self, *child);
+            if (child) self(self, *child, order);
         }
     };
 
-    visit(visit, node);
+    visit(visit, node, 0);
 
     // Always need quadrature/integration weights for any integral evaluation.
     required |= RequiredData::IntegrationWeights;
@@ -276,72 +293,67 @@ std::vector<assembly::FieldRequirement> analyzeFieldRequirements(const FormExprN
         req_by_field[id] |= bits;
     };
 
-    const auto visit = [&](const auto& self, const FormExprNode& n) -> void {
+    const auto visit = [&](const auto& self, const FormExprNode& n, int order) -> void {
+        order = std::clamp(order, 0, 2);
         switch (n.type()) {
-            case FormExprType::DiscreteField: {
-                const auto fid = n.fieldId();
-                if (!fid) {
-                    throw std::logic_error("FormCompiler: DiscreteField node missing fieldId()");
-                }
-                add(*fid, RequiredData::SolutionValues);
-                break;
-            }
+            case FormExprType::DiscreteField:
             case FormExprType::StateField: {
                 const auto fid = n.fieldId();
                 if (!fid) {
-                    throw std::logic_error("FormCompiler: StateField node missing fieldId()");
+                    throw std::logic_error("FormCompiler: DiscreteField/StateField node missing fieldId()");
                 }
-                add(*fid, RequiredData::SolutionValues);
+                RequiredData bits = RequiredData::SolutionValues;
+                if (order >= 1) bits |= RequiredData::SolutionGradients;
+                if (order >= 2) bits |= RequiredData::SolutionHessians;
+                add(*fid, bits);
                 break;
             }
             case FormExprType::Gradient:
             case FormExprType::Divergence:
             case FormExprType::Curl: {
                 const auto kids = n.childrenShared();
-                if (!kids.empty() && kids[0] &&
-                    (kids[0]->type() == FormExprType::DiscreteField || kids[0]->type() == FormExprType::StateField)) {
-                    const auto fid = kids[0]->fieldId();
-                    if (!fid) {
-                        throw std::logic_error("FormCompiler: DiscreteField node missing fieldId()");
-                    }
-                    add(*fid, RequiredData::SolutionValues | RequiredData::SolutionGradients);
-                }
-                break;
+                if (!kids.empty() && kids[0]) self(self, *kids[0], order + 1);
+                return;
             }
             case FormExprType::Hessian: {
                 const auto kids = n.childrenShared();
-                if (!kids.empty() && kids[0]) {
-                    const auto& child = *kids[0];
-                    if (child.type() == FormExprType::DiscreteField || child.type() == FormExprType::StateField) {
-                        const auto fid = child.fieldId();
-                        if (!fid) {
-                            throw std::logic_error("FormCompiler: DiscreteField node missing fieldId()");
-                        }
-                        add(*fid, RequiredData::SolutionValues | RequiredData::SolutionHessians);
-                    } else if (child.type() == FormExprType::Component) {
-                        const auto ckids = child.childrenShared();
-                        if (!ckids.empty() && ckids[0] &&
-                            (ckids[0]->type() == FormExprType::DiscreteField || ckids[0]->type() == FormExprType::StateField)) {
-                            const auto fid = ckids[0]->fieldId();
-                            if (!fid) {
-                                throw std::logic_error("FormCompiler: DiscreteField node missing fieldId()");
-                            }
-                            add(*fid, RequiredData::SolutionValues | RequiredData::SolutionHessians);
-                        }
-                    }
+                if (!kids.empty() && kids[0]) self(self, *kids[0], order + 2);
+                return;
+            }
+            case FormExprType::Conditional: {
+                const auto kids = n.childrenShared();
+                if (kids.size() != 3u || !kids[0] || !kids[1] || !kids[2]) {
+                    throw std::invalid_argument("FormCompiler: conditional expects 3 operands");
                 }
-                break;
+                self(self, *kids[0], 0);
+                self(self, *kids[1], order);
+                self(self, *kids[2], order);
+                return;
+            }
+            case FormExprType::Less:
+            case FormExprType::LessEqual:
+            case FormExprType::Greater:
+            case FormExprType::GreaterEqual:
+            case FormExprType::Equal:
+            case FormExprType::NotEqual: {
+                const auto kids = n.childrenShared();
+                if (kids.size() != 2u || !kids[0] || !kids[1]) {
+                    throw std::invalid_argument("FormCompiler: comparison expects 2 operands");
+                }
+                self(self, *kids[0], 0);
+                self(self, *kids[1], 0);
+                return;
             }
             default:
                 break;
         }
 
         for (const auto& child : n.childrenShared()) {
-            if (child) self(self, *child);
+            if (child) self(self, *child, order);
         }
     };
 
-    visit(visit, node);
+    visit(visit, node, 0);
 
     std::vector<FieldRequirement> out;
     out.reserve(req_by_field.size());
