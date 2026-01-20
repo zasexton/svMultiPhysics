@@ -145,6 +145,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     FE_THROW_IF(!(base_state.dt > 0.0), InvalidArgumentException, "NewtonSolver: dt must be > 0");
     FE_THROW_IF(!std::isfinite(base_state.time), InvalidArgumentException, "NewtonSolver: solve_time must be finite");
 
+    // Ensure time-dependent constraints (Dirichlet, etc.) are evaluated at the actual solve time.
+    // This is required for multi-stage schemes (e.g., generalized-α) where the nonlinear solve
+    // occurs at a stage time t_{n+α_f}, not necessarily at t_{n+1}.
+    transient.system().updateConstraints(solve_time, base_state.dt);
+
     const int max_it = options_.max_iterations;
     for (int it = 0; it < max_it; ++it) {
         history.updateGhosts();

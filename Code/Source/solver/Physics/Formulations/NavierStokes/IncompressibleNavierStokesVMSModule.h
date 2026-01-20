@@ -134,6 +134,11 @@ struct IncompressibleNavierStokesVMSOptions {
     // Constant body force (length-3; only first dim components are used).
     std::array<FE::Real, 3> body_force{0.0, 0.0, 0.0};
 
+    // Enable the convective term rho * (u · ∇) u.
+    //
+    // This can be disabled to recover a (possibly unsteady) Stokes formulation.
+    bool enable_convection{true};
+
     // Enable residual-based VMS stabilization (static subscales u', p').
     bool enable_vms{true};
 

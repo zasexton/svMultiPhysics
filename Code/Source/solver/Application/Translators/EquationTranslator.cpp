@@ -1,80 +1,55 @@
 #include "Application/Translators/EquationTranslator.h"
 
-#include "Application/Translators/BoundaryConditionTranslator.h"
-#include "Application/Translators/MaterialTranslator.h"
-
-#include "FE/Core/Types.h"
-#include "FE/Spaces/SpaceFactory.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Parameters.h"
-#include "Physics/Formulations/Poisson/PoissonModule.h"
+#include "Physics/Core/EquationModuleInput.h"
+#include "Physics/Core/EquationModuleRegistry.h"
 
+#include <algorithm>
 #include <stdexcept>
-#include <vector>
+#include <variant>
 
 namespace {
 
-svmp::FE::ElementType infer_base_element_type(const svmp::MeshBase& mesh)
+svmp::Physics::ParameterMap snapshot_params(const ParameterLists& list)
 {
-  if (mesh.n_cells() == 0) {
-    throw std::runtime_error("[svMultiPhysics::Application] Mesh has no cells; cannot infer FE element type.");
+  svmp::Physics::ParameterMap out;
+  for (const auto& [_, v] : list.params_map) {
+    std::visit(
+        [&](const auto* p) {
+          if (!p) {
+            return;
+          }
+          out[p->name()] = svmp::Physics::ParameterValue{p->defined(), p->svalue()};
+        },
+        v);
   }
-
-  const auto& shapes = mesh.cell_shapes();
-  if (shapes.empty()) {
-    throw std::runtime_error("[svMultiPhysics::Application] Mesh has no cell shapes; cannot infer FE element type.");
-  }
-
-  if (shapes.front().is_mixed_order) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Mixed-order meshes are not supported by the new solver yet. "
-        "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-  }
-
-  const auto family = shapes.front().family;
-  for (const auto& s : shapes) {
-    if (s.family != family) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Mixed cell families are not supported by the new solver yet. "
-          "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-    }
-  }
-
-  switch (family) {
-    case svmp::CellFamily::Line: return svmp::FE::ElementType::Line2;
-    case svmp::CellFamily::Triangle: return svmp::FE::ElementType::Triangle3;
-    case svmp::CellFamily::Quad: return svmp::FE::ElementType::Quad4;
-    case svmp::CellFamily::Tetra: return svmp::FE::ElementType::Tetra4;
-    case svmp::CellFamily::Hex: return svmp::FE::ElementType::Hex8;
-    case svmp::CellFamily::Wedge: return svmp::FE::ElementType::Wedge6;
-    case svmp::CellFamily::Pyramid: return svmp::FE::ElementType::Pyramid5;
-    default:
-      break;
-  }
-
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Unsupported mesh cell family for new solver. "
-      "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
+  return out;
 }
 
-int infer_polynomial_order(const svmp::MeshBase& mesh)
+svmp::Physics::DomainInput snapshot_domain(const DomainParameters& domain)
 {
-  const auto& shapes = mesh.cell_shapes();
-  if (shapes.empty()) {
-    return 1;
+  svmp::Physics::DomainInput out{};
+  out.id = domain.id.value();
+  out.params = snapshot_params(domain);
+
+  if (domain.fluid_viscosity.model.defined()) {
+    out.params["Viscosity.model"] =
+        svmp::Physics::ParameterValue{domain.fluid_viscosity.model.defined(), domain.fluid_viscosity.model.value()};
+
+    const auto append = [&](const ParameterLists& list, const std::string& prefix) {
+      const auto block = snapshot_params(list);
+      for (const auto& [k, v] : block) {
+        out.params[prefix + k] = v;
+      }
+    };
+
+    append(domain.fluid_viscosity.newtonian_model, "Viscosity.");
+    append(domain.fluid_viscosity.carreau_yasuda_model, "Viscosity.");
+    append(domain.fluid_viscosity.cassons_model, "Viscosity.");
   }
 
-  const int order = shapes.front().order > 0 ? shapes.front().order : 1;
-  for (const auto& s : shapes) {
-    const int s_order = s.order > 0 ? s.order : 1;
-    if (s_order != order) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Mixed polynomial orders are not supported by the new solver yet. "
-          "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-    }
-  }
-
-  return order;
+  return out;
 }
 
 } // namespace
@@ -98,61 +73,86 @@ std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createModule(
         "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
   }
 
+  const auto mesh_name = meshes.begin()->first;
   auto mesh = meshes.begin()->second;
   if (!mesh) {
     throw std::runtime_error("[svMultiPhysics::Application] Null mesh encountered during equation translation.");
   }
 
-  if (eq_type == "heatS" || eq_type == "heatF") {
-    return createHeatModule(eq_params, system, mesh);
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = eq_type;
+  input.equation_params = snapshot_params(eq_params);
+  input.mesh_name = mesh_name;
+  input.mesh = mesh;
+
+  // Generic module-specific options hook (added to EquationParameters once).
+  // If unset, these remain empty and the formulation uses its defaults.
+  if (eq_params.module_options.defined()) {
+    input.module_options = eq_params.module_options.value();
+  }
+  if (eq_params.module_options_file_path.defined()) {
+    input.module_options_file_path = eq_params.module_options_file_path.value();
   }
 
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Equation type '" + eq_type +
-      "' is not yet supported by the new OOP solver. Supported types: heatS, heatF. "
-      "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-}
+  if (eq_params.default_domain) {
+    input.default_domain = snapshot_domain(*eq_params.default_domain);
+  }
 
-std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createHeatModule(
-    const EquationParameters& eq_params, svmp::FE::systems::FESystem& system,
-    const std::shared_ptr<svmp::MeshBase>& mesh)
-{
-  auto space = createScalarSpace(eq_params, mesh);
-
-  svmp::Physics::formulations::poisson::PoissonOptions options{};
-  options.field_name = "Temperature";
-
-  std::vector<const DomainParameters*> domains;
   if (!eq_params.domains.empty()) {
-    domains.reserve(eq_params.domains.size());
+    input.domains.reserve(eq_params.domains.size());
     for (const auto* d : eq_params.domains) {
-      domains.push_back(d);
+      if (!d) {
+        continue;
+      }
+      input.domains.push_back(snapshot_domain(*d));
     }
-  } else if (eq_params.default_domain) {
-    domains.push_back(eq_params.default_domain);
   }
 
-  MaterialTranslator::applyThermalProperties(domains, options);
-  BoundaryConditionTranslator::applyScalarBCs(eq_params.boundary_conditions, *mesh, options);
+  if (!eq_params.boundary_conditions.empty()) {
+    input.boundary_conditions.reserve(eq_params.boundary_conditions.size());
+    for (const auto* bc : eq_params.boundary_conditions) {
+      if (!bc) {
+        continue;
+      }
 
-  auto module = std::make_unique<svmp::Physics::formulations::poisson::PoissonModule>(std::move(space),
-                                                                                      std::move(options));
-  module->registerOn(system);
-  return module;
-}
+      svmp::Physics::BoundaryConditionInput bc_in{};
+      bc_in.name = bc->name.value();
+      bc_in.boundary_marker = mesh->label_from_name(bc_in.name);
+      if (bc_in.boundary_marker == svmp::INVALID_LABEL) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Boundary condition references face '" + bc_in.name +
+            "', but that face is not registered. Ensure <Add_face name=\"" + bc_in.name +
+            "\"> exists under the mesh and <Add_BC name=\"" + bc_in.name +
+            "\"> references it, or set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
+      }
 
-std::shared_ptr<const svmp::FE::spaces::FunctionSpace> EquationTranslator::createScalarSpace(
-    const EquationParameters& /*eq_params*/, const std::shared_ptr<svmp::MeshBase>& mesh)
-{
-  if (!mesh) {
-    throw std::runtime_error("[svMultiPhysics::Application] createScalarSpace() called with null mesh.");
+      bc_in.params = snapshot_params(*bc);
+      if (bc->rcr.value_set) {
+        const auto rcr = snapshot_params(bc->rcr);
+        for (const auto& [k, v] : rcr) {
+          bc_in.params["RCR." + k] = v;
+        }
+      }
+      input.boundary_conditions.push_back(std::move(bc_in));
+    }
   }
 
-  const auto element_type = infer_base_element_type(*mesh);
-  const int order = infer_polynomial_order(*mesh);
+  auto& registry = svmp::Physics::EquationModuleRegistry::instance();
+  const auto types = registry.registeredTypes();
+  const auto supported = std::find(types.begin(), types.end(), eq_type) != types.end();
+  if (!supported) {
+    std::string supported_list = types.empty() ? "(none)" : types.front();
+    for (std::size_t i = 1; i < types.size(); ++i) {
+      supported_list += ", " + types[i];
+    }
 
-  auto space = svmp::FE::spaces::SpaceFactory::create_h1(element_type, order);
-  return space;
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Equation type '" + eq_type +
+        "' is not registered for the new OOP solver. Registered types: " + supported_list +
+        ". Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
+  }
+
+  return registry.create(eq_type, input, system);
 }
 
 } // namespace translators

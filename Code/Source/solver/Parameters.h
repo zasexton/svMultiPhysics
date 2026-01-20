@@ -1337,6 +1337,11 @@ class EquationParameters : public ParameterLists
     Parameter<std::string> initialize;
     Parameter<bool> initialize_rcr_from_flow;
 
+    // Generic per-equation extension hook for new OOP solver physics modules.
+    // Intended to avoid adding new top-level XML tags/fields for every new formulation.
+    Parameter<std::string> module_options;
+    Parameter<std::string> module_options_file_path;
+
     Parameter<int> max_iterations;
     Parameter<int> min_iterations;
     Parameter<double> momentum_stabilization_coefficient;

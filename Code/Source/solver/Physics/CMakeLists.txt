@@ -112,26 +112,50 @@ endif()
 set(PHYSICS_PUBLIC_HEADERS
     Physics.h
     Core/Domain.h
+    Core/EquationModuleInput.h
+    Core/EquationModuleRegistry.h
     Core/ParameterSchema.h
     Core/PhysicsModule.h
-    Formulations/Poisson/PoissonModule.h
-    Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h
-    Materials/Common/TensorOps.h
-    Materials/Fluid/CarreauYasudaViscosity.h
-    Materials/Fluid/NewtonianViscosity.h
-    Materials/Solid/LinearElasticStress.h
-    Materials/Solid/NeoHookeanPK1.h
 )
 
 set(PHYSICS_SOURCES
     Physics.cpp
+    Core/EquationModuleRegistry.cpp
     Core/ParameterSchema.cpp
-    Formulations/Poisson/PoissonModule.cpp
-    Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp
-    Materials/Fluid/CarreauYasudaViscosity.cpp
-    Materials/Fluid/NewtonianViscosity.cpp
-    Materials/Solid/LinearElasticStress.cpp
-    Materials/Solid/NeoHookeanPK1.cpp
+)
+
+#------------------------------------------------------------------------------
+# Auto-discover formulation/material sources so adding new physics does not
+# require editing this top-level CMakeLists.txt.
+#------------------------------------------------------------------------------
+
+file(GLOB_RECURSE PHYSICS_FORMULATION_HEADERS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/Formulations/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Formulations/*.hpp"
+)
+file(GLOB_RECURSE PHYSICS_FORMULATION_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/Formulations/*.cpp"
+)
+list(FILTER PHYSICS_FORMULATION_HEADERS EXCLUDE REGEX ".*/(Tests|Examples)/.*")
+list(FILTER PHYSICS_FORMULATION_SOURCES EXCLUDE REGEX ".*/(Tests|Examples)/.*")
+
+file(GLOB_RECURSE PHYSICS_MATERIAL_HEADERS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/Materials/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Materials/*.hpp"
+)
+file(GLOB_RECURSE PHYSICS_MATERIAL_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/Materials/*.cpp"
+)
+list(FILTER PHYSICS_MATERIAL_HEADERS EXCLUDE REGEX ".*/(Tests|Examples)/.*")
+list(FILTER PHYSICS_MATERIAL_SOURCES EXCLUDE REGEX ".*/(Tests|Examples)/.*")
+
+list(APPEND PHYSICS_PUBLIC_HEADERS
+    ${PHYSICS_FORMULATION_HEADERS}
+    ${PHYSICS_MATERIAL_HEADERS}
+)
+list(APPEND PHYSICS_SOURCES
+    ${PHYSICS_FORMULATION_SOURCES}
+    ${PHYSICS_MATERIAL_SOURCES}
 )
 
 if(PHYSICS_BUILD_SHARED)

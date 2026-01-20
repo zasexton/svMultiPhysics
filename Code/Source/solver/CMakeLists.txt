@@ -306,6 +306,18 @@ target_link_libraries(${SV_MULTIPHYSICS_EXE}
   ${VTK_LIBRARIES}
   )
 
+# Ensure equation-module registrars inside the static svphysics library are not
+# dropped by the linker (registration is performed via static initialization).
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_link_libraries(${SV_MULTIPHYSICS_EXE}
+    -Wl,--whole-archive
+    svphysics
+    -Wl,--no-whole-archive
+  )
+else()
+  target_link_libraries(${SV_MULTIPHYSICS_EXE} svphysics)
+endif()
+
 # extra MPI libraries only if there are not set to NOT_FOUND or other null
 if(SV_MPI_EXTRA_LIBRARY)
   target_link_libraries(${SV_MULTIPHYSICS_EXE} ${SV_MPI_EXTRA_LIBRARY})

@@ -103,7 +103,18 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         mu = FormExpr::constant(options_.viscosity);
     }
 
-    const auto a = u; // convection velocity (no ALE/mesh motion here)
+    // Convection velocity (no ALE/mesh motion here).
+    FormExpr a;
+    if (options_.enable_convection) {
+        a = u;
+    } else {
+        std::vector<FormExpr> a_comp;
+        a_comp.reserve(static_cast<std::size_t>(dim));
+        for (int d = 0; d < dim; ++d) {
+            a_comp.push_back(FormExpr::constant(0.0));
+        }
+        a = FormExpr::asVector(std::move(a_comp));
+    }
 
     // Strong momentum residual (full, including dt(u)):
     //   R_m = rho*(dt(u) + (u·∇)u - f) + grad(p) - div(2 mu sym(grad(u))).
@@ -146,7 +157,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         const auto u_sub = -tau_m * r_m;
         const auto p_sub = -tau_c * div(u);
 
-        const auto u_adv = u + u_sub;
+        // Advection velocity for convection-related terms (disabled for Stokes).
+        const auto u_adv = options_.enable_convection ? (u + u_sub) : a;
         const auto p_adv = p + p_sub;
 
         // Momentum: Galerkin + VMS (SUPG-like) + pressure-subscale (LSIC-like).
@@ -159,9 +171,12 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         // tauB cross-stress closure (legacy fluid.cpp):
         //   tauB = rho / sqrt( u'^T Kxi u' )
         // and adds + (u' · ∇v) · ( tauB * (u' · ∇)u ).
-        const auto tau_b = rho / sqrt(inner(u_sub, K * u_sub) + eps);
-        const auto rV_tau = tau_b * (grad(u) * u_sub); // (tauB * (u'·∇)u)
-        const auto cross_stress = inner(grad(v) * u_sub, rV_tau);
+        FormExpr cross_stress = FormExpr::constant(0.0);
+        if (options_.enable_convection) {
+            const auto tau_b = rho / sqrt(inner(u_sub, K * u_sub) + eps);
+            const auto rV_tau = tau_b * (grad(u) * u_sub); // (tauB * (u'·∇)u)
+            cross_stress = inner(grad(v) * u_sub, rV_tau);
+        }
 
         momentum_form = (inertia + convection_adv + viscous + pressure_adv + forcing + supg + cross_stress).dx();
 
@@ -186,7 +201,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         return Factories::toCoupledOutflowBC(bc, u_id, *velocity_space_, options_.velocity_field_name, u, rho);
     });
     bc_manager.install(options_.velocity_dirichlet,
-                       [&](const auto& bc) { return Factories::toVelocityEssentialBC(bc, dim, options_.velocity_field_name); });
+                       [&](const auto& bc) {
+        return Factories::toVelocityEssentialBC(bc, dim, options_.velocity_field_name);
+    });
 
     bc_manager.validate();
 
@@ -204,16 +221,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         p_bc_manager.apply(system, dummy, p, q, p_id);
     }
 
-    Factories::applyVelocityNitscheBCs(momentum_form,
-                                       continuity_form,
-                                       options_,
-                                       *velocity_space_,
-                                       dim,
-                                       u,
-                                       p,
-                                       v,
-                                       q,
-                                       mu);
+    Factories::applyVelocityNitscheBCs(momentum_form, continuity_form, options_, *velocity_space_, dim, u, p, v, q, mu);
 
     // Strong Dirichlet constraints (installed once; independent of operator tag).
     if (!velocity_constraints.empty()) {

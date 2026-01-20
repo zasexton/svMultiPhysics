@@ -2010,6 +2010,9 @@ EquationParameters::EquationParameters()
   set_parameter("Initialize", "", !required, initialize);
   set_parameter("Initialize_RCR_from_flow", false, !required, initialize_rcr_from_flow);
 
+  set_parameter("Module_options", "", !required, module_options);
+  set_parameter("Module_options_file_path", "", !required, module_options_file_path);
+
   set_parameter("Max_iterations", 1, !required, max_iterations);
   set_parameter("Min_iterations", 1, !required, min_iterations);
 

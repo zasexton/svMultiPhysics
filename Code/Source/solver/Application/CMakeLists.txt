@@ -4,13 +4,11 @@ cmake_minimum_required(VERSION 3.12)
 # svapplication - Application/driver layer for the new OOP Mesh/FE/Physics stack
 #------------------------------------------------------------------------------
 
-add_library(svapplication
+add_library(svapplication STATIC
   Core/ApplicationDriver.cpp
   Core/SimulationBuilder.cpp
   Translators/MeshTranslator.cpp
   Translators/EquationTranslator.cpp
-  Translators/BoundaryConditionTranslator.cpp
-  Translators/MaterialTranslator.cpp
 )
 
 set_target_properties(svapplication PROPERTIES
@@ -22,7 +20,6 @@ set_target_properties(svapplication PROPERTIES
 
 target_link_libraries(svapplication
   PUBLIC
-    svphysics
     svfe
     svmesh
   PRIVATE
