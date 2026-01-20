@@ -461,7 +461,7 @@ SparsityPattern BlockSparsity::extractSchurComplement() const {
     // Structurally: S has entries wherever D has entries, plus
     // entries from C * fill(A) * B
 
-    const auto& A = blocks_[blockIndex(0, 0)];
+    [[maybe_unused]] const auto& A = blocks_[blockIndex(0, 0)];
     const auto& B = blocks_[blockIndex(0, 1)];
     const auto& C = blocks_[blockIndex(1, 0)];
     const auto& D = blocks_[blockIndex(1, 1)];

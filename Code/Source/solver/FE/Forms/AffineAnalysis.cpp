@@ -89,6 +89,7 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
         case FormExprType::CellDiameter:
         case FormExprType::CellVolume:
         case FormExprType::FacetArea:
+        case FormExprType::CellDomainId:
             out.degree = 0;
             out.constant = expr;
             out.linear = zeroExpr();
@@ -287,6 +288,7 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
         case FormExprType::CellIntegral:
         case FormExprType::BoundaryIntegral:
         case FormExprType::InteriorFaceIntegral:
+        case FormExprType::InterfaceIntegral:
         case FormExprType::AsVector:
         case FormExprType::AsTensor:
         default:

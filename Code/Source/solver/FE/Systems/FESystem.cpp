@@ -22,6 +22,7 @@
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #include "Assembly/MeshAccess.h"
+#include "Mesh/Core/InterfaceMesh.h"
 #include "Systems/MeshSearchAccess.h"
 #endif
 
@@ -47,6 +48,50 @@ FESystem::FESystem(std::shared_ptr<const svmp::Mesh> mesh, svmp::Configuration c
     search_access_ = std::make_shared<MeshSearchAccess>(*mesh_, coord_cfg_);
     FE_CHECK_NOT_NULL(mesh_access_.get(), "FESystem::mesh_access");
     operator_backends_ = std::make_unique<OperatorBackends>();
+}
+
+void FESystem::setInterfaceMesh(InterfaceId marker, std::shared_ptr<const svmp::InterfaceMesh> mesh)
+{
+    invalidateSetup();
+    FE_THROW_IF(marker < 0, InvalidArgumentException,
+                "FESystem::setInterfaceMesh: marker must be >= 0");
+    FE_CHECK_NOT_NULL(mesh.get(), "FESystem::setInterfaceMesh: mesh");
+    interface_meshes_[marker] = std::move(mesh);
+}
+
+bool FESystem::hasInterfaceMesh(InterfaceId marker) const noexcept
+{
+    return interface_meshes_.find(marker) != interface_meshes_.end();
+}
+
+const svmp::InterfaceMesh& FESystem::interfaceMesh(InterfaceId marker) const
+{
+    auto it = interface_meshes_.find(marker);
+    FE_THROW_IF(it == interface_meshes_.end() || !it->second, InvalidArgumentException,
+                "FESystem::interfaceMesh: unknown interface marker " + std::to_string(marker));
+    return *it->second;
+}
+
+void FESystem::setInterfaceMeshFromFaceSet(InterfaceId marker,
+                                           const std::string& face_set_name,
+                                           bool compute_orientation)
+{
+    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::setInterfaceMeshFromFaceSet: mesh");
+    auto iface = std::make_shared<svmp::InterfaceMesh>(
+        svmp::InterfaceMesh::build_from_face_set(mesh_->base(), face_set_name, compute_orientation));
+    setInterfaceMesh(marker, std::move(iface));
+}
+
+void FESystem::setInterfaceMeshFromBoundaryLabel(InterfaceId marker,
+                                                 int boundary_label,
+                                                 bool compute_orientation)
+{
+    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::setInterfaceMeshFromBoundaryLabel: mesh");
+    auto iface = std::make_shared<svmp::InterfaceMesh>(
+        svmp::InterfaceMesh::build_from_boundary_label(mesh_->base(),
+                                                       static_cast<svmp::label_t>(boundary_label),
+                                                       compute_orientation));
+    setInterfaceMesh(marker, std::move(iface));
 }
 #endif
 
@@ -174,6 +219,26 @@ void FESystem::addInteriorFaceKernel(OperatorTag op, FieldId test_field, FieldId
         field_registry_.markTimeDependent(trial_field, kernel->maxTemporalDerivativeOrder());
     }
     def.interior.push_back(InteriorFaceTerm{test_field, trial_field, std::move(kernel)});
+}
+
+void FESystem::addInterfaceFaceKernel(OperatorTag op, InterfaceId interface_marker, FieldId field,
+                                      std::shared_ptr<assembly::AssemblyKernel> kernel)
+{
+    addInterfaceFaceKernel(std::move(op), interface_marker, field, field, std::move(kernel));
+}
+
+void FESystem::addInterfaceFaceKernel(OperatorTag op, InterfaceId interface_marker, FieldId test_field, FieldId trial_field,
+                                      std::shared_ptr<assembly::AssemblyKernel> kernel)
+{
+    invalidateSetup();
+    if (!operator_registry_.has(op)) {
+        operator_registry_.addOperator(op);
+    }
+    auto& def = operator_registry_.get(op);
+    if (kernel) {
+        field_registry_.markTimeDependent(trial_field, kernel->maxTemporalDerivativeOrder());
+    }
+    def.interface_faces.push_back(InterfaceFaceTerm{interface_marker, test_field, trial_field, std::move(kernel)});
 }
 
 void FESystem::addGlobalKernel(OperatorTag op, std::shared_ptr<GlobalKernel> kernel)

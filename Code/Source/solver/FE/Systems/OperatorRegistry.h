@@ -47,11 +47,19 @@ struct InteriorFaceTerm {
     std::shared_ptr<assembly::AssemblyKernel> kernel;
 };
 
+struct InterfaceFaceTerm {
+    int marker{0};
+    FieldId test_field{INVALID_FIELD_ID};
+    FieldId trial_field{INVALID_FIELD_ID};
+    std::shared_ptr<assembly::AssemblyKernel> kernel;
+};
+
 struct OperatorDefinition {
     OperatorTag tag;
     std::vector<CellTerm> cells;
     std::vector<BoundaryTerm> boundary;
     std::vector<InteriorFaceTerm> interior;
+    std::vector<InterfaceFaceTerm> interface_faces;
     std::vector<std::shared_ptr<GlobalKernel>> global;
 };
 

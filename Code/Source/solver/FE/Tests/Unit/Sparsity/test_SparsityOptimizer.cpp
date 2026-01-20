@@ -266,8 +266,8 @@ TEST(SparsityOptimizerTest, PermutationIsValid) {
     // Check permutation is valid
     std::vector<GlobalIndex> sorted_perm = result.permutation;
     std::sort(sorted_perm.begin(), sorted_perm.end());
-    for (GlobalIndex i = 0; i < 10; ++i) {
-        EXPECT_EQ(sorted_perm[i], i);
+    for (std::size_t i = 0; i < sorted_perm.size(); ++i) {
+        EXPECT_EQ(sorted_perm[i], static_cast<GlobalIndex>(i));
     }
 }
 
@@ -278,8 +278,9 @@ TEST(SparsityOptimizerTest, InversePermutationValid) {
     auto result = optimizer.optimize(pattern);
 
     // Check inverse is correct
-    for (GlobalIndex i = 0; i < 10; ++i) {
-        EXPECT_EQ(result.inverse_permutation[result.permutation[i]], i);
+    for (std::size_t i = 0; i < result.permutation.size(); ++i) {
+        const auto perm_i = result.permutation[i];
+        EXPECT_EQ(result.inverse_permutation[static_cast<std::size_t>(perm_i)], static_cast<GlobalIndex>(i));
     }
 }
 
@@ -523,8 +524,8 @@ TEST(SparsityOptimizerTest, GetOptimalPermutation) {
     // Verify valid permutation
     std::vector<GlobalIndex> sorted = perm;
     std::sort(sorted.begin(), sorted.end());
-    for (GlobalIndex i = 0; i < 10; ++i) {
-        EXPECT_EQ(sorted[i], i);
+    for (std::size_t i = 0; i < sorted.size(); ++i) {
+        EXPECT_EQ(sorted[i], static_cast<GlobalIndex>(i));
     }
 }
 

@@ -38,7 +38,10 @@ struct IndexAssignment {
 
 bool isIntegralNode(FormExprType t) noexcept
 {
-    return t == FormExprType::CellIntegral || t == FormExprType::BoundaryIntegral || t == FormExprType::InteriorFaceIntegral;
+    return t == FormExprType::CellIntegral ||
+           t == FormExprType::BoundaryIntegral ||
+           t == FormExprType::InteriorFaceIntegral ||
+           t == FormExprType::InterfaceIntegral;
 }
 
 FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
@@ -136,6 +139,7 @@ FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
         case FormExprType::CellDiameter:
         case FormExprType::CellVolume:
         case FormExprType::FacetArea:
+        case FormExprType::CellDomainId:
             return FormExpr(node);
         default:
             break;
@@ -146,7 +150,8 @@ FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
         const auto integrand = rebuildUnary(node, assignment);
         if (t == FormExprType::CellIntegral) return integrand.dx();
         if (t == FormExprType::BoundaryIntegral) return integrand.ds(node->boundaryMarker().value_or(-1));
-        return integrand.dS();
+        if (t == FormExprType::InteriorFaceIntegral) return integrand.dS();
+        return integrand.dI(node->interfaceMarker().value_or(-1));
     }
 
     // Unary ops

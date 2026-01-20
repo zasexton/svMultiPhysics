@@ -143,6 +143,7 @@ template <class... Ts>
 struct StrongDirichlet {
     FieldId field{INVALID_FIELD_ID};
     int boundary_marker{-1};
+    int component{-1};  // -1 means "all/unspecified" (scalar fields or apply uniformly to all components)
     FormExpr value{};
 
     // Optional symbol name for diagnostics / pretty-printing.
@@ -150,24 +151,26 @@ struct StrongDirichlet {
 
     [[nodiscard]] bool isValid() const noexcept
     {
-        return field != INVALID_FIELD_ID && value.isValid();
+        return field != INVALID_FIELD_ID && component >= -1 && value.isValid();
     }
 
     [[nodiscard]] std::string toString() const
     {
+        const std::string sym = (component >= 0) ? (symbol + "[" + std::to_string(component) + "]") : symbol;
         const std::string where = (boundary_marker >= 0)
                                       ? ("ds(" + std::to_string(boundary_marker) + ")")
                                       : "ds(*)";
-        return symbol + " = " + value.toString() + " on " + where;
+        return sym + " = " + value.toString() + " on " + where;
     }
 };
 
 inline StrongDirichlet strongDirichlet(FieldId field,
                                        int boundary_marker,
                                        FormExpr value,
-                                       std::string symbol = "u")
+                                       std::string symbol = "u",
+                                       int component = -1)
 {
-    return StrongDirichlet{field, boundary_marker, std::move(value), std::move(symbol)};
+    return StrongDirichlet{field, boundary_marker, component, std::move(value), std::move(symbol)};
 }
 
 /**
@@ -304,6 +307,8 @@ struct NitscheDirichletOptions {
  *   -∫ k (∇v·n) (u-uD) ds
  *   +∫ (γ k p^2 / h) (u-uD) v ds
  *
+ * with the facet-normal element size h_n = 2|K|/|F| (cell volume divided by facet area).
+ *
  * The unsymmetric variant flips the sign of the second term.
  *
  * Requirements on BC type:
@@ -326,7 +331,7 @@ template <class DirichletBC, class ValueExprFn>
     }
 
     const auto n = FormExpr::normal();
-    const auto h = FormExpr::cellDiameter();
+    const auto h = (2.0 * FormExpr::cellVolume()) / FormExpr::facetArea();
 
     int p = 1;
     if (opts.scale_with_p) {

@@ -147,8 +147,12 @@ TEST(SparsityBuilderTest, BuildFromLineMesh) {
     // Check tridiagonal structure
     for (GlobalIndex i = 0; i < 6; ++i) {
         EXPECT_TRUE(pattern.hasEntry(i, i));  // Diagonal
-        if (i > 0) EXPECT_TRUE(pattern.hasEntry(i, i - 1));  // Sub-diagonal
-        if (i < 5) EXPECT_TRUE(pattern.hasEntry(i, i + 1));  // Super-diagonal
+        if (i > 0) {
+            EXPECT_TRUE(pattern.hasEntry(i, i - 1));  // Sub-diagonal
+        }
+        if (i < 5) {
+            EXPECT_TRUE(pattern.hasEntry(i, i + 1));  // Super-diagonal
+        }
     }
 
     // Interior nodes should have exactly 3 entries
@@ -604,7 +608,9 @@ TEST(SparsityBuilderTest, SingleNodeElements) {
 TEST(SparsityBuilderTest, LargeElement) {
     // Single element with many DOFs
     std::vector<GlobalIndex> dofs(20);
-    for (GlobalIndex i = 0; i < 20; ++i) dofs[i] = i;
+    for (std::size_t i = 0; i < dofs.size(); ++i) {
+        dofs[i] = static_cast<GlobalIndex>(i);
+    }
 
     auto dof_map = std::make_shared<MockDofMapQuery>(
         20, 1, std::vector<std::vector<GlobalIndex>>{dofs});

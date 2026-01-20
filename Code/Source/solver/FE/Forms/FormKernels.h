@@ -12,6 +12,7 @@
 
 #include <memory>
 #include <optional>
+#include <span>
 #include <unordered_map>
 
 namespace svmp {
@@ -30,13 +31,15 @@ struct InlinedMaterialStateUpdateProgram {
     std::vector<MaterialStateUpdate> boundary_all{};
     std::unordered_map<int, std::vector<MaterialStateUpdate>> boundary_by_marker{};
     std::vector<MaterialStateUpdate> interior_face{};
+    std::vector<MaterialStateUpdate> interface_face{};
 
     [[nodiscard]] bool empty() const noexcept
     {
         return cell.empty() &&
                boundary_all.empty() &&
                boundary_by_marker.empty() &&
-               interior_face.empty();
+               interior_face.empty() &&
+               interface_face.empty();
     }
 
     void clear()
@@ -45,6 +48,7 @@ struct InlinedMaterialStateUpdateProgram {
         boundary_all.clear();
         boundary_by_marker.clear();
         interior_face.clear();
+        interface_face.clear();
     }
 };
 
@@ -96,6 +100,7 @@ public:
     [[nodiscard]] bool hasCell() const noexcept override;
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
+    [[nodiscard]] bool hasInterfaceFace() const noexcept override;
 
     void computeCell(const assembly::AssemblyContext& ctx,
                      assembly::KernelOutput& output) override;
@@ -110,6 +115,14 @@ public:
                              assembly::KernelOutput& output_plus,
                              assembly::KernelOutput& coupling_mp,
                              assembly::KernelOutput& coupling_pm) override;
+
+    void computeInterfaceFace(const assembly::AssemblyContext& ctx_minus,
+                              const assembly::AssemblyContext& ctx_plus,
+                              int interface_marker,
+                              assembly::KernelOutput& output_minus,
+                              assembly::KernelOutput& output_plus,
+                              assembly::KernelOutput& coupling_mp,
+                              assembly::KernelOutput& coupling_pm) override;
 
     [[nodiscard]] std::string name() const override { return "Forms::FormKernel"; }
     [[nodiscard]] const FormIR& ir() const noexcept { return ir_; }
@@ -157,6 +170,7 @@ public:
     [[nodiscard]] bool hasCell() const noexcept override;
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
+    [[nodiscard]] bool hasInterfaceFace() const noexcept override;
 
     void computeCell(const assembly::AssemblyContext& ctx,
                      assembly::KernelOutput& output) override;
@@ -171,6 +185,14 @@ public:
                              assembly::KernelOutput& output_plus,
                              assembly::KernelOutput& coupling_mp,
                              assembly::KernelOutput& coupling_pm) override;
+
+    void computeInterfaceFace(const assembly::AssemblyContext& ctx_minus,
+                              const assembly::AssemblyContext& ctx_plus,
+                              int interface_marker,
+                              assembly::KernelOutput& output_minus,
+                              assembly::KernelOutput& output_plus,
+                              assembly::KernelOutput& coupling_mp,
+                              assembly::KernelOutput& coupling_pm) override;
 
     [[nodiscard]] std::string name() const override { return "Forms::LinearFormKernel"; }
     [[nodiscard]] bool isMatrixOnly() const noexcept override { return output_ == LinearKernelOutput::MatrixOnly; }
@@ -224,6 +246,7 @@ public:
     [[nodiscard]] bool hasCell() const noexcept override;
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
+    [[nodiscard]] bool hasInterfaceFace() const noexcept override;
 
     void computeCell(const assembly::AssemblyContext& ctx,
                      assembly::KernelOutput& output) override;
@@ -239,10 +262,20 @@ public:
                              assembly::KernelOutput& coupling_mp,
                              assembly::KernelOutput& coupling_pm) override;
 
+    void computeInterfaceFace(const assembly::AssemblyContext& ctx_minus,
+                              const assembly::AssemblyContext& ctx_plus,
+                              int interface_marker,
+                              assembly::KernelOutput& output_minus,
+                              assembly::KernelOutput& output_plus,
+                              assembly::KernelOutput& coupling_mp,
+                              assembly::KernelOutput& coupling_pm) override;
+
     [[nodiscard]] std::string name() const override { return "Forms::NonlinearFormKernel"; }
     [[nodiscard]] bool isMatrixOnly() const noexcept override { return output_ == NonlinearKernelOutput::MatrixOnly; }
     [[nodiscard]] bool isVectorOnly() const noexcept override { return output_ == NonlinearKernelOutput::VectorOnly; }
     [[nodiscard]] const FormIR& residualIR() const noexcept { return residual_ir_; }
+    [[nodiscard]] const InlinedMaterialStateUpdateProgram& inlinedStateUpdates() const noexcept { return inlined_state_updates_; }
+    [[nodiscard]] const ConstitutiveStateLayout* constitutiveStateLayout() const noexcept { return constitutive_state_.get(); }
 
 private:
     FormIR residual_ir_;
@@ -252,6 +285,71 @@ private:
     std::shared_ptr<const ConstitutiveStateLayout> constitutive_state_{};
     assembly::MaterialStateSpec material_state_spec_{};
     InlinedMaterialStateUpdateProgram inlined_state_updates_{};
+};
+
+/**
+ * @brief Sensitivity kernel for d/dQ of a residual form, where Q is a coupled scalar
+ *
+ * This kernel assembles the DOF-vector sensitivities:
+ *   s_i = ∂R_i/∂Q
+ * for a single coupled scalar slot Q, with optional indirect dependence through
+ * AuxiliaryStateRef terminals seeded by a provided d(aux)/dQ column.
+ *
+ * Notes:
+ * - The TrialFunction is treated as constant (no derivative seeding).
+ * - This is intended as infrastructure for coupled-BC Jacobian chain-rule updates.
+ */
+class CoupledResidualSensitivityKernel final : public assembly::AssemblyKernel {
+public:
+    CoupledResidualSensitivityKernel(const NonlinearFormKernel& base,
+                                     std::uint32_t coupled_integral_slot,
+                                     std::span<const Real> daux_dintegrals,
+                                     std::size_t num_integrals);
+    ~CoupledResidualSensitivityKernel() override = default;
+
+    CoupledResidualSensitivityKernel(const CoupledResidualSensitivityKernel&) = delete;
+    CoupledResidualSensitivityKernel& operator=(const CoupledResidualSensitivityKernel&) = delete;
+
+    [[nodiscard]] assembly::RequiredData getRequiredData() const noexcept override;
+    [[nodiscard]] std::vector<assembly::FieldRequirement> fieldRequirements() const override;
+    [[nodiscard]] assembly::MaterialStateSpec materialStateSpec() const noexcept override;
+    [[nodiscard]] std::vector<params::Spec> parameterSpecs() const override;
+    [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override;
+
+    [[nodiscard]] bool hasCell() const noexcept override;
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override;
+    [[nodiscard]] bool hasInteriorFace() const noexcept override;
+    [[nodiscard]] bool hasInterfaceFace() const noexcept override;
+
+    void computeCell(const assembly::AssemblyContext& ctx,
+                     assembly::KernelOutput& output) override;
+
+    void computeBoundaryFace(const assembly::AssemblyContext& ctx,
+                             int boundary_marker,
+                             assembly::KernelOutput& output) override;
+
+    void computeInteriorFace(const assembly::AssemblyContext& ctx_minus,
+                             const assembly::AssemblyContext& ctx_plus,
+                             assembly::KernelOutput& output_minus,
+                             assembly::KernelOutput& output_plus,
+                             assembly::KernelOutput& coupling_mp,
+                             assembly::KernelOutput& coupling_pm) override;
+
+    void computeInterfaceFace(const assembly::AssemblyContext& ctx_minus,
+                              const assembly::AssemblyContext& ctx_plus,
+                              int interface_marker,
+                              assembly::KernelOutput& output_minus,
+                              assembly::KernelOutput& output_plus,
+                              assembly::KernelOutput& coupling_mp,
+                              assembly::KernelOutput& coupling_pm) override;
+
+    [[nodiscard]] std::string name() const override { return "Forms::CoupledResidualSensitivityKernel"; }
+
+private:
+    const NonlinearFormKernel* base_{nullptr};
+    std::uint32_t coupled_integral_slot_{0u};
+    std::span<const Real> daux_dintegrals_{};
+    std::size_t num_integrals_{0u};
 };
 
 /**
@@ -296,6 +394,80 @@ public:
 private:
     FormExpr integrand_{};
     Domain domain_{Domain::Cell};
+    assembly::RequiredData required_data_{assembly::RequiredData::None};
+    std::vector<assembly::FieldRequirement> field_requirements_{};
+};
+
+/**
+ * @brief Boundary functional gradient kernel (d/dU of a boundary integral)
+ *
+ * This kernel assembles the DOF-gradient of a scalar boundary integral:
+ *   Q(U) = ∫_Γ q(u_h, ∇u_h, ...) ds
+ * into a global vector g where g_j = ∂Q/∂U_j.
+ *
+ * The stored integrand must be a scalar-valued expression that may contain a
+ * TrialFunction but must not contain a TestFunction. (For boundary functionals,
+ * callers typically transform DiscreteField/StateField terminals into a TrialFunction
+ * prior to constructing this kernel.)
+ *
+ * Note: Reduction (Sum/Average) is handled by the caller; this kernel always assembles
+ * the raw integral gradient for the specified boundary marker.
+ */
+class BoundaryFunctionalGradientKernel final : public assembly::AssemblyKernel {
+public:
+    explicit BoundaryFunctionalGradientKernel(FormExpr integrand, int boundary_marker);
+    ~BoundaryFunctionalGradientKernel() override = default;
+
+    [[nodiscard]] assembly::RequiredData getRequiredData() const noexcept override { return required_data_; }
+    [[nodiscard]] std::vector<assembly::FieldRequirement> fieldRequirements() const override { return field_requirements_; }
+
+    [[nodiscard]] bool hasCell() const noexcept override { return false; }
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+    [[nodiscard]] bool hasInteriorFace() const noexcept override { return false; }
+    [[nodiscard]] bool hasInterfaceFace() const noexcept override { return false; }
+
+    void computeCell(const assembly::AssemblyContext& /*ctx*/,
+                     assembly::KernelOutput& output) override
+    {
+        output.reserve(0, 0, false, false);
+    }
+
+    void computeBoundaryFace(const assembly::AssemblyContext& ctx,
+                             int boundary_marker,
+                             assembly::KernelOutput& output) override;
+
+    void computeInteriorFace(const assembly::AssemblyContext& /*ctx_minus*/,
+                             const assembly::AssemblyContext& /*ctx_plus*/,
+                             assembly::KernelOutput& output_minus,
+                             assembly::KernelOutput& output_plus,
+                             assembly::KernelOutput& coupling_mp,
+                             assembly::KernelOutput& coupling_pm) override
+    {
+        output_minus.reserve(0, 0, false, false);
+        output_plus.reserve(0, 0, false, false);
+        coupling_mp.reserve(0, 0, false, false);
+        coupling_pm.reserve(0, 0, false, false);
+    }
+
+    void computeInterfaceFace(const assembly::AssemblyContext& /*ctx_minus*/,
+                              const assembly::AssemblyContext& /*ctx_plus*/,
+                              int /*interface_marker*/,
+                              assembly::KernelOutput& output_minus,
+                              assembly::KernelOutput& output_plus,
+                              assembly::KernelOutput& coupling_mp,
+                              assembly::KernelOutput& coupling_pm) override
+    {
+        output_minus.reserve(0, 0, false, false);
+        output_plus.reserve(0, 0, false, false);
+        coupling_mp.reserve(0, 0, false, false);
+        coupling_pm.reserve(0, 0, false, false);
+    }
+
+    [[nodiscard]] std::string name() const override { return "Forms::BoundaryFunctionalGradientKernel"; }
+
+private:
+    FormExpr integrand_{};
+    int boundary_marker_{-1};
     assembly::RequiredData required_data_{assembly::RequiredData::None};
     std::vector<assembly::FieldRequirement> field_requirements_{};
 };

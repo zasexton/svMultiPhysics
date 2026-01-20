@@ -29,7 +29,9 @@ namespace {
 struct DomainDispatch {
     bool has_cell{false};
     bool has_interior{false};
+    bool has_interface{false};
     std::vector<int> boundary_markers{};
+    std::vector<int> interface_markers{};
 };
 
 DomainDispatch analyzeDispatch(const forms::FormIR& ir)
@@ -37,30 +39,54 @@ DomainDispatch analyzeDispatch(const forms::FormIR& ir)
     DomainDispatch out;
     out.has_cell = ir.hasCellTerms();
     out.has_interior = ir.hasInteriorFaceTerms();
+    out.has_interface = ir.hasInterfaceFaceTerms();
 
     if (!ir.hasBoundaryTerms()) {
-        return out;
-    }
-
-    bool has_all_markers = false;
-    std::vector<int> markers;
-    for (const auto& term : ir.terms()) {
-        if (term.domain != forms::IntegralDomain::Boundary) continue;
-        if (term.boundary_marker < 0) {
-            has_all_markers = true;
-            break;
+        out.boundary_markers.clear();
+    } else {
+        bool has_all_markers = false;
+        std::vector<int> markers;
+        for (const auto& term : ir.terms()) {
+            if (term.domain != forms::IntegralDomain::Boundary) continue;
+            if (term.boundary_marker < 0) {
+                has_all_markers = true;
+                break;
+            }
+            markers.push_back(term.boundary_marker);
         }
-        markers.push_back(term.boundary_marker);
+
+        if (has_all_markers) {
+            out.boundary_markers = {-1};
+        } else {
+            std::sort(markers.begin(), markers.end());
+            markers.erase(std::unique(markers.begin(), markers.end()), markers.end());
+            out.boundary_markers = std::move(markers);
+        }
     }
 
-    if (has_all_markers) {
-        out.boundary_markers = {-1};
-        return out;
+    if (!ir.hasInterfaceFaceTerms()) {
+        out.interface_markers.clear();
+    } else {
+        bool has_all_markers = false;
+        std::vector<int> markers;
+        for (const auto& term : ir.terms()) {
+            if (term.domain != forms::IntegralDomain::InterfaceFace) continue;
+            if (term.interface_marker < 0) {
+                has_all_markers = true;
+                break;
+            }
+            markers.push_back(term.interface_marker);
+        }
+
+        if (has_all_markers) {
+            out.interface_markers = {-1};
+        } else {
+            std::sort(markers.begin(), markers.end());
+            markers.erase(std::unique(markers.begin(), markers.end()), markers.end());
+            out.interface_markers = std::move(markers);
+        }
     }
 
-    std::sort(markers.begin(), markers.end());
-    markers.erase(std::unique(markers.begin(), markers.end()), markers.end());
-    out.boundary_markers = std::move(markers);
     return out;
 }
 
@@ -83,6 +109,10 @@ void registerKernel(
     if (dispatch.has_interior) {
         system.addInteriorFaceKernel(op, test_field, trial_field, kernel);
     }
+
+    for (int marker : dispatch.interface_markers) {
+        system.addInterfaceFaceKernel(op, marker, test_field, trial_field, kernel);
+    }
 }
 
 std::unordered_set<FieldId> gatherStateFields(const forms::FormExprNode& node)
@@ -101,6 +131,27 @@ std::unordered_set<FieldId> gatherStateFields(const forms::FormExprNode& node)
     };
     visit(visit, node);
     return out;
+}
+
+bool containsCoupledTerminals(const forms::FormExprNode& node)
+{
+    switch (node.type()) {
+        case forms::FormExprType::BoundaryFunctionalSymbol:
+        case forms::FormExprType::BoundaryIntegralSymbol:
+        case forms::FormExprType::BoundaryIntegralRef:
+        case forms::FormExprType::AuxiliaryStateSymbol:
+        case forms::FormExprType::AuxiliaryStateRef:
+            return true;
+        default:
+            break;
+    }
+
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsCoupledTerminals(*child)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 forms::FormExpr lowerStateFields(
@@ -142,16 +193,22 @@ KernelPtr installResidualForm(
     auto ir = compiler.compileResidual(residual_form);
 
     const auto dispatch = analyzeDispatch(ir);
-    FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && dispatch.boundary_markers.empty(), InvalidArgumentException,
+    FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&
+                    dispatch.boundary_markers.empty() && dispatch.interface_markers.empty(),
+                InvalidArgumentException,
                 "installResidualForm: compiled residual has no integral terms");
 
     // Attempt an affine split R(u;v) = a(u,v) + L(v). If successful, install a LinearFormKernel
     // that assembles the Jacobian from `a` and the residual vector from `K*u + L`.
     std::string reason;
-    auto split = forms::trySplitAffineResidual(
-        residual_form,
-        forms::AffineResidualOptions{.allow_time_derivatives = false, .allow_interior_face_terms = false},
-        &reason);
+    const bool has_coupled_terminals =
+        residual_form.isValid() && residual_form.node() != nullptr && containsCoupledTerminals(*residual_form.node());
+    auto split = has_coupled_terminals
+                     ? std::nullopt
+                     : forms::trySplitAffineResidual(
+                           residual_form,
+                           forms::AffineResidualOptions{.allow_time_derivatives = false, .allow_interior_face_terms = false},
+                           &reason);
 
     KernelPtr kernel{};
     if (split.has_value()) {
@@ -181,7 +238,7 @@ void installStrongDirichlet(FESystem& system, std::span<const forms::bc::StrongD
         FE_THROW_IF(bc.value.hasTest() || bc.value.hasTrial(), InvalidArgumentException,
                     "installStrongDirichlet: StrongDirichlet value must not contain test/trial functions");
         system.addSystemConstraint(
-            std::make_unique<StrongDirichletConstraint>(bc.field, bc.boundary_marker, bc.value));
+            std::make_unique<StrongDirichletConstraint>(bc.field, bc.boundary_marker, bc.value, bc.component));
     }
 }
 
@@ -261,7 +318,9 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
 
             auto ir = std::move(compiled[i][j].value());
             const auto dispatch = analyzeDispatch(ir);
-            FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && dispatch.boundary_markers.empty(), InvalidArgumentException,
+            FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&
+                            dispatch.boundary_markers.empty() && dispatch.interface_markers.empty(),
+                        InvalidArgumentException,
                         "installResidualBlocks: compiled residual block has no integral terms");
 
             auto kernel = std::make_shared<forms::NonlinearFormKernel>(std::move(ir), options.ad_mode);
@@ -346,7 +405,9 @@ CoupledResidualKernels installCoupledResidual(
             auto ir = compiler.compileResidual(lowered);
 
             const auto dispatch = analyzeDispatch(ir);
-            FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && dispatch.boundary_markers.empty(), InvalidArgumentException,
+            FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&
+                            dispatch.boundary_markers.empty() && dispatch.interface_markers.empty(),
+                        InvalidArgumentException,
                         "installCoupledResidual: compiled residual has no integral terms");
 
             auto kernel = std::make_shared<forms::NonlinearFormKernel>(
@@ -365,7 +426,9 @@ CoupledResidualKernels installCoupledResidual(
             const auto lowered = lowerStateFields(base_expr, trial, system);
             auto ir = compiler.compileResidual(lowered);
             const auto dispatch = analyzeDispatch(ir);
-            FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && dispatch.boundary_markers.empty(), InvalidArgumentException,
+            FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&
+                            dispatch.boundary_markers.empty() && dispatch.interface_markers.empty(),
+                        InvalidArgumentException,
                         "installCoupledResidual: compiled Jacobian block has no integral terms");
 
             auto kernel = std::make_shared<forms::NonlinearFormKernel>(

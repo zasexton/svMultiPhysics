@@ -262,7 +262,6 @@ double SparsityOptimizer::estimatePotential(const SparsityPattern& pattern) cons
     if (n < 10) return 0.0;  // Too small to benefit
 
     GlobalIndex bandwidth = pattern.computeBandwidth();
-    auto stats = pattern.computeStats();
 
     // Estimate potential based on how far bandwidth is from ideal
     // Ideal bandwidth for many FEM matrices is O(sqrt(n))

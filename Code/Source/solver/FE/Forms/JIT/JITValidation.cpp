@@ -85,8 +85,9 @@ ValidationResult canCompile(const FormExpr& integrand, const ValidationOptions& 
             case FormExprType::CellIntegral:
             case FormExprType::BoundaryIntegral:
             case FormExprType::InteriorFaceIntegral:
+            case FormExprType::InterfaceIntegral:
                 out.ok = false;
-                out.first_issue = issue(n, "JIT: measure nodes (dx/ds/dS) are not valid in integrands");
+                out.first_issue = issue(n, "JIT: measure nodes (dx/ds/dS/dI) are not valid in integrands");
                 return;
 
             // Einstein notation must be lowered prior to kernel lowering.
@@ -183,4 +184,3 @@ ValidationResult canCompile(const FormIR& ir, const ValidationOptions& options)
 } // namespace forms
 } // namespace FE
 } // namespace svmp
-

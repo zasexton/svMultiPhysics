@@ -125,8 +125,7 @@ TEST(C1Basis, QuadValueModesKroneckerAtCorners) {
     HermiteBasis basis(ElementType::Quad4, 3);
 
     for (std::size_t c = 0; c < 4; ++c) {
-        auto xi = NodeOrdering::get_node_coords(ElementType::Quad4,
-                                                static_cast<int>(c));
+        auto xi = NodeOrdering::get_node_coords(ElementType::Quad4, c);
         math::Vector<Real, 3> pt;
         pt[0] = xi[0];
         pt[1] = xi[1];
@@ -212,8 +211,7 @@ TEST(C1Basis, QuadInterpolatesBicubicPolynomial) {
     // Build DOFs from corner values and derivatives
     std::vector<Real> dofs(16, Real(0));
     for (std::size_t c = 0; c < 4; ++c) {
-        auto node = NodeOrdering::get_node_coords(ElementType::Quad4,
-                                                  static_cast<int>(c));
+        auto node = NodeOrdering::get_node_coords(ElementType::Quad4, c);
         const Real x = node[0];
         const Real y = node[1];
 

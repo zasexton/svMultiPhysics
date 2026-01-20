@@ -259,10 +259,9 @@ class cmType {
     bool slv(const CmMod& cm_mod) const { return (taskId != cm_mod.master); };
 
     // Returns processor ID in fortran indexing
-    int tF(const CmMod& cm_mod) const { return taskId + 1; };
+    int tF(const CmMod&) const { return taskId + 1; };
 
 };
 
 
 #endif
-

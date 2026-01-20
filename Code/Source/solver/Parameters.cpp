@@ -2188,6 +2188,7 @@ GeneralSimulationParameters::GeneralSimulationParameters()
   set_parameter("Convert_BIN_to_VTK_format", false, !required, convert_bin_to_vtk_format);
 
   set_parameter("Debug", false, !required, debug);
+  set_parameter("Use_new_OOP_solver", false, !required, use_new_oop_solver);
 
   set_parameter("Increment_in_saving_restart_files", 0, !required, increment_in_saving_restart_files);
   set_parameter("Increment_in_saving_VTK_files", 0, !required, increment_in_saving_vtk_files);
@@ -2953,4 +2954,3 @@ void LinearSolverParameters::set_values(tinyxml2::XMLElement* xml_elem)
   }
 
 }
-

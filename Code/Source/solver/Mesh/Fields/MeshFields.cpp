@@ -526,14 +526,15 @@ void MeshFields::interpolate_cell_to_vertex(MeshBase& mesh,
       if (vertex_id < 0 || static_cast<size_t>(vertex_id) >= n_vertices) {
         throw std::runtime_error("interpolate_cell_to_vertex: cell connectivity contains invalid vertex index");
       }
+      const auto sv = static_cast<size_t>(vertex_id);
 
       // Add cell value to vertex
       for (size_t comp = 0; comp < n_components; ++comp) {
-        vertex_data[vertex_id * n_components + comp] +=
+        vertex_data[sv * n_components + comp] +=
           cell_data[c * n_components + comp];
       }
 
-      vertex_counts[vertex_id]++;
+      vertex_counts[sv]++;
     }
   }
 
@@ -575,6 +576,7 @@ void MeshFields::interpolate_vertex_to_cell(MeshBase& mesh,
   }
 
   size_t n_components = field_components(mesh, vertex_field);
+  size_t n_vertices = mesh.n_vertices();
   size_t n_cells = mesh.n_cells();
 
   // Average vertex values for each cell
@@ -589,12 +591,13 @@ void MeshFields::interpolate_vertex_to_cell(MeshBase& mesh,
     // Sum vertex values
     for (size_t i = 0; i < n_cell_vertices; ++i) {
       index_t vertex_id = vertices_ptr[i];
-      if (vertex_id < 0 || static_cast<size_t>(vertex_id) >= mesh.n_vertices()) {
+      if (vertex_id < 0 || static_cast<size_t>(vertex_id) >= n_vertices) {
         throw std::runtime_error("interpolate_vertex_to_cell: cell connectivity contains invalid vertex index");
       }
+      const auto sv = static_cast<size_t>(vertex_id);
       for (size_t comp = 0; comp < n_components; ++comp) {
         cell_data[c * n_components + comp] +=
-          vertex_data[vertex_id * n_components + comp];
+          vertex_data[sv * n_components + comp];
       }
     }
 

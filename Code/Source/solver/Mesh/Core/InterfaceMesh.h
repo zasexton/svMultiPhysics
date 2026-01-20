@@ -39,6 +39,7 @@
 #include <vector>
 #include <array>
 #include <algorithm>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 #include <stdexcept>
@@ -98,12 +99,46 @@ public:
 
   // ---- Incidence to volume mesh
   // Maps each trace face to its parent volume cell and local face index within that cell
+  index_t volume_face(index_t local_face_id) const {
+    return trace_face_to_volume_face_.at(static_cast<size_t>(local_face_id));
+  }
+
   index_t volume_cell(index_t local_face_id) const {
     return trace_face2vol_cell_[static_cast<size_t>(local_face_id)];
   }
 
   int local_face_in_cell(index_t local_face_id) const {
     return trace_face_local_id_[static_cast<size_t>(local_face_id)];
+  }
+
+  // Full incidence to volume mesh (minus/plus ordering)
+  //
+  // Convention:
+  // - Boundary faces: `cell_plus == INVALID_INDEX`
+  // - Interior faces: plus-side is the cell with the larger global ID (or local ID if no GIDs)
+  std::array<index_t,2> volume_cells(index_t local_face_id) const {
+    return trace_face2vol_cells_[static_cast<size_t>(local_face_id)];
+  }
+
+  index_t volume_cell_minus(index_t local_face_id) const {
+    return trace_face2vol_cells_[static_cast<size_t>(local_face_id)][0];
+  }
+
+  index_t volume_cell_plus(index_t local_face_id) const {
+    return trace_face2vol_cells_[static_cast<size_t>(local_face_id)][1];
+  }
+
+  int local_face_in_cell_minus(index_t local_face_id) const {
+    return trace_face_local_ids_[static_cast<size_t>(local_face_id)][0];
+  }
+
+  int local_face_in_cell_plus(index_t local_face_id) const {
+    return trace_face_local_ids_[static_cast<size_t>(local_face_id)][1];
+  }
+
+  bool is_boundary_face(index_t local_face_id) const {
+    const auto cells = volume_cells(local_face_id);
+    return cells[0] == INVALID_INDEX || cells[1] == INVALID_INDEX;
   }
 
   // ---- Orientation & normals
@@ -258,6 +293,8 @@ private:
   std::vector<index_t> trace_face_to_volume_face_; // volume-mesh face id for each trace face
   std::vector<index_t> trace_face2vol_cell_;  // parent volume cell for each trace face
   std::vector<int> trace_face_local_id_;      // local face index within parent cell
+  std::vector<std::array<index_t,2>> trace_face2vol_cells_; // (cell_minus, cell_plus)
+  std::vector<std::array<int,2>> trace_face_local_ids_;     // (local_face_minus, local_face_plus)
   std::vector<index_t> trace_vertex_to_volume_vertex_; // volume-mesh vertex id for each trace vertex
 
   // Orientation
@@ -289,6 +326,8 @@ inline InterfaceMesh build_interface_impl(
   interface.trace_face_to_volume_face_.reserve(face_indices.size());
   interface.trace_face2vol_cell_.reserve(face_indices.size());
   interface.trace_face_local_id_.reserve(face_indices.size());
+  interface.trace_face2vol_cells_.reserve(face_indices.size());
+  interface.trace_face_local_ids_.reserve(face_indices.size());
 
   auto compute_local_face_in_cell = [&volume_mesh](index_t cell_id, index_t face_id) -> int {
     if (cell_id < 0) return -1;
@@ -372,11 +411,37 @@ inline InterfaceMesh build_interface_impl(
 
     // Store incidence to volume mesh
     const auto& face_cells = volume_mesh.face_cells(face_id);
-    index_t parent_cell = INVALID_INDEX;
-    if (face_cells[0] != INVALID_INDEX) parent_cell = face_cells[0];
-    else if (face_cells[1] != INVALID_INDEX) parent_cell = face_cells[1];
-    interface.trace_face2vol_cell_.push_back(parent_cell);
-    interface.trace_face_local_id_.push_back(compute_local_face_in_cell(parent_cell, face_id));
+    index_t cell_minus = face_cells[0];
+    index_t cell_plus = face_cells[1];
+
+    // Boundary faces: ensure minus-side is the valid cell.
+    if (cell_minus == INVALID_INDEX && cell_plus != INVALID_INDEX) {
+      cell_minus = cell_plus;
+      cell_plus = INVALID_INDEX;
+    }
+
+    // Interior faces: sort by global ID when available (DG-style plus/minus convention).
+    if (cell_minus != INVALID_INDEX && cell_plus != INVALID_INDEX) {
+      const auto& cell_gids = volume_mesh.cell_gids();
+      const gid_t gid_minus = (!cell_gids.empty() && cell_minus < static_cast<index_t>(cell_gids.size()))
+                                ? cell_gids[static_cast<size_t>(cell_minus)]
+                                : static_cast<gid_t>(cell_minus);
+      const gid_t gid_plus = (!cell_gids.empty() && cell_plus < static_cast<index_t>(cell_gids.size()))
+                               ? cell_gids[static_cast<size_t>(cell_plus)]
+                               : static_cast<gid_t>(cell_plus);
+      if (gid_minus > gid_plus) {
+        std::swap(cell_minus, cell_plus);
+      }
+    }
+
+    interface.trace_face2vol_cells_.push_back({cell_minus, cell_plus});
+    interface.trace_face_local_ids_.push_back(
+        {compute_local_face_in_cell(cell_minus, face_id),
+         compute_local_face_in_cell(cell_plus, face_id)});
+
+    // Backward-compatible "primary" parent accessors use the minus side.
+    interface.trace_face2vol_cell_.push_back(cell_minus);
+    interface.trace_face_local_id_.push_back(interface.trace_face_local_ids_.back()[0]);
   }
 
   // Compute orientation if requested

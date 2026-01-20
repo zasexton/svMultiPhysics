@@ -18,6 +18,7 @@
 #include "Forms/BlockForm.h"
 #include "Forms/Complex.h"
 #include "Forms/BoundaryConditions.h"
+#include "Forms/InterfaceConditions.h"
 #include "Forms/BoundaryFunctional.h"
 #include "Forms/Vocabulary.h"
 

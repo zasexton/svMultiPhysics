@@ -251,6 +251,46 @@ simvascular_add_executable(${SV_MULTIPHYSICS_EXE}
   INSTALL_COMP CoreExecutables
   INSTALL_DESTINATION ${SV_INSTALL_RUNTIME_DIR})
 
+#------------------------------------------------------------------------------
+# New OOP solver stack (Mesh/FE/Physics/Application)
+#
+# This builds the new libraries side-by-side with the legacy solver.
+# Runtime behavior remains unchanged unless <Use_new_OOP_solver> is enabled
+# in the input XML (dispatched early in main.cpp).
+#------------------------------------------------------------------------------
+
+# Mesh: prefer system VTK to avoid FetchContent-based VTK builds in the main solver build.
+if(NOT DEFINED USE_SYSTEM_VTK)
+  set(USE_SYSTEM_VTK ON CACHE BOOL "Use system VTK for svmesh" )
+endif()
+if(NOT DEFINED MESH_BUILD_TESTS)
+  set(MESH_BUILD_TESTS OFF CACHE BOOL "Disable svmesh tests in main build")
+endif()
+
+# FE: Physics requires Assembly; keep tests off in the main solver build.
+if(NOT DEFINED FE_ENABLE_ASSEMBLY)
+  set(FE_ENABLE_ASSEMBLY ON CACHE BOOL "Enable FE Assembly/Systems/Forms for OOP solver")
+endif()
+if(NOT DEFINED FE_BUILD_TESTS)
+  set(FE_BUILD_TESTS OFF CACHE BOOL "Disable svfe tests in main build")
+endif()
+if(NOT DEFINED FE_WITH_MESH)
+  set(FE_WITH_MESH ON CACHE BOOL "Enable FE Mesh integration for OOP solver")
+endif()
+
+# Physics: keep tests off in the main solver build; enable mesh integration when svmesh is present.
+if(NOT DEFINED PHYSICS_BUILD_TESTS)
+  set(PHYSICS_BUILD_TESTS OFF CACHE BOOL "Disable svphysics tests in main build")
+endif()
+if(NOT DEFINED PHYSICS_WITH_MESH)
+  set(PHYSICS_WITH_MESH ON CACHE BOOL "Enable svphysics Mesh integration")
+endif()
+
+add_subdirectory(Mesh)
+add_subdirectory(FE)
+add_subdirectory(Physics)
+add_subdirectory(Application)
+
 target_link_libraries(${SV_MULTIPHYSICS_EXE}
   ${GLOBAL_LIBRARIES}
   ${INTELRUNTIME_LIBRARIES}
@@ -261,6 +301,7 @@ target_link_libraries(${SV_MULTIPHYSICS_EXE}
   ${PARMETIS_INTERNAL_LIBRARY_NAME}
   ${TETGEN_LIBRARY_NAME}
   ${TINYXML_LIBRARY_NAME}
+  svapplication
   ${SV_LIB_LINEAR_SOLVER_NAME}${SV_MPI_NAME_EXT}
   ${VTK_LIBRARIES}
   )

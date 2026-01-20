@@ -19,7 +19,7 @@ namespace systems {
 
 class StrongDirichletConstraint final : public ISystemConstraint {
 public:
-    StrongDirichletConstraint(FieldId field, int boundary_marker, forms::FormExpr value);
+    StrongDirichletConstraint(FieldId field, int boundary_marker, forms::FormExpr value, int component = -1);
 
     void apply(const FESystem& system, constraints::AffineConstraints& constraints) override;
 
@@ -33,6 +33,7 @@ public:
 private:
     FieldId field_{INVALID_FIELD_ID};
     int boundary_marker_{-1};
+    int component_{-1};
     forms::FormExpr value_{};
     bool is_time_dependent_{false};
 
@@ -45,4 +46,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_SYSTEMS_STRONGDIRICHLETCONSTRAINT_H
-

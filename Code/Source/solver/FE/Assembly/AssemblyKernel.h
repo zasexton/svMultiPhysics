@@ -507,6 +507,38 @@ public:
     [[nodiscard]] virtual bool hasInteriorFace() const noexcept { return false; }
 
     // =========================================================================
+    // Interface Face Integration (subset via InterfaceMesh)
+    // =========================================================================
+
+    /**
+     * @brief Compute matrix/vector for an interface face (InterfaceMesh subset)
+     *
+     * This is analogous to computeInteriorFace, but is dispatched only for faces
+     * belonging to a registered InterfaceMesh (e.g., a material interface).
+     *
+     * @param ctx_minus Context for the "minus" side cell
+     * @param ctx_plus Context for the "plus" side cell
+     * @param interface_marker Interface surface identifier (as specified by `.dI(marker)`)
+     * @param output_minus Output contributions to minus cell equations
+     * @param output_plus Output contributions to plus cell equations
+     * @param coupling_minus_plus Coupling from plus DOFs to minus equations
+     * @param coupling_plus_minus Coupling from minus DOFs to plus equations
+     */
+    virtual void computeInterfaceFace(
+        const AssemblyContext& ctx_minus,
+        const AssemblyContext& ctx_plus,
+        int interface_marker,
+        KernelOutput& output_minus,
+        KernelOutput& output_plus,
+        KernelOutput& coupling_minus_plus,
+        KernelOutput& coupling_plus_minus);
+
+    /**
+     * @brief Check if kernel supports interface face integration
+     */
+    [[nodiscard]] virtual bool hasInterfaceFace() const noexcept { return false; }
+
+    // =========================================================================
     // Query
     // =========================================================================
 

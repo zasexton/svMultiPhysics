@@ -24,7 +24,8 @@ namespace forms {
 enum class IntegralDomain : std::uint8_t {
     Cell,
     Boundary,
-    InteriorFace
+    InteriorFace,
+    InterfaceFace
 };
 
 /**
@@ -35,6 +36,9 @@ struct IntegralTerm {
 
     // For boundary integrals: marker >= 0 restricts to that marker; marker < 0 means "all".
     int boundary_marker{-1};
+
+    // For interface integrals: marker >= 0 selects a registered interface surface; marker < 0 means "all".
+    int interface_marker{-1};
 
     // Continuous-time metadata: if > 0, this term contains dt(·,k) and represents
     // the k-th time derivative contribution (time discretization handled elsewhere).
@@ -86,9 +90,10 @@ public:
     [[nodiscard]] int maxTimeDerivativeOrder() const noexcept;
     [[nodiscard]] bool isTransient() const noexcept { return maxTimeDerivativeOrder() > 0; }
 
-    [[nodiscard]] bool hasCellTerms() const noexcept;
-    [[nodiscard]] bool hasBoundaryTerms() const noexcept;
-    [[nodiscard]] bool hasInteriorFaceTerms() const noexcept;
+	    [[nodiscard]] bool hasCellTerms() const noexcept;
+	    [[nodiscard]] bool hasBoundaryTerms() const noexcept;
+	    [[nodiscard]] bool hasInteriorFaceTerms() const noexcept;
+	    [[nodiscard]] bool hasInterfaceFaceTerms() const noexcept;
 
     [[nodiscard]] const std::vector<IntegralTerm>& terms() const noexcept;
 

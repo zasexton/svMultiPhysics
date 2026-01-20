@@ -531,33 +531,34 @@ BoundaryDetector::BoundaryInfo BoundaryDetector::detect_boundary_global(const Di
         return static_cast<int>(static_cast<uint64_t>(hasher(k)) % static_cast<uint64_t>(world));
     };
 
-    std::vector<std::vector<size_t>> indices_by_dest(static_cast<size_t>(world));
+    const size_t world_size = static_cast<size_t>(world);
+    std::vector<std::vector<size_t>> indices_by_dest(world_size);
     for (size_t i = 0; i < keys.size(); ++i) {
         indices_by_dest[static_cast<size_t>(home_rank(keys[i]))].push_back(i);
     }
 
-    std::vector<int> send_counts(world, 0);
-    for (int r = 0; r < world; ++r) {
-        send_counts[r] = static_cast<int>(indices_by_dest[static_cast<size_t>(r)].size() * 6);
+    std::vector<int> send_counts(world_size, 0);
+    for (size_t r = 0; r < world_size; ++r) {
+        send_counts[r] = static_cast<int>(indices_by_dest[r].size() * 6);
     }
 
-    std::vector<int> recv_counts(world, 0);
+    std::vector<int> recv_counts(world_size, 0);
     MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, comm);
 
-    std::vector<int> send_displs(world + 1, 0);
-    std::vector<int> recv_displs(world + 1, 0);
-    for (int r = 0; r < world; ++r) {
+    std::vector<int> send_displs(world_size + 1, 0);
+    std::vector<int> recv_displs(world_size + 1, 0);
+    for (size_t r = 0; r < world_size; ++r) {
         send_displs[r + 1] = send_displs[r] + send_counts[r];
         recv_displs[r + 1] = recv_displs[r] + recv_counts[r];
     }
 
-    std::vector<int64_t> send_buf(static_cast<size_t>(send_displs[world]));
+    std::vector<int64_t> send_buf(static_cast<size_t>(send_displs[world_size]));
     std::vector<size_t> send_key_index;
     send_key_index.reserve(keys.size());
 
-    for (int r = 0; r < world; ++r) {
+    for (size_t r = 0; r < world_size; ++r) {
         int pos = send_displs[r];
-        for (size_t idx : indices_by_dest[static_cast<size_t>(r)]) {
+        for (size_t idx : indices_by_dest[r]) {
             const auto& k = keys[idx];
             send_buf[static_cast<size_t>(pos + 0)] = static_cast<int64_t>(k.n);
             send_buf[static_cast<size_t>(pos + 1)] = static_cast<int64_t>(k.v[0]);
@@ -570,7 +571,7 @@ BoundaryDetector::BoundaryInfo BoundaryDetector::detect_boundary_global(const Di
         }
     }
 
-    std::vector<int64_t> recv_buf(static_cast<size_t>(recv_displs[world]));
+    std::vector<int64_t> recv_buf(static_cast<size_t>(recv_displs[world_size]));
     MPI_Datatype i64_type =
 #ifdef MPI_INT64_T
         MPI_INT64_T;
@@ -601,22 +602,22 @@ BoundaryDetector::BoundaryInfo BoundaryDetector::detect_boundary_global(const Di
     }
 
     // Return global counts back to requesting ranks (one i64 per record).
-    std::vector<int> send_counts2(world, 0);
-    std::vector<int> recv_counts2(world, 0);
-    for (int r = 0; r < world; ++r) {
+    std::vector<int> send_counts2(world_size, 0);
+    std::vector<int> recv_counts2(world_size, 0);
+    for (size_t r = 0; r < world_size; ++r) {
         send_counts2[r] = recv_counts[r] / 6;
         recv_counts2[r] = send_counts[r] / 6;
     }
 
-    std::vector<int> send_displs2(world + 1, 0);
-    std::vector<int> recv_displs2(world + 1, 0);
-    for (int r = 0; r < world; ++r) {
+    std::vector<int> send_displs2(world_size + 1, 0);
+    std::vector<int> recv_displs2(world_size + 1, 0);
+    for (size_t r = 0; r < world_size; ++r) {
         send_displs2[r + 1] = send_displs2[r] + send_counts2[r];
         recv_displs2[r + 1] = recv_displs2[r] + recv_counts2[r];
     }
 
-    std::vector<int64_t> send_back(static_cast<size_t>(send_displs2[world]));
-    for (int src = 0; src < world; ++src) {
+    std::vector<int64_t> send_back(static_cast<size_t>(send_displs2[world_size]));
+    for (size_t src = 0; src < world_size; ++src) {
         const int begin = recv_displs[src];
         const int end = recv_displs[src + 1];
         int out_pos = send_displs2[src];
@@ -632,7 +633,7 @@ BoundaryDetector::BoundaryInfo BoundaryDetector::detect_boundary_global(const Di
         }
     }
 
-    std::vector<int64_t> recv_back(static_cast<size_t>(recv_displs2[world]));
+    std::vector<int64_t> recv_back(static_cast<size_t>(recv_displs2[world_size]));
     MPI_Alltoallv(send_back.data(),
                   send_counts2.data(),
                   send_displs2.data(),

@@ -377,6 +377,7 @@ void prepareCellContext(AssemblyContext& context,
     }
 
     context.configure(cell_id, test_element, trial_element, required_data);
+    context.setCellDomainId(mesh.getCellDomainId(cell_id));
     context.setQuadratureData(scratch.quad_points, scratch.quad_weights);
     context.setPhysicalPoints(scratch.phys_points);
     context.setJacobianData(scratch.jacobians, scratch.inv_jacobians, scratch.jac_dets);

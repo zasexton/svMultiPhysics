@@ -296,7 +296,6 @@ void DofConstraints::buildConstraintMatrix(
 
     // Get reduced mapping
     auto reduced_map = getReducedMapping(n_total_dofs);
-    GlobalIndex n_reduced = numUnconstrainedDofs(n_total_dofs);
 
     row_offsets.reserve(static_cast<std::size_t>(n_total_dofs + 1));
     row_offsets.push_back(0);

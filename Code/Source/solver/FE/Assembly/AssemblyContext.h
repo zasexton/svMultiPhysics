@@ -261,6 +261,13 @@ public:
     [[nodiscard]] GlobalIndex cellId() const noexcept { return cell_id_; }
 
     /**
+     * @brief Get cell domain/subdomain ID (mesh-provided)
+     *
+     * This value is populated by the assembler from `IMeshAccess::getCellDomainId(cell_id)`.
+     */
+    [[nodiscard]] int cellDomainId() const noexcept { return cell_domain_id_; }
+
+    /**
      * @brief Get current face ID (face contexts only)
      */
     [[nodiscard]] GlobalIndex faceId() const noexcept { return face_id_; }
@@ -973,6 +980,11 @@ public:
      */
     void setBoundaryMarker(int marker) { boundary_marker_ = marker; }
 
+    /**
+     * @brief Set cell domain/subdomain ID (for multi-domain coefficients/materials)
+     */
+    void setCellDomainId(int domain_id) noexcept { cell_domain_id_ = domain_id; }
+
     // =========================================================================
     // Data Setting (called by assembler)
     // =========================================================================
@@ -1072,6 +1084,7 @@ private:
     // Context type and identification
     ContextType type_{ContextType::Cell};
     GlobalIndex cell_id_{-1};
+    int cell_domain_id_{0};
     GlobalIndex face_id_{-1};
     LocalIndex local_face_id_{0};
     int boundary_marker_{-1};

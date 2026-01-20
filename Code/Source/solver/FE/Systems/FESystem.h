@@ -42,6 +42,12 @@
 #include <utility>
 #include <vector>
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+namespace svmp {
+class InterfaceMesh;
+}
+#endif
+
 namespace svmp {
 namespace FE {
 
@@ -60,6 +66,7 @@ class FunctionalKernel;
 namespace systems {
 
 using BoundaryId = int;
+using InterfaceId = int;
 class OperatorBackends;
 class CoupledBoundaryManager;
 
@@ -86,6 +93,7 @@ struct AssemblyRequest {
     bool zero_outputs{true};
     bool assemble_boundary_terms{true};
     bool assemble_interior_face_terms{true};
+    bool assemble_interface_face_terms{true};
     bool assemble_global_terms{true};
 };
 
@@ -126,6 +134,11 @@ public:
                                std::shared_ptr<assembly::AssemblyKernel> kernel);
     void addInteriorFaceKernel(OperatorTag op, FieldId test_field, FieldId trial_field,
                                std::shared_ptr<assembly::AssemblyKernel> kernel);
+
+    void addInterfaceFaceKernel(OperatorTag op, InterfaceId interface_marker, FieldId field,
+                                std::shared_ptr<assembly::AssemblyKernel> kernel);
+    void addInterfaceFaceKernel(OperatorTag op, InterfaceId interface_marker, FieldId test_field, FieldId trial_field,
+                                std::shared_ptr<assembly::AssemblyKernel> kernel);
 
     void addGlobalKernel(OperatorTag op,
                          std::shared_ptr<GlobalKernel> kernel);
@@ -222,8 +235,19 @@ public:
                                                                             LocalIndex num_qpts) const;
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-    [[nodiscard]] const svmp::Mesh* mesh() const noexcept { return mesh_.get(); }
-    [[nodiscard]] svmp::Configuration coordinateConfiguration() const noexcept { return coord_cfg_; }
+	    [[nodiscard]] const svmp::Mesh* mesh() const noexcept { return mesh_.get(); }
+	    [[nodiscard]] svmp::Configuration coordinateConfiguration() const noexcept { return coord_cfg_; }
+
+	    void setInterfaceMesh(InterfaceId marker, std::shared_ptr<const svmp::InterfaceMesh> mesh);
+	    [[nodiscard]] bool hasInterfaceMesh(InterfaceId marker) const noexcept;
+	    [[nodiscard]] const svmp::InterfaceMesh& interfaceMesh(InterfaceId marker) const;
+
+	    void setInterfaceMeshFromFaceSet(InterfaceId marker,
+	                                     const std::string& face_set_name,
+	                                     bool compute_orientation = true);
+	    void setInterfaceMeshFromBoundaryLabel(InterfaceId marker,
+	                                           int boundary_label,
+	                                           bool compute_orientation = true);
 #endif
 
     [[nodiscard]] const dofs::DofHandler& dofHandler() const noexcept { return dof_handler_; }
@@ -262,8 +286,9 @@ private:
     std::shared_ptr<const ISearchAccess> search_access_{};
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-    std::shared_ptr<const svmp::Mesh> mesh_{};
-    svmp::Configuration coord_cfg_{svmp::Configuration::Reference};
+	    std::shared_ptr<const svmp::Mesh> mesh_{};
+	    svmp::Configuration coord_cfg_{svmp::Configuration::Reference};
+	    std::unordered_map<InterfaceId, std::shared_ptr<const svmp::InterfaceMesh>> interface_meshes_{};
 #endif
 
     FieldRegistry field_registry_;

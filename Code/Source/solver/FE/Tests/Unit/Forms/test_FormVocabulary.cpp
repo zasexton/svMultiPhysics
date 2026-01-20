@@ -42,6 +42,80 @@ Real singleTetraP1BasisIntegral()
     return singleTetraVolume() / 4.0;
 }
 
+class SingleTetraDomainMeshAccess final : public assembly::IMeshAccess {
+public:
+    explicit SingleTetraDomainMeshAccess(int domain_id)
+        : domain_id_(domain_id)
+    {
+        nodes_ = {
+            {0.0, 0.0, 0.0},  // 0
+            {1.0, 0.0, 0.0},  // 1
+            {0.0, 1.0, 0.0},  // 2
+            {0.0, 0.0, 1.0}   // 3
+        };
+        cell_ = {0, 1, 2, 3};
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Tetra4; }
+
+    [[nodiscard]] int getCellDomainId(GlobalIndex /*cell_id*/) const override { return domain_id_; }
+
+    void getCellNodes(GlobalIndex /*cell_id*/, std::vector<GlobalIndex>& nodes) const override
+    {
+        nodes.assign(cell_.begin(), cell_.end());
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/, std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords.resize(cell_.size());
+        for (std::size_t i = 0; i < cell_.size(); ++i) {
+            coords[i] = nodes_.at(static_cast<std::size_t>(cell_[i]));
+        }
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/, GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return -1; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+
+    void forEachBoundaryFace(int /*marker*/,
+                             std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+private:
+    int domain_id_{0};
+    std::vector<std::array<Real, 3>> nodes_{};
+    std::array<GlobalIndex, 4> cell_{};
+};
+
 assembly::DenseVectorView assembleCellLinear(const FormExpr& scalar_expr,
                                              dofs::DofMap& dof_map,
                                              const assembly::IMeshAccess& mesh,
@@ -200,6 +274,39 @@ TEST(FormVocabularyTest, EntityMeasureTerminalsWorkOnCellAndFace)
         EXPECT_NEAR(vec.getVectorEntry(1), expected, 5e-12);
         EXPECT_NEAR(vec.getVectorEntry(2), expected, 5e-12);
         EXPECT_NEAR(vec.getVectorEntry(3), 0.0, 5e-12);
+    }
+}
+
+TEST(FormVocabularyTest, CellDomainIdAndRegionIndicatorWork)
+{
+    constexpr int domain_id_value = 7;
+    SingleTetraDomainMeshAccess mesh(domain_id_value);
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    const Real expected_integral_scale = singleTetraP1BasisIntegral();
+
+    {
+        auto vec = assembleCellLinear(domainId(), dof_map, mesh, space);
+        const Real expected_entry = static_cast<Real>(domain_id_value) * expected_integral_scale;
+        for (GlobalIndex i = 0; i < 4; ++i) {
+            EXPECT_NEAR(vec.getVectorEntry(i), expected_entry, 5e-12);
+        }
+    }
+
+    {
+        auto vec = assembleCellLinear(regionIndicator(domain_id_value), dof_map, mesh, space);
+        const Real expected_entry = 1.0 * expected_integral_scale;
+        for (GlobalIndex i = 0; i < 4; ++i) {
+            EXPECT_NEAR(vec.getVectorEntry(i), expected_entry, 5e-12);
+        }
+    }
+
+    {
+        auto vec = assembleCellLinear(regionIndicator(domain_id_value + 1), dof_map, mesh, space);
+        for (GlobalIndex i = 0; i < 4; ++i) {
+            EXPECT_NEAR(vec.getVectorEntry(i), 0.0, 5e-12);
+        }
     }
 }
 

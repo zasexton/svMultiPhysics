@@ -49,7 +49,8 @@ struct BoundaryDofsWithCoords {
 [[nodiscard]] BoundaryDofsWithCoords boundaryDofsWithCoordsByMarker(
     const FESystem& system,
     FieldId field,
-    int boundary_marker)
+    int boundary_marker,
+    int component)
 {
     BoundaryDofsWithCoords out;
 
@@ -60,6 +61,14 @@ struct BoundaryDofsWithCoords {
     const auto& dh = system.fieldDofHandler(field);
     const auto& dof_map = dh.getDofMap();
     const GlobalIndex offset = system.fieldDofOffset(field);
+
+    const int n_components = std::max(1, rec.space->value_dimension());
+    if (component < -1) {
+        throw std::invalid_argument("StrongDirichletConstraint: component must be >= -1");
+    }
+    if (component >= n_components) {
+        throw std::invalid_argument("StrongDirichletConstraint: component index out of range");
+    }
 
     std::unordered_map<GlobalIndex, std::array<Real, 3>> coord_by_dof;
     std::unordered_map<int, spaces::FaceRestriction> face_restriction_cache;
@@ -81,6 +90,11 @@ struct BoundaryDofsWithCoords {
         const auto cell_dofs = dof_map.getCellDofs(cell_id);
         FE_THROW_IF(cell_dofs.empty(), InvalidStateException,
                     "StrongDirichletConstraint: empty cell DOF list");
+
+        const auto dofs_per_component = cell_dofs.size() / static_cast<std::size_t>(n_components);
+        FE_THROW_IF(dofs_per_component == 0 || dofs_per_component * static_cast<std::size_t>(n_components) != cell_dofs.size(),
+                    InvalidStateException,
+                    "StrongDirichletConstraint: cell DOF list size is not divisible by field components");
 
         cell_coords.clear();
         mesh.getCellCoordinates(cell_id, cell_coords);
@@ -107,18 +121,26 @@ struct BoundaryDofsWithCoords {
             FE_THROW_IF(ldof < 0, InvalidArgumentException,
                         "StrongDirichletConstraint: negative local DOF index");
             const auto ldof_u = static_cast<std::size_t>(ldof);
-            FE_THROW_IF(ldof_u >= cell_dofs.size(), InvalidArgumentException,
+            FE_THROW_IF(ldof_u >= dofs_per_component, InvalidArgumentException,
                         "StrongDirichletConstraint: local DOF index out of range for cell DOF list");
             FE_THROW_IF(ldof_u >= dof_nodes.size(), InvalidArgumentException,
                         "StrongDirichletConstraint: local DOF index out of range for dof_nodes");
 
-            const GlobalIndex dof = cell_dofs[ldof_u] + offset;
-            if (coord_by_dof.find(dof) != coord_by_dof.end()) {
-                continue;
-            }
-
             const auto x = mapping->map_to_physical(dof_nodes[ldof_u]);
-            coord_by_dof.emplace(dof, std::array<Real, 3>{x[0], x[1], x[2]});
+
+            const int comp_begin = (component < 0) ? 0 : component;
+            const int comp_end = (component < 0) ? n_components : (component + 1);
+            for (int comp = comp_begin; comp < comp_end; ++comp) {
+                const auto local = static_cast<std::size_t>(comp) * dofs_per_component + ldof_u;
+                FE_THROW_IF(local >= cell_dofs.size(), InvalidStateException,
+                            "StrongDirichletConstraint: component-local DOF index out of range");
+
+                const GlobalIndex dof = cell_dofs[local] + offset;
+                if (coord_by_dof.find(dof) != coord_by_dof.end()) {
+                    continue;
+                }
+                coord_by_dof.emplace(dof, std::array<Real, 3>{x[0], x[1], x[2]});
+            }
         }
     });
 
@@ -142,13 +164,17 @@ struct BoundaryDofsWithCoords {
 
 } // namespace
 
-StrongDirichletConstraint::StrongDirichletConstraint(FieldId field, int boundary_marker, forms::FormExpr value)
+StrongDirichletConstraint::StrongDirichletConstraint(FieldId field, int boundary_marker, forms::FormExpr value, int component)
     : field_(field),
       boundary_marker_(boundary_marker),
+      component_(component),
       value_(std::move(value))
 {
     if (field_ == INVALID_FIELD_ID) {
         throw std::invalid_argument("StrongDirichletConstraint: invalid FieldId");
+    }
+    if (component_ < -1) {
+        throw std::invalid_argument("StrongDirichletConstraint: component must be >= -1");
     }
     if (!value_.isValid()) {
         throw std::invalid_argument("StrongDirichletConstraint: invalid value expression");
@@ -162,7 +188,7 @@ void StrongDirichletConstraint::apply(const FESystem& system, constraints::Affin
         throw std::invalid_argument("StrongDirichletConstraint: value expression must not contain test/trial functions");
     }
 
-    auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_);
+    auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_);
     dofs_ = std::move(extracted.dofs);
     coords_ = std::move(extracted.coords);
 

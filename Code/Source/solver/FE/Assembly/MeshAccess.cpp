@@ -135,8 +135,6 @@ GlobalIndex MeshAccess::numBoundaryFaces() const {
         const bool c0_valid = (fc[0] != svmp::INVALID_INDEX);
         const bool c1_valid = (fc[1] != svmp::INVALID_INDEX);
         if (c0_valid == c1_valid) continue; // interior or invalid
-        const auto adj = static_cast<GlobalIndex>(c0_valid ? fc[0] : fc[1]);
-        if (!isOwnedCell(adj)) continue;
         ++count;
     }
     return count;
@@ -148,7 +146,6 @@ GlobalIndex MeshAccess::numInteriorFaces() const {
     for (std::size_t f = 0; f < f2c.size(); ++f) {
         const auto& fc = f2c[f];
         if (fc[0] == svmp::INVALID_INDEX || fc[1] == svmp::INVALID_INDEX) continue;
-        if (!mesh_.is_owned_face(static_cast<svmp::index_t>(f))) continue;
         ++count;
     }
     return count;
@@ -334,7 +331,6 @@ void MeshAccess::forEachBoundaryFace(
         if (c0_valid == c1_valid) continue;
 
         const auto adj_cell = static_cast<GlobalIndex>(c0_valid ? fc[0] : fc[1]);
-        if (!isOwnedCell(adj_cell)) continue;
 
         if (!match_all) {
             const auto lbl = mesh_.base().boundary_label(static_cast<svmp::index_t>(f));
@@ -349,7 +345,6 @@ void MeshAccess::forEachInteriorFace(
     std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> callback) const {
     const auto& f2c = mesh_.base().face2cell();
     for (std::size_t f = 0; f < f2c.size(); ++f) {
-        if (!mesh_.is_owned_face(static_cast<svmp::index_t>(f))) continue;
         const auto& fc = f2c[f];
         if (fc[0] == svmp::INVALID_INDEX || fc[1] == svmp::INVALID_INDEX) continue;
         callback(static_cast<GlobalIndex>(f),

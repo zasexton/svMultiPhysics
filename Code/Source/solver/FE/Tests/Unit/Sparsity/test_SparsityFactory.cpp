@@ -133,8 +133,12 @@ TEST(SparsityFactoryTest, CreateLaplacianPattern1D) {
     // Check tridiagonal structure
     for (GlobalIndex i = 0; i < 10; ++i) {
         EXPECT_TRUE(pattern.hasEntry(i, i));
-        if (i > 0) EXPECT_TRUE(pattern.hasEntry(i, i - 1));
-        if (i < 9) EXPECT_TRUE(pattern.hasEntry(i, i + 1));
+        if (i > 0) {
+            EXPECT_TRUE(pattern.hasEntry(i, i - 1));
+        }
+        if (i < 9) {
+            EXPECT_TRUE(pattern.hasEntry(i, i + 1));
+        }
     }
 }
 
@@ -681,7 +685,7 @@ TEST(SparsityFactoryTest, ClearCache) {
     opts.enable_caching = true;
 
     SparsityFactory factory;
-    factory.create(dof_map, opts);
+    static_cast<void>(factory.create(dof_map, opts));
 
     auto [hits, misses] = factory.getCacheStats();
     EXPECT_EQ(misses, 1);

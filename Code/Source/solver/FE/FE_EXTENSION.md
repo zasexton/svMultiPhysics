@@ -1,0 +1,226 @@
+# FE Library Extension Checklist
+
+This document outlines physics-agnostic extensions needed in the FE library to support advanced multi-field formulations including interface-coupled problems, multi-material domains, and discontinuous coefficient handling.
+
+---
+
+## 1. Interface Assembly Integration
+
+The `InterfaceMesh` infrastructure exists but is not fully connected to the Forms assembly pipeline.
+
+- [x] **InterfaceMesh-to-Forms Integration**
+  - [x] Create `InterfaceAssembler` that iterates over `InterfaceMesh` faces and assembles interface terms
+  - [x] Support assembly of jump/average expressions from `DGOperators` on extracted interface surfaces
+  - [x] Provide face-local quadrature rules for interface integration (consistent with volume element order)
+  - [x] Handle orientation-aware normal vectors for consistent flux direction
+
+- [x] **Interface Kernel Templates**
+  - [x] Assemble `[u]`/`{u}` terms across interfaces via Forms: `jump(u)`, `avg(u)` + `.dI(marker)` (compiled by `forms::FormKernel`)
+  - [x] Assemble flux-based interface couplings via Forms on `.dI(marker)` (e.g., `-∫ ⟨{σ}·n⟩ [[v]] ds`)
+  - [x] Support weighted averages for discontinuous coefficients (harmonic/arithmetic) (`forms::weightedAverage`, `forms::harmonicAverage`, `avg(...)`)
+  - [x] Template for Nitsche-type interface conditions with automatic penalty computation (`Forms/InterfaceConditions.h`)
+
+- [x] **Parent Cell Access**
+  - [x] Ensure `InterfaceMesh` provides efficient access to both parent cells (+ and - sides) (`InterfaceMesh::volume_cell_minus/plus`)
+  - [x] Support evaluation of volume-based fields at interface quadrature points from both sides
+  - [x] Handle boundary faces (single parent) vs interior faces (two parents) uniformly (`InterfaceMesh::is_boundary_face`)
+
+---
+
+## 2. Discontinuous Galerkin Completion
+
+DG operators exist in the vocabulary but end-to-end DG assembly needs completion.
+
+- [x] **Interior Face Loop Infrastructure**
+  - [x] Implement interior-face iteration (`assembly::IMeshAccess::forEachInteriorFace`)
+  - [x] Integrate interior-face couplings into operator sparsity generation (implemented in `systems::FESystem::setup`)
+  - [x] Support MPI-parallel interior face assembly (ghost cell handling)
+
+- [x] **DG Form Integration**
+  - [x] Interior-face integrals use `.dS()` and trigger interior face assembly
+  - [x] DG forms compile into kernels that assemble cell + boundary + interior-face contributions (`forms::FormKernel`)
+  - [x] Support generic upwind flux assembly for advective terms (`forms::upwindValue`)
+
+- [x] **Penalty Parameter Automation**
+  - [x] Compute interior penalty coefficient from element size and polynomial order (`forms::interiorPenaltyCoefficient`)
+  - [x] Support user-specified penalty scaling factor (gamma multiplier via `eta`)
+  - [x] Handle anisotropic meshes with directional h estimation (`forms::hNormal`, `2|K|/|F|`)
+
+---
+
+## 3. Coupled Boundary Condition Jacobians
+
+The coupled BC framework uses lagged/explicit evaluation. Full implicit coupling requires Jacobian contributions.
+
+- [x] **Boundary Functional Derivatives**
+  - [x] Implement `dQ/du` computation for `BoundaryFunctional` (e.g., `Q = ∫_Γ u·n ds`)
+  - [x] Support rank-1 Jacobian updates: `J += ∂R/∂Q ⊗ ∂Q/∂u`
+  - [x] Handle multiple boundary functionals with correct assembly ordering
+
+- [x] **Auxiliary State Jacobian Coupling**
+- [x] Account for `∂X/∂Q` in coupled Jacobians via AD-based auxiliary sensitivities (`systems::CoupledBoundaryManager::computeAuxiliarySensitivityForIntegrals`)
+  - [x] Support full Newton iteration for eliminated 0D state (reduced Jacobian with chain rule in `systems::assembleOperator`)
+  - [x] Use implicit block elimination (Schur complement) by keeping auxiliary state out of the global DOF vector and injecting the reduced coupling into `J`
+
+- [x] **Time-Dependent Coupled BCs**
+  - [x] Support implicit time integration of auxiliary ODEs (`systems::ODEIntegrator`)
+  - [x] Provide time-stepping hooks for auxiliary state update within nonlinear solve (`systems::CoupledBoundaryManager::prepareForAssembly`)
+  - [x] Handle multi-stage time integration methods consistently
+
+---
+
+## 4. Coefficient Discontinuity Support
+
+Multi-material and multi-region problems require discontinuous coefficients.
+
+- [x] **Region-Dependent Coefficients**
+  - [x] Support coefficient expressions of the form `k(x) = k₁·χ₁(x) + k₂·χ₂(x)`
+  - [x] Implement region indicator concept in Forms vocabulary (`domainId()`, `regionIndicator(domain_id)`)
+  - [x] Allow smooth (regularized) and sharp (discontinuous) indicator functions (via `clamp`, `heaviside`, `indicator`)
+
+- [ ] **Per-Region Material Assignment**
+  - [ ] Extend `MaterialStateProvider` to support region-based material lookup
+  - [ ] Handle element-wise constant properties efficiently (no quadrature-point variation)
+  - [ ] Support property evaluation from auxiliary field values
+
+- [x] **Interface Coefficient Averaging**
+  - [x] Implement harmonic averaging for coefficients at interfaces (`forms::harmonicAverage`)
+  - [x] Implement arithmetic averaging as alternative (`avg(k)`)
+  - [x] Support custom weighting functions (`forms::weightedAverage`)
+
+---
+
+## 5. Geometric Differential Operators
+
+Interface and surface problems require geometric quantities computed from fields.
+
+- [ ] **Curvature Computation**
+  - [x] Implement mean curvature from scalar field: `κ = ∇·(∇φ/|∇φ|)` (`forms::meanCurvatureFromLevelSet`)
+  - [x] Support smoothed/regularized gradient magnitude to avoid division by zero (`forms::safeNormalize`)
+  - [ ] Provide L2 projection of curvature to finite element space
+
+- [ ] **Unit Normal from Scalar Field**
+  - [x] Compute unit normal from gradient: `n = ∇φ/|∇φ|` (`forms::unitNormalFromLevelSet`)
+  - [ ] Support extension of normal field away from zero-level set
+  - [x] Handle degenerate cases (vanishing gradient) gracefully (`forms::safeNormalize` with `eps`)
+
+- [x] **Surface Differential Operators**
+  - [x] Implement surface gradient: `∇_s f = ∇f - (∇f·n)n` (`forms::surfaceGradient`)
+  - [x] Implement surface divergence for tangential vector fields (`forms::surfaceDivergence`)
+  - [x] Support surface Laplacian (Laplace-Beltrami operator) (`forms::surfaceLaplacian`)
+
+---
+
+## 6. Cut-Cell and Embedded Interface Methods
+
+Sharp interface treatment for problems with embedded boundaries.
+
+- [ ] **Ghost DOF Framework**
+  - [ ] Implement ghost DOF identification near interfaces
+  - [ ] Support extrapolation of fields across interface for ghost values
+  - [ ] Handle generic jump conditions: `[u] = g`, `[∂u/∂n] = h` at interface
+
+- [ ] **Cut-Cell Integration**
+  - [ ] Support integration over partial elements cut by interface
+  - [ ] Implement sub-triangulation or moment-fitting for cut-cell quadrature
+  - [ ] Handle small cut-cell stability (cell merging or special treatment)
+
+- [ ] **Regularized Delta Functions**
+  - [ ] Implement regularized delta function kernels (1D, 2D, 3D)
+  - [ ] Support spreading operations from interface to volume mesh
+  - [ ] Support interpolation operations from volume mesh to interface
+
+---
+
+## 7. Mass Matrix and Assembly Options
+
+Flexible assembly options for various numerical schemes.
+
+- [ ] **Mass Matrix Variants**
+  - [ ] Support lumped vs consistent mass matrix options
+  - [ ] Implement row-sum lumping with optional correction
+  - [ ] Handle mixed continuous/discontinuous spaces consistently
+
+- [ ] **Flux Conservation at Interfaces**
+  - [ ] Ensure numerical flux is single-valued at interfaces (no flux double-counting)
+  - [ ] Support conservative flux reconstruction for post-processing
+  - [ ] Implement local conservation diagnostics per element/face
+
+- [x] **Assembly Mode Selection**
+  - [x] Support element-by-element assembly for matrix-free methods (`assembly::MatrixFreeAssembler`)
+  - [x] Support pre-assembled sparse matrix mode (`assembly::StandardAssembler`)
+  - [x] Allow hybrid approaches (some operators assembled, some matrix-free) (`systems::OperatorBackends`)
+
+---
+
+## 8. Time Integration Framework Extensions
+
+Generic time integration infrastructure for multi-field problems.
+
+- [ ] **Operator Splitting Framework**
+  - [ ] Framework for sequential operator splitting (Lie-Trotter, Strang)
+  - [ ] Support sequential solve of subproblems with data exchange
+  - [ ] Handle splitting error estimation for adaptive time stepping
+
+- [ ] **Multi-Rate Time Stepping**
+  - [ ] Support different time step sizes for different fields
+  - [ ] Implement subcycling infrastructure for fast components
+  - [ ] Ensure data synchronization at coarse time levels
+
+- [ ] **IMEX Time Integration**
+  - [ ] Support implicit-explicit splitting of operators
+  - [ ] Template for IMEX Runge-Kutta schemes (ARK methods)
+  - [ ] Allow user specification of implicit vs explicit operator treatment
+
+---
+
+## 9. Parallel and Performance
+
+Scalability for large-scale interface-coupled problems.
+
+- [ ] **Interface-Aware Load Balancing**
+  - [ ] Weight partitioning to account for interface assembly cost
+  - [ ] Support dynamic repartitioning as interface evolves
+  - [ ] Minimize interface crossings across MPI boundaries
+
+- [ ] **Ghost Exchange Optimization**
+  - [ ] Efficient halo exchange for fields with interface-localized updates
+  - [ ] Support narrow-band updates (only exchange near interface region)
+  - [ ] Overlap communication with computation where possible
+
+- [ ] **Assembly Optimization**
+  - [ ] Cache interface quadrature points and weights
+  - [ ] Support vectorized/batched interface kernel evaluation
+  - [ ] Minimize redundant geometric computations at interfaces
+
+---
+
+## Priority Summary
+
+### High Priority (Core Functionality)
+1. InterfaceMesh-to-Forms integration (Section 1)
+2. Interior face loop infrastructure (Section 2)
+3. Coupled BC Jacobians (Section 3)
+4. DG form integration (Section 2)
+
+### Medium Priority (Common Use Cases)
+5. Region-dependent coefficients (Section 4)
+6. Geometric differential operators (Section 5)
+7. Mass matrix variants (Section 7)
+8. Penalty parameter automation (Section 2)
+
+### Lower Priority (Advanced Features)
+9. Ghost DOF framework (Section 6)
+10. Cut-cell integration (Section 6)
+11. Operator splitting framework (Section 8)
+12. Multi-rate time stepping (Section 8)
+
+---
+
+## References
+
+- `Code/Source/solver/FE/Forms/Vocabulary.h` - Expression builders and DG operators
+- `Code/Source/solver/FE/Forms/BlockForm.h` - Block assembly infrastructure
+- `Code/Source/solver/Mesh/Core/InterfaceMesh.h` - Interface mesh representation
+- `Code/Source/solver/FE/Spaces/DGOperators.h` - Discontinuous Galerkin operators
+- `Code/Source/solver/FE/Sparsity/DGSparsityBuilder.h` - DG sparsity patterns

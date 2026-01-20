@@ -18,6 +18,7 @@
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #include "Assembly/MeshAccess.h"
+#include "Mesh/Core/InterfaceMesh.h"
 #include "Systems/MeshSearchAccess.h"
 #endif
 
@@ -565,13 +566,15 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 
 		        const auto& def = operator_registry_.get(tag);
 
-	        std::vector<std::pair<FieldId, FieldId>> cell_pairs;
-	        std::vector<std::tuple<int, FieldId, FieldId>> boundary_pairs;
-	        std::vector<std::pair<FieldId, FieldId>> interior_pairs;
+		        std::vector<std::pair<FieldId, FieldId>> cell_pairs;
+		        std::vector<std::tuple<int, FieldId, FieldId>> boundary_pairs;
+		        std::vector<std::pair<FieldId, FieldId>> interior_pairs;
+		        std::vector<std::tuple<int, FieldId, FieldId>> interface_pairs;
 
-	        cell_pairs.reserve(def.cells.size());
-	        boundary_pairs.reserve(def.boundary.size());
-	        interior_pairs.reserve(def.interior.size());
+		        cell_pairs.reserve(def.cells.size());
+		        boundary_pairs.reserve(def.boundary.size());
+		        interior_pairs.reserve(def.interior.size());
+		        interface_pairs.reserve(def.interface_faces.size());
 
 	        auto maybe_add_cell_pair =
 	            [&](FieldId test, FieldId trial, const std::shared_ptr<assembly::AssemblyKernel>& kernel) {
@@ -592,13 +595,24 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 	                boundary_pairs.emplace_back(marker, test, trial);
 	            };
 
-	        auto maybe_add_interior_pair =
-	            [&](FieldId test, FieldId trial, const std::shared_ptr<assembly::AssemblyKernel>& kernel) {
-	                if (!kernel || kernel->isVectorOnly()) {
-	                    return;
-	                }
-	                interior_pairs.emplace_back(test, trial);
-	            };
+		        auto maybe_add_interior_pair =
+		            [&](FieldId test, FieldId trial, const std::shared_ptr<assembly::AssemblyKernel>& kernel) {
+		                if (!kernel || kernel->isVectorOnly()) {
+		                    return;
+		                }
+		                interior_pairs.emplace_back(test, trial);
+		            };
+
+		        auto maybe_add_interface_pair =
+		            [&](int marker,
+		                FieldId test,
+		                FieldId trial,
+		                const std::shared_ptr<assembly::AssemblyKernel>& kernel) {
+		                if (!kernel || kernel->isVectorOnly()) {
+		                    return;
+		                }
+		                interface_pairs.emplace_back(marker, test, trial);
+		            };
 
 	        for (const auto& term : def.cells) {
 	            maybe_add_cell_pair(term.test_field, term.trial_field, term.kernel);
@@ -606,9 +620,12 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 	        for (const auto& term : def.boundary) {
 	            maybe_add_boundary_pair(term.marker, term.test_field, term.trial_field, term.kernel);
 	        }
-	        for (const auto& term : def.interior) {
-	            maybe_add_interior_pair(term.test_field, term.trial_field, term.kernel);
-	        }
+		        for (const auto& term : def.interior) {
+		            maybe_add_interior_pair(term.test_field, term.trial_field, term.kernel);
+		        }
+		        for (const auto& term : def.interface_faces) {
+		            maybe_add_interface_pair(term.marker, term.test_field, term.trial_field, term.kernel);
+		        }
 
 	        std::sort(cell_pairs.begin(), cell_pairs.end());
 	        cell_pairs.erase(std::unique(cell_pairs.begin(), cell_pairs.end()), cell_pairs.end());
@@ -616,8 +633,11 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 	        std::sort(boundary_pairs.begin(), boundary_pairs.end());
 	        boundary_pairs.erase(std::unique(boundary_pairs.begin(), boundary_pairs.end()), boundary_pairs.end());
 
-	        std::sort(interior_pairs.begin(), interior_pairs.end());
-	        interior_pairs.erase(std::unique(interior_pairs.begin(), interior_pairs.end()), interior_pairs.end());
+		        std::sort(interior_pairs.begin(), interior_pairs.end());
+		        interior_pairs.erase(std::unique(interior_pairs.begin(), interior_pairs.end()), interior_pairs.end());
+
+		        std::sort(interface_pairs.begin(), interface_pairs.end());
+		        interface_pairs.erase(std::unique(interface_pairs.begin(), interface_pairs.end()), interface_pairs.end());
 
 		        std::vector<GlobalIndex> row_dofs;
 		        std::vector<GlobalIndex> col_dofs;
@@ -768,12 +788,165 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 		                });
 		        }
 
-        // Global terms: allow kernels to conservatively augment sparsity.
-        for (const auto& kernel : def.global) {
-            if (kernel) {
-                kernel->addSparsityCouplings(*this, *pattern);
-            }
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+		        // Interface face terms (InterfaceMesh subset): include both self and cross-cell couplings.
+		        std::vector<GlobalIndex> iface_row_dofs_minus, iface_row_dofs_plus;
+		        std::vector<GlobalIndex> iface_col_dofs_minus, iface_col_dofs_plus;
+		        for (const auto& [marker, test_field, trial_field] : interface_pairs) {
+		            const auto test_idx = static_cast<std::size_t>(test_field);
+		            const auto trial_idx = static_cast<std::size_t>(trial_field);
+
+		            FE_THROW_IF(test_field < 0 || test_idx >= field_dof_handlers_.size(), InvalidStateException,
+		                        "FESystem::setup: invalid test field in interface-face sparsity build");
+		            FE_THROW_IF(trial_field < 0 || trial_idx >= field_dof_handlers_.size(), InvalidStateException,
+		                        "FESystem::setup: invalid trial field in interface-face sparsity build");
+
+		            const auto& row_map = field_dof_handlers_[test_idx].getDofMap();
+		            const auto& col_map = field_dof_handlers_[trial_idx].getDofMap();
+		            const auto row_offset = field_dof_offsets_[test_idx];
+		            const auto col_offset = field_dof_offsets_[trial_idx];
+
+		            auto add_interface_mesh_couplings = [&](const svmp::InterfaceMesh& iface) {
+		                for (std::size_t lf = 0; lf < iface.n_faces(); ++lf) {
+		                    const auto local_face = static_cast<svmp::index_t>(lf);
+		                    const GlobalIndex cell_minus = static_cast<GlobalIndex>(iface.volume_cell_minus(local_face));
+		                    const GlobalIndex cell_plus = static_cast<GlobalIndex>(iface.volume_cell_plus(local_face));
+		                    if (cell_minus == INVALID_GLOBAL_INDEX || cell_plus == INVALID_GLOBAL_INDEX) {
+		                        continue; // One-sided interface faces: no cross-cell couplings.
+		                    }
+
+		                    auto minus_row_local = row_map.getCellDofs(cell_minus);
+		                    auto plus_row_local = row_map.getCellDofs(cell_plus);
+		                    auto minus_col_local = col_map.getCellDofs(cell_minus);
+		                    auto plus_col_local = col_map.getCellDofs(cell_plus);
+
+		                    iface_row_dofs_minus.resize(minus_row_local.size());
+		                    for (std::size_t i = 0; i < minus_row_local.size(); ++i) {
+		                        iface_row_dofs_minus[i] = minus_row_local[i] + row_offset;
+		                    }
+		                    iface_row_dofs_plus.resize(plus_row_local.size());
+		                    for (std::size_t i = 0; i < plus_row_local.size(); ++i) {
+		                        iface_row_dofs_plus[i] = plus_row_local[i] + row_offset;
+		                    }
+
+		                    iface_col_dofs_minus.resize(minus_col_local.size());
+		                    for (std::size_t j = 0; j < minus_col_local.size(); ++j) {
+		                        iface_col_dofs_minus[j] = minus_col_local[j] + col_offset;
+		                    }
+		                    iface_col_dofs_plus.resize(plus_col_local.size());
+		                    for (std::size_t j = 0; j < plus_col_local.size(); ++j) {
+		                        iface_col_dofs_plus[j] = plus_col_local[j] + col_offset;
+		                    }
+
+		                    add_element_couplings(iface_row_dofs_minus, iface_col_dofs_minus);
+		                    add_element_couplings(iface_row_dofs_plus, iface_col_dofs_plus);
+		                    add_element_couplings(iface_row_dofs_minus, iface_col_dofs_plus);
+		                    add_element_couplings(iface_row_dofs_plus, iface_col_dofs_minus);
+		                }
+		            };
+
+		            if (marker < 0) {
+		                FE_THROW_IF(interface_meshes_.empty(), InvalidStateException,
+		                            "FESystem::setup: interface-face kernels registered for all markers, but no InterfaceMesh was set");
+		                for (const auto& kv : interface_meshes_) {
+		                    if (!kv.second) continue;
+		                    add_interface_mesh_couplings(*kv.second);
+		                }
+		            } else {
+		                auto it = interface_meshes_.find(marker);
+		                FE_THROW_IF(it == interface_meshes_.end() || !it->second, InvalidStateException,
+		                            "FESystem::setup: missing InterfaceMesh for interface marker " + std::to_string(marker));
+		                add_interface_mesh_couplings(*it->second);
+		            }
+		        }
+#endif
+
+	        // Global terms: allow kernels to conservatively augment sparsity.
+	        for (const auto& kernel : def.global) {
+	            if (kernel) {
+	                kernel->addSparsityCouplings(*this, *pattern);
+	            }
         }
+
+	        // Coupled boundary-condition Jacobian: low-rank outer products introduce dense
+	        // couplings between boundary-local DOFs on the BC marker and the DOFs that
+	        // influence the referenced BoundaryFunctionals. Conservatively preallocate
+	        // these couplings so strict backends (e.g., Trilinos) can accept insertions.
+	        if (coupled_boundary_) {
+	            const auto regs = coupled_boundary_->registeredBoundaryFunctionals();
+	            if (!regs.empty() && !def.boundary.empty()) {
+	                const auto primary_field = coupled_boundary_->primaryField();
+	                const auto primary_idx = static_cast<std::size_t>(primary_field);
+	                if (primary_field >= 0 && primary_idx < field_dof_handlers_.size()) {
+	                    const auto& primary_map = field_dof_handlers_[primary_idx].getDofMap();
+	                    const auto primary_offset = field_dof_offsets_[primary_idx];
+
+	                    std::unordered_map<int, std::vector<GlobalIndex>> dofs_by_marker_primary;
+	                    dofs_by_marker_primary.reserve(regs.size());
+
+	                    auto collect_marker_dofs = [&](int marker,
+	                                                  const dofs::DofMap& map,
+	                                                  GlobalIndex offset,
+	                                                  std::vector<GlobalIndex>& out) {
+	                        out.clear();
+	                        mesh_access_->forEachBoundaryFace(marker, [&](GlobalIndex /*face_id*/, GlobalIndex cell_id) {
+	                            const auto cell_dofs = map.getCellDofs(cell_id);
+	                            out.insert(out.end(), cell_dofs.begin(), cell_dofs.end());
+	                        });
+	                        for (auto& v : out) v += offset;
+	                        std::sort(out.begin(), out.end());
+	                        out.erase(std::unique(out.begin(), out.end()), out.end());
+	                    };
+
+	                    for (const auto& bf : regs) {
+	                        const int marker = bf.def.boundary_marker;
+	                        if (marker < 0) continue;
+	                        if (dofs_by_marker_primary.count(marker) != 0u) continue;
+	                        std::vector<GlobalIndex> tmp;
+	                        collect_marker_dofs(marker, primary_map, primary_offset, tmp);
+	                        dofs_by_marker_primary.emplace(marker, std::move(tmp));
+	                    }
+
+	                    std::unordered_map<std::uint64_t, std::vector<GlobalIndex>> row_dofs_cache;
+	                    row_dofs_cache.reserve(def.boundary.size());
+
+	                    auto key_of = [](int marker, FieldId test_field) -> std::uint64_t {
+	                        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(marker)) << 32) |
+	                               static_cast<std::uint32_t>(test_field);
+	                    };
+
+	                    for (const auto& term : def.boundary) {
+	                        const int marker = term.marker;
+	                        if (marker < 0) continue;
+
+	                        const auto k = key_of(marker, term.test_field);
+	                        if (row_dofs_cache.count(k) == 0u) {
+	                            const auto test_idx = static_cast<std::size_t>(term.test_field);
+	                            if (term.test_field < 0 || test_idx >= field_dof_handlers_.size()) {
+	                                continue;
+	                            }
+	                            const auto& row_map = field_dof_handlers_[test_idx].getDofMap();
+	                            const auto row_offset = field_dof_offsets_[test_idx];
+	                            std::vector<GlobalIndex> tmp;
+	                            collect_marker_dofs(marker, row_map, row_offset, tmp);
+	                            row_dofs_cache.emplace(k, std::move(tmp));
+	                        }
+
+	                        const auto& row_dofs = row_dofs_cache.at(k);
+	                        if (row_dofs.empty()) continue;
+
+	                        for (const auto& bf : regs) {
+	                            const int q_marker = bf.def.boundary_marker;
+	                            auto it = dofs_by_marker_primary.find(q_marker);
+	                            if (it == dofs_by_marker_primary.end()) continue;
+	                            const auto& col_dofs = it->second;
+	                            if (col_dofs.empty()) continue;
+	                            pattern->addElementCouplings(row_dofs, col_dofs);
+	                        }
+	                    }
+	                }
+	            }
+	        }
 
 		        if (opts.sparsity_options.ensure_diagonal) {
 		            pattern->ensureDiagonal();
@@ -1098,6 +1271,11 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                     term.kernel->resolveParameterSlots(slot_of_real_param);
                 }
             }
+            for (const auto& term : def.interface_faces) {
+                if (term.kernel) {
+                    term.kernel->resolveParameterSlots(slot_of_real_param);
+                }
+            }
         }
 
         if (coupled_boundary_) {
@@ -1116,6 +1294,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
             form_chars.has_cell_terms = form_chars.has_cell_terms || !def.cells.empty();
             form_chars.has_boundary_terms = form_chars.has_boundary_terms || !def.boundary.empty();
             form_chars.has_interior_face_terms = form_chars.has_interior_face_terms || !def.interior.empty();
+            form_chars.has_interface_face_terms = form_chars.has_interface_face_terms || !def.interface_faces.empty();
             form_chars.has_global_terms = form_chars.has_global_terms || !def.global.empty();
 
             const auto mergeKernelMeta = [&](const std::shared_ptr<assembly::AssemblyKernel>& k) {
@@ -1134,6 +1313,9 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                 mergeKernelMeta(term.kernel);
             }
             for (const auto& term : def.interior) {
+                mergeKernelMeta(term.kernel);
+            }
+            for (const auto& term : def.interface_faces) {
                 mergeKernelMeta(term.kernel);
             }
             for (const auto& k : def.global) {

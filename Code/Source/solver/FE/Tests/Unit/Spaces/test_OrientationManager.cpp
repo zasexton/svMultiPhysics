@@ -175,9 +175,9 @@ TEST_F(OrientationManagerTest, ComposePermutations) {
 
     EXPECT_EQ(composed.size(), 3u);
     // p1 ∘ p2 [i] = p1[p2[i]]
-    EXPECT_EQ(composed[0], p1[p2[0]]);
-    EXPECT_EQ(composed[1], p1[p2[1]]);
-    EXPECT_EQ(composed[2], p1[p2[2]]);
+    EXPECT_EQ(composed[0], p1[static_cast<std::size_t>(p2[0])]);
+    EXPECT_EQ(composed[1], p1[static_cast<std::size_t>(p2[1])]);
+    EXPECT_EQ(composed[2], p1[static_cast<std::size_t>(p2[2])]);
 }
 
 TEST_F(OrientationManagerTest, InvertPermutation) {
@@ -187,8 +187,8 @@ TEST_F(OrientationManagerTest, InvertPermutation) {
 
     // Applying perm then inv should give identity
     auto composed = OrientationManager::compose_permutations(inv, perm);
-    for (int i = 0; i < 3; ++i) {
-        EXPECT_EQ(composed[i], i);
+    for (std::size_t i = 0; i < composed.size(); ++i) {
+        EXPECT_EQ(composed[i], static_cast<int>(i));
     }
 }
 
@@ -198,9 +198,9 @@ TEST_F(OrientationManagerTest, CanonicalOrderingTriangle) {
     auto order = OrientationManager::canonical_ordering(vertices);
 
     // Should sort by global index: 10, 20, 30
-    EXPECT_EQ(vertices[order[0]], 10);
-    EXPECT_EQ(vertices[order[1]], 20);
-    EXPECT_EQ(vertices[order[2]], 30);
+    EXPECT_EQ(vertices[static_cast<std::size_t>(order[0])], 10);
+    EXPECT_EQ(vertices[static_cast<std::size_t>(order[1])], 20);
+    EXPECT_EQ(vertices[static_cast<std::size_t>(order[2])], 30);
 }
 
 TEST_F(OrientationManagerTest, CanonicalOrderingQuad) {
@@ -208,10 +208,10 @@ TEST_F(OrientationManagerTest, CanonicalOrderingQuad) {
 
     auto order = OrientationManager::canonical_ordering(vertices);
 
-    EXPECT_EQ(vertices[order[0]], 10);
-    EXPECT_EQ(vertices[order[1]], 20);
-    EXPECT_EQ(vertices[order[2]], 30);
-    EXPECT_EQ(vertices[order[3]], 40);
+    EXPECT_EQ(vertices[static_cast<std::size_t>(order[0])], 10);
+    EXPECT_EQ(vertices[static_cast<std::size_t>(order[1])], 20);
+    EXPECT_EQ(vertices[static_cast<std::size_t>(order[2])], 30);
+    EXPECT_EQ(vertices[static_cast<std::size_t>(order[3])], 40);
 }
 
 // =============================================================================

@@ -347,6 +347,7 @@ SparsityPreallocation estimatePreallocation(
     GlobalIndex dofs_per_element,
     double avg_elements_per_dof)
 {
+    static_cast<void>(n_elements);
     // Each DOF couples with dofs_per_element DOFs from each touching element
     // Average DOF touches avg_elements_per_dof elements
     // But many couplings are repeated (elements share DOFs)

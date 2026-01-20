@@ -371,10 +371,10 @@ FactoryResult SparsityFactory::createBlockPattern(
     FE_CHECK_ARG(!field_dof_maps.empty(),
                 "Must provide at least one field DOF map");
 
-    GlobalIndex n_fields = static_cast<GlobalIndex>(field_dof_maps.size());
+    const std::size_t n_fields = field_dof_maps.size();
 
     if (!coupling_matrix.empty()) {
-        FE_CHECK_ARG(static_cast<GlobalIndex>(coupling_matrix.size()) == n_fields,
+        FE_CHECK_ARG(coupling_matrix.size() == n_fields,
                     "Coupling matrix rows must match number of fields");
     }
 
@@ -401,7 +401,7 @@ FactoryResult SparsityFactory::createBlockPattern(
 
     // Compute total DOFs and offsets
     std::vector<GlobalIndex> field_offsets(n_fields + 1, 0);
-    for (GlobalIndex i = 0; i < n_fields; ++i) {
+    for (std::size_t i = 0; i < n_fields; ++i) {
         field_offsets[i + 1] = field_offsets[i] + field_dof_maps[i]->getNumDofs();
     }
     GlobalIndex total_dofs = field_offsets[n_fields];
@@ -410,14 +410,14 @@ FactoryResult SparsityFactory::createBlockPattern(
     SparsityPattern pattern(total_dofs, total_dofs);
 
     // Build pattern for each field pair
-    for (GlobalIndex row_field = 0; row_field < n_fields; ++row_field) {
-        for (GlobalIndex col_field = 0; col_field < n_fields; ++col_field) {
+    for (std::size_t row_field = 0; row_field < n_fields; ++row_field) {
+        for (std::size_t col_field = 0; col_field < n_fields; ++col_field) {
             // Check if fields are coupled
             bool coupled = coupling_matrix.empty();
             if (!coupling_matrix.empty()) {
-                const auto& row = coupling_matrix[static_cast<std::size_t>(row_field)];
-                if (col_field < static_cast<GlobalIndex>(row.size())) {
-                    coupled = row[static_cast<std::size_t>(col_field)];
+                const auto& row = coupling_matrix[row_field];
+                if (col_field < row.size()) {
+                    coupled = row[col_field];
                 }
             }
 
@@ -465,7 +465,7 @@ FactoryResult SparsityFactory::createBlockPattern(
 
     // Also create BlockSparsity populated from the monolithic pattern
     std::vector<GlobalIndex> block_sizes(n_fields);
-    for (GlobalIndex i = 0; i < n_fields; ++i) {
+    for (std::size_t i = 0; i < n_fields; ++i) {
         block_sizes[i] = field_dof_maps[i]->getNumDofs();
     }
     result.block_pattern = std::make_unique<BlockSparsity>(
@@ -490,7 +490,7 @@ FactoryResult SparsityFactory::createBlockPattern(
     const FactoryOptions& options) const
 {
     // Create full coupling matrix
-    GlobalIndex n_fields = static_cast<GlobalIndex>(field_dof_maps.size());
+    const std::size_t n_fields = field_dof_maps.size();
     std::vector<std::vector<bool>> full_coupling(n_fields,
                                                   std::vector<bool>(n_fields, true));
     return createBlockPattern(field_dof_maps, full_coupling, options);
@@ -768,10 +768,12 @@ FactoryResult SparsityFactory::createFromArrays(
     FE_CHECK_ARG(n_rows > 0 && n_cols > 0, "Dimensions must be positive");
     FE_CHECK_ARG(static_cast<GlobalIndex>(elem_offsets.size()) == n_elements + 1,
                 "Element offsets size mismatch");
+    FE_CHECK_ARG(n_elements >= 0, "Number of elements must be non-negative");
 
     // Estimate NNZ for strategy selection
     GlobalIndex max_dofs_per_elem = 0;
-    for (GlobalIndex elem = 0; elem < n_elements; ++elem) {
+    const auto n_elements_u = static_cast<std::size_t>(n_elements);
+    for (std::size_t elem = 0; elem < n_elements_u; ++elem) {
         GlobalIndex dofs_in_elem = elem_offsets[elem + 1] - elem_offsets[elem];
         max_dofs_per_elem = std::max(max_dofs_per_elem, dofs_in_elem);
     }
@@ -787,20 +789,24 @@ FactoryResult SparsityFactory::createFromArrays(
         SparsityTwoPassBuilder builder(n_rows, n_cols, tp_opts);
 
         // Count pass
-        for (GlobalIndex elem = 0; elem < n_elements; ++elem) {
+        for (std::size_t elem = 0; elem < n_elements_u; ++elem) {
             GlobalIndex start = elem_offsets[elem];
             GlobalIndex end = elem_offsets[elem + 1];
-            std::span<const GlobalIndex> dofs_span(elem_dofs.data() + start, end - start);
+            FE_CHECK_ARG(start >= 0 && end >= start, "Invalid element offsets");
+            const auto n = static_cast<std::size_t>(end - start);
+            std::span<const GlobalIndex> dofs_span(elem_dofs.data() + static_cast<std::ptrdiff_t>(start), n);
             builder.countElementCouplings(dofs_span);
         }
 
         builder.finalizeCount();
 
         // Fill pass
-        for (GlobalIndex elem = 0; elem < n_elements; ++elem) {
+        for (std::size_t elem = 0; elem < n_elements_u; ++elem) {
             GlobalIndex start = elem_offsets[elem];
             GlobalIndex end = elem_offsets[elem + 1];
-            std::span<const GlobalIndex> dofs_span(elem_dofs.data() + start, end - start);
+            FE_CHECK_ARG(start >= 0 && end >= start, "Invalid element offsets");
+            const auto n = static_cast<std::size_t>(end - start);
+            std::span<const GlobalIndex> dofs_span(elem_dofs.data() + static_cast<std::ptrdiff_t>(start), n);
             builder.addElementCouplings(dofs_span);
         }
 
@@ -808,15 +814,16 @@ FactoryResult SparsityFactory::createFromArrays(
     } else {
         SparsityPattern pattern(n_rows, n_cols);
 
-        for (GlobalIndex elem = 0; elem < n_elements; ++elem) {
+        for (std::size_t elem = 0; elem < n_elements_u; ++elem) {
             GlobalIndex start = elem_offsets[elem];
             GlobalIndex end = elem_offsets[elem + 1];
+            FE_CHECK_ARG(start >= 0 && end >= start, "Invalid element offsets");
 
             for (GlobalIndex i = start; i < end; ++i) {
-                GlobalIndex row = elem_dofs[i];
+                GlobalIndex row = elem_dofs[static_cast<std::size_t>(i)];
                 if (row >= 0 && row < n_rows) {
                     for (GlobalIndex j = start; j < end; ++j) {
-                        GlobalIndex col = elem_dofs[j];
+                        GlobalIndex col = elem_dofs[static_cast<std::size_t>(j)];
                         if (col >= 0 && col < n_cols) {
                             pattern.addEntry(row, col);
                         }

@@ -38,6 +38,21 @@ void AssemblyKernel::computeInteriorFace(
     // Default: no interior face contribution
 }
 
+void AssemblyKernel::computeInterfaceFace(
+    const AssemblyContext& ctx_minus,
+    const AssemblyContext& ctx_plus,
+    int /*interface_marker*/,
+    KernelOutput& output_minus,
+    KernelOutput& output_plus,
+    KernelOutput& coupling_minus_plus,
+    KernelOutput& coupling_plus_minus)
+{
+    // Default: treat interface faces like interior faces if the kernel implements them.
+    computeInteriorFace(ctx_minus, ctx_plus,
+                        output_minus, output_plus,
+                        coupling_minus_plus, coupling_plus_minus);
+}
+
 // ============================================================================
 // MassKernel Implementation
 // ============================================================================

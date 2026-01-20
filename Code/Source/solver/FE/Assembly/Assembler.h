@@ -76,6 +76,12 @@
 #include <functional>
 #include <optional>
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+namespace svmp {
+class InterfaceMesh;
+}
+#endif
+
 namespace svmp {
 
 namespace FE {
@@ -280,6 +286,7 @@ struct AssemblyResult {
     GlobalIndex elements_assembled{0};
     GlobalIndex boundary_faces_assembled{0};
     GlobalIndex interior_faces_assembled{0};
+    GlobalIndex interface_faces_assembled{0};
     double elapsed_time_seconds{0.0};
 
     // Performance metrics
@@ -797,6 +804,29 @@ public:
         AssemblyKernel& kernel,
         GlobalSystemView& matrix_view,
         GlobalSystemView* vector_view) = 0;
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    /**
+     * @brief Assemble interface-face contributions (InterfaceMesh subset)
+     *
+     * Intended for interface-coupled formulations assembled on a user-provided
+     * InterfaceMesh (e.g., multi-material coupling surfaces, mortar/Nitsche).
+     *
+     * Default implementation throws (unsupported).
+     */
+    [[nodiscard]] virtual AssemblyResult assembleInterfaceFaces(
+        const IMeshAccess& /*mesh*/,
+        const svmp::InterfaceMesh& /*interface_mesh*/,
+        int /*interface_marker*/,
+        const spaces::FunctionSpace& /*test_space*/,
+        const spaces::FunctionSpace& /*trial_space*/,
+        AssemblyKernel& /*kernel*/,
+        GlobalSystemView& /*matrix_view*/,
+        GlobalSystemView* /*vector_view*/)
+    {
+        FE_THROW(FEException, "Assembler::assembleInterfaceFaces: not implemented");
+    }
+#endif
 
     // =========================================================================
     // Lifecycle

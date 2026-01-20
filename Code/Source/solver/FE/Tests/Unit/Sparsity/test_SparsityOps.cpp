@@ -315,8 +315,8 @@ TEST(SparsityOpsTest, InvertPermutation) {
 
     // Apply both should give identity
     std::vector<GlobalIndex> result(3);
-    for (GlobalIndex i = 0; i < 3; ++i) {
-        result[i] = inv[perm[i]];
+    for (std::size_t i = 0; i < result.size(); ++i) {
+        result[i] = inv[static_cast<std::size_t>(perm[i])];
     }
 
     std::vector<GlobalIndex> identity = {0, 1, 2};
@@ -457,8 +457,12 @@ TEST(SparsityOpsTest, TridiagonalPattern) {
     // Check structure
     for (GlobalIndex i = 0; i < 5; ++i) {
         EXPECT_TRUE(tri.hasEntry(i, i));
-        if (i > 0) EXPECT_TRUE(tri.hasEntry(i, i-1));
-        if (i < 4) EXPECT_TRUE(tri.hasEntry(i, i+1));
+        if (i > 0) {
+            EXPECT_TRUE(tri.hasEntry(i, i-1));
+        }
+        if (i < 4) {
+            EXPECT_TRUE(tri.hasEntry(i, i+1));
+        }
     }
 
     // Bandwidth should be 1

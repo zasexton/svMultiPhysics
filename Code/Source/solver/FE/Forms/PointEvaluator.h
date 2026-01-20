@@ -31,8 +31,10 @@
  */
 
 #include "Forms/FormExpr.h"
+#include "Forms/Dual.h"
 
 #include <array>
+#include <optional>
 #include <span>
 
 namespace svmp {
@@ -56,6 +58,40 @@ struct PointEvalContext {
  * @throws FEException / std::invalid_argument for unsupported expressions.
  */
 Real evaluateScalarAt(const FormExpr& expr, const PointEvalContext& ctx);
+
+struct PointDualSeedContext {
+    std::size_t deriv_dim{0};
+
+    // Row-major auxiliary sensitivities: d(aux[slot])/d(seeded_vars[k]).
+    // Layout: aux_dseed[slot * deriv_dim + k].
+    std::span<const Real> aux_dseed{};
+
+    struct AuxOverride {
+        std::uint32_t slot{0u};
+        Real value{0.0};
+        std::span<const Real> deriv{};
+    };
+    std::optional<AuxOverride> aux_override{};
+};
+
+/**
+ * @brief Evaluate a scalar expression at (x,t) with forward-mode derivatives.
+ *
+ * Differentiation model (intended for coupled-BC auxiliary ODE sensitivity):
+ * - `BoundaryIntegralRef(slot)` is seeded as an independent variable with
+ *   d/dseed[k] = 1 when k == slot.
+ * - `AuxiliaryStateRef(slot)` derivatives are supplied by `seeds.aux_dseed`
+ *   (or overridden by `seeds.aux_override` for a specific slot).
+ *
+ * @param expr Scalar expression to evaluate (no test/trial/fields/measures).
+ * @param ctx Point evaluation context (values for time, dt, parameter slots, and coupled arrays).
+ * @param workspace Scratch allocator for Dual derivative storage.
+ * @param seeds Derivative dimension and auxiliary sensitivity seeds.
+ */
+Dual evaluateScalarAtDual(const FormExpr& expr,
+                          const PointEvalContext& ctx,
+                          DualWorkspace& workspace,
+                          const PointDualSeedContext& seeds);
 
 /**
  * @brief True if expr depends on time (contains Time/TimeStep or time-aware coefficients)

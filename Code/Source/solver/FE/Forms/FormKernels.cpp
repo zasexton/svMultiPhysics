@@ -402,6 +402,9 @@ void inlineInlinableConstitutives(std::span<FormIR*> irs,
             case IntegralDomain::InteriorFace:
                 state_updates_out.interior_face.insert(state_updates_out.interior_face.end(), updates.begin(), updates.end());
                 return;
+            case IntegralDomain::InterfaceFace:
+                state_updates_out.interface_face.insert(state_updates_out.interface_face.end(), updates.begin(), updates.end());
+                return;
         }
     };
 
@@ -1266,6 +1269,17 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 	        case FormExprType::FacetArea: {
 	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
 	            out.value.s = makeScalarConstant<Scalar>(ctx.facetArea(), env);
+	            if (out.has_grad) {
+	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            return out;
+	        }
+	        case FormExprType::CellDomainId: {
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(static_cast<Real>(ctx.cellDomainId()), env);
 	            if (out.has_grad) {
 	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
 	            }
@@ -4116,6 +4130,9 @@ EvalValue<Real> evalReal(const FormExprNode& node,
         case FormExprType::FacetArea: {
             return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.facetArea()};
         }
+        case FormExprType::CellDomainId: {
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, static_cast<Real>(ctx.cellDomainId())};
+        }
         case FormExprType::ParameterSymbol: {
             const auto nm = node.symbolName();
             FE_THROW_IF(!nm || nm->empty(), InvalidArgumentException,
@@ -6152,6 +6169,7 @@ EvalValue<Real> evalReal(const FormExprNode& node,
         case FormExprType::CellIntegral:
         case FormExprType::BoundaryIntegral:
         case FormExprType::InteriorFaceIntegral:
+        case FormExprType::InterfaceIntegral:
             break;
     }
 
@@ -6175,6 +6193,12 @@ struct EvalEnvDual {
     DualWorkspace* ws{nullptr};
     const ConstitutiveStateLayout* constitutive_state{nullptr};
     ConstitutiveCallCacheDual* constitutive_cache{nullptr};
+
+    // Optional coupled-scalar seeding (for sensitivity assembly).
+    std::optional<std::uint32_t> coupled_integral_seed_slot{};
+    // Row-major matrix d(aux[slot])/dQ[col] with num_integrals == coupled_aux_dseed_cols.
+    std::span<const Real> coupled_aux_dseed{};
+    std::size_t coupled_aux_dseed_cols{0u};
 };
 
 EvalValue<Dual> evalDual(const FormExprNode& node,
@@ -6521,6 +6545,12 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
             out.s = makeDualConstant(ctx.facetArea(), env.ws->alloc());
             return out;
         }
+        case FormExprType::CellDomainId: {
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(static_cast<Real>(ctx.cellDomainId()), env.ws->alloc());
+            return out;
+        }
         case FormExprType::TestFunction: {
             const auto* sig = node.spaceSignature();
             if (!sig) {
@@ -6718,6 +6748,11 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
             EvalValue<Dual> out;
             out.kind = EvalValue<Dual>::Kind::Scalar;
             out.s = makeDualConstant(vals[slot], env.ws->alloc());
+            if (env.coupled_integral_seed_slot.has_value() &&
+                env.coupled_integral_seed_slot.value() == slot &&
+                !out.s.deriv.empty()) {
+                out.s.deriv[0] = 1.0;
+            }
             return out;
         }
         case FormExprType::AuxiliaryStateRef: {
@@ -6730,6 +6765,19 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
             EvalValue<Dual> out;
             out.kind = EvalValue<Dual>::Kind::Scalar;
             out.s = makeDualConstant(vals[slot], env.ws->alloc());
+            if (!env.coupled_aux_dseed.empty() && env.coupled_integral_seed_slot.has_value()) {
+                FE_THROW_IF(env.coupled_aux_dseed_cols == 0u, InvalidArgumentException,
+                            "Forms: coupled auxiliary seed matrix missing column count (dual)");
+                const auto k = static_cast<std::size_t>(env.coupled_integral_seed_slot.value());
+                FE_THROW_IF(k >= env.coupled_aux_dseed_cols, InvalidArgumentException,
+                            "Forms: coupled auxiliary seed column index out of range (dual)");
+                const auto idx = static_cast<std::size_t>(slot) * env.coupled_aux_dseed_cols + k;
+                FE_THROW_IF(idx >= env.coupled_aux_dseed.size(), InvalidArgumentException,
+                            "Forms: coupled auxiliary seed matrix is too small (dual)");
+                if (!out.s.deriv.empty()) {
+                    out.s.deriv[0] = env.coupled_aux_dseed[idx];
+                }
+            }
             return out;
         }
         case FormExprType::MaterialStateOldRef: {
@@ -9032,6 +9080,7 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
         case FormExprType::CellIntegral:
         case FormExprType::BoundaryIntegral:
         case FormExprType::InteriorFaceIntegral:
+        case FormExprType::InterfaceIntegral:
             break;
     }
 
@@ -9198,11 +9247,13 @@ void FormKernel::resolveParameterSlots(
         rewrite_updates(kv.second);
     }
     rewrite_updates(inlined_state_updates_.interior_face);
+    rewrite_updates(inlined_state_updates_.interface_face);
 }
 
 bool FormKernel::hasCell() const noexcept { return ir_.hasCellTerms(); }
 bool FormKernel::hasBoundaryFace() const noexcept { return ir_.hasBoundaryTerms(); }
 bool FormKernel::hasInteriorFace() const noexcept { return ir_.hasInteriorFaceTerms(); }
+bool FormKernel::hasInterfaceFace() const noexcept { return ir_.hasInterfaceFaceTerms(); }
 
 void FormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::KernelOutput& output)
 {
@@ -9493,6 +9544,126 @@ void FormKernel::computeInteriorFace(
                   coupling_pm, n_test_plus, n_trial_minus);
 }
 
+void FormKernel::computeInterfaceFace(
+    const assembly::AssemblyContext& ctx_minus,
+    const assembly::AssemblyContext& ctx_plus,
+    int interface_marker,
+    assembly::KernelOutput& output_minus,
+    assembly::KernelOutput& output_plus,
+    assembly::KernelOutput& coupling_mp,
+    assembly::KernelOutput& coupling_pm)
+{
+    if (ir_.kind() != FormKind::Bilinear) {
+        // Interface face assembly is currently defined only for bilinear forms in FormKernel.
+        output_minus.clear();
+        output_plus.clear();
+        coupling_mp.clear();
+        coupling_pm.clear();
+        return;
+    }
+
+    const auto n_test_minus = ctx_minus.numTestDofs();
+    const auto n_trial_minus = ctx_minus.numTrialDofs();
+    const auto n_test_plus = ctx_plus.numTestDofs();
+    const auto n_trial_plus = ctx_plus.numTrialDofs();
+
+    output_minus.reserve(n_test_minus, n_trial_minus, true, false);
+    output_plus.reserve(n_test_plus, n_trial_plus, true, false);
+    coupling_mp.reserve(n_test_minus, n_trial_plus, true, false);
+    coupling_pm.reserve(n_test_plus, n_trial_minus, true, false);
+
+    output_minus.clear();
+    output_plus.clear();
+    coupling_mp.clear();
+    coupling_pm.clear();
+
+    const auto n_qpts = ctx_minus.numQuadraturePoints();
+
+    if (!inlined_state_updates_.interface_face.empty()) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
+                                                 constitutive_state_.get(),
+                                                 inlined_state_updates_.interface_face,
+                                                 Side::Minus, q);
+
+            const auto* base_minus = ctx_minus.materialStateWorkBase();
+            const auto* base_plus = ctx_plus.materialStateWorkBase();
+            if (base_plus != nullptr && base_plus != base_minus) {
+                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
+                                                     constitutive_state_.get(),
+                                                     inlined_state_updates_.interface_face,
+                                                     Side::Plus, q);
+            }
+        }
+    }
+
+    auto assembleBlock = [&](Side eval_side,
+                             Side test_active,
+                             Side trial_active,
+                             assembly::KernelOutput& out,
+                             LocalIndex n_test,
+                             LocalIndex n_trial) {
+        ConstitutiveCallCacheReal constitutive_cache;
+        EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Bilinear, test_active, trial_active, 0, 0,
+                        constitutive_state_.get(), &constitutive_cache};
+
+        for (const auto& term : ir_.terms()) {
+            if (term.domain != IntegralDomain::InterfaceFace) continue;
+            if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
+
+            const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
+            const auto* time_ctx = ctx_eval.timeIntegrationContext();
+            Real term_weight = 1.0;
+            if (time_ctx) {
+                if (term.time_derivative_order == 1) {
+                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                } else if (term.time_derivative_order == 2) {
+                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                } else if (term.time_derivative_order > 0) {
+                    term_weight = time_ctx->time_derivative_term_weight;
+                } else {
+                    term_weight = time_ctx->non_time_derivative_term_weight;
+                }
+            }
+            if (term_weight == 0.0) continue;
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const Real w = ctx_eval.integrationWeight(q);
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    env.i = i;
+                    for (LocalIndex j = 0; j < n_trial; ++j) {
+                        env.j = j;
+                        const auto val = evalReal(*term.integrand.node(), env, eval_side, q);
+                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                            throw FEException("Forms: interface-face bilinear integrand did not evaluate to scalar",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        out.matrixEntry(i, j) += (term_weight * w) * val.s;
+                    }
+                }
+            }
+        }
+        out.has_matrix = true;
+        out.has_vector = false;
+    };
+
+    // minus-minus (evaluate on minus side)
+    assembleBlock(Side::Minus, Side::Minus, Side::Minus,
+                  output_minus, n_test_minus, n_trial_minus);
+
+    // plus-plus (evaluate on plus side)
+    assembleBlock(Side::Plus, Side::Plus, Side::Plus,
+                  output_plus, n_test_plus, n_trial_plus);
+
+    // minus-plus coupling (evaluate on minus side; trial active on plus)
+    assembleBlock(Side::Minus, Side::Minus, Side::Plus,
+                  coupling_mp, n_test_minus, n_trial_plus);
+
+    // plus-minus coupling (evaluate on plus side; trial active on minus)
+    assembleBlock(Side::Plus, Side::Plus, Side::Minus,
+                  coupling_pm, n_test_plus, n_trial_minus);
+}
+
 // ============================================================================
 // LinearFormKernel (affine residuals)
 // ============================================================================
@@ -9642,6 +9813,7 @@ void LinearFormKernel::resolveParameterSlots(
             rewrite_updates(kv.second);
         }
         rewrite_updates(inlined_state_updates_.interior_face);
+        rewrite_updates(inlined_state_updates_.interface_face);
     };
 
     rewrite(bilinear_ir_, "Forms::LinearFormKernel(bilinear)");
@@ -9670,6 +9842,11 @@ bool LinearFormKernel::hasBoundaryFace() const noexcept
 bool LinearFormKernel::hasInteriorFace() const noexcept
 {
     return bilinear_ir_.hasInteriorFaceTerms() || (linear_ir_.has_value() && linear_ir_->hasInteriorFaceTerms());
+}
+
+bool LinearFormKernel::hasInterfaceFace() const noexcept
+{
+    return bilinear_ir_.hasInterfaceFaceTerms() || (linear_ir_.has_value() && linear_ir_->hasInterfaceFaceTerms());
 }
 
 void LinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::KernelOutput& output)
@@ -10027,6 +10204,22 @@ void LinearFormKernel::computeInteriorFace(
     coupling_pm.reserve(0, 0, false, false);
 }
 
+void LinearFormKernel::computeInterfaceFace(
+    const assembly::AssemblyContext& /*ctx_minus*/,
+    const assembly::AssemblyContext& /*ctx_plus*/,
+    int /*interface_marker*/,
+    assembly::KernelOutput& output_minus,
+    assembly::KernelOutput& output_plus,
+    assembly::KernelOutput& coupling_mp,
+    assembly::KernelOutput& coupling_pm)
+{
+    // Affine optimization currently does not cover interface-face residual assembly.
+    output_minus.reserve(0, 0, false, false);
+    output_plus.reserve(0, 0, false, false);
+    coupling_mp.reserve(0, 0, false, false);
+    coupling_pm.reserve(0, 0, false, false);
+}
+
 // ============================================================================
 // NonlinearFormKernel
 // ============================================================================
@@ -10116,11 +10309,13 @@ void NonlinearFormKernel::resolveParameterSlots(
         rewrite_updates(kv.second);
     }
     rewrite_updates(inlined_state_updates_.interior_face);
+    rewrite_updates(inlined_state_updates_.interface_face);
 }
 
 bool NonlinearFormKernel::hasCell() const noexcept { return residual_ir_.hasCellTerms(); }
 bool NonlinearFormKernel::hasBoundaryFace() const noexcept { return residual_ir_.hasBoundaryTerms(); }
 bool NonlinearFormKernel::hasInteriorFace() const noexcept { return residual_ir_.hasInteriorFaceTerms(); }
+bool NonlinearFormKernel::hasInterfaceFace() const noexcept { return residual_ir_.hasInterfaceFaceTerms(); }
 
 void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::KernelOutput& output)
 {
@@ -10466,6 +10661,597 @@ void NonlinearFormKernel::computeInteriorFace(
     }
 }
 
+void NonlinearFormKernel::computeInterfaceFace(
+    const assembly::AssemblyContext& ctx_minus,
+    const assembly::AssemblyContext& ctx_plus,
+    int interface_marker,
+    assembly::KernelOutput& output_minus,
+    assembly::KernelOutput& output_plus,
+    assembly::KernelOutput& coupling_mp,
+    assembly::KernelOutput& coupling_pm)
+{
+    const auto n_test_minus = ctx_minus.numTestDofs();
+    const auto n_trial_minus = ctx_minus.numTrialDofs();
+    const auto n_test_plus = ctx_plus.numTestDofs();
+    const auto n_trial_plus = ctx_plus.numTrialDofs();
+
+    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
+    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+
+    output_minus.reserve(n_test_minus, n_trial_minus, want_matrix, want_vector);
+    output_plus.reserve(n_test_plus, n_trial_plus, want_matrix, want_vector);
+    coupling_mp.reserve(n_test_minus, n_trial_plus, want_matrix, /*need_vector=*/false);
+    coupling_pm.reserve(n_test_plus, n_trial_minus, want_matrix, /*need_vector=*/false);
+
+    const bool want_minus_matrix = output_minus.has_matrix;
+    const bool want_minus_vector = output_minus.has_vector;
+    const bool want_plus_matrix = output_plus.has_matrix;
+    const bool want_plus_vector = output_plus.has_vector;
+    const bool want_mp_matrix = coupling_mp.has_matrix;
+    const bool want_pm_matrix = coupling_pm.has_matrix;
+
+    const auto n_qpts = ctx_minus.numQuadraturePoints();
+
+    if (!inlined_state_updates_.interface_face.empty()) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            applyInlinedMaterialStateUpdatesDual(ctx_minus, &ctx_plus,
+                                                 constitutive_state_.get(),
+                                                 inlined_state_updates_.interface_face,
+                                                 Side::Minus, q);
+
+            const auto* base_minus = ctx_minus.materialStateWorkBase();
+            const auto* base_plus = ctx_plus.materialStateWorkBase();
+            if (base_plus != nullptr && base_plus != base_minus) {
+                applyInlinedMaterialStateUpdatesDual(ctx_minus, &ctx_plus,
+                                                     constitutive_state_.get(),
+                                                     inlined_state_updates_.interface_face,
+                                                     Side::Plus, q);
+            }
+        }
+    }
+
+    thread_local DualWorkspace ws;
+
+    auto assembleResidualJacBlock = [&](Side eval_side,
+                                        Side test_active,
+                                        Side trial_active,
+                                        const assembly::AssemblyContext& ctx_eval,
+                                        const assembly::AssemblyContext& ctx_other,
+                                        assembly::KernelOutput& out,
+                                        LocalIndex n_test,
+                                        LocalIndex n_trial) {
+        const bool want_matrix = out.has_matrix;
+        const bool want_vector = out.has_vector;
+        if (!want_matrix && !want_vector) {
+            return;
+        }
+        const auto* time_ctx = ctx_eval.timeIntegrationContext();
+        for (LocalIndex i = 0; i < n_test; ++i) {
+            std::span<Real> row{};
+            if (want_matrix) {
+                row = std::span<Real>(
+                    out.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
+                    static_cast<std::size_t>(n_trial));
+                std::fill(row.begin(), row.end(), 0.0);
+            }
+
+            Dual residual_i;
+            residual_i.value = 0.0;
+            residual_i.deriv = row;
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const Real w = ctx_eval.integrationWeight(q);
+                const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
+                ws.reset(n_trial_ad);
+
+                ConstitutiveCallCacheDual constitutive_cache;
+                EvalEnvDual env{ctx_eval, &ctx_other, test_active, trial_active, i,
+                                n_trial_ad, &ws, constitutive_state_.get(), &constitutive_cache};
+
+                Dual sum_q = makeDualConstant(0.0, ws.alloc());
+                for (const auto& term : residual_ir_.terms()) {
+                    if (term.domain != IntegralDomain::InterfaceFace) continue;
+                    if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
+                    Real term_weight = 1.0;
+                    if (time_ctx) {
+                        if (term.time_derivative_order == 1) {
+                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                        } else if (term.time_derivative_order == 2) {
+                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                        } else if (term.time_derivative_order > 0) {
+                            term_weight = time_ctx->time_derivative_term_weight;
+                        } else {
+                            term_weight = time_ctx->non_time_derivative_term_weight;
+                        }
+                    }
+                    if (term_weight == 0.0) continue;
+                    const auto val = evalDual(*term.integrand.node(), env, eval_side, q);
+                    if (val.kind != EvalValue<Dual>::Kind::Scalar) {
+                        throw FEException("Forms: residual interface-face integrand did not evaluate to scalar",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    sum_q.value += term_weight * val.s.value;
+                    for (std::size_t j = 0; j < sum_q.deriv.size(); ++j) {
+                        sum_q.deriv[j] += term_weight * val.s.deriv[j];
+                    }
+                }
+
+                residual_i.value += w * sum_q.value;
+                for (std::size_t j = 0; j < residual_i.deriv.size(); ++j) {
+                    residual_i.deriv[j] += w * sum_q.deriv[j];
+                }
+            }
+
+            if (want_vector) {
+                out.local_vector[static_cast<std::size_t>(i)] = residual_i.value;
+            }
+        }
+    };
+
+    if (want_minus_matrix || want_minus_vector) {
+        // minus equations, derivatives w.r.t minus dofs (residual + minus-minus block)
+        assembleResidualJacBlock(Side::Minus, Side::Minus, Side::Minus,
+                                 ctx_minus, ctx_plus,
+                                 output_minus, n_test_minus, n_trial_minus);
+    }
+
+    if (want_mp_matrix) {
+        // minus equations, derivatives w.r.t plus dofs (minus-plus coupling)
+        assembleResidualJacBlock(Side::Minus, Side::Minus, Side::Plus,
+                                 ctx_minus, ctx_plus,
+                                 coupling_mp, n_test_minus, n_trial_plus);
+    }
+
+    if (want_plus_matrix || want_plus_vector) {
+        // plus equations, derivatives w.r.t plus dofs (residual + plus-plus block)
+        assembleResidualJacBlock(Side::Plus, Side::Plus, Side::Plus,
+                                 ctx_plus, ctx_minus,
+                                 output_plus, n_test_plus, n_trial_plus);
+    }
+
+    if (want_pm_matrix) {
+        // plus equations, derivatives w.r.t minus dofs (plus-minus coupling)
+        assembleResidualJacBlock(Side::Plus, Side::Plus, Side::Minus,
+                                 ctx_plus, ctx_minus,
+                                 coupling_pm, n_test_plus, n_trial_minus);
+    }
+}
+
+// ============================================================================
+// CoupledResidualSensitivityKernel (dR/dQ for coupled-BC chain rule)
+// ============================================================================
+
+CoupledResidualSensitivityKernel::CoupledResidualSensitivityKernel(const NonlinearFormKernel& base,
+                                                                   std::uint32_t coupled_integral_slot,
+                                                                   std::span<const Real> daux_dintegrals,
+                                                                   std::size_t num_integrals)
+    : base_(&base)
+    , coupled_integral_slot_(coupled_integral_slot)
+    , daux_dintegrals_(daux_dintegrals)
+    , num_integrals_(num_integrals)
+{
+    FE_CHECK_NOT_NULL(base_, "CoupledResidualSensitivityKernel: base kernel");
+}
+
+assembly::RequiredData CoupledResidualSensitivityKernel::getRequiredData() const noexcept
+{
+    // Mirror the base residual kernel requirements.
+    return base_->getRequiredData();
+}
+
+std::vector<assembly::FieldRequirement> CoupledResidualSensitivityKernel::fieldRequirements() const
+{
+    return base_->fieldRequirements();
+}
+
+assembly::MaterialStateSpec CoupledResidualSensitivityKernel::materialStateSpec() const noexcept
+{
+    return base_->materialStateSpec();
+}
+
+std::vector<params::Spec> CoupledResidualSensitivityKernel::parameterSpecs() const
+{
+    return base_->parameterSpecs();
+}
+
+int CoupledResidualSensitivityKernel::maxTemporalDerivativeOrder() const noexcept
+{
+    return base_->maxTemporalDerivativeOrder();
+}
+
+bool CoupledResidualSensitivityKernel::hasCell() const noexcept
+{
+    return base_->residualIR().hasCellTerms();
+}
+
+bool CoupledResidualSensitivityKernel::hasBoundaryFace() const noexcept
+{
+    return base_->residualIR().hasBoundaryTerms();
+}
+
+bool CoupledResidualSensitivityKernel::hasInteriorFace() const noexcept
+{
+    return base_->residualIR().hasInteriorFaceTerms();
+}
+
+bool CoupledResidualSensitivityKernel::hasInterfaceFace() const noexcept
+{
+    return base_->residualIR().hasInterfaceFaceTerms();
+}
+
+void CoupledResidualSensitivityKernel::computeCell(const assembly::AssemblyContext& ctx,
+                                                   assembly::KernelOutput& output)
+{
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+    output.reserve(n_test, n_trial, /*need_matrix=*/false, /*need_vector=*/true);
+    std::fill(output.local_vector.begin(), output.local_vector.end(), 0.0);
+
+    const auto n_qpts = ctx.numQuadraturePoints();
+    const auto* time_ctx = ctx.timeIntegrationContext();
+
+    const auto* constitutive_state = base_->constitutiveStateLayout();
+    const auto& updates = base_->inlinedStateUpdates().cell;
+    if (!updates.empty()) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            applyInlinedMaterialStateUpdatesDual(ctx, nullptr,
+                                                 constitutive_state,
+                                                 updates,
+                                                 Side::Minus, q);
+        }
+    }
+
+    thread_local DualWorkspace ws;
+
+    for (LocalIndex i = 0; i < n_test; ++i) {
+        Real dres_i = 0.0;
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
+            ws.reset(/*num_dofs=*/1u);
+
+            ConstitutiveCallCacheDual constitutive_cache;
+            EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, /*n_trial_dofs=*/0u, &ws,
+                            constitutive_state, &constitutive_cache};
+            env.coupled_integral_seed_slot = coupled_integral_slot_;
+            env.coupled_aux_dseed = daux_dintegrals_;
+            env.coupled_aux_dseed_cols = num_integrals_;
+
+            Real sum_dq = 0.0;
+            for (const auto& term : base_->residualIR().terms()) {
+                if (term.domain != IntegralDomain::Cell) continue;
+                Real term_weight = 1.0;
+                if (time_ctx) {
+                    if (term.time_derivative_order == 1) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                    } else if (term.time_derivative_order == 2) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                    } else if (term.time_derivative_order > 0) {
+                        term_weight = time_ctx->time_derivative_term_weight;
+                    } else {
+                        term_weight = time_ctx->non_time_derivative_term_weight;
+                    }
+                }
+                if (term_weight == 0.0) continue;
+
+                const auto val = evalDual(*term.integrand.node(), env, Side::Minus, q);
+                if (val.kind != EvalValue<Dual>::Kind::Scalar) {
+                    throw FEException("Forms: coupled residual sensitivity cell integrand did not evaluate to scalar",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (!val.s.deriv.empty()) {
+                    sum_dq += term_weight * val.s.deriv[0];
+                }
+            }
+
+            dres_i += w * sum_dq;
+        }
+
+        output.local_vector[static_cast<std::size_t>(i)] = dres_i;
+    }
+}
+
+void CoupledResidualSensitivityKernel::computeBoundaryFace(const assembly::AssemblyContext& ctx,
+                                                           int boundary_marker,
+                                                           assembly::KernelOutput& output)
+{
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+    output.reserve(n_test, n_trial, /*need_matrix=*/false, /*need_vector=*/true);
+    std::fill(output.local_vector.begin(), output.local_vector.end(), 0.0);
+
+    const auto n_qpts = ctx.numQuadraturePoints();
+    const auto* time_ctx = ctx.timeIntegrationContext();
+
+    const auto* constitutive_state = base_->constitutiveStateLayout();
+    const auto& updates_all = base_->inlinedStateUpdates().boundary_all;
+    const auto* updates_marker = [&]() -> const std::vector<MaterialStateUpdate>* {
+        const auto it = base_->inlinedStateUpdates().boundary_by_marker.find(boundary_marker);
+        if (it == base_->inlinedStateUpdates().boundary_by_marker.end()) {
+            return nullptr;
+        }
+        return &it->second;
+    }();
+
+    if (!updates_all.empty() || (updates_marker != nullptr && !updates_marker->empty())) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            if (!updates_all.empty()) {
+                applyInlinedMaterialStateUpdatesDual(ctx, nullptr,
+                                                     constitutive_state,
+                                                     updates_all,
+                                                     Side::Minus, q);
+            }
+            if (updates_marker != nullptr && !updates_marker->empty()) {
+                applyInlinedMaterialStateUpdatesDual(ctx, nullptr,
+                                                     constitutive_state,
+                                                     *updates_marker,
+                                                     Side::Minus, q);
+            }
+        }
+    }
+
+    thread_local DualWorkspace ws;
+
+    for (LocalIndex i = 0; i < n_test; ++i) {
+        Real dres_i = 0.0;
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
+            ws.reset(/*num_dofs=*/1u);
+
+            ConstitutiveCallCacheDual constitutive_cache;
+            EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, /*n_trial_dofs=*/0u, &ws,
+                            constitutive_state, &constitutive_cache};
+            env.coupled_integral_seed_slot = coupled_integral_slot_;
+            env.coupled_aux_dseed = daux_dintegrals_;
+            env.coupled_aux_dseed_cols = num_integrals_;
+
+            Real sum_dq = 0.0;
+            for (const auto& term : base_->residualIR().terms()) {
+                if (term.domain != IntegralDomain::Boundary) continue;
+                if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
+                Real term_weight = 1.0;
+                if (time_ctx) {
+                    if (term.time_derivative_order == 1) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                    } else if (term.time_derivative_order == 2) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                    } else if (term.time_derivative_order > 0) {
+                        term_weight = time_ctx->time_derivative_term_weight;
+                    } else {
+                        term_weight = time_ctx->non_time_derivative_term_weight;
+                    }
+                }
+                if (term_weight == 0.0) continue;
+
+                const auto val = evalDual(*term.integrand.node(), env, Side::Minus, q);
+                if (val.kind != EvalValue<Dual>::Kind::Scalar) {
+                    throw FEException("Forms: coupled residual sensitivity boundary integrand did not evaluate to scalar",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (!val.s.deriv.empty()) {
+                    sum_dq += term_weight * val.s.deriv[0];
+                }
+            }
+
+            dres_i += w * sum_dq;
+        }
+
+        output.local_vector[static_cast<std::size_t>(i)] = dres_i;
+    }
+}
+
+void CoupledResidualSensitivityKernel::computeInteriorFace(const assembly::AssemblyContext& ctx_minus,
+                                                           const assembly::AssemblyContext& ctx_plus,
+                                                           assembly::KernelOutput& output_minus,
+                                                           assembly::KernelOutput& output_plus,
+                                                           assembly::KernelOutput& coupling_mp,
+                                                           assembly::KernelOutput& coupling_pm)
+{
+    const auto n_test_minus = ctx_minus.numTestDofs();
+    const auto n_trial_minus = ctx_minus.numTrialDofs();
+    const auto n_test_plus = ctx_plus.numTestDofs();
+    const auto n_trial_plus = ctx_plus.numTrialDofs();
+
+    output_minus.reserve(n_test_minus, n_trial_minus, /*need_matrix=*/false, /*need_vector=*/true);
+    output_plus.reserve(n_test_plus, n_trial_plus, /*need_matrix=*/false, /*need_vector=*/true);
+    coupling_mp.reserve(0, 0, false, false);
+    coupling_pm.reserve(0, 0, false, false);
+
+    std::fill(output_minus.local_vector.begin(), output_minus.local_vector.end(), 0.0);
+    std::fill(output_plus.local_vector.begin(), output_plus.local_vector.end(), 0.0);
+
+    const auto n_qpts = ctx_minus.numQuadraturePoints();
+    const auto* constitutive_state = base_->constitutiveStateLayout();
+    const auto& updates = base_->inlinedStateUpdates().interior_face;
+    if (!updates.empty()) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            applyInlinedMaterialStateUpdatesDual(ctx_minus, &ctx_plus,
+                                                 constitutive_state,
+                                                 updates,
+                                                 Side::Minus, q);
+
+            const auto* base_minus = ctx_minus.materialStateWorkBase();
+            const auto* base_plus = ctx_plus.materialStateWorkBase();
+            if (base_plus != nullptr && base_plus != base_minus) {
+                applyInlinedMaterialStateUpdatesDual(ctx_minus, &ctx_plus,
+                                                     constitutive_state,
+                                                     updates,
+                                                     Side::Plus, q);
+            }
+        }
+    }
+
+    thread_local DualWorkspace ws;
+
+    auto assembleResidualBlock = [&](Side eval_side,
+                                     Side test_active,
+                                     Side trial_active,
+                                     const assembly::AssemblyContext& ctx_eval,
+                                     const assembly::AssemblyContext& ctx_other,
+                                     assembly::KernelOutput& out,
+                                     LocalIndex n_test) {
+        const auto* time_ctx = ctx_eval.timeIntegrationContext();
+        for (LocalIndex i = 0; i < n_test; ++i) {
+            Real dres_i = 0.0;
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const Real w = ctx_eval.integrationWeight(q);
+                ws.reset(/*num_dofs=*/1u);
+
+                ConstitutiveCallCacheDual constitutive_cache;
+                EvalEnvDual env{ctx_eval, &ctx_other, test_active, trial_active, i,
+                                /*n_trial_dofs=*/0u, &ws, constitutive_state, &constitutive_cache};
+                env.coupled_integral_seed_slot = coupled_integral_slot_;
+                env.coupled_aux_dseed = daux_dintegrals_;
+                env.coupled_aux_dseed_cols = num_integrals_;
+
+                Real sum_dq = 0.0;
+                for (const auto& term : base_->residualIR().terms()) {
+                    if (term.domain != IntegralDomain::InteriorFace) continue;
+                    Real term_weight = 1.0;
+                    if (time_ctx) {
+                        if (term.time_derivative_order == 1) {
+                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                        } else if (term.time_derivative_order == 2) {
+                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                        } else if (term.time_derivative_order > 0) {
+                            term_weight = time_ctx->time_derivative_term_weight;
+                        } else {
+                            term_weight = time_ctx->non_time_derivative_term_weight;
+                        }
+                    }
+                    if (term_weight == 0.0) continue;
+                    const auto val = evalDual(*term.integrand.node(), env, eval_side, q);
+                    if (val.kind != EvalValue<Dual>::Kind::Scalar) {
+                        throw FEException("Forms: coupled residual sensitivity interior-face integrand did not evaluate to scalar",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    if (!val.s.deriv.empty()) {
+                        sum_dq += term_weight * val.s.deriv[0];
+                    }
+                }
+
+                dres_i += w * sum_dq;
+            }
+            out.local_vector[static_cast<std::size_t>(i)] = dres_i;
+        }
+    };
+
+    // Mirror the base kernel's convention for interior-face residual assembly.
+    assembleResidualBlock(Side::Minus, Side::Minus, Side::Minus,
+                          ctx_minus, ctx_plus,
+                          output_minus, n_test_minus);
+    assembleResidualBlock(Side::Plus, Side::Plus, Side::Plus,
+                          ctx_plus, ctx_minus,
+                          output_plus, n_test_plus);
+}
+
+void CoupledResidualSensitivityKernel::computeInterfaceFace(const assembly::AssemblyContext& ctx_minus,
+                                                            const assembly::AssemblyContext& ctx_plus,
+                                                            int interface_marker,
+                                                            assembly::KernelOutput& output_minus,
+                                                            assembly::KernelOutput& output_plus,
+                                                            assembly::KernelOutput& coupling_mp,
+                                                            assembly::KernelOutput& coupling_pm)
+{
+    const auto n_test_minus = ctx_minus.numTestDofs();
+    const auto n_trial_minus = ctx_minus.numTrialDofs();
+    const auto n_test_plus = ctx_plus.numTestDofs();
+    const auto n_trial_plus = ctx_plus.numTrialDofs();
+
+    output_minus.reserve(n_test_minus, n_trial_minus, /*need_matrix=*/false, /*need_vector=*/true);
+    output_plus.reserve(n_test_plus, n_trial_plus, /*need_matrix=*/false, /*need_vector=*/true);
+    coupling_mp.reserve(0, 0, false, false);
+    coupling_pm.reserve(0, 0, false, false);
+
+    std::fill(output_minus.local_vector.begin(), output_minus.local_vector.end(), 0.0);
+    std::fill(output_plus.local_vector.begin(), output_plus.local_vector.end(), 0.0);
+
+    const auto n_qpts = ctx_minus.numQuadraturePoints();
+    const auto* constitutive_state = base_->constitutiveStateLayout();
+    const auto& updates = base_->inlinedStateUpdates().interface_face;
+    if (!updates.empty()) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            applyInlinedMaterialStateUpdatesDual(ctx_minus, &ctx_plus,
+                                                 constitutive_state,
+                                                 updates,
+                                                 Side::Minus, q);
+
+            const auto* base_minus = ctx_minus.materialStateWorkBase();
+            const auto* base_plus = ctx_plus.materialStateWorkBase();
+            if (base_plus != nullptr && base_plus != base_minus) {
+                applyInlinedMaterialStateUpdatesDual(ctx_minus, &ctx_plus,
+                                                     constitutive_state,
+                                                     updates,
+                                                     Side::Plus, q);
+            }
+        }
+    }
+
+    thread_local DualWorkspace ws;
+
+    auto assembleResidualBlock = [&](Side eval_side,
+                                     Side test_active,
+                                     Side trial_active,
+                                     const assembly::AssemblyContext& ctx_eval,
+                                     const assembly::AssemblyContext& ctx_other,
+                                     assembly::KernelOutput& out,
+                                     LocalIndex n_test) {
+        const auto* time_ctx = ctx_eval.timeIntegrationContext();
+        for (LocalIndex i = 0; i < n_test; ++i) {
+            Real dres_i = 0.0;
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const Real w = ctx_eval.integrationWeight(q);
+                ws.reset(/*num_dofs=*/1u);
+
+                ConstitutiveCallCacheDual constitutive_cache;
+                EvalEnvDual env{ctx_eval, &ctx_other, test_active, trial_active, i,
+                                /*n_trial_dofs=*/0u, &ws, constitutive_state, &constitutive_cache};
+                env.coupled_integral_seed_slot = coupled_integral_slot_;
+                env.coupled_aux_dseed = daux_dintegrals_;
+                env.coupled_aux_dseed_cols = num_integrals_;
+
+                Real sum_dq = 0.0;
+                for (const auto& term : base_->residualIR().terms()) {
+                    if (term.domain != IntegralDomain::InterfaceFace) continue;
+                    if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
+                    Real term_weight = 1.0;
+                    if (time_ctx) {
+                        if (term.time_derivative_order == 1) {
+                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                        } else if (term.time_derivative_order == 2) {
+                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                        } else if (term.time_derivative_order > 0) {
+                            term_weight = time_ctx->time_derivative_term_weight;
+                        } else {
+                            term_weight = time_ctx->non_time_derivative_term_weight;
+                        }
+                    }
+                    if (term_weight == 0.0) continue;
+                    const auto val = evalDual(*term.integrand.node(), env, eval_side, q);
+                    if (val.kind != EvalValue<Dual>::Kind::Scalar) {
+                        throw FEException("Forms: coupled residual sensitivity interface-face integrand did not evaluate to scalar",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    if (!val.s.deriv.empty()) {
+                        sum_dq += term_weight * val.s.deriv[0];
+                    }
+                }
+
+                dres_i += w * sum_dq;
+            }
+            out.local_vector[static_cast<std::size_t>(i)] = dres_i;
+        }
+    };
+
+    // Mirror the base kernel's convention for interface-face residual assembly.
+    assembleResidualBlock(Side::Minus, Side::Minus, Side::Minus,
+                          ctx_minus, ctx_plus,
+                          output_minus, n_test_minus);
+    assembleResidualBlock(Side::Plus, Side::Plus, Side::Plus,
+                          ctx_plus, ctx_minus,
+                          output_plus, n_test_plus);
+}
+
 // ============================================================================
 // FunctionalFormKernel (FE/Forms -> FE/Assembly functionals)
 // ============================================================================
@@ -10534,6 +11320,82 @@ Real FunctionalFormKernel::evaluateBoundaryFace(const assembly::AssemblyContext&
     FE_THROW_IF(v.kind != EvalValue<Real>::Kind::Scalar, InvalidArgumentException,
                 "Forms::FunctionalFormKernel: integrand did not evaluate to a scalar");
     return v.s;
+}
+
+namespace detail {
+
+assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind kind);
+std::vector<assembly::FieldRequirement> analyzeFieldRequirements(const FormExprNode& node);
+
+} // namespace detail
+
+// ============================================================================
+// BoundaryFunctionalGradientKernel (dQ/du for coupled BCs)
+// ============================================================================
+
+BoundaryFunctionalGradientKernel::BoundaryFunctionalGradientKernel(FormExpr integrand, int boundary_marker)
+    : integrand_(std::move(integrand))
+    , boundary_marker_(boundary_marker)
+{
+    FE_THROW_IF(!integrand_.isValid(), InvalidArgumentException,
+                "Forms::BoundaryFunctionalGradientKernel: invalid integrand");
+    FE_THROW_IF(boundary_marker_ < 0, InvalidArgumentException,
+                "Forms::BoundaryFunctionalGradientKernel: boundary_marker must be >= 0");
+    FE_CHECK_NOT_NULL(integrand_.node(), "Forms::BoundaryFunctionalGradientKernel: integrand node");
+    FE_THROW_IF(containsTestFunction(*integrand_.node()), InvalidArgumentException,
+                "Forms::BoundaryFunctionalGradientKernel: integrand must not contain TestFunction");
+
+    field_requirements_ = detail::analyzeFieldRequirements(*integrand_.node());
+    required_data_ = detail::analyzeRequiredData(*integrand_.node(), FormKind::Residual);
+    for (const auto& fr : field_requirements_) {
+        required_data_ |= fr.required;
+    }
+    required_data_ |= assembly::RequiredData::Normals;
+}
+
+void BoundaryFunctionalGradientKernel::computeBoundaryFace(const assembly::AssemblyContext& ctx,
+                                                           int boundary_marker,
+                                                           assembly::KernelOutput& output)
+{
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+    output.reserve(n_test, n_trial, /*need_matrix=*/false, /*need_vector=*/true);
+
+    std::fill(output.local_vector.begin(), output.local_vector.end(), 0.0);
+
+    if (boundary_marker != boundary_marker_) {
+        return;
+    }
+
+    FE_THROW_IF(n_test != n_trial, InvalidArgumentException,
+                "Forms::BoundaryFunctionalGradientKernel: expected square context (test == trial)");
+
+    thread_local DualWorkspace ws;
+    ws.reset(static_cast<std::size_t>(n_trial));
+
+    EvalEnvDual env{
+        /*minus=*/ctx,
+        /*plus=*/nullptr,
+        /*test_active=*/Side::Minus,
+        /*trial_active=*/Side::Minus,
+        /*i=*/0,
+        /*n_trial_dofs=*/static_cast<std::size_t>(n_trial),
+        /*ws=*/&ws,
+        /*constitutive_state=*/nullptr,
+        /*constitutive_cache=*/nullptr,
+    };
+
+    const auto n_qpts = ctx.numQuadraturePoints();
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        const auto val = evalDual(*integrand_.node(), env, Side::Minus, q);
+        FE_THROW_IF(val.kind != EvalValue<Dual>::Kind::Scalar, InvalidArgumentException,
+                    "Forms::BoundaryFunctionalGradientKernel: integrand did not evaluate to scalar (dual)");
+
+        const Real w = ctx.integrationWeight(q);
+        for (LocalIndex j = 0; j < n_trial; ++j) {
+            output.local_vector[static_cast<std::size_t>(j)] += w * val.s.deriv[static_cast<std::size_t>(j)];
+        }
+    }
 }
 
 } // namespace forms

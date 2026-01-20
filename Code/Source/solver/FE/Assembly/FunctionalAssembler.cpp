@@ -209,6 +209,7 @@ void prepareCellContext(AssemblyContext& context,
 
     context.reserve(n_dofs, n_qpts, dim);
     context.configure(cell_id, space, space, required_data);
+    context.setCellDomainId(mesh.getCellDomainId(cell_id));
     context.setQuadratureData(scratch.quad_points, scratch.quad_weights);
     context.setPhysicalPoints(scratch.phys_points);
     context.setJacobianData(scratch.jacobians, scratch.inv_jacobians, scratch.jac_dets);
@@ -497,6 +498,7 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
 
     context.reserve(n_dofs, n_qpts, dim);
     context.configureFace(face_id, cell_id, local_face_id, space, space, required_data, ContextType::BoundaryFace);
+    context.setCellDomainId(mesh.getCellDomainId(cell_id));
     context.setQuadratureData(scratch.quad_points, scratch.quad_weights);
     context.setPhysicalPoints(scratch.phys_points);
     context.setJacobianData(scratch.jacobians, scratch.inv_jacobians, scratch.jac_dets);

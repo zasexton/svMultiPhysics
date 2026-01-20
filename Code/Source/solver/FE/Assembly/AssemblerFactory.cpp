@@ -108,6 +108,7 @@ std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options,
             reportLine("  - domains: cell=" + std::string(form.has_cell_terms ? "yes" : "no") +
                        ", boundary=" + std::string(form.has_boundary_terms ? "yes" : "no") +
                        ", interior=" + std::string(form.has_interior_face_terms ? "yes" : "no") +
+                       ", interface=" + std::string(form.has_interface_face_terms ? "yes" : "no") +
                        ", global=" + std::string(form.has_global_terms ? "yes" : "no"));
             reportLine("  - needs: DG=" + std::string(form.needsDG() ? "yes" : "no") +
                        ", solution=" + std::string(form.needsSolution() ? "yes" : "no") +

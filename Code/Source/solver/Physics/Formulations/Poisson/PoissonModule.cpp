@@ -7,17 +7,14 @@
 
 #include "Physics/Formulations/Poisson/PoissonModule.h"
 
-#include "FE/Forms/BoundaryConditions.h"
-#include "FE/Forms/BoundaryFunctional.h"
+#include "Physics/Formulations/Poisson/PoissonBCFactories.h"
+
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Forms/WeakForm.h"
-#include "FE/Systems/AuxiliaryStateBuilder.h"
-#include "FE/Systems/CoupledBoundaryConditions.h"
-#include "FE/Systems/CoupledBoundaryManager.h"
+#include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
 
-#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -59,142 +56,29 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
     const auto integrand = k * inner(grad(u), grad(v)) - f * v;
     auto residual = integrand.dx();
 
-    if (!options_.dirichlet.empty() && !options_.dirichlet_weak.empty()) {
-        for (const auto& strong : options_.dirichlet) {
-            for (const auto& weak : options_.dirichlet_weak) {
-                if (strong.boundary_marker >= 0 && strong.boundary_marker == weak.boundary_marker) {
-                    throw std::invalid_argument(
-                        "PoissonModule::registerOn: boundary_marker " + std::to_string(strong.boundary_marker) +
-                        " appears in both strong and weak Dirichlet lists");
-                }
-            }
-        }
-    }
+    FE::systems::BoundaryConditionManager bc_manager;
+    bc_manager.install(options_.neumann, Factories::toNaturalBC);
+    bc_manager.install(options_.robin, Factories::toRobinBC);
+    bc_manager.install(options_.dirichlet, [&](const auto& bc) { return Factories::toEssentialBC(bc, options_.field_name); });
+    bc_manager.install(options_.dirichlet_weak, [&](const auto& bc) {
+        return Factories::toNitscheBC(bc,
+                                      k,
+                                      options_.nitsche_gamma,
+                                      options_.nitsche_symmetric,
+                                      options_.nitsche_scale_with_p);
+    });
+    bc_manager.install(options_.coupled_neumann_rcr, [&](const auto& bc) {
+        return Factories::toWindkesselBC(bc, u_id, *space_, options_.field_name);
+    });
 
-    // Neumann: k∇u·n = g  =>  -∫ g v ds
-    residual = FE::forms::bc::applyNeumannValue(
-        residual,
-        v,
-        std::span<const PoissonOptions::NeumannBC>(options_.neumann),
-        &PoissonOptions::NeumannBC::flux,
-        "poisson_neumann");
+    bc_manager.validate();
 
-    // Robin: k∇u·n + α u = r  =>  ∫ α u v ds - ∫ r v ds
-    residual = FE::forms::bc::applyRobinValue(
-        residual,
-        u,
-        v,
-        std::span<const PoissonOptions::RobinBC>(options_.robin),
-        &PoissonOptions::RobinBC::alpha,
-        "poisson_robin_alpha",
-        &PoissonOptions::RobinBC::rhs,
-        "poisson_robin_rhs");
-
-    // Coupled Neumann (RCR-style demo): uses symbolic coupled placeholders and a loop-free helper.
-    if (!options_.coupled_neumann_rcr.empty()) {
-        const auto u_state = FormExpr::discreteField(u_id, *space_, options_.field_name);
-
-        for (const auto& bc : options_.coupled_neumann_rcr) {
-            if (bc.boundary_marker < 0) {
-                throw std::invalid_argument(
-                    "PoissonModule::registerOn: CoupledRCRNeumannBC boundary_marker must be >= 0");
-            }
-
-            const std::string q_name = bc.functional_name.empty()
-                                           ? ("poisson_Q_" + std::to_string(bc.boundary_marker))
-                                           : bc.functional_name;
-            const std::string x_name = bc.state_name.empty()
-                                           ? ("poisson_X_" + std::to_string(bc.boundary_marker))
-                                           : bc.state_name;
-
-            FE::forms::BoundaryFunctional Q;
-            Q.integrand = u_state;
-            Q.boundary_marker = bc.boundary_marker;
-            Q.name = q_name;
-            Q.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
-
-            const FE::Real Rp = bc.Rp;
-            const FE::Real C = bc.C;
-            const FE::Real Rd = bc.Rd;
-            const FE::Real Pd = bc.Pd;
-
-            if (Rd == 0.0) {
-                throw std::invalid_argument("CoupledRCRNeumannBC: Rd must be nonzero");
-            }
-
-            const auto Qsym = FormExpr::boundaryIntegral(u_state, bc.boundary_marker, q_name);
-
-            if (C == 0.0) {
-                // Purely resistive limit: X = Pd + Rd*Q, so flux = X + Rp*Q = Pd + (Rd+Rp)*Q.
-                const FE::Real Rsum = Rd + Rp;
-                const auto flux = FormExpr::constant(Pd) + FormExpr::constant(Rsum) * Qsym;
-                residual = FE::systems::bc::applyCoupledNeumann(
-                    system,
-                    u_id,
-                    residual,
-                    v,
-                    bc.boundary_marker,
-                    flux);
-            } else {
-                // ODE: dX/dt = (Q - (X - Pd)/Rd) / C
-                const auto Xsym = FormExpr::auxiliaryState(x_name);
-                const auto rhs = (Qsym - (Xsym - FormExpr::constant(Pd)) / FormExpr::constant(Rd)) / FormExpr::constant(C);
-                const auto d_rhs_dX = FormExpr::constant(-1.0 / (Rd * C));
-
-                auto reg = FE::systems::auxiliaryODE(x_name, bc.X0)
-                               .requiresIntegral(Q)
-                               .withRHS(rhs)
-                               .withJacobian(d_rhs_dX)
-                               .withIntegrator(FE::systems::ODEMethod::BackwardEuler)
-                               .build();
-
-                const auto flux = Xsym + FormExpr::constant(Rp) * Qsym;
-
-                residual = FE::systems::bc::applyCoupledNeumann(
-                    system,
-                    u_id,
-                    residual,
-                    v,
-                    bc.boundary_marker,
-                    flux,
-                    std::span<const FE::systems::AuxiliaryStateRegistration>(&reg, 1),
-                    /*integral_symbol_prefix=*/"poisson_coupled_integral",
-                    /*aux_symbol_prefix=*/"poisson_coupled_aux");
-            }
-        }
-    }
-
-    // Weak Dirichlet (Nitsche): u = uD  => boundary terms assembled through ds(marker).
-    if (!options_.dirichlet_weak.empty()) {
-        FE::forms::bc::NitscheDirichletOptions nitsche_opts;
-        nitsche_opts.gamma = options_.nitsche_gamma;
-        nitsche_opts.variant = options_.nitsche_symmetric ? FE::forms::bc::NitscheVariant::Symmetric
-                                                          : FE::forms::bc::NitscheVariant::Unsymmetric;
-        nitsche_opts.scale_with_p = options_.nitsche_scale_with_p;
-
-        residual = FE::forms::bc::applyNitscheDirichletPoissonValue(
-            residual,
-            k,
-            u,
-            v,
-            std::span<const PoissonOptions::DirichletBC>(options_.dirichlet_weak),
-            &PoissonOptions::DirichletBC::value,
-            "poisson_nitsche_dirichlet",
-            nitsche_opts);
-    }
-
-    // Strong Dirichlet: u = uD on boundary marker.
-    // Lowered by FE/Systems to system-aware constraints (no DOF boilerplate here).
-    const auto dirichlet_bcs = FE::forms::bc::makeStrongDirichletListValue(
-        u_id,
-        std::span<const PoissonOptions::DirichletBC>(options_.dirichlet),
-        &PoissonOptions::DirichletBC::value,
-        "poisson_dirichlet",
-        options_.field_name);
+    auto strong_constraints = bc_manager.getStrongConstraints(u_id);
+    bc_manager.apply(system, residual, u, v, u_id);
 
     FE::forms::WeakForm weak_form;
     weak_form.residual = residual;
-    weak_form.strong_constraints = dirichlet_bcs;
+    weak_form.strong_constraints = std::move(strong_constraints);
 
     // Register the same weak form on both operator tags used by FESystem.
     // The underlying kernel can produce either vector or matrix outputs

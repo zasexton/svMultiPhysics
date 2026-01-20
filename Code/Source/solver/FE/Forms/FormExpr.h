@@ -105,6 +105,7 @@ enum class FormExprType : std::uint16_t {
     CellDiameter,
     CellVolume,
     FacetArea,
+    CellDomainId,
 
     // Differential operators
     Gradient,
@@ -175,11 +176,12 @@ enum class FormExprType : std::uint16_t {
     Constitutive,
     ConstitutiveOutput,
 
-    // Integrals
-    CellIntegral,
-    BoundaryIntegral,
-    InteriorFaceIntegral,
-};
+	    // Integrals
+	    CellIntegral,
+	    BoundaryIntegral,
+	    InteriorFaceIntegral,
+	    InterfaceIntegral,
+	};
 
 class FormExpr;
 
@@ -212,11 +214,12 @@ public:
         ElementType element_type{ElementType::Unknown};
     };
 
-    // Optional payload accessors (used by compiler/evaluator without RTTI)
-    [[nodiscard]] virtual std::optional<Real> constantValue() const { return std::nullopt; }
-    [[nodiscard]] virtual std::optional<int> identityDim() const { return std::nullopt; }
-    [[nodiscard]] virtual std::optional<int> boundaryMarker() const { return std::nullopt; }
-    [[nodiscard]] virtual std::optional<int> componentIndex0() const { return std::nullopt; }
+	    // Optional payload accessors (used by compiler/evaluator without RTTI)
+	    [[nodiscard]] virtual std::optional<Real> constantValue() const { return std::nullopt; }
+	    [[nodiscard]] virtual std::optional<int> identityDim() const { return std::nullopt; }
+	    [[nodiscard]] virtual std::optional<int> boundaryMarker() const { return std::nullopt; }
+	    [[nodiscard]] virtual std::optional<int> interfaceMarker() const { return std::nullopt; }
+	    [[nodiscard]] virtual std::optional<int> componentIndex0() const { return std::nullopt; }
     [[nodiscard]] virtual std::optional<int> componentIndex1() const { return std::nullopt; }
     [[nodiscard]] virtual std::optional<int> tensorRows() const { return std::nullopt; }
     [[nodiscard]] virtual std::optional<int> tensorCols() const { return std::nullopt; }
@@ -308,6 +311,7 @@ public:
     static FormExpr cellDiameter();
     static FormExpr cellVolume();
     static FormExpr facetArea();
+    static FormExpr cellDomainId();
 
     // ---- Constructors / packing ----
     static FormExpr asVector(std::vector<FormExpr> components);
@@ -379,10 +383,11 @@ public:
     [[nodiscard]] FormExpr exp() const;
     [[nodiscard]] FormExpr log() const;
 
-    // ---- Measures ----
-    [[nodiscard]] FormExpr dx() const;
-    [[nodiscard]] FormExpr ds(int boundary_marker = -1) const;
-    [[nodiscard]] FormExpr dS() const;
+	    // ---- Measures ----
+	    [[nodiscard]] FormExpr dx() const;
+	    [[nodiscard]] FormExpr ds(int boundary_marker = -1) const;
+	    [[nodiscard]] FormExpr dS() const;
+	    [[nodiscard]] FormExpr dI(int interface_marker = -1) const;
 
     // ---- Query ----
     [[nodiscard]] bool isValid() const noexcept { return node_ != nullptr; }

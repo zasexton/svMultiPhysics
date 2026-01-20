@@ -337,27 +337,30 @@ DistributedSparsityPattern ParallelSparsityManager::build() {
 
 #if FE_HAS_MPI
     if (use_mpi_exchange) {
-        std::vector<int> send_counts(n_ranks_, 0);
+        const auto n_ranks = static_cast<std::size_t>(n_ranks_);
+        std::vector<int> send_counts(n_ranks, 0);
         for (int r = 0; r < n_ranks_; ++r) {
-            auto& pairs = send_pairs_by_rank[static_cast<std::size_t>(r)];
+            const auto sr = static_cast<std::size_t>(r);
+            auto& pairs = send_pairs_by_rank[sr];
             std::sort(pairs.begin(), pairs.end());
             pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
 
             const std::size_t n_vals = pairs.size() * 2;
             FE_CHECK_ARG(n_vals <= static_cast<std::size_t>(std::numeric_limits<int>::max()),
                          "Too many remote row coupling entries to communicate");
-            send_counts[r] = static_cast<int>(n_vals);
+            send_counts[sr] = static_cast<int>(n_vals);
         }
 
-        std::vector<int> recv_counts(n_ranks_, 0);
+        std::vector<int> recv_counts(n_ranks, 0);
         MPI_Alltoall(send_counts.data(), 1, MPI_INT,
                      recv_counts.data(), 1, MPI_INT, comm_);
 
-        std::vector<int> send_displs(n_ranks_, 0);
-        std::vector<int> recv_displs(n_ranks_, 0);
+        std::vector<int> send_displs(n_ranks, 0);
+        std::vector<int> recv_displs(n_ranks, 0);
         for (int r = 1; r < n_ranks_; ++r) {
-            send_displs[r] = send_displs[r - 1] + send_counts[r - 1];
-            recv_displs[r] = recv_displs[r - 1] + recv_counts[r - 1];
+            const auto sr = static_cast<std::size_t>(r);
+            send_displs[sr] = send_displs[sr - 1] + send_counts[sr - 1];
+            recv_displs[sr] = recv_displs[sr - 1] + recv_counts[sr - 1];
         }
 
         const int total_send = send_displs.back() + send_counts.back();
@@ -365,8 +368,9 @@ DistributedSparsityPattern ParallelSparsityManager::build() {
 
         std::vector<GlobalIndex> send_buf(static_cast<std::size_t>(total_send));
         for (int r = 0; r < n_ranks_; ++r) {
-            int pos = send_displs[r];
-            const auto& pairs = send_pairs_by_rank[static_cast<std::size_t>(r)];
+            const auto sr = static_cast<std::size_t>(r);
+            int pos = send_displs[sr];
+            const auto& pairs = send_pairs_by_rank[sr];
             for (const auto& p : pairs) {
                 send_buf[static_cast<std::size_t>(pos++)] = p.row;
                 send_buf[static_cast<std::size_t>(pos++)] = p.col;
@@ -514,27 +518,30 @@ DistributedSparsityPattern ParallelSparsityManager::build(std::span<const Global
 
 #if FE_HAS_MPI
     if (use_mpi_exchange) {
-        std::vector<int> send_counts(n_ranks_, 0);
+        const auto n_ranks = static_cast<std::size_t>(n_ranks_);
+        std::vector<int> send_counts(n_ranks, 0);
         for (int r = 0; r < n_ranks_; ++r) {
-            auto& pairs = send_pairs_by_rank[static_cast<std::size_t>(r)];
+            const auto sr = static_cast<std::size_t>(r);
+            auto& pairs = send_pairs_by_rank[sr];
             std::sort(pairs.begin(), pairs.end());
             pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
 
             const std::size_t n_vals = pairs.size() * 2;
             FE_CHECK_ARG(n_vals <= static_cast<std::size_t>(std::numeric_limits<int>::max()),
                          "Too many remote row coupling entries to communicate");
-            send_counts[r] = static_cast<int>(n_vals);
+            send_counts[sr] = static_cast<int>(n_vals);
         }
 
-        std::vector<int> recv_counts(n_ranks_, 0);
+        std::vector<int> recv_counts(n_ranks, 0);
         MPI_Alltoall(send_counts.data(), 1, MPI_INT,
                      recv_counts.data(), 1, MPI_INT, comm_);
 
-        std::vector<int> send_displs(n_ranks_, 0);
-        std::vector<int> recv_displs(n_ranks_, 0);
+        std::vector<int> send_displs(n_ranks, 0);
+        std::vector<int> recv_displs(n_ranks, 0);
         for (int r = 1; r < n_ranks_; ++r) {
-            send_displs[r] = send_displs[r - 1] + send_counts[r - 1];
-            recv_displs[r] = recv_displs[r - 1] + recv_counts[r - 1];
+            const auto sr = static_cast<std::size_t>(r);
+            send_displs[sr] = send_displs[sr - 1] + send_counts[sr - 1];
+            recv_displs[sr] = recv_displs[sr - 1] + recv_counts[sr - 1];
         }
 
         const int total_send = send_displs.back() + send_counts.back();
@@ -542,8 +549,9 @@ DistributedSparsityPattern ParallelSparsityManager::build(std::span<const Global
 
         std::vector<GlobalIndex> send_buf(static_cast<std::size_t>(total_send));
         for (int r = 0; r < n_ranks_; ++r) {
-            int pos = send_displs[r];
-            const auto& pairs = send_pairs_by_rank[static_cast<std::size_t>(r)];
+            const auto sr = static_cast<std::size_t>(r);
+            int pos = send_displs[sr];
+            const auto& pairs = send_pairs_by_rank[sr];
             for (const auto& p : pairs) {
                 send_buf[static_cast<std::size_t>(pos++)] = p.row;
                 send_buf[static_cast<std::size_t>(pos++)] = p.col;
@@ -634,137 +642,148 @@ void ParallelSparsityManager::exchangeGhostRowSparsity(
         v.erase(std::unique(v.begin(), v.end()), v.end());
     }
 
-    // ---------------------------------------------------------------------
-    // Phase 1: exchange row requests
-    // ---------------------------------------------------------------------
-    std::vector<int> send_counts_rows(n_ranks_, 0);
-    for (int r = 0; r < n_ranks_; ++r) {
-        const auto& rows = rows_by_owner[static_cast<std::size_t>(r)];
-        FE_CHECK_ARG(rows.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max()),
-                     "Too many ghost row requests for MPI_Alltoallv");
-        send_counts_rows[r] = static_cast<int>(rows.size());
-    }
+	// ---------------------------------------------------------------------
+	// Phase 1: exchange row requests
+	// ---------------------------------------------------------------------
+	const auto n_ranks = static_cast<std::size_t>(n_ranks_);
+	std::vector<int> send_counts_rows(n_ranks, 0);
+	for (int r = 0; r < n_ranks_; ++r) {
+	    const auto sr = static_cast<std::size_t>(r);
+	    const auto& rows = rows_by_owner[sr];
+	    FE_CHECK_ARG(rows.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max()),
+	                 "Too many ghost row requests for MPI_Alltoallv");
+	    send_counts_rows[sr] = static_cast<int>(rows.size());
+	}
 
-    std::vector<int> recv_counts_rows(n_ranks_, 0);
-    MPI_Alltoall(send_counts_rows.data(), 1, MPI_INT,
-                 recv_counts_rows.data(), 1, MPI_INT, comm_);
+	std::vector<int> recv_counts_rows(n_ranks, 0);
+	MPI_Alltoall(send_counts_rows.data(), 1, MPI_INT,
+	             recv_counts_rows.data(), 1, MPI_INT, comm_);
 
-    std::vector<int> send_displs_rows(n_ranks_, 0);
-    std::vector<int> recv_displs_rows(n_ranks_, 0);
-    for (int r = 1; r < n_ranks_; ++r) {
-        send_displs_rows[r] = send_displs_rows[r - 1] + send_counts_rows[r - 1];
-        recv_displs_rows[r] = recv_displs_rows[r - 1] + recv_counts_rows[r - 1];
-    }
+	std::vector<int> send_displs_rows(n_ranks, 0);
+	std::vector<int> recv_displs_rows(n_ranks, 0);
+	for (int r = 1; r < n_ranks_; ++r) {
+	    const auto sr = static_cast<std::size_t>(r);
+	    send_displs_rows[sr] = send_displs_rows[sr - 1] + send_counts_rows[sr - 1];
+	    recv_displs_rows[sr] = recv_displs_rows[sr - 1] + recv_counts_rows[sr - 1];
+	}
 
     const int total_send_rows = send_displs_rows.back() + send_counts_rows.back();
-    const int total_recv_rows = recv_displs_rows.back() + recv_counts_rows.back();
+	const int total_recv_rows = recv_displs_rows.back() + recv_counts_rows.back();
 
-    std::vector<GlobalIndex> send_buf_rows(static_cast<std::size_t>(total_send_rows));
-    for (int r = 0; r < n_ranks_; ++r) {
-        int pos = send_displs_rows[r];
-        for (GlobalIndex row : rows_by_owner[static_cast<std::size_t>(r)]) {
-            send_buf_rows[static_cast<std::size_t>(pos++)] = row;
-        }
-    }
+	std::vector<GlobalIndex> send_buf_rows(static_cast<std::size_t>(total_send_rows));
+	for (int r = 0; r < n_ranks_; ++r) {
+	    const auto sr = static_cast<std::size_t>(r);
+	    int pos = send_displs_rows[sr];
+	    for (GlobalIndex row : rows_by_owner[sr]) {
+	        send_buf_rows[static_cast<std::size_t>(pos++)] = row;
+	    }
+	}
 
     std::vector<GlobalIndex> recv_buf_rows(static_cast<std::size_t>(total_recv_rows));
     MPI_Alltoallv(send_buf_rows.data(), send_counts_rows.data(), send_displs_rows.data(), MPI_INT64_T,
                   recv_buf_rows.data(), recv_counts_rows.data(), recv_displs_rows.data(), MPI_INT64_T,
                   comm_);
 
-    // ---------------------------------------------------------------------
-    // Phase 2: each owner rank prepares row sizes + column lists for requests
-    // ---------------------------------------------------------------------
-    std::vector<std::vector<GlobalIndex>> send_row_sizes(static_cast<std::size_t>(n_ranks_));
-    std::vector<std::vector<GlobalIndex>> send_row_cols(static_cast<std::size_t>(n_ranks_));
+	// ---------------------------------------------------------------------
+	// Phase 2: each owner rank prepares row sizes + column lists for requests
+	// ---------------------------------------------------------------------
+	std::vector<std::vector<GlobalIndex>> send_row_sizes(n_ranks);
+	std::vector<std::vector<GlobalIndex>> send_row_cols(n_ranks);
 
-    for (int r = 0; r < n_ranks_; ++r) {
-        const int n_req = recv_counts_rows[r];
-        if (n_req <= 0) continue;
+	for (int r = 0; r < n_ranks_; ++r) {
+	    const auto sr = static_cast<std::size_t>(r);
+	    const int n_req = recv_counts_rows[sr];
+	    if (n_req <= 0) continue;
 
-        auto& sizes = send_row_sizes[static_cast<std::size_t>(r)];
-        sizes.reserve(static_cast<std::size_t>(n_req));
+	    auto& sizes = send_row_sizes[sr];
+	    sizes.reserve(static_cast<std::size_t>(n_req));
 
-        for (int i = 0; i < n_req; ++i) {
-            const GlobalIndex row = recv_buf_rows[static_cast<std::size_t>(recv_displs_rows[r] + i)];
-            if (row < 0 || row >= row_ownership_.globalNumDofs() || !owned_rows.contains(row)) {
-                sizes.push_back(0);
-                continue;
-            }
+	    for (int i = 0; i < n_req; ++i) {
+	        const GlobalIndex row = recv_buf_rows[static_cast<std::size_t>(recv_displs_rows[sr] + i)];
+	        if (row < 0 || row >= row_ownership_.globalNumDofs() || !owned_rows.contains(row)) {
+	            sizes.push_back(0);
+	            continue;
+	        }
 
-            auto cols = pattern.getOwnedRowGlobalCols(row);
-            sizes.push_back(static_cast<GlobalIndex>(cols.size()));
-            auto& flat = send_row_cols[static_cast<std::size_t>(r)];
-            flat.insert(flat.end(), cols.begin(), cols.end());
-        }
-    }
+	        auto cols = pattern.getOwnedRowGlobalCols(row);
+	        sizes.push_back(static_cast<GlobalIndex>(cols.size()));
+	        auto& flat = send_row_cols[sr];
+	        flat.insert(flat.end(), cols.begin(), cols.end());
+	    }
+	}
 
-    // Exchange row sizes (1 value per requested row).
-    std::vector<int> send_counts_sizes(n_ranks_, 0);
-    for (int r = 0; r < n_ranks_; ++r) {
-        const auto& sizes = send_row_sizes[static_cast<std::size_t>(r)];
-        FE_CHECK_ARG(sizes.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max()),
-                     "Too many ghost row size entries for MPI_Alltoallv");
-        send_counts_sizes[r] = static_cast<int>(sizes.size());
-    }
+	// Exchange row sizes (1 value per requested row).
+	std::vector<int> send_counts_sizes(n_ranks, 0);
+	for (int r = 0; r < n_ranks_; ++r) {
+	    const auto sr = static_cast<std::size_t>(r);
+	    const auto& sizes = send_row_sizes[sr];
+	    FE_CHECK_ARG(sizes.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max()),
+	                 "Too many ghost row size entries for MPI_Alltoallv");
+	    send_counts_sizes[sr] = static_cast<int>(sizes.size());
+	}
 
-    std::vector<int> recv_counts_sizes(n_ranks_, 0);
-    MPI_Alltoall(send_counts_sizes.data(), 1, MPI_INT,
-                 recv_counts_sizes.data(), 1, MPI_INT, comm_);
+	std::vector<int> recv_counts_sizes(n_ranks, 0);
+	MPI_Alltoall(send_counts_sizes.data(), 1, MPI_INT,
+	             recv_counts_sizes.data(), 1, MPI_INT, comm_);
 
-    std::vector<int> send_displs_sizes(n_ranks_, 0);
-    std::vector<int> recv_displs_sizes(n_ranks_, 0);
-    for (int r = 1; r < n_ranks_; ++r) {
-        send_displs_sizes[r] = send_displs_sizes[r - 1] + send_counts_sizes[r - 1];
-        recv_displs_sizes[r] = recv_displs_sizes[r - 1] + recv_counts_sizes[r - 1];
-    }
+	std::vector<int> send_displs_sizes(n_ranks, 0);
+	std::vector<int> recv_displs_sizes(n_ranks, 0);
+	for (int r = 1; r < n_ranks_; ++r) {
+	    const auto sr = static_cast<std::size_t>(r);
+	    send_displs_sizes[sr] = send_displs_sizes[sr - 1] + send_counts_sizes[sr - 1];
+	    recv_displs_sizes[sr] = recv_displs_sizes[sr - 1] + recv_counts_sizes[sr - 1];
+	}
 
     const int total_send_sizes = send_displs_sizes.back() + send_counts_sizes.back();
-    const int total_recv_sizes = recv_displs_sizes.back() + recv_counts_sizes.back();
+	const int total_recv_sizes = recv_displs_sizes.back() + recv_counts_sizes.back();
 
-    std::vector<GlobalIndex> send_buf_sizes(static_cast<std::size_t>(total_send_sizes));
-    for (int r = 0; r < n_ranks_; ++r) {
-        int pos = send_displs_sizes[r];
-        for (GlobalIndex sz : send_row_sizes[static_cast<std::size_t>(r)]) {
-            send_buf_sizes[static_cast<std::size_t>(pos++)] = sz;
-        }
-    }
+	std::vector<GlobalIndex> send_buf_sizes(static_cast<std::size_t>(total_send_sizes));
+	for (int r = 0; r < n_ranks_; ++r) {
+	    const auto sr = static_cast<std::size_t>(r);
+	    int pos = send_displs_sizes[sr];
+	    for (GlobalIndex sz : send_row_sizes[sr]) {
+	        send_buf_sizes[static_cast<std::size_t>(pos++)] = sz;
+	    }
+	}
 
     std::vector<GlobalIndex> recv_buf_sizes(static_cast<std::size_t>(total_recv_sizes));
     MPI_Alltoallv(send_buf_sizes.data(), send_counts_sizes.data(), send_displs_sizes.data(), MPI_INT64_T,
                   recv_buf_sizes.data(), recv_counts_sizes.data(), recv_displs_sizes.data(), MPI_INT64_T,
                   comm_);
 
-    // Exchange flattened column lists.
-    std::vector<int> send_counts_cols(n_ranks_, 0);
-    for (int r = 0; r < n_ranks_; ++r) {
-        const auto& cols = send_row_cols[static_cast<std::size_t>(r)];
-        FE_CHECK_ARG(cols.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max()),
-                     "Too many ghost row column entries for MPI_Alltoallv");
-        send_counts_cols[r] = static_cast<int>(cols.size());
-    }
+	// Exchange flattened column lists.
+	std::vector<int> send_counts_cols(n_ranks, 0);
+	for (int r = 0; r < n_ranks_; ++r) {
+	    const auto sr = static_cast<std::size_t>(r);
+	    const auto& cols = send_row_cols[sr];
+	    FE_CHECK_ARG(cols.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max()),
+	                 "Too many ghost row column entries for MPI_Alltoallv");
+	    send_counts_cols[sr] = static_cast<int>(cols.size());
+	}
 
-    std::vector<int> recv_counts_cols(n_ranks_, 0);
-    MPI_Alltoall(send_counts_cols.data(), 1, MPI_INT,
-                 recv_counts_cols.data(), 1, MPI_INT, comm_);
+	std::vector<int> recv_counts_cols(n_ranks, 0);
+	MPI_Alltoall(send_counts_cols.data(), 1, MPI_INT,
+	             recv_counts_cols.data(), 1, MPI_INT, comm_);
 
-    std::vector<int> send_displs_cols(n_ranks_, 0);
-    std::vector<int> recv_displs_cols(n_ranks_, 0);
-    for (int r = 1; r < n_ranks_; ++r) {
-        send_displs_cols[r] = send_displs_cols[r - 1] + send_counts_cols[r - 1];
-        recv_displs_cols[r] = recv_displs_cols[r - 1] + recv_counts_cols[r - 1];
-    }
+	std::vector<int> send_displs_cols(n_ranks, 0);
+	std::vector<int> recv_displs_cols(n_ranks, 0);
+	for (int r = 1; r < n_ranks_; ++r) {
+	    const auto sr = static_cast<std::size_t>(r);
+	    send_displs_cols[sr] = send_displs_cols[sr - 1] + send_counts_cols[sr - 1];
+	    recv_displs_cols[sr] = recv_displs_cols[sr - 1] + recv_counts_cols[sr - 1];
+	}
 
     const int total_send_cols = send_displs_cols.back() + send_counts_cols.back();
-    const int total_recv_cols = recv_displs_cols.back() + recv_counts_cols.back();
+	const int total_recv_cols = recv_displs_cols.back() + recv_counts_cols.back();
 
-    std::vector<GlobalIndex> send_buf_cols(static_cast<std::size_t>(total_send_cols));
-    for (int r = 0; r < n_ranks_; ++r) {
-        int pos = send_displs_cols[r];
-        for (GlobalIndex col : send_row_cols[static_cast<std::size_t>(r)]) {
-            send_buf_cols[static_cast<std::size_t>(pos++)] = col;
-        }
-    }
+	std::vector<GlobalIndex> send_buf_cols(static_cast<std::size_t>(total_send_cols));
+	for (int r = 0; r < n_ranks_; ++r) {
+	    const auto sr = static_cast<std::size_t>(r);
+	    int pos = send_displs_cols[sr];
+	    for (GlobalIndex col : send_row_cols[sr]) {
+	        send_buf_cols[static_cast<std::size_t>(pos++)] = col;
+	    }
+	}
 
     std::vector<GlobalIndex> recv_buf_cols(static_cast<std::size_t>(total_recv_cols));
     MPI_Alltoallv(send_buf_cols.data(), send_counts_cols.data(), send_displs_cols.data(), MPI_INT64_T,
@@ -777,16 +796,17 @@ void ParallelSparsityManager::exchangeGhostRowSparsity(
     std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> ghost_row_to_cols;
     ghost_row_to_cols.reserve(ghost_rows_requested.size());
 
-    for (int owner = 0; owner < n_ranks_; ++owner) {
-        const auto& rows = rows_by_owner[static_cast<std::size_t>(owner)];
-        if (rows.empty()) continue;
+	    for (int owner = 0; owner < n_ranks_; ++owner) {
+	        const auto sowner = static_cast<std::size_t>(owner);
+	        const auto& rows = rows_by_owner[sowner];
+	        if (rows.empty()) continue;
 
-        const int n_sizes = recv_counts_sizes[owner];
-        FE_CHECK_ARG(n_sizes == static_cast<int>(rows.size()),
-                     "Ghost row exchange size mismatch for owner rank " + std::to_string(owner));
+	        const int n_sizes = recv_counts_sizes[sowner];
+	        FE_CHECK_ARG(n_sizes == static_cast<int>(rows.size()),
+	                     "Ghost row exchange size mismatch for owner rank " + std::to_string(owner));
 
-        std::size_t sizes_pos = static_cast<std::size_t>(recv_displs_sizes[owner]);
-        std::size_t cols_pos = static_cast<std::size_t>(recv_displs_cols[owner]);
+	        std::size_t sizes_pos = static_cast<std::size_t>(recv_displs_sizes[sowner]);
+	        std::size_t cols_pos = static_cast<std::size_t>(recv_displs_cols[sowner]);
 
         for (std::size_t i = 0; i < rows.size(); ++i) {
             const GlobalIndex row = rows[i];

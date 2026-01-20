@@ -343,6 +343,9 @@ AssemblyResult WorkStreamAssembler::assembleBoundaryFaces(
     std::vector<std::pair<GlobalIndex, GlobalIndex>> faces;  // (face_id, cell_id)
     mesh.forEachBoundaryFace(boundary_marker,
         [&](GlobalIndex face_id, GlobalIndex cell_id) {
+            if (options_.ghost_policy != GhostPolicy::OwnedRowsOnly && !mesh.isOwnedCell(cell_id)) {
+                return;
+            }
             faces.emplace_back(face_id, cell_id);
         });
 
@@ -475,9 +478,19 @@ AssemblyResult WorkStreamAssembler::assembleInteriorFaces(
 
     // For now, use sequential implementation (DG face assembly is complex)
     const auto required_data = kernel.getRequiredData();
+    const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
+    const auto should_process = [&](GlobalIndex cell_minus, GlobalIndex cell_plus) -> bool {
+        if (owned_rows_only) {
+            return mesh.isOwnedCell(cell_minus) || mesh.isOwnedCell(cell_plus);
+        }
+        return mesh.isOwnedCell(cell_minus);
+    };
 
     mesh.forEachInteriorFace(
         [&](GlobalIndex face_id, GlobalIndex cell_minus, GlobalIndex cell_plus) {
+            if (!should_process(cell_minus, cell_plus)) {
+                return;
+            }
             // Get DOFs
             auto minus_dofs = dof_map_->getCellDofs(cell_minus);
             auto plus_dofs = dof_map_->getCellDofs(cell_plus);

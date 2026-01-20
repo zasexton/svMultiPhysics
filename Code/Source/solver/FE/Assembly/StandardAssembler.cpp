@@ -23,6 +23,10 @@
 #include "Math/Vector.h"
 #include "Math/Matrix.h"
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Mesh/Core/InterfaceMesh.h"
+#endif
+
 #include <chrono>
 #include <algorithm>
 #include <utility>
@@ -70,6 +74,305 @@ int defaultGeometryOrder(ElementType element_type) noexcept
             return 1;
     }
 }
+
+class OwnedRowOnlyView final : public GlobalSystemView {
+public:
+    OwnedRowOnlyView(GlobalSystemView& base,
+                     const dofs::DofMap& row_map,
+                     GlobalIndex row_offset)
+        : base_(&base)
+        , row_map_(&row_map)
+        , row_offset_(row_offset)
+    {
+    }
+
+    void addMatrixEntries(std::span<const GlobalIndex> dofs,
+                          std::span<const Real> local_matrix,
+                          AddMode mode) override
+    {
+        addMatrixEntries(dofs, dofs, local_matrix, mode);
+    }
+
+    void addMatrixEntries(std::span<const GlobalIndex> row_dofs,
+                          std::span<const GlobalIndex> col_dofs,
+                          std::span<const Real> local_matrix,
+                          AddMode mode) override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        const std::size_t n_rows = row_dofs.size();
+        const std::size_t n_cols = col_dofs.size();
+        FE_THROW_IF(local_matrix.size() != n_rows * n_cols, FEException,
+                    "OwnedRowOnlyView::addMatrixEntries: local_matrix size mismatch");
+
+        bool all_owned = true;
+        for (const auto row : row_dofs) {
+            if (!isOwnedRow(row)) {
+                all_owned = false;
+                break;
+            }
+        }
+        if (all_owned) {
+            base_->addMatrixEntries(row_dofs, col_dofs, local_matrix, mode);
+            return;
+        }
+
+        owned_rows_.clear();
+        owned_values_.clear();
+        owned_rows_.reserve(n_rows);
+        owned_values_.reserve(local_matrix.size());
+
+        for (std::size_t i = 0; i < n_rows; ++i) {
+            const auto row = row_dofs[i];
+            if (!isOwnedRow(row)) {
+                continue;
+            }
+            owned_rows_.push_back(row);
+            const std::size_t base_idx = i * n_cols;
+            owned_values_.insert(owned_values_.end(),
+                                 local_matrix.begin() + base_idx,
+                                 local_matrix.begin() + base_idx + n_cols);
+        }
+
+        if (!owned_rows_.empty()) {
+            base_->addMatrixEntries(std::span<const GlobalIndex>(owned_rows_),
+                                    col_dofs,
+                                    std::span<const Real>(owned_values_),
+                                    mode);
+        }
+    }
+
+    void addMatrixEntry(GlobalIndex row, GlobalIndex col, Real value, AddMode mode) override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        if (!isOwnedRow(row)) {
+            return;
+        }
+        base_->addMatrixEntry(row, col, value, mode);
+    }
+
+    void setDiagonal(std::span<const GlobalIndex> dofs,
+                     std::span<const Real> values) override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        FE_THROW_IF(dofs.size() != values.size(), FEException,
+                    "OwnedRowOnlyView::setDiagonal: size mismatch");
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            setDiagonal(dofs[i], values[i]);
+        }
+    }
+
+    void setDiagonal(GlobalIndex dof, Real value) override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        if (!isOwnedRow(dof)) {
+            return;
+        }
+        base_->setDiagonal(dof, value);
+    }
+
+    void zeroRows(std::span<const GlobalIndex> rows, bool set_diagonal) override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        owned_rows_.clear();
+        owned_rows_.reserve(rows.size());
+        for (const auto row : rows) {
+            if (!isOwnedRow(row)) {
+                continue;
+            }
+            owned_rows_.push_back(row);
+        }
+        if (!owned_rows_.empty()) {
+            base_->zeroRows(std::span<const GlobalIndex>(owned_rows_), set_diagonal);
+        }
+    }
+
+    void addVectorEntries(std::span<const GlobalIndex> dofs,
+                          std::span<const Real> local_vector,
+                          AddMode mode) override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        FE_THROW_IF(dofs.size() != local_vector.size(), FEException,
+                    "OwnedRowOnlyView::addVectorEntries: size mismatch");
+
+        bool all_owned = true;
+        for (const auto dof : dofs) {
+            if (!isOwnedRow(dof)) {
+                all_owned = false;
+                break;
+            }
+        }
+        if (all_owned) {
+            base_->addVectorEntries(dofs, local_vector, mode);
+            return;
+        }
+
+        owned_rows_.clear();
+        owned_vector_.clear();
+        owned_rows_.reserve(dofs.size());
+        owned_vector_.reserve(local_vector.size());
+
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            const auto dof = dofs[i];
+            if (!isOwnedRow(dof)) {
+                continue;
+            }
+            owned_rows_.push_back(dof);
+            owned_vector_.push_back(local_vector[i]);
+        }
+
+        if (!owned_rows_.empty()) {
+            base_->addVectorEntries(std::span<const GlobalIndex>(owned_rows_),
+                                    std::span<const Real>(owned_vector_),
+                                    mode);
+        }
+    }
+
+    void addVectorEntry(GlobalIndex dof, Real value, AddMode mode) override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        if (!isOwnedRow(dof)) {
+            return;
+        }
+        base_->addVectorEntry(dof, value, mode);
+    }
+
+    void setVectorEntries(std::span<const GlobalIndex> dofs,
+                          std::span<const Real> values) override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        FE_THROW_IF(dofs.size() != values.size(), FEException,
+                    "OwnedRowOnlyView::setVectorEntries: size mismatch");
+        owned_rows_.clear();
+        owned_vector_.clear();
+        owned_rows_.reserve(dofs.size());
+        owned_vector_.reserve(values.size());
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            const auto dof = dofs[i];
+            if (!isOwnedRow(dof)) {
+                continue;
+            }
+            owned_rows_.push_back(dof);
+            owned_vector_.push_back(values[i]);
+        }
+        if (!owned_rows_.empty()) {
+            base_->setVectorEntries(std::span<const GlobalIndex>(owned_rows_),
+                                    std::span<const Real>(owned_vector_));
+        }
+    }
+
+    void zeroVectorEntries(std::span<const GlobalIndex> dofs) override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        owned_rows_.clear();
+        owned_rows_.reserve(dofs.size());
+        for (const auto dof : dofs) {
+            if (!isOwnedRow(dof)) {
+                continue;
+            }
+            owned_rows_.push_back(dof);
+        }
+        if (!owned_rows_.empty()) {
+            base_->zeroVectorEntries(std::span<const GlobalIndex>(owned_rows_));
+        }
+    }
+
+    [[nodiscard]] Real getVectorEntry(GlobalIndex dof) const override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        return base_->getVectorEntry(dof);
+    }
+
+    void beginAssemblyPhase() override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        base_->beginAssemblyPhase();
+    }
+
+    void endAssemblyPhase() override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        base_->endAssemblyPhase();
+    }
+
+    void finalizeAssembly() override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        base_->finalizeAssembly();
+    }
+
+    [[nodiscard]] AssemblyPhase getPhase() const noexcept override
+    {
+        return base_ ? base_->getPhase() : AssemblyPhase::NotStarted;
+    }
+
+    [[nodiscard]] bool hasMatrix() const noexcept override
+    {
+        return base_ ? base_->hasMatrix() : false;
+    }
+
+    [[nodiscard]] bool hasVector() const noexcept override
+    {
+        return base_ ? base_->hasVector() : false;
+    }
+
+    [[nodiscard]] GlobalIndex numRows() const noexcept override
+    {
+        return base_ ? base_->numRows() : 0;
+    }
+
+    [[nodiscard]] GlobalIndex numCols() const noexcept override
+    {
+        return base_ ? base_->numCols() : 0;
+    }
+
+    [[nodiscard]] GlobalIndex numLocalRows() const noexcept override
+    {
+        return base_ ? base_->numLocalRows() : 0;
+    }
+
+    [[nodiscard]] bool isDistributed() const noexcept override
+    {
+        return base_ ? base_->isDistributed() : false;
+    }
+
+    [[nodiscard]] std::string backendName() const override
+    {
+        return base_ ? base_->backendName() : std::string{};
+    }
+
+    void zero() override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        base_->zero();
+    }
+
+    [[nodiscard]] Real getMatrixEntry(GlobalIndex row, GlobalIndex col) const override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        return base_->getMatrixEntry(row, col);
+    }
+
+private:
+    [[nodiscard]] bool isOwnedRow(GlobalIndex global_row) const noexcept
+    {
+        if (!row_map_) {
+            return true;
+        }
+        const GlobalIndex local = global_row - row_offset_;
+        if (local < 0 || local >= row_map_->getNumDofs()) {
+            return false;
+        }
+        return row_map_->isOwnedDof(local);
+    }
+
+    GlobalSystemView* base_{nullptr};
+    const dofs::DofMap* row_map_{nullptr};
+    GlobalIndex row_offset_{0};
+
+    std::vector<GlobalIndex> owned_rows_;
+    std::vector<Real> owned_values_;
+    std::vector<Real> owned_vector_;
+};
 
 } // namespace
 
@@ -408,9 +711,32 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
         col_dof_offset_ = row_dof_offset_;
     }
 
+    const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
+    std::optional<OwnedRowOnlyView> owned_row_matrix;
+    std::optional<OwnedRowOnlyView> owned_row_vector;
+    GlobalSystemView* insert_matrix_view = matrix_view;
+    GlobalSystemView* insert_vector_view = vector_view;
+    if (owned_rows_only) {
+        if (matrix_view != nullptr) {
+            owned_row_matrix.emplace(*matrix_view, *row_dof_map_, row_dof_offset_);
+            insert_matrix_view = &*owned_row_matrix;
+        }
+        if (vector_view != nullptr) {
+            if (vector_view == matrix_view && owned_row_matrix) {
+                insert_vector_view = insert_matrix_view;
+            } else {
+                owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_);
+                insert_vector_view = &*owned_row_vector;
+            }
+        }
+    }
+
     // Iterate over boundary faces with given marker
     mesh.forEachBoundaryFace(boundary_marker,
         [&](GlobalIndex face_id, GlobalIndex cell_id) {
+            if (!owned_rows_only && !mesh.isOwnedCell(cell_id)) {
+                return;
+            }
             // Get cell DOFs (rows/cols may come from different maps)
             auto row_cell_dofs = row_dof_map_->getCellDofs(cell_id);
             auto col_cell_dofs = col_dof_map_->getCellDofs(cell_id);
@@ -516,10 +842,10 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
             // Insert into global system
             if (options_.use_constraints && constraint_distributor_) {
                 insertLocalConstrained(kernel_output_, row_dofs_, col_dofs_,
-                                       matrix_view, vector_view);
+                                       insert_matrix_view, insert_vector_view);
             } else {
                 insertLocal(kernel_output_, row_dofs_, col_dofs_,
-                            matrix_view, vector_view);
+                            insert_matrix_view, insert_vector_view);
             }
 
             result.boundary_faces_assembled++;
@@ -581,6 +907,31 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
         col_dof_offset_ = row_dof_offset_;
     }
 
+    const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
+    std::optional<OwnedRowOnlyView> owned_row_matrix;
+    std::optional<OwnedRowOnlyView> owned_row_vector;
+    GlobalSystemView* insert_matrix_view = &matrix_view;
+    GlobalSystemView* insert_vector_view = vector_view;
+    if (owned_rows_only) {
+        owned_row_matrix.emplace(matrix_view, *row_dof_map_, row_dof_offset_);
+        insert_matrix_view = &*owned_row_matrix;
+        if (vector_view != nullptr) {
+            if (vector_view == &matrix_view) {
+                insert_vector_view = insert_matrix_view;
+            } else {
+                owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_);
+                insert_vector_view = &*owned_row_vector;
+            }
+        }
+    }
+
+    const auto should_process = [&](GlobalIndex cell_minus, GlobalIndex cell_plus) -> bool {
+        if (owned_rows_only) {
+            return mesh.isOwnedCell(cell_minus) || mesh.isOwnedCell(cell_plus);
+        }
+        return mesh.isOwnedCell(cell_minus);
+    };
+
     // Create second context for the "plus" side
     AssemblyContext context_plus;
     const auto max_row_dofs = row_dof_map_->getMaxDofsPerCell();
@@ -600,6 +951,9 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
 
     mesh.forEachInteriorFace(
         [&](GlobalIndex face_id, GlobalIndex cell_minus, GlobalIndex cell_plus) {
+            if (!should_process(cell_minus, cell_plus)) {
+                return;
+            }
             // Get DOFs for both cells (rows/cols may differ)
             auto minus_row_local = row_dof_map_->getCellDofs(cell_minus);
             auto plus_row_local = row_dof_map_->getCellDofs(cell_plus);
@@ -820,24 +1174,24 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             // Insert contributions (4 blocks for DG)
             // Self-coupling: minus-minus
             if (output_minus.has_matrix || output_minus.has_vector) {
-                insertLocal(output_minus, minus_row_dofs, minus_col_dofs, &matrix_view, vector_view);
+                insertLocal(output_minus, minus_row_dofs, minus_col_dofs, insert_matrix_view, insert_vector_view);
             }
 
             // Self-coupling: plus-plus
             if (output_plus.has_matrix || output_plus.has_vector) {
-                insertLocal(output_plus, plus_row_dofs, plus_col_dofs, &matrix_view, vector_view);
+                insertLocal(output_plus, plus_row_dofs, plus_col_dofs, insert_matrix_view, insert_vector_view);
             }
 
             // Cross-coupling: minus-plus (minus rows, plus cols)
             if (coupling_mp.has_matrix) {
-                matrix_view.addMatrixEntries(minus_row_dofs, plus_col_dofs,
-                                             coupling_mp.local_matrix);
+                insert_matrix_view->addMatrixEntries(minus_row_dofs, plus_col_dofs,
+                                                     coupling_mp.local_matrix);
             }
 
             // Cross-coupling: plus-minus (plus rows, minus cols)
             if (coupling_pm.has_matrix) {
-                matrix_view.addMatrixEntries(plus_row_dofs, minus_col_dofs,
-                                             coupling_pm.local_matrix);
+                insert_matrix_view->addMatrixEntries(plus_row_dofs, minus_col_dofs,
+                                                     coupling_pm.local_matrix);
             }
 
             result.interior_faces_assembled++;
@@ -848,6 +1202,360 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
 
     return result;
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+AssemblyResult StandardAssembler::assembleInterfaceFaces(
+    const IMeshAccess& mesh,
+    const svmp::InterfaceMesh& interface_mesh,
+    int interface_marker,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
+    AssemblyKernel& kernel,
+    GlobalSystemView& matrix_view,
+    GlobalSystemView* vector_view)
+{
+    AssemblyResult result;
+    auto start_time = std::chrono::steady_clock::now();
+
+    if (!initialized_) {
+        initialize();
+    }
+
+    if (!kernel.hasInterfaceFace()) {
+        return result;
+    }
+
+    matrix_view.beginAssemblyPhase();
+    if (vector_view && vector_view != &matrix_view) {
+        vector_view->beginAssemblyPhase();
+    }
+
+    const auto required_data = kernel.getRequiredData();
+    const auto field_requirements = kernel.fieldRequirements();
+    const bool need_field_solutions = !field_requirements.empty();
+    const bool need_solution =
+        hasFlag(required_data, RequiredData::SolutionCoefficients) ||
+        hasFlag(required_data, RequiredData::SolutionValues) ||
+        hasFlag(required_data, RequiredData::SolutionGradients) ||
+        hasFlag(required_data, RequiredData::SolutionHessians) ||
+        hasFlag(required_data, RequiredData::SolutionLaplacians);
+    const bool need_material_state =
+        hasFlag(required_data, RequiredData::MaterialState);
+    const auto material_state_spec = kernel.materialStateSpec();
+
+    if (need_material_state) {
+        FE_THROW_IF(material_state_provider_ == nullptr, FEException,
+                    "StandardAssembler::assembleInterfaceFaces: kernel requires material state but no material state provider was set");
+        FE_THROW_IF(material_state_spec.bytes_per_qpt == 0u, FEException,
+                    "StandardAssembler::assembleInterfaceFaces: kernel requires material state but materialStateSpec().bytes_per_qpt == 0");
+    }
+
+    FE_CHECK_NOT_NULL(row_dof_map_, "StandardAssembler::assembleInterfaceFaces: row_dof_map");
+    if (!col_dof_map_) {
+        col_dof_map_ = row_dof_map_;
+        col_dof_offset_ = row_dof_offset_;
+    }
+
+    // Create second context for the "plus" side
+    AssemblyContext context_plus;
+    const auto max_row_dofs = row_dof_map_->getMaxDofsPerCell();
+    const auto max_col_dofs = col_dof_map_->getMaxDofsPerCell();
+    context_plus.reserve(std::max(max_row_dofs, max_col_dofs), 27, mesh.dimension());
+
+    // Kernel outputs for interface face terms
+    KernelOutput output_minus, output_plus, coupling_mp, coupling_pm;
+
+    // Scratch for DOFs
+    std::vector<GlobalIndex> minus_row_dofs, plus_row_dofs;
+    std::vector<GlobalIndex> minus_col_dofs, plus_col_dofs;
+    std::vector<Real> plus_solution_coeffs;
+    std::vector<std::vector<Real>> plus_prev_solution_coeffs;
+    std::vector<GlobalIndex> cell_nodes_minus;
+    std::vector<GlobalIndex> cell_nodes_plus;
+
+    const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
+    const auto should_process = [&](GlobalIndex cell_minus, GlobalIndex cell_plus) -> bool {
+        if (owned_rows_only) {
+            return mesh.isOwnedCell(cell_minus) || mesh.isOwnedCell(cell_plus);
+        }
+        return mesh.isOwnedCell(cell_minus);
+    };
+
+    std::optional<OwnedRowOnlyView> owned_row_matrix;
+    std::optional<OwnedRowOnlyView> owned_row_vector;
+    GlobalSystemView* insert_matrix_view = &matrix_view;
+    GlobalSystemView* insert_vector_view = vector_view;
+    if (owned_rows_only) {
+        owned_row_matrix.emplace(matrix_view, *row_dof_map_, row_dof_offset_);
+        insert_matrix_view = &*owned_row_matrix;
+        if (vector_view != nullptr) {
+            if (vector_view == &matrix_view) {
+                insert_vector_view = insert_matrix_view;
+            } else {
+                owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_);
+                insert_vector_view = &*owned_row_vector;
+            }
+        }
+    }
+
+    for (std::size_t local_iface = 0; local_iface < interface_mesh.n_faces(); ++local_iface) {
+        const auto iface = static_cast<svmp::index_t>(local_iface);
+        const GlobalIndex face_id = static_cast<GlobalIndex>(interface_mesh.volume_face(iface));
+        const GlobalIndex cell_minus = static_cast<GlobalIndex>(interface_mesh.volume_cell_minus(iface));
+        const GlobalIndex cell_plus = static_cast<GlobalIndex>(interface_mesh.volume_cell_plus(iface));
+
+        FE_THROW_IF(cell_minus == INVALID_GLOBAL_INDEX || cell_plus == INVALID_GLOBAL_INDEX, FEException,
+                    "StandardAssembler::assembleInterfaceFaces: interface face requires two parent cells");
+
+        if (!should_process(cell_minus, cell_plus)) {
+            continue;
+        }
+
+        const LocalIndex local_face_minus = static_cast<LocalIndex>(interface_mesh.local_face_in_cell_minus(iface));
+        const LocalIndex local_face_plus = static_cast<LocalIndex>(interface_mesh.local_face_in_cell_plus(iface));
+        FE_THROW_IF(local_face_minus < 0 || local_face_plus < 0, FEException,
+                    "StandardAssembler::assembleInterfaceFaces: invalid local face index in InterfaceMesh");
+
+        // Get DOFs for both cells (rows/cols may differ)
+        auto minus_row_local = row_dof_map_->getCellDofs(cell_minus);
+        auto plus_row_local = row_dof_map_->getCellDofs(cell_plus);
+        auto minus_col_local = col_dof_map_->getCellDofs(cell_minus);
+        auto plus_col_local = col_dof_map_->getCellDofs(cell_plus);
+
+        minus_row_dofs.resize(minus_row_local.size());
+        for (std::size_t i = 0; i < minus_row_local.size(); ++i) {
+            minus_row_dofs[i] = minus_row_local[i] + row_dof_offset_;
+        }
+        plus_row_dofs.resize(plus_row_local.size());
+        for (std::size_t i = 0; i < plus_row_local.size(); ++i) {
+            plus_row_dofs[i] = plus_row_local[i] + row_dof_offset_;
+        }
+
+        minus_col_dofs.resize(minus_col_local.size());
+        for (std::size_t j = 0; j < minus_col_local.size(); ++j) {
+            minus_col_dofs[j] = minus_col_local[j] + col_dof_offset_;
+        }
+        plus_col_dofs.resize(plus_col_local.size());
+        for (std::size_t j = 0; j < plus_col_local.size(); ++j) {
+            plus_col_dofs[j] = plus_col_local[j] + col_dof_offset_;
+        }
+
+        // Prepare contexts for both sides
+        prepareContextFace(context_, mesh, face_id, cell_minus, local_face_minus, test_space, trial_space,
+                           required_data, ContextType::InteriorFace);
+        context_.setMaterialState(nullptr, nullptr, 0u, 0u);
+        context_.setTimeIntegrationContext(time_integration_);
+        context_.setTime(time_);
+        context_.setTimeStep(dt_);
+        context_.setRealParameterGetter(get_real_param_);
+        context_.setParameterGetter(get_param_);
+        context_.setUserData(user_data_);
+        context_.setJITConstants(jit_constants_);
+        context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+        context_.clearAllPreviousSolutionData();
+
+        std::array<LocalIndex, 4> align_plus_storage{};
+        std::span<const LocalIndex> align_plus{};
+        const ElementType cell_type_minus = mesh.getCellType(cell_minus);
+        const ElementType cell_type_plus = mesh.getCellType(cell_plus);
+        if (cell_type_minus == cell_type_plus) {
+            elements::ReferenceElement ref = elements::ReferenceElement::create(cell_type_minus);
+            const auto& face_nodes_minus = ref.face_nodes(static_cast<std::size_t>(local_face_minus));
+            const auto& face_nodes_plus = ref.face_nodes(static_cast<std::size_t>(local_face_plus));
+            if (face_nodes_minus.size() == face_nodes_plus.size() &&
+                (face_nodes_minus.size() == 2 || face_nodes_minus.size() == 3)) {
+                mesh.getCellNodes(cell_minus, cell_nodes_minus);
+                mesh.getCellNodes(cell_plus, cell_nodes_plus);
+
+                for (std::size_t j = 0; j < face_nodes_plus.size(); ++j) {
+                    const GlobalIndex global_plus = cell_nodes_plus.at(static_cast<std::size_t>(face_nodes_plus[j]));
+                    std::size_t i_match = face_nodes_minus.size();
+                    for (std::size_t i = 0; i < face_nodes_minus.size(); ++i) {
+                        const GlobalIndex global_minus = cell_nodes_minus.at(static_cast<std::size_t>(face_nodes_minus[i]));
+                        if (global_minus == global_plus) {
+                            i_match = i;
+                            break;
+                        }
+                    }
+                    align_plus_storage[j] = static_cast<LocalIndex>(i_match);
+                }
+
+                bool ok = true;
+                for (std::size_t j = 0; j < face_nodes_plus.size(); ++j) {
+                    if (static_cast<std::size_t>(align_plus_storage[j]) >= face_nodes_minus.size()) {
+                        ok = false;
+                        break;
+                    }
+                }
+
+                if (ok) {
+                    align_plus = std::span<const LocalIndex>(
+                        align_plus_storage.data(),
+                        face_nodes_plus.size());
+                }
+            }
+        }
+
+        prepareContextFace(context_plus, mesh, face_id, cell_plus, local_face_plus, test_space, trial_space,
+                           required_data, ContextType::InteriorFace, align_plus);
+        context_plus.setMaterialState(nullptr, nullptr, 0u, 0u);
+        context_plus.setTimeIntegrationContext(time_integration_);
+        context_plus.setTime(time_);
+        context_plus.setTimeStep(dt_);
+        context_plus.setRealParameterGetter(get_real_param_);
+        context_plus.setParameterGetter(get_param_);
+        context_plus.setUserData(user_data_);
+        context_plus.setJITConstants(jit_constants_);
+        context_plus.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+        context_plus.clearAllPreviousSolutionData();
+
+        if (need_solution) {
+            FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+                        "StandardAssembler::assembleInterfaceFaces: kernel requires solution but no solution was set");
+
+            local_solution_coeffs_.resize(minus_col_dofs.size());
+            if (current_solution_view_ != nullptr) {
+                for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
+                    const auto dof = minus_col_dofs[i];
+                    if (dof < 0) {
+                        FE_THROW(FEException, "StandardAssembler::assembleInterfaceFaces: negative DOF index");
+                    }
+                    local_solution_coeffs_[i] = current_solution_view_->getVectorEntry(dof);
+                }
+            } else {
+                for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
+                    const auto dof = minus_col_dofs[i];
+                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+                                "StandardAssembler::assembleInterfaceFaces: solution vector too small for DOF " +
+                                    std::to_string(dof));
+                    local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
+                }
+            }
+            context_.setSolutionCoefficients(local_solution_coeffs_);
+
+            plus_solution_coeffs.resize(plus_col_dofs.size());
+            if (current_solution_view_ != nullptr) {
+                for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
+                    const auto dof = plus_col_dofs[i];
+                    if (dof < 0) {
+                        FE_THROW(FEException, "StandardAssembler::assembleInterfaceFaces: negative DOF index");
+                    }
+                    plus_solution_coeffs[i] = current_solution_view_->getVectorEntry(dof);
+                }
+            } else {
+                for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
+                    const auto dof = plus_col_dofs[i];
+                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+                                "StandardAssembler::assembleInterfaceFaces: solution vector too small for DOF " +
+                                    std::to_string(dof));
+                    plus_solution_coeffs[i] = current_solution_[static_cast<std::size_t>(dof)];
+                }
+            }
+            context_plus.setSolutionCoefficients(plus_solution_coeffs);
+
+            if (time_integration_ != nullptr) {
+                const int required = requiredHistoryStates(time_integration_);
+                if (required > 0) {
+                    FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
+                                "StandardAssembler::assembleInterfaceFaces: time integration requires " +
+                                    std::to_string(required) + " history states, but only " +
+                                    std::to_string(previous_solutions_.size()) + " were provided");
+                    if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
+                        local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
+                    }
+                    if (plus_prev_solution_coeffs.size() < static_cast<std::size_t>(required)) {
+                        plus_prev_solution_coeffs.resize(static_cast<std::size_t>(required));
+                    }
+
+                    for (int k = 1; k <= required; ++k) {
+                        const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                        FE_THROW_IF(prev.empty(), FEException,
+                                    "StandardAssembler::assembleInterfaceFaces: previous solution (k=" +
+                                        std::to_string(k) + ") not set");
+
+                        auto& local_prev_minus = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                        local_prev_minus.resize(minus_col_dofs.size());
+                        for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
+                            const auto dof = minus_col_dofs[i];
+                            FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
+                                        "StandardAssembler::assembleInterfaceFaces: previous solution vector too small for DOF " +
+                                            std::to_string(dof));
+                            local_prev_minus[i] = prev[static_cast<std::size_t>(dof)];
+                        }
+                        context_.setPreviousSolutionCoefficientsK(k, local_prev_minus);
+
+                        auto& local_prev_plus = plus_prev_solution_coeffs[static_cast<std::size_t>(k - 1)];
+                        local_prev_plus.resize(plus_col_dofs.size());
+                        for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
+                            const auto dof = plus_col_dofs[i];
+                            FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
+                                        "StandardAssembler::assembleInterfaceFaces: previous solution vector too small for DOF " +
+                                            std::to_string(dof));
+                            local_prev_plus[i] = prev[static_cast<std::size_t>(dof)];
+                        }
+                        context_plus.setPreviousSolutionCoefficientsK(k, local_prev_plus);
+                    }
+                }
+            }
+        }
+
+        if (need_field_solutions) {
+            populateFieldSolutionData(context_, mesh, cell_minus, field_requirements);
+            populateFieldSolutionData(context_plus, mesh, cell_plus, field_requirements);
+        }
+
+        if (need_material_state) {
+            FE_THROW_IF(context_plus.numQuadraturePoints() != context_.numQuadraturePoints(), FEException,
+                        "StandardAssembler::assembleInterfaceFaces: mismatched quadrature point counts for face state binding");
+
+            // Reuse interior-face state storage for interface faces (subset of faces).
+            auto view = material_state_provider_->getInteriorFaceState(kernel, face_id, context_.numQuadraturePoints());
+            FE_THROW_IF(!view, FEException,
+                        "StandardAssembler::assembleInterfaceFaces: material state provider returned null storage");
+            FE_THROW_IF(view.bytes_per_qpt != material_state_spec.bytes_per_qpt, FEException,
+                        "StandardAssembler::assembleInterfaceFaces: material state bytes_per_qpt mismatch");
+            FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
+                        "StandardAssembler::assembleInterfaceFaces: invalid material state stride");
+
+            context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes);
+            context_plus.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes);
+        }
+
+        // Compute interface face contributions
+        output_minus.clear();
+        output_plus.clear();
+        coupling_mp.clear();
+        coupling_pm.clear();
+
+        kernel.computeInterfaceFace(context_, context_plus, interface_marker,
+                                   output_minus, output_plus,
+                                   coupling_mp, coupling_pm);
+
+        // Insert contributions (4 blocks, DG-style)
+        if (output_minus.has_matrix || output_minus.has_vector) {
+            insertLocal(output_minus, minus_row_dofs, minus_col_dofs, insert_matrix_view, insert_vector_view);
+        }
+        if (output_plus.has_matrix || output_plus.has_vector) {
+            insertLocal(output_plus, plus_row_dofs, plus_col_dofs, insert_matrix_view, insert_vector_view);
+        }
+        if (coupling_mp.has_matrix) {
+            insert_matrix_view->addMatrixEntries(minus_row_dofs, plus_col_dofs,
+                                                 coupling_mp.local_matrix);
+        }
+        if (coupling_pm.has_matrix) {
+            insert_matrix_view->addMatrixEntries(plus_row_dofs, minus_col_dofs,
+                                                 coupling_pm.local_matrix);
+        }
+
+        result.interface_faces_assembled++;
+    }
+
+    auto end_time = std::chrono::steady_clock::now();
+    result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
+
+    return result;
+}
+#endif
 
 // ============================================================================
 // Internal Implementation
@@ -904,8 +1612,28 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         col_dof_offset_ = row_dof_offset_;
     }
 
+    const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
+    std::optional<OwnedRowOnlyView> owned_row_matrix;
+    std::optional<OwnedRowOnlyView> owned_row_vector;
+    GlobalSystemView* insert_matrix_view = matrix_view;
+    GlobalSystemView* insert_vector_view = vector_view;
+    if (owned_rows_only) {
+        if (matrix_view != nullptr) {
+            owned_row_matrix.emplace(*matrix_view, *row_dof_map_, row_dof_offset_);
+            insert_matrix_view = &*owned_row_matrix;
+        }
+        if (vector_view != nullptr) {
+            if (vector_view == matrix_view && owned_row_matrix) {
+                insert_vector_view = insert_matrix_view;
+            } else {
+                owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_);
+                insert_vector_view = &*owned_row_vector;
+            }
+        }
+    }
+
     auto for_each_cell = [&](auto&& callback) {
-        if (options_.ghost_policy == GhostPolicy::OwnedRowsOnly) {
+        if (owned_rows_only) {
             mesh.forEachCell(std::forward<decltype(callback)>(callback));
         } else {
             // Default behavior for distributed meshes: assemble each cell exactly once to avoid
@@ -1022,12 +1750,12 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         // Insert into global system
         if (options_.use_constraints && constraint_distributor_) {
             insertLocalConstrained(kernel_output_, row_dofs_, col_dofs_,
-                                   assemble_matrix ? matrix_view : nullptr,
-                                   assemble_vector ? vector_view : nullptr);
+                                   assemble_matrix ? insert_matrix_view : nullptr,
+                                   assemble_vector ? insert_vector_view : nullptr);
         } else {
             insertLocal(kernel_output_, row_dofs_, col_dofs_,
-                        assemble_matrix ? matrix_view : nullptr,
-                        assemble_vector ? vector_view : nullptr);
+                        assemble_matrix ? insert_matrix_view : nullptr,
+                        assemble_vector ? insert_vector_view : nullptr);
         }
 
         result.elements_assembled++;
@@ -1361,6 +2089,7 @@ void StandardAssembler::prepareContext(
 
     // 9. Configure context with basic info
     context.configure(cell_id, test_space, trial_space, required_data);
+    context.setCellDomainId(mesh.getCellDomainId(cell_id));
 
     // 10. Set all computed data into context
     context.setQuadratureData(scratch_quad_points_, scratch_quad_weights_);
@@ -1795,6 +2524,7 @@ void StandardAssembler::prepareContextFace(
 
     // 10. Configure face context and set computed data
     context.configureFace(face_id, cell_id, local_face_id, test_space, trial_space, required_data, type);
+    context.setCellDomainId(mesh.getCellDomainId(cell_id));
     context.setQuadratureData(scratch_quad_points_, scratch_quad_weights_);
     context.setPhysicalPoints(scratch_phys_points_);
     context.setJacobianData(scratch_jacobians_, scratch_inv_jacobians_, scratch_jac_dets_);

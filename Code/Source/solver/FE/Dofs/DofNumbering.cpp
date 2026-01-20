@@ -287,6 +287,7 @@ GlobalIndex CuthillMcKeeNumbering::findPeripheralVertex(
     std::span<const GlobalIndex> adjacency,
     std::span<const GlobalIndex> adj_indices) const {
 
+    static_cast<void>(adj_indices);
     if (n_dofs == 0) return 0;
 
     // Find minimum degree vertex as starting point
@@ -388,6 +389,7 @@ std::vector<GlobalIndex> SpaceFillingCurveNumbering::computeNumbering(
     std::span<const GlobalIndex> /*adj_indices*/) const {
 
     if (n_dofs == 0) return {};
+    FE_CHECK_ARG(dim_ > 0, "SpaceFillingCurveNumbering: dim must be positive");
 
     // If no coordinates, return identity
     if (coords_.empty()) {
@@ -397,14 +399,16 @@ std::vector<GlobalIndex> SpaceFillingCurveNumbering::computeNumbering(
     }
 
     // Compute curve index for each DOF
-    std::size_t n_vertices = coords_.size() / static_cast<std::size_t>(dim_);
+    const std::size_t dim_u = static_cast<std::size_t>(dim_);
+    std::size_t n_vertices = coords_.size() / dim_u;
     std::vector<std::pair<uint64_t, GlobalIndex>> curve_indices;
     curve_indices.reserve(n_vertices);
 
     for (std::size_t v = 0; v < n_vertices && v < static_cast<std::size_t>(n_dofs); ++v) {
-        double x = coords_[v * dim_];
-        double y = (dim_ >= 2) ? coords_[v * dim_ + 1] : 0.0;
-        double z = (dim_ >= 3) ? coords_[v * dim_ + 2] : 0.0;
+        const std::size_t base = v * dim_u;
+        double x = coords_[base];
+        double y = (dim_ >= 2) ? coords_[base + 1] : 0.0;
+        double z = (dim_ >= 3) ? coords_[base + 2] : 0.0;
 
         uint64_t index = (type_ == CurveType::Hilbert)
             ? hilbertIndex(x, y, z)

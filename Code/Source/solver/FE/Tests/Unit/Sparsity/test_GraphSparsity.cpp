@@ -189,7 +189,7 @@ TEST(GraphSparsityTest, ComputeDegrees) {
 
     EXPECT_EQ(degrees.size(), 5);
     EXPECT_EQ(degrees[0], 4);  // Center connected to all
-    for (GlobalIndex i = 1; i < 5; ++i) {
+    for (std::size_t i = 1; i < degrees.size(); ++i) {
         EXPECT_EQ(degrees[i], 1);  // Leaves connected only to center
     }
 }
@@ -281,7 +281,7 @@ TEST(GraphSparsityTest, GetVerticesOfColor) {
 
         // Verify all returned vertices have correct color
         for (GlobalIndex v : vertices) {
-            EXPECT_EQ(coloring.colors[v], c);
+            EXPECT_EQ(coloring.colors[static_cast<std::size_t>(v)], c);
         }
     }
 }
@@ -326,8 +326,8 @@ TEST(GraphSparsityTest, ReverseCuthillMcKee) {
     // Verify valid permutation
     std::vector<GlobalIndex> sorted_perm = perm;
     std::sort(sorted_perm.begin(), sorted_perm.end());
-    for (GlobalIndex i = 0; i < 10; ++i) {
-        EXPECT_EQ(sorted_perm[i], i);
+    for (std::size_t i = 0; i < sorted_perm.size(); ++i) {
+        EXPECT_EQ(sorted_perm[i], static_cast<GlobalIndex>(i));
     }
 }
 
@@ -386,8 +386,8 @@ TEST(GraphSparsityTest, ApproximateMinimumDegree) {
     // Verify valid permutation
     std::vector<GlobalIndex> sorted_perm = perm;
     std::sort(sorted_perm.begin(), sorted_perm.end());
-    for (GlobalIndex i = 0; i < 5; ++i) {
-        EXPECT_EQ(sorted_perm[i], i);
+    for (std::size_t i = 0; i < sorted_perm.size(); ++i) {
+        EXPECT_EQ(sorted_perm[i], static_cast<GlobalIndex>(i));
     }
 }
 

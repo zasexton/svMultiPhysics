@@ -95,11 +95,13 @@ namespace {
 	    const auto& coords = ((cfg == Configuration::Current || cfg == Configuration::Deformed) && mesh.has_current_coords())
 	                             ? mesh.X_cur()
 	                             : mesh.X_ref();
-	    int dim = mesh.dim();
+	    const int dim = mesh.dim();
+	    const size_t sdim = dim > 0 ? static_cast<size_t>(dim) : size_t{0};
+	    const size_t sn = static_cast<size_t>(n);
 	    std::array<real_t,3> p = {0.0, 0.0, 0.0};
-	    if (dim >= 1) p[0] = coords[static_cast<size_t>(n) * dim + 0];
-	    if (dim >= 2) p[1] = coords[static_cast<size_t>(n) * dim + 1];
-	    if (dim >= 3) p[2] = coords[static_cast<size_t>(n) * dim + 2];
+	    if (dim >= 1) p[0] = coords[sn * sdim + 0];
+	    if (dim >= 2) p[1] = coords[sn * sdim + 1];
+	    if (dim >= 3) p[2] = coords[sn * sdim + 2];
 	    return p;
 	  }
 
@@ -290,19 +292,19 @@ namespace {
           break;
         }
 
-        if (!found) {
-          // Try to remove a nearly collinear vertex to make progress.
-          bool removed = false;
-          const size_t n = idx.size();
-          for (size_t pos = 0; pos < n; ++pos) {
-            const size_t ip = (pos + n - 1) % n;
-            const size_t in = (pos + 1) % n;
-            const index_t a = idx[ip];
-            const index_t b = idx[pos];
-            const index_t c = idx[in];
-            const real_t o = orient2d(pts[static_cast<size_t>(a)],
-                                      pts[static_cast<size_t>(b)],
-                                      pts[static_cast<size_t>(c)]);
+	        if (!found) {
+	          // Try to remove a nearly collinear vertex to make progress.
+	          bool removed = false;
+	          const size_t n2 = idx.size();
+	          for (size_t pos = 0; pos < n2; ++pos) {
+	            const size_t ip = (pos + n2 - 1) % n2;
+	            const size_t in = (pos + 1) % n2;
+	            const index_t a = idx[ip];
+	            const index_t b = idx[pos];
+	            const index_t c = idx[in];
+	            const real_t o = orient2d(pts[static_cast<size_t>(a)],
+	                                      pts[static_cast<size_t>(b)],
+	                                      pts[static_cast<size_t>(c)]);
             if (std::abs(o) <= tol) {
               idx.erase(idx.begin() + static_cast<std::vector<index_t>::difference_type>(pos));
               removed = true;

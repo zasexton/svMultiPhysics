@@ -107,13 +107,16 @@ public:
 
   void finalize();
 
-  // ---- Basic queries ----
-  int dim() const noexcept { return spatial_dim_; }
-  const std::string& mesh_id() const noexcept { return mesh_id_; }
-  size_t n_vertices() const noexcept { return X_ref_.size() / (spatial_dim_ > 0 ? spatial_dim_ : 1); }
-  size_t n_cells() const noexcept { return cell_shape_.size(); }
-  size_t n_faces() const noexcept { return face_shape_.size(); }
-  size_t n_edges() const noexcept { return edge2vertex_.size(); }
+	  // ---- Basic queries ----
+	  int dim() const noexcept { return spatial_dim_; }
+	  const std::string& mesh_id() const noexcept { return mesh_id_; }
+	  size_t n_vertices() const noexcept {
+	    const size_t spatial_dim = spatial_dim_ > 0 ? static_cast<size_t>(spatial_dim_) : size_t{1};
+	    return X_ref_.size() / spatial_dim;
+	  }
+	  size_t n_cells() const noexcept { return cell_shape_.size(); }
+	  size_t n_faces() const noexcept { return face_shape_.size(); }
+	  size_t n_edges() const noexcept { return edge2vertex_.size(); }
   // Number of boundary faces (faces with a single incident cell or explicitly marked)
   size_t n_boundary_faces() const { return boundary_faces().size(); }
 

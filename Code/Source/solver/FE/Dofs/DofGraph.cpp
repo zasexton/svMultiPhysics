@@ -375,7 +375,9 @@ void DofGraph::removeDuplicates() {
         auto end = static_cast<std::size_t>(row_offsets_[static_cast<std::size_t>(d) + 1]);
 
         if (start < end && end <= col_indices_.size()) {
-            std::sort(col_indices_.begin() + start, col_indices_.begin() + end);
+            const auto start_it = col_indices_.begin() + static_cast<std::ptrdiff_t>(start);
+            const auto end_it = col_indices_.begin() + static_cast<std::ptrdiff_t>(end);
+            std::sort(start_it, end_it);
         }
     }
 
@@ -414,7 +416,9 @@ void DofGraph::sortIndices() {
         auto end = static_cast<std::size_t>(row_offsets_[static_cast<std::size_t>(d) + 1]);
 
         if (start < end && end <= col_indices_.size()) {
-            std::sort(col_indices_.begin() + start, col_indices_.begin() + end);
+            const auto start_it = col_indices_.begin() + static_cast<std::ptrdiff_t>(start);
+            const auto end_it = col_indices_.begin() + static_cast<std::ptrdiff_t>(end);
+            std::sort(start_it, end_it);
         }
     }
 }

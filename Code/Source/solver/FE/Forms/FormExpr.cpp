@@ -282,6 +282,14 @@ public:
     [[nodiscard]] bool hasTrial() const noexcept override { return false; }
 };
 
+class CellDomainIdNode final : public FormExprNode {
+public:
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::CellDomainId; }
+    [[nodiscard]] std::string toString() const override { return "domain(K)"; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+};
+
 class CoefficientNode final : public FormExprNode {
 public:
     explicit CoefficientNode(std::string name, ScalarCoefficient func)
@@ -1290,6 +1298,25 @@ public:
     }
 };
 
+class InterfaceIntegralNode final : public UnaryNode {
+public:
+    InterfaceIntegralNode(std::shared_ptr<FormExprNode> child, int interface_marker)
+        : UnaryNode(std::move(child)), interface_marker_(interface_marker)
+    {
+    }
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::InterfaceIntegral; }
+    [[nodiscard]] std::string toString() const override {
+        std::string marker_str = interface_marker_ >= 0 ? std::to_string(interface_marker_) : "all";
+        return "integral_I_" + marker_str + "(" + child_->toString() + ") dI";
+    }
+
+    [[nodiscard]] std::optional<int> interfaceMarker() const override { return interface_marker_; }
+
+private:
+    int interface_marker_{-1};
+};
+
 } // namespace
 
 // ============================================================================
@@ -1517,6 +1544,11 @@ FormExpr FormExpr::cellVolume()
 FormExpr FormExpr::facetArea()
 {
     return FormExpr(std::make_shared<FacetAreaNode>());
+}
+
+FormExpr FormExpr::cellDomainId()
+{
+    return FormExpr(std::make_shared<CellDomainIdNode>());
 }
 
 FormExpr FormExpr::asVector(std::vector<FormExpr> components)
@@ -1900,6 +1932,12 @@ FormExpr FormExpr::dS() const
     return FormExpr(std::make_shared<InteriorFaceIntegralNode>(node_));
 }
 
+FormExpr FormExpr::dI(int interface_marker) const
+{
+    if (!node_) return {};
+    return FormExpr(std::make_shared<InterfaceIntegralNode>(node_, interface_marker));
+}
+
 namespace {
 
 std::shared_ptr<FormExprNode> transformNodeShared(
@@ -2005,6 +2043,10 @@ std::shared_ptr<FormExprNode> transformNodeShared(
             return std::make_shared<BoundaryIntegralNode>(new_kids[0], marker);
         }
         case FormExprType::InteriorFaceIntegral: return std::make_shared<InteriorFaceIntegralNode>(new_kids[0]);
+        case FormExprType::InterfaceIntegral: {
+            const int marker = node->interfaceMarker().value_or(-1);
+            return std::make_shared<InterfaceIntegralNode>(new_kids[0], marker);
+        }
 
         case FormExprType::Constitutive: {
             auto model = node->constitutiveModelShared();

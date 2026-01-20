@@ -486,8 +486,8 @@ void ConstraintDistributor::distributeLocalToGlobalBatch(
     std::size_t rhs_offset = 0;
 
     for (GlobalIndex cell = 0; cell < n_cells; ++cell) {
-        auto dof_start = static_cast<std::size_t>(cell_dof_offsets[cell]);
-        auto dof_end = static_cast<std::size_t>(cell_dof_offsets[cell + 1]);
+        auto dof_start = static_cast<std::size_t>(cell_dof_offsets[static_cast<std::size_t>(cell)]);
+        auto dof_end = static_cast<std::size_t>(cell_dof_offsets[static_cast<std::size_t>(cell + 1)]);
         std::size_t n_dofs = dof_end - dof_start;
         std::size_t matrix_size = n_dofs * n_dofs;
 

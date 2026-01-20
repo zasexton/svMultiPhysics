@@ -573,12 +573,12 @@ void HangingVertexConstraints::detect_edge_hanging(
 
       // If vertex is not in all cells sharing the edge, it's hanging
       if (containing_cells > 0 && containing_cells < cells.size()) {
-        HangingVertexConstraint constraint;
-        constraint.constrained_vertex = v;
-        constraint.parent_type = ConstraintParentType::Edge;
-        constraint.parent_vertices = {v1, v2};
-        constraint.weights = compute_edge_weights(mesh, v, v1, v2);
-        constraint.adjacent_cells = adjacent_cells;
+	        HangingVertexConstraint constraint;
+	        constraint.constrained_vertex = v;
+	        constraint.parent_type = ConstraintParentType::Edge;
+	        constraint.parent_vertices = std::vector<index_t>{v1, v2};
+	        constraint.weights = compute_edge_weights(mesh, v, v1, v2);
+	        constraint.adjacent_cells = adjacent_cells;
 
         // Determine refinement level if provided
         if (refinement_levels) {
@@ -666,12 +666,12 @@ void HangingVertexConstraints::detect_face_hanging(
 
       // If vertex is not in all cells sharing the face, it's hanging
       if (containing_cells > 0 && containing_cells < cells.size()) {
-        HangingVertexConstraint constraint;
-        constraint.constrained_vertex = v;
-        constraint.parent_type = ConstraintParentType::Face;
-        constraint.parent_vertices = face_vertices;
-        constraint.weights = compute_face_weights(mesh, v, face_vertices);
-        constraint.adjacent_cells = adjacent_cells;
+	        HangingVertexConstraint constraint;
+	        constraint.constrained_vertex = v;
+	        constraint.parent_type = ConstraintParentType::Face;
+	        constraint.parent_vertices = std::vector<index_t>(face_vertices.begin(), face_vertices.end());
+	        constraint.weights = compute_face_weights(mesh, v, face_vertices);
+	        constraint.adjacent_cells = adjacent_cells;
 
         // Determine refinement level if provided
         if (refinement_levels) {
@@ -1575,13 +1575,13 @@ HangingVertexUtils::detect_hanging_vertices(const MeshBase& mesh,
           auto edges = get_cell_edges(mesh, neighbor_id);
           for (const auto& edge : edges) {
             if (vertex_on_edge(mesh, v, edge.first, edge.second)) {
-              HangingVertexInfo info;
-              info.vertex_id = v;
-              info.parent_type = ConstraintParentType::Edge;
-              info.parent_vertices = {edge.first, edge.second};
-              info.weights = {0.5, 0.5};  // Midpoint weights
-              info.coarse_neighbors.push_back(neighbor_id);
-              hanging_vertices[v] = info;
+	              HangingVertexInfo info;
+	              info.vertex_id = v;
+	              info.parent_type = ConstraintParentType::Edge;
+	              info.parent_vertices = std::vector<index_t>{edge.first, edge.second};
+	              info.weights = {0.5, 0.5};  // Midpoint weights
+	              info.coarse_neighbors.push_back(neighbor_id);
+	              hanging_vertices[v] = info;
               break;
             }
           }
@@ -1591,13 +1591,13 @@ HangingVertexUtils::detect_hanging_vertices(const MeshBase& mesh,
             auto faces = get_cell_faces(mesh, neighbor_id);
             for (const auto& face : faces) {
               if (vertex_on_face(mesh, v, face)) {
-                HangingVertexInfo info;
-                info.vertex_id = v;
-                info.parent_type = ConstraintParentType::Face;
-                info.parent_vertices = face;
-                compute_barycentric_weights(mesh, v, face, info.weights);
-                info.coarse_neighbors.push_back(neighbor_id);
-                hanging_vertices[v] = info;
+	                HangingVertexInfo info;
+	                info.vertex_id = v;
+	                info.parent_type = ConstraintParentType::Face;
+	                info.parent_vertices = std::vector<index_t>(face.begin(), face.end());
+	                compute_barycentric_weights(mesh, v, face, info.weights);
+	                info.coarse_neighbors.push_back(neighbor_id);
+	                hanging_vertices[v] = info;
                 break;
               }
             }
@@ -1616,12 +1616,12 @@ HangingVertexUtils::generate_constraints(const MeshBase& mesh,
   std::vector<HangingVertexConstraint> constraints;
 
   for (const auto& [vertex_id, info] : hanging_vertices) {
-    HangingVertexConstraint constraint;
-    constraint.constrained_vertex = vertex_id;
-    constraint.parent_type = info.parent_type;
-    constraint.parent_vertices = info.parent_vertices;
-    constraint.weights = info.weights;
-    constraint.refinement_level = info.level_difference + 1;
+	    HangingVertexConstraint constraint;
+	    constraint.constrained_vertex = vertex_id;
+	    constraint.parent_type = info.parent_type;
+	    constraint.parent_vertices = std::vector<index_t>(info.parent_vertices.begin(), info.parent_vertices.end());
+	    constraint.weights = info.weights;
+	    constraint.refinement_level = info.level_difference + 1;
 
     // Add adjacent cells
     auto v_cells = mesh.vertex_cells(vertex_id);

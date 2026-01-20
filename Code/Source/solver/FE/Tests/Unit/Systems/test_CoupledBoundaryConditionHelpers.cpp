@@ -130,11 +130,8 @@ TEST(CoupledBoundaryConditionHelpers, ApplyCoupledNeumann_RegistersAuxStateAndRe
     reg.spec.associated_markers = {2};
     reg.initial_values = {0.0};
     reg.required_integrals = {Q};
-    reg.rhs = [](const svmp::FE::systems::AuxiliaryState& /*state*/,
-                 const svmp::FE::forms::BoundaryFunctionalResults& integrals,
-                 Real /*t*/) {
-        return integrals.get("Q");
-    };
+    reg.rhs = svmp::FE::forms::FormExpr::boundaryIntegralValue("Q");
+    reg.integrator = svmp::FE::systems::ODEMethod::ForwardEuler;
 
     const svmp::FE::constraints::CoupledNeumannBC bc(
         /*boundary_marker=*/2,
@@ -259,6 +256,152 @@ TEST(CoupledBoundaryConditionHelpers, ApplyCoupledRobin_UsesBoundaryFunctionalIn
     EXPECT_NEAR(rhs.getVectorEntry(3), 0.0, 1e-12);
 }
 
+TEST(CoupledBoundaryConditionHelpers, CoupledBoundaryIntegral_JacobianIncludesChainRuleTerm)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(/*boundary_marker=*/2);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("residual");
+
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+
+    // Provide a (zero) cell term so the residual has a TrialFunction and a defined trial space.
+    auto residual = (svmp::FE::forms::FormExpr::constant(0.0) * u * v).dx();
+
+    const auto Q = svmp::FE::forms::FormExpr::boundaryIntegral(
+        svmp::FE::forms::FormExpr::discreteField(u_field, *space, "u"),
+        /*boundary_marker=*/2,
+        /*name=*/"Q");
+
+    residual = svmp::FE::systems::bc::applyCoupledNeumann(
+        sys,
+        u_field,
+        residual,
+        v,
+        /*boundary_marker=*/2,
+        /*flux=*/Q);
+
+    svmp::FE::systems::installResidualForm(sys, "residual", u_field, u_field, residual);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup(/*opts=*/{}, inputs);
+
+    std::vector<Real> u_n = {1.0, 2.0, 3.0, 4.0};
+    svmp::FE::systems::SystemStateView state;
+    state.time = 0.0;
+    state.dt = 1.0;
+    state.u = std::span<const Real>(u_n.data(), u_n.size());
+
+    svmp::FE::assembly::DenseMatrixView jac(4);
+    jac.zero();
+
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "residual";
+    req.want_matrix = true;
+    req.want_vector = false;
+    req.zero_outputs = true;
+    (void)sys.assemble(req, state, &jac, nullptr);
+
+    const Real area = 0.5;
+    const Real w = area / 3.0;
+    const Real expected = -w * w;
+
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            const Real v = jac.getMatrixEntry(i, j);
+            if (i < 3 && j < 3) {
+                EXPECT_NEAR(v, expected, 1e-12);
+            } else {
+                EXPECT_NEAR(v, 0.0, 1e-12);
+            }
+        }
+    }
+}
+
+TEST(CoupledBoundaryConditionHelpers, CoupledAuxiliaryState_JacobianIncludesChainRuleTerm)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(/*boundary_marker=*/2);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("residual");
+
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+
+    // Provide a (zero) cell term so the residual has a TrialFunction and a defined trial space.
+    auto residual = (svmp::FE::forms::FormExpr::constant(0.0) * u * v).dx();
+
+    // Define Q(u) = ∫ u ds and evolve X via Forward Euler: X <- X_prev + dt*Q.
+    svmp::FE::forms::BoundaryFunctional Q;
+    Q.integrand = svmp::FE::forms::FormExpr::discreteField(u_field, *space, "u");
+    Q.boundary_marker = 2;
+    Q.name = "Q";
+    Q.reduction = svmp::FE::forms::BoundaryFunctional::Reduction::Sum;
+
+    svmp::FE::systems::AuxiliaryStateRegistration reg;
+    reg.spec.size = 1;
+    reg.spec.name = "X";
+    reg.spec.associated_markers = {2};
+    reg.initial_values = {0.0};
+    reg.required_integrals = {Q};
+    reg.rhs = svmp::FE::forms::FormExpr::boundaryIntegralValue("Q");
+    reg.integrator = svmp::FE::systems::ODEMethod::ForwardEuler;
+
+    const auto flux = svmp::FE::forms::FormExpr::auxiliaryState("X");
+
+    residual = svmp::FE::systems::bc::applyCoupledNeumann(
+        sys,
+        u_field,
+        residual,
+        v,
+        /*boundary_marker=*/2,
+        /*flux=*/flux,
+        std::span<const svmp::FE::systems::AuxiliaryStateRegistration>(&reg, 1));
+
+    svmp::FE::systems::installResidualForm(sys, "residual", u_field, u_field, residual);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup(/*opts=*/{}, inputs);
+
+    std::vector<Real> u_n = {1.0, 2.0, 3.0, 4.0};
+    svmp::FE::systems::SystemStateView state;
+    state.time = 0.0;
+    state.dt = 1.0;
+    state.u = std::span<const Real>(u_n.data(), u_n.size());
+
+    svmp::FE::assembly::DenseMatrixView jac(4);
+    jac.zero();
+
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "residual";
+    req.want_matrix = true;
+    req.want_vector = false;
+    req.zero_outputs = true;
+    (void)sys.assemble(req, state, &jac, nullptr);
+
+    const Real area = 0.5;
+    const Real w = area / 3.0;
+    const Real expected = -w * w;
+
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            const Real v = jac.getMatrixEntry(i, j);
+            if (i < 3 && j < 3) {
+                EXPECT_NEAR(v, expected, 1e-12);
+            } else {
+                EXPECT_NEAR(v, 0.0, 1e-12);
+            }
+        }
+    }
+}
+
 TEST(CoupledBoundaryConditionHelpers, ApplyCoupledNeumann_ExpressionAware_BoundaryIntegralSymbol)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(/*boundary_marker=*/2);
@@ -327,11 +470,8 @@ TEST(CoupledBoundaryConditionHelpers, ApplyCoupledNeumann_ExpressionAware_Auxili
     reg.spec.size = 1;
     reg.spec.name = "X";
     reg.initial_values = {1.0};
-    reg.rhs = [](const svmp::FE::systems::AuxiliaryState&,
-                 const svmp::FE::forms::BoundaryFunctionalResults&,
-                 Real) {
-        return 0.0;
-    };
+    reg.rhs = svmp::FE::forms::FormExpr::constant(0.0);
+    reg.integrator = svmp::FE::systems::ODEMethod::ForwardEuler;
 
     const auto flux = svmp::FE::forms::FormExpr::auxiliaryState("X");
 

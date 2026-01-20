@@ -81,6 +81,7 @@ void AssemblyContext::configure(
 {
     type_ = ContextType::Cell;
     cell_id_ = cell_id;
+    cell_domain_id_ = 0;
     face_id_ = -1;
     local_face_id_ = 0;
     boundary_marker_ = -1;
@@ -124,6 +125,7 @@ void AssemblyContext::configure(
 {
     type_ = ContextType::Cell;
     cell_id_ = cell_id;
+    cell_domain_id_ = 0;
     face_id_ = -1;
     local_face_id_ = 0;
     boundary_marker_ = -1;
@@ -166,6 +168,7 @@ void AssemblyContext::configureFace(
 {
     type_ = type;
     cell_id_ = cell_id;
+    cell_domain_id_ = 0;
     face_id_ = face_id;
     local_face_id_ = local_face_id;
     required_data_ = required_data;
@@ -208,6 +211,7 @@ void AssemblyContext::configureFace(
 {
     type_ = type;
     cell_id_ = cell_id;
+    cell_domain_id_ = 0;
     face_id_ = face_id;
     local_face_id_ = local_face_id;
     required_data_ = required_data;
@@ -242,6 +246,7 @@ void AssemblyContext::configureFace(
 void AssemblyContext::clear()
 {
     cell_id_ = -1;
+    cell_domain_id_ = 0;
     face_id_ = -1;
     n_test_dofs_ = 0;
     n_trial_dofs_ = 0;

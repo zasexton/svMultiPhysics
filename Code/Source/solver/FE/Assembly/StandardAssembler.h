@@ -254,6 +254,18 @@ public:
         GlobalSystemView& matrix_view,
         GlobalSystemView* vector_view) override;
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    [[nodiscard]] AssemblyResult assembleInterfaceFaces(
+        const IMeshAccess& mesh,
+        const svmp::InterfaceMesh& interface_mesh,
+        int interface_marker,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        AssemblyKernel& kernel,
+        GlobalSystemView& matrix_view,
+        GlobalSystemView* vector_view) override;
+#endif
+
     // =========================================================================
     // Lifecycle
     // =========================================================================

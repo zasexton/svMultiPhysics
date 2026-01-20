@@ -811,6 +811,7 @@ void AssemblyLoop::prepareContext(
     RequiredData required_data)
 {
     context.configure(cell.cell_id, test_space, trial_space, required_data);
+    context.setCellDomainId(mesh_->getCellDomainId(cell.cell_id));
 }
 
 void AssemblyLoop::prepareContextFace(
@@ -821,6 +822,7 @@ void AssemblyLoop::prepareContextFace(
 {
     context.configureFace(face.face_id, face.cell_id, face.local_face_id,
                          space, space, required_data, ContextType::BoundaryFace);
+    context.setCellDomainId(mesh_->getCellDomainId(face.cell_id));
 }
 
 void AssemblyLoop::getCellDofs(

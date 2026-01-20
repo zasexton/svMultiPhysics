@@ -425,26 +425,27 @@ void collectIntegralTerms(
                                              const FormExpr& integrand_expr,
                                              int integrand_sign,
                                              IntegralDomain domain,
-                                             int marker) -> void {
+                                             int boundary_marker,
+                                             int interface_marker) -> void {
         const auto& in = *integrand_expr.node();
         const auto kids = in.childrenShared();
 
         switch (in.type()) {
             case FormExprType::Add: {
                 if (kids.size() != 2) throw std::logic_error("Add node must have 2 children");
-                self(self, makeExprFromNode(kids[0]), integrand_sign, domain, marker);
-                self(self, makeExprFromNode(kids[1]), integrand_sign, domain, marker);
+                self(self, makeExprFromNode(kids[0]), integrand_sign, domain, boundary_marker, interface_marker);
+                self(self, makeExprFromNode(kids[1]), integrand_sign, domain, boundary_marker, interface_marker);
                 return;
             }
             case FormExprType::Subtract: {
                 if (kids.size() != 2) throw std::logic_error("Subtract node must have 2 children");
-                self(self, makeExprFromNode(kids[0]), integrand_sign, domain, marker);
-                self(self, makeExprFromNode(kids[1]), -integrand_sign, domain, marker);
+                self(self, makeExprFromNode(kids[0]), integrand_sign, domain, boundary_marker, interface_marker);
+                self(self, makeExprFromNode(kids[1]), -integrand_sign, domain, boundary_marker, interface_marker);
                 return;
             }
             case FormExprType::Negate: {
                 if (kids.size() != 1) throw std::logic_error("Negate node must have 1 child");
-                self(self, makeExprFromNode(kids[0]), -integrand_sign, domain, marker);
+                self(self, makeExprFromNode(kids[0]), -integrand_sign, domain, boundary_marker, interface_marker);
                 return;
             }
             default:
@@ -458,7 +459,8 @@ void collectIntegralTerms(
 
         IntegralTerm term;
         term.domain = domain;
-        term.boundary_marker = marker;
+        term.boundary_marker = boundary_marker;
+        term.interface_marker = interface_marker;
         term.integrand = std::move(integrand);
         term.debug_string = term.integrand.toString();
         out_terms.push_back(std::move(term));
@@ -488,7 +490,8 @@ void collectIntegralTerms(
                                     makeExprFromNode(children[0]),
                                     sign,
                                     IntegralDomain::Cell,
-                                    /*marker=*/-1);
+                                    /*boundary_marker=*/-1,
+                                    /*interface_marker=*/-1);
             return;
         }
         case FormExprType::BoundaryIntegral: {
@@ -498,7 +501,8 @@ void collectIntegralTerms(
                                     makeExprFromNode(children[0]),
                                     sign,
                                     IntegralDomain::Boundary,
-                                    marker);
+                                    /*boundary_marker=*/marker,
+                                    /*interface_marker=*/-1);
             return;
         }
         case FormExprType::InteriorFaceIntegral: {
@@ -507,7 +511,19 @@ void collectIntegralTerms(
                                     makeExprFromNode(children[0]),
                                     sign,
                                     IntegralDomain::InteriorFace,
-                                    /*marker=*/-1);
+                                    /*boundary_marker=*/-1,
+                                    /*interface_marker=*/-1);
+            return;
+        }
+        case FormExprType::InterfaceIntegral: {
+            if (children.size() != 1) throw std::logic_error("InterfaceIntegral node must have 1 child");
+            const int marker = n.interfaceMarker().value_or(-1);
+            collect_integrand_terms(collect_integrand_terms,
+                                    makeExprFromNode(children[0]),
+                                    sign,
+                                    IntegralDomain::InterfaceFace,
+                                    /*boundary_marker=*/-1,
+                                    /*interface_marker=*/marker);
             return;
         }
         default:
@@ -553,13 +569,15 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
         }
 
         // Face terms require face geometry context (surface measure, normals).
-        if (t.domain == IntegralDomain::Boundary || t.domain == IntegralDomain::InteriorFace) {
+        if (t.domain == IntegralDomain::Boundary ||
+            t.domain == IntegralDomain::InteriorFace ||
+            t.domain == IntegralDomain::InterfaceFace) {
             t.required_data |= assembly::RequiredData::Normals;
         }
 
         // Interior-face terms require plus-side (neighbor) context; include
         // DG-oriented flags so assemblers can prepare the correct data.
-        if (t.domain == IntegralDomain::InteriorFace) {
+        if (t.domain == IntegralDomain::InteriorFace || t.domain == IntegralDomain::InterfaceFace) {
             t.required_data |= assembly::RequiredData::NeighborData;
             t.required_data |= assembly::RequiredData::FaceOrientations;
         }
@@ -595,6 +613,7 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
             case IntegralDomain::Cell: oss << "dx"; break;
             case IntegralDomain::Boundary: oss << "ds(" << t.boundary_marker << ")"; break;
             case IntegralDomain::InteriorFace: oss << "dS"; break;
+            case IntegralDomain::InterfaceFace: oss << "dI(" << t.interface_marker << ")"; break;
         }
         if (t.time_derivative_order > 0) {
             oss << " [dt^" << t.time_derivative_order << "]";

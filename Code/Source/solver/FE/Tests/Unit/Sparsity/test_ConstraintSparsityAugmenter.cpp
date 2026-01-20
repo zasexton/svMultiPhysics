@@ -176,6 +176,7 @@ TEST(ConstraintSparsityAugmenterTest, EliminationFillSimple) {
 
     ConstraintSparsityAugmenter augmenter(std::move(constraints));
     auto stats = augmenter.augment(pattern, AugmentationMode::EliminationFill);
+    static_cast<void>(stats);
 
     // Original pattern + induced couplings
     EXPECT_GT(pattern.getNnz(), 3);
@@ -411,6 +412,7 @@ TEST(ConstraintSparsityAugmenterTest, ConvenienceAugment) {
     std::vector<SparsityConstraint> constraints = {{2, {1}}};
 
     auto stats = augmentWithConstraints(pattern, constraints);
+    static_cast<void>(stats);
     EXPECT_TRUE(pattern.hasEntry(0, 1));
 }
 
@@ -440,6 +442,7 @@ TEST(ConstraintSparsityAugmenterTest, EmptyPattern) {
 
     ConstraintSparsityAugmenter augmenter(std::move(constraints));
     auto stats = augmenter.augment(pattern, AugmentationMode::EliminationFill);
+    static_cast<void>(stats);
 
     // Should still add diagonal for constrained DOF
     EXPECT_TRUE(pattern.hasEntry(2, 2));

@@ -34,6 +34,7 @@ struct FormCharacteristics {
     bool has_cell_terms{false};
     bool has_boundary_terms{false};
     bool has_interior_face_terms{false};
+    bool has_interface_face_terms{false};
     bool has_global_terms{false};
     bool has_field_requirements{false};
     bool has_parameter_specs{false};
@@ -46,6 +47,7 @@ struct FormCharacteristics {
     [[nodiscard]] bool needsDG() const noexcept
     {
         return has_interior_face_terms ||
+               has_interface_face_terms ||
                hasFlag(required_data, RequiredData::NeighborData) ||
                hasFlag(required_data, RequiredData::FaceOrientations);
     }
@@ -88,6 +90,7 @@ inline void mergeFormCharacteristics(FormCharacteristics& dst, const FormCharact
     dst.has_cell_terms = dst.has_cell_terms || src.has_cell_terms;
     dst.has_boundary_terms = dst.has_boundary_terms || src.has_boundary_terms;
     dst.has_interior_face_terms = dst.has_interior_face_terms || src.has_interior_face_terms;
+    dst.has_interface_face_terms = dst.has_interface_face_terms || src.has_interface_face_terms;
     dst.has_global_terms = dst.has_global_terms || src.has_global_terms;
     dst.has_field_requirements = dst.has_field_requirements || src.has_field_requirements;
     dst.has_parameter_specs = dst.has_parameter_specs || src.has_parameter_specs;

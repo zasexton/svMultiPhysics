@@ -45,9 +45,10 @@ compileBoundaryFunctionalKernel(const FormExpr& integrand, int boundary_marker)
                     "compileBoundaryFunctionalKernel: coupled placeholders are not allowed in integrands");
         FE_THROW_IF(n.type() == FormExprType::CellIntegral ||
                         n.type() == FormExprType::BoundaryIntegral ||
-                        n.type() == FormExprType::InteriorFaceIntegral,
+                        n.type() == FormExprType::InteriorFaceIntegral ||
+                        n.type() == FormExprType::InterfaceIntegral,
                     InvalidArgumentException,
-                    "compileBoundaryFunctionalKernel: measures (dx/ds/dS) are not allowed in integrands");
+                    "compileBoundaryFunctionalKernel: measures (dx/ds/dS/dI) are not allowed in integrands");
         for (const auto& child : n.childrenShared()) {
             if (child) self(self, *child);
         }

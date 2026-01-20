@@ -1428,6 +1428,7 @@ class GeneralSimulationParameters : public ParameterLists
     Parameter<bool> start_averaging_from_zero;
     Parameter<bool> verbose;
     Parameter<bool> warning;
+    Parameter<bool> use_new_oop_solver;
 
     Parameter<double> spectral_radius_of_infinite_time_step;
     Parameter<double> time_step_size;
@@ -1663,4 +1664,3 @@ class Parameters {
 };
 
 #endif
-

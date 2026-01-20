@@ -325,7 +325,7 @@ TEST(SparsityFormatTest, CsrCooCsrRoundtrip) {
         auto orig_row = original.getRowIndices(i);
         auto rec_row = recovered.getRowIndices(i);
         ASSERT_EQ(orig_row.size(), rec_row.size());
-        for (std::size_t k = 0; k < orig_row.size(); ++k) {
+        for (GlobalIndex k = 0; k < orig_row.size(); ++k) {
             EXPECT_EQ(orig_row[k], rec_row[k]);
         }
     }
@@ -803,4 +803,3 @@ TEST(SparsityFormatTest, DiagonalPatternToBsr) {
     // Only diagonal blocks should be present
     EXPECT_GE(bsr.nnzBlocks(), 2);
 }
-

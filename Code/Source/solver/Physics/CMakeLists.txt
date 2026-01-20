@@ -115,6 +115,7 @@ set(PHYSICS_PUBLIC_HEADERS
     Core/ParameterSchema.h
     Core/PhysicsModule.h
     Formulations/Poisson/PoissonModule.h
+    Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h
     Materials/Common/TensorOps.h
     Materials/Fluid/CarreauYasudaViscosity.h
     Materials/Fluid/NewtonianViscosity.h
@@ -126,6 +127,7 @@ set(PHYSICS_SOURCES
     Physics.cpp
     Core/ParameterSchema.cpp
     Formulations/Poisson/PoissonModule.cpp
+    Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.cpp
     Materials/Fluid/CarreauYasudaViscosity.cpp
     Materials/Fluid/NewtonianViscosity.cpp
     Materials/Solid/LinearElasticStress.cpp

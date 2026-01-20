@@ -963,10 +963,16 @@ std::vector<GlobalIndex> extractDofsInRegion(
 
     auto n_vertices = vertex_dof_map.numVertices();
     for (GlobalIndex v = 0; v < n_vertices; ++v) {
-        auto idx = static_cast<std::size_t>(v);
-        double x = (idx * dim < vertex_coords.size()) ? vertex_coords[idx * dim] : 0.0;
-        double y = (dim >= 2 && idx * dim + 1 < vertex_coords.size()) ? vertex_coords[idx * dim + 1] : 0.0;
-        double z = (dim >= 3 && idx * dim + 2 < vertex_coords.size()) ? vertex_coords[idx * dim + 2] : 0.0;
+        const auto idx = static_cast<std::size_t>(v);
+        const auto dim_u = static_cast<std::size_t>(std::max(dim, 0));
+        const auto base = idx * dim_u;
+
+        double x = 0.0;
+        double y = 0.0;
+        double z = 0.0;
+        if (dim >= 1 && base < vertex_coords.size()) x = vertex_coords[base];
+        if (dim >= 2 && base + 1 < vertex_coords.size()) y = vertex_coords[base + 1];
+        if (dim >= 3 && base + 2 < vertex_coords.size()) z = vertex_coords[base + 2];
 
         if (predicate(x, y, z)) {
             auto dofs = vertex_dof_map.getVertexDofs(v);
@@ -1033,7 +1039,8 @@ std::vector<GlobalIndex> extractDofsOnPlane(
 
     // Compute plane constant d from n.p = d
     double d = 0.0;
-    for (int i = 0; i < dim; ++i) {
+    const auto dim_u = static_cast<std::size_t>(std::max(dim, 0));
+    for (std::size_t i = 0; i < dim_u; ++i) {
         d += normal[i] * point[i];
     }
 

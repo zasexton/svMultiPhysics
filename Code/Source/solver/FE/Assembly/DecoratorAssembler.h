@@ -204,6 +204,23 @@ public:
         return base_->assembleInteriorFaces(mesh, test_space, trial_space, kernel, matrix_view, vector_view);
     }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    [[nodiscard]] AssemblyResult assembleInterfaceFaces(
+        const IMeshAccess& mesh,
+        const svmp::InterfaceMesh& interface_mesh,
+        int interface_marker,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        AssemblyKernel& kernel,
+        GlobalSystemView& matrix_view,
+        GlobalSystemView* vector_view) override
+    {
+        return base_->assembleInterfaceFaces(mesh, interface_mesh, interface_marker,
+                                            test_space, trial_space, kernel,
+                                            matrix_view, vector_view);
+    }
+#endif
+
     // =========================================================================
     // Lifecycle
     // =========================================================================

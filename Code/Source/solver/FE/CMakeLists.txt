@@ -64,7 +64,7 @@ option(FE_WITH_MESH "Enable Mesh integration convenience APIs (requires linking 
 option(FE_ENABLE_METIS "Enable METIS reorderings (internal ThirdParty)" ON)
 option(FE_ENABLE_PARMETIS "Enable ParMETIS reorderings (internal ThirdParty, requires MPI)" ON)
 option(FE_ENABLE_PYTHON "Build Python bindings (pybind11)" OFF)
-option(FE_ENABLE_SYMENGINE "Enable SymEngine for symbolic FE spaces (pyramid H(div), wedge/pyramid H(curl))" ON)
+option(FE_ENABLE_SYMENGINE "Enable SymEngine for symbolic FE spaces (pyramid H(div), wedge/pyramid H(curl))" ${FE_STANDALONE_BUILD})
 
 # Testing options
 option(FE_ENABLE_COVERAGE "Enable code coverage analysis" OFF)
@@ -82,33 +82,46 @@ option(FE_ENABLE_SANITIZERS "Enable address/undefined sanitizers" OFF)
 #------------------------------------------------------------------------------
 
 # Warning flags
+#
+# NOTE: Keep warnings scoped to FE targets only. This CMakeLists can bring in
+# optional dependencies (Mesh, METIS/GKlib, SymEngine, GTest, etc.) via
+# add_subdirectory(). Using directory-scope add_compile_options() would apply
+# these flags to dependency targets and cause a flood of warnings from external
+# code and system headers.
+set(_SVMP_FE_WARNING_OPTIONS "")
 if(FE_ENABLE_WARNINGS)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        add_compile_options(
-            -Wall
-            -Wextra
-            -Wpedantic
-            -Wcast-align
-            -Wcast-qual
-            -Wformat=2
-            -Wformat-security
-            -Wnon-virtual-dtor
-            -Wold-style-cast
-            -Woverloaded-virtual
-            -Wshadow
-            -Wsign-conversion
-            -Wunused
+        set(_SVMP_FE_WARNING_OPTIONS
+            $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wcast-align>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wcast-qual>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wformat=2>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wformat-security>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wnon-virtual-dtor>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wold-style-cast>
+            $<$<COMPILE_LANGUAGE:CXX>:-Woverloaded-virtual>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wshadow>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wsign-conversion>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wunused>
         )
         if(FE_WARNINGS_AS_ERRORS)
-            add_compile_options(-Werror)
+            list(APPEND _SVMP_FE_WARNING_OPTIONS $<$<COMPILE_LANGUAGE:CXX>:-Werror>)
         endif()
     elseif(MSVC)
-        add_compile_options(/W4)
+        set(_SVMP_FE_WARNING_OPTIONS $<$<COMPILE_LANGUAGE:CXX>:/W4>)
         if(FE_WARNINGS_AS_ERRORS)
-            add_compile_options(/WX)
+            list(APPEND _SVMP_FE_WARNING_OPTIONS $<$<COMPILE_LANGUAGE:CXX>:/WX>)
         endif()
     endif()
 endif()
+
+function(_svmp_fe_target_enable_warnings target_name)
+    if(_SVMP_FE_WARNING_OPTIONS AND TARGET ${target_name})
+        target_compile_options(${target_name} PRIVATE ${_SVMP_FE_WARNING_OPTIONS})
+    endif()
+endfunction()
 
 # Optimization flags
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -571,6 +584,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/ContactPenaltyKernel.h
     Systems/AuxiliaryState.h
     Systems/AuxiliaryStateBuilder.h
+    Systems/BoundaryConditionManager.h
     Systems/ODEIntegrator.h
     Systems/CoupledBoundaryConditions.h
     Systems/CoupledBoundaryManager.h
@@ -622,10 +636,15 @@ set(FE_SYSTEMS_SOURCES
 # Forms sources (requires FE/Assembly; used by SymbolicAssembler)
 set(FE_FORMS_HEADERS
     Forms/Forms.h
-    Forms/BoundaryConditions.h
-    Forms/BoundaryFunctional.h
-    Forms/AffineAnalysis.h
-    Forms/FormExpr.h
+	    Forms/BoundaryConditions.h
+	    Forms/BoundaryCondition.h
+	    Forms/StandardBCs.h
+	    Forms/CoupledBCs.h
+	    Forms/NitscheBC.h
+	    Forms/ConstraintBCs.h
+	    Forms/BoundaryFunctional.h
+	    Forms/AffineAnalysis.h
+	    Forms/FormExpr.h
     Forms/Index.h
     Forms/Einsum.h
     Forms/FormIR.h
@@ -937,6 +956,8 @@ endif()
 # Add an alias for consistency
 add_library(svfe::svfe ALIAS svfe)
 
+_svmp_fe_target_enable_warnings(svfe)
+
 #------------------------------------------------------------------------------
 # Minimal FE library for DOFs (Core + Math + Quadrature + ReferenceElement +
 # OrientationManager + Dofs). This enables building/testing Dofs independently
@@ -971,6 +992,8 @@ set(FE_DOFS_MINIMAL_SOURCES
 add_library(svfe_dofs STATIC ${FE_DOFS_MINIMAL_HEADERS} ${FE_DOFS_MINIMAL_SOURCES})
 add_library(svfe::dofs ALIAS svfe_dofs)
 
+_svmp_fe_target_enable_warnings(svfe_dofs)
+
 set_target_properties(svfe_dofs PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
@@ -997,15 +1020,15 @@ if(FE_WITH_MESH)
     endif()
 endif()
 
-if(FE_ENABLE_MPI)
-    if(TARGET MPI::MPI_CXX)
-        target_link_libraries(svfe_dofs PUBLIC MPI::MPI_CXX)
-    elseif(DEFINED FE_MPI_CXX_LIBRARIES)
-        target_include_directories(svfe_dofs PUBLIC ${FE_MPI_CXX_INCLUDE_DIRS})
-        target_link_libraries(svfe_dofs PUBLIC ${FE_MPI_CXX_LIBRARIES})
-    endif()
-    target_compile_definitions(svfe_dofs PUBLIC FE_HAS_MPI MESH_ENABLE_MPI MPICH_SKIP_MPICXX OMPI_SKIP_MPICXX _MPICC_H)
-endif()
+	if(FE_ENABLE_MPI)
+	    if(TARGET MPI::MPI_CXX)
+	        target_link_libraries(svfe_dofs PUBLIC MPI::MPI_CXX)
+	    elseif(DEFINED FE_MPI_CXX_LIBRARIES)
+	        target_include_directories(svfe_dofs SYSTEM PUBLIC ${FE_MPI_CXX_INCLUDE_DIRS})
+	        target_link_libraries(svfe_dofs PUBLIC ${FE_MPI_CXX_LIBRARIES})
+	    endif()
+	    target_compile_definitions(svfe_dofs PUBLIC FE_HAS_MPI MESH_ENABLE_MPI MPICH_SKIP_MPICXX OMPI_SKIP_MPICXX _MPICC_H)
+	endif()
 
 if(FE_ENABLE_EIGEN)
     if(DEFINED FE_EIGEN_INCLUDE_DIR AND NOT FE_EIGEN_INCLUDE_DIR STREQUAL "")
@@ -1046,17 +1069,17 @@ endif()
 #
 # MPI is a special case: EnableMPI.cmake is included before the `svfe` target
 # exists, so we apply the discovered MPI configuration here.
-if(FE_ENABLE_MPI)
-    if(TARGET MPI::MPI_CXX)
-        target_link_libraries(svfe PUBLIC MPI::MPI_CXX)
-    elseif(DEFINED FE_MPI_CXX_LIBRARIES)
-        target_include_directories(svfe PUBLIC ${FE_MPI_CXX_INCLUDE_DIRS})
-        target_link_libraries(svfe PUBLIC ${FE_MPI_CXX_LIBRARIES})
-    endif()
-    # Disable removed MPI-2 C++ bindings in common MPI implementations to avoid
-    # pulling deprecated headers (and associated warnings) through <mpi.h>.
-    target_compile_definitions(svfe PUBLIC FE_HAS_MPI MESH_ENABLE_MPI MPICH_SKIP_MPICXX OMPI_SKIP_MPICXX _MPICC_H)
-endif()
+	if(FE_ENABLE_MPI)
+	    if(TARGET MPI::MPI_CXX)
+	        target_link_libraries(svfe PUBLIC MPI::MPI_CXX)
+	    elseif(DEFINED FE_MPI_CXX_LIBRARIES)
+	        target_include_directories(svfe SYSTEM PUBLIC ${FE_MPI_CXX_INCLUDE_DIRS})
+	        target_link_libraries(svfe PUBLIC ${FE_MPI_CXX_LIBRARIES})
+	    endif()
+	    # Disable removed MPI-2 C++ bindings in common MPI implementations to avoid
+	    # pulling deprecated headers (and associated warnings) through <mpi.h>.
+	    target_compile_definitions(svfe PUBLIC FE_HAS_MPI MESH_ENABLE_MPI MPICH_SKIP_MPICXX OMPI_SKIP_MPICXX _MPICC_H)
+	endif()
 
 # Eigen is configured before the `svfe` target exists (EnableEigen.cmake), so
 # apply the discovered include directory + feature define here.
@@ -1087,17 +1110,17 @@ if(FE_ENABLE_ASSEMBLY)
         find_package(MPI REQUIRED COMPONENTS CXX)
     endif()
 
-    if(TARGET MPI::MPI_CXX)
-        target_link_libraries(svfe PUBLIC MPI::MPI_CXX)
-    elseif(DEFINED MPI_CXX_INCLUDE_DIRS AND DEFINED MPI_CXX_LIBRARIES)
-        target_include_directories(svfe PUBLIC ${MPI_CXX_INCLUDE_DIRS})
-        target_link_libraries(svfe PUBLIC ${MPI_CXX_LIBRARIES})
-    elseif(DEFINED FE_MPI_CXX_INCLUDE_DIRS AND DEFINED FE_MPI_CXX_LIBRARIES)
-        target_include_directories(svfe PUBLIC ${FE_MPI_CXX_INCLUDE_DIRS})
-        target_link_libraries(svfe PUBLIC ${FE_MPI_CXX_LIBRARIES})
-    else()
-        message(FATAL_ERROR "FE: FSILS backend requires MPI, but no MPI configuration was found")
-    endif()
+	    if(TARGET MPI::MPI_CXX)
+	        target_link_libraries(svfe PUBLIC MPI::MPI_CXX)
+	    elseif(DEFINED MPI_CXX_INCLUDE_DIRS AND DEFINED MPI_CXX_LIBRARIES)
+	        target_include_directories(svfe SYSTEM PUBLIC ${MPI_CXX_INCLUDE_DIRS})
+	        target_link_libraries(svfe PUBLIC ${MPI_CXX_LIBRARIES})
+	    elseif(DEFINED FE_MPI_CXX_INCLUDE_DIRS AND DEFINED FE_MPI_CXX_LIBRARIES)
+	        target_include_directories(svfe SYSTEM PUBLIC ${FE_MPI_CXX_INCLUDE_DIRS})
+	        target_link_libraries(svfe PUBLIC ${FE_MPI_CXX_LIBRARIES})
+	    else()
+	        message(FATAL_ERROR "FE: FSILS backend requires MPI, but no MPI configuration was found")
+	    endif()
 endif()
 
 #------------------------------------------------------------------------------
@@ -1298,6 +1321,7 @@ if(FE_BUILD_TESTS)
     # Create Math test executable
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Math/test_main.cpp)
         add_executable(test_fe_math ${FE_MATH_TEST_SOURCES})
+        _svmp_fe_target_enable_warnings(test_fe_math)
         target_link_libraries(test_fe_math
             PRIVATE
                 svfe
@@ -1310,6 +1334,7 @@ if(FE_BUILD_TESTS)
     file(GLOB FE_CORE_TEST_SOURCES Tests/Unit/Core/test_*.cpp)
     if(FE_CORE_TEST_SOURCES)
         add_executable(test_fe_core ${FE_CORE_TEST_SOURCES})
+        _svmp_fe_target_enable_warnings(test_fe_core)
         target_link_libraries(test_fe_core
             PRIVATE
                 svfe
@@ -1339,6 +1364,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Quadrature/test_main.cpp
     )
     add_executable(test_fe_quadrature ${FE_QUAD_TEST_SOURCES})
+    _svmp_fe_target_enable_warnings(test_fe_quadrature)
     target_link_libraries(test_fe_quadrature
         PRIVATE
             svfe
@@ -1364,6 +1390,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Basis/test_main.cpp
     )
     add_executable(test_fe_basis ${FE_BASIS_TEST_SOURCES})
+    _svmp_fe_target_enable_warnings(test_fe_basis)
     target_link_libraries(test_fe_basis
         PRIVATE
             svfe
@@ -1384,6 +1411,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Geometry/test_main.cpp
     )
     add_executable(test_fe_geometry ${FE_GEOMETRY_TEST_SOURCES})
+    _svmp_fe_target_enable_warnings(test_fe_geometry)
     target_link_libraries(test_fe_geometry
         PRIVATE
             svfe
@@ -1406,6 +1434,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Elements/test_main.cpp
     )
     add_executable(test_fe_elements ${FE_ELEMENTS_TEST_SOURCES})
+    _svmp_fe_target_enable_warnings(test_fe_elements)
     target_link_libraries(test_fe_elements
         PRIVATE
             svfe
@@ -1417,6 +1446,7 @@ if(FE_BUILD_TESTS)
     file(GLOB FE_SPACES_TEST_SOURCES Tests/Unit/Spaces/test_*.cpp)
     if(FE_SPACES_TEST_SOURCES)
         add_executable(test_fe_spaces ${FE_SPACES_TEST_SOURCES})
+        _svmp_fe_target_enable_warnings(test_fe_spaces)
         target_link_libraries(test_fe_spaces
             PRIVATE
                 svfe
@@ -1446,13 +1476,14 @@ if(FE_BUILD_TESTS)
 		    if(FE_WITH_MESH)
 		        list(APPEND FE_DOFS_TEST_SOURCES Tests/Unit/Dofs/test_DofHandlerMesh.cpp)
 		    endif()
-		    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Dofs/test_main.cpp)
-		        add_executable(test_fe_dofs ${FE_DOFS_TEST_SOURCES})
-		        if(FE_WITH_MESH)
-		            target_link_libraries(test_fe_dofs
-		                PRIVATE
-		                    svfe
-		                    ${GTEST_LIBRARIES}
+			    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Dofs/test_main.cpp)
+			        add_executable(test_fe_dofs ${FE_DOFS_TEST_SOURCES})
+			        _svmp_fe_target_enable_warnings(test_fe_dofs)
+			        if(FE_WITH_MESH)
+			            target_link_libraries(test_fe_dofs
+			                PRIVATE
+			                    svfe
+			                    ${GTEST_LIBRARIES}
 		            )
 		        else()
 		            target_link_libraries(test_fe_dofs
@@ -1486,6 +1517,7 @@ if(FE_BUILD_TESTS)
     )
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Constraints/test_main.cpp)
         add_executable(test_fe_constraints ${FE_CONSTRAINTS_TEST_SOURCES})
+        _svmp_fe_target_enable_warnings(test_fe_constraints)
         target_link_libraries(test_fe_constraints
             PRIVATE
                 svfe
@@ -1529,6 +1561,7 @@ if(FE_BUILD_TESTS)
     )
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Sparsity/test_main.cpp)
         add_executable(test_fe_sparsity ${FE_SPARSITY_TEST_SOURCES})
+        _svmp_fe_target_enable_warnings(test_fe_sparsity)
         target_link_libraries(test_fe_sparsity
             PRIVATE
                 svfe
@@ -1550,12 +1583,13 @@ if(FE_BUILD_TESTS)
 	                Tests/Unit/Backends/test_LinearSolverConformance.cpp
 	                Tests/Unit/Backends/test_PetscBackend.cpp
 	                Tests/Unit/Backends/test_main.cpp
-	            )
-	            add_executable(test_fe_backends ${FE_BACKENDS_TEST_SOURCES})
-	            target_link_libraries(test_fe_backends
-	                PRIVATE
-	                    svfe
-	                    ${GTEST_LIBRARIES}
+		            )
+		            add_executable(test_fe_backends ${FE_BACKENDS_TEST_SOURCES})
+		            _svmp_fe_target_enable_warnings(test_fe_backends)
+		            target_link_libraries(test_fe_backends
+		                PRIVATE
+		                    svfe
+		                    ${GTEST_LIBRARIES}
 	            )
 	            add_test(NAME FE_Backends_Tests COMMAND test_fe_backends)
 	        endif()
@@ -1566,12 +1600,13 @@ if(FE_BUILD_TESTS)
 	                Tests/Unit/Backends/test_TrilinosBackend.cpp
 	                Tests/Unit/Backends/test_LinearSolverConformance_Trilinos.cpp
 	                Tests/Unit/Backends/test_trilinos_main.cpp
-	            )
-	            add_executable(test_fe_backends_trilinos ${FE_TRILINOS_BACKENDS_TEST_SOURCES})
-	            target_link_libraries(test_fe_backends_trilinos
-	                PRIVATE
-	                    svfe
-	                    ${GTEST_LIBRARIES}
+		            )
+		            add_executable(test_fe_backends_trilinos ${FE_TRILINOS_BACKENDS_TEST_SOURCES})
+		            _svmp_fe_target_enable_warnings(test_fe_backends_trilinos)
+		            target_link_libraries(test_fe_backends_trilinos
+		                PRIVATE
+		                    svfe
+		                    ${GTEST_LIBRARIES}
 	            )
 	            add_test(NAME FE_Trilinos_Backends_Tests COMMAND test_fe_backends_trilinos)
 	        endif()
@@ -1597,13 +1632,14 @@ if(FE_BUILD_TESTS)
 	                Tests/Unit/Forms/test_NonlinearFormKernel.cpp
 	                Tests/Unit/Forms/test_ConstitutiveModel.cpp
                 Tests/Unit/Forms/test_PrimitiveTypes.cpp
-                Tests/Unit/Forms/test_main.cpp
-            )
-            add_executable(test_fe_forms ${FE_FORMS_TEST_SOURCES})
-            target_link_libraries(test_fe_forms
-                PRIVATE
-                    svfe
-                    ${GTEST_LIBRARIES}
+	                Tests/Unit/Forms/test_main.cpp
+	            )
+	            add_executable(test_fe_forms ${FE_FORMS_TEST_SOURCES})
+	            _svmp_fe_target_enable_warnings(test_fe_forms)
+	            target_link_libraries(test_fe_forms
+	                PRIVATE
+	                    svfe
+	                    ${GTEST_LIBRARIES}
             )
             add_test(NAME FE_Forms_Tests COMMAND test_fe_forms)
         endif()
@@ -1617,13 +1653,14 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Constitutive/test_MaterialStatePlumbing.cpp
                 Tests/Unit/Constitutive/test_Parameters.cpp
                 Tests/Unit/Constitutive/test_GlobalLaw.cpp
-                Tests/Unit/Constitutive/test_main.cpp
-            )
-            add_executable(test_fe_constitutive ${FE_CONSTITUTIVE_TEST_SOURCES})
-            target_link_libraries(test_fe_constitutive
-                PRIVATE
-                    svfe
-                    ${GTEST_LIBRARIES}
+	                Tests/Unit/Constitutive/test_main.cpp
+	            )
+	            add_executable(test_fe_constitutive ${FE_CONSTITUTIVE_TEST_SOURCES})
+	            _svmp_fe_target_enable_warnings(test_fe_constitutive)
+	            target_link_libraries(test_fe_constitutive
+	                PRIVATE
+	                    svfe
+	                    ${GTEST_LIBRARIES}
             )
             add_test(NAME FE_Constitutive_Tests COMMAND test_fe_constitutive)
         endif()
@@ -1663,13 +1700,14 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Assembly/test_MeshAccess.cpp
                 Tests/Unit/Assembly/test_MeshAccess_HighOrder.cpp
             )
-        endif()
-        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Assembly/test_main.cpp)
-            add_executable(test_fe_assembly ${FE_ASSEMBLY_TEST_SOURCES})
-            target_link_libraries(test_fe_assembly
-                PRIVATE
-                    svfe
-                    ${GTEST_LIBRARIES}
+	        endif()
+	        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Assembly/test_main.cpp)
+	            add_executable(test_fe_assembly ${FE_ASSEMBLY_TEST_SOURCES})
+	            _svmp_fe_target_enable_warnings(test_fe_assembly)
+	            target_link_libraries(test_fe_assembly
+	                PRIVATE
+	                    svfe
+	                    ${GTEST_LIBRARIES}
             )
             add_test(NAME FE_Assembly_Tests COMMAND test_fe_assembly)
         endif()
@@ -1696,12 +1734,13 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Systems/test_OperatorBackends.cpp
                 Tests/Unit/Systems/test_TransientDt.cpp
                 Tests/Unit/Systems/test_main.cpp
-            )
-            add_executable(test_fe_systems ${FE_SYSTEMS_TEST_SOURCES})
-            target_link_libraries(test_fe_systems
-                PRIVATE
-                    svfe
-                    ${GTEST_LIBRARIES}
+	            )
+	            add_executable(test_fe_systems ${FE_SYSTEMS_TEST_SOURCES})
+	            _svmp_fe_target_enable_warnings(test_fe_systems)
+	            target_link_libraries(test_fe_systems
+	                PRIVATE
+	                    svfe
+	                    ${GTEST_LIBRARIES}
             )
             add_test(NAME FE_Systems_Tests COMMAND test_fe_systems)
         endif()
@@ -1721,13 +1760,14 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/TimeStepping/test_TimeLoopConvergence.cpp
 		                Tests/Unit/TimeStepping/test_TimeLoopDissipation.cpp
 	                Tests/Unit/TimeStepping/test_TimeLoopPerformance.cpp
-	                Tests/Unit/TimeStepping/test_main.cpp
-	            )
-            add_executable(test_fe_timestepping ${FE_TIMESTEPPING_TEST_SOURCES})
-            target_link_libraries(test_fe_timestepping
-                PRIVATE
-                    svfe
-                    ${GTEST_LIBRARIES}
+		                Tests/Unit/TimeStepping/test_main.cpp
+		            )
+	            add_executable(test_fe_timestepping ${FE_TIMESTEPPING_TEST_SOURCES})
+	            _svmp_fe_target_enable_warnings(test_fe_timestepping)
+	            target_link_libraries(test_fe_timestepping
+	                PRIVATE
+	                    svfe
+	                    ${GTEST_LIBRARIES}
             )
             add_test(NAME FE_TimeStepping_Tests COMMAND test_fe_timestepping)
         endif()
@@ -1737,12 +1777,13 @@ if(FE_BUILD_TESTS)
     if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
         file(GLOB FE_MPI_TEST_SOURCES
             Tests/Unit/Dofs/test_*MPI*.cpp
-        )
-        if(FE_MPI_TEST_SOURCES)
-            add_executable(test_fe_mpi ${FE_MPI_TEST_SOURCES})
-            # MPI tests provide their own main() to call MPI_Init/MPI_Finalize,
-            # so do not link gtest_main here.
-            if(TARGET GTest::gtest)
+	        )
+	        if(FE_MPI_TEST_SOURCES)
+	            add_executable(test_fe_mpi ${FE_MPI_TEST_SOURCES})
+	            _svmp_fe_target_enable_warnings(test_fe_mpi)
+	            # MPI tests provide their own main() to call MPI_Init/MPI_Finalize,
+	            # so do not link gtest_main here.
+	            if(TARGET GTest::gtest)
                 target_link_libraries(test_fe_mpi PRIVATE svfe_dofs GTest::gtest)
             else()
                 set(_fe_mpi_gtest_libs ${GTEST_LIBRARIES})
@@ -1756,12 +1797,13 @@ if(FE_BUILD_TESTS)
 
         file(GLOB FE_CONSTRAINTS_MPI_TEST_SOURCES
             Tests/Unit/Constraints/test_*MPI*.cpp
-        )
-        if(FE_CONSTRAINTS_MPI_TEST_SOURCES)
-            add_executable(test_fe_constraints_mpi ${FE_CONSTRAINTS_MPI_TEST_SOURCES})
-            # MPI tests provide their own main() to call MPI_Init/MPI_Finalize,
-            # so do not link gtest_main here.
-            if(TARGET GTest::gtest)
+	        )
+	        if(FE_CONSTRAINTS_MPI_TEST_SOURCES)
+	            add_executable(test_fe_constraints_mpi ${FE_CONSTRAINTS_MPI_TEST_SOURCES})
+	            _svmp_fe_target_enable_warnings(test_fe_constraints_mpi)
+	            # MPI tests provide their own main() to call MPI_Init/MPI_Finalize,
+	            # so do not link gtest_main here.
+	            if(TARGET GTest::gtest)
                 target_link_libraries(test_fe_constraints_mpi PRIVATE svfe GTest::gtest)
             else()
                 set(_fe_constraints_mpi_gtest_libs ${GTEST_LIBRARIES})
@@ -1778,24 +1820,27 @@ if(FE_BUILD_TESTS)
             add_fe_mpi_test(test_fe_constraints_mpi 4)
         endif()
 
-        file(GLOB FE_BACKENDS_MPI_TEST_SOURCES
-            Tests/Unit/Backends/test_*MPI*.cpp
-        )
-        if(FE_BACKENDS_MPI_TEST_SOURCES)
-            add_executable(test_fe_backends_mpi ${FE_BACKENDS_MPI_TEST_SOURCES})
-            # MPI tests provide their own main() to call MPI_Init/MPI_Finalize,
-            # so do not link gtest_main here.
-            if(TARGET GTest::gtest)
-                target_link_libraries(test_fe_backends_mpi PRIVATE svfe GTest::gtest)
-            else()
-                set(_fe_backends_mpi_gtest_libs ${GTEST_LIBRARIES})
-                list(REMOVE_ITEM _fe_backends_mpi_gtest_libs gtest_main GTest::gtest_main)
-                target_link_libraries(test_fe_backends_mpi PRIVATE svfe ${_fe_backends_mpi_gtest_libs})
-            endif()
-            add_fe_mpi_test(test_fe_backends_mpi 2)
-        endif()
-    endif()
-endif()
+	        if(FE_ENABLE_ASSEMBLY)
+	            file(GLOB FE_BACKENDS_MPI_TEST_SOURCES
+	                Tests/Unit/Backends/test_*MPI*.cpp
+	            )
+	            if(FE_BACKENDS_MPI_TEST_SOURCES)
+	                add_executable(test_fe_backends_mpi ${FE_BACKENDS_MPI_TEST_SOURCES})
+	                _svmp_fe_target_enable_warnings(test_fe_backends_mpi)
+	                # MPI tests provide their own main() to call MPI_Init/MPI_Finalize,
+	                # so do not link gtest_main here.
+	                if(TARGET GTest::gtest)
+	                    target_link_libraries(test_fe_backends_mpi PRIVATE svfe GTest::gtest)
+	                else()
+	                    set(_fe_backends_mpi_gtest_libs ${GTEST_LIBRARIES})
+	                    list(REMOVE_ITEM _fe_backends_mpi_gtest_libs gtest_main GTest::gtest_main)
+	                    target_link_libraries(test_fe_backends_mpi PRIVATE svfe ${_fe_backends_mpi_gtest_libs})
+	                endif()
+	                add_fe_mpi_test(test_fe_backends_mpi 2)
+	            endif()
+	        endif()
+	    endif()
+	endif()
 
 #------------------------------------------------------------------------------
 # Build examples if enabled
@@ -1805,13 +1850,14 @@ if(FE_BUILD_EXAMPLES)
     # Add example subdirectory (if it exists)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Examples)
         file(GLOB FE_EXAMPLE_SOURCES Examples/*.cpp)
-        foreach(example_source ${FE_EXAMPLE_SOURCES})
-            get_filename_component(example_name ${example_source} NAME_WE)
-            add_executable(${example_name} ${example_source})
-            target_link_libraries(${example_name} PRIVATE svfe)
-            set_target_properties(${example_name} PROPERTIES
-                RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
-                FOLDER "Examples/FE"
+	        foreach(example_source ${FE_EXAMPLE_SOURCES})
+	            get_filename_component(example_name ${example_source} NAME_WE)
+	            add_executable(${example_name} ${example_source})
+	            _svmp_fe_target_enable_warnings(${example_name})
+	            target_link_libraries(${example_name} PRIVATE svfe)
+	            set_target_properties(${example_name} PROPERTIES
+	                RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+	                FOLDER "Examples/FE"
             )
         endforeach()
     endif()
@@ -1835,14 +1881,15 @@ if(FE_STANDALONE_BUILD)
 
     # When FE_WITH_MESH is enabled and Mesh is built as part of this build,
     # include svmesh in the export set so the generated package is consistent.
-    if(FE_WITH_MESH AND TARGET svmesh)
-        install(TARGETS svmesh
-            EXPORT svfeTargets
-            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-        )
-    endif()
+	    if(FE_WITH_MESH AND TARGET svmesh)
+	        install(TARGETS svmesh
+	            EXPORT svfeTargets
+	            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+	            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+	            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+	            PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/svmesh
+	        )
+	    endif()
 
     # If Mesh (svmesh) pulled in bundled METIS/ParMETIS targets, ensure they are
     # part of the same export set so `install(EXPORT ...)` remains consistent.

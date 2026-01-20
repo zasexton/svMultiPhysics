@@ -160,12 +160,12 @@ if(MESH_ENABLE_MPI)
     endif()
 
 	    find_package(MPI)
-	    if(MPI_FOUND)
-	        message(STATUS "MPI found - enabling distributed mesh support")
-	        include_directories(${MPI_CXX_INCLUDE_DIRS})
-	        if(NOT MESH_ENABLE_PARMETIS)
-	            message(FATAL_ERROR "MESH_ENABLE_PARMETIS=OFF but MPI is enabled. ParMETIS is required for production-quality distributed partitioning.")
-	        endif()
+		    if(MPI_FOUND)
+		        message(STATUS "MPI found - enabling distributed mesh support")
+		        include_directories(SYSTEM ${MPI_CXX_INCLUDE_DIRS})
+		        if(NOT MESH_ENABLE_PARMETIS)
+		            message(FATAL_ERROR "MESH_ENABLE_PARMETIS=OFF but MPI is enabled. ParMETIS is required for production-quality distributed partitioning.")
+		        endif()
 	        if(NOT MESH_ENABLE_METIS)
 	            message(FATAL_ERROR "MESH_ENABLE_METIS=OFF but MPI is enabled. METIS is required (ParMETIS depends on METIS/GKlib).")
 	        endif()
@@ -489,7 +489,7 @@ set_target_properties(svmesh PROPERTIES
 
 # Compile definitions
 if(MESH_ENABLE_MPI)
-    target_compile_definitions(svmesh PUBLIC MESH_HAS_MPI)
+    target_compile_definitions(svmesh PUBLIC MESH_HAS_MPI MPICH_SKIP_MPICXX OMPI_SKIP_MPICXX _MPICC_H)
 endif()
 
 if(MESH_ENABLE_VTK)

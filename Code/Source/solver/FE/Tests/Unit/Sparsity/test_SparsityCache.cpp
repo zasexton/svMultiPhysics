@@ -289,7 +289,7 @@ TEST(SparsityCacheTest, LRUOrderUpdate) {
     cache.put(sig3, createTestPattern(10));
 
     // Access sig1 to make it most recently used
-    cache.get(sig1);
+    static_cast<void>(cache.get(sig1));
 
     // Adding sig4 should evict sig2 (now oldest)
     cache.put(sig4, createTestPattern(10));
@@ -327,7 +327,7 @@ TEST(SparsityCacheTest, MemoryBasedEviction) {
     int eviction_count = 0;
     for (int i = 0; i < 10; ++i) {
         PatternSignature sig("pattern_" + std::to_string(i), 100, 100);
-        bool inserted = cache.put(sig, createTestPattern(100, 10));
+        static_cast<void>(cache.put(sig, createTestPattern(100, 10)));
 
         if (cache.memoryUsage() > config.max_memory_bytes) {
             // Should trigger eviction
@@ -353,12 +353,12 @@ TEST(SparsityCacheTest, HitMissStatistics) {
     cache.put(sig1, createTestPattern(10));
 
     // Hit
-    cache.get(sig1);
-    cache.get(sig1);
+    static_cast<void>(cache.get(sig1));
+    static_cast<void>(cache.get(sig1));
 
     // Miss
-    cache.get(sig2);
-    cache.get(sig2);
+    static_cast<void>(cache.get(sig2));
+    static_cast<void>(cache.get(sig2));
 
     auto stats = cache.getStats();
     EXPECT_EQ(stats.hits, 2);
@@ -373,7 +373,7 @@ TEST(SparsityCacheTest, ResetStatistics) {
 
     PatternSignature sig("pattern", 10, 10);
     cache.put(sig, createTestPattern(10));
-    cache.get(sig);
+    static_cast<void>(cache.get(sig));
 
     auto stats1 = cache.getStats();
     EXPECT_GT(stats1.hits, 0);

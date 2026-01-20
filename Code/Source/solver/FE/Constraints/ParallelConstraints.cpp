@@ -336,6 +336,7 @@ ParallelConstraintStats ParallelConstraints::importGhostConstraints(
     AffineConstraints& constraints)
 {
     ParallelConstraintStats stats;
+    static_cast<void>(constraints);
 
     if (world_size_ == 1) {
         // Serial mode - nothing to do
@@ -442,6 +443,7 @@ std::vector<ConstraintLine> ParallelConstraints::exportConstraints(
 bool ParallelConstraints::validateConsistency(
     const AffineConstraints& constraints) const
 {
+    static_cast<void>(constraints);
     if (world_size_ == 1) {
         return true;  // Always consistent in serial
     }

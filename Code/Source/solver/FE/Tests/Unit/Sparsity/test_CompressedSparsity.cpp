@@ -383,7 +383,7 @@ TEST(CompressedSparsityTest, MergeThreadBuffersDeterministic) {
     auto row1 = p1.getRowIndices(0);
     auto row2 = p2.getRowIndices(0);
     ASSERT_EQ(row1.size(), row2.size());
-    for (std::size_t i = 0; i < row1.size(); ++i) {
+    for (GlobalIndex i = 0; i < row1.size(); ++i) {
         EXPECT_EQ(row1[i], row2[i]);
     }
 }
@@ -759,4 +759,3 @@ TEST(CompressedSparsityTest, MemoryEfficiency) {
     // Memory should decrease or stay same after compression
     EXPECT_LE(mem_after, mem_before);
 }
-

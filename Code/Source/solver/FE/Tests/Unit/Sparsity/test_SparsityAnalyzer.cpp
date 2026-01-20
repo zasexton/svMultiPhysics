@@ -530,7 +530,7 @@ TEST(SparsityAnalyzerTest, EstimateFactorMemory) {
     auto memory = analyzer.estimateFactorMemory(pattern);
 
     EXPECT_GT(memory, 0);
-    EXPECT_GE(memory, pattern.getNnz() * sizeof(double));
+    EXPECT_GE(memory, static_cast<std::size_t>(pattern.getNnz()) * sizeof(double));
 }
 
 // ============================================================================

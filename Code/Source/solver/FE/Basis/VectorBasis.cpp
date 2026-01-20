@@ -189,15 +189,6 @@ inline void eval_wedge_rt1_divergence_direct(const Vec3& xi, std::vector<Real>& 
     const Real y = xi[1];
     const Real z = xi[2];
 
-    const Real zb = (Real(1) - z) * Real(0.5);
-    const Real zt = (Real(1) + z) * Real(0.5);
-
-    // Derivatives of barycentric coords
-    // dL0/dx = -1, dL0/dy = -1, dL1/dx = 1, dL1/dy = 0, dL2/dx = 0, dL2/dy = 1
-    const Real L0 = Real(1) - x - y;
-    const Real L1 = x;
-    const Real L2 = y;
-
     divergence.resize(24);
     std::size_t idx = 0;
 
@@ -353,7 +344,6 @@ inline void eval_wedge_nd1_direct(const Vec3& xi, std::vector<Vec3>& values) {
     // Tangent directions: (1,0,0) and (0,0,1)
     // Face bubble: L0 * L1 = x*(1-x-y) restricted to y=0 -> x*(1-x)
     // But we need it defined on whole element, use (1-y) localization
-    const Real qf2_bubble = L0 * L1 * (Real(1) - y); // zero on face y=0, use 1-y/y for localization
     // Actually for tangential moment we need functions that have tangent on face
     values[idx++] = Vec3{(Real(1) - y) * L0 * Real(12), Real(0), Real(0)}; // DOF: t_x moment const
     values[idx++] = Vec3{(Real(1) - y) * L0 * z * Real(12), Real(0), Real(0)}; // DOF: t_x moment linear z
@@ -2072,12 +2062,12 @@ RaviartThomasBasis::RaviartThomasBasis(ElementType type, int order)
         }
         // For wedge and pyramid elements, we may have an oversized modal basis.
         // We will use column selection during DOF matrix assembly.
-        const bool oversized_basis = (monomials_.size() > n);
         const std::size_t m = monomials_.size(); // number of modal functions (may be > n)
+        const bool oversized_basis = (m > n);
 
         // For non-oversized cases, verify exact match
         if (!oversized_basis) {
-            FE_CHECK_ARG(monomials_.size() == n,
+            FE_CHECK_ARG(m == n,
                          "RaviartThomasBasis: modal basis size mismatch (expected " +
                          std::to_string(n) + ", got " + std::to_string(monomials_.size()) + ")");
         }
@@ -3881,12 +3871,13 @@ NedelecBasis::NedelecBasis(ElementType type, int order)
 
                             const Real wt = wq * scale;
                             // u-directed moments
+                            const std::size_t k_plus_1 = static_cast<std::size_t>(k + 1);
                             for (std::size_t a = 0; a < u_vals.size(); ++a) {
                                 for (std::size_t b = 0; b < w_vals.size(); ++b) {
-                                    if (a * (k + 1) + b >= n_u) continue;
+                                    if (a * k_plus_1 + b >= n_u) continue;
                                     const Real wa = wt * u_vals[a] * w_vals[b];
                                     for (std::size_t p = 0; p < modal_count; ++p) {
-                                        A[(row + a * (k + 1) + b) * n + p] += wa * mono_u[p];
+                                        A[(row + a * k_plus_1 + b) * n + p] += wa * mono_u[p];
                                     }
                                 }
                             }

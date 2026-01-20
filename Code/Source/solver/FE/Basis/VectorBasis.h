@@ -99,7 +99,7 @@ private:
     };
 
     struct ModalPolynomial {
-        std::array<ModalTerm, 3> terms{};
+        std::array<ModalTerm, 4> terms{};
         int num_terms{0};
     };
 
@@ -148,7 +148,7 @@ private:
     };
 
     struct ModalPolynomial {
-        std::array<ModalTerm, 3> terms{};
+        std::array<ModalTerm, 4> terms{};
         int num_terms{0};
     };
 

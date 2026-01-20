@@ -382,12 +382,13 @@ TEST_F(InterfaceContinuityTest, FacetFrameQuadEdges) {
     };
 
     for (int edge = 0; edge < 4; ++edge) {
+        const auto e = static_cast<std::size_t>(edge);
         auto frame = ElementTransform::compute_facet_frame(
-            *mapping, edge_midpoints[edge], edge, ElementType::Quad4);
+            *mapping, edge_midpoints[e], edge, ElementType::Quad4);
 
         // Check normal direction
-        Real dot = frame.normal[0] * expected_normals[edge][0] +
-                   frame.normal[1] * expected_normals[edge][1];
+        Real dot = frame.normal[0] * expected_normals[e][0] +
+                   frame.normal[1] * expected_normals[e][1];
         EXPECT_NEAR(dot, Real(1), kTolerance)
             << "Edge " << edge << " normal mismatch";
 
@@ -436,13 +437,14 @@ TEST_F(InterfaceContinuityTest, FacetFrameHexFaces) {
     };
 
     for (int face = 0; face < 6; ++face) {
+        const auto f = static_cast<std::size_t>(face);
         auto frame = ElementTransform::compute_facet_frame(
-            *mapping, face_centers[face], face, ElementType::Hex8);
+            *mapping, face_centers[f], face, ElementType::Hex8);
 
         // Check normal direction
-        Real dot = frame.normal[0] * expected_normals[face][0] +
-                   frame.normal[1] * expected_normals[face][1] +
-                   frame.normal[2] * expected_normals[face][2];
+        Real dot = frame.normal[0] * expected_normals[f][0] +
+                   frame.normal[1] * expected_normals[f][1] +
+                   frame.normal[2] * expected_normals[f][2];
         EXPECT_NEAR(dot, Real(1), kTolerance)
             << "Face " << face << " normal mismatch";
 

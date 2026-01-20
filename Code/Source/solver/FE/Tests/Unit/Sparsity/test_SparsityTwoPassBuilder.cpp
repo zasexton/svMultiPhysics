@@ -329,7 +329,7 @@ TEST(SparsityTwoPassBuilderTest, GetBuildStats) {
     builder.addElementCouplings(std::span<const GlobalIndex>(elem1));
     builder.addElementCouplings(std::span<const GlobalIndex>(elem2));
 
-    builder.finalize();
+    static_cast<void>(builder.finalize());
 
     TwoPassBuildStats stats = builder.getStats();
 

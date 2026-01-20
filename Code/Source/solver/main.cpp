@@ -36,6 +36,8 @@
 //
 #include "Simulation.h"
 
+#include "Application/Core/ApplicationDriver.h"
+
 #include "all_fun.h"
 #include "bf.h"
 #include "contact.h"
@@ -869,6 +871,16 @@ int main(int argc, char *argv[])
   //std::cout << "[svFSI] MPI rank: " << mpi_rank << std::endl;
   //std::cout << "[svFSI] MPI size: " << mpi_size << std::endl;
 
+  std::string file_name(argv[1]);
+
+  // Early dispatch: if enabled, run the new OOP solver path and return before any legacy
+  // simulation infrastructure is created (ComMod is never constructed/populated).
+  if (application::core::ApplicationDriver::shouldUseNewSolver(file_name)) {
+    application::core::ApplicationDriver::run(file_name);
+    MPI_Finalize();
+    return 0;
+  }
+
   // Create a Simulation object that stores all data structures for a simulation.
   //
   // The MPI prociess rank is set in the cmType::new_cm() method called
@@ -876,7 +888,6 @@ int main(int argc, char *argv[])
   //
   auto simulation = new Simulation();
   auto& cm = simulation->com_mod.cm;
-  std::string file_name(argv[1]);
 
   #define n_debug_main
   #ifdef debug_main

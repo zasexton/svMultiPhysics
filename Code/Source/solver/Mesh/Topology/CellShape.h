@@ -200,14 +200,16 @@ namespace CellShapeUtils {
     }
   }
 
-  // Get the topological entity kind for a cell family (by dimension)
-  inline EntityKind dimension(CellFamily family) {
-    switch (family) {
-      case CellFamily::Line:
-        return EntityKind::Edge;     // 1D
-      case CellFamily::Triangle:
-      case CellFamily::Quad:
-      case CellFamily::Polygon:
+	  // Get the topological entity kind for a cell family (by dimension)
+	  inline EntityKind dimension(CellFamily family) {
+	    switch (family) {
+	      case CellFamily::Point:
+	        return EntityKind::Vertex;   // 0D
+	      case CellFamily::Line:
+	        return EntityKind::Edge;     // 1D
+	      case CellFamily::Triangle:
+	      case CellFamily::Quad:
+	      case CellFamily::Polygon:
         return EntityKind::Face;     // 2D
       case CellFamily::Tetra:
       case CellFamily::Hex:

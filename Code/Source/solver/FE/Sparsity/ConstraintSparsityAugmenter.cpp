@@ -414,6 +414,7 @@ ReducedDistributedPatternResult ConstraintSparsityAugmenter::buildReducedDistrib
     int n_ranks = 1;
     MPI_Comm_rank(comm, &my_rank);
     MPI_Comm_size(comm, &n_ranks);
+    const auto n_ranks_u = static_cast<std::size_t>(n_ranks);
 
     const IndexRange owned_full = original.ownedRows();
     const GlobalIndex n_full = original.globalRows();
@@ -541,7 +542,7 @@ ReducedDistributedPatternResult ConstraintSparsityAugmenter::buildReducedDistrib
         }
     }
 
-    std::vector<std::vector<GlobalIndex>> req_by_owner(static_cast<std::size_t>(n_ranks));
+    std::vector<std::vector<GlobalIndex>> req_by_owner(n_ranks_u);
     for (GlobalIndex dof : query_set) {
         const int owner = owner_of_full(dof);
         if (owner == my_rank) continue;
@@ -553,23 +554,25 @@ ReducedDistributedPatternResult ConstraintSparsityAugmenter::buildReducedDistrib
     }
 
     // Exchange requests.
-    std::vector<int> send_counts_req(n_ranks, 0);
+    std::vector<int> send_counts_req(n_ranks_u, 0);
     for (int r = 0; r < n_ranks; ++r) {
-        FE_CHECK_ARG(req_by_owner[static_cast<std::size_t>(r)].size() <=
+        const auto sr = static_cast<std::size_t>(r);
+        FE_CHECK_ARG(req_by_owner[sr].size() <=
                          static_cast<std::size_t>(std::numeric_limits<int>::max()),
                      "Too many reduced-index mapping requests for MPI_Alltoallv");
-        send_counts_req[r] = static_cast<int>(req_by_owner[static_cast<std::size_t>(r)].size());
+        send_counts_req[sr] = static_cast<int>(req_by_owner[sr].size());
     }
 
-    std::vector<int> recv_counts_req(n_ranks, 0);
+    std::vector<int> recv_counts_req(n_ranks_u, 0);
     MPI_Alltoall(send_counts_req.data(), 1, MPI_INT,
                  recv_counts_req.data(), 1, MPI_INT, comm);
 
-    std::vector<int> send_displs_req(n_ranks, 0);
-    std::vector<int> recv_displs_req(n_ranks, 0);
+    std::vector<int> send_displs_req(n_ranks_u, 0);
+    std::vector<int> recv_displs_req(n_ranks_u, 0);
     for (int r = 1; r < n_ranks; ++r) {
-        send_displs_req[r] = send_displs_req[r - 1] + send_counts_req[r - 1];
-        recv_displs_req[r] = recv_displs_req[r - 1] + recv_counts_req[r - 1];
+        const auto sr = static_cast<std::size_t>(r);
+        send_displs_req[sr] = send_displs_req[sr - 1] + send_counts_req[sr - 1];
+        recv_displs_req[sr] = recv_displs_req[sr - 1] + recv_counts_req[sr - 1];
     }
 
     const int total_send_req = send_displs_req.back() + send_counts_req.back();
@@ -577,8 +580,9 @@ ReducedDistributedPatternResult ConstraintSparsityAugmenter::buildReducedDistrib
 
     std::vector<GlobalIndex> send_buf_req(static_cast<std::size_t>(total_send_req));
     for (int r = 0; r < n_ranks; ++r) {
-        int pos = send_displs_req[r];
-        for (GlobalIndex dof : req_by_owner[static_cast<std::size_t>(r)]) {
+        const auto sr = static_cast<std::size_t>(r);
+        int pos = send_displs_req[sr];
+        for (GlobalIndex dof : req_by_owner[sr]) {
             send_buf_req[static_cast<std::size_t>(pos++)] = dof;
         }
     }
@@ -589,35 +593,39 @@ ReducedDistributedPatternResult ConstraintSparsityAugmenter::buildReducedDistrib
                   comm);
 
     // Build response: reduced indices for each requested DOF.
-    std::vector<std::vector<GlobalIndex>> resp_by_rank(static_cast<std::size_t>(n_ranks));
+    std::vector<std::vector<GlobalIndex>> resp_by_rank(n_ranks_u);
     for (int r = 0; r < n_ranks; ++r) {
-        const int n_req = recv_counts_req[r];
+        const auto sr = static_cast<std::size_t>(r);
+        const int n_req = recv_counts_req[sr];
         if (n_req <= 0) continue;
 
-        auto& resp = resp_by_rank[static_cast<std::size_t>(r)];
+        auto& resp = resp_by_rank[sr];
         resp.resize(static_cast<std::size_t>(n_req), GlobalIndex{-1});
         for (int i = 0; i < n_req; ++i) {
-            const GlobalIndex dof = recv_buf_req[static_cast<std::size_t>(recv_displs_req[r] + i)];
+            const GlobalIndex dof =
+                recv_buf_req[static_cast<std::size_t>(recv_displs_req[sr] + i)];
             auto it = owned_full_to_reduced.find(dof);
             resp[static_cast<std::size_t>(i)] = (it != owned_full_to_reduced.end()) ? it->second : GlobalIndex{-1};
         }
     }
 
     // Exchange responses.
-    std::vector<int> send_counts_resp(n_ranks, 0);
+    std::vector<int> send_counts_resp(n_ranks_u, 0);
     for (int r = 0; r < n_ranks; ++r) {
-        send_counts_resp[r] = static_cast<int>(resp_by_rank[static_cast<std::size_t>(r)].size());
+        const auto sr = static_cast<std::size_t>(r);
+        send_counts_resp[sr] = static_cast<int>(resp_by_rank[sr].size());
     }
 
-    std::vector<int> recv_counts_resp(n_ranks, 0);
+    std::vector<int> recv_counts_resp(n_ranks_u, 0);
     MPI_Alltoall(send_counts_resp.data(), 1, MPI_INT,
                  recv_counts_resp.data(), 1, MPI_INT, comm);
 
-    std::vector<int> send_displs_resp(n_ranks, 0);
-    std::vector<int> recv_displs_resp(n_ranks, 0);
+    std::vector<int> send_displs_resp(n_ranks_u, 0);
+    std::vector<int> recv_displs_resp(n_ranks_u, 0);
     for (int r = 1; r < n_ranks; ++r) {
-        send_displs_resp[r] = send_displs_resp[r - 1] + send_counts_resp[r - 1];
-        recv_displs_resp[r] = recv_displs_resp[r - 1] + recv_counts_resp[r - 1];
+        const auto sr = static_cast<std::size_t>(r);
+        send_displs_resp[sr] = send_displs_resp[sr - 1] + send_counts_resp[sr - 1];
+        recv_displs_resp[sr] = recv_displs_resp[sr - 1] + recv_counts_resp[sr - 1];
     }
 
     const int total_send_resp = send_displs_resp.back() + send_counts_resp.back();
@@ -625,8 +633,9 @@ ReducedDistributedPatternResult ConstraintSparsityAugmenter::buildReducedDistrib
 
     std::vector<GlobalIndex> send_buf_resp(static_cast<std::size_t>(total_send_resp));
     for (int r = 0; r < n_ranks; ++r) {
-        int pos = send_displs_resp[r];
-        for (GlobalIndex idx : resp_by_rank[static_cast<std::size_t>(r)]) {
+        const auto sr = static_cast<std::size_t>(r);
+        int pos = send_displs_resp[sr];
+        for (GlobalIndex idx : resp_by_rank[sr]) {
             send_buf_resp[static_cast<std::size_t>(pos++)] = idx;
         }
     }
@@ -639,14 +648,15 @@ ReducedDistributedPatternResult ConstraintSparsityAugmenter::buildReducedDistrib
     std::unordered_map<GlobalIndex, GlobalIndex> remote_full_to_reduced;
     remote_full_to_reduced.reserve(query_set.size() * 2);
     for (int owner = 0; owner < n_ranks; ++owner) {
-        const auto& dofs = req_by_owner[static_cast<std::size_t>(owner)];
+        const auto sowner = static_cast<std::size_t>(owner);
+        const auto& dofs = req_by_owner[sowner];
         if (dofs.empty()) continue;
 
-        const int n_resp = recv_counts_resp[owner];
+        const int n_resp = recv_counts_resp[sowner];
         FE_CHECK_ARG(n_resp == static_cast<int>(dofs.size()),
                      "Reduced-index mapping response size mismatch for rank " + std::to_string(owner));
 
-        const std::size_t base = static_cast<std::size_t>(recv_displs_resp[owner]);
+        const std::size_t base = static_cast<std::size_t>(recv_displs_resp[sowner]);
         for (std::size_t i = 0; i < dofs.size(); ++i) {
             const GlobalIndex reduced_idx = recv_buf_resp[base + i];
             FE_CHECK_ARG(reduced_idx >= 0,
@@ -695,7 +705,7 @@ ReducedDistributedPatternResult ConstraintSparsityAugmenter::buildReducedDistrib
         }
     };
 
-    std::vector<std::vector<Pair>> send_pairs(static_cast<std::size_t>(n_ranks));
+    std::vector<std::vector<Pair>> send_pairs(n_ranks_u);
 
     const auto insert_entry = [&](GlobalIndex rrow, GlobalIndex rcol) {
         if (rrow < 0 || rcol < 0) return;
@@ -757,27 +767,29 @@ ReducedDistributedPatternResult ConstraintSparsityAugmenter::buildReducedDistrib
     }
 
     if (n_ranks > 1) {
-        std::vector<int> send_counts(n_ranks, 0);
+        std::vector<int> send_counts(n_ranks_u, 0);
         for (int r = 0; r < n_ranks; ++r) {
-            auto& pairs = send_pairs[static_cast<std::size_t>(r)];
+            const auto sr = static_cast<std::size_t>(r);
+            auto& pairs = send_pairs[sr];
             std::sort(pairs.begin(), pairs.end());
             pairs.erase(std::unique(pairs.begin(), pairs.end()), pairs.end());
 
             const std::size_t n_vals = pairs.size() * 2;
             FE_CHECK_ARG(n_vals <= static_cast<std::size_t>(std::numeric_limits<int>::max()),
                          "Too many reduced pattern entries to communicate");
-            send_counts[r] = static_cast<int>(n_vals);
+            send_counts[sr] = static_cast<int>(n_vals);
         }
 
-        std::vector<int> recv_counts(n_ranks, 0);
+        std::vector<int> recv_counts(n_ranks_u, 0);
         MPI_Alltoall(send_counts.data(), 1, MPI_INT,
                      recv_counts.data(), 1, MPI_INT, comm);
 
-        std::vector<int> send_displs(n_ranks, 0);
-        std::vector<int> recv_displs(n_ranks, 0);
+        std::vector<int> send_displs(n_ranks_u, 0);
+        std::vector<int> recv_displs(n_ranks_u, 0);
         for (int r = 1; r < n_ranks; ++r) {
-            send_displs[r] = send_displs[r - 1] + send_counts[r - 1];
-            recv_displs[r] = recv_displs[r - 1] + recv_counts[r - 1];
+            const auto sr = static_cast<std::size_t>(r);
+            send_displs[sr] = send_displs[sr - 1] + send_counts[sr - 1];
+            recv_displs[sr] = recv_displs[sr - 1] + recv_counts[sr - 1];
         }
 
         const int total_send = send_displs.back() + send_counts.back();
@@ -785,8 +797,9 @@ ReducedDistributedPatternResult ConstraintSparsityAugmenter::buildReducedDistrib
 
         std::vector<GlobalIndex> send_buf(static_cast<std::size_t>(total_send));
         for (int r = 0; r < n_ranks; ++r) {
-            int pos = send_displs[r];
-            const auto& pairs = send_pairs[static_cast<std::size_t>(r)];
+            const auto sr = static_cast<std::size_t>(r);
+            int pos = send_displs[sr];
+            const auto& pairs = send_pairs[sr];
             for (const auto& p : pairs) {
                 send_buf[static_cast<std::size_t>(pos++)] = p.row;
                 send_buf[static_cast<std::size_t>(pos++)] = p.col;

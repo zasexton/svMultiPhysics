@@ -481,19 +481,25 @@ const T& GeometryCache::get_or_compute(
     size_t& misses,
     ComputeFn&& compute_fn) const {
 
-    if (index < 0 || index >= static_cast<index_t>(cache.size())) {
+    if (index < 0) {
         static T default_value{};
         return default_value;
     }
 
-    if (!cache[index].has_value()) {
+    const auto sindex = static_cast<std::size_t>(index);
+    if (sindex >= cache.size()) {
+        static T default_value{};
+        return default_value;
+    }
+
+    if (!cache[sindex].has_value()) {
         ++misses;
-        cache[index] = compute_fn();
+        cache[sindex] = compute_fn();
     } else {
         ++hits;
     }
 
-    return cache[index].value();
+    return cache[sindex].value();
 }
 
 } // namespace svmp

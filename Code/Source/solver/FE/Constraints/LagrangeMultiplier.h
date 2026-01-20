@@ -58,7 +58,7 @@ namespace constraints {
  * Represents one row of the constraint matrix B in B*u = g
  */
 struct LagrangeConstraint {
-    GlobalIndex multiplier_dof;                    ///< Index of the multiplier DOF
+    GlobalIndex multiplier_dof{-1};                ///< Index of the multiplier DOF
     std::vector<GlobalIndex> constrained_dofs;     ///< DOFs involved in constraint
     std::vector<double> coefficients;              ///< Coefficients for each DOF
     double rhs{0.0};                               ///< Right-hand side value g

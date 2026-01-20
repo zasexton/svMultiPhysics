@@ -194,6 +194,16 @@ inline FormExpr detJ() { return FormExpr::jacobianDeterminant(); }
 inline FormExpr h() { return FormExpr::cellDiameter(); }
 inline FormExpr vol() { return FormExpr::cellVolume(); }
 inline FormExpr area() { return FormExpr::facetArea(); }
+inline FormExpr domainId() { return FormExpr::cellDomainId(); }
+
+/**
+ * @brief Directional cell size normal to the current facet
+ *
+ * Defined as h_n = 2 |K| / |F| (cell volume divided by facet area).
+ * This is the facet-normal "height" of the element and is a more robust
+ * choice than isotropic `h()` for penalty scaling on anisotropic meshes.
+ */
+inline FormExpr hNormal() { return (2.0 * vol()) / area(); }
 
 // ---------------------------------------------------------------------------
 // Differential operators (UFL-like shorthands)
@@ -202,6 +212,46 @@ inline FormExpr area() { return FormExpr::facetArea(); }
 inline FormExpr hessian(const FormExpr& a) { return a.hessian(); }
 
 inline FormExpr laplacian(const FormExpr& a) { return trace(a.hessian()); }
+
+// ---------------------------------------------------------------------------
+// Geometric differential operators (surface/level-set helpers)
+// ---------------------------------------------------------------------------
+
+inline FormExpr safeNorm(const FormExpr& v, Real eps = Real(1e-12))
+{
+    return sqrt(inner(v, v) + FormExpr::constant(eps * eps));
+}
+
+inline FormExpr safeNormalize(const FormExpr& v, Real eps = Real(1e-12))
+{
+    return v / safeNorm(v, eps);
+}
+
+inline FormExpr unitNormalFromLevelSet(const FormExpr& phi, Real eps = Real(1e-12))
+{
+    return safeNormalize(grad(phi), eps);
+}
+
+inline FormExpr meanCurvatureFromLevelSet(const FormExpr& phi, Real eps = Real(1e-12))
+{
+    return div(unitNormalFromLevelSet(phi, eps));
+}
+
+inline FormExpr surfaceGradient(const FormExpr& f, const FormExpr& n)
+{
+    const auto gf = grad(f);
+    return gf - inner(gf, n) * n;
+}
+
+inline FormExpr surfaceDivergence(const FormExpr& u, const FormExpr& n)
+{
+    return div(u) - inner(grad(u) * n, n);
+}
+
+inline FormExpr surfaceLaplacian(const FormExpr& f, const FormExpr& n)
+{
+    return surfaceDivergence(surfaceGradient(f, n), n);
+}
 
 // ---------------------------------------------------------------------------
 // Vector/tensor constructors (UFL-like)
@@ -283,6 +333,24 @@ inline FormExpr clamp(const FormExpr& a, const FormExpr& lo, const FormExpr& hi)
     return min(max(a, lo), hi);
 }
 
+inline FormExpr regionIndicator(int domain_id)
+{
+    return eq(domainId(), FormExpr::constant(static_cast<Real>(domain_id)));
+}
+
+inline FormExpr weightedAverage(const FormExpr& a, const FormExpr& w_plus, const FormExpr& w_minus)
+{
+    return w_plus * a.plus() + w_minus * a.minus();
+}
+
+inline FormExpr harmonicAverage(const FormExpr& k)
+{
+    // 2 k⁺ k⁻ / (k⁺ + k⁻)
+    const auto kp = k.plus();
+    const auto km = k.minus();
+    return (2.0 * kp * km) / (kp + km);
+}
+
 // ---------------------------------------------------------------------------
 // DG / interior-facet helpers
 // ---------------------------------------------------------------------------
@@ -303,8 +371,9 @@ inline FormExpr downwindValue(const FormExpr& u, const FormExpr& beta)
 
 inline FormExpr interiorPenaltyCoefficient(Real eta, Real p = 1.0)
 {
-    // Typical SIPG scaling: eta * p^2 / h_avg.
-    return FormExpr::constant(eta * p * p) / avg(FormExpr::cellDiameter());
+    // Typical SIPG scaling: eta * p^2 * avg(1 / h_n),
+    // where h_n = 2|K|/|F| is the facet-normal cell size.
+    return FormExpr::constant(eta * p * p) * avg(FormExpr::constant(1.0) / hNormal());
 }
 
 } // namespace forms

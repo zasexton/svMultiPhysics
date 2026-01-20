@@ -30,6 +30,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -117,6 +118,50 @@ public:
     [[nodiscard]] const constraints::CoupledBCContext& context() const noexcept { return ctx_; }
     [[nodiscard]] const constraints::CoupledBCContext* contextPtr() const noexcept { return &ctx_; }
 
+    struct RegisteredBoundaryFunctional {
+        forms::BoundaryFunctional def{};
+        std::uint32_t slot{0u};
+    };
+
+    /**
+     * @brief Return registered boundary functionals with their stable slot indices
+     *
+     * The returned `slot` indices correspond to the ordering of
+     * `integrals().all()` and to `BoundaryIntegralRef(slot)` terminals used in
+     * compiled FE/Forms kernels.
+     */
+    [[nodiscard]] std::vector<RegisteredBoundaryFunctional> registeredBoundaryFunctionals() const;
+
+    /**
+     * @brief Geometric measure (area/length) of a boundary marker
+     *
+     * Cached per boundary marker. Used for `BoundaryFunctional::Reduction::Average`
+     * and for coupled Jacobian computations.
+     */
+    Real boundaryMeasure(int boundary_marker, const SystemStateView& state);
+
+    /**
+     * @brief Compute auxiliary state values for a given set of boundary integrals
+     *
+     * This mirrors the ODE-advance logic in prepareForAssembly(), but does not
+     * modify the stored auxiliary state. It is intended for Jacobian chain-rule
+     * computations where the residual is differentiated with respect to
+     * boundary-functionals while accounting for their induced auxiliary-state
+     * changes.
+     */
+    [[nodiscard]] std::vector<Real> computeAuxiliaryStateForIntegrals(std::span<const Real> integrals_override,
+                                                                      const SystemStateView& state) const;
+
+    /**
+     * @brief Compute sensitivities d(aux)/d(integrals) for a given set of boundary integrals
+     *
+     * Returns a row-major matrix with shape (aux_size x integrals_override.size()).
+     * This mirrors the auxiliary advance logic used in prepareForAssembly(), including
+     * the sequential update order of registered auxiliary variables.
+     */
+    [[nodiscard]] std::vector<Real> computeAuxiliarySensitivityForIntegrals(std::span<const Real> integrals_override,
+                                                                            const SystemStateView& state) const;
+
 private:
     struct CompiledFunctional {
         forms::BoundaryFunctional def{};
@@ -126,7 +171,6 @@ private:
     void requireSetup() const;
     void compileFunctionalIfNeeded(const forms::BoundaryFunctional& functional);
     Real evaluateFunctional(const CompiledFunctional& entry, const SystemStateView& state);
-    Real boundaryMeasure(int boundary_marker, const SystemStateView& state);
 
     FESystem& system_;
     FieldId primary_field_{INVALID_FIELD_ID};
