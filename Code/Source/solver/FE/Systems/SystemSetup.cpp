@@ -252,28 +252,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
             FE_THROW_IF(topology.n_cells <= 0, InvalidArgumentException,
                         "FESystem::setup: topology_override has no cells");
 
-            dofs::DofLayoutInfo layout;
-            const auto continuity = rec.space->continuity();
-            const bool is_continuous =
-                (continuity == Continuity::C0 || continuity == Continuity::C1);
-
-            const int order = rec.space->polynomial_order();
-            const int dim = topology.dim;
-            const auto cell0 = topology.getCellVertices(0);
-            FE_THROW_IF(cell0.empty(), InvalidArgumentException,
-                        "FESystem::setup: topology_override cell 0 has no vertices");
-
-            if (is_continuous) {
-                layout = dofs::DofLayoutInfo::Lagrange(order, dim,
-                                                      static_cast<int>(cell0.size()),
-                                                      rec.space->value_dimension());
-            } else {
-                layout = dofs::DofLayoutInfo::DG(order, static_cast<int>(cell0.size()),
-                                                 rec.space->value_dimension());
-            }
-
-            layout.total_dofs_per_element = static_cast<LocalIndex>(rec.space->dofs_per_element());
-            dh.distributeDofs(topology, layout, opts.dof_options);
+            dh.distributeDofs(topology, *rec.space, opts.dof_options);
             dh.finalize();
             return dh;
         }
@@ -470,6 +449,15 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     if (merged_entity_map) {
         dof_handler_.setEntityDofMap(std::move(merged_entity_map));
     }
+    // Preserve per-cell orientation metadata (H(curl)/H(div)) by copying it from any field handler
+    // that computed it during DOF distribution.
+    for (const auto& rec : field_registry_.records()) {
+        const auto idx = static_cast<std::size_t>(rec.id);
+        if (idx < field_dof_handlers_.size() && field_dof_handlers_[idx].hasCellOrientations()) {
+            dof_handler_.copyCellOrientationsFrom(field_dof_handlers_[idx]);
+            break;
+        }
+    }
     dof_handler_.finalize();
 
     // ---------------------------------------------------------------------
@@ -493,10 +481,18 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         if (n_components <= 1) {
             field_map_.addScalarField(rec.name, n_dofs_field);
         } else {
-            FE_THROW_IF(n_dofs_field % n_components != 0, InvalidStateException,
-                        "FESystem::setup: vector-valued field has non-divisible DOF count");
-            field_map_.addVectorField(rec.name, static_cast<LocalIndex>(n_components),
-                                      n_dofs_field / n_components);
+            const bool is_vector_basis =
+                (rec.space->continuity() == Continuity::H_curl || rec.space->continuity() == Continuity::H_div);
+            if (is_vector_basis) {
+                field_map_.addVectorBasisField(rec.name,
+                                               static_cast<LocalIndex>(n_components),
+                                               n_dofs_field);
+            } else {
+                FE_THROW_IF(n_dofs_field % n_components != 0, InvalidStateException,
+                            "FESystem::setup: vector-valued field has non-divisible DOF count");
+                field_map_.addVectorField(rec.name, static_cast<LocalIndex>(n_components),
+                                          n_dofs_field / n_components);
+            }
         }
     }
     field_map_.finalize();

@@ -30,6 +30,7 @@
 #include "Core/Types.h"
 #include "Core/FEConfig.h"
 #include "Core/FEException.h"
+#include "Spaces/OrientationManager.h"
 
 #include <memory>
 #include <vector>
@@ -409,6 +410,7 @@ struct DofLayoutInfo {
     LocalIndex dofs_per_cell{0};       ///< Interior DOFs per cell (bubble functions)
     int num_components{1};             ///< Number of field components (1=scalar, 3=vector)
     bool is_continuous{true};          ///< CG (true) vs DG (false)
+    bool tensor_face_dof_layout{false};///< True when face DOFs follow tensor Lagrange interior ordering (quads/hex)
 
     // Total DOFs per element (convenience, computed from other fields and element type)
     LocalIndex total_dofs_per_element{0};
@@ -483,6 +485,17 @@ public:
      */
     void distributeDofs(const MeshTopologyInfo& topology,
                         const DofLayoutInfo& layout,
+                        const DofDistributionOptions& options = {});
+
+    /**
+     * @brief Distribute DOFs using mesh-independent topology + a FunctionSpace
+     *
+     * This overload derives an appropriate @ref DofLayoutInfo from the space
+     * (including H(curl)/H(div) entity DOF counts) and then calls the core
+     * mesh-independent distribution routine.
+     */
+    void distributeDofs(const MeshTopologyInfo& topology,
+                        const spaces::FunctionSpace& space,
                         const DofDistributionOptions& options = {});
 
     /**
@@ -608,6 +621,46 @@ public:
     [[nodiscard]] const GhostDofManager* getGhostManager() const noexcept {
         return ghost_manager_.get();
     }
+
+    // =========================================================================
+    // Orientation metadata (H(curl)/H(div) and other entity-oriented layouts)
+    // =========================================================================
+
+    /**
+     * @brief Whether per-cell orientation metadata is available
+     *
+     * Populated for CG distributions when canonical ordering is enabled and
+     * the input topology provides (or DofHandler derives) edge/face vertex lists.
+     */
+    [[nodiscard]] bool hasCellOrientations() const noexcept;
+
+    /**
+     * @brief Edge orientation signs for a cell (reference-edge order)
+     *
+     * Returns a span of size num_edges(cell_type). Empty if unavailable.
+     */
+    [[nodiscard]] std::span<const spaces::OrientationManager::Sign>
+    cellEdgeOrientations(GlobalIndex cell_id) const;
+
+    /**
+     * @brief Face orientation descriptors for a cell (reference-face order)
+     *
+     * Returns a span of size num_faces(cell_type). Empty if unavailable.
+     */
+    [[nodiscard]] std::span<const spaces::OrientationManager::FaceOrientation>
+    cellFaceOrientations(GlobalIndex cell_id) const;
+
+    /**
+     * @brief Copy per-cell orientation metadata from another DofHandler
+     *
+     * This is primarily intended for workflows that construct a monolithic
+     * DofHandler by externally merging multiple field DofMaps. In that case,
+     * the merged handler does not run distributeDofs(), so orientation tables
+     * must be copied from a field handler that did.
+     *
+     * Must be called before finalize().
+     */
+    void copyCellOrientationsFrom(const DofHandler& other);
 
     // =========================================================================
     // Convenience accessors (delegate to DofMap)
@@ -794,6 +847,12 @@ private:
 	    GlobalIndex n_cells_{0};
 	    int spatial_dim_{0};
 	    LocalIndex num_components_{1};
+
+        // Optional per-cell orientation metadata (CSR-style).
+        std::vector<MeshOffset> cell_edge_orient_offsets_{};
+        std::vector<spaces::OrientationManager::Sign> cell_edge_orient_data_{};
+        std::vector<MeshOffset> cell_face_orient_offsets_{};
+        std::vector<spaces::OrientationManager::FaceOrientation> cell_face_orient_data_{};
 	};
 
 } // namespace dofs

@@ -13,6 +13,7 @@
 #include "Elements/ReferenceElement.h"
 #include "Spaces/FunctionSpace.h"
 #include "Spaces/OrientationManager.h"
+#include "Basis/VectorBasis.h"
 
 // Mesh convenience overloads require the Mesh library to be linked, not just headers present.
 // Standalone FE builds inside the svMultiPhysics repo still see Mesh headers, so __has_include
@@ -2962,6 +2963,11 @@ DofLayoutInfo DofLayoutInfo::Lagrange(int order, int dim, int num_verts_per_cell
             static_cast<GlobalIndex>(info.num_components));
     }
 
+    // Tensor-product face-interior ordering is currently only implemented for
+    // quad faces of hex elements (used for permutation under rotations/reflections).
+    info.tensor_face_dof_layout =
+        (dim == 3 && num_verts_per_cell == 8 && info.dofs_per_face > 1);
+
     return info;
 }
 
@@ -2969,6 +2975,7 @@ DofLayoutInfo DofLayoutInfo::DG(int order, int num_verts_per_cell, int num_compo
     DofLayoutInfo info;
     info.is_continuous = false;
     info.num_components = num_components;
+    info.tensor_face_dof_layout = false;
 
     // For DG, all DOFs are cell-interior (no sharing)
     info.dofs_per_vertex = 0;
@@ -3065,6 +3072,7 @@ struct DofHandler::MeshCacheState : MeshObserver {
                    a.dofs_per_cell == b.dofs_per_cell &&
                    a.num_components == b.num_components &&
                    a.is_continuous == b.is_continuous &&
+                   a.tensor_face_dof_layout == b.tensor_face_dof_layout &&
                    a.total_dofs_per_element == b.total_dofs_per_element;
         }
 
@@ -3220,6 +3228,10 @@ DofHandler::DofHandler(DofHandler&& other) noexcept
     , n_cells_(other.n_cells_)
     , spatial_dim_(other.spatial_dim_)
     , num_components_(other.num_components_)
+    , cell_edge_orient_offsets_(std::move(other.cell_edge_orient_offsets_))
+    , cell_edge_orient_data_(std::move(other.cell_edge_orient_data_))
+    , cell_face_orient_offsets_(std::move(other.cell_face_orient_offsets_))
+    , cell_face_orient_data_(std::move(other.cell_face_orient_data_))
 {
     other.finalized_ = false;
     other.ghost_cache_valid_ = false;
@@ -3251,6 +3263,10 @@ DofHandler& DofHandler::operator=(DofHandler&& other) noexcept {
 	        n_cells_ = other.n_cells_;
 	        spatial_dim_ = other.spatial_dim_;
 	        num_components_ = other.num_components_;
+        cell_edge_orient_offsets_ = std::move(other.cell_edge_orient_offsets_);
+        cell_edge_orient_data_ = std::move(other.cell_edge_orient_data_);
+        cell_face_orient_offsets_ = std::move(other.cell_face_orient_offsets_);
+        cell_face_orient_data_ = std::move(other.cell_face_orient_data_);
 
         other.finalized_ = false;
         other.ghost_cache_valid_ = false;
@@ -3269,6 +3285,138 @@ void DofHandler::distributeDofs(const MeshTopologyInfo& topology,
     checkNotFinalized();
     const auto view = MeshTopologyView::from(topology);
     distributeDofsCore(view, layout, options);
+}
+
+void DofHandler::distributeDofs(const MeshTopologyInfo& topology,
+                                const spaces::FunctionSpace& space,
+                                const DofDistributionOptions& options)
+{
+    checkNotFinalized();
+
+    FE_THROW_IF(topology.n_cells <= 0, FEException,
+                "DofHandler::distributeDofs(MeshTopologyInfo, FunctionSpace): topology has no cells");
+
+    // Infer cell vertex count from cell 0.
+    const auto cell0 = topology.getCellVertices(0);
+    FE_THROW_IF(cell0.empty(), FEException,
+                "DofHandler::distributeDofs(MeshTopologyInfo, FunctionSpace): cell 0 has no vertices");
+    const int n_verts = static_cast<int>(cell0.size());
+
+    const auto continuity = space.continuity();
+    const int dim = topology.dim;
+    const int order = space.polynomial_order();
+    const auto total_dofs = static_cast<LocalIndex>(space.dofs_per_element());
+
+    DofLayoutInfo layout{};
+
+    const bool is_conforming =
+        (continuity == Continuity::C0 || continuity == Continuity::C1 ||
+         continuity == Continuity::H_curl || continuity == Continuity::H_div);
+    layout.is_continuous = is_conforming;
+    layout.tensor_face_dof_layout = false;
+
+    if (continuity == Continuity::C0 || continuity == Continuity::C1) {
+        layout = DofLayoutInfo::Lagrange(order, dim, n_verts);
+        layout.total_dofs_per_element = total_dofs;
+        layout.num_components = space.value_dimension();
+        return distributeDofs(topology, layout, options);
+    }
+
+    if (continuity == Continuity::H_curl || continuity == Continuity::H_div) {
+        const auto& elem = space.element();
+        const auto& b = elem.basis();
+        FE_THROW_IF(!b.is_vector_valued(), FEException,
+                    "DofHandler::distributeDofs: H(curl)/H(div) space requires a vector-valued basis");
+        const auto* vb = dynamic_cast<const basis::VectorBasisFunction*>(&b);
+        FE_THROW_IF(vb == nullptr, FEException,
+                    "DofHandler::distributeDofs: vector basis is not a VectorBasisFunction");
+
+        const auto assoc = vb->dof_associations();
+        const auto cell_type = infer_element_type_from_cell(dim, static_cast<std::size_t>(n_verts));
+        const auto ref = (cell_type != ElementType::Unknown)
+                             ? elements::ReferenceElement::create(cell_type)
+                             : elements::ReferenceElement{};
+
+        const std::size_t num_verts_ref = static_cast<std::size_t>(n_verts);
+        const std::size_t num_edges_ref = ref.num_edges();
+        const std::size_t num_faces_ref = ref.num_faces();
+
+        std::vector<LocalIndex> per_vertex(num_verts_ref, 0);
+        std::vector<LocalIndex> per_edge(num_edges_ref, 0);
+        std::vector<LocalIndex> per_face(num_faces_ref, 0);
+        LocalIndex interior = 0;
+
+        for (const auto& a : assoc) {
+            switch (a.entity_type) {
+                case basis::DofEntity::Vertex: {
+                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_vertex.size()) {
+                        per_vertex[static_cast<std::size_t>(a.entity_id)] += 1;
+                    }
+                    break;
+                }
+                case basis::DofEntity::Edge: {
+                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_edge.size()) {
+                        per_edge[static_cast<std::size_t>(a.entity_id)] += 1;
+                    }
+                    break;
+                }
+                case basis::DofEntity::Face: {
+                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_face.size()) {
+                        per_face[static_cast<std::size_t>(a.entity_id)] += 1;
+                    }
+                    break;
+                }
+                case basis::DofEntity::Interior:
+                default:
+                    interior += 1;
+                    break;
+            }
+        }
+
+        auto uniform_or_zero = [](const std::vector<LocalIndex>& counts) -> std::optional<LocalIndex> {
+            if (counts.empty()) return LocalIndex{0};
+            LocalIndex v = counts[0];
+            for (const auto c : counts) {
+                if (c != v) return std::nullopt;
+            }
+            return v;
+        };
+
+        const auto vtx = uniform_or_zero(per_vertex);
+        const auto edg = uniform_or_zero(per_edge);
+        const auto fac = uniform_or_zero(per_face);
+        FE_THROW_IF(!vtx.has_value() || !edg.has_value() || !fac.has_value(), FEException,
+                    "DofHandler::distributeDofs: non-uniform per-entity DOF counts are not supported");
+
+        layout.dofs_per_vertex = vtx.value_or(0);
+        layout.dofs_per_edge = edg.value_or(0);
+        layout.dofs_per_face = fac.value_or(0);
+        layout.dofs_per_cell = interior;
+        layout.num_components = 1; // coefficients on vector basis functions
+        layout.is_continuous = true;
+        layout.total_dofs_per_element = total_dofs;
+        layout.tensor_face_dof_layout = false;
+
+        return distributeDofs(topology, layout, options);
+    }
+
+    // Default: treat as DG.
+    layout.is_continuous = false;
+    layout.dofs_per_vertex = 0;
+    layout.dofs_per_edge = 0;
+    layout.dofs_per_face = 0;
+    layout.tensor_face_dof_layout = false;
+
+    const auto nc = static_cast<LocalIndex>(std::max(1, space.value_dimension()));
+    layout.num_components = nc;
+    if (nc > 1 && (total_dofs % nc) == 0) {
+        layout.dofs_per_cell = total_dofs / nc;
+    } else {
+        layout.dofs_per_cell = total_dofs;
+        layout.num_components = 1;
+    }
+    layout.total_dofs_per_element = total_dofs;
+    distributeDofs(topology, layout, options);
 }
 
 void DofHandler::distributeDofsCore(const MeshTopologyView& topology,
@@ -3290,6 +3438,12 @@ void DofHandler::distributeDofsCore(const MeshTopologyView& topology,
     num_components_ = static_cast<LocalIndex>(std::max(1, layout.num_components));
     dof_map_.setMyRank(my_rank_);
     ++dof_state_revision_;
+
+    // Clear any previously cached orientation metadata.
+    cell_edge_orient_offsets_.clear();
+    cell_edge_orient_data_.clear();
+    cell_face_orient_offsets_.clear();
+    cell_face_orient_data_.clear();
 
     const MeshTopologyView* topo = &topology;
     MeshTopologyInfo derived_topology;
@@ -3361,8 +3515,179 @@ void DofHandler::distributeDofsCore(const MeshTopologyView& topology,
         }
     }
 
+    // Optional: compute per-cell edge/face orientations for entity-oriented spaces.
+    // This is independent of DOF numbering/renumbering and depends only on
+    // canonical vertex ordering + reference element topology.
+    if (layout.is_continuous &&
+        options.use_canonical_ordering &&
+        (layout.dofs_per_edge > 0 || layout.dofs_per_face > 0)) {
+        const auto n_cells = static_cast<std::size_t>(std::max<GlobalIndex>(topo->n_cells, 0));
+
+        cell_edge_orient_offsets_.assign(n_cells + 1u, MeshOffset{0});
+        cell_face_orient_offsets_.assign(n_cells + 1u, MeshOffset{0});
+
+        for (GlobalIndex c = 0; c < topo->n_cells; ++c) {
+            const auto cell_verts = topo->getCellVertices(c);
+            const auto base_type = infer_element_type_from_cell(topo->dim, cell_verts.size());
+            if (base_type == ElementType::Unknown) {
+                cell_edge_orient_offsets_[static_cast<std::size_t>(c) + 1u] =
+                    static_cast<MeshOffset>(cell_edge_orient_data_.size());
+                cell_face_orient_offsets_[static_cast<std::size_t>(c) + 1u] =
+                    static_cast<MeshOffset>(cell_face_orient_data_.size());
+                continue;
+            }
+
+            const auto ref = elements::ReferenceElement::create(base_type);
+
+            // Edge orientations in reference-edge order.
+            cell_edge_orient_offsets_[static_cast<std::size_t>(c)] =
+                static_cast<MeshOffset>(cell_edge_orient_data_.size());
+            if (layout.dofs_per_edge > 0) {
+                for (std::size_t le = 0; le < ref.num_edges(); ++le) {
+                    const auto& en = ref.edge_nodes(le);
+                    if (en.size() != 2u) {
+                        cell_edge_orient_data_.push_back(+1);
+                        continue;
+                    }
+                    const auto lv0 = static_cast<std::size_t>(en[0]);
+                    const auto lv1 = static_cast<std::size_t>(en[1]);
+                    if (lv0 >= cell_verts.size() || lv1 >= cell_verts.size()) {
+                        cell_edge_orient_data_.push_back(+1);
+                        continue;
+                    }
+                    const GlobalIndex gv0 = cell_verts[lv0];
+                    const GlobalIndex gv1 = cell_verts[lv1];
+
+                    auto gid_of = [&](GlobalIndex v) -> gid_t {
+                        const auto vv = static_cast<std::size_t>(v);
+                        if (vv < topo->vertex_gids.size()) {
+                            return topo->vertex_gids[vv];
+                        }
+                        return static_cast<gid_t>(v);
+                    };
+
+                    const bool forward = (gv0 >= 0 && gv1 >= 0) ? (gid_of(gv0) <= gid_of(gv1)) : true;
+                    cell_edge_orient_data_.push_back(forward ? +1 : -1);
+                }
+            }
+            cell_edge_orient_offsets_[static_cast<std::size_t>(c) + 1u] =
+                static_cast<MeshOffset>(cell_edge_orient_data_.size());
+
+            // Face orientations in reference-face order.
+            cell_face_orient_offsets_[static_cast<std::size_t>(c)] =
+                static_cast<MeshOffset>(cell_face_orient_data_.size());
+            if (layout.dofs_per_face > 0 &&
+                !topo->cell2face_offsets.empty() &&
+                !topo->face2vertex_offsets.empty() &&
+                !topo->face2vertex_data.empty()) {
+                const auto cell_faces = topo->getCellFaces(c);
+                for (std::size_t lf = 0; lf < ref.num_faces() && lf < cell_faces.size(); ++lf) {
+                    const GlobalIndex fid = cell_faces[lf];
+                    const auto global = topo->getFaceVertices(fid);
+                    const auto& fn = ref.face_nodes(lf);
+
+                    spaces::OrientationManager::FaceOrientation orient{};
+                    if (fn.size() == 3u && global.size() == 3u) {
+                        std::array<int, 3> local_v{};
+                        std::array<int, 3> global_v{};
+                        for (std::size_t i = 0; i < 3u; ++i) {
+                            const auto lv = static_cast<std::size_t>(fn[i]);
+                            local_v[i] = (lv < cell_verts.size()) ? static_cast<int>(cell_verts[lv]) : -1;
+                            global_v[i] = static_cast<int>(global[i]);
+                        }
+                        orient = spaces::OrientationManager::triangle_face_orientation(local_v, global_v);
+                    } else if (fn.size() == 4u && global.size() == 4u) {
+                        std::array<int, 4> local_v{};
+                        std::array<int, 4> global_v{};
+                        for (std::size_t i = 0; i < 4u; ++i) {
+                            const auto lv = static_cast<std::size_t>(fn[i]);
+                            local_v[i] = (lv < cell_verts.size()) ? static_cast<int>(cell_verts[lv]) : -1;
+                            global_v[i] = static_cast<int>(global[i]);
+                        }
+                        orient = spaces::OrientationManager::quad_face_orientation(local_v, global_v);
+                    } else {
+                        // Unsupported/degenerate face topology; keep default.
+                        orient.sign = +1;
+                    }
+                    cell_face_orient_data_.push_back(std::move(orient));
+                }
+            }
+            cell_face_orient_offsets_[static_cast<std::size_t>(c) + 1u] =
+                static_cast<MeshOffset>(cell_face_orient_data_.size());
+        }
+    }
+
     if (options.numbering != DofNumberingStrategy::Sequential) {
         renumberDofs(options.numbering);
+    }
+}
+
+bool DofHandler::hasCellOrientations() const noexcept
+{
+    return !cell_edge_orient_offsets_.empty() || !cell_face_orient_offsets_.empty();
+}
+
+std::span<const spaces::OrientationManager::Sign>
+DofHandler::cellEdgeOrientations(GlobalIndex cell_id) const
+{
+    if (cell_id < 0) {
+        return {};
+    }
+    const auto cid = static_cast<std::size_t>(cell_id);
+    if (cid + 1u >= cell_edge_orient_offsets_.size()) {
+        return {};
+    }
+    const auto begin = static_cast<std::size_t>(cell_edge_orient_offsets_[cid]);
+    const auto end = static_cast<std::size_t>(cell_edge_orient_offsets_[cid + 1u]);
+    if (begin > end || end > cell_edge_orient_data_.size()) {
+        return {};
+    }
+    return {cell_edge_orient_data_.data() + begin, end - begin};
+}
+
+std::span<const spaces::OrientationManager::FaceOrientation>
+DofHandler::cellFaceOrientations(GlobalIndex cell_id) const
+{
+    if (cell_id < 0) {
+        return {};
+    }
+    const auto cid = static_cast<std::size_t>(cell_id);
+    if (cid + 1u >= cell_face_orient_offsets_.size()) {
+        return {};
+    }
+    const auto begin = static_cast<std::size_t>(cell_face_orient_offsets_[cid]);
+    const auto end = static_cast<std::size_t>(cell_face_orient_offsets_[cid + 1u]);
+    if (begin > end || end > cell_face_orient_data_.size()) {
+        return {};
+    }
+    return {cell_face_orient_data_.data() + begin, end - begin};
+}
+
+void DofHandler::copyCellOrientationsFrom(const DofHandler& other)
+{
+    checkNotFinalized();
+    ++dof_state_revision_;
+
+    const auto n_cells = static_cast<std::size_t>(std::max<GlobalIndex>(dof_map_.getNumCells(), 0));
+
+    if (!other.cell_edge_orient_offsets_.empty()) {
+        FE_THROW_IF(other.cell_edge_orient_offsets_.size() != n_cells + 1u, FEException,
+                    "DofHandler::copyCellOrientationsFrom: edge orientation table cell count mismatch");
+        cell_edge_orient_offsets_ = other.cell_edge_orient_offsets_;
+        cell_edge_orient_data_ = other.cell_edge_orient_data_;
+    } else {
+        cell_edge_orient_offsets_.clear();
+        cell_edge_orient_data_.clear();
+    }
+
+    if (!other.cell_face_orient_offsets_.empty()) {
+        FE_THROW_IF(other.cell_face_orient_offsets_.size() != n_cells + 1u, FEException,
+                    "DofHandler::copyCellOrientationsFrom: face orientation table cell count mismatch");
+        cell_face_orient_offsets_ = other.cell_face_orient_offsets_;
+        cell_face_orient_data_ = other.cell_face_orient_data_;
+    } else {
+        cell_face_orient_offsets_.clear();
+        cell_face_orient_data_.clear();
     }
 }
 
@@ -3626,13 +3951,14 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
             const auto base_type = infer_base_type(cell_verts.size());
             const bool can_orient_faces =
                 options.use_canonical_ordering &&
+                layout.tensor_face_dof_layout &&
                 (layout.dofs_per_face > 1) &&
                 (base_type != ElementType::Unknown) &&
                 !topology.face2vertex_offsets.empty() &&
                 !topology.face2vertex_data.empty();
 
-            const int poly_order = static_cast<int>(layout.dofs_per_edge) + 1;
-            const int face_grid = poly_order - 1; // interior nodes per axis for tensor faces
+            const int poly_order = can_orient_faces ? (static_cast<int>(layout.dofs_per_edge) + 1) : 0;
+            const int face_grid = can_orient_faces ? (poly_order - 1) : 0; // interior nodes per axis for tensor faces
 
             auto get_face_vertices = [&](GlobalIndex face_id) {
                 return topology.getFaceVertices(face_id);
@@ -4774,13 +5100,14 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
             const auto base_type = infer_base_type(cell_verts.size());
             const bool can_orient_faces =
                 options.use_canonical_ordering &&
+                layout.tensor_face_dof_layout &&
                 (layout.dofs_per_face > 1) &&
                 (base_type != ElementType::Unknown) &&
                 !topology.face2vertex_offsets.empty() &&
                 !topology.face2vertex_data.empty();
 
-            const int poly_order = static_cast<int>(layout.dofs_per_edge) + 1;
-            const int face_grid = poly_order - 1;
+            const int poly_order = can_orient_faces ? (static_cast<int>(layout.dofs_per_edge) + 1) : 0;
+            const int face_grid = can_orient_faces ? (poly_order - 1) : 0;
 
             auto quad_interior_permutation_local_to_global = [&](const std::vector<int>& vertex_perm) -> std::vector<int> {
                 if (poly_order < 2 || face_grid <= 0) {
@@ -5473,6 +5800,7 @@ struct DofHandler::MeshCacheState : MeshObserver {
                    a.dofs_per_cell == b.dofs_per_cell &&
                    a.num_components == b.num_components &&
                    a.is_continuous == b.is_continuous &&
+                   a.tensor_face_dof_layout == b.tensor_face_dof_layout &&
                    a.total_dofs_per_element == b.total_dofs_per_element;
         }
 
@@ -5607,8 +5935,13 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
     // Build DofLayoutInfo from FunctionSpace
     DofLayoutInfo layout;
     const auto continuity = space.continuity();
-    layout.is_continuous = (continuity == Continuity::C0 || continuity == Continuity::C1);
-    layout.num_components = space.value_dimension();
+    layout.is_continuous =
+        (continuity == Continuity::C0 || continuity == Continuity::C1 ||
+         continuity == Continuity::H_curl || continuity == Continuity::H_div);
+    layout.tensor_face_dof_layout = false;
+    layout.num_components = (continuity == Continuity::H_curl || continuity == Continuity::H_div)
+                                ? 1
+                                : space.value_dimension();
 
     const int order = space.polynomial_order();
     const auto total_dofs = static_cast<LocalIndex>(space.dofs_per_element());
@@ -5618,15 +5951,87 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
         throw FEException("DofHandler::distributeDofs(MeshBase): cell 0 has no vertices");
     }
 
-    if (layout.is_continuous) {
+    if (continuity == Continuity::C0 || continuity == Continuity::C1) {
         layout = DofLayoutInfo::Lagrange(order, mesh.dim(), n_verts);
         layout.total_dofs_per_element = total_dofs;
         layout.num_components = space.value_dimension();
+    } else if (continuity == Continuity::H_curl || continuity == Continuity::H_div) {
+        const auto& elem = space.element();
+        const auto& b = elem.basis();
+        FE_THROW_IF(!b.is_vector_valued(), FEException,
+                    "DofHandler::distributeDofs(MeshBase): H(curl)/H(div) space requires a vector-valued basis");
+        const auto* vb = dynamic_cast<const basis::VectorBasisFunction*>(&b);
+        FE_THROW_IF(vb == nullptr, FEException,
+                    "DofHandler::distributeDofs(MeshBase): vector basis is not a VectorBasisFunction");
+
+        const auto assoc = vb->dof_associations();
+        const auto cell_type = infer_element_type_from_cell(mesh.dim(), static_cast<std::size_t>(n_verts));
+        const auto ref = (cell_type != ElementType::Unknown)
+                             ? elements::ReferenceElement::create(cell_type)
+                             : elements::ReferenceElement{};
+
+        const std::size_t num_verts_ref = static_cast<std::size_t>(n_verts);
+        const std::size_t num_edges_ref = ref.num_edges();
+        const std::size_t num_faces_ref = ref.num_faces();
+
+        std::vector<LocalIndex> per_vertex(num_verts_ref, 0);
+        std::vector<LocalIndex> per_edge(num_edges_ref, 0);
+        std::vector<LocalIndex> per_face(num_faces_ref, 0);
+        LocalIndex interior = 0;
+
+        for (const auto& a : assoc) {
+            switch (a.entity_type) {
+                case basis::DofEntity::Vertex:
+                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_vertex.size()) {
+                        per_vertex[static_cast<std::size_t>(a.entity_id)] += 1;
+                    }
+                    break;
+                case basis::DofEntity::Edge:
+                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_edge.size()) {
+                        per_edge[static_cast<std::size_t>(a.entity_id)] += 1;
+                    }
+                    break;
+                case basis::DofEntity::Face:
+                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_face.size()) {
+                        per_face[static_cast<std::size_t>(a.entity_id)] += 1;
+                    }
+                    break;
+                case basis::DofEntity::Interior:
+                default:
+                    interior += 1;
+                    break;
+            }
+        }
+
+        auto uniform_or_zero = [](const std::vector<LocalIndex>& counts) -> std::optional<LocalIndex> {
+            if (counts.empty()) return LocalIndex{0};
+            LocalIndex v = counts[0];
+            for (const auto c : counts) {
+                if (c != v) return std::nullopt;
+            }
+            return v;
+        };
+
+        const auto vtx = uniform_or_zero(per_vertex);
+        const auto edg = uniform_or_zero(per_edge);
+        const auto fac = uniform_or_zero(per_face);
+        FE_THROW_IF(!vtx.has_value() || !edg.has_value() || !fac.has_value(), FEException,
+                    "DofHandler::distributeDofs(MeshBase): non-uniform per-entity DOF counts are not supported");
+
+        layout.dofs_per_vertex = vtx.value_or(0);
+        layout.dofs_per_edge = edg.value_or(0);
+        layout.dofs_per_face = fac.value_or(0);
+        layout.dofs_per_cell = interior;
+        layout.num_components = 1;
+        layout.is_continuous = true;
+        layout.total_dofs_per_element = total_dofs;
+        layout.tensor_face_dof_layout = false;
     } else {
         layout.dofs_per_vertex = 0;
         layout.dofs_per_edge = 0;
         layout.dofs_per_face = 0;
-        const auto nc = static_cast<LocalIndex>(std::max(1, layout.num_components));
+        const auto nc = static_cast<LocalIndex>(std::max(1, space.value_dimension()));
+        layout.num_components = nc;
         if (nc > 1 && (total_dofs % nc) == 0) {
             layout.dofs_per_cell = total_dofs / nc;
         } else {
@@ -5790,8 +6195,13 @@ void DofHandler::distributeDofs(const Mesh& mesh,
     // Build DofLayoutInfo from FunctionSpace
     DofLayoutInfo layout;
     const auto continuity = space.continuity();
-    layout.is_continuous = (continuity == Continuity::C0 || continuity == Continuity::C1);
-    layout.num_components = space.value_dimension();
+    layout.is_continuous =
+        (continuity == Continuity::C0 || continuity == Continuity::C1 ||
+         continuity == Continuity::H_curl || continuity == Continuity::H_div);
+    layout.tensor_face_dof_layout = false;
+    layout.num_components = (continuity == Continuity::H_curl || continuity == Continuity::H_div)
+                                ? 1
+                                : space.value_dimension();
 
     const int order = space.polynomial_order();
     const auto total_dofs = static_cast<LocalIndex>(space.dofs_per_element());
@@ -5801,15 +6211,87 @@ void DofHandler::distributeDofs(const Mesh& mesh,
         throw FEException("DofHandler::distributeDofs(Mesh): cell 0 has no vertices");
     }
 
-    if (layout.is_continuous) {
+    if (continuity == Continuity::C0 || continuity == Continuity::C1) {
         layout = DofLayoutInfo::Lagrange(order, local_mesh.dim(), n_verts);
         layout.total_dofs_per_element = total_dofs;
         layout.num_components = space.value_dimension();
+    } else if (continuity == Continuity::H_curl || continuity == Continuity::H_div) {
+        const auto& elem = space.element();
+        const auto& b = elem.basis();
+        FE_THROW_IF(!b.is_vector_valued(), FEException,
+                    "DofHandler::distributeDofs(Mesh): H(curl)/H(div) space requires a vector-valued basis");
+        const auto* vb = dynamic_cast<const basis::VectorBasisFunction*>(&b);
+        FE_THROW_IF(vb == nullptr, FEException,
+                    "DofHandler::distributeDofs(Mesh): vector basis is not a VectorBasisFunction");
+
+        const auto assoc = vb->dof_associations();
+        const auto cell_type = infer_element_type_from_cell(local_mesh.dim(), static_cast<std::size_t>(n_verts));
+        const auto ref = (cell_type != ElementType::Unknown)
+                             ? elements::ReferenceElement::create(cell_type)
+                             : elements::ReferenceElement{};
+
+        const std::size_t num_verts_ref = static_cast<std::size_t>(n_verts);
+        const std::size_t num_edges_ref = ref.num_edges();
+        const std::size_t num_faces_ref = ref.num_faces();
+
+        std::vector<LocalIndex> per_vertex(num_verts_ref, 0);
+        std::vector<LocalIndex> per_edge(num_edges_ref, 0);
+        std::vector<LocalIndex> per_face(num_faces_ref, 0);
+        LocalIndex interior = 0;
+
+        for (const auto& a : assoc) {
+            switch (a.entity_type) {
+                case basis::DofEntity::Vertex:
+                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_vertex.size()) {
+                        per_vertex[static_cast<std::size_t>(a.entity_id)] += 1;
+                    }
+                    break;
+                case basis::DofEntity::Edge:
+                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_edge.size()) {
+                        per_edge[static_cast<std::size_t>(a.entity_id)] += 1;
+                    }
+                    break;
+                case basis::DofEntity::Face:
+                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_face.size()) {
+                        per_face[static_cast<std::size_t>(a.entity_id)] += 1;
+                    }
+                    break;
+                case basis::DofEntity::Interior:
+                default:
+                    interior += 1;
+                    break;
+            }
+        }
+
+        auto uniform_or_zero = [](const std::vector<LocalIndex>& counts) -> std::optional<LocalIndex> {
+            if (counts.empty()) return LocalIndex{0};
+            LocalIndex v = counts[0];
+            for (const auto c : counts) {
+                if (c != v) return std::nullopt;
+            }
+            return v;
+        };
+
+        const auto vtx = uniform_or_zero(per_vertex);
+        const auto edg = uniform_or_zero(per_edge);
+        const auto fac = uniform_or_zero(per_face);
+        FE_THROW_IF(!vtx.has_value() || !edg.has_value() || !fac.has_value(), FEException,
+                    "DofHandler::distributeDofs(Mesh): non-uniform per-entity DOF counts are not supported");
+
+        layout.dofs_per_vertex = vtx.value_or(0);
+        layout.dofs_per_edge = edg.value_or(0);
+        layout.dofs_per_face = fac.value_or(0);
+        layout.dofs_per_cell = interior;
+        layout.num_components = 1;
+        layout.is_continuous = true;
+        layout.total_dofs_per_element = total_dofs;
+        layout.tensor_face_dof_layout = false;
     } else {
         layout.dofs_per_vertex = 0;
         layout.dofs_per_edge = 0;
         layout.dofs_per_face = 0;
-        const auto nc = static_cast<LocalIndex>(std::max(1, layout.num_components));
+        const auto nc = static_cast<LocalIndex>(std::max(1, space.value_dimension()));
+        layout.num_components = nc;
         if (nc > 1 && (total_dofs % nc) == 0) {
             layout.dofs_per_cell = total_dofs / nc;
         } else {
