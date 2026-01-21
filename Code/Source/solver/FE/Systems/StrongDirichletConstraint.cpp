@@ -56,6 +56,10 @@ struct BoundaryDofsWithCoords {
 
     const auto& rec = system.fieldRecord(field);
     FE_CHECK_NOT_NULL(rec.space.get(), "StrongDirichletConstraint: field space");
+    FE_THROW_IF(rec.space->continuity() == Continuity::H_curl || rec.space->continuity() == Continuity::H_div ||
+                    rec.space->element().basis().is_vector_valued(),
+                InvalidArgumentException,
+                "StrongDirichletConstraint does not support H(curl)/H(div) vector-basis spaces; use the dedicated H(curl)/H(div) constraint types instead");
 
     const auto& mesh = system.meshAccess();
     const auto& dh = system.fieldDofHandler(field);
@@ -208,8 +212,7 @@ void StrongDirichletConstraint::apply(const FESystem& system, constraints::Affin
         }
         pctx.x = coords_[i];
         const Real v = forms::evaluateScalarAt(value_, pctx);
-        constraints.addLine(dof);
-        constraints.setInhomogeneity(dof, v);
+        constraints.addDirichlet(dof, v);
     }
 }
 
