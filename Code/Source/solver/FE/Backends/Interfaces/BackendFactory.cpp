@@ -64,7 +64,7 @@ std::unique_ptr<BackendFactory> BackendFactory::create(BackendKind kind, const C
         case BackendKind::FSILS:
             FE_THROW_IF(options.dof_per_node <= 0, InvalidArgumentException,
                         "BackendFactory: fsils dof_per_node must be > 0");
-            return std::make_unique<FsilsFactory>(options.dof_per_node);
+            return std::make_unique<FsilsFactory>(options.dof_per_node, options.dof_permutation);
 
         case BackendKind::PETSc:
         #if defined(FE_HAS_PETSC) && FE_HAS_PETSC

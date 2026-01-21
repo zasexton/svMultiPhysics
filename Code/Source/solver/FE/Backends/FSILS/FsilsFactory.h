@@ -21,7 +21,12 @@ public:
     using BackendFactory::createMatrix;
     using BackendFactory::createVector;
 
-    explicit FsilsFactory(int dof_per_node = 1) : dof_per_node_(dof_per_node) {}
+    explicit FsilsFactory(int dof_per_node = 1,
+                          std::shared_ptr<const DofPermutation> dof_permutation = {})
+        : dof_per_node_(dof_per_node)
+        , dof_permutation_(std::move(dof_permutation))
+    {
+    }
 
     [[nodiscard]] BackendKind backendKind() const noexcept override { return BackendKind::FSILS; }
 
@@ -41,6 +46,7 @@ public:
 
 private:
     int dof_per_node_{1};
+    std::shared_ptr<const DofPermutation> dof_permutation_{};
     mutable std::shared_ptr<const FsilsShared> cached_shared_{};
 };
 

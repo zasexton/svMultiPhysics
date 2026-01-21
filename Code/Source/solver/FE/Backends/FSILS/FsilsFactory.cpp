@@ -21,7 +21,7 @@ namespace backends {
 std::unique_ptr<GenericMatrix>
 FsilsFactory::createMatrix(const sparsity::SparsityPattern& sparsity) const
 {
-    auto mat = std::make_unique<FsilsMatrix>(sparsity, dof_per_node_);
+    auto mat = std::make_unique<FsilsMatrix>(sparsity, dof_per_node_, dof_permutation_);
     cached_shared_ = mat->shared();
     return mat;
 }
@@ -29,7 +29,7 @@ FsilsFactory::createMatrix(const sparsity::SparsityPattern& sparsity) const
 std::unique_ptr<GenericMatrix>
 FsilsFactory::createMatrix(const sparsity::DistributedSparsityPattern& sparsity) const
 {
-    auto mat = std::make_unique<FsilsMatrix>(sparsity, dof_per_node_);
+    auto mat = std::make_unique<FsilsMatrix>(sparsity, dof_per_node_, dof_permutation_);
     cached_shared_ = mat->shared();
     return mat;
 }
