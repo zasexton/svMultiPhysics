@@ -51,6 +51,17 @@ namespace dofs {
 class SubspaceView;
 
 /**
+ * @brief How a vector-valued field maps physical components to DOFs
+ *
+ * - ComponentWise: DOFs are stored per component (e.g., ProductSpace / H1 vector fields).
+ * - VectorBasis: DOFs are coefficients on vector-valued basis functions (e.g., H(curl)/H(div)).
+ */
+enum class FieldComponentDofLayout : std::uint8_t {
+    ComponentWise,
+    VectorBasis
+};
+
+/**
  * @brief Field descriptor for multi-field systems
  */
 struct FieldDescriptor {
@@ -59,6 +70,7 @@ struct FieldDescriptor {
     GlobalIndex dof_offset{0};          ///< Starting DOF index for this field
     GlobalIndex n_dofs{0};              ///< Total DOFs for this field
     int block_index{0};                 ///< Block index in block systems
+    FieldComponentDofLayout component_dof_layout{FieldComponentDofLayout::ComponentWise};
 
     // Function space information
     std::string space_type;             ///< Type of function space (e.g., "Lagrange")
@@ -146,6 +158,15 @@ public:
      */
     int addVectorField(const std::string& name, LocalIndex n_components,
                        GlobalIndex n_dofs_per_component);
+
+    /**
+     * @brief Add a vector-valued field with a vector-basis DOF layout (H(curl)/H(div))
+     *
+     * For these spaces, DOFs are not stored per component. Component extraction
+     * APIs (getComponentDofs/componentToGlobal/getComponentOfDof) are not defined.
+     */
+    int addVectorBasisField(const std::string& name, LocalIndex value_dimension,
+                            GlobalIndex n_dofs);
 
     /**
      * @brief Add a field with function space

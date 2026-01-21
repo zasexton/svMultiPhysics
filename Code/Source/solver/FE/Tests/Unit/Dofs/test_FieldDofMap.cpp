@@ -106,3 +106,22 @@ TEST(FieldDofMap, RequiresFinalizeForQueries) {
     EXPECT_THROW(map.getFieldDofRange("p"), FEException);
 }
 
+TEST(FieldDofMap, VectorBasisFieldDisallowsComponentQueries) {
+    FieldDofMap map;
+    map.addVectorBasisField("E", /*value_dimension=*/3, /*n_dofs=*/6);
+    map.finalize();
+
+    EXPECT_EQ(map.numFields(), 1u);
+    EXPECT_EQ(map.totalDofs(), 6);
+    EXPECT_EQ(map.numComponents("E"), 3);
+
+    auto range = map.getFieldDofRange("E");
+    EXPECT_EQ(range.first, 0);
+    EXPECT_EQ(range.second, 6);
+
+    EXPECT_EQ(map.fieldToGlobal(0, 5), 5);
+    EXPECT_THROW(map.getComponentDofs("E", 0), FEException);
+    EXPECT_THROW(map.componentToGlobal(0, 0, 0), FEException);
+
+    EXPECT_FALSE(map.getComponentOfDof(0).has_value());
+}

@@ -54,6 +54,7 @@ int FieldDofMap::addScalarField(const std::string& name, GlobalIndex n_dofs) {
     desc.n_components = 1;
     desc.n_dofs = n_dofs;
     desc.block_index = static_cast<int>(fields_.size());
+    desc.component_dof_layout = FieldComponentDofLayout::ComponentWise;
 
     auto idx = static_cast<int>(fields_.size());
     fields_.push_back(std::move(desc));
@@ -75,6 +76,36 @@ int FieldDofMap::addVectorField(const std::string& name, LocalIndex n_components
     desc.n_components = n_components;
     desc.n_dofs = n_dofs_per_component * n_components;
     desc.block_index = static_cast<int>(fields_.size());
+    desc.component_dof_layout = FieldComponentDofLayout::ComponentWise;
+
+    auto idx = static_cast<int>(fields_.size());
+    fields_.push_back(std::move(desc));
+    name_to_index_[name] = static_cast<std::size_t>(idx);
+
+    return idx;
+}
+
+int FieldDofMap::addVectorBasisField(const std::string& name,
+                                     LocalIndex value_dimension,
+                                     GlobalIndex n_dofs) {
+    checkNotFinalized();
+
+    if (name_to_index_.count(name) > 0) {
+        throw FEException("FieldDofMap::addVectorBasisField: field '" + name + "' already exists");
+    }
+    if (value_dimension <= 0 || value_dimension > 3) {
+        throw FEException("FieldDofMap::addVectorBasisField: value_dimension must be 1..3");
+    }
+    if (n_dofs < 0) {
+        throw FEException("FieldDofMap::addVectorBasisField: n_dofs must be non-negative");
+    }
+
+    FieldDescriptor desc;
+    desc.name = name;
+    desc.n_components = value_dimension;
+    desc.n_dofs = n_dofs;
+    desc.block_index = static_cast<int>(fields_.size());
+    desc.component_dof_layout = FieldComponentDofLayout::VectorBasis;
 
     auto idx = static_cast<int>(fields_.size());
     fields_.push_back(std::move(desc));
@@ -99,6 +130,10 @@ int FieldDofMap::addField(const std::string& name, const spaces::FunctionSpace& 
     desc.n_dofs = n_mesh_entities * dofs_per_entity;
     desc.block_index = static_cast<int>(fields_.size());
     desc.polynomial_order = space.polynomial_order();
+    desc.component_dof_layout =
+        (space.continuity() == Continuity::H_curl || space.continuity() == Continuity::H_div)
+            ? FieldComponentDofLayout::VectorBasis
+            : FieldComponentDofLayout::ComponentWise;
 
     auto idx = static_cast<int>(fields_.size());
     fields_.push_back(std::move(desc));
@@ -231,6 +266,10 @@ IndexSet FieldDofMap::getComponentDofs(std::size_t field_idx, LocalIndex compone
     }
 
     const auto& field = fields_[field_idx];
+    if (field.component_dof_layout != FieldComponentDofLayout::ComponentWise) {
+        throw FEException("FieldDofMap::getComponentDofs: field '" + field.name +
+                          "' does not have component-wise DOFs");
+    }
     if (component >= field.n_components) {
         throw FEException("FieldDofMap::getComponentDofs: invalid component index");
     }
@@ -295,6 +334,9 @@ FieldDofMap::getComponentOfDof(GlobalIndex dof_id) const {
         auto [start, end] = getFieldDofRange(f);
         if (dof_id >= start && dof_id < end) {
             const auto& field = fields_[f];
+            if (field.component_dof_layout != FieldComponentDofLayout::ComponentWise) {
+                return std::nullopt;
+            }
             GlobalIndex local = dof_id - start;
 
             LocalIndex component = 0;
@@ -418,6 +460,10 @@ GlobalIndex FieldDofMap::componentToGlobal(std::size_t field_idx, LocalIndex com
     }
 
     const auto& field = fields_[field_idx];
+    if (field.component_dof_layout != FieldComponentDofLayout::ComponentWise) {
+        throw FEException("FieldDofMap::componentToGlobal: field '" + field.name +
+                          "' does not have component-wise DOFs");
+    }
     if (component >= field.n_components) {
         throw FEException("FieldDofMap::componentToGlobal: invalid component");
     }
