@@ -16,6 +16,7 @@
 
 #include "Systems/FESystem.h"
 #include "Systems/StrongDirichletConstraint.h"
+#include "Spaces/FunctionSpace.h"
 
 #include <algorithm>
 #include <unordered_set>
@@ -25,6 +26,31 @@ namespace FE {
 namespace systems {
 
 namespace {
+
+forms::FormExprNode::SpaceSignature signatureFromSpace(const spaces::FunctionSpace& space)
+{
+    forms::FormExprNode::SpaceSignature sig;
+    sig.space_type = space.space_type();
+    sig.field_type = space.field_type();
+    sig.continuity = space.continuity();
+    sig.value_dimension = space.value_dimension();
+    sig.topological_dimension = space.topological_dimension();
+    sig.polynomial_order = space.polynomial_order();
+    sig.element_type = space.element_type();
+    return sig;
+}
+
+bool signaturesMatch(const forms::FormExprNode::SpaceSignature& a,
+                     const forms::FormExprNode::SpaceSignature& b) noexcept
+{
+    return a.space_type == b.space_type &&
+           a.field_type == b.field_type &&
+           a.continuity == b.continuity &&
+           a.value_dimension == b.value_dimension &&
+           a.topological_dimension == b.topological_dimension &&
+           a.polynomial_order == b.polynomial_order &&
+           a.element_type == b.element_type;
+}
 
 struct DomainDispatch {
     bool has_cell{false};
@@ -189,8 +215,25 @@ KernelPtr installResidualForm(
     const forms::FormExpr& residual_form,
     const FormInstallOptions& options)
 {
+    const auto& test_rec = system.fieldRecord(test_field);
+    const auto& trial_rec = system.fieldRecord(trial_field);
+    FE_CHECK_NOT_NULL(test_rec.space.get(), "installResidualForm: test field space");
+    FE_CHECK_NOT_NULL(trial_rec.space.get(), "installResidualForm: trial field space");
+
     forms::FormCompiler compiler(options.compiler_options);
     auto ir = compiler.compileResidual(residual_form);
+
+    FE_THROW_IF(!ir.testSpace().has_value(), InvalidArgumentException,
+                "installResidualForm: compiled residual missing TestFunction space");
+    FE_THROW_IF(!ir.trialSpace().has_value(), InvalidArgumentException,
+                "installResidualForm: compiled residual missing TrialFunction space");
+
+    const auto expected_test = signatureFromSpace(*test_rec.space);
+    const auto expected_trial = signatureFromSpace(*trial_rec.space);
+    FE_THROW_IF(!signaturesMatch(*ir.testSpace(), expected_test), InvalidArgumentException,
+                "installResidualForm: TestFunction space does not match registered test_field space");
+    FE_THROW_IF(!signaturesMatch(*ir.trialSpace(), expected_trial), InvalidArgumentException,
+                "installResidualForm: TrialFunction space does not match registered trial_field space");
 
     const auto dispatch = analyzeDispatch(ir);
     FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&

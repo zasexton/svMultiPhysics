@@ -605,6 +605,8 @@ set(FE_SYSTEMS_HEADERS
     Systems/SystemConstraints.h
     Systems/SystemSetup.h
     Systems/SystemState.h
+    Systems/HCurlTangentialConstraint.h
+    Systems/HDivNormalConstraint.h
     Systems/StrongDirichletConstraint.h
     Systems/TimeIntegrator.h
     Systems/TransientSystem.h
@@ -626,6 +628,8 @@ set(FE_SYSTEMS_SOURCES
     Systems/SystemAssembly.cpp
     Systems/SystemConstraints.cpp
     Systems/SystemSetup.cpp
+    Systems/HCurlTangentialConstraint.cpp
+    Systems/HDivNormalConstraint.cpp
     Systems/StrongDirichletConstraint.cpp
     Systems/TimeIntegrator.cpp
     Systems/CoupledBoundaryManager.cpp
@@ -765,6 +769,7 @@ set(FE_SPARSITY_SOURCES
 # Backend interface sources (TODO: implement)
 set(FE_BACKENDS_HEADERS
     Backends/Interfaces/BackendKind.h
+    Backends/Interfaces/DofPermutation.h
     Backends/Interfaces/BackendFactory.h
     Backends/Interfaces/GenericVector.h
     Backends/Interfaces/GenericMatrix.h
@@ -1667,15 +1672,16 @@ if(FE_BUILD_TESTS)
 
         # Assembly module tests
         set(FE_ASSEMBLY_TEST_SOURCES
-            # Phase 1: CORE tests
-            Tests/Unit/Assembly/test_GlobalSystemView.cpp
-            Tests/Unit/Assembly/test_AssemblyKernel.cpp
-            Tests/Unit/Assembly/test_AssemblyContext.cpp
+	            # Phase 1: CORE tests
+	            Tests/Unit/Assembly/test_GlobalSystemView.cpp
+	            Tests/Unit/Assembly/test_AssemblyKernel.cpp
+	            Tests/Unit/Assembly/test_AssemblyContext.cpp
             Tests/Unit/Assembly/test_JITKernelArgsPacking.cpp
             Tests/Unit/Assembly/test_StandardAssembler.cpp
+            Tests/Unit/Assembly/test_VectorBasisOrientationAssembly.cpp
             Tests/Unit/Assembly/test_AssemblerSelection.cpp
-            Tests/Unit/Assembly/test_ParallelAssembler.cpp
-            Tests/Unit/Assembly/test_GhostContributionManager.cpp
+	            Tests/Unit/Assembly/test_ParallelAssembler.cpp
+	            Tests/Unit/Assembly/test_GhostContributionManager.cpp
             # Phase 2: HIGH priority tests
             Tests/Unit/Assembly/test_AssemblyLoop.cpp
             Tests/Unit/Assembly/test_AssemblyConstraintDistributor.cpp
@@ -1715,19 +1721,20 @@ if(FE_BUILD_TESTS)
         # Systems module tests (Systems depends on Assembly; tests also require Mesh)
         if(FE_WITH_MESH AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Systems/test_main.cpp)
             set(FE_SYSTEMS_TEST_SOURCES
-                Tests/Unit/Systems/test_FieldRegistry.cpp
-                Tests/Unit/Systems/test_ContactPenaltyKernel.cpp
-                Tests/Unit/Systems/test_SurfaceContactKernel.cpp
-                Tests/Unit/Systems/test_ParameterRegistry.cpp
-                Tests/Unit/Systems/test_FieldEvaluation.cpp
-                Tests/Unit/Systems/test_FESystem.cpp
-                Tests/Unit/Systems/test_AssemblerSelection.cpp
-                Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp
+	                Tests/Unit/Systems/test_FieldRegistry.cpp
+	                Tests/Unit/Systems/test_ContactPenaltyKernel.cpp
+	                Tests/Unit/Systems/test_SurfaceContactKernel.cpp
+	                Tests/Unit/Systems/test_ParameterRegistry.cpp
+	                Tests/Unit/Systems/test_FieldEvaluation.cpp
+	                Tests/Unit/Systems/test_FESystem.cpp
+	                Tests/Unit/Systems/test_AssemblerSelection.cpp
+	                Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp
                 Tests/Unit/Systems/test_NavierStokesCoupled.cpp
                 Tests/Unit/Systems/test_SystemConstraints.cpp
+                Tests/Unit/Systems/test_VectorBasisConstraints.cpp
                 Tests/Unit/Systems/test_StrongDirichletConstraint.cpp
                 Tests/Unit/Systems/test_FormsInstaller.cpp
-                Tests/Unit/Systems/test_CoupledBoundaryManager.cpp
+	                Tests/Unit/Systems/test_CoupledBoundaryManager.cpp
                 Tests/Unit/Systems/test_CoupledBoundaryConditionHelpers.cpp
                 Tests/Unit/Systems/test_AuxiliaryStateBuilder.cpp
                 Tests/Unit/Systems/test_ODEIntegrator.cpp

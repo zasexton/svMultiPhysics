@@ -15,6 +15,8 @@
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/GlobalSystemView.h"
 
+#include "Backends/Interfaces/GenericVector.h"
+
 #include "Spaces/FunctionSpace.h"
 #include "Sparsity/DistributedSparsityPattern.h"
 
@@ -364,15 +366,25 @@ std::optional<std::array<Real, 3>> FESystem::evaluateFieldAtPoint(FieldId field,
     std::vector<Real> coeffs;
     coeffs.reserve(cell_dofs_local.size());
 
+    std::unique_ptr<assembly::GlobalSystemView> solution_view;
+    if (state.u_vector != nullptr) {
+        auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
+        solution_view = vec->createAssemblyView();
+    }
+
     const GlobalIndex offset = field_dof_offsets_[field_idx];
     for (const auto d_local : cell_dofs_local) {
         const GlobalIndex d = d_local + offset;
         FE_THROW_IF(d < 0, InvalidArgumentException,
                     "FESystem::evaluateFieldAtPoint: negative DOF index");
-        const auto idx = static_cast<std::size_t>(d);
-        FE_THROW_IF(idx >= state.u.size(), InvalidArgumentException,
-                    "FESystem::evaluateFieldAtPoint: state.u is smaller than required by DOF index");
-        coeffs.push_back(state.u[idx]);
+        if (solution_view) {
+            coeffs.push_back(solution_view->getVectorEntry(d));
+        } else {
+            const auto idx = static_cast<std::size_t>(d);
+            FE_THROW_IF(idx >= state.u.size(), InvalidArgumentException,
+                        "FESystem::evaluateFieldAtPoint: state.u is smaller than required by DOF index");
+            coeffs.push_back(state.u[idx]);
+        }
     }
 
     const auto v = rec.space->evaluate(xi, coeffs);
