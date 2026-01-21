@@ -67,8 +67,10 @@
 #include "GlobalSystemView.h"
 #include "AssemblyKernel.h"
 #include "AssemblyContext.h"
+#include "Spaces/OrientationManager.h"
 
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 namespace svmp {
@@ -172,13 +174,16 @@ public:
     void setConstraints(const constraints::AffineConstraints* constraints) override;
     void setSparsityPattern(const sparsity::SparsityPattern* sparsity) override;
     void setOptions(const AssemblyOptions& options) override;
-    void setCurrentSolution(std::span<const Real> solution) override;
-    void setCurrentSolutionView(const GlobalSystemView* solution_view) override;
-    void setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields) override;
-    void setPreviousSolution(std::span<const Real> solution) override;
-    void setPreviousSolution2(std::span<const Real> solution) override;
-    void setPreviousSolutionK(int k, std::span<const Real> solution) override;
-    void setTimeIntegrationContext(const TimeIntegrationContext* ctx) override;
+	    void setCurrentSolution(std::span<const Real> solution) override;
+	    void setCurrentSolutionView(const GlobalSystemView* solution_view) override;
+	    void setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields) override;
+	    void setPreviousSolution(std::span<const Real> solution) override;
+	    void setPreviousSolution2(std::span<const Real> solution) override;
+	    void setPreviousSolutionView(const GlobalSystemView* solution_view) override;
+	    void setPreviousSolution2View(const GlobalSystemView* solution_view) override;
+	    void setPreviousSolutionK(int k, std::span<const Real> solution) override;
+	    void setPreviousSolutionViewK(int k, const GlobalSystemView* solution_view) override;
+	    void setTimeIntegrationContext(const TimeIntegrationContext* ctx) override;
     void setTime(Real time) override;
     void setTimeStep(Real dt) override;
     void setRealParameterGetter(
@@ -292,6 +297,84 @@ public:
     [[nodiscard]] bool isThreadSafe() const noexcept override { return false; }
 
 private:
+    /**
+     * @brief Apply global->local orientation transforms to vector-basis coefficients
+     *
+     * This handles H(curl)/H(div) entity orientations by transforming the gathered
+     * element-local coefficient vector (indexed in element-local DOF order) into
+     * a coefficient vector compatible with reference-element basis evaluation on
+     * this cell.
+     */
+    void applyVectorBasisGlobalToLocal(
+        const IMeshAccess& mesh,
+        GlobalIndex cell_id,
+        const spaces::FunctionSpace& space,
+        std::span<Real> coeffs);
+
+    /**
+     * @brief Apply local->global orientation transforms to a kernel output
+     *
+     * Transforms element-local residual/matrix entries computed in local basis
+     * into the global-orientation DOF basis used by the system:
+     *   r_g = P_test^T r_l
+     *   A_g = P_test^T A_l P_trial
+     */
+    void applyVectorBasisOutputOrientation(
+        const IMeshAccess& mesh,
+        GlobalIndex test_cell_id,
+        const spaces::FunctionSpace& test_space,
+        GlobalIndex trial_cell_id,
+        const spaces::FunctionSpace& trial_space,
+        KernelOutput& output);
+
+    struct FaceTransformKey {
+        BasisType basis_type{BasisType::Lagrange};
+        Continuity continuity{Continuity::C0};
+        ElementType face_type{ElementType::Unknown};
+        int poly_order{0};
+        std::array<int, 4> vertex_perm{{-1, -1, -1, -1}};
+        std::uint8_t n_verts{0};
+        int sign{+1};
+
+        [[nodiscard]] bool operator==(const FaceTransformKey& other) const noexcept
+        {
+            return basis_type == other.basis_type &&
+                   continuity == other.continuity &&
+                   face_type == other.face_type &&
+                   poly_order == other.poly_order &&
+                   vertex_perm == other.vertex_perm &&
+                   n_verts == other.n_verts &&
+                   sign == other.sign;
+        }
+    };
+
+    struct FaceTransformKeyHash {
+        [[nodiscard]] std::size_t operator()(const FaceTransformKey& key) const noexcept
+        {
+            std::size_t h = 0;
+            auto mix = [&](std::size_t v) {
+                h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            };
+
+            mix(static_cast<std::size_t>(key.basis_type));
+            mix(static_cast<std::size_t>(key.continuity));
+            mix(static_cast<std::size_t>(key.face_type));
+            mix(static_cast<std::size_t>(key.poly_order));
+            mix(static_cast<std::size_t>(key.n_verts));
+            for (std::size_t i = 0; i < static_cast<std::size_t>(key.n_verts) && i < key.vertex_perm.size(); ++i) {
+                mix(static_cast<std::size_t>(key.vertex_perm[i] + 17));
+            }
+            mix(static_cast<std::size_t>(key.sign + 3));
+            return h;
+        }
+    };
+
+    struct FaceTransform {
+        LocalIndex n{0};
+        std::vector<Real> P{};   // global->local
+        std::vector<Real> PT{};  // transpose(P)
+    };
+
     // =========================================================================
     // Internal Implementation
     // =========================================================================
@@ -427,6 +510,14 @@ private:
         Real& surface_measure,
         AssemblyContext::Vector3D& n_phys) const;
 
+    [[nodiscard]] const FaceTransform& getFaceTransform(
+        BasisType basis_type,
+        Continuity continuity,
+        ElementType face_type,
+        int poly_order,
+        const spaces::OrientationManager::FaceOrientation& orientation,
+        LocalIndex expected_size);
+
     // =========================================================================
     // Data Members
     // =========================================================================
@@ -453,6 +544,8 @@ private:
     std::vector<GlobalIndex> scratch_cols_;
     std::vector<Real> scratch_matrix_;
     std::vector<Real> scratch_vector_;
+    std::vector<Real> scratch_orient_in_;
+    std::vector<Real> scratch_orient_out_;
 
     // Scratch for geometry/basis computations
     std::vector<std::array<Real, 3>> cell_coords_;
@@ -464,18 +557,22 @@ private:
     std::vector<Real> scratch_jac_dets_;
     std::vector<Real> scratch_integration_weights_;
     std::vector<Real> scratch_basis_values_;
+    std::vector<AssemblyContext::Vector3D> scratch_basis_vector_values_;
+    std::vector<AssemblyContext::Vector3D> scratch_basis_curls_;
+    std::vector<Real> scratch_basis_divergences_;
     std::vector<AssemblyContext::Vector3D> scratch_ref_gradients_;
     std::vector<AssemblyContext::Vector3D> scratch_phys_gradients_;
     std::vector<AssemblyContext::Matrix3x3> scratch_ref_hessians_;
     std::vector<AssemblyContext::Matrix3x3> scratch_phys_hessians_;
     std::vector<AssemblyContext::Vector3D> scratch_normals_;
 
-    // State
-    std::span<const Real> current_solution_{};
-    const GlobalSystemView* current_solution_view_{nullptr};
-    std::vector<std::span<const Real>> previous_solutions_{};
-    std::vector<Real> local_solution_coeffs_{};
-    std::vector<std::vector<Real>> local_prev_solution_coeffs_{};
+	    // State
+	    std::span<const Real> current_solution_{};
+	    const GlobalSystemView* current_solution_view_{nullptr};
+	    std::vector<std::span<const Real>> previous_solutions_{};
+	    std::vector<const GlobalSystemView*> previous_solution_views_{};
+	    std::vector<Real> local_solution_coeffs_{};
+	    std::vector<std::vector<Real>> local_prev_solution_coeffs_{};
     Real time_{0.0};
     Real dt_{0.0};
     const std::function<std::optional<Real>(std::string_view)>* get_real_param_{nullptr};
@@ -489,6 +586,8 @@ private:
     bool initialized_{false};
 
     std::vector<FieldSolutionAccess> field_solution_access_{};
+
+    std::unordered_map<FaceTransformKey, FaceTransform, FaceTransformKeyHash> face_transform_cache_{};
 };
 
 // ============================================================================

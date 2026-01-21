@@ -20,6 +20,7 @@
 #include "Geometry/MappingFactory.h"
 #include "Geometry/GeometryMapping.h"
 #include "Basis/BasisFunction.h"
+#include "Basis/VectorBasis.h"
 #include "Math/Vector.h"
 #include "Math/Matrix.h"
 
@@ -39,6 +40,78 @@ namespace FE {
 namespace assembly {
 
 namespace {
+
+[[nodiscard]] bool invertDenseMatrix(std::span<const Real> A,
+                                     LocalIndex n,
+                                     std::vector<Real>& inv,
+                                     std::vector<Real>& work)
+{
+    FE_CHECK_ARG(n >= 0, "invertDenseMatrix: negative size");
+    const auto nn = static_cast<std::size_t>(n);
+    FE_THROW_IF(A.size() != nn * nn, FEException, "invertDenseMatrix: size mismatch");
+
+    inv.assign(nn * nn, 0.0);
+    work.assign(A.begin(), A.end());
+    for (LocalIndex i = 0; i < n; ++i) {
+        inv[static_cast<std::size_t>(i) * nn + static_cast<std::size_t>(i)] = 1.0;
+    }
+
+    constexpr Real eps = Real(1e-14);
+
+    for (LocalIndex col = 0; col < n; ++col) {
+        LocalIndex pivot_row = col;
+        Real pivot_val = std::abs(work[static_cast<std::size_t>(col) * nn + static_cast<std::size_t>(col)]);
+        for (LocalIndex r = col + 1; r < n; ++r) {
+            const Real v = std::abs(work[static_cast<std::size_t>(r) * nn + static_cast<std::size_t>(col)]);
+            if (v > pivot_val) {
+                pivot_val = v;
+                pivot_row = r;
+            }
+        }
+
+        if (pivot_val < eps) {
+            return false;
+        }
+
+        if (pivot_row != col) {
+            for (LocalIndex c = 0; c < n; ++c) {
+                std::swap(work[static_cast<std::size_t>(pivot_row) * nn + static_cast<std::size_t>(c)],
+                          work[static_cast<std::size_t>(col) * nn + static_cast<std::size_t>(c)]);
+                std::swap(inv[static_cast<std::size_t>(pivot_row) * nn + static_cast<std::size_t>(c)],
+                          inv[static_cast<std::size_t>(col) * nn + static_cast<std::size_t>(c)]);
+            }
+        }
+
+        const Real diag = work[static_cast<std::size_t>(col) * nn + static_cast<std::size_t>(col)];
+        if (std::abs(diag) < eps) {
+            return false;
+        }
+        const Real inv_diag = Real(1) / diag;
+
+        for (LocalIndex c = 0; c < n; ++c) {
+            work[static_cast<std::size_t>(col) * nn + static_cast<std::size_t>(c)] *= inv_diag;
+            inv[static_cast<std::size_t>(col) * nn + static_cast<std::size_t>(c)] *= inv_diag;
+        }
+
+        for (LocalIndex r = 0; r < n; ++r) {
+            if (r == col) {
+                continue;
+            }
+            const Real factor = work[static_cast<std::size_t>(r) * nn + static_cast<std::size_t>(col)];
+            if (factor == 0.0) {
+                continue;
+            }
+            for (LocalIndex c = 0; c < n; ++c) {
+                work[static_cast<std::size_t>(r) * nn + static_cast<std::size_t>(c)] -=
+                    factor * work[static_cast<std::size_t>(col) * nn + static_cast<std::size_t>(c)];
+                inv[static_cast<std::size_t>(r) * nn + static_cast<std::size_t>(c)] -=
+                    factor * inv[static_cast<std::size_t>(col) * nn + static_cast<std::size_t>(c)];
+            }
+        }
+    }
+
+    return true;
+}
 
 int requiredHistoryStates(const TimeIntegrationContext* ctx) noexcept
 {
@@ -473,6 +546,16 @@ void StandardAssembler::setPreviousSolution2(std::span<const Real> solution)
     setPreviousSolutionK(2, solution);
 }
 
+void StandardAssembler::setPreviousSolutionView(const GlobalSystemView* solution_view)
+{
+    setPreviousSolutionViewK(1, solution_view);
+}
+
+void StandardAssembler::setPreviousSolution2View(const GlobalSystemView* solution_view)
+{
+    setPreviousSolutionViewK(2, solution_view);
+}
+
 void StandardAssembler::setPreviousSolutionK(int k, std::span<const Real> solution)
 {
     FE_THROW_IF(k <= 0, FEException, "StandardAssembler::setPreviousSolutionK: k must be >= 1");
@@ -480,6 +563,24 @@ void StandardAssembler::setPreviousSolutionK(int k, std::span<const Real> soluti
         previous_solutions_.resize(static_cast<std::size_t>(k));
     }
     previous_solutions_[static_cast<std::size_t>(k - 1)] = solution;
+
+    if (previous_solution_views_.size() < static_cast<std::size_t>(k)) {
+        previous_solution_views_.resize(static_cast<std::size_t>(k), nullptr);
+    }
+    previous_solution_views_[static_cast<std::size_t>(k - 1)] = nullptr;
+}
+
+void StandardAssembler::setPreviousSolutionViewK(int k, const GlobalSystemView* solution_view)
+{
+    FE_THROW_IF(k <= 0, FEException, "StandardAssembler::setPreviousSolutionViewK: k must be >= 1");
+    if (previous_solution_views_.size() < static_cast<std::size_t>(k)) {
+        previous_solution_views_.resize(static_cast<std::size_t>(k), nullptr);
+    }
+    previous_solution_views_[static_cast<std::size_t>(k - 1)] = solution_view;
+
+    if (previous_solutions_.size() < static_cast<std::size_t>(k)) {
+        previous_solutions_.resize(static_cast<std::size_t>(k));
+    }
 }
 
 void StandardAssembler::setTimeIntegrationContext(const TimeIntegrationContext* ctx)
@@ -566,6 +667,8 @@ void StandardAssembler::initialize()
 
     // Reserve context storage (estimate quadrature points)
     const LocalIndex est_qpts = 27;  // Typical for 3D Q2
+    // Dimension is mesh-dependent; this is overwritten in the assembly entrypoints
+    // using IMeshAccess::dimension().
     context_.reserve(max_dofs, est_qpts, 3);
 
     initialized_ = true;
@@ -711,6 +814,11 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
         col_dof_offset_ = row_dof_offset_;
     }
 
+    // Ensure AssemblyContext uses the mesh spatial dimension (2D/3D).
+    context_.reserve(std::max(row_dof_map_->getMaxDofsPerCell(),
+                              col_dof_map_->getMaxDofsPerCell()),
+                     /*max_qpts=*/27, mesh.dimension());
+
     const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
     std::optional<OwnedRowOnlyView> owned_row_matrix;
     std::optional<OwnedRowOnlyView> owned_row_vector;
@@ -788,32 +896,50 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
 	                        local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
 	                    }
 	                }
+	                if (context_.trialUsesVectorBasis()) {
+	                    applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
+	                                                  std::span<Real>(local_solution_coeffs_));
+	                }
 	                context_.setSolutionCoefficients(local_solution_coeffs_);
 
-                if (time_integration_ != nullptr) {
-                    const int required = requiredHistoryStates(time_integration_);
-                    if (required > 0) {
-                        FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
-                                    "StandardAssembler::assembleBoundaryFaces: time integration requires " +
-                                        std::to_string(required) + " history states, but only " +
-                                        std::to_string(previous_solutions_.size()) + " were provided");
-                        if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
-                            local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
-                        }
-                        for (int k = 1; k <= required; ++k) {
-                            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
-                            FE_THROW_IF(prev.empty(), FEException,
-                                        "StandardAssembler::assembleBoundaryFaces: previous solution (k=" +
-                                            std::to_string(k) + ") not set");
-                            auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
-                            local_prev.resize(col_dofs_.size());
-                            for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
-                                const auto dof = col_dofs_[i];
-                                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
-                                            "StandardAssembler::assembleBoundaryFaces: previous solution vector too small for DOF " +
-                                                std::to_string(dof));
-                                local_prev[i] = prev[static_cast<std::size_t>(dof)];
-                            }
+	                if (time_integration_ != nullptr) {
+	                    const int required = requiredHistoryStates(time_integration_);
+	                    if (required > 0) {
+	                        FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
+	                                    "StandardAssembler::assembleBoundaryFaces: time integration requires " +
+	                                        std::to_string(required) + " history states, but only " +
+	                                        std::to_string(previous_solutions_.size()) + " were provided");
+	                        if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
+	                            local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
+	                        }
+	                        for (int k = 1; k <= required; ++k) {
+	                            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+	                            const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+	                                                        ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+	                                                        : nullptr;
+	                            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+	                                        "StandardAssembler::assembleBoundaryFaces: previous solution (k=" +
+	                                            std::to_string(k) + ") not set");
+	                            auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+	                            local_prev.resize(col_dofs_.size());
+	                            for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
+	                                const auto dof = col_dofs_[i];
+	                                if (dof < 0) {
+	                                    FE_THROW(FEException, "StandardAssembler::assembleBoundaryFaces: negative DOF index (prev)");
+	                                }
+	                                if (prev_view != nullptr) {
+	                                    local_prev[i] = prev_view->getVectorEntry(dof);
+	                                } else {
+	                                    FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
+	                                                "StandardAssembler::assembleBoundaryFaces: previous solution vector too small for DOF " +
+	                                                    std::to_string(dof));
+	                                    local_prev[i] = prev[static_cast<std::size_t>(dof)];
+	                                }
+	                            }
+	                            if (context_.trialUsesVectorBasis()) {
+	                                applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
+	                                                              std::span<Real>(local_prev));
+	                            }
                             context_.setPreviousSolutionCoefficientsK(k, local_prev);
                         }
                     }
@@ -838,6 +964,10 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
             // Compute local contributions
             kernel_output_.clear();
             kernel.computeBoundaryFace(context_, boundary_marker, kernel_output_);
+
+            if (context_.testUsesVectorBasis() || context_.trialUsesVectorBasis()) {
+                applyVectorBasisOutputOrientation(mesh, cell_id, test_space, cell_id, trial_space, kernel_output_);
+            }
 
             // Insert into global system
             if (options_.use_constraints && constraint_distributor_) {
@@ -906,6 +1036,11 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
         col_dof_map_ = row_dof_map_;
         col_dof_offset_ = row_dof_offset_;
     }
+
+    // Ensure AssemblyContext uses the mesh spatial dimension (2D/3D).
+    context_.reserve(std::max(row_dof_map_->getMaxDofsPerCell(),
+                              col_dof_map_->getMaxDofsPerCell()),
+                     /*max_qpts=*/27, mesh.dimension());
 
     const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
     std::optional<OwnedRowOnlyView> owned_row_matrix;
@@ -1072,6 +1207,10 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
 	                        local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
 	                    }
 	                }
+	                if (context_.trialUsesVectorBasis()) {
+	                    applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
+	                                                  std::span<Real>(local_solution_coeffs_));
+	                }
 	                context_.setSolutionCoefficients(local_solution_coeffs_);
 	
 	                plus_solution_coeffs.resize(plus_col_dofs.size());
@@ -1092,6 +1231,10 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
 	                        plus_solution_coeffs[i] = current_solution_[static_cast<std::size_t>(dof)];
 	                    }
 	                }
+	                if (context_plus.trialUsesVectorBasis()) {
+	                    applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
+	                                                  std::span<Real>(plus_solution_coeffs));
+	                }
 	                context_plus.setSolutionCoefficients(plus_solution_coeffs);
 
                 if (time_integration_ != nullptr) {
@@ -1108,32 +1251,59 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                             plus_prev_solution_coeffs.resize(static_cast<std::size_t>(required));
                         }
 
-                        for (int k = 1; k <= required; ++k) {
-                            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
-                            FE_THROW_IF(prev.empty(), FEException,
-                                        "StandardAssembler::assembleInteriorFaces: previous solution (k=" +
-                                            std::to_string(k) + ") not set");
+	                        for (int k = 1; k <= required; ++k) {
+	                            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+	                            const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+	                                                        ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+	                                                        : nullptr;
+	                            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+	                                        "StandardAssembler::assembleInteriorFaces: previous solution (k=" +
+	                                            std::to_string(k) + ") not set");
 
-                            auto& local_prev_minus = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
-                            local_prev_minus.resize(minus_col_dofs.size());
-                            for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
-                                const auto dof = minus_col_dofs[i];
-                                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
-                                            "StandardAssembler::assembleInteriorFaces: previous solution vector too small for DOF " +
-                                                std::to_string(dof));
-                                local_prev_minus[i] = prev[static_cast<std::size_t>(dof)];
-                            }
+	                            auto& local_prev_minus = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+	                            local_prev_minus.resize(minus_col_dofs.size());
+	                            for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
+	                                const auto dof = minus_col_dofs[i];
+	                                if (dof < 0) {
+	                                    FE_THROW(FEException,
+	                                             "StandardAssembler::assembleInteriorFaces: negative DOF index (prev)");
+	                                }
+	                                if (prev_view != nullptr) {
+	                                    local_prev_minus[i] = prev_view->getVectorEntry(dof);
+	                                } else {
+	                                    FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
+	                                                "StandardAssembler::assembleInteriorFaces: previous solution vector too small for DOF " +
+	                                                    std::to_string(dof));
+	                                    local_prev_minus[i] = prev[static_cast<std::size_t>(dof)];
+	                                }
+	                            }
+	                            if (context_.trialUsesVectorBasis()) {
+	                                applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
+	                                                              std::span<Real>(local_prev_minus));
+	                            }
                             context_.setPreviousSolutionCoefficientsK(k, local_prev_minus);
 
-                            auto& local_prev_plus = plus_prev_solution_coeffs[static_cast<std::size_t>(k - 1)];
-                            local_prev_plus.resize(plus_col_dofs.size());
-                            for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
-                                const auto dof = plus_col_dofs[i];
-                                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
-                                            "StandardAssembler::assembleInteriorFaces: previous solution vector too small for DOF " +
-                                                std::to_string(dof));
-                                local_prev_plus[i] = prev[static_cast<std::size_t>(dof)];
-                            }
+	                            auto& local_prev_plus = plus_prev_solution_coeffs[static_cast<std::size_t>(k - 1)];
+	                            local_prev_plus.resize(plus_col_dofs.size());
+	                            for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
+	                                const auto dof = plus_col_dofs[i];
+	                                if (dof < 0) {
+	                                    FE_THROW(FEException,
+	                                             "StandardAssembler::assembleInteriorFaces: negative DOF index (prev)");
+	                                }
+	                                if (prev_view != nullptr) {
+	                                    local_prev_plus[i] = prev_view->getVectorEntry(dof);
+	                                } else {
+	                                    FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
+	                                                "StandardAssembler::assembleInteriorFaces: previous solution vector too small for DOF " +
+	                                                    std::to_string(dof));
+	                                    local_prev_plus[i] = prev[static_cast<std::size_t>(dof)];
+	                                }
+	                            }
+	                            if (context_plus.trialUsesVectorBasis()) {
+	                                applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
+	                                                              std::span<Real>(local_prev_plus));
+	                            }
                             context_plus.setPreviousSolutionCoefficientsK(k, local_prev_plus);
                         }
                     }
@@ -1170,6 +1340,19 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             kernel.computeInteriorFace(context_, context_plus,
                                        output_minus, output_plus,
                                        coupling_mp, coupling_pm);
+
+            if (output_minus.has_matrix || output_minus.has_vector) {
+                applyVectorBasisOutputOrientation(mesh, cell_minus, test_space, cell_minus, trial_space, output_minus);
+            }
+            if (output_plus.has_matrix || output_plus.has_vector) {
+                applyVectorBasisOutputOrientation(mesh, cell_plus, test_space, cell_plus, trial_space, output_plus);
+            }
+            if (coupling_mp.has_matrix) {
+                applyVectorBasisOutputOrientation(mesh, cell_minus, test_space, cell_plus, trial_space, coupling_mp);
+            }
+            if (coupling_pm.has_matrix) {
+                applyVectorBasisOutputOrientation(mesh, cell_plus, test_space, cell_minus, trial_space, coupling_pm);
+            }
 
             // Insert contributions (4 blocks for DG)
             // Self-coupling: minus-minus
@@ -1255,6 +1438,11 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         col_dof_map_ = row_dof_map_;
         col_dof_offset_ = row_dof_offset_;
     }
+
+    // Ensure AssemblyContext uses the mesh spatial dimension (2D/3D).
+    context_.reserve(std::max(row_dof_map_->getMaxDofsPerCell(),
+                              col_dof_map_->getMaxDofsPerCell()),
+                     /*max_qpts=*/27, mesh.dimension());
 
     // Create second context for the "plus" side
     AssemblyContext context_plus;
@@ -1431,6 +1619,10 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                     local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
                 }
             }
+            if (context_.trialUsesVectorBasis()) {
+                applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
+                                              std::span<Real>(local_solution_coeffs_));
+            }
             context_.setSolutionCoefficients(local_solution_coeffs_);
 
             plus_solution_coeffs.resize(plus_col_dofs.size());
@@ -1451,6 +1643,10 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                     plus_solution_coeffs[i] = current_solution_[static_cast<std::size_t>(dof)];
                 }
             }
+            if (context_plus.trialUsesVectorBasis()) {
+                applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
+                                              std::span<Real>(plus_solution_coeffs));
+            }
             context_plus.setSolutionCoefficients(plus_solution_coeffs);
 
             if (time_integration_ != nullptr) {
@@ -1467,32 +1663,59 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                         plus_prev_solution_coeffs.resize(static_cast<std::size_t>(required));
                     }
 
-                    for (int k = 1; k <= required; ++k) {
-                        const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
-                        FE_THROW_IF(prev.empty(), FEException,
-                                    "StandardAssembler::assembleInterfaceFaces: previous solution (k=" +
-                                        std::to_string(k) + ") not set");
+	                    for (int k = 1; k <= required; ++k) {
+	                        const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+	                        const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+	                                                    ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+	                                                    : nullptr;
+	                        FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+	                                    "StandardAssembler::assembleInterfaceFaces: previous solution (k=" +
+	                                        std::to_string(k) + ") not set");
 
-                        auto& local_prev_minus = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
-                        local_prev_minus.resize(minus_col_dofs.size());
-                        for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
-                            const auto dof = minus_col_dofs[i];
-                            FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
-                                        "StandardAssembler::assembleInterfaceFaces: previous solution vector too small for DOF " +
-                                            std::to_string(dof));
-                            local_prev_minus[i] = prev[static_cast<std::size_t>(dof)];
-                        }
+	                        auto& local_prev_minus = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+	                        local_prev_minus.resize(minus_col_dofs.size());
+	                        for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
+	                            const auto dof = minus_col_dofs[i];
+	                            if (dof < 0) {
+	                                FE_THROW(FEException,
+	                                         "StandardAssembler::assembleInterfaceFaces: negative DOF index (prev)");
+	                            }
+	                            if (prev_view != nullptr) {
+	                                local_prev_minus[i] = prev_view->getVectorEntry(dof);
+	                            } else {
+	                                FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
+	                                            "StandardAssembler::assembleInterfaceFaces: previous solution vector too small for DOF " +
+	                                                std::to_string(dof));
+	                                local_prev_minus[i] = prev[static_cast<std::size_t>(dof)];
+	                            }
+	                        }
+	                        if (context_.trialUsesVectorBasis()) {
+	                            applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
+	                                                          std::span<Real>(local_prev_minus));
+	                        }
                         context_.setPreviousSolutionCoefficientsK(k, local_prev_minus);
 
-                        auto& local_prev_plus = plus_prev_solution_coeffs[static_cast<std::size_t>(k - 1)];
-                        local_prev_plus.resize(plus_col_dofs.size());
-                        for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
-                            const auto dof = plus_col_dofs[i];
-                            FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
-                                        "StandardAssembler::assembleInterfaceFaces: previous solution vector too small for DOF " +
-                                            std::to_string(dof));
-                            local_prev_plus[i] = prev[static_cast<std::size_t>(dof)];
-                        }
+	                        auto& local_prev_plus = plus_prev_solution_coeffs[static_cast<std::size_t>(k - 1)];
+	                        local_prev_plus.resize(plus_col_dofs.size());
+	                        for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
+	                            const auto dof = plus_col_dofs[i];
+	                            if (dof < 0) {
+	                                FE_THROW(FEException,
+	                                         "StandardAssembler::assembleInterfaceFaces: negative DOF index (prev)");
+	                            }
+	                            if (prev_view != nullptr) {
+	                                local_prev_plus[i] = prev_view->getVectorEntry(dof);
+	                            } else {
+	                                FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
+	                                            "StandardAssembler::assembleInterfaceFaces: previous solution vector too small for DOF " +
+	                                                std::to_string(dof));
+	                                local_prev_plus[i] = prev[static_cast<std::size_t>(dof)];
+	                            }
+	                        }
+	                        if (context_plus.trialUsesVectorBasis()) {
+	                            applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
+	                                                          std::span<Real>(local_prev_plus));
+	                        }
                         context_plus.setPreviousSolutionCoefficientsK(k, local_prev_plus);
                     }
                 }
@@ -1530,6 +1753,19 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         kernel.computeInterfaceFace(context_, context_plus, interface_marker,
                                    output_minus, output_plus,
                                    coupling_mp, coupling_pm);
+
+        if (output_minus.has_matrix || output_minus.has_vector) {
+            applyVectorBasisOutputOrientation(mesh, cell_minus, test_space, cell_minus, trial_space, output_minus);
+        }
+        if (output_plus.has_matrix || output_plus.has_vector) {
+            applyVectorBasisOutputOrientation(mesh, cell_plus, test_space, cell_plus, trial_space, output_plus);
+        }
+        if (coupling_mp.has_matrix) {
+            applyVectorBasisOutputOrientation(mesh, cell_minus, test_space, cell_plus, trial_space, coupling_mp);
+        }
+        if (coupling_pm.has_matrix) {
+            applyVectorBasisOutputOrientation(mesh, cell_plus, test_space, cell_minus, trial_space, coupling_pm);
+        }
 
         // Insert contributions (4 blocks, DG-style)
         if (output_minus.has_matrix || output_minus.has_vector) {
@@ -1611,6 +1847,12 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         col_dof_map_ = row_dof_map_;
         col_dof_offset_ = row_dof_offset_;
     }
+
+    // Ensure AssemblyContext uses the mesh spatial dimension (2D/3D). This affects
+    // the runtime shapes of geometry tensors (J, Jinv, normals, etc.) used by Forms.
+    context_.reserve(std::max(row_dof_map_->getMaxDofsPerCell(),
+                              col_dof_map_->getMaxDofsPerCell()),
+                     /*max_qpts=*/27, mesh.dimension());
 
     const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
     std::optional<OwnedRowOnlyView> owned_row_matrix;
@@ -1696,6 +1938,10 @@ AssemblyResult StandardAssembler::assembleCellsCore(
 	                    local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
 	                }
 	            }
+	            if (context_.trialUsesVectorBasis()) {
+	                applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
+	                                              std::span<Real>(local_solution_coeffs_));
+	            }
 	            context_.setSolutionCoefficients(local_solution_coeffs_);
 
             if (time_integration_ != nullptr) {
@@ -1708,20 +1954,35 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                     if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
                         local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
                     }
-                    for (int k = 1; k <= required; ++k) {
-                        const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
-                        FE_THROW_IF(prev.empty(), FEException,
-                                    "StandardAssembler::assembleCellsCore: previous solution (k=" +
-                                        std::to_string(k) + ") not set");
-                        auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
-                        local_prev.resize(col_dofs_.size());
-                        for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
-                            const auto dof = col_dofs_[i];
-                            FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
-                                        "StandardAssembler::assembleCellsCore: previous solution vector too small for DOF " +
-                                            std::to_string(dof));
-                            local_prev[i] = prev[static_cast<std::size_t>(dof)];
-                        }
+	                    for (int k = 1; k <= required; ++k) {
+	                        const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+	                        const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+	                                                    ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+	                                                    : nullptr;
+	                        FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+	                                    "StandardAssembler::assembleCellsCore: previous solution (k=" +
+	                                        std::to_string(k) + ") not set");
+	                        auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+	                        local_prev.resize(col_dofs_.size());
+	                        for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
+	                            const auto dof = col_dofs_[i];
+	                            if (dof < 0) {
+	                                FE_THROW(FEException,
+	                                         "StandardAssembler::assembleCellsCore: negative DOF index (prev)");
+	                            }
+	                            if (prev_view != nullptr) {
+	                                local_prev[i] = prev_view->getVectorEntry(dof);
+	                            } else {
+	                                FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
+	                                            "StandardAssembler::assembleCellsCore: previous solution vector too small for DOF " +
+	                                                std::to_string(dof));
+	                                local_prev[i] = prev[static_cast<std::size_t>(dof)];
+	                            }
+	                        }
+	                        if (context_.trialUsesVectorBasis()) {
+	                            applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
+	                                                          std::span<Real>(local_prev));
+	                        }
                         context_.setPreviousSolutionCoefficientsK(k, local_prev);
                     }
                 }
@@ -1746,6 +2007,10 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         // Compute local matrix/vector via kernel
         kernel_output_.clear();
         kernel.computeCell(context_, kernel_output_);
+
+        if (context_.testUsesVectorBasis() || context_.trialUsesVectorBasis()) {
+            applyVectorBasisOutputOrientation(mesh, cell_id, test_space, cell_id, trial_space, kernel_output_);
+        }
 
         // Insert into global system
         if (options_.use_constraints && constraint_distributor_) {
@@ -1835,6 +2100,38 @@ void StandardAssembler::prepareContext(
                      "StandardAssembler::prepareContext: non-Product trial space DOF count mismatch");
     }
     const bool need_basis_hessians = hasFlag(required_data, RequiredData::BasisHessians);
+    const bool need_basis_curls = hasFlag(required_data, RequiredData::BasisCurls);
+    const bool need_basis_divergences = hasFlag(required_data, RequiredData::BasisDivergences);
+
+    const auto& test_basis = test_element.basis();
+    const auto& trial_basis = trial_element.basis();
+    const bool test_is_vector_basis = test_basis.is_vector_valued();
+    const bool trial_is_vector_basis = trial_basis.is_vector_valued();
+
+    const auto validate_vector_basis_requirements =
+        [&](const spaces::FunctionSpace& space, bool is_vector_basis, const char* which) {
+            if (!is_vector_basis) {
+                return;
+            }
+
+            const auto continuity = space.continuity();
+            FE_THROW_IF(continuity != Continuity::H_curl && continuity != Continuity::H_div, FEException,
+                        std::string("StandardAssembler::prepareContext: ") + which +
+                            " space uses a vector-valued basis but is not H(curl)/H(div)");
+
+            if (continuity == Continuity::H_curl) {
+                FE_THROW_IF(need_basis_divergences, FEException,
+                            std::string("StandardAssembler::prepareContext: BasisDivergences requested for ") + which +
+                                " H(curl) space");
+            } else if (continuity == Continuity::H_div) {
+                FE_THROW_IF(need_basis_curls, FEException,
+                            std::string("StandardAssembler::prepareContext: BasisCurls requested for ") + which +
+                                " H(div) space");
+            }
+        };
+
+    validate_vector_basis_requirements(test_space, test_is_vector_basis, "test");
+    validate_vector_basis_requirements(trial_space, trial_is_vector_basis, "trial");
 
     // 4. Get cell node coordinates from mesh
     mesh.getCellCoordinates(cell_id, cell_coords_);
@@ -1866,28 +2163,98 @@ void StandardAssembler::prepareContext(
 
     const auto test_basis_size = static_cast<std::size_t>(n_test_dofs * n_qpts);
     const auto trial_basis_size = static_cast<std::size_t>(n_trial_dofs * n_qpts);
-    scratch_basis_values_.resize(test_basis_size);
-    scratch_ref_gradients_.resize(test_basis_size);
-    scratch_phys_gradients_.resize(test_basis_size);
-    if (need_basis_hessians) {
-        scratch_ref_hessians_.resize(test_basis_size);
-        scratch_phys_hessians_.resize(test_basis_size);
+    const bool need_test_vector_values =
+        test_is_vector_basis &&
+        (hasFlag(required_data, RequiredData::BasisValues) ||
+         hasFlag(required_data, RequiredData::SolutionValues) ||
+         required_data == RequiredData::None);
+    const bool need_trial_vector_values =
+        trial_is_vector_basis &&
+        (hasFlag(required_data, RequiredData::BasisValues) ||
+         hasFlag(required_data, RequiredData::SolutionValues) ||
+         required_data == RequiredData::None);
+
+    if (test_is_vector_basis) {
+        scratch_basis_values_.clear();
+        scratch_ref_gradients_.clear();
+        scratch_phys_gradients_.clear();
+        scratch_ref_hessians_.clear();
+        scratch_phys_hessians_.clear();
+
+        if (need_test_vector_values) {
+            scratch_basis_vector_values_.resize(test_basis_size);
+        } else {
+            scratch_basis_vector_values_.clear();
+        }
+        if (need_basis_curls) {
+            scratch_basis_curls_.resize(test_basis_size);
+        } else {
+            scratch_basis_curls_.clear();
+        }
+        if (need_basis_divergences) {
+            scratch_basis_divergences_.resize(test_basis_size);
+        } else {
+            scratch_basis_divergences_.clear();
+        }
+    } else {
+        scratch_basis_vector_values_.clear();
+        scratch_basis_curls_.clear();
+        scratch_basis_divergences_.clear();
+
+        scratch_basis_values_.resize(test_basis_size);
+        scratch_ref_gradients_.resize(test_basis_size);
+        scratch_phys_gradients_.resize(test_basis_size);
+        if (need_basis_hessians) {
+            scratch_ref_hessians_.resize(test_basis_size);
+            scratch_phys_hessians_.resize(test_basis_size);
+        } else {
+            scratch_ref_hessians_.clear();
+            scratch_phys_hessians_.clear();
+        }
     }
 
     // Storage for trial if different from test
     std::vector<Real> trial_basis_values;
     std::vector<AssemblyContext::Vector3D> trial_ref_gradients;
     std::vector<AssemblyContext::Vector3D> trial_phys_gradients;
+    std::vector<AssemblyContext::Vector3D> trial_basis_vector_values;
+    std::vector<AssemblyContext::Vector3D> trial_basis_curls;
+    std::vector<Real> trial_basis_divergences;
     std::vector<AssemblyContext::Matrix3x3> trial_ref_hessians;
     std::vector<AssemblyContext::Matrix3x3> trial_phys_hessians;
 
     if (&test_space != &trial_space) {
-        trial_basis_values.resize(trial_basis_size);
-        trial_ref_gradients.resize(trial_basis_size);
-        trial_phys_gradients.resize(trial_basis_size);
-        if (need_basis_hessians) {
-            trial_ref_hessians.resize(trial_basis_size);
-            trial_phys_hessians.resize(trial_basis_size);
+        if (trial_is_vector_basis) {
+            trial_basis_values.clear();
+            trial_ref_gradients.clear();
+            trial_phys_gradients.clear();
+            trial_ref_hessians.clear();
+            trial_phys_hessians.clear();
+
+            if (need_trial_vector_values) {
+                trial_basis_vector_values.resize(trial_basis_size);
+            }
+            if (need_basis_curls) {
+                trial_basis_curls.resize(trial_basis_size);
+            }
+            if (need_basis_divergences) {
+                trial_basis_divergences.resize(trial_basis_size);
+            }
+        } else {
+            trial_basis_vector_values.clear();
+            trial_basis_curls.clear();
+            trial_basis_divergences.clear();
+
+            trial_basis_values.resize(trial_basis_size);
+            trial_ref_gradients.resize(trial_basis_size);
+            trial_phys_gradients.resize(trial_basis_size);
+            if (need_basis_hessians) {
+                trial_ref_hessians.resize(trial_basis_size);
+                trial_phys_hessians.resize(trial_basis_size);
+            } else {
+                trial_ref_hessians.clear();
+                trial_phys_hessians.clear();
+            }
         }
     }
 
@@ -1925,10 +2292,13 @@ void StandardAssembler::prepareContext(
     }
 
     // 8. Evaluate basis functions at quadrature points
-    const auto& test_basis = test_element.basis();
-    std::vector<Real> values_at_pt;
-    std::vector<basis::Gradient> gradients_at_pt;
-    std::vector<basis::Hessian> hessians_at_pt;
+    std::vector<Real> scalar_values_at_pt;
+    std::vector<basis::Gradient> scalar_gradients_at_pt;
+    std::vector<basis::Hessian> scalar_hessians_at_pt;
+
+    std::vector<math::Vector<Real, 3>> vec_values_at_pt;
+    std::vector<math::Vector<Real, 3>> vec_curls_at_pt;
+    std::vector<Real> vec_divs_at_pt;
 
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const math::Vector<Real, 3> xi{
@@ -1936,14 +2306,9 @@ void StandardAssembler::prepareContext(
             scratch_quad_points_[q][1],
             scratch_quad_points_[q][2]};
 
+        const auto& J = scratch_jacobians_[q];
         const auto& J_inv = scratch_inv_jacobians_[q];
-
-        // Evaluate test basis values and gradients
-        test_basis.evaluate_values(xi, values_at_pt);
-        test_basis.evaluate_gradients(xi, gradients_at_pt);
-        if (need_basis_hessians) {
-            test_basis.evaluate_hessians(xi, hessians_at_pt);
-        }
+        const Real det_J = scratch_jac_dets_[q];
 
         std::array<AssemblyContext::Matrix3x3, 3> d2xi_dx2{};
         if (need_basis_hessians) {
@@ -1969,80 +2334,82 @@ void StandardAssembler::prepareContext(
             }
         }
 
-        for (LocalIndex i = 0; i < n_test_dofs; ++i) {
-            const LocalIndex si = test_is_product ? static_cast<LocalIndex>(i % n_test_scalar_dofs) : i;
-            const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
-            scratch_basis_values_[idx] = values_at_pt[static_cast<std::size_t>(si)];
-            scratch_ref_gradients_[idx] = {
-                gradients_at_pt[static_cast<std::size_t>(si)][0],
-                gradients_at_pt[static_cast<std::size_t>(si)][1],
-                gradients_at_pt[static_cast<std::size_t>(si)][2]};
-
-            // Transform gradient to physical space: grad_phys = J^{-T} * grad_ref
-            const auto& grad_ref = scratch_ref_gradients_[idx];
-            AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
-
-            for (int d1 = 0; d1 < dim; ++d1) {
-                for (int d2 = 0; d2 < dim; ++d2) {
-                    grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];  // J^{-T}
-                }
+        if (test_is_vector_basis) {
+            if (need_test_vector_values) {
+                test_basis.evaluate_vector_values(xi, vec_values_at_pt);
             }
-            scratch_phys_gradients_[idx] = grad_phys;
+            if (need_basis_curls) {
+                test_basis.evaluate_curl(xi, vec_curls_at_pt);
+            }
+            if (need_basis_divergences) {
+                test_basis.evaluate_divergence(xi, vec_divs_at_pt);
+            }
 
-            if (need_basis_hessians) {
-                AssemblyContext::Matrix3x3 H_ref{};
-                for (int r = 0; r < 3; ++r) {
-                    for (int c = 0; c < 3; ++c) {
-                        H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                            hessians_at_pt[static_cast<std::size_t>(si)](static_cast<std::size_t>(r),
-                                                                         static_cast<std::size_t>(c));
-                    }
-                }
-                scratch_ref_hessians_[idx] = H_ref;
+            const auto cont = test_space.continuity();
+            for (LocalIndex i = 0; i < n_test_dofs; ++i) {
+                const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
 
-                AssemblyContext::Matrix3x3 H_phys{};
-                for (int r = 0; r < dim; ++r) {
-                    for (int c = 0; c < dim; ++c) {
-                        Real sum = 0.0;
-                        for (int a = 0; a < dim; ++a) {
-                            for (int b = 0; b < dim; ++b) {
-                                sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-                                       H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-                                       J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                if (need_test_vector_values) {
+                    const auto& vref = vec_values_at_pt[static_cast<std::size_t>(i)];
+                    AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
+                    if (cont == Continuity::H_curl) {
+                        for (int r = 0; r < dim; ++r) {
+                            for (int c = 0; c < dim; ++c) {
+                                vphys[static_cast<std::size_t>(r)] += J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
+                                                                      vref[static_cast<std::size_t>(c)];
                             }
                         }
-                        for (int a = 0; a < dim; ++a) {
-                            sum += grad_ref[static_cast<std::size_t>(a)] *
-                                   d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                    } else { // H_div
+                        const Real inv_det = Real(1) / det_J;
+                        for (int r = 0; r < 3; ++r) {
+                            Real sum = 0.0;
+                            for (int c = 0; c < 3; ++c) {
+                                sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                                       vref[static_cast<std::size_t>(c)];
+                            }
+                            vphys[static_cast<std::size_t>(r)] = inv_det * sum;
                         }
-                        H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
                     }
+                    scratch_basis_vector_values_[idx] = vphys;
                 }
-                scratch_phys_hessians_[idx] = H_phys;
-            }
-        }
 
-        // Evaluate trial basis if different
-        if (&test_space != &trial_space) {
-            const auto& trial_basis = trial_element.basis();
-            trial_basis.evaluate_values(xi, values_at_pt);
-            trial_basis.evaluate_gradients(xi, gradients_at_pt);
+                if (need_basis_curls) {
+                    const auto& cref = vec_curls_at_pt[static_cast<std::size_t>(i)];
+                    AssemblyContext::Vector3D cphys{0.0, 0.0, 0.0};
+                    const Real inv_det = Real(1) / det_J;
+                    for (int r = 0; r < 3; ++r) {
+                        Real sum = 0.0;
+                        for (int c = 0; c < 3; ++c) {
+                            sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                                   cref[static_cast<std::size_t>(c)];
+                        }
+                        cphys[static_cast<std::size_t>(r)] = inv_det * sum;
+                    }
+                    scratch_basis_curls_[idx] = cphys;
+                }
+
+                if (need_basis_divergences) {
+                    scratch_basis_divergences_[idx] =
+                        vec_divs_at_pt[static_cast<std::size_t>(i)] / det_J;
+                }
+            }
+        } else {
+            test_basis.evaluate_values(xi, scalar_values_at_pt);
+            test_basis.evaluate_gradients(xi, scalar_gradients_at_pt);
             if (need_basis_hessians) {
-                trial_basis.evaluate_hessians(xi, hessians_at_pt);
+                test_basis.evaluate_hessians(xi, scalar_hessians_at_pt);
             }
 
-            for (LocalIndex j = 0; j < n_trial_dofs; ++j) {
-                const LocalIndex sj = trial_is_product ? static_cast<LocalIndex>(j % n_trial_scalar_dofs) : j;
-                const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
-                trial_basis_values[idx] = values_at_pt[static_cast<std::size_t>(sj)];
-                trial_ref_gradients[idx] = {
-                    gradients_at_pt[static_cast<std::size_t>(sj)][0],
-                    gradients_at_pt[static_cast<std::size_t>(sj)][1],
-                    gradients_at_pt[static_cast<std::size_t>(sj)][2]};
+            for (LocalIndex i = 0; i < n_test_dofs; ++i) {
+                const LocalIndex si = test_is_product ? static_cast<LocalIndex>(i % n_test_scalar_dofs) : i;
+                const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
+                scratch_basis_values_[idx] = scalar_values_at_pt[static_cast<std::size_t>(si)];
+                scratch_ref_gradients_[idx] = {
+                    scalar_gradients_at_pt[static_cast<std::size_t>(si)][0],
+                    scalar_gradients_at_pt[static_cast<std::size_t>(si)][1],
+                    scalar_gradients_at_pt[static_cast<std::size_t>(si)][2]};
 
-                // Transform gradient
-                const auto& grad_ref = trial_ref_gradients[idx];
-                const auto& J_inv = scratch_inv_jacobians_[q];
+                const auto& grad_ref = scratch_ref_gradients_[idx];
                 AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
 
                 for (int d1 = 0; d1 < dim; ++d1) {
@@ -2050,42 +2417,163 @@ void StandardAssembler::prepareContext(
                         grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
                     }
                 }
-                trial_phys_gradients[idx] = grad_phys;
+                scratch_phys_gradients_[idx] = grad_phys;
 
                 if (need_basis_hessians) {
                     AssemblyContext::Matrix3x3 H_ref{};
                     for (int r = 0; r < 3; ++r) {
                         for (int c = 0; c < 3; ++c) {
                             H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                                hessians_at_pt[static_cast<std::size_t>(sj)](static_cast<std::size_t>(r),
-                                                                             static_cast<std::size_t>(c));
+                                scalar_hessians_at_pt[static_cast<std::size_t>(si)](static_cast<std::size_t>(r),
+                                                                                     static_cast<std::size_t>(c));
                         }
                     }
-                    trial_ref_hessians[idx] = H_ref;
+                    scratch_ref_hessians_[idx] = H_ref;
 
-	                    AssemblyContext::Matrix3x3 H_phys{};
-	                    for (int r = 0; r < dim; ++r) {
-	                        for (int c = 0; c < dim; ++c) {
-	                            Real sum = 0.0;
-	                            for (int a = 0; a < dim; ++a) {
-	                                for (int b = 0; b < dim; ++b) {
-	                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-	                                           H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-	                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
-	                                }
-	                            }
-	                            for (int a = 0; a < dim; ++a) {
-	                                sum += grad_ref[static_cast<std::size_t>(a)] *
-	                                       d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
-	                            }
-	                            H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
-	                        }
-	                    }
-	                    trial_phys_hessians[idx] = H_phys;
-	                }
-	            }
-	        }
-	    }
+                    AssemblyContext::Matrix3x3 H_phys{};
+                    for (int r = 0; r < dim; ++r) {
+                        for (int c = 0; c < dim; ++c) {
+                            Real sum = 0.0;
+                            for (int a = 0; a < dim; ++a) {
+                                for (int b = 0; b < dim; ++b) {
+                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                           H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                }
+                            }
+                            for (int a = 0; a < dim; ++a) {
+                                sum += grad_ref[static_cast<std::size_t>(a)] *
+                                       d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                            }
+                            H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                        }
+                    }
+                    scratch_phys_hessians_[idx] = H_phys;
+                }
+            }
+        }
+
+        if (&test_space != &trial_space) {
+            if (trial_is_vector_basis) {
+                if (need_trial_vector_values) {
+                    trial_basis.evaluate_vector_values(xi, vec_values_at_pt);
+                }
+                if (need_basis_curls) {
+                    trial_basis.evaluate_curl(xi, vec_curls_at_pt);
+                }
+                if (need_basis_divergences) {
+                    trial_basis.evaluate_divergence(xi, vec_divs_at_pt);
+                }
+
+                const auto cont = trial_space.continuity();
+                for (LocalIndex j = 0; j < n_trial_dofs; ++j) {
+                    const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
+
+                    if (need_trial_vector_values) {
+                        const auto& vref = vec_values_at_pt[static_cast<std::size_t>(j)];
+                        AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
+                        if (cont == Continuity::H_curl) {
+                            for (int r = 0; r < dim; ++r) {
+                                for (int c = 0; c < dim; ++c) {
+                                    vphys[static_cast<std::size_t>(r)] += J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
+                                                                          vref[static_cast<std::size_t>(c)];
+                                }
+                            }
+                        } else { // H_div
+                            const Real inv_det = Real(1) / det_J;
+                            for (int r = 0; r < 3; ++r) {
+                                Real sum = 0.0;
+                                for (int c = 0; c < 3; ++c) {
+                                    sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                                           vref[static_cast<std::size_t>(c)];
+                                }
+                                vphys[static_cast<std::size_t>(r)] = inv_det * sum;
+                            }
+                        }
+                        trial_basis_vector_values[idx] = vphys;
+                    }
+
+                    if (need_basis_curls) {
+                        const auto& cref = vec_curls_at_pt[static_cast<std::size_t>(j)];
+                        AssemblyContext::Vector3D cphys{0.0, 0.0, 0.0};
+                        const Real inv_det = Real(1) / det_J;
+                        for (int r = 0; r < 3; ++r) {
+                            Real sum = 0.0;
+                            for (int c = 0; c < 3; ++c) {
+                                sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                                       cref[static_cast<std::size_t>(c)];
+                            }
+                            cphys[static_cast<std::size_t>(r)] = inv_det * sum;
+                        }
+                        trial_basis_curls[idx] = cphys;
+                    }
+
+                    if (need_basis_divergences) {
+                        trial_basis_divergences[idx] =
+                            vec_divs_at_pt[static_cast<std::size_t>(j)] / det_J;
+                    }
+                }
+            } else {
+                trial_basis.evaluate_values(xi, scalar_values_at_pt);
+                trial_basis.evaluate_gradients(xi, scalar_gradients_at_pt);
+                if (need_basis_hessians) {
+                    trial_basis.evaluate_hessians(xi, scalar_hessians_at_pt);
+                }
+
+                for (LocalIndex j = 0; j < n_trial_dofs; ++j) {
+                    const LocalIndex sj = trial_is_product ? static_cast<LocalIndex>(j % n_trial_scalar_dofs) : j;
+                    const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
+                    trial_basis_values[idx] = scalar_values_at_pt[static_cast<std::size_t>(sj)];
+                    trial_ref_gradients[idx] = {
+                        scalar_gradients_at_pt[static_cast<std::size_t>(sj)][0],
+                        scalar_gradients_at_pt[static_cast<std::size_t>(sj)][1],
+                        scalar_gradients_at_pt[static_cast<std::size_t>(sj)][2]};
+
+                    const auto& grad_ref = trial_ref_gradients[idx];
+                    AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
+
+                    for (int d1 = 0; d1 < dim; ++d1) {
+                        for (int d2 = 0; d2 < dim; ++d2) {
+                            grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
+                        }
+                    }
+                    trial_phys_gradients[idx] = grad_phys;
+
+                    if (need_basis_hessians) {
+                        AssemblyContext::Matrix3x3 H_ref{};
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                    scalar_hessians_at_pt[static_cast<std::size_t>(sj)](static_cast<std::size_t>(r),
+                                                                                         static_cast<std::size_t>(c));
+                            }
+                        }
+                        trial_ref_hessians[idx] = H_ref;
+
+                        AssemblyContext::Matrix3x3 H_phys{};
+                        for (int r = 0; r < dim; ++r) {
+                            for (int c = 0; c < dim; ++c) {
+                                Real sum = 0.0;
+                                for (int a = 0; a < dim; ++a) {
+                                    for (int b = 0; b < dim; ++b) {
+                                        sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                               H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                               J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                    }
+                                }
+                                for (int a = 0; a < dim; ++a) {
+                                    sum += grad_ref[static_cast<std::size_t>(a)] *
+                                           d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                                }
+                                H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                            }
+                        }
+                        trial_phys_hessians[idx] = H_phys;
+                    }
+                }
+            }
+        }
+    }
 
     // 9. Configure context with basic info
     context.configure(cell_id, test_space, trial_space, required_data);
@@ -2097,24 +2585,70 @@ void StandardAssembler::prepareContext(
     context.setJacobianData(scratch_jacobians_, scratch_inv_jacobians_, scratch_jac_dets_);
     context.setIntegrationWeights(scratch_integration_weights_);
 
-    // Set test basis data
-    context.setTestBasisData(n_test_dofs, scratch_basis_values_, scratch_ref_gradients_);
-
-    // Set trial basis data if different (must happen before setting trial gradients)
-    if (&test_space != &trial_space) {
-        context.setTrialBasisData(n_trial_dofs, trial_basis_values, trial_ref_gradients);
+    // Basis data
+    if (test_is_vector_basis) {
+        context.setTestVectorBasisValues(n_test_dofs,
+                                         need_test_vector_values
+                                             ? std::span<const AssemblyContext::Vector3D>(scratch_basis_vector_values_)
+                                             : std::span<const AssemblyContext::Vector3D>{});
+        if (need_basis_curls) {
+            context.setTestBasisCurls(n_test_dofs, std::span<const AssemblyContext::Vector3D>(scratch_basis_curls_));
+        }
+        if (need_basis_divergences) {
+            context.setTestBasisDivergences(n_test_dofs, std::span<const Real>(scratch_basis_divergences_));
+        }
+    } else {
+        context.setTestBasisData(n_test_dofs, scratch_basis_values_, scratch_ref_gradients_);
+        if (need_basis_hessians) {
+            context.setTestBasisHessians(n_test_dofs, scratch_ref_hessians_);
+        }
     }
 
-    context.setPhysicalGradients(scratch_phys_gradients_,
-        (&test_space != &trial_space) ? trial_phys_gradients : scratch_phys_gradients_);
+    if (&test_space != &trial_space) {
+        if (trial_is_vector_basis) {
+            context.setTrialVectorBasisValues(n_trial_dofs,
+                                              need_trial_vector_values
+                                                  ? std::span<const AssemblyContext::Vector3D>(trial_basis_vector_values)
+                                                  : std::span<const AssemblyContext::Vector3D>{});
+            if (need_basis_curls) {
+                context.setTrialBasisCurls(n_trial_dofs, std::span<const AssemblyContext::Vector3D>(trial_basis_curls));
+            }
+            if (need_basis_divergences) {
+                context.setTrialBasisDivergences(n_trial_dofs, std::span<const Real>(trial_basis_divergences));
+            }
+        } else {
+            context.setTrialBasisData(n_trial_dofs, trial_basis_values, trial_ref_gradients);
+            if (need_basis_hessians) {
+                context.setTrialBasisHessians(n_trial_dofs, trial_ref_hessians);
+            }
+        }
+    }
+
+    // Physical gradients/Hessians (scalar bases only). Vector-basis spaces use curl/div instead.
+    const auto test_phys = test_is_vector_basis
+                               ? std::span<const AssemblyContext::Vector3D>{}
+                               : std::span<const AssemblyContext::Vector3D>(scratch_phys_gradients_);
+    std::span<const AssemblyContext::Vector3D> trial_phys{};
+    if (&test_space != &trial_space) {
+        trial_phys = trial_is_vector_basis ? std::span<const AssemblyContext::Vector3D>{}
+                                           : std::span<const AssemblyContext::Vector3D>(trial_phys_gradients);
+    } else {
+        trial_phys = test_phys;
+    }
+    context.setPhysicalGradients(test_phys, trial_phys);
 
     if (need_basis_hessians) {
-        context.setTestBasisHessians(n_test_dofs, scratch_ref_hessians_);
+        const auto test_H = test_is_vector_basis
+                                ? std::span<const AssemblyContext::Matrix3x3>{}
+                                : std::span<const AssemblyContext::Matrix3x3>(scratch_phys_hessians_);
+        std::span<const AssemblyContext::Matrix3x3> trial_H{};
         if (&test_space != &trial_space) {
-            context.setTrialBasisHessians(n_trial_dofs, trial_ref_hessians);
+            trial_H = trial_is_vector_basis ? std::span<const AssemblyContext::Matrix3x3>{}
+                                            : std::span<const AssemblyContext::Matrix3x3>(trial_phys_hessians);
+        } else {
+            trial_H = test_H;
         }
-        context.setPhysicalHessians(scratch_phys_hessians_,
-                                    (&test_space != &trial_space) ? trial_phys_hessians : scratch_phys_hessians_);
+        context.setPhysicalHessians(test_H, trial_H);
     }
 
     if (hasFlag(required_data, RequiredData::EntityMeasures)) {
@@ -2216,6 +2750,24 @@ void StandardAssembler::prepareContextFace(
                      "StandardAssembler::prepareContextFace: non-Product trial space DOF count mismatch");
     }
     const bool need_basis_hessians = hasFlag(required_data, RequiredData::BasisHessians);
+    const bool need_basis_curls = hasFlag(required_data, RequiredData::BasisCurls);
+    const bool need_basis_divergences = hasFlag(required_data, RequiredData::BasisDivergences);
+
+    const auto& test_basis = test_element.basis();
+    const auto& trial_basis = trial_element.basis();
+    const bool test_is_vector_basis = test_basis.is_vector_valued();
+    const bool trial_is_vector_basis = trial_basis.is_vector_valued();
+
+    const bool need_test_vector_values =
+        test_is_vector_basis &&
+        (hasFlag(required_data, RequiredData::BasisValues) ||
+         hasFlag(required_data, RequiredData::SolutionValues) ||
+         required_data == RequiredData::None);
+    const bool need_trial_vector_values =
+        trial_is_vector_basis &&
+        (hasFlag(required_data, RequiredData::BasisValues) ||
+         hasFlag(required_data, RequiredData::SolutionValues) ||
+         required_data == RequiredData::None);
 
     // 5. Get cell node coordinates from mesh
     mesh.getCellCoordinates(cell_id, cell_coords_);
@@ -2248,27 +2800,86 @@ void StandardAssembler::prepareContextFace(
 
     const auto test_basis_size = static_cast<std::size_t>(n_test_dofs * n_qpts);
     const auto trial_basis_size = static_cast<std::size_t>(n_trial_dofs * n_qpts);
-    scratch_basis_values_.resize(test_basis_size);
-    scratch_ref_gradients_.resize(test_basis_size);
-    scratch_phys_gradients_.resize(test_basis_size);
-    if (need_basis_hessians) {
-        scratch_ref_hessians_.resize(test_basis_size);
-        scratch_phys_hessians_.resize(test_basis_size);
+    if (test_is_vector_basis) {
+        scratch_basis_values_.clear();
+        scratch_ref_gradients_.clear();
+        scratch_phys_gradients_.clear();
+        scratch_ref_hessians_.clear();
+        scratch_phys_hessians_.clear();
+
+        if (need_test_vector_values) {
+            scratch_basis_vector_values_.resize(test_basis_size);
+        } else {
+            scratch_basis_vector_values_.clear();
+        }
+        if (need_basis_curls) {
+            scratch_basis_curls_.resize(test_basis_size);
+        } else {
+            scratch_basis_curls_.clear();
+        }
+        if (need_basis_divergences) {
+            scratch_basis_divergences_.resize(test_basis_size);
+        } else {
+            scratch_basis_divergences_.clear();
+        }
+    } else {
+        scratch_basis_vector_values_.clear();
+        scratch_basis_curls_.clear();
+        scratch_basis_divergences_.clear();
+
+        scratch_basis_values_.resize(test_basis_size);
+        scratch_ref_gradients_.resize(test_basis_size);
+        scratch_phys_gradients_.resize(test_basis_size);
+        if (need_basis_hessians) {
+            scratch_ref_hessians_.resize(test_basis_size);
+            scratch_phys_hessians_.resize(test_basis_size);
+        } else {
+            scratch_ref_hessians_.clear();
+            scratch_phys_hessians_.clear();
+        }
     }
 
     std::vector<Real> trial_basis_values;
     std::vector<AssemblyContext::Vector3D> trial_ref_gradients;
     std::vector<AssemblyContext::Vector3D> trial_phys_gradients;
+    std::vector<AssemblyContext::Vector3D> trial_basis_vector_values;
+    std::vector<AssemblyContext::Vector3D> trial_basis_curls;
+    std::vector<Real> trial_basis_divergences;
     std::vector<AssemblyContext::Matrix3x3> trial_ref_hessians;
     std::vector<AssemblyContext::Matrix3x3> trial_phys_hessians;
 
     if (&test_space != &trial_space) {
-        trial_basis_values.resize(trial_basis_size);
-        trial_ref_gradients.resize(trial_basis_size);
-        trial_phys_gradients.resize(trial_basis_size);
-        if (need_basis_hessians) {
-            trial_ref_hessians.resize(trial_basis_size);
-            trial_phys_hessians.resize(trial_basis_size);
+        if (trial_is_vector_basis) {
+            trial_basis_values.clear();
+            trial_ref_gradients.clear();
+            trial_phys_gradients.clear();
+            trial_ref_hessians.clear();
+            trial_phys_hessians.clear();
+
+            if (need_trial_vector_values) {
+                trial_basis_vector_values.resize(trial_basis_size);
+            }
+            if (need_basis_curls) {
+                trial_basis_curls.resize(trial_basis_size);
+            }
+            if (need_basis_divergences) {
+                trial_basis_divergences.resize(trial_basis_size);
+            }
+        } else {
+            trial_basis_vector_values.clear();
+            trial_basis_curls.clear();
+            trial_basis_divergences.clear();
+
+            trial_basis_values.resize(trial_basis_size);
+            trial_ref_gradients.resize(trial_basis_size);
+            trial_phys_gradients.resize(trial_basis_size);
+            if (need_basis_hessians) {
+                trial_ref_hessians.resize(trial_basis_size);
+                trial_phys_hessians.resize(trial_basis_size);
+            } else {
+                trial_ref_hessians.clear();
+                trial_phys_hessians.clear();
+            }
         }
     }
 
@@ -2365,10 +2976,13 @@ void StandardAssembler::prepareContextFace(
     }
 
     // 9. Evaluate basis functions at face quadrature points
-    const auto& test_basis = test_element.basis();
-    std::vector<Real> values_at_pt;
-    std::vector<basis::Gradient> gradients_at_pt;
-    std::vector<basis::Hessian> hessians_at_pt;
+    std::vector<Real> scalar_values_at_pt;
+    std::vector<basis::Gradient> scalar_gradients_at_pt;
+    std::vector<basis::Hessian> scalar_hessians_at_pt;
+
+    std::vector<math::Vector<Real, 3>> vec_values_at_pt;
+    std::vector<math::Vector<Real, 3>> vec_curls_at_pt;
+    std::vector<Real> vec_divs_at_pt;
 
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const math::Vector<Real, 3> xi{
@@ -2376,13 +2990,9 @@ void StandardAssembler::prepareContextFace(
             scratch_quad_points_[q][1],
             scratch_quad_points_[q][2]};
 
+        const auto& J = scratch_jacobians_[q];
         const auto& J_inv = scratch_inv_jacobians_[q];
-
-        test_basis.evaluate_values(xi, values_at_pt);
-        test_basis.evaluate_gradients(xi, gradients_at_pt);
-        if (need_basis_hessians) {
-            test_basis.evaluate_hessians(xi, hessians_at_pt);
-        }
+        const Real det_J = scratch_jac_dets_[q];
 
         std::array<AssemblyContext::Matrix3x3, 3> d2xi_dx2{};
         if (need_basis_hessians) {
@@ -2408,76 +3018,83 @@ void StandardAssembler::prepareContextFace(
             }
         }
 
-        for (LocalIndex i = 0; i < n_test_dofs; ++i) {
-            const LocalIndex si = test_is_product ? static_cast<LocalIndex>(i % n_test_scalar_dofs) : i;
-            const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
-            scratch_basis_values_[idx] = values_at_pt[static_cast<std::size_t>(si)];
-            scratch_ref_gradients_[idx] = {
-                gradients_at_pt[static_cast<std::size_t>(si)][0],
-                gradients_at_pt[static_cast<std::size_t>(si)][1],
-                gradients_at_pt[static_cast<std::size_t>(si)][2]};
-
-            const auto& grad_ref = scratch_ref_gradients_[idx];
-            AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
-
-            for (int d1 = 0; d1 < dim; ++d1) {
-                for (int d2 = 0; d2 < dim; ++d2) {
-                    grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
-                }
+        if (test_is_vector_basis) {
+            if (need_test_vector_values) {
+                test_basis.evaluate_vector_values(xi, vec_values_at_pt);
             }
-            scratch_phys_gradients_[idx] = grad_phys;
+            if (need_basis_curls) {
+                test_basis.evaluate_curl(xi, vec_curls_at_pt);
+            }
+            if (need_basis_divergences) {
+                test_basis.evaluate_divergence(xi, vec_divs_at_pt);
+            }
 
-            if (need_basis_hessians) {
-                AssemblyContext::Matrix3x3 H_ref{};
-                for (int r = 0; r < 3; ++r) {
-                    for (int c = 0; c < 3; ++c) {
-                        H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                            hessians_at_pt[static_cast<std::size_t>(si)](static_cast<std::size_t>(r),
-                                                                         static_cast<std::size_t>(c));
+            const auto cont = test_space.continuity();
+            for (LocalIndex i = 0; i < n_test_dofs; ++i) {
+                const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
+
+                if (need_test_vector_values) {
+                    const auto& vref = vec_values_at_pt[static_cast<std::size_t>(i)];
+                    AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
+                    if (cont == Continuity::H_curl) {
+                        for (int r = 0; r < dim; ++r) {
+                            for (int c = 0; c < dim; ++c) {
+                                vphys[static_cast<std::size_t>(r)] +=
+                                    J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
+                                    vref[static_cast<std::size_t>(c)];
+                            }
+                        }
+                    } else { // H_div
+                        const Real inv_det = Real(1) / det_J;
+                        for (int r = 0; r < 3; ++r) {
+                            Real sum = 0.0;
+                            for (int c = 0; c < 3; ++c) {
+                                sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                                       vref[static_cast<std::size_t>(c)];
+                            }
+                            vphys[static_cast<std::size_t>(r)] = inv_det * sum;
+                        }
                     }
+                    scratch_basis_vector_values_[idx] = vphys;
                 }
-                scratch_ref_hessians_[idx] = H_ref;
 
-                AssemblyContext::Matrix3x3 H_phys{};
-	                for (int r = 0; r < dim; ++r) {
-	                    for (int c = 0; c < dim; ++c) {
-	                        Real sum = 0.0;
-	                        for (int a = 0; a < dim; ++a) {
-	                            for (int b = 0; b < dim; ++b) {
-	                                sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-	                                       H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-	                                       J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
-	                            }
-	                        }
-	                        for (int a = 0; a < dim; ++a) {
-	                            sum += grad_ref[static_cast<std::size_t>(a)] *
-	                                   d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
-	                        }
-	                        H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
-	                    }
-	                }
-	                scratch_phys_hessians_[idx] = H_phys;
+                if (need_basis_curls) {
+                    const auto& cref = vec_curls_at_pt[static_cast<std::size_t>(i)];
+                    AssemblyContext::Vector3D cphys{0.0, 0.0, 0.0};
+                    const Real inv_det = Real(1) / det_J;
+                    for (int r = 0; r < 3; ++r) {
+                        Real sum = 0.0;
+                        for (int c = 0; c < 3; ++c) {
+                            sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                                   cref[static_cast<std::size_t>(c)];
+                        }
+                        cphys[static_cast<std::size_t>(r)] = inv_det * sum;
+                    }
+                    scratch_basis_curls_[idx] = cphys;
+                }
+
+                if (need_basis_divergences) {
+                    scratch_basis_divergences_[idx] =
+                        vec_divs_at_pt[static_cast<std::size_t>(i)] / det_J;
+                }
             }
-        }
-
-        if (&test_space != &trial_space) {
-            const auto& trial_basis = trial_element.basis();
-            trial_basis.evaluate_values(xi, values_at_pt);
-            trial_basis.evaluate_gradients(xi, gradients_at_pt);
+        } else {
+            test_basis.evaluate_values(xi, scalar_values_at_pt);
+            test_basis.evaluate_gradients(xi, scalar_gradients_at_pt);
             if (need_basis_hessians) {
-                trial_basis.evaluate_hessians(xi, hessians_at_pt);
+                test_basis.evaluate_hessians(xi, scalar_hessians_at_pt);
             }
 
-            for (LocalIndex j = 0; j < n_trial_dofs; ++j) {
-                const LocalIndex sj = trial_is_product ? static_cast<LocalIndex>(j % n_trial_scalar_dofs) : j;
-                const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
-                trial_basis_values[idx] = values_at_pt[static_cast<std::size_t>(sj)];
-                trial_ref_gradients[idx] = {
-                    gradients_at_pt[static_cast<std::size_t>(sj)][0],
-                    gradients_at_pt[static_cast<std::size_t>(sj)][1],
-                    gradients_at_pt[static_cast<std::size_t>(sj)][2]};
+            for (LocalIndex i = 0; i < n_test_dofs; ++i) {
+                const LocalIndex si = test_is_product ? static_cast<LocalIndex>(i % n_test_scalar_dofs) : i;
+                const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
+                scratch_basis_values_[idx] = scalar_values_at_pt[static_cast<std::size_t>(si)];
+                scratch_ref_gradients_[idx] = {
+                    scalar_gradients_at_pt[static_cast<std::size_t>(si)][0],
+                    scalar_gradients_at_pt[static_cast<std::size_t>(si)][1],
+                    scalar_gradients_at_pt[static_cast<std::size_t>(si)][2]};
 
-                const auto& grad_ref = trial_ref_gradients[idx];
+                const auto& grad_ref = scratch_ref_gradients_[idx];
                 AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
 
                 for (int d1 = 0; d1 < dim; ++d1) {
@@ -2485,39 +3102,161 @@ void StandardAssembler::prepareContextFace(
                         grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
                     }
                 }
-                trial_phys_gradients[idx] = grad_phys;
+                scratch_phys_gradients_[idx] = grad_phys;
 
                 if (need_basis_hessians) {
                     AssemblyContext::Matrix3x3 H_ref{};
                     for (int r = 0; r < 3; ++r) {
                         for (int c = 0; c < 3; ++c) {
                             H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                                hessians_at_pt[static_cast<std::size_t>(sj)](static_cast<std::size_t>(r),
-                                                                             static_cast<std::size_t>(c));
+                                scalar_hessians_at_pt[static_cast<std::size_t>(si)](static_cast<std::size_t>(r),
+                                                                                     static_cast<std::size_t>(c));
                         }
                     }
-                    trial_ref_hessians[idx] = H_ref;
+                    scratch_ref_hessians_[idx] = H_ref;
 
-	                    AssemblyContext::Matrix3x3 H_phys{};
-	                    for (int r = 0; r < dim; ++r) {
-	                        for (int c = 0; c < dim; ++c) {
-	                            Real sum = 0.0;
-	                            for (int a = 0; a < dim; ++a) {
-	                                for (int b = 0; b < dim; ++b) {
-	                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-	                                           H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-	                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
-	                                }
-	                            }
-	                            for (int a = 0; a < dim; ++a) {
-	                                sum += grad_ref[static_cast<std::size_t>(a)] *
-	                                       d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
-	                            }
-	                            H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
-	                        }
-	                    }
-	                    trial_phys_hessians[idx] = H_phys;
-	                }
+                    AssemblyContext::Matrix3x3 H_phys{};
+                    for (int r = 0; r < dim; ++r) {
+                        for (int c = 0; c < dim; ++c) {
+                            Real sum = 0.0;
+                            for (int a = 0; a < dim; ++a) {
+                                for (int b = 0; b < dim; ++b) {
+                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                           H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                }
+                            }
+                            for (int a = 0; a < dim; ++a) {
+                                sum += grad_ref[static_cast<std::size_t>(a)] *
+                                       d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                            }
+                            H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                        }
+                    }
+                    scratch_phys_hessians_[idx] = H_phys;
+                }
+            }
+        }
+
+        if (&test_space != &trial_space) {
+            if (trial_is_vector_basis) {
+                if (need_trial_vector_values) {
+                    trial_basis.evaluate_vector_values(xi, vec_values_at_pt);
+                }
+                if (need_basis_curls) {
+                    trial_basis.evaluate_curl(xi, vec_curls_at_pt);
+                }
+                if (need_basis_divergences) {
+                    trial_basis.evaluate_divergence(xi, vec_divs_at_pt);
+                }
+
+                const auto cont = trial_space.continuity();
+                for (LocalIndex j = 0; j < n_trial_dofs; ++j) {
+                    const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
+
+                    if (need_trial_vector_values) {
+                        const auto& vref = vec_values_at_pt[static_cast<std::size_t>(j)];
+                        AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
+                        if (cont == Continuity::H_curl) {
+                            for (int r = 0; r < dim; ++r) {
+                                for (int c = 0; c < dim; ++c) {
+                                    vphys[static_cast<std::size_t>(r)] +=
+                                        J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
+                                        vref[static_cast<std::size_t>(c)];
+                                }
+                            }
+                        } else { // H_div
+                            const Real inv_det = Real(1) / det_J;
+                            for (int r = 0; r < 3; ++r) {
+                                Real sum = 0.0;
+                                for (int c = 0; c < 3; ++c) {
+                                    sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                                           vref[static_cast<std::size_t>(c)];
+                                }
+                                vphys[static_cast<std::size_t>(r)] = inv_det * sum;
+                            }
+                        }
+                        trial_basis_vector_values[idx] = vphys;
+                    }
+
+                    if (need_basis_curls) {
+                        const auto& cref = vec_curls_at_pt[static_cast<std::size_t>(j)];
+                        AssemblyContext::Vector3D cphys{0.0, 0.0, 0.0};
+                        const Real inv_det = Real(1) / det_J;
+                        for (int r = 0; r < 3; ++r) {
+                            Real sum = 0.0;
+                            for (int c = 0; c < 3; ++c) {
+                                sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                                       cref[static_cast<std::size_t>(c)];
+                            }
+                            cphys[static_cast<std::size_t>(r)] = inv_det * sum;
+                        }
+                        trial_basis_curls[idx] = cphys;
+                    }
+
+                    if (need_basis_divergences) {
+                        trial_basis_divergences[idx] =
+                            vec_divs_at_pt[static_cast<std::size_t>(j)] / det_J;
+                    }
+                }
+            } else {
+                trial_basis.evaluate_values(xi, scalar_values_at_pt);
+                trial_basis.evaluate_gradients(xi, scalar_gradients_at_pt);
+                if (need_basis_hessians) {
+                    trial_basis.evaluate_hessians(xi, scalar_hessians_at_pt);
+                }
+
+                for (LocalIndex j = 0; j < n_trial_dofs; ++j) {
+                    const LocalIndex sj = trial_is_product ? static_cast<LocalIndex>(j % n_trial_scalar_dofs) : j;
+                    const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
+                    trial_basis_values[idx] = scalar_values_at_pt[static_cast<std::size_t>(sj)];
+                    trial_ref_gradients[idx] = {
+                        scalar_gradients_at_pt[static_cast<std::size_t>(sj)][0],
+                        scalar_gradients_at_pt[static_cast<std::size_t>(sj)][1],
+                        scalar_gradients_at_pt[static_cast<std::size_t>(sj)][2]};
+
+                    const auto& grad_ref = trial_ref_gradients[idx];
+                    AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
+
+                    for (int d1 = 0; d1 < dim; ++d1) {
+                        for (int d2 = 0; d2 < dim; ++d2) {
+                            grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
+                        }
+                    }
+                    trial_phys_gradients[idx] = grad_phys;
+
+                    if (need_basis_hessians) {
+                        AssemblyContext::Matrix3x3 H_ref{};
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                    scalar_hessians_at_pt[static_cast<std::size_t>(sj)](static_cast<std::size_t>(r),
+                                                                                         static_cast<std::size_t>(c));
+                            }
+                        }
+                        trial_ref_hessians[idx] = H_ref;
+
+                        AssemblyContext::Matrix3x3 H_phys{};
+                        for (int r = 0; r < dim; ++r) {
+                            for (int c = 0; c < dim; ++c) {
+                                Real sum = 0.0;
+                                for (int a = 0; a < dim; ++a) {
+                                    for (int b = 0; b < dim; ++b) {
+                                        sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                               H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                               J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                    }
+                                }
+                                for (int a = 0; a < dim; ++a) {
+                                    sum += grad_ref[static_cast<std::size_t>(a)] *
+                                           d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                                }
+                                H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                            }
+                        }
+                        trial_phys_hessians[idx] = H_phys;
+                    }
+                }
             }
         }
     }
@@ -2529,21 +3268,71 @@ void StandardAssembler::prepareContextFace(
     context.setPhysicalPoints(scratch_phys_points_);
     context.setJacobianData(scratch_jacobians_, scratch_inv_jacobians_, scratch_jac_dets_);
     context.setIntegrationWeights(scratch_integration_weights_);
-    context.setTestBasisData(n_test_dofs, scratch_basis_values_, scratch_ref_gradients_);
-    if (&test_space != &trial_space) {
-        context.setTrialBasisData(n_trial_dofs, trial_basis_values, trial_ref_gradients);
+
+    // Basis data
+    if (test_is_vector_basis) {
+        context.setTestVectorBasisValues(n_test_dofs,
+                                         need_test_vector_values
+                                             ? std::span<const AssemblyContext::Vector3D>(scratch_basis_vector_values_)
+                                             : std::span<const AssemblyContext::Vector3D>{});
+        if (need_basis_curls) {
+            context.setTestBasisCurls(n_test_dofs, std::span<const AssemblyContext::Vector3D>(scratch_basis_curls_));
+        }
+        if (need_basis_divergences) {
+            context.setTestBasisDivergences(n_test_dofs, std::span<const Real>(scratch_basis_divergences_));
+        }
+    } else {
+        context.setTestBasisData(n_test_dofs, scratch_basis_values_, scratch_ref_gradients_);
+        if (need_basis_hessians) {
+            context.setTestBasisHessians(n_test_dofs, scratch_ref_hessians_);
+        }
     }
-    context.setPhysicalGradients(scratch_phys_gradients_,
-                                 (&test_space != &trial_space) ? trial_phys_gradients : scratch_phys_gradients_);
+
+    if (&test_space != &trial_space) {
+        if (trial_is_vector_basis) {
+            context.setTrialVectorBasisValues(n_trial_dofs,
+                                              need_trial_vector_values
+                                                  ? std::span<const AssemblyContext::Vector3D>(trial_basis_vector_values)
+                                                  : std::span<const AssemblyContext::Vector3D>{});
+            if (need_basis_curls) {
+                context.setTrialBasisCurls(n_trial_dofs, std::span<const AssemblyContext::Vector3D>(trial_basis_curls));
+            }
+            if (need_basis_divergences) {
+                context.setTrialBasisDivergences(n_trial_dofs, std::span<const Real>(trial_basis_divergences));
+            }
+        } else {
+            context.setTrialBasisData(n_trial_dofs, trial_basis_values, trial_ref_gradients);
+            if (need_basis_hessians) {
+                context.setTrialBasisHessians(n_trial_dofs, trial_ref_hessians);
+            }
+        }
+    }
+
+    const auto test_phys = test_is_vector_basis
+                               ? std::span<const AssemblyContext::Vector3D>{}
+                               : std::span<const AssemblyContext::Vector3D>(scratch_phys_gradients_);
+    std::span<const AssemblyContext::Vector3D> trial_phys{};
+    if (&test_space != &trial_space) {
+        trial_phys = trial_is_vector_basis ? std::span<const AssemblyContext::Vector3D>{}
+                                           : std::span<const AssemblyContext::Vector3D>(trial_phys_gradients);
+    } else {
+        trial_phys = test_phys;
+    }
+    context.setPhysicalGradients(test_phys, trial_phys);
     context.setNormals(scratch_normals_);
 
     if (need_basis_hessians) {
-        context.setTestBasisHessians(n_test_dofs, scratch_ref_hessians_);
+        const auto test_H = test_is_vector_basis
+                                ? std::span<const AssemblyContext::Matrix3x3>{}
+                                : std::span<const AssemblyContext::Matrix3x3>(scratch_phys_hessians_);
+        std::span<const AssemblyContext::Matrix3x3> trial_H{};
         if (&test_space != &trial_space) {
-            context.setTrialBasisHessians(n_trial_dofs, trial_ref_hessians);
+            trial_H = trial_is_vector_basis ? std::span<const AssemblyContext::Matrix3x3>{}
+                                            : std::span<const AssemblyContext::Matrix3x3>(trial_phys_hessians);
+        } else {
+            trial_H = test_H;
         }
-        context.setPhysicalHessians(scratch_phys_hessians_,
-                                    (&test_space != &trial_space) ? trial_phys_hessians : scratch_phys_hessians_);
+        context.setPhysicalHessians(test_H, trial_H);
     }
 
     if (hasFlag(required_data, RequiredData::EntityMeasures)) {
@@ -2652,6 +3441,514 @@ void StandardAssembler::computeSurfaceMeasureAndNormal(
     }
 }
 
+const StandardAssembler::FaceTransform& StandardAssembler::getFaceTransform(
+    BasisType basis_type,
+    Continuity continuity,
+    ElementType face_type,
+    int poly_order,
+    const spaces::OrientationManager::FaceOrientation& orientation,
+    LocalIndex expected_size)
+{
+    FaceTransformKey key{};
+    key.basis_type = basis_type;
+    key.continuity = continuity;
+    key.face_type = face_type;
+    key.poly_order = poly_order;
+    key.sign = orientation.sign;
+    key.n_verts = static_cast<std::uint8_t>(std::min<std::size_t>(orientation.vertex_perm.size(), 4u));
+    for (std::size_t i = 0; i < static_cast<std::size_t>(key.n_verts); ++i) {
+        key.vertex_perm[i] = orientation.vertex_perm[i];
+    }
+
+    auto it = face_transform_cache_.find(key);
+    if (it != face_transform_cache_.end()) {
+        FE_THROW_IF(it->second.n != expected_size, FEException,
+                    "StandardAssembler::getFaceTransform: cached face transform size mismatch");
+        return it->second;
+    }
+
+    FaceTransform tf{};
+    tf.n = expected_size;
+    const auto nn = static_cast<std::size_t>(std::max<LocalIndex>(0, expected_size));
+    if (expected_size <= 0) {
+        auto [ins, inserted] = face_transform_cache_.emplace(key, std::move(tf));
+        (void)inserted;
+        return ins->second;
+    }
+
+    FE_THROW_IF(key.n_verts == 0u, FEException,
+                "StandardAssembler::getFaceTransform: missing face vertex permutation");
+
+    std::vector<Real> O(nn * nn, 0.0);
+    std::vector<Real> work;
+    std::vector<Real> inv;
+
+    scratch_orient_in_.assign(nn, 0.0);
+
+    for (LocalIndex col = 0; col < expected_size; ++col) {
+        std::fill(scratch_orient_in_.begin(), scratch_orient_in_.end(), 0.0);
+        scratch_orient_in_[static_cast<std::size_t>(col)] = 1.0;
+
+        std::vector<Real> oriented;
+        if (continuity == Continuity::H_div) {
+            if (face_type == ElementType::Triangle3) {
+                oriented = spaces::OrientationManager::orient_triangle_face_dofs(
+                    scratch_orient_in_, orientation, poly_order);
+            } else if (face_type == ElementType::Quad4) {
+                oriented = spaces::OrientationManager::orient_quad_face_dofs(
+                    scratch_orient_in_, orientation, poly_order);
+            } else {
+                FE_THROW(FEException, "StandardAssembler::getFaceTransform: unsupported face type for H(div)");
+            }
+        } else if (continuity == Continuity::H_curl) {
+            if (face_type == ElementType::Triangle3) {
+                oriented = spaces::OrientationManager::orient_hcurl_triangle_face_dofs(
+                    scratch_orient_in_, orientation, poly_order);
+            } else if (face_type == ElementType::Quad4) {
+                oriented = spaces::OrientationManager::orient_hcurl_quad_face_dofs(
+                    scratch_orient_in_, orientation, poly_order);
+            } else {
+                FE_THROW(FEException, "StandardAssembler::getFaceTransform: unsupported face type for H(curl)");
+            }
+        } else {
+            FE_THROW(FEException, "StandardAssembler::getFaceTransform: unsupported continuity");
+        }
+
+        FE_THROW_IF(oriented.size() != nn, FEException,
+                    "StandardAssembler::getFaceTransform: oriented face DOF vector size mismatch");
+
+        for (std::size_t row = 0; row < nn; ++row) {
+            O[row * nn + static_cast<std::size_t>(col)] = oriented[row];
+        }
+    }
+
+    const bool ok = invertDenseMatrix(O, expected_size, inv, work);
+    FE_THROW_IF(!ok, FEException, "StandardAssembler::getFaceTransform: singular face orientation matrix");
+    tf.P = std::move(inv);
+
+    tf.PT.resize(nn * nn, 0.0);
+    for (std::size_t i = 0; i < nn; ++i) {
+        for (std::size_t j = 0; j < nn; ++j) {
+            tf.PT[i * nn + j] = tf.P[j * nn + i];
+        }
+    }
+
+    auto [ins, inserted] = face_transform_cache_.emplace(key, std::move(tf));
+    (void)inserted;
+    return ins->second;
+}
+
+void StandardAssembler::applyVectorBasisGlobalToLocal(
+    const IMeshAccess& mesh,
+    GlobalIndex cell_id,
+    const spaces::FunctionSpace& space,
+    std::span<Real> coeffs)
+{
+    if (coeffs.empty()) {
+        return;
+    }
+    const auto continuity = space.continuity();
+    if (continuity != Continuity::H_curl && continuity != Continuity::H_div) {
+        return;
+    }
+
+    // Standalone/unit-test assembly may provide only a DofMap. For a single-cell mesh, the
+    // canonical orientation is sufficient and we can treat the orientation transform as identity.
+    if (dof_handler_ == nullptr || !dof_handler_->hasCellOrientations()) {
+        FE_THROW_IF(mesh.numCells() > 1, FEException,
+                    "StandardAssembler: H(curl)/H(div) coefficient orientation requires a DofHandler with cell orientations");
+        return;
+    }
+
+    const ElementType cell_type = mesh.getCellType(cell_id);
+    const auto& element = getElement(space, cell_id, cell_type);
+    const auto& basis = element.basis();
+    FE_THROW_IF(!basis.is_vector_valued(), FEException,
+                "StandardAssembler::applyVectorBasisGlobalToLocal: expected vector-valued basis for H(curl)/H(div) space");
+
+    const auto* vbf = dynamic_cast<const basis::VectorBasisFunction*>(&basis);
+    FE_THROW_IF(vbf == nullptr, FEException,
+                "StandardAssembler::applyVectorBasisGlobalToLocal: vector-valued basis is not a VectorBasisFunction");
+
+    const auto associations = vbf->dof_associations();
+    FE_THROW_IF(associations.size() != coeffs.size(), FEException,
+                "StandardAssembler::applyVectorBasisGlobalToLocal: DOF association size mismatch");
+
+    const auto edge_orients = dof_handler_->cellEdgeOrientations(cell_id);
+    const auto face_orients = dof_handler_->cellFaceOrientations(cell_id);
+
+    bool needs_edges = false;
+    bool needs_faces = false;
+    for (const auto& a : associations) {
+        if (a.entity_type == basis::DofEntity::Edge) needs_edges = true;
+        if (a.entity_type == basis::DofEntity::Face) needs_faces = true;
+    }
+
+    if (needs_edges) {
+        FE_THROW_IF(edge_orients.empty(), FEException,
+                    "StandardAssembler::applyVectorBasisGlobalToLocal: missing cell edge orientations");
+    }
+    if (needs_faces) {
+        FE_THROW_IF(face_orients.empty(), FEException,
+                    "StandardAssembler::applyVectorBasisGlobalToLocal: missing cell face orientations");
+    }
+
+    // Edge DOFs: apply sign based on edge orientation. (Any needed reordering of edge modes is
+    // already handled by DofMap canonical edge ordering.)
+    if (needs_edges) {
+        for (LocalIndex i = 0; i < static_cast<LocalIndex>(associations.size()); ++i) {
+            const auto& a = associations[static_cast<std::size_t>(i)];
+            if (a.entity_type != basis::DofEntity::Edge) continue;
+            const int e = a.entity_id;
+            FE_THROW_IF(e < 0 || static_cast<std::size_t>(e) >= edge_orients.size(), FEException,
+                        "StandardAssembler::applyVectorBasisGlobalToLocal: edge id out of range in DOF associations");
+            const int sign = edge_orients[static_cast<std::size_t>(e)];
+            if (sign < 0) {
+                coeffs[static_cast<std::size_t>(i)] = -coeffs[static_cast<std::size_t>(i)];
+            }
+        }
+    }
+
+    // Face DOFs: apply dense (possibly mixing) transform P = O^{-1}.
+    if (needs_faces) {
+        const elements::ReferenceElement ref = elements::ReferenceElement::create(cell_type);
+        const auto n_faces = static_cast<int>(ref.num_faces());
+        FE_THROW_IF(n_faces <= 0, FEException,
+                    "StandardAssembler::applyVectorBasisGlobalToLocal: vector basis has face DOFs but cell has no faces");
+        FE_THROW_IF(face_orients.size() < static_cast<std::size_t>(n_faces), FEException,
+                    "StandardAssembler::applyVectorBasisGlobalToLocal: face orientation span too small for cell");
+
+        std::vector<std::vector<std::pair<int, LocalIndex>>> face_pairs(static_cast<std::size_t>(n_faces));
+        for (LocalIndex i = 0; i < static_cast<LocalIndex>(associations.size()); ++i) {
+            const auto& a = associations[static_cast<std::size_t>(i)];
+            if (a.entity_type != basis::DofEntity::Face) continue;
+            const int f = a.entity_id;
+            FE_THROW_IF(f < 0 || f >= n_faces, FEException,
+                        "StandardAssembler::applyVectorBasisGlobalToLocal: face id out of range in DOF associations");
+            face_pairs[static_cast<std::size_t>(f)].push_back({a.moment_index, i});
+        }
+
+        for (int f = 0; f < n_faces; ++f) {
+            auto& pairs = face_pairs[static_cast<std::size_t>(f)];
+            if (pairs.empty()) continue;
+
+            std::sort(pairs.begin(), pairs.end(),
+                      [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+
+            const LocalIndex n_face_dofs = static_cast<LocalIndex>(pairs.size());
+            const auto& fn = ref.face_nodes(static_cast<std::size_t>(f));
+            ElementType face_type = ElementType::Unknown;
+            if (fn.size() == 3u) {
+                face_type = ElementType::Triangle3;
+            } else if (fn.size() == 4u) {
+                face_type = ElementType::Quad4;
+            } else {
+                FE_THROW(FEException, "StandardAssembler::applyVectorBasisGlobalToLocal: unsupported face topology");
+            }
+
+            const auto& orient = face_orients[static_cast<std::size_t>(f)];
+            const auto& tf = getFaceTransform(basis.basis_type(), continuity, face_type,
+                                              element.polynomial_order(), orient, n_face_dofs);
+
+            const auto nn = static_cast<std::size_t>(n_face_dofs);
+            scratch_orient_in_.assign(nn, 0.0);
+            scratch_orient_out_.assign(nn, 0.0);
+
+            for (std::size_t k = 0; k < nn; ++k) {
+                const auto dof = pairs[k].second;
+                scratch_orient_in_[k] = coeffs[static_cast<std::size_t>(dof)];
+            }
+
+            for (std::size_t r = 0; r < nn; ++r) {
+                Real sum = 0.0;
+                const std::size_t base = r * nn;
+                for (std::size_t c = 0; c < nn; ++c) {
+                    sum += tf.P[base + c] * scratch_orient_in_[c];
+                }
+                scratch_orient_out_[r] = sum;
+            }
+
+            for (std::size_t k = 0; k < nn; ++k) {
+                const auto dof = pairs[k].second;
+                coeffs[static_cast<std::size_t>(dof)] = scratch_orient_out_[k];
+            }
+        }
+    }
+}
+
+void StandardAssembler::applyVectorBasisOutputOrientation(
+    const IMeshAccess& mesh,
+    GlobalIndex test_cell_id,
+    const spaces::FunctionSpace& test_space,
+    GlobalIndex trial_cell_id,
+    const spaces::FunctionSpace& trial_space,
+    KernelOutput& output)
+{
+    const bool need_test = (test_space.continuity() == Continuity::H_curl || test_space.continuity() == Continuity::H_div);
+    const bool need_trial = (trial_space.continuity() == Continuity::H_curl || trial_space.continuity() == Continuity::H_div);
+    if (!need_test && !need_trial) {
+        return;
+    }
+
+    // Standalone/unit-test assembly may provide only a DofMap. For a single-cell mesh, the
+    // canonical orientation is sufficient and we can treat the output transform as identity.
+    if (dof_handler_ == nullptr || !dof_handler_->hasCellOrientations()) {
+        FE_THROW_IF(mesh.numCells() > 1, FEException,
+                    "StandardAssembler: H(curl)/H(div) output orientation requires a DofHandler with cell orientations");
+        return;
+    }
+
+    struct Blocks {
+        std::vector<std::pair<LocalIndex, int>> edge_dofs; // (dof_index, sign)
+        struct FaceBlock {
+            std::vector<LocalIndex> dofs; // in moment-index order
+            const FaceTransform* tf{nullptr};
+        };
+        std::vector<FaceBlock> faces;
+    };
+
+    const auto build_blocks = [&](GlobalIndex cell_id,
+                                  const spaces::FunctionSpace& space,
+                                  LocalIndex expected_dofs) -> std::optional<Blocks> {
+        const auto continuity = space.continuity();
+        if (continuity != Continuity::H_curl && continuity != Continuity::H_div) {
+            return std::nullopt;
+        }
+        FE_THROW_IF(expected_dofs < 0, FEException,
+                    "StandardAssembler::applyVectorBasisOutputOrientation: negative expected DOF count");
+
+        const ElementType cell_type = mesh.getCellType(cell_id);
+        const auto& element = getElement(space, cell_id, cell_type);
+        const auto& basis = element.basis();
+        FE_THROW_IF(!basis.is_vector_valued(), FEException,
+                    "StandardAssembler::applyVectorBasisOutputOrientation: expected vector-valued basis for H(curl)/H(div) space");
+
+        const auto* vbf = dynamic_cast<const basis::VectorBasisFunction*>(&basis);
+        FE_THROW_IF(vbf == nullptr, FEException,
+                    "StandardAssembler::applyVectorBasisOutputOrientation: vector-valued basis is not a VectorBasisFunction");
+
+        const auto associations = vbf->dof_associations();
+        FE_THROW_IF(static_cast<LocalIndex>(associations.size()) != expected_dofs, FEException,
+                    "StandardAssembler::applyVectorBasisOutputOrientation: DOF association size mismatch");
+
+        Blocks blocks;
+
+        const auto edge_orients = dof_handler_->cellEdgeOrientations(cell_id);
+        const auto face_orients = dof_handler_->cellFaceOrientations(cell_id);
+
+        bool needs_edges = false;
+        bool needs_faces = false;
+        for (const auto& a : associations) {
+            if (a.entity_type == basis::DofEntity::Edge) needs_edges = true;
+            if (a.entity_type == basis::DofEntity::Face) needs_faces = true;
+        }
+        if (needs_edges) {
+            FE_THROW_IF(edge_orients.empty(), FEException,
+                        "StandardAssembler::applyVectorBasisOutputOrientation: missing cell edge orientations");
+        }
+        if (needs_faces) {
+            FE_THROW_IF(face_orients.empty(), FEException,
+                        "StandardAssembler::applyVectorBasisOutputOrientation: missing cell face orientations");
+        }
+
+        if (needs_edges) {
+            for (LocalIndex i = 0; i < expected_dofs; ++i) {
+                const auto& a = associations[static_cast<std::size_t>(i)];
+                if (a.entity_type != basis::DofEntity::Edge) continue;
+                const int e = a.entity_id;
+                FE_THROW_IF(e < 0 || static_cast<std::size_t>(e) >= edge_orients.size(), FEException,
+                            "StandardAssembler::applyVectorBasisOutputOrientation: edge id out of range in DOF associations");
+                blocks.edge_dofs.push_back({i, edge_orients[static_cast<std::size_t>(e)]});
+            }
+        }
+
+        if (needs_faces) {
+            const elements::ReferenceElement ref = elements::ReferenceElement::create(cell_type);
+            const auto n_faces = static_cast<int>(ref.num_faces());
+            FE_THROW_IF(n_faces <= 0, FEException,
+                        "StandardAssembler::applyVectorBasisOutputOrientation: vector basis has face DOFs but cell has no faces");
+            FE_THROW_IF(face_orients.size() < static_cast<std::size_t>(n_faces), FEException,
+                        "StandardAssembler::applyVectorBasisOutputOrientation: face orientation span too small for cell");
+
+            std::vector<std::vector<std::pair<int, LocalIndex>>> face_pairs(static_cast<std::size_t>(n_faces));
+            for (LocalIndex i = 0; i < expected_dofs; ++i) {
+                const auto& a = associations[static_cast<std::size_t>(i)];
+                if (a.entity_type != basis::DofEntity::Face) continue;
+                const int f = a.entity_id;
+                FE_THROW_IF(f < 0 || f >= n_faces, FEException,
+                            "StandardAssembler::applyVectorBasisOutputOrientation: face id out of range in DOF associations");
+                face_pairs[static_cast<std::size_t>(f)].push_back({a.moment_index, i});
+            }
+
+            blocks.faces.reserve(static_cast<std::size_t>(n_faces));
+            for (int f = 0; f < n_faces; ++f) {
+                auto& pairs = face_pairs[static_cast<std::size_t>(f)];
+                if (pairs.empty()) continue;
+
+                std::sort(pairs.begin(), pairs.end(),
+                          [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
+
+                const LocalIndex n_face_dofs = static_cast<LocalIndex>(pairs.size());
+                const auto& fn = ref.face_nodes(static_cast<std::size_t>(f));
+                ElementType face_type = ElementType::Unknown;
+                if (fn.size() == 3u) {
+                    face_type = ElementType::Triangle3;
+                } else if (fn.size() == 4u) {
+                    face_type = ElementType::Quad4;
+                } else {
+                    FE_THROW(FEException, "StandardAssembler::applyVectorBasisOutputOrientation: unsupported face topology");
+                }
+
+                const auto& orient = face_orients[static_cast<std::size_t>(f)];
+                const auto& tf = getFaceTransform(basis.basis_type(), continuity, face_type,
+                                                  element.polynomial_order(), orient, n_face_dofs);
+
+                Blocks::FaceBlock blk;
+                blk.dofs.reserve(static_cast<std::size_t>(n_face_dofs));
+                for (const auto& pr : pairs) {
+                    blk.dofs.push_back(pr.second);
+                }
+                blk.tf = &tf;
+                blocks.faces.push_back(std::move(blk));
+            }
+        }
+
+        return blocks;
+    };
+
+    const auto test_blocks = need_test ? build_blocks(test_cell_id, test_space, output.n_test_dofs) : std::nullopt;
+    const auto trial_blocks = need_trial ? build_blocks(trial_cell_id, trial_space, output.n_trial_dofs) : std::nullopt;
+
+    // Transform vector: r_g = P_test^T r_l
+    if (output.has_vector && test_blocks) {
+        auto vec = std::span<Real>(output.local_vector);
+
+        for (const auto& [idx, sign] : test_blocks->edge_dofs) {
+            if (sign < 0) {
+                vec[static_cast<std::size_t>(idx)] = -vec[static_cast<std::size_t>(idx)];
+            }
+        }
+
+        for (const auto& face : test_blocks->faces) {
+            const LocalIndex n = face.tf ? face.tf->n : 0;
+            if (n <= 0) continue;
+            const auto nn = static_cast<std::size_t>(n);
+            FE_THROW_IF(face.dofs.size() != nn, FEException,
+                        "StandardAssembler::applyVectorBasisOutputOrientation: face block size mismatch (vector)");
+
+            scratch_orient_in_.assign(nn, 0.0);
+            scratch_orient_out_.assign(nn, 0.0);
+
+            for (std::size_t i = 0; i < nn; ++i) {
+                scratch_orient_in_[i] = vec[static_cast<std::size_t>(face.dofs[i])];
+            }
+
+            for (std::size_t r = 0; r < nn; ++r) {
+                Real sum = 0.0;
+                const std::size_t base = r * nn;
+                for (std::size_t c = 0; c < nn; ++c) {
+                    sum += face.tf->PT[base + c] * scratch_orient_in_[c];
+                }
+                scratch_orient_out_[r] = sum;
+            }
+
+            for (std::size_t i = 0; i < nn; ++i) {
+                vec[static_cast<std::size_t>(face.dofs[i])] = scratch_orient_out_[i];
+            }
+        }
+    }
+
+    if (!output.has_matrix) {
+        return;
+    }
+
+    const auto n_test = static_cast<std::size_t>(std::max<LocalIndex>(0, output.n_test_dofs));
+    const auto n_trial = static_cast<std::size_t>(std::max<LocalIndex>(0, output.n_trial_dofs));
+    FE_THROW_IF(output.local_matrix.size() != n_test * n_trial, FEException,
+                "StandardAssembler::applyVectorBasisOutputOrientation: local_matrix size mismatch");
+
+    // Right multiply: A <- A * P_trial
+    if (trial_blocks) {
+        // Edge scaling (diagonal)
+        for (const auto& [idx, sign] : trial_blocks->edge_dofs) {
+            if (sign >= 0) continue;
+            const std::size_t j = static_cast<std::size_t>(idx);
+            for (std::size_t i = 0; i < n_test; ++i) {
+                output.local_matrix[i * n_trial + j] = -output.local_matrix[i * n_trial + j];
+            }
+        }
+
+        for (const auto& face : trial_blocks->faces) {
+            const LocalIndex n = face.tf ? face.tf->n : 0;
+            if (n <= 0) continue;
+            const auto nn = static_cast<std::size_t>(n);
+            FE_THROW_IF(face.dofs.size() != nn, FEException,
+                        "StandardAssembler::applyVectorBasisOutputOrientation: face block size mismatch (trial)");
+
+            scratch_orient_in_.assign(nn, 0.0);
+            scratch_orient_out_.assign(nn, 0.0);
+
+            for (std::size_t i = 0; i < n_test; ++i) {
+                for (std::size_t l = 0; l < nn; ++l) {
+                    scratch_orient_in_[l] = output.local_matrix[i * n_trial + static_cast<std::size_t>(face.dofs[l])];
+                }
+                for (std::size_t k = 0; k < nn; ++k) {
+                    Real sum = 0.0;
+                    for (std::size_t l = 0; l < nn; ++l) {
+                        sum += scratch_orient_in_[l] * face.tf->P[l * nn + k];
+                    }
+                    scratch_orient_out_[k] = sum;
+                }
+                for (std::size_t k = 0; k < nn; ++k) {
+                    output.local_matrix[i * n_trial + static_cast<std::size_t>(face.dofs[k])] = scratch_orient_out_[k];
+                }
+            }
+        }
+    }
+
+    // Left multiply: A <- P_test^T * A
+    if (test_blocks) {
+        // Edge scaling (diagonal)
+        for (const auto& [idx, sign] : test_blocks->edge_dofs) {
+            if (sign >= 0) continue;
+            const std::size_t i = static_cast<std::size_t>(idx);
+            const std::size_t base = i * n_trial;
+            for (std::size_t j = 0; j < n_trial; ++j) {
+                output.local_matrix[base + j] = -output.local_matrix[base + j];
+            }
+        }
+
+        for (const auto& face : test_blocks->faces) {
+            const LocalIndex n = face.tf ? face.tf->n : 0;
+            if (n <= 0) continue;
+            const auto nn = static_cast<std::size_t>(n);
+            FE_THROW_IF(face.dofs.size() != nn, FEException,
+                        "StandardAssembler::applyVectorBasisOutputOrientation: face block size mismatch (test)");
+
+            scratch_orient_in_.assign(nn, 0.0);
+            scratch_orient_out_.assign(nn, 0.0);
+
+            for (std::size_t j = 0; j < n_trial; ++j) {
+                for (std::size_t l = 0; l < nn; ++l) {
+                    scratch_orient_in_[l] =
+                        output.local_matrix[static_cast<std::size_t>(face.dofs[l]) * n_trial + j];
+                }
+                for (std::size_t k = 0; k < nn; ++k) {
+                    Real sum = 0.0;
+                    const std::size_t base = k * nn;
+                    for (std::size_t l = 0; l < nn; ++l) {
+                        sum += face.tf->PT[base + l] * scratch_orient_in_[l];
+                    }
+                    scratch_orient_out_[k] = sum;
+                }
+                for (std::size_t k = 0; k < nn; ++k) {
+                    output.local_matrix[static_cast<std::size_t>(face.dofs[k]) * n_trial + j] = scratch_orient_out_[k];
+                }
+            }
+        }
+    }
+}
+
 const FieldSolutionAccess* StandardAssembler::findFieldSolutionAccess(FieldId field) const noexcept
 {
     for (const auto& rec : field_solution_access_) {
@@ -2675,6 +3972,31 @@ void StandardAssembler::populateFieldSolutionData(
 
     FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
 	                "StandardAssembler::populateFieldSolutionData: no current solution vector was set");
+
+    int required_history = 0;
+    if (time_integration_ != nullptr) {
+        if (time_integration_->dt1) {
+            required_history = std::max(required_history, time_integration_->dt1->requiredHistoryStates());
+        }
+        if (time_integration_->dt2) {
+            required_history = std::max(required_history, time_integration_->dt2->requiredHistoryStates());
+        }
+    }
+
+	    if (required_history > 0) {
+	        FE_THROW_IF(static_cast<int>(previous_solutions_.size()) < required_history, FEException,
+	                    "StandardAssembler::populateFieldSolutionData: insufficient solution history (need " +
+	                        std::to_string(required_history) + ")");
+	        for (int k = 1; k <= required_history; ++k) {
+	            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+	            const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+	                                        ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+	                                        : nullptr;
+	            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+	                        "StandardAssembler::populateFieldSolutionData: previous solution state " + std::to_string(k) +
+	                            " not set");
+	        }
+	    }
 
     const ElementType cell_type = mesh.getCellType(cell_id);
     const int dim = mesh.dimension();
@@ -2855,16 +4177,203 @@ void StandardAssembler::populateFieldSolutionData(
                                            want_gradients ? std::span<const AssemblyContext::Vector3D>(scalar_gradients) : std::span<const AssemblyContext::Vector3D>{},
                                            want_hessians ? std::span<const AssemblyContext::Matrix3x3>(scalar_hessians) : std::span<const AssemblyContext::Matrix3x3>{},
                                            want_laplacians ? std::span<const Real>(scalar_laplacians) : std::span<const Real>{});
+
+            // Populate previous field values if a transient context requires history.
+	            if (required_history > 0) {
+	                for (int k = 1; k <= required_history; ++k) {
+	                    const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+	                    const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+	                                                ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+	                                                : nullptr;
+	                    FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+	                                "StandardAssembler::populateFieldSolutionData: previous solution data missing");
+
+	                    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+	                        const auto dof = cell_dofs[i] + access->dof_offset;
+	                        FE_THROW_IF(dof < 0, FEException,
+	                                    "StandardAssembler::populateFieldSolutionData: negative DOF index (prev)");
+	                        if (prev_view != nullptr) {
+	                            local_coeffs[i] = prev_view->getVectorEntry(dof);
+	                        } else {
+	                            FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
+	                                        "StandardAssembler::populateFieldSolutionData: previous solution vector too small for DOF " +
+	                                            std::to_string(dof));
+	                            local_coeffs[i] = prev[static_cast<std::size_t>(dof)];
+	                        }
+	                    }
+
+                    // Values only (dt() needs just value history).
+                    scalar_values.assign(static_cast<std::size_t>(n_qpts), 0.0);
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                       qpts[static_cast<std::size_t>(q)][1],
+                                                       qpts[static_cast<std::size_t>(q)][2]};
+                        basis.evaluate_values(xi, values_at_pt);
+                        Real val = 0.0;
+                        for (LocalIndex j = 0; j < n_dofs; ++j) {
+                            const Real coef = local_coeffs[static_cast<std::size_t>(j)];
+                            val += coef * values_at_pt[static_cast<std::size_t>(j)];
+                        }
+                        scalar_values[static_cast<std::size_t>(q)] = val;
+                    }
+                    context.setFieldPreviousSolutionScalarK(req.field, k, std::span<const Real>(scalar_values));
+                }
+            }
             continue;
         }
 
         if (space.field_type() == FieldType::Vector) {
-            FE_THROW_IF(!is_product, FEException,
-                        "StandardAssembler::populateFieldSolutionData: vector-valued non-Product spaces are not supported");
-
             const int vd = space.value_dimension();
             FE_THROW_IF(vd <= 0 || vd > 3, FEException,
                         "StandardAssembler::populateFieldSolutionData: vector space value_dimension must be 1..3");
+
+            // Vector-basis spaces (H(curl)/H(div)) are non-Product vector-valued spaces. We currently support
+            // values only for these coefficient fields (no gradients/Hessians/Laplacians).
+            if (!is_product) {
+                FE_THROW_IF(!basis.is_vector_valued(), FEException,
+                            "StandardAssembler::populateFieldSolutionData: non-Product vector field is not a vector-basis space");
+                const auto cont = space.continuity();
+                FE_THROW_IF(cont != Continuity::H_curl && cont != Continuity::H_div, FEException,
+                            "StandardAssembler::populateFieldSolutionData: non-Product vector field is not H(curl)/H(div)");
+                FE_THROW_IF(need_gradients || need_hessians, FEException,
+                            "StandardAssembler::populateFieldSolutionData: SolutionGradients/Hessians/Laplacians are not supported for vector-basis fields");
+                FE_THROW_IF(n_dofs != n_scalar_dofs, FEException,
+                            "StandardAssembler::populateFieldSolutionData: vector-basis DOF count mismatch");
+
+                applyVectorBasisGlobalToLocal(mesh, cell_id, space, std::span<Real>(local_coeffs));
+
+                vector_values.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+                vector_jacobians.clear();
+                vector_component_hessians.clear();
+                vector_component_laplacians.clear();
+
+                std::vector<math::Vector<Real, 3>> vec_values_at_pt;
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                   qpts[static_cast<std::size_t>(q)][1],
+                                                   qpts[static_cast<std::size_t>(q)][2]};
+                    basis.evaluate_vector_values(xi, vec_values_at_pt);
+
+                    const auto J = context.jacobian(q);
+                    const auto J_inv = context.inverseJacobian(q);
+                    const Real det_J = context.jacobianDet(q);
+
+                    AssemblyContext::Vector3D u{0.0, 0.0, 0.0};
+                    for (LocalIndex j = 0; j < n_dofs; ++j) {
+                        const Real coef = local_coeffs[static_cast<std::size_t>(j)];
+                        const auto& vref = vec_values_at_pt[static_cast<std::size_t>(j)];
+                        AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
+                        if (cont == Continuity::H_curl) {
+                            for (int r = 0; r < dim; ++r) {
+                                for (int c = 0; c < dim; ++c) {
+                                    vphys[static_cast<std::size_t>(r)] +=
+                                        J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
+                                        vref[static_cast<std::size_t>(c)];
+                                }
+                            }
+                        } else { // H_div
+                            const Real inv_det = Real(1) / det_J;
+                            for (int r = 0; r < dim; ++r) {
+                                Real sum = 0.0;
+                                for (int c = 0; c < dim; ++c) {
+                                    sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                                           vref[static_cast<std::size_t>(c)];
+                                }
+                                vphys[static_cast<std::size_t>(r)] = inv_det * sum;
+                            }
+                        }
+
+                        u[0] += coef * vphys[0];
+                        u[1] += coef * vphys[1];
+                        u[2] += coef * vphys[2];
+                    }
+
+                    vector_values[static_cast<std::size_t>(q)] = u;
+                }
+
+                context.setFieldSolutionVector(req.field, vd,
+                                               want_values ? std::span<const AssemblyContext::Vector3D>(vector_values)
+                                                           : std::span<const AssemblyContext::Vector3D>{});
+
+	                if (required_history > 0) {
+	                    for (int k = 1; k <= required_history; ++k) {
+	                        const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+	                        const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+	                                                    ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+	                                                    : nullptr;
+	                        FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+	                                    "StandardAssembler::populateFieldSolutionData: previous solution data missing");
+
+	                        for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+	                            const auto dof = cell_dofs[i] + access->dof_offset;
+	                            FE_THROW_IF(dof < 0, FEException,
+	                                        "StandardAssembler::populateFieldSolutionData: negative DOF index (prev)");
+	                            if (prev_view != nullptr) {
+	                                local_coeffs[i] = prev_view->getVectorEntry(dof);
+	                            } else {
+	                                FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
+	                                            "StandardAssembler::populateFieldSolutionData: previous solution vector too small for DOF " +
+	                                                std::to_string(dof));
+	                                local_coeffs[i] = prev[static_cast<std::size_t>(dof)];
+	                            }
+	                        }
+
+                        applyVectorBasisGlobalToLocal(mesh, cell_id, space, std::span<Real>(local_coeffs));
+
+                        vector_values.assign(static_cast<std::size_t>(n_qpts),
+                                             AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+
+                        for (LocalIndex q = 0; q < n_qpts; ++q) {
+                            const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                           qpts[static_cast<std::size_t>(q)][1],
+                                                           qpts[static_cast<std::size_t>(q)][2]};
+                            basis.evaluate_vector_values(xi, vec_values_at_pt);
+
+                            const auto J = context.jacobian(q);
+                            const auto J_inv = context.inverseJacobian(q);
+                            const Real det_J = context.jacobianDet(q);
+
+                            AssemblyContext::Vector3D u{0.0, 0.0, 0.0};
+                            for (LocalIndex j = 0; j < n_dofs; ++j) {
+                                const Real coef = local_coeffs[static_cast<std::size_t>(j)];
+                                const auto& vref = vec_values_at_pt[static_cast<std::size_t>(j)];
+                                AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
+                                if (cont == Continuity::H_curl) {
+                                    for (int r = 0; r < dim; ++r) {
+                                        for (int c = 0; c < dim; ++c) {
+                                            vphys[static_cast<std::size_t>(r)] +=
+                                                J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
+                                                vref[static_cast<std::size_t>(c)];
+                                        }
+                                    }
+                                } else { // H_div
+                                    const Real inv_det = Real(1) / det_J;
+                                    for (int r = 0; r < dim; ++r) {
+                                        Real sum = 0.0;
+                                        for (int c = 0; c < dim; ++c) {
+                                            sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                                                   vref[static_cast<std::size_t>(c)];
+                                        }
+                                        vphys[static_cast<std::size_t>(r)] = inv_det * sum;
+                                    }
+                                }
+
+                                u[0] += coef * vphys[0];
+                                u[1] += coef * vphys[1];
+                                u[2] += coef * vphys[2];
+                            }
+
+                            vector_values[static_cast<std::size_t>(q)] = u;
+                        }
+
+                        context.setFieldPreviousSolutionVectorK(req.field, k, vd,
+                                                               std::span<const AssemblyContext::Vector3D>(vector_values));
+                    }
+                }
+
+                continue;
+            }
+
             FE_THROW_IF(n_dofs != static_cast<LocalIndex>(n_scalar_dofs * static_cast<LocalIndex>(vd)), FEException,
                         "StandardAssembler::populateFieldSolutionData: ProductSpace DOF count mismatch");
 
@@ -2987,6 +4496,57 @@ void StandardAssembler::populateFieldSolutionData(
                                            want_gradients ? std::span<const AssemblyContext::Matrix3x3>(vector_jacobians) : std::span<const AssemblyContext::Matrix3x3>{},
                                            want_hessians ? std::span<const AssemblyContext::Matrix3x3>(vector_component_hessians) : std::span<const AssemblyContext::Matrix3x3>{},
                                            want_laplacians ? std::span<const Real>(vector_component_laplacians) : std::span<const Real>{});
+
+            // Populate previous field values if a transient context requires history.
+	            if (required_history > 0) {
+	                for (int k = 1; k <= required_history; ++k) {
+	                    const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+	                    const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+	                                                ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+	                                                : nullptr;
+	                    FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+	                                "StandardAssembler::populateFieldSolutionData: previous solution data missing");
+
+	                    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+	                        const auto dof = cell_dofs[i] + access->dof_offset;
+	                        FE_THROW_IF(dof < 0, FEException,
+	                                    "StandardAssembler::populateFieldSolutionData: negative DOF index (prev)");
+	                        if (prev_view != nullptr) {
+	                            local_coeffs[i] = prev_view->getVectorEntry(dof);
+	                        } else {
+	                            FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
+	                                        "StandardAssembler::populateFieldSolutionData: previous solution vector too small for DOF " +
+	                                            std::to_string(dof));
+	                            local_coeffs[i] = prev[static_cast<std::size_t>(dof)];
+	                        }
+	                    }
+
+                    // Values only (dt() needs just value history).
+                    vector_values.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                       qpts[static_cast<std::size_t>(q)][1],
+                                                       qpts[static_cast<std::size_t>(q)][2]};
+                        basis.evaluate_values(xi, values_at_pt);
+
+                        AssemblyContext::Vector3D u_prev = {0.0, 0.0, 0.0};
+                        for (int c = 0; c < vd; ++c) {
+                            Real val_c = 0.0;
+                            const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
+                            for (LocalIndex j = 0; j < dofs_per_component; ++j) {
+                                const LocalIndex jj = base + j;
+                                val_c += local_coeffs[static_cast<std::size_t>(jj)] *
+                                         values_at_pt[static_cast<std::size_t>(j)];
+                            }
+                            u_prev[static_cast<std::size_t>(c)] = val_c;
+                        }
+                        vector_values[static_cast<std::size_t>(q)] = u_prev;
+                    }
+
+                    context.setFieldPreviousSolutionVectorK(req.field, k, vd,
+                                                            std::span<const AssemblyContext::Vector3D>(vector_values));
+                }
+            }
             continue;
         }
 
