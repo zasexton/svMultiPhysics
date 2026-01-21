@@ -56,6 +56,7 @@ struct SolverOptions {
     Real rel_tol{1e-10};
     Real abs_tol{0.0};
     int max_iter{1000};
+    int krylov_dim{0}; // Optional (backend-specific; e.g., FSILS GMRES RI.sD)
     bool use_initial_guess{false};
 
     FieldSplitOptions fieldsplit{};

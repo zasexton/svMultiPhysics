@@ -9,6 +9,7 @@
 #define SVMP_FE_BACKENDS_BACKEND_FACTORY_H
 
 #include "Backends/Interfaces/BackendKind.h"
+#include "Backends/Interfaces/DofPermutation.h"
 #include "Backends/Interfaces/GenericMatrix.h"
 #include "Backends/Interfaces/GenericVector.h"
 #include "Backends/Interfaces/LinearSolver.h"
@@ -27,13 +28,15 @@ class DistributedSparsityPattern;
 
 namespace backends {
 
-class BackendFactory {
-public:
-    struct CreateOptions {
-        // Backend-specific options.
-        // - FSILS: interpreted as dof-per-node block size for matrix storage.
-        int dof_per_node{1};
-    };
+    class BackendFactory {
+    public:
+        struct CreateOptions {
+            // Backend-specific options.
+            // - FSILS: interpreted as dof-per-node block size for matrix storage.
+            int dof_per_node{1};
+            // Optional DOF permutation (FE ordering -> backend ordering).
+            std::shared_ptr<const DofPermutation> dof_permutation{};
+        };
 
     virtual ~BackendFactory() = default;
 
