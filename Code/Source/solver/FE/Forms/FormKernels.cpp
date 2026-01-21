@@ -10,6 +10,7 @@
 #include "Constitutive/StateLayout.h"
 
 #include "Core/FEException.h"
+#include "Systems/SystemsExceptions.h"
 #include "Forms/ConstitutiveModel.h"
 #include "Forms/Dual.h"
 #include "Forms/JIT/InlinableConstitutiveModel.h"
@@ -4299,6 +4300,13 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                     throw FEException("Forms: TestFunction vector value_dimension must be 1..3",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
+                if (ctx.testUsesVectorBasis()) {
+                    out.v = ctx.basisVectorValue(env.i, q);
+                    for (int c = vd; c < 3; ++c) {
+                        out.v[static_cast<std::size_t>(c)] = 0.0;
+                    }
+                    return out;
+                }
                 const LocalIndex n_test = ctx.numTestDofs();
                 if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
                     throw FEException("Forms: vector TestFunction DOF count is not divisible by value_dimension",
@@ -4349,6 +4357,13 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 if (vd <= 0 || vd > 3) {
                     throw FEException("Forms: TrialFunction vector value_dimension must be 1..3",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (ctx.trialUsesVectorBasis()) {
+                    out.v = ctx.trialBasisVectorValue(env.j, q);
+                    for (int c = vd; c < 3; ++c) {
+                        out.v[static_cast<std::size_t>(c)] = 0.0;
+                    }
+                    return out;
                 }
                 const LocalIndex n_trial = ctx.numTrialDofs();
                 if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
@@ -4880,18 +4895,54 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                                   __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
             }
 
-            // Bilinear forms contribute only the "current" coefficient (history belongs to Systems).
-            const Real scale = stencil->coeff(0);
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) {
+                throw FEException("Forms: dt(...) node missing operand",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            const auto& child = *kids[0];
             const auto val = evalRealUnary(node, env, side, q);
+
+            // TrialFunction dt contributes only the "current" coefficient to bilinear assembly
+            // (history belongs to Systems). For discrete/state fields, dt(...) is a coefficient
+            // value and must include history contributions.
+            const bool trial_dt = (child.type() == FormExprType::TrialFunction);
+            const int required = trial_dt ? 0 : stencil->requiredHistoryStates();
+
             if (val.kind == EvalValue<Real>::Kind::Scalar) {
-                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, scale * val.s};
+                Real out = stencil->coeff(0) * val.s;
+                if (!trial_dt) {
+                    const auto fid = child.fieldId();
+                    if (!fid || *fid == INVALID_FIELD_ID) {
+                        throw FEException("Forms: dt(DiscreteField) missing a valid FieldId",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    for (int k = 1; k <= required; ++k) {
+                        out += stencil->coeff(k) * ctx.fieldPreviousValue(*fid, q, k);
+                    }
+                }
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, out};
             }
             if (val.kind == EvalValue<Real>::Kind::Vector) {
                 EvalValue<Real> out;
                 out.kind = EvalValue<Real>::Kind::Vector;
                 out.resizeVector(val.vectorSize());
                 for (std::size_t d = 0; d < out.vectorSize(); ++d) {
-                    out.vectorAt(d) = scale * val.vectorAt(d);
+                    out.vectorAt(d) = stencil->coeff(0) * val.vectorAt(d);
+                }
+                if (!trial_dt) {
+                    const auto fid = child.fieldId();
+                    if (!fid || *fid == INVALID_FIELD_ID) {
+                        throw FEException("Forms: dt(DiscreteField) missing a valid FieldId",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    for (int k = 1; k <= required; ++k) {
+                        const auto prev = ctx.fieldPreviousVectorValue(*fid, q, k);
+                        for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                            out.vectorAt(d) += stencil->coeff(k) * prev[d];
+                        }
+                    }
                 }
                 return out;
             }
@@ -4899,7 +4950,6 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                               __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	        }
 	        case FormExprType::Divergence: {
-	            return evalSpatialJet<Real>(node, env, side, q, 0).value;
 	            const auto kids = node.childrenShared();
 	            if (kids.size() != 1 || !kids[0]) throw std::logic_error("div must have 1 child");
 	            const auto& child = *kids[0];
@@ -4921,6 +4971,13 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 if (vd <= 0 || vd > 3) {
                     throw FEException("Forms: div(TestFunction) vector value_dimension must be 1..3",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (ctx.testUsesVectorBasis()) {
+                    if (sig->continuity != Continuity::H_div) {
+                        throw FEException("Forms: div(TestFunction) for vector-basis spaces requires H(div) continuity",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.basisDivergence(env.i, q)};
                 }
                 const LocalIndex n_test = ctx.numTestDofs();
                 if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
@@ -4959,6 +5016,13 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 if (vd <= 0 || vd > 3) {
                     throw FEException("Forms: div(TrialFunction) vector value_dimension must be 1..3",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (ctx.trialUsesVectorBasis()) {
+                    if (sig->continuity != Continuity::H_div) {
+                        throw FEException("Forms: div(TrialFunction) for vector-basis spaces requires H(div) continuity",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.trialBasisDivergence(env.j, q)};
                 }
                 const LocalIndex n_trial = ctx.numTrialDofs();
                 if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
@@ -5012,8 +5076,9 @@ EvalValue<Real> evalReal(const FormExprNode& node,
             if (child.type() == FormExprType::Constant) {
                 return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, 0.0};
             }
-            throw FEException("Forms: div() currently supports vector TestFunction/TrialFunction and vector Coefficient only",
-                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            // Fallback for composite expressions (e.g. div(sym(grad(u))) / div(stress)):
+            // use spatial jets so div() works for vector/matrix-valued subexpressions.
+            return evalSpatialJet<Real>(node, env, side, q, 0).value;
         }
         case FormExprType::Curl: {
             const auto kids = node.childrenShared();
@@ -5039,6 +5104,14 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 if (vd <= 0 || vd > 3) {
                     throw FEException("Forms: curl(TestFunction) vector value_dimension must be 1..3",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (ctx.testUsesVectorBasis()) {
+                    if (sig->continuity != Continuity::H_curl) {
+                        throw FEException("Forms: curl(TestFunction) for vector-basis spaces requires H(curl) continuity",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    out.v = ctx.basisCurl(env.i, q);
+                    return out;
                 }
                 const LocalIndex n_test = ctx.numTestDofs();
                 if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
@@ -5095,6 +5168,14 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 if (vd <= 0 || vd > 3) {
                     throw FEException("Forms: curl(TrialFunction) vector value_dimension must be 1..3",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (ctx.trialUsesVectorBasis()) {
+                    if (sig->continuity != Continuity::H_curl) {
+                        throw FEException("Forms: curl(TrialFunction) for vector-basis spaces requires H(curl) continuity",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    out.v = ctx.trialBasisCurl(env.j, q);
+                    return out;
                 }
                 const LocalIndex n_trial = ctx.numTrialDofs();
                 if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
@@ -5683,8 +5764,10 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                     const auto rows = a.matrixRows();
                     const auto cols = a.matrixCols();
                     if (b.vectorSize() != cols) {
-                        throw FEException("Forms: matrix-vector multiplication shape mismatch",
-                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        throw FEException(
+                            "Forms: matrix-vector multiplication shape mismatch: matrix=(" + std::to_string(rows) +
+                                "x" + std::to_string(cols) + "), vector=(" + std::to_string(b.vectorSize()) + ")",
+                            __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     EvalValue<Real> out;
                     out.kind = EvalValue<Real>::Kind::Vector;
@@ -6582,6 +6665,16 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                     throw FEException("Forms: TestFunction vector value_dimension must be 1..3 (dual)",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
+                if (ctx.testUsesVectorBasis()) {
+                    const auto phi = ctx.basisVectorValue(env.i, q);
+                    for (int d = 0; d < 3; ++d) {
+                        out.v[static_cast<std::size_t>(d)].value = phi[static_cast<std::size_t>(d)];
+                    }
+                    for (int c = vd; c < 3; ++c) {
+                        out.v[static_cast<std::size_t>(c)].value = 0.0;
+                    }
+                    return out;
+                }
                 const LocalIndex n_test = ctx.numTestDofs();
                 if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
                     throw FEException("Forms: vector TestFunction DOF count is not divisible by value_dimension (dual)",
@@ -6633,14 +6726,6 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
 
-                const LocalIndex n_trial = ctx.numTrialDofs();
-                if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
-                    throw FEException("Forms: vector TrialFunction DOF count is not divisible by value_dimension (dual)",
-                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                }
-                const LocalIndex dofs_per_component =
-                    static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
-
                 out.vector_size = vd;
                 const auto u_val = ctx.solutionVectorValue(q);
                 for (int c = 0; c < 3; ++c) {
@@ -6648,14 +6733,31 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 }
 
                 if (env.trial_active == side) {
-                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
-                        const int comp_j = static_cast<int>(static_cast<LocalIndex>(j) / dofs_per_component);
-                        if (comp_j < 0 || comp_j >= vd) {
-                            throw FEException("Forms: TrialFunction derivative seeding index out of range (dual)",
+                    if (ctx.trialUsesVectorBasis()) {
+                        for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                            const auto phi = ctx.trialBasisVectorValue(static_cast<LocalIndex>(j), q);
+                            for (int d = 0; d < vd; ++d) {
+                                out.v[static_cast<std::size_t>(d)].deriv[j] = phi[static_cast<std::size_t>(d)];
+                            }
+                        }
+                    } else {
+                        const LocalIndex n_trial = ctx.numTrialDofs();
+                        if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+                            throw FEException("Forms: vector TrialFunction DOF count is not divisible by value_dimension (dual)",
                                               __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                         }
-                        out.v[static_cast<std::size_t>(comp_j)].deriv[j] =
-                            ctx.trialBasisValue(static_cast<LocalIndex>(j), q);
+                        const LocalIndex dofs_per_component =
+                            static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+
+                        for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                            const int comp_j = static_cast<int>(static_cast<LocalIndex>(j) / dofs_per_component);
+                            if (comp_j < 0 || comp_j >= vd) {
+                                throw FEException("Forms: TrialFunction derivative seeding index out of range (dual)",
+                                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                            }
+                            out.v[static_cast<std::size_t>(comp_j)].deriv[j] =
+                                ctx.trialBasisValue(static_cast<LocalIndex>(j), q);
+                        }
                     }
                 }
 
@@ -7510,6 +7612,28 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                                   __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
             }
 
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1 || !kids[0]) {
+                throw FEException("Forms: dt(...) node missing operand (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto& child = *kids[0];
+
+            const bool trial_dt = (child.type() == FormExprType::TrialFunction);
+            std::optional<FieldId> discrete_fid{};
+            if (!trial_dt) {
+                if (child.type() != FormExprType::DiscreteField && child.type() != FormExprType::StateField) {
+                    throw FEException("Forms: dt() currently supports TrialFunction and DiscreteField operands only (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto fid = child.fieldId();
+                if (!fid || *fid == INVALID_FIELD_ID) {
+                    throw FEException("Forms: dt(DiscreteField) missing a valid FieldId (dual)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                discrete_fid = *fid;
+            }
+
             const auto current = evalDualUnary(node, env, side, q);
             if (current.kind == EvalValue<Dual>::Kind::Scalar) {
                 Dual result = makeDualConstant(0.0, env.ws->alloc());
@@ -7517,7 +7641,9 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
 
                 const int required = stencil->requiredHistoryStates();
                 for (int k = 1; k <= required; ++k) {
-                    Dual prev = makeDualConstant(ctx.previousSolutionValue(q, k), env.ws->alloc());
+                    const Real prev_value =
+                        trial_dt ? ctx.previousSolutionValue(q, k) : ctx.fieldPreviousValue(*discrete_fid, q, k);
+                    Dual prev = makeDualConstant(prev_value, env.ws->alloc());
                     prev = mul(prev, stencil->coeff(k), prev);
                     result = add(result, prev, result);
                 }
@@ -7536,7 +7662,8 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 std::vector<assembly::AssemblyContext::Vector3D> prev_vals;
                 prev_vals.reserve(static_cast<std::size_t>(std::max(0, required)));
                 for (int k = 1; k <= required; ++k) {
-                    prev_vals.push_back(ctx.previousSolutionVectorValue(q, k));
+                    prev_vals.push_back(trial_dt ? ctx.previousSolutionVectorValue(q, k)
+                                                 : ctx.fieldPreviousVectorValue(*discrete_fid, q, k));
                 }
 
                 for (std::size_t d = 0; d < out.vectorSize(); ++d) {
@@ -7558,7 +7685,6 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                               __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	        }
 	        case FormExprType::Divergence: {
-	            return evalSpatialJet<Dual>(node, env, side, q, 0).value;
 	            const auto kids = node.childrenShared();
 	            if (kids.size() != 1 || !kids[0]) throw std::logic_error("div must have 1 child (dual)");
 	            const auto& child = *kids[0];
@@ -7577,6 +7703,17 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 if (vd <= 0 || vd > 3) {
                     throw FEException("Forms: div(TestFunction) vector value_dimension must be 1..3 (dual)",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (ctx.testUsesVectorBasis()) {
+                    if (sig->continuity != Continuity::H_div) {
+                        throw FEException("Forms: div(TestFunction) for vector-basis spaces requires H(div) continuity (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const Real div = (env.test_active == side) ? ctx.basisDivergence(env.i, q) : 0.0;
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = makeDualConstant(div, env.ws->alloc());
+                    return out;
                 }
                 const LocalIndex n_test = ctx.numTestDofs();
                 if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
@@ -7614,6 +7751,29 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 if (vd <= 0 || vd > 3) {
                     throw FEException("Forms: div(TrialFunction) vector value_dimension must be 1..3 (dual)",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (ctx.trialUsesVectorBasis()) {
+                    if (sig->continuity != Continuity::H_div) {
+                        throw FEException("Forms: div(TrialFunction) for vector-basis spaces requires H(div) continuity (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+
+                    Dual divu = makeDualConstant(0.0, env.ws->alloc());
+                    if (env.trial_active == side) {
+                        const auto coeffs = ctx.solutionCoefficients();
+                        FE_THROW_IF(coeffs.size() < env.n_trial_dofs, systems::InvalidStateException,
+                                    "Forms: div(TrialFunction) missing solution coefficients (dual)");
+                        for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                            const Real div_phi = ctx.trialBasisDivergence(static_cast<LocalIndex>(j), q);
+                            divu.value += coeffs[j] * div_phi;
+                            divu.deriv[j] = div_phi;
+                        }
+                    }
+
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = divu;
+                    return out;
                 }
                 const LocalIndex n_trial = ctx.numTrialDofs();
                 if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
@@ -7684,15 +7844,17 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 out.s = makeDualConstant(div, env.ws->alloc());
                 return out;
             }
-            if (child.type() == FormExprType::Constant) {
-                EvalValue<Dual> out;
-                out.kind = EvalValue<Dual>::Kind::Scalar;
-                out.s = makeDualConstant(0.0, env.ws->alloc());
-                return out;
-            }
-            throw FEException("Forms: div() currently supports vector TestFunction/TrialFunction and vector Coefficient only (dual)",
-                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
-        }
+	            if (child.type() == FormExprType::Constant) {
+	                EvalValue<Dual> out;
+	                out.kind = EvalValue<Dual>::Kind::Scalar;
+	                out.s = makeDualConstant(0.0, env.ws->alloc());
+	                return out;
+	            }
+	            // Fallback for general expressions (e.g. div(sym(grad(u))) / div(stress)):
+	            // evaluate via spatial jets so we can take derivatives of composite vector/matrix
+	            // expressions when required data (grad/Hess) is available.
+	            return evalSpatialJet<Dual>(node, env, side, q, 0).value;
+	        }
         case FormExprType::Curl: {
             const auto kids = node.childrenShared();
             if (kids.size() != 1 || !kids[0]) throw std::logic_error("curl must have 1 child (dual)");
@@ -7720,6 +7882,17 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 if (vd <= 0 || vd > 3) {
                     throw FEException("Forms: curl(TestFunction) vector value_dimension must be 1..3 (dual)",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (ctx.testUsesVectorBasis()) {
+                    if (sig->continuity != Continuity::H_curl) {
+                        throw FEException("Forms: curl(TestFunction) for vector-basis spaces requires H(curl) continuity (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const auto c = ctx.basisCurl(env.i, q);
+                    for (int d = 0; d < 3; ++d) {
+                        out.v[static_cast<std::size_t>(d)].value = c[static_cast<std::size_t>(d)];
+                    }
+                    return out;
                 }
                 const LocalIndex n_test = ctx.numTestDofs();
                 if ((n_test % static_cast<LocalIndex>(vd)) != 0) {
@@ -7768,6 +7941,36 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 if (vd <= 0 || vd > 3) {
                     throw FEException("Forms: curl(TrialFunction) vector value_dimension must be 1..3 (dual)",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (ctx.trialUsesVectorBasis()) {
+                    if (sig->continuity != Continuity::H_curl) {
+                        throw FEException("Forms: curl(TrialFunction) for vector-basis spaces requires H(curl) continuity (dual)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Vector;
+                    for (int d = 0; d < 3; ++d) {
+                        out.v[static_cast<std::size_t>(d)] = makeDualConstant(0.0, env.ws->alloc());
+                    }
+                    if (env.trial_active != side) {
+                        return out;
+                    }
+
+                    const auto coeffs = ctx.solutionCoefficients();
+                    FE_THROW_IF(coeffs.size() < env.n_trial_dofs, systems::InvalidStateException,
+                                "Forms: curl(TrialFunction) missing solution coefficients (dual)");
+                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                        const auto cj = ctx.trialBasisCurl(static_cast<LocalIndex>(j), q);
+                        const Real coef = coeffs[j];
+                        out.v[0].value += coef * cj[0];
+                        out.v[1].value += coef * cj[1];
+                        out.v[2].value += coef * cj[2];
+                        out.v[0].deriv[j] = cj[0];
+                        out.v[1].deriv[j] = cj[1];
+                        out.v[2].deriv[j] = cj[2];
+                    }
+                    return out;
                 }
                 const LocalIndex n_trial = ctx.numTrialDofs();
                 if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
@@ -8502,8 +8705,11 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                     const auto rows = a.matrixRows();
                     const auto cols = a.matrixCols();
                     if (b.vectorSize() != cols) {
-                        throw FEException("Forms: matrix-vector multiplication shape mismatch (dual)",
-                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        throw FEException(
+                            "Forms: matrix-vector multiplication shape mismatch (dual): matrix=(" +
+                                std::to_string(rows) + "x" + std::to_string(cols) + "), vector=(" +
+                                std::to_string(b.vectorSize()) + ")",
+                            __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                     }
                     EvalValue<Dual> out;
                     out.kind = EvalValue<Dual>::Kind::Vector;
@@ -10248,10 +10454,9 @@ NonlinearFormKernel& NonlinearFormKernel::operator=(NonlinearFormKernel&&) noexc
 
 assembly::RequiredData NonlinearFormKernel::getRequiredData() const noexcept
 {
-    // Require solution data so the assembler sets per-cell coefficients and caches u_h, grad(u_h).
-    auto req = residual_ir_.requiredData() |
-               assembly::RequiredData::SolutionValues |
-               assembly::RequiredData::SolutionGradients;
+    // Require solution coefficients so the assembler binds element-local DOF values.
+    // Additional solution value/derivative caches are requested by the IR itself.
+    auto req = residual_ir_.requiredData() | assembly::RequiredData::SolutionCoefficients;
     if (material_state_spec_.bytes_per_qpt > 0u) {
         req |= assembly::RequiredData::MaterialState;
     }

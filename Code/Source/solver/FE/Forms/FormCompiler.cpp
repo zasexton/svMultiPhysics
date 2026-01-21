@@ -228,10 +228,46 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
                 required |= RequiredData::MaterialState;
                 break;
             case FormExprType::Gradient:
+            {
+                const auto kids = n.childrenShared();
+                if (!kids.empty() && kids[0]) self(self, *kids[0], order + 1);
+                return;
+            }
             case FormExprType::Divergence:
             case FormExprType::Curl: {
                 const auto kids = n.childrenShared();
-                if (!kids.empty() && kids[0]) self(self, *kids[0], order + 1);
+                if (kids.empty() || !kids[0]) {
+                    return;
+                }
+
+                // H(curl)/H(div) vector bases provide curl/div directly via basis evaluation; do not
+                // require PhysicalGradients/SolutionGradients for these operators.
+                if (order == 0) {
+                    if (const auto* sig = kids[0]->spaceSignature()) {
+                        const bool is_vector_basis_hcurl =
+                            (n.type() == FormExprType::Curl &&
+                             sig->field_type == FieldType::Vector &&
+                             sig->continuity == Continuity::H_curl);
+                        const bool is_vector_basis_hdiv =
+                            (n.type() == FormExprType::Divergence &&
+                             sig->field_type == FieldType::Vector &&
+                             sig->continuity == Continuity::H_div);
+
+                        if (is_vector_basis_hcurl) {
+                            required |= RequiredData::BasisCurls;
+                            self(self, *kids[0], 0);
+                            return;
+                        }
+                        if (is_vector_basis_hdiv) {
+                            required |= RequiredData::BasisDivergences;
+                            self(self, *kids[0], 0);
+                            return;
+                        }
+                    }
+                }
+
+                // Fallback: treat as a first-order spatial operator (component-wise vectors).
+                self(self, *kids[0], order + 1);
                 return;
             }
             case FormExprType::Hessian: {
@@ -365,7 +401,7 @@ std::vector<assembly::FieldRequirement> analyzeFieldRequirements(const FormExprN
     return out;
 }
 
-int analyzeTimeDerivativeOrder(const FormExprNode& node)
+int analyzeTimeDerivativeOrder(const FormExprNode& node, FormKind kind)
 {
     int max_order = 0;
     int dt_count = 0;
@@ -390,8 +426,18 @@ int analyzeTimeDerivativeOrder(const FormExprNode& node)
             if (kids.size() != 1 || !kids[0]) {
                 throw std::invalid_argument("FormCompiler: dt(·,k) must have exactly 1 operand");
             }
-            if (kids[0]->type() != FormExprType::TrialFunction) {
-                throw std::invalid_argument("FormCompiler: dt(·,k) currently supports TrialFunction operands only");
+            const auto operand_type = kids[0]->type();
+            const bool ok =
+                (operand_type == FormExprType::TrialFunction) ||
+                (kind == FormKind::Residual &&
+                 (operand_type == FormExprType::DiscreteField || operand_type == FormExprType::StateField));
+            if (!ok) {
+                if (kind == FormKind::Residual) {
+                    throw std::invalid_argument(
+                        "FormCompiler: dt(·,k) currently supports TrialFunction and DiscreteField/StateField operands only");
+                }
+                throw std::invalid_argument(
+                    "FormCompiler: dt(·,k) currently supports TrialFunction operands only");
             }
         }
 
@@ -402,7 +448,12 @@ int analyzeTimeDerivativeOrder(const FormExprNode& node)
 
     visit(visit, node);
 
-    if (dt_count > 1) {
+    // For linear/bilinear forms, we restrict each integral term to at most one dt()
+    // operator so time-dependent contributions remain affine in the time derivative.
+    //
+    // Residual forms may be nonlinear in dt(u) (e.g., stabilization terms that reuse
+    // a strong residual containing dt(u)), so allow multiple dt() nodes there.
+    if (dt_count > 1 && kind != FormKind::Residual) {
         throw std::invalid_argument("FormCompiler: multiple dt() factors in one integral term are not supported");
     }
 
@@ -560,7 +611,7 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
     std::unordered_map<FieldId, assembly::RequiredData> field_required{};
     int max_time_order = 0;
     for (auto& t : terms) {
-        t.time_derivative_order = detail::analyzeTimeDerivativeOrder(*t.integrand.node());
+        t.time_derivative_order = detail::analyzeTimeDerivativeOrder(*t.integrand.node(), kind);
         max_time_order = std::max(max_time_order, t.time_derivative_order);
 
         t.required_data = detail::analyzeRequiredData(*t.integrand.node(), kind);
