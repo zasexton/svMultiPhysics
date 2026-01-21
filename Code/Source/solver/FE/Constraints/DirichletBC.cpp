@@ -122,8 +122,7 @@ DirichletBC& DirichletBC::operator=(DirichletBC&& other) noexcept {
 
 void DirichletBC::apply(AffineConstraints& constraints) const {
     for (std::size_t i = 0; i < dofs_.size(); ++i) {
-        constraints.addLine(dofs_[i]);
-        constraints.setInhomogeneity(dofs_[i], values_[i]);
+        constraints.addDirichlet(dofs_[i], values_[i]);
     }
 }
 

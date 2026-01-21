@@ -51,6 +51,36 @@ TEST(AffineConstraintsTest, AddSingleConstraint) {
     EXPECT_EQ(constraints.numConstraints(), 1);
 }
 
+TEST(AffineConstraintsTest, AddDirichletDuplicateSameValueIsIdempotent) {
+    AffineConstraints constraints;
+
+    EXPECT_NO_THROW(constraints.addDirichlet(5, 1.0));
+    EXPECT_NO_THROW(constraints.addDirichlet(5, 1.0));
+
+    constraints.close();
+    auto c = constraints.getConstraint(5);
+    ASSERT_TRUE(c.has_value());
+    EXPECT_TRUE(c->entries.empty());
+    EXPECT_DOUBLE_EQ(c->inhomogeneity, 1.0);
+}
+
+TEST(AffineConstraintsTest, AddDirichletDuplicateDifferentValueThrows) {
+    AffineConstraints constraints;
+    constraints.addDirichlet(5, 1.0);
+
+    EXPECT_THROW(constraints.addDirichlet(5, 2.0), ConstraintException);
+}
+
+TEST(AffineConstraintsTest, AddDirichletOnNonDirichletConstraintThrows) {
+    AffineConstraints constraints;
+
+    // Create a non-Dirichlet constraint line first.
+    constraints.addLine(5);
+    constraints.addEntry(5, 10, 1.0);
+
+    EXPECT_THROW(constraints.addDirichlet(5, 0.0), ConstraintException);
+}
+
 TEST(AffineConstraintsTest, CloseSingleConstraint) {
     AffineConstraints constraints;
 

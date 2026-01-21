@@ -165,8 +165,42 @@ void AffineConstraints::addConstraintLine(const ConstraintLine& line) {
 }
 
 void AffineConstraints::addDirichlet(GlobalIndex dof, double value) {
-    addLine(dof);
-    setInhomogeneity(dof, value);
+    checkNotClosed();
+
+    if (dof < 0) {
+        CONSTRAINT_THROW_DOF("Invalid negative DOF index", dof);
+    }
+
+    auto it = building_lines_.find(dof);
+    if (it == building_lines_.end()) {
+        addLine(dof);
+        setInhomogeneity(dof, value);
+        return;
+    }
+
+    ConstraintLine& line = it->second;
+    if (!line.entries.empty()) {
+        if (!options_.allow_overwrite) {
+            CONSTRAINT_THROW_DOF("Cannot add Dirichlet constraint: DOF already has master entries", dof);
+        }
+        line.entries.clear();
+        line.inhomogeneity = value;
+        return;
+    }
+
+    const double existing = line.inhomogeneity;
+    const double tol = std::max(1e-12, 10.0 * options_.zero_tolerance);
+    const double scale = 1.0 + std::max(std::abs(existing), std::abs(value));
+    if (std::abs(existing - value) > tol * scale) {
+        if (!options_.allow_overwrite) {
+            std::ostringstream oss;
+            oss << "Conflicting Dirichlet constraints: existing=" << existing << ", new=" << value;
+            CONSTRAINT_THROW_DOF(oss.str(), dof);
+        }
+    }
+
+    // Keep the most recently provided value (useful if difference is only roundoff).
+    line.inhomogeneity = value;
 }
 
 void AffineConstraints::addDirichlet(std::span<const GlobalIndex> dofs, double value) {
