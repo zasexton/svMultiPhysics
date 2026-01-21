@@ -71,11 +71,8 @@ TEST(CoupledBoundaryManagerTest, AuxiliaryStateResetsEachPrepareUntilCommit)
     reg.spec.associated_markers = {2};
     reg.initial_values = {0.0};
     reg.required_integrals = {Q};
-    reg.rhs = [](const AuxiliaryState& /*state*/,
-                 const forms::BoundaryFunctionalResults& integrals,
-                 Real /*t*/) {
-        return integrals.get("Q");
-    };
+    reg.rhs = forms::FormExpr::boundaryIntegralValue("Q");
+    reg.integrator = systems::ODEMethod::ForwardEuler;
     coupled.addAuxiliaryState(std::move(reg));
 
     const auto n_dofs = static_cast<std::size_t>(system.dofHandler().getDofMap().getNumDofs());

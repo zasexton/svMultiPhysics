@@ -22,11 +22,7 @@ TEST(AuxiliaryStateBuilder, BuildsScalarRegistration)
 
     auto reg = systems::auxiliaryODE("X", Real(2.0))
                    .requiresIntegral(Q)
-                   .withRHS([](const systems::AuxiliaryState& state,
-                              const forms::BoundaryFunctionalResults& integrals,
-                              Real) {
-                       return integrals.get("Q") - state["X"];
-                   })
+                   .withRHS(forms::FormExpr::boundaryIntegralValue("Q") - forms::FormExpr::auxiliaryState("X"))
                    .withIntegrator(systems::ODEMethod::BackwardEuler)
                    .build();
 
@@ -37,5 +33,5 @@ TEST(AuxiliaryStateBuilder, BuildsScalarRegistration)
     ASSERT_EQ(reg.required_integrals.size(), 1u);
     EXPECT_EQ(reg.required_integrals[0].name, "Q");
     EXPECT_EQ(reg.integrator, systems::ODEMethod::BackwardEuler);
-    EXPECT_TRUE(static_cast<bool>(reg.rhs));
+    EXPECT_TRUE(reg.rhs.isValid());
 }
