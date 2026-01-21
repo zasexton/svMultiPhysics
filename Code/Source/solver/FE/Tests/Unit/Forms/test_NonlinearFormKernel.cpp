@@ -16,6 +16,8 @@
 #include "Assembly/StandardAssembler.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Spaces/HCurlSpace.h"
+#include "Spaces/HDivSpace.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
@@ -130,6 +132,126 @@ TEST(NonlinearFormKernelTest, DivergenceAndCurlOfCoefficientsSupportedInResidual
         (void)assembler.assembleVector(mesh, space, kernel, Rp);
 
         for (GlobalIndex i = 0; i < 4; ++i) {
+            const Real fd = (Rp.getVectorEntry(i) - R0[static_cast<std::size_t>(i)]) / eps;
+            EXPECT_NEAR(J.getMatrixEntry(i, j), fd, 5e-6);
+        }
+    }
+}
+
+TEST(NonlinearFormKernelTest, CurlOfHCurlTrialSupportedInResidual_ADMatchesFiniteDifferences)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/0);
+
+    const auto n_dofs = static_cast<GlobalIndex>(space.dofs_per_element());
+    dofs::DofMap dof_map(1, n_dofs, static_cast<LocalIndex>(n_dofs));
+    std::vector<GlobalIndex> cell_dofs(static_cast<std::size_t>(n_dofs));
+    for (GlobalIndex i = 0; i < n_dofs; ++i) cell_dofs[static_cast<std::size_t>(i)] = i;
+    dof_map.setCellDofs(0, cell_dofs);
+    dof_map.setNumDofs(n_dofs);
+    dof_map.setNumLocalDofs(n_dofs);
+    dof_map.finalize();
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto residual = inner(curl(u), curl(v)).dx();
+
+    auto ir = compiler.compileResidual(residual);
+    NonlinearFormKernel kernel(std::move(ir), ADMode::Forward);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    std::vector<Real> U(static_cast<std::size_t>(n_dofs), 0.0);
+    for (std::size_t i = 0; i < U.size(); ++i) {
+        U[i] = 0.05 * static_cast<Real>(i + 1);
+    }
+    assembler.setCurrentSolution(U);
+
+    assembly::DenseMatrixView J(n_dofs);
+    assembly::DenseVectorView R(n_dofs);
+    J.zero();
+    R.zero();
+
+    (void)assembler.assembleBoth(mesh, space, space, kernel, J, R);
+
+    std::vector<Real> R0(static_cast<std::size_t>(n_dofs), 0.0);
+    for (GlobalIndex i = 0; i < n_dofs; ++i) {
+        R0[static_cast<std::size_t>(i)] = R.getVectorEntry(i);
+    }
+
+    const Real eps = 1e-7;
+    for (GlobalIndex j = 0; j < n_dofs; ++j) {
+        auto U_plus = U;
+        U_plus[static_cast<std::size_t>(j)] += eps;
+        assembler.setCurrentSolution(U_plus);
+
+        assembly::DenseVectorView Rp(n_dofs);
+        Rp.zero();
+        (void)assembler.assembleVector(mesh, space, kernel, Rp);
+
+        for (GlobalIndex i = 0; i < n_dofs; ++i) {
+            const Real fd = (Rp.getVectorEntry(i) - R0[static_cast<std::size_t>(i)]) / eps;
+            EXPECT_NEAR(J.getMatrixEntry(i, j), fd, 5e-6);
+        }
+    }
+}
+
+TEST(NonlinearFormKernelTest, DivOfHDivTrialSupportedInResidual_ADMatchesFiniteDifferences)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::HDivSpace space(ElementType::Tetra4, /*order=*/0);
+
+    const auto n_dofs = static_cast<GlobalIndex>(space.dofs_per_element());
+    dofs::DofMap dof_map(1, n_dofs, static_cast<LocalIndex>(n_dofs));
+    std::vector<GlobalIndex> cell_dofs(static_cast<std::size_t>(n_dofs));
+    for (GlobalIndex i = 0; i < n_dofs; ++i) cell_dofs[static_cast<std::size_t>(i)] = i;
+    dof_map.setCellDofs(0, cell_dofs);
+    dof_map.setNumDofs(n_dofs);
+    dof_map.setNumLocalDofs(n_dofs);
+    dof_map.finalize();
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto residual = (div(u) * div(v)).dx();
+
+    auto ir = compiler.compileResidual(residual);
+    NonlinearFormKernel kernel(std::move(ir), ADMode::Forward);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    std::vector<Real> U(static_cast<std::size_t>(n_dofs), 0.0);
+    for (std::size_t i = 0; i < U.size(); ++i) {
+        U[i] = 0.02 * static_cast<Real>(i + 1);
+    }
+    assembler.setCurrentSolution(U);
+
+    assembly::DenseMatrixView J(n_dofs);
+    assembly::DenseVectorView R(n_dofs);
+    J.zero();
+    R.zero();
+
+    (void)assembler.assembleBoth(mesh, space, space, kernel, J, R);
+
+    std::vector<Real> R0(static_cast<std::size_t>(n_dofs), 0.0);
+    for (GlobalIndex i = 0; i < n_dofs; ++i) {
+        R0[static_cast<std::size_t>(i)] = R.getVectorEntry(i);
+    }
+
+    const Real eps = 1e-7;
+    for (GlobalIndex j = 0; j < n_dofs; ++j) {
+        auto U_plus = U;
+        U_plus[static_cast<std::size_t>(j)] += eps;
+        assembler.setCurrentSolution(U_plus);
+
+        assembly::DenseVectorView Rp(n_dofs);
+        Rp.zero();
+        (void)assembler.assembleVector(mesh, space, kernel, Rp);
+
+        for (GlobalIndex i = 0; i < n_dofs; ++i) {
             const Real fd = (Rp.getVectorEntry(i) - R0[static_cast<std::size_t>(i)]) / eps;
             EXPECT_NEAR(J.getMatrixEntry(i, j), fd, 5e-6);
         }

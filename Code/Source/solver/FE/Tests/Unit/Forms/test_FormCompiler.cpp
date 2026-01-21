@@ -15,6 +15,8 @@
 #include "Forms/BlockForm.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Spaces/HCurlSpace.h"
+#include "Spaces/HDivSpace.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/L2Space.h"
 #include "Spaces/ProductSpace.h"
@@ -145,6 +147,23 @@ TEST(FormCompilerTest, MultipleDtFactorsRejected)
     EXPECT_THROW((void)compiler.compileBilinear((dt(u) * dt(u) * v).dx()), std::invalid_argument);
 }
 
+TEST(FormCompilerTest, MultipleDtFactorsAllowedInResidual)
+{
+    FormCompiler compiler;
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    EXPECT_NO_THROW((void)compiler.compileResidual((dt(u) * dt(u) * v).dx()));
+
+    const auto ir = compiler.compileResidual((dt(u) * dt(u) * v).dx());
+    EXPECT_TRUE(ir.isCompiled());
+    EXPECT_EQ(ir.kind(), FormKind::Residual);
+    EXPECT_EQ(ir.maxTimeDerivativeOrder(), 1);
+    ASSERT_EQ(ir.terms().size(), 1u);
+    EXPECT_EQ(ir.terms()[0].time_derivative_order, 1);
+}
+
 TEST(FormCompilerTest, TemporalOrderSignalsThroughKernelAndSystem)
 {
     auto mesh = std::make_shared<SingleTetraMeshAccess>();
@@ -200,6 +219,46 @@ TEST(FormCompilerTest, ComponentHessianOfVectorTrialSetsRequiredDataFlags)
     const auto ir_residual = compiler.compileResidual(expr);
     EXPECT_TRUE(assembly::hasFlag(ir_residual.requiredData(), assembly::RequiredData::BasisHessians));
     EXPECT_TRUE(assembly::hasFlag(ir_residual.requiredData(), assembly::RequiredData::SolutionHessians));
+}
+
+TEST(FormCompilerTest, HCurlCurlRequestsBasisCurlsNotGradients)
+{
+    FormCompiler compiler;
+    spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/0);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto expr = inner(curl(u), curl(v)).dx();
+
+    const auto ir_bilinear = compiler.compileBilinear(expr);
+    EXPECT_TRUE(assembly::hasFlag(ir_bilinear.requiredData(), assembly::RequiredData::BasisCurls));
+    EXPECT_FALSE(assembly::hasFlag(ir_bilinear.requiredData(), assembly::RequiredData::PhysicalGradients));
+    EXPECT_FALSE(assembly::hasFlag(ir_bilinear.requiredData(), assembly::RequiredData::SolutionGradients));
+
+    const auto ir_residual = compiler.compileResidual(expr);
+    EXPECT_TRUE(assembly::hasFlag(ir_residual.requiredData(), assembly::RequiredData::BasisCurls));
+    EXPECT_TRUE(assembly::hasFlag(ir_residual.requiredData(), assembly::RequiredData::SolutionValues));
+    EXPECT_FALSE(assembly::hasFlag(ir_residual.requiredData(), assembly::RequiredData::SolutionGradients));
+}
+
+TEST(FormCompilerTest, HDivDivRequestsBasisDivergencesNotGradients)
+{
+    FormCompiler compiler;
+    spaces::HDivSpace space(ElementType::Tetra4, /*order=*/0);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto expr = (div(u) * div(v)).dx();
+
+    const auto ir_bilinear = compiler.compileBilinear(expr);
+    EXPECT_TRUE(assembly::hasFlag(ir_bilinear.requiredData(), assembly::RequiredData::BasisDivergences));
+    EXPECT_FALSE(assembly::hasFlag(ir_bilinear.requiredData(), assembly::RequiredData::PhysicalGradients));
+    EXPECT_FALSE(assembly::hasFlag(ir_bilinear.requiredData(), assembly::RequiredData::SolutionGradients));
+
+    const auto ir_residual = compiler.compileResidual(expr);
+    EXPECT_TRUE(assembly::hasFlag(ir_residual.requiredData(), assembly::RequiredData::BasisDivergences));
+    EXPECT_TRUE(assembly::hasFlag(ir_residual.requiredData(), assembly::RequiredData::SolutionValues));
+    EXPECT_FALSE(assembly::hasFlag(ir_residual.requiredData(), assembly::RequiredData::SolutionGradients));
 }
 
 TEST(FormCompilerTest, BlockLinearCompilationSkipsEmptyBlocks)
