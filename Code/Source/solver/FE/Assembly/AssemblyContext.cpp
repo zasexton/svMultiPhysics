@@ -52,9 +52,15 @@ void AssemblyContext::reserve(LocalIndex max_dofs, LocalIndex max_qpts, int dim)
     test_basis_values_.reserve(n_basis);
     test_ref_gradients_.reserve(n_basis);
     test_phys_gradients_.reserve(n_basis);
+    test_basis_vector_values_.reserve(n_basis);
+    test_basis_curls_.reserve(n_basis);
+    test_basis_divergences_.reserve(n_basis);
     trial_basis_values_.reserve(n_basis);
     trial_ref_gradients_.reserve(n_basis);
     trial_phys_gradients_.reserve(n_basis);
+    trial_basis_vector_values_.reserve(n_basis);
+    trial_basis_curls_.reserve(n_basis);
+    trial_basis_divergences_.reserve(n_basis);
 
     test_ref_hessians_.reserve(n_basis);
     test_phys_hessians_.reserve(n_basis);
@@ -91,10 +97,14 @@ void AssemblyContext::configure(
     n_trial_dofs_ = static_cast<LocalIndex>(trial_element.num_dofs());
     trial_is_test_ = (&test_element == &trial_element);
 
-    test_field_type_ = FieldType::Scalar;
-    trial_field_type_ = FieldType::Scalar;
-    test_value_dim_ = 1;
-    trial_value_dim_ = 1;
+    test_field_type_ = test_element.field_type();
+    trial_field_type_ = trial_element.field_type();
+    test_continuity_ = test_element.continuity();
+    trial_continuity_ = trial_element.continuity();
+    test_is_vector_basis_ = test_element.basis().is_vector_valued();
+    trial_is_vector_basis_ = trial_element.basis().is_vector_valued();
+    test_value_dim_ = (test_field_type_ == FieldType::Vector) ? test_element.dimension() : 1;
+    trial_value_dim_ = (trial_field_type_ == FieldType::Vector) ? trial_element.dimension() : 1;
 
     cell_diameter_ = 0.0;
     cell_volume_ = 0.0;
@@ -107,8 +117,15 @@ void AssemblyContext::configure(
 
     test_ref_hessians_.clear();
     test_phys_hessians_.clear();
-	    trial_ref_hessians_.clear();
-	    trial_phys_hessians_.clear();
+    trial_ref_hessians_.clear();
+    trial_phys_hessians_.clear();
+
+    test_basis_vector_values_.clear();
+    test_basis_curls_.clear();
+    test_basis_divergences_.clear();
+    trial_basis_vector_values_.clear();
+    trial_basis_curls_.clear();
+    trial_basis_divergences_.clear();
 
     solution_hessians_.clear();
     solution_laplacians_.clear();
@@ -133,6 +150,10 @@ void AssemblyContext::configure(
 
     test_field_type_ = test_space.field_type();
     trial_field_type_ = trial_space.field_type();
+    test_continuity_ = test_space.continuity();
+    trial_continuity_ = trial_space.continuity();
+    test_is_vector_basis_ = test_space.element().basis().is_vector_valued();
+    trial_is_vector_basis_ = trial_space.element().basis().is_vector_valued();
     test_value_dim_ = test_space.value_dimension();
     trial_value_dim_ = trial_space.value_dimension();
 
@@ -153,6 +174,13 @@ void AssemblyContext::configure(
     test_phys_hessians_.clear();
     trial_ref_hessians_.clear();
     trial_phys_hessians_.clear();
+
+    test_basis_vector_values_.clear();
+    test_basis_curls_.clear();
+    test_basis_divergences_.clear();
+    trial_basis_vector_values_.clear();
+    trial_basis_curls_.clear();
+    trial_basis_divergences_.clear();
 
     solution_hessians_.clear();
     solution_laplacians_.clear();
@@ -177,10 +205,14 @@ void AssemblyContext::configureFace(
     n_trial_dofs_ = n_test_dofs_;
     trial_is_test_ = true;
 
-    test_field_type_ = FieldType::Scalar;
-    trial_field_type_ = FieldType::Scalar;
-    test_value_dim_ = 1;
-    trial_value_dim_ = 1;
+    test_field_type_ = element.field_type();
+    trial_field_type_ = element.field_type();
+    test_continuity_ = element.continuity();
+    trial_continuity_ = element.continuity();
+    test_is_vector_basis_ = element.basis().is_vector_valued();
+    trial_is_vector_basis_ = test_is_vector_basis_;
+    test_value_dim_ = (test_field_type_ == FieldType::Vector) ? element.dimension() : 1;
+    trial_value_dim_ = test_value_dim_;
 
     cell_diameter_ = 0.0;
     cell_volume_ = 0.0;
@@ -195,6 +227,13 @@ void AssemblyContext::configureFace(
     test_phys_hessians_.clear();
     trial_ref_hessians_.clear();
     trial_phys_hessians_.clear();
+
+    test_basis_vector_values_.clear();
+    test_basis_curls_.clear();
+    test_basis_divergences_.clear();
+    trial_basis_vector_values_.clear();
+    trial_basis_curls_.clear();
+    trial_basis_divergences_.clear();
 
     solution_hessians_.clear();
     solution_laplacians_.clear();
@@ -218,6 +257,10 @@ void AssemblyContext::configureFace(
 
     test_field_type_ = test_space.field_type();
     trial_field_type_ = trial_space.field_type();
+    test_continuity_ = test_space.continuity();
+    trial_continuity_ = trial_space.continuity();
+    test_is_vector_basis_ = test_space.element().basis().is_vector_valued();
+    trial_is_vector_basis_ = trial_space.element().basis().is_vector_valued();
     test_value_dim_ = test_space.value_dimension();
     trial_value_dim_ = trial_space.value_dimension();
 
@@ -239,6 +282,13 @@ void AssemblyContext::configureFace(
     trial_ref_hessians_.clear();
     trial_phys_hessians_.clear();
 
+    test_basis_vector_values_.clear();
+    test_basis_curls_.clear();
+    test_basis_divergences_.clear();
+    trial_basis_vector_values_.clear();
+    trial_basis_curls_.clear();
+    trial_basis_divergences_.clear();
+
     solution_hessians_.clear();
     solution_laplacians_.clear();
 }
@@ -255,6 +305,10 @@ void AssemblyContext::clear()
 
     test_field_type_ = FieldType::Scalar;
     trial_field_type_ = FieldType::Scalar;
+    test_continuity_ = Continuity::C0;
+    trial_continuity_ = Continuity::C0;
+    test_is_vector_basis_ = false;
+    trial_is_vector_basis_ = false;
     test_value_dim_ = 1;
     trial_value_dim_ = 1;
 
@@ -273,9 +327,15 @@ void AssemblyContext::clear()
     test_basis_values_.clear();
     test_ref_gradients_.clear();
     test_phys_gradients_.clear();
+    test_basis_vector_values_.clear();
+    test_basis_curls_.clear();
+    test_basis_divergences_.clear();
     trial_basis_values_.clear();
     trial_ref_gradients_.clear();
     trial_phys_gradients_.clear();
+    trial_basis_vector_values_.clear();
+    trial_basis_curls_.clear();
+    trial_basis_divergences_.clear();
     solution_coefficients_.clear();
     solution_values_.clear();
     solution_vector_values_.clear();
@@ -296,8 +356,8 @@ void AssemblyContext::clear()
 
     test_ref_hessians_.clear();
     test_phys_hessians_.clear();
-	    trial_ref_hessians_.clear();
-	    trial_phys_hessians_.clear();
+    trial_ref_hessians_.clear();
+    trial_phys_hessians_.clear();
     solution_hessians_.clear();
     solution_laplacians_.clear();
     solution_component_hessians_.clear();
@@ -449,6 +509,9 @@ void AssemblyContext::setEntityMeasures(Real cell_diameter, Real cell_volume, Re
 
 Real AssemblyContext::basisValue(LocalIndex i, LocalIndex q) const
 {
+    if (test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::basisValue: scalar basis values not available for vector-basis spaces");
+    }
     if (i >= n_test_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::basisValue: index out of range");
     }
@@ -457,6 +520,9 @@ Real AssemblyContext::basisValue(LocalIndex i, LocalIndex q) const
 
 std::span<const Real> AssemblyContext::basisValues(LocalIndex i) const
 {
+    if (test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::basisValues: scalar basis values not available for vector-basis spaces");
+    }
     if (i >= n_test_dofs_) {
         throw std::out_of_range("AssemblyContext::basisValues: index out of range");
     }
@@ -466,6 +532,9 @@ std::span<const Real> AssemblyContext::basisValues(LocalIndex i) const
 
 AssemblyContext::Vector3D AssemblyContext::referenceGradient(LocalIndex i, LocalIndex q) const
 {
+    if (test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::referenceGradient: scalar basis gradients not available for vector-basis spaces");
+    }
     if (i >= n_test_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::referenceGradient: index out of range");
     }
@@ -474,14 +543,62 @@ AssemblyContext::Vector3D AssemblyContext::referenceGradient(LocalIndex i, Local
 
 AssemblyContext::Vector3D AssemblyContext::physicalGradient(LocalIndex i, LocalIndex q) const
 {
+    if (test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::physicalGradient: scalar basis gradients not available for vector-basis spaces");
+    }
     if (i >= n_test_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::physicalGradient: index out of range");
     }
     return test_phys_gradients_[static_cast<std::size_t>(i * n_qpts_ + q)];
 }
 
+AssemblyContext::Vector3D AssemblyContext::basisVectorValue(LocalIndex i, LocalIndex q) const
+{
+    if (!test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::basisVectorValue: test space does not use a vector basis");
+    }
+    if (test_basis_vector_values_.empty()) {
+        throw std::logic_error("AssemblyContext::basisVectorValue: vector basis values not set");
+    }
+    if (i >= n_test_dofs_ || q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::basisVectorValue: index out of range");
+    }
+    return test_basis_vector_values_[static_cast<std::size_t>(i * n_qpts_ + q)];
+}
+
+AssemblyContext::Vector3D AssemblyContext::basisCurl(LocalIndex i, LocalIndex q) const
+{
+    if (!test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::basisCurl: test space does not use a vector basis");
+    }
+    if (test_basis_curls_.empty()) {
+        throw std::logic_error("AssemblyContext::basisCurl: basis curls not set");
+    }
+    if (i >= n_test_dofs_ || q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::basisCurl: index out of range");
+    }
+    return test_basis_curls_[static_cast<std::size_t>(i * n_qpts_ + q)];
+}
+
+Real AssemblyContext::basisDivergence(LocalIndex i, LocalIndex q) const
+{
+    if (!test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::basisDivergence: test space does not use a vector basis");
+    }
+    if (test_basis_divergences_.empty()) {
+        throw std::logic_error("AssemblyContext::basisDivergence: basis divergences not set");
+    }
+    if (i >= n_test_dofs_ || q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::basisDivergence: index out of range");
+    }
+    return test_basis_divergences_[static_cast<std::size_t>(i * n_qpts_ + q)];
+}
+
 AssemblyContext::Matrix3x3 AssemblyContext::referenceHessian(LocalIndex i, LocalIndex q) const
 {
+    if (test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::referenceHessian: scalar basis Hessians not available for vector-basis spaces");
+    }
     if (test_ref_hessians_.empty()) {
         throw std::logic_error("AssemblyContext::referenceHessian: basis Hessians not set");
     }
@@ -493,6 +610,9 @@ AssemblyContext::Matrix3x3 AssemblyContext::referenceHessian(LocalIndex i, Local
 
 AssemblyContext::Matrix3x3 AssemblyContext::physicalHessian(LocalIndex i, LocalIndex q) const
 {
+    if (test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::physicalHessian: scalar basis Hessians not available for vector-basis spaces");
+    }
     if (test_phys_hessians_.empty()) {
         throw std::logic_error("AssemblyContext::physicalHessian: basis Hessians not set");
     }
@@ -508,6 +628,9 @@ AssemblyContext::Matrix3x3 AssemblyContext::physicalHessian(LocalIndex i, LocalI
 
 Real AssemblyContext::trialBasisValue(LocalIndex j, LocalIndex q) const
 {
+    if (trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::trialBasisValue: scalar basis values not available for vector-basis spaces");
+    }
     if (j >= n_trial_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::trialBasisValue: index out of range");
     }
@@ -518,8 +641,56 @@ Real AssemblyContext::trialBasisValue(LocalIndex j, LocalIndex q) const
     return trial_basis_values_[static_cast<std::size_t>(j * n_qpts_ + q)];
 }
 
+AssemblyContext::Vector3D AssemblyContext::trialBasisVectorValue(LocalIndex j, LocalIndex q) const
+{
+    if (!trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::trialBasisVectorValue: trial space does not use a vector basis");
+    }
+    const auto& storage = trial_is_test_ ? test_basis_vector_values_ : trial_basis_vector_values_;
+    if (storage.empty()) {
+        throw std::logic_error("AssemblyContext::trialBasisVectorValue: vector basis values not set");
+    }
+    if (j >= n_trial_dofs_ || q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::trialBasisVectorValue: index out of range");
+    }
+    return storage[static_cast<std::size_t>(j * n_qpts_ + q)];
+}
+
+AssemblyContext::Vector3D AssemblyContext::trialBasisCurl(LocalIndex j, LocalIndex q) const
+{
+    if (!trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::trialBasisCurl: trial space does not use a vector basis");
+    }
+    const auto& storage = trial_is_test_ ? test_basis_curls_ : trial_basis_curls_;
+    if (storage.empty()) {
+        throw std::logic_error("AssemblyContext::trialBasisCurl: basis curls not set");
+    }
+    if (j >= n_trial_dofs_ || q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::trialBasisCurl: index out of range");
+    }
+    return storage[static_cast<std::size_t>(j * n_qpts_ + q)];
+}
+
+Real AssemblyContext::trialBasisDivergence(LocalIndex j, LocalIndex q) const
+{
+    if (!trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::trialBasisDivergence: trial space does not use a vector basis");
+    }
+    const auto& storage = trial_is_test_ ? test_basis_divergences_ : trial_basis_divergences_;
+    if (storage.empty()) {
+        throw std::logic_error("AssemblyContext::trialBasisDivergence: basis divergences not set");
+    }
+    if (j >= n_trial_dofs_ || q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::trialBasisDivergence: index out of range");
+    }
+    return storage[static_cast<std::size_t>(j * n_qpts_ + q)];
+}
+
 AssemblyContext::Vector3D AssemblyContext::trialPhysicalGradient(LocalIndex j, LocalIndex q) const
 {
+    if (trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::trialPhysicalGradient: scalar basis gradients not available for vector-basis spaces");
+    }
     if (j >= n_trial_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::trialPhysicalGradient: index out of range");
     }
@@ -532,6 +703,9 @@ AssemblyContext::Vector3D AssemblyContext::trialPhysicalGradient(LocalIndex j, L
 
 AssemblyContext::Matrix3x3 AssemblyContext::trialReferenceHessian(LocalIndex j, LocalIndex q) const
 {
+    if (trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::trialReferenceHessian: scalar basis Hessians not available for vector-basis spaces");
+    }
     if (trial_is_test_) {
         return referenceHessian(j, q);
     }
@@ -546,6 +720,9 @@ AssemblyContext::Matrix3x3 AssemblyContext::trialReferenceHessian(LocalIndex j, 
 
 AssemblyContext::Matrix3x3 AssemblyContext::trialPhysicalHessian(LocalIndex j, LocalIndex q) const
 {
+    if (trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::trialPhysicalHessian: scalar basis Hessians not available for vector-basis spaces");
+    }
     if (trial_is_test_) {
         return physicalHessian(j, q);
     }
@@ -628,51 +805,69 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
             }
         }
     } else if (trial_field_type_ == FieldType::Vector) {
-        FE_CHECK_ARG(trial_value_dim_ > 0 && trial_value_dim_ <= 3,
-                     "AssemblyContext::setSolutionCoefficients: invalid trial value dimension");
-        FE_CHECK_ARG((n_trial_dofs_ % static_cast<LocalIndex>(trial_value_dim_)) == 0,
-                     "AssemblyContext::setSolutionCoefficients: trial DOFs not divisible by value_dimension");
-
-        const LocalIndex dofs_per_component =
-            static_cast<LocalIndex>(n_trial_dofs_ / static_cast<LocalIndex>(trial_value_dim_));
-
         solution_values_.clear();
         solution_gradients_.clear();
-
-        // Compute vector u_h(x_q)
-        solution_vector_values_.resize(static_cast<std::size_t>(n_qpts_), Vector3D{0.0, 0.0, 0.0});
-        for (LocalIndex q = 0; q < n_qpts_; ++q) {
-            Vector3D u = {0.0, 0.0, 0.0};
-            for (int c = 0; c < trial_value_dim_; ++c) {
-                Real val_c = 0.0;
-                const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
-                for (LocalIndex j = 0; j < dofs_per_component; ++j) {
-                    const LocalIndex jj = base + j;
-                    val_c += solution_coefficients_[static_cast<std::size_t>(jj)] * trialBasisValue(jj, q);
-                }
-                u[static_cast<std::size_t>(c)] = val_c;
-            }
-            solution_vector_values_[static_cast<std::size_t>(q)] = u;
-        }
-
-        // Compute Jacobian J_{ij} = du_i/dx_j
         solution_jacobians_.clear();
-        if (need_gradients) {
-            solution_jacobians_.resize(static_cast<std::size_t>(n_qpts_), Matrix3x3{});
+
+        if (trial_is_vector_basis_) {
+            FE_THROW_IF(need_gradients, InvalidArgumentException,
+                        "AssemblyContext::setSolutionCoefficients: SolutionGradients are not available for vector-basis spaces; use curl()/div() operators instead");
+
+            solution_vector_values_.resize(static_cast<std::size_t>(n_qpts_), Vector3D{0.0, 0.0, 0.0});
             for (LocalIndex q = 0; q < n_qpts_; ++q) {
-                Matrix3x3 J{};
+                Vector3D u = {0.0, 0.0, 0.0};
+                for (LocalIndex j = 0; j < n_trial_dofs_; ++j) {
+                    const auto phi = trialBasisVectorValue(j, q);
+                    const Real coef = solution_coefficients_[static_cast<std::size_t>(j)];
+                    u[0] += coef * phi[0];
+                    u[1] += coef * phi[1];
+                    u[2] += coef * phi[2];
+                }
+                solution_vector_values_[static_cast<std::size_t>(q)] = u;
+            }
+        } else {
+            FE_CHECK_ARG(trial_value_dim_ > 0 && trial_value_dim_ <= 3,
+                         "AssemblyContext::setSolutionCoefficients: invalid trial value dimension");
+            FE_CHECK_ARG((n_trial_dofs_ % static_cast<LocalIndex>(trial_value_dim_)) == 0,
+                         "AssemblyContext::setSolutionCoefficients: trial DOFs not divisible by value_dimension");
+
+            const LocalIndex dofs_per_component =
+                static_cast<LocalIndex>(n_trial_dofs_ / static_cast<LocalIndex>(trial_value_dim_));
+
+            // Compute vector u_h(x_q) for component-wise vector spaces.
+            solution_vector_values_.resize(static_cast<std::size_t>(n_qpts_), Vector3D{0.0, 0.0, 0.0});
+            for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                Vector3D u = {0.0, 0.0, 0.0};
                 for (int c = 0; c < trial_value_dim_; ++c) {
+                    Real val_c = 0.0;
                     const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
                     for (LocalIndex j = 0; j < dofs_per_component; ++j) {
                         const LocalIndex jj = base + j;
-                        const auto grad_j = trialPhysicalGradient(jj, q);
-                        const Real coef = solution_coefficients_[static_cast<std::size_t>(jj)];
-                        J[static_cast<std::size_t>(c)][0] += coef * grad_j[0];
-                        J[static_cast<std::size_t>(c)][1] += coef * grad_j[1];
-                        J[static_cast<std::size_t>(c)][2] += coef * grad_j[2];
+                        val_c += solution_coefficients_[static_cast<std::size_t>(jj)] * trialBasisValue(jj, q);
                     }
+                    u[static_cast<std::size_t>(c)] = val_c;
                 }
-                solution_jacobians_[static_cast<std::size_t>(q)] = J;
+                solution_vector_values_[static_cast<std::size_t>(q)] = u;
+            }
+
+            // Compute Jacobian J_{ij} = du_i/dx_j
+            if (need_gradients) {
+                solution_jacobians_.resize(static_cast<std::size_t>(n_qpts_), Matrix3x3{});
+                for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                    Matrix3x3 J{};
+                    for (int c = 0; c < trial_value_dim_; ++c) {
+                        const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
+                        for (LocalIndex j = 0; j < dofs_per_component; ++j) {
+                            const LocalIndex jj = base + j;
+                            const auto grad_j = trialPhysicalGradient(jj, q);
+                            const Real coef = solution_coefficients_[static_cast<std::size_t>(jj)];
+                            J[static_cast<std::size_t>(c)][0] += coef * grad_j[0];
+                            J[static_cast<std::size_t>(c)][1] += coef * grad_j[1];
+                            J[static_cast<std::size_t>(c)][2] += coef * grad_j[2];
+                        }
+                    }
+                    solution_jacobians_[static_cast<std::size_t>(q)] = J;
+                }
             }
         }
     } else {
@@ -683,6 +878,8 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
     const bool need_hessians = hasFlag(required_data_, RequiredData::SolutionHessians) ||
                                hasFlag(required_data_, RequiredData::SolutionLaplacians);
     if (need_hessians) {
+        FE_THROW_IF(trial_is_vector_basis_, InvalidArgumentException,
+                    "AssemblyContext::setSolutionCoefficients: SolutionHessians/Laplacians are not available for vector-basis spaces");
         if (trial_is_test_) {
             if (test_phys_hessians_.empty()) {
                 throw std::logic_error(
@@ -846,49 +1043,65 @@ void AssemblyContext::setPreviousSolutionCoefficientsK(int k, std::span<const Re
             dst.gradients[static_cast<std::size_t>(q)] = grad;
         }
     } else if (trial_field_type_ == FieldType::Vector) {
-        FE_CHECK_ARG(trial_value_dim_ > 0 && trial_value_dim_ <= 3,
-                     "AssemblyContext::setPreviousSolutionCoefficientsK: invalid trial value dimension");
-        FE_CHECK_ARG((n_trial_dofs_ % static_cast<LocalIndex>(trial_value_dim_)) == 0,
-                     "AssemblyContext::setPreviousSolutionCoefficientsK: trial DOFs not divisible by value_dimension");
-
-        const LocalIndex dofs_per_component =
-            static_cast<LocalIndex>(n_trial_dofs_ / static_cast<LocalIndex>(trial_value_dim_));
-
         dst.values.clear();
         dst.gradients.clear();
+        dst.jacobians.clear();
         dst.component_hessians.clear();
         dst.component_laplacians.clear();
 
-        dst.vector_values.resize(static_cast<std::size_t>(n_qpts_), Vector3D{0.0, 0.0, 0.0});
-        for (LocalIndex q = 0; q < n_qpts_; ++q) {
-            Vector3D u = {0.0, 0.0, 0.0};
-            for (int c = 0; c < trial_value_dim_; ++c) {
-                Real val_c = 0.0;
-                const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
-                for (LocalIndex j = 0; j < dofs_per_component; ++j) {
-                    const LocalIndex jj = base + j;
-                    val_c += dst.coefficients[static_cast<std::size_t>(jj)] * trialBasisValue(jj, q);
+        if (trial_is_vector_basis_) {
+            dst.vector_values.resize(static_cast<std::size_t>(n_qpts_), Vector3D{0.0, 0.0, 0.0});
+            for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                Vector3D u = {0.0, 0.0, 0.0};
+                for (LocalIndex j = 0; j < n_trial_dofs_; ++j) {
+                    const auto phi = trialBasisVectorValue(j, q);
+                    const Real coef = dst.coefficients[static_cast<std::size_t>(j)];
+                    u[0] += coef * phi[0];
+                    u[1] += coef * phi[1];
+                    u[2] += coef * phi[2];
                 }
-                u[static_cast<std::size_t>(c)] = val_c;
+                dst.vector_values[static_cast<std::size_t>(q)] = u;
             }
-            dst.vector_values[static_cast<std::size_t>(q)] = u;
-        }
+        } else {
+            FE_CHECK_ARG(trial_value_dim_ > 0 && trial_value_dim_ <= 3,
+                         "AssemblyContext::setPreviousSolutionCoefficientsK: invalid trial value dimension");
+            FE_CHECK_ARG((n_trial_dofs_ % static_cast<LocalIndex>(trial_value_dim_)) == 0,
+                         "AssemblyContext::setPreviousSolutionCoefficientsK: trial DOFs not divisible by value_dimension");
 
-        dst.jacobians.resize(static_cast<std::size_t>(n_qpts_), Matrix3x3{});
-        for (LocalIndex q = 0; q < n_qpts_; ++q) {
-            Matrix3x3 J{};
-            for (int c = 0; c < trial_value_dim_; ++c) {
-                const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
-                for (LocalIndex j = 0; j < dofs_per_component; ++j) {
-                    const LocalIndex jj = base + j;
-                    const auto grad_j = trialPhysicalGradient(jj, q);
-                    const Real coef = dst.coefficients[static_cast<std::size_t>(jj)];
-                    J[static_cast<std::size_t>(c)][0] += coef * grad_j[0];
-                    J[static_cast<std::size_t>(c)][1] += coef * grad_j[1];
-                    J[static_cast<std::size_t>(c)][2] += coef * grad_j[2];
+            const LocalIndex dofs_per_component =
+                static_cast<LocalIndex>(n_trial_dofs_ / static_cast<LocalIndex>(trial_value_dim_));
+
+            dst.vector_values.resize(static_cast<std::size_t>(n_qpts_), Vector3D{0.0, 0.0, 0.0});
+            for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                Vector3D u = {0.0, 0.0, 0.0};
+                for (int c = 0; c < trial_value_dim_; ++c) {
+                    Real val_c = 0.0;
+                    const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
+                    for (LocalIndex j = 0; j < dofs_per_component; ++j) {
+                        const LocalIndex jj = base + j;
+                        val_c += dst.coefficients[static_cast<std::size_t>(jj)] * trialBasisValue(jj, q);
+                    }
+                    u[static_cast<std::size_t>(c)] = val_c;
                 }
+                dst.vector_values[static_cast<std::size_t>(q)] = u;
             }
-            dst.jacobians[static_cast<std::size_t>(q)] = J;
+
+            dst.jacobians.resize(static_cast<std::size_t>(n_qpts_), Matrix3x3{});
+            for (LocalIndex q = 0; q < n_qpts_; ++q) {
+                Matrix3x3 J{};
+                for (int c = 0; c < trial_value_dim_; ++c) {
+                    const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
+                    for (LocalIndex j = 0; j < dofs_per_component; ++j) {
+                        const LocalIndex jj = base + j;
+                        const auto grad_j = trialPhysicalGradient(jj, q);
+                        const Real coef = dst.coefficients[static_cast<std::size_t>(jj)];
+                        J[static_cast<std::size_t>(c)][0] += coef * grad_j[0];
+                        J[static_cast<std::size_t>(c)][1] += coef * grad_j[1];
+                        J[static_cast<std::size_t>(c)][2] += coef * grad_j[2];
+                    }
+                }
+                dst.jacobians[static_cast<std::size_t>(q)] = J;
+            }
         }
     } else {
         throw FEException("AssemblyContext::setPreviousSolutionCoefficientsK: only scalar and vector trial fields are supported",
@@ -1170,6 +1383,7 @@ void AssemblyContext::setFieldSolutionScalar(FieldId field,
     it->laplacians.assign(laplacians.begin(), laplacians.end());
 
     it->vector_values.clear();
+    it->history_vector_values.clear();
     it->jacobians.clear();
     it->component_hessians.clear();
     it->component_laplacians.clear();
@@ -1226,9 +1440,100 @@ void AssemblyContext::setFieldSolutionVector(FieldId field,
     it->component_laplacians.assign(component_laplacians.begin(), component_laplacians.end());
 
     it->values.clear();
+    it->history_values.clear();
     it->gradients.clear();
     it->hessians.clear();
     it->laplacians.clear();
+}
+
+void AssemblyContext::setFieldPreviousSolutionScalarK(FieldId field, int k, std::span<const Real> values)
+{
+    FE_THROW_IF(field == INVALID_FIELD_ID, InvalidArgumentException,
+                "AssemblyContext::setFieldPreviousSolutionScalarK: invalid FieldId");
+    FE_THROW_IF(k <= 0, InvalidArgumentException,
+                "AssemblyContext::setFieldPreviousSolutionScalarK: k must be >= 1");
+    if (!values.empty() && values.size() != static_cast<std::size_t>(n_qpts_)) {
+        throw std::invalid_argument(
+            "AssemblyContext::setFieldPreviousSolutionScalarK: values size does not match quadrature points");
+    }
+
+    auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                           [&](const FieldSolutionData& d) { return d.id == field; });
+    const bool inserted = (it == field_solution_data_.end());
+    if (it == field_solution_data_.end()) {
+        field_solution_data_.push_back(FieldSolutionData{});
+        it = std::prev(field_solution_data_.end());
+        it->id = field;
+        it->field_type = FieldType::Scalar;
+        it->value_dim = 1;
+    }
+    if (it->field_type != FieldType::Scalar) {
+        if (inserted) {
+            throw std::logic_error(
+                "AssemblyContext::setFieldPreviousSolutionScalarK: internal field type mismatch after insertion");
+        }
+        throw std::logic_error("AssemblyContext::setFieldPreviousSolutionScalarK: field is not scalar-valued");
+    }
+    it->value_dim = 1;
+
+    it->history_vector_values.clear();
+
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    const auto needed = static_cast<std::size_t>(k) * nq;
+    if (it->history_values.size() < needed) {
+        it->history_values.resize(needed, 0.0);
+    }
+    if (!values.empty()) {
+        std::copy(values.begin(), values.end(), it->history_values.begin() + (static_cast<std::size_t>(k - 1) * nq));
+    }
+}
+
+void AssemblyContext::setFieldPreviousSolutionVectorK(FieldId field,
+                                                      int k,
+                                                      int value_dimension,
+                                                      std::span<const Vector3D> values)
+{
+    FE_THROW_IF(field == INVALID_FIELD_ID, InvalidArgumentException,
+                "AssemblyContext::setFieldPreviousSolutionVectorK: invalid FieldId");
+    FE_THROW_IF(k <= 0, InvalidArgumentException,
+                "AssemblyContext::setFieldPreviousSolutionVectorK: k must be >= 1");
+    FE_THROW_IF(value_dimension <= 0 || value_dimension > 3, InvalidArgumentException,
+                "AssemblyContext::setFieldPreviousSolutionVectorK: value_dimension must be 1..3");
+    if (!values.empty() && values.size() != static_cast<std::size_t>(n_qpts_)) {
+        throw std::invalid_argument(
+            "AssemblyContext::setFieldPreviousSolutionVectorK: values size does not match quadrature points");
+    }
+
+    auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                           [&](const FieldSolutionData& d) { return d.id == field; });
+    const bool inserted = (it == field_solution_data_.end());
+    if (it == field_solution_data_.end()) {
+        field_solution_data_.push_back(FieldSolutionData{});
+        it = std::prev(field_solution_data_.end());
+        it->id = field;
+        it->field_type = FieldType::Vector;
+        it->value_dim = value_dimension;
+    }
+    if (it->field_type != FieldType::Vector) {
+        if (inserted) {
+            throw std::logic_error(
+                "AssemblyContext::setFieldPreviousSolutionVectorK: internal field type mismatch after insertion");
+        }
+        throw std::logic_error("AssemblyContext::setFieldPreviousSolutionVectorK: field is not vector-valued");
+    }
+    it->value_dim = value_dimension;
+
+    it->history_values.clear();
+
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    const auto needed = static_cast<std::size_t>(k) * nq;
+    if (it->history_vector_values.size() < needed) {
+        it->history_vector_values.resize(needed, Vector3D{0.0, 0.0, 0.0});
+    }
+    if (!values.empty()) {
+        std::copy(values.begin(), values.end(),
+                  it->history_vector_values.begin() + (static_cast<std::size_t>(k - 1) * nq));
+    }
 }
 
 bool AssemblyContext::hasFieldSolutionData(FieldId field) const noexcept
@@ -1402,6 +1707,56 @@ Real AssemblyContext::fieldComponentLaplacian(FieldId field, LocalIndex q, int c
     return it->component_laplacians[idx];
 }
 
+Real AssemblyContext::fieldPreviousValue(FieldId field, LocalIndex q, int k) const
+{
+    if (k <= 0) {
+        throw std::out_of_range("AssemblyContext::fieldPreviousValue: history index k must be >= 1");
+    }
+    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == field_solution_data_.end() || it->history_values.empty()) {
+        throw std::logic_error("AssemblyContext::fieldPreviousValue: field previous value data not set");
+    }
+    if (it->field_type != FieldType::Scalar) {
+        throw std::logic_error("AssemblyContext::fieldPreviousValue: field is not scalar-valued");
+    }
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::fieldPreviousValue: index out of range");
+    }
+
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    const auto idx = static_cast<std::size_t>(k - 1) * nq + static_cast<std::size_t>(q);
+    if (idx >= it->history_values.size()) {
+        throw std::out_of_range("AssemblyContext::fieldPreviousValue: history index out of range");
+    }
+    return it->history_values[idx];
+}
+
+AssemblyContext::Vector3D AssemblyContext::fieldPreviousVectorValue(FieldId field, LocalIndex q, int k) const
+{
+    if (k <= 0) {
+        throw std::out_of_range("AssemblyContext::fieldPreviousVectorValue: history index k must be >= 1");
+    }
+    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == field_solution_data_.end() || it->history_vector_values.empty()) {
+        throw std::logic_error("AssemblyContext::fieldPreviousVectorValue: field previous vector value data not set");
+    }
+    if (it->field_type != FieldType::Vector) {
+        throw std::logic_error("AssemblyContext::fieldPreviousVectorValue: field is not vector-valued");
+    }
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::fieldPreviousVectorValue: index out of range");
+    }
+
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    const auto idx = static_cast<std::size_t>(k - 1) * nq + static_cast<std::size_t>(q);
+    if (idx >= it->history_vector_values.size()) {
+        throw std::out_of_range("AssemblyContext::fieldPreviousVectorValue: history index out of range");
+    }
+    return it->history_vector_values[idx];
+}
+
 // ============================================================================
 // Material State
 // ============================================================================
@@ -1504,12 +1859,18 @@ void AssemblyContext::setTestBasisData(
     std::span<const Real> values,
     std::span<const Vector3D> gradients)
 {
+    if (test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::setTestBasisData: scalar basis data not valid for vector-basis spaces");
+    }
     n_test_dofs_ = n_dofs;
     if (trial_is_test_) {
         n_trial_dofs_ = n_dofs;
     }
     test_basis_values_.assign(values.begin(), values.end());
     test_ref_gradients_.assign(gradients.begin(), gradients.end());
+    test_basis_vector_values_.clear();
+    test_basis_curls_.clear();
+    test_basis_divergences_.clear();
 }
 
 void AssemblyContext::setTrialBasisData(
@@ -1517,10 +1878,82 @@ void AssemblyContext::setTrialBasisData(
     std::span<const Real> values,
     std::span<const Vector3D> gradients)
 {
+    if (trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::setTrialBasisData: scalar basis data not valid for vector-basis spaces");
+    }
     n_trial_dofs_ = n_dofs;
     trial_is_test_ = false;
     trial_basis_values_.assign(values.begin(), values.end());
     trial_ref_gradients_.assign(gradients.begin(), gradients.end());
+    trial_basis_vector_values_.clear();
+    trial_basis_curls_.clear();
+    trial_basis_divergences_.clear();
+}
+
+void AssemblyContext::setTestVectorBasisValues(LocalIndex n_dofs, std::span<const Vector3D> values)
+{
+    if (!test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::setTestVectorBasisValues: test space does not use a vector basis");
+    }
+    n_test_dofs_ = n_dofs;
+    if (trial_is_test_) {
+        n_trial_dofs_ = n_dofs;
+    }
+    test_basis_vector_values_.assign(values.begin(), values.end());
+    test_basis_values_.clear();
+    test_ref_gradients_.clear();
+    test_phys_gradients_.clear();
+}
+
+void AssemblyContext::setTrialVectorBasisValues(LocalIndex n_dofs, std::span<const Vector3D> values)
+{
+    if (!trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::setTrialVectorBasisValues: trial space does not use a vector basis");
+    }
+    n_trial_dofs_ = n_dofs;
+    trial_is_test_ = false;
+    trial_basis_vector_values_.assign(values.begin(), values.end());
+    trial_basis_values_.clear();
+    trial_ref_gradients_.clear();
+    trial_phys_gradients_.clear();
+}
+
+void AssemblyContext::setTestBasisCurls(LocalIndex n_dofs, std::span<const Vector3D> curls)
+{
+    (void)n_dofs;
+    if (!test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::setTestBasisCurls: test space does not use a vector basis");
+    }
+    test_basis_curls_.assign(curls.begin(), curls.end());
+}
+
+void AssemblyContext::setTrialBasisCurls(LocalIndex n_dofs, std::span<const Vector3D> curls)
+{
+    (void)n_dofs;
+    if (!trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::setTrialBasisCurls: trial space does not use a vector basis");
+    }
+    trial_is_test_ = false;
+    trial_basis_curls_.assign(curls.begin(), curls.end());
+}
+
+void AssemblyContext::setTestBasisDivergences(LocalIndex n_dofs, std::span<const Real> divergences)
+{
+    (void)n_dofs;
+    if (!test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::setTestBasisDivergences: test space does not use a vector basis");
+    }
+    test_basis_divergences_.assign(divergences.begin(), divergences.end());
+}
+
+void AssemblyContext::setTrialBasisDivergences(LocalIndex n_dofs, std::span<const Real> divergences)
+{
+    (void)n_dofs;
+    if (!trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::setTrialBasisDivergences: trial space does not use a vector basis");
+    }
+    trial_is_test_ = false;
+    trial_basis_divergences_.assign(divergences.begin(), divergences.end());
 }
 
 void AssemblyContext::setTestBasisHessians(
@@ -1528,6 +1961,9 @@ void AssemblyContext::setTestBasisHessians(
     std::span<const Matrix3x3> hessians)
 {
     (void)n_dofs;
+    if (test_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::setTestBasisHessians: scalar basis Hessians not valid for vector-basis spaces");
+    }
     test_ref_hessians_.assign(hessians.begin(), hessians.end());
 }
 
@@ -1536,6 +1972,9 @@ void AssemblyContext::setTrialBasisHessians(
     std::span<const Matrix3x3> hessians)
 {
     (void)n_dofs;
+    if (trial_is_vector_basis_) {
+        throw std::logic_error("AssemblyContext::setTrialBasisHessians: scalar basis Hessians not valid for vector-basis spaces");
+    }
     trial_ref_hessians_.assign(hessians.begin(), hessians.end());
 }
 

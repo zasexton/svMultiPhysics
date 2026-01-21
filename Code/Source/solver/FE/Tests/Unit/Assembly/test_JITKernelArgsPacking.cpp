@@ -90,7 +90,7 @@ TEST(JITKernelArgsPacking, PacksCellKernelArgsPointersAndCounts)
     EXPECT_EQ(args.side.num_coupled_aux, coupled_aux.size());
 
     EXPECT_EQ(args.side.num_previous_solutions, 1u);
-    EXPECT_EQ(args.side.previous_solution_coefficients[0], prev_coeffs.data());
+    EXPECT_EQ(args.side.previous_solution_coefficients[0], ctx.previousSolutionCoefficientsRaw(/*k=*/1).data());
 
     EXPECT_EQ(args.output.element_matrix, out.local_matrix.data());
     EXPECT_EQ(args.output.element_vector, out.local_vector.data());
@@ -100,4 +100,3 @@ TEST(JITKernelArgsPacking, PacksCellKernelArgsPointersAndCounts)
 } // namespace assembly
 } // namespace FE
 } // namespace svmp
-

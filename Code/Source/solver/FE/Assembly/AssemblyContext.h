@@ -306,6 +306,12 @@ public:
     [[nodiscard]] FieldType testFieldType() const noexcept { return test_field_type_; }
     [[nodiscard]] FieldType trialFieldType() const noexcept { return trial_field_type_; }
 
+    [[nodiscard]] Continuity testContinuity() const noexcept { return test_continuity_; }
+    [[nodiscard]] Continuity trialContinuity() const noexcept { return trial_continuity_; }
+
+    [[nodiscard]] bool testUsesVectorBasis() const noexcept { return test_is_vector_basis_; }
+    [[nodiscard]] bool trialUsesVectorBasis() const noexcept { return trial_is_vector_basis_; }
+
     [[nodiscard]] int testValueDimension() const noexcept { return test_value_dim_; }
     [[nodiscard]] int trialValueDimension() const noexcept { return trial_value_dim_; }
 
@@ -525,6 +531,49 @@ public:
     }
 
     // =========================================================================
+    // Vector Basis Function Data (Test Space, H(curl)/H(div))
+    // =========================================================================
+
+    /**
+     * @brief Get test vector basis function value (physical space) at quadrature point
+     */
+    [[nodiscard]] Vector3D basisVectorValue(LocalIndex i, LocalIndex q) const;
+
+    /**
+     * @brief Raw test vector basis values storage (layout: [i * n_qpts + q])
+     */
+    [[nodiscard]] std::span<const Vector3D> testBasisVectorValuesRaw() const noexcept
+    {
+        return test_basis_vector_values_;
+    }
+
+    /**
+     * @brief Get curl of a test basis function (physical space) at quadrature point (H(curl))
+     */
+    [[nodiscard]] Vector3D basisCurl(LocalIndex i, LocalIndex q) const;
+
+    /**
+     * @brief Raw test basis curls storage (layout: [i * n_qpts + q])
+     */
+    [[nodiscard]] std::span<const Vector3D> testBasisCurlsRaw() const noexcept
+    {
+        return test_basis_curls_;
+    }
+
+    /**
+     * @brief Get divergence of a test basis function (physical space) at quadrature point (H(div))
+     */
+    [[nodiscard]] Real basisDivergence(LocalIndex i, LocalIndex q) const;
+
+    /**
+     * @brief Raw test basis divergences storage (layout: [i * n_qpts + q])
+     */
+    [[nodiscard]] std::span<const Real> testBasisDivergencesRaw() const noexcept
+    {
+        return test_basis_divergences_;
+    }
+
+    // =========================================================================
     // Basis Hessians (optional; prepared if RequiredData::BasisHessians)
     // =========================================================================
 
@@ -570,6 +619,54 @@ public:
      */
     [[nodiscard]] std::span<const Real> trialBasisValuesRaw() const noexcept {
         return trial_is_test_ ? std::span<const Real>(test_basis_values_) : std::span<const Real>(trial_basis_values_);
+    }
+
+    // =========================================================================
+    // Vector Basis Function Data (Trial Space, H(curl)/H(div))
+    // =========================================================================
+
+    /**
+     * @brief Get trial vector basis function value (physical space) at quadrature point
+     */
+    [[nodiscard]] Vector3D trialBasisVectorValue(LocalIndex j, LocalIndex q) const;
+
+    /**
+     * @brief Raw trial vector basis values storage (layout: [j * n_qpts + q])
+     *
+     * When the trial space aliases the test space, this returns the test storage.
+     */
+    [[nodiscard]] std::span<const Vector3D> trialBasisVectorValuesRaw() const noexcept
+    {
+        return trial_is_test_ ? std::span<const Vector3D>(test_basis_vector_values_)
+                              : std::span<const Vector3D>(trial_basis_vector_values_);
+    }
+
+    /**
+     * @brief Get curl of a trial basis function (physical space) at quadrature point (H(curl))
+     */
+    [[nodiscard]] Vector3D trialBasisCurl(LocalIndex j, LocalIndex q) const;
+
+    /**
+     * @brief Raw trial basis curls storage (layout: [j * n_qpts + q])
+     */
+    [[nodiscard]] std::span<const Vector3D> trialBasisCurlsRaw() const noexcept
+    {
+        return trial_is_test_ ? std::span<const Vector3D>(test_basis_curls_)
+                              : std::span<const Vector3D>(trial_basis_curls_);
+    }
+
+    /**
+     * @brief Get divergence of a trial basis function (physical space) at quadrature point (H(div))
+     */
+    [[nodiscard]] Real trialBasisDivergence(LocalIndex j, LocalIndex q) const;
+
+    /**
+     * @brief Raw trial basis divergences storage (layout: [j * n_qpts + q])
+     */
+    [[nodiscard]] std::span<const Real> trialBasisDivergencesRaw() const noexcept
+    {
+        return trial_is_test_ ? std::span<const Real>(test_basis_divergences_)
+                              : std::span<const Real>(trial_basis_divergences_);
     }
 
     /**
@@ -780,6 +877,20 @@ public:
                                 std::span<const Matrix3x3> component_hessians = {},
                                 std::span<const Real> component_laplacians = {});
 
+    /**
+     * @brief Bind previous (history) scalar field values at quadrature points
+     *
+     * History indexing convention: k=1 is u^{n-1}, k=2 is u^{n-2}, ...
+     */
+    void setFieldPreviousSolutionScalarK(FieldId field, int k, std::span<const Real> values);
+
+    /**
+     * @brief Bind previous (history) vector field values at quadrature points
+     *
+     * History indexing convention: k=1 is u^{n-1}, k=2 is u^{n-2}, ...
+     */
+    void setFieldPreviousSolutionVectorK(FieldId field, int k, int value_dimension, std::span<const Vector3D> values);
+
     [[nodiscard]] bool hasFieldSolutionData(FieldId field) const noexcept;
     [[nodiscard]] FieldType fieldSolutionFieldType(FieldId field) const;
     [[nodiscard]] int fieldSolutionValueDimension(FieldId field) const;
@@ -792,6 +903,9 @@ public:
     [[nodiscard]] Real fieldLaplacian(FieldId field, LocalIndex q) const;
     [[nodiscard]] Matrix3x3 fieldComponentHessian(FieldId field, LocalIndex q, int component) const;
     [[nodiscard]] Real fieldComponentLaplacian(FieldId field, LocalIndex q, int component) const;
+
+    [[nodiscard]] Real fieldPreviousValue(FieldId field, LocalIndex q, int k) const;
+    [[nodiscard]] Vector3D fieldPreviousVectorValue(FieldId field, LocalIndex q, int k) const;
 
     /**
      * @brief Check if solution data is available
@@ -1031,6 +1145,36 @@ public:
         std::span<const Vector3D> gradients);
 
     /**
+     * @brief Set test vector basis values (physical space; layout: [i * n_qpts + q])
+     */
+    void setTestVectorBasisValues(LocalIndex n_dofs, std::span<const Vector3D> values);
+
+    /**
+     * @brief Set trial vector basis values (physical space; layout: [j * n_qpts + q])
+     */
+    void setTrialVectorBasisValues(LocalIndex n_dofs, std::span<const Vector3D> values);
+
+    /**
+     * @brief Set curl of test basis functions (physical space; layout: [i * n_qpts + q])
+     */
+    void setTestBasisCurls(LocalIndex n_dofs, std::span<const Vector3D> curls);
+
+    /**
+     * @brief Set curl of trial basis functions (physical space; layout: [j * n_qpts + q])
+     */
+    void setTrialBasisCurls(LocalIndex n_dofs, std::span<const Vector3D> curls);
+
+    /**
+     * @brief Set divergence of test basis functions (physical space; layout: [i * n_qpts + q])
+     */
+    void setTestBasisDivergences(LocalIndex n_dofs, std::span<const Real> divergences);
+
+    /**
+     * @brief Set divergence of trial basis functions (physical space; layout: [j * n_qpts + q])
+     */
+    void setTrialBasisDivergences(LocalIndex n_dofs, std::span<const Real> divergences);
+
+    /**
      * @brief Set reference Hessians for test basis functions
      */
     void setTestBasisHessians(
@@ -1098,6 +1242,10 @@ private:
     // Space metadata (needed for vector-valued TrialFunction evaluation)
     FieldType test_field_type_{FieldType::Scalar};
     FieldType trial_field_type_{FieldType::Scalar};
+    Continuity test_continuity_{Continuity::C0};
+    Continuity trial_continuity_{Continuity::C0};
+    bool test_is_vector_basis_{false};
+    bool trial_is_vector_basis_{false};
     int test_value_dim_{1};
     int trial_value_dim_{1};
 
@@ -1123,10 +1271,18 @@ private:
     std::vector<Vector3D> test_ref_gradients_;      // [i * n_qpts + q]
     std::vector<Vector3D> test_phys_gradients_;     // [i * n_qpts + q]
 
+    // Test vector-basis data (H(curl)/H(div)) (n_test_dofs * n_qpts arrays)
+    std::vector<Vector3D> test_basis_vector_values_; // [i * n_qpts + q]
+    std::vector<Vector3D> test_basis_curls_;         // [i * n_qpts + q]
+    std::vector<Real> test_basis_divergences_;       // [i * n_qpts + q]
+
     // Trial basis data (may be same as test for square)
     std::vector<Real> trial_basis_values_;
     std::vector<Vector3D> trial_ref_gradients_;
     std::vector<Vector3D> trial_phys_gradients_;
+    std::vector<Vector3D> trial_basis_vector_values_;
+    std::vector<Vector3D> trial_basis_curls_;
+    std::vector<Real> trial_basis_divergences_;
     bool trial_is_test_{true};  // Optimization flag
 
     // Optional basis Hessians (n_dofs * n_qpts arrays)
@@ -1153,6 +1309,10 @@ private:
 
         std::vector<Real> values{};
         std::vector<Vector3D> vector_values{};
+        // Previous (history) values packed by time index:
+        //   history_values[(k-1)*n_qpts + q] == field value at quadrature point q from u^{n-k}.
+        std::vector<Real> history_values{};
+        std::vector<Vector3D> history_vector_values{};
         std::vector<Vector3D> gradients{};
         std::vector<Matrix3x3> jacobians{};
         std::vector<Matrix3x3> hessians{};
