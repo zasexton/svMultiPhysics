@@ -539,6 +539,27 @@ public:
     virtual void setPreviousSolution2(std::span<const Real> /*solution*/) {}
 
     /**
+     * @brief Set the previous-step solution vector via a global-indexed view
+     *
+     * This supports backends whose local storage is not directly indexable by
+     * global DOF (e.g., distributed/ghosted vectors or permuted layouts).
+     *
+     * Default implementation is a no-op.
+     *
+     * @param solution_view Global-indexed vector view (nullable to clear)
+     */
+    virtual void setPreviousSolutionView(const GlobalSystemView* /*solution_view*/) {}
+
+    /**
+     * @brief Set the previous-previous solution vector via a global-indexed view
+     *
+     * Default implementation is a no-op.
+     *
+     * @param solution_view Global-indexed vector view (nullable to clear)
+     */
+    virtual void setPreviousSolution2View(const GlobalSystemView* /*solution_view*/) {}
+
+    /**
      * @brief Set the k-th previous solution vector (u^{n-k}) for transient assembly
      *
      * Default implementation forwards k=1,2 to setPreviousSolution/setPreviousSolution2.
@@ -550,6 +571,21 @@ public:
             setPreviousSolution(solution);
         } else if (k == 2) {
             setPreviousSolution2(solution);
+        }
+    }
+
+    /**
+     * @brief Set the k-th previous solution vector via a global-indexed view
+     *
+     * Default implementation forwards k=1,2 to setPreviousSolutionView/setPreviousSolution2View.
+     * Higher k values are ignored unless overridden by a concrete assembler.
+     */
+    virtual void setPreviousSolutionViewK(int k, const GlobalSystemView* solution_view)
+    {
+        if (k == 1) {
+            setPreviousSolutionView(solution_view);
+        } else if (k == 2) {
+            setPreviousSolution2View(solution_view);
         }
     }
 

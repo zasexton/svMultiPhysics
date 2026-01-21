@@ -331,6 +331,7 @@ void MeshAccess::forEachBoundaryFace(
         if (c0_valid == c1_valid) continue;
 
         const auto adj_cell = static_cast<GlobalIndex>(c0_valid ? fc[0] : fc[1]);
+        if (!isOwnedCell(adj_cell)) continue;
 
         if (!match_all) {
             const auto lbl = mesh_.base().boundary_label(static_cast<svmp::index_t>(f));

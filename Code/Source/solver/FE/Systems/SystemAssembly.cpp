@@ -294,6 +294,9 @@ assembly::AssemblyResult assembleOperator(
         }
     }
 
+    std::unique_ptr<assembly::GlobalSystemView> prev_solution_view;
+    std::unique_ptr<assembly::GlobalSystemView> prev2_solution_view;
+
     if (required_history > 0) {
         if (!state.u_history.empty()) {
             FE_THROW_IF(static_cast<int>(state.u_history.size()) < required_history, InvalidArgumentException,
@@ -309,10 +312,32 @@ assembly::AssemblyResult assembleOperator(
             assembler.setPreviousSolution(state.u_prev);
             assembler.setPreviousSolution2(state.u_prev2);
         }
+
+        // Provide global-indexed views for history states when available (needed by some backends).
+        if (required_history >= 1) {
+            if (state.u_prev_vector != nullptr) {
+                auto* vec = const_cast<backends::GenericVector*>(state.u_prev_vector);
+                prev_solution_view = vec->createAssemblyView();
+                assembler.setPreviousSolutionView(prev_solution_view.get());
+            } else {
+                assembler.setPreviousSolutionView(nullptr);
+            }
+        }
+        if (required_history >= 2) {
+            if (state.u_prev2_vector != nullptr) {
+                auto* vec = const_cast<backends::GenericVector*>(state.u_prev2_vector);
+                prev2_solution_view = vec->createAssemblyView();
+                assembler.setPreviousSolution2View(prev2_solution_view.get());
+            } else {
+                assembler.setPreviousSolution2View(nullptr);
+            }
+        }
     } else {
         // No dt(...) required by the active time-integration context.
         assembler.setPreviousSolution({});
         assembler.setPreviousSolution2({});
+        assembler.setPreviousSolutionView(nullptr);
+        assembler.setPreviousSolution2View(nullptr);
     }
 
     // Optional parameter validation + defaults.
