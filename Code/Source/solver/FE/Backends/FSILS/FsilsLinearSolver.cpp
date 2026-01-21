@@ -21,6 +21,7 @@
 #include <cmath>
 #include <limits>
 #include <mpi.h>
+#include <string>
 #include <vector>
 
 namespace svmp {
@@ -35,6 +36,7 @@ FsilsLinearSolver::FsilsLinearSolver(const SolverOptions& options)
 void FsilsLinearSolver::setOptions(const SolverOptions& options)
 {
     FE_THROW_IF(options.max_iter <= 0, InvalidArgumentException, "FsilsLinearSolver: max_iter must be > 0");
+    FE_THROW_IF(options.krylov_dim < 0, InvalidArgumentException, "FsilsLinearSolver: krylov_dim must be >= 0");
     FE_THROW_IF(options.rel_tol < 0.0, InvalidArgumentException, "FsilsLinearSolver: rel_tol must be >= 0");
     FE_THROW_IF(options.abs_tol < 0.0, InvalidArgumentException, "FsilsLinearSolver: abs_tol must be >= 0");
     FE_THROW_IF(options.use_initial_guess, NotImplementedException, "FsilsLinearSolver: initial guess not supported");
@@ -125,25 +127,44 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 "FsilsLinearSolver::solve: nnz exceeds FSILS int index range");
     Array<double> Val(dof * dof, static_cast<int>(nnz), values_work.data());
 
-    fsi_linear_solver::FSILS_lsType ls{};
-    int effective_max_iter = options_.max_iter;
-    if (options_.method == SolverMethod::BlockSchur) {
-        // FSILS NS solver uses RI.mItr as a basis dimension and allocates O(nNo * mItr) workspace.
-        // Treat very large generic max_iter as "unset" and fall back to the FSILS default (10) for safety.
-        const int safe_max_iter = (options_.max_iter > 50) ? 10 : options_.max_iter;
-        effective_max_iter = safe_max_iter;
-        fsi_linear_solver::fsils_ls_create(ls,
-                                           fsi_linear_solver::LS_TYPE_NS,
-                                           options_.rel_tol,
-                                           options_.abs_tol,
-                                           safe_max_iter);
-    } else {
-        fsi_linear_solver::fsils_ls_create(ls,
-                                           to_fsils_solver(options_.method),
-                                           options_.rel_tol,
-                                           options_.abs_tol,
-                                           options_.max_iter);
-    }
+	    fsi_linear_solver::FSILS_lsType ls{};
+	    if (options_.method == SolverMethod::BlockSchur) {
+	        // FSILS NS solver uses RI.mItr as a basis dimension and allocates O(nNo * mItr) workspace.
+	        // Treat very large generic max_iter as "unset" and fall back to the FSILS default (10) for safety.
+	        const int safe_max_iter = (options_.max_iter > 50) ? 10 : options_.max_iter;
+	        fsi_linear_solver::fsils_ls_create(ls,
+	                                           fsi_linear_solver::LS_TYPE_NS,
+	                                           options_.rel_tol,
+	                                           options_.abs_tol,
+	                                           safe_max_iter);
+		    } else {
+		        const auto method = to_fsils_solver(options_.method);
+		        if (method == fsi_linear_solver::LS_TYPE_GMRES) {
+		            // FSILS GMRES uses RI.mItr as a restart count and RI.sD as the Krylov subspace dimension.
+		            // Match the legacy svMultiPhysics behavior: interpret SolverOptions::max_iter as the
+		            // FSILS restart count and optionally honor SolverOptions::krylov_dim.
+		            if (options_.krylov_dim > 0) {
+		                fsi_linear_solver::fsils_ls_create(ls,
+		                                                   method,
+		                                                   options_.rel_tol,
+		                                                   options_.abs_tol,
+		                                                   options_.max_iter,
+		                                                   options_.krylov_dim);
+		            } else {
+		                fsi_linear_solver::fsils_ls_create(ls,
+		                                                   method,
+		                                                   options_.rel_tol,
+		                                                   options_.abs_tol,
+		                                                   options_.max_iter);
+		            }
+		        } else {
+		        fsi_linear_solver::fsils_ls_create(ls,
+		                                           method,
+		                                           options_.rel_tol,
+	                                           options_.abs_tol,
+	                                           options_.max_iter);
+	        }
+	    }
 
     Vector<int> incL(0);
     Vector<double> res(0);
@@ -180,37 +201,61 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     }
 
     SolverReport report;
-    report.initial_residual_norm = x->norm();
+	    report.initial_residual_norm = x->norm();
 
-    fsi_linear_solver::fsils_solve(lhs, ls, dof, Ri, Val, prec, incL, res);
+	    fsi_linear_solver::fsils_solve(lhs, ls, dof, Ri, Val, prec, incL, res);
 
-    // Populate diagnostics from FSILS internal report (RI is used across solvers).
-    report.iterations = ls.RI.itr;
-    report.final_residual_norm = ls.RI.fNorm;
-    const Real denom = std::max<Real>(report.initial_residual_norm, 1e-30);
-    report.relative_residual = report.final_residual_norm / denom;
-    report.converged = ls.RI.suc;
-    report.message = "fsils";
+	    // Populate diagnostics from FSILS internal report (RI is used across solvers).
+	    report.iterations = ls.RI.itr;
+	    report.final_residual_norm = ls.RI.fNorm;
+	    const Real denom = std::max<Real>(report.initial_residual_norm, 1e-30);
+	    report.relative_residual = report.final_residual_norm / denom;
+	    report.converged = ls.RI.suc;
+	    report.message = "fsils";
 
-    // FSILS does not robustly report breakdowns for singular/ill-posed systems; guard against
-    // NaNs/infs and corrupted iteration counts so the FE API remains predictable.
-    const auto is_finite = [](Real v) { return std::isfinite(static_cast<double>(v)); };
-    bool x_finite = true;
-    for (const auto v : x->data()) {
-        if (!is_finite(v)) {
-            x_finite = false;
-            break;
-        }
-    }
-    const bool iters_ok = (report.iterations >= 0) && (report.iterations <= effective_max_iter);
-    if (!is_finite(report.final_residual_norm) || !is_finite(report.relative_residual) || !iters_ok || !x_finite) {
-        x->zero();
-        report.converged = false;
-        report.iterations = std::clamp(report.iterations, 0, effective_max_iter);
-        report.final_residual_norm = std::numeric_limits<Real>::infinity();
-        report.relative_residual = std::numeric_limits<Real>::infinity();
-        report.message = "fsils (numerical breakdown)";
-    }
+	    // FSILS does not robustly report breakdowns for singular/ill-posed systems; guard against
+	    // NaNs/infs and corrupted iteration counts so the FE API remains predictable.
+	    const auto is_finite = [](Real v) { return std::isfinite(static_cast<double>(v)); };
+		    const auto raw_iterations = report.iterations;
+		    const auto raw_fnorm = report.final_residual_norm;
+		    const auto raw_rel = report.relative_residual;
+	    bool x_finite = true;
+	    for (const auto v : x->data()) {
+	        if (!is_finite(v)) {
+	            x_finite = false;
+	            break;
+	        }
+	    }
+		    const bool iters_ok = (raw_iterations >= 0 && raw_iterations <= options_.max_iter);
+		    const bool fnorm_ok = is_finite(raw_fnorm);
+		    const bool rel_ok = is_finite(raw_rel);
+		    if (!iters_ok || !fnorm_ok || !rel_ok || !x_finite) {
+		        report.iterations = std::max(0, std::min(raw_iterations, options_.max_iter));
+		        std::string reason;
+		        if (!iters_ok) reason += "itr";
+		        if (!x_finite) {
+	            if (!reason.empty()) reason += ",";
+	            reason += "x";
+	        }
+	        if (!fnorm_ok) {
+	            if (!reason.empty()) reason += ",";
+	            reason += "fNorm";
+	        }
+	        if (!rel_ok) {
+	            if (!reason.empty()) reason += ",";
+	            reason += "rel";
+	        }
+	        if (reason.empty()) reason = "unknown";
+
+	        x->zero();
+	        report.converged = false;
+	        report.final_residual_norm = std::numeric_limits<Real>::infinity();
+	        report.relative_residual = std::numeric_limits<Real>::infinity();
+	        report.message = "fsils (breakdown:" + reason + ")";
+	    } else if (!report.converged) {
+	        report.message = "fsils (not converged; itr=" + std::to_string(report.iterations) +
+	                         ", rel=" + std::to_string(report.relative_residual) + ")";
+	    }
 
     return report;
 }

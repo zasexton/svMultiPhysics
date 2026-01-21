@@ -22,9 +22,9 @@ namespace backends {
 
 namespace {
 
-class FsilsVectorView final : public assembly::GlobalSystemView {
-public:
-    explicit FsilsVectorView(FsilsVector& vec) : vec_(&vec) {}
+	class FsilsVectorView final : public assembly::GlobalSystemView {
+	public:
+	    explicit FsilsVectorView(FsilsVector& vec) : vec_(&vec) {}
 
     // Matrix operations (no-op)
     void addMatrixEntries(std::span<const GlobalIndex>, std::span<const Real>, assembly::AddMode) override {}
@@ -46,18 +46,28 @@ public:
         }
     }
 
-    void addVectorEntry(GlobalIndex dof, Real value, assembly::AddMode mode) override
-    {
-        FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
-        if (dof < 0 || dof >= vec_->size()) {
-            return;
-        }
+	    void addVectorEntry(GlobalIndex dof, Real value, assembly::AddMode mode) override
+	    {
+	        FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
+	        if (dof < 0 || dof >= vec_->size()) {
+	            return;
+	        }
 
-        std::size_t idx = 0;
-        if (const auto* shared = vec_->shared()) {
-            const int dof_per_node = shared->dof;
-            const int global_node = static_cast<int>(dof / dof_per_node);
-            const int comp = static_cast<int>(dof % dof_per_node);
+	        if (const auto* shared = vec_->shared()) {
+	            if (const auto perm = shared->dof_permutation; perm && !perm->empty()) {
+	                const auto& fwd = perm->forward;
+	                if (static_cast<std::size_t>(dof) >= fwd.size()) {
+	                    return;
+	                }
+	                dof = fwd[static_cast<std::size_t>(dof)];
+	            }
+	        }
+
+	        std::size_t idx = 0;
+	        if (const auto* shared = vec_->shared()) {
+	            const int dof_per_node = shared->dof;
+	            const int global_node = static_cast<int>(dof / dof_per_node);
+	            const int comp = static_cast<int>(dof % dof_per_node);
             const int old = shared->globalNodeToOld(global_node);
             if (old < 0) return;
             idx = static_cast<std::size_t>(old) * static_cast<std::size_t>(dof_per_node) +
@@ -102,18 +112,28 @@ public:
         }
     }
 
-    [[nodiscard]] Real getVectorEntry(GlobalIndex dof) const override
-    {
-        FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
-        if (dof < 0 || dof >= vec_->size()) {
-            return 0.0;
-        }
+	    [[nodiscard]] Real getVectorEntry(GlobalIndex dof) const override
+	    {
+	        FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
+	        if (dof < 0 || dof >= vec_->size()) {
+	            return 0.0;
+	        }
 
-        std::size_t idx = 0;
-        if (const auto* shared = vec_->shared()) {
-            const int dof_per_node = shared->dof;
-            const int global_node = static_cast<int>(dof / dof_per_node);
-            const int comp = static_cast<int>(dof % dof_per_node);
+	        if (const auto* shared = vec_->shared()) {
+	            if (const auto perm = shared->dof_permutation; perm && !perm->empty()) {
+	                const auto& fwd = perm->forward;
+	                if (static_cast<std::size_t>(dof) >= fwd.size()) {
+	                    return 0.0;
+	                }
+	                dof = fwd[static_cast<std::size_t>(dof)];
+	            }
+	        }
+
+	        std::size_t idx = 0;
+	        if (const auto* shared = vec_->shared()) {
+	            const int dof_per_node = shared->dof;
+	            const int global_node = static_cast<int>(dof / dof_per_node);
+	            const int comp = static_cast<int>(dof % dof_per_node);
             const int old = shared->globalNodeToOld(global_node);
             if (old < 0) return 0.0;
             idx = static_cast<std::size_t>(old) * static_cast<std::size_t>(dof_per_node) +

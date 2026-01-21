@@ -48,13 +48,9 @@ int main(int argc, char** argv)
     ::testing::InitGoogleTest(&argc, argv);
 
 #if defined(FE_HAS_FSILS)
-    int mpi_was_initialized = 0;
-    MPI_Initialized(&mpi_was_initialized);
-    bool mpi_initialized_here = false;
-    if (!mpi_was_initialized) {
-        MPI_Init(&argc, &argv);
-        mpi_initialized_here = true;
-    }
+    // The non-MPI backends unit test binary is expected to run in serial.
+    // FSILS and other MPI-aware backends must therefore tolerate MPI not being
+    // initialized (they should fall back to single-rank behavior).
 #endif
 
 #if defined(FE_HAS_PETSC)
@@ -72,12 +68,6 @@ int main(int argc, char** argv)
 #if defined(FE_HAS_PETSC)
     if (petsc_initialized_here) {
         PetscFinalize();
-    }
-#endif
-
-#if defined(FE_HAS_FSILS)
-    if (mpi_initialized_here) {
-        MPI_Finalize();
     }
 #endif
 
