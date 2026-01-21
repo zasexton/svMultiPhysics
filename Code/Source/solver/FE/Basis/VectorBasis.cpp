@@ -1674,8 +1674,10 @@ RaviartThomasBasis::RaviartThomasBasis(ElementType type, int order)
         return;
     }
 
-    if (order_ > 0 && (is_quadrilateral(type) || is_hexahedron(type) ||
-                       is_triangle(type) || is_tetrahedron(type))) {
+    // Generate nodal (moment-based) basis functions via DOF matrix inversion.
+    // This is used for all supported orders, including k=0, to ensure consistent
+    // entity ordering and orientation behavior across mesh permutations.
+    if (is_quadrilateral(type) || is_hexahedron(type) || is_triangle(type) || is_tetrahedron(type)) {
         const std::size_t n = size_;
 
         // ------------------------------------------------------------------
@@ -2757,16 +2759,21 @@ void RaviartThomasBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
         // n_i = grad(lambda_i) and standard face parameterizations.
         constexpr Real c0 = Real(-2.0 / std::sqrt(3.0));
         values.resize(4);
-        values[0] = math::Vector<Real, 3>{c0 * x, c0 * y, c0 * z};
-        values[1] = math::Vector<Real, 3>{Real(2) - Real(2) * x,
-                                          -Real(2) * y,
-                                          -Real(2) * z};
-        values[2] = math::Vector<Real, 3>{-Real(2) * x,
-                                          Real(2) - Real(2) * y,
-                                          -Real(2) * z};
-        values[3] = math::Vector<Real, 3>{-Real(2) * x,
+        // Ordering matches ReferenceElement (Tetra4) face list:
+        //   f0: (0,1,2) opposite v3
+        //   f1: (0,1,3) opposite v2
+        //   f2: (1,2,3) opposite v0
+        //   f3: (0,2,3) opposite v1
+        values[0] = math::Vector<Real, 3>{-Real(2) * x,
                                           -Real(2) * y,
                                           Real(2) - Real(2) * z};
+        values[1] = math::Vector<Real, 3>{-Real(2) * x,
+                                          Real(2) - Real(2) * y,
+                                          -Real(2) * z};
+        values[2] = math::Vector<Real, 3>{c0 * x, c0 * y, c0 * z};
+        values[3] = math::Vector<Real, 3>{Real(2) - Real(2) * x,
+                                          -Real(2) * y,
+                                          -Real(2) * z};
         return;
     }
 
@@ -2892,9 +2899,10 @@ void RaviartThomasBasis::evaluate_divergence(const math::Vector<Real, 3>& xi,
         if (is_tetrahedron(element_type_)) {
             // Constant divergences corresponding to the minimal RT0 tetra basis above.
             const Real c0 = Real(-2.0 / std::sqrt(3.0));
-            divergence = {Real(3) * c0,
+            // Keep ordering consistent with evaluate_vector_values (ReferenceElement face order).
+            divergence = {Real(-6),
                           Real(-6),
-                          Real(-6),
+                          Real(3) * c0,
                           Real(-6)};
         } else if (is_wedge(element_type_)) {
             // Divergences of the minimal RT0 wedge basis

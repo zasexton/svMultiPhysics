@@ -5,8 +5,10 @@
 
 #include <gtest/gtest.h>
 #include "FE/Basis/LagrangeBasis.h"
+#include "FE/Basis/NodeOrderingConventions.h"
 #include "FE/Basis/VectorBasis.h"
 #include "FE/Core/FEException.h"
+#include "FE/Elements/ReferenceElement.h"
 #include "FE/Quadrature/GaussQuadrature.h"
 #include "FE/Quadrature/QuadratureFactory.h"
 #include "FE/Quadrature/TriangleQuadrature.h"
@@ -59,17 +61,23 @@ static double integrate_tetra_face_tangential_moment(const NedelecBasis& basis,
 
 TEST(RaviartThomasBasis, DivergenceConstants) {
     RaviartThomasBasis basis(ElementType::Quad4, 0);
-    svmp::FE::math::Vector<Real, 3> xi{0.0, 0.0, 0.0};
-    std::vector<svmp::FE::math::Vector<Real, 3>> values;
-    basis.evaluate_vector_values(xi, values);
-    ASSERT_EQ(values.size(), 4u);
-    EXPECT_NEAR(values[0][0], 0.5, 1e-12);
+    ASSERT_EQ(basis.size(), 4u);
 
-    std::vector<Real> div;
-    basis.evaluate_divergence(xi, div);
-    ASSERT_EQ(div.size(), 4u);
-    EXPECT_NEAR(div[0], 0.5, 1e-12);
-    EXPECT_NEAR(div[1], -0.5, 1e-12);
+    const svmp::FE::math::Vector<Real, 3> xi0{Real(0.0), Real(0.0), Real(0.0)};
+    const svmp::FE::math::Vector<Real, 3> xi1{Real(0.37), Real(-0.22), Real(0.0)};
+
+    std::vector<Real> div0;
+    std::vector<Real> div1;
+    basis.evaluate_divergence(xi0, div0);
+    basis.evaluate_divergence(xi1, div1);
+
+    ASSERT_EQ(div0.size(), basis.size());
+    ASSERT_EQ(div1.size(), basis.size());
+
+    for (std::size_t i = 0; i < basis.size(); ++i) {
+        EXPECT_NEAR(div0[i], div1[i], 1e-12);
+        EXPECT_NEAR(div0[i], 0.25, 1e-12);
+    }
 }
 
 TEST(NedelecBasis, CurlSigns) {
@@ -341,39 +349,20 @@ TEST(RaviartThomasBasis, TriangleOrderOneEdgeDofsAreKronecker) {
 
 TEST(RaviartThomasBasis, HexDivergenceConstants) {
     RaviartThomasBasis basis(ElementType::Hex8, 0);
-    svmp::FE::math::Vector<Real, 3> xi{Real(0.2), Real(-0.1), Real(0.3)};
+    const svmp::FE::math::Vector<Real, 3> xi0{Real(0.2), Real(-0.1), Real(0.3)};
+    const svmp::FE::math::Vector<Real, 3> xi1{Real(-0.33), Real(0.27), Real(-0.19)};
 
-    std::vector<Real> div;
-    basis.evaluate_divergence(xi, div);
-    ASSERT_EQ(div.size(), 6u);
-    EXPECT_NEAR(div[0], 0.25, 1e-12);
-    EXPECT_NEAR(div[1], -0.25, 1e-12);
-    EXPECT_NEAR(div[2], 0.25, 1e-12);
-    EXPECT_NEAR(div[3], -0.25, 1e-12);
-    EXPECT_NEAR(div[4], 0.25, 1e-12);
-    EXPECT_NEAR(div[5], -0.25, 1e-12);
+    std::vector<Real> div0;
+    std::vector<Real> div1;
+    basis.evaluate_divergence(xi0, div0);
+    basis.evaluate_divergence(xi1, div1);
+    ASSERT_EQ(div0.size(), 6u);
+    ASSERT_EQ(div1.size(), 6u);
 
-    std::vector<svmp::FE::math::Vector<Real, 3>> vals;
-    basis.evaluate_vector_values(xi, vals);
-    ASSERT_EQ(vals.size(), 6u);
-    EXPECT_NEAR(vals[0][0], 0.25 * (Real(1) + xi[0]), 1e-12);
-    EXPECT_NEAR(vals[1][0], 0.25 * (Real(1) - xi[0]), 1e-12);
-    EXPECT_NEAR(vals[2][1], 0.25 * (Real(1) + xi[1]), 1e-12);
-    EXPECT_NEAR(vals[3][1], 0.25 * (Real(1) - xi[1]), 1e-12);
-    EXPECT_NEAR(vals[4][2], 0.25 * (Real(1) + xi[2]), 1e-12);
-    EXPECT_NEAR(vals[5][2], 0.25 * (Real(1) - xi[2]), 1e-12);
-    EXPECT_NEAR(vals[0][1], 0.0, 1e-12);
-    EXPECT_NEAR(vals[0][2], 0.0, 1e-12);
-    EXPECT_NEAR(vals[1][1], 0.0, 1e-12);
-    EXPECT_NEAR(vals[1][2], 0.0, 1e-12);
-    EXPECT_NEAR(vals[2][0], 0.0, 1e-12);
-    EXPECT_NEAR(vals[2][2], 0.0, 1e-12);
-    EXPECT_NEAR(vals[3][0], 0.0, 1e-12);
-    EXPECT_NEAR(vals[3][2], 0.0, 1e-12);
-    EXPECT_NEAR(vals[4][0], 0.0, 1e-12);
-    EXPECT_NEAR(vals[4][1], 0.0, 1e-12);
-    EXPECT_NEAR(vals[5][0], 0.0, 1e-12);
-    EXPECT_NEAR(vals[5][1], 0.0, 1e-12);
+    for (std::size_t i = 0; i < div0.size(); ++i) {
+        EXPECT_NEAR(div0[i], div1[i], 1e-12);
+        EXPECT_NEAR(std::abs(div0[i]), 0.125, 1e-12);
+    }
 }
 
 TEST(NedelecBasis, HexCurlConstants) {
@@ -481,57 +470,59 @@ TEST(NedelecBasis, PyramidCurlsAreDivergenceFree) {
     }
 }
 
-static double integrate_edge_normal_flux(const RaviartThomasBasis& basis,
-                                         int edge_id,
-                                         const svmp::FE::math::Vector<Real, 3>& xi_fixed,
-                                         int varying_dim) {
+static double integrate_edge_normal_flux_quad4(const RaviartThomasBasis& basis,
+                                               int edge_id,
+                                               int func_id,
+                                               int quad_order = 6) {
     using svmp::FE::quadrature::GaussQuadrature1D;
-    GaussQuadrature1D quad(4);
+    using svmp::FE::elements::ReferenceElement;
+    using svmp::FE::math::Vector;
+
+    const ReferenceElement ref = ReferenceElement::create(ElementType::Quad4);
+    const auto& en = ref.edge_nodes(static_cast<std::size_t>(edge_id));
+    EXPECT_EQ(en.size(), 2u);
+    const Vector<Real, 3> p0 = NodeOrdering::get_node_coords(ElementType::Quad4, static_cast<std::size_t>(en[0]));
+    const Vector<Real, 3> p1 = NodeOrdering::get_node_coords(ElementType::Quad4, static_cast<std::size_t>(en[1]));
+
+    const Vector<Real, 3> tvec = p1 - p0;
+    const Real len = tvec.norm();
+    EXPECT_GT(len, Real(0));
+    if (len <= Real(0)) {
+        return 0.0;
+    }
+
+    const Vector<Real, 3> t = tvec / len;
+    const Vector<Real, 3> nrm{t[1], -t[0], Real(0)};
+    const Real J = len * Real(0.5);
+
+    GaussQuadrature1D quad(quad_order);
     double flux = 0.0;
     for (std::size_t q = 0; q < quad.num_points(); ++q) {
-        auto p = xi_fixed;
-        p[static_cast<std::size_t>(varying_dim)] = quad.point(q)[0];
+        const Real s = quad.point(q)[0];
+        const Real tpar = (s + Real(1)) * Real(0.5);
+        const Vector<Real, 3> xi = p0 * (Real(1) - tpar) + p1 * tpar;
 
-        std::vector<svmp::FE::math::Vector<Real, 3>> v;
-        basis.evaluate_vector_values(p, v);
-        const svmp::FE::math::Vector<Real, 3>& f = v[static_cast<std::size_t>(edge_id)];
+        std::vector<Vector<Real, 3>> vals;
+        basis.evaluate_vector_values(xi, vals);
+        const auto& v = vals[static_cast<std::size_t>(func_id)];
 
-        // Outward normals for quad edges: +x, -x, +y, -y
-        svmp::FE::math::Vector<Real, 3> n{};
-        if (edge_id == 0) n[0] = 1.0;
-        else if (edge_id == 1) n[0] = -1.0;
-        else if (edge_id == 2) n[1] = 1.0;
-        else n[1] = -1.0;
-
-        flux += quad.weight(q) * (f[0] * n[0] + f[1] * n[1]);
+        flux += static_cast<double>(quad.weight(q) * (J * v.dot(nrm)));
     }
     return flux;
 }
 
 TEST(RaviartThomasBasis, QuadEdgeFluxes) {
     RaviartThomasBasis basis(ElementType::Quad4, 0);
+    ASSERT_EQ(basis.size(), 4u);
 
-    // Edge parameterizations: x=+/-1 vary y; y=+/-1 vary x
-    struct Edge {
-        int id;
-        svmp::FE::math::Vector<Real, 3> xi;
-        int varying_dim;
-    };
-    std::vector<Edge> edges = {
-        {0, {Real(1), Real(0), Real(0)}, 1},   // x=+1
-        {1, {Real(-1), Real(0), Real(0)}, 1},  // x=-1
-        {2, {Real(0), Real(1), Real(0)}, 0},   // y=+1
-        {3, {Real(0), Real(-1), Real(0)}, 0},  // y=-1
-    };
-
-    for (const auto& e : edges) {
-        double own_flux = integrate_edge_normal_flux(basis, e.id, e.xi, e.varying_dim);
-        EXPECT_GT(std::abs(own_flux), 1.5); // dominant on its edge
-
-        for (int other = 0; other < 4; ++other) {
-            if (other == e.id) continue;
-            double flux = integrate_edge_normal_flux(basis, other, e.xi, e.varying_dim);
-            EXPECT_LT(std::abs(flux), std::abs(own_flux));
+    for (int edge = 0; edge < 4; ++edge) {
+        for (int func = 0; func < 4; ++func) {
+            const double flux = integrate_edge_normal_flux_quad4(basis, edge, func);
+            if (edge == func) {
+                EXPECT_NEAR(flux, 1.0, 1e-12);
+            } else {
+                EXPECT_NEAR(flux, 0.0, 1e-12);
+            }
         }
     }
 }
@@ -1420,4 +1411,3 @@ TEST(NedelecBasis, DofAssociationsPyramid) {
     EXPECT_EQ(face_dofs, 0);
     EXPECT_EQ(interior_dofs, 0);
 }
-
