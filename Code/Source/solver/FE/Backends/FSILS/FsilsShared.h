@@ -10,9 +10,11 @@
 
 #include "Core/Types.h"
 
+#include "Backends/Interfaces/DofPermutation.h"
 #include "Backends/FSILS/liner_solver/fils_struct.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -45,6 +47,9 @@ struct FsilsShared final {
     // Inverse permutation for convenience: old_of_internal[internal] = old.
     std::vector<int> old_of_internal{};
 
+    // Optional global DOF permutation: FE ordering -> FSILS node-block ordering.
+    std::shared_ptr<const DofPermutation> dof_permutation{};
+
     fsi_linear_solver::FSILS_lhsType lhs{};
 
     [[nodiscard]] int localNodeCount() const noexcept { return lhs.nNo; }
@@ -70,4 +75,3 @@ struct FsilsShared final {
 } // namespace svmp
 
 #endif // SVMP_FE_BACKENDS_FSILS_SHARED_H
-

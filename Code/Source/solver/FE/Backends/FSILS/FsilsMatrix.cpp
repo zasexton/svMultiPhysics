@@ -208,26 +208,34 @@ public:
         addMatrixEntry(dof, dof, value, assembly::AddMode::Insert);
     }
 
-    void zeroRows(std::span<const GlobalIndex> rows, bool set_diagonal) override
-    {
-        FE_CHECK_NOT_NULL(matrix_, "FsilsMatrixView::matrix");
+	    void zeroRows(std::span<const GlobalIndex> rows, bool set_diagonal) override
+	    {
+	        FE_CHECK_NOT_NULL(matrix_, "FsilsMatrixView::matrix");
 
-        const auto shared = matrix_->shared();
-        if (!shared) return;
+	        const auto shared = matrix_->shared();
+	        if (!shared) return;
 
         auto& lhs = *static_cast<fsi_linear_solver::FSILS_lhsType*>(matrix_->fsilsLhsPtr());
         const int dof = matrix_->fsilsDof();
         const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
-        Real* values = matrix_->fsilsValuesPtr();
+	        Real* values = matrix_->fsilsValuesPtr();
 
-        for (const GlobalIndex row_dof : rows) {
-            if (row_dof < 0 || row_dof >= matrix_->numRows()) continue;
+	        for (const GlobalIndex row_dof : rows) {
+	            if (row_dof < 0 || row_dof >= matrix_->numRows()) continue;
 
-            const int global_node = static_cast<int>(row_dof / dof);
-            const int row_comp = static_cast<int>(row_dof % dof);
+	            GlobalIndex row_fs = row_dof;
+	            if (const auto perm = shared->dof_permutation; perm && !perm->empty()) {
+	                if (static_cast<std::size_t>(row_dof) >= perm->forward.size()) {
+	                    continue;
+	                }
+	                row_fs = perm->forward[static_cast<std::size_t>(row_dof)];
+	            }
 
-            const int old = shared->globalNodeToOld(global_node);
-            if (old < 0) continue;
+	            const int global_node = static_cast<int>(row_fs / dof);
+	            const int row_comp = static_cast<int>(row_fs % dof);
+
+	            const int old = shared->globalNodeToOld(global_node);
+	            if (old < 0) continue;
 
             const int internal = lhs.map(old);
             const int start = lhs.rowPtr(0, internal);
@@ -284,11 +292,13 @@ private:
 } // namespace
 
 FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& sparsity)
-    : FsilsMatrix(sparsity, /*dof_per_node=*/1)
+    : FsilsMatrix(sparsity, /*dof_per_node=*/1, /*dof_permutation=*/{})
 {
 }
 
-FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern, int dof_per_node)
+FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
+                         int dof_per_node,
+                         std::shared_ptr<const DofPermutation> dof_permutation)
 {
     FE_THROW_IF(!pattern.isFinalized(), InvalidArgumentException, "FsilsMatrix: sparsity pattern must be finalized");
     FE_THROW_IF(dof_per_node <= 0, InvalidArgumentException, "FsilsMatrix: dof_per_node must be > 0");
@@ -312,6 +322,14 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern, int dof_per_n
     FE_THROW_IF(global_rows_ % dof != 0, InvalidArgumentException,
                 "FsilsMatrix: global size must be divisible by dof_per_node");
 
+    const bool have_perm = dof_permutation && !dof_permutation->empty();
+    if (have_perm) {
+        FE_THROW_IF(dof_permutation->forward.size() != static_cast<std::size_t>(global_rows_) ||
+                        dof_permutation->inverse.size() != static_cast<std::size_t>(global_rows_),
+                    InvalidArgumentException,
+                    "FsilsMatrix: dof permutation size mismatch with global system size");
+    }
+
     const GlobalIndex gnNo_g = global_rows_ / dof;
     const int gnNo = as_int(gnNo_g, "global node count");
     const int nNo = gnNo;
@@ -327,13 +345,19 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern, int dof_per_n
         std::vector<int> cols;
         cols.reserve(32);
         for (int r = 0; r < dof; ++r) {
-            const GlobalIndex row_dof = static_cast<GlobalIndex>(node) * dof + r;
+            const GlobalIndex row_fs = static_cast<GlobalIndex>(node) * dof + r;
+            const GlobalIndex row_dof = have_perm
+                                            ? dof_permutation->inverse[static_cast<std::size_t>(row_fs)]
+                                            : row_fs;
             const auto start = row_ptr[static_cast<std::size_t>(row_dof)];
             const auto end = row_ptr[static_cast<std::size_t>(row_dof + 1)];
             for (GlobalIndex k = start; k < end; ++k) {
                 const GlobalIndex col_dof = col_idx[static_cast<std::size_t>(k)];
                 if (col_dof < 0 || col_dof >= global_cols_) continue;
-                cols.push_back(static_cast<int>(col_dof / dof));
+                const GlobalIndex col_fs = have_perm
+                                               ? dof_permutation->forward[static_cast<std::size_t>(col_dof)]
+                                               : col_dof;
+                cols.push_back(static_cast<int>(col_fs / dof));
             }
         }
         std::sort(cols.begin(), cols.end());
@@ -356,6 +380,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern, int dof_per_n
     shared->gnNo = gnNo;
     shared->owned_node_start = 0;
     shared->owned_node_count = nNo;
+    shared->dof_permutation = std::move(dof_permutation);
 
     Vector<int> gNodes(nNo);
     for (int i = 0; i < nNo; ++i) {
@@ -384,11 +409,16 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern, int dof_per_n
     shared_ = std::move(shared);
 }
 
-FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern, int dof_per_node)
+FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
+                         int dof_per_node,
+                         std::shared_ptr<const DofPermutation> dof_permutation)
 {
     FE_THROW_IF(!pattern.isFinalized(), InvalidArgumentException, "FsilsMatrix: distributed sparsity must be finalized");
     FE_THROW_IF(dof_per_node <= 0, InvalidArgumentException, "FsilsMatrix: dof_per_node must be > 0");
     FE_THROW_IF(!pattern.isSquare(), NotImplementedException, "FsilsMatrix: rectangular systems not supported");
+
+    FE_THROW_IF(dof_permutation && !dof_permutation->empty(), NotImplementedException,
+                "FsilsMatrix: dof permutation is not implemented for distributed FSILS runs yet");
 
     global_rows_ = pattern.globalRows();
     global_cols_ = pattern.globalCols();
@@ -654,18 +684,27 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
     return std::make_unique<FsilsMatrixView>(*this);
 }
 
-Real FsilsMatrix::getEntry(GlobalIndex row, GlobalIndex col) const
-{
-    if (row < 0 || row >= global_rows_ || col < 0 || col >= global_cols_) {
-        return 0.0;
-    }
-    FE_THROW_IF(!shared_, FEException, "FsilsMatrix::getEntry: missing FSILS layout");
+	Real FsilsMatrix::getEntry(GlobalIndex row, GlobalIndex col) const
+	{
+	    if (row < 0 || row >= global_rows_ || col < 0 || col >= global_cols_) {
+	        return 0.0;
+	    }
+	    FE_THROW_IF(!shared_, FEException, "FsilsMatrix::getEntry: missing FSILS layout");
 
-    const int dof = shared_->dof;
-    const int global_row_node = static_cast<int>(row / dof);
-    const int global_col_node = static_cast<int>(col / dof);
-    const int row_comp = static_cast<int>(row % dof);
-    const int col_comp = static_cast<int>(col % dof);
+	    if (const auto perm = shared_->dof_permutation; perm && !perm->empty()) {
+	        const auto& fwd = perm->forward;
+	        if (static_cast<std::size_t>(row) >= fwd.size() || static_cast<std::size_t>(col) >= fwd.size()) {
+	            return 0.0;
+	        }
+	        row = fwd[static_cast<std::size_t>(row)];
+	        col = fwd[static_cast<std::size_t>(col)];
+	    }
+
+	    const int dof = shared_->dof;
+	    const int global_row_node = static_cast<int>(row / dof);
+	    const int global_col_node = static_cast<int>(col / dof);
+	    const int row_comp = static_cast<int>(row % dof);
+	    const int col_comp = static_cast<int>(col % dof);
 
     const int row_old = shared_->globalNodeToOld(global_row_node);
     const int col_old = shared_->globalNodeToOld(global_col_node);
@@ -694,18 +733,27 @@ Real FsilsMatrix::getEntry(GlobalIndex row, GlobalIndex col) const
     return values_[base + off];
 }
 
-void FsilsMatrix::addValue(GlobalIndex row, GlobalIndex col, Real value, assembly::AddMode mode)
-{
-    if (row < 0 || row >= global_rows_ || col < 0 || col >= global_cols_) {
-        return;
-    }
-    FE_THROW_IF(!shared_, FEException, "FsilsMatrix::addValue: missing FSILS layout");
+	void FsilsMatrix::addValue(GlobalIndex row, GlobalIndex col, Real value, assembly::AddMode mode)
+	{
+	    if (row < 0 || row >= global_rows_ || col < 0 || col >= global_cols_) {
+	        return;
+	    }
+	    FE_THROW_IF(!shared_, FEException, "FsilsMatrix::addValue: missing FSILS layout");
 
-    const int dof = shared_->dof;
-    const int global_row_node = static_cast<int>(row / dof);
-    const int global_col_node = static_cast<int>(col / dof);
-    const int row_comp = static_cast<int>(row % dof);
-    const int col_comp = static_cast<int>(col % dof);
+	    if (const auto perm = shared_->dof_permutation; perm && !perm->empty()) {
+	        const auto& fwd = perm->forward;
+	        if (static_cast<std::size_t>(row) >= fwd.size() || static_cast<std::size_t>(col) >= fwd.size()) {
+	            return;
+	        }
+	        row = fwd[static_cast<std::size_t>(row)];
+	        col = fwd[static_cast<std::size_t>(col)];
+	    }
+
+	    const int dof = shared_->dof;
+	    const int global_row_node = static_cast<int>(row / dof);
+	    const int global_col_node = static_cast<int>(col / dof);
+	    const int row_comp = static_cast<int>(row % dof);
+	    const int col_comp = static_cast<int>(col % dof);
 
     const int row_old = shared_->globalNodeToOld(global_row_node);
     const int col_old = shared_->globalNodeToOld(global_col_node);
@@ -782,4 +830,3 @@ GlobalIndex FsilsMatrix::fsilsNnz() const noexcept
 } // namespace backends
 } // namespace FE
 } // namespace svmp
-

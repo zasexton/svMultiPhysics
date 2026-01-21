@@ -9,6 +9,7 @@
 #define SVMP_FE_BACKENDS_FSILS_MATRIX_H
 
 #include "Backends/Interfaces/GenericMatrix.h"
+#include "Backends/Interfaces/DofPermutation.h"
 #include "Backends/FSILS/FsilsShared.h"
 
 #include <memory>
@@ -26,8 +27,12 @@ namespace backends {
 class FsilsMatrix final : public GenericMatrix {
 public:
     explicit FsilsMatrix(const sparsity::SparsityPattern& sparsity);
-    FsilsMatrix(const sparsity::SparsityPattern& sparsity, int dof_per_node);
-    FsilsMatrix(const sparsity::DistributedSparsityPattern& sparsity, int dof_per_node);
+    FsilsMatrix(const sparsity::SparsityPattern& sparsity,
+                int dof_per_node,
+                std::shared_ptr<const DofPermutation> dof_permutation = {});
+    FsilsMatrix(const sparsity::DistributedSparsityPattern& sparsity,
+                int dof_per_node,
+                std::shared_ptr<const DofPermutation> dof_permutation = {});
     ~FsilsMatrix() override;
 
     FsilsMatrix(FsilsMatrix&&) noexcept;
