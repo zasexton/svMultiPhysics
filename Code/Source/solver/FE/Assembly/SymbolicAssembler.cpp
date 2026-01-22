@@ -8,6 +8,7 @@
 #include "Assembly/SymbolicAssembler.h"
 
 #include "Assembly/StandardAssembler.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 
 #include <utility>
 
@@ -59,8 +60,11 @@ AssemblyResult SymbolicAssembler::assembleForm(const forms::FormExpr& bilinear_f
                                                GlobalSystemView& matrix_view)
 {
     auto ir = impl_->compiler.compileBilinear(bilinear_form);
-    forms::FormKernel kernel(std::move(ir));
-    return assembleMatrix(mesh, test_space, trial_space, kernel, matrix_view);
+    std::shared_ptr<AssemblyKernel> kernel = std::make_shared<forms::FormKernel>(std::move(ir));
+    if (impl_->sym_options.jit.enable) {
+        kernel = std::make_shared<forms::jit::JITKernelWrapper>(kernel, impl_->sym_options.jit);
+    }
+    return assembleMatrix(mesh, test_space, trial_space, *kernel, matrix_view);
 }
 
 AssemblyResult SymbolicAssembler::assembleLinearForm(const forms::FormExpr& linear_form,
@@ -69,8 +73,11 @@ AssemblyResult SymbolicAssembler::assembleLinearForm(const forms::FormExpr& line
                                                      GlobalSystemView& vector_view)
 {
     auto ir = impl_->compiler.compileLinear(linear_form);
-    forms::FormKernel kernel(std::move(ir));
-    return assembleVector(mesh, space, kernel, vector_view);
+    std::shared_ptr<AssemblyKernel> kernel = std::make_shared<forms::FormKernel>(std::move(ir));
+    if (impl_->sym_options.jit.enable) {
+        kernel = std::make_shared<forms::jit::JITKernelWrapper>(kernel, impl_->sym_options.jit);
+    }
+    return assembleVector(mesh, space, *kernel, vector_view);
 }
 
 AssemblyResult SymbolicAssembler::assembleResidualAndJacobian(const forms::FormExpr& residual_form,
@@ -82,8 +89,12 @@ AssemblyResult SymbolicAssembler::assembleResidualAndJacobian(const forms::FormE
 {
     setCurrentSolution(solution);
     auto ir = impl_->compiler.compileResidual(residual_form);
-    forms::NonlinearFormKernel kernel(std::move(ir), impl_->sym_options.ad_mode);
-    return assembleBoth(mesh, space, space, kernel, jacobian_view, residual_view);
+    std::shared_ptr<AssemblyKernel> kernel =
+        std::make_shared<forms::NonlinearFormKernel>(std::move(ir), impl_->sym_options.ad_mode);
+    if (impl_->sym_options.jit.enable) {
+        kernel = std::make_shared<forms::jit::JITKernelWrapper>(kernel, impl_->sym_options.jit);
+    }
+    return assembleBoth(mesh, space, space, *kernel, jacobian_view, residual_view);
 }
 
 void SymbolicAssembler::setSymbolicOptions(forms::SymbolicOptions options)
@@ -100,7 +111,11 @@ const forms::SymbolicOptions& SymbolicAssembler::getSymbolicOptions() const noex
 std::unique_ptr<AssemblyKernel> SymbolicAssembler::precompileBilinear(const forms::FormExpr& bilinear_form)
 {
     auto ir = impl_->compiler.compileBilinear(bilinear_form);
-    return std::make_unique<forms::FormKernel>(std::move(ir));
+    if (!impl_->sym_options.jit.enable) {
+        return std::make_unique<forms::FormKernel>(std::move(ir));
+    }
+    auto fallback = std::make_shared<forms::FormKernel>(std::move(ir));
+    return std::make_unique<forms::jit::JITKernelWrapper>(std::move(fallback), impl_->sym_options.jit);
 }
 
 std::unique_ptr<Assembler> createSymbolicAssembler()

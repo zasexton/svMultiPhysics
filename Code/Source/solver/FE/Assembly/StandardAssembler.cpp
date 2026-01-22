@@ -958,7 +958,7 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
                             "StandardAssembler::assembleBoundaryFaces: material state bytes_per_qpt mismatch");
                 FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
                             "StandardAssembler::assembleBoundaryFaces: invalid material state stride");
-                context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes);
+                context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
             }
 
             // Compute local contributions
@@ -1327,8 +1327,8 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                 FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
                             "StandardAssembler::assembleInteriorFaces: invalid material state stride");
 
-                context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes);
-                context_plus.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes);
+                context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
+                context_plus.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
             }
 
             // Compute DG face contributions
@@ -1740,8 +1740,8 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
             FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
                         "StandardAssembler::assembleInterfaceFaces: invalid material state stride");
 
-            context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes);
-            context_plus.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes);
+            context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
+            context_plus.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
         }
 
         // Compute interface face contributions
@@ -2001,7 +2001,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                         "StandardAssembler::assembleCellsCore: material state bytes_per_qpt mismatch");
             FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
                         "StandardAssembler::assembleCellsCore: invalid material state stride");
-            context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes);
+            context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
         }
 
         // Compute local matrix/vector via kernel

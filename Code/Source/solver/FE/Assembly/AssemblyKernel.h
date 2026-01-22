@@ -60,6 +60,7 @@
  */
 
 #include "Core/Types.h"
+#include "Core/Alignment.h"
 #include "Core/ParameterValue.h"
 
 #include <span>
@@ -174,7 +175,7 @@ inline constexpr bool hasFlag(RequiredData flags, RequiredData flag) {
  */
 struct MaterialStateSpec {
     std::size_t bytes_per_qpt{0};
-    std::size_t alignment{alignof(std::max_align_t)};
+    std::size_t alignment{kFEPreferredAlignmentBytes};
 };
 
 // ============================================================================

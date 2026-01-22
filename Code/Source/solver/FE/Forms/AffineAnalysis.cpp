@@ -81,6 +81,7 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
         case FormExprType::ReferenceCoordinate:
         case FormExprType::Time:
         case FormExprType::TimeStep:
+        case FormExprType::EffectiveTimeStep:
         case FormExprType::Identity:
         case FormExprType::Jacobian:
         case FormExprType::JacobianInverse:

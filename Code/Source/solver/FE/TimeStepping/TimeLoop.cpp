@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <unordered_map>
 #include <vector>
@@ -326,8 +327,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 u_prev[i] = u_n[i] - static_cast<Real>(dt) * v_n[i];
             }
             if (!constraints.empty()) {
-                constraints.distributeHomogeneous(reinterpret_cast<double*>(u_prev.data()),
-                                                  static_cast<GlobalIndex>(u_prev.size()));
+                constraints.distributeHomogeneous(u_prev_scratch);
             }
 
             rhs.zero();
@@ -403,14 +403,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
         if (!constraints.empty()) {
             if (overwrite_u_dot) {
-                auto v = history.uDotSpan();
-                constraints.distributeHomogeneous(reinterpret_cast<double*>(v.data()),
-                                                  static_cast<GlobalIndex>(v.size()));
+                constraints.distributeHomogeneous(history.uDot());
             }
             if (overwrite_u_ddot) {
-                auto a = history.uDDotSpan();
-                constraints.distributeHomogeneous(reinterpret_cast<double*>(a.data()),
-                                                  static_cast<GlobalIndex>(a.size()));
+                constraints.distributeHomogeneous(history.uDDot());
             }
         }
 
@@ -904,8 +900,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             w[k] -= static_cast<Real>(ssum) * u_n[k];
                         }
                         if (!constraints.empty()) {
-                            constraints.distributeHomogeneous(reinterpret_cast<double*>(w.data()),
-                                                              static_cast<GlobalIndex>(w.size()));
+                            constraints.distributeHomogeneous(*collocation.stage_combination);
                         }
 
                         add_state.u = std::span<const Real>(w.data(), w.size());
@@ -937,8 +932,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             }
                         }
                         if (!constraints.empty()) {
-                            constraints.distributeHomogeneous(reinterpret_cast<double*>(w.data()),
-                                                              static_cast<GlobalIndex>(w.size()));
+                            constraints.distributeHomogeneous(*collocation.stage_combination);
                         }
 
                         add_state.u = std::span<const Real>(w.data(), w.size());
@@ -962,8 +956,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             }
                         }
                         if (!constraints.empty()) {
-                            constraints.distributeHomogeneous(reinterpret_cast<double*>(w.data()),
-                                                              static_cast<GlobalIndex>(w.size()));
+                            constraints.distributeHomogeneous(*collocation.stage_combination);
                         }
 
                         add_state.u = std::span<const Real>(w.data(), w.size());
@@ -1523,6 +1516,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             int collocation_stages_used = 0;
 
             bool threw = false;
+            std::exception_ptr caught_exception{};
             try {
                 if (options_.scheme == SchemeKind::BackwardEuler || options_.scheme == SchemeKind::DG0) {
                     nr = newton.solveStep(transient, linear, solve_time, history, workspace);
@@ -1625,28 +1619,148 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     nr = solveThetaStep(/*theta=*/0.5, solve_time, dt);
                 } else if (options_.scheme == SchemeKind::GeneralizedAlpha) {
                     const int temporal_order = transient.system().temporalOrder();
-                    if (temporal_order <= 1) {
-                        FE_CHECK_NOT_NULL(generalized_alpha_fo.get(), "TimeLoop: generalized-alpha(1st-order) integrator");
-                        FE_THROW_IF(!ga1_params.has_value(), systems::InvalidStateException,
-                                    "TimeLoop: generalized-alpha parameters not initialized");
+	                    if (temporal_order <= 1) {
+	                        FE_CHECK_NOT_NULL(generalized_alpha_fo.get(), "TimeLoop: generalized-alpha(1st-order) integrator");
+	                        FE_THROW_IF(!ga1_params.has_value(), systems::InvalidStateException,
+	                                    "TimeLoop: generalized-alpha parameters not initialized");
 
-                        // Ensure uDot storage exists and is initialized before the stage solve.
-                        const bool had_u_dot = history.hasUDotState();
-                        history.ensureSecondOrderState(factory);
-                        if (!had_u_dot) {
-                            (void)utils::initializeSecondOrderStateFromDisplacementHistory(
-                                history,
-                                history.uDot().localSpan(),
-                                history.uDDot().localSpan(),
-                                /*overwrite_u_dot=*/true,
-                                /*overwrite_u_ddot=*/false);
-                        }
-                        const auto& constraints = transient.system().constraints();
-                        if (!constraints.empty()) {
-                            auto v = history.uDotSpan();
-                            constraints.distributeHomogeneous(reinterpret_cast<double*>(v.data()),
-                                                              static_cast<GlobalIndex>(v.size()));
-                        }
+	                        auto& sys = transient.system();
+	                        const auto& constraints = sys.constraints();
+
+	                        // Ensure uDot storage exists and is initialized before the stage solve.
+	                        const bool had_u_dot = history.hasUDotState();
+	                        history.ensureSecondOrderState(factory);
+	                        if (!had_u_dot) {
+	                            // Compute a PDE-consistent initial uDot by solving a transient linear system for
+	                            // the time-derivative fields at the stage time. This avoids the degenerate uDot=0
+	                            // initialization that can remove inertia from the first residual evaluation.
+	                            history.uDot().zero();
+
+                            const auto dt_fields = sys.timeDerivativeFields(options_.newton.jacobian_op);
+                            if (!dt_fields.empty()) {
+                                std::vector<GlobalIndex> nondt_dofs;
+                                const auto& fmap = sys.fieldMap();
+                                nondt_dofs.reserve(static_cast<std::size_t>(sys.dofHandler().getNumDofs()));
+
+                                for (std::size_t fi = 0; fi < fmap.numFields(); ++fi) {
+                                    const auto fid = static_cast<FieldId>(fi);
+                                    const bool is_dt_field =
+                                        std::find(dt_fields.begin(), dt_fields.end(), fid) != dt_fields.end();
+                                    if (is_dt_field) {
+                                        continue;
+                                    }
+                                    const auto range = fmap.getFieldDofRange(fi);
+                                    for (GlobalIndex d = range.first; d < range.second; ++d) {
+                                        nondt_dofs.push_back(d);
+                                    }
+                                }
+
+                                const double stage_time = t + ga1_params->alpha_f * dt;
+                                sys.updateConstraints(stage_time, dt);
+                                sys.beginTimeStep();
+
+                                systems::SystemStateView init_state{};
+                                init_state.time = stage_time;
+                                init_state.dt = dt;
+                                init_state.dt_prev = history.dtPrev();
+                                init_state.u = history.uSpan();
+                                init_state.u_prev = history.uPrevSpan();
+                                init_state.u_prev2 = history.uPrev2Span();
+                                init_state.u_vector = &history.u();
+                                init_state.u_prev_vector = &history.uPrev();
+                                init_state.u_prev2_vector = &history.uPrev2();
+                                init_state.u_history = history.uHistorySpans();
+                                init_state.dt_history = history.dtHistory();
+
+                                auto ctx_base = generalized_alpha_fo->buildContext(temporal_order, init_state);
+                                const auto* dt1 = ctx_base.dt1 ? &(*ctx_base.dt1) : nullptr;
+                                const double c = dt1 ? static_cast<double>(dt1->coeff(/*history_index=*/0)) : 0.0;
+                                const double c0 = dt1 ? static_cast<double>(dt1->coeff(/*history_index=*/2)) : 0.0;
+
+                                const bool can_solve = (dt1 != nullptr) && (std::abs(c0) > 0.0) &&
+                                    std::isfinite(c) && std::isfinite(c0);
+
+                                if (can_solve) {
+                                    // Assemble non-dt residual r(u) with dt terms disabled.
+                                    assembly::TimeIntegrationContext ctx_non_dt = ctx_base;
+                                    ctx_non_dt.time_derivative_term_weight = 0.0;
+                                    ctx_non_dt.non_time_derivative_term_weight = 1.0;
+
+                                    auto& r_non_dt = *scratch_vec0;
+                                    r_non_dt.zero();
+                                    auto r_view = r_non_dt.createAssemblyView();
+                                    FE_CHECK_NOT_NULL(r_view.get(), "TimeLoop: uDot init residual view");
+
+                                    systems::AssemblyRequest req_r;
+                                    req_r.op = options_.newton.residual_op;
+                                    req_r.want_vector = true;
+                                    systems::SystemStateView state_r = init_state;
+                                    state_r.time_integration = &ctx_non_dt;
+                                    const auto ar_r = sys.assemble(req_r, state_r, nullptr, r_view.get());
+                                    FE_THROW_IF(!ar_r.success, FEException,
+                                                "TimeLoop: uDot initialization residual assembly failed: " + ar_r.error_message);
+
+                                    // Assemble dt-only Jacobian A with dt terms enabled and dt-free terms disabled.
+                                    assembly::TimeIntegrationContext ctx_dt_only = ctx_base;
+                                    ctx_dt_only.time_derivative_term_weight = 1.0;
+                                    ctx_dt_only.non_time_derivative_term_weight = 0.0;
+
+                                    auto& A = *workspace.jacobian;
+                                    A.zero();
+                                    auto A_view = A.createAssemblyView();
+                                    FE_CHECK_NOT_NULL(A_view.get(), "TimeLoop: uDot init matrix view");
+
+                                    systems::AssemblyRequest req_A;
+                                    req_A.op = options_.newton.jacobian_op;
+                                    req_A.want_matrix = true;
+                                    systems::SystemStateView state_A = init_state;
+                                    state_A.time_integration = &ctx_dt_only;
+                                    const auto ar_A = sys.assemble(req_A, state_A, A_view.get(), nullptr);
+                                    FE_THROW_IF(!ar_A.success, FEException,
+                                                "TimeLoop: uDot initialization matrix assembly failed: " + ar_A.error_message);
+
+                                    // Build RHS b = -(c/c0) * r_non_dt and constrain non-dt fields to uDot=0.
+                                    auto& b = *scratch_vec1;
+                                    copyVector(b, r_non_dt);
+                                    b.scale(static_cast<Real>(-c / c0));
+                                    if (!nondt_dofs.empty()) {
+                                        auto b_mod = b.createAssemblyView();
+                                        FE_CHECK_NOT_NULL(b_mod.get(), "TimeLoop: uDot init rhs view");
+                                        b_mod->beginAssemblyPhase();
+                                        b_mod->zeroVectorEntries(nondt_dofs);
+                                        b_mod->finalizeAssembly();
+
+                                        auto A_mod = A.createAssemblyView();
+                                        FE_CHECK_NOT_NULL(A_mod.get(), "TimeLoop: uDot init matrix modify view");
+                                        A_mod->beginAssemblyPhase();
+                                        A_mod->zeroRows(nondt_dofs, /*set_diagonal=*/true);
+                                        A_mod->finalizeAssembly();
+                                    }
+
+                                    // Solve A * uDot = b.
+                                    const auto rep = linear.solve(A, history.uDot(), b);
+                                    if (!rep.converged) {
+                                        // Fall back to a finite-difference uDot (may be zero at the first step).
+                                        (void)utils::initializeSecondOrderStateFromDisplacementHistory(
+                                            history,
+                                            history.uDot().localSpan(),
+                                            history.uDDot().localSpan(),
+                                            /*overwrite_u_dot=*/true,
+                                            /*overwrite_u_ddot=*/false);
+                                    }
+                                } else {
+	                                    (void)utils::initializeSecondOrderStateFromDisplacementHistory(
+	                                        history,
+	                                        history.uDot().localSpan(),
+	                                        history.uDDot().localSpan(),
+	                                        /*overwrite_u_dot=*/true,
+	                                        /*overwrite_u_ddot=*/false);
+	                                }
+	                            }
+	                        }
+	                        if (!constraints.empty()) {
+	                            constraints.distributeHomogeneous(history.uDot());
+	                        }
 
                         // Ensure (u_n, uDot_n) values are ghost-consistent before constructing constants.
                         history.updateGhosts();
@@ -1670,6 +1784,22 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
                         systems::TransientSystem transient_stage(transient.system(), generalized_alpha_fo);
                         const double stage_time = t + ga1_params->alpha_f * dt;
+
+                        // Predictor for the stage unknown u_{n+alpha_f}: start from u^n and extrapolate using uDot^n.
+                        {
+                            auto cur = history.uSpan();
+                            const auto v = history.uDotSpan();
+                            FE_CHECK_ARG(cur.size() == v.size(), "TimeLoop: generalized-alpha predictor size mismatch");
+                            const Real alpha_dt = static_cast<Real>(ga1_params->alpha_f * dt);
+                            for (std::size_t i = 0; i < cur.size(); ++i) {
+                                cur[i] += alpha_dt * v[i];
+                            }
+                            if (!constraints.empty()) {
+                                constraints.distribute(history.u());
+                            }
+                            history.u().updateGhosts();
+                        }
+
                         nr = newton.solveStep(transient_stage, linear, stage_time, history, workspace);
                         if (nr.converged) {
                             const double inv_af = 1.0 / ga1_params->alpha_f;
@@ -1688,15 +1818,14 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             const double c_old = (1.0 - gamma) / gamma;
                             auto v = history.uDotSpan();
                             FE_CHECK_ARG(v.size() == cur.size(), "TimeLoop: generalized-alpha uDot size mismatch");
-                            for (std::size_t i = 0; i < cur.size(); ++i) {
-                                const Real v_n = v[i];
-                                v[i] = static_cast<Real>(inv_gamma_dt) * (cur[i] - prev[i]) -
-                                    static_cast<Real>(c_old) * v_n;
-                            }
-                            if (!constraints.empty()) {
-                                constraints.distributeHomogeneous(reinterpret_cast<double*>(v.data()),
-                                                                  static_cast<GlobalIndex>(v.size()));
-                            }
+	                            for (std::size_t i = 0; i < cur.size(); ++i) {
+	                                const Real v_n = v[i];
+	                                v[i] = static_cast<Real>(inv_gamma_dt) * (cur[i] - prev[i]) -
+	                                    static_cast<Real>(c_old) * v_n;
+	                            }
+	                            if (!constraints.empty()) {
+	                                constraints.distributeHomogeneous(history.uDot());
+	                            }
                         }
                     } else if (temporal_order == 2) {
                         if (!ga2_params.has_value()) {
@@ -2162,6 +2291,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 }
             } catch (const FEException&) {
                 threw = true;
+                caught_exception = std::current_exception();
                 nr = NewtonReport{};
                 nr.converged = false;
             }
@@ -2492,12 +2622,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                        /*overwrite_u_ddot=*/true);
 	                    const auto& constraints = transient.system().constraints();
 	                    if (!constraints.empty()) {
-	                        auto v = history.uDotSpan();
-	                        constraints.distributeHomogeneous(reinterpret_cast<double*>(v.data()),
-	                                                          static_cast<GlobalIndex>(v.size()));
-	                        auto a = history.uDDotSpan();
-	                        constraints.distributeHomogeneous(reinterpret_cast<double*>(a.data()),
-	                                                          static_cast<GlobalIndex>(a.size()));
+	                        constraints.distributeHomogeneous(history.uDot());
+	                        constraints.distributeHomogeneous(history.uDDot());
 	                    }
 	                }
 	                if (callbacks.on_step_accepted) {
@@ -2509,7 +2635,14 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             }
 
             if (!adaptive) {
-                FE_THROW_IF(threw, FEException, "TimeLoop: nonlinear solve threw an exception");
+                if (threw && caught_exception) {
+                    try {
+                        std::rethrow_exception(caught_exception);
+                    } catch (FEException& e) {
+                        e.add_context("TimeLoop: nonlinear solve threw an exception");
+                        throw;
+                    }
+                }
                 FE_THROW(FEException, "TimeLoop: nonlinear solve did not converge");
             }
 

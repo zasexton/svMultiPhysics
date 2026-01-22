@@ -122,6 +122,7 @@ struct MaterialStateView {
     std::byte* data_work{nullptr};     ///< Base pointer for "work/current" state
     std::size_t bytes_per_qpt{0};      ///< Payload bytes per integration point
     std::size_t stride_bytes{0};       ///< Stride between integration points (>= bytes_per_qpt)
+    std::size_t alignment{alignof(std::max_align_t)}; ///< Alignment guarantee for base pointers
 
     [[nodiscard]] explicit operator bool() const noexcept { return data_work != nullptr; }
 };

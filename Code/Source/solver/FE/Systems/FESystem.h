@@ -39,6 +39,7 @@
 #include <array>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -263,6 +264,8 @@ public:
 		    [[nodiscard]] bool isSetup() const noexcept { return is_setup_; }
 		    [[nodiscard]] int temporalOrder() const noexcept;
 		    [[nodiscard]] bool isTransient() const noexcept { return temporalOrder() > 0; }
+		    [[nodiscard]] std::vector<FieldId> timeDerivativeFields(const OperatorTag& op) const;
+		    [[nodiscard]] std::vector<FieldId> timeDerivativeFields() const;
 
 	    // ---- Parameter requirements (optional) ----
 	    [[nodiscard]] const ParameterRegistry& parameterRegistry() const noexcept { return parameter_registry_; }

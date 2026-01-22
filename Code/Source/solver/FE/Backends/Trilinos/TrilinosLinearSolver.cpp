@@ -13,6 +13,7 @@
 #include "Backends/Trilinos/TrilinosVector.h"
 #include "Backends/Trilinos/TrilinosUtils.h"
 #include "Core/FEException.h"
+#include "Core/Logger.h"
 
 #include <BelosLinearProblem.hpp>
 #include <BelosSolverFactory.hpp>
@@ -34,7 +35,10 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <cmath>
+#include <sstream>
 
 namespace svmp {
 namespace FE {
@@ -58,6 +62,29 @@ namespace {
 using MV = Tpetra::MultiVector<trilinos::Scalar, trilinos::LO, trilinos::GO, trilinos::Node>;
 using OP = Tpetra::Operator<trilinos::Scalar, trilinos::LO, trilinos::GO, trilinos::Node>;
 using RowMatrix = Tpetra::RowMatrix<trilinos::Scalar, trilinos::LO, trilinos::GO, trilinos::Node>;
+
+[[nodiscard]] bool oopTraceEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("SVMP_OOP_SOLVER_TRACE");
+        if (env == nullptr) {
+            return false;
+        }
+        std::string v(env);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return !(v == "0" || v == "false" || v == "off" || v == "no");
+    }();
+    return enabled;
+}
+
+void traceLog(const std::string& msg)
+{
+    if (!oopTraceEnabled()) {
+        return;
+    }
+    FE_LOG_INFO(msg);
+}
 
 [[nodiscard]] std::string belosSolverName(SolverMethod method)
 {
@@ -174,6 +201,22 @@ SolverReport TrilinosLinearSolver::solve(const GenericMatrix& A_in,
         rep.initial_residual_norm = static_cast<Real>(r.norm2());
     }
 
+    if (oopTraceEnabled()) {
+        std::ostringstream oss;
+        oss << "TrilinosLinearSolver::solve: n=" << A->numRows()
+            << " method=" << solverMethodToString(options_.method)
+            << " pc=" << preconditionerToString(options_.preconditioner)
+            << " rel_tol=" << options_.rel_tol
+            << " abs_tol=" << options_.abs_tol
+            << " max_iter=" << options_.max_iter
+            << " use_initial_guess=" << (options_.use_initial_guess ? 1 : 0);
+        if (!options_.trilinos_xml_file.empty()) {
+            oss << " xml='" << options_.trilinos_xml_file << "'";
+        }
+        oss << " r0=" << rep.initial_residual_norm;
+        traceLog(oss.str());
+    }
+
     const auto belos_params = buildBelosParams(options_);
     Belos::SolverFactory<trilinos::Scalar, MV, OP> factory;
     const auto solver_name = belosSolverName(options_.method);
@@ -224,6 +267,16 @@ SolverReport TrilinosLinearSolver::solve(const GenericMatrix& A_in,
     // Belos uses rel tol; apply abs tol if provided.
     if (options_.abs_tol > 0.0) {
         rep.converged = rep.converged || (rep.final_residual_norm <= options_.abs_tol);
+    }
+
+    if (oopTraceEnabled()) {
+        std::ostringstream oss;
+        oss << "TrilinosLinearSolver::solve: converged=" << (rep.converged ? 1 : 0)
+            << " iters=" << rep.iterations
+            << " rn=" << rep.final_residual_norm
+            << " rel=" << rep.relative_residual
+            << " msg='" << rep.message << "'";
+        traceLog(oss.str());
     }
 
     return rep;

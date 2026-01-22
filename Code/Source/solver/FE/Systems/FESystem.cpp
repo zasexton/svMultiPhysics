@@ -17,10 +17,13 @@
 
 #include "Backends/Interfaces/GenericVector.h"
 
+#include "Forms/FormKernels.h"
+
 #include "Spaces/FunctionSpace.h"
 #include "Sparsity/DistributedSparsityPattern.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #include "Assembly/MeshAccess.h"
@@ -461,6 +464,132 @@ int FESystem::temporalOrder() const noexcept
         }
     }
     return max_order;
+}
+
+namespace {
+
+void gatherTimeDerivativeFieldsFromNode(const forms::FormExprNode& node,
+                                        FieldId kernel_trial_field,
+                                        std::unordered_set<FieldId>& out)
+{
+    if (node.type() == forms::FormExprType::TimeDerivative) {
+        const auto children = node.childrenShared();
+        if (!children.empty() && children.front()) {
+            const auto& child = *children.front();
+            if (child.type() == forms::FormExprType::TrialFunction) {
+                if (kernel_trial_field != INVALID_FIELD_ID) {
+                    out.insert(kernel_trial_field);
+                }
+            } else if (child.type() == forms::FormExprType::StateField ||
+                       child.type() == forms::FormExprType::DiscreteField) {
+                if (const auto fid = child.fieldId()) {
+                    out.insert(*fid);
+                }
+            }
+        }
+    }
+
+    for (const auto& child : node.childrenShared()) {
+        if (child) {
+            gatherTimeDerivativeFieldsFromNode(*child, kernel_trial_field, out);
+        }
+    }
+}
+
+void gatherTimeDerivativeFieldsFromIR(const forms::FormIR& ir,
+                                      FieldId kernel_trial_field,
+                                      std::unordered_set<FieldId>& out)
+{
+    for (const auto& term : ir.terms()) {
+        const auto* root = term.integrand.node();
+        if (!root) {
+            continue;
+        }
+        gatherTimeDerivativeFieldsFromNode(*root, kernel_trial_field, out);
+    }
+}
+
+void gatherTimeDerivativeFieldsFromKernel(const std::shared_ptr<assembly::AssemblyKernel>& kernel,
+                                          FieldId kernel_trial_field,
+                                          std::unordered_set<FieldId>& out)
+{
+    if (!kernel) {
+        return;
+    }
+
+    if (const auto* k = dynamic_cast<const forms::NonlinearFormKernel*>(kernel.get())) {
+        gatherTimeDerivativeFieldsFromIR(k->residualIR(), kernel_trial_field, out);
+        return;
+    }
+
+    if (const auto* k = dynamic_cast<const forms::FormKernel*>(kernel.get())) {
+        gatherTimeDerivativeFieldsFromIR(k->ir(), kernel_trial_field, out);
+        return;
+    }
+
+    if (const auto* k = dynamic_cast<const forms::LinearFormKernel*>(kernel.get())) {
+        gatherTimeDerivativeFieldsFromIR(k->bilinearIR(), kernel_trial_field, out);
+        if (k->linearIR().has_value()) {
+            gatherTimeDerivativeFieldsFromIR(*k->linearIR(), kernel_trial_field, out);
+        }
+        return;
+    }
+}
+
+std::vector<FieldId> sortedUnique(std::unordered_set<FieldId> ids)
+{
+    std::vector<FieldId> out;
+    out.reserve(ids.size());
+    for (const auto fid : ids) {
+        out.push_back(fid);
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+} // namespace
+
+std::vector<FieldId> FESystem::timeDerivativeFields(const OperatorTag& op) const
+{
+    std::unordered_set<FieldId> fields;
+    const auto& def = operator_registry_.get(op);
+
+    for (const auto& term : def.cells) {
+        gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+    }
+    for (const auto& term : def.boundary) {
+        gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+    }
+    for (const auto& term : def.interior) {
+        gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+    }
+    for (const auto& term : def.interface_faces) {
+        gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+    }
+
+    return sortedUnique(std::move(fields));
+}
+
+std::vector<FieldId> FESystem::timeDerivativeFields() const
+{
+    std::unordered_set<FieldId> fields;
+    for (const auto& op : operator_registry_.list()) {
+        const auto& def = operator_registry_.get(op);
+        for (const auto& term : def.cells) {
+            gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+        }
+        for (const auto& term : def.boundary) {
+            gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+        }
+        for (const auto& term : def.interior) {
+            gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+        }
+        for (const auto& term : def.interface_faces) {
+            gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+        }
+    }
+    return sortedUnique(std::move(fields));
 }
 
 const dofs::DofHandler& FESystem::fieldDofHandler(FieldId field) const

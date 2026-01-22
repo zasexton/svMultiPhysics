@@ -60,6 +60,7 @@ option(FE_ENABLE_EIGEN "Enable Eigen3 for optimized Math operations" OFF)
 option(FE_ENABLE_TRILINOS "Enable Trilinos backend support" OFF)
 option(FE_ENABLE_PETSC "Enable PETSc backend support" OFF)
 option(FE_ENABLE_ASSEMBLY "Enable Assembly module (work-in-progress)" OFF)
+option(FE_ENABLE_LLVM_JIT "Enable LLVM OrcJIT backend for FE/Forms" OFF)
 option(FE_WITH_MESH "Enable Mesh integration convenience APIs (requires linking Mesh)" OFF)
 option(FE_ENABLE_METIS "Enable METIS reorderings (internal ThirdParty)" ON)
 option(FE_ENABLE_PARMETIS "Enable ParMETIS reorderings (internal ThirdParty, requires MPI)" ON)
@@ -483,6 +484,7 @@ set(FE_ASSEMBLY_HEADERS
     Assembly/AssemblyKernel.h
     Assembly/AssemblyContext.h
     Assembly/JIT/KernelArgs.h
+    Assembly/JIT/FieldSolutions.h
     Assembly/TimeIntegrationContext.h
     Assembly/StandardAssembler.h
     Assembly/ParallelAssembler.h
@@ -662,8 +664,10 @@ set(FE_FORMS_HEADERS
 	    Forms/PointEvaluator.h
 	    Forms/JIT/KernelIR.h
 	    Forms/JIT/JITValidation.h
+	    Forms/JIT/LLVMJITBuildInfo.h
+	    Forms/JIT/JITKernelWrapper.h
 	    Forms/Vocabulary.h
-	)
+		)
 
 set(FE_FORMS_SOURCES
     Forms/FormExpr.cpp
@@ -677,7 +681,9 @@ set(FE_FORMS_SOURCES
 	    Forms/PointEvaluator.cpp
 	    Forms/JIT/KernelIR.cpp
 	    Forms/JIT/JITValidation.cpp
-	)
+	    Forms/JIT/LLVMJITBuildInfo.cpp
+	    Forms/JIT/JITKernelWrapper.cpp
+		)
 
 # TimeStepping sources (requires FE/Systems + FE/Assembly + FE/Backends)
 	set(FE_TIMESTEPPING_HEADERS
@@ -938,6 +944,17 @@ if(FE_ENABLE_SYMENGINE)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableSymEngine.cmake)
 endif()
 
+# Configure LLVM for the Forms OrcJIT backend if enabled.
+#
+# Note: Forms/JIT sources are only built when FE_ENABLE_ASSEMBLY is enabled.
+if(FE_ENABLE_LLVM_JIT)
+    if(FE_ENABLE_ASSEMBLY)
+        include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableLLVMJIT.cmake)
+    else()
+        message(WARNING "FE: FE_ENABLE_LLVM_JIT is ON but FE_ENABLE_ASSEMBLY is OFF; Forms/JIT is not built, so LLVM will not be searched/linked.")
+    endif()
+endif()
+
 # Configure Google Test if tests are enabled
 if(FE_BUILD_TESTS)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableGTest.cmake)
@@ -1061,6 +1078,7 @@ target_include_directories(svfe
 )
 
 target_compile_definitions(svfe PUBLIC SVMP_FE_WITH_MESH=$<BOOL:${FE_WITH_MESH}>)
+target_compile_definitions(svfe PUBLIC SVMP_FE_ENABLE_LLVM_JIT=$<BOOL:${FE_ENABLE_LLVM_JIT}>)
 
 if(FE_WITH_MESH)
     if(TARGET svmesh)
@@ -1093,6 +1111,26 @@ if(FE_ENABLE_EIGEN)
         target_include_directories(svfe PUBLIC ${FE_EIGEN_INCLUDE_DIR})
     endif()
     target_compile_definitions(svfe PUBLIC FE_HAS_EIGEN=1)
+endif()
+
+# LLVM is configured before the `svfe` target exists (EnableLLVMJIT.cmake), so
+# apply the discovered include directories + link libraries here.
+if(FE_ENABLE_LLVM_JIT AND FE_ENABLE_ASSEMBLY)
+    if(DEFINED FE_LLVM_INCLUDE_DIRS AND NOT FE_LLVM_INCLUDE_DIRS STREQUAL "")
+        target_include_directories(svfe SYSTEM PUBLIC ${FE_LLVM_INCLUDE_DIRS})
+    endif()
+
+    if(DEFINED FE_LLVM_JIT_COMPILE_DEFINITIONS AND NOT FE_LLVM_JIT_COMPILE_DEFINITIONS STREQUAL "")
+        target_compile_definitions(svfe PUBLIC ${FE_LLVM_JIT_COMPILE_DEFINITIONS})
+    endif()
+
+    if(DEFINED FE_LLVM_JIT_LIBRARIES AND NOT FE_LLVM_JIT_LIBRARIES STREQUAL "")
+        target_link_libraries(svfe PUBLIC ${FE_LLVM_JIT_LIBRARIES})
+    endif()
+
+    if(DEFINED FE_LLVM_SYSTEM_LIBS AND NOT FE_LLVM_SYSTEM_LIBS STREQUAL "")
+        target_link_libraries(svfe PUBLIC ${FE_LLVM_SYSTEM_LIBS})
+    endif()
 endif()
 
 #------------------------------------------------------------------------------

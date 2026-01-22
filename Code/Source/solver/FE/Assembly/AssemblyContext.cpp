@@ -346,6 +346,7 @@ void AssemblyContext::clear()
     material_state_work_base_ = nullptr;
     material_state_bytes_per_qpt_ = 0;
     material_state_stride_bytes_ = 0;
+    material_state_alignment_bytes_ = alignof(std::max_align_t);
     time_ = 0.0;
     dt_ = 0.0;
     get_real_param_ = nullptr;
@@ -363,6 +364,7 @@ void AssemblyContext::clear()
     solution_component_hessians_.clear();
     solution_component_laplacians_.clear();
     field_solution_data_.clear();
+    jit_field_solution_table_.clear();
 }
 
 bool AssemblyContext::hasPreviousSolutionData() const noexcept
@@ -1342,6 +1344,57 @@ Real AssemblyContext::solutionComponentLaplacian(LocalIndex q, int component) co
 void AssemblyContext::clearFieldSolutionData() noexcept
 {
     field_solution_data_.clear();
+    jit_field_solution_table_.clear();
+}
+
+void AssemblyContext::rebuildJITFieldSolutionTable()
+{
+    jit_field_solution_table_.clear();
+    if (field_solution_data_.empty() || n_qpts_ <= 0) {
+        return;
+    }
+
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    jit_field_solution_table_.reserve(field_solution_data_.size());
+
+    auto flattenXYZ = [](std::span<const Vector3D> a) noexcept -> const Real* {
+        return a.empty() ? nullptr : a.data()->data();
+    };
+    auto flattenMat3 = [](std::span<const Matrix3x3> mats) noexcept -> const Real* {
+        if (mats.empty()) return nullptr;
+        return &(*mats.data())[0][0];
+    };
+
+    for (const auto& f : field_solution_data_) {
+        jit::FieldSolutionEntryV1 e;
+        e.field_id = static_cast<std::int32_t>(f.id);
+        e.field_type = static_cast<std::uint32_t>(f.field_type);
+        e.value_dim = static_cast<std::uint32_t>(f.value_dim);
+
+        e.values = f.values.empty() ? nullptr : f.values.data();
+        e.gradients_xyz = flattenXYZ(f.gradients);
+        e.hessians = flattenMat3(f.hessians);
+        e.laplacians = f.laplacians.empty() ? nullptr : f.laplacians.data();
+
+        e.vector_values_xyz = flattenXYZ(f.vector_values);
+        e.jacobians = flattenMat3(f.jacobians);
+        e.component_hessians = flattenMat3(f.component_hessians);
+        e.component_laplacians = f.component_laplacians.empty() ? nullptr : f.component_laplacians.data();
+
+        if (f.field_type == FieldType::Scalar) {
+            if (!f.history_values.empty()) {
+                e.history_values = f.history_values.data();
+                e.history_count = static_cast<std::uint32_t>(f.history_values.size() / nq);
+            }
+        } else if (f.field_type == FieldType::Vector) {
+            if (!f.history_vector_values.empty()) {
+                e.history_vector_values_xyz = flattenXYZ(f.history_vector_values);
+                e.history_count = static_cast<std::uint32_t>(f.history_vector_values.size() / nq);
+            }
+        }
+
+        jit_field_solution_table_.push_back(e);
+    }
 }
 
 void AssemblyContext::setFieldSolutionScalar(FieldId field,
@@ -1387,6 +1440,8 @@ void AssemblyContext::setFieldSolutionScalar(FieldId field,
     it->jacobians.clear();
     it->component_hessians.clear();
     it->component_laplacians.clear();
+
+    rebuildJITFieldSolutionTable();
 }
 
 void AssemblyContext::setFieldSolutionVector(FieldId field,
@@ -1444,6 +1499,8 @@ void AssemblyContext::setFieldSolutionVector(FieldId field,
     it->gradients.clear();
     it->hessians.clear();
     it->laplacians.clear();
+
+    rebuildJITFieldSolutionTable();
 }
 
 void AssemblyContext::setFieldPreviousSolutionScalarK(FieldId field, int k, std::span<const Real> values)
@@ -1486,6 +1543,8 @@ void AssemblyContext::setFieldPreviousSolutionScalarK(FieldId field, int k, std:
     if (!values.empty()) {
         std::copy(values.begin(), values.end(), it->history_values.begin() + (static_cast<std::size_t>(k - 1) * nq));
     }
+
+    rebuildJITFieldSolutionTable();
 }
 
 void AssemblyContext::setFieldPreviousSolutionVectorK(FieldId field,
@@ -1534,6 +1593,8 @@ void AssemblyContext::setFieldPreviousSolutionVectorK(FieldId field,
         std::copy(values.begin(), values.end(),
                   it->history_vector_values.begin() + (static_cast<std::size_t>(k - 1) * nq));
     }
+
+    rebuildJITFieldSolutionTable();
 }
 
 bool AssemblyContext::hasFieldSolutionData(FieldId field) const noexcept
@@ -1763,20 +1824,23 @@ AssemblyContext::Vector3D AssemblyContext::fieldPreviousVectorValue(FieldId fiel
 
 void AssemblyContext::setMaterialState(std::byte* cell_state_base,
                                        std::size_t bytes_per_qpt,
-                                       std::size_t stride_bytes) noexcept
+                                       std::size_t stride_bytes,
+                                       std::size_t alignment_bytes) noexcept
 {
-    setMaterialState(cell_state_base, cell_state_base, bytes_per_qpt, stride_bytes);
+    setMaterialState(cell_state_base, cell_state_base, bytes_per_qpt, stride_bytes, alignment_bytes);
 }
 
 void AssemblyContext::setMaterialState(std::byte* cell_state_old_base,
                                        std::byte* cell_state_work_base,
                                        std::size_t bytes_per_qpt,
-                                       std::size_t stride_bytes) noexcept
+                                       std::size_t stride_bytes,
+                                       std::size_t alignment_bytes) noexcept
 {
     material_state_old_base_ = (cell_state_old_base != nullptr) ? cell_state_old_base : cell_state_work_base;
     material_state_work_base_ = cell_state_work_base;
     material_state_bytes_per_qpt_ = bytes_per_qpt;
     material_state_stride_bytes_ = stride_bytes;
+    material_state_alignment_bytes_ = alignment_bytes;
 }
 
 std::span<std::byte> AssemblyContext::materialState(LocalIndex q) const

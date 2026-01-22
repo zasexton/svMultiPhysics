@@ -75,33 +75,34 @@ struct SymbolicOptions {
 /**
  * @brief Node tag for the form expression AST
  */
-enum class FormExprType : std::uint16_t {
-    // Terminals
-    TestFunction,
-    TrialFunction,
-    DiscreteField,
-    StateField,
-    Coefficient,
-    ParameterSymbol,          ///< Runtime scalar parameter by name (setup-time identifier)
-    ParameterRef,             ///< Runtime scalar parameter by slot (JIT-friendly)
-    Constant,
-    BoundaryFunctionalSymbol,
-    BoundaryIntegralSymbol,   ///< Coupled boundary-integral value by name (requires Systems registration)
-    BoundaryIntegralRef,      ///< Coupled boundary-integral value by slot (JIT-friendly)
-    AuxiliaryStateSymbol,
-    AuxiliaryStateRef,        ///< Coupled auxiliary-state value by slot (JIT-friendly)
-    MaterialStateOldRef,      ///< Per-qpt material state load (old) by byte offset
-    MaterialStateWorkRef,     ///< Per-qpt material state load (work/current) by byte offset
-    PreviousSolutionRef,      ///< Previous solution value u^{n-k} by history index k>=1
-    Coordinate,
-    ReferenceCoordinate,
-    Time,
-    TimeStep,
-    Identity,
-    Jacobian,
-    JacobianInverse,
-    JacobianDeterminant,
-    Normal,
+	enum class FormExprType : std::uint16_t {
+	    // Terminals
+	    TestFunction,
+	    TrialFunction,
+	    DiscreteField,
+	    StateField,
+	    Coefficient,
+	    ParameterSymbol,          ///< Runtime scalar parameter by name (setup-time identifier)
+	    ParameterRef,             ///< Runtime scalar parameter by slot (JIT-friendly)
+	    Constant,
+	    BoundaryFunctionalSymbol,
+	    BoundaryIntegralSymbol,   ///< Coupled boundary-integral value by name (requires Systems registration)
+	    BoundaryIntegralRef,      ///< Coupled boundary-integral value by slot (JIT-friendly)
+	    AuxiliaryStateSymbol,
+	    AuxiliaryStateRef,        ///< Coupled auxiliary-state value by slot (JIT-friendly)
+	    MaterialStateOldRef,      ///< Per-qpt material state load (old) by byte offset
+	    MaterialStateWorkRef,     ///< Per-qpt material state load (work/current) by byte offset
+	    PreviousSolutionRef,      ///< Previous solution value u^{n-k} by history index k>=1
+	    Coordinate,
+	    ReferenceCoordinate,
+	    Time,
+	    TimeStep,
+	    EffectiveTimeStep,        ///< Effective dt implied by dt(·) stencil coefficient (falls back to TimeStep)
+	    Identity,
+	    Jacobian,
+	    JacobianInverse,
+	    JacobianDeterminant,
+	    Normal,
     CellDiameter,
     CellVolume,
     FacetArea,
@@ -298,14 +299,15 @@ public:
     static FormExpr materialStateOldRef(std::uint32_t offset_bytes);
     static FormExpr materialStateWorkRef(std::uint32_t offset_bytes);
     static FormExpr previousSolution(int steps_back = 1);
-    static FormExpr coordinate();
-    static FormExpr referenceCoordinate();
-    static FormExpr time();
-    static FormExpr timeStep();
-    static FormExpr identity();
-    static FormExpr identity(int dim);
-    static FormExpr jacobian();
-    static FormExpr jacobianInverse();
+	    static FormExpr coordinate();
+	    static FormExpr referenceCoordinate();
+	    static FormExpr time();
+	    static FormExpr timeStep();
+	    static FormExpr effectiveTimeStep();
+	    static FormExpr identity();
+	    static FormExpr identity(int dim);
+	    static FormExpr jacobian();
+	    static FormExpr jacobianInverse();
     static FormExpr jacobianDeterminant();
     static FormExpr normal();
     static FormExpr cellDiameter();

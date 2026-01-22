@@ -19,10 +19,18 @@
 #include "Forms/FormKernels.h"
 
 #include "Backends/Interfaces/GenericVector.h"
+#include "Core/Logger.h"
+#include "Core/Alignment.h"
+#include "Core/AlignedAllocator.h"
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <chrono>
+#include <cstdlib>
 #include <cmath>
+#include <sstream>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -32,6 +40,29 @@ namespace FE {
 namespace systems {
 
 namespace {
+
+[[nodiscard]] bool oopTraceEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("SVMP_OOP_SOLVER_TRACE");
+        if (env == nullptr) {
+            return false;
+        }
+        std::string v(env);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return !(v == "0" || v == "false" || v == "off" || v == "no");
+    }();
+    return enabled;
+}
+
+void traceLog(const std::string& msg)
+{
+    if (!oopTraceEnabled()) {
+        return;
+    }
+    FE_LOG_INFO(msg);
+}
 
 void mergeAssemblyResult(assembly::AssemblyResult& total, const assembly::AssemblyResult& part)
 {
@@ -231,7 +262,18 @@ assembly::AssemblyResult assembleOperator(
     // Per design, this runs immediately before PDE assembly so coupled coefficients
     // can read a consistent, up-to-date context during kernel evaluation.
     if (system.coupled_boundary_) {
+        if (oopTraceEnabled()) {
+            traceLog("assembleOperator: coupled_boundary.prepareForAssembly() begin");
+        }
+        const auto t0 = std::chrono::steady_clock::now();
         system.coupled_boundary_->prepareForAssembly(state);
+        const auto t1 = std::chrono::steady_clock::now();
+        if (oopTraceEnabled()) {
+            std::ostringstream oss;
+            oss << "assembleOperator: coupled_boundary.prepareForAssembly() done time="
+                << std::chrono::duration<double>(t1 - t0).count();
+            traceLog(oss.str());
+        }
     }
 
     if (request.zero_outputs) {
@@ -362,9 +404,10 @@ assembly::AssemblyResult assembleOperator(
     assembler.setUserData(state.user_data);
 
     // JIT-friendly constant slots (Real-valued parameters resolved to stable indices).
-    std::vector<Real> jit_constants;
+    std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> jit_constants;
     if (have_param_contracts && system.parameter_registry_.slotCount() > 0u) {
-        jit_constants = system.parameter_registry_.evaluateRealSlots(state);
+        const auto slots = system.parameter_registry_.evaluateRealSlots(state);
+        jit_constants.assign(slots.begin(), slots.end());
         assembler.setJITConstants(jit_constants);
     } else {
         assembler.setJITConstants({});
@@ -405,6 +448,18 @@ assembly::AssemblyResult assembleOperator(
 
 	        const bool want_matrix = request.want_matrix && !term.kernel->isVectorOnly();
 	        const bool want_vector = request.want_vector && !term.kernel->isMatrixOnly();
+	        if (!want_matrix && !want_vector) {
+	            continue;
+	        }
+
+	        if (oopTraceEnabled()) {
+	            std::ostringstream oss;
+	            oss << "assembleOperator: op='" << request.op << "' cell term test='" << test_field.name
+	                << "' trial='" << trial_field.name << "' want_matrix=" << (want_matrix ? 1 : 0)
+	                << " want_vector=" << (want_vector ? 1 : 0);
+	            traceLog(oss.str());
+	        }
+	        const auto term_t0 = std::chrono::steady_clock::now();
 
 	        if (want_matrix && want_vector) {
 	            auto r = assembler.assembleBoth(mesh, *test_field.space, *trial_field.space, *term.kernel,
@@ -425,14 +480,23 @@ assembly::AssemblyResult assembleOperator(
 	                mergeAssemblyResult(total, r);
 	            }
 	        }
+
+	        if (oopTraceEnabled()) {
+	            const auto term_t1 = std::chrono::steady_clock::now();
+	            std::ostringstream oss;
+	            oss << "assembleOperator: op='" << request.op << "' cell term done test='" << test_field.name
+	                << "' trial='" << trial_field.name << "' time="
+	                << std::chrono::duration<double>(term_t1 - term_t0).count();
+	            traceLog(oss.str());
+	        }
 	    }
 
-    // Boundary terms
-    if (request.assemble_boundary_terms) {
-        for (const auto& term : def.boundary) {
-            FE_CHECK_NOT_NULL(term.kernel.get(), "assembleOperator: boundary term kernel");
-            const auto& test_field = system.field_registry_.get(term.test_field);
-            const auto& trial_field = system.field_registry_.get(term.trial_field);
+	    // Boundary terms
+	    if (request.assemble_boundary_terms) {
+	        for (const auto& term : def.boundary) {
+	            FE_CHECK_NOT_NULL(term.kernel.get(), "assembleOperator: boundary term kernel");
+	            const auto& test_field = system.field_registry_.get(term.test_field);
+	            const auto& trial_field = system.field_registry_.get(term.trial_field);
 
             FE_CHECK_NOT_NULL(test_field.space.get(), "assembleOperator: test_field.space");
             FE_CHECK_NOT_NULL(trial_field.space.get(), "assembleOperator: trial_field.space");
@@ -444,18 +508,38 @@ assembly::AssemblyResult assembleOperator(
             FE_THROW_IF(trial_field.id < 0 || trial_idx >= system.field_dof_handlers_.size(), InvalidStateException,
                         "assembleOperator: invalid trial field DOF handler");
 
-            assembler.setRowDofMap(system.field_dof_handlers_[test_idx].getDofMap(),
-                                   system.field_dof_offsets_[test_idx]);
-            assembler.setColDofMap(system.field_dof_handlers_[trial_idx].getDofMap(),
-                                   system.field_dof_offsets_[trial_idx]);
+	            assembler.setRowDofMap(system.field_dof_handlers_[test_idx].getDofMap(),
+	                                   system.field_dof_offsets_[test_idx]);
+	            assembler.setColDofMap(system.field_dof_handlers_[trial_idx].getDofMap(),
+	                                   system.field_dof_offsets_[trial_idx]);
 
-            auto r = assembler.assembleBoundaryFaces(
-                mesh, term.marker, *test_field.space, *trial_field.space, *term.kernel,
-                request.want_matrix ? matrix_out : nullptr,
-                request.want_vector ? vector_out : nullptr);
-            mergeAssemblyResult(total, r);
-        }
-    }
+	            const bool want_matrix = request.want_matrix && !term.kernel->isVectorOnly();
+	            const bool want_vector = request.want_vector && !term.kernel->isMatrixOnly();
+	            if (oopTraceEnabled() && (want_matrix || want_vector)) {
+	                std::ostringstream oss;
+	                oss << "assembleOperator: op='" << request.op << "' boundary term marker=" << term.marker
+	                    << " test='" << test_field.name << "' trial='" << trial_field.name << "' want_matrix="
+	                    << (want_matrix ? 1 : 0) << " want_vector=" << (want_vector ? 1 : 0);
+	                traceLog(oss.str());
+	            }
+	            const auto term_t0 = std::chrono::steady_clock::now();
+
+	            auto r = assembler.assembleBoundaryFaces(
+	                mesh, term.marker, *test_field.space, *trial_field.space, *term.kernel,
+	                request.want_matrix ? matrix_out : nullptr,
+	                request.want_vector ? vector_out : nullptr);
+	            mergeAssemblyResult(total, r);
+
+	            if (oopTraceEnabled() && (want_matrix || want_vector)) {
+	                const auto term_t1 = std::chrono::steady_clock::now();
+	                std::ostringstream oss;
+	                oss << "assembleOperator: op='" << request.op << "' boundary term done marker=" << term.marker
+	                    << " test='" << test_field.name << "' trial='" << trial_field.name << "' time="
+	                    << std::chrono::duration<double>(term_t1 - term_t0).count();
+	                traceLog(oss.str());
+	            }
+	        }
+	    }
 
 		    // Interior face terms (DG)
 		    if (request.assemble_interior_face_terms) {
@@ -479,26 +563,44 @@ assembly::AssemblyResult assembleOperator(
 	            assembler.setColDofMap(system.field_dof_handlers_[trial_idx].getDofMap(),
 	                                   system.field_dof_offsets_[trial_idx]);
 
-	            const bool want_matrix = request.want_matrix && !term.kernel->isVectorOnly();
-	            const bool want_vector = request.want_vector && !term.kernel->isMatrixOnly();
-	            if (!want_matrix && !want_vector) {
-	                continue;
-	            }
+		            const bool want_matrix = request.want_matrix && !term.kernel->isVectorOnly();
+		            const bool want_vector = request.want_vector && !term.kernel->isMatrixOnly();
+		            if (!want_matrix && !want_vector) {
+		                continue;
+		            }
 
-	            if (want_matrix) {
-	                auto r = assembler.assembleInteriorFaces(
-	                    mesh, *test_field.space, *trial_field.space, *term.kernel, *matrix_out,
-	                    want_vector ? vector_out : nullptr);
-	                mergeAssemblyResult(total, r);
+		            if (oopTraceEnabled()) {
+		                std::ostringstream oss;
+		                oss << "assembleOperator: op='" << request.op << "' interior-face term test='" << test_field.name
+		                    << "' trial='" << trial_field.name << "' want_matrix=" << (want_matrix ? 1 : 0)
+		                    << " want_vector=" << (want_vector ? 1 : 0);
+		                traceLog(oss.str());
+		            }
+		            const auto term_t0 = std::chrono::steady_clock::now();
+
+		            if (want_matrix) {
+		                auto r = assembler.assembleInteriorFaces(
+		                    mesh, *test_field.space, *trial_field.space, *term.kernel, *matrix_out,
+		                    want_vector ? vector_out : nullptr);
+		                mergeAssemblyResult(total, r);
 	            } else {
 	                assembly::DenseVectorView dummy_matrix(0);
 	                auto r = assembler.assembleInteriorFaces(
 	                    mesh, *test_field.space, *trial_field.space, *term.kernel, dummy_matrix,
-	                    vector_out);
-	                mergeAssemblyResult(total, r);
-	            }
-		        }
-		    }
+		                    vector_out);
+		                mergeAssemblyResult(total, r);
+		            }
+
+		            if (oopTraceEnabled()) {
+		                const auto term_t1 = std::chrono::steady_clock::now();
+		                std::ostringstream oss;
+		                oss << "assembleOperator: op='" << request.op << "' interior-face term done test='"
+		                    << test_field.name << "' trial='" << trial_field.name << "' time="
+		                    << std::chrono::duration<double>(term_t1 - term_t0).count();
+		                traceLog(oss.str());
+		            }
+			        }
+			    }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 		    // Interface face terms (InterfaceMesh subset)

@@ -1245,6 +1245,24 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 	            }
 	            return out;
 	        }
+	        case FormExprType::EffectiveTimeStep: {
+	            Real dt_eff = ctx.timeStep();
+	            if (const auto* time_ctx = ctx.timeIntegrationContext(); time_ctx && time_ctx->dt1) {
+	                const Real a0 = time_ctx->dt1->coeff(0);
+	                if (a0 != 0.0) {
+	                    dt_eff = static_cast<Real>(1.0 / std::abs(static_cast<double>(a0)));
+	                }
+	            }
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(dt_eff, env);
+	            if (out.has_grad) {
+	                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            }
+	            if (out.has_hess) {
+	                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            }
+	            return out;
+	        }
 	        case FormExprType::CellDiameter: {
 	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
 	            out.value.s = makeScalarConstant<Scalar>(ctx.cellDiameter(), env);
@@ -4070,6 +4088,16 @@ EvalValue<Real> evalReal(const FormExprNode& node,
             return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.time()};
         case FormExprType::TimeStep:
             return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.timeStep()};
+        case FormExprType::EffectiveTimeStep: {
+            Real dt_eff = ctx.timeStep();
+            if (const auto* time_ctx = ctx.timeIntegrationContext(); time_ctx && time_ctx->dt1) {
+                const Real a0 = time_ctx->dt1->coeff(0);
+                if (a0 != 0.0) {
+                    dt_eff = static_cast<Real>(1.0 / std::abs(static_cast<double>(a0)));
+                }
+            }
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, dt_eff};
+        }
         case FormExprType::Coordinate: {
             EvalValue<Real> out;
             out.kind = EvalValue<Real>::Kind::Vector;
@@ -6539,6 +6567,19 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
             EvalValue<Dual> out;
             out.kind = EvalValue<Dual>::Kind::Scalar;
             out.s = makeDualConstant(ctx.timeStep(), env.ws->alloc());
+            return out;
+        }
+        case FormExprType::EffectiveTimeStep: {
+            Real dt_eff = ctx.timeStep();
+            if (const auto* time_ctx = ctx.timeIntegrationContext(); time_ctx && time_ctx->dt1) {
+                const Real a0 = time_ctx->dt1->coeff(0);
+                if (a0 != 0.0) {
+                    dt_eff = static_cast<Real>(1.0 / std::abs(static_cast<double>(a0)));
+                }
+            }
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(dt_eff, env.ws->alloc());
             return out;
         }
         case FormExprType::Coordinate: {

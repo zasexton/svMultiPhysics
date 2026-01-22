@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -47,6 +48,26 @@ bool parse_bool_relaxed(const std::string& raw)
     return false;
   }
   return false;
+}
+
+bool oop_trace_enabled()
+{
+  if (const char* env = std::getenv("SVMP_OOP_SOLVER_TRACE")) {
+    return parse_bool_relaxed(env);
+  }
+  return false;
+}
+
+std::string step_reject_reason_to_string(svmp::FE::timestepping::StepRejectReason r)
+{
+  using svmp::FE::timestepping::StepRejectReason;
+  switch (r) {
+    case StepRejectReason::NonlinearSolveFailed:
+      return "NonlinearSolveFailed";
+    case StepRejectReason::ErrorTooLarge:
+      return "ErrorTooLarge";
+  }
+  return std::to_string(static_cast<int>(r));
 }
 
 const EquationParameters* first_equation(const Parameters& params)
@@ -122,6 +143,16 @@ bool ApplicationDriver::shouldUseNewSolver(const std::string& xml_file)
 
 void ApplicationDriver::run(const std::string& xml_file)
 {
+  std::cout << "[svMultiPhysics::Application] ApplicationDriver::run(xml_file='" << xml_file << "')"
+            << std::endl;
+  if (!xml_file.empty()) {
+    std::error_code ec;
+    const auto abs = std::filesystem::absolute(xml_file, ec);
+    if (!ec) {
+      std::cout << "[svMultiPhysics::Application] XML path: " << abs.string() << std::endl;
+    }
+  }
+
   Parameters params;
   params.read_xml(xml_file);
   runWithParameters(params);
@@ -139,6 +170,15 @@ void ApplicationDriver::runWithParameters(const Parameters& params)
                "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver."
             << std::endl;
 
+  const auto mesh_blocks =
+      static_cast<int>(std::count_if(params.mesh_parameters.begin(), params.mesh_parameters.end(),
+                                     [](const auto* p) { return p != nullptr; }));
+  const auto equation_blocks =
+      static_cast<int>(std::count_if(params.equation_parameters.begin(), params.equation_parameters.end(),
+                                     [](const auto* p) { return p != nullptr; }));
+  std::cout << "[svMultiPhysics::Application] Input summary: meshes=" << mesh_blocks
+            << " equations=" << equation_blocks << std::endl;
+
   SimulationBuilder builder(params);
   auto sim = builder.build();
 
@@ -150,10 +190,30 @@ void ApplicationDriver::runWithParameters(const Parameters& params)
     std::cout << "[svMultiPhysics::Application] No meshes were loaded from <Add_mesh>." << std::endl;
   }
 
+  std::cout << "[svMultiPhysics::Application] Components: fe_system=" << (sim.fe_system ? "yes" : "no")
+            << " physics_modules=" << static_cast<int>(sim.physics_modules.size())
+            << " backend=" << (sim.backend ? svmp::FE::backends::backendKindToString(sim.backend->backendKind()) : "none")
+            << " linear_solver=" << (sim.linear_solver ? svmp::FE::backends::backendKindToString(sim.linear_solver->backendKind()) : "none")
+            << " time_history=" << (sim.time_history ? "yes" : "no") << std::endl;
+  if (sim.fe_system) {
+    std::cout << "[svMultiPhysics::Application] FE system: ndofs=" << sim.fe_system->dofHandler().getNumDofs()
+              << " constraints=" << sim.fe_system->constraints().numConstraints() << std::endl;
+  }
+  if (sim.time_history) {
+    std::cout << "[svMultiPhysics::Application] TimeHistory: time=" << sim.time_history->time()
+              << " dt=" << sim.time_history->dt() << " step=" << sim.time_history->stepIndex()
+              << " depth=" << sim.time_history->historyDepth() << std::endl;
+  }
+
   const int num_steps = params.general_simulation_parameters.number_of_time_steps.value();
+  const double dt = params.general_simulation_parameters.time_step_size.value();
+  std::cout << "[svMultiPhysics::Application] Time stepping: Number_of_time_steps=" << num_steps
+            << " Time_step_size=" << dt << std::endl;
   if (num_steps <= 1) {
+    std::cout << "[svMultiPhysics::Application] Starting steady-state solve." << std::endl;
     runSteadyState(sim, params);
   } else {
+    std::cout << "[svMultiPhysics::Application] Starting transient solve." << std::endl;
     runTransient(sim, params);
   }
 }
@@ -196,12 +256,20 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
 
   svmp::FE::timestepping::NewtonSolver newton(newton_opts);
   svmp::FE::timestepping::NewtonWorkspace workspace;
+
+  std::cout << "[svMultiPhysics::Application] Steady: allocating Newton workspace." << std::endl;
   newton.allocateWorkspace(transient.system(), *sim.backend, workspace);
+  std::cout << "[svMultiPhysics::Application] Steady: Newton workspace allocated." << std::endl;
 
   // Ensure time-history vectors use the same backend layout as the Newton workspace.
+  std::cout << "[svMultiPhysics::Application] Steady: repacking TimeHistory for backend layout." << std::endl;
   sim.time_history->repack(*sim.backend);
+  std::cout << "[svMultiPhysics::Application] Steady: TimeHistory repacked." << std::endl;
 
   const double solve_time = sim.time_history->time();
+  std::cout << "[svMultiPhysics::Application] Steady solve: time=" << solve_time
+            << " newton(max_it=" << newton_opts.max_iterations << ", abs_tol=" << newton_opts.abs_tolerance
+            << ", rel_tol=" << newton_opts.rel_tolerance << ")" << std::endl;
 
   const auto report = newton.solveStep(transient, *sim.linear_solver, solve_time, *sim.time_history, workspace);
   std::cout << "[svMultiPhysics::Application] Steady Newton: converged=" << report.converged
@@ -268,20 +336,78 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       }
     }
   }
+  // NOTE: Newton update scaling for dt(·) fields is available in the FE library
+  // (NewtonOptions::scale_dt_increments), but enabling it globally can severely
+  // slow convergence for linear problems (e.g., Stokes). Keep it off by default
+  // and rely on line search for globalization.
+  opts.newton.scale_dt_increments = false;
+
+  std::cout << "[svMultiPhysics::Application] Transient solve: t0=" << opts.t0 << " dt=" << opts.dt
+            << " t_end=" << opts.t_end << " max_steps=" << opts.max_steps
+            << " scheme=GeneralizedAlpha rho_inf=" << opts.generalized_alpha_rho_inf
+            << " newton(max_it=" << opts.newton.max_iterations << ", abs_tol=" << opts.newton.abs_tolerance
+            << ", rel_tol=" << opts.newton.rel_tolerance << ")" << std::endl;
 
   // Ensure time-history vectors use the same backend layout as the solver workspace.
+  std::cout << "[svMultiPhysics::Application] Transient: repacking TimeHistory for backend layout." << std::endl;
   sim.time_history->repack(*sim.backend);
+  std::cout << "[svMultiPhysics::Application] Transient: TimeHistory repacked." << std::endl;
 
   auto bdf1 = std::make_shared<const svmp::FE::systems::BDFIntegrator>(1);
   svmp::FE::systems::TransientSystem transient(*sim.fe_system, std::move(bdf1));
 
   svmp::FE::timestepping::TimeLoopCallbacks callbacks{};
+  callbacks.on_step_start = [&](const svmp::FE::timestepping::TimeHistory& h) {
+    if (!oop_trace_enabled()) {
+      return;
+    }
+    std::cout << "[svMultiPhysics::Application] TimeLoop: step_start step=" << h.stepIndex()
+              << " time=" << h.time() << " dt=" << h.dt() << std::endl;
+  };
+  callbacks.on_nonlinear_done = [&](const svmp::FE::timestepping::TimeHistory& h,
+                                   const svmp::FE::timestepping::NewtonReport& nr) {
+    if (!oop_trace_enabled()) {
+      return;
+    }
+    std::cout << "[svMultiPhysics::Application] TimeLoop: nonlinear_done step=" << h.stepIndex()
+              << " time=" << h.time() << " converged=" << nr.converged
+              << " iters=" << nr.iterations << " ||r||=" << nr.residual_norm
+              << " (linear: converged=" << nr.linear.converged
+              << " iters=" << nr.linear.iterations
+              << " rel=" << nr.linear.relative_residual << ")" << std::endl;
+  };
   callbacks.on_step_accepted = [&](const svmp::FE::timestepping::TimeHistory& h) {
+    if (oop_trace_enabled()) {
+      std::cout << "[svMultiPhysics::Application] TimeLoop: step_accepted step=" << h.stepIndex()
+                << " time=" << h.time() << " dt=" << h.dt() << std::endl;
+    }
     outputResults(sim, params, h.stepIndex(), h.time());
+  };
+  callbacks.on_step_rejected = [&](const svmp::FE::timestepping::TimeHistory& h,
+                                  svmp::FE::timestepping::StepRejectReason reason,
+                                  const svmp::FE::timestepping::NewtonReport& nr) {
+    if (!oop_trace_enabled()) {
+      return;
+    }
+    std::cout << "[svMultiPhysics::Application] TimeLoop: step_rejected step=" << h.stepIndex()
+              << " time=" << h.time() << " dt=" << h.dt() << " reason=" << step_reject_reason_to_string(reason)
+              << " (newton: converged=" << nr.converged << " iters=" << nr.iterations
+              << " ||r||=" << nr.residual_norm << ")" << std::endl;
+  };
+  callbacks.on_dt_updated = [&](double old_dt, double new_dt, int step_index, int attempt_index) {
+    if (!oop_trace_enabled()) {
+      return;
+    }
+    std::cout << "[svMultiPhysics::Application] TimeLoop: dt_updated step=" << step_index
+              << " attempt=" << attempt_index << " old_dt=" << old_dt << " new_dt=" << new_dt << std::endl;
   };
 
   svmp::FE::timestepping::TimeLoop loop(opts);
+  std::cout << "[svMultiPhysics::Application] TimeLoop: entering loop.run()" << std::endl;
   const auto rep = loop.run(transient, *sim.backend, *sim.linear_solver, *sim.time_history, callbacks);
+  std::cout << "[svMultiPhysics::Application] TimeLoop: loop.run() returned success=" << rep.success
+            << " steps_taken=" << rep.steps_taken << " final_time=" << rep.final_time
+            << " message='" << rep.message << "'" << std::endl;
 
   if (!rep.success) {
     throw std::runtime_error("[svMultiPhysics::Application] Transient solve failed: " + rep.message +
@@ -293,22 +419,32 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
 {
   if (!params.general_simulation_parameters.save_results_to_vtk_format.defined() ||
       !params.general_simulation_parameters.save_results_to_vtk_format.value()) {
+    if (oop_trace_enabled()) {
+      std::cout << "[svMultiPhysics::Application] VTK output: disabled (<Save_results_to_VTK_format>=false)." << std::endl;
+    }
     return;
   }
 
   if (!sim.primary_mesh || !sim.fe_system || !sim.time_history) {
+    if (oop_trace_enabled()) {
+      std::cout << "[svMultiPhysics::Application] VTK output: missing mesh/system/history; skipping." << std::endl;
+    }
     return;
   }
 
   const int save_incr = std::max(1, params.general_simulation_parameters.increment_in_saving_vtk_files.value());
   const int save_ats = std::max(0, params.general_simulation_parameters.start_saving_after_time_step.value());
   if (step < save_ats || (step % save_incr) != 0) {
+    if (oop_trace_enabled()) {
+      std::cout << "[svMultiPhysics::Application] VTK output: skipping step=" << step
+                << " (start_after=" << save_ats << " increment=" << save_incr << ")" << std::endl;
+    }
     return;
   }
 
-  if (svmp::MeshComm::world().rank() != 0) {
-    return;
-  }
+  const auto comm = svmp::MeshComm::world();
+  const bool is_root = (comm.rank() == 0);
+  const bool mpi_parallel = (comm.size() > 1);
 
   std::filesystem::path out_dir = ".";
   if (params.general_simulation_parameters.save_results_in_folder.defined() &&
@@ -324,8 +460,12 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
   }
 
   std::ostringstream fname;
-  fname << prefix << "_" << std::setw(3) << std::setfill('0') << step << ".vtu";
+  fname << prefix << "_" << std::setw(3) << std::setfill('0') << step << (mpi_parallel ? ".pvtu" : ".vtu");
   const auto out_path = out_dir / fname.str();
+  if (oop_trace_enabled() && is_root) {
+    std::cout << "[svMultiPhysics::Application] VTK output: begin step=" << step << " time=" << time
+              << " file='" << out_path.string() << "'" << std::endl;
+  }
 
   svmp::FE::systems::SystemStateView state;
   state.time = time;
@@ -361,6 +501,11 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
     const auto& rec = sim.fe_system->fieldRecord(field_id);
     const auto ncomp = static_cast<std::size_t>(std::max(1, rec.components));
 
+    if (oop_trace_enabled()) {
+      std::cout << "[svMultiPhysics::Application] VTK output: evaluating field '" << rec.name
+                << "' components=" << ncomp << std::endl;
+    }
+
     auto h = ensure_point_field(rec.name, ncomp);
     auto* data = static_cast<double*>(mesh.field_data(h));
     if (!data) {
@@ -384,14 +529,23 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
         data[v * ncomp + c] = static_cast<double>((*val)[c]);
       }
     }
+
+    if (oop_trace_enabled()) {
+      std::cout << "[svMultiPhysics::Application] VTK output: field '" << rec.name << "' done." << std::endl;
+    }
   }
 
   svmp::MeshIOOptions io{};
-  io.format = "vtu";
+  io.format = mpi_parallel ? "pvtu" : "vtu";
   io.path = out_path.string();
-  mesh.save(io);
+  mesh.save_parallel(io);
 
-  std::cout << "[svMultiPhysics::Application] Wrote VTK: " << out_path.string() << std::endl;
+  if (is_root) {
+    std::cout << "[svMultiPhysics::Application] Wrote VTK: " << out_path.string() << std::endl;
+  }
+  if (oop_trace_enabled() && is_root) {
+    std::cout << "[svMultiPhysics::Application] VTK output: done step=" << step << " time=" << time << std::endl;
+  }
 }
 
 } // namespace core

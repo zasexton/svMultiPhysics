@@ -4,10 +4,11 @@
 #include <memory>
 #include <string>
 
+#include "Mesh/Mesh.h"
+
 class EquationParameters;
 
 namespace svmp {
-class MeshBase;
 namespace FE {
 namespace systems {
 class FESystem;
@@ -28,7 +29,7 @@ class EquationTranslator {
 public:
   static std::unique_ptr<svmp::Physics::PhysicsModule> createModule(
       const EquationParameters& eq_params, svmp::FE::systems::FESystem& system,
-      const std::map<std::string, std::shared_ptr<svmp::MeshBase>>& meshes);
+      const std::map<std::string, std::shared_ptr<svmp::Mesh>>& meshes);
 };
 
 } // namespace translators

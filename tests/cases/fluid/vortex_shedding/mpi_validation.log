@@ -1,0 +1,182 @@
+[svMultiPhysics::Application] ApplicationDriver::run(xml_file='solver_new.xml')
+[svMultiPhysics::Application] XML path: /home/zack/Downloads/svMultiPhysics/tests/cases/fluid/vortex_shedding/solver_new.xml
+[svMultiPhysics::Application] ApplicationDriver::run(xml_file='solver_new.xml')
+[svMultiPhysics::Application] XML path: /home/zack/Downloads/svMultiPhysics/tests/cases/fluid/vortex_shedding/solver_new.xml
+[svMultiPhysics::Application] <Use_new_OOP_solver>=true; running new OOP solver path.
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application] Not supported yet: Domain_file_path, multiple domains, spatial/temporal BC files, profiles/imposed flux, restart/continuation, FSI/etc. Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.
+[svMultiPhysics::Application] Input summary: meshes=1 equations=1
+[svMultiPhysics::Application] SimulationBuilder: loadMeshes()
+[svMultiPhysics::Application] SimulationBuilder: meshes declared=1
+[svMultiPhysics::Application]   Loading mesh 'msh' path='mesh/mesh-complete.mesh.vtu' faces=5
+[svMultiPhysics::Application] MeshTranslator: loading mesh file_path='mesh/mesh-complete.mesh.vtu'
+[svMultiPhysics::Application] MeshTranslator: detected format='vtu'
+[svMultiPhysics::Application] <Use_new_OOP_solver>=true; running new OOP solver path.
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application] Not supported yet: Domain_file_path, multiple domains, spatial/temporal BC files, profiles/imposed flux, restart/continuation, FSI/etc. Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.
+[svMultiPhysics::Application] Input summary: meshes=1 equations=1
+[svMultiPhysics::Application] SimulationBuilder: loadMeshes()
+[svMultiPhysics::Application] SimulationBuilder: meshes declared=1
+[svMultiPhysics::Application]   Loading mesh 'msh' path='mesh/mesh-complete.mesh.vtu' faces=5
+[svMultiPhysics::Application] MeshTranslator: loading mesh file_path='mesh/mesh-complete.mesh.vtu'
+[svMultiPhysics::Application] MeshTranslator: detected format='vtu'
+[svMultiPhysics::Application] MeshTranslator: mesh loaded dim=2 vertices=1771 cells=3307 faces=5077
+[svMultiPhysics::Application] MeshTranslator: applying face labels; count=5
+[svMultiPhysics::Application] MeshTranslator: mesh loaded dim=2 vertices=1821 cells=3307 faces=5127
+[svMultiPhysics::Application] MeshTranslator: applying face labels; count=5
+[svMultiPhysics::Application]   Face 'left': file_path='mesh/mesh-surfaces/left_line.vtp'
+[svMultiPhysics::Application]   Face 'left': file_path='mesh/mesh-surfaces/left_line.vtp'
+[svMultiPhysics::Application]   Face 'left': format='vtp' cells=16 -> label=1
+[svMultiPhysics::Application]   Face 'bottom': file_path='mesh/mesh-surfaces/bottom_line.vtp'
+[svMultiPhysics::Application]   Face 'left': format='vtp' cells=16 -> label=1
+[svMultiPhysics::Application]   Face 'left': no local matches (this is expected on non-owning MPI ranks).
+[svMultiPhysics::Application]   Face 'bottom': file_path='mesh/mesh-surfaces/bottom_line.vtp'
+[svMultiPhysics::Application]   Face 'bottom': format='vtp' cells=73 -> label=2
+[svMultiPhysics::Application]   Face 'bottom': format='vtp' cells=73 -> label=2
+[svMultiPhysics::Application]   Face 'top': file_path='mesh/mesh-surfaces/top_line.vtp'
+[svMultiPhysics::Application]   Face 'top': file_path='mesh/mesh-surfaces/top_line.vtp'
+[svMultiPhysics::Application]   Face 'top': format='vtp' cells=72 -> label=3
+[svMultiPhysics::Application]   Face 'top': format='vtp' cells=72 -> label=3
+[svMultiPhysics::Application]   Face 'right': file_path='mesh/mesh-surfaces/right_line.vtp'
+[svMultiPhysics::Application]   Face 'right': file_path='mesh/mesh-surfaces/right_line.vtp'
+[svMultiPhysics::Application]   Face 'right': format='vtp' cells=16 -> label=4
+[svMultiPhysics::Application]   Face 'right': format='vtp' cells=16 -> label=4
+[svMultiPhysics::Application]   Face 'right': no local matches (this is expected on non-owning MPI ranks).
+[svMultiPhysics::Application]   Face 'body': file_path='mesh/mesh-surfaces/body_line.vtp'
+[svMultiPhysics::Application]   Face 'body': file_path='mesh/mesh-surfaces/body_line.vtp'
+[svMultiPhysics::Application]   Face 'body': format='vtp' cells=307 -> label=5
+[svMultiPhysics::Application]   Face 'body': format='vtp' cells=307 -> label=5
+[svMultiPhysics::Application]   Mesh 'msh': dim=2 vertices=1771 cells=3307 faces=5077
+[svMultiPhysics::Application] SimulationBuilder: meshes loaded=1 primary='msh'
+[svMultiPhysics::Application] SimulationBuilder: createFESystem()
+[svMultiPhysics::Application] SimulationBuilder: created FE system from primary mesh 'msh'
+[svMultiPhysics::Application] SimulationBuilder: createPhysicsModules()
+[svMultiPhysics::Application] SimulationBuilder: equations declared=1
+[svMultiPhysics::Application]   Translating equation type='fluid' domains=0 bcs=4
+[svMultiPhysics::Application] EquationTranslator: createModule(type='fluid')
+[svMultiPhysics::Application] EquationTranslator: mesh='msh' domains=0 boundary_conditions=4
+[svMultiPhysics::Application]   BC 'left': boundary_marker=1
+[svMultiPhysics::Application]   BC 'bottom': boundary_marker=2
+[svMultiPhysics::Application]   BC 'top': boundary_marker=3
+[svMultiPhysics::Application]   BC 'body': boundary_marker=5
+[svMultiPhysics::Application]   Mesh 'msh': dim=2 vertices=1821 cells=3307 faces=5127
+[svMultiPhysics::Application] SimulationBuilder: meshes loaded=1 primary='msh'
+[svMultiPhysics::Application] SimulationBuilder: createFESystem()
+[svMultiPhysics::Application] SimulationBuilder: created FE system from primary mesh 'msh'
+[svMultiPhysics::Application] SimulationBuilder: createPhysicsModules()
+[svMultiPhysics::Application] SimulationBuilder: equations declared=1
+[svMultiPhysics::Application]   Translating equation type='fluid' domains=0 bcs=4
+[svMultiPhysics::Application] EquationTranslator: createModule(type='fluid')
+[svMultiPhysics::Application] EquationTranslator: mesh='msh' domains=0 boundary_conditions=4
+[svMultiPhysics::Application]   BC 'left': boundary_marker=1
+[svMultiPhysics::Application]   BC 'bottom': boundary_marker=2
+[svMultiPhysics::Application]   BC 'top': boundary_marker=3
+[svMultiPhysics::Application]   BC 'body': boundary_marker=5
+[svMultiPhysics::Application] SimulationBuilder: setupSystem()
+[svMultiPhysics::Application] SimulationBuilder: setupSystem()
+[svMultiPhysics::Application] SimulationBuilder: FE system setup complete; ndofs=10647 constraints=351
+[svMultiPhysics::Application] SimulationBuilder: fields=2
+[svMultiPhysics::Application]   field[0] name='Velocity' components=2 dofs=7098 offset=0
+[svMultiPhysics::Application]   field[1] name='Pressure' components=1 dofs=3549 offset=7098
+[svMultiPhysics::Application] SimulationBuilder: createSolvers()
+[svMultiPhysics::Application] SimulationBuilder: backend=fsils
+[svMultiPhysics::Application] SimulationBuilder: dof_per_node=3
+[svMultiPhysics::Application] SimulationBuilder: building FSILS DOF permutation.
+[svMultiPhysics::Application] SimulationBuilder: FSILS DOF permutation=enabled
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=gmres preconditioner=none rel_tol=9.9999999999999995e-07 abs_tol=0.0000000000000000e+00 max_iter=1000
+[svMultiPhysics::Application] SimulationBuilder: priming FSILS matrix layout; pattern rows=10647 cols=10647 nnz=112659
+[svMultiPhysics::Application] SimulationBuilder: FE system setup complete; ndofs=10647 constraints=589
+[svMultiPhysics::Application] SimulationBuilder: fields=2
+[svMultiPhysics::Application]   field[0] name='Velocity' components=2 dofs=7098 offset=0
+[svMultiPhysics::Application]   field[1] name='Pressure' components=1 dofs=3549 offset=7098
+[svMultiPhysics::Application] SimulationBuilder: createSolvers()
+[svMultiPhysics::Application] SimulationBuilder: backend=fsils
+[svMultiPhysics::Application] SimulationBuilder: dof_per_node=3
+[svMultiPhysics::Application] SimulationBuilder: building FSILS DOF permutation.
+[svMultiPhysics::Application] SimulationBuilder: FSILS DOF permutation=enabled
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=gmres preconditioner=none rel_tol=9.9999999999999995e-07 abs_tol=0.0000000000000000e+00 max_iter=1000
+[svMultiPhysics::Application] SimulationBuilder: priming FSILS matrix layout; pattern rows=10647 cols=10647 nnz=113859
+[svMultiPhysics::Application] SimulationBuilder: allocateHistory()
+[svMultiPhysics::Application] SimulationBuilder: allocating TimeHistory ndofs=10647 depth=2
+[svMultiPhysics::Application] SimulationBuilder: allocateHistory()
+[svMultiPhysics::Application] SimulationBuilder: allocating TimeHistory ndofs=10647 depth=2
+[svMultiPhysics::Application] SimulationBuilder: TimeHistory initialized time=0.0000000000000000e+00 dt=5.0000000000000003e-02 step=0
+[svMultiPhysics::Application] Loaded mesh 'msh': 1821 vertices, 3307 cells, 5127 faces.
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] FE system: ndofs=10647 constraints=589
+[svMultiPhysics::Application] TimeHistory: time=0.0000000000000000e+00 dt=5.0000000000000003e-02 step=0 depth=2
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=2 Time_step_size=5.0000000000000003e-02
+[svMultiPhysics::Application] Starting transient solve.
+[svMultiPhysics::Application] Transient solve: t0=0.0000000000000000e+00 dt=5.0000000000000003e-02 t_end=1.0000000000000001e-01 max_steps=2 scheme=GeneralizedAlpha rho_inf=5.0000000000000000e-01 newton(max_it=7, abs_tol=1.0000000000000001e-05, rel_tol=0.0000000000000000e+00)
+[svMultiPhysics::Application] Transient: repacking TimeHistory for backend layout.
+[svMultiPhysics::Application] SimulationBuilder: TimeHistory initialized time=0.0000000000000000e+00 dt=5.0000000000000003e-02 step=0
+[svMultiPhysics::Application] Loaded mesh 'msh': 1771 vertices, 3307 cells, 5077 faces.
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] FE system: ndofs=10647 constraints=351
+[svMultiPhysics::Application] TimeHistory: time=0.0000000000000000e+00 dt=5.0000000000000003e-02 step=0 depth=2
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=2 Time_step_size=5.0000000000000003e-02
+[svMultiPhysics::Application] Starting transient solve.
+[svMultiPhysics::Application] Transient solve: t0=0.0000000000000000e+00 dt=5.0000000000000003e-02 t_end=1.0000000000000001e-01 max_steps=2 scheme=GeneralizedAlpha rho_inf=5.0000000000000000e-01 newton(max_it=7, abs_tol=1.0000000000000001e-05, rel_tol=0.0000000000000000e+00)
+[svMultiPhysics::Application] Transient: repacking TimeHistory for backend layout.
+[svMultiPhysics::Application] Transient: TimeHistory repacked.
+[svMultiPhysics::Application] TimeLoop: entering loop.run()
+[svMultiPhysics::Application] Transient: TimeHistory repacked.
+[svMultiPhysics::Application] TimeLoop: entering loop.run()
+terminate called after throwing an instance of 'svmp::FE::FEException'
+terminate called after throwing an instance of 'svmp::FE::FEException'
+  what():  [FE Exception] Unknown error (Rank 1)
+  Location: /home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/TimeStepping/TimeLoop.cpp:2646 in run()
+  Message: TimeLoop: nonlinear solve did not converge
+
+  what():  [FE Exception] Unknown error (Rank 0)
+  Location: /home/zack/Downloads/svMultiPhysics/Code/Source/solver/FE/TimeStepping/TimeLoop.cpp:2646 in run()
+  Message: TimeLoop: nonlinear solve did not converge
+
+[zack-ThinkPad-X1-Carbon-7th:3741589] *** Process received signal ***
+[zack-ThinkPad-X1-Carbon-7th:3741589] Signal: Aborted (6)
+[zack-ThinkPad-X1-Carbon-7th:3741589] Associated errno: Unknown error 32767 (32767)
+[zack-ThinkPad-X1-Carbon-7th:3741589] Signal code: User function (kill, sigsend, abort, etc.) (0)
+[zack-ThinkPad-X1-Carbon-7th:3741590] *** Process received signal ***
+[zack-ThinkPad-X1-Carbon-7th:3741590] Signal: Aborted (6)
+[zack-ThinkPad-X1-Carbon-7th:3741590] Signal code:  (-6)
+[zack-ThinkPad-X1-Carbon-7th:3741590] [ 0] /lib/x86_64-linux-gnu/libc.so.6(+0x42520)[0x7dee71e42520]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [ 1] [zack-ThinkPad-X1-Carbon-7th:3741589] [ 0] /lib/x86_64-linux-gnu/libc.so.6(+0x42520)[0x7735ba042520]
+[zack-ThinkPad-X1-Carbon-7th:3741589] [ 1] /lib/x86_64-linux-gnu/libc.so.6(pthread_kill+0x12c)[0x7dee71e969fc]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [ 2] /lib/x86_64-linux-gnu/libc.so.6(pthread_kill+0x12c)[0x7735ba0969fc]
+[zack-ThinkPad-X1-Carbon-7th:3741589] [ 2] /lib/x86_64-linux-gnu/libc.so.6(raise+0x16)[0x7735ba042476]
+[zack-ThinkPad-X1-Carbon-7th:3741589] [ 3] /lib/x86_64-linux-gnu/libc.so.6(raise+0x16)[0x7dee71e42476]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [ 3] /lib/x86_64-linux-gnu/libc.so.6(abort+0xd3)[0x7735ba0287f3]
+[zack-ThinkPad-X1-Carbon-7th:3741589] [ 4] /lib/x86_64-linux-gnu/libc.so.6(abort+0xd3)[0x7dee71e287f3]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [ 4] /lib/x86_64-linux-gnu/libstdc++.so.6(+0xa4ee6)[0x7735ba4a4ee6]
+[zack-ThinkPad-X1-Carbon-7th:3741589] [ 5] /lib/x86_64-linux-gnu/libstdc++.so.6(+0xa4ee6)[0x7dee722a4ee6]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [ 5] /lib/x86_64-linux-gnu/libstdc++.so.6(+0xb6f8c)[0x7dee722b6f8c]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [ 6] /lib/x86_64-linux-gnu/libstdc++.so.6(+0xb6f8c)[0x7735ba4b6f8c]
+[zack-ThinkPad-X1-Carbon-7th:3741589] [ 6] /lib/x86_64-linux-gnu/libstdc++.so.6(+0xb6ff7)[0x7dee722b6ff7]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [ 7] /lib/x86_64-linux-gnu/libstdc++.so.6(+0xb6ff7)[0x7735ba4b6ff7]
+[zack-ThinkPad-X1-Carbon-7th:3741589] [ 7] /lib/x86_64-linux-gnu/libstdc++.so.6(+0xb7258)[0x7dee722b7258]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [ 8] /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics(+0xe08ff)[0x589aaceb68ff]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [ 9] /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics(+0x412219)[0x589aad1e8219]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [10] /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics(+0x41690d)[0x589aad1ec90d]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [11] /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics(+0x416e8c)[0x589aad1ece8c]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [12] /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics(+0x146e7f)[0x589aacf1ce7f]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [13] /lib/x86_64-linux-gnu/libstdc++.so.6(+0xb7258)[0x7735ba4b7258]
+[zack-ThinkPad-X1-Carbon-7th:3741589] [ 8] /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics(+0xe08ff)[0x56ad041de8ff]
+[zack-ThinkPad-X1-Carbon-7th:3741589] [ 9] /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics(+0x412219)[0x56ad04510219]
+[zack-ThinkPad-X1-Carbon-7th:3741589] [10] /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics(+0x41690d)[0x56ad0451490d]
+[zack-ThinkPad-X1-Carbon-7th:3741589] /lib/x86_64-linux-gnu/libc.so.6(+0x29d90)[0x7dee71e29d90]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [14] [11] /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics(+0x416e8c)[0x56ad04514e8c]
+[zack-ThinkPad-X1-Carbon-7th:3741589] [12] /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics(+0x146e7f)[0x56ad04244e7f]
+[zack-ThinkPad-X1-Carbon-7th:3741589] [13] /lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0x80)[0x7dee71e29e40]
+[zack-ThinkPad-X1-Carbon-7th:3741590] [15] /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics(+0x14c145)[0x589aacf22145]
+[zack-ThinkPad-X1-Carbon-7th:3741590] *** End of error message ***
+/lib/x86_64-linux-gnu/libc.so.6(+0x29d90)[0x7735ba029d90]
+[zack-ThinkPad-X1-Carbon-7th:3741589] [14] /lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0x80)[0x7735ba029e40]
+[zack-ThinkPad-X1-Carbon-7th:3741589] [15] /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics(+0x14c145)[0x56ad0424a145]
+[zack-ThinkPad-X1-Carbon-7th:3741589] *** End of error message ***
+--------------------------------------------------------------------------
+Primary job  terminated normally, but 1 process returned
+a non-zero exit code. Per user-direction, the job has been aborted.
+--------------------------------------------------------------------------
+--------------------------------------------------------------------------
+mpiexec noticed that process rank 0 with PID 0 on node zack-ThinkPad-X1-Carbon-7th exited on signal 6 (Aborted).
+--------------------------------------------------------------------------

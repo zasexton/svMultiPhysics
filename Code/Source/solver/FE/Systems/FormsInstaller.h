@@ -43,6 +43,18 @@ class FESystem;
 struct FormInstallOptions {
     forms::ADMode ad_mode{forms::ADMode::Forward};
     forms::SymbolicOptions compiler_options{};
+
+    // Coupled residual installation controls (used by installCoupledResidual()).
+    bool coupled_residual_install_residual_kernels{true};
+    bool coupled_residual_install_jacobian_blocks{true};
+
+    // When true, the residual vector for each test field is produced by a single
+    // Jacobian block kernel (output=Both) instead of a separate vector-only kernel.
+    // This reduces assembly passes during Newton when assembling matrix+vector together.
+    // Requires:
+    // - coupled_residual_install_residual_kernels == false
+    // - coupled_residual_install_jacobian_blocks == true
+    bool coupled_residual_from_jacobian_block{false};
 };
 
 using KernelPtr = std::shared_ptr<assembly::AssemblyKernel>;

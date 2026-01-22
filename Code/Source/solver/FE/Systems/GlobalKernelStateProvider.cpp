@@ -186,7 +186,7 @@ assembly::MaterialStateView GlobalKernelStateProvider::getCellState(const Global
 
     auto* old_base = st.cell_old.data + static_cast<std::size_t>(cell_id) * st.cell_stride_bytes;
     auto* work_base = st.cell_work.data + static_cast<std::size_t>(cell_id) * st.cell_stride_bytes;
-    return assembly::MaterialStateView{old_base, work_base, st.bytes_per_qpt, st.stride_bytes};
+    return assembly::MaterialStateView{old_base, work_base, st.bytes_per_qpt, st.stride_bytes, st.alignment};
 }
 
 assembly::MaterialStateView GlobalKernelStateProvider::getBoundaryFaceState(const GlobalKernel& kernel,
@@ -215,7 +215,7 @@ assembly::MaterialStateView GlobalKernelStateProvider::getBoundaryFaceState(cons
     const auto idx = idx_it->second;
     auto* old_base = st.boundary_old.data + idx * st.boundary_face_stride_bytes;
     auto* work_base = st.boundary_work.data + idx * st.boundary_face_stride_bytes;
-    return assembly::MaterialStateView{old_base, work_base, st.bytes_per_qpt, st.stride_bytes};
+    return assembly::MaterialStateView{old_base, work_base, st.bytes_per_qpt, st.stride_bytes, st.alignment};
 }
 
 assembly::MaterialStateView GlobalKernelStateProvider::getInteriorFaceState(const GlobalKernel& kernel,
@@ -244,7 +244,7 @@ assembly::MaterialStateView GlobalKernelStateProvider::getInteriorFaceState(cons
     const auto idx = idx_it->second;
     auto* old_base = st.interior_old.data + idx * st.interior_face_stride_bytes;
     auto* work_base = st.interior_work.data + idx * st.interior_face_stride_bytes;
-    return assembly::MaterialStateView{old_base, work_base, st.bytes_per_qpt, st.stride_bytes};
+    return assembly::MaterialStateView{old_base, work_base, st.bytes_per_qpt, st.stride_bytes, st.alignment};
 }
 
 void GlobalKernelStateProvider::beginTimeStep()
@@ -285,4 +285,3 @@ void GlobalKernelStateProvider::commitTimeStep()
 } // namespace systems
 } // namespace FE
 } // namespace svmp
-

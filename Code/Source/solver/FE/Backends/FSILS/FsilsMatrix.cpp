@@ -417,15 +417,20 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     FE_THROW_IF(dof_per_node <= 0, InvalidArgumentException, "FsilsMatrix: dof_per_node must be > 0");
     FE_THROW_IF(!pattern.isSquare(), NotImplementedException, "FsilsMatrix: rectangular systems not supported");
 
-    FE_THROW_IF(dof_permutation && !dof_permutation->empty(), NotImplementedException,
-                "FsilsMatrix: dof permutation is not implemented for distributed FSILS runs yet");
-
     global_rows_ = pattern.globalRows();
     global_cols_ = pattern.globalCols();
 
     const int dof = dof_per_node;
     FE_THROW_IF(global_rows_ % dof != 0, InvalidArgumentException,
                 "FsilsMatrix: global size must be divisible by dof_per_node");
+
+    const bool have_perm = dof_permutation && !dof_permutation->empty();
+    if (have_perm) {
+        FE_THROW_IF(dof_permutation->forward.size() != static_cast<std::size_t>(global_rows_) ||
+                        dof_permutation->inverse.size() != static_cast<std::size_t>(global_rows_),
+                    InvalidArgumentException,
+                    "FsilsMatrix: dof permutation size mismatch with global system size");
+    }
 
     const GlobalIndex gnNo_g = global_rows_ / dof;
     const int gnNo = as_int(gnNo_g, "global node count");
@@ -487,6 +492,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     shared->owned_node_start = owned_node_start;
     shared->owned_node_count = owned_node_count;
     shared->ghost_nodes = ghost_nodes;
+    shared->dof_permutation = std::move(dof_permutation);
 
     auto gather_row_nodes = [&](GlobalIndex global_row_dof, std::vector<int>& out_nodes) {
         out_nodes.clear();

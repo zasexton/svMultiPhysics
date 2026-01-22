@@ -152,6 +152,9 @@ struct DualValue {
             return scalar(ctx.time);
         case FormExprType::TimeStep:
             return scalar(ctx.dt);
+        case FormExprType::EffectiveTimeStep:
+            // PointEvalContext does not carry a TimeIntegrationContext; fall back to the physical step size.
+            return scalar(ctx.dt);
         case FormExprType::Coordinate:
             return vector(ctx.x);
         case FormExprType::ReferenceCoordinate:
@@ -346,6 +349,9 @@ struct DualValue {
         case FormExprType::Time:
             return scalar(makeDualConstant(ctx.time, ws.alloc()));
         case FormExprType::TimeStep:
+            return scalar(makeDualConstant(ctx.dt, ws.alloc()));
+        case FormExprType::EffectiveTimeStep:
+            // PointEvalContext does not carry a TimeIntegrationContext; fall back to the physical step size.
             return scalar(makeDualConstant(ctx.dt, ws.alloc()));
         case FormExprType::Coordinate:
             return vectorDual(ctx.x);
@@ -615,7 +621,8 @@ struct DualValue {
 {
     bool found = false;
     const auto visit = [&](const auto& self, const FormExprNode& n) -> void {
-        if (n.type() == FormExprType::Time || n.type() == FormExprType::TimeStep || n.timeScalarCoefficient()) {
+        if (n.type() == FormExprType::Time || n.type() == FormExprType::TimeStep ||
+            n.type() == FormExprType::EffectiveTimeStep || n.timeScalarCoefficient()) {
             found = true;
             return;
         }

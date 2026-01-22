@@ -13,6 +13,9 @@
 #include "Assembly/MatrixFreeAssembler.h"
 #include "Assembly/FunctionalAssembler.h"
 
+#include "Core/Alignment.h"
+#include "Core/AlignedAllocator.h"
+
 #include <functional>
 #include <unordered_map>
 #include <utility>
@@ -186,9 +189,10 @@ Real OperatorBackends::evaluateFunctional(const FESystem& system,
                                      ? &get_param_wrapped
                                      : (state.getParam ? &state.getParam : nullptr));
     assembler.setUserData(state.user_data);
-    std::vector<Real> jit_constants;
+    std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> jit_constants;
     if (have_param_contracts && preg.slotCount() > 0u) {
-        jit_constants = preg.evaluateRealSlots(state);
+        const auto slots = preg.evaluateRealSlots(state);
+        jit_constants.assign(slots.begin(), slots.end());
         assembler.setJITConstants(jit_constants);
     } else {
         assembler.setJITConstants({});
@@ -248,9 +252,10 @@ Real OperatorBackends::evaluateBoundaryFunctional(const FESystem& system,
                                      ? &get_param_wrapped
                                      : (state.getParam ? &state.getParam : nullptr));
     assembler.setUserData(state.user_data);
-    std::vector<Real> jit_constants;
+    std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> jit_constants;
     if (have_param_contracts && preg.slotCount() > 0u) {
-        jit_constants = preg.evaluateRealSlots(state);
+        const auto slots = preg.evaluateRealSlots(state);
+        jit_constants.assign(slots.begin(), slots.end());
         assembler.setJITConstants(jit_constants);
     } else {
         assembler.setJITConstants({});

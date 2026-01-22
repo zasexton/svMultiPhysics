@@ -60,8 +60,10 @@
  */
 
 #include "Core/Types.h"
+#include "Core/AlignedAllocator.h"
 #include "Core/ParameterValue.h"
 #include "AssemblyKernel.h"
+#include "Assembly/JIT/FieldSolutions.h"
 #include "TimeIntegrationContext.h"
 
 #include <vector>
@@ -908,6 +910,18 @@ public:
     [[nodiscard]] Vector3D fieldPreviousVectorValue(FieldId field, LocalIndex q, int k) const;
 
     /**
+     * @brief JIT-friendly, flat views of auxiliary field solution data
+     *
+     * This provides a stable table of POD entries intended for JIT ABI packing
+     * (DiscreteField/StateField lowering). The table is rebuilt whenever field
+     * solution data is modified.
+     */
+    [[nodiscard]] std::span<const jit::FieldSolutionEntryV1> jitFieldSolutionTable() const noexcept
+    {
+        return jit_field_solution_table_;
+    }
+
+    /**
      * @brief Check if solution data is available
      */
     [[nodiscard]] bool hasSolutionData() const noexcept {
@@ -967,16 +981,19 @@ public:
      */
     void setMaterialState(std::byte* cell_state_base,
                           std::size_t bytes_per_qpt,
-                          std::size_t stride_bytes) noexcept;
+                          std::size_t stride_bytes,
+                          std::size_t alignment_bytes = alignof(std::max_align_t)) noexcept;
 
     void setMaterialState(std::byte* cell_state_old_base,
                           std::byte* cell_state_work_base,
                           std::size_t bytes_per_qpt,
-                          std::size_t stride_bytes) noexcept;
+                          std::size_t stride_bytes,
+                          std::size_t alignment_bytes = alignof(std::max_align_t)) noexcept;
 
     [[nodiscard]] bool hasMaterialState() const noexcept { return material_state_work_base_ != nullptr; }
     [[nodiscard]] std::size_t materialStateBytesPerQpt() const noexcept { return material_state_bytes_per_qpt_; }
     [[nodiscard]] std::size_t materialStateStrideBytes() const noexcept { return material_state_stride_bytes_; }
+    [[nodiscard]] std::size_t materialStateAlignmentBytes() const noexcept { return material_state_alignment_bytes_; }
 
     [[nodiscard]] const std::byte* materialStateOldBase() const noexcept { return material_state_old_base_; }
     [[nodiscard]] std::byte* materialStateWorkBase() const noexcept { return material_state_work_base_; }
@@ -1225,6 +1242,11 @@ public:
     void setSolutionGradients(std::span<const Vector3D> gradients);
 
 private:
+    template <class T>
+    using JITAlignedVector = std::vector<T, AlignedAllocator<T, jit::kJITPointerAlignmentBytes>>;
+
+    void rebuildJITFieldSolutionTable();
+
     // Context type and identification
     ContextType type_{ContextType::Cell};
     GlobalIndex cell_id_{-1};
@@ -1250,16 +1272,16 @@ private:
     int trial_value_dim_{1};
 
     // Quadrature data
-    std::vector<Point3D> quad_points_;
-    std::vector<Real> quad_weights_;
-    std::vector<Real> integration_weights_;
+    JITAlignedVector<Point3D> quad_points_;
+    JITAlignedVector<Real> quad_weights_;
+    JITAlignedVector<Real> integration_weights_;
 
     // Geometry data
-    std::vector<Point3D> physical_points_;
-    std::vector<Matrix3x3> jacobians_;
-    std::vector<Matrix3x3> inverse_jacobians_;
-    std::vector<Real> jacobian_dets_;
-    std::vector<Vector3D> normals_;
+    JITAlignedVector<Point3D> physical_points_;
+    JITAlignedVector<Matrix3x3> jacobians_;
+    JITAlignedVector<Matrix3x3> inverse_jacobians_;
+    JITAlignedVector<Real> jacobian_dets_;
+    JITAlignedVector<Vector3D> normals_;
 
     // Entity measures (optional)
     Real cell_diameter_{0.0};
@@ -1267,71 +1289,72 @@ private:
     Real facet_area_{0.0};
 
     // Test basis data (n_test_dofs * n_qpts arrays)
-    std::vector<Real> test_basis_values_;           // [i * n_qpts + q]
-    std::vector<Vector3D> test_ref_gradients_;      // [i * n_qpts + q]
-    std::vector<Vector3D> test_phys_gradients_;     // [i * n_qpts + q]
+    JITAlignedVector<Real> test_basis_values_;           // [i * n_qpts + q]
+    JITAlignedVector<Vector3D> test_ref_gradients_;      // [i * n_qpts + q]
+    JITAlignedVector<Vector3D> test_phys_gradients_;     // [i * n_qpts + q]
 
     // Test vector-basis data (H(curl)/H(div)) (n_test_dofs * n_qpts arrays)
-    std::vector<Vector3D> test_basis_vector_values_; // [i * n_qpts + q]
-    std::vector<Vector3D> test_basis_curls_;         // [i * n_qpts + q]
-    std::vector<Real> test_basis_divergences_;       // [i * n_qpts + q]
+    JITAlignedVector<Vector3D> test_basis_vector_values_; // [i * n_qpts + q]
+    JITAlignedVector<Vector3D> test_basis_curls_;         // [i * n_qpts + q]
+    JITAlignedVector<Real> test_basis_divergences_;       // [i * n_qpts + q]
 
     // Trial basis data (may be same as test for square)
-    std::vector<Real> trial_basis_values_;
-    std::vector<Vector3D> trial_ref_gradients_;
-    std::vector<Vector3D> trial_phys_gradients_;
-    std::vector<Vector3D> trial_basis_vector_values_;
-    std::vector<Vector3D> trial_basis_curls_;
-    std::vector<Real> trial_basis_divergences_;
+    JITAlignedVector<Real> trial_basis_values_;
+    JITAlignedVector<Vector3D> trial_ref_gradients_;
+    JITAlignedVector<Vector3D> trial_phys_gradients_;
+    JITAlignedVector<Vector3D> trial_basis_vector_values_;
+    JITAlignedVector<Vector3D> trial_basis_curls_;
+    JITAlignedVector<Real> trial_basis_divergences_;
     bool trial_is_test_{true};  // Optimization flag
 
     // Optional basis Hessians (n_dofs * n_qpts arrays)
-    std::vector<Matrix3x3> test_ref_hessians_;
-    std::vector<Matrix3x3> test_phys_hessians_;
-    std::vector<Matrix3x3> trial_ref_hessians_;
-    std::vector<Matrix3x3> trial_phys_hessians_;
+    JITAlignedVector<Matrix3x3> test_ref_hessians_;
+    JITAlignedVector<Matrix3x3> test_phys_hessians_;
+    JITAlignedVector<Matrix3x3> trial_ref_hessians_;
+    JITAlignedVector<Matrix3x3> trial_phys_hessians_;
 
     // Solution data (for nonlinear problems)
-    std::vector<Real> solution_coefficients_;
-    std::vector<Real> solution_values_;
-    std::vector<Vector3D> solution_vector_values_;
-    std::vector<Vector3D> solution_gradients_;
-    std::vector<Matrix3x3> solution_jacobians_;
-    std::vector<Matrix3x3> solution_hessians_;
-    std::vector<Real> solution_laplacians_;
-    std::vector<Matrix3x3> solution_component_hessians_;  // [q * trial_value_dim + c]
-    std::vector<Real> solution_component_laplacians_;     // [q * trial_value_dim + c]
+    JITAlignedVector<Real> solution_coefficients_;
+    JITAlignedVector<Real> solution_values_;
+    JITAlignedVector<Vector3D> solution_vector_values_;
+    JITAlignedVector<Vector3D> solution_gradients_;
+    JITAlignedVector<Matrix3x3> solution_jacobians_;
+    JITAlignedVector<Matrix3x3> solution_hessians_;
+    JITAlignedVector<Real> solution_laplacians_;
+    JITAlignedVector<Matrix3x3> solution_component_hessians_;  // [q * trial_value_dim + c]
+    JITAlignedVector<Real> solution_component_laplacians_;     // [q * trial_value_dim + c]
 
     struct FieldSolutionData {
         FieldId id{INVALID_FIELD_ID};
         FieldType field_type{FieldType::Scalar};
         int value_dim{1};
 
-        std::vector<Real> values{};
-        std::vector<Vector3D> vector_values{};
+        JITAlignedVector<Real> values{};
+        JITAlignedVector<Vector3D> vector_values{};
         // Previous (history) values packed by time index:
         //   history_values[(k-1)*n_qpts + q] == field value at quadrature point q from u^{n-k}.
-        std::vector<Real> history_values{};
-        std::vector<Vector3D> history_vector_values{};
-        std::vector<Vector3D> gradients{};
-        std::vector<Matrix3x3> jacobians{};
-        std::vector<Matrix3x3> hessians{};
-        std::vector<Real> laplacians{};
-        std::vector<Matrix3x3> component_hessians{};  // [q * value_dim + c]
-        std::vector<Real> component_laplacians{};     // [q * value_dim + c]
+        JITAlignedVector<Real> history_values{};
+        JITAlignedVector<Vector3D> history_vector_values{};
+        JITAlignedVector<Vector3D> gradients{};
+        JITAlignedVector<Matrix3x3> jacobians{};
+        JITAlignedVector<Matrix3x3> hessians{};
+        JITAlignedVector<Real> laplacians{};
+        JITAlignedVector<Matrix3x3> component_hessians{};  // [q * value_dim + c]
+        JITAlignedVector<Real> component_laplacians{};     // [q * value_dim + c]
     };
 
     std::vector<FieldSolutionData> field_solution_data_{};
+    JITAlignedVector<jit::FieldSolutionEntryV1> jit_field_solution_table_{};
 
     // Transient history solution data (optional)
     struct HistorySolutionData {
-        std::vector<Real> coefficients{};
-        std::vector<Real> values{};
-        std::vector<Vector3D> vector_values{};
-        std::vector<Vector3D> gradients{};
-        std::vector<Matrix3x3> jacobians{};
-        std::vector<Matrix3x3> component_hessians{};  // [q * value_dim + c]
-        std::vector<Real> component_laplacians{};     // [q * value_dim + c]
+        JITAlignedVector<Real> coefficients{};
+        JITAlignedVector<Real> values{};
+        JITAlignedVector<Vector3D> vector_values{};
+        JITAlignedVector<Vector3D> gradients{};
+        JITAlignedVector<Matrix3x3> jacobians{};
+        JITAlignedVector<Matrix3x3> component_hessians{};  // [q * value_dim + c]
+        JITAlignedVector<Real> component_laplacians{};     // [q * value_dim + c]
     };
 
     // Indexing: history_solution_data_[k-1] corresponds to u^{n-k}, k >= 1.
@@ -1342,6 +1365,7 @@ private:
     std::byte* material_state_work_base_{nullptr};
     std::size_t material_state_bytes_per_qpt_{0};
     std::size_t material_state_stride_bytes_{0};
+    std::size_t material_state_alignment_bytes_{alignof(std::max_align_t)};
 
     // Optional time/parameter context (owned by Systems)
     Real time_{0.0};

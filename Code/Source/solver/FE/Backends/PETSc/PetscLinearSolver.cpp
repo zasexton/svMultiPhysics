@@ -14,9 +14,13 @@
 #include "Backends/PETSc/PetscMatrix.h"
 #include "Backends/PETSc/PetscVector.h"
 #include "Core/FEException.h"
+#include "Core/Logger.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <cmath>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -72,6 +76,29 @@ void PetscLinearSolver::ensureKspCreated()
 }
 
 namespace {
+
+[[nodiscard]] bool oopTraceEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("SVMP_OOP_SOLVER_TRACE");
+        if (env == nullptr) {
+            return false;
+        }
+        std::string v(env);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return !(v == "0" || v == "false" || v == "off" || v == "no");
+    }();
+    return enabled;
+}
+
+void traceLog(const std::string& msg)
+{
+    if (!oopTraceEnabled()) {
+        return;
+    }
+    FE_LOG_INFO(msg);
+}
 
 [[nodiscard]] std::string reasonToString(KSPConvergedReason r)
 {
@@ -219,6 +246,19 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
             x->zero();
         }
 
+        if (oopTraceEnabled()) {
+            std::ostringstream oss;
+            oss << "PETScLinearSolver::solve: n=" << A->numRows()
+                << " method=" << solverMethodToString(options_.method)
+                << " pc=" << preconditionerToString(options_.preconditioner)
+                << " rel_tol=" << options_.rel_tol
+                << " abs_tol=" << options_.abs_tol
+                << " max_iter=" << options_.max_iter
+                << " use_initial_guess=" << (options_.use_initial_guess ? 1 : 0)
+                << " prefix='" << normalizedPetscPrefix(options_.petsc_options_prefix) << "'";
+            traceLog(oss.str());
+        }
+
         // Compute initial residual ||b - A x||.
         PetscReal r0 = 0.0;
         {
@@ -251,6 +291,17 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
         FE_PETSC_CALL(KSPGetConvergedReason(ksp_, &reason));
         rep.converged = (reason > 0);
         rep.message = "petsc: reason=" + reasonToString(reason);
+
+        if (oopTraceEnabled()) {
+            std::ostringstream oss;
+            oss << "PETScLinearSolver::solve: converged=" << (rep.converged ? 1 : 0)
+                << " iters=" << rep.iterations
+                << " r0=" << rep.initial_residual_norm
+                << " rn=" << rep.final_residual_norm
+                << " rel=" << rep.relative_residual
+                << " msg='" << rep.message << "'";
+            traceLog(oss.str());
+        }
 
         return rep;
     }
@@ -355,6 +406,20 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
             x->zero();
         }
 
+        if (oopTraceEnabled()) {
+            std::ostringstream oss;
+            oss << "PETScLinearSolver::solve(block): blocks=" << m << "x" << n
+                << " n_total=" << A_block->numRows()
+                << " method=" << solverMethodToString(options_.method)
+                << " pc=" << preconditionerToString(options_.preconditioner)
+                << " rel_tol=" << options_.rel_tol
+                << " abs_tol=" << options_.abs_tol
+                << " max_iter=" << options_.max_iter
+                << " use_initial_guess=" << (options_.use_initial_guess ? 1 : 0)
+                << " prefix='" << normalizedPetscPrefix(options_.petsc_options_prefix) << "'";
+            traceLog(oss.str());
+        }
+
         PetscReal r0 = 0.0;
         {
             Vec r = nullptr;
@@ -392,6 +457,17 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
         FE_PETSC_CALL(KSPGetConvergedReason(ksp_, &reason));
         rep.converged = (reason > 0);
         rep.message = "petsc(nest): reason=" + reasonToString(reason);
+
+        if (oopTraceEnabled()) {
+            std::ostringstream oss;
+            oss << "PETScLinearSolver::solve(block): converged=" << (rep.converged ? 1 : 0)
+                << " iters=" << rep.iterations
+                << " r0=" << rep.initial_residual_norm
+                << " rn=" << rep.final_residual_norm
+                << " rel=" << rep.relative_residual
+                << " msg='" << rep.message << "'";
+            traceLog(oss.str());
+        }
 
         FE_PETSC_CALL(VecDestroy(&x_nest));
         FE_PETSC_CALL(VecDestroy(&b_nest));

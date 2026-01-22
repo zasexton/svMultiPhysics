@@ -205,6 +205,14 @@ public:
     [[nodiscard]] bool hasTrial() const noexcept override { return false; }
 };
 
+class EffectiveTimeStepNode final : public FormExprNode {
+public:
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::EffectiveTimeStep; }
+    [[nodiscard]] std::string toString() const override { return "dt_eff"; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+};
+
 class IdentityNode final : public FormExprNode {
 public:
     IdentityNode() = default;
@@ -1499,6 +1507,11 @@ FormExpr FormExpr::time()
 FormExpr FormExpr::timeStep()
 {
     return FormExpr(std::make_shared<TimeStepNode>());
+}
+
+FormExpr FormExpr::effectiveTimeStep()
+{
+    return FormExpr(std::make_shared<EffectiveTimeStepNode>());
 }
 
 FormExpr FormExpr::identity()

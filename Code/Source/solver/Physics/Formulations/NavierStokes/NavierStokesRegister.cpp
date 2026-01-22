@@ -233,16 +233,24 @@ struct TemporalSpatialValues {
   }
 };
 
-std::unordered_set<svmp::index_t> collect_boundary_vertices(const svmp::MeshBase& mesh, int boundary_marker)
+std::unordered_set<svmp::gid_t> collect_boundary_vertex_gids(const svmp::MeshBase& mesh, int boundary_marker)
 {
-  std::unordered_set<svmp::index_t> verts;
+  std::unordered_set<svmp::gid_t> gids;
   const auto faces = mesh.faces_with_label(static_cast<svmp::label_t>(boundary_marker));
+  const auto& vgids = mesh.vertex_gids();
   for (const auto f : faces) {
     for (const auto v : mesh.face_vertices(f)) {
-      verts.insert(v);
+      if (v < 0) {
+        continue;
+      }
+      const auto idx = static_cast<std::size_t>(v);
+      if (idx >= vgids.size()) {
+        continue;
+      }
+      gids.insert(vgids[idx]);
     }
   }
-  return verts;
+  return gids;
 }
 
 std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(const svmp::MeshBase& mesh,
@@ -274,12 +282,25 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
         ", but mesh dimension is " + std::to_string(dim) + ".");
   }
 
-  const auto boundary_vertices = collect_boundary_vertices(mesh, boundary_marker);
-  if (!boundary_vertices.empty() && static_cast<int>(boundary_vertices.size()) != num_nodes) {
+  const auto boundary_gids = collect_boundary_vertex_gids(mesh, boundary_marker);
+  const bool identity_vertex_gids = [&] {
+    const auto& vgids = mesh.vertex_gids();
+    if (vgids.size() != mesh.n_vertices()) {
+      return false;
+    }
+    for (std::size_t i = 0; i < vgids.size(); ++i) {
+      if (vgids[i] != static_cast<svmp::gid_t>(i)) {
+        return false;
+      }
+    }
+    return true;
+  }();
+
+  if (identity_vertex_gids && !boundary_gids.empty() && static_cast<int>(boundary_gids.size()) != num_nodes) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path + "' specifies num_nodes=" +
         std::to_string(num_nodes) + ", but boundary marker " + std::to_string(boundary_marker) + " has " +
-        std::to_string(boundary_vertices.size()) + " unique nodes.");
+        std::to_string(boundary_gids.size()) + " unique nodes.");
   }
 
   auto out = std::make_shared<TemporalSpatialValues>();
@@ -308,51 +329,65 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
   }
   out->period = out->t.back();
 
-  out->node_ids.resize(static_cast<std::size_t>(num_nodes));
-  out->coords.resize(static_cast<std::size_t>(num_nodes));
-  out->d.resize(static_cast<std::size_t>(num_nodes) * static_cast<std::size_t>(num_ts) *
-                static_cast<std::size_t>(ndof));
+  out->node_ids.clear();
+  out->coords.clear();
+  out->d.clear();
+  out->node_ids.reserve(static_cast<std::size_t>(num_nodes));
+  out->coords.reserve(static_cast<std::size_t>(num_nodes));
+  out->d.reserve(static_cast<std::size_t>(num_nodes) * static_cast<std::size_t>(num_ts) * static_cast<std::size_t>(ndof));
 
-  const auto& X = mesh.X_ref();
   for (int b = 0; b < num_nodes; ++b) {
     long long node_id_1based = 0;
     in >> node_id_1based;
-    const long long node_id0 = node_id_1based - 1;
-    if (node_id0 < 0 || node_id0 >= static_cast<long long>(mesh.n_vertices())) {
+    const long long node_gid0_ll = node_id_1based - 1;
+    if (node_gid0_ll < 0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path +
+          "': invalid negative node id: " + std::to_string(node_id_1based) + ".");
+    }
+
+    const auto node_gid = static_cast<svmp::gid_t>(node_gid0_ll);
+    const auto node_idx = mesh.global_to_local_vertex(node_gid);
+
+    if (identity_vertex_gids && node_idx == svmp::INVALID_INDEX) {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path +
           "': node id out of range: " + std::to_string(node_id_1based) + ".");
     }
-    const auto node_idx = static_cast<svmp::index_t>(node_id0);
-    if (!boundary_vertices.empty() && boundary_vertices.count(node_idx) == 0) {
+    if (identity_vertex_gids && node_idx != svmp::INVALID_INDEX && !boundary_gids.empty() &&
+        boundary_gids.count(node_gid) == 0u) {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] Temporal/spatial BC file '" + file_path + "': node id " +
           std::to_string(node_id_1based) + " is not on boundary marker " + std::to_string(boundary_marker) + ".");
     }
-    out->node_ids[static_cast<std::size_t>(b)] = node_idx;
 
-    std::array<svmp::FE::Real, 3> p{0.0, 0.0, 0.0};
-    const auto base = static_cast<std::size_t>(node_idx) * static_cast<std::size_t>(dim);
-    p[0] = static_cast<svmp::FE::Real>(X.at(base + 0));
-    if (dim >= 2) {
-      p[1] = static_cast<svmp::FE::Real>(X.at(base + 1));
-    }
-    if (dim >= 3) {
-      p[2] = static_cast<svmp::FE::Real>(X.at(base + 2));
-    }
-    out->coords[static_cast<std::size_t>(b)] = p;
+    const bool keep = (node_idx != svmp::INVALID_INDEX) && (boundary_gids.empty() || boundary_gids.count(node_gid) != 0u);
+    if (keep) {
+      out->node_ids.push_back(node_idx);
 
-    out->node_index_by_key.emplace(TemporalSpatialValues::quantize(p, dim), static_cast<std::size_t>(b));
+      const auto& X = mesh.X_ref();
+      std::array<svmp::FE::Real, 3> p{0.0, 0.0, 0.0};
+      const auto base = static_cast<std::size_t>(node_idx) * static_cast<std::size_t>(dim);
+      p[0] = static_cast<svmp::FE::Real>(X.at(base + 0));
+      if (dim >= 2) {
+        p[1] = static_cast<svmp::FE::Real>(X.at(base + 1));
+      }
+      if (dim >= 3) {
+        p[2] = static_cast<svmp::FE::Real>(X.at(base + 2));
+      }
+      out->coords.push_back(p);
+
+      const auto stored_idx = out->coords.size() - 1;
+      out->node_index_by_key.emplace(TemporalSpatialValues::quantize(p, dim), stored_idx);
+    }
 
     for (int i = 0; i < num_ts; ++i) {
       for (int k = 0; k < ndof; ++k) {
         double value = 0.0;
         in >> value;
-        const auto idx = ((static_cast<std::size_t>(b) * static_cast<std::size_t>(num_ts) +
-                           static_cast<std::size_t>(i)) *
-                              static_cast<std::size_t>(ndof) +
-                          static_cast<std::size_t>(k));
-        out->d[idx] = static_cast<svmp::FE::Real>(value);
+        if (keep) {
+          out->d.push_back(static_cast<svmp::FE::Real>(value));
+        }
       }
     }
   }

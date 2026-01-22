@@ -5,11 +5,11 @@
 #include <string>
 #include <vector>
 
+#include "Mesh/Mesh.h"
+
 class Parameters;
 
 namespace svmp {
-class MeshBase;
-
 namespace FE {
 namespace systems {
 class FESystem;
@@ -34,8 +34,8 @@ namespace application {
 namespace core {
 
 struct SimulationComponents {
-  std::map<std::string, std::shared_ptr<svmp::MeshBase>> meshes{};
-  std::shared_ptr<svmp::MeshBase> primary_mesh{};
+  std::map<std::string, std::shared_ptr<svmp::Mesh>> meshes{};
+  std::shared_ptr<svmp::Mesh> primary_mesh{};
   std::string primary_mesh_name{};
 
   std::unique_ptr<svmp::FE::systems::FESystem> fe_system{};

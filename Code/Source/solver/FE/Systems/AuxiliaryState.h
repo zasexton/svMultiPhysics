@@ -11,6 +11,8 @@
  */
 
 #include "Core/Types.h"
+#include "Core/Alignment.h"
+#include "Core/AlignedAllocator.h"
 #include "Core/FEException.h"
 
 #include "Systems/ODEIntegrator.h"
@@ -218,9 +220,9 @@ public:
     }
 
 private:
-    std::vector<Real> committed_{};
-    std::vector<Real> values_{};
-    std::vector<std::vector<Real>> history_{};
+    std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> committed_{};
+    std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> values_{};
+    std::vector<std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>>> history_{};
     std::unordered_map<std::string, std::size_t> name_to_index_{};
 };
 

@@ -19,6 +19,44 @@
 #include <utility>
 #include <vector>
 
+namespace {
+
+class PressureNullspacePinConstraint final : public svmp::FE::systems::ISystemConstraint {
+public:
+    explicit PressureNullspacePinConstraint(svmp::FE::FieldId pressure_field, double value)
+        : pressure_field_(pressure_field)
+        , value_(value)
+    {
+    }
+
+    void apply(const svmp::FE::systems::FESystem& system, svmp::FE::constraints::AffineConstraints& constraints) override
+    {
+        const auto& fmap = system.fieldMap();
+        const auto p_dofs = fmap.getComponentDofs(static_cast<std::size_t>(pressure_field_), /*component=*/0);
+        FE_THROW_IF(p_dofs.empty(), svmp::FE::FEException,
+                    "PressureNullspacePinConstraint: pressure field has no DOFs");
+
+        const svmp::FE::GlobalIndex pin_dof = *p_dofs.begin();
+        constraints.addDirichlet(pin_dof, value_);
+    }
+
+    bool updateValues(const svmp::FE::systems::FESystem& /*system*/,
+                      svmp::FE::constraints::AffineConstraints& /*constraints*/,
+                      double /*time*/,
+                      double /*dt*/) override
+    {
+        return false;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override { return false; }
+
+private:
+    svmp::FE::FieldId pressure_field_{svmp::FE::INVALID_FIELD_ID};
+    double value_{0.0};
+};
+
+} // namespace
+
 namespace svmp {
 namespace Physics {
 namespace formulations {
@@ -137,7 +175,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         //   p' = -tau_C * (div u)
         // and coarse-scale stabilization terms assembled from (u', p').
         const auto eps = FormExpr::constant(options_.stabilization_epsilon);
-        const auto dt_step = FormExpr::timeStep();
+        const auto dt_step = FormExpr::effectiveTimeStep();
         const auto ct_m = FormExpr::constant(options_.ct_m);
         const auto ct_c = FormExpr::constant(options_.ct_c);
 
@@ -229,6 +267,11 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     }
     if (!pressure_constraints.empty()) {
         FE::systems::installStrongDirichlet(system, pressure_constraints);
+    } else {
+        // Pressure is only determined up to an additive constant unless it is constrained.
+        // Pin one pressure DOF to avoid a singular saddle-point system that causes iterative solvers
+        // (e.g., FSILS GMRES) to break down.
+        system.addSystemConstraint(std::make_unique<PressureNullspacePinConstraint>(p_id, /*value=*/0.0));
     }
 
     // Install coupled residual on both operator tags used by FESystem convenience calls.
@@ -237,8 +280,17 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     residual.setBlock(1, continuity_form);
 
     const std::array<FE::FieldId, 2> fields = {u_id, p_id};
-    (void)FE::systems::installCoupledResidual(system, "residual", fields, fields, residual);
-    (void)FE::systems::installCoupledResidual(system, "jacobian", fields, fields, residual);
+    {
+        FE::systems::FormInstallOptions residual_install{};
+        residual_install.coupled_residual_install_jacobian_blocks = false;
+        (void)FE::systems::installCoupledResidual(system, "residual", fields, fields, residual, residual_install);
+    }
+    {
+        FE::systems::FormInstallOptions jacobian_install{};
+        jacobian_install.coupled_residual_install_residual_kernels = false;
+        jacobian_install.coupled_residual_from_jacobian_block = true;
+        (void)FE::systems::installCoupledResidual(system, "jacobian", fields, fields, residual, jacobian_install);
+    }
 }
 
 } // namespace navier_stokes

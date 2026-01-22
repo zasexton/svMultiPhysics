@@ -13,6 +13,8 @@
  */
 
 #include "Core/Types.h"
+#include "Core/Alignment.h"
+#include "Core/AlignedAllocator.h"
 #include "Core/FEException.h"
 #include "Forms/FormExpr.h"
 
@@ -128,7 +130,7 @@ public:
     }
 
 private:
-    std::vector<Real> values_{};
+    std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> values_{};
     std::vector<std::string> names_{};
     std::unordered_map<std::string, std::size_t> name_to_index_{};
 };

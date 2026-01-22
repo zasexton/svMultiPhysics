@@ -17,6 +17,7 @@
 #include "TimeStepping/TimeHistory.h"
 
 #include <string>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -32,6 +33,23 @@ struct NewtonOptions {
     double step_tolerance{0.0};
 
     bool assemble_both_when_possible{true};
+
+    // Modified Newton: reuse the Jacobian for multiple nonlinear iterations.
+    // `1` => full Newton (assemble every iteration).
+    int jacobian_rebuild_period{1};
+
+    // Heuristic update scaling for dt(·) fields (rate-form-like behavior).
+    // Scales the Newton update du on time-derivative fields by `dt_increment_scale`
+    // (or, when <=0, by 1/dt1_stencil[0] when available).
+    bool scale_dt_increments{false};
+    double dt_increment_scale{0.0};
+
+    // Backtracking line search on the residual norm (merit function 0.5*||r||^2).
+    bool use_line_search{true};
+    int line_search_max_iterations{10};
+    double line_search_alpha_min{1e-6};
+    double line_search_shrink{0.5};
+    double line_search_c1{1e-4};
 };
 
 struct NewtonReport {
@@ -46,10 +64,15 @@ struct NewtonWorkspace {
     std::unique_ptr<backends::GenericMatrix> jacobian{};
     std::unique_ptr<backends::GenericVector> residual{};
     std::unique_ptr<backends::GenericVector> delta{};
+    std::unique_ptr<backends::GenericVector> u_backup{};
+    std::unique_ptr<backends::GenericVector> residual_scratch{};
+    std::unique_ptr<backends::GenericVector> residual_base{};
+    std::vector<GlobalIndex> dt_field_dofs{};
 
     [[nodiscard]] bool isAllocated() const noexcept
     {
-        return jacobian != nullptr && residual != nullptr && delta != nullptr;
+        return jacobian != nullptr && residual != nullptr && delta != nullptr &&
+               u_backup != nullptr && residual_scratch != nullptr && residual_base != nullptr;
     }
 };
 

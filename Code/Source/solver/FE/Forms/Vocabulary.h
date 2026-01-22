@@ -186,6 +186,7 @@ inline FormExpr x() { return FormExpr::coordinate(); }
 inline FormExpr X() { return FormExpr::referenceCoordinate(); }
 inline FormExpr t() { return FormExpr::time(); }
 inline FormExpr deltat() { return FormExpr::timeStep(); }
+inline FormExpr deltat_eff() { return FormExpr::effectiveTimeStep(); }
 
 inline FormExpr J() { return FormExpr::jacobian(); }
 inline FormExpr Jinv() { return FormExpr::jacobianInverse(); }

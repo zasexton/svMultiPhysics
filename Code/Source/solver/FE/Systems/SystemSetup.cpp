@@ -40,8 +40,10 @@
 #include "Core/FEConfig.h"
 
 #include <algorithm>
+#include <optional>
 #include <thread>
 #include <tuple>
+#include <unordered_set>
 
 #if FE_HAS_MPI
 #  include <mpi.h>
@@ -92,9 +94,290 @@ private:
     constraints::AffineConstraints constraints_;
 };
 
+class PermutedAffineConstraintsQuery final : public sparsity::IConstraintQuery {
+public:
+    PermutedAffineConstraintsQuery(const constraints::AffineConstraints& constraints,
+                                   std::span<const GlobalIndex> forward,
+                                   std::span<const GlobalIndex> inverse)
+        : constraints_(&constraints)
+        , forward_(forward)
+        , inverse_(inverse)
+    {}
+
+    [[nodiscard]] bool isConstrained(GlobalIndex dof) const override
+    {
+        FE_CHECK_NOT_NULL(constraints_, "PermutedAffineConstraintsQuery::constraints");
+        if (dof < 0 || static_cast<std::size_t>(dof) >= inverse_.size()) {
+            return false;
+        }
+        const auto fe = inverse_[static_cast<std::size_t>(dof)];
+        if (fe < 0) {
+            return false;
+        }
+        return constraints_->isConstrained(fe);
+    }
+
+    [[nodiscard]] std::vector<GlobalIndex> getMasterDofs(GlobalIndex constrained_dof) const override
+    {
+        FE_CHECK_NOT_NULL(constraints_, "PermutedAffineConstraintsQuery::constraints");
+        if (constrained_dof < 0 || static_cast<std::size_t>(constrained_dof) >= inverse_.size()) {
+            return {};
+        }
+        const auto fe_constrained = inverse_[static_cast<std::size_t>(constrained_dof)];
+        if (fe_constrained < 0) {
+            return {};
+        }
+
+        auto view = constraints_->getConstraint(fe_constrained);
+        if (!view.has_value()) {
+            return {};
+        }
+
+        std::vector<GlobalIndex> masters;
+        masters.reserve(view->entries.size());
+        for (const auto& entry : view->entries) {
+            const auto fe_master = entry.master_dof;
+            if (fe_master < 0 || static_cast<std::size_t>(fe_master) >= forward_.size()) {
+                continue;
+            }
+            masters.push_back(forward_[static_cast<std::size_t>(fe_master)]);
+        }
+        return masters;
+    }
+
+    [[nodiscard]] std::vector<GlobalIndex> getAllConstrainedDofs() const override
+    {
+        FE_CHECK_NOT_NULL(constraints_, "PermutedAffineConstraintsQuery::constraints");
+        const auto fe_dofs = constraints_->getConstrainedDofs();
+        std::vector<GlobalIndex> fs_dofs;
+        fs_dofs.reserve(fe_dofs.size());
+        for (const auto fe : fe_dofs) {
+            if (fe < 0 || static_cast<std::size_t>(fe) >= forward_.size()) {
+                continue;
+            }
+            fs_dofs.push_back(forward_[static_cast<std::size_t>(fe)]);
+        }
+        std::sort(fs_dofs.begin(), fs_dofs.end());
+        fs_dofs.erase(std::unique(fs_dofs.begin(), fs_dofs.end()), fs_dofs.end());
+        return fs_dofs;
+    }
+
+    [[nodiscard]] std::size_t numConstraints() const override
+    {
+        FE_CHECK_NOT_NULL(constraints_, "PermutedAffineConstraintsQuery::constraints");
+        return constraints_->numConstraints();
+    }
+
+private:
+    const constraints::AffineConstraints* constraints_{nullptr};
+    std::span<const GlobalIndex> forward_{};
+    std::span<const GlobalIndex> inverse_{};
+};
+
+struct NodalInterleavedDofMap {
+    int dof_per_node{0};
+    GlobalIndex n_nodes{0};
+    sparsity::IndexRange owned_range{};
+
+    std::vector<GlobalIndex> fe_to_fs{};
+    std::vector<GlobalIndex> fs_to_fe{};
+
+    std::vector<int> ghost_nodes{};
+    std::vector<unsigned char> node_is_relevant{};
+    std::vector<unsigned char> node_is_ghost{};
+
+    [[nodiscard]] bool isGhostNode(int node) const noexcept
+    {
+        if (node < 0 || static_cast<std::size_t>(node) >= node_is_ghost.size()) {
+            return false;
+        }
+        return node_is_ghost[static_cast<std::size_t>(node)] != 0;
+    }
+
+    [[nodiscard]] bool isRelevantDof(GlobalIndex dof) const noexcept
+    {
+        if (dof_per_node <= 0 || dof < 0) {
+            return false;
+        }
+        const auto node = static_cast<GlobalIndex>(dof / dof_per_node);
+        if (node < 0 || static_cast<std::size_t>(node) >= node_is_relevant.size()) {
+            return false;
+        }
+        return node_is_relevant[static_cast<std::size_t>(node)] != 0;
+    }
+
+    [[nodiscard]] GlobalIndex mapFeToFs(GlobalIndex fe_dof) const noexcept
+    {
+        if (fe_dof < 0 || static_cast<std::size_t>(fe_dof) >= fe_to_fs.size()) {
+            return INVALID_GLOBAL_INDEX;
+        }
+        return fe_to_fs[static_cast<std::size_t>(fe_dof)];
+    }
+};
+
+[[nodiscard]] std::optional<NodalInterleavedDofMap> tryBuildNodalInterleavedDofMap(const dofs::DofHandler& dof_handler,
+                                                                                   const dofs::FieldDofMap& field_map)
+{
+    const GlobalIndex total_dofs = dof_handler.getNumDofs();
+    if (total_dofs <= 0) {
+        return std::nullopt;
+    }
+
+    const std::size_t n_fields = field_map.numFields();
+    if (n_fields == 0u) {
+        return std::nullopt;
+    }
+
+    GlobalIndex n_nodes = -1;
+    int dof_per_node = 0;
+    for (std::size_t f = 0; f < n_fields; ++f) {
+        const auto& field = field_map.getField(f);
+        FE_THROW_IF(field.component_dof_layout != dofs::FieldComponentDofLayout::ComponentWise,
+                    InvalidArgumentException,
+                    "FESystem::setup: node-interleaved distributed sparsity requires component-wise fields");
+        FE_THROW_IF(field.n_components <= 0, InvalidStateException,
+                    "FESystem::setup: invalid field components for node-interleaved distributed sparsity");
+        FE_THROW_IF(field.n_dofs % field.n_components != 0, InvalidStateException,
+                    "FESystem::setup: field DOF count must be divisible by components for node-interleaved distributed sparsity");
+
+        const GlobalIndex n_per_component = field.n_dofs / field.n_components;
+        if (n_nodes < 0) {
+            n_nodes = n_per_component;
+        } else if (n_nodes != n_per_component) {
+            return std::nullopt;
+        }
+        dof_per_node += field.n_components;
+    }
+    if (n_nodes <= 0 || dof_per_node <= 0) {
+        return std::nullopt;
+    }
+    if (total_dofs != static_cast<GlobalIndex>(dof_per_node) * n_nodes) {
+        return std::nullopt;
+    }
+
+    NodalInterleavedDofMap map;
+    map.dof_per_node = dof_per_node;
+    map.n_nodes = n_nodes;
+    map.fe_to_fs.assign(static_cast<std::size_t>(total_dofs), INVALID_GLOBAL_INDEX);
+    map.fs_to_fe.assign(static_cast<std::size_t>(total_dofs), INVALID_GLOBAL_INDEX);
+
+    for (GlobalIndex node = 0; node < n_nodes; ++node) {
+        int comp_offset = 0;
+        for (std::size_t f = 0; f < n_fields; ++f) {
+            const auto& field = field_map.getField(f);
+            for (LocalIndex c = 0; c < field.n_components; ++c) {
+                const GlobalIndex fe = field_map.componentToGlobal(f, c, node);
+                const GlobalIndex fs = node * static_cast<GlobalIndex>(dof_per_node) + static_cast<GlobalIndex>(comp_offset);
+                if (fe < 0 || fe >= total_dofs) {
+                    return std::nullopt;
+                }
+                if (fs < 0 || fs >= total_dofs) {
+                    return std::nullopt;
+                }
+                map.fe_to_fs[static_cast<std::size_t>(fe)] = fs;
+                map.fs_to_fe[static_cast<std::size_t>(fs)] = fe;
+                ++comp_offset;
+            }
+        }
+        FE_THROW_IF(comp_offset != dof_per_node, InvalidStateException,
+                    "FESystem::setup: failed to build node-interleaved DOF permutation");
+    }
+
+    for (std::size_t i = 0; i < map.fe_to_fs.size(); ++i) {
+        if (map.fe_to_fs[i] == INVALID_GLOBAL_INDEX) {
+            return std::nullopt;
+        }
+    }
+    for (std::size_t i = 0; i < map.fs_to_fe.size(); ++i) {
+        if (map.fs_to_fe[i] == INVALID_GLOBAL_INDEX) {
+            return std::nullopt;
+        }
+    }
+
+    const auto& part = dof_handler.getPartition();
+    const auto owned_fe = part.locallyOwned().toVector();
+    std::vector<int> owned_nodes;
+    owned_nodes.reserve(owned_fe.size() / static_cast<std::size_t>(std::max(1, dof_per_node)));
+
+    for (const auto fe : owned_fe) {
+        if (fe < 0 || fe >= total_dofs) {
+            continue;
+        }
+        const auto fs = map.fe_to_fs[static_cast<std::size_t>(fe)];
+        if (fs < 0) {
+            continue;
+        }
+        owned_nodes.push_back(static_cast<int>(fs / dof_per_node));
+    }
+
+    std::sort(owned_nodes.begin(), owned_nodes.end());
+    owned_nodes.erase(std::unique(owned_nodes.begin(), owned_nodes.end()), owned_nodes.end());
+    if (owned_nodes.empty()) {
+        return std::nullopt;
+    }
+
+    const int owned_node_start = owned_nodes.front();
+    const int owned_node_end = owned_nodes.back() + 1;
+    if (owned_node_start < 0 || owned_node_end <= owned_node_start) {
+        return std::nullopt;
+    }
+    if (static_cast<std::size_t>(owned_node_end - owned_node_start) != owned_nodes.size()) {
+        return std::nullopt; // not contiguous in node space
+    }
+
+    map.owned_range.first = static_cast<GlobalIndex>(owned_node_start) * dof_per_node;
+    map.owned_range.last = static_cast<GlobalIndex>(owned_node_end) * dof_per_node;
+
+    const auto ghost_fe = part.ghost().toVector();
+    std::vector<int> ghost_nodes;
+    ghost_nodes.reserve(ghost_fe.size() / static_cast<std::size_t>(std::max(1, dof_per_node)));
+
+    for (const auto fe : ghost_fe) {
+        if (fe < 0 || fe >= total_dofs) {
+            continue;
+        }
+        const auto fs = map.fe_to_fs[static_cast<std::size_t>(fe)];
+        if (fs < 0) {
+            continue;
+        }
+        const int node = static_cast<int>(fs / dof_per_node);
+        if (node >= owned_node_start && node < owned_node_end) {
+            continue;
+        }
+        ghost_nodes.push_back(node);
+    }
+
+    std::sort(ghost_nodes.begin(), ghost_nodes.end());
+    ghost_nodes.erase(std::unique(ghost_nodes.begin(), ghost_nodes.end()), ghost_nodes.end());
+
+    map.ghost_nodes = std::move(ghost_nodes);
+    map.node_is_ghost.assign(static_cast<std::size_t>(n_nodes), 0);
+    map.node_is_relevant.assign(static_cast<std::size_t>(n_nodes), 0);
+
+    for (int node = owned_node_start; node < owned_node_end; ++node) {
+        if (node < 0 || static_cast<GlobalIndex>(node) >= n_nodes) {
+            return std::nullopt;
+        }
+        map.node_is_relevant[static_cast<std::size_t>(node)] = 1;
+    }
+
+    for (const int node : map.ghost_nodes) {
+        if (node < 0 || static_cast<GlobalIndex>(node) >= n_nodes) {
+            return std::nullopt;
+        }
+        map.node_is_ghost[static_cast<std::size_t>(node)] = 1;
+        map.node_is_relevant[static_cast<std::size_t>(node)] = 1;
+    }
+
+    return map;
+}
+
 dofs::FieldLayout toFieldLayout(dofs::DofNumberingStrategy numbering)
 {
     switch (numbering) {
+        case dofs::DofNumberingStrategy::Sequential:
+            // DofHandler's default CG numbering assigns component blocks; no additional renumbering is applied.
+            return dofs::FieldLayout::Block;
         case dofs::DofNumberingStrategy::Block:
             return dofs::FieldLayout::Block;
         case dofs::DofNumberingStrategy::Interleaved:
@@ -466,9 +749,9 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     field_map_ = dofs::FieldDofMap{};
 
     if (field_registry_.size() > 1u) {
-        field_map_.setLayout(opts.dof_options.numbering == dofs::DofNumberingStrategy::Block
-                                 ? dofs::FieldLayout::Block
-                                 : dofs::FieldLayout::FieldBlock);
+        field_map_.setLayout(opts.dof_options.numbering == dofs::DofNumberingStrategy::Interleaved
+                                 ? dofs::FieldLayout::FieldBlock
+                                 : dofs::FieldLayout::Block);
     } else {
         field_map_.setLayout(toFieldLayout(opts.dof_options.numbering));
     }
@@ -538,14 +821,26 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     const auto n_cells_sparsity = meshAccess().numCells();
 
     const auto& partition = dof_handler_.getPartition();
+    const bool mpi_parallel = (partition.globalSize() > 0) && (partition.globalSize() > partition.localOwnedSize());
+
+    enum class DistSparsityMode { None, ContiguousRange, NodalInterleaved };
+
+    DistSparsityMode dist_mode = DistSparsityMode::None;
+    sparsity::IndexRange owned_range{};
+    std::optional<NodalInterleavedDofMap> nodal_map{};
+
     const auto owned_iv_opt = partition.locallyOwned().contiguousRange();
-    const bool build_distributed =
-        (partition.globalSize() > 0) &&
-        (partition.globalSize() > partition.localOwnedSize()) &&
-        owned_iv_opt.has_value();
-    const sparsity::IndexRange owned_range = build_distributed
-                                                ? sparsity::IndexRange{owned_iv_opt->begin, owned_iv_opt->end}
-                                                : sparsity::IndexRange{};
+    if (mpi_parallel && owned_iv_opt.has_value()) {
+        dist_mode = DistSparsityMode::ContiguousRange;
+        owned_range = sparsity::IndexRange{owned_iv_opt->begin, owned_iv_opt->end};
+    } else if (mpi_parallel) {
+        nodal_map = tryBuildNodalInterleavedDofMap(dof_handler_, field_map_);
+        if (nodal_map.has_value()) {
+            dist_mode = DistSparsityMode::NodalInterleaved;
+            owned_range = nodal_map->owned_range;
+        }
+    }
+
     const auto& ghost_set = partition.ghost();
     const auto& relevant_set = partition.locallyRelevant();
 
@@ -553,12 +848,12 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 		        auto pattern = std::make_unique<sparsity::SparsityPattern>(
 		            n_total_dofs, n_total_dofs);
 
-		        std::unique_ptr<sparsity::DistributedSparsityPattern> dist_pattern;
-		        std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> ghost_row_cols;
-		        if (build_distributed) {
-		            dist_pattern = std::make_unique<sparsity::DistributedSparsityPattern>(
-		                owned_range, owned_range, n_total_dofs, n_total_dofs);
-		        }
+			        std::unique_ptr<sparsity::DistributedSparsityPattern> dist_pattern;
+			        std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> ghost_row_cols;
+			        if (dist_mode != DistSparsityMode::None) {
+			            dist_pattern = std::make_unique<sparsity::DistributedSparsityPattern>(
+			                owned_range, owned_range, n_total_dofs, n_total_dofs);
+			        }
 
 		        const auto& def = operator_registry_.get(tag);
 
@@ -638,33 +933,77 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 		        std::vector<GlobalIndex> row_dofs;
 		        std::vector<GlobalIndex> col_dofs;
 
-		        auto add_element_couplings = [&](std::span<const GlobalIndex> rows,
-		                                         std::span<const GlobalIndex> cols) {
-		            pattern->addElementCouplings(rows, cols);
-		            if (!dist_pattern) {
-		                return;
-		            }
+			        auto add_element_couplings = [&](std::span<const GlobalIndex> rows,
+			                                         std::span<const GlobalIndex> cols) {
+			            pattern->addElementCouplings(rows, cols);
+			            if (!dist_pattern) {
+			                return;
+			            }
 
-		            for (const auto global_row : rows) {
-		                if (owned_range.contains(global_row)) {
-		                    for (const auto global_col : cols) {
-		                        dist_pattern->addEntry(global_row, global_col);
-		                    }
-		                    continue;
-		                }
+			            if (dist_mode == DistSparsityMode::ContiguousRange) {
+			                for (const auto global_row : rows) {
+			                    if (owned_range.contains(global_row)) {
+			                        for (const auto global_col : cols) {
+			                            dist_pattern->addEntry(global_row, global_col);
+			                        }
+			                        continue;
+			                    }
 
-		                if (!ghost_set.contains(global_row)) {
-		                    continue;
-		                }
+			                    if (!ghost_set.contains(global_row)) {
+			                        continue;
+			                    }
 
-		                auto& cols_for_row = ghost_row_cols[global_row];
-		                for (const auto global_col : cols) {
-		                    if (relevant_set.contains(global_col)) {
-		                        cols_for_row.push_back(global_col);
-		                    }
-		                }
-		            }
-		        };
+			                    auto& cols_for_row = ghost_row_cols[global_row];
+			                    for (const auto global_col : cols) {
+			                        if (relevant_set.contains(global_col)) {
+			                            cols_for_row.push_back(global_col);
+			                        }
+			                    }
+			                }
+			                return;
+			            }
+
+			            FE_THROW_IF(dist_mode != DistSparsityMode::NodalInterleaved || !nodal_map.has_value(),
+			                        InvalidStateException,
+			                        "FESystem::setup: missing nodal interleaved mapping for distributed sparsity build");
+
+			            const auto& nodal = *nodal_map;
+			            const int dof = nodal.dof_per_node;
+
+			            for (const auto global_row_fe : rows) {
+			                const auto global_row_fs = nodal.mapFeToFs(global_row_fe);
+			                if (global_row_fs == INVALID_GLOBAL_INDEX) {
+			                    continue;
+			                }
+
+			                if (owned_range.contains(global_row_fs)) {
+			                    for (const auto global_col_fe : cols) {
+			                        const auto global_col_fs = nodal.mapFeToFs(global_col_fe);
+			                        if (global_col_fs == INVALID_GLOBAL_INDEX) {
+			                            continue;
+			                        }
+			                        dist_pattern->addEntry(global_row_fs, global_col_fs);
+			                    }
+			                    continue;
+			                }
+
+			                const int node = static_cast<int>(global_row_fs / dof);
+			                if (!nodal.isGhostNode(node)) {
+			                    continue;
+			                }
+
+			                auto& cols_for_row = ghost_row_cols[global_row_fs];
+			                for (const auto global_col_fe : cols) {
+			                    const auto global_col_fs = nodal.mapFeToFs(global_col_fe);
+			                    if (global_col_fs == INVALID_GLOBAL_INDEX) {
+			                        continue;
+			                    }
+			                    if (nodal.isRelevantDof(global_col_fs)) {
+			                        cols_for_row.push_back(global_col_fs);
+			                    }
+			                }
+			            }
+			        };
 
 		        auto add_cell_couplings = [&](GlobalIndex cell_id,
 		                                      const dofs::DofMap& row_map,
@@ -959,14 +1298,25 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 	            }
 	        }
 	
-	        if (opts.use_constraints_in_assembly && !affine_constraints_.empty()) {
-	            auto query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
-	            sparsity::ConstraintSparsityAugmenter augmenter(std::move(query));
-	            augmenter.augment(*pattern, sparsity::AugmentationMode::EliminationFill);
-	            if (dist_pattern) {
-	                augmenter.augment(*dist_pattern, sparsity::AugmentationMode::EliminationFill);
-	            }
-	        }
+		        if (opts.use_constraints_in_assembly && !affine_constraints_.empty()) {
+		            auto query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
+		            sparsity::ConstraintSparsityAugmenter augmenter(std::move(query));
+		            augmenter.augment(*pattern, sparsity::AugmentationMode::EliminationFill);
+		            if (dist_pattern) {
+		                if (dist_mode == DistSparsityMode::NodalInterleaved) {
+		                    FE_THROW_IF(!nodal_map.has_value(), InvalidStateException,
+		                                "FESystem::setup: missing nodal mapping for constraint sparsity augmentation");
+		                    auto dist_query = std::make_shared<PermutedAffineConstraintsQuery>(
+		                        affine_constraints_,
+		                        std::span<const GlobalIndex>(nodal_map->fe_to_fs),
+		                        std::span<const GlobalIndex>(nodal_map->fs_to_fe));
+		                    sparsity::ConstraintSparsityAugmenter dist_augmenter(std::move(dist_query));
+		                    dist_augmenter.augment(*dist_pattern, sparsity::AugmentationMode::EliminationFill);
+		                } else {
+		                    augmenter.augment(*dist_pattern, sparsity::AugmentationMode::EliminationFill);
+		                }
+		            }
+		        }
 	
 	        if (opts.sparsity_options.ensure_diagonal) {
 	            pattern->ensureDiagonal();
@@ -986,65 +1336,115 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 	        pattern->finalize();
 	        sparsity_by_op_.emplace(tag, std::move(pattern));
 
-	        if (dist_pattern) {
-	            dist_pattern->finalize();
+		        if (dist_pattern) {
+		            dist_pattern->finalize();
 
-	            // Store optional ghost-row sparsity using the locally relevant (owned+ghost) overlap.
-	            // This is required by overlap-style MPI backends (e.g., FSILS) so all column nodes
-	            // referenced by owned rows are present locally.
-	            auto ghost_rows_all = ghost_set.toVector();
-	            std::vector<GlobalIndex> ghost_row_map;
-	            ghost_row_map.reserve(ghost_rows_all.size());
-	            for (const auto row : ghost_rows_all) {
-	                if (row < 0 || row >= n_total_dofs) {
-	                    continue;
-	                }
-	                if (owned_range.contains(row)) {
-	                    continue;
-	                }
-	                ghost_row_map.push_back(row);
-	            }
+		            // Store optional ghost-row sparsity using the locally relevant (owned+ghost) overlap.
+		            // This is required by overlap-style MPI backends (e.g., FSILS) so all column nodes
+		            // referenced by owned rows are present locally.
+		            if (dist_mode == DistSparsityMode::NodalInterleaved) {
+		                FE_THROW_IF(!nodal_map.has_value(), InvalidStateException,
+		                            "FESystem::setup: missing nodal mapping for ghost-row sparsity storage");
+		                const auto& nodal = *nodal_map;
+		                const int dof = nodal.dof_per_node;
 
-	            if (!ghost_row_map.empty()) {
-	                // ghost_set.toVector() is already sorted/unique; keep it that way after filtering.
-	                std::vector<GlobalIndex> ghost_row_ptr;
-	                std::vector<GlobalIndex> ghost_row_cols_flat;
-	                ghost_row_ptr.reserve(ghost_row_map.size() + 1);
-	                ghost_row_ptr.push_back(0);
+		                std::vector<GlobalIndex> ghost_row_map;
+		                ghost_row_map.reserve(nodal.ghost_nodes.size() * static_cast<std::size_t>(std::max(1, dof)));
+		                for (const int node : nodal.ghost_nodes) {
+		                    for (int c = 0; c < dof; ++c) {
+		                        ghost_row_map.push_back(static_cast<GlobalIndex>(node) * dof + c);
+		                    }
+		                }
 
-	                for (const auto row : ghost_row_map) {
-	                    auto cols_it = ghost_row_cols.find(row);
-	                    std::vector<GlobalIndex> cols_vec;
-	                    if (cols_it != ghost_row_cols.end()) {
-	                        cols_vec = cols_it->second;
-	                    }
-	                    cols_vec.push_back(row); // ensure diagonal
+		                if (!ghost_row_map.empty()) {
+		                    std::vector<GlobalIndex> ghost_row_ptr;
+		                    std::vector<GlobalIndex> ghost_row_cols_flat;
+		                    ghost_row_ptr.reserve(ghost_row_map.size() + 1);
+		                    ghost_row_ptr.push_back(0);
 
-	                    // Only store columns that are locally present (owned+ghost) so overlap backends can map them.
-	                    cols_vec.erase(std::remove_if(cols_vec.begin(),
-	                                                 cols_vec.end(),
-	                                                 [&](GlobalIndex col) {
-	                                                     return (col < 0) || (col >= n_total_dofs) || !relevant_set.contains(col);
-	                                                 }),
-	                                   cols_vec.end());
+		                    for (const auto row : ghost_row_map) {
+		                        auto cols_it = ghost_row_cols.find(row);
+		                        std::vector<GlobalIndex> cols_vec;
+		                        if (cols_it != ghost_row_cols.end()) {
+		                            cols_vec = cols_it->second;
+		                        }
+		                        cols_vec.push_back(row); // ensure diagonal
 
-	                    std::sort(cols_vec.begin(), cols_vec.end());
-	                    cols_vec.erase(std::unique(cols_vec.begin(), cols_vec.end()), cols_vec.end());
+		                        cols_vec.erase(std::remove_if(cols_vec.begin(),
+		                                                     cols_vec.end(),
+		                                                     [&](GlobalIndex col) {
+		                                                         return (col < 0) || (col >= n_total_dofs) || !nodal.isRelevantDof(col);
+		                                                     }),
+		                                       cols_vec.end());
 
-	                    ghost_row_cols_flat.insert(ghost_row_cols_flat.end(), cols_vec.begin(), cols_vec.end());
-	                    ghost_row_ptr.push_back(static_cast<GlobalIndex>(ghost_row_cols_flat.size()));
-	                }
+		                        std::sort(cols_vec.begin(), cols_vec.end());
+		                        cols_vec.erase(std::unique(cols_vec.begin(), cols_vec.end()), cols_vec.end());
 
-	                dist_pattern->setGhostRows(std::move(ghost_row_map),
-	                                          std::move(ghost_row_ptr),
-	                                          std::move(ghost_row_cols_flat));
-	            } else {
-	                dist_pattern->clearGhostRows();
-	            }
+		                        ghost_row_cols_flat.insert(ghost_row_cols_flat.end(), cols_vec.begin(), cols_vec.end());
+		                        ghost_row_ptr.push_back(static_cast<GlobalIndex>(ghost_row_cols_flat.size()));
+		                    }
 
-	            distributed_sparsity_by_op_.emplace(tag, std::move(dist_pattern));
-	        }
-	    }
+		                    dist_pattern->setGhostRows(std::move(ghost_row_map),
+		                                              std::move(ghost_row_ptr),
+		                                              std::move(ghost_row_cols_flat));
+		                } else {
+		                    dist_pattern->clearGhostRows();
+		                }
+		            } else {
+		                auto ghost_rows_all = ghost_set.toVector();
+		                std::vector<GlobalIndex> ghost_row_map;
+		                ghost_row_map.reserve(ghost_rows_all.size());
+		                for (const auto row : ghost_rows_all) {
+		                    if (row < 0 || row >= n_total_dofs) {
+		                        continue;
+		                    }
+		                    if (owned_range.contains(row)) {
+		                        continue;
+		                    }
+		                    ghost_row_map.push_back(row);
+		                }
+
+		                if (!ghost_row_map.empty()) {
+		                    // ghost_set.toVector() is already sorted/unique; keep it that way after filtering.
+		                    std::vector<GlobalIndex> ghost_row_ptr;
+		                    std::vector<GlobalIndex> ghost_row_cols_flat;
+		                    ghost_row_ptr.reserve(ghost_row_map.size() + 1);
+		                    ghost_row_ptr.push_back(0);
+
+		                    for (const auto row : ghost_row_map) {
+		                        auto cols_it = ghost_row_cols.find(row);
+		                        std::vector<GlobalIndex> cols_vec;
+		                        if (cols_it != ghost_row_cols.end()) {
+		                            cols_vec = cols_it->second;
+		                        }
+		                        cols_vec.push_back(row); // ensure diagonal
+
+		                        // Only store columns that are locally present (owned+ghost) so overlap backends can map them.
+		                        cols_vec.erase(std::remove_if(cols_vec.begin(),
+		                                                     cols_vec.end(),
+		                                                     [&](GlobalIndex col) {
+		                                                         return (col < 0) || (col >= n_total_dofs) || !relevant_set.contains(col);
+		                                                     }),
+		                                       cols_vec.end());
+
+		                        std::sort(cols_vec.begin(), cols_vec.end());
+		                        cols_vec.erase(std::unique(cols_vec.begin(), cols_vec.end()), cols_vec.end());
+
+		                        ghost_row_cols_flat.insert(ghost_row_cols_flat.end(), cols_vec.begin(), cols_vec.end());
+		                        ghost_row_ptr.push_back(static_cast<GlobalIndex>(ghost_row_cols_flat.size()));
+		                    }
+
+		                    dist_pattern->setGhostRows(std::move(ghost_row_map),
+		                                              std::move(ghost_row_ptr),
+		                                              std::move(ghost_row_cols_flat));
+		                } else {
+		                    dist_pattern->clearGhostRows();
+		                }
+		            }
+
+		            distributed_sparsity_by_op_.emplace(tag, std::move(dist_pattern));
+		        }
+		    }
 
     // ---------------------------------------------------------------------
     // Per-cell material state storage (optional; for RequiredData::MaterialState)

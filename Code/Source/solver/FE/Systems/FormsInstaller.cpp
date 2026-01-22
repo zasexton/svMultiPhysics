@@ -11,6 +11,7 @@
 
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/WeakForm.h"
 #include "Forms/AffineAnalysis.h"
 
@@ -141,6 +142,14 @@ void registerKernel(
     }
 }
 
+KernelPtr maybeWrapForJIT(KernelPtr kernel, const FormInstallOptions& options)
+{
+    if (!kernel || !options.compiler_options.jit.enable) {
+        return kernel;
+    }
+    return std::make_shared<forms::jit::JITKernelWrapper>(std::move(kernel), options.compiler_options.jit);
+}
+
 std::unordered_set<FieldId> gatherStateFields(const forms::FormExprNode& node)
 {
     std::unordered_set<FieldId> out;
@@ -269,6 +278,7 @@ KernelPtr installResidualForm(
         kernel = std::make_shared<forms::NonlinearFormKernel>(std::move(ir), options.ad_mode);
     }
 
+    kernel = maybeWrapForJIT(std::move(kernel), options);
     registerKernel(system, op, test_field, trial_field, dispatch, kernel);
     return kernel;
 }
@@ -366,9 +376,9 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
                         InvalidArgumentException,
                         "installResidualBlocks: compiled residual block has no integral terms");
 
-            auto kernel = std::make_shared<forms::NonlinearFormKernel>(std::move(ir), options.ad_mode);
+            auto kernel = maybeWrapForJIT(std::make_shared<forms::NonlinearFormKernel>(std::move(ir), options.ad_mode), options);
             registerKernel(system, op, test_fields[i], trial_fields[j], dispatch, kernel);
-            kernels[i][j] = std::move(kernel);
+            kernels[i][j] = kernel;
         }
     }
 
@@ -402,6 +412,12 @@ CoupledResidualKernels installCoupledResidual(
                 "installCoupledResidual: empty test field list");
     FE_THROW_IF(trial_fields.empty(), InvalidArgumentException,
                 "installCoupledResidual: empty trial field list");
+    FE_THROW_IF(options.coupled_residual_from_jacobian_block && options.coupled_residual_install_residual_kernels,
+                InvalidArgumentException,
+                "installCoupledResidual: coupled_residual_from_jacobian_block requires coupled_residual_install_residual_kernels=false");
+    FE_THROW_IF(options.coupled_residual_from_jacobian_block && !options.coupled_residual_install_jacobian_blocks,
+                InvalidArgumentException,
+                "installCoupledResidual: coupled_residual_from_jacobian_block requires coupled_residual_install_jacobian_blocks=true");
 
     forms::FormCompiler compiler(options.compiler_options);
 
@@ -442,8 +458,8 @@ CoupledResidualKernels installCoupledResidual(
         FE_THROW_IF(active_trial == INVALID_FIELD_ID, InvalidArgumentException,
                     "installCoupledResidual: residual block does not reference any StateField; cannot determine active trial field");
 
-        // Install residual kernel (vector-only).
-        {
+        if (options.coupled_residual_install_residual_kernels) {
+            // Install residual kernel (vector-only).
             const auto lowered = lowerStateFields(base_expr, active_trial, system);
             auto ir = compiler.compileResidual(lowered);
 
@@ -453,31 +469,42 @@ CoupledResidualKernels installCoupledResidual(
                         InvalidArgumentException,
                         "installCoupledResidual: compiled residual has no integral terms");
 
-            auto kernel = std::make_shared<forms::NonlinearFormKernel>(
-                std::move(ir), options.ad_mode, forms::NonlinearKernelOutput::VectorOnly);
+            auto kernel = maybeWrapForJIT(std::make_shared<forms::NonlinearFormKernel>(
+                                              std::move(ir), options.ad_mode, forms::NonlinearKernelOutput::VectorOnly),
+                                          options);
             registerKernel(system, op, test_fields[i], active_trial, dispatch, kernel);
-            out.residual[i] = std::move(kernel);
+            out.residual[i] = kernel;
         }
 
-        // Install Jacobian blocks (matrix-only) for every referenced trial field.
-        for (std::size_t j = 0; j < trial_fields.size(); ++j) {
-            const FieldId trial = trial_fields[j];
-            if (!state_fields.contains(trial)) {
-                continue; // dR/d(trial) == 0
+        if (options.coupled_residual_install_jacobian_blocks) {
+            // Install Jacobian blocks (matrix-only) for every referenced trial field.
+            for (std::size_t j = 0; j < trial_fields.size(); ++j) {
+                const FieldId trial = trial_fields[j];
+                if (!state_fields.contains(trial)) {
+                    continue; // dR/d(trial) == 0
+                }
+
+                const auto lowered = lowerStateFields(base_expr, trial, system);
+                auto ir = compiler.compileResidual(lowered);
+                const auto dispatch = analyzeDispatch(ir);
+                FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&
+                                dispatch.boundary_markers.empty() && dispatch.interface_markers.empty(),
+                            InvalidArgumentException,
+                            "installCoupledResidual: compiled Jacobian block has no integral terms");
+
+                const auto output = (options.coupled_residual_from_jacobian_block && trial == active_trial)
+                    ? forms::NonlinearKernelOutput::Both
+                    : forms::NonlinearKernelOutput::MatrixOnly;
+
+                auto kernel = maybeWrapForJIT(std::make_shared<forms::NonlinearFormKernel>(
+                                                  std::move(ir), options.ad_mode, output),
+                                              options);
+                registerKernel(system, op, test_fields[i], trial, dispatch, kernel);
+                out.jacobian_blocks[i][j] = kernel;
+                if (output == forms::NonlinearKernelOutput::Both) {
+                    out.residual[i] = kernel;
+                }
             }
-
-            const auto lowered = lowerStateFields(base_expr, trial, system);
-            auto ir = compiler.compileResidual(lowered);
-            const auto dispatch = analyzeDispatch(ir);
-            FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&
-                            dispatch.boundary_markers.empty() && dispatch.interface_markers.empty(),
-                        InvalidArgumentException,
-                        "installCoupledResidual: compiled Jacobian block has no integral terms");
-
-            auto kernel = std::make_shared<forms::NonlinearFormKernel>(
-                std::move(ir), options.ad_mode, forms::NonlinearKernelOutput::MatrixOnly);
-            registerKernel(system, op, test_fields[i], trial, dispatch, kernel);
-            out.jacobian_blocks[i][j] = std::move(kernel);
         }
     }
 

@@ -288,7 +288,8 @@ assembly::MaterialStateView MaterialStateProvider::getCellState(const assembly::
 
     auto* old_base = it->second.buffer_old.data + static_cast<std::size_t>(cell_id) * it->second.cell_stride_bytes;
     auto* work_base = it->second.buffer_work.data + static_cast<std::size_t>(cell_id) * it->second.cell_stride_bytes;
-    return assembly::MaterialStateView{old_base, work_base, it->second.bytes_per_qpt, it->second.stride_bytes};
+    return assembly::MaterialStateView{old_base, work_base, it->second.bytes_per_qpt, it->second.stride_bytes,
+                                       it->second.alignment};
 }
 
 assembly::MaterialStateView MaterialStateProvider::getBoundaryFaceState(const assembly::AssemblyKernel& kernel,
@@ -315,7 +316,8 @@ assembly::MaterialStateView MaterialStateProvider::getBoundaryFaceState(const as
     const auto idx = idx_it->second;
     auto* old_base = it->second.boundary_old.data + idx * it->second.boundary_face_stride_bytes;
     auto* work_base = it->second.boundary_work.data + idx * it->second.boundary_face_stride_bytes;
-    return assembly::MaterialStateView{old_base, work_base, it->second.bytes_per_qpt, it->second.stride_bytes};
+    return assembly::MaterialStateView{old_base, work_base, it->second.bytes_per_qpt, it->second.stride_bytes,
+                                       it->second.alignment};
 }
 
 assembly::MaterialStateView MaterialStateProvider::getInteriorFaceState(const assembly::AssemblyKernel& kernel,
@@ -342,7 +344,8 @@ assembly::MaterialStateView MaterialStateProvider::getInteriorFaceState(const as
     const auto idx = idx_it->second;
     auto* old_base = it->second.interior_old.data + idx * it->second.interior_face_stride_bytes;
     auto* work_base = it->second.interior_work.data + idx * it->second.interior_face_stride_bytes;
-    return assembly::MaterialStateView{old_base, work_base, it->second.bytes_per_qpt, it->second.stride_bytes};
+    return assembly::MaterialStateView{old_base, work_base, it->second.bytes_per_qpt, it->second.stride_bytes,
+                                       it->second.alignment};
 }
 
 void MaterialStateProvider::beginTimeStep()

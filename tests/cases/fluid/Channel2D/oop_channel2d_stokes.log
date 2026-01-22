@@ -1,0 +1,351 @@
+[svMultiPhysics::Application] ApplicationDriver::run(xml_file='solver_new_stokes.xml')
+[svMultiPhysics::Application] XML path: /home/zack/Downloads/svMultiPhysics/tests/cases/fluid/Channel2D/solver_new_stokes.xml
+[svMultiPhysics::Application] <Use_new_OOP_solver>=true; running new OOP solver path.
+[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α).
+[svMultiPhysics::Application] Not supported yet: Domain_file_path, multiple domains, spatial/temporal BC files, profiles/imposed flux, restart/continuation, FSI/etc. Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.
+[svMultiPhysics::Application] Input summary: meshes=1 equations=1
+[svMultiPhysics::Application] SimulationBuilder: loadMeshes()
+[svMultiPhysics::Application] SimulationBuilder: meshes declared=1
+[svMultiPhysics::Application]   Loading mesh 'msh' path='mesh/mesh-complete.mesh.vtu' faces=4
+[svMultiPhysics::Application] MeshTranslator: loading mesh file_path='mesh/mesh-complete.mesh.vtu'
+[svMultiPhysics::Application] MeshTranslator: detected format='vtu'
+[svMultiPhysics::Application] MeshTranslator: mesh loaded dim=2 vertices=6725 cells=13048 faces=19772
+[svMultiPhysics::Application] MeshTranslator: applying face labels; count=4
+[svMultiPhysics::Application]   Face 'left': file_path='mesh/mesh-surfaces/left.vtp'
+[svMultiPhysics::Application]   Face 'left': format='vtp' cells=40 -> label=1
+[svMultiPhysics::Application]   Face 'bottom': file_path='mesh/mesh-surfaces/bottom.vtp'
+[svMultiPhysics::Application]   Face 'bottom': format='vtp' cells=160 -> label=2
+[svMultiPhysics::Application]   Face 'top': file_path='mesh/mesh-surfaces/top.vtp'
+[svMultiPhysics::Application]   Face 'top': format='vtp' cells=160 -> label=3
+[svMultiPhysics::Application]   Face 'right': file_path='mesh/mesh-surfaces/right.vtp'
+[svMultiPhysics::Application]   Face 'right': format='vtp' cells=40 -> label=4
+[svMultiPhysics::Application]   Mesh 'msh': dim=2 vertices=6725 cells=13048 faces=19772
+[svMultiPhysics::Application] SimulationBuilder: meshes loaded=1 primary='msh'
+[svMultiPhysics::Application] SimulationBuilder: createFESystem()
+[svMultiPhysics::Application] SimulationBuilder: created FE system from primary mesh 'msh'
+[svMultiPhysics::Application] SimulationBuilder: createPhysicsModules()
+[svMultiPhysics::Application] SimulationBuilder: equations declared=1
+[svMultiPhysics::Application]   Translating equation type='stokes' domains=0 bcs=4
+[svMultiPhysics::Application] EquationTranslator: createModule(type='stokes')
+[svMultiPhysics::Application] EquationTranslator: mesh='msh' domains=0 boundary_conditions=4
+[svMultiPhysics::Application]   BC 'left': boundary_marker=1
+[svMultiPhysics::Application]   BC 'bottom': boundary_marker=2
+[svMultiPhysics::Application]   BC 'top': boundary_marker=3
+[svMultiPhysics::Application]   BC 'right': boundary_marker=4
+[svMultiPhysics::Application] SimulationBuilder: setupSystem()
+[svMultiPhysics::Application] SimulationBuilder: FE system setup complete; ndofs=20175 constraints=645
+[svMultiPhysics::Application] SimulationBuilder: fields=2
+[svMultiPhysics::Application]   field[0] name='Velocity' components=2 dofs=13450 offset=0
+[svMultiPhysics::Application]   field[1] name='Pressure' components=1 dofs=6725 offset=13450
+[svMultiPhysics::Application] SimulationBuilder: createSolvers()
+[svMultiPhysics::Application] SimulationBuilder: backend=fsils
+[svMultiPhysics::Application] SimulationBuilder: dof_per_node=3
+[svMultiPhysics::Application] SimulationBuilder: building FSILS DOF permutation.
+[svMultiPhysics::Application] SimulationBuilder: FSILS DOF permutation=enabled
+[svMultiPhysics::Application] SimulationBuilder: linear solver method=gmres preconditioner=none rel_tol=9.9999999999999995e-07 abs_tol=0.0000000000000000e+00 max_iter=1000
+[svMultiPhysics::Application] SimulationBuilder: priming FSILS matrix layout; pattern rows=20175 cols=20175 nnz=416421
+[svMultiPhysics::Application] SimulationBuilder: allocateHistory()
+[svMultiPhysics::Application] SimulationBuilder: allocating TimeHistory ndofs=20175 depth=2
+[svMultiPhysics::Application] SimulationBuilder: TimeHistory initialized time=0.0000000000000000e+00 dt=5.0000000000000003e-02 step=0
+[svMultiPhysics::Application] Loaded mesh 'msh': 6725 vertices, 13048 cells, 19772 faces.
+[svMultiPhysics::Application] Components: fe_system=yes physics_modules=1 backend=fsils linear_solver=fsils time_history=yes
+[svMultiPhysics::Application] FE system: ndofs=20175 constraints=645
+[svMultiPhysics::Application] TimeHistory: time=0.0000000000000000e+00 dt=5.0000000000000003e-02 step=0 depth=2
+[svMultiPhysics::Application] Time stepping: Number_of_time_steps=2 Time_step_size=5.0000000000000003e-02
+[svMultiPhysics::Application] Starting transient solve.
+[svMultiPhysics::Application] Transient solve: t0=0.0000000000000000e+00 dt=5.0000000000000003e-02 t_end=1.0000000000000001e-01 max_steps=2 scheme=GeneralizedAlpha rho_inf=5.0000000000000000e-01 newton(max_it=7, abs_tol=1.0000000000000001e-05, rel_tol=0.0000000000000000e+00)
+[svMultiPhysics::Application] Transient: repacking TimeHistory for backend layout.
+[svMultiPhysics::Application] Transient: TimeHistory repacked.
+[svMultiPhysics::Application] TimeLoop: entering loop.run()
+[01:48:26.511] [R0] [INFO] NewtonSolver::allocateWorkspace: backend=fsils ndofs=20175 jacobian_op='jacobian' residual_op='residual' dist_sparsity=no dt_field_dofs=13450
+[svMultiPhysics::Application] TimeLoop: step_start step=0 time=0.0000000000000000e+00 dt=5.0000000000000003e-02
+[01:48:26.515] [R0] [INFO] assembleOperator: op='residual' cell term test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:48:33.748] [R0] [INFO] assembleOperator: op='residual' cell term done test='Velocity' trial='Velocity' time=7.23305
+[01:48:33.748] [R0] [INFO] assembleOperator: op='residual' cell term test='Pressure' trial='Pressure' want_matrix=0 want_vector=1
+[01:48:34.169] [R0] [INFO] assembleOperator: op='residual' cell term done test='Pressure' trial='Pressure' time=0.420139
+[01:48:34.169] [R0] [INFO] assembleOperator: op='residual' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:48:34.172] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00357466
+[01:48:34.172] [R0] [INFO] assembleOperator: op='residual' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:48:34.176] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00331351
+[01:48:34.176] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:48:43.479] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Velocity' time=9.30352
+[01:48:43.479] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:48:53.113] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Pressure' time=9.63416
+[01:48:53.113] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Velocity' want_matrix=1 want_vector=0
+[01:48:58.156] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Velocity' time=5.04224
+[01:48:58.156] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Pressure' want_matrix=1 want_vector=0
+[01:49:02.815] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Pressure' time=4.65885
+[01:49:02.815] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:49:02.816] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00119496
+[01:49:02.816] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:49:02.817] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00126106
+[01:49:02.817] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:49:02.818] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Pressure' time=0.00111499
+[01:49:02.818] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:49:02.819] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Pressure' time=0.00102805
+[01:49:02.820] [R0] [INFO] FsilsLinearSolver::solve: n=20175 dof=3 nNo=6725 method=gmres prec=none rel_tol=1e-06 abs_tol=0 max_iter=1000 krylov_dim=0 fsils_use_rcs=0
+[01:49:02.846] [R0] [INFO] FsilsLinearSolver::solve: converged=1 iters=13 r0=46.787 rn=0.000602814 rel=1.28842e-05 msg='fsils'
+[01:49:02.846] [R0] [INFO] NewtonSolver::solveStep: time=0.0333333 dt=0.05 max_it=7 abs_tol=1e-05 rel_tol=0 step_tol=0 residual_op='residual' jacobian_op='jacobian' linear_backend=fsils linear(method=gmres, pc=none, max_iter=1000, rel_tol=1e-06, abs_tol=0)
+[01:49:02.846] [R0] [INFO] NewtonSolver: beginTimeStep() + assemble (matrix+vector) op='jacobian'
+[01:49:02.846] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Velocity' want_matrix=1 want_vector=1
+[01:49:21.419] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Velocity' time=18.5729
+[01:49:21.419] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:49:40.028] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Pressure' time=18.6093
+[01:49:40.028] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Velocity' want_matrix=1 want_vector=0
+[01:49:45.469] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Velocity' time=5.44103
+[01:49:45.469] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Pressure' want_matrix=1 want_vector=1
+[01:49:50.408] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Pressure' time=4.93909
+[01:49:50.408] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=1 want_vector=1
+[01:49:50.413] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00421587
+[01:49:50.413] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=1 want_vector=1
+[01:49:50.417] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00401704
+[01:49:50.417] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:49:50.421] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Pressure' time=0.00406403
+[01:49:50.421] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:49:50.425] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Pressure' time=0.00406252
+[01:49:50.425] [R0] [INFO] NewtonSolver: assemble op='jacobian' want_matrix=1 want_vector=1 ok=1 elems=52192 mat_ins=1056888 vec_ins=117432 time=47.5786
+[01:49:50.425] [R0] [INFO] NewtonSolver: it=0 ||r||=49.4115 ||r0||=49.4115 rel=1
+[01:49:50.425] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:50:09.261] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Velocity' time=18.8359
+[01:50:09.261] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Pressure' want_matrix=0 want_vector=1
+[01:50:14.253] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Pressure' time=4.99173
+[01:50:14.253] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:50:14.257] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00415138
+[01:50:14.257] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:50:14.261] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00411064
+[01:50:14.270] [R0] [INFO] NewtonSolver: Jacobian check op='jacobian' it=0 h=2.99435e-06 ||Jv||=12.3459 ||FD||=12.3459 ||Jv-FD||=3.0512e-09 rel=2.47144e-10
+[01:50:14.270] [R0] [INFO] NewtonSolver: calling linear.solve()
+[01:50:14.270] [R0] [INFO] FsilsLinearSolver::solve: n=20175 dof=3 nNo=6725 method=gmres prec=none rel_tol=1e-06 abs_tol=0 max_iter=1000 krylov_dim=0 fsils_use_rcs=0
+[01:50:14.853] [R0] [INFO] FsilsLinearSolver::solve: converged=1 iters=146 r0=49.4115 rn=0.000152515 rel=3.08664e-06 msg='fsils'
+[01:50:14.853] [R0] [INFO] NewtonSolver: linear solve converged=1 iters=146 r0=49.4115 rn=0.000152515 rel=3.08664e-06 msg='fsils'
+[01:50:14.854] [R0] [INFO] NewtonSolver: scaled dt increments by factor=0.0266667 dofs=13450
+[01:50:14.854] [R0] [INFO] NewtonSolver: line search begin alpha=1 alpha_min=1e-06 shrink=0.5 c1=0.0001
+[01:50:14.854] [R0] [INFO] NewtonSolver: beginTimeStep() + assemble (vector) op='residual' phase='line_search'
+[01:50:14.854] [R0] [INFO] assembleOperator: op='residual' cell term test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:50:32.383] [R0] [INFO] assembleOperator: op='residual' cell term done test='Velocity' trial='Velocity' time=17.5285
+[01:50:32.383] [R0] [INFO] assembleOperator: op='residual' cell term test='Pressure' trial='Pressure' want_matrix=0 want_vector=1
+[01:50:37.029] [R0] [INFO] assembleOperator: op='residual' cell term done test='Pressure' trial='Pressure' time=4.6463
+[01:50:37.029] [R0] [INFO] assembleOperator: op='residual' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:50:37.034] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00467904
+[01:50:37.034] [R0] [INFO] assembleOperator: op='residual' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:50:37.038] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00381959
+[01:50:37.038] [R0] [INFO] NewtonSolver: assemble op='residual' want_matrix=0 want_vector=1 ok=1 elems=26096 vec_ins=117432 time=22.1833 phase='line_search'
+[01:50:37.038] [R0] [INFO] NewtonSolver: line search trial alpha=1 ||r(alpha)||=47.9607 ok=1
+[01:50:37.038] [R0] [INFO] NewtonSolver: it=1 ||r||=47.9607 ||r0||=49.4115 rel=0.970639
+[01:50:37.038] [R0] [INFO] NewtonSolver: beginTimeStep() + assemble (matrix) op='jacobian'
+[01:50:37.038] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:50:56.092] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Velocity' time=19.0541
+[01:50:56.092] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:51:14.881] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Pressure' time=18.7891
+[01:51:14.881] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Velocity' want_matrix=1 want_vector=0
+[01:51:20.196] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Velocity' time=5.31495
+[01:51:20.196] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Pressure' want_matrix=1 want_vector=0
+[01:51:25.072] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Pressure' time=4.87617
+[01:51:25.072] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:51:25.076] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00401357
+[01:51:25.076] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:51:25.080] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00409954
+[01:51:25.080] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:51:25.085] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Pressure' time=0.00413021
+[01:51:25.085] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:51:25.089] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Pressure' time=0.00401935
+[01:51:25.089] [R0] [INFO] NewtonSolver: assemble op='jacobian' want_matrix=1 want_vector=0 ok=1 elems=52192 mat_ins=1056888 time=48.0505
+[01:51:25.089] [R0] [INFO] NewtonSolver: calling linear.solve()
+[01:51:25.089] [R0] [INFO] FsilsLinearSolver::solve: n=20175 dof=3 nNo=6725 method=gmres prec=none rel_tol=1e-06 abs_tol=0 max_iter=1000 krylov_dim=0 fsils_use_rcs=0
+[01:51:25.758] [R0] [INFO] FsilsLinearSolver::solve: converged=1 iters=156 r0=47.9607 rn=0.000149259 rel=3.11212e-06 msg='fsils'
+[01:51:25.758] [R0] [INFO] NewtonSolver: linear solve converged=1 iters=156 r0=47.9607 rn=0.000149259 rel=3.11212e-06 msg='fsils'
+[01:51:25.759] [R0] [INFO] NewtonSolver: scaled dt increments by factor=0.0266667 dofs=13450
+[01:51:25.759] [R0] [INFO] NewtonSolver: line search begin alpha=1 alpha_min=1e-06 shrink=0.5 c1=0.0001
+[01:51:25.759] [R0] [INFO] NewtonSolver: beginTimeStep() + assemble (vector) op='residual' phase='line_search'
+[01:51:25.759] [R0] [INFO] assembleOperator: op='residual' cell term test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:51:42.566] [R0] [INFO] assembleOperator: op='residual' cell term done test='Velocity' trial='Velocity' time=16.8072
+[01:51:42.566] [R0] [INFO] assembleOperator: op='residual' cell term test='Pressure' trial='Pressure' want_matrix=0 want_vector=1
+[01:51:47.071] [R0] [INFO] assembleOperator: op='residual' cell term done test='Pressure' trial='Pressure' time=4.50463
+[01:51:47.071] [R0] [INFO] assembleOperator: op='residual' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:51:47.075] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00402747
+[01:51:47.075] [R0] [INFO] assembleOperator: op='residual' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:51:47.079] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00396076
+[01:51:47.079] [R0] [INFO] NewtonSolver: assemble op='residual' want_matrix=0 want_vector=1 ok=1 elems=26096 vec_ins=117432 time=21.3198 phase='line_search'
+[01:51:47.079] [R0] [INFO] NewtonSolver: line search trial alpha=1 ||r(alpha)||=46.6817 ok=1
+[01:51:47.079] [R0] [INFO] NewtonSolver: it=2 ||r||=46.6817 ||r0||=49.4115 rel=0.944755
+[01:51:47.079] [R0] [INFO] NewtonSolver: beginTimeStep() + assemble (matrix) op='jacobian'
+[01:51:47.079] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:52:05.809] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Velocity' time=18.7303
+[01:52:05.809] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:52:24.286] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Pressure' time=18.4763
+[01:52:24.286] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Velocity' want_matrix=1 want_vector=0
+[01:52:29.653] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Velocity' time=5.36709
+[01:52:29.653] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Pressure' want_matrix=1 want_vector=0
+[01:52:34.539] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Pressure' time=4.88567
+[01:52:34.539] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:52:34.543] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.0041831
+[01:52:34.543] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:52:34.547] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00430924
+[01:52:34.547] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:52:34.551] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Pressure' time=0.00405528
+[01:52:34.551] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:52:34.555] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Pressure' time=0.00410293
+[01:52:34.555] [R0] [INFO] NewtonSolver: assemble op='jacobian' want_matrix=1 want_vector=0 ok=1 elems=52192 mat_ins=1056888 time=47.476
+[01:52:34.555] [R0] [INFO] NewtonSolver: calling linear.solve()
+[01:52:34.555] [R0] [INFO] FsilsLinearSolver::solve: n=20175 dof=3 nNo=6725 method=gmres prec=none rel_tol=1e-06 abs_tol=0 max_iter=1000 krylov_dim=0 fsils_use_rcs=0
+[01:52:35.278] [R0] [INFO] FsilsLinearSolver::solve: converged=1 iters=161 r0=46.6817 rn=0.000144862 rel=3.10319e-06 msg='fsils'
+[01:52:35.278] [R0] [INFO] NewtonSolver: linear solve converged=1 iters=161 r0=46.6817 rn=0.000144862 rel=3.10319e-06 msg='fsils'
+[01:52:35.279] [R0] [INFO] NewtonSolver: scaled dt increments by factor=0.0266667 dofs=13450
+[01:52:35.279] [R0] [INFO] NewtonSolver: line search begin alpha=1 alpha_min=1e-06 shrink=0.5 c1=0.0001
+[01:52:35.279] [R0] [INFO] NewtonSolver: beginTimeStep() + assemble (vector) op='residual' phase='line_search'
+[01:52:35.279] [R0] [INFO] assembleOperator: op='residual' cell term test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:52:52.637] [R0] [INFO] assembleOperator: op='residual' cell term done test='Velocity' trial='Velocity' time=17.3575
+[01:52:52.637] [R0] [INFO] assembleOperator: op='residual' cell term test='Pressure' trial='Pressure' want_matrix=0 want_vector=1
+[01:52:57.172] [R0] [INFO] assembleOperator: op='residual' cell term done test='Pressure' trial='Pressure' time=4.53504
+[01:52:57.172] [R0] [INFO] assembleOperator: op='residual' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:52:57.175] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00376663
+[01:52:57.175] [R0] [INFO] assembleOperator: op='residual' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:52:57.179] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00379214
+[01:52:57.179] [R0] [INFO] NewtonSolver: assemble op='residual' want_matrix=0 want_vector=1 ok=1 elems=26096 vec_ins=117432 time=21.9001 phase='line_search'
+[01:52:57.179] [R0] [INFO] NewtonSolver: line search trial alpha=1 ||r(alpha)||=45.4369 ok=1
+[01:52:57.179] [R0] [INFO] NewtonSolver: it=3 ||r||=45.4369 ||r0||=49.4115 rel=0.919562
+[01:52:57.179] [R0] [INFO] NewtonSolver: beginTimeStep() + assemble (matrix) op='jacobian'
+[01:52:57.180] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:53:16.355] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Velocity' time=19.1756
+[01:53:16.355] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:53:35.130] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Pressure' time=18.7744
+[01:53:35.130] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Velocity' want_matrix=1 want_vector=0
+[01:53:40.257] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Velocity' time=5.12718
+[01:53:40.257] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Pressure' want_matrix=1 want_vector=0
+[01:53:45.253] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Pressure' time=4.99568
+[01:53:45.253] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:53:45.257] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00403366
+[01:53:45.257] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:53:45.261] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00393493
+[01:53:45.261] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:53:45.265] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Pressure' time=0.00396751
+[01:53:45.265] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:53:45.269] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Pressure' time=0.00394733
+[01:53:45.269] [R0] [INFO] NewtonSolver: assemble op='jacobian' want_matrix=1 want_vector=0 ok=1 elems=52192 mat_ins=1056888 time=48.0888
+[01:53:45.269] [R0] [INFO] NewtonSolver: calling linear.solve()
+[01:53:45.269] [R0] [INFO] FsilsLinearSolver::solve: n=20175 dof=3 nNo=6725 method=gmres prec=none rel_tol=1e-06 abs_tol=0 max_iter=1000 krylov_dim=0 fsils_use_rcs=0
+[01:53:46.063] [R0] [INFO] FsilsLinearSolver::solve: converged=1 iters=169 r0=45.4369 rn=0.000140368 rel=3.0893e-06 msg='fsils'
+[01:53:46.063] [R0] [INFO] NewtonSolver: linear solve converged=1 iters=169 r0=45.4369 rn=0.000140368 rel=3.0893e-06 msg='fsils'
+[01:53:46.064] [R0] [INFO] NewtonSolver: scaled dt increments by factor=0.0266667 dofs=13450
+[01:53:46.064] [R0] [INFO] NewtonSolver: line search begin alpha=1 alpha_min=1e-06 shrink=0.5 c1=0.0001
+[01:53:46.064] [R0] [INFO] NewtonSolver: beginTimeStep() + assemble (vector) op='residual' phase='line_search'
+[01:53:46.064] [R0] [INFO] assembleOperator: op='residual' cell term test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:54:03.164] [R0] [INFO] assembleOperator: op='residual' cell term done test='Velocity' trial='Velocity' time=17.1002
+[01:54:03.164] [R0] [INFO] assembleOperator: op='residual' cell term test='Pressure' trial='Pressure' want_matrix=0 want_vector=1
+[01:54:07.690] [R0] [INFO] assembleOperator: op='residual' cell term done test='Pressure' trial='Pressure' time=4.52594
+[01:54:07.690] [R0] [INFO] assembleOperator: op='residual' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:54:07.694] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.0038229
+[01:54:07.694] [R0] [INFO] assembleOperator: op='residual' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:54:07.697] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00374457
+[01:54:07.697] [R0] [INFO] NewtonSolver: assemble op='residual' want_matrix=0 want_vector=1 ok=1 elems=26096 vec_ins=117432 time=21.6337 phase='line_search'
+[01:54:07.698] [R0] [INFO] NewtonSolver: line search trial alpha=1 ||r(alpha)||=44.2252 ok=1
+[01:54:07.698] [R0] [INFO] NewtonSolver: it=4 ||r||=44.2252 ||r0||=49.4115 rel=0.89504
+[01:54:07.698] [R0] [INFO] NewtonSolver: beginTimeStep() + assemble (matrix) op='jacobian'
+[01:54:07.698] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:54:26.553] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Velocity' time=18.8552
+[01:54:26.553] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:54:44.452] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Pressure' time=17.8986
+[01:54:44.452] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Velocity' want_matrix=1 want_vector=0
+[01:54:49.722] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Velocity' time=5.27065
+[01:54:49.722] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Pressure' want_matrix=1 want_vector=0
+[01:54:54.559] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Pressure' time=4.83671
+[01:54:54.559] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:54:54.563] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00406283
+[01:54:54.563] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:54:54.567] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00399832
+[01:54:54.567] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:54:54.571] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Pressure' time=0.0040709
+[01:54:54.571] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:54:54.575] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Pressure' time=0.00407515
+[01:54:54.575] [R0] [INFO] NewtonSolver: assemble op='jacobian' want_matrix=1 want_vector=0 ok=1 elems=52192 mat_ins=1056888 time=46.8774
+[01:54:54.575] [R0] [INFO] NewtonSolver: calling linear.solve()
+[01:54:54.575] [R0] [INFO] FsilsLinearSolver::solve: n=20175 dof=3 nNo=6725 method=gmres prec=none rel_tol=1e-06 abs_tol=0 max_iter=1000 krylov_dim=0 fsils_use_rcs=0
+[01:54:55.412] [R0] [INFO] FsilsLinearSolver::solve: converged=1 iters=175 r0=44.2252 rn=0.000138249 rel=3.12601e-06 msg='fsils'
+[01:54:55.412] [R0] [INFO] NewtonSolver: linear solve converged=1 iters=175 r0=44.2252 rn=0.000138249 rel=3.12601e-06 msg='fsils'
+[01:54:55.413] [R0] [INFO] NewtonSolver: scaled dt increments by factor=0.0266667 dofs=13450
+[01:54:55.413] [R0] [INFO] NewtonSolver: line search begin alpha=1 alpha_min=1e-06 shrink=0.5 c1=0.0001
+[01:54:55.413] [R0] [INFO] NewtonSolver: beginTimeStep() + assemble (vector) op='residual' phase='line_search'
+[01:54:55.413] [R0] [INFO] assembleOperator: op='residual' cell term test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:55:12.272] [R0] [INFO] assembleOperator: op='residual' cell term done test='Velocity' trial='Velocity' time=16.859
+[01:55:12.272] [R0] [INFO] assembleOperator: op='residual' cell term test='Pressure' trial='Pressure' want_matrix=0 want_vector=1
+[01:55:16.921] [R0] [INFO] assembleOperator: op='residual' cell term done test='Pressure' trial='Pressure' time=4.64876
+[01:55:16.921] [R0] [INFO] assembleOperator: op='residual' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:55:16.925] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00385614
+[01:55:16.925] [R0] [INFO] assembleOperator: op='residual' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:55:16.929] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00378716
+[01:55:16.929] [R0] [INFO] NewtonSolver: assemble op='residual' want_matrix=0 want_vector=1 ok=1 elems=26096 vec_ins=117432 time=21.5153 phase='line_search'
+[01:55:16.929] [R0] [INFO] NewtonSolver: line search trial alpha=1 ||r(alpha)||=43.0459 ok=1
+[01:55:16.929] [R0] [INFO] NewtonSolver: it=5 ||r||=43.0459 ||r0||=49.4115 rel=0.871172
+[01:55:16.929] [R0] [INFO] NewtonSolver: beginTimeStep() + assemble (matrix) op='jacobian'
+[01:55:16.929] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:55:35.654] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Velocity' time=18.7252
+[01:55:35.654] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:55:54.211] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Pressure' time=18.5568
+[01:55:54.211] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Velocity' want_matrix=1 want_vector=0
+[01:55:59.451] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Velocity' time=5.24013
+[01:55:59.451] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Pressure' want_matrix=1 want_vector=0
+[01:56:04.395] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Pressure' time=4.94395
+[01:56:04.395] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:56:04.399] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00410805
+[01:56:04.399] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:56:04.404] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00407277
+[01:56:04.404] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:56:04.408] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Pressure' time=0.00410294
+[01:56:04.408] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:56:04.412] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Pressure' time=0.00389183
+[01:56:04.412] [R0] [INFO] NewtonSolver: assemble op='jacobian' want_matrix=1 want_vector=0 ok=1 elems=52192 mat_ins=1056888 time=47.4823
+[01:56:04.412] [R0] [INFO] NewtonSolver: calling linear.solve()
+[01:56:04.412] [R0] [INFO] FsilsLinearSolver::solve: n=20175 dof=3 nNo=6725 method=gmres prec=none rel_tol=1e-06 abs_tol=0 max_iter=1000 krylov_dim=0 fsils_use_rcs=0
+[01:56:05.289] [R0] [INFO] FsilsLinearSolver::solve: converged=1 iters=178 r0=43.0459 rn=0.000133736 rel=3.10682e-06 msg='fsils'
+[01:56:05.289] [R0] [INFO] NewtonSolver: linear solve converged=1 iters=178 r0=43.0459 rn=0.000133736 rel=3.10682e-06 msg='fsils'
+[01:56:05.290] [R0] [INFO] NewtonSolver: scaled dt increments by factor=0.0266667 dofs=13450
+[01:56:05.290] [R0] [INFO] NewtonSolver: line search begin alpha=1 alpha_min=1e-06 shrink=0.5 c1=0.0001
+[01:56:05.290] [R0] [INFO] NewtonSolver: beginTimeStep() + assemble (vector) op='residual' phase='line_search'
+[01:56:05.290] [R0] [INFO] assembleOperator: op='residual' cell term test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:56:22.107] [R0] [INFO] assembleOperator: op='residual' cell term done test='Velocity' trial='Velocity' time=16.8166
+[01:56:22.107] [R0] [INFO] assembleOperator: op='residual' cell term test='Pressure' trial='Pressure' want_matrix=0 want_vector=1
+[01:56:26.851] [R0] [INFO] assembleOperator: op='residual' cell term done test='Pressure' trial='Pressure' time=4.74401
+[01:56:26.851] [R0] [INFO] assembleOperator: op='residual' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:56:26.855] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00390392
+[01:56:26.855] [R0] [INFO] assembleOperator: op='residual' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:56:26.859] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00387782
+[01:56:26.859] [R0] [INFO] NewtonSolver: assemble op='residual' want_matrix=0 want_vector=1 ok=1 elems=26096 vec_ins=117432 time=21.5684 phase='line_search'
+[01:56:26.859] [R0] [INFO] NewtonSolver: line search trial alpha=1 ||r(alpha)||=41.898 ok=1
+[01:56:26.859] [R0] [INFO] NewtonSolver: it=6 ||r||=41.898 ||r0||=49.4115 rel=0.847941
+[01:56:26.859] [R0] [INFO] NewtonSolver: beginTimeStep() + assemble (matrix) op='jacobian'
+[01:56:26.859] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:56:45.683] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Velocity' time=18.8238
+[01:56:45.683] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:57:04.124] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Velocity' trial='Pressure' time=18.4411
+[01:57:04.124] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Velocity' want_matrix=1 want_vector=0
+[01:57:09.400] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Velocity' time=5.27624
+[01:57:09.400] [R0] [INFO] assembleOperator: op='jacobian' cell term test='Pressure' trial='Pressure' want_matrix=1 want_vector=0
+[01:57:14.489] [R0] [INFO] assembleOperator: op='jacobian' cell term done test='Pressure' trial='Pressure' time=5.08846
+[01:57:14.489] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:57:14.493] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00406716
+[01:57:14.493] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=1 want_vector=0
+[01:57:14.497] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00405624
+[01:57:14.497] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=1 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:57:14.501] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=1 test='Velocity' trial='Pressure' time=0.0042168
+[01:57:14.501] [R0] [INFO] assembleOperator: op='jacobian' boundary term marker=4 test='Velocity' trial='Pressure' want_matrix=1 want_vector=0
+[01:57:14.505] [R0] [INFO] assembleOperator: op='jacobian' boundary term done marker=4 test='Velocity' trial='Pressure' time=0.00412786
+[01:57:14.505] [R0] [INFO] NewtonSolver: assemble op='jacobian' want_matrix=1 want_vector=0 ok=1 elems=52192 mat_ins=1056888 time=47.6461
+[01:57:14.505] [R0] [INFO] NewtonSolver: calling linear.solve()
+[01:57:14.505] [R0] [INFO] FsilsLinearSolver::solve: n=20175 dof=3 nNo=6725 method=gmres prec=none rel_tol=1e-06 abs_tol=0 max_iter=1000 krylov_dim=0 fsils_use_rcs=0
+[01:57:15.398] [R0] [INFO] FsilsLinearSolver::solve: converged=1 iters=179 r0=41.898 rn=0.000128634 rel=3.07017e-06 msg='fsils'
+[01:57:15.398] [R0] [INFO] NewtonSolver: linear solve converged=1 iters=179 r0=41.898 rn=0.000128634 rel=3.07017e-06 msg='fsils'
+[01:57:15.398] [R0] [INFO] NewtonSolver: scaled dt increments by factor=0.0266667 dofs=13450
+[01:57:15.398] [R0] [INFO] NewtonSolver: line search begin alpha=1 alpha_min=1e-06 shrink=0.5 c1=0.0001
+[01:57:15.398] [R0] [INFO] NewtonSolver: beginTimeStep() + assemble (vector) op='residual' phase='line_search'
+[01:57:15.399] [R0] [INFO] assembleOperator: op='residual' cell term test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:57:32.358] [R0] [INFO] assembleOperator: op='residual' cell term done test='Velocity' trial='Velocity' time=16.9592
+[01:57:32.358] [R0] [INFO] assembleOperator: op='residual' cell term test='Pressure' trial='Pressure' want_matrix=0 want_vector=1
+[01:57:37.038] [R0] [INFO] assembleOperator: op='residual' cell term done test='Pressure' trial='Pressure' time=4.6803
+[01:57:37.038] [R0] [INFO] assembleOperator: op='residual' boundary term marker=1 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:57:37.042] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=1 test='Velocity' trial='Velocity' time=0.00380537
+[01:57:37.042] [R0] [INFO] assembleOperator: op='residual' boundary term marker=4 test='Velocity' trial='Velocity' want_matrix=0 want_vector=1
+[01:57:37.046] [R0] [INFO] assembleOperator: op='residual' boundary term done marker=4 test='Velocity' trial='Velocity' time=0.00375754
+[01:57:37.046] [R0] [INFO] NewtonSolver: assemble op='residual' want_matrix=0 want_vector=1 ok=1 elems=26096 vec_ins=117432 time=21.6471 phase='line_search'
+[01:57:37.046] [R0] [INFO] NewtonSolver: line search trial alpha=1 ||r(alpha)||=40.7807 ok=1
+[01:57:37.046] [R0] [INFO] NewtonSolver: reached max iterations without convergence.
+[svMultiPhysics::Application] TimeLoop: nonlinear_done step=0 time=0.0000000000000000e+00 converged=0 iters=7 ||r||=4.0780731253292146e+01 (linear: converged=1 iters=179 rel=3.0701733810445808e-06)
