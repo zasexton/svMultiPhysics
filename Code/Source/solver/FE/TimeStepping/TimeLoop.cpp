@@ -39,6 +39,38 @@ void copyVector(backends::GenericVector& dst, const backends::GenericVector& src
     std::copy(s.begin(), s.end(), d.begin());
 }
 
+void zeroVectorEntries(std::span<const GlobalIndex> dofs, backends::GenericVector& vec)
+{
+    if (dofs.empty()) {
+        return;
+    }
+
+    auto view = vec.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "TimeLoop: zeroVectorEntries view");
+    view->beginAssemblyPhase();
+    view->zeroVectorEntries(dofs);
+    view->finalizeAssembly();
+}
+
+void copyVectorEntries(std::span<const GlobalIndex> dofs, backends::GenericVector& dst, backends::GenericVector& src)
+{
+    if (dofs.empty()) {
+        return;
+    }
+
+    auto dst_view = dst.createAssemblyView();
+    auto src_view = src.createAssemblyView();
+    FE_CHECK_NOT_NULL(dst_view.get(), "TimeLoop: copyVectorEntries dst view");
+    FE_CHECK_NOT_NULL(src_view.get(), "TimeLoop: copyVectorEntries src view");
+
+    dst_view->beginAssemblyPhase();
+    for (const auto dof : dofs) {
+        const auto value = src_view->getVectorEntry(dof);
+        dst_view->addVectorEntry(dof, value, assembly::AddMode::Insert);
+    }
+    dst_view->finalizeAssembly();
+}
+
 class Dt1NoHistoryIntegrator final : public systems::TimeIntegrator {
 public:
     [[nodiscard]] std::string name() const override { return "Dt1NoHistory"; }
@@ -1626,22 +1658,11 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
 	                        auto& sys = transient.system();
 	                        const auto& constraints = sys.constraints();
-
-	                        // Ensure uDot storage exists and is initialized before the stage solve.
-	                        const bool had_u_dot = history.hasUDotState();
-	                        history.ensureSecondOrderState(factory);
-	                        if (!had_u_dot) {
-	                            // Compute a PDE-consistent initial uDot by solving a transient linear system for
-	                            // the time-derivative fields at the stage time. This avoids the degenerate uDot=0
-	                            // initialization that can remove inertia from the first residual evaluation.
-	                            history.uDot().zero();
-
                             const auto dt_fields = sys.timeDerivativeFields(options_.newton.jacobian_op);
+                            std::vector<GlobalIndex> nondt_dofs;
                             if (!dt_fields.empty()) {
-                                std::vector<GlobalIndex> nondt_dofs;
                                 const auto& fmap = sys.fieldMap();
                                 nondt_dofs.reserve(static_cast<std::size_t>(sys.dofHandler().getNumDofs()));
-
                                 for (std::size_t fi = 0; fi < fmap.numFields(); ++fi) {
                                     const auto fid = static_cast<FieldId>(fi);
                                     const bool is_dt_field =
@@ -1654,7 +1675,18 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                         nondt_dofs.push_back(d);
                                     }
                                 }
+                            }
 
+	                        // Ensure uDot storage exists and is initialized before the stage solve.
+	                        const bool had_u_dot = history.hasUDotState();
+	                        history.ensureSecondOrderState(factory);
+	                        if (!had_u_dot) {
+	                            // Compute a PDE-consistent initial uDot by solving a transient linear system for
+	                            // the time-derivative fields at the stage time. This avoids the degenerate uDot=0
+	                            // initialization that can remove inertia from the first residual evaluation.
+	                            history.uDot().zero();
+
+                            if (!dt_fields.empty()) {
                                 const double stage_time = t + ga1_params->alpha_f * dt;
                                 sys.updateConstraints(stage_time, dt);
                                 sys.beginTimeStep();
@@ -1758,6 +1790,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                                }
 	                            }
 	                        }
+	                        if (!nondt_dofs.empty()) {
+	                            zeroVectorEntries(nondt_dofs, history.uDot());
+	                        }
 	                        if (!constraints.empty()) {
 	                            constraints.distributeHomogeneous(history.uDot());
 	                        }
@@ -1800,20 +1835,29 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             history.u().updateGhosts();
                         }
 
-                        nr = newton.solveStep(transient_stage, linear, stage_time, history, workspace);
-                        if (nr.converged) {
-                            const double inv_af = 1.0 / ga1_params->alpha_f;
-                            const double c_prev = (ga1_params->alpha_f - 1.0) * inv_af;
-                            auto cur = history.uSpan();
-                            const auto prev = history.uPrevSpan();
-                            FE_CHECK_ARG(cur.size() == prev.size(), "TimeLoop: generalized-alpha size mismatch");
-                            for (std::size_t i = 0; i < cur.size(); ++i) {
-                                cur[i] = static_cast<Real>(inv_af) * cur[i] + static_cast<Real>(c_prev) * prev[i];
-                            }
+	                        nr = newton.solveStep(transient_stage, linear, stage_time, history, workspace);
+	                        if (nr.converged) {
+	                            const double inv_af = 1.0 / ga1_params->alpha_f;
+	                            const double c_prev = (ga1_params->alpha_f - 1.0) * inv_af;
+	                            if (!nondt_dofs.empty()) {
+	                                copyVector(*scratch_vec0, history.u());
+	                            }
+	                            auto cur = history.uSpan();
+	                            const auto prev = history.uPrevSpan();
+	                            FE_CHECK_ARG(cur.size() == prev.size(), "TimeLoop: generalized-alpha size mismatch");
+	                            for (std::size_t i = 0; i < cur.size(); ++i) {
+	                                cur[i] = static_cast<Real>(inv_af) * cur[i] + static_cast<Real>(c_prev) * prev[i];
+	                            }
+	                            if (!nondt_dofs.empty()) {
+	                                // Algebraic fields (e.g., pressure for incompressible flow) should not be
+	                                // extrapolated via the generalized-α stage relation. Preserve the stage
+	                                // values returned by the nonlinear solve for these DOFs.
+	                                copyVectorEntries(nondt_dofs, history.u(), *scratch_vec0);
+	                            }
 
-                            // Update uDot_{n+1} (stored as TimeHistory::uDot) for use by later stages
-                            // and end-of-step finalization.
-                            const double gamma = ga1_params->gamma;
+	                            // Update uDot_{n+1} (stored as TimeHistory::uDot) for use by later stages
+	                            // and end-of-step finalization.
+	                            const double gamma = ga1_params->gamma;
                             const double inv_gamma_dt = 1.0 / (gamma * dt);
                             const double c_old = (1.0 - gamma) / gamma;
                             auto v = history.uDotSpan();
@@ -1822,6 +1866,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                                const Real v_n = v[i];
 	                                v[i] = static_cast<Real>(inv_gamma_dt) * (cur[i] - prev[i]) -
 	                                    static_cast<Real>(c_old) * v_n;
+	                            }
+	                            if (!nondt_dofs.empty()) {
+	                                zeroVectorEntries(nondt_dofs, history.uDot());
 	                            }
 	                            if (!constraints.empty()) {
 	                                constraints.distributeHomogeneous(history.uDot());

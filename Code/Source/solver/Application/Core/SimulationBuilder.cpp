@@ -1,5 +1,6 @@
 #include "Application/Core/SimulationBuilder.h"
 
+#include "Application/Core/OopMpiLog.h"
 #include "Application/Translators/EquationTranslator.h"
 #include "Application/Translators/MeshTranslator.h"
 
@@ -302,22 +303,22 @@ SimulationBuilder::SimulationBuilder(const Parameters& params)
 
 SimulationComponents SimulationBuilder::build()
 {
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: loadMeshes()" << std::endl;
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: loadMeshes()" << std::endl;
   loadMeshes();
 
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: createFESystem()" << std::endl;
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: createFESystem()" << std::endl;
   createFESystem();
 
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: createPhysicsModules()" << std::endl;
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: createPhysicsModules()" << std::endl;
   createPhysicsModules();
 
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: setupSystem()" << std::endl;
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: setupSystem()" << std::endl;
   setupSystem();
 
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: createSolvers()" << std::endl;
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: createSolvers()" << std::endl;
   createSolvers();
 
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: allocateHistory()" << std::endl;
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: allocateHistory()" << std::endl;
   allocateHistory();
 
   return std::move(components_);
@@ -328,7 +329,7 @@ void SimulationBuilder::loadMeshes()
   const auto declared =
       static_cast<int>(std::count_if(params_.mesh_parameters.begin(), params_.mesh_parameters.end(),
                                      [](const auto* p) { return p != nullptr; }));
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: meshes declared=" << declared << std::endl;
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: meshes declared=" << declared << std::endl;
 
   for (const auto* mesh_params : params_.mesh_parameters) {
     if (!mesh_params) {
@@ -346,20 +347,20 @@ void SimulationBuilder::loadMeshes()
     }
 
     const auto mesh_path = mesh_params->mesh_file_path.value();
-    std::cout << "[svMultiPhysics::Application]   Loading mesh '" << mesh_name << "' path='" << mesh_path << "'"
+    oopCout() << "[svMultiPhysics::Application]   Loading mesh '" << mesh_name << "' path='" << mesh_path << "'"
               << " faces=" << static_cast<int>(mesh_params->face_parameters.size());
     if (mesh_params->domain_id.defined()) {
-      std::cout << " domain_id=" << mesh_params->domain_id.value();
+      oopCout() << " domain_id=" << mesh_params->domain_id.value();
     }
-    std::cout << std::endl;
+    oopCout() << std::endl;
 
     auto mesh = application::translators::MeshTranslator::loadMesh(*mesh_params);
     components_.meshes.emplace(mesh_name, mesh);
 
     if (mesh) {
-      std::cout << "[svMultiPhysics::Application]   Mesh '" << mesh_name << "': dim=" << mesh->dim()
-                << " vertices=" << mesh->n_vertices() << " cells=" << mesh->n_cells()
-                << " faces=" << mesh->n_faces() << std::endl;
+      oopCout() << "[svMultiPhysics::Application]   Mesh '" << mesh_name << "': dim=" << mesh->dim()
+                << " local_vertices=" << mesh->n_vertices() << " local_cells=" << mesh->n_cells()
+                << " local_faces=" << mesh->n_faces() << std::endl;
     }
 
     if (!components_.primary_mesh) {
@@ -368,7 +369,7 @@ void SimulationBuilder::loadMeshes()
     }
   }
 
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: meshes loaded="
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: meshes loaded="
             << static_cast<int>(components_.meshes.size()) << " primary='" << components_.primary_mesh_name << "'"
             << std::endl;
 }
@@ -388,7 +389,7 @@ void SimulationBuilder::createFESystem()
 
   components_.fe_system =
       std::make_unique<svmp::FE::systems::FESystem>(components_.primary_mesh, svmp::Configuration::Reference);
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: created FE system from primary mesh '"
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: created FE system from primary mesh '"
             << components_.primary_mesh_name << "'" << std::endl;
 #endif
 }
@@ -402,7 +403,7 @@ void SimulationBuilder::createPhysicsModules()
   const auto declared =
       static_cast<int>(std::count_if(params_.equation_parameters.begin(), params_.equation_parameters.end(),
                                      [](const auto* p) { return p != nullptr; }));
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: equations declared=" << declared << std::endl;
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: equations declared=" << declared << std::endl;
 
   components_.physics_modules.clear();
   for (const auto* eq_params : params_.equation_parameters) {
@@ -410,7 +411,7 @@ void SimulationBuilder::createPhysicsModules()
       continue;
     }
 
-    std::cout << "[svMultiPhysics::Application]   Translating equation type='" << eq_params->type.value() << "'"
+    oopCout() << "[svMultiPhysics::Application]   Translating equation type='" << eq_params->type.value() << "'"
               << " domains=" << static_cast<int>(eq_params->domains.size())
               << " bcs=" << static_cast<int>(eq_params->boundary_conditions.size()) << std::endl;
 
@@ -445,15 +446,15 @@ void SimulationBuilder::setupSystem()
   components_.fe_system->setup(setup_opts);
 
   const auto n_dofs = components_.fe_system->dofHandler().getNumDofs();
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: FE system setup complete; ndofs=" << n_dofs
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: FE system setup complete; ndofs=" << n_dofs
             << " constraints=" << components_.fe_system->constraints().numConstraints() << std::endl;
 
   const auto& fmap = components_.fe_system->fieldMap();
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: fields=" << static_cast<int>(fmap.numFields())
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: fields=" << static_cast<int>(fmap.numFields())
             << std::endl;
   for (std::size_t i = 0; i < fmap.numFields(); ++i) {
     const auto& f = fmap.getField(i);
-    std::cout << "[svMultiPhysics::Application]   field[" << i << "] name='" << f.name
+    oopCout() << "[svMultiPhysics::Application]   field[" << i << "] name='" << f.name
               << "' components=" << f.n_components << " dofs=" << f.n_dofs << " offset=" << f.dof_offset
               << std::endl;
   }
@@ -466,7 +467,7 @@ void SimulationBuilder::createSolvers()
   }
 
   const auto backend_kind = selectBackend(params_);
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: backend="
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: backend="
             << svmp::FE::backends::backendKindToString(backend_kind) << std::endl;
 
   svmp::FE::backends::BackendFactory::CreateOptions create_options{};
@@ -482,13 +483,13 @@ void SimulationBuilder::createSolvers()
     }
   }
 
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: dof_per_node=" << create_options.dof_per_node
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: dof_per_node=" << create_options.dof_per_node
             << std::endl;
 
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS && create_options.dof_per_node > 1) {
-    std::cout << "[svMultiPhysics::Application] SimulationBuilder: building FSILS DOF permutation." << std::endl;
+    oopCout() << "[svMultiPhysics::Application] SimulationBuilder: building FSILS DOF permutation." << std::endl;
     create_options.dof_permutation = build_fsils_dof_permutation(*components_.fe_system, create_options.dof_per_node);
-    std::cout << "[svMultiPhysics::Application] SimulationBuilder: FSILS DOF permutation="
+    oopCout() << "[svMultiPhysics::Application] SimulationBuilder: FSILS DOF permutation="
               << (create_options.dof_permutation ? "enabled" : "disabled") << std::endl;
   }
 
@@ -498,7 +499,7 @@ void SimulationBuilder::createSolvers()
   }
 
   const auto solver_options = translateSolverOptions(params_, backend_kind);
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: linear solver method="
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: linear solver method="
             << svmp::FE::backends::solverMethodToString(solver_options.method)
             << " preconditioner=" << svmp::FE::backends::preconditionerToString(solver_options.preconditioner)
             << " rel_tol=" << solver_options.rel_tol << " abs_tol=" << solver_options.abs_tol
@@ -511,7 +512,7 @@ void SimulationBuilder::createSolvers()
   // Prime backend layout (notably FSILS) by creating the system matrix once.
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS) {
     const auto& pat = components_.fe_system->sparsity("jacobian");
-    std::cout << "[svMultiPhysics::Application] SimulationBuilder: priming FSILS matrix layout; pattern rows="
+    oopCout() << "[svMultiPhysics::Application] SimulationBuilder: priming FSILS matrix layout; pattern rows="
               << pat.numRows() << " cols=" << pat.numCols() << " nnz=" << pat.getNnz() << std::endl;
     const auto* dist = components_.fe_system->distributedSparsityIfAvailable("jacobian");
     if (dist) {
@@ -533,7 +534,7 @@ void SimulationBuilder::allocateHistory()
 
   const auto ndofs = components_.fe_system->dofHandler().getNumDofs();
   const int history_depth = 2;
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: allocating TimeHistory ndofs=" << ndofs
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: allocating TimeHistory ndofs=" << ndofs
             << " depth=" << history_depth << std::endl;
 
   auto history = svmp::FE::timestepping::TimeHistory::allocate(*components_.backend, ndofs, history_depth,
@@ -542,7 +543,7 @@ void SimulationBuilder::allocateHistory()
   double dt = params_.general_simulation_parameters.time_step_size.value();
   if (!(dt > 0.0)) {
     dt = 1.0;
-    std::cout << "[svMultiPhysics::Application] Time_step_size is not set or <= 0; using dt=1.0." << std::endl;
+    oopCout() << "[svMultiPhysics::Application] Time_step_size is not set or <= 0; using dt=1.0." << std::endl;
   }
   history.setDt(dt);
   history.setPrevDt(dt);
@@ -550,7 +551,7 @@ void SimulationBuilder::allocateHistory()
   history.primeDtHistory(dt);
 
   components_.time_history = std::make_unique<svmp::FE::timestepping::TimeHistory>(std::move(history));
-  std::cout << "[svMultiPhysics::Application] SimulationBuilder: TimeHistory initialized time="
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: TimeHistory initialized time="
             << components_.time_history->time() << " dt=" << components_.time_history->dt()
             << " step=" << components_.time_history->stepIndex() << std::endl;
 }

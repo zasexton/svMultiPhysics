@@ -1,5 +1,6 @@
 #include "Application/Translators/EquationTranslator.h"
 
+#include "Application/Core/OopMpiLog.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Parameters.h"
 #include "Physics/Core/EquationModuleInput.h"
@@ -64,8 +65,8 @@ std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createModule(
 {
   const std::string eq_type = eq_params.type.value();
 
-  std::cout << "[svMultiPhysics::Application] EquationTranslator: createModule(type='" << eq_type << "')"
-            << std::endl;
+  application::core::oopCout() << "[svMultiPhysics::Application] EquationTranslator: createModule(type='" << eq_type
+                               << "')" << std::endl;
 
   if (meshes.empty()) {
     throw std::runtime_error("[svMultiPhysics::Application] No meshes are available for equation translation.");
@@ -89,21 +90,22 @@ std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createModule(
   input.mesh_name = mesh_name;
   input.mesh = mesh->local_mesh_ptr();
 
-  std::cout << "[svMultiPhysics::Application] EquationTranslator: mesh='" << mesh_name << "'"
-            << " domains=" << static_cast<int>(eq_params.domains.size())
-            << " boundary_conditions=" << static_cast<int>(eq_params.boundary_conditions.size()) << std::endl;
+  application::core::oopCout() << "[svMultiPhysics::Application] EquationTranslator: mesh='" << mesh_name << "'"
+                               << " domains=" << static_cast<int>(eq_params.domains.size())
+                               << " boundary_conditions=" << static_cast<int>(eq_params.boundary_conditions.size())
+                               << std::endl;
 
   // Generic module-specific options hook (added to EquationParameters once).
   // If unset, these remain empty and the formulation uses its defaults.
   if (eq_params.module_options.defined()) {
     input.module_options = eq_params.module_options.value();
-    std::cout << "[svMultiPhysics::Application] EquationTranslator: module_options='" << input.module_options << "'"
-              << std::endl;
+    application::core::oopCout() << "[svMultiPhysics::Application] EquationTranslator: module_options='"
+                                 << input.module_options << "'" << std::endl;
   }
   if (eq_params.module_options_file_path.defined()) {
     input.module_options_file_path = eq_params.module_options_file_path.value();
-    std::cout << "[svMultiPhysics::Application] EquationTranslator: module_options_file_path='"
-              << input.module_options_file_path << "'" << std::endl;
+    application::core::oopCout() << "[svMultiPhysics::Application] EquationTranslator: module_options_file_path='"
+                                 << input.module_options_file_path << "'" << std::endl;
   }
 
   if (eq_params.default_domain) {
@@ -130,8 +132,8 @@ std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createModule(
       svmp::Physics::BoundaryConditionInput bc_in{};
       bc_in.name = bc->name.value();
       bc_in.boundary_marker = mesh->label_from_name(bc_in.name);
-      std::cout << "[svMultiPhysics::Application]   BC '" << bc_in.name
-                << "': boundary_marker=" << bc_in.boundary_marker << std::endl;
+      application::core::oopCout() << "[svMultiPhysics::Application]   BC '" << bc_in.name
+                                   << "': boundary_marker=" << bc_in.boundary_marker << std::endl;
       if (bc_in.boundary_marker == svmp::INVALID_LABEL) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Boundary condition references face '" + bc_in.name +

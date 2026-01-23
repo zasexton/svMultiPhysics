@@ -269,17 +269,17 @@ void FsilsVector::updateGhosts()
 
     const int dof = shared_->dof;
     const int nNo = lhs.nNo;
-    const int owned_nodes = shared_->owned_node_count;
+    const int mynNo = lhs.mynNo;
 
     FE_THROW_IF(dof <= 0, InvalidArgumentException, "FsilsVector::updateGhosts: invalid dof");
     FE_THROW_IF(nNo < 0, InvalidArgumentException, "FsilsVector::updateGhosts: invalid local node count");
     FE_THROW_IF(static_cast<int>(data_.size()) != dof * nNo,
                 InvalidArgumentException, "FsilsVector::updateGhosts: local size mismatch");
-    FE_THROW_IF(owned_nodes < 0 || owned_nodes > nNo,
-                InvalidArgumentException, "FsilsVector::updateGhosts: invalid owned node count");
+    FE_THROW_IF(mynNo < 0 || mynNo > nNo,
+                InvalidArgumentException, "FsilsVector::updateGhosts: invalid mynNo");
 
     // FSILS provides additive overlap communication. For a pure owner->ghost update, zero out
-    // ghost slots so only owned ranks contribute for each shared node.
+    // ghost slots so only the owning ranks contribute for each shared node.
     std::vector<double> u_internal(static_cast<std::size_t>(dof) * static_cast<std::size_t>(nNo), 0.0);
     for (int old = 0; old < nNo; ++old) {
         const int internal = lhs.map(old);
@@ -288,7 +288,7 @@ void FsilsVector::updateGhosts()
                                         static_cast<std::size_t>(old) * static_cast<std::size_t>(dof);
             const std::size_t int_idx = static_cast<std::size_t>(c) +
                                         static_cast<std::size_t>(internal) * static_cast<std::size_t>(dof);
-            u_internal[int_idx] = (old < owned_nodes) ? data_[old_idx] : 0.0;
+            u_internal[int_idx] = (internal < mynNo) ? data_[old_idx] : 0.0;
         }
     }
 

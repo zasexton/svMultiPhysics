@@ -1333,8 +1333,9 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 	            }
 	        }
 	
-	        pattern->finalize();
-	        sparsity_by_op_.emplace(tag, std::move(pattern));
+		        pattern->finalize();
+		        const auto* full_pattern = pattern.get();
+		        sparsity_by_op_.emplace(tag, std::move(pattern));
 
 		        if (dist_pattern) {
 		            dist_pattern->finalize();
@@ -1362,27 +1363,41 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 		                    ghost_row_ptr.reserve(ghost_row_map.size() + 1);
 		                    ghost_row_ptr.push_back(0);
 
-		                    for (const auto row : ghost_row_map) {
-		                        auto cols_it = ghost_row_cols.find(row);
-		                        std::vector<GlobalIndex> cols_vec;
-		                        if (cols_it != ghost_row_cols.end()) {
-		                            cols_vec = cols_it->second;
-		                        }
-		                        cols_vec.push_back(row); // ensure diagonal
+			                    for (const auto row_fs : ghost_row_map) {
+			                        std::vector<GlobalIndex> cols_vec;
+			                        cols_vec.reserve(32);
 
-		                        cols_vec.erase(std::remove_if(cols_vec.begin(),
-		                                                     cols_vec.end(),
-		                                                     [&](GlobalIndex col) {
-		                                                         return (col < 0) || (col >= n_total_dofs) || !nodal.isRelevantDof(col);
-		                                                     }),
-		                                       cols_vec.end());
+			                        if (full_pattern != nullptr && row_fs >= 0 && row_fs < n_total_dofs) {
+			                            const auto row_fe = nodal.fs_to_fe[static_cast<std::size_t>(row_fs)];
+			                            if (row_fe >= 0 && row_fe < n_total_dofs) {
+			                                const auto cols_fe = full_pattern->getRowSpan(row_fe);
+			                                for (const auto col_fe : cols_fe) {
+			                                    const auto col_fs = nodal.mapFeToFs(col_fe);
+			                                    if (col_fs == INVALID_GLOBAL_INDEX) {
+			                                        continue;
+			                                    }
+			                                    if (nodal.isRelevantDof(col_fs)) {
+			                                        cols_vec.push_back(col_fs);
+			                                    }
+			                                }
+			                            }
+			                        }
+
+			                        cols_vec.push_back(row_fs); // ensure diagonal
+
+			                        cols_vec.erase(std::remove_if(cols_vec.begin(),
+			                                                     cols_vec.end(),
+			                                                     [&](GlobalIndex col) {
+			                                                         return (col < 0) || (col >= n_total_dofs) || !nodal.isRelevantDof(col);
+			                                                     }),
+			                                       cols_vec.end());
 
 		                        std::sort(cols_vec.begin(), cols_vec.end());
 		                        cols_vec.erase(std::unique(cols_vec.begin(), cols_vec.end()), cols_vec.end());
 
-		                        ghost_row_cols_flat.insert(ghost_row_cols_flat.end(), cols_vec.begin(), cols_vec.end());
-		                        ghost_row_ptr.push_back(static_cast<GlobalIndex>(ghost_row_cols_flat.size()));
-		                    }
+			                        ghost_row_cols_flat.insert(ghost_row_cols_flat.end(), cols_vec.begin(), cols_vec.end());
+			                        ghost_row_ptr.push_back(static_cast<GlobalIndex>(ghost_row_cols_flat.size()));
+			                    }
 
 		                    dist_pattern->setGhostRows(std::move(ghost_row_map),
 		                                              std::move(ghost_row_ptr),
@@ -1411,13 +1426,20 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 		                    ghost_row_ptr.reserve(ghost_row_map.size() + 1);
 		                    ghost_row_ptr.push_back(0);
 
-		                    for (const auto row : ghost_row_map) {
-		                        auto cols_it = ghost_row_cols.find(row);
-		                        std::vector<GlobalIndex> cols_vec;
-		                        if (cols_it != ghost_row_cols.end()) {
-		                            cols_vec = cols_it->second;
-		                        }
-		                        cols_vec.push_back(row); // ensure diagonal
+			                    for (const auto row : ghost_row_map) {
+			                        std::vector<GlobalIndex> cols_vec;
+			                        cols_vec.reserve(32);
+
+			                        if (full_pattern != nullptr && row >= 0 && row < n_total_dofs) {
+			                            const auto cols = full_pattern->getRowSpan(row);
+			                            for (const auto col : cols) {
+			                                if (relevant_set.contains(col)) {
+			                                    cols_vec.push_back(col);
+			                                }
+			                            }
+			                        }
+
+			                        cols_vec.push_back(row); // ensure diagonal
 
 		                        // Only store columns that are locally present (owned+ghost) so overlap backends can map them.
 		                        cols_vec.erase(std::remove_if(cols_vec.begin(),

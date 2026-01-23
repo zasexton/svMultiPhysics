@@ -1,5 +1,6 @@
 #include "Application/Translators/MeshTranslator.h"
 
+#include "Application/Core/OopMpiLog.h"
 #include "Parameters.h"
 
 #include "Mesh/Mesh.h"
@@ -59,8 +60,10 @@ std::shared_ptr<svmp::Mesh> MeshTranslator::loadMesh(const MeshParameters& param
         params.name.value() + "\">.");
   }
 
-  std::cout << "[svMultiPhysics::Application] MeshTranslator: loading mesh file_path='" << file_path << "'"
-            << std::endl;
+  if (application::core::oopTraceEnabled()) {
+    application::core::oopCout() << "[svMultiPhysics::Application] MeshTranslator: loading mesh file_path='" << file_path
+                                 << "'" << std::endl;
+  }
 
   svmp::MeshIOOptions io_opts{};
   io_opts.path = file_path;
@@ -70,12 +73,17 @@ std::shared_ptr<svmp::Mesh> MeshTranslator::loadMesh(const MeshParameters& param
                              file_path + "'.");
   }
 
-  std::cout << "[svMultiPhysics::Application] MeshTranslator: detected format='" << io_opts.format << "'" << std::endl;
+  if (application::core::oopTraceEnabled()) {
+    application::core::oopCout() << "[svMultiPhysics::Application] MeshTranslator: detected format='" << io_opts.format
+                                 << "'" << std::endl;
+  }
 
   auto mesh = std::make_shared<svmp::Mesh>(svmp::Mesh::load_parallel(io_opts, svmp::MeshComm::world()));
-  std::cout << "[svMultiPhysics::Application] MeshTranslator: mesh loaded dim=" << mesh->dim()
-            << " vertices=" << mesh->n_vertices() << " cells=" << mesh->n_cells()
-            << " faces=" << mesh->n_faces() << std::endl;
+  if (application::core::oopTraceEnabled()) {
+    application::core::oopCout() << "[svMultiPhysics::Application] MeshTranslator: mesh loaded dim=" << mesh->dim()
+                                 << " vertices=" << mesh->n_vertices() << " cells=" << mesh->n_cells()
+                                 << " faces=" << mesh->n_faces() << std::endl;
+  }
 
   applyFaceLabels(*mesh, params.face_parameters);
   applyDomainLabels(*mesh, params);
@@ -103,8 +111,8 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
     return;
   }
 
-  std::cout << "[svMultiPhysics::Application] MeshTranslator: applying face labels; count="
-            << static_cast<int>(face_params.size()) << std::endl;
+  application::core::oopCout() << "[svMultiPhysics::Application] MeshTranslator: applying face labels; count="
+                               << static_cast<int>(face_params.size()) << std::endl;
 
   if (mesh.dim() <= 0) {
     throw std::runtime_error("[svMultiPhysics::Application] Loaded mesh has invalid dimension.");
@@ -148,8 +156,8 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
                                "\"> is missing <Face_file_path>.");
     }
 
-    std::cout << "[svMultiPhysics::Application]   Face '" << face_name << "': file_path='" << face_path << "'"
-              << std::endl;
+    application::core::oopCout() << "[svMultiPhysics::Application]   Face '" << face_name << "': file_path='"
+                                 << face_path << "'" << std::endl;
 
     // Load face surface mesh (typically .vtp).
     svmp::MeshIOOptions face_opts{};
@@ -163,8 +171,9 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
     svmp::MeshBase face_mesh = svmp::MeshBase::load(face_opts);
 
     const auto label = next_label++;
-    std::cout << "[svMultiPhysics::Application]   Face '" << face_name << "': format='" << face_opts.format
-              << "' cells=" << face_mesh.n_cells() << " -> label=" << label << std::endl;
+    application::core::oopCout() << "[svMultiPhysics::Application]   Face '" << face_name << "': format='"
+                                 << face_opts.format << "' cells=" << face_mesh.n_cells() << " -> label=" << label
+                                 << std::endl;
     mesh.register_label(face_name, label);
 
     svmp::index_t local_matched = 0;
@@ -203,9 +212,10 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
       ++local_matched;
     }
 
-    if (local_matched == 0) {
-      std::cout << "[svMultiPhysics::Application]   Face '" << face_name
-                << "': no local matches (this is expected on non-owning MPI ranks)." << std::endl;
+    if (application::core::oopTraceEnabled() && local_matched == 0) {
+      application::core::oopCout()
+          << "[svMultiPhysics::Application]   Face '" << face_name
+          << "': no local matches (this is expected on non-owning MPI ranks)." << std::endl;
     }
   }
 }
@@ -223,8 +233,8 @@ void MeshTranslator::applyDomainLabels(svmp::Mesh& mesh, const MeshParameters& p
   }
 
   const auto label = static_cast<svmp::label_t>(params.domain_id.value());
-  std::cout << "[svMultiPhysics::Application] MeshTranslator: setting domain_id=" << label
-            << " for " << mesh.n_cells() << " cells." << std::endl;
+  application::core::oopCout() << "[svMultiPhysics::Application] MeshTranslator: setting domain_id=" << label
+                               << " for " << mesh.n_cells() << " cells." << std::endl;
   for (svmp::index_t c = 0; c < static_cast<svmp::index_t>(mesh.n_cells()); ++c) {
     svmp::MeshLabels::set_region_label(mesh.base(), c, label);
   }
