@@ -1704,13 +1704,11 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                 init_state.u_history = history.uHistorySpans();
                                 init_state.dt_history = history.dtHistory();
 
-                                auto ctx_base = generalized_alpha_fo->buildContext(temporal_order, init_state);
-                                const auto* dt1 = ctx_base.dt1 ? &(*ctx_base.dt1) : nullptr;
-                                const double c = dt1 ? static_cast<double>(dt1->coeff(/*history_index=*/0)) : 0.0;
-                                const double c0 = dt1 ? static_cast<double>(dt1->coeff(/*history_index=*/2)) : 0.0;
+	                                auto ctx_base = generalized_alpha_fo->buildContext(temporal_order, init_state);
+	                                const auto* dt1 = ctx_base.dt1 ? &(*ctx_base.dt1) : nullptr;
+	                                const double c = dt1 ? static_cast<double>(dt1->coeff(/*history_index=*/0)) : 0.0;
 
-                                const bool can_solve = (dt1 != nullptr) && (std::abs(c0) > 0.0) &&
-                                    std::isfinite(c) && std::isfinite(c0);
+	                                const bool can_solve = (dt1 != nullptr) && std::isfinite(c) && (std::abs(c) > 0.0);
 
                                 if (can_solve) {
                                     // Assemble non-dt residual r(u) with dt terms disabled.
@@ -1751,14 +1749,16 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                     FE_THROW_IF(!ar_A.success, FEException,
                                                 "TimeLoop: uDot initialization matrix assembly failed: " + ar_A.error_message);
 
-                                    // Build RHS b = -(c/c0) * r_non_dt and constrain non-dt fields to uDot=0.
-                                    auto& b = *scratch_vec1;
-                                    copyVector(b, r_non_dt);
-                                    b.scale(static_cast<Real>(-c / c0));
-                                    if (!nondt_dofs.empty()) {
-                                        auto b_mod = b.createAssemblyView();
-                                        FE_CHECK_NOT_NULL(b_mod.get(), "TimeLoop: uDot init rhs view");
-                                        b_mod->beginAssemblyPhase();
+	                                    // Build RHS b = -c * r_non_dt so that:
+	                                    //   (c*M) * uDot = -c * r_non_dt  =>  M * uDot = -r_non_dt
+	                                    // which matches the PDE-consistent initial rate for first-order systems.
+	                                    auto& b = *scratch_vec1;
+	                                    copyVector(b, r_non_dt);
+	                                    b.scale(static_cast<Real>(-c));
+	                                    if (!nondt_dofs.empty()) {
+	                                        auto b_mod = b.createAssemblyView();
+	                                        FE_CHECK_NOT_NULL(b_mod.get(), "TimeLoop: uDot init rhs view");
+	                                        b_mod->beginAssemblyPhase();
                                         b_mod->zeroVectorEntries(nondt_dofs);
                                         b_mod->finalizeAssembly();
 

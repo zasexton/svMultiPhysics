@@ -268,10 +268,19 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     if (!pressure_constraints.empty()) {
         FE::systems::installStrongDirichlet(system, pressure_constraints);
     } else {
-        // Pressure is only determined up to an additive constant unless it is constrained.
-        // Pin one pressure DOF to avoid a singular saddle-point system that causes iterative solvers
+        // Pressure has a constant nullspace when there is no pressure Dirichlet constraint and the
+        // velocity test space is fully essential (no natural/traction-type boundaries). In that case,
+        // pin one pressure DOF to avoid a singular saddle-point system that can cause iterative solvers
         // (e.g., FSILS GMRES) to break down.
-        system.addSystemConstraint(std::make_unique<PressureNullspacePinConstraint>(p_id, /*value=*/0.0));
+        //
+        // If any traction/outflow-like boundary condition is present, the constant mode is typically
+        // fixed by the boundary data and pinning can unnecessarily force a specific nodal pressure
+        // value (e.g., p=0 at the first pressure DOF).
+        const bool has_natural_momentum_bc = !options_.traction_neumann.empty() || !options_.traction_robin.empty() ||
+                                            !options_.pressure_outflow.empty() || !options_.coupled_outflow_rcr.empty();
+        if (!has_natural_momentum_bc) {
+            system.addSystemConstraint(std::make_unique<PressureNullspacePinConstraint>(p_id, /*value=*/0.0));
+        }
     }
 
     // Install coupled residual on both operator tags used by FESystem convenience calls.
