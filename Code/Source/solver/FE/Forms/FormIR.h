@@ -18,6 +18,10 @@ namespace svmp {
 namespace FE {
 namespace forms {
 
+namespace jit {
+class JITCompiler;
+} // namespace jit
+
 /**
  * @brief Integration domain for an integral term
  */
@@ -100,6 +104,14 @@ public:
     [[nodiscard]] std::string dump() const;
 
     /**
+     * @brief Deep-copy this FormIR (explicit clone; FormIR is otherwise move-only)
+     *
+     * This is intended for caching and setup-time rewrites where a template FormIR
+     * must be reused without mutating the cached instance.
+     */
+    [[nodiscard]] FormIR clone() const;
+
+    /**
      * @brief Apply a node-level transformation to every term integrand
      *
      * This is intended for setup-time rewrites (e.g., resolving ParameterSymbol
@@ -120,6 +132,7 @@ public:
 
 private:
     friend class FormCompiler;
+    friend class jit::JITCompiler;
 
     void setCompiled(bool compiled);
     void setKind(FormKind kind);

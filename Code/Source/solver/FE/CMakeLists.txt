@@ -651,8 +651,16 @@ set(FE_FORMS_HEADERS
 	    Forms/BoundaryFunctional.h
 	    Forms/AffineAnalysis.h
 	    Forms/FormExpr.h
+    Forms/SymbolicDifferentiation.h
     Forms/Index.h
     Forms/Einsum.h
+    Forms/Tensor/TensorIndex.h
+    Forms/Tensor/TensorSymmetry.h
+    Forms/Tensor/SpecialTensors.h
+    Forms/Tensor/TensorContraction.h
+    Forms/Tensor/TensorCanonicalize.h
+    Forms/Tensor/TensorDifferentiation.h
+    Forms/Tensor/SpecialTensorDerivatives.h
     Forms/FormIR.h
     Forms/FormCompiler.h
     Forms/FormKernels.h
@@ -662,10 +670,17 @@ set(FE_FORMS_HEADERS
     Forms/BlockForm.h
 	    Forms/Complex.h
 	    Forms/PointEvaluator.h
+	    Forms/JIT/ExternalCalls.h
+	    Forms/JIT/InlinableConstitutiveModel.h
+	    Forms/JIT/JITCompiler.h
+	    Forms/JIT/JITEngine.h
+	    Forms/JIT/JITFormKernel.h
 	    Forms/JIT/KernelIR.h
 	    Forms/JIT/JITValidation.h
+	    Forms/JIT/LLVMGen.h
 	    Forms/JIT/LLVMJITBuildInfo.h
 	    Forms/JIT/JITKernelWrapper.h
+	    Forms/JIT/JITFunctionalKernelWrapper.h
 	    Forms/Vocabulary.h
 		)
 
@@ -673,16 +688,29 @@ set(FE_FORMS_SOURCES
     Forms/FormExpr.cpp
     Forms/Index.cpp
     Forms/Einsum.cpp
+    Forms/Tensor/TensorIndex.cpp
+    Forms/Tensor/TensorSymmetry.cpp
+    Forms/Tensor/SpecialTensors.cpp
+    Forms/Tensor/TensorContraction.cpp
+    Forms/Tensor/TensorCanonicalize.cpp
+    Forms/Tensor/TensorDifferentiation.cpp
+    Forms/Tensor/SpecialTensorDerivatives.cpp
     Forms/FormIR.cpp
     Forms/FormCompiler.cpp
     Forms/AffineAnalysis.cpp
 	    Forms/BoundaryFunctional.cpp
 	    Forms/FormKernels.cpp
+	    Forms/SymbolicDifferentiation.cpp
 	    Forms/PointEvaluator.cpp
+	    Forms/JIT/ExternalCalls.cpp
+	    Forms/JIT/JITCompiler.cpp
+	    Forms/JIT/JITEngine.cpp
 	    Forms/JIT/KernelIR.cpp
 	    Forms/JIT/JITValidation.cpp
+	    Forms/JIT/LLVMGen.cpp
 	    Forms/JIT/LLVMJITBuildInfo.cpp
 	    Forms/JIT/JITKernelWrapper.cpp
+	    Forms/JIT/JITFunctionalKernelWrapper.cpp
 		)
 
 # TimeStepping sources (requires FE/Systems + FE/Assembly + FE/Backends)
@@ -1670,13 +1698,20 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Forms/test_FormKernel_DG.cpp
 		                Tests/Unit/Forms/test_FormSpatialDerivatives.cpp
 		                Tests/Unit/Forms/test_FormVocabulary.cpp
-	                Tests/Unit/Forms/test_MixedSpaceVocabulary.cpp
-	                Tests/Unit/Forms/test_Einsum.cpp
-	                Tests/Unit/Forms/test_NonlinearFormKernel.cpp
-	                Tests/Unit/Forms/test_ConstitutiveModel.cpp
-                Tests/Unit/Forms/test_PrimitiveTypes.cpp
-	                Tests/Unit/Forms/test_main.cpp
-	            )
+		                Tests/Unit/Forms/test_MixedSpaceVocabulary.cpp
+		                Tests/Unit/Forms/test_Einsum.cpp
+		                Tests/Unit/Forms/test_NonlinearFormKernel.cpp
+		                Tests/Unit/Forms/test_SymbolicDifferentiation.cpp
+		                Tests/Unit/Forms/Tensor/test_TensorIndex.cpp
+		                Tests/Unit/Forms/Tensor/test_TensorSymmetry.cpp
+		                Tests/Unit/Forms/Tensor/test_TensorContraction.cpp
+		                Tests/Unit/Forms/Tensor/test_TensorDifferentiation.cpp
+		                Tests/Unit/Forms/Tensor/test_SpecialTensors.cpp
+		                Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp
+		                Tests/Unit/Forms/test_ConstitutiveModel.cpp
+	                Tests/Unit/Forms/test_PrimitiveTypes.cpp
+		                Tests/Unit/Forms/test_main.cpp
+		            )
 	            add_executable(test_fe_forms ${FE_FORMS_TEST_SOURCES})
 	            _svmp_fe_target_enable_warnings(test_fe_forms)
 	            target_link_libraries(test_fe_forms
@@ -1799,6 +1834,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/TimeStepping/test_TimeLoopStability.cpp
 		                Tests/Unit/TimeStepping/test_TimeSteppingUtils.cpp
 		                Tests/Unit/TimeStepping/test_StepControllers.cpp
+		                Tests/Unit/TimeStepping/test_NewtonSolver.cpp
 		                Tests/Unit/TimeStepping/test_MultiStageScheme.cpp
 		                Tests/Unit/TimeStepping/test_StepController.cpp
 		                Tests/Unit/TimeStepping/test_TimeLoopStageTimes.cpp

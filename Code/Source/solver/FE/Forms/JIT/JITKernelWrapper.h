@@ -5,10 +5,11 @@
  * @file JITKernelWrapper.h
  * @brief AssemblyKernel adapter that can dispatch to a future LLVM JIT backend
  *
- * Phase-0 implementation:
- * - Always falls back to the wrapped interpreter kernel.
- * - Performs (optional) JIT validation and emits a one-time diagnostic when
- *   JIT is requested but not available in this build.
+ * JIT implementation:
+ * - Wraps an existing interpreter kernel and (when available) dispatches to
+ *   JIT-compiled kernels generated from the underlying FormIR.
+ * - Falls back to the wrapped interpreter kernel on any compile/runtime
+ *   unavailability.
  *
  * This header contains no LLVM dependencies.
  */
@@ -19,12 +20,15 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <string>
 
 namespace svmp {
 namespace FE {
 namespace forms {
 namespace jit {
+
+class JITCompiler;
 
 class JITKernelWrapper final : public assembly::AssemblyKernel {
 public:
@@ -79,8 +83,32 @@ public:
     [[nodiscard]] bool isVectorOnly() const noexcept override;
 
 private:
+    enum class WrappedKind : std::uint8_t {
+        Unknown = 0u,
+        FormKernel,
+        LinearFormKernel,
+        SymbolicNonlinearFormKernel,
+        NonlinearFormKernel,
+    };
+
+    struct CompiledDispatch {
+        bool ok{false};
+        bool cacheable{true};
+        std::string message{};
+
+        std::uintptr_t cell{0};
+        std::uintptr_t interior_face{0};
+
+        std::uintptr_t boundary_all{0};
+        std::unordered_map<int, std::uintptr_t> boundary_by_marker{};
+
+        std::uintptr_t interface_all{0};
+        std::unordered_map<int, std::uintptr_t> interface_by_marker{};
+    };
+
     void markDirty() noexcept;
     void maybeCompile();
+    [[nodiscard]] bool canUseJIT() const noexcept;
 
     std::shared_ptr<assembly::AssemblyKernel> fallback_{};
     JITOptions options_{};
@@ -90,8 +118,18 @@ private:
     std::uint64_t compiled_revision_{static_cast<std::uint64_t>(-1)};
     std::uint64_t attempted_revision_{static_cast<std::uint64_t>(-1)};
 
+    WrappedKind kind_{WrappedKind::Unknown};
+    std::shared_ptr<JITCompiler> compiler_{};
+    CompiledDispatch compiled_form_{};
+    CompiledDispatch compiled_bilinear_{};
+    CompiledDispatch compiled_linear_{};
+    CompiledDispatch compiled_residual_{};
+    CompiledDispatch compiled_tangent_{};
+    bool has_compiled_linear_{false};
+
     bool warned_unavailable_{false};
     bool warned_validation_{false};
+    bool warned_compile_failure_{false};
 };
 
 } // namespace jit
@@ -100,4 +138,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_FORMS_JIT_JIT_KERNEL_WRAPPER_H
-

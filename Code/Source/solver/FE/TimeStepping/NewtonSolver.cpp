@@ -876,6 +876,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         const double r_norm0_sq = r_norm0 * r_norm0;
 
         double alpha = 1.0;
+        double alpha_last = alpha;
         double trial_norm = std::numeric_limits<double>::infinity();
         bool accepted = false;
 
@@ -889,6 +890,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
 
         for (int ls = 0; ls < options_.line_search_max_iterations; ++ls) {
+            alpha_last = alpha;
             copyVector(history.u(), u_backup);
             axpy(history.u(), static_cast<Real>(-alpha), du);
             if (!constraints.empty()) {
@@ -930,6 +932,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (alpha < options_.line_search_alpha_min) {
                 alpha = options_.line_search_alpha_min;
             }
+        }
+
+        if (!accepted) {
+            // When the line search fails to satisfy the Armijo condition, accept the last evaluated
+            // trial point. Ensure `alpha` matches that state (important for step-tolerance logic).
+            alpha = alpha_last;
         }
 
         if (!accepted && oopTraceEnabled()) {

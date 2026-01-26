@@ -227,6 +227,26 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
             case FormExprType::MaterialStateWorkRef:
                 required |= RequiredData::MaterialState;
                 break;
+            case FormExprType::StateField: {
+                // StateField usually refers to an auxiliary/state variable provided as
+                // field solution data (handled via FieldRequirements). We also support
+                // a special sentinel FieldId (INVALID_FIELD_ID) to represent the current
+                // solution state u in symbolic tangent forms.
+                const auto fid = n.fieldId();
+                if (fid && *fid == INVALID_FIELD_ID) {
+                    required |= RequiredData::SolutionValues;
+                    required |= RequiredData::BasisValues;
+                    if (order >= 1) {
+                        required |= RequiredData::SolutionGradients;
+                        required |= RequiredData::PhysicalGradients;
+                    }
+                    if (order >= 2) {
+                        required |= RequiredData::SolutionHessians;
+                        required |= RequiredData::BasisHessians;
+                    }
+                }
+                break;
+            }
             case FormExprType::Gradient:
             {
                 const auto kids = n.childrenShared();
@@ -338,6 +358,11 @@ std::vector<assembly::FieldRequirement> analyzeFieldRequirements(const FormExprN
                 if (!fid) {
                     throw std::logic_error("FormCompiler: DiscreteField/StateField node missing fieldId()");
                 }
+                if (n.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+                    // Special-case: INVALID StateField represents the current solution state (u),
+                    // not an external field entry.
+                    break;
+                }
                 RequiredData bits = RequiredData::SolutionValues;
                 if (order >= 1) bits |= RequiredData::SolutionGradients;
                 if (order >= 2) bits |= RequiredData::SolutionHessians;
@@ -405,6 +430,7 @@ int analyzeTimeDerivativeOrder(const FormExprNode& node, FormKind kind)
 {
     int max_order = 0;
     int dt_count = 0;
+    int dt_trial_count = 0;
     std::optional<int> dt_order{};
 
     const auto visit = [&](const auto& self, const FormExprNode& n) -> void {
@@ -426,18 +452,21 @@ int analyzeTimeDerivativeOrder(const FormExprNode& node, FormKind kind)
             if (kids.size() != 1 || !kids[0]) {
                 throw std::invalid_argument("FormCompiler: dt(·,k) must have exactly 1 operand");
             }
-            const auto operand_type = kids[0]->type();
-            const bool ok =
-                (operand_type == FormExprType::TrialFunction) ||
-                (kind == FormKind::Residual &&
-                 (operand_type == FormExprType::DiscreteField || operand_type == FormExprType::StateField));
+            const auto& operand = *kids[0];
+            const auto operand_type = operand.type();
+
+            bool ok = false;
+            if (operand_type == FormExprType::TrialFunction) {
+                ok = true;
+                ++dt_trial_count;
+            } else if (operand_type == FormExprType::DiscreteField || operand_type == FormExprType::StateField) {
+                // dt(field) is treated as a coefficient value and includes history contributions.
+                ok = true;
+            }
+
             if (!ok) {
-                if (kind == FormKind::Residual) {
-                    throw std::invalid_argument(
-                        "FormCompiler: dt(·,k) currently supports TrialFunction and DiscreteField/StateField operands only");
-                }
                 throw std::invalid_argument(
-                    "FormCompiler: dt(·,k) currently supports TrialFunction operands only");
+                    "FormCompiler: dt(·,k) currently supports TrialFunction and DiscreteField/StateField operands only");
             }
         }
 
@@ -448,12 +477,14 @@ int analyzeTimeDerivativeOrder(const FormExprNode& node, FormKind kind)
 
     visit(visit, node);
 
-    // For linear/bilinear forms, we restrict each integral term to at most one dt()
-    // operator so time-dependent contributions remain affine in the time derivative.
-    //
-    // Residual forms may be nonlinear in dt(u) (e.g., stabilization terms that reuse
-    // a strong residual containing dt(u)), so allow multiple dt() nodes there.
-    if (dt_count > 1 && kind != FormKind::Residual) {
+    // For bilinear forms, dt(TrialFunction) must remain affine (at most one dt applied to the unknown).
+    // Allow additional dt(...) nodes on DiscreteField/StateField, which behave as coefficient values.
+    if (dt_count > 1 && kind == FormKind::Bilinear && dt_trial_count > 1) {
+        throw std::invalid_argument("FormCompiler: multiple dt(TrialFunction) factors in one integral term are not supported");
+    }
+
+    // For linear forms, keep the conservative restriction (historically only one dt per term).
+    if (dt_count > 1 && kind == FormKind::Linear) {
         throw std::invalid_argument("FormCompiler: multiple dt() factors in one integral term are not supported");
     }
 
@@ -593,7 +624,9 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
         throw std::invalid_argument("FormCompiler: cannot compile invalid form");
     }
 
-    detail::requireNoIndexedAccess(*form.node());
+    if (!impl_->options.jit.enable) {
+        detail::requireNoIndexedAccess(*form.node());
+    }
     detail::requireNoCoupledPlaceholders(*form.node());
 
     FormIR ir;

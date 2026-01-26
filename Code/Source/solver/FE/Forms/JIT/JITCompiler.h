@@ -47,6 +47,10 @@ public:
     [[nodiscard]] JITCompileResult compile(const FormIR& ir,
                                            const ValidationOptions& validation = {});
 
+    [[nodiscard]] JITCompileResult compileFunctional(const FormExpr& integrand,
+                                                     IntegralDomain domain,
+                                                     const ValidationOptions& validation = {});
+
     JITCompiler(const JITCompiler&) = delete;
     JITCompiler& operator=(const JITCompiler&) = delete;
 
@@ -63,4 +67,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_FORMS_JIT_JIT_COMPILER_H
-

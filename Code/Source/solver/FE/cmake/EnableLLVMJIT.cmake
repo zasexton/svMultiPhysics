@@ -11,7 +11,9 @@ if(FE_ENABLE_LLVM_JIT)
     message(STATUS "FE: Configuring LLVM OrcJIT support for Forms")
 
     # Require a modern LLVM with the ORC (LLJIT) APIs we plan to use.
-    set(_SVMP_FE_LLVM_JIT_MIN_VERSION "15.0")
+    # NOTE: The implementation is written to tolerate minor API differences
+    # between LLVM 14+ (e.g., ObjectCache and JIT event listener hooks).
+    set(_SVMP_FE_LLVM_JIT_MIN_VERSION "14.0")
 
     # Prefer the LLVM CMake package config (works on Linux/macOS/Windows).
     find_package(LLVM ${_SVMP_FE_LLVM_JIT_MIN_VERSION} CONFIG REQUIRED)
@@ -74,4 +76,3 @@ if(FE_ENABLE_LLVM_JIT)
 
     message(STATUS "FE: LLVM JIT configuration complete")
 endif()
-

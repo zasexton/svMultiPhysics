@@ -7,14 +7,15 @@
 
 #include "Forms/JIT/JITKernelWrapper.h"
 
+#include "Assembly/JIT/KernelArgs.h"
 #include "Core/FEException.h"
 #include "Core/Logger.h"
 
 #include "Forms/FormKernels.h"
+#include "Forms/JIT/JITCompiler.h"
 #include "Forms/JIT/JITValidation.h"
 
-#include <optional>
-#include <sstream>
+#include <cstddef>
 #include <utility>
 
 #ifndef SVMP_FE_ENABLE_LLVM_JIT
@@ -28,44 +29,14 @@ namespace jit {
 
 namespace {
 
-struct IRView {
-    const FormIR* ir{nullptr};
-    std::string_view label{};
-};
+using JITFn = void (*)(const void*);
 
-[[nodiscard]] std::vector<IRView> gatherIRs(const assembly::AssemblyKernel& kernel)
+inline void callJIT(std::uintptr_t addr, const void* args) noexcept
 {
-    std::vector<IRView> out;
-
-    if (const auto* k = dynamic_cast<const FormKernel*>(&kernel)) {
-        out.push_back(IRView{.ir = &k->ir(), .label = "FormKernel"});
-        return out;
+    if (addr == 0 || args == nullptr) {
+        return;
     }
-
-    if (const auto* k = dynamic_cast<const LinearFormKernel*>(&kernel)) {
-        out.push_back(IRView{.ir = &k->bilinearIR(), .label = "LinearFormKernel(bilinear)"});
-        if (k->linearIR().has_value()) {
-            out.push_back(IRView{.ir = &*k->linearIR(), .label = "LinearFormKernel(linear)"});
-        }
-        return out;
-    }
-
-    if (const auto* k = dynamic_cast<const NonlinearFormKernel*>(&kernel)) {
-        out.push_back(IRView{.ir = &k->residualIR(), .label = "NonlinearFormKernel(residual)"});
-        return out;
-    }
-
-    return out;
-}
-
-[[nodiscard]] std::string formatValidationIssue(const ValidationIssue& issue)
-{
-    std::ostringstream oss;
-    oss << issue.message;
-    if (!issue.subexpr.empty()) {
-        oss << " (subexpr: " << issue.subexpr << ")";
-    }
-    return oss.str();
+    reinterpret_cast<JITFn>(addr)(args);
 }
 
 } // namespace
@@ -76,6 +47,18 @@ JITKernelWrapper::JITKernelWrapper(std::shared_ptr<assembly::AssemblyKernel> fal
       options_(std::move(options))
 {
     FE_CHECK_NOT_NULL(fallback_.get(), "JITKernelWrapper: fallback kernel");
+
+    if (dynamic_cast<const FormKernel*>(fallback_.get()) != nullptr) {
+        kind_ = WrappedKind::FormKernel;
+    } else if (dynamic_cast<const LinearFormKernel*>(fallback_.get()) != nullptr) {
+        kind_ = WrappedKind::LinearFormKernel;
+    } else if (dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get()) != nullptr) {
+        kind_ = WrappedKind::SymbolicNonlinearFormKernel;
+    } else if (dynamic_cast<const NonlinearFormKernel*>(fallback_.get()) != nullptr) {
+        kind_ = WrappedKind::NonlinearFormKernel;
+    } else {
+        kind_ = WrappedKind::Unknown;
+    }
 }
 
 assembly::RequiredData JITKernelWrapper::getRequiredData() const
@@ -121,6 +104,161 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
                                    assembly::KernelOutput& output)
 {
     maybeCompile();
+    if (!canUseJIT()) {
+        fallback_->computeCell(ctx, output);
+        return;
+    }
+
+    const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+
+    if (kind_ == WrappedKind::FormKernel) {
+        const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
+        if (!k) {
+            fallback_->computeCell(ctx, output);
+            return;
+        }
+
+        const bool want_matrix = (k->ir().kind() == FormKind::Bilinear);
+        const bool want_vector = (k->ir().kind() == FormKind::Linear);
+
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), want_matrix, want_vector);
+        output.clear();
+
+        const auto& updates = k->inlinedStateUpdates().cell;
+        if (!updates.empty()) {
+            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                applyInlinedMaterialStateUpdatesReal(ctx, nullptr, k->ir().kind(),
+                                                     k->constitutiveStateLayout(),
+                                                     updates,
+                                                     Side::Minus, q);
+            }
+        }
+
+        const auto args = assembly::jit::packCellKernelArgsV3(ctx, output, checks);
+        callJIT(compiled_form_.cell, &args);
+
+        output.has_matrix = want_matrix;
+        output.has_vector = want_vector;
+        return;
+    }
+
+    if (kind_ == WrappedKind::LinearFormKernel) {
+        const auto* k = dynamic_cast<const LinearFormKernel*>(fallback_.get());
+        if (!k) {
+            fallback_->computeCell(ctx, output);
+            return;
+        }
+
+        const bool want_matrix = !k->isVectorOnly();
+        const bool want_vector = !k->isMatrixOnly();
+
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), want_matrix, want_vector);
+        output.clear();
+
+        const auto& updates = k->inlinedStateUpdates().cell;
+        if (!updates.empty()) {
+            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                applyInlinedMaterialStateUpdatesReal(ctx, nullptr, FormKind::Bilinear,
+                                                     k->constitutiveStateLayout(),
+                                                     updates,
+                                                     Side::Minus, q);
+            }
+        }
+
+        // 1) Jacobian (bilinear part).
+        if (want_matrix) {
+            const auto args_bi = assembly::jit::packCellKernelArgsV3(ctx, output, checks);
+            callJIT(compiled_bilinear_.cell, &args_bi);
+        }
+
+        // 2) Residual vector = (linear part) + (K*u).
+        if (want_vector) {
+            const auto coeffs = ctx.solutionCoefficients();
+            FE_THROW_IF(coeffs.size() < static_cast<std::size_t>(ctx.numTrialDofs()), InvalidArgumentException,
+                        "JITKernelWrapper(LinearFormKernel)::computeCell: missing solution coefficients");
+
+            if (has_compiled_linear_ && k->linearIR().has_value()) {
+                const auto args_lin = assembly::jit::packCellKernelArgsV3(ctx, output, checks);
+                callJIT(compiled_linear_.cell, &args_lin);
+            }
+
+            // K*u contribution.
+            if (want_matrix) {
+                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                    Real sum = 0.0;
+                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+                        sum += output.matrixEntry(i, j) * coeffs[static_cast<std::size_t>(j)];
+                    }
+                    output.vectorEntry(i) += sum;
+                }
+            } else {
+                assembly::KernelOutput tmp;
+                tmp.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
+                tmp.clear();
+
+                const auto args_bi = assembly::jit::packCellKernelArgsV3(ctx, tmp, checks);
+                callJIT(compiled_bilinear_.cell, &args_bi);
+
+                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                    Real sum = 0.0;
+                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+                        sum += tmp.matrixEntry(i, j) * coeffs[static_cast<std::size_t>(j)];
+                    }
+                    output.vectorEntry(i) += sum;
+                }
+            }
+        }
+
+        output.has_matrix = want_matrix;
+        output.has_vector = want_vector;
+        return;
+    }
+
+    if (kind_ == WrappedKind::SymbolicNonlinearFormKernel) {
+        const auto* k = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get());
+        if (!k) {
+            fallback_->computeCell(ctx, output);
+            return;
+        }
+
+        const bool want_matrix = !k->isVectorOnly();
+        const bool want_vector = !k->isMatrixOnly();
+
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), want_matrix, want_vector);
+        output.clear();
+
+        const auto& updates = k->inlinedStateUpdates().cell;
+        if (!updates.empty()) {
+            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                applyInlinedMaterialStateUpdatesReal(ctx, nullptr, FormKind::Residual,
+                                                     k->constitutiveStateLayout(),
+                                                     updates,
+                                                     Side::Minus, q);
+            }
+        }
+
+        if (want_matrix) {
+            if (compiled_tangent_.cell == 0) {
+                fallback_->computeCell(ctx, output);
+                return;
+            }
+            const auto args = assembly::jit::packCellKernelArgsV3(ctx, output, checks);
+            callJIT(compiled_tangent_.cell, &args);
+        }
+        if (want_vector) {
+            if (compiled_residual_.cell == 0) {
+                fallback_->computeCell(ctx, output);
+                return;
+            }
+            const auto args = assembly::jit::packCellKernelArgsV3(ctx, output, checks);
+            callJIT(compiled_residual_.cell, &args);
+        }
+
+        output.has_matrix = want_matrix;
+        output.has_vector = want_vector;
+        return;
+    }
+
     fallback_->computeCell(ctx, output);
 }
 
@@ -129,6 +267,216 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
                                            assembly::KernelOutput& output)
 {
     maybeCompile();
+    if (!canUseJIT()) {
+        fallback_->computeBoundaryFace(ctx, boundary_marker, output);
+        return;
+    }
+
+    const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+
+    if (kind_ == WrappedKind::FormKernel) {
+        const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
+        if (!k) {
+            fallback_->computeBoundaryFace(ctx, boundary_marker, output);
+            return;
+        }
+
+        const bool want_matrix = (k->ir().kind() == FormKind::Bilinear);
+        const bool want_vector = (k->ir().kind() == FormKind::Linear);
+
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), want_matrix, want_vector);
+        output.clear();
+
+        const auto& updates_all = k->inlinedStateUpdates().boundary_all;
+        const auto* updates_marker = [&]() -> const std::vector<MaterialStateUpdate>* {
+            const auto it = k->inlinedStateUpdates().boundary_by_marker.find(boundary_marker);
+            return (it == k->inlinedStateUpdates().boundary_by_marker.end()) ? nullptr : &it->second;
+        }();
+
+        if (!updates_all.empty() || (updates_marker != nullptr && !updates_marker->empty())) {
+            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                if (!updates_all.empty()) {
+                    applyInlinedMaterialStateUpdatesReal(ctx, nullptr, k->ir().kind(),
+                                                         k->constitutiveStateLayout(),
+                                                         updates_all,
+                                                         Side::Minus, q);
+                }
+                if (updates_marker != nullptr && !updates_marker->empty()) {
+                    applyInlinedMaterialStateUpdatesReal(ctx, nullptr, k->ir().kind(),
+                                                         k->constitutiveStateLayout(),
+                                                         *updates_marker,
+                                                         Side::Minus, q);
+                }
+            }
+        }
+
+        const auto args = assembly::jit::packBoundaryFaceKernelArgsV3(ctx, boundary_marker, output, checks);
+        callJIT(compiled_form_.boundary_all, &args);
+        if (const auto it = compiled_form_.boundary_by_marker.find(boundary_marker);
+            it != compiled_form_.boundary_by_marker.end()) {
+            callJIT(it->second, &args);
+        }
+
+        output.has_matrix = want_matrix;
+        output.has_vector = want_vector;
+        return;
+    }
+
+    if (kind_ == WrappedKind::LinearFormKernel) {
+        const auto* k = dynamic_cast<const LinearFormKernel*>(fallback_.get());
+        if (!k) {
+            fallback_->computeBoundaryFace(ctx, boundary_marker, output);
+            return;
+        }
+
+        const bool want_matrix = !k->isVectorOnly();
+        const bool want_vector = !k->isMatrixOnly();
+
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), want_matrix, want_vector);
+        output.clear();
+
+        const auto& updates_all = k->inlinedStateUpdates().boundary_all;
+        const auto* updates_marker = [&]() -> const std::vector<MaterialStateUpdate>* {
+            const auto it = k->inlinedStateUpdates().boundary_by_marker.find(boundary_marker);
+            return (it == k->inlinedStateUpdates().boundary_by_marker.end()) ? nullptr : &it->second;
+        }();
+
+        if (!updates_all.empty() || (updates_marker != nullptr && !updates_marker->empty())) {
+            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                if (!updates_all.empty()) {
+                    applyInlinedMaterialStateUpdatesReal(ctx, nullptr, FormKind::Bilinear,
+                                                         k->constitutiveStateLayout(),
+                                                         updates_all,
+                                                         Side::Minus, q);
+                }
+                if (updates_marker != nullptr && !updates_marker->empty()) {
+                    applyInlinedMaterialStateUpdatesReal(ctx, nullptr, FormKind::Bilinear,
+                                                         k->constitutiveStateLayout(),
+                                                         *updates_marker,
+                                                         Side::Minus, q);
+                }
+            }
+        }
+
+        // 1) Jacobian (bilinear boundary part).
+        if (want_matrix) {
+            const auto args_bi = assembly::jit::packBoundaryFaceKernelArgsV3(ctx, boundary_marker, output, checks);
+            callJIT(compiled_bilinear_.boundary_all, &args_bi);
+            if (const auto it = compiled_bilinear_.boundary_by_marker.find(boundary_marker);
+                it != compiled_bilinear_.boundary_by_marker.end()) {
+                callJIT(it->second, &args_bi);
+            }
+        }
+
+        // 2) Residual vector = (linear boundary part) + (K*u).
+        if (want_vector) {
+            const auto coeffs = ctx.solutionCoefficients();
+            FE_THROW_IF(coeffs.size() < static_cast<std::size_t>(ctx.numTrialDofs()), InvalidArgumentException,
+                        "JITKernelWrapper(LinearFormKernel)::computeBoundaryFace: missing solution coefficients");
+
+            if (has_compiled_linear_ && k->linearIR().has_value()) {
+                const auto args_lin = assembly::jit::packBoundaryFaceKernelArgsV3(ctx, boundary_marker, output, checks);
+                callJIT(compiled_linear_.boundary_all, &args_lin);
+                if (const auto it = compiled_linear_.boundary_by_marker.find(boundary_marker);
+                    it != compiled_linear_.boundary_by_marker.end()) {
+                    callJIT(it->second, &args_lin);
+                }
+            }
+
+            if (want_matrix) {
+                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                    Real sum = 0.0;
+                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+                        sum += output.matrixEntry(i, j) * coeffs[static_cast<std::size_t>(j)];
+                    }
+                    output.vectorEntry(i) += sum;
+                }
+            } else {
+                assembly::KernelOutput tmp;
+                tmp.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
+                tmp.clear();
+
+                const auto args_bi = assembly::jit::packBoundaryFaceKernelArgsV3(ctx, boundary_marker, tmp, checks);
+                callJIT(compiled_bilinear_.boundary_all, &args_bi);
+                if (const auto it = compiled_bilinear_.boundary_by_marker.find(boundary_marker);
+                    it != compiled_bilinear_.boundary_by_marker.end()) {
+                    callJIT(it->second, &args_bi);
+                }
+
+                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                    Real sum = 0.0;
+                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+                        sum += tmp.matrixEntry(i, j) * coeffs[static_cast<std::size_t>(j)];
+                    }
+                    output.vectorEntry(i) += sum;
+                }
+            }
+        }
+
+        output.has_matrix = want_matrix;
+        output.has_vector = want_vector;
+        return;
+    }
+
+    if (kind_ == WrappedKind::SymbolicNonlinearFormKernel) {
+        const auto* k = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get());
+        if (!k) {
+            fallback_->computeBoundaryFace(ctx, boundary_marker, output);
+            return;
+        }
+
+        const bool want_matrix = !k->isVectorOnly();
+        const bool want_vector = !k->isMatrixOnly();
+
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), want_matrix, want_vector);
+        output.clear();
+
+        const auto& updates_all = k->inlinedStateUpdates().boundary_all;
+        const auto* updates_marker = [&]() -> const std::vector<MaterialStateUpdate>* {
+            const auto it = k->inlinedStateUpdates().boundary_by_marker.find(boundary_marker);
+            return (it == k->inlinedStateUpdates().boundary_by_marker.end()) ? nullptr : &it->second;
+        }();
+
+        if (!updates_all.empty() || (updates_marker != nullptr && !updates_marker->empty())) {
+            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                if (!updates_all.empty()) {
+                    applyInlinedMaterialStateUpdatesReal(ctx, nullptr, FormKind::Residual,
+                                                         k->constitutiveStateLayout(),
+                                                         updates_all,
+                                                         Side::Minus, q);
+                }
+                if (updates_marker != nullptr && !updates_marker->empty()) {
+                    applyInlinedMaterialStateUpdatesReal(ctx, nullptr, FormKind::Residual,
+                                                         k->constitutiveStateLayout(),
+                                                         *updates_marker,
+                                                         Side::Minus, q);
+                }
+            }
+        }
+
+        const auto args = assembly::jit::packBoundaryFaceKernelArgsV3(ctx, boundary_marker, output, checks);
+
+        if (want_matrix) {
+            callJIT(compiled_tangent_.boundary_all, &args);
+            if (const auto it = compiled_tangent_.boundary_by_marker.find(boundary_marker);
+                it != compiled_tangent_.boundary_by_marker.end()) {
+                callJIT(it->second, &args);
+            }
+        }
+
+        if (want_vector) {
+            callJIT(compiled_residual_.boundary_all, &args);
+            if (const auto it = compiled_residual_.boundary_by_marker.find(boundary_marker);
+                it != compiled_residual_.boundary_by_marker.end()) {
+                callJIT(it->second, &args);
+            }
+        }
+
+        output.has_matrix = want_matrix;
+        output.has_vector = want_vector;
+        return;
+    }
+
     fallback_->computeBoundaryFace(ctx, boundary_marker, output);
 }
 
@@ -140,9 +488,148 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
                                            assembly::KernelOutput& coupling_plus_minus)
 {
     maybeCompile();
+    if (!canUseJIT()) {
+        fallback_->computeInteriorFace(ctx_minus, ctx_plus,
+                                       output_minus, output_plus,
+                                       coupling_minus_plus, coupling_plus_minus);
+        return;
+    }
+
+    const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+
+    if (kind_ == WrappedKind::FormKernel) {
+        const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
+        if (!k || k->ir().kind() != FormKind::Bilinear) {
+            fallback_->computeInteriorFace(ctx_minus, ctx_plus,
+                                           output_minus, output_plus,
+                                           coupling_minus_plus, coupling_plus_minus);
+            return;
+        }
+
+        const auto n_test_minus = ctx_minus.numTestDofs();
+        const auto n_trial_minus = ctx_minus.numTrialDofs();
+        const auto n_test_plus = ctx_plus.numTestDofs();
+        const auto n_trial_plus = ctx_plus.numTrialDofs();
+
+        output_minus.reserve(n_test_minus, n_trial_minus, true, false);
+        output_plus.reserve(n_test_plus, n_trial_plus, true, false);
+        coupling_minus_plus.reserve(n_test_minus, n_trial_plus, true, false);
+        coupling_plus_minus.reserve(n_test_plus, n_trial_minus, true, false);
+
+        output_minus.clear();
+        output_plus.clear();
+        coupling_minus_plus.clear();
+        coupling_plus_minus.clear();
+
+        const auto& updates = k->inlinedStateUpdates().interior_face;
+        if (!updates.empty()) {
+            for (LocalIndex q = 0; q < ctx_minus.numQuadraturePoints(); ++q) {
+                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
+                                                     k->constitutiveStateLayout(),
+                                                     updates,
+                                                     Side::Minus, q);
+
+                const auto* base_minus = ctx_minus.materialStateWorkBase();
+                const auto* base_plus = ctx_plus.materialStateWorkBase();
+                if (base_plus != nullptr && base_plus != base_minus) {
+                    applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
+                                                         k->constitutiveStateLayout(),
+                                                         updates,
+                                                         Side::Plus, q);
+                }
+            }
+        }
+
+        const auto args =
+            assembly::jit::packInteriorFaceKernelArgsV3(ctx_minus, ctx_plus,
+                                                        output_minus, output_plus,
+                                                        coupling_minus_plus, coupling_plus_minus,
+                                                        checks);
+        callJIT(compiled_form_.interior_face, &args);
+
+        output_minus.has_matrix = true;
+        output_minus.has_vector = false;
+        output_plus.has_matrix = true;
+        output_plus.has_vector = false;
+        coupling_minus_plus.has_matrix = true;
+        coupling_minus_plus.has_vector = false;
+        coupling_plus_minus.has_matrix = true;
+        coupling_plus_minus.has_vector = false;
+        return;
+    }
+
+    if (kind_ == WrappedKind::SymbolicNonlinearFormKernel) {
+        const auto* k = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get());
+        if (!k) {
+            fallback_->computeInteriorFace(ctx_minus, ctx_plus,
+                                           output_minus, output_plus,
+                                           coupling_minus_plus, coupling_plus_minus);
+            return;
+        }
+
+        const bool want_matrix = !k->isVectorOnly();
+        const bool want_vector = !k->isMatrixOnly();
+
+        const auto n_test_minus = ctx_minus.numTestDofs();
+        const auto n_trial_minus = ctx_minus.numTrialDofs();
+        const auto n_test_plus = ctx_plus.numTestDofs();
+        const auto n_trial_plus = ctx_plus.numTrialDofs();
+
+        output_minus.reserve(n_test_minus, n_trial_minus, want_matrix, want_vector);
+        output_plus.reserve(n_test_plus, n_trial_plus, want_matrix, want_vector);
+        coupling_minus_plus.reserve(n_test_minus, n_trial_plus, want_matrix, /*need_vector=*/false);
+        coupling_plus_minus.reserve(n_test_plus, n_trial_minus, want_matrix, /*need_vector=*/false);
+
+        output_minus.clear();
+        output_plus.clear();
+        coupling_minus_plus.clear();
+        coupling_plus_minus.clear();
+
+        const auto& updates = k->inlinedStateUpdates().interior_face;
+        if (!updates.empty()) {
+            for (LocalIndex q = 0; q < ctx_minus.numQuadraturePoints(); ++q) {
+                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Residual,
+                                                     k->constitutiveStateLayout(),
+                                                     updates,
+                                                     Side::Minus, q);
+
+                const auto* base_minus = ctx_minus.materialStateWorkBase();
+                const auto* base_plus = ctx_plus.materialStateWorkBase();
+                if (base_plus != nullptr && base_plus != base_minus) {
+                    applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Residual,
+                                                         k->constitutiveStateLayout(),
+                                                         updates,
+                                                         Side::Plus, q);
+                }
+            }
+        }
+
+        const auto args =
+            assembly::jit::packInteriorFaceKernelArgsV3(ctx_minus, ctx_plus,
+                                                        output_minus, output_plus,
+                                                        coupling_minus_plus, coupling_plus_minus,
+                                                        checks);
+        if (want_matrix) {
+            callJIT(compiled_tangent_.interior_face, &args);
+        }
+        if (want_vector) {
+            callJIT(compiled_residual_.interior_face, &args);
+        }
+
+        output_minus.has_matrix = want_matrix;
+        output_minus.has_vector = want_vector;
+        output_plus.has_matrix = want_matrix;
+        output_plus.has_vector = want_vector;
+        coupling_minus_plus.has_matrix = want_matrix;
+        coupling_minus_plus.has_vector = false;
+        coupling_plus_minus.has_matrix = want_matrix;
+        coupling_plus_minus.has_vector = false;
+        return;
+    }
+
     fallback_->computeInteriorFace(ctx_minus, ctx_plus,
-                                  output_minus, output_plus,
-                                  coupling_minus_plus, coupling_plus_minus);
+                                   output_minus, output_plus,
+                                   coupling_minus_plus, coupling_plus_minus);
 }
 
 void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx_minus,
@@ -154,9 +641,162 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
                                             assembly::KernelOutput& coupling_plus_minus)
 {
     maybeCompile();
+    if (!canUseJIT()) {
+        fallback_->computeInterfaceFace(ctx_minus, ctx_plus, interface_marker,
+                                        output_minus, output_plus,
+                                        coupling_minus_plus, coupling_plus_minus);
+        return;
+    }
+
+    const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+
+    if (kind_ == WrappedKind::FormKernel) {
+        const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
+        if (!k || k->ir().kind() != FormKind::Bilinear) {
+            fallback_->computeInterfaceFace(ctx_minus, ctx_plus, interface_marker,
+                                            output_minus, output_plus,
+                                            coupling_minus_plus, coupling_plus_minus);
+            return;
+        }
+
+        const auto n_test_minus = ctx_minus.numTestDofs();
+        const auto n_trial_minus = ctx_minus.numTrialDofs();
+        const auto n_test_plus = ctx_plus.numTestDofs();
+        const auto n_trial_plus = ctx_plus.numTrialDofs();
+
+        output_minus.reserve(n_test_minus, n_trial_minus, true, false);
+        output_plus.reserve(n_test_plus, n_trial_plus, true, false);
+        coupling_minus_plus.reserve(n_test_minus, n_trial_plus, true, false);
+        coupling_plus_minus.reserve(n_test_plus, n_trial_minus, true, false);
+
+        output_minus.clear();
+        output_plus.clear();
+        coupling_minus_plus.clear();
+        coupling_plus_minus.clear();
+
+        const auto& updates = k->inlinedStateUpdates().interface_face;
+        if (!updates.empty()) {
+            for (LocalIndex q = 0; q < ctx_minus.numQuadraturePoints(); ++q) {
+                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
+                                                     k->constitutiveStateLayout(),
+                                                     updates,
+                                                     Side::Minus, q);
+
+                const auto* base_minus = ctx_minus.materialStateWorkBase();
+                const auto* base_plus = ctx_plus.materialStateWorkBase();
+                if (base_plus != nullptr && base_plus != base_minus) {
+                    applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
+                                                         k->constitutiveStateLayout(),
+                                                         updates,
+                                                         Side::Plus, q);
+                }
+            }
+        }
+
+        const auto args =
+            assembly::jit::packInterfaceFaceKernelArgsV3(ctx_minus, ctx_plus, interface_marker,
+                                                         output_minus, output_plus,
+                                                         coupling_minus_plus, coupling_plus_minus,
+                                                         checks);
+        callJIT(compiled_form_.interface_all, &args);
+        if (const auto it = compiled_form_.interface_by_marker.find(interface_marker);
+            it != compiled_form_.interface_by_marker.end()) {
+            callJIT(it->second, &args);
+        }
+
+        output_minus.has_matrix = true;
+        output_minus.has_vector = false;
+        output_plus.has_matrix = true;
+        output_plus.has_vector = false;
+        coupling_minus_plus.has_matrix = true;
+        coupling_minus_plus.has_vector = false;
+        coupling_plus_minus.has_matrix = true;
+        coupling_plus_minus.has_vector = false;
+        return;
+    }
+
+    if (kind_ == WrappedKind::SymbolicNonlinearFormKernel) {
+        const auto* k = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get());
+        if (!k) {
+            fallback_->computeInterfaceFace(ctx_minus, ctx_plus, interface_marker,
+                                            output_minus, output_plus,
+                                            coupling_minus_plus, coupling_plus_minus);
+            return;
+        }
+
+        const bool want_matrix = !k->isVectorOnly();
+        const bool want_vector = !k->isMatrixOnly();
+
+        const auto n_test_minus = ctx_minus.numTestDofs();
+        const auto n_trial_minus = ctx_minus.numTrialDofs();
+        const auto n_test_plus = ctx_plus.numTestDofs();
+        const auto n_trial_plus = ctx_plus.numTrialDofs();
+
+        output_minus.reserve(n_test_minus, n_trial_minus, want_matrix, want_vector);
+        output_plus.reserve(n_test_plus, n_trial_plus, want_matrix, want_vector);
+        coupling_minus_plus.reserve(n_test_minus, n_trial_plus, want_matrix, /*need_vector=*/false);
+        coupling_plus_minus.reserve(n_test_plus, n_trial_minus, want_matrix, /*need_vector=*/false);
+
+        output_minus.clear();
+        output_plus.clear();
+        coupling_minus_plus.clear();
+        coupling_plus_minus.clear();
+
+        const auto& updates = k->inlinedStateUpdates().interface_face;
+        if (!updates.empty()) {
+            for (LocalIndex q = 0; q < ctx_minus.numQuadraturePoints(); ++q) {
+                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Residual,
+                                                     k->constitutiveStateLayout(),
+                                                     updates,
+                                                     Side::Minus, q);
+
+                const auto* base_minus = ctx_minus.materialStateWorkBase();
+                const auto* base_plus = ctx_plus.materialStateWorkBase();
+                if (base_plus != nullptr && base_plus != base_minus) {
+                    applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Residual,
+                                                         k->constitutiveStateLayout(),
+                                                         updates,
+                                                         Side::Plus, q);
+                }
+            }
+        }
+
+        const auto args =
+            assembly::jit::packInterfaceFaceKernelArgsV3(ctx_minus, ctx_plus, interface_marker,
+                                                         output_minus, output_plus,
+                                                         coupling_minus_plus, coupling_plus_minus,
+                                                         checks);
+
+        if (want_matrix) {
+            callJIT(compiled_tangent_.interface_all, &args);
+            if (const auto it = compiled_tangent_.interface_by_marker.find(interface_marker);
+                it != compiled_tangent_.interface_by_marker.end()) {
+                callJIT(it->second, &args);
+            }
+        }
+
+        if (want_vector) {
+            callJIT(compiled_residual_.interface_all, &args);
+            if (const auto it = compiled_residual_.interface_by_marker.find(interface_marker);
+                it != compiled_residual_.interface_by_marker.end()) {
+                callJIT(it->second, &args);
+            }
+        }
+
+        output_minus.has_matrix = want_matrix;
+        output_minus.has_vector = want_vector;
+        output_plus.has_matrix = want_matrix;
+        output_plus.has_vector = want_vector;
+        coupling_minus_plus.has_matrix = want_matrix;
+        coupling_minus_plus.has_vector = false;
+        coupling_plus_minus.has_matrix = want_matrix;
+        coupling_plus_minus.has_vector = false;
+        return;
+    }
+
     fallback_->computeInterfaceFace(ctx_minus, ctx_plus, interface_marker,
-                                   output_minus, output_plus,
-                                   coupling_minus_plus, coupling_plus_minus);
+                                    output_minus, output_plus,
+                                    coupling_minus_plus, coupling_plus_minus);
 }
 
 std::string JITKernelWrapper::name() const
@@ -190,6 +830,19 @@ void JITKernelWrapper::markDirty() noexcept
     ++revision_;
     compiled_revision_ = static_cast<std::uint64_t>(-1);
     attempted_revision_ = static_cast<std::uint64_t>(-1);
+
+    compiled_form_ = CompiledDispatch{};
+    compiled_bilinear_ = CompiledDispatch{};
+    compiled_linear_ = CompiledDispatch{};
+    compiled_residual_ = CompiledDispatch{};
+    compiled_tangent_ = CompiledDispatch{};
+    has_compiled_linear_ = false;
+    warned_compile_failure_ = false;
+}
+
+bool JITKernelWrapper::canUseJIT() const noexcept
+{
+    return options_.enable && compiled_revision_ == revision_;
 }
 
 void JITKernelWrapper::maybeCompile()
@@ -208,45 +861,164 @@ void JITKernelWrapper::maybeCompile()
     }
     attempted_revision_ = revision_;
 
-    const auto irs = gatherIRs(*fallback_);
-    if (!irs.empty() && !warned_validation_) {
-        ValidationOptions vopt;
-        vopt.strictness = Strictness::AllowExternalCalls;
-
-        for (const auto& v : irs) {
-            if (v.ir == nullptr) continue;
-            const auto r = canCompile(*v.ir, vopt);
-            if (!r.ok) {
-                warned_validation_ = true;
-                std::string msg = "JIT: kernel '" + fallback_->name() + "' is not currently JIT-compatible";
-                if (!v.label.empty()) {
-                    msg += " [" + std::string(v.label) + "]";
-                }
-                if (r.first_issue.has_value()) {
-                    msg += ": " + formatValidationIssue(*r.first_issue);
-                }
-                FE_LOG_WARNING(msg);
-                break;
-            }
+    // We currently only JIT-accelerate kernels that are backed by FE/Forms IR.
+    if (kind_ == WrappedKind::Unknown || kind_ == WrappedKind::NonlinearFormKernel) {
+        if (!warned_unavailable_) {
+            warned_unavailable_ = true;
+            FE_LOG_WARNING("JIT requested for kernel '" + fallback_->name() +
+                           "', but this kernel type is not JIT-accelerated yet; using interpreter.");
         }
-    }
-
-    if (warned_unavailable_) {
         return;
     }
 
-#if SVMP_FE_ENABLE_LLVM_JIT
-    FE_LOG_WARNING("JIT requested for kernel '" + fallback_->name() +
-                   "', but the LLVM backend is not implemented yet (phase 0); using interpreter.");
-#else
-    FE_LOG_WARNING("JIT requested for kernel '" + fallback_->name() +
-                   "', but FE was built without LLVM JIT support; using interpreter.");
-#endif
-    warned_unavailable_ = true;
+    if (!compiler_) {
+        compiler_ = JITCompiler::getOrCreate(options_);
+    }
+    if (!compiler_) {
+        if (!warned_unavailable_) {
+            warned_unavailable_ = true;
+            FE_LOG_WARNING("JIT requested for kernel '" + fallback_->name() +
+                           "', but JITCompiler could not be created; using interpreter.");
+        }
+        return;
+    }
+
+    ValidationOptions vopt;
+    vopt.strictness = Strictness::AllowExternalCalls;
+
+    const auto fillDispatch = [&](CompiledDispatch& out, const JITCompileResult& r) {
+        out = CompiledDispatch{};
+        out.ok = r.ok;
+        out.cacheable = r.cacheable;
+        out.message = r.message;
+        out.boundary_by_marker.reserve(r.kernels.size());
+        out.interface_by_marker.reserve(r.kernels.size());
+
+        for (const auto& k : r.kernels) {
+            switch (k.domain) {
+                case IntegralDomain::Cell:
+                    out.cell = k.address;
+                    break;
+                case IntegralDomain::Boundary:
+                    if (k.boundary_marker < 0) {
+                        out.boundary_all = k.address;
+                    } else {
+                        out.boundary_by_marker[k.boundary_marker] = k.address;
+                    }
+                    break;
+                case IntegralDomain::InteriorFace:
+                    out.interior_face = k.address;
+                    break;
+                case IntegralDomain::InterfaceFace:
+                    if (k.interface_marker < 0) {
+                        out.interface_all = k.address;
+                    } else {
+                        out.interface_by_marker[k.interface_marker] = k.address;
+                    }
+                    break;
+            }
+        }
+    };
+
+    auto warnCompileFailureOnce = [&](std::string_view what, std::string_view msg) {
+        if (warned_compile_failure_) {
+            return;
+        }
+        warned_compile_failure_ = true;
+        std::string full = "JIT: failed to compile " + std::string(what) + " for kernel '" + fallback_->name() + "'";
+        if (!msg.empty()) {
+            full += ": " + std::string(msg);
+        }
+        FE_LOG_WARNING(full);
+    };
+
+    if (kind_ == WrappedKind::FormKernel) {
+        const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
+        if (!k) {
+            warnCompileFailureOnce("FormKernel", "dynamic_cast failed");
+            return;
+        }
+
+        const auto r = compiler_->compile(k->ir(), vopt);
+        if (!r.ok) {
+            warnCompileFailureOnce("FormKernel", r.message);
+            return;
+        }
+        fillDispatch(compiled_form_, r);
+        compiled_revision_ = revision_;
+        return;
+    }
+
+    if (kind_ == WrappedKind::LinearFormKernel) {
+        const auto* k = dynamic_cast<const LinearFormKernel*>(fallback_.get());
+        if (!k) {
+            warnCompileFailureOnce("LinearFormKernel", "dynamic_cast failed");
+            return;
+        }
+
+        const bool want_matrix = !k->isVectorOnly();
+        const bool want_vector = !k->isMatrixOnly();
+
+        const auto r_bi = compiler_->compile(k->bilinearIR(), vopt);
+        if (!r_bi.ok) {
+            warnCompileFailureOnce("LinearFormKernel(bilinear)", r_bi.message);
+            return;
+        }
+        fillDispatch(compiled_bilinear_, r_bi);
+
+        has_compiled_linear_ = false;
+        if (want_vector && k->linearIR().has_value()) {
+            const auto r_lin = compiler_->compile(*k->linearIR(), vopt);
+            if (!r_lin.ok) {
+                warnCompileFailureOnce("LinearFormKernel(linear)", r_lin.message);
+                return;
+            }
+            fillDispatch(compiled_linear_, r_lin);
+            has_compiled_linear_ = true;
+        }
+
+        compiled_revision_ = revision_;
+        return;
+    }
+
+    if (kind_ == WrappedKind::SymbolicNonlinearFormKernel) {
+        const auto* k = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get());
+        if (!k) {
+            warnCompileFailureOnce("SymbolicNonlinearFormKernel", "dynamic_cast failed");
+            return;
+        }
+
+        const bool want_matrix = !k->isVectorOnly();
+        const bool want_vector = !k->isMatrixOnly();
+
+        if (want_vector) {
+            const auto r_res = compiler_->compile(k->residualIR(), vopt);
+            if (!r_res.ok) {
+                warnCompileFailureOnce("SymbolicNonlinearFormKernel(residual)", r_res.message);
+                return;
+            }
+            fillDispatch(compiled_residual_, r_res);
+        } else {
+            compiled_residual_ = CompiledDispatch{};
+        }
+
+        if (want_matrix) {
+            const auto r_tan = compiler_->compile(k->tangentIR(), vopt);
+            if (!r_tan.ok) {
+                warnCompileFailureOnce("SymbolicNonlinearFormKernel(tangent)", r_tan.message);
+                return;
+            }
+            fillDispatch(compiled_tangent_, r_tan);
+        } else {
+            compiled_tangent_ = CompiledDispatch{};
+        }
+
+        compiled_revision_ = revision_;
+        return;
+    }
 }
 
 } // namespace jit
 } // namespace forms
 } // namespace FE
 } // namespace svmp
-

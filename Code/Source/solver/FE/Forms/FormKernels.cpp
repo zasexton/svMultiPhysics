@@ -11,9 +11,12 @@
 
 #include "Core/FEException.h"
 #include "Systems/SystemsExceptions.h"
+#include "Forms/FormCompiler.h"
 #include "Forms/ConstitutiveModel.h"
 #include "Forms/Dual.h"
+#include "Forms/Einsum.h"
 #include "Forms/JIT/InlinableConstitutiveModel.h"
+#include "Forms/SymbolicDifferentiation.h"
 #include "Forms/Value.h"
 
 #include "Assembly/AssemblyContext.h"
@@ -22,7 +25,9 @@
 #include <cstddef>
 #include <cmath>
 #include <cstring>
+#include <list>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
@@ -56,8 +61,6 @@ struct ConstitutiveStateLayout {
 };
 
 namespace {
-
-enum class Side : std::uint8_t { Minus, Plus };
 
 const assembly::AssemblyContext& ctxForSide(const assembly::AssemblyContext& ctx_minus,
                                             const assembly::AssemblyContext* ctx_plus,
@@ -119,6 +122,75 @@ bool containsTrialFunction(const FormExprNode& node)
         if (child && containsTrialFunction(*child)) return true;
     }
     return false;
+}
+
+bool containsIndexedAccess(const FormExprNode& node)
+{
+    if (node.type() == FormExprType::IndexedAccess) {
+        return true;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsIndexedAccess(*child)) return true;
+    }
+    return false;
+}
+
+bool containsIndexedAccess(const FormExpr& expr)
+{
+    if (!expr.isValid() || expr.node() == nullptr) {
+        return false;
+    }
+    return containsIndexedAccess(*expr.node());
+}
+
+void lowerIndexedAccessInExpr(FormExpr& expr)
+{
+    if (!containsIndexedAccess(expr)) {
+        return;
+    }
+    expr = einsum(expr);
+}
+
+void lowerIndexedAccessInUpdates(std::vector<MaterialStateUpdate>& updates)
+{
+    for (auto& op : updates) {
+        lowerIndexedAccessInExpr(op.value);
+    }
+}
+
+void lowerIndexedAccessInUpdates(InlinedMaterialStateUpdateProgram& updates)
+{
+    lowerIndexedAccessInUpdates(updates.cell);
+    lowerIndexedAccessInUpdates(updates.boundary_all);
+    for (auto& kv : updates.boundary_by_marker) {
+        lowerIndexedAccessInUpdates(kv.second);
+    }
+    lowerIndexedAccessInUpdates(updates.interior_face);
+    lowerIndexedAccessInUpdates(updates.interface_face);
+}
+
+void lowerIndexedAccessInFormIR(FormIR& ir)
+{
+    bool any = false;
+    for (const auto& term : ir.terms()) {
+        if (containsIndexedAccess(term.integrand)) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) {
+        return;
+    }
+
+    ir.transformIntegrands([&](const FormExprNode& n, const IntegralTerm& term) -> std::optional<FormExpr> {
+        if (&n != term.integrand.node()) {
+            return std::nullopt;
+        }
+        if (!containsIndexedAccess(term.integrand)) {
+            return std::nullopt;
+        }
+        return einsum(term.integrand);
+    });
 }
 
 template<typename Scalar>
@@ -2113,7 +2185,98 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
             const auto fid = node.fieldId();
-            if (!fid || *fid == INVALID_FIELD_ID) {
+            if (!fid) {
+                throw FEException("Forms: DiscreteField/StateField node missing FieldId (jet)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            // Special-case: StateField(INVALID_FIELD_ID) represents the current solution state u
+            // (used in symbolic tangent forms). This behaves like a coefficient (no derivatives).
+            if (node.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+                if (sig->field_type == FieldType::Scalar) {
+                    out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+                    out.value.s = makeScalarConstant<Scalar>(ctx.solutionValue(q), env);
+                    if (out.has_grad) {
+                        const auto g = ctx.solutionGradient(q);
+                        out.grad.kind = EvalValue<Scalar>::Kind::Vector;
+                        out.grad.vector_size = dim;
+                        for (int d = 0; d < 3; ++d) {
+                            out.grad.v[static_cast<std::size_t>(d)] =
+                                makeScalarConstant<Scalar>(g[static_cast<std::size_t>(d)], env);
+                        }
+                    }
+                    if (out.has_hess) {
+                        const auto H = ctx.solutionHessian(q);
+                        out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+                        out.hess.matrix_rows = dim;
+                        out.hess.matrix_cols = dim;
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                out.hess.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                    makeScalarConstant<Scalar>(H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env);
+                            }
+                        }
+                    }
+                    return out;
+                }
+
+                if (sig->field_type == FieldType::Vector) {
+                    const int vd = sig->value_dimension;
+                    if (vd <= 0 || vd > 3) {
+                        throw FEException("Forms: StateField vector value_dimension must be 1..3 (jet)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const auto u_val = ctx.solutionVectorValue(q);
+                    out.value.kind = EvalValue<Scalar>::Kind::Vector;
+                    out.value.vector_size = vd;
+                    for (int c = 0; c < 3; ++c) {
+                        out.value.v[static_cast<std::size_t>(c)] =
+                            makeScalarConstant<Scalar>(u_val[static_cast<std::size_t>(c)], env);
+                    }
+
+                    if (out.has_grad || out.has_hess) {
+                        FE_THROW_IF(ctx.trialUsesVectorBasis(), InvalidArgumentException,
+                                    "Forms: grad/H(StateField) for vector-basis spaces is not supported; use curl()/div() operators");
+                    }
+
+                    if (out.has_grad) {
+                        const auto J = ctx.solutionJacobian(q);
+                        out.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                        out.grad.matrix_rows = vd;
+                        out.grad.matrix_cols = dim;
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) {
+                                out.grad.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                    makeScalarConstant<Scalar>(J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env);
+                            }
+                        }
+                    }
+
+                    if (out.has_hess) {
+                        out.hess.kind = EvalValue<Scalar>::Kind::Tensor3;
+                        out.hess.tensor3_dim0 = vd;
+                        out.hess.tensor3_dim1 = dim;
+                        out.hess.tensor3_dim2 = dim;
+                        for (int comp = 0; comp < vd; ++comp) {
+                            const auto Hc = ctx.solutionComponentHessian(q, comp);
+                            for (int i = 0; i < dim; ++i) {
+                                for (int j = 0; j < dim; ++j) {
+                                    out.hess.tensor3At(static_cast<std::size_t>(comp),
+                                                       static_cast<std::size_t>(i),
+                                                       static_cast<std::size_t>(j)) =
+                                        makeScalarConstant<Scalar>(Hc[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)], env);
+                                }
+                            }
+                        }
+                    }
+                    return out;
+                }
+
+                throw FEException("Forms: StateField field type not supported (jet)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            if (*fid == INVALID_FIELD_ID) {
                 throw FEException("Forms: DiscreteField node missing a valid FieldId (jet)",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
@@ -3776,6 +3939,86 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
             throw FEException("Forms: div() operand kind not supported in spatial jets",
                               __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
         }
+        case FormExprType::Curl: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1u || !kids[0]) {
+                throw std::logic_error("Forms: curl must have 1 child (jet)");
+            }
+            if (order >= 2) {
+                throw FEException("Forms: spatial jet does not support second derivatives of curl(·) (would require 3rd derivatives)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            const int child_order = order + 1;
+            const auto u = evalSpatialJet<Scalar>(*kids[0], env, side, q, child_order);
+            if (!isVectorKind<Scalar>(u.value.kind)) {
+                throw FEException("Forms: curl() in spatial jets supports vector-valued operands only",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            const int vd = static_cast<int>(u.value.vectorSize());
+            auto d1 = [&](int comp, int wrt) -> Scalar {
+                if (comp < 0 || comp >= vd) return makeScalarConstant<Scalar>(0.0, env);
+                if (wrt < 0 || wrt >= dim) return makeScalarConstant<Scalar>(0.0, env);
+                return u.grad.matrixAt(static_cast<std::size_t>(comp), static_cast<std::size_t>(wrt));
+            };
+
+            SpatialJet<Scalar> res;
+            res.has_grad = (order >= 1);
+            res.has_hess = false;
+            res.value.kind = EvalValue<Scalar>::Kind::Vector;
+            for (int d = 0; d < 3; ++d) {
+                res.value.v[static_cast<std::size_t>(d)] = makeScalarConstant<Scalar>(0.0, env);
+            }
+
+            if (dim == 2) {
+                // 2D curl(u) = [0, 0, dUy/dx - dUx/dy]
+                res.value.v[2] = s_sub(d1(1, 0), d1(0, 1), env);
+            } else if (dim == 3) {
+                // 3D curl(u) = [dUz/dy - dUy/dz, dUx/dz - dUz/dx, dUy/dx - dUx/dy]
+                res.value.v[0] = s_sub(d1(2, 1), d1(1, 2), env);
+                res.value.v[1] = s_sub(d1(0, 2), d1(2, 0), env);
+                res.value.v[2] = s_sub(d1(1, 0), d1(0, 1), env);
+            }
+
+            if (order >= 1) {
+                res.grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                res.grad.resizeMatrix(3u, static_cast<std::size_t>(dim));
+                for (std::size_t r = 0; r < res.grad.matrixRows(); ++r) {
+                    for (std::size_t c = 0; c < res.grad.matrixCols(); ++c) {
+                        res.grad.matrixAt(r, c) = makeScalarConstant<Scalar>(0.0, env);
+                    }
+                }
+
+                auto d2 = [&](int comp, int wrt0, int wrt1) -> Scalar {
+                    if (comp < 0 || comp >= vd) return makeScalarConstant<Scalar>(0.0, env);
+                    if (wrt0 < 0 || wrt0 >= dim) return makeScalarConstant<Scalar>(0.0, env);
+                    if (wrt1 < 0 || wrt1 >= dim) return makeScalarConstant<Scalar>(0.0, env);
+                    return u.hess.tensor3At(static_cast<std::size_t>(comp),
+                                            static_cast<std::size_t>(wrt0),
+                                            static_cast<std::size_t>(wrt1));
+                };
+
+                if (dim == 2) {
+                    // grad(curl_z) = [d2Uy/dx^2 - d2Ux/dxdy, d2Uy/dydx - d2Ux/dy^2]
+                    for (int p = 0; p < dim; ++p) {
+                        res.grad.matrixAt(2u, static_cast<std::size_t>(p)) =
+                            s_sub(d2(1, p, 0), d2(0, p, 1), env);
+                    }
+                } else if (dim == 3) {
+                    for (int p = 0; p < dim; ++p) {
+                        res.grad.matrixAt(0u, static_cast<std::size_t>(p)) =
+                            s_sub(d2(2, p, 1), d2(1, p, 2), env);
+                        res.grad.matrixAt(1u, static_cast<std::size_t>(p)) =
+                            s_sub(d2(0, p, 2), d2(2, p, 0), env);
+                        res.grad.matrixAt(2u, static_cast<std::size_t>(p)) =
+                            s_sub(d2(1, p, 0), d2(0, p, 1), env);
+                    }
+                }
+            }
+
+            return res;
+        }
         case FormExprType::Hessian: {
             const auto kids = node.childrenShared();
             if (kids.size() != 1u || !kids[0]) {
@@ -4420,7 +4663,34 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
             const auto fid = node.fieldId();
-            if (!fid || *fid == INVALID_FIELD_ID) {
+            if (!fid) {
+                throw FEException("Forms: DiscreteField/StateField node missing FieldId",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            // Special-case: StateField(INVALID_FIELD_ID) represents the current solution state u
+            // (used in symbolic tangent forms).
+            if (node.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+                if (sig->field_type == FieldType::Scalar) {
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.solutionValue(q)};
+                }
+                if (sig->field_type == FieldType::Vector) {
+                    const int vd = sig->value_dimension;
+                    if (vd <= 0 || vd > 3) {
+                        throw FEException("Forms: StateField vector value_dimension must be 1..3",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Vector;
+                    out.vector_size = vd;
+                    out.v = ctx.solutionVectorValue(q);
+                    return out;
+                }
+                throw FEException("Forms: StateField field type not supported",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            if (*fid == INVALID_FIELD_ID) {
                 throw FEException("Forms: DiscreteField node missing a valid FieldId",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
@@ -4942,12 +5212,18 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 Real out = stencil->coeff(0) * val.s;
                 if (!trial_dt) {
                     const auto fid = child.fieldId();
-                    if (!fid || *fid == INVALID_FIELD_ID) {
-                        throw FEException("Forms: dt(DiscreteField) missing a valid FieldId",
-                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                    }
-                    for (int k = 1; k <= required; ++k) {
-                        out += stencil->coeff(k) * ctx.fieldPreviousValue(*fid, q, k);
+                    FE_THROW_IF(!fid, InvalidArgumentException,
+                                "Forms: dt(field) operand missing FieldId");
+                    if (child.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+                        for (int k = 1; k <= required; ++k) {
+                            out += stencil->coeff(k) * ctx.previousSolutionValue(q, k);
+                        }
+                    } else {
+                        FE_THROW_IF(*fid == INVALID_FIELD_ID, InvalidArgumentException,
+                                    "Forms: dt(DiscreteField/StateField) missing a valid FieldId");
+                        for (int k = 1; k <= required; ++k) {
+                            out += stencil->coeff(k) * ctx.fieldPreviousValue(*fid, q, k);
+                        }
                     }
                 }
                 return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, out};
@@ -4961,14 +5237,23 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 }
                 if (!trial_dt) {
                     const auto fid = child.fieldId();
-                    if (!fid || *fid == INVALID_FIELD_ID) {
-                        throw FEException("Forms: dt(DiscreteField) missing a valid FieldId",
-                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                    }
-                    for (int k = 1; k <= required; ++k) {
-                        const auto prev = ctx.fieldPreviousVectorValue(*fid, q, k);
-                        for (std::size_t d = 0; d < out.vectorSize(); ++d) {
-                            out.vectorAt(d) += stencil->coeff(k) * prev[d];
+                    FE_THROW_IF(!fid, InvalidArgumentException,
+                                "Forms: dt(field) operand missing FieldId");
+                    if (child.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+                        for (int k = 1; k <= required; ++k) {
+                            const auto prev = ctx.previousSolutionVectorValue(q, k);
+                            for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                                out.vectorAt(d) += stencil->coeff(k) * prev[d];
+                            }
+                        }
+                    } else {
+                        FE_THROW_IF(*fid == INVALID_FIELD_ID, InvalidArgumentException,
+                                    "Forms: dt(DiscreteField/StateField) missing a valid FieldId");
+                        for (int k = 1; k <= required; ++k) {
+                            const auto prev = ctx.fieldPreviousVectorValue(*fid, q, k);
+                            for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                                out.vectorAt(d) += stencil->coeff(k) * prev[d];
+                            }
                         }
                     }
                 }
@@ -5078,7 +5363,43 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 const auto fid = child.fieldId();
-                if (!fid || *fid == INVALID_FIELD_ID) {
+                if (!fid) {
+                    throw FEException("Forms: div(DiscreteField/StateField) missing FieldId",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                if (child.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+                    // div(u): current solution state
+                    if (ctx.trialUsesVectorBasis()) {
+                        if (sig->continuity != Continuity::H_div) {
+                            throw FEException("Forms: div(StateField) for vector-basis spaces requires H(div) continuity",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        const auto coeffs = ctx.solutionCoefficients();
+                        FE_THROW_IF(coeffs.empty(), InvalidArgumentException,
+                                    "Forms: div(StateField) requires solution coefficients in AssemblyContext");
+                        Real div = 0.0;
+                        for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+                            div += coeffs[static_cast<std::size_t>(j)] * ctx.trialBasisDivergence(j, q);
+                        }
+                        return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, div};
+                    }
+
+                    const int vd = sig->value_dimension;
+                    if (vd <= 0 || vd > 3) {
+                        throw FEException("Forms: div(StateField) vector value_dimension must be 1..3",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const auto J = ctx.solutionJacobian(q);
+                    Real div = 0.0;
+                    const int n = std::min(dim, vd);
+                    for (int d = 0; d < n; ++d) {
+                        div += J[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
+                    }
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, div};
+                }
+
+                if (*fid == INVALID_FIELD_ID) {
                     throw FEException("Forms: div(DiscreteField) missing a valid FieldId",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
@@ -5247,13 +5568,56 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 const auto fid = child.fieldId();
-                if (!fid || *fid == INVALID_FIELD_ID) {
-                    throw FEException("Forms: curl(DiscreteField) missing a valid FieldId",
+                if (!fid) {
+                    throw FEException("Forms: curl(DiscreteField/StateField) missing FieldId",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 const int vd = sig->value_dimension;
                 if (vd <= 0 || vd > 3) {
                     throw FEException("Forms: curl(DiscreteField) vector value_dimension must be 1..3",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+
+                if (child.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Vector;
+                    if (ctx.trialUsesVectorBasis()) {
+                        if (sig->continuity != Continuity::H_curl) {
+                            throw FEException("Forms: curl(StateField) for vector-basis spaces requires H(curl) continuity",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        const auto coeffs = ctx.solutionCoefficients();
+                        FE_THROW_IF(coeffs.empty(), InvalidArgumentException,
+                                    "Forms: curl(StateField) requires solution coefficients in AssemblyContext");
+                        for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+                            const Real coef = coeffs[static_cast<std::size_t>(j)];
+                            const auto phi = ctx.trialBasisCurl(j, q);
+                            out.v[0] += coef * phi[0];
+                            out.v[1] += coef * phi[1];
+                            out.v[2] += coef * phi[2];
+                        }
+                        return out;
+                    }
+
+                    const auto J = ctx.solutionJacobian(q);
+                    auto d = [&](int comp, int wrt) -> Real {
+                        if (comp < 0 || comp >= vd) return 0.0;
+                        if (wrt < 0 || wrt >= dim) return 0.0;
+                        return J[static_cast<std::size_t>(comp)][static_cast<std::size_t>(wrt)];
+                    };
+
+                    if (dim == 2) {
+                        out.v[2] = d(1, 0) - d(0, 1);
+                        return out;
+                    }
+                    out.v[0] = d(2, 1) - d(1, 2);
+                    out.v[1] = d(0, 2) - d(2, 0);
+                    out.v[2] = d(1, 0) - d(0, 1);
+                    return out;
+                }
+
+                if (*fid == INVALID_FIELD_ID) {
+                    throw FEException("Forms: curl(DiscreteField) missing a valid FieldId",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
 
@@ -5288,8 +5652,9 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 out.kind = EvalValue<Real>::Kind::Vector;
                 return out;
             }
-            throw FEException("Forms: curl() currently supports vector TestFunction/TrialFunction and vector Coefficient only",
-                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            // Fallback for composite expressions (e.g. curl(u + w) or curl(cross(u,w))):
+            // evaluate via spatial jets so curl() works for vector-valued subexpressions.
+            return evalSpatialJet<Real>(node, env, side, q, 0).value;
         }
         case FormExprType::RestrictMinus: {
             const auto kids = node.childrenShared();
@@ -8130,8 +8495,10 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 }
                 return out;
             }
-            throw FEException("Forms: curl() currently supports vector TestFunction/TrialFunction and vector Coefficient only (dual)",
-                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            // Fallback for composite expressions (e.g. curl(u + w) or curl(cross(u,w))):
+            // evaluate via spatial jets so curl() works for vector-valued subexpressions when
+            // required data (grad/Hess) is available.
+            return evalSpatialJet<Dual>(node, env, side, q, 0).value;
         }
         case FormExprType::RestrictMinus: {
             const auto kids = node.childrenShared();
@@ -9335,6 +9702,8 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                       __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
 }
 
+} // namespace
+
 void applyInlinedMaterialStateUpdatesReal(const assembly::AssemblyContext& ctx_minus,
                                           const assembly::AssemblyContext* ctx_plus,
                                           FormKind kind,
@@ -9406,8 +9775,6 @@ void applyInlinedMaterialStateUpdatesDual(const assembly::AssemblyContext& ctx_m
         std::memcpy(state.data() + offset, &value, sizeof(Real));
     }
 }
-
-} // namespace
 
 // ============================================================================
 // FormKernel
@@ -9502,8 +9869,21 @@ bool FormKernel::hasBoundaryFace() const noexcept { return ir_.hasBoundaryTerms(
 bool FormKernel::hasInteriorFace() const noexcept { return ir_.hasInteriorFaceTerms(); }
 bool FormKernel::hasInterfaceFace() const noexcept { return ir_.hasInterfaceFaceTerms(); }
 
+void FormKernel::ensureInterpreterLoweredIndexedAccess()
+{
+    if (!indexed_lowering_once_) {
+        indexed_lowering_once_ = std::make_unique<std::once_flag>();
+    }
+    std::call_once(*indexed_lowering_once_, [&] {
+        lowerIndexedAccessInFormIR(ir_);
+        lowerIndexedAccessInUpdates(inlined_state_updates_);
+    });
+}
+
 void FormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::KernelOutput& output)
 {
+    ensureInterpreterLoweredIndexedAccess();
+
     const auto n_test = ctx.numTestDofs();
     const auto n_trial = ctx.numTrialDofs();
 
@@ -9583,6 +9963,8 @@ void FormKernel::computeBoundaryFace(
     int boundary_marker,
     assembly::KernelOutput& output)
 {
+    ensureInterpreterLoweredIndexedAccess();
+
     const auto n_test = ctx.numTestDofs();
     const auto n_trial = ctx.numTrialDofs();
 
@@ -9682,6 +10064,8 @@ void FormKernel::computeInteriorFace(
     assembly::KernelOutput& coupling_mp,
     assembly::KernelOutput& coupling_pm)
 {
+    ensureInterpreterLoweredIndexedAccess();
+
     if (ir_.kind() != FormKind::Bilinear) {
         // Interior face assembly is currently defined only for bilinear forms in FormKernel.
         output_minus.clear();
@@ -9800,6 +10184,8 @@ void FormKernel::computeInterfaceFace(
     assembly::KernelOutput& coupling_mp,
     assembly::KernelOutput& coupling_pm)
 {
+    ensureInterpreterLoweredIndexedAccess();
+
     if (ir_.kind() != FormKind::Bilinear) {
         // Interface face assembly is currently defined only for bilinear forms in FormKernel.
         output_minus.clear();
@@ -10096,8 +10482,24 @@ bool LinearFormKernel::hasInterfaceFace() const noexcept
     return bilinear_ir_.hasInterfaceFaceTerms() || (linear_ir_.has_value() && linear_ir_->hasInterfaceFaceTerms());
 }
 
+void LinearFormKernel::ensureInterpreterLoweredIndexedAccess()
+{
+    if (!indexed_lowering_once_) {
+        indexed_lowering_once_ = std::make_unique<std::once_flag>();
+    }
+    std::call_once(*indexed_lowering_once_, [&] {
+        lowerIndexedAccessInFormIR(bilinear_ir_);
+        if (linear_ir_.has_value()) {
+            lowerIndexedAccessInFormIR(*linear_ir_);
+        }
+        lowerIndexedAccessInUpdates(inlined_state_updates_);
+    });
+}
+
 void LinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::KernelOutput& output)
 {
+    ensureInterpreterLoweredIndexedAccess();
+
     const auto n_test = ctx.numTestDofs();
     const auto n_trial = ctx.numTrialDofs();
 
@@ -10260,6 +10662,8 @@ void LinearFormKernel::computeBoundaryFace(
     int boundary_marker,
     assembly::KernelOutput& output)
 {
+    ensureInterpreterLoweredIndexedAccess();
+
     const auto n_test = ctx.numTestDofs();
     const auto n_trial = ctx.numTrialDofs();
 
@@ -10563,8 +10967,21 @@ bool NonlinearFormKernel::hasBoundaryFace() const noexcept { return residual_ir_
 bool NonlinearFormKernel::hasInteriorFace() const noexcept { return residual_ir_.hasInteriorFaceTerms(); }
 bool NonlinearFormKernel::hasInterfaceFace() const noexcept { return residual_ir_.hasInterfaceFaceTerms(); }
 
+void NonlinearFormKernel::ensureInterpreterLoweredIndexedAccess()
+{
+    if (!indexed_lowering_once_) {
+        indexed_lowering_once_ = std::make_unique<std::once_flag>();
+    }
+    std::call_once(*indexed_lowering_once_, [&] {
+        lowerIndexedAccessInFormIR(residual_ir_);
+        lowerIndexedAccessInUpdates(inlined_state_updates_);
+    });
+}
+
 void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::KernelOutput& output)
 {
+    ensureInterpreterLoweredIndexedAccess();
+
     const auto n_test = ctx.numTestDofs();
     const auto n_trial = ctx.numTrialDofs();
 
@@ -10654,6 +11071,8 @@ void NonlinearFormKernel::computeBoundaryFace(
     int boundary_marker,
     assembly::KernelOutput& output)
 {
+    ensureInterpreterLoweredIndexedAccess();
+
     const auto n_test = ctx.numTestDofs();
     const auto n_trial = ctx.numTrialDofs();
 
@@ -10760,6 +11179,8 @@ void NonlinearFormKernel::computeInteriorFace(
     assembly::KernelOutput& coupling_mp,
     assembly::KernelOutput& coupling_pm)
 {
+    ensureInterpreterLoweredIndexedAccess();
+
     const auto n_test_minus = ctx_minus.numTestDofs();
     const auto n_trial_minus = ctx_minus.numTrialDofs();
     const auto n_test_plus = ctx_plus.numTestDofs();
@@ -10916,6 +11337,8 @@ void NonlinearFormKernel::computeInterfaceFace(
     assembly::KernelOutput& coupling_mp,
     assembly::KernelOutput& coupling_pm)
 {
+    ensureInterpreterLoweredIndexedAccess();
+
     const auto n_test_minus = ctx_minus.numTestDofs();
     const auto n_trial_minus = ctx_minus.numTrialDofs();
     const auto n_test_plus = ctx_plus.numTestDofs();
@@ -11060,6 +11483,1109 @@ void NonlinearFormKernel::computeInterfaceFace(
         assembleResidualJacBlock(Side::Plus, Side::Plus, Side::Minus,
                                  ctx_plus, ctx_minus,
                                  coupling_pm, n_test_plus, n_trial_minus);
+    }
+}
+
+namespace {
+
+// ============================================================================
+// Symbolic tangent caching (per-process, in-memory)
+// ============================================================================
+
+inline constexpr std::uint32_t kSymbolicTangentCacheVersion = 1u;
+inline constexpr std::size_t kSymbolicTangentCacheMaxEntries = 128u;
+
+[[nodiscard]] std::uint64_t fnv1aInit64() noexcept
+{
+    return 14695981039346656037ULL;
+}
+
+inline void fnv1aUpdate64(std::uint64_t& h, const void* data, std::size_t bytes) noexcept
+{
+    const auto* p = static_cast<const unsigned char*>(data);
+    for (std::size_t i = 0; i < bytes; ++i) {
+        h ^= static_cast<std::uint64_t>(p[i]);
+        h *= 1099511628211ULL;
+    }
+}
+
+template<typename T>
+inline void hashPod64(std::uint64_t& h, const T& v) noexcept
+{
+    static_assert(std::is_trivially_copyable_v<T>, "hashPod64 requires trivially copyable types");
+    fnv1aUpdate64(h, &v, sizeof(T));
+}
+
+inline void hashTag64(std::uint64_t& h, std::uint64_t tag) noexcept
+{
+    hashPod64(h, tag);
+}
+
+[[nodiscard]] std::uint64_t hashString64(std::string_view s) noexcept
+{
+    std::uint64_t h = fnv1aInit64();
+    fnv1aUpdate64(h, s.data(), s.size());
+    return h;
+}
+
+[[nodiscard]] std::uint64_t hashSpaceSignature64(const FormExprNode::SpaceSignature& sig) noexcept
+{
+    std::uint64_t h = fnv1aInit64();
+    hashPod64(h, static_cast<std::uint8_t>(sig.space_type));
+    hashPod64(h, static_cast<std::uint8_t>(sig.field_type));
+    hashPod64(h, static_cast<std::uint8_t>(sig.continuity));
+    hashPod64(h, static_cast<std::int32_t>(sig.value_dimension));
+    hashPod64(h, static_cast<std::int32_t>(sig.topological_dimension));
+    hashPod64(h, static_cast<std::int32_t>(sig.polynomial_order));
+    hashPod64(h, static_cast<std::uint8_t>(sig.element_type));
+    return h;
+}
+
+using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
+
+[[nodiscard]] std::uint64_t stableHash64(const FormExprNode& node, NodeHashMemo& memo)
+{
+    if (const auto it = memo.find(&node); it != memo.end()) {
+        return it->second;
+    }
+
+    std::uint64_t h = fnv1aInit64();
+
+    hashTag64(h, 0x01ULL);
+    hashPod64(h, static_cast<std::uint16_t>(node.type()));
+
+    // For nodes that embed runtime callables (e.g. Coefficients), include pointer identity to avoid
+    // cross-form cache aliasing when two distinct callables share the same name.
+    if (node.type() == FormExprType::Coefficient) {
+        hashTag64(h, 0x02ULL);
+        const auto ptr = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&node));
+        hashPod64(h, ptr);
+    }
+
+    if (const auto v = node.constantValue(); v.has_value()) {
+        hashTag64(h, 0x10ULL);
+        std::uint64_t bits = 0u;
+        static_assert(sizeof(bits) == sizeof(*v));
+        std::memcpy(&bits, &(*v), sizeof(bits));
+        hashPod64(h, bits);
+    }
+    if (const auto v = node.identityDim(); v.has_value()) {
+        hashTag64(h, 0x11ULL);
+        hashPod64(h, static_cast<std::int32_t>(*v));
+    }
+    if (const auto v = node.boundaryMarker(); v.has_value()) {
+        hashTag64(h, 0x12ULL);
+        hashPod64(h, static_cast<std::int32_t>(*v));
+    }
+    if (const auto v = node.interfaceMarker(); v.has_value()) {
+        hashTag64(h, 0x13ULL);
+        hashPod64(h, static_cast<std::int32_t>(*v));
+    }
+    if (const auto v = node.componentIndex0(); v.has_value()) {
+        hashTag64(h, 0x14ULL);
+        hashPod64(h, static_cast<std::int32_t>(*v));
+    }
+    if (const auto v = node.componentIndex1(); v.has_value()) {
+        hashTag64(h, 0x15ULL);
+        hashPod64(h, static_cast<std::int32_t>(*v));
+    }
+    if (const auto v = node.tensorRows(); v.has_value()) {
+        hashTag64(h, 0x16ULL);
+        hashPod64(h, static_cast<std::int32_t>(*v));
+    }
+    if (const auto v = node.tensorCols(); v.has_value()) {
+        hashTag64(h, 0x17ULL);
+        hashPod64(h, static_cast<std::int32_t>(*v));
+    }
+    if (const auto v = node.indexRank(); v.has_value()) {
+        hashTag64(h, 0x18ULL);
+        hashPod64(h, static_cast<std::int32_t>(*v));
+    }
+    if (const auto v = node.indexIds(); v.has_value()) {
+        hashTag64(h, 0x19ULL);
+        for (const auto x : *v) {
+            hashPod64(h, static_cast<std::int32_t>(x));
+        }
+    }
+    if (const auto v = node.indexExtents(); v.has_value()) {
+        hashTag64(h, 0x1AULL);
+        for (const auto x : *v) {
+            hashPod64(h, static_cast<std::int32_t>(x));
+        }
+    }
+    if (const auto v = node.constitutiveOutputIndex(); v.has_value()) {
+        hashTag64(h, 0x1BULL);
+        hashPod64(h, static_cast<std::int32_t>(*v));
+    }
+    if (const auto* sig = node.spaceSignature(); sig != nullptr) {
+        hashTag64(h, 0x1CULL);
+        const auto sh = hashSpaceSignature64(*sig);
+        hashPod64(h, sh);
+    }
+    if (const auto v = node.timeDerivativeOrder(); v.has_value()) {
+        hashTag64(h, 0x1DULL);
+        hashPod64(h, static_cast<std::int32_t>(*v));
+    }
+    if (const auto v = node.fieldId(); v.has_value()) {
+        hashTag64(h, 0x1EULL);
+        hashPod64(h, static_cast<std::uint16_t>(*v));
+    }
+    if (const auto v = node.symbolName(); v.has_value()) {
+        hashTag64(h, 0x1FULL);
+        const auto sh = hashString64(*v);
+        hashPod64(h, sh);
+    }
+    if (const auto v = node.slotIndex(); v.has_value()) {
+        hashTag64(h, 0x20ULL);
+        hashPod64(h, *v);
+    }
+    if (const auto v = node.historyIndex(); v.has_value()) {
+        hashTag64(h, 0x21ULL);
+        hashPod64(h, static_cast<std::int32_t>(*v));
+    }
+    if (const auto v = node.stateOffsetBytes(); v.has_value()) {
+        hashTag64(h, 0x22ULL);
+        hashPod64(h, *v);
+    }
+    if (const auto* model = node.constitutiveModel(); model != nullptr) {
+        hashTag64(h, 0x23ULL);
+        const auto mp = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(model));
+        hashPod64(h, mp);
+    }
+
+    const auto kids = node.childrenShared();
+    hashTag64(h, 0x30ULL);
+    hashPod64(h, static_cast<std::uint32_t>(kids.size()));
+    for (const auto& k : kids) {
+        if (!k) {
+            hashTag64(h, 0x31ULL);
+            continue;
+        }
+        const auto ch = stableHash64(*k, memo);
+        hashPod64(h, ch);
+    }
+
+    memo.emplace(&node, h);
+    return h;
+}
+
+[[nodiscard]] std::uint64_t stableHash64(const FormExpr& expr)
+{
+    if (!expr.isValid() || expr.node() == nullptr) {
+        return 0u;
+    }
+    NodeHashMemo memo;
+    return stableHash64(*expr.node(), memo);
+}
+
+[[nodiscard]] std::uint64_t residualHashForSymbolicTangent(const FormIR& residual_ir)
+{
+    std::uint64_t h = fnv1aInit64();
+
+    hashTag64(h, 0x53594D424F4C4943ULL); // "SYMBOLIC" tag
+    hashPod64(h, static_cast<std::uint8_t>(residual_ir.kind()));
+
+    if (residual_ir.testSpace().has_value()) {
+        hashTag64(h, 0x40ULL);
+        const auto sh = hashSpaceSignature64(*residual_ir.testSpace());
+        hashPod64(h, sh);
+    } else {
+        hashTag64(h, 0x41ULL);
+    }
+    if (residual_ir.trialSpace().has_value()) {
+        hashTag64(h, 0x42ULL);
+        const auto sh = hashSpaceSignature64(*residual_ir.trialSpace());
+        hashPod64(h, sh);
+    } else {
+        hashTag64(h, 0x43ULL);
+    }
+
+    hashTag64(h, 0x44ULL);
+    hashPod64(h, static_cast<std::int32_t>(residual_ir.maxTimeDerivativeOrder()));
+
+    NodeHashMemo memo;
+
+    const auto& terms = residual_ir.terms();
+    hashTag64(h, 0x45ULL);
+    hashPod64(h, static_cast<std::uint32_t>(terms.size()));
+
+    for (const auto& term : terms) {
+        hashTag64(h, 0x50ULL);
+        hashPod64(h, static_cast<std::uint8_t>(term.domain));
+        hashPod64(h, static_cast<std::int32_t>(term.boundary_marker));
+        hashPod64(h, static_cast<std::int32_t>(term.interface_marker));
+        hashPod64(h, static_cast<std::int32_t>(term.time_derivative_order));
+
+        const auto* root = term.integrand.node();
+        if (root == nullptr) {
+            hashTag64(h, 0x51ULL);
+            continue;
+        }
+        const auto ih = stableHash64(*root, memo);
+        hashPod64(h, ih);
+    }
+
+    return h;
+}
+
+struct SymbolicTangentCacheKey {
+    std::uint64_t residual_hash{0u};
+    std::uint32_t version{kSymbolicTangentCacheVersion};
+
+    [[nodiscard]] bool operator==(const SymbolicTangentCacheKey& other) const noexcept
+    {
+        return residual_hash == other.residual_hash && version == other.version;
+    }
+};
+
+struct SymbolicTangentCacheKeyHash {
+    [[nodiscard]] std::size_t operator()(const SymbolicTangentCacheKey& k) const noexcept
+    {
+        const std::uint64_t x = k.residual_hash ^ (static_cast<std::uint64_t>(k.version) << 32);
+        return static_cast<std::size_t>(x ^ (x >> 32));
+    }
+};
+
+class SymbolicTangentIRCache final {
+public:
+    [[nodiscard]] std::shared_ptr<const FormIR> lookup(const SymbolicTangentCacheKey& key)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = map_.find(key);
+        if (it == map_.end()) {
+            return {};
+        }
+        lru_.splice(lru_.begin(), lru_, it->second.lru_it);
+        return it->second.ir;
+    }
+
+    void insert(const SymbolicTangentCacheKey& key, std::shared_ptr<const FormIR> ir)
+    {
+        if (!ir) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (auto it = map_.find(key); it != map_.end()) {
+            it->second.ir = std::move(ir);
+            lru_.splice(lru_.begin(), lru_, it->second.lru_it);
+            return;
+        }
+
+        if (map_.size() >= kSymbolicTangentCacheMaxEntries && !lru_.empty()) {
+            const auto victim = lru_.back();
+            lru_.pop_back();
+            map_.erase(victim);
+        }
+
+        lru_.push_front(key);
+        map_.emplace(key, Entry{std::move(ir), lru_.begin()});
+    }
+
+private:
+    struct Entry {
+        std::shared_ptr<const FormIR> ir{};
+        std::list<SymbolicTangentCacheKey>::iterator lru_it{};
+    };
+
+    std::mutex mutex_{};
+    std::list<SymbolicTangentCacheKey> lru_{};
+    std::unordered_map<SymbolicTangentCacheKey, Entry, SymbolicTangentCacheKeyHash> map_{};
+};
+
+[[nodiscard]] SymbolicTangentIRCache& symbolicTangentIRCache()
+{
+    static SymbolicTangentIRCache cache;
+    return cache;
+}
+
+} // namespace
+
+// ============================================================================
+// SymbolicNonlinearFormKernel (symbolic tangent decomposition)
+// ============================================================================
+
+SymbolicNonlinearFormKernel::SymbolicNonlinearFormKernel(FormIR residual_ir, NonlinearKernelOutput output)
+    : residual_ir_(std::move(residual_ir))
+    , output_(output)
+{
+    if (!residual_ir_.isCompiled()) {
+        throw std::invalid_argument("SymbolicNonlinearFormKernel: residual IR is not compiled");
+    }
+    if (residual_ir_.kind() != FormKind::Residual) {
+        throw std::invalid_argument("SymbolicNonlinearFormKernel: IR kind must be Residual");
+    }
+
+    const FormIR* irs[] = {&residual_ir_};
+    parameter_specs_ = computeParameterSpecs(std::span<const FormIR* const>{irs});
+
+    constitutive_state_ = buildConstitutiveStateLayout(residual_ir_, material_state_spec_);
+}
+
+SymbolicNonlinearFormKernel::~SymbolicNonlinearFormKernel() = default;
+SymbolicNonlinearFormKernel::SymbolicNonlinearFormKernel(SymbolicNonlinearFormKernel&&) noexcept = default;
+SymbolicNonlinearFormKernel& SymbolicNonlinearFormKernel::operator=(SymbolicNonlinearFormKernel&&) noexcept = default;
+
+assembly::RequiredData SymbolicNonlinearFormKernel::getRequiredData() const noexcept
+{
+    auto req = residual_ir_.requiredData() | assembly::RequiredData::SolutionCoefficients;
+    if (tangent_ready_ && tangent_ir_.isCompiled()) {
+        req |= tangent_ir_.requiredData();
+    }
+    if (material_state_spec_.bytes_per_qpt > 0u) {
+        req |= assembly::RequiredData::MaterialState;
+    }
+    return req;
+}
+
+std::vector<assembly::FieldRequirement> SymbolicNonlinearFormKernel::fieldRequirements() const
+{
+    return residual_ir_.fieldRequirements();
+}
+
+assembly::MaterialStateSpec SymbolicNonlinearFormKernel::materialStateSpec() const noexcept
+{
+    return material_state_spec_;
+}
+
+std::vector<params::Spec> SymbolicNonlinearFormKernel::parameterSpecs() const
+{
+    return parameter_specs_;
+}
+
+void SymbolicNonlinearFormKernel::rebuildTangentIR()
+{
+    // Build tangent form as sum over differentiated integrands with the same measures/markers as residual IR.
+    FE_THROW_IF(!residual_ir_.testSpace().has_value() || !residual_ir_.trialSpace().has_value(), InvalidArgumentException,
+                "SymbolicNonlinearFormKernel: residual IR missing test/trial space signatures");
+
+    const SymbolicTangentCacheKey cache_key{
+        .residual_hash = residualHashForSymbolicTangent(residual_ir_),
+        .version = kSymbolicTangentCacheVersion,
+    };
+
+    if (const auto cached = symbolicTangentIRCache().lookup(cache_key); cached) {
+        tangent_ir_ = cached->clone();
+        tangent_ready_ = true;
+        return;
+    }
+
+    FormExpr tangent_form{};
+    bool first = true;
+
+    for (const auto& term : residual_ir_.terms()) {
+        if (!term.integrand.isValid()) {
+            continue;
+        }
+
+        FormExpr dI = differentiateResidual(term.integrand);
+
+        FormExpr wrapped{};
+        switch (term.domain) {
+            case IntegralDomain::Cell:
+                wrapped = dI.dx();
+                break;
+            case IntegralDomain::Boundary:
+                wrapped = dI.ds(term.boundary_marker);
+                break;
+            case IntegralDomain::InteriorFace:
+                wrapped = dI.dS();
+                break;
+            case IntegralDomain::InterfaceFace:
+                wrapped = dI.dI(term.interface_marker);
+                break;
+        }
+
+        if (!wrapped.isValid()) {
+            continue;
+        }
+
+        tangent_form = first ? wrapped : (tangent_form + wrapped);
+        first = false;
+    }
+
+    if (!tangent_form.isValid()) {
+        const auto u = FormExpr::trialFunction(*residual_ir_.trialSpace(), "du");
+        const auto v = FormExpr::testFunction(*residual_ir_.testSpace(), "v");
+        tangent_form = (FormExpr::constant(0.0) * inner(u, v)).dx();
+    }
+    if (!tangent_form.hasTest() || !tangent_form.hasTrial()) {
+        // Tangent can be identically zero for residual terms that are independent of u,
+        // but FormCompiler::compileBilinear requires explicit test+trial terminals.
+        const auto u = FormExpr::trialFunction(*residual_ir_.trialSpace(), "du");
+        const auto v = FormExpr::testFunction(*residual_ir_.testSpace(), "v");
+        tangent_form = (FormExpr::constant(0.0) * inner(u, v)).dx();
+    }
+
+    FormCompiler compiler;
+    tangent_ir_ = compiler.compileBilinear(tangent_form);
+    tangent_ready_ = true;
+
+    symbolicTangentIRCache().insert(cache_key, std::make_shared<FormIR>(tangent_ir_.clone()));
+}
+
+void SymbolicNonlinearFormKernel::rewriteResidualTrialToState()
+{
+    if (residual_scalar_ready_) {
+        return;
+    }
+
+    const auto transform = [&](const FormExprNode& n) -> std::optional<FormExpr> {
+        if (n.type() != FormExprType::TrialFunction) {
+            return std::nullopt;
+        }
+        const auto* sig = n.spaceSignature();
+        FE_THROW_IF(!sig, InvalidArgumentException,
+                    "SymbolicNonlinearFormKernel: TrialFunction missing SpaceSignature during residual rewrite");
+        return FormExpr::stateField(INVALID_FIELD_ID, *sig, n.toString());
+    };
+
+    residual_ir_.transformIntegrands(transform);
+
+    const auto rewrite_updates = [&](std::vector<MaterialStateUpdate>& updates) {
+        for (auto& op : updates) {
+            op.value = op.value.transformNodes(transform);
+        }
+    };
+
+    rewrite_updates(inlined_state_updates_.cell);
+    rewrite_updates(inlined_state_updates_.boundary_all);
+    for (auto& kv : inlined_state_updates_.boundary_by_marker) {
+        rewrite_updates(kv.second);
+    }
+    rewrite_updates(inlined_state_updates_.interior_face);
+    rewrite_updates(inlined_state_updates_.interface_face);
+
+    residual_scalar_ready_ = true;
+}
+
+void SymbolicNonlinearFormKernel::resolveInlinableConstitutives()
+{
+    if (inlinable_constitutives_resolved_) {
+        return;
+    }
+
+    FormIR* irs[] = {&residual_ir_};
+    inlineInlinableConstitutives(std::span<FormIR*>{irs},
+                                 constitutive_state_.get(),
+                                 material_state_spec_,
+                                 inlined_state_updates_);
+
+    if (output_ != NonlinearKernelOutput::VectorOnly && !tangent_ready_) {
+        // Symbolic differentiation requires constitutives to be eliminated from the residual integrands.
+        rebuildTangentIR();
+    }
+
+    // Residual evaluation uses scalar (Real) mode, which must not contain TrialFunction nodes.
+    // Rewrite TrialFunction -> StateField(INVALID_FIELD_ID) to represent the current solution u.
+    rewriteResidualTrialToState();
+
+    inlinable_constitutives_resolved_ = true;
+}
+
+void SymbolicNonlinearFormKernel::resolveParameterSlots(
+    const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
+{
+    const auto transform = [&](const FormExprNode& n) -> std::optional<FormExpr> {
+        if (n.type() != FormExprType::ParameterSymbol) {
+            return std::nullopt;
+        }
+        const auto key = n.symbolName();
+        FE_THROW_IF(!key || key->empty(), InvalidArgumentException,
+                    "Forms::SymbolicNonlinearFormKernel: ParameterSymbol node missing name");
+        const auto slot = slot_of_real_param(*key);
+        FE_THROW_IF(!slot.has_value(), InvalidArgumentException,
+                    "Forms::SymbolicNonlinearFormKernel: could not resolve parameter slot for '" + std::string(*key) + "'");
+        return FormExpr::parameterRef(*slot);
+    };
+
+    residual_ir_.transformIntegrands(transform);
+    if (tangent_ready_) {
+        tangent_ir_.transformIntegrands(transform);
+    }
+
+    const auto rewrite_updates = [&](std::vector<MaterialStateUpdate>& updates) {
+        for (auto& op : updates) {
+            op.value = op.value.transformNodes(transform);
+        }
+    };
+    rewrite_updates(inlined_state_updates_.cell);
+    rewrite_updates(inlined_state_updates_.boundary_all);
+    for (auto& kv : inlined_state_updates_.boundary_by_marker) {
+        rewrite_updates(kv.second);
+    }
+    rewrite_updates(inlined_state_updates_.interior_face);
+    rewrite_updates(inlined_state_updates_.interface_face);
+}
+
+bool SymbolicNonlinearFormKernel::hasCell() const noexcept { return residual_ir_.hasCellTerms(); }
+bool SymbolicNonlinearFormKernel::hasBoundaryFace() const noexcept { return residual_ir_.hasBoundaryTerms(); }
+bool SymbolicNonlinearFormKernel::hasInteriorFace() const noexcept { return residual_ir_.hasInteriorFaceTerms(); }
+bool SymbolicNonlinearFormKernel::hasInterfaceFace() const noexcept { return residual_ir_.hasInterfaceFaceTerms(); }
+
+void SymbolicNonlinearFormKernel::ensureInterpreterLoweredIndexedAccess()
+{
+    if (!indexed_lowering_once_) {
+        indexed_lowering_once_ = std::make_unique<std::once_flag>();
+    }
+    std::call_once(*indexed_lowering_once_, [&] {
+        lowerIndexedAccessInFormIR(residual_ir_);
+        if (tangent_ready_ && tangent_ir_.isCompiled()) {
+            lowerIndexedAccessInFormIR(tangent_ir_);
+        }
+        lowerIndexedAccessInUpdates(inlined_state_updates_);
+    });
+}
+
+void SymbolicNonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx,
+                                              assembly::KernelOutput& output)
+{
+    ensureInterpreterLoweredIndexedAccess();
+
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+
+    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
+    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    FE_THROW_IF(want_matrix && !tangent_ready_, InvalidArgumentException,
+                "SymbolicNonlinearFormKernel: tangent IR not built; call resolveInlinableConstitutives() during setup");
+    FE_THROW_IF((want_vector || material_state_spec_.bytes_per_qpt > 0u) && !residual_scalar_ready_, InvalidArgumentException,
+                "SymbolicNonlinearFormKernel: residual IR not prepared for scalar evaluation; call resolveInlinableConstitutives() during setup");
+    output.reserve(n_test, n_trial, want_matrix, want_vector);
+
+    const auto n_qpts = ctx.numQuadraturePoints();
+    const auto* time_ctx = ctx.timeIntegrationContext();
+
+    if (!inlined_state_updates_.cell.empty()) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            applyInlinedMaterialStateUpdatesReal(ctx, nullptr, FormKind::Residual,
+                                                 constitutive_state_.get(),
+                                                 inlined_state_updates_.cell,
+                                                 Side::Minus, q);
+        }
+    }
+
+    if (want_vector) {
+        for (LocalIndex i = 0; i < n_test; ++i) {
+            Real ri = 0.0;
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const Real w = ctx.integrationWeight(q);
+
+                ConstitutiveCallCacheReal constitutive_cache;
+                EvalEnvReal env{ctx, nullptr, FormKind::Residual, Side::Minus, Side::Minus, i, 0,
+                                constitutive_state_.get(), &constitutive_cache};
+
+                Real sum_q = 0.0;
+                for (const auto& term : residual_ir_.terms()) {
+                    if (term.domain != IntegralDomain::Cell) continue;
+                    Real term_weight = 1.0;
+                    if (time_ctx) {
+                        if (term.time_derivative_order == 1) {
+                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                        } else if (term.time_derivative_order == 2) {
+                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                        } else if (term.time_derivative_order > 0) {
+                            term_weight = time_ctx->time_derivative_term_weight;
+                        } else {
+                            term_weight = time_ctx->non_time_derivative_term_weight;
+                        }
+                    }
+                    if (term_weight == 0.0) continue;
+
+                    const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                    if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                        throw FEException("Forms: residual cell integrand did not evaluate to scalar (symbolic kernel)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    sum_q += term_weight * val.s;
+                }
+                ri += w * sum_q;
+            }
+            output.vectorEntry(i) += ri;
+        }
+    }
+
+    if (want_matrix) {
+        ConstitutiveCallCacheReal constitutive_cache;
+        EvalEnvReal env{ctx, nullptr, FormKind::Bilinear, Side::Minus, Side::Minus, 0, 0,
+                        constitutive_state_.get(), &constitutive_cache};
+
+        for (const auto& term : tangent_ir_.terms()) {
+            if (term.domain != IntegralDomain::Cell) continue;
+            Real term_weight = 1.0;
+            if (time_ctx) {
+                if (term.time_derivative_order == 1) {
+                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                } else if (term.time_derivative_order == 2) {
+                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                } else if (term.time_derivative_order > 0) {
+                    term_weight = time_ctx->time_derivative_term_weight;
+                } else {
+                    term_weight = time_ctx->non_time_derivative_term_weight;
+                }
+            }
+            if (term_weight == 0.0) continue;
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const Real w = ctx.integrationWeight(q);
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    env.i = i;
+                    for (LocalIndex j = 0; j < n_trial; ++j) {
+                        env.j = j;
+                        const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                            throw FEException("Forms: tangent cell integrand did not evaluate to scalar (symbolic kernel)",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        output.matrixEntry(i, j) += (term_weight * w) * val.s;
+                    }
+                }
+            }
+        }
+    }
+
+    output.has_matrix = want_matrix;
+    output.has_vector = want_vector;
+}
+
+void SymbolicNonlinearFormKernel::computeBoundaryFace(const assembly::AssemblyContext& ctx,
+                                                      int boundary_marker,
+                                                      assembly::KernelOutput& output)
+{
+    ensureInterpreterLoweredIndexedAccess();
+
+    const auto n_test = ctx.numTestDofs();
+    const auto n_trial = ctx.numTrialDofs();
+
+    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
+    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    FE_THROW_IF(want_matrix && !tangent_ready_, InvalidArgumentException,
+                "SymbolicNonlinearFormKernel: tangent IR not built; call resolveInlinableConstitutives() during setup");
+    FE_THROW_IF((want_vector || material_state_spec_.bytes_per_qpt > 0u) && !residual_scalar_ready_, InvalidArgumentException,
+                "SymbolicNonlinearFormKernel: residual IR not prepared for scalar evaluation; call resolveInlinableConstitutives() during setup");
+    output.reserve(n_test, n_trial, want_matrix, want_vector);
+
+    const auto n_qpts = ctx.numQuadraturePoints();
+    const auto* time_ctx = ctx.timeIntegrationContext();
+
+    const auto* boundary_marker_updates = [&]() -> const std::vector<MaterialStateUpdate>* {
+        const auto it = inlined_state_updates_.boundary_by_marker.find(boundary_marker);
+        return (it == inlined_state_updates_.boundary_by_marker.end()) ? nullptr : &it->second;
+    }();
+
+    if (!inlined_state_updates_.boundary_all.empty() || (boundary_marker_updates != nullptr && !boundary_marker_updates->empty())) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            if (!inlined_state_updates_.boundary_all.empty()) {
+                applyInlinedMaterialStateUpdatesReal(ctx, nullptr, FormKind::Residual,
+                                                     constitutive_state_.get(),
+                                                     inlined_state_updates_.boundary_all,
+                                                     Side::Minus, q);
+            }
+            if (boundary_marker_updates != nullptr && !boundary_marker_updates->empty()) {
+                applyInlinedMaterialStateUpdatesReal(ctx, nullptr, FormKind::Residual,
+                                                     constitutive_state_.get(),
+                                                     *boundary_marker_updates,
+                                                     Side::Minus, q);
+            }
+        }
+    }
+
+    if (want_vector) {
+        for (LocalIndex i = 0; i < n_test; ++i) {
+            Real ri = 0.0;
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const Real w = ctx.integrationWeight(q);
+
+                ConstitutiveCallCacheReal constitutive_cache;
+                EvalEnvReal env{ctx, nullptr, FormKind::Residual, Side::Minus, Side::Minus, i, 0,
+                                constitutive_state_.get(), &constitutive_cache};
+
+                Real sum_q = 0.0;
+                for (const auto& term : residual_ir_.terms()) {
+                    if (term.domain != IntegralDomain::Boundary) continue;
+                    if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
+
+                    Real term_weight = 1.0;
+                    if (time_ctx) {
+                        if (term.time_derivative_order == 1) {
+                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                        } else if (term.time_derivative_order == 2) {
+                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                        } else if (term.time_derivative_order > 0) {
+                            term_weight = time_ctx->time_derivative_term_weight;
+                        } else {
+                            term_weight = time_ctx->non_time_derivative_term_weight;
+                        }
+                    }
+                    if (term_weight == 0.0) continue;
+
+                    const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                    if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                        throw FEException("Forms: residual boundary integrand did not evaluate to scalar (symbolic kernel)",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    sum_q += term_weight * val.s;
+                }
+                ri += w * sum_q;
+            }
+            output.vectorEntry(i) += ri;
+        }
+    }
+
+    if (want_matrix) {
+        ConstitutiveCallCacheReal constitutive_cache;
+        EvalEnvReal env{ctx, nullptr, FormKind::Bilinear, Side::Minus, Side::Minus, 0, 0,
+                        constitutive_state_.get(), &constitutive_cache};
+
+        for (const auto& term : tangent_ir_.terms()) {
+            if (term.domain != IntegralDomain::Boundary) continue;
+            if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
+
+            Real term_weight = 1.0;
+            if (time_ctx) {
+                if (term.time_derivative_order == 1) {
+                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                } else if (term.time_derivative_order == 2) {
+                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                } else if (term.time_derivative_order > 0) {
+                    term_weight = time_ctx->time_derivative_term_weight;
+                } else {
+                    term_weight = time_ctx->non_time_derivative_term_weight;
+                }
+            }
+            if (term_weight == 0.0) continue;
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const Real w = ctx.integrationWeight(q);
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    env.i = i;
+                    for (LocalIndex j = 0; j < n_trial; ++j) {
+                        env.j = j;
+                        const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
+                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                            throw FEException("Forms: tangent boundary integrand did not evaluate to scalar (symbolic kernel)",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        output.matrixEntry(i, j) += (term_weight * w) * val.s;
+                    }
+                }
+            }
+        }
+    }
+
+    output.has_matrix = want_matrix;
+    output.has_vector = want_vector;
+}
+
+void SymbolicNonlinearFormKernel::computeInteriorFace(const assembly::AssemblyContext& ctx_minus,
+                                                      const assembly::AssemblyContext& ctx_plus,
+                                                      assembly::KernelOutput& output_minus,
+                                                      assembly::KernelOutput& output_plus,
+                                                      assembly::KernelOutput& coupling_mp,
+                                                      assembly::KernelOutput& coupling_pm)
+{
+    ensureInterpreterLoweredIndexedAccess();
+
+    const auto n_test_minus = ctx_minus.numTestDofs();
+    const auto n_trial_minus = ctx_minus.numTrialDofs();
+    const auto n_test_plus = ctx_plus.numTestDofs();
+    const auto n_trial_plus = ctx_plus.numTrialDofs();
+
+    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
+    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    FE_THROW_IF(want_matrix && !tangent_ready_, InvalidArgumentException,
+                "SymbolicNonlinearFormKernel: tangent IR not built; call resolveInlinableConstitutives() during setup");
+    FE_THROW_IF((want_vector || material_state_spec_.bytes_per_qpt > 0u) && !residual_scalar_ready_, InvalidArgumentException,
+                "SymbolicNonlinearFormKernel: residual IR not prepared for scalar evaluation; call resolveInlinableConstitutives() during setup");
+
+    output_minus.reserve(n_test_minus, n_trial_minus, want_matrix, want_vector);
+    output_plus.reserve(n_test_plus, n_trial_plus, want_matrix, want_vector);
+    coupling_mp.reserve(n_test_minus, n_trial_plus, want_matrix, /*need_vector=*/false);
+    coupling_pm.reserve(n_test_plus, n_trial_minus, want_matrix, /*need_vector=*/false);
+
+    const auto n_qpts = ctx_minus.numQuadraturePoints();
+
+    if (!inlined_state_updates_.interior_face.empty()) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Residual,
+                                                 constitutive_state_.get(),
+                                                 inlined_state_updates_.interior_face,
+                                                 Side::Minus, q);
+
+            const auto* base_minus = ctx_minus.materialStateWorkBase();
+            const auto* base_plus = ctx_plus.materialStateWorkBase();
+            if (base_plus != nullptr && base_plus != base_minus) {
+                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Residual,
+                                                     constitutive_state_.get(),
+                                                     inlined_state_updates_.interior_face,
+                                                     Side::Plus, q);
+            }
+        }
+    }
+
+    if (want_vector) {
+        auto assembleResidualVec = [&](Side eval_side,
+                                       Side test_active,
+                                       assembly::KernelOutput& out,
+                                       LocalIndex n_test) {
+            const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
+            const auto* time_ctx = ctx_eval.timeIntegrationContext();
+            ConstitutiveCallCacheReal constitutive_cache;
+            EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Residual, test_active, test_active, 0, 0,
+                            constitutive_state_.get(), &constitutive_cache};
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                env.i = i;
+                Real ri = 0.0;
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    const Real w = ctx_eval.integrationWeight(q);
+
+                    Real sum_q = 0.0;
+                    for (const auto& term : residual_ir_.terms()) {
+                        if (term.domain != IntegralDomain::InteriorFace) continue;
+                        Real term_weight = 1.0;
+                        if (time_ctx) {
+                            if (term.time_derivative_order == 1) {
+                                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                            } else if (term.time_derivative_order == 2) {
+                                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                            } else if (term.time_derivative_order > 0) {
+                                term_weight = time_ctx->time_derivative_term_weight;
+                            } else {
+                                term_weight = time_ctx->non_time_derivative_term_weight;
+                            }
+                        }
+                        if (term_weight == 0.0) continue;
+
+                        const auto val = evalReal(*term.integrand.node(), env, eval_side, q);
+                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                            throw FEException("Forms: residual interior-face integrand did not evaluate to scalar (symbolic kernel)",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        sum_q += term_weight * val.s;
+                    }
+                    ri += w * sum_q;
+                }
+                out.vectorEntry(i) += ri;
+            }
+        };
+
+        assembleResidualVec(Side::Minus, Side::Minus, output_minus, n_test_minus);
+        assembleResidualVec(Side::Plus, Side::Plus, output_plus, n_test_plus);
+    }
+
+    if (want_matrix) {
+        auto assembleBlock = [&](Side eval_side,
+                                 Side test_active,
+                                 Side trial_active,
+                                 assembly::KernelOutput& out,
+                                 LocalIndex n_test,
+                                 LocalIndex n_trial) {
+            ConstitutiveCallCacheReal constitutive_cache;
+            EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Bilinear, test_active, trial_active, 0, 0,
+                            constitutive_state_.get(), &constitutive_cache};
+
+            for (const auto& term : tangent_ir_.terms()) {
+                if (term.domain != IntegralDomain::InteriorFace) continue;
+                const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
+                const auto* time_ctx = ctx_eval.timeIntegrationContext();
+                Real term_weight = 1.0;
+                if (time_ctx) {
+                    if (term.time_derivative_order == 1) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                    } else if (term.time_derivative_order == 2) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                    } else if (term.time_derivative_order > 0) {
+                        term_weight = time_ctx->time_derivative_term_weight;
+                    } else {
+                        term_weight = time_ctx->non_time_derivative_term_weight;
+                    }
+                }
+                if (term_weight == 0.0) continue;
+
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    const Real w = ctx_eval.integrationWeight(q);
+                    for (LocalIndex i = 0; i < n_test; ++i) {
+                        env.i = i;
+                        for (LocalIndex j = 0; j < n_trial; ++j) {
+                            env.j = j;
+                            const auto val = evalReal(*term.integrand.node(), env, eval_side, q);
+                            if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                                throw FEException("Forms: tangent interior-face integrand did not evaluate to scalar (symbolic kernel)",
+                                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                            }
+                            out.matrixEntry(i, j) += (term_weight * w) * val.s;
+                        }
+                    }
+                }
+            }
+        };
+
+        // minus-minus (evaluate on minus side)
+        assembleBlock(Side::Minus, Side::Minus, Side::Minus, output_minus, n_test_minus, n_trial_minus);
+        // plus-plus (evaluate on plus side)
+        assembleBlock(Side::Plus, Side::Plus, Side::Plus, output_plus, n_test_plus, n_trial_plus);
+        // minus-plus coupling (evaluate on minus side)
+        assembleBlock(Side::Minus, Side::Minus, Side::Plus, coupling_mp, n_test_minus, n_trial_plus);
+        // plus-minus coupling (evaluate on plus side)
+        assembleBlock(Side::Plus, Side::Plus, Side::Minus, coupling_pm, n_test_plus, n_trial_minus);
+    }
+}
+
+void SymbolicNonlinearFormKernel::computeInterfaceFace(const assembly::AssemblyContext& ctx_minus,
+                                                       const assembly::AssemblyContext& ctx_plus,
+                                                       int interface_marker,
+                                                       assembly::KernelOutput& output_minus,
+                                                       assembly::KernelOutput& output_plus,
+                                                       assembly::KernelOutput& coupling_mp,
+                                                       assembly::KernelOutput& coupling_pm)
+{
+    ensureInterpreterLoweredIndexedAccess();
+
+    const auto n_test_minus = ctx_minus.numTestDofs();
+    const auto n_trial_minus = ctx_minus.numTrialDofs();
+    const auto n_test_plus = ctx_plus.numTestDofs();
+    const auto n_trial_plus = ctx_plus.numTrialDofs();
+
+    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
+    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    FE_THROW_IF(want_matrix && !tangent_ready_, InvalidArgumentException,
+                "SymbolicNonlinearFormKernel: tangent IR not built; call resolveInlinableConstitutives() during setup");
+    FE_THROW_IF((want_vector || material_state_spec_.bytes_per_qpt > 0u) && !residual_scalar_ready_, InvalidArgumentException,
+                "SymbolicNonlinearFormKernel: residual IR not prepared for scalar evaluation; call resolveInlinableConstitutives() during setup");
+
+    output_minus.reserve(n_test_minus, n_trial_minus, want_matrix, want_vector);
+    output_plus.reserve(n_test_plus, n_trial_plus, want_matrix, want_vector);
+    coupling_mp.reserve(n_test_minus, n_trial_plus, want_matrix, /*need_vector=*/false);
+    coupling_pm.reserve(n_test_plus, n_trial_minus, want_matrix, /*need_vector=*/false);
+
+    const auto n_qpts = ctx_minus.numQuadraturePoints();
+
+    if (!inlined_state_updates_.interface_face.empty()) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Residual,
+                                                 constitutive_state_.get(),
+                                                 inlined_state_updates_.interface_face,
+                                                 Side::Minus, q);
+
+            const auto* base_minus = ctx_minus.materialStateWorkBase();
+            const auto* base_plus = ctx_plus.materialStateWorkBase();
+            if (base_plus != nullptr && base_plus != base_minus) {
+                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Residual,
+                                                     constitutive_state_.get(),
+                                                     inlined_state_updates_.interface_face,
+                                                     Side::Plus, q);
+            }
+        }
+    }
+
+    if (want_vector) {
+        auto assembleResidualVec = [&](Side eval_side,
+                                       Side test_active,
+                                       assembly::KernelOutput& out,
+                                       LocalIndex n_test) {
+            const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
+            const auto* time_ctx = ctx_eval.timeIntegrationContext();
+            ConstitutiveCallCacheReal constitutive_cache;
+            EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Residual, test_active, test_active, 0, 0,
+                            constitutive_state_.get(), &constitutive_cache};
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                env.i = i;
+                Real ri = 0.0;
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    const Real w = ctx_eval.integrationWeight(q);
+
+                    Real sum_q = 0.0;
+                    for (const auto& term : residual_ir_.terms()) {
+                        if (term.domain != IntegralDomain::InterfaceFace) continue;
+                        if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
+                        Real term_weight = 1.0;
+                        if (time_ctx) {
+                            if (term.time_derivative_order == 1) {
+                                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                            } else if (term.time_derivative_order == 2) {
+                                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                            } else if (term.time_derivative_order > 0) {
+                                term_weight = time_ctx->time_derivative_term_weight;
+                            } else {
+                                term_weight = time_ctx->non_time_derivative_term_weight;
+                            }
+                        }
+                        if (term_weight == 0.0) continue;
+
+                        const auto val = evalReal(*term.integrand.node(), env, eval_side, q);
+                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                            throw FEException("Forms: residual interface-face integrand did not evaluate to scalar (symbolic kernel)",
+                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                        }
+                        sum_q += term_weight * val.s;
+                    }
+                    ri += w * sum_q;
+                }
+                out.vectorEntry(i) += ri;
+            }
+        };
+
+        assembleResidualVec(Side::Minus, Side::Minus, output_minus, n_test_minus);
+        assembleResidualVec(Side::Plus, Side::Plus, output_plus, n_test_plus);
+    }
+
+    if (want_matrix) {
+        auto assembleBlock = [&](Side eval_side,
+                                 Side test_active,
+                                 Side trial_active,
+                                 assembly::KernelOutput& out,
+                                 LocalIndex n_test,
+                                 LocalIndex n_trial) {
+            ConstitutiveCallCacheReal constitutive_cache;
+            EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Bilinear, test_active, trial_active, 0, 0,
+                            constitutive_state_.get(), &constitutive_cache};
+
+            for (const auto& term : tangent_ir_.terms()) {
+                if (term.domain != IntegralDomain::InterfaceFace) continue;
+                if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
+
+                const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
+                const auto* time_ctx = ctx_eval.timeIntegrationContext();
+                Real term_weight = 1.0;
+                if (time_ctx) {
+                    if (term.time_derivative_order == 1) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
+                    } else if (term.time_derivative_order == 2) {
+                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
+                    } else if (term.time_derivative_order > 0) {
+                        term_weight = time_ctx->time_derivative_term_weight;
+                    } else {
+                        term_weight = time_ctx->non_time_derivative_term_weight;
+                    }
+                }
+                if (term_weight == 0.0) continue;
+
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    const Real w = ctx_eval.integrationWeight(q);
+                    for (LocalIndex i = 0; i < n_test; ++i) {
+                        env.i = i;
+                        for (LocalIndex j = 0; j < n_trial; ++j) {
+                            env.j = j;
+                            const auto val = evalReal(*term.integrand.node(), env, eval_side, q);
+                            if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                                throw FEException("Forms: tangent interface-face integrand did not evaluate to scalar (symbolic kernel)",
+                                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                            }
+                            out.matrixEntry(i, j) += (term_weight * w) * val.s;
+                        }
+                    }
+                }
+            }
+        };
+
+        // minus-minus (evaluate on minus side)
+        assembleBlock(Side::Minus, Side::Minus, Side::Minus, output_minus, n_test_minus, n_trial_minus);
+        // plus-plus (evaluate on plus side)
+        assembleBlock(Side::Plus, Side::Plus, Side::Plus, output_plus, n_test_plus, n_trial_plus);
+        // minus-plus coupling (evaluate on minus side)
+        assembleBlock(Side::Minus, Side::Minus, Side::Plus, coupling_mp, n_test_minus, n_trial_plus);
+        // plus-minus coupling (evaluate on plus side)
+        assembleBlock(Side::Plus, Side::Plus, Side::Minus, coupling_pm, n_test_plus, n_trial_minus);
     }
 }
 
@@ -11518,8 +13044,20 @@ FunctionalFormKernel::FunctionalFormKernel(
                 "Forms::FunctionalFormKernel: integrand must not contain TestFunction/TrialFunction (use DiscreteField/StateField instead)");
 }
 
+void FunctionalFormKernel::ensureInterpreterLoweredIndexedAccess()
+{
+    if (!indexed_lowering_once_) {
+        indexed_lowering_once_ = std::make_unique<std::once_flag>();
+    }
+    std::call_once(*indexed_lowering_once_, [&] {
+        lowerIndexedAccessInExpr(integrand_);
+    });
+}
+
 Real FunctionalFormKernel::evaluateCell(const assembly::AssemblyContext& ctx, LocalIndex q)
 {
+    ensureInterpreterLoweredIndexedAccess();
+
     if (domain_ != Domain::Cell) {
         return 0.0;
     }
@@ -11546,6 +13084,8 @@ Real FunctionalFormKernel::evaluateBoundaryFace(const assembly::AssemblyContext&
                                                 LocalIndex q,
                                                 int /*boundary_marker*/)
 {
+    ensureInterpreterLoweredIndexedAccess();
+
     if (domain_ != Domain::BoundaryFace) {
         return 0.0;
     }

@@ -89,8 +89,14 @@ AssemblyResult SymbolicAssembler::assembleResidualAndJacobian(const forms::FormE
 {
     setCurrentSolution(solution);
     auto ir = impl_->compiler.compileResidual(residual_form);
-    std::shared_ptr<AssemblyKernel> kernel =
-        std::make_shared<forms::NonlinearFormKernel>(std::move(ir), impl_->sym_options.ad_mode);
+    std::shared_ptr<AssemblyKernel> kernel{};
+    if (impl_->sym_options.use_symbolic_tangent) {
+        kernel = std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(ir), forms::NonlinearKernelOutput::Both);
+        // Symbolic differentiation of inlinable constitutives requires setup-time expansion.
+        kernel->resolveInlinableConstitutives();
+    } else {
+        kernel = std::make_shared<forms::NonlinearFormKernel>(std::move(ir), impl_->sym_options.ad_mode);
+    }
     if (impl_->sym_options.jit.enable) {
         kernel = std::make_shared<forms::jit::JITKernelWrapper>(kernel, impl_->sym_options.jit);
     }

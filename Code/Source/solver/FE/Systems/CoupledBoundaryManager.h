@@ -68,6 +68,15 @@ public:
     void addCoupledRobinBC(constraints::CoupledRobinBC bc);
     void addAuxiliaryState(AuxiliaryStateRegistration registration);
 
+    /**
+     * @brief Compiler/JIT options for boundary functional kernels
+     *
+     * By default, coupled boundary integrals use the interpreter functional kernels.
+     * When `options.jit.enable=true`, boundary functionals may be JIT-compiled with
+     * interpreter fallback.
+     */
+    void setCompilerOptions(forms::SymbolicOptions options);
+
     // ---------------------------------------------------------------------
     // Parameter contract integration
     // ---------------------------------------------------------------------
@@ -186,6 +195,8 @@ private:
     forms::BoundaryFunctionalResults integrals_{};
     AuxiliaryState aux_state_{};
     constraints::CoupledBCContext ctx_{integrals_, aux_state_, 0.0, 0.0};
+
+    forms::SymbolicOptions compiler_options_{};
 };
 
 } // namespace systems

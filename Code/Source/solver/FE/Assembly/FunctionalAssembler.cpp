@@ -1238,16 +1238,12 @@ Real FunctionalAssembler::assembleBoundaryCore(
                 }
             }
 
-            // Integrate over face
-            for (LocalIndex q = 0; q < context_.numQuadraturePoints(); ++q) {
-                Real value = kernel.evaluateBoundaryFace(context_, q, boundary_marker);
-                Real jxw = context_.integrationWeight(q);
+            const Real face_value = kernel.evaluateBoundaryFaceTotal(context_, boundary_marker);
 
-                if (options_.use_kahan_summation) {
-                    accumulator.add(value * jxw);
-                } else {
-                    total += value * jxw;
-                }
+            if (options_.use_kahan_summation) {
+                accumulator.add(face_value);
+            } else {
+                total += face_value;
             }
 
             result.faces_processed++;

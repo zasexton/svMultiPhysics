@@ -30,13 +30,15 @@
 
 #if SVMP_FE_ENABLE_LLVM_JIT
 #include <llvm/Config/llvm-config.h>
+#include <llvm/ExecutionEngine/ObjectCache.h>
 #include <llvm/ExecutionEngine/JITEventListener.h>
-#include <llvm/ExecutionEngine/Orc/DynamicLibrarySearchGenerator.h>
 #include <llvm/ExecutionEngine/Orc/Core.h>
+#include <llvm/ExecutionEngine/Orc/CompileUtils.h>
+#include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/Orc/IRCompileLayer.h>
 #include <llvm/ExecutionEngine/Orc/IRTransformLayer.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
-#include <llvm/ExecutionEngine/Orc/ObjectCache.h>
+#include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Passes/PassBuilder.h>
@@ -87,7 +89,7 @@ namespace {
     }
 }
 
-class InMemoryObjectCache final : public llvm::orc::ObjectCache {
+class InMemoryObjectCache final : public llvm::ObjectCache {
 public:
     InMemoryObjectCache() = default;
     ~InMemoryObjectCache() override = default;
@@ -125,7 +127,7 @@ private:
     std::unordered_map<std::string, std::unique_ptr<llvm::MemoryBuffer>> objects_by_module_id_{};
 };
 
-class FileSystemObjectCache final : public llvm::orc::ObjectCache {
+class FileSystemObjectCache final : public llvm::ObjectCache {
 public:
     explicit FileSystemObjectCache(std::filesystem::path directory)
         : directory_(std::move(directory))
@@ -144,7 +146,7 @@ public:
         }
 
         const std::string module_id = module->getModuleIdentifier();
-        const auto copy =
+        auto copy =
             llvm::MemoryBuffer::getMemBufferCopy(obj_buffer.getBuffer(), obj_buffer.getBufferIdentifier());
 
         {
@@ -308,20 +310,21 @@ void initializeLLVMOnce()
 }
 
 void configureObjectCache(llvm::orc::IRCompileLayer& compile_layer,
-                          std::unique_ptr<llvm::orc::ObjectCache>& owned_cache)
+                          llvm::ObjectCache* cache)
 {
-    if (!owned_cache) {
+    if (cache == nullptr) {
         return;
     }
 
-    if constexpr (requires(llvm::orc::IRCompileLayer& layer, llvm::orc::ObjectCache* cache) {
-                      layer.setObjectCache(cache);
-                  }) {
-        compile_layer.setObjectCache(owned_cache.get());
-    } else if constexpr (requires(llvm::orc::IRCompileLayer& layer, std::unique_ptr<llvm::orc::ObjectCache> cache) {
-                             layer.setObjectCache(std::move(cache));
-                         }) {
-        compile_layer.setObjectCache(std::move(owned_cache));
+    // LLVM 14: IRCompileLayer has no setObjectCache; configure via the compiler.
+    auto& compiler = compile_layer.getCompiler();
+    if (auto* simple = dynamic_cast<llvm::orc::SimpleCompiler*>(&compiler)) {
+        simple->setObjectCache(cache);
+        return;
+    }
+    if (auto* concurrent = dynamic_cast<llvm::orc::ConcurrentIRCompiler*>(&compiler)) {
+        concurrent->setObjectCache(cache);
+        return;
     }
 }
 
@@ -407,11 +410,8 @@ void configureProcessSymbolResolution(llvm::orc::LLJIT& jit)
                                   llvmErrorToString(generator_expected.takeError()));
     }
 
-    auto err = jit.getMainJITDylib().addGenerator(std::move(*generator_expected));
-    if (err) {
-        FE_THROW(FEException, "LLVM JIT: failed to register process symbol generator: " +
-                                  llvmErrorToString(std::move(err)));
-    }
+    // LLVM 14: addGenerator returns a reference and does not report errors.
+    jit.getMainJITDylib().addGenerator(std::move(*generator_expected));
 }
 
 void registerExternalCallSymbols(llvm::orc::LLJIT& jit)
@@ -421,8 +421,8 @@ void registerExternalCallSymbols(llvm::orc::LLJIT& jit)
 
     auto add = [&](const char* name, auto fn_ptr) {
         symbols[mangle(name)] =
-            llvm::orc::ExecutorSymbolDef(llvm::orc::ExecutorAddr::fromPtr(fn_ptr),
-                                         llvm::JITSymbolFlags::Exported);
+            llvm::JITEvaluatedSymbol(llvm::pointerToJITTargetAddress(fn_ptr),
+                                     llvm::JITSymbolFlags::Exported);
     };
 
     add("svmp_fe_jit_coeff_eval_scalar_v1", &svmp_fe_jit_coeff_eval_scalar_v1);
@@ -448,10 +448,8 @@ void configureEventListeners(llvm::orc::LLJIT& jit,
         gdb_listener.reset(llvm::JITEventListener::createGDBRegistrationListener());
     }
     if (gdb_listener) {
-        if constexpr (requires(llvm::orc::LLJIT& j, llvm::JITEventListener* listener) {
-                          j.getObjLinkingLayer().registerJITEventListener(listener);
-                      }) {
-            jit.getObjLinkingLayer().registerJITEventListener(gdb_listener.get());
+        if (auto* layer = dynamic_cast<llvm::orc::RTDyldObjectLinkingLayer*>(&jit.getObjLinkingLayer())) {
+            layer->registerJITEventListener(*gdb_listener);
         }
     }
 
@@ -468,10 +466,8 @@ void configureEventListeners(llvm::orc::LLJIT& jit,
         perf_listener.reset(listener);
     }
     if (perf_listener) {
-        if constexpr (requires(llvm::orc::LLJIT& j, llvm::JITEventListener* listener) {
-                          j.getObjLinkingLayer().registerJITEventListener(listener);
-                      }) {
-            jit.getObjLinkingLayer().registerJITEventListener(perf_listener.get());
+        if (auto* layer = dynamic_cast<llvm::orc::RTDyldObjectLinkingLayer*>(&jit.getObjLinkingLayer())) {
+            layer->registerJITEventListener(*perf_listener);
         }
     }
 #else
@@ -535,10 +531,10 @@ void configureEventListeners(llvm::orc::LLJIT& jit,
 struct JITEngine::Impl {
 #if SVMP_FE_ENABLE_LLVM_JIT
     JITOptions options{};
-    std::unique_ptr<llvm::orc::LLJIT> jit{};
-    std::unique_ptr<llvm::orc::ObjectCache> object_cache{};
     std::unique_ptr<llvm::JITEventListener> gdb_listener{};
     std::unique_ptr<llvm::JITEventListener> perf_listener{};
+    std::unique_ptr<llvm::ObjectCache> object_cache{};
+    std::unique_ptr<llvm::orc::LLJIT> jit{};
     std::string target_triple{};
     std::string data_layout{};
     std::string cpu_name{};
@@ -572,10 +568,10 @@ std::unique_ptr<JITEngine> JITEngine::create(const JITOptions& options)
 
         if (!options.cache_directory.empty()) {
             engine->impl_->object_cache = std::make_unique<FileSystemObjectCache>(options.cache_directory);
-            configureObjectCache(engine->impl_->jit->getIRCompileLayer(), engine->impl_->object_cache);
+            configureObjectCache(engine->impl_->jit->getIRCompileLayer(), engine->impl_->object_cache.get());
         } else if (options.cache_kernels) {
             engine->impl_->object_cache = std::make_unique<InMemoryObjectCache>();
-            configureObjectCache(engine->impl_->jit->getIRCompileLayer(), engine->impl_->object_cache);
+            configureObjectCache(engine->impl_->jit->getIRCompileLayer(), engine->impl_->object_cache.get());
         }
 
         FE_LOG_INFO("LLVM JIT: OrcJIT initialized (LLVM " + llvmVersionString() +

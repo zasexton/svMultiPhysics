@@ -195,6 +195,23 @@ struct Builder {
     // hash -> candidate op indices (collision-resolved by structural equality).
     std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> hash_to_ops{};
 
+    // Canonical renumbering for IndexedAccess index ids (Index::id() is not stable across runs).
+    std::unordered_map<int, std::uint16_t> indexed_id_renaming{};
+    std::uint16_t next_indexed_id{0};
+
+    [[nodiscard]] std::uint16_t canonicalizeIndexedId(int id)
+    {
+        if (id < 0) {
+            throw std::invalid_argument("KernelIR: IndexedAccess has negative index id");
+        }
+        if (auto it = indexed_id_renaming.find(id); it != indexed_id_renaming.end()) {
+            return it->second;
+        }
+        const std::uint16_t cid = next_indexed_id++;
+        indexed_id_renaming.emplace(id, cid);
+        return cid;
+    }
+
     [[nodiscard]] std::uint64_t opHash(FormExprType type,
                                        std::uint64_t imm0,
                                        std::uint64_t imm1,
@@ -246,7 +263,42 @@ struct Builder {
             }
         }
 
-        const auto imm = extractImmediate(node);
+        ImmPayload imm{};
+        if (node.type() == FormExprType::IndexedAccess) {
+            const int rank = node.indexRank().value_or(0);
+            const auto ids_opt = node.indexIds();
+            const auto ext_opt = node.indexExtents();
+            if (rank <= 0 || !ids_opt || !ext_opt) {
+                throw std::invalid_argument("KernelIR: IndexedAccess missing index metadata");
+            }
+            if (rank > 4) {
+                throw std::invalid_argument("KernelIR: IndexedAccess rank > 4 is not supported");
+            }
+
+            const auto ids = *ids_opt;
+            const auto ext = *ext_opt;
+
+            std::uint64_t packed_ids = 0;
+            std::uint64_t packed_ext = 0;
+            for (int k = 0; k < rank; ++k) {
+                const int id = ids[static_cast<std::size_t>(k)];
+                const int e = ext[static_cast<std::size_t>(k)];
+                if (e <= 0 || e > 255) {
+                    throw std::invalid_argument("KernelIR: IndexedAccess index extent out of supported range (1..255)");
+                }
+                const auto cid = canonicalizeIndexedId(id);
+                packed_ids |= (static_cast<std::uint64_t>(cid) & 0xffffULL) << (16u * static_cast<std::uint32_t>(k));
+                packed_ext |= (static_cast<std::uint64_t>(static_cast<std::uint8_t>(e)) & 0xffULL)
+                              << (8u * static_cast<std::uint32_t>(k));
+            }
+            packed_ext |= (static_cast<std::uint64_t>(static_cast<std::uint8_t>(rank)) & 0xffULL) << 32u;
+
+            imm.imm0 = packed_ids;
+            imm.imm1 = packed_ext;
+            imm.cacheable = true;
+        } else {
+            imm = extractImmediate(node);
+        }
         result.cacheable = result.cacheable && imm.cacheable;
 
         const std::uint64_t h = opHash(node.type(), imm.imm0, imm.imm1, kid_indices);

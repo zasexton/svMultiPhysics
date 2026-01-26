@@ -74,6 +74,13 @@ bool FormIR::hasInterfaceFaceTerms() const noexcept
 const std::vector<IntegralTerm>& FormIR::terms() const noexcept { return impl_->terms; }
 std::string FormIR::dump() const { return impl_->dump; }
 
+FormIR FormIR::clone() const
+{
+    FormIR out;
+    *out.impl_ = *impl_;
+    return out;
+}
+
 void FormIR::transformIntegrands(const FormExpr::NodeTransform& transform)
 {
     if (!transform) {

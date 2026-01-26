@@ -275,7 +275,11 @@ KernelPtr installResidualForm(
             forms::LinearKernelOutput::Both);
     } else {
         (void)reason; // reserved for future diagnostics/telemetry
-        kernel = std::make_shared<forms::NonlinearFormKernel>(std::move(ir), options.ad_mode);
+        if (options.compiler_options.use_symbolic_tangent) {
+            kernel = std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(ir), forms::NonlinearKernelOutput::Both);
+        } else {
+            kernel = std::make_shared<forms::NonlinearFormKernel>(std::move(ir), options.ad_mode);
+        }
     }
 
     kernel = maybeWrapForJIT(std::move(kernel), options);
@@ -376,7 +380,14 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
                         InvalidArgumentException,
                         "installResidualBlocks: compiled residual block has no integral terms");
 
-            auto kernel = maybeWrapForJIT(std::make_shared<forms::NonlinearFormKernel>(std::move(ir), options.ad_mode), options);
+            KernelPtr kernel{};
+            if (options.compiler_options.use_symbolic_tangent) {
+                kernel = maybeWrapForJIT(std::make_shared<forms::SymbolicNonlinearFormKernel>(
+                                             std::move(ir), forms::NonlinearKernelOutput::Both),
+                                         options);
+            } else {
+                kernel = maybeWrapForJIT(std::make_shared<forms::NonlinearFormKernel>(std::move(ir), options.ad_mode), options);
+            }
             registerKernel(system, op, test_fields[i], trial_fields[j], dispatch, kernel);
             kernels[i][j] = kernel;
         }
@@ -469,9 +480,16 @@ CoupledResidualKernels installCoupledResidual(
                         InvalidArgumentException,
                         "installCoupledResidual: compiled residual has no integral terms");
 
-            auto kernel = maybeWrapForJIT(std::make_shared<forms::NonlinearFormKernel>(
-                                              std::move(ir), options.ad_mode, forms::NonlinearKernelOutput::VectorOnly),
-                                          options);
+            KernelPtr kernel{};
+            if (options.compiler_options.use_symbolic_tangent) {
+                kernel = maybeWrapForJIT(std::make_shared<forms::SymbolicNonlinearFormKernel>(
+                                             std::move(ir), forms::NonlinearKernelOutput::VectorOnly),
+                                         options);
+            } else {
+                kernel = maybeWrapForJIT(std::make_shared<forms::NonlinearFormKernel>(
+                                             std::move(ir), options.ad_mode, forms::NonlinearKernelOutput::VectorOnly),
+                                         options);
+            }
             registerKernel(system, op, test_fields[i], active_trial, dispatch, kernel);
             out.residual[i] = kernel;
         }
@@ -496,9 +514,15 @@ CoupledResidualKernels installCoupledResidual(
                     ? forms::NonlinearKernelOutput::Both
                     : forms::NonlinearKernelOutput::MatrixOnly;
 
-                auto kernel = maybeWrapForJIT(std::make_shared<forms::NonlinearFormKernel>(
-                                                  std::move(ir), options.ad_mode, output),
-                                              options);
+                KernelPtr kernel{};
+                if (options.compiler_options.use_symbolic_tangent) {
+                    kernel = maybeWrapForJIT(std::make_shared<forms::SymbolicNonlinearFormKernel>(std::move(ir), output),
+                                             options);
+                } else {
+                    kernel = maybeWrapForJIT(std::make_shared<forms::NonlinearFormKernel>(
+                                                 std::move(ir), options.ad_mode, output),
+                                             options);
+                }
                 registerKernel(system, op, test_fields[i], trial, dispatch, kernel);
                 out.jacobian_blocks[i][j] = kernel;
                 if (output == forms::NonlinearKernelOutput::Both) {

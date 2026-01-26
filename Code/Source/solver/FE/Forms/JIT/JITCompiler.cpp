@@ -48,6 +48,77 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
     h *= kFNVPrime;
 }
 
+[[nodiscard]] bool containsTestOrTrial(const FormExprNode& node) noexcept
+{
+    if (node.type() == FormExprType::TestFunction || node.type() == FormExprType::TrialFunction) {
+        return true;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsTestOrTrial(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool containsPreviousSolutionRef(const FormExprNode& node) noexcept
+{
+    if (node.type() == FormExprType::PreviousSolutionRef) {
+        return true;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsPreviousSolutionRef(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool sameSpaceSignature(const FormExprNode::SpaceSignature& a,
+                                      const FormExprNode::SpaceSignature& b) noexcept
+{
+    return a.space_type == b.space_type &&
+           a.field_type == b.field_type &&
+           a.continuity == b.continuity &&
+           a.value_dimension == b.value_dimension &&
+           a.topological_dimension == b.topological_dimension &&
+           a.polynomial_order == b.polynomial_order &&
+           a.element_type == b.element_type;
+}
+
+[[nodiscard]] std::optional<FormExprNode::SpaceSignature>
+inferFunctionalTrialSpaceSignature(const FormExprNode& node, bool& out_conflict) noexcept
+{
+    out_conflict = false;
+    std::optional<FormExprNode::SpaceSignature> sig;
+
+    const auto visit = [&](const auto& self, const FormExprNode& n) -> void {
+        if (out_conflict) {
+            return;
+        }
+
+        if (n.type() == FormExprType::DiscreteField || n.type() == FormExprType::StateField) {
+            if (const auto* s = n.spaceSignature()) {
+                if (!sig) {
+                    sig = *s;
+                } else if (!sameSpaceSignature(*sig, *s)) {
+                    out_conflict = true;
+                    return;
+                }
+            }
+        }
+
+        for (const auto& child : n.childrenShared()) {
+            if (child) {
+                self(self, *child);
+            }
+        }
+    };
+
+    visit(visit, node);
+    return sig;
+}
+
 #if SVMP_FE_ENABLE_LLVM_JIT
 [[nodiscard]] std::string toHex(std::uint64_t v)
 {
@@ -313,7 +384,7 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
     };
 
     static std::mutex registry_mutex;
-    static std::unordered_map<CompilerKey, std::weak_ptr<JITCompiler>, CompilerKeyHash> registry;
+    static std::unordered_map<CompilerKey, std::shared_ptr<JITCompiler>, CompilerKeyHash> registry;
 
     CompilerKey key;
     key.optimization_level = options.optimization_level;
@@ -323,9 +394,7 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
 
     std::lock_guard<std::mutex> lock(registry_mutex);
     if (auto it = registry.find(key); it != registry.end()) {
-        if (auto existing = it->second.lock()) {
-            return existing;
-        }
+        return it->second;
     }
 
     JITOptions opt = options;
@@ -445,6 +514,76 @@ JITCompileResult JITCompiler::compile(const FormIR& ir, const ValidationOptions&
     out.ok = true;
     return out;
 #endif
+}
+
+JITCompileResult JITCompiler::compileFunctional(const FormExpr& integrand,
+                                                IntegralDomain domain,
+                                                const ValidationOptions& validation)
+{
+    JITCompileResult out;
+    out.ok = false;
+    out.cacheable = true;
+
+    if (domain != IntegralDomain::Cell && domain != IntegralDomain::Boundary) {
+        out.message = "JITCompiler::compileFunctional: only Cell and Boundary domains are supported";
+        out.cacheable = false;
+        return out;
+    }
+
+    if (!integrand.isValid() || integrand.node() == nullptr) {
+        out.message = "JITCompiler::compileFunctional: invalid integrand";
+        out.cacheable = false;
+        return out;
+    }
+
+    const auto& root = *integrand.node();
+
+    if (containsTestOrTrial(root)) {
+        out.message = "JITCompiler::compileFunctional: integrand contains TestFunction/TrialFunction; functional kernels must use DiscreteField/StateField instead";
+        out.cacheable = false;
+        return out;
+    }
+
+    bool conflict = false;
+    const auto trial_sig = inferFunctionalTrialSpaceSignature(root, conflict);
+    if (conflict) {
+        out.message =
+            "JITCompiler::compileFunctional: multiple distinct DiscreteField/StateField space signatures found; multi-field functional kernels are not supported";
+        out.cacheable = false;
+        return out;
+    }
+
+    if (containsPreviousSolutionRef(root) && !trial_sig.has_value()) {
+        out.message =
+            "JITCompiler::compileFunctional: PreviousSolutionRef requires a DiscreteField/StateField operand (to infer scalar vs vector shape)";
+        out.cacheable = false;
+        return out;
+    }
+
+    FormIR ir;
+    ir.setCompiled(true);
+    ir.setKind(FormKind::Linear);
+    ir.setRequiredData(assembly::RequiredData::None);
+    ir.setFieldRequirements({});
+    ir.setTestSpace(std::nullopt);
+    ir.setTrialSpace(trial_sig);
+    ir.setMaxTimeDerivativeOrder(0);
+
+    IntegralTerm term;
+    term.domain = domain;
+    term.boundary_marker = -1;
+    term.interface_marker = -1;
+    term.time_derivative_order = 0;
+    term.integrand = integrand;
+    term.debug_string = root.toString();
+    term.required_data = assembly::RequiredData::None;
+
+    std::vector<IntegralTerm> terms;
+    terms.push_back(std::move(term));
+    ir.setTerms(std::move(terms));
+    ir.setDump("JIT synthetic functional FormIR");
+
+    return compile(ir, validation);
 }
 
 } // namespace jit

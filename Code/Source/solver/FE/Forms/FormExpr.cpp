@@ -990,18 +990,41 @@ public:
 
     [[nodiscard]] std::string toString() const override
     {
-        if (rank_ == 1) {
-            return child_->toString() + "(" + names_[0] + ")";
+        if (rank_ < 1 || rank_ > 4) {
+            return child_->toString() + "(?)";
         }
-        if (rank_ == 2) {
-            return child_->toString() + "(" + names_[0] + "," + names_[1] + ")";
+
+        std::string out = child_->toString();
+        out += "_{";
+        for (int k = 0; k < rank_; ++k) {
+            const auto& nm = names_[static_cast<std::size_t>(k)];
+            if (!nm.empty()) {
+                out += nm;
+                continue;
+            }
+            const int id = ids_[static_cast<std::size_t>(k)];
+            if (id >= 0) {
+                out += "i";
+                out += std::to_string(id);
+            } else {
+                out += "?";
+            }
         }
-        return child_->toString() + "(?)";
+        out += "}";
+        return out;
     }
 
     [[nodiscard]] std::optional<int> indexRank() const override { return rank_; }
     [[nodiscard]] std::optional<std::array<int, 4>> indexIds() const override { return ids_; }
     [[nodiscard]] std::optional<std::array<int, 4>> indexExtents() const override { return extents_; }
+    [[nodiscard]] std::optional<std::array<std::string_view, 4>> indexNames() const override
+    {
+        std::array<std::string_view, 4> out{};
+        for (std::size_t k = 0; k < out.size(); ++k) {
+            out[k] = names_[k];
+        }
+        return out;
+    }
 
 private:
     int rank_{0};
@@ -1375,10 +1398,30 @@ FormExpr FormExpr::discreteField(FieldId field, const spaces::FunctionSpace& spa
 
 FormExpr FormExpr::stateField(FieldId field, const spaces::FunctionSpace& space, std::string name)
 {
-    if (field == INVALID_FIELD_ID) {
-        throw std::invalid_argument("FormExpr::stateField: invalid FieldId");
-    }
     return FormExpr(std::make_shared<StateFieldNode>(field, makeSpaceSignature(space), std::move(name)));
+}
+
+FormExpr FormExpr::testFunction(const FormExprNode::SpaceSignature& signature, std::string name)
+{
+    return FormExpr(std::make_shared<TestFunctionNode>(signature, std::move(name)));
+}
+
+FormExpr FormExpr::trialFunction(const FormExprNode::SpaceSignature& signature, std::string name)
+{
+    return FormExpr(std::make_shared<TrialFunctionNode>(signature, std::move(name)));
+}
+
+FormExpr FormExpr::discreteField(FieldId field, const FormExprNode::SpaceSignature& signature, std::string name)
+{
+    if (field == INVALID_FIELD_ID) {
+        throw std::invalid_argument("FormExpr::discreteField: invalid FieldId");
+    }
+    return FormExpr(std::make_shared<DiscreteFieldNode>(field, signature, std::move(name)));
+}
+
+FormExpr FormExpr::stateField(FieldId field, const FormExprNode::SpaceSignature& signature, std::string name)
+{
+    return FormExpr(std::make_shared<StateFieldNode>(field, signature, std::move(name)));
 }
 
 FormExpr FormExpr::coefficient(std::string name, ScalarCoefficient func)
@@ -1837,6 +1880,66 @@ FormExpr FormExpr::operator()(const Index& i, const Index& j) const
     return FormExpr(std::make_shared<IndexedAccessNode>(node_, i, j));
 }
 
+FormExpr FormExpr::operator()(const Index& i, const Index& j, const Index& k) const
+{
+    if (!node_) return {};
+    std::array<int, 4> ids{};
+    std::array<int, 4> ext{};
+    std::array<std::string, 4> names{};
+    ids.fill(-1);
+    ext.fill(-1);
+    ids[0] = i.id();
+    ids[1] = j.id();
+    ids[2] = k.id();
+    ext[0] = i.extent();
+    ext[1] = j.extent();
+    ext[2] = k.extent();
+    names[0] = i.name();
+    names[1] = j.name();
+    names[2] = k.name();
+    return FormExpr(std::make_shared<IndexedAccessNode>(node_, 3, ids, ext, std::move(names)));
+}
+
+FormExpr FormExpr::operator()(const Index& i, const Index& j, const Index& k, const Index& l) const
+{
+    if (!node_) return {};
+    std::array<int, 4> ids{};
+    std::array<int, 4> ext{};
+    std::array<std::string, 4> names{};
+    ids.fill(-1);
+    ext.fill(-1);
+    ids[0] = i.id();
+    ids[1] = j.id();
+    ids[2] = k.id();
+    ids[3] = l.id();
+    ext[0] = i.extent();
+    ext[1] = j.extent();
+    ext[2] = k.extent();
+    ext[3] = l.extent();
+    names[0] = i.name();
+    names[1] = j.name();
+    names[2] = k.name();
+    names[3] = l.name();
+    return FormExpr(std::make_shared<IndexedAccessNode>(node_, 4, ids, ext, std::move(names)));
+}
+
+FormExpr FormExpr::indexedAccessRaw(FormExpr base,
+                                   int rank,
+                                   std::array<int, 4> ids,
+                                   std::array<int, 4> extents)
+{
+    if (!base.node_) return {};
+    if (rank < 1 || rank > 4) {
+        throw std::invalid_argument("FormExpr::indexedAccessRaw: rank must be 1..4");
+    }
+    std::array<std::string, 4> names{};
+    for (std::size_t k = 0; k < names.size(); ++k) {
+        const int id = ids[k];
+        names[k] = (id >= 0) ? ("i" + std::to_string(id)) : std::string{};
+    }
+    return FormExpr(std::make_shared<IndexedAccessNode>(base.node_, rank, std::move(ids), std::move(extents), std::move(names)));
+}
+
 FormExpr FormExpr::transpose() const
 {
     if (!node_) return {};
@@ -2027,9 +2130,15 @@ std::shared_ptr<FormExprNode> transformNodeShared(
                 throw std::logic_error("FormExpr::transformNodes: IndexedAccess missing index metadata");
             }
             std::array<std::string, 4> names{};
-            for (std::size_t k = 0; k < names.size(); ++k) {
-                const int id = (*ids_opt)[k];
-                names[k] = (id >= 0) ? ("i" + std::to_string(id)) : std::string{};
+            if (const auto names_opt = node->indexNames()) {
+                for (std::size_t k = 0; k < names.size(); ++k) {
+                    names[k] = std::string((*names_opt)[k]);
+                }
+            } else {
+                for (std::size_t k = 0; k < names.size(); ++k) {
+                    const int id = (*ids_opt)[k];
+                    names[k] = (id >= 0) ? ("i" + std::to_string(id)) : std::string{};
+                }
             }
             return std::make_shared<IndexedAccessNode>(new_kids[0], rank, *ids_opt, *ext_opt, std::move(names));
         }

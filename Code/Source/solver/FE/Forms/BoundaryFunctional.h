@@ -145,7 +145,16 @@ std::shared_ptr<assembly::FunctionalKernel>
 compileBoundaryFunctionalKernel(const FormExpr& integrand, int boundary_marker);
 
 std::shared_ptr<assembly::FunctionalKernel>
+compileBoundaryFunctionalKernel(const FormExpr& integrand,
+                                int boundary_marker,
+                                const SymbolicOptions& options);
+
+std::shared_ptr<assembly::FunctionalKernel>
 compileBoundaryFunctionalKernel(const BoundaryFunctional& functional);
+
+std::shared_ptr<assembly::FunctionalKernel>
+compileBoundaryFunctionalKernel(const BoundaryFunctional& functional,
+                                const SymbolicOptions& options);
 
 } // namespace forms
 } // namespace FE

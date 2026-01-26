@@ -59,7 +59,7 @@ using SideArgs = assembly::jit::KernelSideArgsV3;
 
 [[nodiscard]] std::array<Real, 3> physicalPointAt(const SideArgs& side, LocalIndex qpt) noexcept
 {
-    if (side.physical_points_xyz == nullptr || qpt < 0) {
+    if (side.physical_points_xyz == nullptr) {
         return {Real(0.0), Real(0.0), Real(0.0)};
     }
     const std::size_t base = static_cast<std::size_t>(qpt) * 3u;
@@ -70,7 +70,7 @@ using SideArgs = assembly::jit::KernelSideArgsV3;
 
 [[nodiscard]] Real integrationWeightAt(const SideArgs& side, LocalIndex qpt) noexcept
 {
-    if (side.integration_weights == nullptr || qpt < 0) {
+    if (side.integration_weights == nullptr) {
         return Real(0.0);
     }
     return side.integration_weights[static_cast<std::size_t>(qpt)];
@@ -82,7 +82,7 @@ struct NonlocalV1 {
 
 const std::byte* stateOldPtrAt(const SideArgs& side, LocalIndex qpt) noexcept
 {
-    if (side.material_state_old_base == nullptr || qpt < 0) {
+    if (side.material_state_old_base == nullptr) {
         return nullptr;
     }
     if (side.material_state_stride_bytes == 0u) {
@@ -95,7 +95,7 @@ const std::byte* stateOldPtrAt(const SideArgs& side, LocalIndex qpt) noexcept
 
 std::byte* stateWorkPtrAt(const SideArgs& side, LocalIndex qpt) noexcept
 {
-    if (side.material_state_work_base == nullptr || qpt < 0) {
+    if (side.material_state_work_base == nullptr) {
         return nullptr;
     }
     if (side.material_state_stride_bytes == 0u) {

@@ -10,6 +10,7 @@
 #include "Core/FEException.h"
 #include "Forms/FormKernels.h"
 #include "Forms/FormIR.h"
+#include "Forms/JIT/JITFunctionalKernelWrapper.h"
 
 #include <utility>
 
@@ -28,6 +29,14 @@ std::vector<assembly::FieldRequirement> analyzeFieldRequirements(const FormExprN
 
 std::shared_ptr<assembly::FunctionalKernel>
 compileBoundaryFunctionalKernel(const FormExpr& integrand, int boundary_marker)
+{
+    return compileBoundaryFunctionalKernel(integrand, boundary_marker, SymbolicOptions{});
+}
+
+std::shared_ptr<assembly::FunctionalKernel>
+compileBoundaryFunctionalKernel(const FormExpr& integrand,
+                                int boundary_marker,
+                                const SymbolicOptions& options)
 {
     FE_THROW_IF(!integrand.isValid(), InvalidArgumentException,
                 "compileBoundaryFunctionalKernel: invalid integrand");
@@ -61,17 +70,34 @@ compileBoundaryFunctionalKernel(const FormExpr& integrand, int boundary_marker)
         required |= fr.required;
     }
 
-    return std::make_shared<FunctionalFormKernel>(
+    auto base = std::make_shared<FunctionalFormKernel>(
         integrand,
         FunctionalFormKernel::Domain::BoundaryFace,
         required,
         field_requirements);
+
+    if (!options.jit.enable) {
+        return base;
+    }
+
+    return std::make_shared<jit::JITFunctionalKernelWrapper>(
+        std::move(base),
+        integrand,
+        jit::JITFunctionalKernelWrapper::Domain::BoundaryFace,
+        options.jit);
 }
 
 std::shared_ptr<assembly::FunctionalKernel>
 compileBoundaryFunctionalKernel(const BoundaryFunctional& functional)
 {
     return compileBoundaryFunctionalKernel(functional.integrand, functional.boundary_marker);
+}
+
+std::shared_ptr<assembly::FunctionalKernel>
+compileBoundaryFunctionalKernel(const BoundaryFunctional& functional,
+                                const SymbolicOptions& options)
+{
+    return compileBoundaryFunctionalKernel(functional.integrand, functional.boundary_marker, options);
 }
 
 } // namespace forms

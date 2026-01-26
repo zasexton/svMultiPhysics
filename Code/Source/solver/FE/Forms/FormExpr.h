@@ -61,6 +61,7 @@ struct JITOptions {
  */
 struct SymbolicOptions {
     ADMode ad_mode{ADMode::None};
+    bool use_symbolic_tangent{false};
     JITOptions jit{};
     bool simplify_expressions{true};
     bool exploit_sparsity{true};
@@ -227,6 +228,7 @@ public:
     [[nodiscard]] virtual std::optional<int> indexRank() const { return std::nullopt; }
     [[nodiscard]] virtual std::optional<std::array<int, 4>> indexIds() const { return std::nullopt; }
     [[nodiscard]] virtual std::optional<std::array<int, 4>> indexExtents() const { return std::nullopt; }
+    [[nodiscard]] virtual std::optional<std::array<std::string_view, 4>> indexNames() const { return std::nullopt; }
     [[nodiscard]] virtual std::optional<int> constitutiveOutputIndex() const { return std::nullopt; }
     [[nodiscard]] virtual const SpaceSignature* spaceSignature() const { return nullptr; }
     [[nodiscard]] virtual std::optional<int> timeDerivativeOrder() const { return std::nullopt; }
@@ -277,6 +279,12 @@ public:
     static FormExpr trialFunction(const spaces::FunctionSpace& space, std::string name = "u");
     static FormExpr discreteField(FieldId field, const spaces::FunctionSpace& space, std::string name = "u");
     static FormExpr stateField(FieldId field, const spaces::FunctionSpace& space, std::string name = "u");
+
+    // Signature-based overloads (for tooling/transforms that do not have a FunctionSpace instance).
+    static FormExpr testFunction(const FormExprNode::SpaceSignature& signature, std::string name = "v");
+    static FormExpr trialFunction(const FormExprNode::SpaceSignature& signature, std::string name = "u");
+    static FormExpr discreteField(FieldId field, const FormExprNode::SpaceSignature& signature, std::string name = "u");
+    static FormExpr stateField(FieldId field, const FormExprNode::SpaceSignature& signature, std::string name = "u");
 
     // NOTE: Callback-based coefficients are supported for interpreter/fallback paths,
     // but are not "JIT-fast" (opaque call boundary; no inlining/vectorization).
@@ -367,6 +375,16 @@ public:
     [[nodiscard]] FormExpr component(int i, int j = -1) const;
     [[nodiscard]] FormExpr operator()(const Index& i) const;
     [[nodiscard]] FormExpr operator()(const Index& i, const Index& j) const;
+    [[nodiscard]] FormExpr operator()(const Index& i, const Index& j, const Index& k) const;
+    [[nodiscard]] FormExpr operator()(const Index& i, const Index& j, const Index& k, const Index& l) const;
+
+    // Advanced: construct an IndexedAccess node with explicit index metadata.
+    // This is intended for tensor-calculus transforms that must preserve
+    // symbolic indices without relying on `forms::Index`'s global id counter.
+    static FormExpr indexedAccessRaw(FormExpr base,
+                                     int rank,
+                                     std::array<int, 4> ids,
+                                     std::array<int, 4> extents);
 
     // ---- Tensor ops / scalar functions ----
     [[nodiscard]] FormExpr transpose() const;

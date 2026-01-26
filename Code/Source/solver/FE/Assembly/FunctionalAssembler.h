@@ -206,6 +206,24 @@ public:
     }
 
     /**
+     * @brief Evaluate over entire boundary face (alternative interface)
+     *
+     * Default implementation sums point-wise values multiplied by integration weights (JxW).
+     *
+     * @param ctx Assembly context for face
+     * @param boundary_marker Boundary label
+     * @return Total contribution from this face (already weighted)
+     */
+    [[nodiscard]] virtual Real evaluateBoundaryFaceTotal(const AssemblyContext& ctx,
+                                                         int boundary_marker) {
+        Real sum = 0.0;
+        for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+            sum += evaluateBoundaryFace(ctx, q, boundary_marker) * ctx.integrationWeight(q);
+        }
+        return sum;
+    }
+
+    /**
      * @brief Check if kernel supports boundary face integration
      */
     [[nodiscard]] virtual bool hasBoundaryFace() const noexcept { return false; }

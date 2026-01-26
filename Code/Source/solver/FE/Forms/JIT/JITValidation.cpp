@@ -8,6 +8,7 @@
 #include "Forms/JIT/JITValidation.h"
 
 #include "Core/FEException.h"
+#include "Forms/Tensor/TensorContraction.h"
 
 #include <stdexcept>
 #include <string>
@@ -45,6 +46,16 @@ namespace {
     return out;
 }
 
+[[nodiscard]] std::string formatIndexList(const std::vector<forms::tensor::ContractionAnalysis::IndexInfo>& indices)
+{
+    std::string out;
+    for (std::size_t k = 0; k < indices.size(); ++k) {
+        if (k > 0) out += ", ";
+        out += indices[k].name.empty() ? ("i" + std::to_string(indices[k].id)) : indices[k].name;
+    }
+    return out;
+}
+
 } // namespace
 
 ValidationResult canCompile(const FormExpr& integrand, const ValidationOptions& options)
@@ -64,6 +75,7 @@ ValidationResult canCompile(const FormExpr& integrand, const ValidationOptions& 
     }
 
     const auto& root = *integrand.node();
+    bool saw_indexed_access = false;
 
     const auto visit = [&](const auto& self, const FormExprNode& n) -> void {
         if (!out.ok) return;
@@ -90,11 +102,9 @@ ValidationResult canCompile(const FormExpr& integrand, const ValidationOptions& 
                 out.first_issue = issue(n, "JIT: measure nodes (dx/ds/dS/dI) are not valid in integrands");
                 return;
 
-            // Einstein notation must be lowered prior to kernel lowering.
             case FormExprType::IndexedAccess:
-                out.ok = false;
-                out.first_issue = issue(n, "JIT: IndexedAccess must be lowered (call forms::einsum)");
-                return;
+                saw_indexed_access = true;
+                break;
 
             default:
                 break;
@@ -137,6 +147,30 @@ ValidationResult canCompile(const FormExpr& integrand, const ValidationOptions& 
     };
 
     visit(visit, root);
+
+    if (out.ok && saw_indexed_access) {
+        const auto a = forms::tensor::analyzeContractions(integrand);
+        if (!a.ok) {
+            out.ok = false;
+            out.first_issue = ValidationIssue{
+                .type = FormExprType::IndexedAccess,
+                .message = "JIT: invalid Einstein-index usage: " + a.message,
+                .subexpr = integrand.toString(),
+            };
+            return out;
+        }
+        if (!a.free_indices.empty()) {
+            out.ok = false;
+            out.first_issue = ValidationIssue{
+                .type = FormExprType::IndexedAccess,
+                .message = "JIT: result has free indices {" + formatIndexList(a.free_indices) +
+                           "} but expected scalar output (integrand must be fully contracted)",
+                .subexpr = integrand.toString(),
+            };
+            return out;
+        }
+    }
+
     return out;
 }
 

@@ -6,10 +6,14 @@
  * @brief Basic index objects for UFL-like Einstein notation in FE/Forms
  *
  * This file defines a minimal Index/IndexSet vocabulary for building indexed
- * expressions (e.g., `A(i,j)`) and then lowering them via `forms::einsum(...)`.
+ * expressions (e.g., `A(i,j)`).
  *
- * Important: Indexed expressions are symbolic-only and must be lowered before
- * compilation/assembly.
+ * Default path: call `forms::einsum(expr)` to lower indexed expressions into an
+ * explicit component-wise sum before compilation/assembly.
+ *
+ * LLVM JIT tensor-calculus path: when enabled, fully-contracted indexed
+ * expressions may be lowered to compact loop-based kernels without scalar-term
+ * expansion (see `Forms/JIT/LLVM_JIT_IMPLEMENTATION_CHECKLIST.md`).
  */
 
 #include <string>
@@ -58,4 +62,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_FORMS_INDEX_H
-

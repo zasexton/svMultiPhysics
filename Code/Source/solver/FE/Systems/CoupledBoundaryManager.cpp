@@ -83,6 +83,17 @@ void CoupledBoundaryManager::requireSetup() const
                 "CoupledBoundaryManager: system.setup() has not been called");
 }
 
+void CoupledBoundaryManager::setCompilerOptions(forms::SymbolicOptions options)
+{
+    compiler_options_ = std::move(options);
+
+    // Invalidate any already-compiled boundary functional kernels so they can be
+    // recompiled under the updated options on demand.
+    for (auto& entry : functionals_) {
+        entry.kernel.reset();
+    }
+}
+
 void CoupledBoundaryManager::addBoundaryFunctional(forms::BoundaryFunctional functional)
 {
     FE_THROW_IF(functional.name.empty(), InvalidArgumentException,
@@ -261,6 +272,7 @@ void CoupledBoundaryManager::resolveParameterSlots(
 
     for (auto& entry : functionals_) {
         entry.def.integrand = resolve_expr(entry.def.integrand, "CoupledBoundaryManager::functionals");
+        entry.kernel.reset();
     }
     for (auto& reg : aux_registrations_) {
         reg.rhs = resolve_expr(reg.rhs, "CoupledBoundaryManager::aux_state_rhs");
@@ -277,7 +289,7 @@ void CoupledBoundaryManager::compileFunctionalIfNeeded(const forms::BoundaryFunc
                 "CoupledBoundaryManager: unknown boundary functional '" + functional.name + "'");
     auto& entry = functionals_.at(it->second);
     if (entry.kernel) return;
-    entry.kernel = forms::compileBoundaryFunctionalKernel(entry.def);
+    entry.kernel = forms::compileBoundaryFunctionalKernel(entry.def, compiler_options_);
 }
 
 Real CoupledBoundaryManager::boundaryMeasure(int boundary_marker, const SystemStateView& state)
