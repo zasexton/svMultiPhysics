@@ -21,7 +21,7 @@ It is intentionally broader than what `FE/Forms` will implement immediately. Ite
   - algebra: unary `-`, `+/-/*//`, `pow`, `min/max`, comparisons (`<,<=,>,>=,==,!=`), `conditional`,
   - calculus: `grad` (trial/test/scalar coeff), `div`/`curl` (vector trial/test + vector coeff), `H(·)` / `hessian(·)` (scalar terminals), `laplacian(u)=trace(H(u))` (helper for scalar terminals),
   - temporal: `dt(u,k)` (continuous-time operator; symbolic-only and requires a transient time-integration context to assemble),
-  - indexing: `component(i[,j])`, plus Einstein-style indexed access `A(i[,j])` + lowering via `Index` / `IndexSet` and `einsum(expr)` (fully-contracted scalar expressions only),
+  - indexing: `component(i[,j])`, plus Einstein-style indexed access `A(i[,j])` + lowering via `Index` / `IndexSet` and `einsum(expr)` (supports scalar output and vector/matrix output via up to 2 free indices),
   - tensor ops: `transpose`, `trace`, `det`, `inv`, `cofactor`, `sym`, `skew`, `dev`, `norm`, `normalize`, `cross`, and `doubleContraction` (including rank-4 : rank-2 → rank-2),
   - DG: `jump`, `avg`, and explicit trace restrictions `expr.minus()` / `expr.plus()`.
 - Measures: `.dx()`, `.ds(boundary_marker)`, `.dS()`.

@@ -9,6 +9,7 @@
 
 #include "Core/FEException.h"
 
+#include <algorithm>
 #include <unordered_map>
 #include <stdexcept>
 
@@ -21,6 +22,7 @@ namespace {
 struct IndexUse {
     int extent{0};
     int count{0};
+    std::size_t first_occurrence{0};
 };
 
 struct IndexAssignment {
@@ -267,7 +269,8 @@ FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
 }
 
 void collectIndexUses(const FormExprNode& node,
-                      std::unordered_map<int, IndexUse>& uses)
+                      std::unordered_map<int, IndexUse>& uses,
+                      std::size_t& visit_counter)
 {
     if (node.type() == FormExprType::IndexedAccess) {
         const int rank = node.indexRank().value_or(0);
@@ -280,11 +283,16 @@ void collectIndexUses(const FormExprNode& node,
         const auto ext = *ext_opt;
 
         for (int k = 0; k < rank; ++k) {
+            ++visit_counter;
             const int id = ids[static_cast<std::size_t>(k)];
+            if (id < 0) {
+                throw std::invalid_argument("einsum: invalid (negative) index id");
+            }
             const int e = ext[static_cast<std::size_t>(k)];
             auto& u = uses[id];
             if (u.extent == 0) {
                 u.extent = e;
+                u.first_occurrence = visit_counter;
             } else if (u.extent != e) {
                 throw std::invalid_argument("einsum: inconsistent index extents for a repeated index");
             }
@@ -293,7 +301,7 @@ void collectIndexUses(const FormExprNode& node,
     }
 
     for (const auto& child : node.childrenShared()) {
-        if (child) collectIndexUses(*child, uses);
+        if (child) collectIndexUses(*child, uses, visit_counter);
     }
 }
 
@@ -304,59 +312,133 @@ FormExpr einsum(const FormExpr& expr)
     if (!expr.isValid()) return {};
 
     std::unordered_map<int, IndexUse> uses;
-    collectIndexUses(*expr.node(), uses);
+    std::size_t visit_counter = 0;
+    collectIndexUses(*expr.node(), uses, visit_counter);
     if (uses.empty()) {
         return expr; // nothing to lower
     }
 
+    struct IndexInfo {
+        int id{0};
+        int extent{0};
+        int count{0};
+        std::size_t first_occurrence{0};
+    };
+
+    std::vector<IndexInfo> indices;
+    indices.reserve(uses.size());
+    for (const auto& [id, u] : uses) {
+        indices.push_back(IndexInfo{
+            .id = id,
+            .extent = u.extent,
+            .count = u.count,
+            .first_occurrence = u.first_occurrence,
+        });
+    }
+    std::sort(indices.begin(), indices.end(),
+              [](const IndexInfo& a, const IndexInfo& b) {
+                  if (a.first_occurrence != b.first_occurrence) return a.first_occurrence < b.first_occurrence;
+                  return a.id < b.id;
+              });
+
+    std::vector<int> free_ids;
+    std::vector<int> free_extents;
     std::vector<int> bound_ids;
     std::vector<int> bound_extents;
-    bound_ids.reserve(uses.size());
-    bound_extents.reserve(uses.size());
+    free_ids.reserve(indices.size());
+    free_extents.reserve(indices.size());
+    bound_ids.reserve(indices.size());
+    bound_extents.reserve(indices.size());
 
-    for (const auto& [id, u] : uses) {
+    for (const auto& u : indices) {
+        if (u.count == 1) {
+            free_ids.push_back(u.id);
+            free_extents.push_back(u.extent);
+            continue;
+        }
         if (u.count == 2) {
-            bound_ids.push_back(id);
+            bound_ids.push_back(u.id);
             bound_extents.push_back(u.extent);
             continue;
         }
-        if (u.count == 1) {
-            throw std::invalid_argument("einsum: free indices are not supported (expression must be fully contracted)");
-        }
-        throw std::invalid_argument("einsum: an index must appear exactly twice (bound) or not at all");
+        throw std::invalid_argument("einsum: an index must appear exactly twice (bound) or once (free)");
     }
 
-    FormExpr sum{};
-    bool first = true;
+    if (free_ids.size() > 2u) {
+        throw std::invalid_argument("einsum: more than two free indices is not supported");
+    }
 
-    IndexAssignment assignment;
+    const auto sumOverBound = [&](IndexAssignment& assignment) -> FormExpr {
+        FormExpr sum{};
+        bool first = true;
 
-    const auto recurse = [&](const auto& self, std::size_t k) -> void {
-        if (k == bound_ids.size()) {
-            const auto term = rebuildWithIndexSubstitution(expr.nodeShared(), assignment);
-            if (first) {
-                sum = term;
-                first = false;
-            } else {
-                sum = sum + term;
+        const auto recurse = [&](const auto& self, std::size_t k) -> void {
+            if (k == bound_ids.size()) {
+                const auto term = rebuildWithIndexSubstitution(expr.nodeShared(), assignment);
+                if (first) {
+                    sum = term;
+                    first = false;
+                } else {
+                    sum = sum + term;
+                }
+                return;
             }
-            return;
-        }
 
-        const int id = bound_ids[k];
-        const int extent = bound_extents[k];
-        if (extent <= 0) {
-            throw std::invalid_argument("einsum: invalid index extent");
-        }
-        for (int v = 0; v < extent; ++v) {
-            assignment.id_to_value[id] = v;
-            self(self, k + 1);
-        }
-        assignment.id_to_value.erase(id);
+            const int id = bound_ids[k];
+            const int extent = bound_extents[k];
+            if (extent <= 0) {
+                throw std::invalid_argument("einsum: invalid index extent");
+            }
+            for (int v = 0; v < extent; ++v) {
+                assignment.id_to_value[id] = v;
+                self(self, k + 1);
+            }
+            assignment.id_to_value.erase(id);
+        };
+
+        recurse(recurse, 0);
+        return sum;
     };
 
-    recurse(recurse, 0);
-    return sum;
+    if (free_ids.empty()) {
+        IndexAssignment assignment;
+        return sumOverBound(assignment);
+    }
+
+    if (free_ids.size() == 1u) {
+        const int extent0 = free_extents[0];
+        if (extent0 <= 0) {
+            throw std::invalid_argument("einsum: invalid free-index extent");
+        }
+        std::vector<FormExpr> components;
+        components.reserve(static_cast<std::size_t>(extent0));
+        for (int v0 = 0; v0 < extent0; ++v0) {
+            IndexAssignment assignment;
+            assignment.id_to_value[free_ids[0]] = v0;
+            components.push_back(sumOverBound(assignment));
+        }
+        return FormExpr::asVector(std::move(components));
+    }
+
+    const int extent0 = free_extents[0];
+    const int extent1 = free_extents[1];
+    if (extent0 <= 0 || extent1 <= 0) {
+        throw std::invalid_argument("einsum: invalid free-index extent");
+    }
+    std::vector<std::vector<FormExpr>> rows;
+    rows.reserve(static_cast<std::size_t>(extent0));
+    for (int v0 = 0; v0 < extent0; ++v0) {
+        std::vector<FormExpr> row;
+        row.reserve(static_cast<std::size_t>(extent1));
+        for (int v1 = 0; v1 < extent1; ++v1) {
+            IndexAssignment assignment;
+            assignment.id_to_value[free_ids[0]] = v0;
+            assignment.id_to_value[free_ids[1]] = v1;
+            row.push_back(sumOverBound(assignment));
+        }
+        rows.push_back(std::move(row));
+    }
+    return FormExpr::asTensor(std::move(rows));
 }
 
 } // namespace forms

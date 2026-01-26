@@ -13,7 +13,9 @@
 #include "Forms/FormKernels.h"
 #include "Forms/Index.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Spaces/HCurlSpace.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/HDivSpace.h"
 #include "Spaces/ProductSpace.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
@@ -146,10 +148,180 @@ TEST(IndexedAccessJIT, InteriorFaceVectorContractionMatchesInterpreter)
 
     expectDenseNear(A_jit, A_interp, 1e-12);
 }
+
+TEST(IndexedAccessJIT, HCurlCellValueContractionMatchesInterpreter)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/0);
+    auto dof_map = makeSingleCellDofMap(static_cast<GlobalIndex>(space.dofs_per_element()));
+
+    SymbolicOptions sym_opts;
+    sym_opts.jit.enable = true;
+
+    FormCompiler compiler(sym_opts);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    const Index i("i");
+    const auto form = (u(i) * v(i)).dx();
+
+    auto ir_interp = compiler.compileBilinear(form);
+    auto ir_jit = compiler.compileBilinear(form);
+
+    auto interp_kernel = std::make_shared<FormKernel>(std::move(ir_interp));
+
+    auto jit_fallback = std::make_shared<FormKernel>(std::move(ir_jit));
+    forms::JITOptions jit_opts;
+    jit_opts.enable = true;
+    jit_opts.optimization_level = 2;
+    jit_opts.vectorize = true;
+    forms::jit::JITKernelWrapper jit_kernel(jit_fallback, jit_opts);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    assembly::DenseMatrixView A_interp(static_cast<GlobalIndex>(space.dofs_per_element()));
+    A_interp.zero();
+    (void)assembler.assembleMatrix(mesh, space, space, *interp_kernel, A_interp);
+
+    assembly::DenseMatrixView A_jit(static_cast<GlobalIndex>(space.dofs_per_element()));
+    A_jit.zero();
+    (void)assembler.assembleMatrix(mesh, space, space, jit_kernel, A_jit);
+
+    expectDenseNear(A_jit, A_interp, 1e-12);
+}
+
+TEST(IndexedAccessJIT, HCurlCellCurlContractionMatchesInterpreter)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::HCurlSpace space(ElementType::Tetra4, /*order=*/0);
+    auto dof_map = makeSingleCellDofMap(static_cast<GlobalIndex>(space.dofs_per_element()));
+
+    SymbolicOptions sym_opts;
+    sym_opts.jit.enable = true;
+
+    FormCompiler compiler(sym_opts);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    const Index i("i");
+    const auto form = (curl(u)(i) * curl(v)(i)).dx();
+
+    auto ir_interp = compiler.compileBilinear(form);
+    auto ir_jit = compiler.compileBilinear(form);
+
+    auto interp_kernel = std::make_shared<FormKernel>(std::move(ir_interp));
+
+    auto jit_fallback = std::make_shared<FormKernel>(std::move(ir_jit));
+    forms::JITOptions jit_opts;
+    jit_opts.enable = true;
+    jit_opts.optimization_level = 2;
+    jit_opts.vectorize = true;
+    forms::jit::JITKernelWrapper jit_kernel(jit_fallback, jit_opts);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    assembly::DenseMatrixView A_interp(static_cast<GlobalIndex>(space.dofs_per_element()));
+    A_interp.zero();
+    (void)assembler.assembleMatrix(mesh, space, space, *interp_kernel, A_interp);
+
+    assembly::DenseMatrixView A_jit(static_cast<GlobalIndex>(space.dofs_per_element()));
+    A_jit.zero();
+    (void)assembler.assembleMatrix(mesh, space, space, jit_kernel, A_jit);
+
+    expectDenseNear(A_jit, A_interp, 1e-12);
+}
+
+TEST(IndexedAccessJIT, HDivCellValueContractionMatchesInterpreter)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::HDivSpace space(ElementType::Tetra4, /*order=*/0);
+    auto dof_map = makeSingleCellDofMap(static_cast<GlobalIndex>(space.dofs_per_element()));
+
+    SymbolicOptions sym_opts;
+    sym_opts.jit.enable = true;
+
+    FormCompiler compiler(sym_opts);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    const Index i("i");
+    const auto form = (u(i) * v(i)).dx();
+
+    auto ir_interp = compiler.compileBilinear(form);
+    auto ir_jit = compiler.compileBilinear(form);
+
+    auto interp_kernel = std::make_shared<FormKernel>(std::move(ir_interp));
+
+    auto jit_fallback = std::make_shared<FormKernel>(std::move(ir_jit));
+    forms::JITOptions jit_opts;
+    jit_opts.enable = true;
+    jit_opts.optimization_level = 2;
+    jit_opts.vectorize = true;
+    forms::jit::JITKernelWrapper jit_kernel(jit_fallback, jit_opts);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    assembly::DenseMatrixView A_interp(static_cast<GlobalIndex>(space.dofs_per_element()));
+    A_interp.zero();
+    (void)assembler.assembleMatrix(mesh, space, space, *interp_kernel, A_interp);
+
+    assembly::DenseMatrixView A_jit(static_cast<GlobalIndex>(space.dofs_per_element()));
+    A_jit.zero();
+    (void)assembler.assembleMatrix(mesh, space, space, jit_kernel, A_jit);
+
+    expectDenseNear(A_jit, A_interp, 1e-12);
+}
+
+TEST(IndexedAccessJIT, HDivCellDivMatchesInterpreter)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::HDivSpace space(ElementType::Tetra4, /*order=*/0);
+    auto dof_map = makeSingleCellDofMap(static_cast<GlobalIndex>(space.dofs_per_element()));
+
+    SymbolicOptions sym_opts;
+    sym_opts.jit.enable = true;
+
+    FormCompiler compiler(sym_opts);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    const auto form = (div(u) * div(v)).dx();
+
+    auto ir_interp = compiler.compileBilinear(form);
+    auto ir_jit = compiler.compileBilinear(form);
+
+    auto interp_kernel = std::make_shared<FormKernel>(std::move(ir_interp));
+
+    auto jit_fallback = std::make_shared<FormKernel>(std::move(ir_jit));
+    forms::JITOptions jit_opts;
+    jit_opts.enable = true;
+    jit_opts.optimization_level = 2;
+    jit_opts.vectorize = true;
+    forms::jit::JITKernelWrapper jit_kernel(jit_fallback, jit_opts);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    assembly::DenseMatrixView A_interp(static_cast<GlobalIndex>(space.dofs_per_element()));
+    A_interp.zero();
+    (void)assembler.assembleMatrix(mesh, space, space, *interp_kernel, A_interp);
+
+    assembly::DenseMatrixView A_jit(static_cast<GlobalIndex>(space.dofs_per_element()));
+    A_jit.zero();
+    (void)assembler.assembleMatrix(mesh, space, space, jit_kernel, A_jit);
+
+    expectDenseNear(A_jit, A_interp, 1e-12);
+}
 #endif
 
 } // namespace test
 } // namespace forms
 } // namespace FE
 } // namespace svmp
-

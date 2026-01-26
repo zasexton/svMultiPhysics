@@ -487,6 +487,23 @@ TEST(FormSpatialDerivativesTest, NestedDerivativesMatchFiniteDifferences)
     EXPECT_LT(grad_div_err_int, 1e-6);
 }
 
+TEST(FormSpatialDerivativesTest, CurlOfMatrixCompositeMatchesReference)
+{
+    // A(x) = x ⊗ x, with A_{ij} = x_i x_j.
+    // Define curl row-wise: (curl A)_{i*} = curl(A_{i*}).
+    // For i=0, (curl A)_{0,1} = -x_2 on a 3D domain.
+    const auto x = FormExpr::coordinate();
+    const auto A = outer(x, x);
+    const auto c01 = component(curl(A), 0, 1);
+    const auto z = component(x, 2);
+
+    const auto diff = c01 + z;
+    const auto error = diff * diff;
+
+    const Real err_int = assembleErrorIntegral(error);
+    EXPECT_LT(err_int, 1e-12);
+}
+
 } // namespace test
 } // namespace forms
 } // namespace FE

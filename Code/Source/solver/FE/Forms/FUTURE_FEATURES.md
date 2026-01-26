@@ -23,8 +23,9 @@ For an extensive “future PDE vocabulary” checklist (including cross-module c
   - Complex support is provided via explicit real/imag splitting and 2×2 real block lifting (`FE/Forms/Complex.h`).
   - Remaining work: richer complex algebra ergonomics (e.g., complex trial/test handles, conjugation conventions) and/or true complex backends.
 - Einstein index notation:
-  - Basic fully-contracted Einstein summation is implemented via `Index` / `IndexSet`, indexed access `A(i[,j])`, and `einsum(expr)` lowering.
-  - Remaining work: support free indices (vector/matrix-valued results), generalized contraction patterns, and higher-rank indexing.
+  - Einstein summation lowering is implemented via `Index` / `IndexSet`, indexed access `A(i[,j])`, and `einsum(expr)`.
+  - Supported today: scalar output (fully contracted) and vector/matrix outputs via up to 2 free indices.
+  - Remaining work: generalized contraction patterns (beyond implicit sums), higher-rank indexing (rank > 2), and richer tensor calculus (symmetry/metric-aware simplification).
 - Additional nonlinear scalar functions and their AD rules (`sin/cos/tan`, `atan2`, `tanh`, etc.) and more robust handling of non-smooth ops (`min/max`, `conditional`) near switching points.
 - Vector-valued trial/test functions are implemented via `spaces::ProductSpace` (vector-valued `TrialFunction(V)` / `TestFunction(V)`).
   Remaining work: tensor-valued unknowns, mixed/enriched spaces as true mixed arguments (beyond per-block compilation), and richer component/subspace selection.

@@ -22,9 +22,13 @@ namespace forms {
  * @brief Lower indexed expressions via Einstein summation
  *
  * Current limitations (intentional, to keep lowering unambiguous):
- * - Indices must be fully contracted (no free indices): result is scalar.
- * - Each index may appear at most twice (standard Einstein convention).
+ * - Each index id may appear exactly twice (bound / summed) or exactly once (free).
+ * - Output rank is limited to <= 2 free indices:
+ *     - 0 free indices: scalar output
+ *     - 1 free index: vector output (`AsVector`)
+ *     - 2 free indices: matrix output (`AsTensor`)
  * - Index ranges are finite (from IndexSet extent; default 3).
+ * - Only rank-1 and rank-2 `IndexedAccess` nodes are supported.
  *
  * @throws std::invalid_argument if the expression contains unsupported indexed patterns.
  */
@@ -35,4 +39,3 @@ namespace forms {
 } // namespace svmp
 
 #endif // SVMP_FE_FORMS_EINSUM_H
-

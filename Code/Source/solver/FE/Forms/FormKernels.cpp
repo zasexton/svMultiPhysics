@@ -3951,8 +3951,54 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 
             const int child_order = order + 1;
             const auto u = evalSpatialJet<Scalar>(*kids[0], env, side, q, child_order);
+
+            if (isMatrixKind<Scalar>(u.value.kind)) {
+                if (order >= 1) {
+                    throw FEException("Forms: grad(curl(matrix)) is not supported (requires rank-4)",
+                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+                }
+
+                const auto rows = u.value.matrixRows();
+                const auto cols = u.value.matrixCols();
+
+                auto d1 = [&](std::size_t row, int comp, int wrt) -> Scalar {
+                    if (row >= rows) return makeScalarConstant<Scalar>(0.0, env);
+                    if (comp < 0 || comp >= static_cast<int>(cols)) return makeScalarConstant<Scalar>(0.0, env);
+                    if (wrt < 0 || wrt >= dim) return makeScalarConstant<Scalar>(0.0, env);
+                    return u.grad.tensor3At(row, static_cast<std::size_t>(comp), static_cast<std::size_t>(wrt));
+                };
+
+                SpatialJet<Scalar> res;
+                res.has_grad = false;
+                res.has_hess = false;
+                res.value.kind = EvalValue<Scalar>::Kind::Matrix;
+                res.value.resizeMatrix(rows, 3u);
+
+                for (std::size_t r = 0; r < rows; ++r) {
+                    for (std::size_t c = 0; c < 3u; ++c) {
+                        res.value.matrixAt(r, c) = makeScalarConstant<Scalar>(0.0, env);
+                    }
+                }
+
+                if (dim == 2) {
+                    // 2D curl(u) = [0, 0, dUy/dx - dUx/dy] (row-wise for matrices)
+                    for (std::size_t r = 0; r < rows; ++r) {
+                        res.value.matrixAt(r, 2u) = s_sub(d1(r, 1, 0), d1(r, 0, 1), env);
+                    }
+                } else if (dim == 3) {
+                    // 3D curl(u) = [dUz/dy - dUy/dz, dUx/dz - dUz/dx, dUy/dx - dUx/dy]
+                    for (std::size_t r = 0; r < rows; ++r) {
+                        res.value.matrixAt(r, 0u) = s_sub(d1(r, 2, 1), d1(r, 1, 2), env);
+                        res.value.matrixAt(r, 1u) = s_sub(d1(r, 0, 2), d1(r, 2, 0), env);
+                        res.value.matrixAt(r, 2u) = s_sub(d1(r, 1, 0), d1(r, 0, 1), env);
+                    }
+                }
+
+                return res;
+            }
+
             if (!isVectorKind<Scalar>(u.value.kind)) {
-                throw FEException("Forms: curl() in spatial jets supports vector-valued operands only",
+                throw FEException("Forms: curl() in spatial jets supports vector- or matrix-valued operands only",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
 

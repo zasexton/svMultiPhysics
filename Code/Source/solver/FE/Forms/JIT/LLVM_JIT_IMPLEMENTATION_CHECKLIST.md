@@ -422,14 +422,14 @@ This section extends the core LLVM JIT plan with a detailed, incremental checkli
 - [x] Add unit tests under `Code/Source/solver/FE/Tests/Unit/Forms/Tensor/`:
   - [x] `test_TensorIndex.cpp` (free/dummy/fixed behavior, variance operations).
   - [x] `test_TensorSymmetry.cpp` (independent component counts and mapping).
-- [ ] Support free indices in tensor expressions:
-  - [ ] `A_{ij} B^j` → vector output (one free index `i`)
-  - [ ] `A_{ik} B^{kj}` → matrix output (two free indices `i`, `j`)
-  - [ ] Validate result shape matches expected test/trial function shape
-- [ ] Support tensor structures for H(curl)/H(div) spaces:
-  - [ ] Piola transformations: covariant vs contravariant mapping
-  - [ ] Curl/div of tensor-valued fields
-  - [ ] Integration with existing `FormExprType::Curl`/`Divergence`
+- [x] Support free indices in tensor expressions:
+  - [x] `A_{ij} B^j` → vector output (one free index `i`)
+  - [x] `A_{ik} B^{kj}` → matrix output (two free indices `i`, `j`)
+  - [x] Validate result shape matches expected test/trial function shape
+- [x] Support tensor structures for H(curl)/H(div) spaces:
+  - [x] Piola transformations: covariant vs contravariant mapping
+  - [x] Curl/div of tensor-valued fields
+  - [x] Integration with existing `FormExprType::Curl`/`Divergence`
   
 ### 14.3 Phase 2 — FormExpr Integration (Index Notation + New Vocabulary)
 - [ ] Extend the `FormExpr` layer to carry tensor-index metadata and symmetry tags where needed (stable printing, hashing, structural equality).
