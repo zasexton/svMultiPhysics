@@ -8,6 +8,7 @@
 #include "Forms/JIT/KernelIR.h"
 
 #include "Core/FEException.h"
+#include "Forms/Tensor/TensorIndex.h"
 
 #include <algorithm>
 #include <bit>
@@ -160,6 +161,32 @@ struct ImmPayload {
             return out;
         }
 
+        case FormExprType::AsVector:
+            // Shape inference uses child_count; no immediate payload needed.
+            return out;
+
+        case FormExprType::AsTensor: {
+            const auto rows = node.tensorRows().value_or(0);
+            const auto cols = node.tensorCols().value_or(0);
+            if (rows <= 0 || cols <= 0) {
+                throw std::invalid_argument("KernelIR: AsTensor missing (rows,cols)");
+            }
+            out.imm0 = static_cast<std::uint64_t>(static_cast<std::uint32_t>(rows)) |
+                       (static_cast<std::uint64_t>(static_cast<std::uint32_t>(cols)) << 32);
+            return out;
+        }
+
+        case FormExprType::SymmetricEigenvalue:
+        case FormExprType::SymmetricEigenvalueDirectionalDerivative:
+        case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA: {
+            const auto which = node.eigenIndex();
+            if (!which) {
+                throw std::invalid_argument("KernelIR: symmetric-eigen node missing eigen index");
+            }
+            out.imm0 = static_cast<std::uint64_t>(static_cast<std::int64_t>(*which));
+            return out;
+        }
+
         case FormExprType::TimeDerivative: {
             const auto order = node.timeDerivativeOrder().value_or(1);
             out.imm0 = static_cast<std::uint64_t>(static_cast<std::int64_t>(order));
@@ -268,6 +295,7 @@ struct Builder {
             const int rank = node.indexRank().value_or(0);
             const auto ids_opt = node.indexIds();
             const auto ext_opt = node.indexExtents();
+            const auto var_opt = node.indexVariances();
             if (rank <= 0 || !ids_opt || !ext_opt) {
                 throw std::invalid_argument("KernelIR: IndexedAccess missing index metadata");
             }
@@ -277,6 +305,11 @@ struct Builder {
 
             const auto ids = *ids_opt;
             const auto ext = *ext_opt;
+            std::array<tensor::IndexVariance, 4> vars{};
+            vars.fill(tensor::IndexVariance::None);
+            if (var_opt) {
+                vars = *var_opt;
+            }
 
             std::uint64_t packed_ids = 0;
             std::uint64_t packed_ext = 0;
@@ -290,6 +323,21 @@ struct Builder {
                 packed_ids |= (static_cast<std::uint64_t>(cid) & 0xffffULL) << (16u * static_cast<std::uint32_t>(k));
                 packed_ext |= (static_cast<std::uint64_t>(static_cast<std::uint8_t>(e)) & 0xffULL)
                               << (8u * static_cast<std::uint32_t>(k));
+
+                // Pack index variances (2 bits per index) in imm1[40..47].
+                std::uint64_t vbits = 0;
+                switch (vars[static_cast<std::size_t>(k)]) {
+                    case tensor::IndexVariance::None:
+                        vbits = 0;
+                        break;
+                    case tensor::IndexVariance::Lower:
+                        vbits = 1;
+                        break;
+                    case tensor::IndexVariance::Upper:
+                        vbits = 2;
+                        break;
+                }
+                packed_ext |= (vbits & 0x3ULL) << (40u + 2u * static_cast<std::uint32_t>(k));
             }
             packed_ext |= (static_cast<std::uint64_t>(static_cast<std::uint8_t>(rank)) & 0xffULL) << 32u;
 

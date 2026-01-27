@@ -17,9 +17,11 @@
 #include "Forms/Einsum.h"
 #include "Forms/JIT/InlinableConstitutiveModel.h"
 #include "Forms/SymbolicDifferentiation.h"
+#include "Forms/Tensor/SpectralEigen.h"
 #include "Forms/Value.h"
 
 #include "Assembly/AssemblyContext.h"
+#include "Math/Eigensolvers.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -6080,6 +6082,126 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                                                               : std::log(a.s);
             return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, v};
         }
+
+        case FormExprType::SymmetricEigenvalue: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (!isMatrixKind<Real>(a.kind)) {
+                throw FEException("Forms: eig_sym() expects a matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || (rows != 2u && rows != 3u)) {
+                throw FEException("Forms: eig_sym() expects a 2x2 or 3x3 square matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto which = static_cast<std::int32_t>(node.eigenIndex().value_or(0));
+            if (rows == 2u) {
+                std::array<double, 4> A{};
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        A[r * 2u + c] = static_cast<double>(a.matrixAt(r, c));
+                    }
+                }
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, static_cast<Real>(svmp_fe_sym_eigenvalue_2x2_v1(A.data(), which))};
+            }
+            std::array<double, 9> A{};
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    A[r * 3u + c] = static_cast<double>(a.matrixAt(r, c));
+                }
+            }
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, static_cast<Real>(svmp_fe_sym_eigenvalue_3x3_v1(A.data(), which))};
+        }
+
+        case FormExprType::SymmetricEigenvalueDirectionalDerivative: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+                throw std::logic_error("Forms: eig_sym_dd() must have 2 children");
+            }
+            const auto a = evalReal(*kids[0], env, side, q);
+            const auto da = evalReal(*kids[1], env, side, q);
+            if (!isMatrixKind<Real>(a.kind) || !isMatrixKind<Real>(da.kind)) {
+                throw FEException("Forms: eig_sym_dd() expects two matrices",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || rows != da.matrixRows() || cols != da.matrixCols() || (rows != 2u && rows != 3u)) {
+                throw FEException("Forms: eig_sym_dd() expects two 2x2 or 3x3 square matrices with matching dims",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto which = static_cast<std::int32_t>(node.eigenIndex().value_or(0));
+            if (rows == 2u) {
+                std::array<double, 4> A{};
+                std::array<double, 4> dA{};
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        A[r * 2u + c] = static_cast<double>(a.matrixAt(r, c));
+                        dA[r * 2u + c] = static_cast<double>(da.matrixAt(r, c));
+                    }
+                }
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, static_cast<Real>(svmp_fe_sym_eigenvalue_dd_2x2_v1(A.data(), dA.data(), which))};
+            }
+            std::array<double, 9> A{};
+            std::array<double, 9> dA{};
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    A[r * 3u + c] = static_cast<double>(a.matrixAt(r, c));
+                    dA[r * 3u + c] = static_cast<double>(da.matrixAt(r, c));
+                }
+            }
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, static_cast<Real>(svmp_fe_sym_eigenvalue_dd_3x3_v1(A.data(), dA.data(), which))};
+        }
+
+        case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 3u || !kids[0] || !kids[1] || !kids[2]) {
+                throw std::logic_error("Forms: eig_sym_ddA() must have 3 children");
+            }
+            const auto a = evalReal(*kids[0], env, side, q);
+            const auto b = evalReal(*kids[1], env, side, q);
+            const auto da = evalReal(*kids[2], env, side, q);
+            if (!isMatrixKind<Real>(a.kind) || !isMatrixKind<Real>(b.kind) || !isMatrixKind<Real>(da.kind)) {
+                throw FEException("Forms: eig_sym_ddA() expects three matrices",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols ||
+                rows != b.matrixRows() || cols != b.matrixCols() ||
+                rows != da.matrixRows() || cols != da.matrixCols() ||
+                (rows != 2u && rows != 3u)) {
+                throw FEException("Forms: eig_sym_ddA() expects three 2x2 or 3x3 square matrices with matching dims",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto which = static_cast<std::int32_t>(node.eigenIndex().value_or(0));
+            if (rows == 2u) {
+                std::array<double, 4> A{};
+                std::array<double, 4> B{};
+                std::array<double, 4> dA{};
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        A[r * 2u + c] = static_cast<double>(a.matrixAt(r, c));
+                        B[r * 2u + c] = static_cast<double>(b.matrixAt(r, c));
+                        dA[r * 2u + c] = static_cast<double>(da.matrixAt(r, c));
+                    }
+                }
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, static_cast<Real>(svmp_fe_sym_eigenvalue_ddA_2x2_v1(A.data(), B.data(), dA.data(), which))};
+            }
+            std::array<double, 9> A{};
+            std::array<double, 9> B{};
+            std::array<double, 9> dA{};
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    A[r * 3u + c] = static_cast<double>(a.matrixAt(r, c));
+                    B[r * 3u + c] = static_cast<double>(b.matrixAt(r, c));
+                    dA[r * 3u + c] = static_cast<double>(da.matrixAt(r, c));
+                }
+            }
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, static_cast<Real>(svmp_fe_sym_eigenvalue_ddA_3x3_v1(A.data(), B.data(), dA.data(), which))};
+        }
+
         case FormExprType::Add:
         case FormExprType::Subtract:
         case FormExprType::Multiply:
@@ -9021,6 +9143,90 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
             else out.s = log(a.s, makeDualConstant(0.0, env.ws->alloc()));
             return out;
         }
+
+        case FormExprType::SymmetricEigenvalue: {
+            const auto a = evalDualUnary(node, env, side, q);
+            if (!isMatrixKind<Dual>(a.kind)) {
+                throw FEException("Forms: eig_sym() expects a matrix (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || (rows != 2u && rows != 3u)) {
+                throw FEException("Forms: eig_sym() expects a 2x2 or 3x3 square matrix (dual)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            FE_THROW_IF(env.ws == nullptr, FEException, "Forms: eig_sym() missing DualWorkspace");
+
+            const std::int32_t which_raw = static_cast<std::int32_t>(node.eigenIndex().value_or(0));
+            const std::int32_t which = (rows == 2u)
+                ? std::clamp(which_raw, std::int32_t(0), std::int32_t(1))
+                : std::clamp(which_raw, std::int32_t(0), std::int32_t(2));
+
+            Dual out = makeDualConstant(0.0, env.ws->alloc());
+
+            if (rows == 2u) {
+                math::Matrix2x2<double> M;
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        M(static_cast<int>(r), static_cast<int>(c)) = static_cast<double>(a.matrixAt(r, c).value);
+                    }
+                }
+                const auto [evals, evecs] = math::eigen_2x2_symmetric(M); // descending
+                out.value = evals[static_cast<std::size_t>(which)];
+
+                const double v0 = evecs(0, static_cast<std::size_t>(which));
+                const double v1 = evecs(1, static_cast<std::size_t>(which));
+
+                const std::size_t nd = out.deriv.size();
+                for (std::size_t k = 0; k < nd; ++k) {
+                    const double d00 = a.matrixAt(0, 0).deriv[k];
+                    const double d01 = 0.5 * (a.matrixAt(0, 1).deriv[k] + a.matrixAt(1, 0).deriv[k]);
+                    const double d11 = a.matrixAt(1, 1).deriv[k];
+                    out.deriv[k] = v0 * (d00 * v0 + d01 * v1) + v1 * (d01 * v0 + d11 * v1);
+                }
+            } else {
+                math::Matrix3x3<double> M;
+                for (std::size_t r = 0; r < 3u; ++r) {
+                    for (std::size_t c = 0; c < 3u; ++c) {
+                        M(static_cast<int>(r), static_cast<int>(c)) = static_cast<double>(a.matrixAt(r, c).value);
+                    }
+                }
+                const auto [evals_asc, evecs] = math::eigen_3x3_symmetric(M); // ascending
+                const std::int32_t asc_idx = 2 - which;
+                out.value = evals_asc[static_cast<std::size_t>(asc_idx)];
+
+                const double v0 = evecs(0, static_cast<std::size_t>(asc_idx));
+                const double v1 = evecs(1, static_cast<std::size_t>(asc_idx));
+                const double v2 = evecs(2, static_cast<std::size_t>(asc_idx));
+
+                const std::size_t nd = out.deriv.size();
+                for (std::size_t k = 0; k < nd; ++k) {
+                    double d[3][3];
+                    for (int r = 0; r < 3; ++r) {
+                        d[r][r] = a.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(r)).deriv[k];
+                    }
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = r + 1; c < 3; ++c) {
+                            const double s = 0.5 * (a.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)).deriv[k] +
+                                                    a.matrixAt(static_cast<std::size_t>(c), static_cast<std::size_t>(r)).deriv[k]);
+                            d[r][c] = s;
+                            d[c][r] = s;
+                        }
+                    }
+                    const double mv0 = d[0][0] * v0 + d[0][1] * v1 + d[0][2] * v2;
+                    const double mv1 = d[1][0] * v0 + d[1][1] * v1 + d[1][2] * v2;
+                    const double mv2 = d[2][0] * v0 + d[2][1] * v1 + d[2][2] * v2;
+                    out.deriv[k] = v0 * mv0 + v1 * mv1 + v2 * mv2;
+                }
+            }
+
+            EvalValue<Dual> v;
+            v.kind = EvalValue<Dual>::Kind::Scalar;
+            v.s = out;
+            return v;
+        }
+
         case FormExprType::Add:
         case FormExprType::Subtract:
         case FormExprType::Multiply:
@@ -11659,6 +11865,12 @@ using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
             hashPod64(h, static_cast<std::int32_t>(x));
         }
     }
+    if (const auto v = node.indexVariances(); v.has_value()) {
+        hashTag64(h, 0x24ULL);
+        for (const auto x : *v) {
+            hashPod64(h, static_cast<std::uint8_t>(x));
+        }
+    }
     if (const auto v = node.constitutiveOutputIndex(); v.has_value()) {
         hashTag64(h, 0x1BULL);
         hashPod64(h, static_cast<std::int32_t>(*v));
@@ -11697,6 +11909,10 @@ using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
         hashTag64(h, 0x23ULL);
         const auto mp = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(model));
         hashPod64(h, mp);
+    }
+    if (const auto v = node.eigenIndex(); v.has_value()) {
+        hashTag64(h, 0x25ULL);
+        hashPod64(h, static_cast<std::int32_t>(*v));
     }
 
     const auto kids = node.childrenShared();
@@ -11964,6 +12180,11 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
     }
 
     FormCompiler compiler;
+    if (containsIndexedAccess(tangent_form)) {
+        auto opts = compiler.options();
+        opts.jit.enable = true;
+        compiler.setOptions(std::move(opts));
+    }
     tangent_ir_ = compiler.compileBilinear(tangent_form);
     tangent_ready_ = true;
 
@@ -12180,7 +12401,8 @@ void SymbolicNonlinearFormKernel::computeCell(const assembly::AssemblyContext& c
                         env.j = j;
                         const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
                         if (val.kind != EvalValue<Real>::Kind::Scalar) {
-                            throw FEException("Forms: tangent cell integrand did not evaluate to scalar (symbolic kernel)",
+                            throw FEException("Forms: tangent cell integrand did not evaluate to scalar (symbolic kernel). "
+                                              "Integrand: " + term.integrand.toString(),
                                               __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                         }
                         output.matrixEntry(i, j) += (term_weight * w) * val.s;

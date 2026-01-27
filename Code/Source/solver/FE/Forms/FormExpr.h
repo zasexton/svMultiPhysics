@@ -30,6 +30,10 @@ namespace forms {
 
 class ConstitutiveModel;
 class Index;
+namespace tensor {
+enum class IndexVariance : std::uint8_t;
+struct TensorIndex;
+} // namespace tensor
 
 // ============================================================================
 // Options / Modes
@@ -174,16 +178,21 @@ struct SymbolicOptions {
     Exp,
     Log,
 
-    // Constitutive (material-point) operator
-    Constitutive,
-    ConstitutiveOutput,
+	    // Constitutive (material-point) operator
+	    Constitutive,
+	    ConstitutiveOutput,
 
-	    // Integrals
-	    CellIntegral,
-	    BoundaryIntegral,
-	    InteriorFaceIntegral,
-	    InterfaceIntegral,
-	};
+		    // Integrals
+		    CellIntegral,
+		    BoundaryIntegral,
+		    InteriorFaceIntegral,
+		    InterfaceIntegral,
+
+	    // Spectral / eigen (symmetric tensors)
+	    SymmetricEigenvalue,
+	    SymmetricEigenvalueDirectionalDerivative,
+	    SymmetricEigenvalueDirectionalDerivativeWrtA,
+		};
 
 class FormExpr;
 
@@ -224,19 +233,21 @@ public:
 	    [[nodiscard]] virtual std::optional<int> componentIndex0() const { return std::nullopt; }
     [[nodiscard]] virtual std::optional<int> componentIndex1() const { return std::nullopt; }
     [[nodiscard]] virtual std::optional<int> tensorRows() const { return std::nullopt; }
-    [[nodiscard]] virtual std::optional<int> tensorCols() const { return std::nullopt; }
-    [[nodiscard]] virtual std::optional<int> indexRank() const { return std::nullopt; }
-    [[nodiscard]] virtual std::optional<std::array<int, 4>> indexIds() const { return std::nullopt; }
-    [[nodiscard]] virtual std::optional<std::array<int, 4>> indexExtents() const { return std::nullopt; }
-    [[nodiscard]] virtual std::optional<std::array<std::string_view, 4>> indexNames() const { return std::nullopt; }
-    [[nodiscard]] virtual std::optional<int> constitutiveOutputIndex() const { return std::nullopt; }
-    [[nodiscard]] virtual const SpaceSignature* spaceSignature() const { return nullptr; }
-    [[nodiscard]] virtual std::optional<int> timeDerivativeOrder() const { return std::nullopt; }
-    [[nodiscard]] virtual std::optional<FieldId> fieldId() const { return std::nullopt; }
-    [[nodiscard]] virtual std::optional<std::string_view> symbolName() const { return std::nullopt; }
-    [[nodiscard]] virtual std::optional<std::uint32_t> slotIndex() const { return std::nullopt; }
-    [[nodiscard]] virtual std::optional<int> historyIndex() const { return std::nullopt; }
-    [[nodiscard]] virtual std::optional<std::uint32_t> stateOffsetBytes() const { return std::nullopt; }
+		    [[nodiscard]] virtual std::optional<int> tensorCols() const { return std::nullopt; }
+		    [[nodiscard]] virtual std::optional<int> indexRank() const { return std::nullopt; }
+		    [[nodiscard]] virtual std::optional<std::array<int, 4>> indexIds() const { return std::nullopt; }
+		    [[nodiscard]] virtual std::optional<std::array<int, 4>> indexExtents() const { return std::nullopt; }
+		    [[nodiscard]] virtual std::optional<std::array<std::string_view, 4>> indexNames() const { return std::nullopt; }
+		    [[nodiscard]] virtual std::optional<std::array<tensor::IndexVariance, 4>> indexVariances() const { return std::nullopt; }
+		    [[nodiscard]] virtual std::optional<int> constitutiveOutputIndex() const { return std::nullopt; }
+		    [[nodiscard]] virtual const SpaceSignature* spaceSignature() const { return nullptr; }
+		    [[nodiscard]] virtual std::optional<int> timeDerivativeOrder() const { return std::nullopt; }
+		    [[nodiscard]] virtual std::optional<FieldId> fieldId() const { return std::nullopt; }
+		    [[nodiscard]] virtual std::optional<std::string_view> symbolName() const { return std::nullopt; }
+		    [[nodiscard]] virtual std::optional<std::uint32_t> slotIndex() const { return std::nullopt; }
+		    [[nodiscard]] virtual std::optional<int> historyIndex() const { return std::nullopt; }
+		    [[nodiscard]] virtual std::optional<std::uint32_t> stateOffsetBytes() const { return std::nullopt; }
+	    [[nodiscard]] virtual std::optional<int> eigenIndex() const { return std::nullopt; }
 
     [[nodiscard]] virtual const ScalarCoefficient* scalarCoefficient() const { return nullptr; }
     [[nodiscard]] virtual const TimeScalarCoefficient* timeScalarCoefficient() const { return nullptr; }
@@ -372,19 +383,29 @@ public:
     [[nodiscard]] FormExpr conditional(const FormExpr& then_expr, const FormExpr& else_expr) const;
 
     // ---- Indexing ----
-    [[nodiscard]] FormExpr component(int i, int j = -1) const;
-    [[nodiscard]] FormExpr operator()(const Index& i) const;
-    [[nodiscard]] FormExpr operator()(const Index& i, const Index& j) const;
-    [[nodiscard]] FormExpr operator()(const Index& i, const Index& j, const Index& k) const;
-    [[nodiscard]] FormExpr operator()(const Index& i, const Index& j, const Index& k, const Index& l) const;
+	    [[nodiscard]] FormExpr component(int i, int j = -1) const;
+	    [[nodiscard]] FormExpr operator()(const Index& i) const;
+	    [[nodiscard]] FormExpr operator()(const Index& i, const Index& j) const;
+	    [[nodiscard]] FormExpr operator()(const Index& i, const Index& j, const Index& k) const;
+	    [[nodiscard]] FormExpr operator()(const Index& i, const Index& j, const Index& k, const Index& l) const;
+	    [[nodiscard]] FormExpr operator()(const tensor::TensorIndex& i) const;
+	    [[nodiscard]] FormExpr operator()(const tensor::TensorIndex& i, const tensor::TensorIndex& j) const;
+	    [[nodiscard]] FormExpr operator()(const tensor::TensorIndex& i, const tensor::TensorIndex& j, const tensor::TensorIndex& k) const;
+	    [[nodiscard]] FormExpr operator()(const tensor::TensorIndex& i, const tensor::TensorIndex& j, const tensor::TensorIndex& k, const tensor::TensorIndex& l) const;
 
     // Advanced: construct an IndexedAccess node with explicit index metadata.
     // This is intended for tensor-calculus transforms that must preserve
     // symbolic indices without relying on `forms::Index`'s global id counter.
-    static FormExpr indexedAccessRaw(FormExpr base,
-                                     int rank,
-                                     std::array<int, 4> ids,
-                                     std::array<int, 4> extents);
+	    static FormExpr indexedAccessRaw(FormExpr base,
+	                                     int rank,
+	                                     std::array<int, 4> ids,
+	                                     std::array<int, 4> extents);
+	    static FormExpr indexedAccessRawWithMetadata(FormExpr base,
+	                                                 int rank,
+	                                                 std::array<int, 4> ids,
+	                                                 std::array<int, 4> extents,
+	                                                 std::array<tensor::IndexVariance, 4> variances,
+	                                                 std::array<std::string, 4> names);
 
     // ---- Tensor ops / scalar functions ----
     [[nodiscard]] FormExpr transpose() const;
@@ -402,6 +423,18 @@ public:
     [[nodiscard]] FormExpr sqrt() const;
     [[nodiscard]] FormExpr exp() const;
     [[nodiscard]] FormExpr log() const;
+
+    // Symmetric eigenvalue access (2x2 and 3x3 only; eigenvalues sorted descending).
+    [[nodiscard]] FormExpr symmetricEigenvalue(int which) const;
+
+    // Internal helpers used by symbolic differentiation.
+    [[nodiscard]] static FormExpr symmetricEigenvalueDirectionalDerivative(const FormExpr& A,
+                                                                           const FormExpr& dA,
+                                                                           int which);
+    [[nodiscard]] static FormExpr symmetricEigenvalueDirectionalDerivativeWrtA(const FormExpr& A,
+                                                                               const FormExpr& B,
+                                                                               const FormExpr& dA,
+                                                                               int which);
 
 	    // ---- Measures ----
 	    [[nodiscard]] FormExpr dx() const;

@@ -659,8 +659,14 @@ set(FE_FORMS_HEADERS
     Forms/Tensor/SpecialTensors.h
     Forms/Tensor/TensorContraction.h
     Forms/Tensor/TensorCanonicalize.h
+    Forms/Tensor/TensorSimplify.h
     Forms/Tensor/TensorDifferentiation.h
-    Forms/Tensor/SpecialTensorDerivatives.h
+	    Forms/Tensor/SymmetryOptimizer.h
+	    Forms/Tensor/TensorCSE.h
+	    Forms/Tensor/LoopStructure.h
+	    Forms/Tensor/TensorAllocation.h
+    Forms/Tensor/SpectralEigen.h
+	    Forms/Tensor/SpecialTensorDerivatives.h
     Forms/FormIR.h
     Forms/FormCompiler.h
     Forms/FormKernels.h
@@ -693,8 +699,14 @@ set(FE_FORMS_SOURCES
     Forms/Tensor/SpecialTensors.cpp
     Forms/Tensor/TensorContraction.cpp
     Forms/Tensor/TensorCanonicalize.cpp
+    Forms/Tensor/TensorSimplify.cpp
     Forms/Tensor/TensorDifferentiation.cpp
-    Forms/Tensor/SpecialTensorDerivatives.cpp
+	    Forms/Tensor/SymmetryOptimizer.cpp
+	    Forms/Tensor/TensorCSE.cpp
+	    Forms/Tensor/LoopStructure.cpp
+	    Forms/Tensor/TensorAllocation.cpp
+    Forms/Tensor/SpectralEigen.cpp
+	    Forms/Tensor/SpecialTensorDerivatives.cpp
     Forms/FormIR.cpp
     Forms/FormCompiler.cpp
     Forms/AffineAnalysis.cpp
@@ -1702,12 +1714,22 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Forms/test_Einsum.cpp
 		                Tests/Unit/Forms/test_NonlinearFormKernel.cpp
 		                Tests/Unit/Forms/test_SymbolicDifferentiation.cpp
+                    Tests/Unit/Forms/test_HessianVectorProduct.cpp
 		                Tests/Unit/Forms/Tensor/test_TensorIndex.cpp
 		                Tests/Unit/Forms/Tensor/test_TensorSymmetry.cpp
-		                Tests/Unit/Forms/Tensor/test_TensorContraction.cpp
-		                Tests/Unit/Forms/Tensor/test_TensorDifferentiation.cpp
-		                Tests/Unit/Forms/Tensor/test_SpecialTensors.cpp
-		                Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp
+			                Tests/Unit/Forms/Tensor/test_TensorContraction.cpp
+			                Tests/Unit/Forms/Tensor/test_TensorCanonicalize.cpp
+			                Tests/Unit/Forms/Tensor/test_TensorSimplify.cpp
+			                Tests/Unit/Forms/Tensor/test_TensorDifferentiation.cpp
+			                Tests/Unit/Forms/Tensor/test_SymmetryOptimizer.cpp
+				                Tests/Unit/Forms/Tensor/test_TensorCSE.cpp
+				                Tests/Unit/Forms/Tensor/test_LoopStructure.cpp
+				                Tests/Unit/Forms/Tensor/test_TensorAllocation.cpp
+				                Tests/Unit/Forms/Tensor/test_TensorSymbolicDifferentiation.cpp
+                    Tests/Unit/Forms/Tensor/test_SpectralEigenJIT.cpp
+			                Tests/Unit/Forms/Tensor/test_TensorPrettyPrinting.cpp
+			                Tests/Unit/Forms/Tensor/test_SpecialTensors.cpp
+			                Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp
 		                Tests/Unit/Forms/test_ConstitutiveModel.cpp
 	                Tests/Unit/Forms/test_PrimitiveTypes.cpp
 		                Tests/Unit/Forms/test_main.cpp

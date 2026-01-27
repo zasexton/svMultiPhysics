@@ -11,6 +11,7 @@
 #include "Core/Logger.h"
 #include "Forms/JIT/ExternalCalls.h"
 #include "Forms/JIT/LLVMJITBuildInfo.h"
+#include "Forms/Tensor/SpectralEigen.h"
 
 #include <algorithm>
 #include <atomic>
@@ -432,6 +433,14 @@ void registerExternalCallSymbols(llvm::orc::LLJIT& jit)
     add("svmp_fe_jit_coeff_eval_tensor4_v1", &svmp_fe_jit_coeff_eval_tensor4_v1);
     add("svmp_fe_jit_constitutive_eval_v1", &svmp_fe_jit_constitutive_eval_v1);
     add("svmp_fe_jit_constitutive_eval_batch_v1", &svmp_fe_jit_constitutive_eval_batch_v1);
+
+    // Strict-mode, cacheable spectral helpers.
+    add("svmp_fe_sym_eigenvalue_2x2_v1", &svmp_fe_sym_eigenvalue_2x2_v1);
+    add("svmp_fe_sym_eigenvalue_3x3_v1", &svmp_fe_sym_eigenvalue_3x3_v1);
+    add("svmp_fe_sym_eigenvalue_dd_2x2_v1", &svmp_fe_sym_eigenvalue_dd_2x2_v1);
+    add("svmp_fe_sym_eigenvalue_dd_3x3_v1", &svmp_fe_sym_eigenvalue_dd_3x3_v1);
+    add("svmp_fe_sym_eigenvalue_ddA_2x2_v1", &svmp_fe_sym_eigenvalue_ddA_2x2_v1);
+    add("svmp_fe_sym_eigenvalue_ddA_3x3_v1", &svmp_fe_sym_eigenvalue_ddA_3x3_v1);
 
     auto err = jit.getMainJITDylib().define(llvm::orc::absoluteSymbols(std::move(symbols)));
     if (err) {

@@ -9,6 +9,7 @@
 
 #include "Forms/ConstitutiveModel.h"
 #include "Forms/Index.h"
+#include "Forms/Tensor/TensorIndex.h"
 #include "Spaces/FunctionSpace.h"
 
 #include <sstream>
@@ -765,6 +766,113 @@ public:
     [[nodiscard]] std::string toString() const override { return "log(" + child_->toString() + ")"; }
 };
 
+class SymmetricEigenvalueNode final : public UnaryNode {
+public:
+    SymmetricEigenvalueNode(std::shared_ptr<FormExprNode> child, int which)
+        : UnaryNode(std::move(child)), which_(which)
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::SymmetricEigenvalue; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "eig_sym(" + child_->toString() + ", " + std::to_string(which_) + ")";
+    }
+    [[nodiscard]] std::optional<int> eigenIndex() const override { return which_; }
+
+private:
+    int which_{0};
+};
+
+class SymmetricEigenvalueDirectionalDerivativeNode final : public FormExprNode {
+public:
+    SymmetricEigenvalueDirectionalDerivativeNode(std::shared_ptr<FormExprNode> a,
+                                                 std::shared_ptr<FormExprNode> da,
+                                                 int which)
+        : a_(std::move(a))
+        , da_(std::move(da))
+        , which_(which)
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::SymmetricEigenvalueDirectionalDerivative; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "eig_sym_dd(" + a_->toString() + ", " + da_->toString() + ", " + std::to_string(which_) + ")";
+    }
+    [[nodiscard]] std::optional<int> eigenIndex() const override { return which_; }
+
+    [[nodiscard]] bool hasTest() const noexcept override
+    {
+        return (a_ && a_->hasTest()) || (da_ && da_->hasTest());
+    }
+
+    [[nodiscard]] bool hasTrial() const noexcept override
+    {
+        return (a_ && a_->hasTrial()) || (da_ && da_->hasTrial());
+    }
+
+    [[nodiscard]] std::vector<const FormExprNode*> children() const override
+    {
+        return {a_.get(), da_.get()};
+    }
+
+    [[nodiscard]] std::vector<std::shared_ptr<FormExprNode>> childrenShared() const override
+    {
+        return {a_, da_};
+    }
+
+private:
+    std::shared_ptr<FormExprNode> a_;
+    std::shared_ptr<FormExprNode> da_;
+    int which_{0};
+};
+
+class SymmetricEigenvalueDirectionalDerivativeWrtANode final : public FormExprNode {
+public:
+    SymmetricEigenvalueDirectionalDerivativeWrtANode(std::shared_ptr<FormExprNode> a,
+                                                     std::shared_ptr<FormExprNode> b,
+                                                     std::shared_ptr<FormExprNode> da,
+                                                     int which)
+        : a_(std::move(a))
+        , b_(std::move(b))
+        , da_(std::move(da))
+        , which_(which)
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "eig_sym_ddA(" + a_->toString() + ", " + b_->toString() + ", " + da_->toString() + ", " +
+               std::to_string(which_) + ")";
+    }
+
+    [[nodiscard]] bool hasTest() const noexcept override
+    {
+        return (a_ && a_->hasTest()) || (b_ && b_->hasTest()) || (da_ && da_->hasTest());
+    }
+    [[nodiscard]] bool hasTrial() const noexcept override
+    {
+        return (a_ && a_->hasTrial()) || (b_ && b_->hasTrial()) || (da_ && da_->hasTrial());
+    }
+
+    [[nodiscard]] std::optional<int> eigenIndex() const override { return which_; }
+
+    [[nodiscard]] std::vector<const FormExprNode*> children() const override
+    {
+        return {a_.get(), b_.get(), da_.get()};
+    }
+
+    [[nodiscard]] std::vector<std::shared_ptr<FormExprNode>> childrenShared() const override
+    {
+        return {a_, b_, da_};
+    }
+
+private:
+    std::shared_ptr<FormExprNode> a_;
+    std::shared_ptr<FormExprNode> b_;
+    std::shared_ptr<FormExprNode> da_;
+    int which_{0};
+};
+
 // ============================================================================
 // Binary operator nodes
 // ============================================================================
@@ -954,6 +1062,7 @@ public:
         rank_ = 1;
         ids_.fill(-1);
         extents_.fill(-1);
+        variances_.fill(tensor::IndexVariance::None);
         ids_[0] = i.id();
         extents_[0] = i.extent();
         names_[0] = i.name();
@@ -965,6 +1074,7 @@ public:
         rank_ = 2;
         ids_.fill(-1);
         extents_.fill(-1);
+        variances_.fill(tensor::IndexVariance::None);
         ids_[0] = i.id();
         ids_[1] = j.id();
         extents_[0] = i.extent();
@@ -977,12 +1087,14 @@ public:
                       int rank,
                       std::array<int, 4> ids,
                       std::array<int, 4> extents,
-                      std::array<std::string, 4> names)
+                      std::array<std::string, 4> names,
+                      std::array<tensor::IndexVariance, 4> variances)
         : UnaryNode(std::move(child))
         , rank_(rank)
         , ids_(std::move(ids))
         , extents_(std::move(extents))
         , names_(std::move(names))
+        , variances_(std::move(variances))
     {
     }
 
@@ -994,21 +1106,61 @@ public:
             return child_->toString() + "(?)";
         }
 
-        std::string out = child_->toString();
-        out += "_{";
-        for (int k = 0; k < rank_; ++k) {
+        const auto indexLabel = [&](int k) -> std::string {
             const auto& nm = names_[static_cast<std::size_t>(k)];
             if (!nm.empty()) {
-                out += nm;
-                continue;
+                return nm;
             }
             const int id = ids_[static_cast<std::size_t>(k)];
             if (id >= 0) {
-                out += "i";
-                out += std::to_string(id);
-            } else {
-                out += "?";
+                return "i" + std::to_string(id);
             }
+            return "?";
+        };
+
+        // ---- Special pretty-print cases (tensor-calculus readability) ----
+        // Symmetrization / antisymmetrization tags.
+        if (rank_ == 2 && (child_->type() == FormExprType::SymmetricPart || child_->type() == FormExprType::SkewPart)) {
+            const auto kids = child_->childrenShared();
+            const std::string base = (!kids.empty() && kids[0]) ? kids[0]->toString() : child_->toString();
+            const char open = (child_->type() == FormExprType::SymmetricPart) ? '(' : '[';
+            const char close = (child_->type() == FormExprType::SymmetricPart) ? ')' : ']';
+            return base + "_{" + open + indexLabel(0) + indexLabel(1) + close + "}";
+        }
+
+        // Kronecker delta (identity tensor) in index form.
+        if (rank_ == 2 && child_->type() == FormExprType::Identity) {
+            return std::string("\u03B4") + "_{" + indexLabel(0) + indexLabel(1) + "}";
+        }
+
+        // Levi-Civita / permutation tensor appearances via common ops.
+        if (rank_ == 1 && child_->type() == FormExprType::CrossProduct) {
+            const auto kids = child_->childrenShared();
+            if (kids.size() == 2u && kids[0] && kids[1]) {
+                const std::string i = indexLabel(0);
+                const std::string j = "j";
+                const std::string k = "k";
+                return "(" + std::string("\u03B5") + "_{" + i + j + k + "} * " +
+                       kids[0]->toString() + "_{" + j + "} * " +
+                       kids[1]->toString() + "_{" + k + "})";
+            }
+        }
+        if (rank_ == 1 && child_->type() == FormExprType::Curl) {
+            const auto kids = child_->childrenShared();
+            if (kids.size() == 1u && kids[0]) {
+                const std::string i = indexLabel(0);
+                const std::string j = "j";
+                const std::string k = "k";
+                return "(" + std::string("\u03B5") + "_{" + i + j + k + "} * grad(" +
+                       kids[0]->toString() + ")_{" + k + j + "})";
+            }
+        }
+
+        // Default indexed access printing.
+        std::string out = child_->toString();
+        out += "_{";
+        for (int k = 0; k < rank_; ++k) {
+            out += indexLabel(k);
         }
         out += "}";
         return out;
@@ -1026,11 +1178,17 @@ public:
         return out;
     }
 
+    [[nodiscard]] std::optional<std::array<tensor::IndexVariance, 4>> indexVariances() const override
+    {
+        return variances_;
+    }
+
 private:
     int rank_{0};
     std::array<int, 4> ids_{};
     std::array<int, 4> extents_{};
     std::array<std::string, 4> names_{};
+    std::array<tensor::IndexVariance, 4> variances_{};
 };
 
 class ConditionalNode final : public FormExprNode {
@@ -1886,8 +2044,10 @@ FormExpr FormExpr::operator()(const Index& i, const Index& j, const Index& k) co
     std::array<int, 4> ids{};
     std::array<int, 4> ext{};
     std::array<std::string, 4> names{};
+    std::array<tensor::IndexVariance, 4> vars{};
     ids.fill(-1);
     ext.fill(-1);
+    vars.fill(tensor::IndexVariance::None);
     ids[0] = i.id();
     ids[1] = j.id();
     ids[2] = k.id();
@@ -1897,7 +2057,7 @@ FormExpr FormExpr::operator()(const Index& i, const Index& j, const Index& k) co
     names[0] = i.name();
     names[1] = j.name();
     names[2] = k.name();
-    return FormExpr(std::make_shared<IndexedAccessNode>(node_, 3, ids, ext, std::move(names)));
+    return FormExpr(std::make_shared<IndexedAccessNode>(node_, 3, ids, ext, std::move(names), vars));
 }
 
 FormExpr FormExpr::operator()(const Index& i, const Index& j, const Index& k, const Index& l) const
@@ -1906,8 +2066,10 @@ FormExpr FormExpr::operator()(const Index& i, const Index& j, const Index& k, co
     std::array<int, 4> ids{};
     std::array<int, 4> ext{};
     std::array<std::string, 4> names{};
+    std::array<tensor::IndexVariance, 4> vars{};
     ids.fill(-1);
     ext.fill(-1);
+    vars.fill(tensor::IndexVariance::None);
     ids[0] = i.id();
     ids[1] = j.id();
     ids[2] = k.id();
@@ -1920,7 +2082,124 @@ FormExpr FormExpr::operator()(const Index& i, const Index& j, const Index& k, co
     names[1] = j.name();
     names[2] = k.name();
     names[3] = l.name();
-    return FormExpr(std::make_shared<IndexedAccessNode>(node_, 4, ids, ext, std::move(names)));
+    return FormExpr(std::make_shared<IndexedAccessNode>(node_, 4, ids, ext, std::move(names), vars));
+}
+
+FormExpr FormExpr::operator()(const tensor::TensorIndex& i) const
+{
+    if (!node_) return {};
+    if (i.isFixed()) {
+        throw std::invalid_argument("FormExpr::operator()(TensorIndex): fixed indices are not supported (use component())");
+    }
+
+    std::array<int, 4> ids{};
+    std::array<int, 4> extents{};
+    std::array<std::string, 4> names{};
+    std::array<tensor::IndexVariance, 4> variances{};
+    ids.fill(-1);
+    extents.fill(-1);
+    variances.fill(tensor::IndexVariance::None);
+
+    ids[0] = i.id;
+    extents[0] = i.dimension;
+    names[0] = i.name;
+    variances[0] = i.variance;
+    return indexedAccessRawWithMetadata(FormExpr(node_), 1, ids, extents, variances, std::move(names));
+}
+
+FormExpr FormExpr::operator()(const tensor::TensorIndex& i, const tensor::TensorIndex& j) const
+{
+    if (!node_) return {};
+    if (i.isFixed() || j.isFixed()) {
+        throw std::invalid_argument("FormExpr::operator()(TensorIndex,TensorIndex): fixed indices are not supported");
+    }
+
+    std::array<int, 4> ids{};
+    std::array<int, 4> extents{};
+    std::array<std::string, 4> names{};
+    std::array<tensor::IndexVariance, 4> variances{};
+    ids.fill(-1);
+    extents.fill(-1);
+    variances.fill(tensor::IndexVariance::None);
+
+    ids[0] = i.id;
+    ids[1] = j.id;
+    extents[0] = i.dimension;
+    extents[1] = j.dimension;
+    names[0] = i.name;
+    names[1] = j.name;
+    variances[0] = i.variance;
+    variances[1] = j.variance;
+    return indexedAccessRawWithMetadata(FormExpr(node_), 2, ids, extents, variances, std::move(names));
+}
+
+FormExpr FormExpr::operator()(const tensor::TensorIndex& i,
+                              const tensor::TensorIndex& j,
+                              const tensor::TensorIndex& k) const
+{
+    if (!node_) return {};
+    if (i.isFixed() || j.isFixed() || k.isFixed()) {
+        throw std::invalid_argument("FormExpr::operator()(TensorIndex,...): fixed indices are not supported");
+    }
+
+    std::array<int, 4> ids{};
+    std::array<int, 4> extents{};
+    std::array<std::string, 4> names{};
+    std::array<tensor::IndexVariance, 4> variances{};
+    ids.fill(-1);
+    extents.fill(-1);
+    variances.fill(tensor::IndexVariance::None);
+
+    ids[0] = i.id;
+    ids[1] = j.id;
+    ids[2] = k.id;
+    extents[0] = i.dimension;
+    extents[1] = j.dimension;
+    extents[2] = k.dimension;
+    names[0] = i.name;
+    names[1] = j.name;
+    names[2] = k.name;
+    variances[0] = i.variance;
+    variances[1] = j.variance;
+    variances[2] = k.variance;
+    return indexedAccessRawWithMetadata(FormExpr(node_), 3, ids, extents, variances, std::move(names));
+}
+
+FormExpr FormExpr::operator()(const tensor::TensorIndex& i,
+                              const tensor::TensorIndex& j,
+                              const tensor::TensorIndex& k,
+                              const tensor::TensorIndex& l) const
+{
+    if (!node_) return {};
+    if (i.isFixed() || j.isFixed() || k.isFixed() || l.isFixed()) {
+        throw std::invalid_argument("FormExpr::operator()(TensorIndex,...): fixed indices are not supported");
+    }
+
+    std::array<int, 4> ids{};
+    std::array<int, 4> extents{};
+    std::array<std::string, 4> names{};
+    std::array<tensor::IndexVariance, 4> variances{};
+    ids.fill(-1);
+    extents.fill(-1);
+    variances.fill(tensor::IndexVariance::None);
+
+    ids[0] = i.id;
+    ids[1] = j.id;
+    ids[2] = k.id;
+    ids[3] = l.id;
+    extents[0] = i.dimension;
+    extents[1] = j.dimension;
+    extents[2] = k.dimension;
+    extents[3] = l.dimension;
+    names[0] = i.name;
+    names[1] = j.name;
+    names[2] = k.name;
+    names[3] = l.name;
+    variances[0] = i.variance;
+    variances[1] = j.variance;
+    variances[2] = k.variance;
+    variances[3] = l.variance;
+    return indexedAccessRawWithMetadata(FormExpr(node_), 4, ids, extents, variances, std::move(names));
 }
 
 FormExpr FormExpr::indexedAccessRaw(FormExpr base,
@@ -1937,7 +2216,32 @@ FormExpr FormExpr::indexedAccessRaw(FormExpr base,
         const int id = ids[k];
         names[k] = (id >= 0) ? ("i" + std::to_string(id)) : std::string{};
     }
-    return FormExpr(std::make_shared<IndexedAccessNode>(base.node_, rank, std::move(ids), std::move(extents), std::move(names)));
+    std::array<tensor::IndexVariance, 4> vars{};
+    vars.fill(tensor::IndexVariance::None);
+    return indexedAccessRawWithMetadata(std::move(base), rank, std::move(ids), std::move(extents), std::move(vars), std::move(names));
+}
+
+FormExpr FormExpr::indexedAccessRawWithMetadata(FormExpr base,
+                                               int rank,
+                                               std::array<int, 4> ids,
+                                               std::array<int, 4> extents,
+                                               std::array<tensor::IndexVariance, 4> variances,
+                                               std::array<std::string, 4> names)
+{
+    if (!base.node_) return {};
+    if (rank < 1 || rank > 4) {
+        throw std::invalid_argument("FormExpr::indexedAccessRawWithMetadata: rank must be 1..4");
+    }
+    for (int k = 0; k < rank; ++k) {
+        const auto idx = static_cast<std::size_t>(k);
+        if (ids[idx] < 0 || extents[idx] <= 0) {
+            throw std::invalid_argument("FormExpr::indexedAccessRawWithMetadata: invalid index id/extent");
+        }
+        if (names[idx].empty()) {
+            names[idx] = "i" + std::to_string(ids[idx]);
+        }
+    }
+    return FormExpr(std::make_shared<IndexedAccessNode>(base.node_, rank, std::move(ids), std::move(extents), std::move(names), std::move(variances)));
 }
 
 FormExpr FormExpr::transpose() const
@@ -2028,6 +2332,27 @@ FormExpr FormExpr::log() const
 {
     if (!node_) return {};
     return FormExpr(std::make_shared<LogNode>(node_));
+}
+
+FormExpr FormExpr::symmetricEigenvalue(int which) const
+{
+    if (!node_) return {};
+    return FormExpr(std::make_shared<SymmetricEigenvalueNode>(node_, which));
+}
+
+FormExpr FormExpr::symmetricEigenvalueDirectionalDerivative(const FormExpr& A, const FormExpr& dA, int which)
+{
+    if (!A.node_ || !dA.node_) return {};
+    return FormExpr(std::make_shared<SymmetricEigenvalueDirectionalDerivativeNode>(A.node_, dA.node_, which));
+}
+
+FormExpr FormExpr::symmetricEigenvalueDirectionalDerivativeWrtA(const FormExpr& A,
+                                                                const FormExpr& B,
+                                                                const FormExpr& dA,
+                                                                int which)
+{
+    if (!A.node_ || !B.node_ || !dA.node_) return {};
+    return FormExpr(std::make_shared<SymmetricEigenvalueDirectionalDerivativeWrtANode>(A.node_, B.node_, dA.node_, which));
 }
 
 FormExpr FormExpr::dx() const
@@ -2122,26 +2447,31 @@ std::shared_ptr<FormExprNode> transformNodeShared(
             const int j = node->componentIndex1().value_or(-1);
             return std::make_shared<ComponentNode>(new_kids[0], i, j);
         }
-        case FormExprType::IndexedAccess: {
-            const int rank = node->indexRank().value_or(0);
-            const auto ids_opt = node->indexIds();
-            const auto ext_opt = node->indexExtents();
-            if (!ids_opt || !ext_opt) {
-                throw std::logic_error("FormExpr::transformNodes: IndexedAccess missing index metadata");
-            }
-            std::array<std::string, 4> names{};
-            if (const auto names_opt = node->indexNames()) {
-                for (std::size_t k = 0; k < names.size(); ++k) {
-                    names[k] = std::string((*names_opt)[k]);
-                }
-            } else {
-                for (std::size_t k = 0; k < names.size(); ++k) {
-                    const int id = (*ids_opt)[k];
-                    names[k] = (id >= 0) ? ("i" + std::to_string(id)) : std::string{};
-                }
-            }
-            return std::make_shared<IndexedAccessNode>(new_kids[0], rank, *ids_opt, *ext_opt, std::move(names));
-        }
+	        case FormExprType::IndexedAccess: {
+	            const int rank = node->indexRank().value_or(0);
+	            const auto ids_opt = node->indexIds();
+	            const auto ext_opt = node->indexExtents();
+	            if (!ids_opt || !ext_opt) {
+	                throw std::logic_error("FormExpr::transformNodes: IndexedAccess missing index metadata");
+	            }
+	            std::array<std::string, 4> names{};
+	            if (const auto names_opt = node->indexNames()) {
+	                for (std::size_t k = 0; k < names.size(); ++k) {
+	                    names[k] = std::string((*names_opt)[k]);
+	                }
+	            } else {
+	                for (std::size_t k = 0; k < names.size(); ++k) {
+	                    const int id = (*ids_opt)[k];
+	                    names[k] = (id >= 0) ? ("i" + std::to_string(id)) : std::string{};
+	                }
+	            }
+	            std::array<tensor::IndexVariance, 4> vars{};
+	            vars.fill(tensor::IndexVariance::None);
+	            if (const auto vars_opt = node->indexVariances()) {
+	                vars = *vars_opt;
+	            }
+	            return std::make_shared<IndexedAccessNode>(new_kids[0], rank, *ids_opt, *ext_opt, std::move(names), vars);
+	        }
 
         case FormExprType::Transpose: return std::make_shared<TransposeNode>(new_kids[0]);
         case FormExprType::Trace: return std::make_shared<TraceNode>(new_kids[0]);
@@ -2158,6 +2488,28 @@ std::shared_ptr<FormExprNode> transformNodeShared(
         case FormExprType::Sqrt: return std::make_shared<SqrtNode>(new_kids[0]);
         case FormExprType::Exp: return std::make_shared<ExpNode>(new_kids[0]);
         case FormExprType::Log: return std::make_shared<LogNode>(new_kids[0]);
+
+        case FormExprType::SymmetricEigenvalue: {
+            const auto which = node->eigenIndex();
+            if (!which.has_value()) {
+                throw std::logic_error("FormExpr::transformNodes: SymmetricEigenvalue missing eigen index");
+            }
+            return std::make_shared<SymmetricEigenvalueNode>(new_kids[0], *which);
+        }
+        case FormExprType::SymmetricEigenvalueDirectionalDerivative: {
+            const auto which = node->eigenIndex();
+            if (!which.has_value()) {
+                throw std::logic_error("FormExpr::transformNodes: SymmetricEigenvalueDirectionalDerivative missing eigen index");
+            }
+            return std::make_shared<SymmetricEigenvalueDirectionalDerivativeNode>(new_kids[0], new_kids[1], *which);
+        }
+        case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA: {
+            const auto which = node->eigenIndex();
+            if (!which.has_value()) {
+                throw std::logic_error("FormExpr::transformNodes: SymmetricEigenvalueDirectionalDerivativeWrtA missing eigen index");
+            }
+            return std::make_shared<SymmetricEigenvalueDirectionalDerivativeWrtANode>(new_kids[0], new_kids[1], new_kids[2], *which);
+        }
 
         case FormExprType::CellIntegral: return std::make_shared<CellIntegralNode>(new_kids[0]);
         case FormExprType::BoundaryIntegral: {

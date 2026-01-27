@@ -432,8 +432,8 @@ This section extends the core LLVM JIT plan with a detailed, incremental checkli
   - [x] Integration with existing `FormExprType::Curl`/`Divergence`
   
 ### 14.3 Phase 2 — FormExpr Integration (Index Notation + New Vocabulary)
-- [ ] Extend the `FormExpr` layer to carry tensor-index metadata and symmetry tags where needed (stable printing, hashing, structural equality).
-- [ ] Add tensor-calculus vocabulary to `Code/Source/solver/FE/Forms/FormExpr.h`/`.cpp` (choose one approach):
+- [x] Extend the `FormExpr` layer to carry tensor-index metadata and symmetry tags where needed (stable printing, hashing, structural equality).
+- [x] Add tensor-calculus vocabulary to `Code/Source/solver/FE/Forms/FormExpr.h`/`.cpp` (choose one approach):
   - [ ] **Option A (new node types):** add `FormExprType` entries for:
     - [ ] `TensorLiteral`, `TensorContraction`, `TensorProduct`
     - [ ] `KroneckerDelta`, `LeviCivita`, `MetricTensor`
@@ -449,80 +449,80 @@ This section extends the core LLVM JIT plan with a detailed, incremental checkli
   - [x] Mismatched index dimensions: "Index 'i' has extent 3 in A but extent 2 in B"
   - [x] Invalid contractions: "Index 'i' appears 3 times; must appear exactly twice for contraction"
   - [x] Free index mismatch: "Result has free indices {i,j} but expected scalar output"
-  - [ ] Variance errors: "Cannot contract covariant index with covariant index without metric"
-- [ ] Implement tensor-aware pretty-printing:
+  - [x] Variance errors: "Cannot contract covariant index with covariant index without metric"
+- [x] Implement tensor-aware pretty-printing:
   - [x] Print indexed access in subscript form (e.g., `A_{ij} * B_{jk}`) instead of expanded form (variance-aware `^`/`_` notation is future work)
-  - [ ] Show symmetry tags: `A_{(ij)}` for symmetric, `A_{[ij]}` for antisymmetric
-  - [ ] Special tensors: print `δ_{ij}` and `ε_{ijk}` symbolically
-  - [ ] Canonical form display for debugging canonicalization
+  - [x] Show symmetry tags: `A_{(ij)}` for symmetric, `A_{[ij]}` for antisymmetric
+  - [x] Special tensors: print `δ_{ij}` and `ε_{ijk}` symbolically
+  - [x] Canonical form display for debugging canonicalization
 
 ### 14.4 Phase 3 — Tensor Algebra Layer (Contraction, Simplify, Canonicalize)
-- [ ] Implement `Code/Source/solver/FE/Forms/Tensor/TensorContraction.h/.cpp`:
+- [x] Implement `Code/Source/solver/FE/Forms/Tensor/TensorContraction.h/.cpp`:
   - [x] `analyzeContractions(expr)` (identify free vs bound indices; validate extent consistency for `IndexedAccess`).
-  - [ ] `optimalContractionOrder(...)` with a cost model (dynamic programming parenthesization for chains).
-  - [ ] `contractIndices(expr, a, b)` as a primitive contraction transform.
-- [ ] Define contraction cost model:
-  - [ ] FLOP-based cost: O(∏ extents of all indices involved)
-  - [ ] Memory access cost: consider tensor sizes and cache effects
-  - [ ] Special-tensor shortcuts: δ-contractions are O(n) not O(n²)
-  - [ ] Symmetry-aware cost: symmetric tensors have fewer unique entries
-- [ ] Implement `Code/Source/solver/FE/Forms/Tensor/TensorSimplify.h/.cpp`:
-  - [ ] δ-contraction rules (substitution, trace-to-dimension, composition).
-  - [ ] ε-contraction identities (ε·ε → δδ − δδ; symmetry annihilation).
-  - [ ] Metric contraction/raise/lower simplifications (`g_ij g^{jk} → δ^k_i`, etc.).
-  - [ ] Symmetry-aware simplification (symmetric vs antisymmetric contractions → 0).
-  - [ ] Fixed-point iteration with termination guarantees and debug counters (for profiling).
-- [ ] Implement `Code/Source/solver/FE/Forms/Tensor/TensorCanonicalize.h/.cpp`:
+  - [x] `optimalContractionOrder(...)` with a cost model (dynamic programming parenthesization for chains).
+  - [x] `contractIndices(expr, a, b)` as a primitive contraction transform.
+- [x] Define contraction cost model:
+  - [x] FLOP-based cost: O(∏ extents of all indices involved)
+  - [x] Memory access cost: consider tensor sizes and cache effects
+  - [x] Special-tensor shortcuts: δ-contractions are O(n) not O(n²)
+  - [x] Symmetry-aware cost: symmetric tensors have fewer unique entries
+- [x] Implement `Code/Source/solver/FE/Forms/Tensor/TensorSimplify.h/.cpp`:
+  - [x] δ-contraction rules (substitution, trace-to-dimension, composition).
+  - [x] ε-contraction identities (ε·ε → δδ − δδ; symmetry annihilation).
+  - [x] Metric contraction/raise/lower simplifications (`g_ij g^{jk} → δ^k_i`, etc.).
+  - [x] Symmetry-aware simplification (symmetric vs antisymmetric contractions → 0).
+  - [x] Fixed-point iteration with termination guarantees and debug counters (for profiling).
+- [x] Implement `Code/Source/solver/FE/Forms/Tensor/TensorCanonicalize.h/.cpp`:
   - [x] Canonical index renaming so structurally identical contractions hash identically (implemented in `KernelIR` lowering; also available as `computeCanonicalIndexRenaming` helper).
-  - [ ] Canonical term ordering for sums/products (where mathematically valid).
-- [ ] Add unit tests:
-  - [ ] `test_TensorSimplify.cpp` (δ/ε/metric/symmetry rules).
-  - [ ] `test_TensorCanonicalize.cpp` (index renaming and ordering invariants).
+  - [x] Canonical term ordering for sums/products (where mathematically valid).
+- [x] Add unit tests:
+  - [x] `test_TensorSimplify.cpp` (δ/ε/metric/symmetry rules).
+  - [x] `test_TensorCanonicalize.cpp` (index renaming and ordering invariants).
 
 ### 14.5 Phase 4 — Tensor-Aware Symbolic Differentiation
-- [ ] Implement `Code/Source/solver/FE/Forms/Tensor/TensorDifferentiation.h/.cpp`:
-  - [ ] `TensorDiffContext` (diff variable + indices; include multi-field identification such as `FieldId` where relevant).
-  - [ ] Product and chain rules for tensor products/contractions.
-  - [ ] Determinant/inverse/trace/cofactor derivatives in index form (keep contractions symbolic).
-  - [ ] Optional: spectral/eigen derivatives (defer unless needed by current constitutives).
-- [ ] Implement `Code/Source/solver/FE/Forms/Tensor/SpecialTensorDerivatives.h/.cpp`:
-  - [ ] Kronecker delta and Levi-Civita derivatives (0).
-  - [ ] Metric tensor derivatives (identity metric default; hook for mesh-motion/curved metrics).
-  - [ ] Deformation-gradient derivatives (for hyperelasticity chains) in index form.
-- [ ] Provide a public entry point (and capability query) for tensor differentiation:
+- [x] Implement `Code/Source/solver/FE/Forms/Tensor/TensorDifferentiation.h/.cpp`:
+  - [x] `TensorDiffContext` (diff variable + indices; include multi-field identification such as `FieldId` where relevant).
+  - [x] Product and chain rules for tensor products/contractions.
+  - [x] Determinant/inverse/trace/cofactor derivatives in index form (keep contractions symbolic).
+  - [x] Optional: spectral/eigen derivatives.
+- [x] Implement `Code/Source/solver/FE/Forms/Tensor/SpecialTensorDerivatives.h/.cpp`:
+  - [x] Kronecker delta and Levi-Civita derivatives (0).
+  - [x] Metric tensor derivatives (identity metric default; hook for mesh-motion/curved metrics).
+  - [x] Deformation-gradient derivatives (for hyperelasticity chains) in index form.
+- [x] Provide a public entry point (and capability query) for tensor differentiation:
   - [x] `differentiateTensorResidual(residual, ctx)` and `checkTensorDifferentiability(expr)`.
-  - [ ] Integrate with existing `forms::differentiateResidual(...)` (dispatch when tensor calculus nodes are present).
-- [ ] Verification tests:
-  - [ ] Compare tensor-derived tangents against existing AD (Dual) for representative nonlinear forms (hyperelasticity, nonlinear diffusion, convection).
-  - [ ] Add finite-difference verification harness for complex tensor forms (optional but recommended).
-- [ ] (Future) Higher-order derivative support:
-  - [ ] Second derivatives for Hessian computation (optimization, stability analysis)
-  - [ ] Define index structure for d²A/du²
-  - [ ] Integration with Newton-type solvers requiring Hessian-vector products
-  - 
+  - [x] Integrate with existing `forms::differentiateResidual(...)` (dispatch when tensor calculus nodes are present).
+- [x] Verification tests:
+  - [x] Compare tensor-derived tangents against existing AD (Dual) for representative nonlinear forms (hyperelasticity, nonlinear diffusion, convection).
+  - [x] Add finite-difference verification harness for complex tensor forms (optional but recommended).
+- [x] (Future) Higher-order derivative support:
+  - [x] Second derivatives for Hessian computation (optimization, stability analysis)
+  - [x] Define index structure for d²A/du²
+  - [x] Integration with Newton-type solvers requiring Hessian-vector products
+  
 ### 14.6 Phase 5 — Optimal Lowering (Symmetry, CSE, Loop-Nest IR)
-- [ ] Implement `Code/Source/solver/FE/Forms/Tensor/SymmetryOptimizer.h/.cpp`:
-  - [ ] Compute independent component sets for common symmetries and provide canonical mapping/sign rules.
-  - [ ] Lower tensor expressions using only independent components (`lowerWithSymmetry`).
-- [ ] Implement `Code/Source/solver/FE/Forms/Tensor/TensorCSE.h/.cpp`:
-  - [ ] Tensor-aware CSE that recognizes repeated contractions and expensive subexpressions (e.g., `det(F)`, `inv(F)`).
-  - [ ] Temporary-introduction strategy compatible with `KernelIR`/LLVM emission.
-- [ ] Implement `Code/Source/solver/FE/Forms/Tensor/LoopStructure.h/.cpp`:
-  - [ ] `generateLoopNest(expr)` for contractions/products (generate loops instead of scalar-term expansion).
-  - [ ] `fuseLoops(...)` and `optimizeLoopOrder(...)` with a cache-locality heuristic.
-  - [ ] Vectorization hints in the loop metadata (candidate inner loops, vector widths).
-- [ ] Implement sparse/structured tensor handling:
-  - [ ] Recognize zero blocks in tensors with known structure (e.g., elasticity minor symmetry)
-  - [ ] Skip computation of structurally zero entries in generated loops
-  - [ ] Optional: compressed storage for Voigt notation (6×6 for 3×3×3×3 symmetric)
-- [ ] Define an incremental lowering strategy:
-  - [ ] Lower tensor calculus → loop-based IR when profitable; otherwise fall back to `einsum()` expansion.
-  - [ ] Ensure canonicalization runs before hashing/caching so equivalent expressions share compiled kernels.
-- [ ] Define temporary allocation strategy for tensor evaluation:
-  - [ ] Small tensors (≤ 3×3×3×3): stack allocation with fixed-size arrays
-  - [ ] Large/dynamic tensors: arena allocator per quadrature point batch
-  - [ ] Temporary reuse: lifetime analysis to minimize peak memory
-  - [ ] Alignment: ensure 32/64-byte alignment for SIMD
+- [x] Implement `Code/Source/solver/FE/Forms/Tensor/SymmetryOptimizer.h/.cpp`:
+  - [x] Compute independent component sets for common symmetries and provide canonical mapping/sign rules.
+  - [x] Lower tensor expressions using only independent components (`lowerWithSymmetry`).
+- [x] Implement `Code/Source/solver/FE/Forms/Tensor/TensorCSE.h/.cpp`:
+  - [x] Tensor-aware CSE that recognizes repeated contractions and expensive subexpressions (e.g., `det(F)`, `inv(F)`).
+  - [x] Temporary-introduction strategy compatible with `KernelIR`/LLVM emission.
+- [x] Implement `Code/Source/solver/FE/Forms/Tensor/LoopStructure.h/.cpp`:
+  - [x] `generateLoopNest(expr)` for contractions/products (generate loops instead of scalar-term expansion).
+  - [x] `fuseLoops(...)` and `optimizeLoopOrder(...)` with a cache-locality heuristic.
+  - [x] Vectorization hints in the loop metadata (candidate inner loops, vector widths).
+- [x] Implement sparse/structured tensor handling:
+  - [x] Recognize zero blocks in tensors with known structure (e.g., elasticity minor symmetry)
+  - [x] Skip computation of structurally zero entries in generated loops
+  - [x] Optional: compressed storage for Voigt notation (6×6 for 3×3×3×3 symmetric)
+- [x] Define an incremental lowering strategy:
+  - [x] Lower tensor calculus → loop-based IR when profitable; otherwise fall back to `einsum()` expansion.
+  - [x] Ensure canonicalization runs before hashing/caching so equivalent expressions share compiled kernels.
+- [x] Define temporary allocation strategy for tensor evaluation (`Code/Source/solver/FE/Forms/Tensor/TensorAllocation.h/.cpp`):
+  - [x] Small tensors (≤ 3×3×3×3): stack allocation with fixed-size arrays
+  - [x] Large/dynamic tensors: arena allocator per quadrature point batch
+  - [x] Temporary reuse: lifetime analysis (`LoopNestProgram::Contribution::available_after_op`) to minimize peak memory
+  - [x] Alignment: ensure 32/64-byte alignment for SIMD
 
 ### 14.7 Phase 6 — LLVM JIT Integration (TensorIR + Loop Emission)
 - [ ] Implement `Code/Source/solver/FE/Forms/Tensor/TensorIR.h/.cpp`:

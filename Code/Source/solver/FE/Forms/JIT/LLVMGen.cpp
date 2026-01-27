@@ -780,6 +780,40 @@ struct ShapeInferenceResult {
                 break;
             }
 
+            case FormExprType::SymmetricEigenvalue: {
+                const auto& a = childAt(0);
+                if (a.kind != Shape::Kind::Matrix || a.dims[0] != a.dims[1] || (a.dims[0] != 2u && a.dims[0] != 3u)) {
+                    return fail("LLVMGen: eig_sym expects a 2x2 or 3x3 square matrix");
+                }
+                out.shapes[idx] = scalarShape();
+                break;
+            }
+
+            case FormExprType::SymmetricEigenvalueDirectionalDerivative: {
+                const auto& a = childAt(0);
+                const auto& b = childAt(1);
+                if (a.kind != Shape::Kind::Matrix || b.kind != Shape::Kind::Matrix ||
+                    a.dims[0] != a.dims[1] || b.dims[0] != b.dims[1] ||
+                    a.dims[0] != b.dims[0] || (a.dims[0] != 2u && a.dims[0] != 3u)) {
+                    return fail("LLVMGen: eig_sym_dd expects two 2x2 or 3x3 square matrices with matching dims");
+                }
+                out.shapes[idx] = scalarShape();
+                break;
+            }
+
+            case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA: {
+                const auto& a = childAt(0);
+                const auto& b = childAt(1);
+                const auto& c = childAt(2);
+                if (a.kind != Shape::Kind::Matrix || b.kind != Shape::Kind::Matrix || c.kind != Shape::Kind::Matrix ||
+                    a.dims[0] != a.dims[1] || b.dims[0] != b.dims[1] || c.dims[0] != c.dims[1] ||
+                    a.dims[0] != b.dims[0] || a.dims[0] != c.dims[0] || (a.dims[0] != 2u && a.dims[0] != 3u)) {
+                    return fail("LLVMGen: eig_sym_ddA expects three 2x2 or 3x3 square matrices with matching dims");
+                }
+                out.shapes[idx] = scalarShape();
+                break;
+            }
+
             case FormExprType::IndexedAccess: {
                 if (op.child_count != 1u) {
                     return fail("LLVMGen: IndexedAccess expects exactly 1 child");
@@ -1347,6 +1381,20 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                         i32,               // out_kind
                                         f64_ptr,           // out_values
                                         i32);              // out_len
+
+        // Spectral helpers (symmetric 2x2/3x3 eigenvalues; strict-mode, cacheable).
+        auto eig_sym_2x2_fn =
+            module->getOrInsertFunction("svmp_fe_sym_eigenvalue_2x2_v1", f64, f64_ptr, i32);
+        auto eig_sym_3x3_fn =
+            module->getOrInsertFunction("svmp_fe_sym_eigenvalue_3x3_v1", f64, f64_ptr, i32);
+        auto eig_sym_dd_2x2_fn =
+            module->getOrInsertFunction("svmp_fe_sym_eigenvalue_dd_2x2_v1", f64, f64_ptr, f64_ptr, i32);
+        auto eig_sym_dd_3x3_fn =
+            module->getOrInsertFunction("svmp_fe_sym_eigenvalue_dd_3x3_v1", f64, f64_ptr, f64_ptr, i32);
+        auto eig_sym_ddA_2x2_fn =
+            module->getOrInsertFunction("svmp_fe_sym_eigenvalue_ddA_2x2_v1", f64, f64_ptr, f64_ptr, f64_ptr, i32);
+        auto eig_sym_ddA_3x3_fn =
+            module->getOrInsertFunction("svmp_fe_sym_eigenvalue_ddA_3x3_v1", f64, f64_ptr, f64_ptr, f64_ptr, i32);
 
         auto f64c = [&](double v) -> llvm::Constant* {
             return llvm::ConstantFP::get(f64, v);
@@ -2312,6 +2360,71 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                 out.elems[i] = builder.CreateFDiv(cofT.elems[i], detA);
             }
             return out;
+        };
+
+        auto storeMatrixToStack = [&](const CodeValue& a) -> llvm::Value* {
+            const auto n = elemCount(a.shape);
+            auto* arr_ty = llvm::ArrayType::get(f64, n);
+            auto* alloca = builder.CreateAlloca(arr_ty);
+            for (std::size_t i = 0; i < n; ++i) {
+                auto* gep = builder.CreateInBoundsGEP(arr_ty,
+                                                     alloca,
+                                                     {builder.getInt32(0), builder.getInt32(static_cast<std::uint32_t>(i))});
+                builder.CreateStore(a.elems[i], gep);
+            }
+            return builder.CreatePointerCast(alloca, f64_ptr);
+        };
+
+        auto eigSym = [&](const CodeValue& a, std::uint32_t which) -> CodeValue {
+            if (a.shape.kind != Shape::Kind::Matrix || a.shape.dims[0] != a.shape.dims[1]) {
+                throw std::runtime_error("LLVMGen: eig_sym expects square matrix");
+            }
+            const auto n = static_cast<std::size_t>(a.shape.dims[0]);
+            if (n != 2u && n != 3u) {
+                throw std::runtime_error("LLVMGen: eig_sym supports only 2x2 and 3x3 matrices");
+            }
+            auto* aptr = storeMatrixToStack(a);
+            auto callee = (n == 2u) ? eig_sym_2x2_fn : eig_sym_3x3_fn;
+            auto* val = builder.CreateCall(callee, {aptr, builder.getInt32(which)});
+            return makeScalar(val);
+        };
+
+        auto eigSymDD = [&](const CodeValue& a, const CodeValue& da, std::uint32_t which) -> CodeValue {
+            if (a.shape.kind != Shape::Kind::Matrix || da.shape.kind != Shape::Kind::Matrix ||
+                a.shape.dims[0] != a.shape.dims[1] || da.shape.dims[0] != da.shape.dims[1] ||
+                a.shape.dims[0] != da.shape.dims[0]) {
+                throw std::runtime_error("LLVMGen: eig_sym_dd expects matching square matrices");
+            }
+            const auto n = static_cast<std::size_t>(a.shape.dims[0]);
+            if (n != 2u && n != 3u) {
+                throw std::runtime_error("LLVMGen: eig_sym_dd supports only 2x2 and 3x3 matrices");
+            }
+            auto* aptr = storeMatrixToStack(a);
+            auto* dptr = storeMatrixToStack(da);
+            auto callee = (n == 2u) ? eig_sym_dd_2x2_fn : eig_sym_dd_3x3_fn;
+            auto* val = builder.CreateCall(callee, {aptr, dptr, builder.getInt32(which)});
+            return makeScalar(val);
+        };
+
+        auto eigSymDDWrtA = [&](const CodeValue& a,
+                                const CodeValue& b,
+                                const CodeValue& da,
+                                std::uint32_t which) -> CodeValue {
+            if (a.shape.kind != Shape::Kind::Matrix || b.shape.kind != Shape::Kind::Matrix || da.shape.kind != Shape::Kind::Matrix ||
+                a.shape.dims[0] != a.shape.dims[1] || b.shape.dims[0] != b.shape.dims[1] || da.shape.dims[0] != da.shape.dims[1] ||
+                a.shape.dims[0] != b.shape.dims[0] || a.shape.dims[0] != da.shape.dims[0]) {
+                throw std::runtime_error("LLVMGen: eig_sym_ddA expects matching square matrices");
+            }
+            const auto n = static_cast<std::size_t>(a.shape.dims[0]);
+            if (n != 2u && n != 3u) {
+                throw std::runtime_error("LLVMGen: eig_sym_ddA supports only 2x2 and 3x3 matrices");
+            }
+            auto* aptr = storeMatrixToStack(a);
+            auto* bptr = storeMatrixToStack(b);
+            auto* dptr = storeMatrixToStack(da);
+            auto callee = (n == 2u) ? eig_sym_ddA_2x2_fn : eig_sym_ddA_3x3_fn;
+            auto* val = builder.CreateCall(callee, {aptr, bptr, dptr, builder.getInt32(which)});
+            return makeScalar(val);
         };
 
         auto symOrSkew = [&](bool symmetric, const CodeValue& a) -> CodeValue {
@@ -4702,6 +4815,27 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values[op_idx] = evalLog(getChild(op, 0));
                         break;
 
+                    case FormExprType::SymmetricEigenvalue: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values[op_idx] = eigSym(getChild(op, 0), which);
+                        break;
+                    }
+
+                    case FormExprType::SymmetricEigenvalueDirectionalDerivative: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values[op_idx] = eigSymDD(getChild(op, 0), getChild(op, 1), which);
+                        break;
+                    }
+
+                    case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values[op_idx] = eigSymDDWrtA(getChild(op, 0), getChild(op, 1), getChild(op, 2), which);
+                        break;
+                    }
+
                     default:
                         throw std::runtime_error("LLVMGen: unsupported FormExprType in codegen (FormExprType=" +
                                                  std::to_string(static_cast<std::uint16_t>(op.type)) + ")");
@@ -5486,6 +5620,28 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                     case FormExprType::Log:
                         values[op_idx] = evalLog(getChild(op, 0));
                         break;
+
+                    case FormExprType::SymmetricEigenvalue: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values[op_idx] = eigSym(getChild(op, 0), which);
+                        break;
+                    }
+
+                    case FormExprType::SymmetricEigenvalueDirectionalDerivative: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values[op_idx] = eigSymDD(getChild(op, 0), getChild(op, 1), which);
+                        break;
+                    }
+
+                    case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values[op_idx] = eigSymDDWrtA(getChild(op, 0), getChild(op, 1), getChild(op, 2), which);
+                        break;
+                    }
+
                     default:
                         throw std::runtime_error("LLVMGen: unsupported op in cached eval");
                 }
@@ -6395,6 +6551,30 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values_minus[op_idx] = evalLog(childMinus(op, 0));
                         values_plus[op_idx] = evalLog(childPlus(op, 0));
                         break;
+
+                    case FormExprType::SymmetricEigenvalue: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values_minus[op_idx] = eigSym(childMinus(op, 0), which);
+                        values_plus[op_idx] = eigSym(childPlus(op, 0), which);
+                        break;
+                    }
+
+                    case FormExprType::SymmetricEigenvalueDirectionalDerivative: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values_minus[op_idx] = eigSymDD(childMinus(op, 0), childMinus(op, 1), which);
+                        values_plus[op_idx] = eigSymDD(childPlus(op, 0), childPlus(op, 1), which);
+                        break;
+                    }
+
+                    case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values_minus[op_idx] = eigSymDDWrtA(childMinus(op, 0), childMinus(op, 1), childMinus(op, 2), which);
+                        values_plus[op_idx] = eigSymDDWrtA(childPlus(op, 0), childPlus(op, 1), childPlus(op, 2), which);
+                        break;
+                    }
 
                     default:
                         throw std::runtime_error("LLVMGen: unsupported op in cached face eval");
@@ -8377,6 +8557,30 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             values_minus[op_idx] = evalLog(childMinus(op, 0));
                             values_plus[op_idx] = evalLog(childPlus(op, 0));
                             break;
+
+                        case FormExprType::SymmetricEigenvalue: {
+                            const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                            const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                            values_minus[op_idx] = eigSym(childMinus(op, 0), which);
+                            values_plus[op_idx] = eigSym(childPlus(op, 0), which);
+                            break;
+                        }
+
+                        case FormExprType::SymmetricEigenvalueDirectionalDerivative: {
+                            const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                            const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                            values_minus[op_idx] = eigSymDD(childMinus(op, 0), childMinus(op, 1), which);
+                            values_plus[op_idx] = eigSymDD(childPlus(op, 0), childPlus(op, 1), which);
+                            break;
+                        }
+
+                        case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA: {
+                            const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                            const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                            values_minus[op_idx] = eigSymDDWrtA(childMinus(op, 0), childMinus(op, 1), childMinus(op, 2), which);
+                            values_plus[op_idx] = eigSymDDWrtA(childPlus(op, 0), childPlus(op, 1), childPlus(op, 2), which);
+                            break;
+                        }
 
                         default:
                             throw std::runtime_error("LLVMGen: unsupported FormExprType in face codegen (FormExprType=" +

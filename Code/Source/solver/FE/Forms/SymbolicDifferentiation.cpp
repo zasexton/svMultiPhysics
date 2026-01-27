@@ -8,6 +8,7 @@
 #include "Forms/SymbolicDifferentiation.h"
 
 #include "Core/Types.h"
+#include "Forms/Tensor/TensorDifferentiation.h"
 
 #include <cmath>
 #include <limits>
@@ -101,6 +102,9 @@ namespace {
         case FormExprType::Determinant:
         case FormExprType::Norm:
         case FormExprType::Component:
+        case FormExprType::SymmetricEigenvalue:
+        case FormExprType::SymmetricEigenvalueDirectionalDerivative:
+        case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA:
             return true;
 
         case FormExprType::TestFunction:
@@ -807,12 +811,27 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 const int rank = node->indexRank().value_or(0);
                 const auto ids_opt = node->indexIds();
                 const auto ext_opt = node->indexExtents();
+                const auto names_opt = node->indexNames();
+                const auto vars_opt = node->indexVariances();
                 if (rank <= 0 || !ids_opt || !ext_opt) {
                     throw std::invalid_argument("differentiateResidual: IndexedAccess missing index metadata");
                 }
+
+                std::array<std::string, 4> names{};
+                if (names_opt) {
+                    for (std::size_t k = 0; k < names.size(); ++k) {
+                        names[k] = std::string((*names_opt)[k]);
+                    }
+                }
+                std::array<tensor::IndexVariance, 4> vars{};
+                vars.fill(tensor::IndexVariance::None);
+                if (vars_opt) {
+                    vars = *vars_opt;
+                }
+
                 const auto a = diff1(0);
-                out.primal = FormExpr::indexedAccessRaw(a.primal, rank, *ids_opt, *ext_opt);
-                out.deriv = FormExpr::indexedAccessRaw(a.deriv, rank, *ids_opt, *ext_opt);
+                out.primal = FormExpr::indexedAccessRawWithMetadata(a.primal, rank, *ids_opt, *ext_opt, vars, names);
+                out.deriv = FormExpr::indexedAccessRawWithMetadata(a.deriv, rank, *ids_opt, *ext_opt, vars, names);
                 break;
             }
 
@@ -1056,6 +1075,24 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 break;
             }
 
+            case FormExprType::SymmetricEigenvalue: {
+                const auto a = diff1(0);
+                const int which = node->eigenIndex().value_or(0);
+                out.primal = a.primal.symmetricEigenvalue(which);
+                out.deriv = FormExpr::symmetricEigenvalueDirectionalDerivative(a.primal, a.deriv, which);
+                break;
+            }
+
+            case FormExprType::SymmetricEigenvalueDirectionalDerivative: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                const int which = node->eigenIndex().value_or(0);
+                out.primal = FormExpr::symmetricEigenvalueDirectionalDerivative(a.primal, b.primal, which);
+                out.deriv = FormExpr::symmetricEigenvalueDirectionalDerivativeWrtA(a.primal, b.primal, a.deriv, which) +
+                            FormExpr::symmetricEigenvalueDirectionalDerivative(a.primal, b.deriv, which);
+                break;
+            }
+
             // ---- Constitutive hooks (must be inlined) ----
             case FormExprType::Constitutive:
             case FormExprType::ConstitutiveOutput:
@@ -1099,7 +1136,11 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
     };
 
     const auto pair = diff(diff, residual_form.nodeShared());
-    return simplify(pair.deriv);
+    auto deriv = simplify(pair.deriv);
+    if (tensor::containsTensorCalculusNodes(deriv)) {
+        deriv = tensor::postprocessTensorDerivative(deriv);
+    }
+    return deriv;
 }
 
 } // namespace
@@ -1163,6 +1204,606 @@ FormExpr differentiateResidual(const FormExpr& residual_form,
     cfg.field_id = field;
     cfg.trial_state_field = trial_state_field;
     return differentiateResidualImpl(residual_form, cfg);
+}
+
+FormExpr directionalDerivativeWrtField(const FormExpr& expr,
+                                       FieldId field,
+                                       const FormExpr& direction)
+{
+    if (!expr.isValid() || expr.node() == nullptr) {
+        throw std::invalid_argument("directionalDerivativeWrtField: invalid expression");
+    }
+    if (!direction.isValid() || direction.node() == nullptr) {
+        throw std::invalid_argument("directionalDerivativeWrtField: invalid direction expression");
+    }
+
+    const auto check = checkSymbolicDifferentiability(expr);
+    if (!check.ok) {
+        const auto msg = check.first_issue ? check.first_issue->message : std::string("SymbolicDiff: unsupported expression");
+        throw std::invalid_argument("directionalDerivativeWrtField: " + msg);
+    }
+
+    std::unordered_map<const FormExprNode*, DiffPair> memo;
+
+    std::optional<FormExprNode::SpaceSignature> wrt_field_sig{};
+    std::optional<std::string> wrt_field_name{};
+
+    const auto diff = [&](const auto& self, const std::shared_ptr<FormExprNode>& node) -> DiffPair {
+        if (!node) {
+            throw std::invalid_argument("directionalDerivativeWrtField: encountered null node");
+        }
+        if (auto it = memo.find(node.get()); it != memo.end()) {
+            return it->second;
+        }
+
+        DiffPair out;
+
+        const auto kids = node->childrenShared();
+
+        auto diff1 = [&](std::size_t k) -> DiffPair {
+            if (kids.size() <= k || !kids[k]) {
+                throw std::invalid_argument("directionalDerivativeWrtField: missing child");
+            }
+            return self(self, kids[k]);
+        };
+
+        auto zeroOf = [&](const FormExpr& ref) -> FormExpr {
+            return FormExpr::constant(0.0) * ref;
+        };
+
+        const auto isWrtField = [&](const FormExprNode::SpaceSignature& sig, FieldId fid, const std::string& name) -> bool {
+            if (fid != field) {
+                return false;
+            }
+
+            if (wrt_field_sig.has_value()) {
+                if (!spaceSignatureEqual(sig, *wrt_field_sig)) {
+                    throw std::invalid_argument("directionalDerivativeWrtField: target FieldId appears with inconsistent SpaceSignature");
+                }
+            } else {
+                wrt_field_sig = sig;
+            }
+
+            if (wrt_field_name.has_value()) {
+                if (name != *wrt_field_name) {
+                    throw std::invalid_argument("directionalDerivativeWrtField: target FieldId appears with inconsistent symbol name");
+                }
+            } else {
+                wrt_field_name = name;
+            }
+
+            return true;
+        };
+
+        switch (node->type()) {
+            // ---- Terminals (treated as constants) ----
+            case FormExprType::Constant:
+            case FormExprType::Coefficient:
+            case FormExprType::ParameterSymbol:
+            case FormExprType::ParameterRef:
+            case FormExprType::BoundaryIntegralSymbol:
+            case FormExprType::BoundaryIntegralRef:
+            case FormExprType::AuxiliaryStateSymbol:
+            case FormExprType::AuxiliaryStateRef:
+            case FormExprType::MaterialStateOldRef:
+            case FormExprType::MaterialStateWorkRef:
+            case FormExprType::PreviousSolutionRef:
+            case FormExprType::Coordinate:
+            case FormExprType::ReferenceCoordinate:
+            case FormExprType::Normal:
+            case FormExprType::Jacobian:
+            case FormExprType::JacobianInverse:
+            case FormExprType::JacobianDeterminant:
+            case FormExprType::CellDiameter:
+            case FormExprType::CellVolume:
+            case FormExprType::FacetArea:
+            case FormExprType::CellDomainId:
+            case FormExprType::Time:
+            case FormExprType::TimeStep:
+            case FormExprType::EffectiveTimeStep:
+            case FormExprType::BoundaryFunctionalSymbol:
+            case FormExprType::Identity:
+                out.primal = FormExpr(node);
+                out.deriv = zeroOf(out.primal);
+                break;
+
+            case FormExprType::TestFunction:
+                out.primal = FormExpr::testFunction(*node->spaceSignature(), node->toString());
+                out.deriv = zeroOf(out.primal);
+                break;
+
+            case FormExprType::TrialFunction: {
+                const auto* sig = node->spaceSignature();
+                if (!sig) {
+                    throw std::invalid_argument("directionalDerivativeWrtField: TrialFunction missing SpaceSignature");
+                }
+                out.primal = FormExpr::trialFunction(*sig, node->toString());
+                out.deriv = zeroOf(out.primal);
+                break;
+            }
+
+            case FormExprType::DiscreteField: {
+                const auto fid = node->fieldId();
+                const auto* sig = node->spaceSignature();
+                if (!fid || !sig) {
+                    throw std::invalid_argument("directionalDerivativeWrtField: DiscreteField missing metadata");
+                }
+                out.primal = FormExpr::discreteField(*fid, *sig, node->toString());
+                out.deriv = isWrtField(*sig, *fid, node->toString()) ? direction : zeroOf(out.primal);
+                break;
+            }
+
+            case FormExprType::StateField: {
+                const auto fid = node->fieldId();
+                const auto* sig = node->spaceSignature();
+                if (!fid || !sig) {
+                    throw std::invalid_argument("directionalDerivativeWrtField: StateField missing metadata");
+                }
+                out.primal = FormExpr::stateField(*fid, *sig, node->toString());
+                out.deriv = isWrtField(*sig, *fid, node->toString()) ? direction : zeroOf(out.primal);
+                break;
+            }
+
+            // ---- Unary ops ----
+            case FormExprType::Negate: {
+                const auto a = diff1(0);
+                out.primal = -a.primal;
+                out.deriv = -a.deriv;
+                break;
+            }
+            case FormExprType::Gradient: {
+                const auto a = diff1(0);
+                out.primal = a.primal.grad();
+                out.deriv = a.deriv.grad();
+                break;
+            }
+            case FormExprType::Divergence: {
+                const auto a = diff1(0);
+                out.primal = a.primal.div();
+                out.deriv = a.deriv.div();
+                break;
+            }
+            case FormExprType::Curl: {
+                const auto a = diff1(0);
+                out.primal = a.primal.curl();
+                out.deriv = a.deriv.curl();
+                break;
+            }
+            case FormExprType::Hessian: {
+                const auto a = diff1(0);
+                out.primal = a.primal.hessian();
+                out.deriv = a.deriv.hessian();
+                break;
+            }
+            case FormExprType::TimeDerivative: {
+                const int order = node->timeDerivativeOrder().value_or(1);
+                const auto a = diff1(0);
+                out.primal = a.primal.dt(order);
+                out.deriv = a.deriv.dt(order);
+                break;
+            }
+            case FormExprType::RestrictMinus: {
+                const auto a = diff1(0);
+                out.primal = a.primal.minus();
+                out.deriv = a.deriv.minus();
+                break;
+            }
+            case FormExprType::RestrictPlus: {
+                const auto a = diff1(0);
+                out.primal = a.primal.plus();
+                out.deriv = a.deriv.plus();
+                break;
+            }
+            case FormExprType::Jump: {
+                const auto a = diff1(0);
+                out.primal = a.primal.jump();
+                out.deriv = a.deriv.jump();
+                break;
+            }
+            case FormExprType::Average: {
+                const auto a = diff1(0);
+                out.primal = a.primal.avg();
+                out.deriv = a.deriv.avg();
+                break;
+            }
+
+            // ---- Constructors / indexing ----
+            case FormExprType::AsVector: {
+                std::vector<FormExpr> pv;
+                std::vector<FormExpr> dv;
+                pv.reserve(kids.size());
+                dv.reserve(kids.size());
+                for (const auto& k : kids) {
+                    const auto r = self(self, k);
+                    pv.push_back(r.primal);
+                    dv.push_back(r.deriv);
+                }
+                out.primal = FormExpr::asVector(std::move(pv));
+                out.deriv = FormExpr::asVector(std::move(dv));
+                break;
+            }
+            case FormExprType::AsTensor: {
+                const int rows = node->tensorRows().value_or(0);
+                const int cols = node->tensorCols().value_or(0);
+                if (rows <= 0 || cols <= 0) {
+                    throw std::invalid_argument("directionalDerivativeWrtField: AsTensor missing (rows,cols)");
+                }
+                if (kids.size() != static_cast<std::size_t>(rows * cols)) {
+                    throw std::invalid_argument("directionalDerivativeWrtField: AsTensor children size mismatch");
+                }
+
+                std::vector<std::vector<FormExpr>> prow(static_cast<std::size_t>(rows));
+                std::vector<std::vector<FormExpr>> drow(static_cast<std::size_t>(rows));
+                for (int r = 0; r < rows; ++r) {
+                    prow[static_cast<std::size_t>(r)].reserve(static_cast<std::size_t>(cols));
+                    drow[static_cast<std::size_t>(r)].reserve(static_cast<std::size_t>(cols));
+                    for (int c = 0; c < cols; ++c) {
+                        const auto idx = static_cast<std::size_t>(r * cols + c);
+                        const auto rr = self(self, kids[idx]);
+                        prow[static_cast<std::size_t>(r)].push_back(rr.primal);
+                        drow[static_cast<std::size_t>(r)].push_back(rr.deriv);
+                    }
+                }
+                out.primal = FormExpr::asTensor(std::move(prow));
+                out.deriv = FormExpr::asTensor(std::move(drow));
+                break;
+            }
+            case FormExprType::Component: {
+                const int i = node->componentIndex0().value_or(0);
+                const int j = node->componentIndex1().value_or(-1);
+                const auto a = diff1(0);
+                out.primal = a.primal.component(i, j);
+                out.deriv = a.deriv.component(i, j);
+                break;
+            }
+            case FormExprType::IndexedAccess: {
+                const int rank = node->indexRank().value_or(0);
+                const auto ids_opt = node->indexIds();
+                const auto ext_opt = node->indexExtents();
+                const auto names_opt = node->indexNames();
+                const auto vars_opt = node->indexVariances();
+                if (rank <= 0 || !ids_opt || !ext_opt) {
+                    throw std::invalid_argument("directionalDerivativeWrtField: IndexedAccess missing index metadata");
+                }
+
+                std::array<std::string, 4> names{};
+                if (names_opt) {
+                    for (std::size_t k = 0; k < names.size(); ++k) {
+                        names[k] = std::string((*names_opt)[k]);
+                    }
+                }
+                std::array<tensor::IndexVariance, 4> vars{};
+                vars.fill(tensor::IndexVariance::None);
+                if (vars_opt) {
+                    vars = *vars_opt;
+                }
+
+                const auto a = diff1(0);
+                out.primal = FormExpr::indexedAccessRawWithMetadata(a.primal, rank, *ids_opt, *ext_opt, vars, names);
+                out.deriv = FormExpr::indexedAccessRawWithMetadata(a.deriv, rank, *ids_opt, *ext_opt, vars, names);
+                break;
+            }
+
+            // ---- Algebra ----
+            case FormExprType::Add: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                out.primal = a.primal + b.primal;
+                out.deriv = a.deriv + b.deriv;
+                break;
+            }
+            case FormExprType::Subtract: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                out.primal = a.primal - b.primal;
+                out.deriv = a.deriv - b.deriv;
+                break;
+            }
+            case FormExprType::Multiply: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                out.primal = a.primal * b.primal;
+                out.deriv = (a.deriv * b.primal) + (a.primal * b.deriv);
+                break;
+            }
+            case FormExprType::Divide: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                out.primal = a.primal / b.primal;
+                out.deriv = (a.deriv / b.primal) - (a.primal * b.deriv / (b.primal * b.primal));
+                break;
+            }
+
+            // InnerProduct is scalar; DoubleContraction is scalar. OuterProduct returns a tensor-like value.
+            case FormExprType::InnerProduct: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                out.primal = a.primal.inner(b.primal);
+                out.deriv = a.deriv.inner(b.primal) + a.primal.inner(b.deriv);
+                break;
+            }
+            case FormExprType::DoubleContraction: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                out.primal = a.primal.doubleContraction(b.primal);
+                out.deriv = a.deriv.doubleContraction(b.primal) + a.primal.doubleContraction(b.deriv);
+                break;
+            }
+            case FormExprType::OuterProduct: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                out.primal = a.primal.outer(b.primal);
+                out.deriv = a.deriv.outer(b.primal) + a.primal.outer(b.deriv);
+                break;
+            }
+            case FormExprType::CrossProduct: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                out.primal = a.primal.cross(b.primal);
+                out.deriv = a.deriv.cross(b.primal) + a.primal.cross(b.deriv);
+                break;
+            }
+
+            case FormExprType::Power: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                out.primal = pow(a.primal, b.primal);
+
+                Real exp = 0.0;
+                if (b.primal.isValid() && b.primal.node() && isConstantScalar(*b.primal.node(), exp)) {
+                    if (exp == 0.0) {
+                        out.deriv = zeroOf(out.primal);
+                    } else {
+                        out.deriv = FormExpr::constant(exp) *
+                                    pow(a.primal, FormExpr::constant(exp - 1.0)) *
+                                    a.deriv;
+                    }
+                } else {
+                    // Match Dual::pow behavior: when pow(a,b) evaluates to 0, AD returns a zero derivative
+                    // without evaluating log(a) or 1/a (which would produce NaNs).
+                    const auto is_zero = eq(out.primal, FormExpr::constant(0.0)); // 0/1
+                    const auto safe_a = a.primal + is_zero; // shift to avoid log(0) and 1/0 in the masked case
+                    out.deriv = out.primal * (b.deriv * log(safe_a) + b.primal * (a.deriv / safe_a));
+                }
+                break;
+            }
+
+            case FormExprType::Minimum:
+            case FormExprType::Maximum: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                out.primal = (node->type() == FormExprType::Minimum) ? a.primal.min(b.primal) : a.primal.max(b.primal);
+                // Use a 0/1 mask from comparisons for derivative (piecewise; ties pick +a).
+                const auto pick_a = (node->type() == FormExprType::Minimum) ? le(a.primal, b.primal) : ge(a.primal, b.primal);
+                out.deriv = pick_a * a.deriv + (FormExpr::constant(1.0) - pick_a) * b.deriv;
+                break;
+            }
+
+            // ---- Comparisons / control ----
+            case FormExprType::Less:
+            case FormExprType::LessEqual:
+            case FormExprType::Greater:
+            case FormExprType::GreaterEqual:
+            case FormExprType::Equal:
+            case FormExprType::NotEqual: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                out.primal = FormExpr(node);
+                out.deriv = zeroOf(out.primal);
+                (void)a;
+                (void)b;
+                break;
+            }
+            case FormExprType::Conditional: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                const auto c = diff1(2);
+                out.primal = a.primal.conditional(b.primal, c.primal);
+                out.deriv = a.primal.conditional(b.deriv, c.deriv);
+                break;
+            }
+
+            // ---- Tensor ops / scalar functions ----
+            case FormExprType::Transpose: {
+                const auto a = diff1(0);
+                out.primal = a.primal.transpose();
+                out.deriv = a.deriv.transpose();
+                break;
+            }
+            case FormExprType::Trace: {
+                const auto a = diff1(0);
+                out.primal = a.primal.trace();
+                out.deriv = a.deriv.trace();
+                break;
+            }
+            case FormExprType::Determinant: {
+                const auto a = diff1(0);
+                out.primal = a.primal.det();
+                // Use cofactor-based rule to avoid singular-matrix inversion at det(A)=0:
+                //   d(det(A)) = cofactor(A) : dA
+                out.deriv = a.primal.cofactor().doubleContraction(a.deriv);
+                break;
+            }
+            case FormExprType::Cofactor: {
+                const auto a = diff1(0);
+                const auto detA = det(a.primal);
+                const auto invA = inv(a.primal);
+                const auto invAT = transpose(invA);
+                out.primal = a.primal.cofactor();
+                const auto ddet = detA * inner(inv(transpose(a.primal)), a.deriv);
+                const auto dinv = -(invA * a.deriv * invA);
+                out.deriv = ddet * invAT + detA * transpose(dinv);
+                break;
+            }
+            case FormExprType::Inverse: {
+                const auto a = diff1(0);
+                out.primal = inv(a.primal);
+                out.deriv = -(out.primal * a.deriv * out.primal);
+                break;
+            }
+            case FormExprType::Deviator: {
+                const auto a = diff1(0);
+                out.primal = a.primal.dev();
+                out.deriv = a.deriv.dev();
+                break;
+            }
+            case FormExprType::SymmetricPart: {
+                const auto a = diff1(0);
+                out.primal = a.primal.sym();
+                out.deriv = a.deriv.sym();
+                break;
+            }
+            case FormExprType::SkewPart: {
+                const auto a = diff1(0);
+                out.primal = a.primal.skew();
+                out.deriv = a.deriv.skew();
+                break;
+            }
+            case FormExprType::Norm: {
+                const auto a = diff1(0);
+                out.primal = a.primal.norm();
+                const auto nrm = out.primal;
+                const auto d = inner(a.primal, a.deriv) / nrm;
+                out.deriv = eq(nrm, FormExpr::constant(0.0)).conditional(FormExpr::constant(0.0), d);
+                break;
+            }
+            case FormExprType::Normalize: {
+                const auto a = diff1(0);
+                out.primal = a.primal.normalize();
+                const auto nrm = a.primal.norm();
+                const auto dnrm = inner(a.primal, a.deriv) / nrm;
+                const auto d = (a.deriv * nrm - a.primal * dnrm) / (nrm * nrm);
+                out.deriv = eq(nrm, FormExpr::constant(0.0)).conditional(zeroOf(out.primal), d);
+                break;
+            }
+            case FormExprType::AbsoluteValue: {
+                const auto a = diff1(0);
+                out.primal = a.primal.abs();
+                const auto is_nonneg = ge(a.primal, FormExpr::constant(0.0)); // 0/1
+                const auto sign = (FormExpr::constant(2.0) * is_nonneg) - FormExpr::constant(1.0); // +1 or -1
+                out.deriv = sign * a.deriv;
+                break;
+            }
+            case FormExprType::Sign: {
+                const auto a = diff1(0);
+                out.primal = a.primal.sign();
+                out.deriv = zeroOf(out.primal);
+                break;
+            }
+            case FormExprType::Sqrt: {
+                const auto a = diff1(0);
+                out.primal = a.primal.sqrt();
+                const auto is_zero = eq(out.primal, FormExpr::constant(0.0)); // 0/1
+                const auto denom = (FormExpr::constant(2.0) * out.primal) + is_zero;
+                out.deriv = a.deriv / denom;
+                break;
+            }
+            case FormExprType::Exp: {
+                const auto a = diff1(0);
+                out.primal = a.primal.exp();
+                out.deriv = out.primal * a.deriv;
+                break;
+            }
+            case FormExprType::Log: {
+                const auto a = diff1(0);
+                out.primal = a.primal.log();
+                out.deriv = a.deriv / a.primal;
+                break;
+            }
+
+            case FormExprType::SymmetricEigenvalue: {
+                const auto a = diff1(0);
+                const int which = node->eigenIndex().value_or(0);
+                out.primal = a.primal.symmetricEigenvalue(which);
+                out.deriv = FormExpr::symmetricEigenvalueDirectionalDerivative(a.primal, a.deriv, which);
+                break;
+            }
+
+            case FormExprType::SymmetricEigenvalueDirectionalDerivative: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                const int which = node->eigenIndex().value_or(0);
+                out.primal = FormExpr::symmetricEigenvalueDirectionalDerivative(a.primal, b.primal, which);
+                out.deriv = FormExpr::symmetricEigenvalueDirectionalDerivativeWrtA(a.primal, b.primal, a.deriv, which) +
+                            FormExpr::symmetricEigenvalueDirectionalDerivative(a.primal, b.deriv, which);
+                break;
+            }
+
+            case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA: {
+                // Only needed for 3rd+ derivatives; treat as a (differentiable) n-ary op.
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                const auto c = diff1(2);
+                const int which = node->eigenIndex().value_or(0);
+                out.primal = FormExpr::symmetricEigenvalueDirectionalDerivativeWrtA(a.primal, b.primal, c.primal, which);
+                out.deriv = FormExpr::symmetricEigenvalueDirectionalDerivativeWrtA(a.primal, b.primal, c.deriv, which);
+                break;
+            }
+
+            // ---- Constitutive hooks (must be inlined) ----
+            case FormExprType::Constitutive:
+            case FormExprType::ConstitutiveOutput:
+                throw std::invalid_argument("directionalDerivativeWrtField: Constitutive nodes must be inlined before differentiation");
+
+            // ---- Measure wrappers ----
+            case FormExprType::CellIntegral: {
+                const auto a = diff1(0);
+                out.primal = a.primal.dx();
+                out.deriv = a.deriv.dx();
+                break;
+            }
+            case FormExprType::BoundaryIntegral: {
+                const int marker = node->boundaryMarker().value_or(-1);
+                const auto a = diff1(0);
+                out.primal = a.primal.ds(marker);
+                out.deriv = a.deriv.ds(marker);
+                break;
+            }
+            case FormExprType::InteriorFaceIntegral: {
+                const auto a = diff1(0);
+                out.primal = a.primal.dS();
+                out.deriv = a.deriv.dS();
+                break;
+            }
+            case FormExprType::InterfaceIntegral: {
+                const int marker = node->interfaceMarker().value_or(-1);
+                const auto a = diff1(0);
+                out.primal = a.primal.dI(marker);
+                out.deriv = a.deriv.dI(marker);
+                break;
+            }
+
+            default:
+                throw std::invalid_argument("directionalDerivativeWrtField: unsupported FormExprType " +
+                                            std::to_string(static_cast<std::uint16_t>(node->type())));
+        }
+
+        memo.emplace(node.get(), out);
+        return out;
+    };
+
+    auto pair = diff(diff, expr.nodeShared());
+    FormExpr deriv = simplify(pair.deriv);
+    if (tensor::containsTensorCalculusNodes(deriv)) {
+        deriv = tensor::postprocessTensorDerivative(deriv);
+    }
+    return deriv;
+}
+
+FormExpr differentiateResidualHessianVector(const FormExpr& residual_form,
+                                           const FormExpr& direction)
+{
+    const auto tangent = differentiateResidual(residual_form);
+    return directionalDerivativeWrtField(tangent, INVALID_FIELD_ID, direction);
+}
+
+FormExpr differentiateResidualHessianVector(const FormExpr& residual_form,
+                                           FieldId field,
+                                           const FormExpr& direction,
+                                           FieldId trial_state_field)
+{
+    const auto tangent = differentiateResidual(residual_form, field, trial_state_field);
+    return directionalDerivativeWrtField(tangent, field, direction);
 }
 
 } // namespace forms

@@ -85,6 +85,48 @@ struct SymbolicDiffResult {
                                             FieldId trial_state_field = INVALID_FIELD_ID);
 
 /**
+ * @brief Directional derivative of an expression w.r.t. a FieldId
+ *
+ * This computes: d(expr)/d(field)[direction], treating all TrialFunction/TestFunction
+ * terminals as constants. Only `StateField(field)` / `DiscreteField(field)` terminals
+ * participate in the differentiation.
+ *
+ * This is intended as a building block for higher-order derivatives such as
+ * Hessian-vector products.
+ */
+[[nodiscard]] FormExpr directionalDerivativeWrtField(const FormExpr& expr,
+                                                     FieldId field,
+                                                     const FormExpr& direction);
+
+/**
+ * @brief Hessian-vector product of a residual form w.r.t. the active TrialFunction
+ *
+ * This returns a bilinear form representing:
+ *   H(u)[w](δu, v) = d/du ( dR/du[δu, v] )[w]
+ *
+ * where `w` is provided by `direction` and is expected to be compatible with the
+ * residual's unknown (same value shape). Common choices include:
+ * - a `StateField`/`DiscreteField` terminal backed by an externally-provided direction vector
+ * - `PreviousSolutionRef(k)` when reusing transient history slots in time-integration contexts
+ *
+ * The returned expression is suitable for standard bilinear assembly (matrix).
+ */
+[[nodiscard]] FormExpr differentiateResidualHessianVector(const FormExpr& residual_form,
+                                                         const FormExpr& direction);
+
+/**
+ * @brief Hessian-vector product of a residual form w.r.t. a FieldId (multi-field)
+ *
+ * This differentiates the residual w.r.t. `field` to form a tangent bilinear form,
+ * then takes a directional derivative of that tangent w.r.t. the same field in the
+ * provided `direction`.
+ */
+[[nodiscard]] FormExpr differentiateResidualHessianVector(const FormExpr& residual_form,
+                                                         FieldId field,
+                                                         const FormExpr& direction,
+                                                         FieldId trial_state_field = INVALID_FIELD_ID);
+
+/**
  * @brief Simplify a FormExpr with lightweight algebraic rewrites and constant folding
  */
 [[nodiscard]] FormExpr simplify(const FormExpr& expr);

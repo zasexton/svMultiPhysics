@@ -18,11 +18,40 @@ namespace FE {
 namespace forms {
 namespace tensor {
 
-// Placeholder API: when special tensor FormExpr nodes exist, these helpers can
-// construct correct symbolic derivatives. For now, they serve as extension points.
+/**
+ * @brief Derivative of Kronecker delta / identity tensor (0)
+ */
+[[nodiscard]] FormExpr differentiateDelta(const TensorDiffContext& ctx);
 
-[[nodiscard]] inline FormExpr differentiateDelta(const TensorDiffContext&) { return FormExpr::constant(0.0); }
-[[nodiscard]] inline FormExpr differentiateLeviCivita(const TensorDiffContext&) { return FormExpr::constant(0.0); }
+/**
+ * @brief Derivative of Levi-Civita tensor (0)
+ */
+[[nodiscard]] FormExpr differentiateLeviCivita(const TensorDiffContext& ctx);
+
+/**
+ * @brief Derivative of metric tensor g_ij (default identity metric => 0)
+ */
+[[nodiscard]] FormExpr differentiateMetricTensor(const TensorDiffContext& ctx);
+
+/**
+ * @brief Derivative of inverse metric tensor g^ij (default identity metric => 0)
+ */
+[[nodiscard]] FormExpr differentiateInverseMetricTensor(const TensorDiffContext& ctx);
+
+struct DeformationGradientDiffResult {
+    FormExpr F{};
+    FormExpr dF{};
+};
+
+/**
+ * @brief Construct and differentiate deformation gradient F = I + grad(u)
+ *
+ * This helper is intended for hyperelasticity chains. It returns:
+ * - `F`: the deformation gradient (primal)
+ * - `dF`: its directional derivative w.r.t. `ctx` (e.g., grad(δu))
+ */
+[[nodiscard]] DeformationGradientDiffResult differentiateDeformationGradient(const FormExpr& displacement,
+                                                                            const TensorDiffContext& ctx = {});
 
 } // namespace tensor
 } // namespace forms
@@ -30,4 +59,3 @@ namespace tensor {
 } // namespace svmp
 
 #endif // SVMP_FE_FORMS_TENSOR_SPECIAL_TENSOR_DERIVATIVES_H
-

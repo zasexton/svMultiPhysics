@@ -29,8 +29,8 @@ TEST(TensorDifferentiation, DifferentiateResidualAcceptsIndexedAccess)
     EXPECT_NO_THROW({
         const auto tangent = differentiateResidual(residual);
         EXPECT_TRUE(tangent.isValid());
+        EXPECT_NE(tangent.toString().find("_{i}"), std::string::npos);
     });
 }
 
 } // namespace svmp::FE::forms::tensor
-

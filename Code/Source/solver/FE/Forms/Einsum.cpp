@@ -76,6 +76,7 @@ FormExpr rebuildBinary(const std::shared_ptr<FormExprNode>& node,
         case FormExprType::Multiply: return a * b;
         case FormExprType::Divide: return a / b;
         case FormExprType::InnerProduct: return a.inner(b);
+        case FormExprType::DoubleContraction: return a.doubleContraction(b);
         case FormExprType::OuterProduct: return a.outer(b);
         case FormExprType::CrossProduct: return a.cross(b);
         case FormExprType::Power: return a.pow(b);
@@ -129,10 +130,24 @@ FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
     switch (t) {
         case FormExprType::TestFunction:
         case FormExprType::TrialFunction:
+        case FormExprType::DiscreteField:
+        case FormExprType::StateField:
         case FormExprType::Coefficient:
+        case FormExprType::ParameterSymbol:
+        case FormExprType::ParameterRef:
         case FormExprType::Constant:
+        case FormExprType::BoundaryIntegralSymbol:
+        case FormExprType::BoundaryIntegralRef:
+        case FormExprType::AuxiliaryStateSymbol:
+        case FormExprType::AuxiliaryStateRef:
+        case FormExprType::MaterialStateOldRef:
+        case FormExprType::MaterialStateWorkRef:
+        case FormExprType::PreviousSolutionRef:
         case FormExprType::Coordinate:
         case FormExprType::ReferenceCoordinate:
+        case FormExprType::Time:
+        case FormExprType::TimeStep:
+        case FormExprType::EffectiveTimeStep:
         case FormExprType::Identity:
         case FormExprType::Jacobian:
         case FormExprType::JacobianInverse:
@@ -194,6 +209,44 @@ FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
         return rebuildUnary(node, assignment).component(i, j);
     }
 
+    if (t == FormExprType::AsVector) {
+        const auto kids = node->childrenShared();
+        std::vector<FormExpr> components;
+        components.reserve(kids.size());
+        for (const auto& kid : kids) {
+            if (!kid) {
+                throw std::invalid_argument("einsum: AsVector has null child");
+            }
+            components.push_back(rebuildWithIndexSubstitution(kid, assignment));
+        }
+        return FormExpr::asVector(std::move(components));
+    }
+
+    if (t == FormExprType::AsTensor) {
+        const int rows = node->tensorRows().value_or(0);
+        const int cols = node->tensorCols().value_or(0);
+        const auto kids = node->childrenShared();
+        if (rows <= 0 || cols <= 0) {
+            throw std::invalid_argument("einsum: AsTensor missing (rows,cols)");
+        }
+        if (kids.size() != static_cast<std::size_t>(rows * cols)) {
+            throw std::invalid_argument("einsum: AsTensor children size mismatch");
+        }
+        std::vector<std::vector<FormExpr>> out_rows(static_cast<std::size_t>(rows));
+        for (int r = 0; r < rows; ++r) {
+            auto& row = out_rows[static_cast<std::size_t>(r)];
+            row.reserve(static_cast<std::size_t>(cols));
+            for (int c = 0; c < cols; ++c) {
+                const auto idx = static_cast<std::size_t>(r * cols + c);
+                if (!kids[idx]) {
+                    throw std::invalid_argument("einsum: AsTensor has null child");
+                }
+                row.push_back(rebuildWithIndexSubstitution(kids[idx], assignment));
+            }
+        }
+        return FormExpr::asTensor(std::move(out_rows));
+    }
+
     if (t == FormExprType::ConstitutiveOutput) {
         const auto kids = node->childrenShared();
         if (kids.size() != 1u || !kids[0]) {
@@ -249,6 +302,7 @@ FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
         case FormExprType::Multiply:
         case FormExprType::Divide:
         case FormExprType::InnerProduct:
+        case FormExprType::DoubleContraction:
         case FormExprType::OuterProduct:
         case FormExprType::CrossProduct:
         case FormExprType::Power:
