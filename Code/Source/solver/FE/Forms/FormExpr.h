@@ -9,6 +9,7 @@
 #include "Core/Types.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -52,12 +53,41 @@ enum class ADMode : std::uint8_t {
 /**
  * @brief JIT compilation options (placeholder for future codegen)
  */
+enum class TensorLoweringMode : std::uint8_t {
+    Off,
+    Auto,
+    On,
+};
+
+struct TensorJITOptions {
+    TensorLoweringMode mode{TensorLoweringMode::Auto};
+
+    // Force loop-nest lowering even when scalar expansion is "small".
+    bool force_loop_nest{false};
+
+    // Lowering knobs (LoopStructureOptions).
+    bool enable_symmetry_lowering{true};
+    bool enable_optimal_contraction_order{true};
+    bool enable_vectorization_hints{true};
+    bool enable_delta_shortcuts{true};
+    std::uint64_t scalar_expansion_term_threshold{64};
+
+    // Temporary allocation knobs (TensorAllocationOptions).
+    std::size_t temp_stack_max_entries{81};
+    std::size_t temp_alignment_bytes{64};
+    bool temp_enable_reuse{true};
+
+    // Optional: enable Polly-related loop metadata / passes.
+    bool enable_polly{false};
+};
+
 struct JITOptions {
     bool enable{false};
     int optimization_level{2};
     bool cache_kernels{true};
     bool vectorize{true};
     std::string cache_directory;
+    TensorJITOptions tensor{};
 };
 
 /**

@@ -525,24 +525,24 @@ This section extends the core LLVM JIT plan with a detailed, incremental checkli
   - [x] Alignment: ensure 32/64-byte alignment for SIMD
 
 ### 14.7 Phase 6 — LLVM JIT Integration (TensorIR + Loop Emission)
-- [ ] Implement `Code/Source/solver/FE/Forms/Tensor/TensorIR.h/.cpp`:
-  - [ ] `TensorIRNode` kinds for tensor ops, loop nests, loads/stores, and scalar ops.
-  - [ ] `lowerToTensorIR(expr)` that preserves tensor structure until final emission.
-- [ ] Implement `Code/Source/solver/FE/Forms/JIT/LLVMTensorGen.h/.cpp`:
-  - [ ] Emit loop nests (`emitLoopNest`) with correct PHI nodes and reduction patterns.
-  - [ ] Emit contractions as loops (`emitContraction`) and apply vectorization when enabled.
-  - [ ] Emit symmetry-aware loops (e.g., `j >= i` for symmetric tensors) when safe.
-- [ ] Integrate TensorIR into the existing JIT pipeline:
-  - [ ] Extend `Code/Source/solver/FE/Forms/JIT/LLVMGen.*` to delegate tensor-structured nodes/IR to `LLVMTensorGen`.
-  - [ ] Extend `Code/Source/solver/FE/Forms/JIT/JITValidation.*` to validate tensor/loop IR (strict vs allow-external-calls).
-  - [ ] Ensure kernel caching keys include tensor-lowering options and canonicalized TensorIR hashes.
-- [ ] Optional: Polly integration (behind a build/runtime flag):
-  - [ ] Add loop metadata suitable for Polly tiling/vectorization.
-  - [ ] Validate behavior across LLVM versions used by CI.
-- [ ] Ensure thread safety in tensor calculus pipeline:
-  - [ ] Canonicalization: no global mutable state; use local index renaming
-  - [ ] TensorIR caching: thread-safe cache with compile-once semantics
-  - [ ] Loop emission: no shared mutable state between threads
+- [x] Implement `Code/Source/solver/FE/Forms/Tensor/TensorIR.h/.cpp`:
+  - [x] `TensorIRNode` kinds for tensor ops, loop nests, loads/stores, and scalar ops.
+  - [x] `lowerToTensorIR(expr)` that preserves tensor structure until final emission.
+- [x] Implement `Code/Source/solver/FE/Forms/JIT/LLVMTensorGen.h/.cpp`:
+  - [x] Emit loop nests (`emitLoopNest`) with correct PHI nodes and reduction patterns.
+  - [x] Emit contractions as loops (`emitContraction`) and apply vectorization when enabled.
+  - [x] Emit symmetry-aware loops (e.g., `j >= i` for symmetric tensors) when safe.
+- [x] Integrate TensorIR into the existing JIT pipeline:
+  - [x] Extend `Code/Source/solver/FE/Forms/JIT/LLVMGen.*` to delegate tensor-structured nodes/IR to `LLVMTensorGen`.
+  - [x] Extend `Code/Source/solver/FE/Forms/JIT/JITValidation.*` to validate tensor/loop IR (strict vs allow-external-calls).
+  - [x] Ensure kernel caching keys include tensor-lowering options and canonicalized TensorIR hashes.
+- [x] Optional: Polly integration (behind a build/runtime flag):
+  - [x] Add loop metadata suitable for Polly tiling/vectorization.
+  - [x] Validate behavior across LLVM versions used by CI.
+- [x] Ensure thread safety in tensor calculus pipeline:
+  - [x] Canonicalization: no global mutable state; use local index renaming
+  - [x] TensorIR caching: thread-safe cache with compile-once semantics
+  - [x] Loop emission: no shared mutable state between threads
 
 ### 14.8 Testing, Benchmarks, and Rollout
 - [ ] Add end-to-end tests that compare:

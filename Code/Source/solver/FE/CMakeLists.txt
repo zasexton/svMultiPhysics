@@ -665,6 +665,7 @@ set(FE_FORMS_HEADERS
 	    Forms/Tensor/TensorCSE.h
 	    Forms/Tensor/LoopStructure.h
 	    Forms/Tensor/TensorAllocation.h
+	    Forms/Tensor/TensorIR.h
     Forms/Tensor/SpectralEigen.h
 	    Forms/Tensor/SpecialTensorDerivatives.h
     Forms/FormIR.h
@@ -684,6 +685,7 @@ set(FE_FORMS_HEADERS
 	    Forms/JIT/KernelIR.h
 	    Forms/JIT/JITValidation.h
 	    Forms/JIT/LLVMGen.h
+	    Forms/JIT/LLVMTensorGen.h
 	    Forms/JIT/LLVMJITBuildInfo.h
 	    Forms/JIT/JITKernelWrapper.h
 	    Forms/JIT/JITFunctionalKernelWrapper.h
@@ -705,6 +707,7 @@ set(FE_FORMS_SOURCES
 	    Forms/Tensor/TensorCSE.cpp
 	    Forms/Tensor/LoopStructure.cpp
 	    Forms/Tensor/TensorAllocation.cpp
+	    Forms/Tensor/TensorIR.cpp
     Forms/Tensor/SpectralEigen.cpp
 	    Forms/Tensor/SpecialTensorDerivatives.cpp
     Forms/FormIR.cpp
@@ -720,6 +723,7 @@ set(FE_FORMS_SOURCES
 	    Forms/JIT/KernelIR.cpp
 	    Forms/JIT/JITValidation.cpp
 	    Forms/JIT/LLVMGen.cpp
+	    Forms/JIT/LLVMTensorGen.cpp
 	    Forms/JIT/LLVMJITBuildInfo.cpp
 	    Forms/JIT/JITKernelWrapper.cpp
 	    Forms/JIT/JITFunctionalKernelWrapper.cpp

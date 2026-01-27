@@ -14,6 +14,7 @@
 #include "Forms/JIT/KernelIR.h"
 #include "Forms/JIT/LLVMGen.h"
 #include "Forms/JIT/LLVMJITBuildInfo.h"
+#include "Forms/Tensor/TensorIR.h"
 
 #include <algorithm>
 #include <atomic>
@@ -138,6 +139,23 @@ inferFunctionalTrialSpaceSignature(const FormExprNode& node, bool& out_conflict)
 }
 
 #if SVMP_FE_ENABLE_LLVM_JIT
+[[nodiscard]] std::uint64_t hashTensorOptions(const TensorJITOptions& opt) noexcept
+{
+    std::uint64_t h = kFNVOffset;
+    hashMix(h, static_cast<std::uint64_t>(opt.mode));
+    hashMix(h, static_cast<std::uint64_t>(opt.force_loop_nest ? 1u : 0u));
+    hashMix(h, static_cast<std::uint64_t>(opt.enable_symmetry_lowering ? 1u : 0u));
+    hashMix(h, static_cast<std::uint64_t>(opt.enable_optimal_contraction_order ? 1u : 0u));
+    hashMix(h, static_cast<std::uint64_t>(opt.enable_vectorization_hints ? 1u : 0u));
+    hashMix(h, static_cast<std::uint64_t>(opt.enable_delta_shortcuts ? 1u : 0u));
+    hashMix(h, opt.scalar_expansion_term_threshold);
+    hashMix(h, static_cast<std::uint64_t>(opt.temp_stack_max_entries));
+    hashMix(h, static_cast<std::uint64_t>(opt.temp_alignment_bytes));
+    hashMix(h, static_cast<std::uint64_t>(opt.temp_enable_reuse ? 1u : 0u));
+    hashMix(h, static_cast<std::uint64_t>(opt.enable_polly ? 1u : 0u));
+    return h;
+}
+
 struct SpaceSigHash {
     std::uint64_t h{0};
 };
@@ -224,7 +242,7 @@ struct KernelGroupPlan {
     hashMix(h, trial_sig_hash.h);
     hashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(jit_options.optimization_level)));
     hashMix(h, static_cast<std::uint64_t>(jit_options.vectorize ? 1u : 0u));
-    hashMix(h, 0u);
+    hashMix(h, hashTensorOptions(jit_options.tensor));
     hashMix(h, 0u);
     hashMix(h, hashString(target_triple));
     hashMix(h, hashString(data_layout));
@@ -302,10 +320,47 @@ struct CompilationPlan {
 
         for (const auto idx : group.term_indices) {
             const auto& term = ir.terms()[idx];
-            const auto lowered = lowerToKernelIR(term.integrand);
-            cacheable = cacheable && lowered.cacheable;
+            std::uint64_t term_hash = 0;
+            bool term_cacheable = true;
 
-            const auto term_hash = lowered.ir.stableHash64();
+            if (jit_options.tensor.mode != TensorLoweringMode::Off) {
+                tensor::TensorIRLoweringOptions tensor_opts;
+                tensor_opts.enable_cache = true;
+                tensor_opts.force_loop_nest =
+                    (jit_options.tensor.mode == TensorLoweringMode::On) || jit_options.tensor.force_loop_nest;
+
+                tensor_opts.loop.enable_symmetry_lowering = jit_options.tensor.enable_symmetry_lowering;
+                tensor_opts.loop.enable_optimal_contraction_order = jit_options.tensor.enable_optimal_contraction_order;
+                tensor_opts.loop.enable_vectorization_hints = jit_options.vectorize && jit_options.tensor.enable_vectorization_hints;
+                tensor_opts.loop.enable_delta_shortcuts = jit_options.tensor.enable_delta_shortcuts;
+                tensor_opts.loop.scalar_expansion_term_threshold = jit_options.tensor.scalar_expansion_term_threshold;
+
+                tensor_opts.alloc.stack_max_entries = jit_options.tensor.temp_stack_max_entries;
+                tensor_opts.alloc.alignment_bytes = jit_options.tensor.temp_alignment_bytes;
+                tensor_opts.alloc.enable_reuse = jit_options.tensor.temp_enable_reuse;
+
+                const auto tl = tensor::lowerToTensorIR(term.integrand, tensor_opts);
+                if (!tl.ok) {
+                    throw std::runtime_error(tl.message.empty() ? "JITCompiler: tensor lowering failed" : tl.message);
+                }
+
+                if (tl.used_loop_nest) {
+                    term_hash = tl.ir.stableHash64();
+                    term_cacheable = tl.cacheable;
+                } else {
+                    const auto effective =
+                        tl.fallback_expr.isValid() ? tl.fallback_expr : term.integrand;
+                    const auto lowered = lowerToKernelIR(effective);
+                    term_hash = lowered.ir.stableHash64();
+                    term_cacheable = lowered.cacheable;
+                }
+            } else {
+                const auto lowered = lowerToKernelIR(term.integrand);
+                term_hash = lowered.ir.stableHash64();
+                term_cacheable = lowered.cacheable;
+            }
+
+            cacheable = cacheable && term_cacheable;
             hashMix(combined_ir_hash, term_hash);
             hashMix(combined_ir_hash, static_cast<std::uint64_t>(static_cast<std::int64_t>(term.time_derivative_order)));
         }
@@ -361,13 +416,25 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
         bool vectorize{true};
         bool cache_kernels{true};
         std::string cache_directory{};
+        TensorJITOptions tensor{};
 
         bool operator==(const CompilerKey& other) const noexcept
         {
             return optimization_level == other.optimization_level &&
                    vectorize == other.vectorize &&
                    cache_kernels == other.cache_kernels &&
-                   cache_directory == other.cache_directory;
+                   cache_directory == other.cache_directory &&
+                   tensor.mode == other.tensor.mode &&
+                   tensor.force_loop_nest == other.tensor.force_loop_nest &&
+                   tensor.enable_symmetry_lowering == other.tensor.enable_symmetry_lowering &&
+                   tensor.enable_optimal_contraction_order == other.tensor.enable_optimal_contraction_order &&
+                   tensor.enable_vectorization_hints == other.tensor.enable_vectorization_hints &&
+                   tensor.enable_delta_shortcuts == other.tensor.enable_delta_shortcuts &&
+                   tensor.scalar_expansion_term_threshold == other.tensor.scalar_expansion_term_threshold &&
+                   tensor.temp_stack_max_entries == other.tensor.temp_stack_max_entries &&
+                   tensor.temp_alignment_bytes == other.tensor.temp_alignment_bytes &&
+                   tensor.temp_enable_reuse == other.tensor.temp_enable_reuse &&
+                   tensor.enable_polly == other.tensor.enable_polly;
         }
     };
 
@@ -379,6 +446,17 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
             hashMix(h, static_cast<std::uint64_t>(k.vectorize ? 1u : 0u));
             hashMix(h, static_cast<std::uint64_t>(k.cache_kernels ? 1u : 0u));
             hashMix(h, hashString(k.cache_directory));
+            hashMix(h, static_cast<std::uint64_t>(k.tensor.mode));
+            hashMix(h, static_cast<std::uint64_t>(k.tensor.force_loop_nest ? 1u : 0u));
+            hashMix(h, static_cast<std::uint64_t>(k.tensor.enable_symmetry_lowering ? 1u : 0u));
+            hashMix(h, static_cast<std::uint64_t>(k.tensor.enable_optimal_contraction_order ? 1u : 0u));
+            hashMix(h, static_cast<std::uint64_t>(k.tensor.enable_vectorization_hints ? 1u : 0u));
+            hashMix(h, static_cast<std::uint64_t>(k.tensor.enable_delta_shortcuts ? 1u : 0u));
+            hashMix(h, k.tensor.scalar_expansion_term_threshold);
+            hashMix(h, static_cast<std::uint64_t>(k.tensor.temp_stack_max_entries));
+            hashMix(h, static_cast<std::uint64_t>(k.tensor.temp_alignment_bytes));
+            hashMix(h, static_cast<std::uint64_t>(k.tensor.temp_enable_reuse ? 1u : 0u));
+            hashMix(h, static_cast<std::uint64_t>(k.tensor.enable_polly ? 1u : 0u));
             return static_cast<std::size_t>(h);
         }
     };
@@ -391,6 +469,7 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
     key.vectorize = options.vectorize;
     key.cache_kernels = options.cache_kernels;
     key.cache_directory = options.cache_directory;
+    key.tensor = options.tensor;
 
     std::lock_guard<std::mutex> lock(registry_mutex);
     if (auto it = registry.find(key); it != registry.end()) {

@@ -8,6 +8,7 @@
 #include "Forms/JIT/JITValidation.h"
 
 #include "Core/FEException.h"
+#include "Forms/Tensor/LoopStructure.h"
 #include "Forms/Tensor/TensorContraction.h"
 
 #include <stdexcept>
@@ -165,6 +166,30 @@ ValidationResult canCompile(const FormExpr& integrand, const ValidationOptions& 
                 .type = FormExprType::IndexedAccess,
                 .message = "JIT: result has free indices {" + formatIndexList(a.free_indices) +
                            "} but expected scalar output (integrand must be fully contracted)",
+                .subexpr = integrand.toString(),
+            };
+            return out;
+        }
+
+        // Validate that tensor calculus can be lowered either to loop-nest IR or
+        // to a scalar-expanded fallback (einsum). This mirrors the JIT lowering
+        // decision and produces clearer diagnostics for unsupported patterns.
+        try {
+            const auto lr = forms::tensor::lowerTensorExpressionIncremental(integrand);
+            if (!lr.ok) {
+                out.ok = false;
+                out.first_issue = ValidationIssue{
+                    .type = FormExprType::IndexedAccess,
+                    .message = "JIT: tensor/loop lowering failed: " + (lr.message.empty() ? std::string{"unknown error"} : lr.message),
+                    .subexpr = integrand.toString(),
+                };
+                return out;
+            }
+        } catch (const std::exception& e) {
+            out.ok = false;
+            out.first_issue = ValidationIssue{
+                .type = FormExprType::IndexedAccess,
+                .message = std::string("JIT: tensor/loop lowering threw exception: ") + e.what(),
                 .subexpr = integrand.toString(),
             };
             return out;

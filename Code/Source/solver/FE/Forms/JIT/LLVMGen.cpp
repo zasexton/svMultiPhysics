@@ -13,7 +13,9 @@
 #include "Assembly/JIT/KernelArgs.h"
 #include "Forms/ConstitutiveModel.h"
 #include "Forms/JIT/ExternalCalls.h"
+#include "Forms/JIT/LLVMTensorGen.h"
 #include "Forms/JIT/KernelIR.h"
+#include "Forms/Tensor/TensorIR.h"
 
 #include <algorithm>
 #include <array>
@@ -321,7 +323,8 @@ struct ShapeInferenceResult {
 
 [[nodiscard]] ShapeInferenceResult inferShapes(const KernelIR& ir,
                                                const std::optional<FormExprNode::SpaceSignature>& test_sig,
-                                               const std::optional<FormExprNode::SpaceSignature>& trial_sig)
+                                               const std::optional<FormExprNode::SpaceSignature>& trial_sig,
+                                               bool require_scalar_root = true)
 {
     (void)test_sig;
     ShapeInferenceResult out;
@@ -881,9 +884,11 @@ struct ShapeInferenceResult {
         return fail("LLVMGen: invalid KernelIR root index");
     }
 
-    const auto root_shape = out.shapes[ir.root];
-    if (!root_shape.isScalar()) {
-        return fail("LLVMGen: integrand must lower to a scalar for AssemblyKernel evaluation");
+    if (require_scalar_root) {
+        const auto root_shape = out.shapes[ir.root];
+        if (!root_shape.isScalar()) {
+            return fail("LLVMGen: integrand must lower to a scalar for AssemblyKernel evaluation");
+        }
     }
 
     for (const auto& s : out.shapes) {
@@ -984,6 +989,8 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             std::vector<std::uint8_t> dep_mask{};
             int time_derivative_order{0};
 
+            std::optional<tensor::TensorIR> tensor_ir{};
+
             bool has_indexed_access{false};
             // Canonical (KernelIR-level) index ids and extents for Einstein-summation loops.
             std::vector<std::pair<std::uint16_t, std::uint8_t>> bound_indices{};
@@ -1000,7 +1007,47 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             if (term.domain != domain) {
                 return LLVMGenResult{.ok = false, .message = "LLVMGen: term domain does not match kernel domain"};
             }
-            auto lowered = lowerToKernelIR(term.integrand);
+            FormExpr effective_integrand = term.integrand;
+            std::optional<tensor::TensorIR> tensor_ir;
+
+            if (options_.tensor.mode != TensorLoweringMode::Off) {
+                try {
+                    tensor::TensorIRLoweringOptions tensor_opts;
+                    tensor_opts.enable_cache = false;
+                    tensor_opts.force_loop_nest =
+                        (options_.tensor.mode == TensorLoweringMode::On) || options_.tensor.force_loop_nest;
+
+                    tensor_opts.loop.enable_symmetry_lowering = options_.tensor.enable_symmetry_lowering;
+                    tensor_opts.loop.enable_optimal_contraction_order = options_.tensor.enable_optimal_contraction_order;
+                    tensor_opts.loop.enable_vectorization_hints = options_.vectorize && options_.tensor.enable_vectorization_hints;
+                    tensor_opts.loop.enable_delta_shortcuts = options_.tensor.enable_delta_shortcuts;
+                    tensor_opts.loop.scalar_expansion_term_threshold = options_.tensor.scalar_expansion_term_threshold;
+
+                    tensor_opts.alloc.stack_max_entries = options_.tensor.temp_stack_max_entries;
+                    tensor_opts.alloc.alignment_bytes = options_.tensor.temp_alignment_bytes;
+                    tensor_opts.alloc.enable_reuse = options_.tensor.temp_enable_reuse;
+
+                    const auto tl = tensor::lowerToTensorIR(term.integrand, tensor_opts);
+                    if (!tl.ok) {
+                        return LLVMGenResult{
+                            .ok = false,
+                            .message = tl.message.empty() ? "LLVMGen: tensor lowering failed" : tl.message,
+                        };
+                    }
+                    if (tl.used_loop_nest) {
+                        tensor_ir = tl.ir;
+                    } else if (tl.fallback_expr.isValid()) {
+                        effective_integrand = tl.fallback_expr;
+                    }
+                } catch (const std::exception& e) {
+                    return LLVMGenResult{
+                        .ok = false,
+                        .message = std::string("LLVMGen: tensor lowering threw exception: ") + e.what(),
+                    };
+                }
+            }
+
+            auto lowered = lowerToKernelIR(effective_integrand);
             if (lowered.ir.empty()) {
                 return LLVMGenResult{.ok = false, .message = "LLVMGen: failed to lower term to KernelIR"};
             }
@@ -1100,6 +1147,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                 .shapes = std::move(shapes.shapes),
                 .dep_mask = std::move(dep),
                 .time_derivative_order = term.time_derivative_order,
+                .tensor_ir = std::move(tensor_ir),
                 .has_indexed_access = has_indexed_access,
                 .bound_indices = std::move(bound_indices),
             });
@@ -3048,13 +3096,13 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             throw std::runtime_error("LLVMGen: DiscreteField/StateField unsupported shape");
         };
 
-        auto evalKernelIRSingleScalar = [&](const LoweredTerm& term,
-                                            llvm::Value* q_index,
-                                            llvm::Value* i_index,
-                                            llvm::Value* j_index,
-                                            const SideView& side,
-                                            const std::vector<llvm::Value*>* indexed_env,
-                                            const std::vector<CodeValue>* cached) -> llvm::Value* {
+        auto evalKernelIRSingleValue = [&](const LoweredTerm& term,
+                                           llvm::Value* q_index,
+                                           llvm::Value* i_index,
+                                           llvm::Value* j_index,
+                                           const SideView& side,
+                                           const std::vector<llvm::Value*>* indexed_env,
+                                           const std::vector<CodeValue>* cached) -> CodeValue {
             std::vector<CodeValue> values;
             values.resize(term.ir.ops.size());
 
@@ -4842,7 +4890,20 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                 }
             }
 
-            const auto& root = values[term.ir.root];
+            if (term.ir.root >= values.size()) {
+                throw std::runtime_error("LLVMGen: invalid KernelIR root index");
+            }
+            return values[term.ir.root];
+        };
+
+        auto evalKernelIRSingleScalar = [&](const LoweredTerm& term,
+                                            llvm::Value* q_index,
+                                            llvm::Value* i_index,
+                                            llvm::Value* j_index,
+                                            const SideView& side,
+                                            const std::vector<llvm::Value*>* indexed_env,
+                                            const std::vector<CodeValue>* cached) -> llvm::Value* {
+            const auto root = evalKernelIRSingleValue(term, q_index, i_index, j_index, side, indexed_env, cached);
             if (root.shape.kind != Shape::Kind::Scalar) {
                 throw std::runtime_error("LLVMGen: integrand did not lower to scalar");
             }
@@ -4855,6 +4916,171 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                       llvm::Value* j_index,
                                       const SideView& side,
                                       const std::vector<CodeValue>* cached) -> llvm::Value* {
+            if (term.tensor_ir.has_value()) {
+                LLVMTensorGen tensor_gen(*ctx,
+                                         builder,
+                                         *fn,
+                                         LLVMTensorGenOptions{
+                                             .vectorize = options_.vectorize,
+                                             .enable_polly = options_.tensor.enable_polly,
+                                         });
+
+                const auto eval_scalar = [&](const FormExpr& scalar_expr) -> llvm::Value* {
+                    if (!scalar_expr.isValid() || scalar_expr.node() == nullptr) {
+                        throw std::runtime_error("LLVMGen: TensorIR scalar expression is invalid");
+                    }
+
+                    auto lowered_scalar = lowerToKernelIR(scalar_expr);
+                    auto scalar_shapes = inferShapes(lowered_scalar.ir, ir.testSpace(), ir.trialSpace(), /*require_scalar_root=*/false);
+                    if (!scalar_shapes.ok) {
+                        throw std::runtime_error(scalar_shapes.message.empty() ? "LLVMGen: failed to infer scalar shapes" : scalar_shapes.message);
+                    }
+
+                    LoweredTerm scalar_term;
+                    scalar_term.ir = std::move(lowered_scalar.ir);
+                    scalar_term.shapes = std::move(scalar_shapes.shapes);
+
+                    const auto v = evalKernelIRSingleValue(scalar_term,
+                                                          q_index,
+                                                          i_index,
+                                                          j_index,
+                                                          side,
+                                                          /*indexed_env=*/nullptr,
+                                                          /*cached=*/nullptr);
+                    if (v.shape.kind != Shape::Kind::Scalar) {
+                        throw std::runtime_error("LLVMGen: TensorIR scalar expression did not lower to scalar");
+                    }
+                    return v.elems[0];
+                };
+
+                const auto& tir = *term.tensor_ir;
+                std::vector<CodeValue> base_values;
+                base_values.resize(tir.program.tensors.size());
+                std::vector<bool> has_base;
+                has_base.resize(tir.program.tensors.size(), false);
+
+                for (std::size_t tid = 0; tid < tir.program.tensors.size(); ++tid) {
+                    const auto& spec = tir.program.tensors[tid];
+                    if (!spec.base.isValid() || spec.base.node() == nullptr) {
+                        continue;
+                    }
+
+                    auto lowered_base = lowerToKernelIR(spec.base);
+                    auto base_shapes = inferShapes(lowered_base.ir, ir.testSpace(), ir.trialSpace(), /*require_scalar_root=*/false);
+                    if (!base_shapes.ok) {
+                        throw std::runtime_error(base_shapes.message.empty() ? "LLVMGen: failed to infer base-tensor shapes" : base_shapes.message);
+                    }
+
+                    LoweredTerm base_term;
+                    base_term.ir = std::move(lowered_base.ir);
+                    base_term.shapes = std::move(base_shapes.shapes);
+
+                    base_values[tid] = evalKernelIRSingleValue(base_term,
+                                                              q_index,
+                                                              i_index,
+                                                              j_index,
+                                                              side,
+                                                              /*indexed_env=*/nullptr,
+                                                              /*cached=*/nullptr);
+                    has_base[tid] = true;
+                }
+
+                const auto load_input = [&](int tensor_id,
+                                            const tensor::TensorSpec& spec,
+                                            const std::vector<llvm::Value*>& index_env) -> llvm::Value* {
+                    if (tensor_id < 0 || static_cast<std::size_t>(tensor_id) >= base_values.size()) {
+                        throw std::runtime_error("LLVMGen: TensorIR input tensor id out of range");
+                    }
+                    if (!has_base[static_cast<std::size_t>(tensor_id)]) {
+                        throw std::runtime_error("LLVMGen: TensorIR input tensor missing evaluated base value");
+                    }
+
+                    const auto& base = base_values[static_cast<std::size_t>(tensor_id)];
+                    if (base.shape.kind == Shape::Kind::Scalar) {
+                        return base.elems[0];
+                    }
+
+                    const int base_rank = spec.base_rank;
+                    if (base_rank < 0 || static_cast<std::size_t>(base_rank) > spec.base_axis_to_tensor_axis.size()) {
+                        throw std::runtime_error("LLVMGen: TensorIR input tensor has invalid base-rank metadata");
+                    }
+
+                    auto loadIndex = [&](int axis) -> llvm::Value* {
+                        if (axis < 0 || axis >= base_rank) {
+                            throw std::runtime_error("LLVMGen: TensorIR input tensor base-axis out of range");
+                        }
+                        const int tpos = spec.base_axis_to_tensor_axis[static_cast<std::size_t>(axis)];
+                        if (tpos < 0 || static_cast<std::size_t>(tpos) >= spec.axes.size()) {
+                            throw std::runtime_error("LLVMGen: TensorIR input tensor has invalid axis mapping");
+                        }
+                        const int id = spec.axes[static_cast<std::size_t>(tpos)];
+                        if (id < 0 || static_cast<std::size_t>(id) >= index_env.size() || index_env[static_cast<std::size_t>(id)] == nullptr) {
+                            throw std::runtime_error("LLVMGen: TensorIR input tensor missing index assignment");
+                        }
+                        return index_env[static_cast<std::size_t>(id)];
+                    };
+
+                    auto selectLinear = [&](llvm::Value* idx) -> llvm::Value* {
+                        const auto n = elemCount(base.shape);
+                        if (n == 0u) {
+                            throw std::runtime_error("LLVMGen: TensorIR input tensor has empty base");
+                        }
+                        llvm::Value* out = base.elems[0];
+                        for (std::size_t t = 1; t < n; ++t) {
+                            auto* is_t = builder.CreateICmpEQ(idx, builder.getInt32(static_cast<std::uint32_t>(t)));
+                            out = builder.CreateSelect(is_t, base.elems[t], out);
+                        }
+                        return out;
+                    };
+
+                    if (base.shape.kind == Shape::Kind::Vector) {
+                        if (base_rank != 1) throw std::runtime_error("LLVMGen: TensorIR input vector rank mismatch");
+                        return selectLinear(loadIndex(0));
+                    }
+                    if (base.shape.kind == Shape::Kind::Matrix) {
+                        if (base_rank != 2) throw std::runtime_error("LLVMGen: TensorIR input matrix rank mismatch");
+                        auto* ii = loadIndex(0);
+                        auto* jj = loadIndex(1);
+                        const auto cols = static_cast<std::uint32_t>(base.shape.dims[1]);
+                        auto* lin = builder.CreateAdd(builder.CreateMul(ii, builder.getInt32(cols)), jj);
+                        return selectLinear(lin);
+                    }
+                    if (base.shape.kind == Shape::Kind::Tensor3) {
+                        if (base_rank != 3) throw std::runtime_error("LLVMGen: TensorIR input tensor3 rank mismatch");
+                        auto* ii = loadIndex(0);
+                        auto* jj = loadIndex(1);
+                        auto* kk = loadIndex(2);
+                        const auto d1 = static_cast<std::uint32_t>(base.shape.dims[1]);
+                        const auto d2 = static_cast<std::uint32_t>(base.shape.dims[2]);
+                        auto* lin = builder.CreateAdd(builder.CreateMul(ii, builder.getInt32(d1 * d2)),
+                                                      builder.CreateAdd(builder.CreateMul(jj, builder.getInt32(d2)), kk));
+                        return selectLinear(lin);
+                    }
+                    if (base.shape.kind == Shape::Kind::Tensor4) {
+                        if (base_rank != 4) throw std::runtime_error("LLVMGen: TensorIR input tensor4 rank mismatch");
+                        auto* ii = loadIndex(0);
+                        auto* jj = loadIndex(1);
+                        auto* kk = loadIndex(2);
+                        auto* ll = loadIndex(3);
+                        const auto d1 = static_cast<std::uint32_t>(base.shape.dims[1]);
+                        const auto d2 = static_cast<std::uint32_t>(base.shape.dims[2]);
+                        const auto d3 = static_cast<std::uint32_t>(base.shape.dims[3]);
+                        const auto stride0 = d1 * d2 * d3;
+                        const auto stride1 = d2 * d3;
+                        const auto stride2 = d3;
+                        auto* lin = builder.CreateAdd(builder.CreateMul(ii, builder.getInt32(stride0)),
+                                                      builder.CreateAdd(builder.CreateMul(jj, builder.getInt32(stride1)),
+                                                                        builder.CreateAdd(builder.CreateMul(kk, builder.getInt32(stride2)), ll)));
+                        return selectLinear(lin);
+                    }
+
+                    throw std::runtime_error("LLVMGen: TensorIR input tensor has unsupported shape kind");
+                };
+
+                (void)cached;
+                return tensor_gen.emitScalar(tir, eval_scalar, load_input);
+            }
+
             if (!term.has_indexed_access) {
                 return evalKernelIRSingleScalar(term, q_index, i_index, j_index, side, /*indexed_env=*/nullptr, cached);
             }
@@ -6632,15 +6858,15 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                 builder.SetInsertPoint(term_end);
             }
         } else {
-            auto evalKernelIRFaceScalar = [&](const LoweredTerm& term,
-                                              llvm::Value* q_index,
-                                              llvm::Value* i_index,
-                                              llvm::Value* j_index,
-                                              bool eval_plus,
-                                              bool test_active_plus,
-                                              bool trial_active_plus,
-                                              const std::vector<llvm::Value*>* indexed_env,
-                                              const FaceCached* cached) -> llvm::Value* {
+            auto evalKernelIRFaceValue = [&](const LoweredTerm& term,
+                                             llvm::Value* q_index,
+                                             llvm::Value* i_index,
+                                             llvm::Value* j_index,
+                                             bool eval_plus,
+                                             bool test_active_plus,
+                                             bool trial_active_plus,
+                                             const std::vector<llvm::Value*>* indexed_env,
+                                             const FaceCached* cached) -> CodeValue {
                 std::vector<CodeValue> values_minus;
                 std::vector<CodeValue> values_plus;
                 values_minus.resize(term.ir.ops.size());
@@ -8588,7 +8814,30 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                     }
                 }
 
-                const auto& root = eval_plus ? values_plus[term.ir.root] : values_minus[term.ir.root];
+                if (term.ir.root >= values_minus.size() || term.ir.root >= values_plus.size()) {
+                    throw std::runtime_error("LLVMGen: invalid KernelIR root index");
+                }
+                return eval_plus ? values_plus[term.ir.root] : values_minus[term.ir.root];
+            };
+
+            auto evalKernelIRFaceScalar = [&](const LoweredTerm& term,
+                                              llvm::Value* q_index,
+                                              llvm::Value* i_index,
+                                              llvm::Value* j_index,
+                                              bool eval_plus,
+                                              bool test_active_plus,
+                                              bool trial_active_plus,
+                                              const std::vector<llvm::Value*>* indexed_env,
+                                              const FaceCached* cached) -> llvm::Value* {
+                const auto root = evalKernelIRFaceValue(term,
+                                                        q_index,
+                                                        i_index,
+                                                        j_index,
+                                                        eval_plus,
+                                                        test_active_plus,
+                                                        trial_active_plus,
+                                                        indexed_env,
+                                                        cached);
                 if (root.shape.kind != Shape::Kind::Scalar) {
                     throw std::runtime_error("LLVMGen: integrand did not lower to scalar");
                 }
@@ -8603,6 +8852,175 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                         bool test_active_plus,
                                         bool trial_active_plus,
                                         const FaceCached* cached) -> llvm::Value* {
+                if (term.tensor_ir.has_value()) {
+                    LLVMTensorGen tensor_gen(*ctx,
+                                             builder,
+                                             *fn,
+                                             LLVMTensorGenOptions{
+                                                 .vectorize = options_.vectorize,
+                                                 .enable_polly = options_.tensor.enable_polly,
+                                             });
+
+                    const auto eval_scalar = [&](const FormExpr& scalar_expr) -> llvm::Value* {
+                        if (!scalar_expr.isValid() || scalar_expr.node() == nullptr) {
+                            throw std::runtime_error("LLVMGen: TensorIR scalar expression is invalid");
+                        }
+
+                        auto lowered_scalar = lowerToKernelIR(scalar_expr);
+                        auto scalar_shapes = inferShapes(lowered_scalar.ir, ir.testSpace(), ir.trialSpace(), /*require_scalar_root=*/false);
+                        if (!scalar_shapes.ok) {
+                            throw std::runtime_error(scalar_shapes.message.empty() ? "LLVMGen: failed to infer scalar shapes" : scalar_shapes.message);
+                        }
+
+                        LoweredTerm scalar_term;
+                        scalar_term.ir = std::move(lowered_scalar.ir);
+                        scalar_term.shapes = std::move(scalar_shapes.shapes);
+
+                        const auto v = evalKernelIRFaceValue(scalar_term,
+                                                             q_index,
+                                                             i_index,
+                                                             j_index,
+                                                             eval_plus,
+                                                             test_active_plus,
+                                                             trial_active_plus,
+                                                             /*indexed_env=*/nullptr,
+                                                             /*cached=*/nullptr);
+                        if (v.shape.kind != Shape::Kind::Scalar) {
+                            throw std::runtime_error("LLVMGen: TensorIR scalar expression did not lower to scalar");
+                        }
+                        return v.elems[0];
+                    };
+
+                    const auto& tir = *term.tensor_ir;
+                    std::vector<CodeValue> base_values;
+                    base_values.resize(tir.program.tensors.size());
+                    std::vector<bool> has_base;
+                    has_base.resize(tir.program.tensors.size(), false);
+
+                    for (std::size_t tid = 0; tid < tir.program.tensors.size(); ++tid) {
+                        const auto& spec = tir.program.tensors[tid];
+                        if (!spec.base.isValid() || spec.base.node() == nullptr) {
+                            continue;
+                        }
+
+                        auto lowered_base = lowerToKernelIR(spec.base);
+                        auto base_shapes = inferShapes(lowered_base.ir, ir.testSpace(), ir.trialSpace(), /*require_scalar_root=*/false);
+                        if (!base_shapes.ok) {
+                            throw std::runtime_error(base_shapes.message.empty() ? "LLVMGen: failed to infer base-tensor shapes" : base_shapes.message);
+                        }
+
+                        LoweredTerm base_term;
+                        base_term.ir = std::move(lowered_base.ir);
+                        base_term.shapes = std::move(base_shapes.shapes);
+
+                        base_values[tid] = evalKernelIRFaceValue(base_term,
+                                                                 q_index,
+                                                                 i_index,
+                                                                 j_index,
+                                                                 eval_plus,
+                                                                 test_active_plus,
+                                                                 trial_active_plus,
+                                                                 /*indexed_env=*/nullptr,
+                                                                 /*cached=*/nullptr);
+                        has_base[tid] = true;
+                    }
+
+                    const auto load_input = [&](int tensor_id,
+                                                const tensor::TensorSpec& spec,
+                                                const std::vector<llvm::Value*>& index_env) -> llvm::Value* {
+                        if (tensor_id < 0 || static_cast<std::size_t>(tensor_id) >= base_values.size()) {
+                            throw std::runtime_error("LLVMGen: TensorIR input tensor id out of range");
+                        }
+                        if (!has_base[static_cast<std::size_t>(tensor_id)]) {
+                            throw std::runtime_error("LLVMGen: TensorIR input tensor missing evaluated base value");
+                        }
+
+                        const auto& base = base_values[static_cast<std::size_t>(tensor_id)];
+                        if (base.shape.kind == Shape::Kind::Scalar) {
+                            return base.elems[0];
+                        }
+
+                        const int base_rank = spec.base_rank;
+                        if (base_rank < 0 || static_cast<std::size_t>(base_rank) > spec.base_axis_to_tensor_axis.size()) {
+                            throw std::runtime_error("LLVMGen: TensorIR input tensor has invalid base-rank metadata");
+                        }
+
+                        auto loadIndex = [&](int axis) -> llvm::Value* {
+                            if (axis < 0 || axis >= base_rank) {
+                                throw std::runtime_error("LLVMGen: TensorIR input tensor base-axis out of range");
+                            }
+                            const int tpos = spec.base_axis_to_tensor_axis[static_cast<std::size_t>(axis)];
+                            if (tpos < 0 || static_cast<std::size_t>(tpos) >= spec.axes.size()) {
+                                throw std::runtime_error("LLVMGen: TensorIR input tensor has invalid axis mapping");
+                            }
+                            const int id = spec.axes[static_cast<std::size_t>(tpos)];
+                            if (id < 0 || static_cast<std::size_t>(id) >= index_env.size() || index_env[static_cast<std::size_t>(id)] == nullptr) {
+                                throw std::runtime_error("LLVMGen: TensorIR input tensor missing index assignment");
+                            }
+                            return index_env[static_cast<std::size_t>(id)];
+                        };
+
+                        auto selectLinear = [&](llvm::Value* idx) -> llvm::Value* {
+                            const auto n = elemCount(base.shape);
+                            if (n == 0u) {
+                                throw std::runtime_error("LLVMGen: TensorIR input tensor has empty base");
+                            }
+                            llvm::Value* out = base.elems[0];
+                            for (std::size_t t = 1; t < n; ++t) {
+                                auto* is_t = builder.CreateICmpEQ(idx, builder.getInt32(static_cast<std::uint32_t>(t)));
+                                out = builder.CreateSelect(is_t, base.elems[t], out);
+                            }
+                            return out;
+                        };
+
+                        if (base.shape.kind == Shape::Kind::Vector) {
+                            if (base_rank != 1) throw std::runtime_error("LLVMGen: TensorIR input vector rank mismatch");
+                            return selectLinear(loadIndex(0));
+                        }
+                        if (base.shape.kind == Shape::Kind::Matrix) {
+                            if (base_rank != 2) throw std::runtime_error("LLVMGen: TensorIR input matrix rank mismatch");
+                            auto* ii = loadIndex(0);
+                            auto* jj = loadIndex(1);
+                            const auto cols = static_cast<std::uint32_t>(base.shape.dims[1]);
+                            auto* lin = builder.CreateAdd(builder.CreateMul(ii, builder.getInt32(cols)), jj);
+                            return selectLinear(lin);
+                        }
+                        if (base.shape.kind == Shape::Kind::Tensor3) {
+                            if (base_rank != 3) throw std::runtime_error("LLVMGen: TensorIR input tensor3 rank mismatch");
+                            auto* ii = loadIndex(0);
+                            auto* jj = loadIndex(1);
+                            auto* kk = loadIndex(2);
+                            const auto d1 = static_cast<std::uint32_t>(base.shape.dims[1]);
+                            const auto d2 = static_cast<std::uint32_t>(base.shape.dims[2]);
+                            auto* lin = builder.CreateAdd(builder.CreateMul(ii, builder.getInt32(d1 * d2)),
+                                                          builder.CreateAdd(builder.CreateMul(jj, builder.getInt32(d2)), kk));
+                            return selectLinear(lin);
+                        }
+                        if (base.shape.kind == Shape::Kind::Tensor4) {
+                            if (base_rank != 4) throw std::runtime_error("LLVMGen: TensorIR input tensor4 rank mismatch");
+                            auto* ii = loadIndex(0);
+                            auto* jj = loadIndex(1);
+                            auto* kk = loadIndex(2);
+                            auto* ll = loadIndex(3);
+                            const auto d1 = static_cast<std::uint32_t>(base.shape.dims[1]);
+                            const auto d2 = static_cast<std::uint32_t>(base.shape.dims[2]);
+                            const auto d3 = static_cast<std::uint32_t>(base.shape.dims[3]);
+                            const auto stride0 = d1 * d2 * d3;
+                            const auto stride1 = d2 * d3;
+                            const auto stride2 = d3;
+                            auto* lin = builder.CreateAdd(builder.CreateMul(ii, builder.getInt32(stride0)),
+                                                          builder.CreateAdd(builder.CreateMul(jj, builder.getInt32(stride1)),
+                                                                            builder.CreateAdd(builder.CreateMul(kk, builder.getInt32(stride2)), ll)));
+                            return selectLinear(lin);
+                        }
+
+                        throw std::runtime_error("LLVMGen: TensorIR input tensor has unsupported shape kind");
+                    };
+
+                    (void)cached;
+                    return tensor_gen.emitScalar(tir, eval_scalar, load_input);
+                }
+
                 if (!term.has_indexed_access) {
                     return evalKernelIRFaceScalar(term, q_index, i_index, j_index,
                                                   eval_plus, test_active_plus, trial_active_plus,
