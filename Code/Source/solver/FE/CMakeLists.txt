@@ -1715,10 +1715,11 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Forms/test_FormSpatialDerivatives.cpp
 		                Tests/Unit/Forms/test_FormVocabulary.cpp
 		                Tests/Unit/Forms/test_MixedSpaceVocabulary.cpp
-		                Tests/Unit/Forms/test_Einsum.cpp
-		                Tests/Unit/Forms/test_NonlinearFormKernel.cpp
-		                Tests/Unit/Forms/test_SymbolicDifferentiation.cpp
-                    Tests/Unit/Forms/test_HessianVectorProduct.cpp
+			                Tests/Unit/Forms/test_Einsum.cpp
+			                Tests/Unit/Forms/test_FormsPerformance.cpp
+			                Tests/Unit/Forms/test_NonlinearFormKernel.cpp
+			                Tests/Unit/Forms/test_SymbolicDifferentiation.cpp
+	                    Tests/Unit/Forms/test_HessianVectorProduct.cpp
 		                Tests/Unit/Forms/Tensor/test_TensorIndex.cpp
 		                Tests/Unit/Forms/Tensor/test_TensorSymmetry.cpp
 			                Tests/Unit/Forms/Tensor/test_TensorContraction.cpp

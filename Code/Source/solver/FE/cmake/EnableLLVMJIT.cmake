@@ -10,6 +10,11 @@
 if(FE_ENABLE_LLVM_JIT)
     message(STATUS "FE: Configuring LLVM OrcJIT support for Forms")
 
+    # LLVM's CMake package runs C feature checks (e.g., for libffi/terminfo),
+    # so ensure the C language is enabled even if FE is built as a C++-only
+    # project.
+    enable_language(C)
+
     # Require a modern LLVM with the ORC (LLJIT) APIs we plan to use.
     # NOTE: The implementation is written to tolerate minor API differences
     # between LLVM 14+ (e.g., ObjectCache and JIT event listener hooks).

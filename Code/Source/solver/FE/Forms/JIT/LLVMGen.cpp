@@ -22,6 +22,8 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -36,8 +38,10 @@
 #endif
 
 #if SVMP_FE_ENABLE_LLVM_JIT
+#include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Intrinsics.h>
@@ -55,6 +59,50 @@ namespace jit {
 namespace {
 
 #if SVMP_FE_ENABLE_LLVM_JIT
+[[nodiscard]] std::string sanitizeFilename(std::string_view s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (const char ch : s) {
+        const bool ok =
+            (ch >= 'a' && ch <= 'z') ||
+            (ch >= 'A' && ch <= 'Z') ||
+            (ch >= '0' && ch <= '9') ||
+            (ch == '_' || ch == '-' || ch == '.');
+        out.push_back(ok ? ch : '_');
+    }
+    return out;
+}
+
+void writeTextFile(const std::filesystem::path& path, std::string_view contents) noexcept
+{
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) {
+        return;
+    }
+
+    try {
+        std::ofstream os(path, std::ios::trunc);
+        if (!os.good()) {
+            return;
+        }
+        os.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+        os.flush();
+    } catch (...) {
+    }
+}
+
+[[nodiscard]] std::filesystem::path dumpPath(const JITOptions& options,
+                                            std::string_view symbol,
+                                            std::string_view suffix)
+{
+    const std::filesystem::path dir =
+        options.dump_directory.empty() ? std::filesystem::path("svmp_fe_jit_dumps")
+                                       : std::filesystem::path(options.dump_directory);
+    return dir / (sanitizeFilename(symbol) + std::string(suffix));
+}
+
 struct Shape {
     enum class Kind : std::uint8_t {
         Scalar,
@@ -1052,6 +1100,19 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                 return LLVMGenResult{.ok = false, .message = "LLVMGen: failed to lower term to KernelIR"};
             }
 
+            if (options_.dump_kernel_ir) {
+                std::ostringstream oss;
+                oss << "Symbol: " << symbol << "\n"
+                    << "Term index: " << tidx << "\n"
+                    << "Domain: " << toString(domain) << "\n"
+                    << "Boundary marker: " << boundary_marker << "\n"
+                    << "Interface marker: " << interface_marker << "\n"
+                    << "Integrand: " << term.debug_string << "\n\n"
+                    << lowered.ir.dump();
+                const auto path = dumpPath(options_, symbol, "_term" + std::to_string(tidx) + ".kernelir.txt");
+                writeTextFile(path, oss.str());
+            }
+
             auto shapes = inferShapes(lowered.ir, ir.testSpace(), ir.trialSpace());
             if (!shapes.ok) {
                 return LLVMGenResult{.ok = false, .message = shapes.message};
@@ -1157,6 +1218,22 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
         auto module = std::make_unique<llvm::Module>(std::string(symbol), *ctx);
         module->setModuleIdentifier(std::string(symbol));
 
+        std::unique_ptr<llvm::DIBuilder> di_builder;
+        llvm::DICompileUnit* di_cu = nullptr;
+        llvm::DIFile* di_file = nullptr;
+
+        if (options_.debug_info) {
+            module->setSourceFileName("svmp_fe_jit");
+            di_builder = std::make_unique<llvm::DIBuilder>(*module);
+            di_file = di_builder->createFile("svmp_fe_jit", ".");
+            di_cu = di_builder->createCompileUnit(llvm::dwarf::DW_LANG_C_plus_plus,
+                                                  di_file,
+                                                  "svmp_fe_jit",
+                                                  /*isOptimized=*/options_.optimization_level > 0,
+                                                  /*Flags=*/"",
+                                                  /*RV=*/0);
+        }
+
         const std::string target_triple = engine.targetTriple();
         const std::string data_layout = engine.dataLayoutString();
         if (!target_triple.empty()) {
@@ -1176,6 +1253,22 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                           llvm::GlobalValue::ExternalLinkage,
                                           std::string(symbol),
                                           module.get());
+
+        if (di_builder && di_cu && di_file) {
+            auto* sub_type =
+                di_builder->createSubroutineType(di_builder->getOrCreateTypeArray({}));
+            auto* sp = di_builder->createFunction(di_cu,
+                                                  std::string(symbol),
+                                                  std::string(symbol),
+                                                  di_file,
+                                                  /*LineNo=*/1,
+                                                  sub_type,
+                                                  /*ScopeLine=*/1,
+                                                  llvm::DINode::FlagZero,
+                                                  llvm::DISubprogram::SPFlagDefinition);
+            fn->setSubprogram(sp);
+            builder.SetCurrentDebugLocation(llvm::DILocation::get(*ctx, 1, 1, sp));
+        }
 
         auto* entry = llvm::BasicBlock::Create(*ctx, "entry", fn);
         builder.SetInsertPoint(entry);
@@ -9230,8 +9323,27 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
         builder.CreateRetVoid();
 
+        if (di_builder) {
+            di_builder->finalize();
+        }
+
         if (llvm::verifyModule(*module, &llvm::errs())) {
             return LLVMGenResult{.ok = false, .message = "LLVMGen: generated module failed verification"};
+        }
+
+        if (options_.dump_llvm_ir) {
+            std::string ir_text;
+            llvm::raw_string_ostream os(ir_text);
+            module->print(os, nullptr);
+            os.flush();
+            writeTextFile(dumpPath(options_, symbol, "_before.ll"), ir_text);
+        }
+        if (options_.dump_llvm_ir_optimized && options_.optimization_level <= 0) {
+            std::string ir_text;
+            llvm::raw_string_ostream os(ir_text);
+            module->print(os, nullptr);
+            os.flush();
+            writeTextFile(dumpPath(options_, symbol, "_after.ll"), ir_text);
         }
 
         llvm::orc::ThreadSafeModule tsm(std::move(module), std::move(ctx));

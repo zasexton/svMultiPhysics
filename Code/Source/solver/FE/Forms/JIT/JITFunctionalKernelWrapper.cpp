@@ -93,19 +93,27 @@ Real JITFunctionalKernelWrapper::evaluateCellTotal(const assembly::AssemblyConte
         return fallback_->evaluateCellTotal(ctx);
     }
 
-    thread_local assembly::KernelOutput out;
-    out.reserve(/*n_test=*/1, /*n_trial=*/ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/true);
-    out.clear();
+    try {
+        thread_local assembly::KernelOutput out;
+        out.reserve(/*n_test=*/1, /*n_trial=*/ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/true);
+        out.clear();
 
-    const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
-    auto args = assembly::jit::packCellKernelArgsV3(ctx, out, checks);
+        const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+        auto args = assembly::jit::packCellKernelArgsV3(ctx, out, checks);
 
-    args.side.n_test_dofs = 1u;
-    args.output.n_test_dofs = 1u;
-    overrideFunctionalWeights(args.side);
+        args.side.n_test_dofs = 1u;
+        args.output.n_test_dofs = 1u;
+        overrideFunctionalWeights(args.side);
 
-    callJIT(addr_, &args);
-    return out.local_vector.empty() ? Real(0.0) : out.local_vector[0];
+        callJIT(addr_, &args);
+        return out.local_vector.empty() ? Real(0.0) : out.local_vector[0];
+    } catch (const std::exception& e) {
+        markRuntimeFailureOnce("evaluateCellTotal", e.what());
+        return fallback_->evaluateCellTotal(ctx);
+    } catch (...) {
+        markRuntimeFailureOnce("evaluateCellTotal", "unknown exception");
+        return fallback_->evaluateCellTotal(ctx);
+    }
 }
 
 Real JITFunctionalKernelWrapper::evaluateBoundaryFaceTotal(const assembly::AssemblyContext& ctx,
@@ -120,19 +128,27 @@ Real JITFunctionalKernelWrapper::evaluateBoundaryFaceTotal(const assembly::Assem
         return fallback_->evaluateBoundaryFaceTotal(ctx, boundary_marker);
     }
 
-    thread_local assembly::KernelOutput out;
-    out.reserve(/*n_test=*/1, /*n_trial=*/ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/true);
-    out.clear();
+    try {
+        thread_local assembly::KernelOutput out;
+        out.reserve(/*n_test=*/1, /*n_trial=*/ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/true);
+        out.clear();
 
-    const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
-    auto args = assembly::jit::packBoundaryFaceKernelArgsV3(ctx, boundary_marker, out, checks);
+        const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+        auto args = assembly::jit::packBoundaryFaceKernelArgsV3(ctx, boundary_marker, out, checks);
 
-    args.side.n_test_dofs = 1u;
-    args.output.n_test_dofs = 1u;
-    overrideFunctionalWeights(args.side);
+        args.side.n_test_dofs = 1u;
+        args.output.n_test_dofs = 1u;
+        overrideFunctionalWeights(args.side);
 
-    callJIT(addr_, &args);
-    return out.local_vector.empty() ? Real(0.0) : out.local_vector[0];
+        callJIT(addr_, &args);
+        return out.local_vector.empty() ? Real(0.0) : out.local_vector[0];
+    } catch (const std::exception& e) {
+        markRuntimeFailureOnce("evaluateBoundaryFaceTotal", e.what());
+        return fallback_->evaluateBoundaryFaceTotal(ctx, boundary_marker);
+    } catch (...) {
+        markRuntimeFailureOnce("evaluateBoundaryFaceTotal", "unknown exception");
+        return fallback_->evaluateBoundaryFaceTotal(ctx, boundary_marker);
+    }
 }
 
 std::string JITFunctionalKernelWrapper::name() const
@@ -142,7 +158,24 @@ std::string JITFunctionalKernelWrapper::name() const
 
 bool JITFunctionalKernelWrapper::canUseJIT() const noexcept
 {
-    return options_.enable && compiled_ && addr_ != 0;
+    return options_.enable && compiled_ && addr_ != 0 && !runtime_failed_;
+}
+
+void JITFunctionalKernelWrapper::markRuntimeFailureOnce(std::string_view where, std::string_view msg) noexcept
+{
+    std::lock_guard<std::mutex> lock(jit_mutex_);
+    runtime_failed_ = true;
+    if (warned_runtime_failure_) {
+        return;
+    }
+    warned_runtime_failure_ = true;
+
+    std::string full =
+        "JIT: runtime failure in " + std::string(where) + " for functional kernel '" + fallback_->name() + "'";
+    if (!msg.empty()) {
+        full += ": " + std::string(msg);
+    }
+    FE_LOG_WARNING(full);
 }
 
 void JITFunctionalKernelWrapper::maybeCompile()
@@ -214,4 +247,3 @@ void JITFunctionalKernelWrapper::maybeCompile()
 } // namespace forms
 } // namespace FE
 } // namespace svmp
-

@@ -48,6 +48,7 @@
 #include <llvm/Support/Host.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/TargetSelect.h>
+#include <llvm/Support/raw_ostream.h>
 
 #if __has_include(<llvm/ExecutionEngine/Orc/Debugging/PerfJITEventListener.h>)
 #include <llvm/ExecutionEngine/Orc/Debugging/PerfJITEventListener.h>
@@ -65,6 +66,43 @@ namespace jit {
 namespace {
 
 #if SVMP_FE_ENABLE_LLVM_JIT
+struct ObjectCacheCounters {
+    std::atomic<std::uint64_t> notify_compiled{0};
+    std::atomic<std::uint64_t> get_calls{0};
+    std::atomic<std::uint64_t> mem_hits{0};
+    std::atomic<std::uint64_t> disk_hits{0};
+    std::atomic<std::uint64_t> misses{0};
+    std::atomic<std::uint64_t> bytes_written{0};
+    std::atomic<std::uint64_t> bytes_read{0};
+    std::atomic<std::uint64_t> in_memory_entries{0};
+};
+
+[[nodiscard]] JITObjectCacheStats snapshotStats(const ObjectCacheCounters& c) noexcept
+{
+    JITObjectCacheStats out;
+    out.notify_compiled = c.notify_compiled.load(std::memory_order_relaxed);
+    out.get_calls = c.get_calls.load(std::memory_order_relaxed);
+    out.mem_hits = c.mem_hits.load(std::memory_order_relaxed);
+    out.disk_hits = c.disk_hits.load(std::memory_order_relaxed);
+    out.misses = c.misses.load(std::memory_order_relaxed);
+    out.bytes_written = c.bytes_written.load(std::memory_order_relaxed);
+    out.bytes_read = c.bytes_read.load(std::memory_order_relaxed);
+    out.in_memory_entries = c.in_memory_entries.load(std::memory_order_relaxed);
+    return out;
+}
+
+void resetCounters(ObjectCacheCounters& c) noexcept
+{
+    c.notify_compiled.store(0u, std::memory_order_relaxed);
+    c.get_calls.store(0u, std::memory_order_relaxed);
+    c.mem_hits.store(0u, std::memory_order_relaxed);
+    c.disk_hits.store(0u, std::memory_order_relaxed);
+    c.misses.store(0u, std::memory_order_relaxed);
+    c.bytes_written.store(0u, std::memory_order_relaxed);
+    c.bytes_read.store(0u, std::memory_order_relaxed);
+    c.in_memory_entries.store(0u, std::memory_order_relaxed);
+}
+
 [[nodiscard]] int sanitizeOptLevel(int level) noexcept
 {
     return std::clamp(level, 0, 3);
@@ -92,7 +130,10 @@ namespace {
 
 class InMemoryObjectCache final : public llvm::ObjectCache {
 public:
-    InMemoryObjectCache() = default;
+    explicit InMemoryObjectCache(ObjectCacheCounters* counters)
+        : counters_(counters)
+    {
+    }
     ~InMemoryObjectCache() override = default;
 
     InMemoryObjectCache(const InMemoryObjectCache&) = delete;
@@ -107,6 +148,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         auto copy = llvm::MemoryBuffer::getMemBufferCopy(obj_buffer.getBuffer(), obj_buffer.getBufferIdentifier());
         objects_by_module_id_[module->getModuleIdentifier()] = std::move(copy);
+        if (counters_ != nullptr) {
+            counters_->notify_compiled.fetch_add(1u, std::memory_order_relaxed);
+            counters_->bytes_written.fetch_add(static_cast<std::uint64_t>(obj_buffer.getBufferSize()),
+                                               std::memory_order_relaxed);
+            counters_->in_memory_entries.store(static_cast<std::uint64_t>(objects_by_module_id_.size()),
+                                               std::memory_order_relaxed);
+        }
     }
 
     [[nodiscard]] std::unique_ptr<llvm::MemoryBuffer> getObject(const llvm::Module* module) override
@@ -116,9 +164,18 @@ public:
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
+        if (counters_ != nullptr) {
+            counters_->get_calls.fetch_add(1u, std::memory_order_relaxed);
+        }
         const auto it = objects_by_module_id_.find(module->getModuleIdentifier());
         if (it == objects_by_module_id_.end() || !it->second) {
+            if (counters_ != nullptr) {
+                counters_->misses.fetch_add(1u, std::memory_order_relaxed);
+            }
             return nullptr;
+        }
+        if (counters_ != nullptr) {
+            counters_->mem_hits.fetch_add(1u, std::memory_order_relaxed);
         }
         return llvm::MemoryBuffer::getMemBufferCopy(it->second->getBuffer(), it->second->getBufferIdentifier());
     }
@@ -126,12 +183,15 @@ public:
 private:
     std::mutex mutex_{};
     std::unordered_map<std::string, std::unique_ptr<llvm::MemoryBuffer>> objects_by_module_id_{};
+    ObjectCacheCounters* counters_{nullptr};
 };
 
 class FileSystemObjectCache final : public llvm::ObjectCache {
 public:
-    explicit FileSystemObjectCache(std::filesystem::path directory)
-        : directory_(std::move(directory))
+    FileSystemObjectCache(std::filesystem::path directory,
+                          ObjectCacheCounters* counters)
+        : directory_(std::move(directory)),
+          counters_(counters)
     {
     }
 
@@ -153,6 +213,11 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             objects_by_module_id_[module_id] = std::move(copy);
+            if (counters_ != nullptr) {
+                counters_->notify_compiled.fetch_add(1u, std::memory_order_relaxed);
+                counters_->in_memory_entries.store(static_cast<std::uint64_t>(objects_by_module_id_.size()),
+                                                   std::memory_order_relaxed);
+            }
         }
 
         if (directory_.empty()) {
@@ -188,6 +253,9 @@ public:
             std::filesystem::rename(tmp_path, final_path, ec);
             if (ec) {
                 std::filesystem::remove(tmp_path, ec);
+            } else if (counters_ != nullptr) {
+                counters_->bytes_written.fetch_add(static_cast<std::uint64_t>(obj_buffer.getBufferSize()),
+                                                   std::memory_order_relaxed);
             }
         } catch (...) {
             std::filesystem::remove(tmp_path, ec);
@@ -204,8 +272,14 @@ public:
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (counters_ != nullptr) {
+                counters_->get_calls.fetch_add(1u, std::memory_order_relaxed);
+            }
             const auto it = objects_by_module_id_.find(module_id);
             if (it != objects_by_module_id_.end() && it->second) {
+                if (counters_ != nullptr) {
+                    counters_->mem_hits.fetch_add(1u, std::memory_order_relaxed);
+                }
                 return llvm::MemoryBuffer::getMemBufferCopy(it->second->getBuffer(), it->second->getBufferIdentifier());
             }
         }
@@ -217,14 +291,25 @@ public:
         std::error_code ec;
         const auto path = cachePathForModuleId(module_id);
         if (!std::filesystem::exists(path, ec) || ec) {
+            if (counters_ != nullptr) {
+                counters_->misses.fetch_add(1u, std::memory_order_relaxed);
+            }
             return nullptr;
         }
 
         auto buf_or_err = llvm::MemoryBuffer::getFile(path.string(), /*IsText=*/false);
         if (!buf_or_err) {
+            if (counters_ != nullptr) {
+                counters_->misses.fetch_add(1u, std::memory_order_relaxed);
+            }
             return nullptr;
         }
 
+        if (counters_ != nullptr) {
+            counters_->disk_hits.fetch_add(1u, std::memory_order_relaxed);
+            counters_->bytes_read.fetch_add(static_cast<std::uint64_t>((*buf_or_err)->getBufferSize()),
+                                            std::memory_order_relaxed);
+        }
         return std::move(*buf_or_err);
     }
 
@@ -263,7 +348,135 @@ private:
     std::mutex mutex_{};
     std::unordered_map<std::string, std::unique_ptr<llvm::MemoryBuffer>> objects_by_module_id_{};
     std::atomic<std::uint64_t> tmp_counter_{0u};
+    ObjectCacheCounters* counters_{nullptr};
 };
+
+[[nodiscard]] std::string readCacheMarker(const std::filesystem::path& path) noexcept
+{
+    try {
+        std::ifstream is(path);
+        if (!is.good()) {
+            return {};
+        }
+        std::string line;
+        std::getline(is, line);
+        return line;
+    } catch (...) {
+        return {};
+    }
+}
+
+void writeCacheMarker(const std::filesystem::path& path, std::string_view marker) noexcept
+{
+    try {
+        std::ofstream os(path, std::ios::trunc);
+        if (!os.good()) {
+            return;
+        }
+        os << marker;
+        os.flush();
+    } catch (...) {
+    }
+}
+
+[[nodiscard]] std::string sanitizePathComponent(std::string_view s)
+{
+    std::string out;
+    out.reserve(s.size());
+    for (const char ch : s) {
+        const bool ok =
+            (ch >= 'a' && ch <= 'z') ||
+            (ch >= 'A' && ch <= 'Z') ||
+            (ch >= '0' && ch <= '9') ||
+            (ch == '_' || ch == '-' || ch == '.');
+        out.push_back(ok ? ch : '_');
+    }
+    return out;
+}
+
+void writeTextFileBestEffort(const std::filesystem::path& path, std::string_view contents) noexcept
+{
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) {
+        return;
+    }
+
+    try {
+        std::ofstream os(path, std::ios::trunc);
+        if (!os.good()) {
+            return;
+        }
+        os.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+        os.flush();
+    } catch (...) {
+    }
+}
+
+[[nodiscard]] std::filesystem::path dumpIRPath(std::string_view dump_directory,
+                                              std::string_view module_id,
+                                              std::string_view suffix)
+{
+    const std::filesystem::path dir =
+        dump_directory.empty() ? std::filesystem::path("svmp_fe_jit_dumps")
+                               : std::filesystem::path(std::string(dump_directory));
+    return dir / (sanitizePathComponent(module_id) + std::string(suffix));
+}
+
+void dumpLLVMIRBestEffort(std::string_view dump_directory,
+                          const llvm::Module& module,
+                          std::string_view suffix) noexcept
+{
+    try {
+        std::string text;
+        llvm::raw_string_ostream os(text);
+        module.print(os, nullptr);
+        os.flush();
+        writeTextFileBestEffort(dumpIRPath(dump_directory, module.getModuleIdentifier(), suffix), text);
+    } catch (...) {
+    }
+}
+
+[[nodiscard]] std::filesystem::path validatedObjectCacheDirectory(std::filesystem::path base_directory,
+                                                                  std::string_view llvm_version,
+                                                                  bool log_mismatch)
+{
+    if (base_directory.empty()) {
+        return {};
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(base_directory, ec);
+    if (ec) {
+        return base_directory;
+    }
+
+    const auto marker_path = base_directory / "svmp_fe_jit_objcache.llvm_version";
+    const std::string marker = readCacheMarker(marker_path);
+    if (marker.empty()) {
+        writeCacheMarker(marker_path, llvm_version);
+        return base_directory;
+    }
+
+    if (marker == llvm_version) {
+        return base_directory;
+    }
+
+    if (log_mismatch) {
+        FE_LOG_WARNING("LLVM JIT: object cache directory was created for LLVM " + marker +
+                       " but this build uses LLVM " + std::string(llvm_version) +
+                       " (using versioned subdirectory instead)");
+    }
+
+    const auto versioned = base_directory / ("llvm-" + sanitizePathComponent(llvm_version));
+    std::filesystem::create_directories(versioned, ec);
+    if (ec) {
+        return base_directory;
+    }
+
+    writeCacheMarker(versioned / "svmp_fe_jit_objcache.llvm_version", llvm_version);
+    return versioned;
+}
 
 [[nodiscard]] std::string hostCPUName()
 {
@@ -330,10 +543,9 @@ void configureObjectCache(llvm::orc::IRCompileLayer& compile_layer,
 }
 
 void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
-                             int opt_level,
-                             bool vectorize)
+                             const JITOptions& options)
 {
-    const int sanitized_opt_level = sanitizeOptLevel(opt_level);
+    const int sanitized_opt_level = sanitizeOptLevel(options.optimization_level);
     if (sanitized_opt_level == 0) {
         return;
     }
@@ -341,8 +553,11 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
     const llvm::OptimizationLevel llvm_opt_level = toLLVMOptLevel(sanitized_opt_level);
 
     llvm::orc::IRTransformLayer::TransformFunction transform =
-        [llvm_opt_level, vectorize](llvm::orc::ThreadSafeModule tsm,
-                                    llvm::orc::MaterializationResponsibility& /*responsibility*/)
+        [llvm_opt_level,
+         vectorize = options.vectorize,
+         dump_optimized = options.dump_llvm_ir_optimized,
+         dump_directory = options.dump_directory](llvm::orc::ThreadSafeModule tsm,
+                                                  llvm::orc::MaterializationResponsibility& /*responsibility*/)
             -> llvm::Expected<llvm::orc::ThreadSafeModule> {
         tsm.withModuleDo([&](llvm::Module& module) {
             llvm::LoopAnalysisManager loop_analysis_manager;
@@ -373,6 +588,9 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
                     module_pass_manager = pass_builder.buildPerModuleDefaultPipeline(llvm_opt_level);
                 }
                 module_pass_manager.run(module, module_analysis_manager);
+                if (dump_optimized) {
+                    dumpLLVMIRBestEffort(dump_directory, module, "_after.ll");
+                }
                 return;
             }
 
@@ -393,6 +611,9 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
                 module_pass_manager = pass_builder.buildPerModuleDefaultPipeline(llvm_opt_level);
             }
             module_pass_manager.run(module, module_analysis_manager);
+            if (dump_optimized) {
+                dumpLLVMIRBestEffort(dump_directory, module, "_after.ll");
+            }
         });
 
         return std::move(tsm);
@@ -527,9 +748,7 @@ void configureEventListeners(llvm::orc::LLJIT& jit,
     configureProcessSymbolResolution(*jit);
     registerExternalCallSymbols(*jit);
 
-    configureTransformLayer(jit->getIRTransformLayer(),
-                            sanitizeOptLevel(options.optimization_level),
-                            options.vectorize);
+    configureTransformLayer(jit->getIRTransformLayer(), options);
 
     return jit;
 }
@@ -543,6 +762,7 @@ struct JITEngine::Impl {
     std::unique_ptr<llvm::JITEventListener> gdb_listener{};
     std::unique_ptr<llvm::JITEventListener> perf_listener{};
     std::unique_ptr<llvm::ObjectCache> object_cache{};
+    ObjectCacheCounters object_cache_counters{};
     std::unique_ptr<llvm::orc::LLJIT> jit{};
     std::string target_triple{};
     std::string data_layout{};
@@ -576,10 +796,15 @@ std::unique_ptr<JITEngine> JITEngine::create(const JITOptions& options)
                                 engine->impl_->perf_listener);
 
         if (!options.cache_directory.empty()) {
-            engine->impl_->object_cache = std::make_unique<FileSystemObjectCache>(options.cache_directory);
+            const auto cache_dir =
+                validatedObjectCacheDirectory(options.cache_directory,
+                                              llvmVersionString(),
+                                              options.cache_diagnostics);
+            engine->impl_->object_cache = std::make_unique<FileSystemObjectCache>(cache_dir,
+                                                                                  &engine->impl_->object_cache_counters);
             configureObjectCache(engine->impl_->jit->getIRCompileLayer(), engine->impl_->object_cache.get());
         } else if (options.cache_kernels) {
-            engine->impl_->object_cache = std::make_unique<InMemoryObjectCache>();
+            engine->impl_->object_cache = std::make_unique<InMemoryObjectCache>(&engine->impl_->object_cache_counters);
             configureObjectCache(engine->impl_->jit->getIRCompileLayer(), engine->impl_->object_cache.get());
         }
 
@@ -604,6 +829,28 @@ JITEngine::~JITEngine() = default;
 bool JITEngine::available() const noexcept
 {
     return impl_ != nullptr;
+}
+
+JITObjectCacheStats JITEngine::objectCacheStats() const
+{
+#if SVMP_FE_ENABLE_LLVM_JIT
+    if (impl_ == nullptr) {
+        return {};
+    }
+    return snapshotStats(impl_->object_cache_counters);
+#else
+    return {};
+#endif
+}
+
+void JITEngine::resetObjectCacheStats()
+{
+#if SVMP_FE_ENABLE_LLVM_JIT
+    if (impl_ == nullptr) {
+        return;
+    }
+    resetCounters(impl_->object_cache_counters);
+#endif
 }
 
 void JITEngine::addModule(llvm::orc::ThreadSafeModule&& module)
@@ -637,6 +884,33 @@ JITEngine::SymbolAddress JITEngine::lookup(std::string_view name)
 #else
     (void)name;
     FE_THROW(FEException, "JITEngine::lookup: FE was built without LLVM JIT support");
+#endif
+}
+
+bool JITEngine::tryLookup(std::string_view name, SymbolAddress& out) noexcept
+{
+#if SVMP_FE_ENABLE_LLVM_JIT
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (impl_ == nullptr || impl_->jit == nullptr) {
+            return false;
+        }
+
+        auto sym_expected = impl_->jit->lookup(std::string(name));
+        if (!sym_expected) {
+            llvm::consumeError(sym_expected.takeError());
+            return false;
+        }
+
+        out = static_cast<SymbolAddress>(sym_expected->getAddress());
+        return true;
+    } catch (...) {
+        return false;
+    }
+#else
+    (void)name;
+    (void)out;
+    return false;
 #endif
 }
 

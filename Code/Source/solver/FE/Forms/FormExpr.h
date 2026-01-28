@@ -87,6 +87,13 @@ struct JITOptions {
     bool cache_kernels{true};
     bool vectorize{true};
     std::string cache_directory;
+    bool cache_diagnostics{false};
+    std::size_t max_in_memory_kernels{0};
+    bool dump_kernel_ir{false};
+    bool dump_llvm_ir{false};
+    bool dump_llvm_ir_optimized{false};
+    bool debug_info{false};
+    std::string dump_directory{"svmp_fe_jit_dumps"};
     TensorJITOptions tensor{};
 };
 

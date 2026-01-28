@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstddef>
+#include <sstream>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -34,6 +35,105 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
 {
     h ^= v;
     h *= kFNVPrime;
+}
+
+[[nodiscard]] const char* opName(FormExprType t) noexcept
+{
+    switch (t) {
+        case FormExprType::TestFunction: return "TestFunction";
+        case FormExprType::TrialFunction: return "TrialFunction";
+        case FormExprType::DiscreteField: return "DiscreteField";
+        case FormExprType::StateField: return "StateField";
+        case FormExprType::Coefficient: return "Coefficient";
+        case FormExprType::ParameterSymbol: return "ParameterSymbol";
+        case FormExprType::ParameterRef: return "ParameterRef";
+        case FormExprType::Constant: return "Constant";
+        case FormExprType::BoundaryFunctionalSymbol: return "BoundaryFunctionalSymbol";
+        case FormExprType::BoundaryIntegralSymbol: return "BoundaryIntegralSymbol";
+        case FormExprType::BoundaryIntegralRef: return "BoundaryIntegralRef";
+        case FormExprType::AuxiliaryStateSymbol: return "AuxiliaryStateSymbol";
+        case FormExprType::AuxiliaryStateRef: return "AuxiliaryStateRef";
+        case FormExprType::MaterialStateOldRef: return "MaterialStateOldRef";
+        case FormExprType::MaterialStateWorkRef: return "MaterialStateWorkRef";
+        case FormExprType::PreviousSolutionRef: return "PreviousSolutionRef";
+        case FormExprType::Coordinate: return "Coordinate";
+        case FormExprType::ReferenceCoordinate: return "ReferenceCoordinate";
+        case FormExprType::Time: return "Time";
+        case FormExprType::TimeStep: return "TimeStep";
+        case FormExprType::EffectiveTimeStep: return "EffectiveTimeStep";
+        case FormExprType::Identity: return "Identity";
+        case FormExprType::Jacobian: return "Jacobian";
+        case FormExprType::JacobianInverse: return "JacobianInverse";
+        case FormExprType::JacobianDeterminant: return "JacobianDeterminant";
+        case FormExprType::Normal: return "Normal";
+        case FormExprType::CellDiameter: return "CellDiameter";
+        case FormExprType::CellVolume: return "CellVolume";
+        case FormExprType::FacetArea: return "FacetArea";
+        case FormExprType::CellDomainId: return "CellDomainId";
+
+        case FormExprType::Gradient: return "Gradient";
+        case FormExprType::Divergence: return "Divergence";
+        case FormExprType::Curl: return "Curl";
+        case FormExprType::Hessian: return "Hessian";
+        case FormExprType::TimeDerivative: return "TimeDerivative";
+
+        case FormExprType::RestrictMinus: return "RestrictMinus";
+        case FormExprType::RestrictPlus: return "RestrictPlus";
+        case FormExprType::Jump: return "Jump";
+        case FormExprType::Average: return "Average";
+
+        case FormExprType::Negate: return "Negate";
+        case FormExprType::Transpose: return "Transpose";
+        case FormExprType::Trace: return "Trace";
+        case FormExprType::Determinant: return "Determinant";
+        case FormExprType::Inverse: return "Inverse";
+        case FormExprType::Cofactor: return "Cofactor";
+        case FormExprType::Deviator: return "Deviator";
+        case FormExprType::SymmetricPart: return "SymmetricPart";
+        case FormExprType::SkewPart: return "SkewPart";
+        case FormExprType::Norm: return "Norm";
+        case FormExprType::Normalize: return "Normalize";
+        case FormExprType::AbsoluteValue: return "AbsoluteValue";
+        case FormExprType::Sign: return "Sign";
+        case FormExprType::Sqrt: return "Sqrt";
+        case FormExprType::Exp: return "Exp";
+        case FormExprType::Log: return "Log";
+
+        case FormExprType::SymmetricEigenvalue: return "SymmetricEigenvalue";
+        case FormExprType::SymmetricEigenvalueDirectionalDerivative: return "SymmetricEigenvalueDirectionalDerivative";
+        case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA: return "SymmetricEigenvalueDirectionalDerivativeWrtA";
+
+        case FormExprType::Add: return "Add";
+        case FormExprType::Subtract: return "Subtract";
+        case FormExprType::Multiply: return "Multiply";
+        case FormExprType::Divide: return "Divide";
+        case FormExprType::InnerProduct: return "InnerProduct";
+        case FormExprType::DoubleContraction: return "DoubleContraction";
+        case FormExprType::OuterProduct: return "OuterProduct";
+        case FormExprType::CrossProduct: return "CrossProduct";
+        case FormExprType::Power: return "Power";
+        case FormExprType::Minimum: return "Minimum";
+        case FormExprType::Maximum: return "Maximum";
+
+        case FormExprType::Less: return "Less";
+        case FormExprType::LessEqual: return "LessEqual";
+        case FormExprType::Greater: return "Greater";
+        case FormExprType::GreaterEqual: return "GreaterEqual";
+        case FormExprType::Equal: return "Equal";
+        case FormExprType::NotEqual: return "NotEqual";
+        case FormExprType::Conditional: return "Conditional";
+
+        case FormExprType::Component: return "Component";
+        case FormExprType::AsVector: return "AsVector";
+        case FormExprType::AsTensor: return "AsTensor";
+        case FormExprType::IndexedAccess: return "IndexedAccess";
+
+        case FormExprType::ConstitutiveOutput: return "ConstitutiveOutput";
+        case FormExprType::Constitutive: return "Constitutive";
+
+        default:
+            return "Unknown";
+    }
 }
 
 [[nodiscard]] bool isCommutative(FormExprType t) noexcept
@@ -429,6 +529,38 @@ std::uint64_t KernelIR::stableHash64() const
     }
 
     return op_hash[root];
+}
+
+std::string KernelIR::dump() const
+{
+    std::ostringstream oss;
+    oss << "KernelIR(root=" << root
+        << ", ops=" << ops.size()
+        << ", children=" << children.size()
+        << ", hash=0x" << std::hex << stableHash64() << std::dec << ")\n";
+
+    for (std::size_t i = 0; i < ops.size(); ++i) {
+        const auto& op = ops[i];
+        oss << "  [" << i << "] " << opName(op.type)
+            << " first_child=" << op.first_child
+            << " child_count=" << op.child_count
+            << " imm0=0x" << std::hex << op.imm0
+            << " imm1=0x" << op.imm1 << std::dec;
+
+        if (op.child_count != 0u) {
+            oss << " kids=[";
+            for (std::size_t k = 0; k < op.child_count; ++k) {
+                if (k != 0u) {
+                    oss << ",";
+                }
+                const auto idx = children[static_cast<std::size_t>(op.first_child) + k];
+                oss << idx;
+            }
+            oss << "]";
+        }
+        oss << "\n";
+    }
+    return oss.str();
 }
 
 KernelIRBuildResult lowerToKernelIR(const FormExprNode& root,

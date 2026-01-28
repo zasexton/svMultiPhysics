@@ -83,6 +83,7 @@ public:
 private:
     void maybeCompile();
     [[nodiscard]] bool canUseJIT() const noexcept;
+    void markRuntimeFailureOnce(std::string_view where, std::string_view msg) noexcept;
 
     std::shared_ptr<assembly::FunctionalKernel> fallback_{};
     FormExpr integrand_{};
@@ -99,6 +100,8 @@ private:
 
     bool warned_unavailable_{false};
     bool warned_compile_failure_{false};
+    bool runtime_failed_{false};
+    bool warned_runtime_failure_{false};
 };
 
 } // namespace jit
@@ -107,4 +110,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_FORMS_JIT_JIT_FUNCTIONAL_KERNEL_WRAPPER_H
-

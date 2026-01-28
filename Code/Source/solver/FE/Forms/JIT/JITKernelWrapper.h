@@ -109,6 +109,7 @@ private:
     void markDirty() noexcept;
     void maybeCompile();
     [[nodiscard]] bool canUseJIT() const noexcept;
+    void markRuntimeFailureOnce(std::string_view where, std::string_view msg) noexcept;
 
     std::shared_ptr<assembly::AssemblyKernel> fallback_{};
     JITOptions options_{};
@@ -130,6 +131,8 @@ private:
     bool warned_unavailable_{false};
     bool warned_validation_{false};
     bool warned_compile_failure_{false};
+    bool runtime_failed_{false};
+    bool warned_runtime_failure_{false};
 };
 
 } // namespace jit

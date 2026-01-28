@@ -9,6 +9,7 @@
  */
 
 #include "Forms/FormIR.h"
+#include "Forms/JIT/JITCacheStats.h"
 #include "Forms/JIT/JITValidation.h"
 
 #include <cstdint>
@@ -50,6 +51,9 @@ public:
     [[nodiscard]] JITCompileResult compileFunctional(const FormExpr& integrand,
                                                      IntegralDomain domain,
                                                      const ValidationOptions& validation = {});
+
+    [[nodiscard]] JITCacheStats cacheStats() const;
+    void resetCacheStats();
 
     JITCompiler(const JITCompiler&) = delete;
     JITCompiler& operator=(const JITCompiler&) = delete;

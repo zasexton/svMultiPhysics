@@ -19,6 +19,8 @@
 #include "Forms/Dual.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/Index.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
@@ -26,12 +28,17 @@
 
 #include <chrono>
 #include <cmath>
+#include <memory>
 #include <vector>
 
 namespace svmp {
 namespace FE {
 namespace forms {
 namespace test {
+
+#ifndef SVMP_FE_ENABLE_LLVM_JIT
+#define SVMP_FE_ENABLE_LLVM_JIT 0
+#endif
 
 namespace {
 
@@ -395,6 +402,208 @@ TEST(FormsPerformance, DISABLED_MemoryAllocationProfile)
     });
     SUCCEED() << "Ran " << kIters << " assemblies in " << sec << " s; use a dedicated profiler for allocations.";
 }
+
+#if SVMP_FE_ENABLE_LLVM_JIT
+TEST(FormsPerformance, DISABLED_JIT_CellKernelThroughputVsInterpreter)
+{
+    SingleTetraMeshAccess mesh;
+    auto base = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace space(base, 3);
+    auto dof_map = makeContiguousSingleCellDofMap(static_cast<GlobalIndex>(space.dofs_per_element()));
+
+    SymbolicOptions sym_opts;
+    sym_opts.jit.enable = true;
+    FormCompiler compiler(sym_opts);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const Index i("i");
+    const Index j("j");
+    const auto form = (grad(u)(i, j) * grad(v)(i, j)).dx();
+
+    auto ir_interp = compiler.compileBilinear(form);
+    auto ir_jit = compiler.compileBilinear(form);
+
+    auto interp_kernel = std::make_shared<FormKernel>(std::move(ir_interp));
+    auto jit_fallback = std::make_shared<FormKernel>(std::move(ir_jit));
+
+    forms::JITOptions jit_opts;
+    jit_opts.enable = true;
+    jit_opts.optimization_level = 2;
+    jit_opts.vectorize = true;
+    forms::jit::JITKernelWrapper jit_kernel(jit_fallback, jit_opts);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    assembly::DenseMatrixView mat(static_cast<GlobalIndex>(space.dofs_per_element()));
+    mat.zero();
+
+    // Warmup + JIT compile.
+    (void)assembler.assembleMatrix(mesh, space, space, *interp_kernel, mat);
+    (void)assembler.assembleMatrix(mesh, space, space, jit_kernel, mat);
+
+    constexpr int kIters = 2000;
+    const double sec_interp = timeSeconds([&]() {
+        for (int i = 0; i < kIters; ++i) {
+            mat.zero();
+            (void)assembler.assembleMatrix(mesh, space, space, *interp_kernel, mat);
+        }
+    });
+    const double sec_jit = timeSeconds([&]() {
+        for (int i = 0; i < kIters; ++i) {
+            mat.zero();
+            (void)assembler.assembleMatrix(mesh, space, space, jit_kernel, mat);
+        }
+    });
+
+    const double interp_elem_s = (sec_interp > 0.0) ? (static_cast<double>(kIters) / sec_interp) : 0.0;
+    const double jit_elem_s = (sec_jit > 0.0) ? (static_cast<double>(kIters) / sec_jit) : 0.0;
+    const double speedup = (interp_elem_s > 0.0) ? (jit_elem_s / interp_elem_s) : 0.0;
+    SUCCEED() << "cell elems/s: interp=" << interp_elem_s << ", jit=" << jit_elem_s << ", speedup=" << speedup;
+}
+
+TEST(FormsPerformance, DISABLED_JIT_Macro_AssembleMatrixVectorBothVsInterpreter)
+{
+    SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    auto dof_map = createSingleTetraDofMap();
+
+    SymbolicOptions sym_opts;
+    sym_opts.jit.enable = true;
+    FormCompiler compiler(sym_opts);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    auto ir_mass_interp = compiler.compileBilinear((u * v).dx());
+    auto ir_mass_jit = compiler.compileBilinear((u * v).dx());
+
+    auto interp_mass = std::make_shared<FormKernel>(std::move(ir_mass_interp));
+    auto jit_mass_fallback = std::make_shared<FormKernel>(std::move(ir_mass_jit));
+    forms::JITOptions jit_opts;
+    jit_opts.enable = true;
+    jit_opts.optimization_level = 2;
+    jit_opts.vectorize = true;
+    forms::jit::JITKernelWrapper jit_mass(jit_mass_fallback, jit_opts);
+
+    auto ir_lin_interp = compiler.compileLinear(v.ds(2));
+    auto ir_lin_jit = compiler.compileLinear(v.ds(2));
+    auto interp_lin = std::make_shared<FormKernel>(std::move(ir_lin_interp));
+    auto jit_lin_fallback = std::make_shared<FormKernel>(std::move(ir_lin_jit));
+    forms::jit::JITKernelWrapper jit_lin(jit_lin_fallback, jit_opts);
+
+    auto ir_res_interp = compiler.compileResidual((u * u * v).dx());
+    auto ir_res_jit = compiler.compileResidual((u * u * v).dx());
+    auto interp_res = std::make_shared<NonlinearFormKernel>(std::move(ir_res_interp), ADMode::Forward,
+                                                            NonlinearKernelOutput::Both);
+    auto jit_res_fallback = std::make_shared<NonlinearFormKernel>(std::move(ir_res_jit), ADMode::Forward,
+                                                                  NonlinearKernelOutput::Both);
+    forms::jit::JITKernelWrapper jit_residual(jit_res_fallback, jit_opts);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setCurrentSolution(std::vector<Real>{0.1, -0.2, 0.3, -0.1});
+
+    assembly::DenseMatrixView mat(4);
+    assembly::DenseVectorView vec(4);
+    mat.zero();
+    vec.zero();
+
+    // Warmup + JIT compile.
+    (void)assembler.assembleMatrix(mesh, space, space, *interp_mass, mat);
+    (void)assembler.assembleMatrix(mesh, space, space, jit_mass, mat);
+    (void)assembler.assembleBoundaryFaces(mesh, 2, space, *interp_lin, nullptr, &vec);
+    (void)assembler.assembleBoundaryFaces(mesh, 2, space, jit_lin, nullptr, &vec);
+    (void)assembler.assembleBoth(mesh, space, space, *interp_res, mat, vec);
+    (void)assembler.assembleBoth(mesh, space, space, jit_residual, mat, vec);
+
+    constexpr int kIters = 1500;
+    const double sec_mat_interp = timeSeconds([&]() {
+        for (int i = 0; i < kIters; ++i) {
+            mat.zero();
+            (void)assembler.assembleMatrix(mesh, space, space, *interp_mass, mat);
+        }
+    });
+    const double sec_mat_jit = timeSeconds([&]() {
+        for (int i = 0; i < kIters; ++i) {
+            mat.zero();
+            (void)assembler.assembleMatrix(mesh, space, space, jit_mass, mat);
+        }
+    });
+    const double sec_vec_interp = timeSeconds([&]() {
+        for (int i = 0; i < kIters; ++i) {
+            vec.zero();
+            (void)assembler.assembleBoundaryFaces(mesh, 2, space, *interp_lin, nullptr, &vec);
+        }
+    });
+    const double sec_vec_jit = timeSeconds([&]() {
+        for (int i = 0; i < kIters; ++i) {
+            vec.zero();
+            (void)assembler.assembleBoundaryFaces(mesh, 2, space, jit_lin, nullptr, &vec);
+        }
+    });
+    const double sec_both_interp = timeSeconds([&]() {
+        for (int i = 0; i < kIters; ++i) {
+            mat.zero();
+            vec.zero();
+            (void)assembler.assembleBoth(mesh, space, space, *interp_res, mat, vec);
+        }
+    });
+    const double sec_both_jit = timeSeconds([&]() {
+        for (int i = 0; i < kIters; ++i) {
+            mat.zero();
+            vec.zero();
+            (void)assembler.assembleBoth(mesh, space, space, jit_residual, mat, vec);
+        }
+    });
+
+    SUCCEED() << "assembleMatrix ms/call: interp=" << (1e3 * sec_mat_interp / kIters)
+              << ", jit=" << (1e3 * sec_mat_jit / kIters)
+              << " | assembleVector(boundary) ms/call: interp=" << (1e3 * sec_vec_interp / kIters)
+              << ", jit=" << (1e3 * sec_vec_jit / kIters)
+              << " | assembleBoth(nonlinear) ms/call: interp=" << (1e3 * sec_both_interp / kIters)
+              << ", jit=" << (1e3 * sec_both_jit / kIters);
+}
+
+TEST(FormsPerformance, DISABLED_JIT_CacheEffectiveness_FirstCallVsSteadyState)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    auto dof_map = createSingleTetraDofMap();
+
+    SymbolicOptions sym_opts;
+    sym_opts.jit.enable = true;
+    FormCompiler compiler(sym_opts);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto form = inner(grad(u), grad(v)).dx();
+
+    auto ir = compiler.compileBilinear(form);
+    auto fallback = std::make_shared<FormKernel>(std::move(ir));
+    forms::JITOptions jit_opts;
+    jit_opts.enable = true;
+    jit_opts.optimization_level = 2;
+    jit_opts.vectorize = true;
+    forms::jit::JITKernelWrapper jit_kernel(fallback, jit_opts);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    assembly::DenseMatrixView mat(4);
+    const double first = timeSeconds([&]() {
+        mat.zero();
+        (void)assembler.assembleMatrix(mesh, space, space, jit_kernel, mat);
+    });
+    const double second = timeSeconds([&]() {
+        mat.zero();
+        (void)assembler.assembleMatrix(mesh, space, space, jit_kernel, mat);
+    });
+
+    SUCCEED() << "first call (compile+run) = " << first << " s; steady-state call = " << second << " s";
+}
+#endif
 
 } // namespace test
 } // namespace forms

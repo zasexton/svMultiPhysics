@@ -109,7 +109,8 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
         return;
     }
 
-    const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+    try {
+        const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
@@ -260,6 +261,13 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
     }
 
     fallback_->computeCell(ctx, output);
+    } catch (const std::exception& e) {
+        markRuntimeFailureOnce("computeCell", e.what());
+        fallback_->computeCell(ctx, output);
+    } catch (...) {
+        markRuntimeFailureOnce("computeCell", "unknown exception");
+        fallback_->computeCell(ctx, output);
+    }
 }
 
 void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
@@ -272,7 +280,8 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
         return;
     }
 
-    const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+    try {
+        const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
@@ -478,6 +487,13 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
     }
 
     fallback_->computeBoundaryFace(ctx, boundary_marker, output);
+    } catch (const std::exception& e) {
+        markRuntimeFailureOnce("computeBoundaryFace", e.what());
+        fallback_->computeBoundaryFace(ctx, boundary_marker, output);
+    } catch (...) {
+        markRuntimeFailureOnce("computeBoundaryFace", "unknown exception");
+        fallback_->computeBoundaryFace(ctx, boundary_marker, output);
+    }
 }
 
 void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_minus,
@@ -495,7 +511,8 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
         return;
     }
 
-    const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+    try {
+        const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
@@ -630,6 +647,17 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
     fallback_->computeInteriorFace(ctx_minus, ctx_plus,
                                    output_minus, output_plus,
                                    coupling_minus_plus, coupling_plus_minus);
+    } catch (const std::exception& e) {
+        markRuntimeFailureOnce("computeInteriorFace", e.what());
+        fallback_->computeInteriorFace(ctx_minus, ctx_plus,
+                                       output_minus, output_plus,
+                                       coupling_minus_plus, coupling_plus_minus);
+    } catch (...) {
+        markRuntimeFailureOnce("computeInteriorFace", "unknown exception");
+        fallback_->computeInteriorFace(ctx_minus, ctx_plus,
+                                       output_minus, output_plus,
+                                       coupling_minus_plus, coupling_plus_minus);
+    }
 }
 
 void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx_minus,
@@ -648,7 +676,8 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
         return;
     }
 
-    const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+    try {
+        const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
@@ -797,6 +826,17 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
     fallback_->computeInterfaceFace(ctx_minus, ctx_plus, interface_marker,
                                     output_minus, output_plus,
                                     coupling_minus_plus, coupling_plus_minus);
+    } catch (const std::exception& e) {
+        markRuntimeFailureOnce("computeInterfaceFace", e.what());
+        fallback_->computeInterfaceFace(ctx_minus, ctx_plus, interface_marker,
+                                        output_minus, output_plus,
+                                        coupling_minus_plus, coupling_plus_minus);
+    } catch (...) {
+        markRuntimeFailureOnce("computeInterfaceFace", "unknown exception");
+        fallback_->computeInterfaceFace(ctx_minus, ctx_plus, interface_marker,
+                                        output_minus, output_plus,
+                                        coupling_minus_plus, coupling_plus_minus);
+    }
 }
 
 std::string JITKernelWrapper::name() const
@@ -838,11 +878,29 @@ void JITKernelWrapper::markDirty() noexcept
     compiled_tangent_ = CompiledDispatch{};
     has_compiled_linear_ = false;
     warned_compile_failure_ = false;
+    runtime_failed_ = false;
+    warned_runtime_failure_ = false;
 }
 
 bool JITKernelWrapper::canUseJIT() const noexcept
 {
-    return options_.enable && compiled_revision_ == revision_;
+    return options_.enable && compiled_revision_ == revision_ && !runtime_failed_;
+}
+
+void JITKernelWrapper::markRuntimeFailureOnce(std::string_view where, std::string_view msg) noexcept
+{
+    std::lock_guard<std::mutex> lock(jit_mutex_);
+    runtime_failed_ = true;
+    if (warned_runtime_failure_) {
+        return;
+    }
+    warned_runtime_failure_ = true;
+
+    std::string full = "JIT: runtime failure in " + std::string(where) + " for kernel '" + fallback_->name() + "'";
+    if (!msg.empty()) {
+        full += ": " + std::string(msg);
+    }
+    FE_LOG_WARNING(full);
 }
 
 void JITKernelWrapper::maybeCompile()

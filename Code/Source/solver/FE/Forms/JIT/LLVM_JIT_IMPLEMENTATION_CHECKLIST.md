@@ -171,17 +171,20 @@ For `Strictness::AllowExternalCalls`, JIT kernels must be able to call out to C/
 
 ## 8. Kernel Caching (in-memory + optional on-disk)
 
-- [ ] Define the cache key precisely (must cover all semantic + codegen knobs):
-  - [ ] `KernelIR::stableHash64()` of each fused kernel (or term list) + ABI version
-  - [ ] FormKind + IntegralDomain (+ marker id for boundary/interface)
-  - [ ] element/space signature inputs that affect basis sizes and semantics
-  - [ ] JITOptions knobs (opt level, vectorize, debug_info, specialization policy)
-  - [ ] target triple + CPU features (+ LLVM version if on-disk)
-  - [ ] include inlinable constitutive kind ids / state layout signatures when relevant
-- [ ] Implement in-memory cache:
-  - [ ] `unordered_map<CacheKey, CompiledKernelHandle>` on the engine or compiler layer
-  - [ ] concurrency control (compile-once semantics)
-- [ ] Optional: implement LLVM `ObjectCache`-based on-disk cache (directory = `JITOptions::cache_directory`).
+- [x] Define the cache key precisely (must cover all semantic + codegen knobs):
+  - [x] `KernelIR::stableHash64()` of each fused kernel (or term list) + ABI version
+  - [x] FormKind + IntegralDomain (+ marker id for boundary/interface)
+  - [x] element/space signature inputs that affect basis sizes and semantics
+  - [x] JITOptions knobs (opt level, vectorize, debug_info, specialization policy)
+  - [x] target triple + CPU features (+ LLVM version if on-disk)
+  - [x] include inlinable constitutive kind ids / state layout signatures when relevant
+- [x] Implement in-memory cache:
+  - [x] `unordered_map<CacheKey, CompiledKernelHandle>` on the engine or compiler layer
+  - [x] concurrency control (compile-once semantics)
+- [x] Optional: implement LLVM `ObjectCache`-based on-disk cache (directory = `JITOptions::cache_directory`).
+- [x] Add cache diagnostics: hit/miss counters + size reporting (`JITCompiler::cacheStats()` / `JITEngine::objectCacheStats()`).
+- [x] Add optional in-memory kernel cache eviction (LRU) via `JITOptions::max_in_memory_kernels`.
+- [x] Validate/segregate on-disk cache directories via an LLVM-version marker (fallback to `llvm-<version>/` on mismatch).
 
 ## 9. JIT Kernel Wrappers (`AssemblyKernel` implementations)
 
@@ -213,33 +216,33 @@ Implement concrete `assembly::AssemblyKernel` classes that invoke compiled funct
 
 ## 11. Robustness / Diagnostics
 
-- [ ] Never crash simulations:
-  - [ ] wrap JIT compilation in error handling and fall back to interpreter kernels
-  - [ ] include diagnostic context: form dump, offending node (`JITValidationIssue`), LLVM error message
-- [ ] Add debug options (driven by `JITOptions`):.vtu
-  - [ ] dump lowered `KernelIR`
-  - [ ] dump generated LLVM IR before/after optimization
-  - [ ] optional emission of DWARF for stepping through JIT code
-- [ ] Profiling hooks:
-  - [ ] perf listener (Linux)
-  - [ ] GDB registration listener
+- [x] Never crash simulations:
+  - [x] wrap JIT compilation in error handling and fall back to interpreter kernels
+  - [x] include diagnostic context: form dump, offending node (`JITValidationIssue`), LLVM error message
+- [x] Add debug options (driven by `JITOptions`):.vtu
+  - [x] dump lowered `KernelIR`
+  - [x] dump generated LLVM IR before/after optimization
+  - [x] optional emission of DWARF for stepping through JIT code
+- [x] Profiling hooks:
+  - [x] perf listener (Linux)
+  - [x] GDB registration listener
 
 ## 12. Testing + Benchmarking
 
-- [ ] Add unit tests for end-to-end JIT correctness (new suite recommended: `Code/Source/solver/FE/Tests/Unit/JIT/`):
-  - [ ] Poisson (cell bilinear): `inner(grad(u), grad(v))`
-  - [ ] Mass matrix (cell bilinear): `u*v`
-  - [ ] Neumann/Robin (boundary): `g*v`
-  - [ ] Interior penalty / jump/avg (interior face)
-  - [ ] Time-derivative weighted forms (`dt(u)*v`) with transient context
-  - [ ] ParameterRef / coupled slot loads
-  - [ ] Material state loads/stores (inlined updates)
-  - [ ] Vector-valued trial/test (ProductSpace) at least for H1-like bases
-- [ ] Add regression tests that run assembly with `jit.enable=true` and compare to interpreter outputs on small meshes.
-- [ ] Add benchmarks:
-  - [ ] micro-bench: kernel invocation throughput (per element)
-  - [ ] macro-bench: `assembleMatrix/assembleVector/assembleBoth` scaling vs interpreter
-  - [ ] cache effectiveness metrics (first-call compile time vs steady-state)
+- [x] Add unit tests for end-to-end JIT correctness (new suite recommended: `Code/Source/solver/FE/Tests/Unit/JIT/`):
+  - [x] Poisson (cell bilinear): `inner(grad(u), grad(v))` (`Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp`)
+  - [x] Mass matrix (cell bilinear): `u*v` (`Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp`)
+  - [x] Neumann/Robin (boundary): `g*v` (`Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp`)
+  - [x] Interior penalty / jump/avg (interior face) (`Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp`)
+  - [x] Time-derivative weighted forms (`dt(u)*v`) with transient context (`Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp`)
+  - [x] ParameterRef / coupled slot loads (`Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp`)
+  - [x] Material state loads/stores (inlined updates) (`Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp`)
+  - [x] Vector-valued trial/test (ProductSpace) at least for H1-like bases (`Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp`)
+- [x] Add regression tests that run assembly with `jit.enable=true` and compare to interpreter outputs on small meshes. (`Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp`)
+- [x] Add benchmarks:
+  - [x] micro-bench: kernel invocation throughput (per element) (`Tests/Unit/Forms/test_FormsPerformance.cpp`)
+  - [x] macro-bench: `assembleMatrix/assembleVector/assembleBoth` scaling vs interpreter (`Tests/Unit/Forms/test_FormsPerformance.cpp`)
+  - [x] cache effectiveness metrics (first-call compile time vs steady-state) (`Tests/Unit/Forms/test_FormsPerformance.cpp`)
 
 ## 13. Symbolic Differentiation + Tangent Decomposition (Nonlinear JIT path)
 

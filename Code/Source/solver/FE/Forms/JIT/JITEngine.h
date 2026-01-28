@@ -10,6 +10,7 @@
  */
 
 #include "Forms/FormExpr.h"
+#include "Forms/JIT/JITCacheStats.h"
 
 #include <cstdint>
 #include <memory>
@@ -50,6 +51,7 @@ public:
     void addModule(llvm::orc::ThreadSafeModule&& module);
 
     [[nodiscard]] SymbolAddress lookup(std::string_view name);
+    [[nodiscard]] bool tryLookup(std::string_view name, SymbolAddress& out) noexcept;
 
     template <typename Fn>
     [[nodiscard]] Fn lookupAs(std::string_view name)
@@ -61,6 +63,8 @@ public:
     [[nodiscard]] std::string dataLayoutString() const;
     [[nodiscard]] std::string cpuName() const;
     [[nodiscard]] std::string cpuFeaturesString() const;
+    [[nodiscard]] JITObjectCacheStats objectCacheStats() const;
+    void resetObjectCacheStats();
 
 private:
     JITEngine() = default;

@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -56,6 +57,7 @@ struct KernelIR {
      * should be treated as non-cacheable even if a hash is available.
      */
     [[nodiscard]] std::uint64_t stableHash64() const;
+    [[nodiscard]] std::string dump() const;
 };
 
 struct KernelIRBuildOptions {

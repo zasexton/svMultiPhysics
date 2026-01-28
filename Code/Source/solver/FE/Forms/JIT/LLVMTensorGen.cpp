@@ -152,9 +152,9 @@ llvm::Value* LLVMTensorGen::emitScalar(const forms::tensor::TensorIR& ir,
     auto* i64 = builder.getInt64Ty();
     auto* f64 = builder.getDoubleTy();
 
-    auto* f64c = [&](double v) -> llvm::Constant* { return llvm::ConstantFP::get(f64, v); };
-    auto* i32c = [&](std::uint32_t v) -> llvm::ConstantInt* { return llvm::ConstantInt::get(i32, v); };
-    auto* i64c = [&](std::uint64_t v) -> llvm::ConstantInt* { return llvm::ConstantInt::get(i64, v); };
+    auto f64c = [&](double v) -> llvm::Constant* { return llvm::ConstantFP::get(f64, v); };
+    auto i32c = [&](std::uint32_t v) -> llvm::ConstantInt* { return llvm::ConstantInt::get(i32, v); };
+    auto i64c = [&](std::uint64_t v) -> llvm::ConstantInt* { return llvm::ConstantInt::get(i64, v); };
 
     // Allocate temporary buffers at function entry (not inside loops).
     llvm::Value* stack_base = nullptr;
@@ -345,7 +345,7 @@ llvm::Value* LLVMTensorGen::emitScalar(const forms::tensor::TensorIR& ir,
         auto blocks = createLoopBlocks(ctx, fn, prefix);
         blocks.preheader = builder.GetInsertBlock();
 
-        auto* start = i32c(0);
+        llvm::Value* start = i32c(0);
         if (li.lower_bound_id >= 0) {
             auto* lb = indexValueForId(li.lower_bound_id);
             start = builder.CreateAdd(lb, i32c(static_cast<std::uint32_t>(std::max(0, li.lower_bound_offset))));
@@ -428,7 +428,7 @@ llvm::Value* LLVMTensorGen::emitScalar(const forms::tensor::TensorIR& ir,
         auto blocks = createLoopBlocks(ctx, fn, prefix);
         blocks.preheader = builder.GetInsertBlock();
 
-        auto* start = i32c(0);
+        llvm::Value* start = i32c(0);
         if (li.lower_bound_id >= 0) {
             auto* lb = indexValueForId(li.lower_bound_id);
             start = builder.CreateAdd(lb, i32c(static_cast<std::uint32_t>(std::max(0, li.lower_bound_offset))));
