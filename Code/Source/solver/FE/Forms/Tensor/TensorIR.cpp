@@ -7,6 +7,7 @@
 
 #include "Forms/Tensor/TensorIR.h"
 
+#include "Core/Logger.h"
 #include "Forms/Einsum.h"
 #include "Forms/JIT/KernelIR.h"
 
@@ -286,6 +287,9 @@ TensorIRLoweringResult lowerToTensorIR(const FormExpr& expr, const TensorIRLower
                                          : lowered.loop.message;
                 }
             }
+            lowered.preferred_loop_nest = true;
+            lowered.estimated_scalar_terms = 0;
+            lowered.decision_reason = "forced";
         } else {
             lowered = lowerTensorExpressionIncremental(expr, options.loop);
         }
@@ -298,6 +302,13 @@ TensorIRLoweringResult lowerToTensorIR(const FormExpr& expr, const TensorIRLower
         }
 
         out.used_loop_nest = lowered.used_loop_nest;
+        if (options.log_decisions) {
+            FE_LOG_INFO("TensorIR lowering: used_loop_nest=" +
+                        std::string(out.used_loop_nest ? "true" : "false") +
+                        " reason=" + (lowered.decision_reason.empty() ? std::string{"unknown"} : lowered.decision_reason) +
+                        " est_terms=" + std::to_string(lowered.estimated_scalar_terms) +
+                        " threshold=" + std::to_string(options.loop.scalar_expansion_term_threshold));
+        }
 
         if (!lowered.used_loop_nest) {
             out.fallback_expr = lowered.einsum_expanded.isValid() ? lowered.einsum_expanded : expr;

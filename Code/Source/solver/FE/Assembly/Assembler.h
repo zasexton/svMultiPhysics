@@ -65,6 +65,7 @@
 #include "Core/FEException.h"
 #include "Core/ParameterValue.h"
 #include "Assembly/TimeIntegrationContext.h"
+#include "Assembly/Coloring.h"
 
 #include <array>
 #include <cstddef>
@@ -266,6 +267,10 @@ struct AssemblyOptions {
     // Scheduling / locality (decorator opt-in)
     bool schedule_elements{false};       ///< Reorder element traversal (cache/locality)
     int schedule_strategy{0};            ///< 0=Natural,1=Hilbert,2=Morton,3=RCM,4=Complexity,5=CacheBlocked
+
+    // Coloring (decorator opt-in)
+    bool use_coloring{false};            ///< Enable graph-colored parallel assembly
+    ColoringOptions coloring{};          ///< Coloring algorithm/options (used when use_coloring=true)
 
     // Auto-selection policy (used only when assembler_name="Auto")
     AutoSelectionPolicy auto_policy{AutoSelectionPolicy::Conservative};

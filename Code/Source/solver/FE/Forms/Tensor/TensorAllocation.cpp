@@ -327,10 +327,15 @@ TensorTempWorkspace::AlignedBuffer::~AlignedBuffer()
 
 void TensorTempWorkspace::AlignedBuffer::reset(std::size_t bytes, std::size_t alignment)
 {
-    clear();
     if (bytes == 0u) {
+        clear();
         return;
     }
+    // Reuse existing allocation when possible to avoid per-evaluation churn.
+    if (owns_ && data_ != nullptr && alignment_ == alignment && bytes_ >= bytes) {
+        return;
+    }
+    clear();
     data_ = static_cast<std::byte*>(::operator new(bytes, std::align_val_t(alignment)));
     bytes_ = bytes;
     alignment_ = alignment;

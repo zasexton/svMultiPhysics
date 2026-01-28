@@ -33,12 +33,12 @@ inline void callJIT(std::uintptr_t addr, const void* args) noexcept
     reinterpret_cast<JITFn>(addr)(args);
 }
 
-inline void overrideFunctionalWeights(assembly::jit::KernelSideArgsV3& side) noexcept
+inline void overrideFunctionalWeights(assembly::jit::KernelSideArgsV4& side) noexcept
 {
     side.time_derivative_term_weight = 1.0;
     side.non_time_derivative_term_weight = 1.0;
-    side.dt1_term_weight = 1.0;
-    side.dt2_term_weight = 1.0;
+    side.dt_term_weights.fill(Real(1.0));
+    side.max_time_derivative_order = 0u;
 }
 
 } // namespace
@@ -99,7 +99,7 @@ Real JITFunctionalKernelWrapper::evaluateCellTotal(const assembly::AssemblyConte
         out.clear();
 
         const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
-        auto args = assembly::jit::packCellKernelArgsV3(ctx, out, checks);
+        auto args = assembly::jit::packCellKernelArgsV4(ctx, out, checks);
 
         args.side.n_test_dofs = 1u;
         args.output.n_test_dofs = 1u;
@@ -134,7 +134,7 @@ Real JITFunctionalKernelWrapper::evaluateBoundaryFaceTotal(const assembly::Assem
         out.clear();
 
         const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
-        auto args = assembly::jit::packBoundaryFaceKernelArgsV3(ctx, boundary_marker, out, checks);
+        auto args = assembly::jit::packBoundaryFaceKernelArgsV4(ctx, boundary_marker, out, checks);
 
         args.side.n_test_dofs = 1u;
         args.output.n_test_dofs = 1u;

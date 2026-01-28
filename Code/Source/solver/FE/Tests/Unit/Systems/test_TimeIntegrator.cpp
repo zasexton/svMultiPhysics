@@ -273,13 +273,16 @@ TEST(TimeIntegrator, BackwardDifferenceIntegrator_BuildContext_Order2_Correct)
     expectStencilNear(ctx.dt2->a, {4.0, -8.0, 4.0}, 1e-12);
 }
 
-TEST(TimeIntegrator, BackwardDifferenceIntegrator_BuildContext_Order3_Throws)
+TEST(TimeIntegrator, BackwardDifferenceIntegrator_BuildContext_Order3_Correct)
 {
     SystemStateView state;
     state.dt = 0.5;
 
     BackwardDifferenceIntegrator integrator;
-    EXPECT_THROW((void)integrator.buildContext(/*max_time_derivative_order=*/3, state), svmp::FE::InvalidArgumentException);
+    const auto ctx = integrator.buildContext(/*max_time_derivative_order=*/3, state);
+    ASSERT_EQ(ctx.dt_extra.size(), 1u);
+    ASSERT_TRUE(ctx.dt_extra[0].has_value());
+    expectStencilNear(ctx.dt_extra[0]->a, {8.0, -24.0, 24.0, -8.0}, 1e-12);
 }
 
 TEST(TimeIntegrator, BDF2Integrator_BuildContext_VariableStep_CorrectCoefficients)
@@ -372,4 +375,3 @@ TEST(TimeIntegrator, TimeIntegrator_MissingHistoryVectors_Throws)
     BDFIntegrator bdf3(3);
     EXPECT_THROW((void)bdf3.buildContext(/*max_time_derivative_order=*/1, state), svmp::FE::InvalidArgumentException);
 }
-

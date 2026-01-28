@@ -9,6 +9,7 @@
 
 #include "Assembly/AssemblerSelection.h"
 #include "Assembly/CachedAssembler.h"
+#include "Assembly/ColoredAssembler.h"
 #include "Assembly/DeviceAssembler.h"
 #include "Assembly/ParallelAssembler.h"
 #include "Assembly/ScheduledAssembler.h"
@@ -174,6 +175,12 @@ std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options,
         const auto strategy = static_cast<ScheduledAssembler::Strategy>(options.schedule_strategy);
         assembled = std::make_unique<ScheduledAssembler>(std::move(assembled), strategy);
         reportLine("Decorator enabled: ScheduledAssembler");
+    }
+
+    // Coloring for thread-parallelism (race-free insertion).
+    if (options.use_coloring) {
+        assembled = std::make_unique<ColoredAssembler>(std::move(assembled), options.coloring);
+        reportLine("Decorator enabled: ColoredAssembler");
     }
 
     // Caching next (affects kernel evaluation cost).

@@ -20,6 +20,10 @@ namespace svmp {
 namespace FE {
 namespace forms {
 
+namespace tensor {
+struct TensorIR;
+} // namespace tensor
+
 struct ConstitutiveStateLayout;
 
 struct MaterialStateUpdate {
@@ -118,6 +122,18 @@ public:
         const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param) override;
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override { return ir_.maxTimeDerivativeOrder(); }
 
+    /**
+     * @brief Configure tensor-calculus evaluation for interpreter mode.
+     *
+     * Default behavior expands IndexedAccess via `forms::einsum()` before evaluation.
+     * When enabled (mode != Off), IndexedAccess integrands are lowered to TensorIR
+     * and evaluated via a lightweight loop interpreter.
+     *
+     * This is intended as a non-JIT fallback path and for testing/benchmarks.
+     * Call during setup (not concurrently with assembly).
+     */
+    void setTensorInterpreterOptions(TensorJITOptions options);
+
     [[nodiscard]] bool hasCell() const noexcept override;
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
@@ -165,6 +181,10 @@ private:
     assembly::MaterialStateSpec material_state_spec_{};
     InlinedMaterialStateUpdateProgram inlined_state_updates_{};
     std::unique_ptr<std::once_flag> indexed_lowering_once_{std::make_unique<std::once_flag>()};
+
+    TensorJITOptions tensor_interpreter_options_{};
+    std::vector<std::shared_ptr<const tensor::TensorIR>> tensor_term_ir_{};
+    std::vector<FormExpr> tensor_term_fallback_{};
 };
 
 /**

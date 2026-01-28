@@ -60,10 +60,14 @@ enum class TensorLoweringMode : std::uint8_t {
 };
 
 struct TensorJITOptions {
-    TensorLoweringMode mode{TensorLoweringMode::Auto};
+    // Rollout default: keep tensor-calculus lowering opt-in until benchmark targets are met.
+    TensorLoweringMode mode{TensorLoweringMode::Off};
 
     // Force loop-nest lowering even when scalar expansion is "small".
     bool force_loop_nest{false};
+
+    // Optional feedback: log when the tensor path is selected and why.
+    bool log_decisions{false};
 
     // Lowering knobs (LoopStructureOptions).
     bool enable_symmetry_lowering{true};
@@ -81,6 +85,26 @@ struct TensorJITOptions {
     bool enable_polly{false};
 };
 
+struct JITSpecializationOptions {
+    // Master switch for emitting and using specialized kernel variants.
+    bool enable{false};
+
+    // Which sizes to specialize when compiling variants.
+    bool specialize_n_qpts{true};
+    bool specialize_dofs{false};
+
+    // Simple compile-time guards to avoid code-size explosions.
+    std::uint32_t max_specialized_n_qpts{32};
+    std::uint32_t max_specialized_dofs{64};
+
+    // Per-kernel cap on (size -> variant) entries kept by the wrapper.
+    std::size_t max_variants_per_kernel{8};
+
+    // Optional loop metadata for the LLVM optimizer.
+    bool enable_loop_unroll_metadata{true};
+    std::uint32_t max_unroll_trip_count{32};
+};
+
 struct JITOptions {
     bool enable{false};
     int optimization_level{2};
@@ -94,6 +118,7 @@ struct JITOptions {
     bool dump_llvm_ir_optimized{false};
     bool debug_info{false};
     std::string dump_directory{"svmp_fe_jit_dumps"};
+    JITSpecializationOptions specialization{};
     TensorJITOptions tensor{};
 };
 
@@ -229,6 +254,42 @@ struct SymbolicOptions {
 	    SymmetricEigenvalue,
 	    SymmetricEigenvalueDirectionalDerivative,
 	    SymmetricEigenvalueDirectionalDerivativeWrtA,
+
+        // -----------------------------------------------------------------
+        // Section 10.1: New-physics vocabulary extensions (Forms + LLVM JIT)
+        // -----------------------------------------------------------------
+
+	        // Matrix functions (non element-wise; small dense matrices)
+	        MatrixExponential,
+	        MatrixLogarithm,
+	        MatrixSqrt,
+	        MatrixPower,
+
+	        // Directional derivatives of matrix functions (d/dA f(A) · dA)
+	        MatrixExponentialDirectionalDerivative,
+	        MatrixLogarithmDirectionalDerivative,
+	        MatrixSqrtDirectionalDerivative,
+	        MatrixPowerDirectionalDerivative,
+
+        // Regularized / smooth scalar approximations
+        SmoothHeaviside,
+        SmoothAbsoluteValue,
+        SmoothMin,
+        SmoothMax,
+        SmoothSign,
+
+	        // General eigendecomposition operators
+	        Eigenvalue,
+	        SymmetricEigenvector,
+	        SpectralDecomposition,
+
+	        // Directional derivatives of eigen operators (d/dA op(A) · dA)
+	        SymmetricEigenvectorDirectionalDerivative,
+	        SpectralDecompositionDirectionalDerivative,
+
+        // Convolution / history operators
+        HistoryWeightedSum,
+        HistoryConvolution,
 		};
 
 class FormExpr;
@@ -461,8 +522,44 @@ public:
     [[nodiscard]] FormExpr exp() const;
     [[nodiscard]] FormExpr log() const;
 
+	    // ---- Matrix functions (small dense matrices) ----
+	    [[nodiscard]] FormExpr matrixExp() const;
+	    [[nodiscard]] FormExpr matrixLog() const;
+	    [[nodiscard]] FormExpr matrixSqrt() const;
+	    [[nodiscard]] FormExpr matrixPow(const FormExpr& exponent) const;
+
+	    // Directional derivatives of matrix functions (Fréchet derivatives along dA).
+	    [[nodiscard]] static FormExpr matrixExpDirectionalDerivative(const FormExpr& A, const FormExpr& dA);
+	    [[nodiscard]] static FormExpr matrixLogDirectionalDerivative(const FormExpr& A, const FormExpr& dA);
+	    [[nodiscard]] static FormExpr matrixSqrtDirectionalDerivative(const FormExpr& A, const FormExpr& dA);
+	    [[nodiscard]] static FormExpr matrixPowDirectionalDerivative(const FormExpr& A,
+	                                                                 const FormExpr& dA,
+	                                                                 const FormExpr& exponent);
+
+    // ---- Smooth / regularized scalar functions ----
+    [[nodiscard]] FormExpr smoothAbs(const FormExpr& eps) const;
+    [[nodiscard]] FormExpr smoothSign(const FormExpr& eps) const;
+    [[nodiscard]] FormExpr smoothHeaviside(const FormExpr& eps) const;
+    [[nodiscard]] FormExpr smoothMin(const FormExpr& rhs, const FormExpr& eps) const;
+    [[nodiscard]] FormExpr smoothMax(const FormExpr& rhs, const FormExpr& eps) const;
+
     // Symmetric eigenvalue access (2x2 and 3x3 only; eigenvalues sorted descending).
     [[nodiscard]] FormExpr symmetricEigenvalue(int which) const;
+
+	    // General eigendecomposition accessors (initial support: symmetric 2x2/3x3).
+	    [[nodiscard]] FormExpr eigenvalue(int which) const;
+	    [[nodiscard]] FormExpr symmetricEigenvector(int which) const;
+	    [[nodiscard]] FormExpr spectralDecomposition() const; // eigenvectors as columns
+
+	    [[nodiscard]] static FormExpr symmetricEigenvectorDirectionalDerivative(const FormExpr& A,
+	                                                                            const FormExpr& dA,
+	                                                                            int which);
+	    [[nodiscard]] static FormExpr spectralDecompositionDirectionalDerivative(const FormExpr& A,
+	                                                                             const FormExpr& dA);
+
+    // History operators (weights correspond to k=1..N, i.e. u^{n-1}, u^{n-2}, ...)
+    [[nodiscard]] static FormExpr historyWeightedSum(std::vector<FormExpr> weights);
+    [[nodiscard]] static FormExpr historyConvolution(std::vector<FormExpr> weights);
 
     // Internal helpers used by symbolic differentiation.
     [[nodiscard]] static FormExpr symmetricEigenvalueDirectionalDerivative(const FormExpr& A,
@@ -534,6 +631,18 @@ inline FormExpr sign(const FormExpr& a) { return a.sign(); }
 inline FormExpr sqrt(const FormExpr& a) { return a.sqrt(); }
 inline FormExpr exp(const FormExpr& a) { return a.exp(); }
 inline FormExpr log(const FormExpr& a) { return a.log(); }
+inline FormExpr expm(const FormExpr& A) { return A.matrixExp(); }
+inline FormExpr logm(const FormExpr& A) { return A.matrixLog(); }
+inline FormExpr sqrtm(const FormExpr& A) { return A.matrixSqrt(); }
+inline FormExpr powm(const FormExpr& A, const FormExpr& p) { return A.matrixPow(p); }
+inline FormExpr smoothAbs(const FormExpr& a, const FormExpr& eps) { return a.smoothAbs(eps); }
+inline FormExpr smoothSign(const FormExpr& a, const FormExpr& eps) { return a.smoothSign(eps); }
+inline FormExpr smoothHeaviside(const FormExpr& a, const FormExpr& eps) { return a.smoothHeaviside(eps); }
+inline FormExpr smoothMin(const FormExpr& a, const FormExpr& b, const FormExpr& eps) { return a.smoothMin(b, eps); }
+inline FormExpr smoothMax(const FormExpr& a, const FormExpr& b, const FormExpr& eps) { return a.smoothMax(b, eps); }
+inline FormExpr eigenvalue(const FormExpr& A, int which) { return A.eigenvalue(which); }
+inline FormExpr eigvec_sym(const FormExpr& A, int which) { return A.symmetricEigenvector(which); }
+inline FormExpr spectralDecomp(const FormExpr& A) { return A.spectralDecomposition(); }
 inline FormExpr jump(const FormExpr& expr) { return expr.jump(); }
 inline FormExpr avg(const FormExpr& expr) { return expr.avg(); }
 inline FormExpr minus(const FormExpr& expr) { return expr.minus(); }

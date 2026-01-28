@@ -33,7 +33,7 @@
 
 /**
  * @file ColoredAssembler.h
- * @brief Graph-colored parallel assembly strategy
+ * @brief Graph-colored parallel assembly strategy (decorator)
  *
  * ColoredAssembler implements race-free parallel assembly using element graph
  * coloring. Elements are colored such that no two elements of the same color
@@ -68,255 +68,56 @@
  * @see StandardAssembler for simple sequential assembly
  */
 
-#include "Core/Types.h"
-#include "Core/FEException.h"
-#include "Assembler.h"
-#include "AssemblyKernel.h"
-#include "AssemblyContext.h"
-#include "GlobalSystemView.h"
-#include "AssemblyLoop.h"
+#include "Assembly/Coloring.h"
+#include "Assembly/DecoratorAssembler.h"
+#include "Assembly/AssemblyLoop.h"
 
 #include <vector>
 #include <span>
-#include <functional>
 #include <memory>
-#include <optional>
+#include <string>
 
 namespace svmp {
 namespace FE {
 
-// Forward declarations
-namespace dofs {
-    class DofMap;
-}
-
-namespace spaces {
-    class FunctionSpace;
-}
-
-namespace constraints {
-    class AffineConstraints;
-}
-
 namespace assembly {
-
-// ============================================================================
-// Coloring Algorithms
-// ============================================================================
-
-/**
- * @brief Coloring algorithm selection
- */
-enum class ColoringAlgorithm : std::uint8_t {
-    Greedy,         ///< Simple greedy first-fit coloring
-    DSatur,         ///< Saturation degree ordering (better quality)
-    LargestFirst,   ///< Process largest-degree vertices first
-    SmallestLast,   ///< Smallest-last vertex ordering
-    BalancedGreedy  ///< Greedy with balance consideration
-};
-
-/**
- * @brief Options for element coloring
- */
-struct ColoringOptions {
-    ColoringAlgorithm algorithm{ColoringAlgorithm::DSatur};
-
-    /**
-     * @brief Maximum number of colors to use
-     *
-     * If coloring requires more colors, assembly falls back to sequential.
-     */
-    int max_colors{256};
-
-    /**
-     * @brief Attempt to balance color sizes
-     *
-     * If true, tries to distribute elements evenly across colors.
-     */
-    bool balance_colors{true};
-
-    /**
-     * @brief Reorder elements by color for cache efficiency
-     */
-    bool reorder_elements{false};
-
-    /**
-     * @brief Verbose output during coloring
-     */
-    bool verbose{false};
-};
-
-/**
- * @brief Statistics from coloring
- */
-struct ColoringStats {
-    int num_colors{0};                    ///< Number of colors used
-    GlobalIndex num_elements{0};          ///< Total elements colored
-    int min_color_size{0};                ///< Smallest color bucket
-    int max_color_size{0};                ///< Largest color bucket
-    double avg_color_size{0.0};           ///< Average color bucket size
-    double coloring_seconds{0.0};         ///< Time to compute coloring
-    std::vector<int> color_sizes;         ///< Size of each color bucket
-};
-
-// ============================================================================
-// Element Graph
-// ============================================================================
-
-/**
- * @brief Sparse graph representing element connectivity
- *
- * Two elements are connected if they share at least one DOF.
- */
-class ElementGraph {
-public:
-    /**
-     * @brief Default constructor
-     */
-    ElementGraph() = default;
-
-    /**
-     * @brief Construct with number of elements
-     */
-    explicit ElementGraph(GlobalIndex num_elements);
-
-    /**
-     * @brief Build graph from mesh and DOF map
-     */
-    void build(const IMeshAccess& mesh, const dofs::DofMap& dof_map);
-
-    /**
-     * @brief Add an edge between two elements
-     */
-    void addEdge(GlobalIndex elem1, GlobalIndex elem2);
-
-    /**
-     * @brief Get neighbors of an element
-     */
-    [[nodiscard]] std::span<const GlobalIndex> neighbors(GlobalIndex elem) const;
-
-    /**
-     * @brief Get degree (number of neighbors) of an element
-     */
-    [[nodiscard]] int degree(GlobalIndex elem) const;
-
-    /**
-     * @brief Get maximum degree in the graph
-     */
-    [[nodiscard]] int maxDegree() const noexcept { return max_degree_; }
-
-    /**
-     * @brief Get number of elements
-     */
-    [[nodiscard]] GlobalIndex numElements() const noexcept {
-        if (!adjacency_offsets_.empty()) {
-            return static_cast<GlobalIndex>(adjacency_offsets_.size() - 1);
-        }
-        return static_cast<GlobalIndex>(building_adj_.size());
-    }
-
-    /**
-     * @brief Get number of edges
-     */
-    [[nodiscard]] GlobalIndex numEdges() const noexcept { return num_edges_; }
-
-    /**
-     * @brief Clear the graph
-     */
-    void clear();
-
-private:
-    // CSR storage
-    std::vector<GlobalIndex> adjacency_offsets_;  // Size: num_elements + 1
-    std::vector<GlobalIndex> adjacency_list_;     // All neighbors concatenated
-
-    // Building phase storage
-    std::vector<std::vector<GlobalIndex>> building_adj_;
-
-    // Stats
-    int max_degree_{0};
-    GlobalIndex num_edges_{0};
-};
-
-// ============================================================================
-// Colored Assembler Options
-// ============================================================================
-
-/**
- * @brief Options for ColoredAssembler
- */
-struct ColoredAssemblerOptions {
-    /**
-     * @brief Number of threads to use (0 = auto)
-     */
-    int num_threads{0};
-
-    /**
-     * @brief Coloring options
-     */
-    ColoringOptions coloring{};
-
-    /**
-     * @brief Apply constraints during assembly
-     */
-    bool apply_constraints{true};
-
-    /**
-     * @brief Recompute coloring when mesh changes
-     */
-    bool auto_recolor{false};
-
-    /**
-     * @brief Verbose timing output
-     */
-    bool verbose{false};
-};
 
 // ============================================================================
 // Colored Assembler
 // ============================================================================
 
 /**
- * @brief Graph-colored parallel assembler
+ * @brief Graph-colored parallel assembler decorator
  *
  * ColoredAssembler provides race-free parallel assembly by ensuring
  * elements processed simultaneously do not share DOFs.
- *
- * Usage:
- * @code
- *   ColoredAssembler assembler;
- *   assembler.setMesh(mesh);
- *   assembler.setDofMap(dof_map);
- *   assembler.setSpace(space);
- *
- *   // Compute coloring (one-time or when mesh changes)
- *   assembler.computeColoring();
- *
- *   // Assembly
- *   assembler.assembleMatrix(kernel, matrix_view);
- *   assembler.assembleVector(kernel, vector_view);
- * @endcode
  */
-class ColoredAssembler {
+class ColoredAssembler final : public DecoratorAssembler {
 public:
     // =========================================================================
     // Construction
     // =========================================================================
 
     /**
-     * @brief Default constructor
+     * @brief Default constructor (wraps StandardAssembler)
      */
     ColoredAssembler();
 
     /**
-     * @brief Construct with options
+     * @brief Construct with coloring options (wraps StandardAssembler)
      */
-    explicit ColoredAssembler(const ColoredAssemblerOptions& options);
+    explicit ColoredAssembler(const ColoringOptions& options);
+
+    /**
+     * @brief Construct as a decorator around an existing assembler
+     */
+    explicit ColoredAssembler(std::unique_ptr<Assembler> base,
+                              const ColoringOptions& options = {});
 
     /**
      * @brief Destructor
      */
-    ~ColoredAssembler();
+    ~ColoredAssembler() override;
 
     /**
      * @brief Move constructor
@@ -332,158 +133,85 @@ public:
     ColoredAssembler(const ColoredAssembler&) = delete;
     ColoredAssembler& operator=(const ColoredAssembler&) = delete;
 
-    // =========================================================================
-    // Configuration
-    // =========================================================================
-
-    /**
-     * @brief Set mesh access
-     */
-    void setMesh(const IMeshAccess& mesh);
-
-    /**
-     * @brief Set DOF map
-     */
-    void setDofMap(const dofs::DofMap& dof_map);
-
-    /**
-     * @brief Set function space
-     */
-    void setSpace(const spaces::FunctionSpace& space);
-
-    /**
-     * @brief Set test and trial spaces (for rectangular assembly)
-     */
-    void setSpaces(const spaces::FunctionSpace& test_space,
-                   const spaces::FunctionSpace& trial_space);
-
-    /**
-     * @brief Set constraints
-     */
-    void setConstraints(const constraints::AffineConstraints& constraints);
-
-    /**
-     * @brief Set assembler options
-     */
-    void setOptions(const ColoredAssemblerOptions& options);
-
-    /**
-     * @brief Get current options
-     */
-    [[nodiscard]] const ColoredAssemblerOptions& getOptions() const noexcept {
-        return options_;
-    }
-
-    // =========================================================================
-    // Coloring
-    // =========================================================================
-
-    /**
-     * @brief Compute element coloring
-     *
-     * Must be called before assembly. Can be called again if mesh changes.
-     *
-     * @return Coloring statistics
-     */
-    ColoringStats computeColoring();
-
-    /**
-     * @brief Set pre-computed coloring
-     *
-     * @param colors Color for each element (size = numCells)
-     * @param num_colors Number of colors used
-     */
-    void setColoring(std::span<const int> colors, int num_colors);
-
-    /**
-     * @brief Check if coloring is available
-     */
-    [[nodiscard]] bool hasColoring() const noexcept { return has_coloring_; }
-
-    /**
-     * @brief Get number of colors
-     */
-    [[nodiscard]] int numColors() const noexcept { return num_colors_; }
-
-    /**
-     * @brief Get element colors
-     */
-    [[nodiscard]] std::span<const int> getColors() const noexcept {
-        return element_colors_;
-    }
-
-    /**
-     * @brief Get coloring statistics
-     */
-    [[nodiscard]] const ColoringStats& getColoringStats() const noexcept {
-        return coloring_stats_;
-    }
-
-    // =========================================================================
-    // Assembly Operations
-    // =========================================================================
-
-    /**
-     * @brief Assemble matrix using colored parallel assembly
-     *
-     * @param kernel Assembly kernel
-     * @param matrix_view Global matrix view
-     * @return Assembly statistics
-     */
-    LoopStatistics assembleMatrix(
-        AssemblyKernel& kernel,
-        GlobalSystemView& matrix_view);
-
-    /**
-     * @brief Assemble vector using colored parallel assembly
-     *
-     * @param kernel Assembly kernel
-     * @param vector_view Global vector view
-     * @return Assembly statistics
-     */
-    LoopStatistics assembleVector(
-        AssemblyKernel& kernel,
-        GlobalSystemView& vector_view);
-
-    /**
-     * @brief Assemble both matrix and vector
-     *
-     * @param kernel Assembly kernel
-     * @param matrix_view Global matrix view
-     * @param vector_view Global vector view
-     * @return Assembly statistics
-     */
-    LoopStatistics assembleBoth(
-        AssemblyKernel& kernel,
-        GlobalSystemView& matrix_view,
-        GlobalSystemView& vector_view);
-
-    /**
-     * @brief Assemble with callback interface
-     *
-     * @param compute_callback Element computation callback
-     * @param insert_callback Global insertion callback
-     * @return Assembly statistics
-     */
-    LoopStatistics assemble(
-        CellCallback compute_callback,
-        CellInsertCallback insert_callback);
+    // Bring base-class overloads into scope (avoid overload hiding).
+    using Assembler::assembleMatrix;
+    using Assembler::assembleBoth;
+    using Assembler::assembleBoundaryFaces;
 
     // =========================================================================
     // Query
     // =========================================================================
 
-    /**
-     * @brief Check if assembler is configured
-     */
-    [[nodiscard]] bool isConfigured() const noexcept;
+    [[nodiscard]] std::string name() const override { return "Colored(" + base().name() + ")"; }
 
-    /**
-     * @brief Get last assembly statistics
-     */
-    [[nodiscard]] const LoopStatistics& getLastStats() const noexcept {
-        return last_stats_;
-    }
+    [[nodiscard]] bool isThreadSafe() const noexcept override { return true; }
+
+    // =========================================================================
+    // Configuration (Assembler interface)
+    // =========================================================================
+
+    void setDofMap(const dofs::DofMap& dof_map) override;
+    void setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset = 0) override;
+    void setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset = 0) override;
+    void setOptions(const AssemblyOptions& options) override;
+
+    void reset() override;
+
+    // =========================================================================
+    // Assembly Operations (Assembler interface)
+    // =========================================================================
+
+    [[nodiscard]] AssemblyResult assembleMatrix(
+        const IMeshAccess& mesh,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        AssemblyKernel& kernel,
+        GlobalSystemView& matrix_view) override;
+
+    [[nodiscard]] AssemblyResult assembleVector(
+        const IMeshAccess& mesh,
+        const spaces::FunctionSpace& space,
+        AssemblyKernel& kernel,
+        GlobalSystemView& vector_view) override;
+
+    [[nodiscard]] AssemblyResult assembleBoth(
+        const IMeshAccess& mesh,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        AssemblyKernel& kernel,
+        GlobalSystemView& matrix_view,
+        GlobalSystemView& vector_view) override;
+
+    [[nodiscard]] AssemblyResult assembleBoundaryFaces(
+        const IMeshAccess& mesh,
+        int boundary_marker,
+        const spaces::FunctionSpace& space,
+        AssemblyKernel& kernel,
+        GlobalSystemView* matrix_view,
+        GlobalSystemView* vector_view) override;
+
+    [[nodiscard]] AssemblyResult assembleInteriorFaces(
+        const IMeshAccess& mesh,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        AssemblyKernel& kernel,
+        GlobalSystemView& matrix_view,
+        GlobalSystemView* vector_view) override;
+
+    // =========================================================================
+    // Coloring API
+    // =========================================================================
+
+    void computeColoring(const IMeshAccess& mesh, const dofs::DofMap& dof_map);
+
+    void setColoring(std::span<const int> colors, int num_colors);
+
+    void invalidateColoring();
+
+    [[nodiscard]] bool hasColoring() const noexcept { return has_coloring_; }
+    [[nodiscard]] int numColors() const noexcept { return num_colors_; }
+    [[nodiscard]] std::span<const int> getColors() const noexcept { return element_colors_; }
+    [[nodiscard]] const ColoringStats& getColoringStats() const noexcept { return coloring_stats_; }
 
 private:
     // =========================================================================
@@ -493,7 +221,7 @@ private:
     /**
      * @brief Build element connectivity graph
      */
-    void buildElementGraph();
+    void buildElementGraph(const IMeshAccess& mesh, const dofs::DofMap& dof_map);
 
     /**
      * @brief Greedy coloring algorithm
@@ -520,24 +248,21 @@ private:
      */
     void buildColorLists();
 
-    /**
-     * @brief Execute colored assembly loop
-     */
-    void executeColoredLoop(
-        CellCallback& compute,
-        CellInsertCallback& insert);
+    [[nodiscard]] AssemblyResult assembleCells(
+        const IMeshAccess& mesh,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        AssemblyKernel& kernel,
+        GlobalSystemView* matrix_view,
+        GlobalSystemView* vector_view);
 
     // =========================================================================
     // Data Members
     // =========================================================================
 
-    // Configuration
-    ColoredAssemblerOptions options_;
-    const IMeshAccess* mesh_{nullptr};
+    ColoringOptions options_;
     const dofs::DofMap* dof_map_{nullptr};
-    const spaces::FunctionSpace* test_space_{nullptr};
-    const spaces::FunctionSpace* trial_space_{nullptr};
-    const constraints::AffineConstraints* constraints_{nullptr};
+    GlobalIndex last_num_cells_{0};
 
     // Element graph
     ElementGraph element_graph_;
@@ -553,57 +278,7 @@ private:
 
     // Assembly infrastructure
     std::unique_ptr<AssemblyLoop> loop_;
-
-    // Thread-local storage
-    std::vector<std::unique_ptr<AssemblyContext>> thread_contexts_;
-    std::vector<KernelOutput> thread_outputs_;
-    std::vector<std::vector<GlobalIndex>> thread_row_dofs_;
-    std::vector<std::vector<GlobalIndex>> thread_col_dofs_;
-
-    // Statistics
-    LoopStatistics last_stats_;
 };
-
-// ============================================================================
-// Coloring Utilities
-// ============================================================================
-
-/**
- * @brief Compute element coloring with specified algorithm
- *
- * @param graph Element connectivity graph
- * @param algorithm Coloring algorithm to use
- * @param colors Output: color for each element
- * @return Number of colors used
- */
-int colorGraph(
-    const ElementGraph& graph,
-    ColoringAlgorithm algorithm,
-    std::vector<int>& colors);
-
-/**
- * @brief Verify coloring is valid (no adjacent elements have same color)
- *
- * @param graph Element connectivity graph
- * @param colors Element colors
- * @return true if coloring is valid
- */
-bool verifyColoring(
-    const ElementGraph& graph,
-    std::span<const int> colors);
-
-/**
- * @brief Estimate optimal number of colors for a mesh
- *
- * Based on element type and mesh statistics.
- *
- * @param mesh Mesh access
- * @param dof_map DOF map
- * @return Estimated color count
- */
-int estimateColorCount(
-    const IMeshAccess& mesh,
-    const dofs::DofMap& dof_map);
 
 } // namespace assembly
 } // namespace FE

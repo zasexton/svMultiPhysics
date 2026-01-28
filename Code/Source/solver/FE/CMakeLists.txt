@@ -82,6 +82,63 @@ option(FE_ENABLE_SANITIZERS "Enable address/undefined sanitizers" OFF)
 # Compiler flags
 #------------------------------------------------------------------------------
 
+#------------------------------------------------------------------------------
+# Clang/libstdc++ compatibility (Ubuntu Clang 14 vs libstdc++ 13)
+#
+# Ubuntu's Clang 14 cannot compile some C++20 headers from newer libstdc++
+# (notably <chrono> with std::chrono::hh_mm_ss), producing errors like:
+#   "call to consteval function ... is not a constant expression"
+#
+# Work around this by forcing Clang (<16) to use the libstdc++-11 headers.
+# We keep the system libstdc++ runtime (typically newer) for linking.
+#------------------------------------------------------------------------------
+set(_SVMP_FE_IS_CLANG FALSE)
+set(_SVMP_FE_CLANG_MAJOR 0)
+
+# Prefer CMake's compiler ID when accurate.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set(_SVMP_FE_IS_CLANG TRUE)
+    if(CMAKE_CXX_COMPILER_VERSION MATCHES "^([0-9]+)\\.")
+        set(_SVMP_FE_CLANG_MAJOR "${CMAKE_MATCH_1}")
+    endif()
+endif()
+
+# Fallback: if the compiler at CMAKE_CXX_COMPILER changed since the build dir
+# was generated (e.g., /usr/bin/c++ switched from g++ to clang), CMake's cached
+# compiler ID/version can be stale. Probe the binary to detect Clang.
+if(NOT _SVMP_FE_IS_CLANG AND NOT CMAKE_CROSSCOMPILING)
+    execute_process(
+        COMMAND "${CMAKE_CXX_COMPILER}" "--version"
+        RESULT_VARIABLE _svmp_fe_cxx_version_rc
+        OUTPUT_VARIABLE _svmp_fe_cxx_version_out
+        ERROR_VARIABLE _svmp_fe_cxx_version_err
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_STRIP_TRAILING_WHITESPACE
+    )
+    if(_svmp_fe_cxx_version_rc EQUAL 0)
+        set(_svmp_fe_cxx_version_text "${_svmp_fe_cxx_version_out}\n${_svmp_fe_cxx_version_err}")
+        if(_svmp_fe_cxx_version_text MATCHES "clang version")
+            set(_SVMP_FE_IS_CLANG TRUE)
+            if(_svmp_fe_cxx_version_text MATCHES "clang version ([0-9]+)\\.")
+                set(_SVMP_FE_CLANG_MAJOR "${CMAKE_MATCH_1}")
+            endif()
+            message(STATUS "FE: NOTE: CMake reports compiler ID '${CMAKE_CXX_COMPILER_ID}', but '${CMAKE_CXX_COMPILER}' identifies as Clang; consider deleting the build directory to refresh compiler detection")
+        endif()
+    endif()
+endif()
+
+if(_SVMP_FE_IS_CLANG AND _SVMP_FE_CLANG_MAJOR LESS 16 AND
+   EXISTS "/usr/include/c++/11" AND
+   EXISTS "/usr/include/x86_64-linux-gnu/c++/11")
+    message(STATUS "FE: Clang <16 detected; using libstdc++-11 headers to avoid <chrono> build failure with newer libstdc++")
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>
+        $<$<COMPILE_LANGUAGE:CXX>:-isystem/usr/include/c++/11>
+        $<$<COMPILE_LANGUAGE:CXX>:-isystem/usr/include/x86_64-linux-gnu/c++/11>
+        $<$<COMPILE_LANGUAGE:CXX>:-isystem/usr/include/c++/11/backward>
+    )
+endif()
+
 # Warning flags
 #
 # NOTE: Keep warnings scoped to FE targets only. This CMakeLists can bring in
@@ -666,6 +723,7 @@ set(FE_FORMS_HEADERS
 	    Forms/Tensor/LoopStructure.h
 	    Forms/Tensor/TensorAllocation.h
 	    Forms/Tensor/TensorIR.h
+	    Forms/Tensor/TensorInterpreter.h
     Forms/Tensor/SpectralEigen.h
 	    Forms/Tensor/SpecialTensorDerivatives.h
     Forms/FormIR.h
@@ -708,6 +766,7 @@ set(FE_FORMS_SOURCES
 	    Forms/Tensor/LoopStructure.cpp
 	    Forms/Tensor/TensorAllocation.cpp
 	    Forms/Tensor/TensorIR.cpp
+	    Forms/Tensor/TensorInterpreter.cpp
     Forms/Tensor/SpectralEigen.cpp
 	    Forms/Tensor/SpecialTensorDerivatives.cpp
     Forms/FormIR.cpp
@@ -1701,12 +1760,13 @@ if(FE_BUILD_TESTS)
         # Forms module tests (depends on Assembly)
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Forms/test_main.cpp)
 		            set(FE_FORMS_TEST_SOURCES
-		                Tests/Unit/Forms/test_FormExpr.cpp
-		                    Tests/Unit/Forms/test_CoupledTerminals.cpp
-		                    Tests/Unit/Forms/test_JITValidation.cpp
-		                    Tests/Unit/Forms/test_PointEvaluator.cpp
-		                Tests/Unit/Forms/test_BoundaryConditionHelpers.cpp
-		                Tests/Unit/Forms/test_FormCompiler.cpp
+			                Tests/Unit/Forms/test_FormExpr.cpp
+			                    Tests/Unit/Forms/test_CoupledTerminals.cpp
+			                    Tests/Unit/Forms/test_JITValidation.cpp
+			                    Tests/Unit/Forms/test_ExternalCallsNewPhysics.cpp
+			                    Tests/Unit/Forms/test_PointEvaluator.cpp
+			                Tests/Unit/Forms/test_BoundaryConditionHelpers.cpp
+			                Tests/Unit/Forms/test_FormCompiler.cpp
 		                Tests/Unit/Forms/test_Dual.cpp
 		                Tests/Unit/Forms/test_DynamicValueShapes.cpp
 		                Tests/Unit/Forms/test_FormKernel_Cell.cpp
@@ -1730,6 +1790,8 @@ if(FE_BUILD_TESTS)
 				                Tests/Unit/Forms/Tensor/test_TensorCSE.cpp
 				                Tests/Unit/Forms/Tensor/test_LoopStructure.cpp
 				                Tests/Unit/Forms/Tensor/test_TensorAllocation.cpp
+				                Tests/Unit/Forms/Tensor/test_TensorInterpreterKernel.cpp
+				                Tests/Unit/Forms/Tensor/test_TensorBenchmarks.cpp
 				                Tests/Unit/Forms/Tensor/test_TensorSymbolicDifferentiation.cpp
                     Tests/Unit/Forms/Tensor/test_SpectralEigenJIT.cpp
 			                Tests/Unit/Forms/Tensor/test_TensorPrettyPrinting.cpp

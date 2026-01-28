@@ -911,6 +911,9 @@ TensorLoweringResult lowerTensorExpressionIncremental(const FormExpr& expr,
 
     if (!containsIndexedAccess(expr)) {
         out.used_loop_nest = false;
+        out.preferred_loop_nest = false;
+        out.estimated_scalar_terms = 0;
+        out.decision_reason = "no_indexed_access";
         out.einsum_expanded = expr;
         return out;
     }
@@ -934,6 +937,8 @@ TensorLoweringResult lowerTensorExpressionIncremental(const FormExpr& expr,
 
     // Estimate scalar expansion term count.
     std::uint64_t est_terms = 0;
+    std::size_t max_indexed_factors = 0;
+    int max_rank = 0;
     try {
         std::vector<SignedTerm> terms;
         terms.reserve(8);
@@ -943,6 +948,24 @@ TensorLoweringResult lowerTensorExpressionIncremental(const FormExpr& expr,
             if (!containsIndexedAccess(t.expr)) {
                 continue;
             }
+
+            // Lightweight pattern recognition: prefer loops for higher-rank tensors
+            // or longer contraction chains (beyond simple 2-factor products).
+            std::vector<FormExpr> factors;
+            factors.reserve(8);
+            collectMultiplyFactors(t.expr, factors);
+            std::size_t indexed_count = 0;
+            int term_max_rank = 0;
+            for (const auto& f : factors) {
+                const auto* n = f.node();
+                if (n && n->type() == FormExprType::IndexedAccess) {
+                    indexed_count += 1;
+                    term_max_rank = std::max(term_max_rank, n->indexRank().value_or(0));
+                }
+            }
+            max_indexed_factors = std::max(max_indexed_factors, indexed_count);
+            max_rank = std::max(max_rank, term_max_rank);
+
             const auto a = analyzeContractions(t.expr);
             if (!a.ok) {
                 est_terms = options.scalar_expansion_term_threshold + 1;
@@ -967,7 +990,21 @@ TensorLoweringResult lowerTensorExpressionIncremental(const FormExpr& expr,
         est_terms = options.scalar_expansion_term_threshold + 1;
     }
 
-    const bool prefer_loops = (est_terms > options.scalar_expansion_term_threshold);
+    const bool prefer_loops_by_threshold = (est_terms > options.scalar_expansion_term_threshold);
+    const bool prefer_loops_by_pattern = (max_rank >= 3) || (max_indexed_factors >= 3);
+    const bool prefer_loops = prefer_loops_by_threshold || prefer_loops_by_pattern;
+
+    out.preferred_loop_nest = prefer_loops;
+    out.estimated_scalar_terms = est_terms;
+    if (prefer_loops_by_threshold && prefer_loops_by_pattern) {
+        out.decision_reason = "pattern+threshold";
+    } else if (prefer_loops_by_pattern) {
+        out.decision_reason = "pattern";
+    } else if (prefer_loops_by_threshold) {
+        out.decision_reason = "threshold";
+    } else {
+        out.decision_reason = "scalar";
+    }
 
     if (prefer_loops) {
         out.loop = generateLoopNest(work, options);

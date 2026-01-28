@@ -74,7 +74,7 @@ class MatrixConstRef {
 public:
     explicit MatrixConstRef(const forms::Value<Scalar>& v) : v_(&v) {}
 
-    [[nodiscard]] forms::Value<Scalar>::Kind kind() const noexcept { return v_->kind; }
+    [[nodiscard]] typename forms::Value<Scalar>::Kind kind() const noexcept { return v_->kind; }
     [[nodiscard]] std::size_t rows() const noexcept { return v_->matrixRows(); }
     [[nodiscard]] std::size_t cols() const noexcept { return v_->matrixCols(); }
 
@@ -89,7 +89,7 @@ class MatrixRef {
 public:
     explicit MatrixRef(forms::Value<Scalar>& v) : v_(&v) {}
 
-    [[nodiscard]] forms::Value<Scalar>::Kind kind() const noexcept { return v_->kind; }
+    [[nodiscard]] typename forms::Value<Scalar>::Kind kind() const noexcept { return v_->kind; }
     [[nodiscard]] std::size_t rows() const noexcept { return v_->matrixRows(); }
     [[nodiscard]] std::size_t cols() const noexcept { return v_->matrixCols(); }
 

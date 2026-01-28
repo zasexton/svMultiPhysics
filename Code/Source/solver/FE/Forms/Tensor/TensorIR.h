@@ -85,6 +85,9 @@ struct TensorIRLoweringOptions {
     // bypassing the scalar-expansion threshold heuristic.
     bool force_loop_nest{false};
 
+    // If true, log tensor-vs-scalar lowering decisions (reason/estimates).
+    bool log_decisions{false};
+
     LoopStructureOptions loop{};
     TensorAllocationOptions alloc{};
 };
@@ -118,4 +121,3 @@ struct TensorIRLoweringResult {
 } // namespace svmp
 
 #endif // SVMP_FE_FORMS_TENSOR_TENSOR_IR_H
-

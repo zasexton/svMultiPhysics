@@ -176,6 +176,9 @@ struct TensorLoweringResult {
     std::string message{};
 
     bool used_loop_nest{false};
+    bool preferred_loop_nest{false};
+    std::uint64_t estimated_scalar_terms{0};
+    std::string decision_reason{};
     LoopNestProgram loop{};
     FormExpr einsum_expanded{};
 };

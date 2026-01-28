@@ -181,23 +181,29 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 		    } else {
 		        const auto method = to_fsils_solver(options_.method);
 		        if (method == fsi_linear_solver::LS_TYPE_GMRES) {
-		            // FSILS GMRES uses RI.mItr as a restart count and RI.sD as the Krylov subspace dimension.
-		            // Match the legacy svMultiPhysics behavior: interpret SolverOptions::max_iter as the
-		            // FSILS restart count and optionally honor SolverOptions::krylov_dim.
-		            if (options_.krylov_dim > 0) {
-		                fsi_linear_solver::fsils_ls_create(ls,
-		                                                   method,
-		                                                   options_.rel_tol,
-		                                                   options_.abs_tol,
-		                                                   options_.max_iter,
-		                                                   options_.krylov_dim);
-		            } else {
-		                fsi_linear_solver::fsils_ls_create(ls,
-		                                                   method,
-		                                                   options_.rel_tol,
-		                                                   options_.abs_tol,
-		                                                   options_.max_iter);
+		            // FSILS GMRES counts iterations as `mItr * (sD + 1)` where:
+		            // - RI.mItr: restart count (outer)
+		            // - RI.sD:   Krylov subspace dimension (inner)
+		            //
+		            // FE SolverOptions::max_iter is interpreted as the maximum total Krylov steps, so choose
+		            // (mItr, sD) such that the worst-case iteration count does not exceed max_iter.
+		            int sD = options_.krylov_dim;
+		            if (sD <= 0) {
+		                // Keep default restart length modest to limit workspace.
+		                sD = std::max(0, std::min(50, options_.max_iter) - 1);
 		            }
+		            const int sD_max = std::max(0, options_.max_iter - 1);
+		            sD = std::clamp(sD, 0, sD_max);
+
+		            const int per_restart = sD + 1;
+		            const int mItr = std::max(1, options_.max_iter / std::max(1, per_restart));
+
+		            fsi_linear_solver::fsils_ls_create(ls,
+		                                               method,
+		                                               options_.rel_tol,
+		                                               options_.abs_tol,
+		                                               mItr,
+		                                               sD);
 		        } else {
 		        fsi_linear_solver::fsils_ls_create(ls,
 		                                           method,

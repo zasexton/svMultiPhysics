@@ -173,6 +173,14 @@ inferFunctionalTrialSpaceSignature(const FormExprNode& node, bool& out_conflict)
     return h;
 }
 
+[[nodiscard]] std::uint64_t hashSpecializationCodegenOptions(const JITSpecializationOptions& opt) noexcept
+{
+    std::uint64_t h = kFNVOffset;
+    hashMix(h, static_cast<std::uint64_t>(opt.enable_loop_unroll_metadata ? 1u : 0u));
+    hashMix(h, static_cast<std::uint64_t>(opt.max_unroll_trip_count));
+    return h;
+}
+
 struct SpaceSigHash {
     std::uint64_t h{0};
 };
@@ -246,10 +254,11 @@ struct KernelGroupPlan {
                                                   std::string_view data_layout,
                                                   std::string_view cpu_name,
                                                   std::string_view cpu_features,
-                                                  std::string_view llvm_version) noexcept
+                                                  std::string_view llvm_version,
+                                                  const JITCompileSpecialization* specialization) noexcept
 {
     std::uint64_t h = kFNVOffset;
-    hashMix(h, static_cast<std::uint64_t>(assembly::jit::kKernelArgsABIVersionV3));
+    hashMix(h, static_cast<std::uint64_t>(assembly::jit::kKernelArgsABIVersionV4));
     hashMix(h, static_cast<std::uint64_t>(ir.kind()));
     hashMix(h, static_cast<std::uint64_t>(group.key.domain));
     hashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(group.key.boundary_marker)));
@@ -260,12 +269,31 @@ struct KernelGroupPlan {
     hashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(jit_options.optimization_level)));
     hashMix(h, static_cast<std::uint64_t>(jit_options.vectorize ? 1u : 0u));
     hashMix(h, hashTensorOptions(jit_options.tensor));
+    hashMix(h, hashSpecializationCodegenOptions(jit_options.specialization));
     hashMix(h, static_cast<std::uint64_t>(jit_options.debug_info ? 1u : 0u));
     hashMix(h, hashString(target_triple));
     hashMix(h, hashString(data_layout));
     hashMix(h, hashString(cpu_name));
     hashMix(h, hashString(cpu_features));
     hashMix(h, hashString(llvm_version));
+
+    const bool use_spec = (specialization != nullptr) && (specialization->domain == group.key.domain);
+    hashMix(h, static_cast<std::uint64_t>(use_spec ? 1u : 0u));
+    if (use_spec) {
+        const auto mixOptU32 = [&](const std::optional<std::uint32_t>& v) {
+            hashMix(h, static_cast<std::uint64_t>(v.has_value() ? 1u : 0u));
+            if (v) {
+                hashMix(h, static_cast<std::uint64_t>(*v));
+            }
+        };
+
+        mixOptU32(specialization->n_qpts_minus);
+        mixOptU32(specialization->n_test_dofs_minus);
+        mixOptU32(specialization->n_trial_dofs_minus);
+        mixOptU32(specialization->n_qpts_plus);
+        mixOptU32(specialization->n_test_dofs_plus);
+        mixOptU32(specialization->n_trial_dofs_plus);
+    }
     return h;
 }
 
@@ -288,7 +316,8 @@ struct CompilationPlan {
                                        std::string_view data_layout,
                                        std::string_view cpu_name,
                                        std::string_view cpu_features,
-                                       std::string_view llvm_version)
+                                       std::string_view llvm_version,
+                                       const JITCompileSpecialization* specialization)
 {
     CompilationPlan plan;
     plan.ok = false;
@@ -345,6 +374,7 @@ struct CompilationPlan {
                 tensor_opts.enable_cache = true;
                 tensor_opts.force_loop_nest =
                     (jit_options.tensor.mode == TensorLoweringMode::On) || jit_options.tensor.force_loop_nest;
+                tensor_opts.log_decisions = jit_options.tensor.log_decisions;
 
                 tensor_opts.loop.enable_symmetry_lowering = jit_options.tensor.enable_symmetry_lowering;
                 tensor_opts.loop.enable_optimal_contraction_order = jit_options.tensor.enable_optimal_contraction_order;
@@ -393,7 +423,8 @@ struct CompilationPlan {
                                                 data_layout,
                                                 cpu_name,
                                                 cpu_features,
-                                                llvm_version);
+                                                llvm_version,
+                                                specialization);
         plan.cacheable = plan.cacheable && group.cacheable;
         plan.groups.push_back(std::move(group));
     }
@@ -447,6 +478,8 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
         bool dump_llvm_ir_optimized{false};
         bool debug_info{false};
         std::string dump_directory{};
+        bool specialization_enable_loop_unroll_metadata{true};
+        std::uint32_t specialization_max_unroll_trip_count{32};
         TensorJITOptions tensor{};
 
         bool operator==(const CompilerKey& other) const noexcept
@@ -462,6 +495,8 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
                    dump_llvm_ir_optimized == other.dump_llvm_ir_optimized &&
                    debug_info == other.debug_info &&
                    dump_directory == other.dump_directory &&
+                   specialization_enable_loop_unroll_metadata == other.specialization_enable_loop_unroll_metadata &&
+                   specialization_max_unroll_trip_count == other.specialization_max_unroll_trip_count &&
                    tensor.mode == other.tensor.mode &&
                    tensor.force_loop_nest == other.tensor.force_loop_nest &&
                    tensor.enable_symmetry_lowering == other.tensor.enable_symmetry_lowering &&
@@ -491,6 +526,8 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
             hashMix(h, static_cast<std::uint64_t>(k.dump_llvm_ir_optimized ? 1u : 0u));
             hashMix(h, static_cast<std::uint64_t>(k.debug_info ? 1u : 0u));
             hashMix(h, hashString(k.dump_directory));
+            hashMix(h, static_cast<std::uint64_t>(k.specialization_enable_loop_unroll_metadata ? 1u : 0u));
+            hashMix(h, static_cast<std::uint64_t>(k.specialization_max_unroll_trip_count));
             hashMix(h, static_cast<std::uint64_t>(k.tensor.mode));
             hashMix(h, static_cast<std::uint64_t>(k.tensor.force_loop_nest ? 1u : 0u));
             hashMix(h, static_cast<std::uint64_t>(k.tensor.enable_symmetry_lowering ? 1u : 0u));
@@ -521,6 +558,8 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
     key.dump_llvm_ir_optimized = options.dump_llvm_ir_optimized;
     key.debug_info = options.debug_info;
     key.dump_directory = options.dump_directory;
+    key.specialization_enable_loop_unroll_metadata = options.specialization.enable_loop_unroll_metadata;
+    key.specialization_max_unroll_trip_count = options.specialization.max_unroll_trip_count;
     key.tensor = options.tensor;
 
     std::lock_guard<std::mutex> lock(registry_mutex);
@@ -536,48 +575,43 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
     return compiler;
 }
 
-JITCompileResult JITCompiler::compile(const FormIR& ir, const ValidationOptions& validation)
+#if SVMP_FE_ENABLE_LLVM_JIT
+namespace {
+
+[[nodiscard]] JITCompileResult compileFormIRImpl(JITCompiler::Impl& impl,
+                                                 const FormIR& ir,
+                                                 const ValidationOptions& validation,
+                                                 const JITCompileSpecialization* specialization)
 {
     JITCompileResult out;
     out.ok = false;
     out.cacheable = true;
 
-    if (!impl_) {
-        out.message = "JITCompiler: internal error (missing impl)";
-        return out;
-    }
+    std::lock_guard<std::mutex> lock(impl.mutex);
 
-#if !SVMP_FE_ENABLE_LLVM_JIT
-    (void)ir;
-    (void)validation;
-    out.message = "JITCompiler: FE was built without LLVM JIT support";
-    out.cacheable = false;
-    return out;
-#else
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-
-    if (!impl_->engine || !impl_->engine->available()) {
+    if (!impl.engine || !impl.engine->available()) {
         out.message = "JITCompiler: LLVM JIT engine is not available at runtime";
         out.cacheable = false;
         return out;
     }
 
-    const std::string target_triple = impl_->engine->targetTriple();
-    const std::string data_layout = impl_->engine->dataLayoutString();
-    const std::string cpu_name = impl_->engine->cpuName();
-    const std::string cpu_features = impl_->engine->cpuFeaturesString();
+    const std::string target_triple = impl.engine->targetTriple();
+    const std::string data_layout = impl.engine->dataLayoutString();
+    const std::string cpu_name = impl.engine->cpuName();
+    const std::string cpu_features = impl.engine->cpuFeaturesString();
     const std::string llvm_version = llvmVersionString();
 
     CompilationPlan plan;
     try {
         plan = buildPlan(ir,
                          validation,
-                         impl_->options,
+                         impl.options,
                          target_triple,
                          data_layout,
                          cpu_name,
                          cpu_features,
-                         llvm_version);
+                         llvm_version,
+                         specialization);
     } catch (const std::exception& e) {
         out.message = std::string("JITCompiler: failed to lower FormIR to KernelIR: ") + e.what();
         out.message += "\n\nFormIR dump:\n" + ir.dump();
@@ -600,25 +634,25 @@ JITCompileResult JITCompiler::compile(const FormIR& ir, const ValidationOptions&
     std::uint64_t local_stores = 0;
     std::uint64_t local_evictions = 0;
 
-    const auto touch = [&](Impl::KernelCacheEntry& entry) {
-        impl_->kernel_cache_lru.splice(impl_->kernel_cache_lru.begin(),
-                                       impl_->kernel_cache_lru,
-                                       entry.lru_it);
-        entry.lru_it = impl_->kernel_cache_lru.begin();
+    const auto touch = [&](JITCompiler::Impl::KernelCacheEntry& entry) {
+        impl.kernel_cache_lru.splice(impl.kernel_cache_lru.begin(),
+                                     impl.kernel_cache_lru,
+                                     entry.lru_it);
+        entry.lru_it = impl.kernel_cache_lru.begin();
     };
 
     const auto evict_if_needed = [&]() {
-        const std::size_t max_entries = impl_->options.max_in_memory_kernels;
+        const std::size_t max_entries = impl.options.max_in_memory_kernels;
         if (max_entries == 0u) {
             return;
         }
 
-        while (impl_->kernel_cache.size() > max_entries) {
-            const std::uint64_t victim = impl_->kernel_cache_lru.back();
-            impl_->kernel_cache_lru.pop_back();
-            impl_->kernel_cache.erase(victim);
+        while (impl.kernel_cache.size() > max_entries) {
+            const std::uint64_t victim = impl.kernel_cache_lru.back();
+            impl.kernel_cache_lru.pop_back();
+            impl.kernel_cache.erase(victim);
             ++local_evictions;
-            impl_->kernel_cache_stats.evictions += 1u;
+            impl.kernel_cache_stats.evictions += 1u;
         }
     };
 
@@ -630,11 +664,11 @@ JITCompileResult JITCompiler::compile(const FormIR& ir, const ValidationOptions&
         k.cache_key = group.cache_key;
         k.cacheable = group.cacheable;
 
-        const bool enable_cache = impl_->options.cache_kernels && group.cacheable;
+        const bool enable_cache = impl.options.cache_kernels && group.cacheable;
         if (enable_cache) {
-            if (auto it = impl_->kernel_cache.find(group.cache_key); it != impl_->kernel_cache.end()) {
+            if (auto it = impl.kernel_cache.find(group.cache_key); it != impl.kernel_cache.end()) {
                 ++local_hits;
-                impl_->kernel_cache_stats.hits += 1u;
+                impl.kernel_cache_stats.hits += 1u;
                 touch(it->second);
                 out.kernels.push_back(it->second.kernel);
                 continue;
@@ -642,19 +676,19 @@ JITCompileResult JITCompiler::compile(const FormIR& ir, const ValidationOptions&
 
             std::uintptr_t addr = 0;
             const std::string stable_symbol = stableSymbolForKernel(group.cache_key);
-            if (impl_->engine && impl_->engine->tryLookup(stable_symbol, addr)) {
+            if (impl.engine && impl.engine->tryLookup(stable_symbol, addr)) {
                 k.symbol = stable_symbol;
                 k.address = addr;
 
-                impl_->kernel_cache_lru.push_front(group.cache_key);
-                Impl::KernelCacheEntry entry;
+                impl.kernel_cache_lru.push_front(group.cache_key);
+                JITCompiler::Impl::KernelCacheEntry entry;
                 entry.kernel = k;
-                entry.lru_it = impl_->kernel_cache_lru.begin();
-                impl_->kernel_cache.emplace(group.cache_key, std::move(entry));
+                entry.lru_it = impl.kernel_cache_lru.begin();
+                impl.kernel_cache.emplace(group.cache_key, std::move(entry));
                 ++local_symbol_hits;
                 ++local_stores;
-                impl_->kernel_cache_stats.engine_symbol_hits += 1u;
-                impl_->kernel_cache_stats.stores += 1u;
+                impl.kernel_cache_stats.engine_symbol_hits += 1u;
+                impl.kernel_cache_stats.stores += 1u;
                 evict_if_needed();
 
                 out.kernels.push_back(k);
@@ -662,67 +696,74 @@ JITCompileResult JITCompiler::compile(const FormIR& ir, const ValidationOptions&
             }
 
             ++local_misses;
-            impl_->kernel_cache_stats.misses += 1u;
+            impl.kernel_cache_stats.misses += 1u;
         }
 
         std::string symbol = stableSymbolForKernel(group.cache_key);
         if (!enable_cache) {
-            const auto id = impl_->unique_symbol_counter.fetch_add(1, std::memory_order_relaxed);
+            const auto id = impl.unique_symbol_counter.fetch_add(1, std::memory_order_relaxed);
             symbol += "_inst" + std::to_string(id);
         }
 
         try {
             std::uintptr_t addr = 0;
-            LLVMGen gen(impl_->options);
-            const auto r = gen.compileAndAddKernel(*impl_->engine,
+            LLVMGen gen(impl.options);
+
+            const JITCompileSpecialization* group_spec = nullptr;
+            if (specialization != nullptr && specialization->domain == group.key.domain) {
+                group_spec = specialization;
+            }
+
+            const auto r = gen.compileAndAddKernel(*impl.engine,
                                                    ir,
                                                    group.term_indices,
                                                    group.key.domain,
                                                    group.key.boundary_marker,
                                                    group.key.interface_marker,
                                                    symbol,
-                                                   addr);
+                                                   addr,
+                                                   group_spec);
             if (!r.ok) {
                 throw std::runtime_error(r.message.empty() ? "LLVMGen: kernel generation failed" : r.message);
             }
             k.symbol = symbol;
             k.address = addr;
-	        } catch (const std::exception& e) {
-	            out.message = std::string("JITCompiler: LLVM compilation failed: ") + e.what();
-	            out.message += "\nKernel symbol: " + symbol;
-	            out.message += "\nDomain: ";
-	            out.message += toString(group.key.domain);
-	            out.message += "\nBoundary marker: " + std::to_string(group.key.boundary_marker);
-	            out.message += "\nInterface marker: " + std::to_string(group.key.interface_marker);
-	            out.message += "\nCache key: 0x" + toHex(group.cache_key);
-	            out.message += "\n\nFormIR dump:\n" + ir.dump();
-	            out.cacheable = false;
+        } catch (const std::exception& e) {
+            out.message = std::string("JITCompiler: LLVM compilation failed: ") + e.what();
+            out.message += "\nKernel symbol: " + symbol;
+            out.message += "\nDomain: ";
+            out.message += toString(group.key.domain);
+            out.message += "\nBoundary marker: " + std::to_string(group.key.boundary_marker);
+            out.message += "\nInterface marker: " + std::to_string(group.key.interface_marker);
+            out.message += "\nCache key: 0x" + toHex(group.cache_key);
+            out.message += "\n\nFormIR dump:\n" + ir.dump();
+            out.cacheable = false;
             return out;
         }
 
         out.kernels.push_back(k);
         if (enable_cache) {
-            impl_->kernel_cache_lru.push_front(group.cache_key);
-            Impl::KernelCacheEntry entry;
+            impl.kernel_cache_lru.push_front(group.cache_key);
+            JITCompiler::Impl::KernelCacheEntry entry;
             entry.kernel = k;
-            entry.lru_it = impl_->kernel_cache_lru.begin();
-            impl_->kernel_cache.emplace(group.cache_key, std::move(entry));
+            entry.lru_it = impl.kernel_cache_lru.begin();
+            impl.kernel_cache.emplace(group.cache_key, std::move(entry));
             ++local_stores;
-            impl_->kernel_cache_stats.stores += 1u;
+            impl.kernel_cache_stats.stores += 1u;
             evict_if_needed();
         }
     }
 
-    if (impl_->options.cache_diagnostics) {
+    if (impl.options.cache_diagnostics) {
         std::ostringstream oss;
-        const auto object_stats = impl_->engine ? impl_->engine->objectCacheStats() : JITObjectCacheStats{};
+        const auto object_stats = impl.engine ? impl.engine->objectCacheStats() : JITObjectCacheStats{};
         oss << "JIT cache: groups=" << plan.groups.size()
             << ", hits=" << local_hits
             << ", symbol_hits=" << local_symbol_hits
             << ", misses=" << local_misses
             << ", stores=" << local_stores
             << ", evictions=" << local_evictions
-            << ", kernel_cache_size=" << impl_->kernel_cache.size()
+            << ", kernel_cache_size=" << impl.kernel_cache.size()
             << ", objcache_gets=" << object_stats.get_calls
             << ", objcache_mem_hits=" << object_stats.mem_hits
             << ", objcache_disk_hits=" << object_stats.disk_hits
@@ -732,6 +773,55 @@ JITCompileResult JITCompiler::compile(const FormIR& ir, const ValidationOptions&
 
     out.ok = true;
     return out;
+}
+
+} // namespace
+#endif
+
+JITCompileResult JITCompiler::compile(const FormIR& ir, const ValidationOptions& validation)
+{
+    JITCompileResult out;
+    out.ok = false;
+    out.cacheable = true;
+
+    if (!impl_) {
+        out.message = "JITCompiler: internal error (missing impl)";
+        return out;
+    }
+
+#if !SVMP_FE_ENABLE_LLVM_JIT
+    (void)ir;
+    (void)validation;
+    out.message = "JITCompiler: FE was built without LLVM JIT support";
+	    out.cacheable = false;
+	    return out;
+#else
+	    return compileFormIRImpl(*impl_, ir, validation, /*specialization=*/nullptr);
+#endif
+}
+
+JITCompileResult JITCompiler::compileSpecialized(const FormIR& ir,
+                                                 const JITCompileSpecialization& specialization,
+                                                 const ValidationOptions& validation)
+{
+    JITCompileResult out;
+    out.ok = false;
+    out.cacheable = true;
+
+    if (!impl_) {
+        out.message = "JITCompiler: internal error (missing impl)";
+        return out;
+    }
+
+#if !SVMP_FE_ENABLE_LLVM_JIT
+    (void)ir;
+    (void)specialization;
+    (void)validation;
+    out.message = "JITCompiler: FE was built without LLVM JIT support";
+    out.cacheable = false;
+    return out;
+#else
+    return compileFormIRImpl(*impl_, ir, validation, &specialization);
 #endif
 }
 

@@ -96,6 +96,9 @@ struct TimeIntegrationContext {
 
     std::optional<TimeDerivativeStencil> dt1{};
     std::optional<TimeDerivativeStencil> dt2{};
+    // Optional higher-order derivative stencils:
+    // - index 0 corresponds to order 3, index 1 -> order 4, etc.
+    std::vector<std::optional<TimeDerivativeStencil>> dt_extra{};
 
     // Optional per-term scaling, used by some time-stepping schemes (e.g. θ-method)
     // to weight dt-containing vs dt-free contributions without re-compiling kernels.
@@ -105,14 +108,37 @@ struct TimeIntegrationContext {
     // Optional per-derivative scaling (enables splitting dt(·) vs dt(·,2) terms).
     Real dt1_term_weight{1.0};
     Real dt2_term_weight{1.0};
+    // Optional per-derivative scaling for dt(·,k), k>=3 (same indexing convention as dt_extra).
+    std::vector<Real> dt_extra_term_weight{};
 
     [[nodiscard]] const TimeDerivativeStencil* stencil(int order) const noexcept
     {
         switch (order) {
             case 1: return dt1 ? &(*dt1) : nullptr;
             case 2: return dt2 ? &(*dt2) : nullptr;
-            default: return nullptr;
+            default:
+                break;
         }
+        if (order < 3) {
+            return nullptr;
+        }
+        const auto idx = static_cast<std::size_t>(order - 3);
+        if (idx >= dt_extra.size()) {
+            return nullptr;
+        }
+        return dt_extra[idx] ? &(*dt_extra[idx]) : nullptr;
+    }
+
+    [[nodiscard]] Real derivativeTermWeight(int order) const noexcept
+    {
+        if (order == 1) return dt1_term_weight;
+        if (order == 2) return dt2_term_weight;
+        if (order < 3) return Real(1.0);
+        const auto idx = static_cast<std::size_t>(order - 3);
+        if (idx >= dt_extra_term_weight.size()) {
+            return Real(1.0);
+        }
+        return dt_extra_term_weight[idx];
     }
 };
 

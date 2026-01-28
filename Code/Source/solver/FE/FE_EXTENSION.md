@@ -195,6 +195,146 @@ Scalability for large-scale interface-coupled problems.
 
 ---
 
+## 10. Forms + LLVM JIT Infrastructure for New Physics
+
+This section tracks physics-agnostic extensions needed so the Forms IR, symbolic differentiation, and
+LLVM JIT backend can cover advanced constitutive models and frequency-/time-domain formulations
+(structural, fluids, electromagnetics, acoustics).
+
+### 10.1 FormExprType Vocabulary Extensions
+
+- [x] **Matrix functions (non element-wise)**
+  - [x] Add `FormExprType::{MatrixExponential,MatrixLogarithm,MatrixSqrt,MatrixPower}` in `Forms/FormExpr.h`
+  - [x] Add node constructors / printing / invariants in `Forms/FormExpr.cpp`
+  - [x] Lower to deterministic IR in `Forms/JIT/KernelIR.cpp` (and TensorIR lowering if applicable)
+  - [x] Emit LLVM via versioned ExternalCalls helpers in `Forms/JIT/LLVMGen.cpp`
+  - [x] Add differentiation rules in `Forms/SymbolicDifferentiation.cpp` (and `Forms/Tensor/TensorDifferentiation.cpp`)
+  - [x] Add JIT validation rules (shape + domain constraints, SPD checks where required) in `Forms/JIT/JITValidation.cpp`
+  - [x] Decide initial support scope (recommended: 2×2 and 3×3; `log/sqrt` restricted to SPD matrices)
+
+- [x] **Regularized / smooth approximations**
+  - [x] Add `FormExprType::{SmoothHeaviside,SmoothAbsoluteValue,SmoothMin,SmoothMax,SmoothSign}` in `Forms/FormExpr.h`
+  - [x] Decide whether these are first-class nodes vs `Forms/Vocabulary.h` combinators
+  - [x] If combinators: add JIT peephole patterns in `Forms/JIT/KernelIR.cpp` and/or `Forms/JIT/LLVMGen.cpp`
+        (not applicable; implemented as first-class nodes)
+  - [x] `clamp(x,lo,hi)` exists as a combinator in `Forms/Vocabulary.h` (currently `min(max(x,lo),hi)`)
+
+- [x] **General eigendecomposition operators**
+  - [x] Add `FormExprType::{Eigenvalue,SymmetricEigenvector,SpectralDecomposition}` in `Forms/FormExpr.h`
+  - [x] Add lowering rules in `Forms/JIT/KernelIR.cpp` (or force ExternalCalls lowering for determinism)
+  - [x] Add LLVM emission in `Forms/JIT/LLVMGen.cpp` via ExternalCalls eigensolver helpers
+  - [x] Add symbolic derivatives:
+    - [x] extend eigenvalue rules (beyond existing symmetric eigenvalue directional derivatives)
+    - [x] add eigenvector/spectral decomposition derivatives (including repeated-eigenvalue handling strategy)
+  - [x] Add validation rules (symmetric vs general, conditioning limits, repeated eigenvalues) in `Forms/JIT/JITValidation.cpp`
+
+- [x] **Convolution / history integral operators**
+  - [x] Add `FormExprType::{HistoryWeightedSum,HistoryConvolution}` in `Forms/FormExpr.h`
+  - [x] Define semantics for history terminals (weights slot, history depth, which solution stream)
+  - [x] Extend JIT ABI to pass history weights and history coefficient pointers (see 10.2) and lower in `Forms/JIT/KernelIR.cpp`
+  - [x] Add LLVM emission loops over history in `Forms/JIT/LLVMGen.cpp`
+
+- [x] **Higher-order time derivatives**
+  - [x] Generalize `TimeDerivative(order)` to order `N` (order > 2) in `Forms/FormExpr.*`
+  - [x] Extend ABI packing for additional time discretization coefficients (see 10.2)
+  - [x] Extend LLVM emission (`termWeight`, dt coefficient loads) in `Forms/JIT/LLVMGen.cpp` for order > 2
+
+### 10.2 KernelArgs ABI Extensions (JIT)
+
+- [ ] **History access ABI**
+  - [ ] Extend `Assembly/JIT/KernelArgs.h` side args with:
+    - [ ] `history_weights` pointer (or a general pointer+stride descriptor)
+    - [ ] `num_history_steps`
+    - [ ] `history_solution_coefficients` (array-of-pointers or packed 2D layout)
+  - [ ] Update packers (`Assembly/JIT/KernelArgs.*`) and bump the KernelArgs ABI version constant
+  - [ ] Update `Forms/JIT/LLVMGen.cpp` to load new fields and preserve strict alignment checks
+
+- [x] **Higher-order dt coefficients ABI**
+  - [x] Extend `Assembly/JIT/KernelArgs.h` to provide dt coefficients for order ≥ 3
+        (either `dt3_coeff0`, etc., or a general array)
+  - [x] Update packers and bump ABI version (if layout changes)
+  - [x] Update `Forms/JIT/LLVMGen.cpp` to consume the generalized coefficients
+
+- [ ] **Complex-valued field support**
+  - [ ] Decide strategy:
+    - [ ] keep current real/imag block splitting and add LLVMGen fusions (10.3), or
+    - [ ] add native complex pointers/flags to KernelArgs and emit complex arithmetic directly
+  - [ ] If ABI extension:
+    - [ ] add complex solution and basis pointers in `Assembly/JIT/KernelArgs.h`
+    - [ ] update packers + bump ABI version
+    - [ ] extend `Forms/JIT/LLVMGen.cpp` to load/compute complex values (including conjugation and Hermitian products)
+
+- [ ] **Material state descriptors (optional)**
+  - [ ] Decide whether advanced structured material state should remain ExternalCalls-based
+        vs adding a descriptor pointer/counts to `Assembly/JIT/KernelArgs.h`
+  - [ ] If ABI extension: update packers + bump ABI version, and update `Forms/JIT/LLVMGen.cpp`
+
+### 10.3 LLVMGen / Codegen Extensions
+
+- [ ] **Matrix function emission**
+  - [ ] Add `emitMatrix{Exp,Log,Sqrt,Pow}` helpers in `Forms/JIT/LLVMGen.cpp`
+  - [ ] Route emission through versioned ExternalCalls helpers (10.4) for numerical robustness
+
+- [ ] **Efficient complex arithmetic emission**
+  - [ ] If keeping real/imag block splitting: add peephole fusions in `Forms/JIT/LLVMGen.cpp`
+        (complex multiply/add, conjugate transpose patterns, Hermitian inner products)
+  - [ ] If native complex ABI: introduce a `ComplexCodeValue`-style representation in `Forms/JIT/LLVMGen.cpp`
+
+- [ ] **Local iteration framework (material-point Newton)**
+  - [ ] Decide strategy:
+    - [ ] keep local solves in ExternalCalls only, or
+    - [ ] add first-class `FormExprType::LocalSolve` with in-kernel loops
+  - [ ] If in-kernel:
+    - [ ] add while-loop emission + convergence checks in `Forms/JIT/LLVMGen.cpp`
+    - [ ] add bounded iteration + failure handling (fallback path) in `Forms/JIT/JITKernelWrapper.cpp`
+    - [ ] ensure temporary storage strategy is safe and performant (stack/reuse limits)
+
+### 10.4 ExternalCalls ABI Extensions (C-ABI helpers)
+
+- [ ] **Matrix function helpers (versioned symbols)**
+  - [ ] Add signatures in `Forms/JIT/ExternalCalls.h`:
+    - [ ] `svmp_fe_jit_matrix_exp_3x3_v1(const double* A, double* expA)`
+    - [ ] `svmp_fe_jit_matrix_log_3x3_v1(const double* A, double* logA)`
+    - [ ] `svmp_fe_jit_matrix_sqrt_3x3_v1(const double* A, double* sqrtA)`
+    - [ ] `svmp_fe_jit_matrix_pow_3x3_v1(const double* A, double p, double* Ap)`
+  - [ ] Implement in `Forms/JIT/ExternalCalls.cpp` using a proven algorithm/library (e.g., Eigen/LAPACK)
+  - [ ] Add tests validating correctness and failure modes (SPD checks, conditioning) in `FE/Tests/Unit/Forms`
+
+- [ ] **Eigendecomposition helpers**
+  - [ ] Add `svmp_fe_jit_eig_sym_3x3_v1(const double* A, double* eigvals, double* eigvecs)`
+  - [ ] Add `svmp_fe_jit_eig_general_3x3_v1(...)` (define real/imag output ABI explicitly)
+  - [ ] Implement in `Forms/JIT/ExternalCalls.cpp` and validate edge cases (repeated eigenvalues)
+
+- [ ] **Local Newton helper (optional)**
+  - [ ] Add `svmp_fe_jit_local_newton_v1(...)` helper for generic local solves (if not in-kernel)
+  - [ ] Add tests for convergence/robustness and ensure strict JIT validation compatibility
+
+### 10.5 Symbolic Differentiation Extensions
+
+- [ ] **Matrix function derivatives**
+  - [ ] Add derivative rules in `Forms/SymbolicDifferentiation.cpp` (Fréchet derivatives or an approved approximation)
+  - [ ] Add tensor-index equivalents in `Forms/Tensor/TensorDifferentiation.cpp`
+
+- [ ] **Eigenvalue/eigenvector derivatives**
+  - [ ] Extend eigenvalue derivatives beyond the current directional derivative support
+  - [ ] Add eigenvector derivatives and define behavior for repeated eigenvalues (fallback/regularization)
+
+- [ ] **Local solve differentiation**
+  - [ ] If `LocalSolve` becomes a first-class node, add rules to differentiate its residual and form a local Jacobian
+
+### 10.6 JIT Validation Extensions
+
+- [ ] **Matrix input validation**
+  - [ ] SPD checks for `MatrixLogarithm`/`MatrixSqrt` and shape checks for all matrix functions
+
+- [ ] **Complex expression validation**
+  - [ ] Ensure consistent real/imag pairing and supported operations when complex mode is enabled
+
+- [ ] **Local solve validation**
+  - [ ] Check well-formedness of `LocalSolve` nodes (tolerance, max iters, residual shape)
+
+---
+
 ## Priority Summary
 
 ### High Priority (Core Functionality)
@@ -202,24 +342,29 @@ Scalability for large-scale interface-coupled problems.
 2. Interior face loop infrastructure (Section 2)
 3. Coupled BC Jacobians (Section 3)
 4. DG form integration (Section 2)
+5. Forms + LLVM JIT new-physics coverage (Section 10)
 
 ### Medium Priority (Common Use Cases)
-5. Region-dependent coefficients (Section 4)
-6. Geometric differential operators (Section 5)
-7. Mass matrix variants (Section 7)
-8. Penalty parameter automation (Section 2)
+6. Region-dependent coefficients (Section 4)
+7. Geometric differential operators (Section 5)
+8. Mass matrix variants (Section 7)
+9. Penalty parameter automation (Section 2)
 
 ### Lower Priority (Advanced Features)
-9. Ghost DOF framework (Section 6)
-10. Cut-cell integration (Section 6)
-11. Operator splitting framework (Section 8)
-12. Multi-rate time stepping (Section 8)
+10. Ghost DOF framework (Section 6)
+11. Cut-cell integration (Section 6)
+12. Operator splitting framework (Section 8)
+13. Multi-rate time stepping (Section 8)
 
 ---
 
 ## References
 
 - `Code/Source/solver/FE/Forms/Vocabulary.h` - Expression builders and DG operators
+- `Code/Source/solver/FE/Forms/SymbolicDifferentiation.cpp` - Symbolic derivatives for Forms
+- `Code/Source/solver/FE/Assembly/JIT/KernelArgs.h` - KernelArgs ABI (packing + offsets)
+- `Code/Source/solver/FE/Forms/JIT/ExternalCalls.h` - JIT-resolved helper ABI
+- `Code/Source/solver/FE/Forms/JIT/LLVMGen.cpp` - LLVM IR generation backend
 - `Code/Source/solver/FE/Forms/BlockForm.h` - Block assembly infrastructure
 - `Code/Source/solver/Mesh/Core/InterfaceMesh.h` - Interface mesh representation
 - `Code/Source/solver/FE/Spaces/DGOperators.h` - Discontinuous Galerkin operators

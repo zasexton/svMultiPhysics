@@ -334,6 +334,11 @@ assembly::AssemblyResult assembleOperator(
         if (state.time_integration->dt2) {
             required_history = std::max(required_history, state.time_integration->dt2->requiredHistoryStates());
         }
+        for (const auto& s : state.time_integration->dt_extra) {
+            if (s) {
+                required_history = std::max(required_history, s->requiredHistoryStates());
+            }
+        }
     }
 
     std::unique_ptr<assembly::GlobalSystemView> prev_solution_view;

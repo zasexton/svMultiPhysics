@@ -2731,7 +2731,7 @@ void RaviartThomasBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
             // Minimal RT0 on reference triangle (v0=(0,0), v1=(1,0), v2=(0,1)).
             // Basis functions chosen so that integrated normal flux over each edge
             // (with standard outward normals) gives Kronecker delta DOFs.
-            constexpr Real inv_sqrt2 = Real(1.0 / std::sqrt(2.0));
+            constexpr Real inv_sqrt2 = Real(0.70710678118654752440084436210484903928483593768847L); // 1/sqrt(2)
             values.resize(3);
             values[0] = math::Vector<Real, 3>{inv_sqrt2 * x, inv_sqrt2 * y, Real(0)};
             values[1] = math::Vector<Real, 3>{x - Real(1), y, Real(0)};
@@ -2757,7 +2757,7 @@ void RaviartThomasBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
         // v2=(0,1,0), v3=(0,0,1)) with DOFs as face fluxes.
         // Constructed so that ∫_{Fi} v_j · n_i dS = δ_{ij} using
         // n_i = grad(lambda_i) and standard face parameterizations.
-        constexpr Real c0 = Real(-2.0 / std::sqrt(3.0));
+        constexpr Real c0 = Real(-1.15470053837925152901829756100391491129520350254025L); // -2/sqrt(3)
         values.resize(4);
         // Ordering matches ReferenceElement (Tetra4) face list:
         //   f0: (0,1,2) opposite v3

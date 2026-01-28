@@ -10,6 +10,7 @@
 
 #include "Forms/FormIR.h"
 #include "Forms/JIT/JITCacheStats.h"
+#include "Forms/JIT/JITSpecialization.h"
 #include "Forms/JIT/JITValidation.h"
 
 #include <cstdint>
@@ -47,6 +48,10 @@ public:
 
     [[nodiscard]] JITCompileResult compile(const FormIR& ir,
                                            const ValidationOptions& validation = {});
+
+    [[nodiscard]] JITCompileResult compileSpecialized(const FormIR& ir,
+                                                      const JITCompileSpecialization& specialization,
+                                                      const ValidationOptions& validation = {});
 
     [[nodiscard]] JITCompileResult compileFunctional(const FormExpr& integrand,
                                                      IntegralDomain domain,

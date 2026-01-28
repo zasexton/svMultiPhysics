@@ -36,10 +36,8 @@
  * @brief Block-structured assembly for multi-field problems
  *
  * BlockAssembler handles assembly of systems with multiple coupled fields,
- * such as:
- * - Navier-Stokes: velocity-pressure coupling
- * - FSI: fluid-structure coupling
- * - Multiphysics: thermal-mechanical coupling
+ * providing generic infrastructure for field registration, block-to-kernel
+ * mapping, and coordinated assembly of block-structured matrices/vectors.
  *
  * Block structure:
  * @code
@@ -71,8 +69,6 @@
 #include "Core/FEException.h"
 #include "Assembler.h"
 #include "AssemblyKernel.h"
-#include "AssemblyContext.h"
-#include "AssemblyLoop.h"
 #include "GlobalSystemView.h"
 
 #include <vector>
@@ -176,70 +172,6 @@ struct BlockAssemblyStats {
     // Per-block statistics
     std::map<BlockIndex, double> block_assembly_seconds;
     std::map<BlockIndex, GlobalIndex> block_nnz;
-};
-
-// ============================================================================
-// Block Kernel Interface
-// ============================================================================
-
-/**
- * @brief Kernel interface for block assembly
- *
- * Block kernels compute element contributions for multi-field systems.
- * Each field combination can have its own computation method.
- */
-class IBlockKernel {
-public:
-    virtual ~IBlockKernel() = default;
-
-    /**
-     * @brief Compute block (i,j) element matrix
-     *
-     * @param context Assembly context
-     * @param row_field Row (test) field index
-     * @param col_field Column (trial) field index
-     * @param output Output for local block matrix
-     */
-    virtual void computeBlock(
-        AssemblyContext& context,
-        FieldId row_field,
-        FieldId col_field,
-        KernelOutput& output) = 0;
-
-    /**
-     * @brief Compute field RHS contribution
-     *
-     * @param context Assembly context
-     * @param field Field index
-     * @param output Output for local RHS
-     */
-    virtual void computeRhs(
-        AssemblyContext& context,
-        FieldId field,
-        KernelOutput& output) = 0;
-
-    /**
-     * @brief Check if block (i,j) is non-zero
-     *
-     * Allows skipping zero blocks in assembly.
-     */
-    [[nodiscard]] virtual bool hasBlock(FieldId row_field, FieldId col_field) const = 0;
-
-    /**
-     * @brief Get number of fields
-     */
-    [[nodiscard]] virtual int numFields() const = 0;
-
-    /**
-     * @brief Get required data for block computation
-     */
-    [[nodiscard]] virtual RequiredData getRequiredData(
-        FieldId row_field, FieldId col_field) const
-    {
-        (void)row_field;
-        (void)col_field;
-        return RequiredData::BasisValues | RequiredData::BasisGradients;
-    }
 };
 
 // ============================================================================
@@ -366,11 +298,14 @@ private:
  *   assembler.setMesh(mesh);
  *
  *   // Configure fields
- *   assembler.addField(0, "velocity", velocity_space, velocity_dofs);
- *   assembler.addField(1, "pressure", pressure_space, pressure_dofs);
+ *   assembler.addField(0, "field_0", space_0, dofs_0);
+ *   assembler.addField(1, "field_1", space_1, dofs_1);
  *
- *   // Set kernel
- *   assembler.setKernel(stokes_kernel);
+ *   // Assign per-block kernels
+ *   assembler.setBlockKernel(0, 0, kernel_00);
+ *   assembler.setBlockKernel(0, 1, kernel_01);
+ *   assembler.setBlockKernel(1, 0, kernel_10);
+ *   assembler.setBlockKernel(1, 1, kernel_11);
  *
  *   // Assemble monolithic system
  *   assembler.assembleSystem(matrix_view, rhs_view);
@@ -383,13 +318,13 @@ private:
  *   // ... configure fields ...
  *
  *   // Assemble individual blocks
- *   assembler.assembleBlock(0, 0, A_uu);  // velocity-velocity
- *   assembler.assembleBlock(0, 1, A_up);  // velocity-pressure
- *   assembler.assembleBlock(1, 0, A_pu);  // pressure-velocity
- *   assembler.assembleBlock(1, 1, A_pp);  // pressure-pressure
+ *   assembler.assembleBlock(0, 0, A_00);
+ *   assembler.assembleBlock(0, 1, A_01);
+ *   assembler.assembleBlock(1, 0, A_10);
+ *   assembler.assembleBlock(1, 1, A_11);
  *
- *   assembler.assembleRhs(0, f_u);        // velocity RHS
- *   assembler.assembleRhs(1, f_p);        // pressure RHS
+ *   assembler.assembleFieldRhs(0, f_0);
+ *   assembler.assembleFieldRhs(1, f_1);
  * @endcode
  */
 class BlockAssembler {
@@ -459,11 +394,6 @@ public:
     void setBlockDofMap(const dofs::BlockDofMap& block_dof_map);
 
     /**
-     * @brief Set the block kernel
-     */
-    void setKernel(IBlockKernel& kernel);
-
-    /**
      * @brief Set options
      */
     void setOptions(const BlockAssemblerOptions& options);
@@ -481,6 +411,85 @@ public:
     [[nodiscard]] const BlockSystemConfig& getConfig() const noexcept {
         return config_;
     }
+
+    // =========================================================================
+    // Assembler Assignment (per-block)
+    // =========================================================================
+
+    /**
+     * @brief Set assembler for a specific block (row_field, col_field)
+     */
+    void setBlockAssembler(FieldId row_field, FieldId col_field,
+                           std::shared_ptr<Assembler> assembler);
+
+    /**
+     * @brief Set assembler for all blocks involving a field (row or column)
+     */
+    void setFieldAssembler(FieldId field, std::shared_ptr<Assembler> assembler);
+
+    /**
+     * @brief Set assembler for diagonal block only
+     */
+    void setDiagonalAssembler(FieldId field, std::shared_ptr<Assembler> assembler);
+
+    /**
+     * @brief Set default assembler for blocks without explicit assignment
+     */
+    void setDefaultAssembler(std::shared_ptr<Assembler> assembler);
+
+    /**
+     * @brief Get assembler for a block (assigned or default)
+     */
+    [[nodiscard]] Assembler& getBlockAssembler(FieldId row_field, FieldId col_field);
+
+    /**
+     * @brief Check if block has an explicitly assigned assembler
+     */
+    [[nodiscard]] bool hasBlockAssembler(FieldId row_field, FieldId col_field) const;
+
+    // =========================================================================
+    // Kernel Assignment (per-block / per-field)
+    // =========================================================================
+
+    /**
+     * @brief Set kernel for a specific block
+     */
+    void setBlockKernel(FieldId row_field, FieldId col_field,
+                        std::shared_ptr<AssemblyKernel> kernel);
+
+    /**
+     * @brief Set RHS kernel for a field
+     */
+    void setRhsKernel(FieldId field, std::shared_ptr<AssemblyKernel> kernel);
+
+    /**
+     * @brief Check if block has a kernel (non-zero block)
+     */
+    [[nodiscard]] bool hasBlockKernel(FieldId row_field, FieldId col_field) const;
+
+    /**
+     * @brief Get all non-zero block indices
+     */
+    [[nodiscard]] std::vector<BlockIndex> getNonZeroBlocks() const;
+
+    // =========================================================================
+    // State Propagation
+    // =========================================================================
+
+    /**
+     * @brief Set current solution vector (monolithic/global indexing)
+     */
+    void setCurrentSolution(std::span<const Real> global_solution);
+
+    /**
+     * @brief Set current physical time
+     */
+    void setTime(Real time);
+
+    /**
+     * @brief Set current time step size dt
+     */
+    void setTimeStep(Real dt);
 
     // =========================================================================
     // Monolithic Assembly
@@ -539,6 +548,18 @@ public:
         GlobalSystemView& rhs_view);
 
     // =========================================================================
+    // Parallel Block Assembly
+    // =========================================================================
+
+    /**
+     * @brief Assemble multiple blocks concurrently
+     */
+    BlockAssemblyStats assembleBlocksParallel(
+        std::span<const BlockIndex> blocks,
+        GlobalSystemView& matrix_view,
+        GlobalSystemView* rhs_view = nullptr);
+
+    // =========================================================================
     // Coupling Assembly
     // =========================================================================
 
@@ -559,6 +580,17 @@ public:
      * @return Assembly statistics
      */
     BlockAssemblyStats assembleDiagonalBlocks(GlobalSystemView& matrix_view);
+
+    // =========================================================================
+    // Selective Assembly
+    // =========================================================================
+
+    /**
+     * @brief Assemble specific blocks by predicate
+     */
+    BlockAssemblyStats assembleBlocksIf(
+        std::function<bool(FieldId row, FieldId col)> predicate,
+        GlobalSystemView& matrix_view);
 
     // =========================================================================
     // Block Information
@@ -628,9 +660,8 @@ private:
     void assembleBlockInternal(
         FieldId row_field,
         FieldId col_field,
-        GlobalSystemView& matrix_view,
-        GlobalIndex row_offset,
-        GlobalIndex col_offset);
+        GlobalSystemView& output_view,
+        bool is_monolithic);
 
     /**
      * @brief Assemble field RHS (internal)
@@ -638,39 +669,39 @@ private:
     void assembleFieldRhsInternal(
         FieldId field,
         GlobalSystemView& rhs_view,
-        GlobalIndex offset);
-
-    /**
-     * @brief Get DOFs for cell and field
-     */
-    void getCellFieldDofs(
-        GlobalIndex cell_id,
-        FieldId field,
-        std::vector<GlobalIndex>& dofs);
+        bool is_monolithic);
 
     // =========================================================================
     // Data Members
     // =========================================================================
 
-    // Configuration
-    BlockAssemblerOptions options_;
     BlockSystemConfig config_;
     const IMeshAccess* mesh_{nullptr};
-    IBlockKernel* kernel_{nullptr};
     const dofs::BlockDofMap* block_dof_map_{nullptr};
+
+    // Per-block assemblers: block (row_field, col_field) -> Assembler
+    std::map<BlockIndex, std::shared_ptr<Assembler>> block_assemblers_;
+
+    // Per-block kernels: block (row_field, col_field) -> AssemblyKernel
+    std::map<BlockIndex, std::shared_ptr<AssemblyKernel>> block_kernels_;
+
+    // Per-field RHS kernels: field -> AssemblyKernel
+    std::map<FieldId, std::shared_ptr<AssemblyKernel>> rhs_kernels_;
+
+    // Default assembler for blocks without explicit assignment
+    std::shared_ptr<Assembler> default_assembler_;
 
     // Block offsets (for monolithic assembly)
     std::vector<GlobalIndex> field_offsets_;  // Size: num_fields + 1
     std::vector<GlobalIndex> field_sizes_;    // Size: num_fields
 
-    // Assembly infrastructure
-    std::unique_ptr<AssemblyLoop> loop_;
+    // Cached state for propagation
+    std::span<const Real> current_solution_{};
+    Real time_{0.0};
+    Real dt_{0.0};
 
-    // Thread-local storage
-    std::vector<std::unique_ptr<AssemblyContext>> thread_contexts_;
-    std::vector<KernelOutput> thread_outputs_;
-    std::vector<std::vector<GlobalIndex>> thread_row_dofs_;
-    std::vector<std::vector<GlobalIndex>> thread_col_dofs_;
+    // Options
+    BlockAssemblerOptions options_;
 
     // Statistics
     BlockAssemblyStats last_stats_;
@@ -685,23 +716,6 @@ private:
  */
 std::unique_ptr<BlockAssembler> createBlockAssembler(
     const BlockAssemblerOptions& options = {});
-
-/**
- * @brief Create simple 2-field block kernel
- *
- * Creates a block kernel for systems like Stokes (velocity-pressure).
- *
- * @param a_kernel Kernel for A block (velocity-velocity)
- * @param b_kernel Kernel for B block (velocity-pressure)
- * @param bt_kernel Kernel for B^T block (pressure-velocity)
- * @param c_kernel Kernel for C block (pressure-pressure, may be null)
- * @return Block kernel
- */
-std::unique_ptr<IBlockKernel> createTwoFieldBlockKernel(
-    AssemblyKernel& a_kernel,
-    AssemblyKernel& b_kernel,
-    AssemblyKernel* bt_kernel = nullptr,
-    AssemblyKernel* c_kernel = nullptr);
 
 } // namespace assembly
 } // namespace FE

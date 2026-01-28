@@ -663,6 +663,30 @@ void registerExternalCallSymbols(llvm::orc::LLJIT& jit)
     add("svmp_fe_sym_eigenvalue_ddA_2x2_v1", &svmp_fe_sym_eigenvalue_ddA_2x2_v1);
     add("svmp_fe_sym_eigenvalue_ddA_3x3_v1", &svmp_fe_sym_eigenvalue_ddA_3x3_v1);
 
+    // Strict-mode, cacheable new-physics numeric helpers (Section 10.1).
+    add("svmp_fe_jit_eig_sym_2x2_v1", &svmp_fe_jit_eig_sym_2x2_v1);
+    add("svmp_fe_jit_eig_sym_3x3_v1", &svmp_fe_jit_eig_sym_3x3_v1);
+    add("svmp_fe_jit_matrix_exp_2x2_v1", &svmp_fe_jit_matrix_exp_2x2_v1);
+    add("svmp_fe_jit_matrix_exp_3x3_v1", &svmp_fe_jit_matrix_exp_3x3_v1);
+    add("svmp_fe_jit_matrix_log_2x2_v1", &svmp_fe_jit_matrix_log_2x2_v1);
+    add("svmp_fe_jit_matrix_log_3x3_v1", &svmp_fe_jit_matrix_log_3x3_v1);
+    add("svmp_fe_jit_matrix_sqrt_2x2_v1", &svmp_fe_jit_matrix_sqrt_2x2_v1);
+    add("svmp_fe_jit_matrix_sqrt_3x3_v1", &svmp_fe_jit_matrix_sqrt_3x3_v1);
+    add("svmp_fe_jit_matrix_pow_2x2_v1", &svmp_fe_jit_matrix_pow_2x2_v1);
+    add("svmp_fe_jit_matrix_pow_3x3_v1", &svmp_fe_jit_matrix_pow_3x3_v1);
+    add("svmp_fe_jit_matrix_exp_dd_2x2_v1", &svmp_fe_jit_matrix_exp_dd_2x2_v1);
+    add("svmp_fe_jit_matrix_exp_dd_3x3_v1", &svmp_fe_jit_matrix_exp_dd_3x3_v1);
+    add("svmp_fe_jit_matrix_log_dd_2x2_v1", &svmp_fe_jit_matrix_log_dd_2x2_v1);
+    add("svmp_fe_jit_matrix_log_dd_3x3_v1", &svmp_fe_jit_matrix_log_dd_3x3_v1);
+    add("svmp_fe_jit_matrix_sqrt_dd_2x2_v1", &svmp_fe_jit_matrix_sqrt_dd_2x2_v1);
+    add("svmp_fe_jit_matrix_sqrt_dd_3x3_v1", &svmp_fe_jit_matrix_sqrt_dd_3x3_v1);
+    add("svmp_fe_jit_matrix_pow_dd_2x2_v1", &svmp_fe_jit_matrix_pow_dd_2x2_v1);
+    add("svmp_fe_jit_matrix_pow_dd_3x3_v1", &svmp_fe_jit_matrix_pow_dd_3x3_v1);
+    add("svmp_fe_jit_eigvec_sym_dd_2x2_v1", &svmp_fe_jit_eigvec_sym_dd_2x2_v1);
+    add("svmp_fe_jit_eigvec_sym_dd_3x3_v1", &svmp_fe_jit_eigvec_sym_dd_3x3_v1);
+    add("svmp_fe_jit_spectral_decomp_dd_2x2_v1", &svmp_fe_jit_spectral_decomp_dd_2x2_v1);
+    add("svmp_fe_jit_spectral_decomp_dd_3x3_v1", &svmp_fe_jit_spectral_decomp_dd_3x3_v1);
+
     auto err = jit.getMainJITDylib().define(llvm::orc::absoluteSymbols(std::move(symbols)));
     if (err) {
         FE_THROW(FEException, "LLVM JIT: failed to register external-call symbols: " +

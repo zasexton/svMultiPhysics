@@ -73,18 +73,18 @@ This is the orchestration layer that:
 
 - [x] Add `Code/Source/solver/FE/Forms/JIT/JITCompiler.h`
 - [x] Add `Code/Source/solver/FE/Forms/JIT/JITCompiler.cpp`
-- [ ] Implement compilation pipeline:
-  - [ ] `forms::jit::canCompile(FormIR, strictness)` gate
-  - [ ] `lowerToKernelIR(term.integrand)` per term (or per fused domain kernel)
-  - [ ] decide kernel fusion strategy:
-    - [ ] **preferred**: generate one kernel per `(domain, marker, form-kind)` that accumulates all matching terms
+- [x] Implement compilation pipeline:
+  - [x] `forms::jit::canCompile(FormIR, strictness)` gate
+  - [x] `lowerToKernelIR(term.integrand)` per term (or per fused domain kernel)
+  - [x] decide kernel fusion strategy:
+    - [x] **preferred**: generate one kernel per `(domain, marker, form-kind)` that accumulates all matching terms
     - [ ] alternative: one kernel per term (simpler, but more overhead)
-  - [ ] decide specialization strategy:
-    - [ ] generic loops using `n_qpts/n_dofs` from args
-    - [ ] specialized variants for common `n_qpts` (and/or dof counts)
-  - [ ] produce stable cache key (see section 8)
-  - [ ] compile via `JITEngine` and return a configured kernel wrapper
-  - [ ] handle compilation failures with clear diagnostics and fallback (no hard crash)
+  - [x] decide specialization strategy:
+    - [x] generic loops using `n_qpts/n_dofs` from args
+    - [x] specialized variants for common `n_qpts` (and/or dof counts)
+  - [x] produce stable cache key (see section 8)
+  - [x] compile via `JITEngine` and return a configured kernel wrapper
+  - [x] handle compilation failures with clear diagnostics and fallback (no hard crash)
 
 ## 6. LLVM IR Generator (`KernelIR`/`FormExpr` → LLVM)
 
@@ -548,18 +548,18 @@ This section extends the core LLVM JIT plan with a detailed, incremental checkli
   - [x] Loop emission: no shared mutable state between threads
 
 ### 14.8 Testing, Benchmarks, and Rollout
-- [ ] Add end-to-end tests that compare:
-  - [ ] Tensor-calculus interpreter path vs existing scalar-expanded interpreter path (correctness).
+- [x] Add end-to-end tests that compare:
+  - [x] Tensor-calculus interpreter path vs existing scalar-expanded interpreter path (correctness). (`Code/Source/solver/FE/Tests/Unit/Forms/Tensor/test_TensorInterpreterKernel.cpp`)
   - [x] Tensor-calculus JIT path vs interpreter (bitwise/tolerance) for representative kernels (`Code/Source/solver/FE/Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp`).
-- [ ] Add benchmarks to measure:
-  - [ ] Expression/IR size (FormExpr nodes, KernelIR nodes, LLVM IR instruction count).
-  - [ ] JIT compile time (first compile + cache hit).
-  - [ ] Runtime assembly throughput (elements/sec) vs current `einsum`-expanded JIT and interpreter.
-- [ ] Rollout strategy:
-  - [ ] Keep tensor calculus disabled by default until tests/benchmarks meet targets.
-  - [ ] Add a runtime toggle (e.g., `jit.tensor_calculus = on/off/auto`) with “auto” gating on expression complexity.
-- [ ] Implement auto-detection heuristics for tensor calculus benefit:
-  - [ ] Threshold: use tensor path when scalar expansion would exceed N terms (e.g., N=50)
-  - [ ] Pattern recognition: detect matrix-matrix products, tensor contractions
-  - [ ] Complexity estimation: estimate scalar term count vs loop iteration count
-  - [ ] Feedback mechanism: log when tensor path is chosen and why  
+- [x] Add benchmarks to measure:
+  - [x] Expression/IR size (FormExpr nodes, KernelIR nodes, LLVM IR instruction count). (`Code/Source/solver/FE/Tests/Unit/Forms/Tensor/test_TensorBenchmarks.cpp`)
+  - [x] JIT compile time (first compile + cache hit). (`Code/Source/solver/FE/Tests/Unit/Forms/Tensor/test_TensorBenchmarks.cpp`)
+  - [x] Runtime assembly throughput (elements/sec) vs current `einsum`-expanded JIT and interpreter. (`Code/Source/solver/FE/Tests/Unit/Forms/Tensor/test_TensorBenchmarks.cpp`)
+- [x] Rollout strategy:
+  - [x] Keep tensor calculus disabled by default until tests/benchmarks meet targets. (`Code/Source/solver/FE/Forms/FormExpr.h`)
+  - [x] Add a runtime toggle (e.g., `jit.tensor_calculus = on/off/auto`) with “auto” gating on expression complexity. (`Code/Source/solver/FE/Forms/FormExpr.h`)
+- [x] Implement auto-detection heuristics for tensor calculus benefit:
+  - [x] Threshold: use tensor path when scalar expansion would exceed N terms (e.g., N=50). (`Code/Source/solver/FE/Forms/Tensor/LoopStructure.cpp`)
+  - [x] Pattern recognition: detect matrix-matrix products, tensor contractions. (`Code/Source/solver/FE/Forms/Tensor/LoopStructure.cpp`)
+  - [x] Complexity estimation: estimate scalar term count vs loop iteration count. (`Code/Source/solver/FE/Forms/Tensor/LoopStructure.cpp`)
+  - [x] Feedback mechanism: log when tensor path is chosen and why. (`Code/Source/solver/FE/Forms/Tensor/TensorIR.cpp`)  

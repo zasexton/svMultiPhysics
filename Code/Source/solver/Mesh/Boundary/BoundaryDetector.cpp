@@ -767,7 +767,9 @@ BoundaryDetector::compute_boundary_incidence() const {
 
     // Enumerate all maximal n-cells and their (n-1)-entities for 2D/3D
     for (index_t c = 0; c < static_cast<index_t>(mesh_.n_cells()); ++c) {
-        auto [vertices_ptr, n_vertices] = mesh_.cell_vertices_span(c);
+        const auto cell_vertices = mesh_.cell_vertices_span(c);
+        const index_t* vertices_ptr = cell_vertices.first;
+        const size_t n_vertices = cell_vertices.second;
         const CellShape& shape = mesh_.cell_shape(c);
         if (cell_topological_dim(shape.family) != tdim) {
             continue;
@@ -857,7 +859,7 @@ BoundaryDetector::compute_boundary_incidence() const {
                 }
             }
 
-            auto local_to_global = [&](index_t local_idx) -> index_t {
+            auto local_to_global = [vertices_ptr, n_vertices](index_t local_idx) -> index_t {
                 const size_t idx = static_cast<size_t>(local_idx);
                 if (idx >= n_vertices) {
                     throw std::runtime_error("BoundaryDetector: local node index out of range for cell connectivity");

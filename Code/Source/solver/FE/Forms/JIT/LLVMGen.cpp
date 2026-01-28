@@ -46,6 +46,7 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
@@ -136,116 +137,117 @@ constexpr std::uint32_t kMaxTensor3Dim = 3u;
 constexpr std::uint32_t kMaxTensor4Dim = 3u;
 
 struct ABIV3 {
-    static constexpr std::size_t cell_side_off = offsetof(assembly::jit::CellKernelArgsV3, side);
-    static constexpr std::size_t cell_out_off = offsetof(assembly::jit::CellKernelArgsV3, output);
+    static constexpr std::size_t cell_side_off = offsetof(assembly::jit::CellKernelArgsV4, side);
+    static constexpr std::size_t cell_out_off = offsetof(assembly::jit::CellKernelArgsV4, output);
 
-    static constexpr std::size_t bdry_side_off = offsetof(assembly::jit::BoundaryFaceKernelArgsV3, side);
-    static constexpr std::size_t bdry_out_off = offsetof(assembly::jit::BoundaryFaceKernelArgsV3, output);
+    static constexpr std::size_t bdry_side_off = offsetof(assembly::jit::BoundaryFaceKernelArgsV4, side);
+    static constexpr std::size_t bdry_out_off = offsetof(assembly::jit::BoundaryFaceKernelArgsV4, output);
 
-    static constexpr std::size_t face_minus_side_off = offsetof(assembly::jit::InteriorFaceKernelArgsV3, minus);
-    static constexpr std::size_t face_plus_side_off = offsetof(assembly::jit::InteriorFaceKernelArgsV3, plus);
+    static constexpr std::size_t face_minus_side_off = offsetof(assembly::jit::InteriorFaceKernelArgsV4, minus);
+    static constexpr std::size_t face_plus_side_off = offsetof(assembly::jit::InteriorFaceKernelArgsV4, plus);
 
-    static constexpr std::size_t face_out_minus_off = offsetof(assembly::jit::InteriorFaceKernelArgsV3, output_minus);
-    static constexpr std::size_t face_out_plus_off = offsetof(assembly::jit::InteriorFaceKernelArgsV3, output_plus);
+    static constexpr std::size_t face_out_minus_off = offsetof(assembly::jit::InteriorFaceKernelArgsV4, output_minus);
+    static constexpr std::size_t face_out_plus_off = offsetof(assembly::jit::InteriorFaceKernelArgsV4, output_plus);
     static constexpr std::size_t face_coupling_minus_plus_off =
-        offsetof(assembly::jit::InteriorFaceKernelArgsV3, coupling_minus_plus);
+        offsetof(assembly::jit::InteriorFaceKernelArgsV4, coupling_minus_plus);
     static constexpr std::size_t face_coupling_plus_minus_off =
-        offsetof(assembly::jit::InteriorFaceKernelArgsV3, coupling_plus_minus);
+        offsetof(assembly::jit::InteriorFaceKernelArgsV4, coupling_plus_minus);
 
-    static constexpr std::size_t side_dim_off = offsetof(assembly::jit::KernelSideArgsV3, dim);
-    static constexpr std::size_t side_n_qpts_off = offsetof(assembly::jit::KernelSideArgsV3, n_qpts);
-    static constexpr std::size_t side_n_test_dofs_off = offsetof(assembly::jit::KernelSideArgsV3, n_test_dofs);
-    static constexpr std::size_t side_n_trial_dofs_off = offsetof(assembly::jit::KernelSideArgsV3, n_trial_dofs);
+    static constexpr std::size_t side_dim_off = offsetof(assembly::jit::KernelSideArgsV4, dim);
+    static constexpr std::size_t side_n_qpts_off = offsetof(assembly::jit::KernelSideArgsV4, n_qpts);
+    static constexpr std::size_t side_n_test_dofs_off = offsetof(assembly::jit::KernelSideArgsV4, n_test_dofs);
+    static constexpr std::size_t side_n_trial_dofs_off = offsetof(assembly::jit::KernelSideArgsV4, n_trial_dofs);
 
-    static constexpr std::size_t side_test_field_type_off = offsetof(assembly::jit::KernelSideArgsV3, test_field_type);
-    static constexpr std::size_t side_trial_field_type_off = offsetof(assembly::jit::KernelSideArgsV3, trial_field_type);
-    static constexpr std::size_t side_test_value_dim_off = offsetof(assembly::jit::KernelSideArgsV3, test_value_dim);
-    static constexpr std::size_t side_trial_value_dim_off = offsetof(assembly::jit::KernelSideArgsV3, trial_value_dim);
+    static constexpr std::size_t side_test_field_type_off = offsetof(assembly::jit::KernelSideArgsV4, test_field_type);
+    static constexpr std::size_t side_trial_field_type_off = offsetof(assembly::jit::KernelSideArgsV4, trial_field_type);
+    static constexpr std::size_t side_test_value_dim_off = offsetof(assembly::jit::KernelSideArgsV4, test_value_dim);
+    static constexpr std::size_t side_trial_value_dim_off = offsetof(assembly::jit::KernelSideArgsV4, trial_value_dim);
     static constexpr std::size_t side_test_uses_vector_basis_off =
-        offsetof(assembly::jit::KernelSideArgsV3, test_uses_vector_basis);
+        offsetof(assembly::jit::KernelSideArgsV4, test_uses_vector_basis);
     static constexpr std::size_t side_trial_uses_vector_basis_off =
-        offsetof(assembly::jit::KernelSideArgsV3, trial_uses_vector_basis);
+        offsetof(assembly::jit::KernelSideArgsV4, trial_uses_vector_basis);
 
     static constexpr std::size_t side_integration_weights_off =
-        offsetof(assembly::jit::KernelSideArgsV3, integration_weights);
-    static constexpr std::size_t side_quad_points_xyz_off = offsetof(assembly::jit::KernelSideArgsV3, quad_points_xyz);
+        offsetof(assembly::jit::KernelSideArgsV4, integration_weights);
+    static constexpr std::size_t side_quad_points_xyz_off = offsetof(assembly::jit::KernelSideArgsV4, quad_points_xyz);
     static constexpr std::size_t side_physical_points_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV3, physical_points_xyz);
+        offsetof(assembly::jit::KernelSideArgsV4, physical_points_xyz);
 
-    static constexpr std::size_t side_jacobians_off = offsetof(assembly::jit::KernelSideArgsV3, jacobians);
-    static constexpr std::size_t side_inverse_jacobians_off = offsetof(assembly::jit::KernelSideArgsV3, inverse_jacobians);
-    static constexpr std::size_t side_jacobian_dets_off = offsetof(assembly::jit::KernelSideArgsV3, jacobian_dets);
-    static constexpr std::size_t side_normals_xyz_off = offsetof(assembly::jit::KernelSideArgsV3, normals_xyz);
+    static constexpr std::size_t side_jacobians_off = offsetof(assembly::jit::KernelSideArgsV4, jacobians);
+    static constexpr std::size_t side_inverse_jacobians_off = offsetof(assembly::jit::KernelSideArgsV4, inverse_jacobians);
+    static constexpr std::size_t side_jacobian_dets_off = offsetof(assembly::jit::KernelSideArgsV4, jacobian_dets);
+    static constexpr std::size_t side_normals_xyz_off = offsetof(assembly::jit::KernelSideArgsV4, normals_xyz);
 
-    static constexpr std::size_t side_test_basis_values_off = offsetof(assembly::jit::KernelSideArgsV3, test_basis_values);
+    static constexpr std::size_t side_test_basis_values_off = offsetof(assembly::jit::KernelSideArgsV4, test_basis_values);
     static constexpr std::size_t side_trial_basis_values_off =
-        offsetof(assembly::jit::KernelSideArgsV3, trial_basis_values);
+        offsetof(assembly::jit::KernelSideArgsV4, trial_basis_values);
     static constexpr std::size_t side_test_phys_grads_off =
-        offsetof(assembly::jit::KernelSideArgsV3, test_phys_gradients_xyz);
+        offsetof(assembly::jit::KernelSideArgsV4, test_phys_gradients_xyz);
     static constexpr std::size_t side_trial_phys_grads_off =
-        offsetof(assembly::jit::KernelSideArgsV3, trial_phys_gradients_xyz);
+        offsetof(assembly::jit::KernelSideArgsV4, trial_phys_gradients_xyz);
 
-    static constexpr std::size_t side_test_phys_hess_off = offsetof(assembly::jit::KernelSideArgsV3, test_phys_hessians);
+    static constexpr std::size_t side_test_phys_hess_off = offsetof(assembly::jit::KernelSideArgsV4, test_phys_hessians);
     static constexpr std::size_t side_trial_phys_hess_off =
-        offsetof(assembly::jit::KernelSideArgsV3, trial_phys_hessians);
+        offsetof(assembly::jit::KernelSideArgsV4, trial_phys_hessians);
 
     static constexpr std::size_t side_test_vector_basis_values_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV3, test_basis_vector_values_xyz);
+        offsetof(assembly::jit::KernelSideArgsV4, test_basis_vector_values_xyz);
     static constexpr std::size_t side_test_vector_basis_curls_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV3, test_basis_curls_xyz);
+        offsetof(assembly::jit::KernelSideArgsV4, test_basis_curls_xyz);
     static constexpr std::size_t side_test_vector_basis_divs_off =
-        offsetof(assembly::jit::KernelSideArgsV3, test_basis_divergences);
+        offsetof(assembly::jit::KernelSideArgsV4, test_basis_divergences);
 
     static constexpr std::size_t side_trial_vector_basis_values_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV3, trial_basis_vector_values_xyz);
+        offsetof(assembly::jit::KernelSideArgsV4, trial_basis_vector_values_xyz);
     static constexpr std::size_t side_trial_vector_basis_curls_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV3, trial_basis_curls_xyz);
+        offsetof(assembly::jit::KernelSideArgsV4, trial_basis_curls_xyz);
     static constexpr std::size_t side_trial_vector_basis_divs_off =
-        offsetof(assembly::jit::KernelSideArgsV3, trial_basis_divergences);
+        offsetof(assembly::jit::KernelSideArgsV4, trial_basis_divergences);
 
     static constexpr std::size_t side_solution_coefficients_off =
-        offsetof(assembly::jit::KernelSideArgsV3, solution_coefficients);
+        offsetof(assembly::jit::KernelSideArgsV4, solution_coefficients);
     static constexpr std::size_t side_num_previous_solutions_off =
-        offsetof(assembly::jit::KernelSideArgsV3, num_previous_solutions);
+        offsetof(assembly::jit::KernelSideArgsV4, num_previous_solutions);
     static constexpr std::size_t side_previous_solution_coefficients_off =
-        offsetof(assembly::jit::KernelSideArgsV3, previous_solution_coefficients);
+        offsetof(assembly::jit::KernelSideArgsV4, previous_solution_coefficients);
 
-    static constexpr std::size_t side_field_solutions_off = offsetof(assembly::jit::KernelSideArgsV3, field_solutions);
+    static constexpr std::size_t side_field_solutions_off = offsetof(assembly::jit::KernelSideArgsV4, field_solutions);
     static constexpr std::size_t side_num_field_solutions_off =
-        offsetof(assembly::jit::KernelSideArgsV3, num_field_solutions);
+        offsetof(assembly::jit::KernelSideArgsV4, num_field_solutions);
 
-    static constexpr std::size_t side_jit_constants_off = offsetof(assembly::jit::KernelSideArgsV3, jit_constants);
-    static constexpr std::size_t side_coupled_integrals_off = offsetof(assembly::jit::KernelSideArgsV3, coupled_integrals);
-    static constexpr std::size_t side_coupled_aux_off = offsetof(assembly::jit::KernelSideArgsV3, coupled_aux);
+    static constexpr std::size_t side_jit_constants_off = offsetof(assembly::jit::KernelSideArgsV4, jit_constants);
+    static constexpr std::size_t side_coupled_integrals_off = offsetof(assembly::jit::KernelSideArgsV4, coupled_integrals);
+    static constexpr std::size_t side_coupled_aux_off = offsetof(assembly::jit::KernelSideArgsV4, coupled_aux);
 
-    static constexpr std::size_t side_time_off = offsetof(assembly::jit::KernelSideArgsV3, time);
-    static constexpr std::size_t side_dt_off = offsetof(assembly::jit::KernelSideArgsV3, dt);
-    static constexpr std::size_t side_cell_domain_id_off = offsetof(assembly::jit::KernelSideArgsV3, cell_domain_id);
-    static constexpr std::size_t side_cell_diameter_off = offsetof(assembly::jit::KernelSideArgsV3, cell_diameter);
-    static constexpr std::size_t side_cell_volume_off = offsetof(assembly::jit::KernelSideArgsV3, cell_volume);
-    static constexpr std::size_t side_facet_area_off = offsetof(assembly::jit::KernelSideArgsV3, facet_area);
+    static constexpr std::size_t side_time_off = offsetof(assembly::jit::KernelSideArgsV4, time);
+    static constexpr std::size_t side_dt_off = offsetof(assembly::jit::KernelSideArgsV4, dt);
+    static constexpr std::size_t side_cell_domain_id_off = offsetof(assembly::jit::KernelSideArgsV4, cell_domain_id);
+    static constexpr std::size_t side_cell_diameter_off = offsetof(assembly::jit::KernelSideArgsV4, cell_diameter);
+    static constexpr std::size_t side_cell_volume_off = offsetof(assembly::jit::KernelSideArgsV4, cell_volume);
+    static constexpr std::size_t side_facet_area_off = offsetof(assembly::jit::KernelSideArgsV4, facet_area);
 
     static constexpr std::size_t side_time_derivative_term_weight_off =
-        offsetof(assembly::jit::KernelSideArgsV3, time_derivative_term_weight);
+        offsetof(assembly::jit::KernelSideArgsV4, time_derivative_term_weight);
     static constexpr std::size_t side_non_time_derivative_term_weight_off =
-        offsetof(assembly::jit::KernelSideArgsV3, non_time_derivative_term_weight);
-    static constexpr std::size_t side_dt1_term_weight_off = offsetof(assembly::jit::KernelSideArgsV3, dt1_term_weight);
-    static constexpr std::size_t side_dt2_term_weight_off = offsetof(assembly::jit::KernelSideArgsV3, dt2_term_weight);
-
-    static constexpr std::size_t side_dt1_coeff0_off = offsetof(assembly::jit::KernelSideArgsV3, dt1_coeff0);
-    static constexpr std::size_t side_dt2_coeff0_off = offsetof(assembly::jit::KernelSideArgsV3, dt2_coeff0);
+        offsetof(assembly::jit::KernelSideArgsV4, non_time_derivative_term_weight);
+    static constexpr std::size_t side_dt_stencil_coeffs_off =
+        offsetof(assembly::jit::KernelSideArgsV4, dt_stencil_coeffs);
+    static constexpr std::size_t side_dt_term_weights_off =
+        offsetof(assembly::jit::KernelSideArgsV4, dt_term_weights);
+    static constexpr std::size_t side_max_time_derivative_order_off =
+        offsetof(assembly::jit::KernelSideArgsV4, max_time_derivative_order);
 
     static constexpr std::size_t side_material_state_old_base_off =
-        offsetof(assembly::jit::KernelSideArgsV3, material_state_old_base);
+        offsetof(assembly::jit::KernelSideArgsV4, material_state_old_base);
     static constexpr std::size_t side_material_state_work_base_off =
-        offsetof(assembly::jit::KernelSideArgsV3, material_state_work_base);
+        offsetof(assembly::jit::KernelSideArgsV4, material_state_work_base);
     static constexpr std::size_t side_material_state_stride_bytes_off =
-        offsetof(assembly::jit::KernelSideArgsV3, material_state_stride_bytes);
+        offsetof(assembly::jit::KernelSideArgsV4, material_state_stride_bytes);
 
-    static constexpr std::size_t out_element_matrix_off = offsetof(assembly::jit::KernelOutputViewV3, element_matrix);
-    static constexpr std::size_t out_element_vector_off = offsetof(assembly::jit::KernelOutputViewV3, element_vector);
-    static constexpr std::size_t out_n_test_dofs_off = offsetof(assembly::jit::KernelOutputViewV3, n_test_dofs);
-    static constexpr std::size_t out_n_trial_dofs_off = offsetof(assembly::jit::KernelOutputViewV3, n_trial_dofs);
+    static constexpr std::size_t out_element_matrix_off = offsetof(assembly::jit::KernelOutputViewV4, element_matrix);
+    static constexpr std::size_t out_element_vector_off = offsetof(assembly::jit::KernelOutputViewV4, element_vector);
+    static constexpr std::size_t out_n_test_dofs_off = offsetof(assembly::jit::KernelOutputViewV4, n_test_dofs);
+    static constexpr std::size_t out_n_trial_dofs_off = offsetof(assembly::jit::KernelOutputViewV4, n_trial_dofs);
 
     static constexpr std::size_t field_entry_field_id_off = offsetof(assembly::jit::FieldSolutionEntryV1, field_id);
     static constexpr std::size_t field_entry_field_type_off = offsetof(assembly::jit::FieldSolutionEntryV1, field_type);
@@ -831,12 +833,157 @@ struct ShapeInferenceResult {
                 break;
             }
 
+            case FormExprType::MatrixExponential:
+            case FormExprType::MatrixLogarithm:
+            case FormExprType::MatrixSqrt: {
+                const auto& a = childAt(0);
+                if (a.kind != Shape::Kind::Matrix || a.dims[0] != a.dims[1] || (a.dims[0] != 2u && a.dims[0] != 3u)) {
+                    return fail("LLVMGen: matrix function expects a 2x2 or 3x3 square matrix");
+                }
+                out.shapes[idx] = a;
+                break;
+            }
+
+            case FormExprType::MatrixPower: {
+                const auto& a = childAt(0);
+                const auto& p = childAt(1);
+                if (a.kind != Shape::Kind::Matrix || a.dims[0] != a.dims[1] || (a.dims[0] != 2u && a.dims[0] != 3u)) {
+                    return fail("LLVMGen: powm expects a 2x2 or 3x3 square matrix");
+                }
+                if (!p.isScalar()) {
+                    return fail("LLVMGen: powm expects a scalar exponent");
+                }
+                out.shapes[idx] = a;
+                break;
+            }
+
+            case FormExprType::MatrixExponentialDirectionalDerivative:
+            case FormExprType::MatrixLogarithmDirectionalDerivative:
+            case FormExprType::MatrixSqrtDirectionalDerivative: {
+                const auto& a = childAt(0);
+                const auto& da = childAt(1);
+                if (a.kind != Shape::Kind::Matrix || da.kind != Shape::Kind::Matrix ||
+                    a.dims[0] != a.dims[1] || da.dims[0] != da.dims[1] ||
+                    a.dims[0] != da.dims[0] || (a.dims[0] != 2u && a.dims[0] != 3u)) {
+                    return fail("LLVMGen: matrix function directional derivative expects two matching 2x2 or 3x3 square matrices");
+                }
+                out.shapes[idx] = a;
+                break;
+            }
+
+            case FormExprType::MatrixPowerDirectionalDerivative: {
+                const auto& a = childAt(0);
+                const auto& da = childAt(1);
+                const auto& p = childAt(2);
+                if (a.kind != Shape::Kind::Matrix || da.kind != Shape::Kind::Matrix ||
+                    a.dims[0] != a.dims[1] || da.dims[0] != da.dims[1] ||
+                    a.dims[0] != da.dims[0] || (a.dims[0] != 2u && a.dims[0] != 3u)) {
+                    return fail("LLVMGen: powm_dd expects two matching 2x2 or 3x3 square matrices");
+                }
+                if (!p.isScalar()) {
+                    return fail("LLVMGen: powm_dd expects a scalar exponent");
+                }
+                out.shapes[idx] = a;
+                break;
+            }
+
+            case FormExprType::SmoothAbsoluteValue:
+            case FormExprType::SmoothSign:
+            case FormExprType::SmoothHeaviside: {
+                const auto& a = childAt(0);
+                const auto& eps = childAt(1);
+                if (!a.isScalar() || !eps.isScalar()) {
+                    return fail("LLVMGen: smooth function expects scalar operands");
+                }
+                out.shapes[idx] = scalarShape();
+                break;
+            }
+
+            case FormExprType::SmoothMin:
+            case FormExprType::SmoothMax: {
+                const auto& a = childAt(0);
+                const auto& b = childAt(1);
+                const auto& eps = childAt(2);
+                if (!a.isScalar() || !b.isScalar() || !eps.isScalar()) {
+                    return fail("LLVMGen: smooth min/max expects scalar operands");
+                }
+                out.shapes[idx] = scalarShape();
+                break;
+            }
+
             case FormExprType::SymmetricEigenvalue: {
                 const auto& a = childAt(0);
                 if (a.kind != Shape::Kind::Matrix || a.dims[0] != a.dims[1] || (a.dims[0] != 2u && a.dims[0] != 3u)) {
                     return fail("LLVMGen: eig_sym expects a 2x2 or 3x3 square matrix");
                 }
                 out.shapes[idx] = scalarShape();
+                break;
+            }
+
+            case FormExprType::Eigenvalue: {
+                const auto& a = childAt(0);
+                if (a.kind != Shape::Kind::Matrix || a.dims[0] != a.dims[1] || (a.dims[0] != 2u && a.dims[0] != 3u)) {
+                    return fail("LLVMGen: eig expects a 2x2 or 3x3 square matrix");
+                }
+                out.shapes[idx] = scalarShape();
+                break;
+            }
+
+            case FormExprType::SymmetricEigenvector: {
+                const auto& a = childAt(0);
+                if (a.kind != Shape::Kind::Matrix || a.dims[0] != a.dims[1] || (a.dims[0] != 2u && a.dims[0] != 3u)) {
+                    return fail("LLVMGen: eigvec_sym expects a 2x2 or 3x3 square matrix");
+                }
+                out.shapes[idx] = vectorShape(a.dims[0]);
+                break;
+            }
+
+            case FormExprType::SpectralDecomposition: {
+                const auto& a = childAt(0);
+                if (a.kind != Shape::Kind::Matrix || a.dims[0] != a.dims[1] || (a.dims[0] != 2u && a.dims[0] != 3u)) {
+                    return fail("LLVMGen: spectral_decomp expects a 2x2 or 3x3 square matrix");
+                }
+                out.shapes[idx] = a;
+                break;
+            }
+
+            case FormExprType::SymmetricEigenvectorDirectionalDerivative: {
+                const auto& a = childAt(0);
+                const auto& da = childAt(1);
+                if (a.kind != Shape::Kind::Matrix || da.kind != Shape::Kind::Matrix ||
+                    a.dims[0] != a.dims[1] || da.dims[0] != da.dims[1] ||
+                    a.dims[0] != da.dims[0] || (a.dims[0] != 2u && a.dims[0] != 3u)) {
+                    return fail("LLVMGen: eigvec_sym_dd expects two matching 2x2 or 3x3 square matrices");
+                }
+                out.shapes[idx] = vectorShape(a.dims[0]);
+                break;
+            }
+
+            case FormExprType::SpectralDecompositionDirectionalDerivative: {
+                const auto& a = childAt(0);
+                const auto& da = childAt(1);
+                if (a.kind != Shape::Kind::Matrix || da.kind != Shape::Kind::Matrix ||
+                    a.dims[0] != a.dims[1] || da.dims[0] != da.dims[1] ||
+                    a.dims[0] != da.dims[0] || (a.dims[0] != 2u && a.dims[0] != 3u)) {
+                    return fail("LLVMGen: spectral_decomp_dd expects two matching 2x2 or 3x3 square matrices");
+                }
+                out.shapes[idx] = a;
+                break;
+            }
+
+            case FormExprType::HistoryWeightedSum:
+            case FormExprType::HistoryConvolution: {
+                for (std::size_t k = 0; k < static_cast<std::size_t>(op.child_count); ++k) {
+                    if (!childAt(k).isScalar()) {
+                        return fail("LLVMGen: history operator expects scalar weights");
+                    }
+                }
+                if (trial_sig && trial_sig->field_type == FieldType::Vector) {
+                    const auto vd = static_cast<std::uint32_t>(std::max(1, trial_sig->value_dimension));
+                    out.shapes[idx] = vectorShape(vd);
+                } else {
+                    out.shapes[idx] = scalarShape();
+                }
                 break;
             }
 
@@ -997,7 +1144,8 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                            int boundary_marker,
                                            int interface_marker,
                                            std::string_view symbol,
-                                           std::uintptr_t& out_address) const
+                                           std::uintptr_t& out_address,
+                                           const JITCompileSpecialization* specialization) const
 {
     (void)engine;
     (void)ir;
@@ -1006,6 +1154,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
     (void)boundary_marker;
     (void)interface_marker;
     (void)symbol;
+    (void)specialization;
     out_address = 0;
 
 #if !SVMP_FE_ENABLE_LLVM_JIT
@@ -1064,6 +1213,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                     tensor_opts.enable_cache = false;
                     tensor_opts.force_loop_nest =
                         (options_.tensor.mode == TensorLoweringMode::On) || options_.tensor.force_loop_nest;
+                    tensor_opts.log_decisions = options_.tensor.log_decisions;
 
                     tensor_opts.loop.enable_symmetry_lowering = options_.tensor.enable_symmetry_lowering;
                     tensor_opts.loop.enable_optimal_contraction_order = options_.tensor.enable_optimal_contraction_order;
@@ -1130,8 +1280,9 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                 }
                 if (op.type == FormExprType::TimeDerivative) {
                     const int order = static_cast<int>(static_cast<std::int64_t>(op.imm0));
-                    if (order < 1 || order > 2) {
-                        return LLVMGenResult{.ok = false, .message = "LLVMGen: dt(·,k) currently supports k=1 or k=2 only"};
+                    if (order < 1 || order > static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV4)) {
+                        return LLVMGenResult{.ok = false, .message = "LLVMGen: dt(·,k) requires 1 <= k <= " +
+                                                                       std::to_string(assembly::jit::kMaxTimeDerivativeOrderV4)};
                     }
                 }
             }
@@ -1537,6 +1688,58 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
         auto eig_sym_ddA_3x3_fn =
             module->getOrInsertFunction("svmp_fe_sym_eigenvalue_ddA_3x3_v1", f64, f64_ptr, f64_ptr, f64_ptr, i32);
 
+        // Symmetric eigendecomposition helpers (eigenvalues + eigenvectors; cacheable).
+        auto eig_sym_full_2x2_fn =
+            module->getOrInsertFunction("svmp_fe_jit_eig_sym_2x2_v1", builder.getVoidTy(), f64_ptr, f64_ptr, f64_ptr);
+        auto eig_sym_full_3x3_fn =
+            module->getOrInsertFunction("svmp_fe_jit_eig_sym_3x3_v1", builder.getVoidTy(), f64_ptr, f64_ptr, f64_ptr);
+
+        // Matrix function helpers (small 2x2/3x3; versioned symbols).
+        auto mat_exp_2x2_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_exp_2x2_v1", builder.getVoidTy(), f64_ptr, f64_ptr);
+        auto mat_exp_3x3_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_exp_3x3_v1", builder.getVoidTy(), f64_ptr, f64_ptr);
+        auto mat_log_2x2_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_log_2x2_v1", builder.getVoidTy(), f64_ptr, f64_ptr);
+        auto mat_log_3x3_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_log_3x3_v1", builder.getVoidTy(), f64_ptr, f64_ptr);
+        auto mat_sqrt_2x2_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_sqrt_2x2_v1", builder.getVoidTy(), f64_ptr, f64_ptr);
+        auto mat_sqrt_3x3_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_sqrt_3x3_v1", builder.getVoidTy(), f64_ptr, f64_ptr);
+        auto mat_pow_2x2_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_pow_2x2_v1", builder.getVoidTy(), f64_ptr, f64, f64_ptr);
+        auto mat_pow_3x3_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_pow_3x3_v1", builder.getVoidTy(), f64_ptr, f64, f64_ptr);
+
+        // Matrix function directional derivatives (Fréchet derivatives).
+        auto mat_exp_dd_2x2_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_exp_dd_2x2_v1", builder.getVoidTy(), f64_ptr, f64_ptr, f64_ptr);
+        auto mat_exp_dd_3x3_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_exp_dd_3x3_v1", builder.getVoidTy(), f64_ptr, f64_ptr, f64_ptr);
+        auto mat_log_dd_2x2_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_log_dd_2x2_v1", builder.getVoidTy(), f64_ptr, f64_ptr, f64_ptr);
+        auto mat_log_dd_3x3_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_log_dd_3x3_v1", builder.getVoidTy(), f64_ptr, f64_ptr, f64_ptr);
+        auto mat_sqrt_dd_2x2_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_sqrt_dd_2x2_v1", builder.getVoidTy(), f64_ptr, f64_ptr, f64_ptr);
+        auto mat_sqrt_dd_3x3_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_sqrt_dd_3x3_v1", builder.getVoidTy(), f64_ptr, f64_ptr, f64_ptr);
+        auto mat_pow_dd_2x2_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_pow_dd_2x2_v1", builder.getVoidTy(), f64_ptr, f64_ptr, f64, f64_ptr);
+        auto mat_pow_dd_3x3_fn =
+            module->getOrInsertFunction("svmp_fe_jit_matrix_pow_dd_3x3_v1", builder.getVoidTy(), f64_ptr, f64_ptr, f64, f64_ptr);
+
+        // Symmetric eigen operator directional derivatives.
+        auto eigvec_sym_dd_2x2_fn =
+            module->getOrInsertFunction("svmp_fe_jit_eigvec_sym_dd_2x2_v1", builder.getVoidTy(), f64_ptr, f64_ptr, i32, f64_ptr);
+        auto eigvec_sym_dd_3x3_fn =
+            module->getOrInsertFunction("svmp_fe_jit_eigvec_sym_dd_3x3_v1", builder.getVoidTy(), f64_ptr, f64_ptr, i32, f64_ptr);
+        auto spectral_decomp_dd_2x2_fn =
+            module->getOrInsertFunction("svmp_fe_jit_spectral_decomp_dd_2x2_v1", builder.getVoidTy(), f64_ptr, f64_ptr, f64_ptr);
+        auto spectral_decomp_dd_3x3_fn =
+            module->getOrInsertFunction("svmp_fe_jit_spectral_decomp_dd_3x3_v1", builder.getVoidTy(), f64_ptr, f64_ptr, f64_ptr);
+
         auto f64c = [&](double v) -> llvm::Constant* {
             return llvm::ConstantFP::get(f64, v);
         };
@@ -1610,27 +1813,32 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
             llvm::Value* time{nullptr};
             llvm::Value* dt{nullptr};
-            llvm::Value* dt1_coeff0{nullptr};
-            llvm::Value* dt2_coeff0{nullptr};
 
             llvm::Value* time_derivative_term_weight{nullptr};
             llvm::Value* non_time_derivative_term_weight{nullptr};
-            llvm::Value* dt1_term_weight{nullptr};
-            llvm::Value* dt2_term_weight{nullptr};
+            llvm::Value* dt_stencil_coeffs_base{nullptr}; // f64*
+            llvm::Value* dt_term_weights_base{nullptr};   // f64*
+            llvm::Value* max_time_derivative_order{nullptr}; // i32
 
             llvm::Value* material_state_old_base{nullptr};
             llvm::Value* material_state_work_base{nullptr};
             llvm::Value* material_state_stride_bytes{nullptr};
         };
 
-        auto loadSideView = [&](llvm::Value* side_ptr) -> SideView {
+        auto loadSideView = [&](llvm::Value* side_ptr,
+                                const std::optional<std::uint32_t>& fixed_n_qpts,
+                                const std::optional<std::uint32_t>& fixed_n_test_dofs,
+                                const std::optional<std::uint32_t>& fixed_n_trial_dofs) -> SideView {
             SideView s;
             s.side_ptr = side_ptr;
 
             s.dim = loadU32(side_ptr, ABIV3::side_dim_off);
-            s.n_qpts = loadU32(side_ptr, ABIV3::side_n_qpts_off);
-            s.n_test_dofs = loadU32(side_ptr, ABIV3::side_n_test_dofs_off);
-            s.n_trial_dofs = loadU32(side_ptr, ABIV3::side_n_trial_dofs_off);
+            s.n_qpts = fixed_n_qpts ? builder.getInt32(*fixed_n_qpts)
+                                    : loadU32(side_ptr, ABIV3::side_n_qpts_off);
+            s.n_test_dofs = fixed_n_test_dofs ? builder.getInt32(*fixed_n_test_dofs)
+                                              : loadU32(side_ptr, ABIV3::side_n_test_dofs_off);
+            s.n_trial_dofs = fixed_n_trial_dofs ? builder.getInt32(*fixed_n_trial_dofs)
+                                                : loadU32(side_ptr, ABIV3::side_n_trial_dofs_off);
 
             s.test_field_type = loadU32(side_ptr, ABIV3::side_test_field_type_off);
             s.trial_field_type = loadU32(side_ptr, ABIV3::side_trial_field_type_off);
@@ -1680,13 +1888,14 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
             s.time = loadF64(side_ptr, ABIV3::side_time_off);
             s.dt = loadF64(side_ptr, ABIV3::side_dt_off);
-            s.dt1_coeff0 = loadF64(side_ptr, ABIV3::side_dt1_coeff0_off);
-            s.dt2_coeff0 = loadF64(side_ptr, ABIV3::side_dt2_coeff0_off);
 
             s.time_derivative_term_weight = loadF64(side_ptr, ABIV3::side_time_derivative_term_weight_off);
             s.non_time_derivative_term_weight = loadF64(side_ptr, ABIV3::side_non_time_derivative_term_weight_off);
-            s.dt1_term_weight = loadF64(side_ptr, ABIV3::side_dt1_term_weight_off);
-            s.dt2_term_weight = loadF64(side_ptr, ABIV3::side_dt2_term_weight_off);
+            s.dt_stencil_coeffs_base =
+                builder.CreatePointerCast(gepBytes(side_ptr, ABIV3::side_dt_stencil_coeffs_off), f64_ptr);
+            s.dt_term_weights_base =
+                builder.CreatePointerCast(gepBytes(side_ptr, ABIV3::side_dt_term_weights_off), f64_ptr);
+            s.max_time_derivative_order = loadU32(side_ptr, ABIV3::side_max_time_derivative_order_off);
 
             s.material_state_old_base = loadPtr(side_ptr, ABIV3::side_material_state_old_base_off);
             s.material_state_work_base = loadPtr(side_ptr, ABIV3::side_material_state_work_base_off);
@@ -1694,11 +1903,24 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             return s;
         };
 
-        const bool is_face_domain = (domain == IntegralDomain::InteriorFace || domain == IntegralDomain::InterfaceFace);
+	        const bool is_face_domain = (domain == IntegralDomain::InteriorFace || domain == IntegralDomain::InterfaceFace);
+	        const std::optional<std::uint32_t> fixed_n_qpts_minus =
+	            (specialization != nullptr) ? specialization->n_qpts_minus : std::optional<std::uint32_t>{};
+	        const std::optional<std::uint32_t> fixed_n_test_dofs_minus =
+	            (specialization != nullptr) ? specialization->n_test_dofs_minus : std::optional<std::uint32_t>{};
+	        const std::optional<std::uint32_t> fixed_n_trial_dofs_minus =
+	            (specialization != nullptr) ? specialization->n_trial_dofs_minus : std::optional<std::uint32_t>{};
 
-        SideView side_single{};
-        SideView side_minus{};
-        SideView side_plus{};
+	        const std::optional<std::uint32_t> fixed_n_qpts_plus =
+	            (specialization != nullptr) ? specialization->n_qpts_plus : std::optional<std::uint32_t>{};
+	        const std::optional<std::uint32_t> fixed_n_test_dofs_plus =
+	            (specialization != nullptr) ? specialization->n_test_dofs_plus : std::optional<std::uint32_t>{};
+	        const std::optional<std::uint32_t> fixed_n_trial_dofs_plus =
+	            (specialization != nullptr) ? specialization->n_trial_dofs_plus : std::optional<std::uint32_t>{};
+
+	        SideView side_single{};
+	        SideView side_minus{};
+	        SideView side_plus{};
 
         llvm::Value* out_single_ptr = nullptr;
         llvm::Value* out_minus_ptr = nullptr;
@@ -1711,20 +1933,22 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
         if (!is_face_domain) {
             const std::size_t side_off = (domain == IntegralDomain::Cell) ? ABIV3::cell_side_off : ABIV3::bdry_side_off;
-            const std::size_t out_off = (domain == IntegralDomain::Cell) ? ABIV3::cell_out_off : ABIV3::bdry_out_off;
+	            const std::size_t out_off = (domain == IntegralDomain::Cell) ? ABIV3::cell_out_off : ABIV3::bdry_out_off;
 
-            auto* side_ptr = gepBytes(args_ptr, side_off);
-            out_single_ptr = gepBytes(args_ptr, out_off);
-            side_single = loadSideView(side_ptr);
+	            auto* side_ptr = gepBytes(args_ptr, side_off);
+	            out_single_ptr = gepBytes(args_ptr, out_off);
+	            side_single = loadSideView(side_ptr, fixed_n_qpts_minus, fixed_n_test_dofs_minus, fixed_n_trial_dofs_minus);
 
-            element_matrix_single = loadPtr(out_single_ptr, ABIV3::out_element_matrix_off);
-            element_vector_single = loadPtr(out_single_ptr, ABIV3::out_element_vector_off);
-        } else {
+	            element_matrix_single = loadPtr(out_single_ptr, ABIV3::out_element_matrix_off);
+	            element_vector_single = loadPtr(out_single_ptr, ABIV3::out_element_vector_off);
+	        } else {
             auto* minus_ptr = gepBytes(args_ptr, ABIV3::face_minus_side_off);
             auto* plus_ptr = gepBytes(args_ptr, ABIV3::face_plus_side_off);
 
-            side_minus = loadSideView(minus_ptr);
-            side_plus = loadSideView(plus_ptr);
+	            side_minus =
+	                loadSideView(minus_ptr, fixed_n_qpts_minus, fixed_n_test_dofs_minus, fixed_n_trial_dofs_minus);
+	            side_plus =
+	                loadSideView(plus_ptr, fixed_n_qpts_plus, fixed_n_test_dofs_plus, fixed_n_trial_dofs_plus);
 
             out_minus_ptr = gepBytes(args_ptr, ABIV3::face_out_minus_off);
             out_plus_ptr = gepBytes(args_ptr, ABIV3::face_out_plus_off);
@@ -1732,13 +1956,13 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             out_coupling_pm_ptr = gepBytes(args_ptr, ABIV3::face_coupling_plus_minus_off);
         }
 
-        auto emitForLoop = [&](llvm::Value* end,
-                               std::string_view name,
-                               const auto& body_fn) -> void {
-            auto* pre = builder.GetInsertBlock();
-            auto* header = llvm::BasicBlock::Create(*ctx, std::string(name) + ".hdr", fn);
-            auto* body = llvm::BasicBlock::Create(*ctx, std::string(name) + ".body", fn);
-            auto* exit = llvm::BasicBlock::Create(*ctx, std::string(name) + ".exit", fn);
+	        auto emitForLoop = [&](llvm::Value* end,
+	                               std::string_view name,
+	                               const auto& body_fn) -> void {
+	            auto* pre = builder.GetInsertBlock();
+	            auto* header = llvm::BasicBlock::Create(*ctx, std::string(name) + ".hdr", fn);
+	            auto* body = llvm::BasicBlock::Create(*ctx, std::string(name) + ".body", fn);
+	            auto* exit = llvm::BasicBlock::Create(*ctx, std::string(name) + ".exit", fn);
 
             builder.CreateBr(header);
             builder.SetInsertPoint(header);
@@ -1749,16 +1973,32 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             auto* cond = builder.CreateICmpULT(idx_phi, end);
             builder.CreateCondBr(cond, body, exit);
 
-            builder.SetInsertPoint(body);
-            body_fn(idx_phi);
+	            builder.SetInsertPoint(body);
+	            body_fn(idx_phi);
 
-            auto* body_end = builder.GetInsertBlock();
-            auto* next = builder.CreateAdd(idx_phi, builder.getInt32(1));
-            builder.CreateBr(header);
-            idx_phi->addIncoming(next, body_end);
+	            auto* body_end = builder.GetInsertBlock();
+	            auto* next = builder.CreateAdd(idx_phi, builder.getInt32(1));
+	            auto* backedge = builder.CreateBr(header);
+	            if (options_.specialization.enable_loop_unroll_metadata) {
+	                if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(end)) {
+	                    const auto trip = c->getZExtValue();
+	                    if (trip > 0u &&
+	                        trip <= static_cast<std::uint64_t>(options_.specialization.max_unroll_trip_count)) {
+	                        llvm::SmallVector<llvm::Metadata*, 4> md_args;
+	                        llvm::TempMDNode tmp = llvm::MDNode::getTemporary(*ctx, {});
+	                        md_args.push_back(tmp.get());
+	                        md_args.push_back(llvm::MDNode::get(
+	                            *ctx, {llvm::MDString::get(*ctx, "llvm.loop.unroll.full")}));
+	                        auto* loop_id = llvm::MDNode::get(*ctx, md_args);
+	                        loop_id->replaceOperandWith(0, loop_id);
+	                        backedge->setMetadata("llvm.loop", loop_id);
+	                    }
+	                }
+	            }
+	            idx_phi->addIncoming(next, body_end);
 
-            builder.SetInsertPoint(exit);
-        };
+	            builder.SetInsertPoint(exit);
+	        };
 
         auto emitReduceSum = [&](llvm::Value* end,
                                  std::string_view name,
@@ -1801,14 +2041,30 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             builder.SetInsertPoint(latch);
             auto* idx_next = builder.CreateAdd(idx_phi, builder.getInt32(1));
             idx_phi->addIncoming(idx_next, latch);
-            for (std::size_t k = 0; k < n_acc; ++k) {
-                auto* next = builder.CreateFAdd(acc_phi[k], terms[k]);
-                acc_phi[k]->addIncoming(next, latch);
-            }
-            builder.CreateBr(header);
+	            for (std::size_t k = 0; k < n_acc; ++k) {
+	                auto* next = builder.CreateFAdd(acc_phi[k], terms[k]);
+	                acc_phi[k]->addIncoming(next, latch);
+	            }
+	            auto* backedge = builder.CreateBr(header);
+	            if (options_.specialization.enable_loop_unroll_metadata) {
+	                if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(end)) {
+	                    const auto trip = c->getZExtValue();
+	                    if (trip > 0u &&
+	                        trip <= static_cast<std::uint64_t>(options_.specialization.max_unroll_trip_count)) {
+	                        llvm::SmallVector<llvm::Metadata*, 4> md_args;
+	                        llvm::TempMDNode tmp = llvm::MDNode::getTemporary(*ctx, {});
+	                        md_args.push_back(tmp.get());
+	                        md_args.push_back(llvm::MDNode::get(
+	                            *ctx, {llvm::MDString::get(*ctx, "llvm.loop.unroll.full")}));
+	                        auto* loop_id = llvm::MDNode::get(*ctx, md_args);
+	                        loop_id->replaceOperandWith(0, loop_id);
+	                        backedge->setMetadata("llvm.loop", loop_id);
+	                    }
+	                }
+	            }
 
-            builder.SetInsertPoint(exit);
-            std::vector<llvm::Value*> out;
+	            builder.SetInsertPoint(exit);
+	            std::vector<llvm::Value*> out;
             out.reserve(n_acc);
             for (std::size_t k = 0; k < n_acc; ++k) {
                 out.push_back(acc_phi[k]);
@@ -1853,15 +2109,15 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             auto* td = side.time_derivative_term_weight;
             auto* non_td = side.non_time_derivative_term_weight;
 
-            if (time_derivative_order == 1) {
-                return builder.CreateFMul(td, side.dt1_term_weight);
-            }
-            if (time_derivative_order == 2) {
-                return builder.CreateFMul(td, side.dt2_term_weight);
-            }
             if (time_derivative_order > 0) {
+                const int idx = time_derivative_order - 1;
+                if (idx >= 0 && idx < static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV4)) {
+                    auto* w = loadRealPtrAt(side.dt_term_weights_base, builder.getInt64(static_cast<std::uint64_t>(idx)));
+                    return builder.CreateFMul(td, w);
+                }
                 return td;
             }
+
             return non_td;
         };
 
@@ -2516,6 +2772,259 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             return builder.CreatePointerCast(alloca, f64_ptr);
         };
 
+        auto callMatrixUnary = [&](const CodeValue& a,
+                                   llvm::FunctionCallee fn2x2,
+                                   llvm::FunctionCallee fn3x3) -> CodeValue {
+            if (a.shape.kind != Shape::Kind::Matrix || a.shape.dims[0] != a.shape.dims[1]) {
+                throw std::runtime_error("LLVMGen: matrix function expects square matrix");
+            }
+            const auto n = static_cast<std::size_t>(a.shape.dims[0]);
+            if (n != 2u && n != 3u) {
+                throw std::runtime_error("LLVMGen: matrix function supports only 2x2 and 3x3 matrices");
+            }
+
+            auto* aptr = storeMatrixToStack(a);
+            auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
+            auto* out_alloca = builder.CreateAlloca(out_arr_ty);
+            auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
+
+            auto callee = (n == 2u) ? fn2x2 : fn3x3;
+            builder.CreateCall(callee, {aptr, out_ptr});
+
+            CodeValue out = makeMatrix(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n));
+            for (std::size_t i = 0; i < n * n; ++i) {
+                out.elems[i] = loadRealPtrAt(out_ptr, builder.getInt64(i));
+            }
+            return out;
+        };
+
+        auto callMatrixPow = [&](const CodeValue& a,
+                                 llvm::Value* p,
+                                 llvm::FunctionCallee fn2x2,
+                                 llvm::FunctionCallee fn3x3) -> CodeValue {
+            if (a.shape.kind != Shape::Kind::Matrix || a.shape.dims[0] != a.shape.dims[1]) {
+                throw std::runtime_error("LLVMGen: matrix pow expects square matrix");
+            }
+            const auto n = static_cast<std::size_t>(a.shape.dims[0]);
+            if (n != 2u && n != 3u) {
+                throw std::runtime_error("LLVMGen: matrix pow supports only 2x2 and 3x3 matrices");
+            }
+
+            auto* aptr = storeMatrixToStack(a);
+            auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
+            auto* out_alloca = builder.CreateAlloca(out_arr_ty);
+            auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
+
+            auto callee = (n == 2u) ? fn2x2 : fn3x3;
+            builder.CreateCall(callee, {aptr, p, out_ptr});
+
+            CodeValue out = makeMatrix(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n));
+            for (std::size_t i = 0; i < n * n; ++i) {
+                out.elems[i] = loadRealPtrAt(out_ptr, builder.getInt64(i));
+            }
+            return out;
+        };
+
+        auto callMatrixUnaryDD = [&](const CodeValue& a,
+                                     const CodeValue& da,
+                                     llvm::FunctionCallee fn2x2,
+                                     llvm::FunctionCallee fn3x3) -> CodeValue {
+            if (a.shape.kind != Shape::Kind::Matrix || da.shape.kind != Shape::Kind::Matrix ||
+                a.shape.dims[0] != a.shape.dims[1] || da.shape.dims[0] != da.shape.dims[1] ||
+                a.shape.dims[0] != da.shape.dims[0]) {
+                throw std::runtime_error("LLVMGen: matrix function directional derivative expects matching square matrices");
+            }
+            const auto n = static_cast<std::size_t>(a.shape.dims[0]);
+            if (n != 2u && n != 3u) {
+                throw std::runtime_error("LLVMGen: matrix function directional derivative supports only 2x2 and 3x3 matrices");
+            }
+
+            auto* aptr = storeMatrixToStack(a);
+            auto* daptr = storeMatrixToStack(da);
+            auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
+            auto* out_alloca = builder.CreateAlloca(out_arr_ty);
+            auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
+
+            auto callee = (n == 2u) ? fn2x2 : fn3x3;
+            builder.CreateCall(callee, {aptr, daptr, out_ptr});
+
+            CodeValue out = makeMatrix(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n));
+            for (std::size_t i = 0; i < n * n; ++i) {
+                out.elems[i] = loadRealPtrAt(out_ptr, builder.getInt64(i));
+            }
+            return out;
+        };
+
+        auto callMatrixPowDD = [&](const CodeValue& a,
+                                   const CodeValue& da,
+                                   llvm::Value* p,
+                                   llvm::FunctionCallee fn2x2,
+                                   llvm::FunctionCallee fn3x3) -> CodeValue {
+            if (a.shape.kind != Shape::Kind::Matrix || da.shape.kind != Shape::Kind::Matrix ||
+                a.shape.dims[0] != a.shape.dims[1] || da.shape.dims[0] != da.shape.dims[1] ||
+                a.shape.dims[0] != da.shape.dims[0]) {
+                throw std::runtime_error("LLVMGen: matrix pow directional derivative expects matching square matrices");
+            }
+            const auto n = static_cast<std::size_t>(a.shape.dims[0]);
+            if (n != 2u && n != 3u) {
+                throw std::runtime_error("LLVMGen: matrix pow directional derivative supports only 2x2 and 3x3 matrices");
+            }
+
+            auto* aptr = storeMatrixToStack(a);
+            auto* daptr = storeMatrixToStack(da);
+            auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
+            auto* out_alloca = builder.CreateAlloca(out_arr_ty);
+            auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
+
+            auto callee = (n == 2u) ? fn2x2 : fn3x3;
+            builder.CreateCall(callee, {aptr, daptr, p, out_ptr});
+
+            CodeValue out = makeMatrix(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n));
+            for (std::size_t i = 0; i < n * n; ++i) {
+                out.elems[i] = loadRealPtrAt(out_ptr, builder.getInt64(i));
+            }
+            return out;
+        };
+
+        auto eigSymVecDD = [&](const CodeValue& a, const CodeValue& da, std::uint32_t which) -> CodeValue {
+            if (a.shape.kind != Shape::Kind::Matrix || da.shape.kind != Shape::Kind::Matrix ||
+                a.shape.dims[0] != a.shape.dims[1] || da.shape.dims[0] != da.shape.dims[1] ||
+                a.shape.dims[0] != da.shape.dims[0]) {
+                throw std::runtime_error("LLVMGen: eigvec_sym_dd expects matching square matrices");
+            }
+            const auto n = static_cast<std::size_t>(a.shape.dims[0]);
+            if (n != 2u && n != 3u) {
+                throw std::runtime_error("LLVMGen: eigvec_sym_dd supports only 2x2 and 3x3 matrices");
+            }
+            auto* aptr = storeMatrixToStack(a);
+            auto* daptr = storeMatrixToStack(da);
+
+            auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n));
+            auto* out_alloca = builder.CreateAlloca(out_arr_ty);
+            auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
+
+            auto callee = (n == 2u) ? eigvec_sym_dd_2x2_fn : eigvec_sym_dd_3x3_fn;
+            builder.CreateCall(callee, {aptr, daptr, builder.getInt32(which), out_ptr});
+
+            CodeValue out = makeZero(vectorShape(static_cast<std::uint32_t>(n)));
+            for (std::size_t r = 0; r < n; ++r) {
+                out.elems[r] = loadRealPtrAt(out_ptr, builder.getInt64(r));
+            }
+            return out;
+        };
+
+        auto spectralDecompDD = [&](const CodeValue& a, const CodeValue& da) -> CodeValue {
+            if (a.shape.kind != Shape::Kind::Matrix || da.shape.kind != Shape::Kind::Matrix ||
+                a.shape.dims[0] != a.shape.dims[1] || da.shape.dims[0] != da.shape.dims[1] ||
+                a.shape.dims[0] != da.shape.dims[0]) {
+                throw std::runtime_error("LLVMGen: spectral_decomp_dd expects matching square matrices");
+            }
+            const auto n = static_cast<std::size_t>(a.shape.dims[0]);
+            if (n != 2u && n != 3u) {
+                throw std::runtime_error("LLVMGen: spectral_decomp_dd supports only 2x2 and 3x3 matrices");
+            }
+
+            auto* aptr = storeMatrixToStack(a);
+            auto* daptr = storeMatrixToStack(da);
+            auto* out_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
+            auto* out_alloca = builder.CreateAlloca(out_arr_ty);
+            auto* out_ptr = builder.CreatePointerCast(out_alloca, f64_ptr);
+
+            auto callee = (n == 2u) ? spectral_decomp_dd_2x2_fn : spectral_decomp_dd_3x3_fn;
+            builder.CreateCall(callee, {aptr, daptr, out_ptr});
+
+            CodeValue out = makeMatrix(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n));
+            for (std::size_t i = 0; i < n * n; ++i) {
+                out.elems[i] = loadRealPtrAt(out_ptr, builder.getInt64(i));
+            }
+            return out;
+        };
+
+        auto eigSymVec = [&](const CodeValue& a, std::uint32_t which) -> CodeValue {
+            if (a.shape.kind != Shape::Kind::Matrix || a.shape.dims[0] != a.shape.dims[1]) {
+                throw std::runtime_error("LLVMGen: eigvec_sym expects square matrix");
+            }
+            const auto n = static_cast<std::size_t>(a.shape.dims[0]);
+            if (n != 2u && n != 3u) {
+                throw std::runtime_error("LLVMGen: eigvec_sym supports only 2x2 and 3x3 matrices");
+            }
+            auto* aptr = storeMatrixToStack(a);
+            auto* evals_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n));
+            auto* evecs_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
+            auto* evals_alloca = builder.CreateAlloca(evals_arr_ty);
+            auto* evecs_alloca = builder.CreateAlloca(evecs_arr_ty);
+            auto* evals_ptr = builder.CreatePointerCast(evals_alloca, f64_ptr);
+            auto* evecs_ptr = builder.CreatePointerCast(evecs_alloca, f64_ptr);
+            auto callee = (n == 2u) ? eig_sym_full_2x2_fn : eig_sym_full_3x3_fn;
+            builder.CreateCall(callee, {aptr, evals_ptr, evecs_ptr});
+
+            const auto ww = std::min<std::uint32_t>(which, static_cast<std::uint32_t>(n > 0u ? (n - 1u) : 0u));
+            CodeValue out = makeZero(vectorShape(static_cast<std::uint32_t>(n)));
+            for (std::size_t r = 0; r < n; ++r) {
+                const auto idx = r * n + static_cast<std::size_t>(ww);
+                out.elems[r] = loadRealPtrAt(evecs_ptr, builder.getInt64(idx));
+            }
+            return out;
+        };
+
+        auto spectralDecomp = [&](const CodeValue& a) -> CodeValue {
+            if (a.shape.kind != Shape::Kind::Matrix || a.shape.dims[0] != a.shape.dims[1]) {
+                throw std::runtime_error("LLVMGen: spectral_decomp expects square matrix");
+            }
+            const auto n = static_cast<std::size_t>(a.shape.dims[0]);
+            if (n != 2u && n != 3u) {
+                throw std::runtime_error("LLVMGen: spectral_decomp supports only 2x2 and 3x3 matrices");
+            }
+            auto* aptr = storeMatrixToStack(a);
+            auto* evals_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n));
+            auto* evecs_arr_ty = llvm::ArrayType::get(f64, static_cast<std::uint32_t>(n * n));
+            auto* evals_alloca = builder.CreateAlloca(evals_arr_ty);
+            auto* evecs_alloca = builder.CreateAlloca(evecs_arr_ty);
+            auto* evals_ptr = builder.CreatePointerCast(evals_alloca, f64_ptr);
+            auto* evecs_ptr = builder.CreatePointerCast(evecs_alloca, f64_ptr);
+            auto callee = (n == 2u) ? eig_sym_full_2x2_fn : eig_sym_full_3x3_fn;
+            builder.CreateCall(callee, {aptr, evals_ptr, evecs_ptr});
+
+            CodeValue out = makeMatrix(static_cast<std::uint32_t>(n), static_cast<std::uint32_t>(n));
+            for (std::size_t i = 0; i < n * n; ++i) {
+                out.elems[i] = loadRealPtrAt(evecs_ptr, builder.getInt64(i));
+            }
+            return out;
+        };
+
+        auto smoothAbs = [&](const CodeValue& x, const CodeValue& eps) -> CodeValue {
+            if (x.shape.kind != Shape::Kind::Scalar || eps.shape.kind != Shape::Kind::Scalar) {
+                throw std::runtime_error("LLVMGen: smooth_abs expects scalars");
+            }
+            auto* xx = builder.CreateFMul(x.elems[0], x.elems[0]);
+            auto* ee = builder.CreateFMul(eps.elems[0], eps.elems[0]);
+            return makeScalar(f_sqrt(builder.CreateFAdd(xx, ee)));
+        };
+
+        auto smoothSign = [&](const CodeValue& x, const CodeValue& eps) -> CodeValue {
+            const auto denom = smoothAbs(x, eps);
+            return makeScalar(builder.CreateFDiv(x.elems[0], denom.elems[0]));
+        };
+
+        auto smoothHeaviside = [&](const CodeValue& x, const CodeValue& eps) -> CodeValue {
+            const auto s = smoothSign(x, eps);
+            return makeScalar(builder.CreateFMul(f64c(0.5), builder.CreateFAdd(f64c(1.0), s.elems[0])));
+        };
+
+        auto smoothMin = [&](const CodeValue& a, const CodeValue& b, const CodeValue& eps) -> CodeValue {
+            auto* diff = builder.CreateFSub(a.elems[0], b.elems[0]);
+            const auto ad = smoothAbs(makeScalar(diff), eps);
+            auto* sum = builder.CreateFAdd(a.elems[0], b.elems[0]);
+            return makeScalar(builder.CreateFMul(f64c(0.5), builder.CreateFSub(sum, ad.elems[0])));
+        };
+
+        auto smoothMax = [&](const CodeValue& a, const CodeValue& b, const CodeValue& eps) -> CodeValue {
+            auto* diff = builder.CreateFSub(a.elems[0], b.elems[0]);
+            const auto ad = smoothAbs(makeScalar(diff), eps);
+            auto* sum = builder.CreateFAdd(a.elems[0], b.elems[0]);
+            return makeScalar(builder.CreateFMul(f64c(0.5), builder.CreateFAdd(sum, ad.elems[0])));
+        };
+
         auto eigSym = [&](const CodeValue& a, std::uint32_t which) -> CodeValue {
             if (a.shape.kind != Shape::Kind::Matrix || a.shape.dims[0] != a.shape.dims[1]) {
                 throw std::runtime_error("LLVMGen: eig_sym expects square matrix");
@@ -2769,17 +3278,31 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             builder.CreateStore(value, addr);
         };
 
+        constexpr std::uint64_t kDtCoeffStride =
+            static_cast<std::uint64_t>(assembly::jit::kMaxPreviousSolutionsV4 + 1u);
+
+        auto loadDtCoeff = [&](const SideView& side, int order, int history_index) -> llvm::Value* {
+            if (order < 1 || order > static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV4)) {
+                return f64c(0.0);
+            }
+            if (history_index < 0 || history_index > static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4)) {
+                return f64c(0.0);
+            }
+            const std::uint64_t idx =
+                static_cast<std::uint64_t>(static_cast<std::int64_t>(order - 1)) * kDtCoeffStride +
+                static_cast<std::uint64_t>(static_cast<std::int64_t>(history_index));
+            return loadRealPtrAt(side.dt_stencil_coeffs_base, builder.getInt64(idx));
+        };
+
         auto loadEffectiveDt = [&](const SideView& side) -> llvm::Value* {
-            auto* a0 = side.dt1_coeff0;
+            auto* a0 = loadDtCoeff(side, /*order=*/1, /*history_index=*/0);
             auto* is_zero = builder.CreateFCmpOEQ(a0, f64c(0.0));
             auto* inv_abs = builder.CreateFDiv(f64c(1.0), f_fabs(a0));
             return builder.CreateSelect(is_zero, side.dt, inv_abs);
         };
 
         auto loadDtCoeff0 = [&](const SideView& side, int order) -> llvm::Value* {
-            if (order == 1) return side.dt1_coeff0;
-            if (order == 2) return side.dt2_coeff0;
-            return f64c(0.0);
+            return loadDtCoeff(side, order, /*history_index=*/0);
         };
 
         auto loadPrevSolutionCoeffsPtr = [&](const SideView& side, int k) -> llvm::Value* {
@@ -3187,6 +3710,99 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             }
 
             throw std::runtime_error("LLVMGen: DiscreteField/StateField unsupported shape");
+        };
+
+        auto evalDiscreteOrStateFieldHistoryK = [&](const SideView& side,
+                                                    bool plus_side,
+                                                    const Shape& out_shape,
+                                                    int fid,
+                                                    int k,
+                                                    llvm::Value* q_index) -> CodeValue {
+            auto* entry = fieldEntryPtrFor(plus_side, fid);
+            auto* entry_is_null = builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+
+            const std::string tag =
+                std::string("field_hist") + (plus_side ? "_p" : "_m") + "_f" + std::to_string(fid) + "_k" + std::to_string(k);
+
+            auto* ok_entry = llvm::BasicBlock::Create(*ctx, tag + ".entry.ok", fn);
+            auto* zero = llvm::BasicBlock::Create(*ctx, tag + ".zero", fn);
+            auto* merge = llvm::BasicBlock::Create(*ctx, tag + ".merge", fn);
+
+            builder.CreateCondBr(entry_is_null, zero, ok_entry);
+
+            builder.SetInsertPoint(ok_entry);
+            auto* history_count = loadU32(entry, ABIV3::field_entry_history_count_off);
+            auto* has_k = builder.CreateICmpUGE(history_count, builder.getInt32(static_cast<std::uint32_t>(k)));
+            auto* ok_k = llvm::BasicBlock::Create(*ctx, tag + ".k.ok", fn);
+            builder.CreateCondBr(has_k, ok_k, zero);
+
+            if (out_shape.kind == Shape::Kind::Scalar) {
+                llvm::Value* loaded = f64c(0.0);
+
+                builder.SetInsertPoint(ok_k);
+                auto* base = loadPtr(entry, ABIV3::field_entry_history_values_off);
+                auto* base_is_null = builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                auto* ok_base = llvm::BasicBlock::Create(*ctx, tag + ".base.ok", fn);
+                builder.CreateCondBr(base_is_null, zero, ok_base);
+
+                builder.SetInsertPoint(ok_base);
+                auto* k_minus1 = builder.getInt32(static_cast<std::uint32_t>(k - 1));
+                auto* off = builder.CreateMul(k_minus1, side.n_qpts);
+                auto* idx = builder.CreateAdd(off, q_index);
+                auto* idx64 = builder.CreateZExt(idx, i64);
+                loaded = loadRealPtrAt(base, idx64);
+                builder.CreateBr(merge);
+                auto* ok_block = builder.GetInsertBlock();
+
+                builder.SetInsertPoint(zero);
+                builder.CreateBr(merge);
+                auto* zero_block = builder.GetInsertBlock();
+
+                builder.SetInsertPoint(merge);
+                auto* phi = builder.CreatePHI(f64, 2, tag + ".phi");
+                phi->addIncoming(f64c(0.0), zero_block);
+                phi->addIncoming(loaded, ok_block);
+                return makeScalar(phi);
+            }
+
+            if (out_shape.kind == Shape::Kind::Vector) {
+                const auto vd = static_cast<std::size_t>(out_shape.dims[0]);
+                std::array<llvm::Value*, 3> loaded{f64c(0.0), f64c(0.0), f64c(0.0)};
+
+                builder.SetInsertPoint(ok_k);
+                auto* base = loadPtr(entry, ABIV3::field_entry_history_vector_values_xyz_off);
+                auto* base_is_null = builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                auto* ok_base = llvm::BasicBlock::Create(*ctx, tag + ".base.ok", fn);
+                builder.CreateCondBr(base_is_null, zero, ok_base);
+
+                builder.SetInsertPoint(ok_base);
+                auto* n_qpts64 = builder.CreateZExt(side.n_qpts, i64);
+                auto* scale = builder.getInt64(static_cast<std::uint64_t>(3u * static_cast<std::uint32_t>(k - 1)));
+                auto* off64 = builder.CreateMul(n_qpts64, scale);
+                auto* base_k = builder.CreateGEP(f64, base, off64);
+                const auto v = loadVec3FromQ(base_k, q_index);
+                for (std::size_t c = 0; c < vd; ++c) {
+                    loaded[c] = v[c];
+                }
+                builder.CreateBr(merge);
+                auto* ok_block = builder.GetInsertBlock();
+
+                builder.SetInsertPoint(zero);
+                builder.CreateBr(merge);
+                auto* zero_block = builder.GetInsertBlock();
+
+                builder.SetInsertPoint(merge);
+                CodeValue out = makeZero(out_shape);
+                for (std::size_t c = 0; c < vd; ++c) {
+                    auto* phi = builder.CreatePHI(f64, 2, tag + ".phi" + std::to_string(c));
+                    phi->addIncoming(f64c(0.0), zero_block);
+                    phi->addIncoming(loaded[c], ok_block);
+                    out.elems[c] = phi;
+                }
+                return out;
+            }
+
+            throw std::runtime_error("LLVMGen: DiscreteField/StateField history unsupported shape");
         };
 
         auto evalKernelIRSingleValue = [&](const LoweredTerm& term,
@@ -4682,8 +5298,28 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                     case FormExprType::TimeDerivative: {
                         const int order = static_cast<int>(static_cast<std::int64_t>(op.imm0));
-                        auto* coeff0 = loadDtCoeff0(side, order);
-                        values[op_idx] = mul(makeScalar(coeff0), getChild(op, 0));
+                        CodeValue acc = mul(makeScalar(loadDtCoeff(side, order, 0)), getChild(op, 0));
+
+                        const auto child_op_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
+                        const auto& kid = term.ir.ops[child_op_idx];
+                        if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
+                            const int fid = unpackFieldIdImm1(kid.imm1);
+                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                    acc = add(acc,
+                                              mul(makeScalar(loadDtCoeff(side, order, k)),
+                                                  evalPreviousSolution(side, shape, k, q_index)));
+                                }
+                            } else {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                    acc = add(acc,
+                                              mul(makeScalar(loadDtCoeff(side, order, k)),
+                                                  evalDiscreteOrStateFieldHistoryK(side, /*plus_side=*/false, shape, fid, k, q_index)));
+                                }
+                            }
+                        }
+
+                        values[op_idx] = acc;
                         break;
                     }
 
@@ -4956,10 +5592,130 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values[op_idx] = evalLog(getChild(op, 0));
                         break;
 
+                    case FormExprType::MatrixExponential:
+                        values[op_idx] = callMatrixUnary(getChild(op, 0), mat_exp_2x2_fn, mat_exp_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixLogarithm:
+                        values[op_idx] = callMatrixUnary(getChild(op, 0), mat_log_2x2_fn, mat_log_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixSqrt:
+                        values[op_idx] = callMatrixUnary(getChild(op, 0), mat_sqrt_2x2_fn, mat_sqrt_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixPower:
+                        values[op_idx] =
+                            callMatrixPow(getChild(op, 0), getChild(op, 1).elems[0], mat_pow_2x2_fn, mat_pow_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixExponentialDirectionalDerivative:
+                        values[op_idx] = callMatrixUnaryDD(getChild(op, 0), getChild(op, 1), mat_exp_dd_2x2_fn, mat_exp_dd_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixLogarithmDirectionalDerivative:
+                        values[op_idx] = callMatrixUnaryDD(getChild(op, 0), getChild(op, 1), mat_log_dd_2x2_fn, mat_log_dd_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixSqrtDirectionalDerivative:
+                        values[op_idx] = callMatrixUnaryDD(getChild(op, 0), getChild(op, 1), mat_sqrt_dd_2x2_fn, mat_sqrt_dd_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixPowerDirectionalDerivative:
+                        values[op_idx] = callMatrixPowDD(getChild(op, 0), getChild(op, 1), getChild(op, 2).elems[0], mat_pow_dd_2x2_fn, mat_pow_dd_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixExponentialDirectionalDerivative:
+                        values[op_idx] = callMatrixUnaryDD(getChild(op, 0), getChild(op, 1), mat_exp_dd_2x2_fn, mat_exp_dd_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixLogarithmDirectionalDerivative:
+                        values[op_idx] = callMatrixUnaryDD(getChild(op, 0), getChild(op, 1), mat_log_dd_2x2_fn, mat_log_dd_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixSqrtDirectionalDerivative:
+                        values[op_idx] = callMatrixUnaryDD(getChild(op, 0), getChild(op, 1), mat_sqrt_dd_2x2_fn, mat_sqrt_dd_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixPowerDirectionalDerivative:
+                        values[op_idx] = callMatrixPowDD(getChild(op, 0), getChild(op, 1), getChild(op, 2).elems[0], mat_pow_dd_2x2_fn, mat_pow_dd_3x3_fn);
+                        break;
+
+                    case FormExprType::SmoothAbsoluteValue:
+                        values[op_idx] = smoothAbs(getChild(op, 0), getChild(op, 1));
+                        break;
+
+                    case FormExprType::SmoothSign:
+                        values[op_idx] = smoothSign(getChild(op, 0), getChild(op, 1));
+                        break;
+
+                    case FormExprType::SmoothHeaviside:
+                        values[op_idx] = smoothHeaviside(getChild(op, 0), getChild(op, 1));
+                        break;
+
+                    case FormExprType::SmoothMin:
+                        values[op_idx] = smoothMin(getChild(op, 0), getChild(op, 1), getChild(op, 2));
+                        break;
+
+                    case FormExprType::SmoothMax:
+                        values[op_idx] = smoothMax(getChild(op, 0), getChild(op, 1), getChild(op, 2));
+                        break;
+
                     case FormExprType::SymmetricEigenvalue: {
                         const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
                         const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
                         values[op_idx] = eigSym(getChild(op, 0), which);
+                        break;
+                    }
+
+                    case FormExprType::Eigenvalue: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values[op_idx] = eigSym(getChild(op, 0), which);
+                        break;
+                    }
+
+                    case FormExprType::SymmetricEigenvector: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values[op_idx] = eigSymVec(getChild(op, 0), which);
+                        break;
+                    }
+
+                    case FormExprType::SpectralDecomposition:
+                        values[op_idx] = spectralDecomp(getChild(op, 0));
+                        break;
+
+                    case FormExprType::SymmetricEigenvectorDirectionalDerivative: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values[op_idx] = eigSymVecDD(getChild(op, 0), getChild(op, 1), which);
+                        break;
+                    }
+
+                    case FormExprType::SpectralDecompositionDirectionalDerivative:
+                        values[op_idx] = spectralDecompDD(getChild(op, 0), getChild(op, 1));
+                        break;
+
+                    case FormExprType::SymmetricEigenvectorDirectionalDerivative: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values[op_idx] = eigSymVecDD(getChild(op, 0), getChild(op, 1), which);
+                        break;
+                    }
+
+                    case FormExprType::SpectralDecompositionDirectionalDerivative:
+                        values[op_idx] = spectralDecompDD(getChild(op, 0), getChild(op, 1));
+                        break;
+
+                    case FormExprType::HistoryWeightedSum:
+                    case FormExprType::HistoryConvolution: {
+                        CodeValue acc = makeZero(shape);
+                        for (std::size_t kk = 0; kk < static_cast<std::size_t>(op.child_count); ++kk) {
+                            const int k = static_cast<int>(kk + 1u);
+                            acc = add(acc, mul(getChild(op, kk), evalPreviousSolution(side, shape, k, q_index)));
+                        }
+                        values[op_idx] = acc;
                         break;
                     }
 
@@ -5786,7 +6542,28 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                     case FormExprType::TimeDerivative: {
                         const int order = static_cast<int>(static_cast<std::int64_t>(op.imm0));
-                        values[op_idx] = mul(makeScalar(loadDtCoeff0(side, order)), getChild(op, 0));
+                        CodeValue acc = mul(makeScalar(loadDtCoeff(side, order, 0)), getChild(op, 0));
+
+                        const auto child_op_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
+                        const auto& kid = term.ir.ops[child_op_idx];
+                        if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
+                            const int fid = unpackFieldIdImm1(kid.imm1);
+                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                    acc = add(acc,
+                                              mul(makeScalar(loadDtCoeff(side, order, k)),
+                                                  evalPreviousSolution(side, shape, k, q_index)));
+                                }
+                            } else {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                    acc = add(acc,
+                                              mul(makeScalar(loadDtCoeff(side, order, k)),
+                                                  evalDiscreteOrStateFieldHistoryK(side, /*plus_side=*/false, shape, fid, k, q_index)));
+                                }
+                            }
+                        }
+
+                        values[op_idx] = acc;
                         break;
                     }
                     case FormExprType::MaterialStateOldRef:
@@ -5940,10 +6717,76 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values[op_idx] = evalLog(getChild(op, 0));
                         break;
 
+                    case FormExprType::MatrixExponential:
+                        values[op_idx] = callMatrixUnary(getChild(op, 0), mat_exp_2x2_fn, mat_exp_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixLogarithm:
+                        values[op_idx] = callMatrixUnary(getChild(op, 0), mat_log_2x2_fn, mat_log_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixSqrt:
+                        values[op_idx] = callMatrixUnary(getChild(op, 0), mat_sqrt_2x2_fn, mat_sqrt_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixPower:
+                        values[op_idx] =
+                            callMatrixPow(getChild(op, 0), getChild(op, 1).elems[0], mat_pow_2x2_fn, mat_pow_3x3_fn);
+                        break;
+
+                    case FormExprType::SmoothAbsoluteValue:
+                        values[op_idx] = smoothAbs(getChild(op, 0), getChild(op, 1));
+                        break;
+
+                    case FormExprType::SmoothSign:
+                        values[op_idx] = smoothSign(getChild(op, 0), getChild(op, 1));
+                        break;
+
+                    case FormExprType::SmoothHeaviside:
+                        values[op_idx] = smoothHeaviside(getChild(op, 0), getChild(op, 1));
+                        break;
+
+                    case FormExprType::SmoothMin:
+                        values[op_idx] = smoothMin(getChild(op, 0), getChild(op, 1), getChild(op, 2));
+                        break;
+
+                    case FormExprType::SmoothMax:
+                        values[op_idx] = smoothMax(getChild(op, 0), getChild(op, 1), getChild(op, 2));
+                        break;
+
                     case FormExprType::SymmetricEigenvalue: {
                         const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
                         const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
                         values[op_idx] = eigSym(getChild(op, 0), which);
+                        break;
+                    }
+
+                    case FormExprType::Eigenvalue: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values[op_idx] = eigSym(getChild(op, 0), which);
+                        break;
+                    }
+
+                    case FormExprType::SymmetricEigenvector: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values[op_idx] = eigSymVec(getChild(op, 0), which);
+                        break;
+                    }
+
+                    case FormExprType::SpectralDecomposition:
+                        values[op_idx] = spectralDecomp(getChild(op, 0));
+                        break;
+
+                    case FormExprType::HistoryWeightedSum:
+                    case FormExprType::HistoryConvolution: {
+                        CodeValue acc = makeZero(shape);
+                        for (std::size_t kk = 0; kk < static_cast<std::size_t>(op.child_count); ++kk) {
+                            const int k = static_cast<int>(kk + 1u);
+                            acc = add(acc, mul(getChild(op, kk), evalPreviousSolution(side, shape, k, q_index)));
+                        }
+                        values[op_idx] = acc;
                         break;
                     }
 
@@ -6606,8 +7449,36 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                     case FormExprType::TimeDerivative: {
                         const int order = static_cast<int>(static_cast<std::int64_t>(op.imm0));
-                        values_minus[op_idx] = mul(makeScalar(loadDtCoeff0(side_minus, order)), childMinus(op, 0));
-                        values_plus[op_idx] = mul(makeScalar(loadDtCoeff0(side_plus, order)), childPlus(op, 0));
+                        CodeValue acc_minus = mul(makeScalar(loadDtCoeff(side_minus, order, 0)), childMinus(op, 0));
+                        CodeValue acc_plus = mul(makeScalar(loadDtCoeff(side_plus, order, 0)), childPlus(op, 0));
+
+                        const auto child_op_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
+                        const auto& kid = term.ir.ops[child_op_idx];
+                        if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
+                            const int fid = unpackFieldIdImm1(kid.imm1);
+                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                    acc_minus = add(acc_minus,
+                                                    mul(makeScalar(loadDtCoeff(side_minus, order, k)),
+                                                        evalPreviousSolution(side_minus, shape, k, q_index)));
+                                    acc_plus = add(acc_plus,
+                                                   mul(makeScalar(loadDtCoeff(side_plus, order, k)),
+                                                       evalPreviousSolution(side_plus, shape, k, q_index)));
+                                }
+                            } else {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                    acc_minus = add(acc_minus,
+                                                    mul(makeScalar(loadDtCoeff(side_minus, order, k)),
+                                                        evalDiscreteOrStateFieldHistoryK(side_minus, /*plus_side=*/false, shape, fid, k, q_index)));
+                                    acc_plus = add(acc_plus,
+                                                   mul(makeScalar(loadDtCoeff(side_plus, order, k)),
+                                                       evalDiscreteOrStateFieldHistoryK(side_plus, /*plus_side=*/true, shape, fid, k, q_index)));
+                                }
+                            }
+                        }
+
+                        values_minus[op_idx] = acc_minus;
+                        values_plus[op_idx] = acc_plus;
                         break;
                     }
 
@@ -6871,11 +7742,124 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values_plus[op_idx] = evalLog(childPlus(op, 0));
                         break;
 
+                    case FormExprType::MatrixExponential:
+                        values_minus[op_idx] = callMatrixUnary(childMinus(op, 0), mat_exp_2x2_fn, mat_exp_3x3_fn);
+                        values_plus[op_idx] = callMatrixUnary(childPlus(op, 0), mat_exp_2x2_fn, mat_exp_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixLogarithm:
+                        values_minus[op_idx] = callMatrixUnary(childMinus(op, 0), mat_log_2x2_fn, mat_log_3x3_fn);
+                        values_plus[op_idx] = callMatrixUnary(childPlus(op, 0), mat_log_2x2_fn, mat_log_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixSqrt:
+                        values_minus[op_idx] = callMatrixUnary(childMinus(op, 0), mat_sqrt_2x2_fn, mat_sqrt_3x3_fn);
+                        values_plus[op_idx] = callMatrixUnary(childPlus(op, 0), mat_sqrt_2x2_fn, mat_sqrt_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixPower:
+                        values_minus[op_idx] = callMatrixPow(childMinus(op, 0), childMinus(op, 1).elems[0], mat_pow_2x2_fn, mat_pow_3x3_fn);
+                        values_plus[op_idx] = callMatrixPow(childPlus(op, 0), childPlus(op, 1).elems[0], mat_pow_2x2_fn, mat_pow_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixExponentialDirectionalDerivative:
+                        values_minus[op_idx] = callMatrixUnaryDD(childMinus(op, 0), childMinus(op, 1), mat_exp_dd_2x2_fn, mat_exp_dd_3x3_fn);
+                        values_plus[op_idx] = callMatrixUnaryDD(childPlus(op, 0), childPlus(op, 1), mat_exp_dd_2x2_fn, mat_exp_dd_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixLogarithmDirectionalDerivative:
+                        values_minus[op_idx] = callMatrixUnaryDD(childMinus(op, 0), childMinus(op, 1), mat_log_dd_2x2_fn, mat_log_dd_3x3_fn);
+                        values_plus[op_idx] = callMatrixUnaryDD(childPlus(op, 0), childPlus(op, 1), mat_log_dd_2x2_fn, mat_log_dd_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixSqrtDirectionalDerivative:
+                        values_minus[op_idx] = callMatrixUnaryDD(childMinus(op, 0), childMinus(op, 1), mat_sqrt_dd_2x2_fn, mat_sqrt_dd_3x3_fn);
+                        values_plus[op_idx] = callMatrixUnaryDD(childPlus(op, 0), childPlus(op, 1), mat_sqrt_dd_2x2_fn, mat_sqrt_dd_3x3_fn);
+                        break;
+
+                    case FormExprType::MatrixPowerDirectionalDerivative:
+                        values_minus[op_idx] = callMatrixPowDD(childMinus(op, 0), childMinus(op, 1), childMinus(op, 2).elems[0], mat_pow_dd_2x2_fn, mat_pow_dd_3x3_fn);
+                        values_plus[op_idx] = callMatrixPowDD(childPlus(op, 0), childPlus(op, 1), childPlus(op, 2).elems[0], mat_pow_dd_2x2_fn, mat_pow_dd_3x3_fn);
+                        break;
+
+                    case FormExprType::SmoothAbsoluteValue:
+                        values_minus[op_idx] = smoothAbs(childMinus(op, 0), childMinus(op, 1));
+                        values_plus[op_idx] = smoothAbs(childPlus(op, 0), childPlus(op, 1));
+                        break;
+
+                    case FormExprType::SmoothSign:
+                        values_minus[op_idx] = smoothSign(childMinus(op, 0), childMinus(op, 1));
+                        values_plus[op_idx] = smoothSign(childPlus(op, 0), childPlus(op, 1));
+                        break;
+
+                    case FormExprType::SmoothHeaviside:
+                        values_minus[op_idx] = smoothHeaviside(childMinus(op, 0), childMinus(op, 1));
+                        values_plus[op_idx] = smoothHeaviside(childPlus(op, 0), childPlus(op, 1));
+                        break;
+
+                    case FormExprType::SmoothMin:
+                        values_minus[op_idx] = smoothMin(childMinus(op, 0), childMinus(op, 1), childMinus(op, 2));
+                        values_plus[op_idx] = smoothMin(childPlus(op, 0), childPlus(op, 1), childPlus(op, 2));
+                        break;
+
+                    case FormExprType::SmoothMax:
+                        values_minus[op_idx] = smoothMax(childMinus(op, 0), childMinus(op, 1), childMinus(op, 2));
+                        values_plus[op_idx] = smoothMax(childPlus(op, 0), childPlus(op, 1), childPlus(op, 2));
+                        break;
+
                     case FormExprType::SymmetricEigenvalue: {
                         const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
                         const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
                         values_minus[op_idx] = eigSym(childMinus(op, 0), which);
                         values_plus[op_idx] = eigSym(childPlus(op, 0), which);
+                        break;
+                    }
+
+                    case FormExprType::Eigenvalue: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values_minus[op_idx] = eigSym(childMinus(op, 0), which);
+                        values_plus[op_idx] = eigSym(childPlus(op, 0), which);
+                        break;
+                    }
+
+                    case FormExprType::SymmetricEigenvector: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values_minus[op_idx] = eigSymVec(childMinus(op, 0), which);
+                        values_plus[op_idx] = eigSymVec(childPlus(op, 0), which);
+                        break;
+                    }
+
+                    case FormExprType::SpectralDecomposition:
+                        values_minus[op_idx] = spectralDecomp(childMinus(op, 0));
+                        values_plus[op_idx] = spectralDecomp(childPlus(op, 0));
+                        break;
+
+                    case FormExprType::SymmetricEigenvectorDirectionalDerivative: {
+                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                        values_minus[op_idx] = eigSymVecDD(childMinus(op, 0), childMinus(op, 1), which);
+                        values_plus[op_idx] = eigSymVecDD(childPlus(op, 0), childPlus(op, 1), which);
+                        break;
+                    }
+
+                    case FormExprType::SpectralDecompositionDirectionalDerivative:
+                        values_minus[op_idx] = spectralDecompDD(childMinus(op, 0), childMinus(op, 1));
+                        values_plus[op_idx] = spectralDecompDD(childPlus(op, 0), childPlus(op, 1));
+                        break;
+
+                    case FormExprType::HistoryWeightedSum:
+                    case FormExprType::HistoryConvolution: {
+                        CodeValue acc_m = makeZero(shape);
+                        CodeValue acc_p = makeZero(shape);
+                        for (std::size_t kk = 0; kk < static_cast<std::size_t>(op.child_count); ++kk) {
+                            const int k = static_cast<int>(kk + 1u);
+                            acc_m = add(acc_m, mul(childMinus(op, kk), evalPreviousSolution(side_minus, shape, k, q_index)));
+                            acc_p = add(acc_p, mul(childPlus(op, kk), evalPreviousSolution(side_plus, shape, k, q_index)));
+                        }
+                        values_minus[op_idx] = acc_m;
+                        values_plus[op_idx] = acc_p;
                         break;
                     }
 
@@ -8516,8 +9500,36 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                         case FormExprType::TimeDerivative: {
                             const int order = static_cast<int>(static_cast<std::int64_t>(op.imm0));
-                            values_minus[op_idx] = mul(makeScalar(loadDtCoeff0(side_minus, order)), childMinus(op, 0));
-                            values_plus[op_idx] = mul(makeScalar(loadDtCoeff0(side_plus, order)), childPlus(op, 0));
+                            CodeValue acc_minus = mul(makeScalar(loadDtCoeff(side_minus, order, 0)), childMinus(op, 0));
+                            CodeValue acc_plus = mul(makeScalar(loadDtCoeff(side_plus, order, 0)), childPlus(op, 0));
+
+                            const auto child_op_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
+                            const auto& kid = term.ir.ops[child_op_idx];
+                            if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
+                                const int fid = unpackFieldIdImm1(kid.imm1);
+                                if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                                    for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                        acc_minus = add(acc_minus,
+                                                        mul(makeScalar(loadDtCoeff(side_minus, order, k)),
+                                                            evalPreviousSolution(side_minus, shape, k, q_index)));
+                                        acc_plus = add(acc_plus,
+                                                       mul(makeScalar(loadDtCoeff(side_plus, order, k)),
+                                                           evalPreviousSolution(side_plus, shape, k, q_index)));
+                                    }
+                                } else {
+                                    for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                        acc_minus = add(acc_minus,
+                                                        mul(makeScalar(loadDtCoeff(side_minus, order, k)),
+                                                            evalDiscreteOrStateFieldHistoryK(side_minus, /*plus_side=*/false, shape, fid, k, q_index)));
+                                        acc_plus = add(acc_plus,
+                                                       mul(makeScalar(loadDtCoeff(side_plus, order, k)),
+                                                           evalDiscreteOrStateFieldHistoryK(side_plus, /*plus_side=*/true, shape, fid, k, q_index)));
+                                    }
+                                }
+                            }
+
+                            values_minus[op_idx] = acc_minus;
+                            values_plus[op_idx] = acc_plus;
                             break;
                         }
 
@@ -8877,11 +9889,124 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             values_plus[op_idx] = evalLog(childPlus(op, 0));
                             break;
 
+                        case FormExprType::MatrixExponential:
+                            values_minus[op_idx] = callMatrixUnary(childMinus(op, 0), mat_exp_2x2_fn, mat_exp_3x3_fn);
+                            values_plus[op_idx] = callMatrixUnary(childPlus(op, 0), mat_exp_2x2_fn, mat_exp_3x3_fn);
+                            break;
+
+                        case FormExprType::MatrixLogarithm:
+                            values_minus[op_idx] = callMatrixUnary(childMinus(op, 0), mat_log_2x2_fn, mat_log_3x3_fn);
+                            values_plus[op_idx] = callMatrixUnary(childPlus(op, 0), mat_log_2x2_fn, mat_log_3x3_fn);
+                            break;
+
+                        case FormExprType::MatrixSqrt:
+                            values_minus[op_idx] = callMatrixUnary(childMinus(op, 0), mat_sqrt_2x2_fn, mat_sqrt_3x3_fn);
+                            values_plus[op_idx] = callMatrixUnary(childPlus(op, 0), mat_sqrt_2x2_fn, mat_sqrt_3x3_fn);
+                            break;
+
+                        case FormExprType::MatrixPower:
+                            values_minus[op_idx] = callMatrixPow(childMinus(op, 0), childMinus(op, 1).elems[0], mat_pow_2x2_fn, mat_pow_3x3_fn);
+                            values_plus[op_idx] = callMatrixPow(childPlus(op, 0), childPlus(op, 1).elems[0], mat_pow_2x2_fn, mat_pow_3x3_fn);
+                            break;
+
+                        case FormExprType::MatrixExponentialDirectionalDerivative:
+                            values_minus[op_idx] = callMatrixUnaryDD(childMinus(op, 0), childMinus(op, 1), mat_exp_dd_2x2_fn, mat_exp_dd_3x3_fn);
+                            values_plus[op_idx] = callMatrixUnaryDD(childPlus(op, 0), childPlus(op, 1), mat_exp_dd_2x2_fn, mat_exp_dd_3x3_fn);
+                            break;
+
+                        case FormExprType::MatrixLogarithmDirectionalDerivative:
+                            values_minus[op_idx] = callMatrixUnaryDD(childMinus(op, 0), childMinus(op, 1), mat_log_dd_2x2_fn, mat_log_dd_3x3_fn);
+                            values_plus[op_idx] = callMatrixUnaryDD(childPlus(op, 0), childPlus(op, 1), mat_log_dd_2x2_fn, mat_log_dd_3x3_fn);
+                            break;
+
+                        case FormExprType::MatrixSqrtDirectionalDerivative:
+                            values_minus[op_idx] = callMatrixUnaryDD(childMinus(op, 0), childMinus(op, 1), mat_sqrt_dd_2x2_fn, mat_sqrt_dd_3x3_fn);
+                            values_plus[op_idx] = callMatrixUnaryDD(childPlus(op, 0), childPlus(op, 1), mat_sqrt_dd_2x2_fn, mat_sqrt_dd_3x3_fn);
+                            break;
+
+                        case FormExprType::MatrixPowerDirectionalDerivative:
+                            values_minus[op_idx] = callMatrixPowDD(childMinus(op, 0), childMinus(op, 1), childMinus(op, 2).elems[0], mat_pow_dd_2x2_fn, mat_pow_dd_3x3_fn);
+                            values_plus[op_idx] = callMatrixPowDD(childPlus(op, 0), childPlus(op, 1), childPlus(op, 2).elems[0], mat_pow_dd_2x2_fn, mat_pow_dd_3x3_fn);
+                            break;
+
+                        case FormExprType::SmoothAbsoluteValue:
+                            values_minus[op_idx] = smoothAbs(childMinus(op, 0), childMinus(op, 1));
+                            values_plus[op_idx] = smoothAbs(childPlus(op, 0), childPlus(op, 1));
+                            break;
+
+                        case FormExprType::SmoothSign:
+                            values_minus[op_idx] = smoothSign(childMinus(op, 0), childMinus(op, 1));
+                            values_plus[op_idx] = smoothSign(childPlus(op, 0), childPlus(op, 1));
+                            break;
+
+                        case FormExprType::SmoothHeaviside:
+                            values_minus[op_idx] = smoothHeaviside(childMinus(op, 0), childMinus(op, 1));
+                            values_plus[op_idx] = smoothHeaviside(childPlus(op, 0), childPlus(op, 1));
+                            break;
+
+                        case FormExprType::SmoothMin:
+                            values_minus[op_idx] = smoothMin(childMinus(op, 0), childMinus(op, 1), childMinus(op, 2));
+                            values_plus[op_idx] = smoothMin(childPlus(op, 0), childPlus(op, 1), childPlus(op, 2));
+                            break;
+
+                        case FormExprType::SmoothMax:
+                            values_minus[op_idx] = smoothMax(childMinus(op, 0), childMinus(op, 1), childMinus(op, 2));
+                            values_plus[op_idx] = smoothMax(childPlus(op, 0), childPlus(op, 1), childPlus(op, 2));
+                            break;
+
                         case FormExprType::SymmetricEigenvalue: {
                             const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
                             const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
                             values_minus[op_idx] = eigSym(childMinus(op, 0), which);
                             values_plus[op_idx] = eigSym(childPlus(op, 0), which);
+                            break;
+                        }
+
+                        case FormExprType::Eigenvalue: {
+                            const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                            const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                            values_minus[op_idx] = eigSym(childMinus(op, 0), which);
+                            values_plus[op_idx] = eigSym(childPlus(op, 0), which);
+                            break;
+                        }
+
+                        case FormExprType::SymmetricEigenvector: {
+                            const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                            const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                            values_minus[op_idx] = eigSymVec(childMinus(op, 0), which);
+                            values_plus[op_idx] = eigSymVec(childPlus(op, 0), which);
+                            break;
+                        }
+
+                        case FormExprType::SpectralDecomposition:
+                            values_minus[op_idx] = spectralDecomp(childMinus(op, 0));
+                            values_plus[op_idx] = spectralDecomp(childPlus(op, 0));
+                            break;
+
+                        case FormExprType::SymmetricEigenvectorDirectionalDerivative: {
+                            const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
+                            const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
+                            values_minus[op_idx] = eigSymVecDD(childMinus(op, 0), childMinus(op, 1), which);
+                            values_plus[op_idx] = eigSymVecDD(childPlus(op, 0), childPlus(op, 1), which);
+                            break;
+                        }
+
+                        case FormExprType::SpectralDecompositionDirectionalDerivative:
+                            values_minus[op_idx] = spectralDecompDD(childMinus(op, 0), childMinus(op, 1));
+                            values_plus[op_idx] = spectralDecompDD(childPlus(op, 0), childPlus(op, 1));
+                            break;
+
+                        case FormExprType::HistoryWeightedSum:
+                        case FormExprType::HistoryConvolution: {
+                            CodeValue acc_m = makeZero(shape);
+                            CodeValue acc_p = makeZero(shape);
+                            for (std::size_t kk = 0; kk < static_cast<std::size_t>(op.child_count); ++kk) {
+                                const int k = static_cast<int>(kk + 1u);
+                                acc_m = add(acc_m, mul(childMinus(op, kk), evalPreviousSolution(side_minus, shape, k, q_index)));
+                                acc_p = add(acc_p, mul(childPlus(op, kk), evalPreviousSolution(side_plus, shape, k, q_index)));
+                            }
+                            values_minus[op_idx] = acc_m;
+                            values_plus[op_idx] = acc_p;
                             break;
                         }
 
@@ -9189,15 +10314,27 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             };
 
             if (want_matrix) {
-                auto emitFaceBlock = [&](bool eval_plus,
-                                         bool test_active_plus,
-                                         bool trial_active_plus,
-                                         llvm::Value* out_view_ptr,
-                                         std::string_view label) -> void {
-                    const SideView& side_eval = eval_plus ? side_plus : side_minus;
-                    auto* element_matrix = loadPtr(out_view_ptr, ABIV3::out_element_matrix_off);
-                    auto* n_test = loadU32(out_view_ptr, ABIV3::out_n_test_dofs_off);
-                    auto* n_trial = loadU32(out_view_ptr, ABIV3::out_n_trial_dofs_off);
+	                auto emitFaceBlock = [&](bool eval_plus,
+	                                         bool test_active_plus,
+	                                         bool trial_active_plus,
+	                                         llvm::Value* out_view_ptr,
+	                                         std::string_view label) -> void {
+	                    const SideView& side_eval = eval_plus ? side_plus : side_minus;
+	                    auto* element_matrix = loadPtr(out_view_ptr, ABIV3::out_element_matrix_off);
+	                    auto* n_test = loadU32(out_view_ptr, ABIV3::out_n_test_dofs_off);
+	                    auto* n_trial = loadU32(out_view_ptr, ABIV3::out_n_trial_dofs_off);
+	                    if (specialization != nullptr) {
+	                        const auto& fixed_test =
+	                            test_active_plus ? specialization->n_test_dofs_plus : specialization->n_test_dofs_minus;
+	                        const auto& fixed_trial =
+	                            trial_active_plus ? specialization->n_trial_dofs_plus : specialization->n_trial_dofs_minus;
+	                        if (fixed_test) {
+	                            n_test = builder.getInt32(*fixed_test);
+	                        }
+	                        if (fixed_trial) {
+	                            n_trial = builder.getInt32(*fixed_trial);
+	                        }
+	                    }
 
                     for (std::size_t t = 0; t < terms.size(); ++t) {
                         auto* term_entry = llvm::BasicBlock::Create(*ctx, std::string(label) + "_term" + std::to_string(t) + ".entry", fn);
@@ -9262,13 +10399,20 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                               out_coupling_pm_ptr,
                               "pm");
             } else if (want_vector) {
-                auto emitFaceVector = [&](bool eval_plus,
-                                          bool test_active_plus,
-                                          llvm::Value* out_view_ptr,
-                                          std::string_view label) -> void {
-                    const SideView& side_eval = eval_plus ? side_plus : side_minus;
-                    auto* element_vector = loadPtr(out_view_ptr, ABIV3::out_element_vector_off);
-                    auto* n_test = loadU32(out_view_ptr, ABIV3::out_n_test_dofs_off);
+	                auto emitFaceVector = [&](bool eval_plus,
+	                                          bool test_active_plus,
+	                                          llvm::Value* out_view_ptr,
+	                                          std::string_view label) -> void {
+	                    const SideView& side_eval = eval_plus ? side_plus : side_minus;
+	                    auto* element_vector = loadPtr(out_view_ptr, ABIV3::out_element_vector_off);
+	                    auto* n_test = loadU32(out_view_ptr, ABIV3::out_n_test_dofs_off);
+	                    if (specialization != nullptr) {
+	                        const auto& fixed_test =
+	                            test_active_plus ? specialization->n_test_dofs_plus : specialization->n_test_dofs_minus;
+	                        if (fixed_test) {
+	                            n_test = builder.getInt32(*fixed_test);
+	                        }
+	                    }
 
                     for (std::size_t t = 0; t < terms.size(); ++t) {
                         auto* term_entry = llvm::BasicBlock::Create(*ctx, std::string(label) + "_term" + std::to_string(t) + ".entry", fn);

@@ -179,7 +179,7 @@ TEST(TransientDtTest, WaveEquationDt2PlusDiffusion_AssemblesScaledMassPlusStiffn
     }
 }
 
-TEST(TransientDtTest, HigherOrderDtCompilesButIsRejectedByIntegrator)
+TEST(TransientDtTest, HigherOrderDtCompilesButRequiresHistoryVector)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
     auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
@@ -221,7 +221,13 @@ TEST(TransientDtTest, HigherOrderDtCompilesButIsRejectedByIntegrator)
     svmp::FE::assembly::DenseMatrixView A(4);
     A.zero();
 
-    EXPECT_THROW((void)transient.assemble(req, state, &A, nullptr), svmp::FE::NotImplementedException);
+    try {
+        (void)transient.assemble(req, state, &A, nullptr);
+        FAIL() << "Expected InvalidArgumentException";
+    } catch (const svmp::FE::InvalidArgumentException& e) {
+        const std::string msg = e.what();
+        EXPECT_NE(msg.find("state.u_history"), std::string::npos);
+    }
 }
 
 TEST(TransientDtTest, ResidualAndJacobianIncludeHistoryForDt)

@@ -19,6 +19,7 @@
 #include "Assembly/TimeIntegrationContext.h"
 #include "Systems/SystemState.h"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 
@@ -61,12 +62,12 @@ public:
  * - For dt(u): backward Euler stencil (BDF1)  (u^n - u^{n-1})/dt
  * - For dt(u,2): second-order backward difference (u^n - 2u^{n-1} + u^{n-2})/dt^2
  *
- * This integrator is intentionally limited to orders 1 and 2.
+ * This integrator supports dt orders up to 8 with a uniform-step backward stencil.
  */
 class BackwardDifferenceIntegrator final : public TimeIntegrator {
 public:
     [[nodiscard]] std::string name() const override { return "BackwardDifference"; }
-    [[nodiscard]] int maxSupportedDerivativeOrder() const noexcept override { return 2; }
+    [[nodiscard]] int maxSupportedDerivativeOrder() const noexcept override { return 8; }
 
     [[nodiscard]] assembly::TimeIntegrationContext
     buildContext(int max_time_derivative_order, const SystemStateView& state) const override;
@@ -106,7 +107,7 @@ public:
     explicit BDFIntegrator(int order);
 
     [[nodiscard]] std::string name() const override { return "BDF" + std::to_string(order_); }
-    [[nodiscard]] int maxSupportedDerivativeOrder() const noexcept override { return 2; }
+    [[nodiscard]] int maxSupportedDerivativeOrder() const noexcept override { return std::min(8, 9 - order_); }
     [[nodiscard]] int order() const noexcept { return order_; }
 
     [[nodiscard]] assembly::TimeIntegrationContext

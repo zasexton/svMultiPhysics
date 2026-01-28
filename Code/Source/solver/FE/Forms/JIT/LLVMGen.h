@@ -10,6 +10,7 @@
 
 #include "Forms/FormIR.h"
 #include "Forms/JIT/JITEngine.h"
+#include "Forms/JIT/JITSpecialization.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -41,7 +42,8 @@ public:
                                                     int boundary_marker,
                                                     int interface_marker,
                                                     std::string_view symbol,
-                                                    std::uintptr_t& out_address) const;
+                                                    std::uintptr_t& out_address,
+                                                    const JITCompileSpecialization* specialization = nullptr) const;
 
 private:
     JITOptions options_{};
@@ -53,4 +55,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_FORMS_JIT_LLVM_GEN_H
-

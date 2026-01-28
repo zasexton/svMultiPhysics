@@ -766,6 +766,110 @@ public:
     [[nodiscard]] std::string toString() const override { return "log(" + child_->toString() + ")"; }
 };
 
+class MatrixExponentialNode final : public UnaryNode {
+public:
+    using UnaryNode::UnaryNode;
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::MatrixExponential; }
+    [[nodiscard]] std::string toString() const override { return "expm(" + child_->toString() + ")"; }
+};
+
+class MatrixLogarithmNode final : public UnaryNode {
+public:
+    using UnaryNode::UnaryNode;
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::MatrixLogarithm; }
+    [[nodiscard]] std::string toString() const override { return "logm(" + child_->toString() + ")"; }
+};
+
+class MatrixSqrtNode final : public UnaryNode {
+public:
+    using UnaryNode::UnaryNode;
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::MatrixSqrt; }
+    [[nodiscard]] std::string toString() const override { return "sqrtm(" + child_->toString() + ")"; }
+};
+
+class SmoothMinNode final : public FormExprNode {
+public:
+    SmoothMinNode(std::shared_ptr<FormExprNode> a,
+                  std::shared_ptr<FormExprNode> b,
+                  std::shared_ptr<FormExprNode> eps)
+        : a_(std::move(a)), b_(std::move(b)), eps_(std::move(eps))
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::SmoothMin; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "smooth_min(" + a_->toString() + "," + b_->toString() + "," + eps_->toString() + ")";
+    }
+
+    [[nodiscard]] bool hasTest() const noexcept override
+    {
+        return (a_ && a_->hasTest()) || (b_ && b_->hasTest()) || (eps_ && eps_->hasTest());
+    }
+
+    [[nodiscard]] bool hasTrial() const noexcept override
+    {
+        return (a_ && a_->hasTrial()) || (b_ && b_->hasTrial()) || (eps_ && eps_->hasTrial());
+    }
+
+    [[nodiscard]] std::vector<const FormExprNode*> children() const override
+    {
+        return {a_.get(), b_.get(), eps_.get()};
+    }
+
+    [[nodiscard]] std::vector<std::shared_ptr<FormExprNode>> childrenShared() const override
+    {
+        return {a_, b_, eps_};
+    }
+
+private:
+    std::shared_ptr<FormExprNode> a_;
+    std::shared_ptr<FormExprNode> b_;
+    std::shared_ptr<FormExprNode> eps_;
+};
+
+class SmoothMaxNode final : public FormExprNode {
+public:
+    SmoothMaxNode(std::shared_ptr<FormExprNode> a,
+                  std::shared_ptr<FormExprNode> b,
+                  std::shared_ptr<FormExprNode> eps)
+        : a_(std::move(a)), b_(std::move(b)), eps_(std::move(eps))
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::SmoothMax; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "smooth_max(" + a_->toString() + "," + b_->toString() + "," + eps_->toString() + ")";
+    }
+
+    [[nodiscard]] bool hasTest() const noexcept override
+    {
+        return (a_ && a_->hasTest()) || (b_ && b_->hasTest()) || (eps_ && eps_->hasTest());
+    }
+
+    [[nodiscard]] bool hasTrial() const noexcept override
+    {
+        return (a_ && a_->hasTrial()) || (b_ && b_->hasTrial()) || (eps_ && eps_->hasTrial());
+    }
+
+    [[nodiscard]] std::vector<const FormExprNode*> children() const override
+    {
+        return {a_.get(), b_.get(), eps_.get()};
+    }
+
+    [[nodiscard]] std::vector<std::shared_ptr<FormExprNode>> childrenShared() const override
+    {
+        return {a_, b_, eps_};
+    }
+
+private:
+    std::shared_ptr<FormExprNode> a_;
+    std::shared_ptr<FormExprNode> b_;
+    std::shared_ptr<FormExprNode> eps_;
+};
+
 class SymmetricEigenvalueNode final : public UnaryNode {
 public:
     SymmetricEigenvalueNode(std::shared_ptr<FormExprNode> child, int which)
@@ -781,6 +885,200 @@ public:
 
 private:
     int which_{0};
+};
+
+class EigenvalueNode final : public UnaryNode {
+public:
+    EigenvalueNode(std::shared_ptr<FormExprNode> child, int which)
+        : UnaryNode(std::move(child)), which_(which)
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::Eigenvalue; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "eig(" + child_->toString() + ", " + std::to_string(which_) + ")";
+    }
+    [[nodiscard]] std::optional<int> eigenIndex() const override { return which_; }
+
+private:
+    int which_{0};
+};
+
+class SymmetricEigenvectorNode final : public UnaryNode {
+public:
+    SymmetricEigenvectorNode(std::shared_ptr<FormExprNode> child, int which)
+        : UnaryNode(std::move(child)), which_(which)
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::SymmetricEigenvector; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "eigvec_sym(" + child_->toString() + ", " + std::to_string(which_) + ")";
+    }
+    [[nodiscard]] std::optional<int> eigenIndex() const override { return which_; }
+
+private:
+    int which_{0};
+};
+
+class SymmetricEigenvectorDirectionalDerivativeNode final : public FormExprNode {
+public:
+    SymmetricEigenvectorDirectionalDerivativeNode(std::shared_ptr<FormExprNode> a,
+                                                  std::shared_ptr<FormExprNode> da,
+                                                  int which)
+        : a_(std::move(a))
+        , da_(std::move(da))
+        , which_(which)
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::SymmetricEigenvectorDirectionalDerivative; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "eigvec_sym_dd(" + a_->toString() + ", " + da_->toString() + ", " + std::to_string(which_) + ")";
+    }
+
+    [[nodiscard]] std::optional<int> eigenIndex() const override { return which_; }
+
+    [[nodiscard]] bool hasTest() const noexcept override
+    {
+        return (a_ && a_->hasTest()) || (da_ && da_->hasTest());
+    }
+
+    [[nodiscard]] bool hasTrial() const noexcept override
+    {
+        return (a_ && a_->hasTrial()) || (da_ && da_->hasTrial());
+    }
+
+    [[nodiscard]] std::vector<const FormExprNode*> children() const override
+    {
+        return {a_.get(), da_.get()};
+    }
+
+    [[nodiscard]] std::vector<std::shared_ptr<FormExprNode>> childrenShared() const override
+    {
+        return {a_, da_};
+    }
+
+private:
+    std::shared_ptr<FormExprNode> a_;
+    std::shared_ptr<FormExprNode> da_;
+    int which_{0};
+};
+
+class SpectralDecompositionNode final : public UnaryNode {
+public:
+    using UnaryNode::UnaryNode;
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::SpectralDecomposition; }
+    [[nodiscard]] std::string toString() const override { return "spectral_decomp(" + child_->toString() + ")"; }
+};
+
+class HistoryWeightedSumNode final : public FormExprNode {
+public:
+    explicit HistoryWeightedSumNode(std::vector<std::shared_ptr<FormExprNode>> weights)
+        : weights_(std::move(weights))
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::HistoryWeightedSum; }
+
+    [[nodiscard]] std::string toString() const override
+    {
+        std::string s = "hist_sum(";
+        for (std::size_t i = 0; i < weights_.size(); ++i) {
+            if (i > 0) s += ",";
+            s += weights_[i] ? weights_[i]->toString() : std::string{"<null>"};
+        }
+        s += ")";
+        return s;
+    }
+
+    [[nodiscard]] bool hasTest() const noexcept override
+    {
+        for (const auto& w : weights_) {
+            if (w && w->hasTest()) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool hasTrial() const noexcept override
+    {
+        for (const auto& w : weights_) {
+            if (w && w->hasTrial()) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] std::vector<const FormExprNode*> children() const override
+    {
+        std::vector<const FormExprNode*> out;
+        out.reserve(weights_.size());
+        for (const auto& w : weights_) {
+            out.push_back(w.get());
+        }
+        return out;
+    }
+
+    [[nodiscard]] std::vector<std::shared_ptr<FormExprNode>> childrenShared() const override
+    {
+        return weights_;
+    }
+
+private:
+    std::vector<std::shared_ptr<FormExprNode>> weights_{};
+};
+
+class HistoryConvolutionNode final : public FormExprNode {
+public:
+    explicit HistoryConvolutionNode(std::vector<std::shared_ptr<FormExprNode>> weights)
+        : weights_(std::move(weights))
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::HistoryConvolution; }
+
+    [[nodiscard]] std::string toString() const override
+    {
+        std::string s = "hist_conv(";
+        for (std::size_t i = 0; i < weights_.size(); ++i) {
+            if (i > 0) s += ",";
+            s += weights_[i] ? weights_[i]->toString() : std::string{"<null>"};
+        }
+        s += ")";
+        return s;
+    }
+
+    [[nodiscard]] bool hasTest() const noexcept override
+    {
+        for (const auto& w : weights_) {
+            if (w && w->hasTest()) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] bool hasTrial() const noexcept override
+    {
+        for (const auto& w : weights_) {
+            if (w && w->hasTrial()) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] std::vector<const FormExprNode*> children() const override
+    {
+        std::vector<const FormExprNode*> out;
+        out.reserve(weights_.size());
+        for (const auto& w : weights_) {
+            out.push_back(w.get());
+        }
+        return out;
+    }
+
+    [[nodiscard]] std::vector<std::shared_ptr<FormExprNode>> childrenShared() const override
+    {
+        return weights_;
+    }
+
+private:
+    std::vector<std::shared_ptr<FormExprNode>> weights_{};
 };
 
 class SymmetricEigenvalueDirectionalDerivativeNode final : public FormExprNode {
@@ -901,6 +1199,110 @@ public:
 
 protected:
     std::shared_ptr<FormExprNode> lhs_, rhs_;
+};
+
+class MatrixPowerNode final : public BinaryNode {
+public:
+    using BinaryNode::BinaryNode;
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::MatrixPower; }
+    [[nodiscard]] std::string toString() const override { return "powm(" + lhs_->toString() + "," + rhs_->toString() + ")"; }
+};
+
+class MatrixExponentialDirectionalDerivativeNode final : public BinaryNode {
+public:
+    using BinaryNode::BinaryNode;
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::MatrixExponentialDirectionalDerivative; }
+    [[nodiscard]] std::string toString() const override { return "expm_dd(" + lhs_->toString() + "," + rhs_->toString() + ")"; }
+};
+
+class MatrixLogarithmDirectionalDerivativeNode final : public BinaryNode {
+public:
+    using BinaryNode::BinaryNode;
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::MatrixLogarithmDirectionalDerivative; }
+    [[nodiscard]] std::string toString() const override { return "logm_dd(" + lhs_->toString() + "," + rhs_->toString() + ")"; }
+};
+
+class MatrixSqrtDirectionalDerivativeNode final : public BinaryNode {
+public:
+    using BinaryNode::BinaryNode;
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::MatrixSqrtDirectionalDerivative; }
+    [[nodiscard]] std::string toString() const override { return "sqrtm_dd(" + lhs_->toString() + "," + rhs_->toString() + ")"; }
+};
+
+class SmoothAbsoluteValueNode final : public BinaryNode {
+public:
+    using BinaryNode::BinaryNode;
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::SmoothAbsoluteValue; }
+    [[nodiscard]] std::string toString() const override { return "smooth_abs(" + lhs_->toString() + "," + rhs_->toString() + ")"; }
+};
+
+class SmoothSignNode final : public BinaryNode {
+public:
+    using BinaryNode::BinaryNode;
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::SmoothSign; }
+    [[nodiscard]] std::string toString() const override { return "smooth_sign(" + lhs_->toString() + "," + rhs_->toString() + ")"; }
+};
+
+class SmoothHeavisideNode final : public BinaryNode {
+public:
+    using BinaryNode::BinaryNode;
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::SmoothHeaviside; }
+    [[nodiscard]] std::string toString() const override { return "smooth_heaviside(" + lhs_->toString() + "," + rhs_->toString() + ")"; }
+};
+
+class MatrixPowerDirectionalDerivativeNode final : public FormExprNode {
+public:
+    MatrixPowerDirectionalDerivativeNode(std::shared_ptr<FormExprNode> A,
+                                         std::shared_ptr<FormExprNode> dA,
+                                         std::shared_ptr<FormExprNode> p)
+        : a_(std::move(A)), da_(std::move(dA)), p_(std::move(p))
+    {}
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::MatrixPowerDirectionalDerivative; }
+    [[nodiscard]] std::string toString() const override
+    {
+        return "powm_dd(" + a_->toString() + "," + da_->toString() + "," + p_->toString() + ")";
+    }
+
+    [[nodiscard]] bool hasTest() const noexcept override
+    {
+        return (a_ && a_->hasTest()) || (da_ && da_->hasTest()) || (p_ && p_->hasTest());
+    }
+
+    [[nodiscard]] bool hasTrial() const noexcept override
+    {
+        return (a_ && a_->hasTrial()) || (da_ && da_->hasTrial()) || (p_ && p_->hasTrial());
+    }
+
+    [[nodiscard]] std::vector<const FormExprNode*> children() const override
+    {
+        return {a_.get(), da_.get(), p_.get()};
+    }
+
+    [[nodiscard]] std::vector<std::shared_ptr<FormExprNode>> childrenShared() const override
+    {
+        return {a_, da_, p_};
+    }
+
+private:
+    std::shared_ptr<FormExprNode> a_;
+    std::shared_ptr<FormExprNode> da_;
+    std::shared_ptr<FormExprNode> p_;
+};
+
+class SpectralDecompositionDirectionalDerivativeNode final : public BinaryNode {
+public:
+    using BinaryNode::BinaryNode;
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::SpectralDecompositionDirectionalDerivative; }
+    [[nodiscard]] std::string toString() const override { return "spectral_decomp_dd(" + lhs_->toString() + "," + rhs_->toString() + ")"; }
 };
 
 class AddNode final : public BinaryNode {
@@ -2334,10 +2736,138 @@ FormExpr FormExpr::log() const
     return FormExpr(std::make_shared<LogNode>(node_));
 }
 
+FormExpr FormExpr::matrixExp() const
+{
+    if (!node_) return {};
+    return FormExpr(std::make_shared<MatrixExponentialNode>(node_));
+}
+
+FormExpr FormExpr::matrixLog() const
+{
+    if (!node_) return {};
+    return FormExpr(std::make_shared<MatrixLogarithmNode>(node_));
+}
+
+FormExpr FormExpr::matrixSqrt() const
+{
+    if (!node_) return {};
+    return FormExpr(std::make_shared<MatrixSqrtNode>(node_));
+}
+
+FormExpr FormExpr::matrixPow(const FormExpr& exponent) const
+{
+    if (!node_ || !exponent.node_) return {};
+    return FormExpr(std::make_shared<MatrixPowerNode>(node_, exponent.node_));
+}
+
+FormExpr FormExpr::matrixExpDirectionalDerivative(const FormExpr& A, const FormExpr& dA)
+{
+    if (!A.node_ || !dA.node_) return {};
+    return FormExpr(std::make_shared<MatrixExponentialDirectionalDerivativeNode>(A.node_, dA.node_));
+}
+
+FormExpr FormExpr::matrixLogDirectionalDerivative(const FormExpr& A, const FormExpr& dA)
+{
+    if (!A.node_ || !dA.node_) return {};
+    return FormExpr(std::make_shared<MatrixLogarithmDirectionalDerivativeNode>(A.node_, dA.node_));
+}
+
+FormExpr FormExpr::matrixSqrtDirectionalDerivative(const FormExpr& A, const FormExpr& dA)
+{
+    if (!A.node_ || !dA.node_) return {};
+    return FormExpr(std::make_shared<MatrixSqrtDirectionalDerivativeNode>(A.node_, dA.node_));
+}
+
+FormExpr FormExpr::matrixPowDirectionalDerivative(const FormExpr& A, const FormExpr& dA, const FormExpr& exponent)
+{
+    if (!A.node_ || !dA.node_ || !exponent.node_) return {};
+    return FormExpr(std::make_shared<MatrixPowerDirectionalDerivativeNode>(A.node_, dA.node_, exponent.node_));
+}
+
+FormExpr FormExpr::smoothAbs(const FormExpr& eps) const
+{
+    if (!node_ || !eps.node_) return {};
+    return FormExpr(std::make_shared<SmoothAbsoluteValueNode>(node_, eps.node_));
+}
+
+FormExpr FormExpr::smoothSign(const FormExpr& eps) const
+{
+    if (!node_ || !eps.node_) return {};
+    return FormExpr(std::make_shared<SmoothSignNode>(node_, eps.node_));
+}
+
+FormExpr FormExpr::smoothHeaviside(const FormExpr& eps) const
+{
+    if (!node_ || !eps.node_) return {};
+    return FormExpr(std::make_shared<SmoothHeavisideNode>(node_, eps.node_));
+}
+
+FormExpr FormExpr::smoothMin(const FormExpr& rhs, const FormExpr& eps) const
+{
+    if (!node_ || !rhs.node_ || !eps.node_) return {};
+    return FormExpr(std::make_shared<SmoothMinNode>(node_, rhs.node_, eps.node_));
+}
+
+FormExpr FormExpr::smoothMax(const FormExpr& rhs, const FormExpr& eps) const
+{
+    if (!node_ || !rhs.node_ || !eps.node_) return {};
+    return FormExpr(std::make_shared<SmoothMaxNode>(node_, rhs.node_, eps.node_));
+}
+
 FormExpr FormExpr::symmetricEigenvalue(int which) const
 {
     if (!node_) return {};
     return FormExpr(std::make_shared<SymmetricEigenvalueNode>(node_, which));
+}
+
+FormExpr FormExpr::eigenvalue(int which) const
+{
+    if (!node_) return {};
+    return FormExpr(std::make_shared<EigenvalueNode>(node_, which));
+}
+
+FormExpr FormExpr::symmetricEigenvector(int which) const
+{
+    if (!node_) return {};
+    return FormExpr(std::make_shared<SymmetricEigenvectorNode>(node_, which));
+}
+
+FormExpr FormExpr::spectralDecomposition() const
+{
+    if (!node_) return {};
+    return FormExpr(std::make_shared<SpectralDecompositionNode>(node_));
+}
+
+FormExpr FormExpr::symmetricEigenvectorDirectionalDerivative(const FormExpr& A, const FormExpr& dA, int which)
+{
+    if (!A.node_ || !dA.node_) return {};
+    return FormExpr(std::make_shared<SymmetricEigenvectorDirectionalDerivativeNode>(A.node_, dA.node_, which));
+}
+
+FormExpr FormExpr::spectralDecompositionDirectionalDerivative(const FormExpr& A, const FormExpr& dA)
+{
+    if (!A.node_ || !dA.node_) return {};
+    return FormExpr(std::make_shared<SpectralDecompositionDirectionalDerivativeNode>(A.node_, dA.node_));
+}
+
+FormExpr FormExpr::historyWeightedSum(std::vector<FormExpr> weights)
+{
+    std::vector<std::shared_ptr<FormExprNode>> w;
+    w.reserve(weights.size());
+    for (auto& e : weights) {
+        w.push_back(e.node_);
+    }
+    return FormExpr(std::make_shared<HistoryWeightedSumNode>(std::move(w)));
+}
+
+FormExpr FormExpr::historyConvolution(std::vector<FormExpr> weights)
+{
+    std::vector<std::shared_ptr<FormExprNode>> w;
+    w.reserve(weights.size());
+    for (auto& e : weights) {
+        w.push_back(e.node_);
+    }
+    return FormExpr(std::make_shared<HistoryConvolutionNode>(std::move(w)));
 }
 
 FormExpr FormExpr::symmetricEigenvalueDirectionalDerivative(const FormExpr& A, const FormExpr& dA, int which)
@@ -2488,6 +3018,9 @@ std::shared_ptr<FormExprNode> transformNodeShared(
         case FormExprType::Sqrt: return std::make_shared<SqrtNode>(new_kids[0]);
         case FormExprType::Exp: return std::make_shared<ExpNode>(new_kids[0]);
         case FormExprType::Log: return std::make_shared<LogNode>(new_kids[0]);
+        case FormExprType::MatrixExponential: return std::make_shared<MatrixExponentialNode>(new_kids[0]);
+        case FormExprType::MatrixLogarithm: return std::make_shared<MatrixLogarithmNode>(new_kids[0]);
+        case FormExprType::MatrixSqrt: return std::make_shared<MatrixSqrtNode>(new_kids[0]);
 
         case FormExprType::SymmetricEigenvalue: {
             const auto which = node->eigenIndex();
@@ -2496,6 +3029,31 @@ std::shared_ptr<FormExprNode> transformNodeShared(
             }
             return std::make_shared<SymmetricEigenvalueNode>(new_kids[0], *which);
         }
+        case FormExprType::Eigenvalue: {
+            const auto which = node->eigenIndex();
+            if (!which.has_value()) {
+                throw std::logic_error("FormExpr::transformNodes: Eigenvalue missing eigen index");
+            }
+            return std::make_shared<EigenvalueNode>(new_kids[0], *which);
+        }
+        case FormExprType::SymmetricEigenvector: {
+            const auto which = node->eigenIndex();
+            if (!which.has_value()) {
+                throw std::logic_error("FormExpr::transformNodes: SymmetricEigenvector missing eigen index");
+            }
+            return std::make_shared<SymmetricEigenvectorNode>(new_kids[0], *which);
+        }
+        case FormExprType::SpectralDecomposition:
+            return std::make_shared<SpectralDecompositionNode>(new_kids[0]);
+        case FormExprType::SymmetricEigenvectorDirectionalDerivative: {
+            const auto which = node->eigenIndex();
+            if (!which.has_value()) {
+                throw std::logic_error("FormExpr::transformNodes: SymmetricEigenvectorDirectionalDerivative missing eigen index");
+            }
+            return std::make_shared<SymmetricEigenvectorDirectionalDerivativeNode>(new_kids[0], new_kids[1], *which);
+        }
+        case FormExprType::SpectralDecompositionDirectionalDerivative:
+            return std::make_shared<SpectralDecompositionDirectionalDerivativeNode>(new_kids[0], new_kids[1]);
         case FormExprType::SymmetricEigenvalueDirectionalDerivative: {
             const auto which = node->eigenIndex();
             if (!which.has_value()) {
@@ -2547,8 +3105,18 @@ std::shared_ptr<FormExprNode> transformNodeShared(
         case FormExprType::OuterProduct: return std::make_shared<OuterProductNode>(new_kids[0], new_kids[1]);
         case FormExprType::CrossProduct: return std::make_shared<CrossProductNode>(new_kids[0], new_kids[1]);
         case FormExprType::Power: return std::make_shared<PowerNode>(new_kids[0], new_kids[1]);
+        case FormExprType::MatrixPower: return std::make_shared<MatrixPowerNode>(new_kids[0], new_kids[1]);
+        case FormExprType::MatrixExponentialDirectionalDerivative:
+            return std::make_shared<MatrixExponentialDirectionalDerivativeNode>(new_kids[0], new_kids[1]);
+        case FormExprType::MatrixLogarithmDirectionalDerivative:
+            return std::make_shared<MatrixLogarithmDirectionalDerivativeNode>(new_kids[0], new_kids[1]);
+        case FormExprType::MatrixSqrtDirectionalDerivative:
+            return std::make_shared<MatrixSqrtDirectionalDerivativeNode>(new_kids[0], new_kids[1]);
         case FormExprType::Minimum: return std::make_shared<MinimumNode>(new_kids[0], new_kids[1]);
         case FormExprType::Maximum: return std::make_shared<MaximumNode>(new_kids[0], new_kids[1]);
+        case FormExprType::SmoothAbsoluteValue: return std::make_shared<SmoothAbsoluteValueNode>(new_kids[0], new_kids[1]);
+        case FormExprType::SmoothSign: return std::make_shared<SmoothSignNode>(new_kids[0], new_kids[1]);
+        case FormExprType::SmoothHeaviside: return std::make_shared<SmoothHeavisideNode>(new_kids[0], new_kids[1]);
 
         case FormExprType::Less:
         case FormExprType::LessEqual:
@@ -2561,10 +3129,20 @@ std::shared_ptr<FormExprNode> transformNodeShared(
         // Ternary
         case FormExprType::Conditional:
             return std::make_shared<ConditionalNode>(new_kids[0], new_kids[1], new_kids[2]);
+        case FormExprType::SmoothMin:
+            return std::make_shared<SmoothMinNode>(new_kids[0], new_kids[1], new_kids[2]);
+        case FormExprType::SmoothMax:
+            return std::make_shared<SmoothMaxNode>(new_kids[0], new_kids[1], new_kids[2]);
+        case FormExprType::MatrixPowerDirectionalDerivative:
+            return std::make_shared<MatrixPowerDirectionalDerivativeNode>(new_kids[0], new_kids[1], new_kids[2]);
 
         // Packing
         case FormExprType::AsVector:
             return std::make_shared<AsVectorNode>(std::move(new_kids));
+        case FormExprType::HistoryWeightedSum:
+            return std::make_shared<HistoryWeightedSumNode>(std::move(new_kids));
+        case FormExprType::HistoryConvolution:
+            return std::make_shared<HistoryConvolutionNode>(std::move(new_kids));
         case FormExprType::AsTensor: {
             const int rows = node->tensorRows().value_or(0);
             const int cols = node->tensorCols().value_or(0);

@@ -77,10 +77,10 @@ struct Tolerances {
     static constexpr T loose        = T(10000) * epsilon;
 
     // Square root of epsilon (useful for finite differences)
-    static constexpr T sqrt_epsilon = std::sqrt(epsilon);
+    static inline const T sqrt_epsilon = std::sqrt(epsilon);
 
     // Cube root of epsilon (useful for numerical derivatives)
-    static constexpr T cbrt_epsilon = std::cbrt(epsilon);
+    static inline const T cbrt_epsilon = std::cbrt(epsilon);
 
     // Smallest positive normalized value
     static constexpr T min_positive = std::numeric_limits<T>::min();
@@ -125,8 +125,8 @@ template<typename T> inline constexpr T epsilon      = Tolerances<T>::epsilon;
 template<typename T> inline constexpr T tolerance    = Tolerances<T>::tolerance;
 template<typename T> inline constexpr T strict_tol   = Tolerances<T>::strict;
 template<typename T> inline constexpr T loose_tol    = Tolerances<T>::loose;
-template<typename T> inline constexpr T sqrt_epsilon = Tolerances<T>::sqrt_epsilon;
-template<typename T> inline constexpr T cbrt_epsilon = Tolerances<T>::cbrt_epsilon;
+template<typename T> inline const T sqrt_epsilon = Tolerances<T>::sqrt_epsilon;
+template<typename T> inline const T cbrt_epsilon = Tolerances<T>::cbrt_epsilon;
 template<typename T> inline constexpr T min_positive = Tolerances<T>::min_positive;
 template<typename T> inline constexpr T max_value    = Tolerances<T>::max_value;
 template<typename T> inline constexpr T infinity     = Tolerances<T>::infinity;

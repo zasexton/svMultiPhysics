@@ -11,11 +11,14 @@
 #include "Forms/ConstitutiveModel.h"
 #include "Forms/FormExpr.h"
 #include "Forms/Value.h"
+#include "Math/Eigensolvers.h"
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace svmp {
@@ -25,7 +28,7 @@ namespace jit {
 
 namespace {
 
-using SideArgs = assembly::jit::KernelSideArgsV3;
+using SideArgs = assembly::jit::KernelSideArgsV4;
 
 [[nodiscard]] const external::ExternalCallTableV1* tryGetExternalCallTable(const SideArgs* side) noexcept
 {
@@ -639,3 +642,660 @@ extern "C" void svmp_fe_jit_constitutive_eval_batch_v1(const void* side_ptr,
 } // namespace forms
 } // namespace FE
 } // namespace svmp
+
+// ---------------------------------------------------------------------------
+// New-physics numeric helpers (matrix functions + eigendecomposition)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+[[nodiscard]] std::array<double, 4> sym2(const double* A) noexcept
+{
+    if (A == nullptr) return {0.0, 0.0, 0.0, 0.0};
+    const double a00 = A[0];
+    const double a01 = 0.5 * (A[1] + A[2]);
+    const double a11 = A[3];
+    return {a00, a01, a01, a11};
+}
+
+[[nodiscard]] std::array<double, 9> sym3(const double* A) noexcept
+{
+    std::array<double, 9> S{};
+    if (A == nullptr) return S;
+    for (int r = 0; r < 3; ++r) {
+        S[static_cast<std::size_t>(r * 3 + r)] = A[static_cast<std::size_t>(r * 3 + r)];
+    }
+    for (int r = 0; r < 3; ++r) {
+        for (int c = r + 1; c < 3; ++c) {
+            const double v = 0.5 * (A[static_cast<std::size_t>(r * 3 + c)] + A[static_cast<std::size_t>(c * 3 + r)]);
+            S[static_cast<std::size_t>(r * 3 + c)] = v;
+            S[static_cast<std::size_t>(c * 3 + r)] = v;
+        }
+    }
+    return S;
+}
+
+template <std::size_t N>
+void fillNaN(double* out) noexcept
+{
+    if (out == nullptr) return;
+    const double qnan = std::numeric_limits<double>::quiet_NaN();
+    for (std::size_t i = 0; i < N; ++i) {
+        out[i] = qnan;
+    }
+}
+
+template <std::size_t N>
+void fillZero(double* out) noexcept
+{
+    if (out == nullptr) return;
+    for (std::size_t i = 0; i < N; ++i) {
+        out[i] = 0.0;
+    }
+}
+
+template <std::size_t N>
+void fillIdentity(double* out) noexcept
+{
+    fillZero<N * N>(out);
+    if (out == nullptr) return;
+    for (std::size_t i = 0; i < N; ++i) {
+        out[i * N + i] = 1.0;
+    }
+}
+
+} // namespace
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_eig_sym_2x2_v1(const double* A,
+                                                                 double* eigvals2,
+                                                                 double* eigvecs4) noexcept
+{
+    if (eigvals2 == nullptr || eigvecs4 == nullptr) {
+        return;
+    }
+
+    svmp::FE::math::Matrix2x2<double> M;
+    const auto S = sym2(A);
+    M(0, 0) = S[0];
+    M(0, 1) = S[1];
+    M(1, 0) = S[2];
+    M(1, 1) = S[3];
+
+    const auto [evals, evecs] = svmp::FE::math::eigen_2x2_symmetric(M); // descending
+    eigvals2[0] = static_cast<double>(evals[0]);
+    eigvals2[1] = static_cast<double>(evals[1]);
+
+    // Row-major eigenvector matrix with columns as eigenvectors.
+    eigvecs4[0] = static_cast<double>(evecs(0, 0));
+    eigvecs4[1] = static_cast<double>(evecs(0, 1));
+    eigvecs4[2] = static_cast<double>(evecs(1, 0));
+    eigvecs4[3] = static_cast<double>(evecs(1, 1));
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_eig_sym_3x3_v1(const double* A,
+                                                                 double* eigvals3,
+                                                                 double* eigvecs9) noexcept
+{
+    if (eigvals3 == nullptr || eigvecs9 == nullptr) {
+        return;
+    }
+
+    svmp::FE::math::Matrix3x3<double> M;
+    const auto S = sym3(A);
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            M(r, c) = S[static_cast<std::size_t>(r * 3 + c)];
+        }
+    }
+
+    // eigen_3x3_symmetric returns ascending eigenvalues; reorder to descending.
+    const auto [evals_asc, evecs_asc] = svmp::FE::math::eigen_3x3_symmetric(M);
+
+    eigvals3[0] = static_cast<double>(evals_asc[2]);
+    eigvals3[1] = static_cast<double>(evals_asc[1]);
+    eigvals3[2] = static_cast<double>(evals_asc[0]);
+
+    // Row-major eigenvector matrix with columns as eigenvectors (descending order).
+    for (int r = 0; r < 3; ++r) {
+        eigvecs9[static_cast<std::size_t>(r * 3 + 0)] = static_cast<double>(evecs_asc(r, 2));
+        eigvecs9[static_cast<std::size_t>(r * 3 + 1)] = static_cast<double>(evecs_asc(r, 1));
+        eigvecs9[static_cast<std::size_t>(r * 3 + 2)] = static_cast<double>(evecs_asc(r, 0));
+    }
+}
+
+namespace {
+
+template <std::size_t N, class F>
+void spectralMapSPD(const double* A, double* out, const F& f) noexcept
+{
+    if (out == nullptr) {
+        return;
+    }
+
+    std::array<double, N> evals{};
+    std::array<double, N * N> evecs{};
+
+    if constexpr (N == 2) {
+        double eigvals2[2]{};
+        double eigvecs4[4]{};
+        svmp::FE::forms::jit::svmp_fe_jit_eig_sym_2x2_v1(A, eigvals2, eigvecs4);
+        evals = {eigvals2[0], eigvals2[1]};
+        evecs = {eigvecs4[0], eigvecs4[1], eigvecs4[2], eigvecs4[3]};
+    } else if constexpr (N == 3) {
+        double eigvals3[3]{};
+        double eigvecs9[9]{};
+        svmp::FE::forms::jit::svmp_fe_jit_eig_sym_3x3_v1(A, eigvals3, eigvecs9);
+        evals = {eigvals3[0], eigvals3[1], eigvals3[2]};
+        for (std::size_t i = 0; i < 9; ++i) evecs[i] = eigvecs9[i];
+    }
+
+    for (std::size_t i = 0; i < N; ++i) {
+        if (!(evals[i] > 0.0) || !std::isfinite(evals[i])) {
+            fillNaN<N * N>(out);
+            return;
+        }
+    }
+
+    std::array<double, N> fe{};
+    for (std::size_t i = 0; i < N; ++i) {
+        fe[i] = f(evals[i]);
+    }
+
+    // out = Q diag(fe) Q^T (Q columns are eigenvectors), where evecs is row-major.
+    fillZero<N * N>(out);
+    for (std::size_t i = 0; i < N; ++i) {
+        const double fi = fe[i];
+        for (std::size_t r = 0; r < N; ++r) {
+            const double qri = evecs[r * N + i];
+            for (std::size_t c = 0; c < N; ++c) {
+                const double qci = evecs[c * N + i];
+                out[r * N + c] += fi * qri * qci;
+            }
+        }
+    }
+}
+
+template <std::size_t N, class F>
+void spectralMapSymmetric(const double* A, double* out, const F& f) noexcept
+{
+    if (out == nullptr) {
+        return;
+    }
+
+    std::array<double, N> evals{};
+    std::array<double, N * N> evecs{};
+
+    if constexpr (N == 2) {
+        double eigvals2[2]{};
+        double eigvecs4[4]{};
+        svmp::FE::forms::jit::svmp_fe_jit_eig_sym_2x2_v1(A, eigvals2, eigvecs4);
+        evals = {eigvals2[0], eigvals2[1]};
+        evecs = {eigvecs4[0], eigvecs4[1], eigvecs4[2], eigvecs4[3]};
+    } else if constexpr (N == 3) {
+        double eigvals3[3]{};
+        double eigvecs9[9]{};
+        svmp::FE::forms::jit::svmp_fe_jit_eig_sym_3x3_v1(A, eigvals3, eigvecs9);
+        evals = {eigvals3[0], eigvals3[1], eigvals3[2]};
+        for (std::size_t i = 0; i < 9; ++i) evecs[i] = eigvecs9[i];
+    }
+
+    std::array<double, N> fe{};
+    for (std::size_t i = 0; i < N; ++i) {
+        fe[i] = f(evals[i]);
+    }
+
+    fillZero<N * N>(out);
+    for (std::size_t i = 0; i < N; ++i) {
+        const double fi = fe[i];
+        for (std::size_t r = 0; r < N; ++r) {
+            const double qri = evecs[r * N + i];
+            for (std::size_t c = 0; c < N; ++c) {
+                const double qci = evecs[c * N + i];
+                out[r * N + c] += fi * qri * qci;
+            }
+        }
+    }
+}
+
+} // namespace
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_exp_2x2_v1(const double* A, double* expA4) noexcept
+{
+    spectralMapSymmetric<2>(A, expA4, [](double x) { return std::exp(x); });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_exp_3x3_v1(const double* A, double* expA9) noexcept
+{
+    spectralMapSymmetric<3>(A, expA9, [](double x) { return std::exp(x); });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_log_2x2_v1(const double* A, double* logA4) noexcept
+{
+    spectralMapSPD<2>(A, logA4, [](double x) { return std::log(x); });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_log_3x3_v1(const double* A, double* logA9) noexcept
+{
+    spectralMapSPD<3>(A, logA9, [](double x) { return std::log(x); });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_sqrt_2x2_v1(const double* A, double* sqrtA4) noexcept
+{
+    spectralMapSPD<2>(A, sqrtA4, [](double x) { return std::sqrt(x); });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_sqrt_3x3_v1(const double* A, double* sqrtA9) noexcept
+{
+    spectralMapSPD<3>(A, sqrtA9, [](double x) { return std::sqrt(x); });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_pow_2x2_v1(const double* A, double p, double* Ap4) noexcept
+{
+    if (!std::isfinite(p)) {
+        fillNaN<4>(Ap4);
+        return;
+    }
+    if (p == 0.0) {
+        fillIdentity<2>(Ap4);
+        return;
+    }
+    spectralMapSPD<2>(A, Ap4, [&](double x) { return std::pow(x, p); });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_pow_3x3_v1(const double* A, double p, double* Ap9) noexcept
+{
+    if (!std::isfinite(p)) {
+        fillNaN<9>(Ap9);
+        return;
+    }
+    if (p == 0.0) {
+        fillIdentity<3>(Ap9);
+        return;
+    }
+    spectralMapSPD<3>(A, Ap9, [&](double x) { return std::pow(x, p); });
+}
+
+namespace {
+
+[[nodiscard]] std::int32_t clampWhich(std::int32_t which, std::int32_t n) noexcept
+{
+    if (n <= 1) return 0;
+    if (which < 0) return 0;
+    if (which >= n) return n - 1;
+    return which;
+}
+
+[[nodiscard]] double safeDenom(double denom, double scale) noexcept
+{
+    const double eps = 1e-12 * std::max(1.0, scale);
+    if (std::abs(denom) < eps) {
+        return (denom < 0.0) ? -eps : eps;
+    }
+    return denom;
+}
+
+template <std::size_t N>
+struct EigSymData {
+    std::array<double, N> evals{};
+    std::array<double, N * N> evecs{}; // row-major, columns are eigenvectors (descending)
+};
+
+template <std::size_t N>
+[[nodiscard]] EigSymData<N> eigSym(const double* A) noexcept
+{
+    EigSymData<N> out{};
+    if constexpr (N == 2) {
+        double eigvals2[2]{};
+        double eigvecs4[4]{};
+        svmp::FE::forms::jit::svmp_fe_jit_eig_sym_2x2_v1(A, eigvals2, eigvecs4);
+        out.evals = {eigvals2[0], eigvals2[1]};
+        out.evecs = {eigvecs4[0], eigvecs4[1], eigvecs4[2], eigvecs4[3]};
+    } else if constexpr (N == 3) {
+        double eigvals3[3]{};
+        double eigvecs9[9]{};
+        svmp::FE::forms::jit::svmp_fe_jit_eig_sym_3x3_v1(A, eigvals3, eigvecs9);
+        out.evals = {eigvals3[0], eigvals3[1], eigvals3[2]};
+        for (std::size_t i = 0; i < 9; ++i) out.evecs[i] = eigvecs9[i];
+    }
+    return out;
+}
+
+template <std::size_t N, class F, class FP>
+void spectralFrechetSymmetric(const double* A,
+                              const double* dA,
+                              double* out,
+                              const F& f,
+                              const FP& fp) noexcept
+{
+    if (out == nullptr) return;
+
+    const auto ed = eigSym<N>(A);
+
+    std::array<double, N * N> Sd{};
+    if constexpr (N == 2) {
+        const auto S = sym2(dA);
+        Sd = {S[0], S[1], S[2], S[3]};
+    } else if constexpr (N == 3) {
+        const auto S = sym3(dA);
+        for (std::size_t i = 0; i < 9; ++i) Sd[i] = S[i];
+    }
+
+    // B = Q^T dA Q (row-major, with Q columns as eigenvectors).
+    std::array<double, N * N> B{};
+    for (std::size_t i = 0; i < N; ++i) {
+        for (std::size_t j = 0; j < N; ++j) {
+            double sum = 0.0;
+            for (std::size_t r = 0; r < N; ++r) {
+                const double qri = ed.evecs[r * N + i];
+                for (std::size_t c = 0; c < N; ++c) {
+                    const double qcj = ed.evecs[c * N + j];
+                    sum += qri * Sd[r * N + c] * qcj;
+                }
+            }
+            B[i * N + j] = sum;
+        }
+    }
+
+    std::array<double, N> fe{};
+    std::array<double, N> fpe{};
+    double scale = 0.0;
+    for (std::size_t i = 0; i < N; ++i) {
+        const double lam = ed.evals[i];
+        scale = std::max(scale, std::abs(lam));
+        fe[i] = f(lam);
+        fpe[i] = fp(lam);
+    }
+    scale = std::max(1.0, scale);
+
+    std::array<double, N * N> C{};
+    for (std::size_t i = 0; i < N; ++i) {
+        for (std::size_t j = 0; j < N; ++j) {
+            double g = 0.0;
+            if (i == j) {
+                g = fpe[i];
+            } else {
+                const double denom_raw = ed.evals[i] - ed.evals[j];
+                const double denom = safeDenom(denom_raw, scale);
+                if (std::abs(denom_raw) < 1e-12 * scale) {
+                    g = fp(0.5 * (ed.evals[i] + ed.evals[j]));
+                } else {
+                    g = (fe[i] - fe[j]) / denom;
+                }
+            }
+            C[i * N + j] = g * B[i * N + j];
+        }
+    }
+
+    // out = Q C Q^T
+    fillZero<N * N>(out);
+    for (std::size_t r = 0; r < N; ++r) {
+        for (std::size_t c = 0; c < N; ++c) {
+            double sum = 0.0;
+            for (std::size_t i = 0; i < N; ++i) {
+                const double qri = ed.evecs[r * N + i];
+                for (std::size_t j = 0; j < N; ++j) {
+                    const double qcj = ed.evecs[c * N + j];
+                    sum += qri * C[i * N + j] * qcj;
+                }
+            }
+            out[r * N + c] = sum;
+        }
+    }
+}
+
+template <std::size_t N, class F, class FP>
+void spectralFrechetSPD(const double* A,
+                        const double* dA,
+                        double* out,
+                        const F& f,
+                        const FP& fp) noexcept
+{
+    if (out == nullptr) return;
+
+    const auto ed = eigSym<N>(A);
+    for (std::size_t i = 0; i < N; ++i) {
+        if (!(ed.evals[i] > 0.0) || !std::isfinite(ed.evals[i])) {
+            fillNaN<N * N>(out);
+            return;
+        }
+    }
+
+    spectralFrechetSymmetric<N>(A, dA, out, f, fp);
+}
+
+} // namespace
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_exp_dd_2x2_v1(const double* A, const double* dA, double* dExpA4) noexcept
+{
+    spectralFrechetSymmetric<2>(A, dA, dExpA4, [](double x) { return std::exp(x); }, [](double x) { return std::exp(x); });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_exp_dd_3x3_v1(const double* A, const double* dA, double* dExpA9) noexcept
+{
+    spectralFrechetSymmetric<3>(A, dA, dExpA9, [](double x) { return std::exp(x); }, [](double x) { return std::exp(x); });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_log_dd_2x2_v1(const double* A, const double* dA, double* dLogA4) noexcept
+{
+    spectralFrechetSPD<2>(A, dA, dLogA4, [](double x) { return std::log(x); }, [](double x) { return 1.0 / x; });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_log_dd_3x3_v1(const double* A, const double* dA, double* dLogA9) noexcept
+{
+    spectralFrechetSPD<3>(A, dA, dLogA9, [](double x) { return std::log(x); }, [](double x) { return 1.0 / x; });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_sqrt_dd_2x2_v1(const double* A, const double* dA, double* dSqrtA4) noexcept
+{
+    spectralFrechetSPD<2>(A, dA, dSqrtA4, [](double x) { return std::sqrt(x); }, [](double x) { return 0.5 / std::sqrt(x); });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_sqrt_dd_3x3_v1(const double* A, const double* dA, double* dSqrtA9) noexcept
+{
+    spectralFrechetSPD<3>(A, dA, dSqrtA9, [](double x) { return std::sqrt(x); }, [](double x) { return 0.5 / std::sqrt(x); });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_pow_dd_2x2_v1(const double* A, const double* dA, double p, double* dAp4) noexcept
+{
+    if (dAp4 == nullptr) return;
+    if (!std::isfinite(p)) {
+        fillNaN<4>(dAp4);
+        return;
+    }
+    if (p == 0.0) {
+        fillZero<4>(dAp4);
+        return;
+    }
+    spectralFrechetSPD<2>(A, dA, dAp4,
+                          [&](double x) { return std::pow(x, p); },
+                          [&](double x) { return p * std::pow(x, p - 1.0); });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_matrix_pow_dd_3x3_v1(const double* A, const double* dA, double p, double* dAp9) noexcept
+{
+    if (dAp9 == nullptr) return;
+    if (!std::isfinite(p)) {
+        fillNaN<9>(dAp9);
+        return;
+    }
+    if (p == 0.0) {
+        fillZero<9>(dAp9);
+        return;
+    }
+    spectralFrechetSPD<3>(A, dA, dAp9,
+                          [&](double x) { return std::pow(x, p); },
+                          [&](double x) { return p * std::pow(x, p - 1.0); });
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_eigvec_sym_dd_2x2_v1(const double* A,
+                                                                       const double* dA,
+                                                                       std::int32_t which,
+                                                                       double* dv2) noexcept
+{
+    if (dv2 == nullptr) return;
+    which = clampWhich(which, 2);
+
+    double eigvals2[2]{};
+    double evecs4[4]{};
+    svmp::FE::forms::jit::svmp_fe_jit_eig_sym_2x2_v1(A, eigvals2, evecs4);
+
+    const int i = static_cast<int>(which);
+    const int j = 1 - i;
+
+    const std::array<double, 2> vi{evecs4[0 * 2 + i], evecs4[1 * 2 + i]};
+    const std::array<double, 2> vj{evecs4[0 * 2 + j], evecs4[1 * 2 + j]};
+
+    const auto Sd = sym2(dA);
+    const std::array<double, 2> Sd_vi{
+        Sd[0] * vi[0] + Sd[1] * vi[1],
+        Sd[2] * vi[0] + Sd[3] * vi[1],
+    };
+    const double vjDvi = vj[0] * Sd_vi[0] + vj[1] * Sd_vi[1];
+
+    const double denom_raw = eigvals2[static_cast<std::size_t>(i)] - eigvals2[static_cast<std::size_t>(j)];
+    const double scale = std::max(std::abs(eigvals2[0]), std::abs(eigvals2[1]));
+    const double denom = safeDenom(denom_raw, scale);
+
+    const double factor = vjDvi / denom;
+    dv2[0] = vj[0] * factor;
+    dv2[1] = vj[1] * factor;
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_eigvec_sym_dd_3x3_v1(const double* A,
+                                                                       const double* dA,
+                                                                       std::int32_t which,
+                                                                       double* dv3) noexcept
+{
+    if (dv3 == nullptr) return;
+    which = clampWhich(which, 3);
+
+    double eigvals3[3]{};
+    double evecs9[9]{};
+    svmp::FE::forms::jit::svmp_fe_jit_eig_sym_3x3_v1(A, eigvals3, evecs9);
+
+    const int i = static_cast<int>(which);
+
+    std::array<double, 3> vi{
+        evecs9[0 * 3 + i],
+        evecs9[1 * 3 + i],
+        evecs9[2 * 3 + i],
+    };
+
+    const auto Sd = sym3(dA);
+    const double scale = std::max({std::abs(eigvals3[0]), std::abs(eigvals3[1]), std::abs(eigvals3[2])});
+
+    std::array<double, 3> dv{0.0, 0.0, 0.0};
+    for (int j = 0; j < 3; ++j) {
+        if (j == i) continue;
+
+        std::array<double, 3> vj{
+            evecs9[0 * 3 + j],
+            evecs9[1 * 3 + j],
+            evecs9[2 * 3 + j],
+        };
+
+        std::array<double, 3> Sd_vi{
+            Sd[0 * 3 + 0] * vi[0] + Sd[0 * 3 + 1] * vi[1] + Sd[0 * 3 + 2] * vi[2],
+            Sd[1 * 3 + 0] * vi[0] + Sd[1 * 3 + 1] * vi[1] + Sd[1 * 3 + 2] * vi[2],
+            Sd[2 * 3 + 0] * vi[0] + Sd[2 * 3 + 1] * vi[1] + Sd[2 * 3 + 2] * vi[2],
+        };
+        const double vjDvi = vj[0] * Sd_vi[0] + vj[1] * Sd_vi[1] + vj[2] * Sd_vi[2];
+
+        const double denom_raw = eigvals3[static_cast<std::size_t>(i)] - eigvals3[static_cast<std::size_t>(j)];
+        const double denom = safeDenom(denom_raw, scale);
+
+        const double factor = vjDvi / denom;
+        for (int r = 0; r < 3; ++r) {
+            dv[static_cast<std::size_t>(r)] += vj[static_cast<std::size_t>(r)] * factor;
+        }
+    }
+
+    dv3[0] = dv[0];
+    dv3[1] = dv[1];
+    dv3[2] = dv[2];
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_spectral_decomp_dd_2x2_v1(const double* A,
+                                                                            const double* dA,
+                                                                            double* dQ4) noexcept
+{
+    if (dQ4 == nullptr) return;
+
+    double eigvals2[2]{};
+    double evecs4[4]{};
+    svmp::FE::forms::jit::svmp_fe_jit_eig_sym_2x2_v1(A, eigvals2, evecs4);
+    const auto Sd = sym2(dA);
+
+    const double scale = std::max(std::abs(eigvals2[0]), std::abs(eigvals2[1]));
+
+    for (int i = 0; i < 2; ++i) {
+        const int j = 1 - i;
+        const std::array<double, 2> vi{evecs4[0 * 2 + i], evecs4[1 * 2 + i]};
+        const std::array<double, 2> vj{evecs4[0 * 2 + j], evecs4[1 * 2 + j]};
+
+        const std::array<double, 2> Sd_vi{
+            Sd[0] * vi[0] + Sd[1] * vi[1],
+            Sd[2] * vi[0] + Sd[3] * vi[1],
+        };
+        const double vjDvi = vj[0] * Sd_vi[0] + vj[1] * Sd_vi[1];
+        const double denom_raw = eigvals2[static_cast<std::size_t>(i)] - eigvals2[static_cast<std::size_t>(j)];
+        const double denom = safeDenom(denom_raw, scale);
+        const double factor = vjDvi / denom;
+
+        // Column i of dQ is dv_i.
+        dQ4[0 * 2 + i] = vj[0] * factor;
+        dQ4[1 * 2 + i] = vj[1] * factor;
+    }
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_spectral_decomp_dd_3x3_v1(const double* A,
+                                                                            const double* dA,
+                                                                            double* dQ9) noexcept
+{
+    if (dQ9 == nullptr) return;
+
+    double eigvals3[3]{};
+    double evecs9[9]{};
+    svmp::FE::forms::jit::svmp_fe_jit_eig_sym_3x3_v1(A, eigvals3, evecs9);
+    const auto Sd = sym3(dA);
+
+    const double scale = std::max({std::abs(eigvals3[0]), std::abs(eigvals3[1]), std::abs(eigvals3[2])});
+
+    for (int i = 0; i < 3; ++i) {
+        std::array<double, 3> vi{
+            evecs9[0 * 3 + i],
+            evecs9[1 * 3 + i],
+            evecs9[2 * 3 + i],
+        };
+
+        std::array<double, 3> dv{0.0, 0.0, 0.0};
+        for (int j = 0; j < 3; ++j) {
+            if (j == i) continue;
+
+            std::array<double, 3> vj{
+                evecs9[0 * 3 + j],
+                evecs9[1 * 3 + j],
+                evecs9[2 * 3 + j],
+            };
+
+            std::array<double, 3> Sd_vi{
+                Sd[0 * 3 + 0] * vi[0] + Sd[0 * 3 + 1] * vi[1] + Sd[0 * 3 + 2] * vi[2],
+                Sd[1 * 3 + 0] * vi[0] + Sd[1 * 3 + 1] * vi[1] + Sd[1 * 3 + 2] * vi[2],
+                Sd[2 * 3 + 0] * vi[0] + Sd[2 * 3 + 1] * vi[1] + Sd[2 * 3 + 2] * vi[2],
+            };
+            const double vjDvi = vj[0] * Sd_vi[0] + vj[1] * Sd_vi[1] + vj[2] * Sd_vi[2];
+
+            const double denom_raw = eigvals3[static_cast<std::size_t>(i)] - eigvals3[static_cast<std::size_t>(j)];
+            const double denom = safeDenom(denom_raw, scale);
+            const double factor = vjDvi / denom;
+            for (int r = 0; r < 3; ++r) {
+                dv[static_cast<std::size_t>(r)] += vj[static_cast<std::size_t>(r)] * factor;
+            }
+        }
+
+        // Column i of dQ is dv_i.
+        for (int r = 0; r < 3; ++r) {
+            dQ9[static_cast<std::size_t>(r * 3 + i)] = dv[static_cast<std::size_t>(r)];
+        }
+    }
+}

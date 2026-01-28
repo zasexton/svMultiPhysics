@@ -16,8 +16,11 @@
 #include "Forms/Dual.h"
 #include "Forms/Einsum.h"
 #include "Forms/JIT/InlinableConstitutiveModel.h"
+#include "Forms/JIT/ExternalCalls.h"
 #include "Forms/SymbolicDifferentiation.h"
 #include "Forms/Tensor/SpectralEigen.h"
+#include "Forms/Tensor/TensorInterpreter.h"
+#include "Forms/Tensor/TensorIR.h"
 #include "Forms/Value.h"
 
 #include "Assembly/AssemblyContext.h"
@@ -74,6 +77,19 @@ const assembly::AssemblyContext& ctxForSide(const assembly::AssemblyContext& ctx
                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
     }
     return *ctx_plus;
+}
+
+[[nodiscard]] Real termWeightFor(const assembly::TimeIntegrationContext* time_ctx,
+                                 int time_derivative_order) noexcept
+{
+    if (time_ctx == nullptr) {
+        return Real(1.0);
+    }
+    if (time_derivative_order > 0) {
+        return time_ctx->time_derivative_term_weight *
+               time_ctx->derivativeTermWeight(time_derivative_order);
+    }
+    return time_ctx->non_time_derivative_term_weight;
 }
 
 template<typename Scalar>
@@ -6083,6 +6099,425 @@ EvalValue<Real> evalReal(const FormExprNode& node,
             return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, v};
         }
 
+        case FormExprType::MatrixExponential:
+        case FormExprType::MatrixLogarithm:
+        case FormExprType::MatrixSqrt: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (!isMatrixKind<Real>(a.kind)) {
+                throw FEException("Forms: expm/logm/sqrtm expects a matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || (rows != 2u && rows != 3u)) {
+                throw FEException("Forms: expm/logm/sqrtm expects a 2x2 or 3x3 square matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Matrix;
+            out.resizeMatrix(rows, cols);
+
+            if (rows == 2u) {
+                std::array<double, 4> A{};
+                std::array<double, 4> B{};
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        A[r * 2u + c] = static_cast<double>(a.matrixAt(r, c));
+                    }
+                }
+                if (node.type() == FormExprType::MatrixExponential) {
+                    jit::svmp_fe_jit_matrix_exp_2x2_v1(A.data(), B.data());
+                } else if (node.type() == FormExprType::MatrixLogarithm) {
+                    jit::svmp_fe_jit_matrix_log_2x2_v1(A.data(), B.data());
+                } else {
+                    jit::svmp_fe_jit_matrix_sqrt_2x2_v1(A.data(), B.data());
+                }
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        out.matrixAt(r, c) = static_cast<Real>(B[r * 2u + c]);
+                    }
+                }
+                return out;
+            }
+
+            std::array<double, 9> A{};
+            std::array<double, 9> B{};
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    A[r * 3u + c] = static_cast<double>(a.matrixAt(r, c));
+                }
+            }
+            if (node.type() == FormExprType::MatrixExponential) {
+                jit::svmp_fe_jit_matrix_exp_3x3_v1(A.data(), B.data());
+            } else if (node.type() == FormExprType::MatrixLogarithm) {
+                jit::svmp_fe_jit_matrix_log_3x3_v1(A.data(), B.data());
+            } else {
+                jit::svmp_fe_jit_matrix_sqrt_3x3_v1(A.data(), B.data());
+            }
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    out.matrixAt(r, c) = static_cast<Real>(B[r * 3u + c]);
+                }
+            }
+            return out;
+        }
+
+        case FormExprType::MatrixPower: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+                throw std::logic_error("Forms: powm() must have 2 children");
+            }
+            const auto a = evalReal(*kids[0], env, side, q);
+            const auto p = evalReal(*kids[1], env, side, q);
+            if (!isMatrixKind<Real>(a.kind) || p.kind != EvalValue<Real>::Kind::Scalar) {
+                throw FEException("Forms: powm(A,p) expects a matrix A and scalar exponent p",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || (rows != 2u && rows != 3u)) {
+                throw FEException("Forms: powm expects a 2x2 or 3x3 square matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Matrix;
+            out.resizeMatrix(rows, cols);
+
+            const double pp = static_cast<double>(p.s);
+            if (rows == 2u) {
+                std::array<double, 4> A{};
+                std::array<double, 4> B{};
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        A[r * 2u + c] = static_cast<double>(a.matrixAt(r, c));
+                    }
+                }
+                jit::svmp_fe_jit_matrix_pow_2x2_v1(A.data(), pp, B.data());
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        out.matrixAt(r, c) = static_cast<Real>(B[r * 2u + c]);
+                    }
+                }
+                return out;
+            }
+
+            std::array<double, 9> A{};
+            std::array<double, 9> B{};
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    A[r * 3u + c] = static_cast<double>(a.matrixAt(r, c));
+                }
+            }
+            jit::svmp_fe_jit_matrix_pow_3x3_v1(A.data(), pp, B.data());
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    out.matrixAt(r, c) = static_cast<Real>(B[r * 3u + c]);
+                }
+            }
+            return out;
+        }
+
+        case FormExprType::MatrixExponentialDirectionalDerivative:
+        case FormExprType::MatrixLogarithmDirectionalDerivative:
+        case FormExprType::MatrixSqrtDirectionalDerivative: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+                throw std::logic_error("Forms: matrix function directional derivative must have 2 children");
+            }
+            const auto a = evalReal(*kids[0], env, side, q);
+            const auto da = evalReal(*kids[1], env, side, q);
+            if (!isMatrixKind<Real>(a.kind) || !isMatrixKind<Real>(da.kind)) {
+                throw FEException("Forms: matrix function directional derivative expects two matrices",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || rows != da.matrixRows() || cols != da.matrixCols() || (rows != 2u && rows != 3u)) {
+                throw FEException("Forms: matrix function directional derivative expects two 2x2 or 3x3 square matrices with matching dims",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Matrix;
+            out.resizeMatrix(rows, cols);
+
+            if (rows == 2u) {
+                std::array<double, 4> A{};
+                std::array<double, 4> dA{};
+                std::array<double, 4> B{};
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        A[r * 2u + c] = static_cast<double>(a.matrixAt(r, c));
+                        dA[r * 2u + c] = static_cast<double>(da.matrixAt(r, c));
+                    }
+                }
+                if (node.type() == FormExprType::MatrixExponentialDirectionalDerivative) {
+                    jit::svmp_fe_jit_matrix_exp_dd_2x2_v1(A.data(), dA.data(), B.data());
+                } else if (node.type() == FormExprType::MatrixLogarithmDirectionalDerivative) {
+                    jit::svmp_fe_jit_matrix_log_dd_2x2_v1(A.data(), dA.data(), B.data());
+                } else {
+                    jit::svmp_fe_jit_matrix_sqrt_dd_2x2_v1(A.data(), dA.data(), B.data());
+                }
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        out.matrixAt(r, c) = static_cast<Real>(B[r * 2u + c]);
+                    }
+                }
+                return out;
+            }
+
+            std::array<double, 9> A{};
+            std::array<double, 9> dA{};
+            std::array<double, 9> B{};
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    A[r * 3u + c] = static_cast<double>(a.matrixAt(r, c));
+                    dA[r * 3u + c] = static_cast<double>(da.matrixAt(r, c));
+                }
+            }
+            if (node.type() == FormExprType::MatrixExponentialDirectionalDerivative) {
+                jit::svmp_fe_jit_matrix_exp_dd_3x3_v1(A.data(), dA.data(), B.data());
+            } else if (node.type() == FormExprType::MatrixLogarithmDirectionalDerivative) {
+                jit::svmp_fe_jit_matrix_log_dd_3x3_v1(A.data(), dA.data(), B.data());
+            } else {
+                jit::svmp_fe_jit_matrix_sqrt_dd_3x3_v1(A.data(), dA.data(), B.data());
+            }
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    out.matrixAt(r, c) = static_cast<Real>(B[r * 3u + c]);
+                }
+            }
+            return out;
+        }
+
+        case FormExprType::MatrixPowerDirectionalDerivative: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 3u || !kids[0] || !kids[1] || !kids[2]) {
+                throw std::logic_error("Forms: powm_dd() must have 3 children");
+            }
+            const auto a = evalReal(*kids[0], env, side, q);
+            const auto da = evalReal(*kids[1], env, side, q);
+            const auto p = evalReal(*kids[2], env, side, q);
+            if (!isMatrixKind<Real>(a.kind) || !isMatrixKind<Real>(da.kind) || p.kind != EvalValue<Real>::Kind::Scalar) {
+                throw FEException("Forms: powm_dd(A,dA,p) expects two matrices and a scalar exponent",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || rows != da.matrixRows() || cols != da.matrixCols() || (rows != 2u && rows != 3u)) {
+                throw FEException("Forms: powm_dd expects two 2x2 or 3x3 square matrices with matching dims",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Matrix;
+            out.resizeMatrix(rows, cols);
+
+            const double pp = static_cast<double>(p.s);
+            if (rows == 2u) {
+                std::array<double, 4> A{};
+                std::array<double, 4> dA{};
+                std::array<double, 4> B{};
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        A[r * 2u + c] = static_cast<double>(a.matrixAt(r, c));
+                        dA[r * 2u + c] = static_cast<double>(da.matrixAt(r, c));
+                    }
+                }
+                jit::svmp_fe_jit_matrix_pow_dd_2x2_v1(A.data(), dA.data(), pp, B.data());
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        out.matrixAt(r, c) = static_cast<Real>(B[r * 2u + c]);
+                    }
+                }
+                return out;
+            }
+
+            std::array<double, 9> A{};
+            std::array<double, 9> dA{};
+            std::array<double, 9> B{};
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    A[r * 3u + c] = static_cast<double>(a.matrixAt(r, c));
+                    dA[r * 3u + c] = static_cast<double>(da.matrixAt(r, c));
+                }
+            }
+            jit::svmp_fe_jit_matrix_pow_dd_3x3_v1(A.data(), dA.data(), pp, B.data());
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    out.matrixAt(r, c) = static_cast<Real>(B[r * 3u + c]);
+                }
+            }
+            return out;
+        }
+
+        case FormExprType::SymmetricEigenvectorDirectionalDerivative: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+                throw std::logic_error("Forms: eigvec_sym_dd() must have 2 children");
+            }
+            const auto a = evalReal(*kids[0], env, side, q);
+            const auto da = evalReal(*kids[1], env, side, q);
+            if (!isMatrixKind<Real>(a.kind) || !isMatrixKind<Real>(da.kind)) {
+                throw FEException("Forms: eigvec_sym_dd() expects two matrices",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || rows != da.matrixRows() || cols != da.matrixCols() || (rows != 2u && rows != 3u)) {
+                throw FEException("Forms: eigvec_sym_dd() expects two 2x2 or 3x3 square matrices with matching dims",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            const auto which = static_cast<std::int32_t>(node.eigenIndex().value_or(0));
+            if (rows == 2u) {
+                std::array<double, 4> A{};
+                std::array<double, 4> dA{};
+                std::array<double, 2> dv{};
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        A[r * 2u + c] = static_cast<double>(a.matrixAt(r, c));
+                        dA[r * 2u + c] = static_cast<double>(da.matrixAt(r, c));
+                    }
+                }
+                jit::svmp_fe_jit_eigvec_sym_dd_2x2_v1(A.data(), dA.data(), which, dv.data());
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                out.resizeVector(2u);
+                out.vectorAt(0) = static_cast<Real>(dv[0]);
+                out.vectorAt(1) = static_cast<Real>(dv[1]);
+                return out;
+            }
+
+            std::array<double, 9> A{};
+            std::array<double, 9> dA{};
+            std::array<double, 3> dv{};
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    A[r * 3u + c] = static_cast<double>(a.matrixAt(r, c));
+                    dA[r * 3u + c] = static_cast<double>(da.matrixAt(r, c));
+                }
+            }
+            jit::svmp_fe_jit_eigvec_sym_dd_3x3_v1(A.data(), dA.data(), which, dv.data());
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Vector;
+            out.resizeVector(3u);
+            out.vectorAt(0) = static_cast<Real>(dv[0]);
+            out.vectorAt(1) = static_cast<Real>(dv[1]);
+            out.vectorAt(2) = static_cast<Real>(dv[2]);
+            return out;
+        }
+
+        case FormExprType::SpectralDecompositionDirectionalDerivative: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+                throw std::logic_error("Forms: spectral_decomp_dd() must have 2 children");
+            }
+            const auto a = evalReal(*kids[0], env, side, q);
+            const auto da = evalReal(*kids[1], env, side, q);
+            if (!isMatrixKind<Real>(a.kind) || !isMatrixKind<Real>(da.kind)) {
+                throw FEException("Forms: spectral_decomp_dd() expects two matrices",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || rows != da.matrixRows() || cols != da.matrixCols() || (rows != 2u && rows != 3u)) {
+                throw FEException("Forms: spectral_decomp_dd() expects two 2x2 or 3x3 square matrices with matching dims",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Matrix;
+            out.resizeMatrix(rows, cols);
+
+            if (rows == 2u) {
+                std::array<double, 4> A{};
+                std::array<double, 4> dA{};
+                std::array<double, 4> dQ{};
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        A[r * 2u + c] = static_cast<double>(a.matrixAt(r, c));
+                        dA[r * 2u + c] = static_cast<double>(da.matrixAt(r, c));
+                    }
+                }
+                jit::svmp_fe_jit_spectral_decomp_dd_2x2_v1(A.data(), dA.data(), dQ.data());
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        out.matrixAt(r, c) = static_cast<Real>(dQ[r * 2u + c]);
+                    }
+                }
+                return out;
+            }
+
+            std::array<double, 9> A{};
+            std::array<double, 9> dA{};
+            std::array<double, 9> dQ{};
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    A[r * 3u + c] = static_cast<double>(a.matrixAt(r, c));
+                    dA[r * 3u + c] = static_cast<double>(da.matrixAt(r, c));
+                }
+            }
+            jit::svmp_fe_jit_spectral_decomp_dd_3x3_v1(A.data(), dA.data(), dQ.data());
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    out.matrixAt(r, c) = static_cast<Real>(dQ[r * 3u + c]);
+                }
+            }
+            return out;
+        }
+
+        case FormExprType::SmoothAbsoluteValue:
+        case FormExprType::SmoothSign:
+        case FormExprType::SmoothHeaviside: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 2u || !kids[0] || !kids[1]) {
+                throw std::logic_error("Forms: smooth unary op must have 2 children");
+            }
+            const auto x = evalReal(*kids[0], env, side, q);
+            const auto eps = evalReal(*kids[1], env, side, q);
+            if (x.kind != EvalValue<Real>::Kind::Scalar || eps.kind != EvalValue<Real>::Kind::Scalar) {
+                throw FEException("Forms: smooth op expects scalar inputs",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const Real denom = std::sqrt(x.s * x.s + eps.s * eps.s);
+            if (node.type() == FormExprType::SmoothAbsoluteValue) {
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, denom};
+            }
+            const Real s = (denom == 0.0) ? Real(0.0) : (x.s / denom);
+            if (node.type() == FormExprType::SmoothSign) {
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, s};
+            }
+            // SmoothHeaviside
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, Real(0.5) * (Real(1.0) + s)};
+        }
+
+        case FormExprType::SmoothMin:
+        case FormExprType::SmoothMax: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 3u || !kids[0] || !kids[1] || !kids[2]) {
+                throw std::logic_error("Forms: smooth min/max must have 3 children");
+            }
+            const auto a = evalReal(*kids[0], env, side, q);
+            const auto b = evalReal(*kids[1], env, side, q);
+            const auto eps = evalReal(*kids[2], env, side, q);
+            if (a.kind != EvalValue<Real>::Kind::Scalar ||
+                b.kind != EvalValue<Real>::Kind::Scalar ||
+                eps.kind != EvalValue<Real>::Kind::Scalar) {
+                throw FEException("Forms: smooth min/max expects scalar inputs",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const Real d = a.s - b.s;
+            const Real ad = std::sqrt(d * d + eps.s * eps.s);
+            const Real mean = Real(0.5) * (a.s + b.s);
+            const Real out = (node.type() == FormExprType::SmoothMin)
+                                 ? (mean - Real(0.5) * ad)
+                                 : (mean + Real(0.5) * ad);
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, out};
+        }
+
         case FormExprType::SymmetricEigenvalue: {
             const auto a = evalRealUnary(node, env, side, q);
             if (!isMatrixKind<Real>(a.kind)) {
@@ -6112,6 +6547,187 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 }
             }
             return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, static_cast<Real>(svmp_fe_sym_eigenvalue_3x3_v1(A.data(), which))};
+        }
+
+        case FormExprType::Eigenvalue: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (!isMatrixKind<Real>(a.kind)) {
+                throw FEException("Forms: eig() expects a matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || (rows != 2u && rows != 3u)) {
+                throw FEException("Forms: eig() expects a 2x2 or 3x3 square matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto which = static_cast<std::int32_t>(node.eigenIndex().value_or(0));
+            if (rows == 2u) {
+                std::array<double, 4> A{};
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        A[r * 2u + c] = static_cast<double>(a.matrixAt(r, c));
+                    }
+                }
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar,
+                                       static_cast<Real>(svmp_fe_sym_eigenvalue_2x2_v1(A.data(), which))};
+            }
+            std::array<double, 9> A{};
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    A[r * 3u + c] = static_cast<double>(a.matrixAt(r, c));
+                }
+            }
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar,
+                                   static_cast<Real>(svmp_fe_sym_eigenvalue_3x3_v1(A.data(), which))};
+        }
+
+        case FormExprType::SymmetricEigenvector: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (!isMatrixKind<Real>(a.kind)) {
+                throw FEException("Forms: eigvec_sym() expects a matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || (rows != 2u && rows != 3u)) {
+                throw FEException("Forms: eigvec_sym() expects a 2x2 or 3x3 square matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto which = static_cast<std::int32_t>(node.eigenIndex().value_or(0));
+            if (rows == 2u) {
+                std::array<double, 4> A{};
+                double evals[2]{};
+                double evecs[4]{};
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        A[r * 2u + c] = static_cast<double>(a.matrixAt(r, c));
+                    }
+                }
+                jit::svmp_fe_jit_eig_sym_2x2_v1(A.data(), evals, evecs);
+                const std::int32_t w = std::clamp(which, std::int32_t(0), std::int32_t(1));
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                out.resizeVector(2u);
+                out.vectorAt(0) = static_cast<Real>(evecs[0 * 2 + static_cast<std::size_t>(w)]);
+                out.vectorAt(1) = static_cast<Real>(evecs[1 * 2 + static_cast<std::size_t>(w)]);
+                return out;
+            }
+            std::array<double, 9> A{};
+            double evals[3]{};
+            double evecs[9]{};
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    A[r * 3u + c] = static_cast<double>(a.matrixAt(r, c));
+                }
+            }
+            jit::svmp_fe_jit_eig_sym_3x3_v1(A.data(), evals, evecs);
+            const std::int32_t w = std::clamp(which, std::int32_t(0), std::int32_t(2));
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Vector;
+            out.resizeVector(3u);
+            out.vectorAt(0) = static_cast<Real>(evecs[0 * 3 + static_cast<std::size_t>(w)]);
+            out.vectorAt(1) = static_cast<Real>(evecs[1 * 3 + static_cast<std::size_t>(w)]);
+            out.vectorAt(2) = static_cast<Real>(evecs[2 * 3 + static_cast<std::size_t>(w)]);
+            return out;
+        }
+
+        case FormExprType::SpectralDecomposition: {
+            const auto a = evalRealUnary(node, env, side, q);
+            if (!isMatrixKind<Real>(a.kind)) {
+                throw FEException("Forms: spectral_decomp() expects a matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto rows = a.matrixRows();
+            const auto cols = a.matrixCols();
+            if (rows != cols || (rows != 2u && rows != 3u)) {
+                throw FEException("Forms: spectral_decomp() expects a 2x2 or 3x3 square matrix",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            EvalValue<Real> out;
+            out.kind = EvalValue<Real>::Kind::Matrix;
+            out.resizeMatrix(rows, cols);
+
+            if (rows == 2u) {
+                std::array<double, 4> A{};
+                double evals[2]{};
+                double evecs[4]{};
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        A[r * 2u + c] = static_cast<double>(a.matrixAt(r, c));
+                    }
+                }
+                jit::svmp_fe_jit_eig_sym_2x2_v1(A.data(), evals, evecs);
+                for (std::size_t r = 0; r < 2u; ++r) {
+                    for (std::size_t c = 0; c < 2u; ++c) {
+                        out.matrixAt(r, c) = static_cast<Real>(evecs[r * 2u + c]);
+                    }
+                }
+                return out;
+            }
+
+            std::array<double, 9> A{};
+            double evals[3]{};
+            double evecs[9]{};
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    A[r * 3u + c] = static_cast<double>(a.matrixAt(r, c));
+                }
+            }
+            jit::svmp_fe_jit_eig_sym_3x3_v1(A.data(), evals, evecs);
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    out.matrixAt(r, c) = static_cast<Real>(evecs[r * 3u + c]);
+                }
+            }
+            return out;
+        }
+
+        case FormExprType::HistoryWeightedSum:
+        case FormExprType::HistoryConvolution: {
+            const auto kids = node.childrenShared();
+            if (kids.empty()) {
+                if (ctx.trialFieldType() == FieldType::Vector) {
+                    EvalValue<Real> out;
+                    out.kind = EvalValue<Real>::Kind::Vector;
+                    out.resizeVector(static_cast<std::size_t>(ctx.trialValueDimension()));
+                    return out;
+                }
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, Real(0.0)};
+            }
+
+            if (ctx.trialFieldType() == FieldType::Vector) {
+                EvalValue<Real> out;
+                out.kind = EvalValue<Real>::Kind::Vector;
+                out.resizeVector(static_cast<std::size_t>(ctx.trialValueDimension()));
+                for (std::size_t kk = 0; kk < kids.size(); ++kk) {
+                    if (!kids[kk]) continue;
+                    const auto w = evalReal(*kids[kk], env, side, q);
+                    if (w.kind != EvalValue<Real>::Kind::Scalar) {
+                        throw FEException("Forms: history operator expects scalar weights",
+                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    const int k = static_cast<int>(kk + 1u);
+                    const auto prev = ctx.previousSolutionVectorValue(q, k);
+                    for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                        out.vectorAt(d) += w.s * prev[d];
+                    }
+                }
+                return out;
+            }
+
+            Real sum = 0.0;
+            for (std::size_t kk = 0; kk < kids.size(); ++kk) {
+                if (!kids[kk]) continue;
+                const auto w = evalReal(*kids[kk], env, side, q);
+                if (w.kind != EvalValue<Real>::Kind::Scalar) {
+                    throw FEException("Forms: history operator expects scalar weights",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const int k = static_cast<int>(kk + 1u);
+                sum += w.s * ctx.previousSolutionValue(q, k);
+            }
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, sum};
         }
 
         case FormExprType::SymmetricEigenvalueDirectionalDerivative: {
@@ -10046,6 +10662,9 @@ FormKernel::FormKernel(FormIR ir)
     parameter_specs_ = computeParameterSpecs(std::span<const FormIR* const>{irs});
 
     constitutive_state_ = buildConstitutiveStateLayout(ir_, material_state_spec_);
+
+    // Interpreter tensor-calculus evaluation is opt-in (rollout safety).
+    tensor_interpreter_options_.mode = TensorLoweringMode::Off;
 }
 
 FormKernel::~FormKernel() = default;
@@ -10116,6 +10735,16 @@ void FormKernel::resolveParameterSlots(
     rewrite_updates(inlined_state_updates_.interface_face);
 }
 
+void FormKernel::setTensorInterpreterOptions(TensorJITOptions options)
+{
+    tensor_interpreter_options_ = std::move(options);
+
+    // Reset the one-time interpreter lowering/preparation so the new policy takes effect.
+    indexed_lowering_once_ = std::make_unique<std::once_flag>();
+    tensor_term_ir_.clear();
+    tensor_term_fallback_.clear();
+}
+
 bool FormKernel::hasCell() const noexcept { return ir_.hasCellTerms(); }
 bool FormKernel::hasBoundaryFace() const noexcept { return ir_.hasBoundaryTerms(); }
 bool FormKernel::hasInteriorFace() const noexcept { return ir_.hasInteriorFaceTerms(); }
@@ -10127,9 +10756,127 @@ void FormKernel::ensureInterpreterLoweredIndexedAccess()
         indexed_lowering_once_ = std::make_unique<std::once_flag>();
     }
     std::call_once(*indexed_lowering_once_, [&] {
-        lowerIndexedAccessInFormIR(ir_);
+        // Always lower IndexedAccess in inlined update programs: these are evaluated
+        // via scalar evalReal() and are expected to stay small.
         lowerIndexedAccessInUpdates(inlined_state_updates_);
+
+        if (tensor_interpreter_options_.mode == TensorLoweringMode::Off) {
+            // Baseline interpreter behavior: eagerly scalar-expand IndexedAccess.
+            lowerIndexedAccessInFormIR(ir_);
+            tensor_term_ir_.clear();
+            tensor_term_fallback_.clear();
+            return;
+        }
+
+        // Tensor-calculus interpreter mode: pre-lower integrands to TensorIR (loops)
+        // or to a scalar fallback expression (einsum) when loops are not chosen.
+        const auto& terms = ir_.terms();
+        tensor_term_ir_.assign(terms.size(), nullptr);
+        tensor_term_fallback_.assign(terms.size(), FormExpr{});
+
+        tensor::TensorIRLoweringOptions topts;
+        topts.enable_cache = true;
+        topts.force_loop_nest =
+            (tensor_interpreter_options_.mode == TensorLoweringMode::On) || tensor_interpreter_options_.force_loop_nest;
+        topts.log_decisions = tensor_interpreter_options_.log_decisions;
+
+        topts.loop.enable_symmetry_lowering = tensor_interpreter_options_.enable_symmetry_lowering;
+        topts.loop.enable_optimal_contraction_order = tensor_interpreter_options_.enable_optimal_contraction_order;
+        topts.loop.enable_vectorization_hints = tensor_interpreter_options_.enable_vectorization_hints;
+        topts.loop.enable_delta_shortcuts = tensor_interpreter_options_.enable_delta_shortcuts;
+        topts.loop.scalar_expansion_term_threshold = tensor_interpreter_options_.scalar_expansion_term_threshold;
+
+        topts.alloc.stack_max_entries = tensor_interpreter_options_.temp_stack_max_entries;
+        topts.alloc.alignment_bytes = tensor_interpreter_options_.temp_alignment_bytes;
+        topts.alloc.enable_reuse = tensor_interpreter_options_.temp_enable_reuse;
+
+        for (std::size_t t = 0; t < terms.size(); ++t) {
+            const auto& integrand = terms[t].integrand;
+            if (!integrand.isValid() || integrand.node() == nullptr) {
+                continue;
+            }
+            if (!containsIndexedAccess(integrand)) {
+                continue;
+            }
+
+            auto r = tensor::lowerToTensorIR(integrand, topts);
+            if (!r.ok) {
+                // Conservative fallback: preserve existing interpreter behavior.
+                tensor_term_ir_.clear();
+                tensor_term_fallback_.clear();
+                lowerIndexedAccessInFormIR(ir_);
+                return;
+            }
+
+            if (r.used_loop_nest) {
+                tensor_term_ir_[t] = std::make_shared<tensor::TensorIR>(std::move(r.ir));
+            } else if (r.fallback_expr.isValid()) {
+                tensor_term_fallback_[t] = r.fallback_expr;
+            } else {
+                // Defensive: if no loop and no fallback provided, fall back to baseline behavior.
+                tensor_term_ir_.clear();
+                tensor_term_fallback_.clear();
+                lowerIndexedAccessInFormIR(ir_);
+                return;
+            }
+        }
     });
+}
+
+[[nodiscard]] Real evalScalarIntegrandTensorAware(
+    std::size_t term_index,
+    const FormExpr& integrand,
+    const std::vector<std::shared_ptr<const tensor::TensorIR>>& tensor_ir,
+    const std::vector<FormExpr>& tensor_fallback,
+    const EvalEnvReal& env,
+    Side side,
+    LocalIndex q)
+{
+    if (term_index < tensor_ir.size() && tensor_ir[term_index] != nullptr) {
+        tensor::TensorInterpreterCallbacks cb;
+        cb.eval_value = [&](const FormExpr& e) -> EvalValue<Real> {
+            if (!e.isValid() || e.node() == nullptr) {
+                throw FEException("Forms: tensor interpreter received invalid base expression",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            return evalReal(*e.node(), env, side, q);
+        };
+        cb.eval_scalar = [&](const FormExpr& e) -> Real {
+            if (!e.isValid() || e.node() == nullptr) {
+                throw FEException("Forms: tensor interpreter received invalid scalar expression",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto v = evalReal(*e.node(), env, side, q);
+            if (v.kind != EvalValue<Real>::Kind::Scalar) {
+                throw FEException("Forms: tensor interpreter scalar callback did not evaluate to scalar",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            return v.s;
+        };
+        const auto r = tensor::evalTensorIRScalar(*tensor_ir[term_index], cb);
+        if (!r.ok) {
+            throw FEException("Forms: tensor interpreter evaluation failed: " + r.message,
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        }
+        return r.value;
+    }
+
+    if (term_index < tensor_fallback.size() && tensor_fallback[term_index].isValid() &&
+        tensor_fallback[term_index].node() != nullptr) {
+        const auto v = evalReal(*tensor_fallback[term_index].node(), env, side, q);
+        if (v.kind != EvalValue<Real>::Kind::Scalar) {
+            throw FEException("Forms: tensor interpreter fallback integrand did not evaluate to scalar",
+                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        }
+        return v.s;
+    }
+
+    const auto v = evalReal(*integrand.node(), env, side, q);
+    if (v.kind != EvalValue<Real>::Kind::Scalar) {
+        throw FEException("Forms: integrand did not evaluate to scalar",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+    return v.s;
 }
 
 void FormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::KernelOutput& output)
@@ -10160,20 +10907,11 @@ void FormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::Ker
     ConstitutiveCallCacheReal constitutive_cache;
     EvalEnvReal env{ctx, nullptr, ir_.kind(), Side::Minus, Side::Minus, 0, 0, constitutive_state_.get(), &constitutive_cache};
 
-    for (const auto& term : ir_.terms()) {
+    const auto& terms = ir_.terms();
+    for (std::size_t term_index = 0; term_index < terms.size(); ++term_index) {
+        const auto& term = terms[term_index];
         if (term.domain != IntegralDomain::Cell) continue;
-        Real term_weight = 1.0;
-        if (time_ctx) {
-            if (term.time_derivative_order == 1) {
-                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-            } else if (term.time_derivative_order == 2) {
-                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-            } else if (term.time_derivative_order > 0) {
-                term_weight = time_ctx->time_derivative_term_weight;
-            } else {
-                term_weight = time_ctx->non_time_derivative_term_weight;
-            }
-        }
+        const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
         if (term_weight == 0.0) continue;
 
         for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -10184,23 +10922,27 @@ void FormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::Ker
                     env.i = i;
                     for (LocalIndex j = 0; j < n_trial; ++j) {
                         env.j = j;
-                        const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
-                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
-                            throw FEException("Forms: cell bilinear integrand did not evaluate to scalar",
-                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                        }
-                        output.matrixEntry(i, j) += (term_weight * w) * val.s;
+                        const Real s = evalScalarIntegrandTensorAware(term_index,
+                                                                      term.integrand,
+                                                                      tensor_term_ir_,
+                                                                      tensor_term_fallback_,
+                                                                      env,
+                                                                      Side::Minus,
+                                                                      q);
+                        output.matrixEntry(i, j) += (term_weight * w) * s;
                     }
                 }
             } else if (want_vector) {
                 for (LocalIndex i = 0; i < n_test; ++i) {
                     env.i = i;
-                    const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
-                    if (val.kind != EvalValue<Real>::Kind::Scalar) {
-                        throw FEException("Forms: cell linear integrand did not evaluate to scalar",
-                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                    }
-                    output.vectorEntry(i) += (term_weight * w) * val.s;
+                    const Real s = evalScalarIntegrandTensorAware(term_index,
+                                                                  term.integrand,
+                                                                  tensor_term_ir_,
+                                                                  tensor_term_fallback_,
+                                                                  env,
+                                                                  Side::Minus,
+                                                                  q);
+                    output.vectorEntry(i) += (term_weight * w) * s;
                 }
             }
         }
@@ -10257,21 +10999,12 @@ void FormKernel::computeBoundaryFace(
     ConstitutiveCallCacheReal constitutive_cache;
     EvalEnvReal env{ctx, nullptr, ir_.kind(), Side::Minus, Side::Minus, 0, 0, constitutive_state_.get(), &constitutive_cache};
 
-    for (const auto& term : ir_.terms()) {
+    const auto& terms = ir_.terms();
+    for (std::size_t term_index = 0; term_index < terms.size(); ++term_index) {
+        const auto& term = terms[term_index];
         if (term.domain != IntegralDomain::Boundary) continue;
         if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
-        Real term_weight = 1.0;
-        if (time_ctx) {
-            if (term.time_derivative_order == 1) {
-                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-            } else if (term.time_derivative_order == 2) {
-                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-            } else if (term.time_derivative_order > 0) {
-                term_weight = time_ctx->time_derivative_term_weight;
-            } else {
-                term_weight = time_ctx->non_time_derivative_term_weight;
-            }
-        }
+        const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
         if (term_weight == 0.0) continue;
 
         for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -10282,23 +11015,27 @@ void FormKernel::computeBoundaryFace(
                     env.i = i;
                     for (LocalIndex j = 0; j < n_trial; ++j) {
                         env.j = j;
-                        const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
-                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
-                            throw FEException("Forms: boundary bilinear integrand did not evaluate to scalar",
-                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                        }
-                        output.matrixEntry(i, j) += (term_weight * w) * val.s;
+                        const Real s = evalScalarIntegrandTensorAware(term_index,
+                                                                      term.integrand,
+                                                                      tensor_term_ir_,
+                                                                      tensor_term_fallback_,
+                                                                      env,
+                                                                      Side::Minus,
+                                                                      q);
+                        output.matrixEntry(i, j) += (term_weight * w) * s;
                     }
                 }
             } else if (want_vector) {
                 for (LocalIndex i = 0; i < n_test; ++i) {
                     env.i = i;
-                    const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
-                    if (val.kind != EvalValue<Real>::Kind::Scalar) {
-                        throw FEException("Forms: boundary linear integrand did not evaluate to scalar",
-                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                    }
-                    output.vectorEntry(i) += (term_weight * w) * val.s;
+                    const Real s = evalScalarIntegrandTensorAware(term_index,
+                                                                  term.integrand,
+                                                                  tensor_term_ir_,
+                                                                  tensor_term_fallback_,
+                                                                  env,
+                                                                  Side::Minus,
+                                                                  q);
+                    output.vectorEntry(i) += (term_weight * w) * s;
                 }
             }
         }
@@ -10372,22 +11109,13 @@ void FormKernel::computeInteriorFace(
         EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Bilinear, test_active, trial_active, 0, 0,
                         constitutive_state_.get(), &constitutive_cache};
 
-        for (const auto& term : ir_.terms()) {
+        const auto& terms = ir_.terms();
+        for (std::size_t term_index = 0; term_index < terms.size(); ++term_index) {
+            const auto& term = terms[term_index];
             if (term.domain != IntegralDomain::InteriorFace) continue;
             const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
             const auto* time_ctx = ctx_eval.timeIntegrationContext();
-            Real term_weight = 1.0;
-            if (time_ctx) {
-                if (term.time_derivative_order == 1) {
-                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                } else if (term.time_derivative_order == 2) {
-                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                } else if (term.time_derivative_order > 0) {
-                    term_weight = time_ctx->time_derivative_term_weight;
-                } else {
-                    term_weight = time_ctx->non_time_derivative_term_weight;
-                }
-            }
+            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
             if (term_weight == 0.0) continue;
 
             for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -10396,12 +11124,14 @@ void FormKernel::computeInteriorFace(
                     env.i = i;
                     for (LocalIndex j = 0; j < n_trial; ++j) {
                         env.j = j;
-                        const auto val = evalReal(*term.integrand.node(), env, eval_side, q);
-                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
-                            throw FEException("Forms: interior-face bilinear integrand did not evaluate to scalar",
-                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                        }
-                        out.matrixEntry(i, j) += (term_weight * w) * val.s;
+                        const Real s = evalScalarIntegrandTensorAware(term_index,
+                                                                      term.integrand,
+                                                                      tensor_term_ir_,
+                                                                      tensor_term_fallback_,
+                                                                      env,
+                                                                      eval_side,
+                                                                      q);
+                        out.matrixEntry(i, j) += (term_weight * w) * s;
                     }
                 }
             }
@@ -10492,24 +11222,15 @@ void FormKernel::computeInterfaceFace(
         EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Bilinear, test_active, trial_active, 0, 0,
                         constitutive_state_.get(), &constitutive_cache};
 
-        for (const auto& term : ir_.terms()) {
+        const auto& terms = ir_.terms();
+        for (std::size_t term_index = 0; term_index < terms.size(); ++term_index) {
+            const auto& term = terms[term_index];
             if (term.domain != IntegralDomain::InterfaceFace) continue;
             if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
 
             const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
             const auto* time_ctx = ctx_eval.timeIntegrationContext();
-            Real term_weight = 1.0;
-            if (time_ctx) {
-                if (term.time_derivative_order == 1) {
-                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                } else if (term.time_derivative_order == 2) {
-                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                } else if (term.time_derivative_order > 0) {
-                    term_weight = time_ctx->time_derivative_term_weight;
-                } else {
-                    term_weight = time_ctx->non_time_derivative_term_weight;
-                }
-            }
+            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
             if (term_weight == 0.0) continue;
 
             for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -10518,12 +11239,14 @@ void FormKernel::computeInterfaceFace(
                     env.i = i;
                     for (LocalIndex j = 0; j < n_trial; ++j) {
                         env.j = j;
-                        const auto val = evalReal(*term.integrand.node(), env, eval_side, q);
-                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
-                            throw FEException("Forms: interface-face bilinear integrand did not evaluate to scalar",
-                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                        }
-                        out.matrixEntry(i, j) += (term_weight * w) * val.s;
+                        const Real s = evalScalarIntegrandTensorAware(term_index,
+                                                                      term.integrand,
+                                                                      tensor_term_ir_,
+                                                                      tensor_term_fallback_,
+                                                                      env,
+                                                                      eval_side,
+                                                                      q);
+                        out.matrixEntry(i, j) += (term_weight * w) * s;
                     }
                 }
             }
@@ -10782,18 +11505,7 @@ void LinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembl
         for (const auto& term : bilinear_ir_.terms()) {
             if (term.domain != IntegralDomain::Cell) continue;
 
-            Real term_weight = 1.0;
-            if (time_ctx) {
-                if (term.time_derivative_order == 1) {
-                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                } else if (term.time_derivative_order == 2) {
-                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                } else if (term.time_derivative_order > 0) {
-                    term_weight = time_ctx->time_derivative_term_weight;
-                } else {
-                    term_weight = time_ctx->non_time_derivative_term_weight;
-                }
-            }
+            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
             if (term_weight == 0.0) continue;
 
             for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -10828,18 +11540,7 @@ void LinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembl
             for (const auto& term : linear_ir_->terms()) {
                 if (term.domain != IntegralDomain::Cell) continue;
 
-                Real term_weight = 1.0;
-                if (time_ctx) {
-                    if (term.time_derivative_order == 1) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                    } else if (term.time_derivative_order == 2) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                    } else if (term.time_derivative_order > 0) {
-                        term_weight = time_ctx->time_derivative_term_weight;
-                    } else {
-                        term_weight = time_ctx->non_time_derivative_term_weight;
-                    }
-                }
+                const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
 
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -10873,18 +11574,7 @@ void LinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembl
             for (const auto& term : bilinear_ir_.terms()) {
                 if (term.domain != IntegralDomain::Cell) continue;
 
-                Real term_weight = 1.0;
-                if (time_ctx) {
-                    if (term.time_derivative_order == 1) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                    } else if (term.time_derivative_order == 2) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                    } else if (term.time_derivative_order > 0) {
-                        term_weight = time_ctx->time_derivative_term_weight;
-                    } else {
-                        term_weight = time_ctx->non_time_derivative_term_weight;
-                    }
-                }
+                const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
 
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -10963,18 +11653,7 @@ void LinearFormKernel::computeBoundaryFace(
             if (term.domain != IntegralDomain::Boundary) continue;
             if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
 
-            Real term_weight = 1.0;
-            if (time_ctx) {
-                if (term.time_derivative_order == 1) {
-                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                } else if (term.time_derivative_order == 2) {
-                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                } else if (term.time_derivative_order > 0) {
-                    term_weight = time_ctx->time_derivative_term_weight;
-                } else {
-                    term_weight = time_ctx->non_time_derivative_term_weight;
-                }
-            }
+            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
             if (term_weight == 0.0) continue;
 
             for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -11010,18 +11689,7 @@ void LinearFormKernel::computeBoundaryFace(
                 if (term.domain != IntegralDomain::Boundary) continue;
                 if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
 
-                Real term_weight = 1.0;
-                if (time_ctx) {
-                    if (term.time_derivative_order == 1) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                    } else if (term.time_derivative_order == 2) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                    } else if (term.time_derivative_order > 0) {
-                        term_weight = time_ctx->time_derivative_term_weight;
-                    } else {
-                        term_weight = time_ctx->non_time_derivative_term_weight;
-                    }
-                }
+                const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
 
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -11056,18 +11724,7 @@ void LinearFormKernel::computeBoundaryFace(
                 if (term.domain != IntegralDomain::Boundary) continue;
                 if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
 
-                Real term_weight = 1.0;
-                if (time_ctx) {
-                    if (term.time_derivative_order == 1) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                    } else if (term.time_derivative_order == 2) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                    } else if (term.time_derivative_order > 0) {
-                        term_weight = time_ctx->time_derivative_term_weight;
-                    } else {
-                        term_weight = time_ctx->non_time_derivative_term_weight;
-                    }
-                }
+                const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
 
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -11282,18 +11939,7 @@ void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, asse
 
             for (const auto& term : residual_ir_.terms()) {
                 if (term.domain != IntegralDomain::Cell) continue;
-                Real term_weight = 1.0;
-                if (time_ctx) {
-                    if (term.time_derivative_order == 1) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                    } else if (term.time_derivative_order == 2) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                    } else if (term.time_derivative_order > 0) {
-                        term_weight = time_ctx->time_derivative_term_weight;
-                    } else {
-                        term_weight = time_ctx->non_time_derivative_term_weight;
-                    }
-                }
+                const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
                 const auto val = evalDual(*term.integrand.node(), env, Side::Minus, q);
                 if (val.kind != EvalValue<Dual>::Kind::Scalar) {
@@ -11387,18 +12033,7 @@ void NonlinearFormKernel::computeBoundaryFace(
             for (const auto& term : residual_ir_.terms()) {
                 if (term.domain != IntegralDomain::Boundary) continue;
                 if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
-                Real term_weight = 1.0;
-                if (time_ctx) {
-                    if (term.time_derivative_order == 1) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                    } else if (term.time_derivative_order == 2) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                    } else if (term.time_derivative_order > 0) {
-                        term_weight = time_ctx->time_derivative_term_weight;
-                    } else {
-                        term_weight = time_ctx->non_time_derivative_term_weight;
-                    }
-                }
+                const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
                 const auto val = evalDual(*term.integrand.node(), env, Side::Minus, q);
                 if (val.kind != EvalValue<Dual>::Kind::Scalar) {
@@ -11514,18 +12149,7 @@ void NonlinearFormKernel::computeInteriorFace(
                 Dual sum_q = makeDualConstant(0.0, ws.alloc());
                 for (const auto& term : residual_ir_.terms()) {
                     if (term.domain != IntegralDomain::InteriorFace) continue;
-                    Real term_weight = 1.0;
-                    if (time_ctx) {
-                        if (term.time_derivative_order == 1) {
-                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                        } else if (term.time_derivative_order == 2) {
-                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                        } else if (term.time_derivative_order > 0) {
-                            term_weight = time_ctx->time_derivative_term_weight;
-                        } else {
-                            term_weight = time_ctx->non_time_derivative_term_weight;
-                        }
-                    }
+                    const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                     if (term_weight == 0.0) continue;
                     const auto val = evalDual(*term.integrand.node(), env, eval_side, q);
                     if (val.kind != EvalValue<Dual>::Kind::Scalar) {
@@ -11673,18 +12297,7 @@ void NonlinearFormKernel::computeInterfaceFace(
                 for (const auto& term : residual_ir_.terms()) {
                     if (term.domain != IntegralDomain::InterfaceFace) continue;
                     if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
-                    Real term_weight = 1.0;
-                    if (time_ctx) {
-                        if (term.time_derivative_order == 1) {
-                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                        } else if (term.time_derivative_order == 2) {
-                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                        } else if (term.time_derivative_order > 0) {
-                            term_weight = time_ctx->time_derivative_term_weight;
-                        } else {
-                            term_weight = time_ctx->non_time_derivative_term_weight;
-                        }
-                    }
+                    const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                     if (term_weight == 0.0) continue;
                     const auto val = evalDual(*term.integrand.node(), env, eval_side, q);
                     if (val.kind != EvalValue<Dual>::Kind::Scalar) {
@@ -12345,18 +12958,7 @@ void SymbolicNonlinearFormKernel::computeCell(const assembly::AssemblyContext& c
                 Real sum_q = 0.0;
                 for (const auto& term : residual_ir_.terms()) {
                     if (term.domain != IntegralDomain::Cell) continue;
-                    Real term_weight = 1.0;
-                    if (time_ctx) {
-                        if (term.time_derivative_order == 1) {
-                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                        } else if (term.time_derivative_order == 2) {
-                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                        } else if (term.time_derivative_order > 0) {
-                            term_weight = time_ctx->time_derivative_term_weight;
-                        } else {
-                            term_weight = time_ctx->non_time_derivative_term_weight;
-                        }
-                    }
+                    const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                     if (term_weight == 0.0) continue;
 
                     const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
@@ -12379,18 +12981,7 @@ void SymbolicNonlinearFormKernel::computeCell(const assembly::AssemblyContext& c
 
         for (const auto& term : tangent_ir_.terms()) {
             if (term.domain != IntegralDomain::Cell) continue;
-            Real term_weight = 1.0;
-            if (time_ctx) {
-                if (term.time_derivative_order == 1) {
-                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                } else if (term.time_derivative_order == 2) {
-                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                } else if (term.time_derivative_order > 0) {
-                    term_weight = time_ctx->time_derivative_term_weight;
-                } else {
-                    term_weight = time_ctx->non_time_derivative_term_weight;
-                }
-            }
+            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
             if (term_weight == 0.0) continue;
 
             for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -12473,18 +13064,7 @@ void SymbolicNonlinearFormKernel::computeBoundaryFace(const assembly::AssemblyCo
                     if (term.domain != IntegralDomain::Boundary) continue;
                     if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
 
-                    Real term_weight = 1.0;
-                    if (time_ctx) {
-                        if (term.time_derivative_order == 1) {
-                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                        } else if (term.time_derivative_order == 2) {
-                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                        } else if (term.time_derivative_order > 0) {
-                            term_weight = time_ctx->time_derivative_term_weight;
-                        } else {
-                            term_weight = time_ctx->non_time_derivative_term_weight;
-                        }
-                    }
+                    const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                     if (term_weight == 0.0) continue;
 
                     const auto val = evalReal(*term.integrand.node(), env, Side::Minus, q);
@@ -12509,18 +13089,7 @@ void SymbolicNonlinearFormKernel::computeBoundaryFace(const assembly::AssemblyCo
             if (term.domain != IntegralDomain::Boundary) continue;
             if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
 
-            Real term_weight = 1.0;
-            if (time_ctx) {
-                if (term.time_derivative_order == 1) {
-                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                } else if (term.time_derivative_order == 2) {
-                    term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                } else if (term.time_derivative_order > 0) {
-                    term_weight = time_ctx->time_derivative_term_weight;
-                } else {
-                    term_weight = time_ctx->non_time_derivative_term_weight;
-                }
-            }
+            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
             if (term_weight == 0.0) continue;
 
             for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -12610,18 +13179,7 @@ void SymbolicNonlinearFormKernel::computeInteriorFace(const assembly::AssemblyCo
                     Real sum_q = 0.0;
                     for (const auto& term : residual_ir_.terms()) {
                         if (term.domain != IntegralDomain::InteriorFace) continue;
-                        Real term_weight = 1.0;
-                        if (time_ctx) {
-                            if (term.time_derivative_order == 1) {
-                                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                            } else if (term.time_derivative_order == 2) {
-                                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                            } else if (term.time_derivative_order > 0) {
-                                term_weight = time_ctx->time_derivative_term_weight;
-                            } else {
-                                term_weight = time_ctx->non_time_derivative_term_weight;
-                            }
-                        }
+                        const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                         if (term_weight == 0.0) continue;
 
                         const auto val = evalReal(*term.integrand.node(), env, eval_side, q);
@@ -12656,18 +13214,7 @@ void SymbolicNonlinearFormKernel::computeInteriorFace(const assembly::AssemblyCo
                 if (term.domain != IntegralDomain::InteriorFace) continue;
                 const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
                 const auto* time_ctx = ctx_eval.timeIntegrationContext();
-                Real term_weight = 1.0;
-                if (time_ctx) {
-                    if (term.time_derivative_order == 1) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                    } else if (term.time_derivative_order == 2) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                    } else if (term.time_derivative_order > 0) {
-                        term_weight = time_ctx->time_derivative_term_weight;
-                    } else {
-                        term_weight = time_ctx->non_time_derivative_term_weight;
-                    }
-                }
+                const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
 
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -12766,18 +13313,7 @@ void SymbolicNonlinearFormKernel::computeInterfaceFace(const assembly::AssemblyC
                     for (const auto& term : residual_ir_.terms()) {
                         if (term.domain != IntegralDomain::InterfaceFace) continue;
                         if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
-                        Real term_weight = 1.0;
-                        if (time_ctx) {
-                            if (term.time_derivative_order == 1) {
-                                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                            } else if (term.time_derivative_order == 2) {
-                                term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                            } else if (term.time_derivative_order > 0) {
-                                term_weight = time_ctx->time_derivative_term_weight;
-                            } else {
-                                term_weight = time_ctx->non_time_derivative_term_weight;
-                            }
-                        }
+                        const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                         if (term_weight == 0.0) continue;
 
                         const auto val = evalReal(*term.integrand.node(), env, eval_side, q);
@@ -12814,18 +13350,7 @@ void SymbolicNonlinearFormKernel::computeInterfaceFace(const assembly::AssemblyC
 
                 const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
                 const auto* time_ctx = ctx_eval.timeIntegrationContext();
-                Real term_weight = 1.0;
-                if (time_ctx) {
-                    if (term.time_derivative_order == 1) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                    } else if (term.time_derivative_order == 2) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                    } else if (term.time_derivative_order > 0) {
-                        term_weight = time_ctx->time_derivative_term_weight;
-                    } else {
-                        term_weight = time_ctx->non_time_derivative_term_weight;
-                    }
-                }
+                const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
 
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -12960,18 +13485,7 @@ void CoupledResidualSensitivityKernel::computeCell(const assembly::AssemblyConte
             Real sum_dq = 0.0;
             for (const auto& term : base_->residualIR().terms()) {
                 if (term.domain != IntegralDomain::Cell) continue;
-                Real term_weight = 1.0;
-                if (time_ctx) {
-                    if (term.time_derivative_order == 1) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                    } else if (term.time_derivative_order == 2) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                    } else if (term.time_derivative_order > 0) {
-                        term_weight = time_ctx->time_derivative_term_weight;
-                    } else {
-                        term_weight = time_ctx->non_time_derivative_term_weight;
-                    }
-                }
+                const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
 
                 const auto val = evalDual(*term.integrand.node(), env, Side::Minus, q);
@@ -13049,18 +13563,7 @@ void CoupledResidualSensitivityKernel::computeBoundaryFace(const assembly::Assem
             for (const auto& term : base_->residualIR().terms()) {
                 if (term.domain != IntegralDomain::Boundary) continue;
                 if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
-                Real term_weight = 1.0;
-                if (time_ctx) {
-                    if (term.time_derivative_order == 1) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                    } else if (term.time_derivative_order == 2) {
-                        term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                    } else if (term.time_derivative_order > 0) {
-                        term_weight = time_ctx->time_derivative_term_weight;
-                    } else {
-                        term_weight = time_ctx->non_time_derivative_term_weight;
-                    }
-                }
+                const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
 
                 const auto val = evalDual(*term.integrand.node(), env, Side::Minus, q);
@@ -13147,18 +13650,7 @@ void CoupledResidualSensitivityKernel::computeInteriorFace(const assembly::Assem
                 Real sum_dq = 0.0;
                 for (const auto& term : base_->residualIR().terms()) {
                     if (term.domain != IntegralDomain::InteriorFace) continue;
-                    Real term_weight = 1.0;
-                    if (time_ctx) {
-                        if (term.time_derivative_order == 1) {
-                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                        } else if (term.time_derivative_order == 2) {
-                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                        } else if (term.time_derivative_order > 0) {
-                            term_weight = time_ctx->time_derivative_term_weight;
-                        } else {
-                            term_weight = time_ctx->non_time_derivative_term_weight;
-                        }
-                    }
+                    const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                     if (term_weight == 0.0) continue;
                     const auto val = evalDual(*term.integrand.node(), env, eval_side, q);
                     if (val.kind != EvalValue<Dual>::Kind::Scalar) {
@@ -13254,18 +13746,7 @@ void CoupledResidualSensitivityKernel::computeInterfaceFace(const assembly::Asse
                 for (const auto& term : base_->residualIR().terms()) {
                     if (term.domain != IntegralDomain::InterfaceFace) continue;
                     if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
-                    Real term_weight = 1.0;
-                    if (time_ctx) {
-                        if (term.time_derivative_order == 1) {
-                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt1_term_weight;
-                        } else if (term.time_derivative_order == 2) {
-                            term_weight = time_ctx->time_derivative_term_weight * time_ctx->dt2_term_weight;
-                        } else if (term.time_derivative_order > 0) {
-                            term_weight = time_ctx->time_derivative_term_weight;
-                        } else {
-                            term_weight = time_ctx->non_time_derivative_term_weight;
-                        }
-                    }
+                    const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                     if (term_weight == 0.0) continue;
                     const auto val = evalDual(*term.integrand.node(), env, eval_side, q);
                     if (val.kind != EvalValue<Dual>::Kind::Scalar) {

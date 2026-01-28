@@ -138,10 +138,49 @@ extern "C" void svmp_fe_jit_constitutive_eval_batch_v1(const void* side_ptr,
                                                        std::uint32_t out_len,
                                                        std::uint32_t out_stride) noexcept;
 
+// ---------------------------------------------------------------------------
+// Versioned numeric helpers for new-physics operators (strict-mode compatible)
+// ---------------------------------------------------------------------------
+
+// Symmetric eigendecomposition (2x2 / 3x3), row-major input/output.
+// - Eigenvalues are sorted in descending order.
+// - Eigenvectors are stored as columns of the output matrix (row-major layout).
+extern "C" void svmp_fe_jit_eig_sym_2x2_v1(const double* A, double* eigvals2, double* eigvecs4) noexcept;
+extern "C" void svmp_fe_jit_eig_sym_3x3_v1(const double* A, double* eigvals3, double* eigvecs9) noexcept;
+
+// Matrix functions for small dense matrices, row-major input/output.
+// - expm is supported for symmetric 2x2/3x3.
+// - logm/sqrtm/powm are restricted to SPD inputs (failure -> NaNs in output).
+extern "C" void svmp_fe_jit_matrix_exp_2x2_v1(const double* A, double* expA4) noexcept;
+extern "C" void svmp_fe_jit_matrix_exp_3x3_v1(const double* A, double* expA9) noexcept;
+extern "C" void svmp_fe_jit_matrix_log_2x2_v1(const double* A, double* logA4) noexcept;
+extern "C" void svmp_fe_jit_matrix_log_3x3_v1(const double* A, double* logA9) noexcept;
+extern "C" void svmp_fe_jit_matrix_sqrt_2x2_v1(const double* A, double* sqrtA4) noexcept;
+extern "C" void svmp_fe_jit_matrix_sqrt_3x3_v1(const double* A, double* sqrtA9) noexcept;
+extern "C" void svmp_fe_jit_matrix_pow_2x2_v1(const double* A, double p, double* Ap4) noexcept;
+extern "C" void svmp_fe_jit_matrix_pow_3x3_v1(const double* A, double p, double* Ap9) noexcept;
+
+// Directional derivatives (Fréchet derivatives) of matrix functions.
+// - expm is supported for symmetric 2x2/3x3.
+// - logm/sqrtm/powm are restricted to SPD inputs (failure -> NaNs in output).
+extern "C" void svmp_fe_jit_matrix_exp_dd_2x2_v1(const double* A, const double* dA, double* dExpA4) noexcept;
+extern "C" void svmp_fe_jit_matrix_exp_dd_3x3_v1(const double* A, const double* dA, double* dExpA9) noexcept;
+extern "C" void svmp_fe_jit_matrix_log_dd_2x2_v1(const double* A, const double* dA, double* dLogA4) noexcept;
+extern "C" void svmp_fe_jit_matrix_log_dd_3x3_v1(const double* A, const double* dA, double* dLogA9) noexcept;
+extern "C" void svmp_fe_jit_matrix_sqrt_dd_2x2_v1(const double* A, const double* dA, double* dSqrtA4) noexcept;
+extern "C" void svmp_fe_jit_matrix_sqrt_dd_3x3_v1(const double* A, const double* dA, double* dSqrtA9) noexcept;
+extern "C" void svmp_fe_jit_matrix_pow_dd_2x2_v1(const double* A, const double* dA, double p, double* dAp4) noexcept;
+extern "C" void svmp_fe_jit_matrix_pow_dd_3x3_v1(const double* A, const double* dA, double p, double* dAp9) noexcept;
+
+// Directional derivatives of symmetric eigen operators.
+extern "C" void svmp_fe_jit_eigvec_sym_dd_2x2_v1(const double* A, const double* dA, std::int32_t which, double* dv2) noexcept;
+extern "C" void svmp_fe_jit_eigvec_sym_dd_3x3_v1(const double* A, const double* dA, std::int32_t which, double* dv3) noexcept;
+extern "C" void svmp_fe_jit_spectral_decomp_dd_2x2_v1(const double* A, const double* dA, double* dQ4) noexcept;
+extern "C" void svmp_fe_jit_spectral_decomp_dd_3x3_v1(const double* A, const double* dA, double* dQ9) noexcept;
+
 } // namespace jit
 } // namespace forms
 } // namespace FE
 } // namespace svmp
 
 #endif // SVMP_FE_FORMS_JIT_EXTERNAL_CALLS_H
-

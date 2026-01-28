@@ -125,6 +125,11 @@ int requiredHistoryStates(const TimeIntegrationContext* ctx) noexcept
     if (ctx->dt2) {
         required = std::max(required, ctx->dt2->requiredHistoryStates());
     }
+    for (const auto& s : ctx->dt_extra) {
+        if (s) {
+            required = std::max(required, s->requiredHistoryStates());
+        }
+    }
     return required;
 }
 
@@ -3980,6 +3985,11 @@ void StandardAssembler::populateFieldSolutionData(
         }
         if (time_integration_->dt2) {
             required_history = std::max(required_history, time_integration_->dt2->requiredHistoryStates());
+        }
+        for (const auto& s : time_integration_->dt_extra) {
+            if (s) {
+                required_history = std::max(required_history, s->requiredHistoryStates());
+            }
         }
     }
 

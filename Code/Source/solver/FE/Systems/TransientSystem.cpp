@@ -116,6 +116,11 @@ assembly::AssemblyResult TransientSystem::assemble(
     if (ctx_.dt2) {
         required_history = std::max(required_history, ctx_.dt2->requiredHistoryStates());
     }
+    for (const auto& s : ctx_.dt_extra) {
+        if (s) {
+            required_history = std::max(required_history, s->requiredHistoryStates());
+        }
+    }
     validateState(state, required_history);
 
     SystemStateView transient_state = state;

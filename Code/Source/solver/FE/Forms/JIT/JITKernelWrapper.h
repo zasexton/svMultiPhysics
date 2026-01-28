@@ -21,11 +21,16 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 
 namespace svmp {
 namespace FE {
 namespace forms {
+
+enum class IntegralDomain : std::uint8_t;
+class FormIR;
+
 namespace jit {
 
 class JITCompiler;
@@ -91,7 +96,7 @@ private:
         NonlinearFormKernel,
     };
 
-    struct CompiledDispatch {
+	    struct CompiledDispatch {
         bool ok{false};
         bool cacheable{true};
         std::string message{};
@@ -104,12 +109,94 @@ private:
 
         std::uintptr_t interface_all{0};
         std::unordered_map<int, std::uintptr_t> interface_by_marker{};
-    };
+	    };
 
-    void markDirty() noexcept;
-    void maybeCompile();
-    [[nodiscard]] bool canUseJIT() const noexcept;
-    void markRuntimeFailureOnce(std::string_view where, std::string_view msg) noexcept;
+	    enum class KernelRole : std::uint8_t {
+	        Form = 0u,
+	        Bilinear,
+	        Linear,
+	        Residual,
+	        Tangent,
+	    };
+
+	    struct SpecializationKey {
+	        KernelRole role{KernelRole::Form};
+	        IntegralDomain domain{};
+
+	        bool has_n_qpts_minus{false};
+	        bool has_n_test_dofs_minus{false};
+	        bool has_n_trial_dofs_minus{false};
+
+	        std::uint32_t n_qpts_minus{0};
+	        std::uint32_t n_test_dofs_minus{0};
+	        std::uint32_t n_trial_dofs_minus{0};
+
+	        bool has_n_qpts_plus{false};
+	        bool has_n_test_dofs_plus{false};
+	        bool has_n_trial_dofs_plus{false};
+
+	        std::uint32_t n_qpts_plus{0};
+	        std::uint32_t n_test_dofs_plus{0};
+	        std::uint32_t n_trial_dofs_plus{0};
+
+	        friend bool operator==(const SpecializationKey& a, const SpecializationKey& b) noexcept
+	        {
+	            return a.role == b.role &&
+	                   a.domain == b.domain &&
+	                   a.has_n_qpts_minus == b.has_n_qpts_minus &&
+	                   a.has_n_test_dofs_minus == b.has_n_test_dofs_minus &&
+	                   a.has_n_trial_dofs_minus == b.has_n_trial_dofs_minus &&
+	                   a.n_qpts_minus == b.n_qpts_minus &&
+	                   a.n_test_dofs_minus == b.n_test_dofs_minus &&
+	                   a.n_trial_dofs_minus == b.n_trial_dofs_minus &&
+	                   a.has_n_qpts_plus == b.has_n_qpts_plus &&
+	                   a.has_n_test_dofs_plus == b.has_n_test_dofs_plus &&
+	                   a.has_n_trial_dofs_plus == b.has_n_trial_dofs_plus &&
+	                   a.n_qpts_plus == b.n_qpts_plus &&
+	                   a.n_test_dofs_plus == b.n_test_dofs_plus &&
+	                   a.n_trial_dofs_plus == b.n_trial_dofs_plus;
+	        }
+	    };
+
+	    struct SpecializationKeyHash {
+	        std::size_t operator()(const SpecializationKey& k) const noexcept
+	        {
+	            std::uint64_t h = 1469598103934665603ULL;
+	            const auto mix = [&](std::uint64_t v) {
+	                h ^= v;
+	                h *= 1099511628211ULL;
+	            };
+	            mix(static_cast<std::uint64_t>(k.role));
+	            mix(static_cast<std::uint64_t>(k.domain));
+
+	            mix(static_cast<std::uint64_t>(k.has_n_qpts_minus ? 1u : 0u));
+	            mix(static_cast<std::uint64_t>(k.has_n_test_dofs_minus ? 1u : 0u));
+	            mix(static_cast<std::uint64_t>(k.has_n_trial_dofs_minus ? 1u : 0u));
+	            mix(static_cast<std::uint64_t>(k.n_qpts_minus));
+	            mix(static_cast<std::uint64_t>(k.n_test_dofs_minus));
+	            mix(static_cast<std::uint64_t>(k.n_trial_dofs_minus));
+
+	            mix(static_cast<std::uint64_t>(k.has_n_qpts_plus ? 1u : 0u));
+	            mix(static_cast<std::uint64_t>(k.has_n_test_dofs_plus ? 1u : 0u));
+	            mix(static_cast<std::uint64_t>(k.has_n_trial_dofs_plus ? 1u : 0u));
+	            mix(static_cast<std::uint64_t>(k.n_qpts_plus));
+	            mix(static_cast<std::uint64_t>(k.n_test_dofs_plus));
+	            mix(static_cast<std::uint64_t>(k.n_trial_dofs_plus));
+
+	            return static_cast<std::size_t>(h);
+	        }
+	    };
+
+	    void markDirty() noexcept;
+	    void maybeCompile();
+	    [[nodiscard]] bool canUseJIT() const noexcept;
+	    void markRuntimeFailureOnce(std::string_view where, std::string_view msg) noexcept;
+	    [[nodiscard]] std::shared_ptr<const CompiledDispatch> getSpecializedDispatch(
+	        KernelRole role,
+	        const FormIR& ir,
+	        IntegralDomain domain,
+	        const assembly::AssemblyContext& ctx_minus,
+	        const assembly::AssemblyContext* ctx_plus);
 
     std::shared_ptr<assembly::AssemblyKernel> fallback_{};
     JITOptions options_{};
@@ -124,14 +211,19 @@ private:
     CompiledDispatch compiled_form_{};
     CompiledDispatch compiled_bilinear_{};
     CompiledDispatch compiled_linear_{};
-    CompiledDispatch compiled_residual_{};
-    CompiledDispatch compiled_tangent_{};
-    bool has_compiled_linear_{false};
+	    CompiledDispatch compiled_residual_{};
+	    CompiledDispatch compiled_tangent_{};
+	    bool has_compiled_linear_{false};
 
-    bool warned_unavailable_{false};
-    bool warned_validation_{false};
-    bool warned_compile_failure_{false};
-    bool runtime_failed_{false};
+	    std::unordered_map<SpecializationKey, std::shared_ptr<CompiledDispatch>, SpecializationKeyHash>
+	        specialized_dispatch_{};
+	    std::unordered_set<SpecializationKey, SpecializationKeyHash> attempted_specializations_{};
+	    bool warned_specialization_failure_{false};
+
+	    bool warned_unavailable_{false};
+	    bool warned_validation_{false};
+	    bool warned_compile_failure_{false};
+	    bool runtime_failed_{false};
     bool warned_runtime_failure_{false};
 };
 

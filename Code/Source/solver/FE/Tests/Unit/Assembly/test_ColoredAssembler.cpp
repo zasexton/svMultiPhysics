@@ -136,43 +136,42 @@ TEST_F(ColoredAssemblerTest, DefaultConstruction) {
     EXPECT_FALSE(assembler.hasColoring());
 }
 
-TEST_F(ColoredAssemblerTest, ConstructionWithOptions) {
-    ColoredAssemblerOptions options;
-    options.num_threads = 4;
-    options.apply_constraints = false;
+TEST_F(ColoredAssemblerTest, ConstructionWithColoringOptions) {
+    ColoringOptions options;
+    options.algorithm = ColoringAlgorithm::Greedy;
+    options.max_colors = 64;
+    options.balance_colors = false;
     options.verbose = true;
 
     ColoredAssembler assembler(options);
 
-    EXPECT_EQ(assembler.getOptions().num_threads, 4);
-    EXPECT_FALSE(assembler.getOptions().apply_constraints);
-    EXPECT_TRUE(assembler.getOptions().verbose);
+    EXPECT_EQ(assembler.name(), "Colored(StandardAssembler)");
+    EXPECT_FALSE(assembler.hasColoring());
 }
 
 // ============================================================================
 // Configuration Tests
 // ============================================================================
 
-TEST_F(ColoredAssemblerTest, SetMesh) {
-    ColoredAssembler assembler;
-    assembler.setMesh(*mesh_);
-    // Still not configured without DofMap and Space
-    EXPECT_FALSE(assembler.isConfigured());
-}
-
-TEST_F(ColoredAssemblerTest, SetOptions) {
+TEST_F(ColoredAssemblerTest, SetOptionsInvalidatesColoringAndForwardsToBase) {
     ColoredAssembler assembler;
 
-    ColoredAssemblerOptions options;
+    // Seed a coloring state
+    std::vector<int> colors(100, 0);
+    assembler.setColoring(colors, 1);
+    EXPECT_TRUE(assembler.hasColoring());
+
+    AssemblyOptions options{};
     options.num_threads = 8;
+    options.use_coloring = true;
     options.coloring.algorithm = ColoringAlgorithm::DSatur;
+    options.coloring.max_colors = 128; // trigger invalidation
     options.coloring.balance_colors = true;
 
     assembler.setOptions(options);
 
     EXPECT_EQ(assembler.getOptions().num_threads, 8);
-    EXPECT_EQ(assembler.getOptions().coloring.algorithm, ColoringAlgorithm::DSatur);
-    EXPECT_TRUE(assembler.getOptions().coloring.balance_colors);
+    EXPECT_FALSE(assembler.hasColoring());
 }
 
 // ============================================================================
@@ -320,27 +319,20 @@ TEST_F(ColoredAssemblerTest, BlockIndexIsDiagonal) {
 }
 
 // ============================================================================
-// Colored Assembler Options Tests
-// ============================================================================
-
-TEST_F(ColoredAssemblerTest, ColoredAssemblerOptionsDefaults) {
-    ColoredAssemblerOptions options;
-
-    EXPECT_EQ(options.num_threads, 0);  // Auto
-    EXPECT_TRUE(options.apply_constraints);
-    EXPECT_FALSE(options.auto_recolor);
-    EXPECT_FALSE(options.verbose);
-}
-
-// ============================================================================
 // Move Semantics Tests
 // ============================================================================
 
 TEST_F(ColoredAssemblerTest, MoveConstruction) {
-    ColoredAssemblerOptions options;
-    options.num_threads = 4;
+    ColoringOptions coloring;
+    coloring.max_colors = 64;
 
-    ColoredAssembler assembler1(options);
+    ColoredAssembler assembler1(coloring);
+
+    AssemblyOptions options{};
+    options.num_threads = 4;
+    options.use_coloring = true;
+    options.coloring = coloring;
+    assembler1.setOptions(options);
 
     std::vector<int> colors(50, 0);
     for (std::size_t i = 0; i < colors.size(); ++i) {
@@ -356,10 +348,12 @@ TEST_F(ColoredAssemblerTest, MoveConstruction) {
 }
 
 TEST_F(ColoredAssemblerTest, MoveAssignment) {
-    ColoredAssemblerOptions options;
-    options.num_threads = 4;
+    ColoredAssembler assembler1;
 
-    ColoredAssembler assembler1(options);
+    AssemblyOptions options{};
+    options.num_threads = 4;
+    options.use_coloring = true;
+    assembler1.setOptions(options);
 
     std::vector<int> colors(50, 0);
     assembler1.setColoring(colors, 2);
@@ -381,18 +375,6 @@ TEST_F(ColoredAssemblerTest, VerifyColoringValidEmptyGraph) {
 
     // Empty graph/colors should be valid
     EXPECT_TRUE(verifyColoring(graph, colors));
-}
-
-// ============================================================================
-// Statistics Tests
-// ============================================================================
-
-TEST_F(ColoredAssemblerTest, LoopStatisticsFromColoredAssembler) {
-    ColoredAssembler assembler;
-
-    auto stats = assembler.getLastStats();
-    EXPECT_EQ(stats.total_iterations, 0);
-    EXPECT_DOUBLE_EQ(stats.elapsed_seconds, 0.0);
 }
 
 // ============================================================================

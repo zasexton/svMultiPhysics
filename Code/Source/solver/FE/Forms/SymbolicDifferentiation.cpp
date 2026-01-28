@@ -103,6 +103,7 @@ namespace {
         case FormExprType::Norm:
         case FormExprType::Component:
         case FormExprType::SymmetricEigenvalue:
+        case FormExprType::Eigenvalue:
         case FormExprType::SymmetricEigenvalueDirectionalDerivative:
         case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA:
             return true;
@@ -132,6 +133,9 @@ namespace {
 
         case FormExprType::Minimum:
         case FormExprType::Maximum:
+        case FormExprType::SmoothAbsoluteValue:
+        case FormExprType::SmoothSign:
+        case FormExprType::SmoothHeaviside:
         case FormExprType::Power:
         case FormExprType::Add:
         case FormExprType::Subtract:
@@ -146,6 +150,13 @@ namespace {
             const auto kids = node.childrenShared();
             if (kids.size() != 3u || !kids[1] || !kids[2]) return false;
             return isDefinitelyScalarNode(*kids[1]) && isDefinitelyScalarNode(*kids[2]);
+        }
+
+        case FormExprType::SmoothMin:
+        case FormExprType::SmoothMax: {
+            const auto kids = node.childrenShared();
+            if (kids.size() != 3u || !kids[0] || !kids[1] || !kids[2]) return false;
+            return isDefinitelyScalarNode(*kids[0]) && isDefinitelyScalarNode(*kids[1]) && isDefinitelyScalarNode(*kids[2]);
         }
 
         default:
@@ -932,6 +943,27 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 break;
             }
 
+            case FormExprType::SmoothMin:
+            case FormExprType::SmoothMax: {
+                if (kids.size() != 3u || !kids[0] || !kids[1] || !kids[2]) {
+                    throw std::invalid_argument("differentiateResidual: SmoothMin/SmoothMax expects 3 children");
+                }
+                const auto a = self(self, kids[0]);
+                const auto b = self(self, kids[1]);
+                const auto eps = self(self, kids[2]);
+                const bool is_min = (node->type() == FormExprType::SmoothMin);
+                out.primal = is_min ? a.primal.smoothMin(b.primal, eps.primal) : a.primal.smoothMax(b.primal, eps.primal);
+
+                const auto d = a.primal - b.primal;
+                const auto ad = d.smoothAbs(eps.primal); // sqrt(d^2 + eps^2)
+                const auto num = d * (a.deriv - b.deriv) + eps.primal * eps.deriv;
+                const auto dad = eq(ad, FormExpr::constant(0.0)).conditional(zeroOf(ad), num / ad);
+
+                out.deriv = FormExpr::constant(0.5) * (a.deriv + b.deriv) +
+                            (is_min ? FormExpr::constant(-0.5) : FormExpr::constant(0.5)) * dad;
+                break;
+            }
+
             // ---- Predicates ----
             case FormExprType::Less:
             case FormExprType::LessEqual:
@@ -1075,11 +1107,85 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 break;
             }
 
+            case FormExprType::MatrixExponential: {
+                const auto a = diff1(0);
+                out.primal = a.primal.matrixExp();
+                out.deriv = (a.deriv.isValid() && a.deriv.node() != nullptr && isZeroLike(*a.deriv.node()))
+                                ? zeroOf(out.primal)
+                                : FormExpr::matrixExpDirectionalDerivative(a.primal, a.deriv);
+                break;
+            }
+            case FormExprType::MatrixLogarithm: {
+                const auto a = diff1(0);
+                out.primal = a.primal.matrixLog();
+                out.deriv = (a.deriv.isValid() && a.deriv.node() != nullptr && isZeroLike(*a.deriv.node()))
+                                ? zeroOf(out.primal)
+                                : FormExpr::matrixLogDirectionalDerivative(a.primal, a.deriv);
+                break;
+            }
+            case FormExprType::MatrixSqrt: {
+                const auto a = diff1(0);
+                out.primal = a.primal.matrixSqrt();
+                out.deriv = (a.deriv.isValid() && a.deriv.node() != nullptr && isZeroLike(*a.deriv.node()))
+                                ? zeroOf(out.primal)
+                                : FormExpr::matrixSqrtDirectionalDerivative(a.primal, a.deriv);
+                break;
+            }
+
+            case FormExprType::SmoothAbsoluteValue: {
+                const auto x = diff1(0);
+                const auto eps = diff1(1);
+                out.primal = x.primal.smoothAbs(eps.primal); // sqrt(x^2+eps^2)
+                const auto denom = out.primal;
+                const auto num = x.primal * x.deriv + eps.primal * eps.deriv;
+                const auto d = num / denom;
+                out.deriv = eq(denom, FormExpr::constant(0.0)).conditional(zeroOf(out.primal), d);
+                break;
+            }
+            case FormExprType::SmoothSign:
+            case FormExprType::SmoothHeaviside: {
+                const auto x = diff1(0);
+                const auto eps = diff1(1);
+                const bool is_heaviside = (node->type() == FormExprType::SmoothHeaviside);
+                out.primal = is_heaviside ? x.primal.smoothHeaviside(eps.primal) : x.primal.smoothSign(eps.primal);
+
+                const auto denom = x.primal.smoothAbs(eps.primal);
+                const auto num_denom = x.primal * x.deriv + eps.primal * eps.deriv;
+                const auto d_denom = num_denom / denom;
+                const auto d_sign = (x.deriv * denom - x.primal * d_denom) / (denom * denom);
+                const auto d = is_heaviside ? (FormExpr::constant(0.5) * d_sign) : d_sign;
+                out.deriv = eq(denom, FormExpr::constant(0.0)).conditional(zeroOf(out.primal), d);
+                break;
+            }
+
             case FormExprType::SymmetricEigenvalue: {
                 const auto a = diff1(0);
                 const int which = node->eigenIndex().value_or(0);
                 out.primal = a.primal.symmetricEigenvalue(which);
                 out.deriv = FormExpr::symmetricEigenvalueDirectionalDerivative(a.primal, a.deriv, which);
+                break;
+            }
+
+            case FormExprType::Eigenvalue: {
+                const auto a = diff1(0);
+                const int which = node->eigenIndex().value_or(0);
+                out.primal = a.primal.eigenvalue(which);
+                out.deriv = FormExpr::symmetricEigenvalueDirectionalDerivative(a.primal, a.deriv, which);
+                break;
+            }
+
+            case FormExprType::SymmetricEigenvector: {
+                const auto a = diff1(0);
+                const int which = node->eigenIndex().value_or(0);
+                out.primal = a.primal.symmetricEigenvector(which);
+                out.deriv = FormExpr::symmetricEigenvectorDirectionalDerivative(a.primal, a.deriv, which);
+                break;
+            }
+
+            case FormExprType::SpectralDecomposition: {
+                const auto a = diff1(0);
+                out.primal = a.primal.spectralDecomposition();
+                out.deriv = FormExpr::spectralDecompositionDirectionalDerivative(a.primal, a.deriv);
                 break;
             }
 
@@ -1090,6 +1196,48 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 out.primal = FormExpr::symmetricEigenvalueDirectionalDerivative(a.primal, b.primal, which);
                 out.deriv = FormExpr::symmetricEigenvalueDirectionalDerivativeWrtA(a.primal, b.primal, a.deriv, which) +
                             FormExpr::symmetricEigenvalueDirectionalDerivative(a.primal, b.deriv, which);
+                break;
+            }
+
+            case FormExprType::MatrixPower: {
+                const auto A = diff1(0);
+                const auto p = diff1(1);
+                out.primal = A.primal.matrixPow(p.primal);
+                const auto dA_term =
+                    (A.deriv.isValid() && A.deriv.node() != nullptr && isZeroLike(*A.deriv.node()))
+                        ? zeroOf(out.primal)
+                        : FormExpr::matrixPowDirectionalDerivative(A.primal, A.deriv, p.primal);
+                const auto dp_term =
+                    (p.deriv.isValid() && p.deriv.node() != nullptr && isZeroLike(*p.deriv.node()))
+                        ? zeroOf(out.primal)
+                        : (p.deriv * (out.primal * A.primal.matrixLog()));
+                out.deriv = dA_term + dp_term;
+                break;
+            }
+
+            case FormExprType::HistoryWeightedSum:
+            case FormExprType::HistoryConvolution: {
+                std::vector<FormExpr> primal_weights;
+                primal_weights.reserve(kids.size());
+                out.deriv = {};
+                for (std::size_t kk = 0; kk < kids.size(); ++kk) {
+                    const auto w = self(self, kids[kk]);
+                    primal_weights.push_back(w.primal);
+                }
+                out.primal = (node->type() == FormExprType::HistoryWeightedSum)
+                                 ? FormExpr::historyWeightedSum(primal_weights)
+                                 : FormExpr::historyConvolution(primal_weights);
+
+                FormExpr sum = zeroOf(out.primal);
+                for (std::size_t kk = 0; kk < kids.size(); ++kk) {
+                    const auto w = self(self, kids[kk]);
+                    if (w.deriv.isValid() && w.deriv.node() && isZeroLike(*w.deriv.node())) {
+                        continue;
+                    }
+                    const int steps_back = static_cast<int>(kk + 1u);
+                    sum = sum + (w.deriv * FormExpr::previousSolution(steps_back));
+                }
+                out.deriv = sum;
                 break;
             }
 
@@ -1568,6 +1716,22 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                 break;
             }
 
+            case FormExprType::MatrixPower: {
+                const auto A = diff1(0);
+                const auto p = diff1(1);
+                out.primal = A.primal.matrixPow(p.primal);
+                const auto dA_term =
+                    (A.deriv.isValid() && A.deriv.node() != nullptr && isZeroLike(*A.deriv.node()))
+                        ? zeroOf(out.primal)
+                        : FormExpr::matrixPowDirectionalDerivative(A.primal, A.deriv, p.primal);
+                const auto dp_term =
+                    (p.deriv.isValid() && p.deriv.node() != nullptr && isZeroLike(*p.deriv.node()))
+                        ? zeroOf(out.primal)
+                        : (p.deriv * (out.primal * A.primal.matrixLog()));
+                out.deriv = dA_term + dp_term;
+                break;
+            }
+
             case FormExprType::Minimum:
             case FormExprType::Maximum: {
                 const auto a = diff1(0);
@@ -1576,6 +1740,24 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                 // Use a 0/1 mask from comparisons for derivative (piecewise; ties pick +a).
                 const auto pick_a = (node->type() == FormExprType::Minimum) ? le(a.primal, b.primal) : ge(a.primal, b.primal);
                 out.deriv = pick_a * a.deriv + (FormExpr::constant(1.0) - pick_a) * b.deriv;
+                break;
+            }
+
+            case FormExprType::SmoothMin:
+            case FormExprType::SmoothMax: {
+                const auto a = diff1(0);
+                const auto b = diff1(1);
+                const auto eps = diff1(2);
+                const bool is_min = (node->type() == FormExprType::SmoothMin);
+                out.primal = is_min ? a.primal.smoothMin(b.primal, eps.primal) : a.primal.smoothMax(b.primal, eps.primal);
+
+                const auto d = a.primal - b.primal;
+                const auto ad = d.smoothAbs(eps.primal); // sqrt(d^2 + eps^2)
+                const auto num = d * (a.deriv - b.deriv) + eps.primal * eps.deriv;
+                const auto dad = eq(ad, FormExpr::constant(0.0)).conditional(zeroOf(ad), num / ad);
+
+                out.deriv = FormExpr::constant(0.5) * (a.deriv + b.deriv) +
+                            (is_min ? FormExpr::constant(-0.5) : FormExpr::constant(0.5)) * dad;
                 break;
             }
 
@@ -1711,11 +1893,85 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                 break;
             }
 
+            case FormExprType::MatrixExponential: {
+                const auto a = diff1(0);
+                out.primal = a.primal.matrixExp();
+                out.deriv = (a.deriv.isValid() && a.deriv.node() != nullptr && isZeroLike(*a.deriv.node()))
+                                ? zeroOf(out.primal)
+                                : FormExpr::matrixExpDirectionalDerivative(a.primal, a.deriv);
+                break;
+            }
+            case FormExprType::MatrixLogarithm: {
+                const auto a = diff1(0);
+                out.primal = a.primal.matrixLog();
+                out.deriv = (a.deriv.isValid() && a.deriv.node() != nullptr && isZeroLike(*a.deriv.node()))
+                                ? zeroOf(out.primal)
+                                : FormExpr::matrixLogDirectionalDerivative(a.primal, a.deriv);
+                break;
+            }
+            case FormExprType::MatrixSqrt: {
+                const auto a = diff1(0);
+                out.primal = a.primal.matrixSqrt();
+                out.deriv = (a.deriv.isValid() && a.deriv.node() != nullptr && isZeroLike(*a.deriv.node()))
+                                ? zeroOf(out.primal)
+                                : FormExpr::matrixSqrtDirectionalDerivative(a.primal, a.deriv);
+                break;
+            }
+
+            case FormExprType::SmoothAbsoluteValue: {
+                const auto x = diff1(0);
+                const auto eps = diff1(1);
+                out.primal = x.primal.smoothAbs(eps.primal);
+                const auto denom = out.primal;
+                const auto num = x.primal * x.deriv + eps.primal * eps.deriv;
+                const auto d = num / denom;
+                out.deriv = eq(denom, FormExpr::constant(0.0)).conditional(zeroOf(out.primal), d);
+                break;
+            }
+            case FormExprType::SmoothSign:
+            case FormExprType::SmoothHeaviside: {
+                const auto x = diff1(0);
+                const auto eps = diff1(1);
+                const bool is_heaviside = (node->type() == FormExprType::SmoothHeaviside);
+                out.primal = is_heaviside ? x.primal.smoothHeaviside(eps.primal) : x.primal.smoothSign(eps.primal);
+
+                const auto denom = x.primal.smoothAbs(eps.primal);
+                const auto num_denom = x.primal * x.deriv + eps.primal * eps.deriv;
+                const auto d_denom = num_denom / denom;
+                const auto d_sign = (x.deriv * denom - x.primal * d_denom) / (denom * denom);
+                const auto d = is_heaviside ? (FormExpr::constant(0.5) * d_sign) : d_sign;
+                out.deriv = eq(denom, FormExpr::constant(0.0)).conditional(zeroOf(out.primal), d);
+                break;
+            }
+
             case FormExprType::SymmetricEigenvalue: {
                 const auto a = diff1(0);
                 const int which = node->eigenIndex().value_or(0);
                 out.primal = a.primal.symmetricEigenvalue(which);
                 out.deriv = FormExpr::symmetricEigenvalueDirectionalDerivative(a.primal, a.deriv, which);
+                break;
+            }
+
+            case FormExprType::Eigenvalue: {
+                const auto a = diff1(0);
+                const int which = node->eigenIndex().value_or(0);
+                out.primal = a.primal.eigenvalue(which);
+                out.deriv = FormExpr::symmetricEigenvalueDirectionalDerivative(a.primal, a.deriv, which);
+                break;
+            }
+
+            case FormExprType::SymmetricEigenvector: {
+                const auto a = diff1(0);
+                const int which = node->eigenIndex().value_or(0);
+                out.primal = a.primal.symmetricEigenvector(which);
+                out.deriv = FormExpr::symmetricEigenvectorDirectionalDerivative(a.primal, a.deriv, which);
+                break;
+            }
+
+            case FormExprType::SpectralDecomposition: {
+                const auto a = diff1(0);
+                out.primal = a.primal.spectralDecomposition();
+                out.deriv = FormExpr::spectralDecompositionDirectionalDerivative(a.primal, a.deriv);
                 break;
             }
 
@@ -1737,6 +1993,31 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                 const int which = node->eigenIndex().value_or(0);
                 out.primal = FormExpr::symmetricEigenvalueDirectionalDerivativeWrtA(a.primal, b.primal, c.primal, which);
                 out.deriv = FormExpr::symmetricEigenvalueDirectionalDerivativeWrtA(a.primal, b.primal, c.deriv, which);
+                break;
+            }
+
+            case FormExprType::HistoryWeightedSum:
+            case FormExprType::HistoryConvolution: {
+                std::vector<FormExpr> primal_weights;
+                primal_weights.reserve(kids.size());
+                for (const auto& k : kids) {
+                    const auto w = self(self, k);
+                    primal_weights.push_back(w.primal);
+                }
+                out.primal = (node->type() == FormExprType::HistoryWeightedSum)
+                                 ? FormExpr::historyWeightedSum(primal_weights)
+                                 : FormExpr::historyConvolution(primal_weights);
+
+                FormExpr sum = zeroOf(out.primal);
+                for (std::size_t kk = 0; kk < kids.size(); ++kk) {
+                    const auto w = self(self, kids[kk]);
+                    if (w.deriv.isValid() && w.deriv.node() && isZeroLike(*w.deriv.node())) {
+                        continue;
+                    }
+                    const int steps_back = static_cast<int>(kk + 1u);
+                    sum = sum + (w.deriv * FormExpr::previousSolution(steps_back));
+                }
+                out.deriv = sum;
                 break;
             }
 

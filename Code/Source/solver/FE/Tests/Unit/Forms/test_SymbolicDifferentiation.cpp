@@ -984,6 +984,61 @@ TEST(SymbolicNonlinearFormKernelTest, JITMatchesInterpreter)
 }
 #endif
 
+TEST(SymbolicDifferentiationNewPhysicsTest, MatrixFunctionDerivativesUseDirectionalDerivativeNodes)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    // SPD-ish 2x2 matrix built from a scalar field (keeps log/sqrt well-defined in practice).
+    const auto A = FormExpr::identity(2) * (u * u + FormExpr::constant(Real(2.0)));
+
+    const auto t_exp = differentiateResidual((A.matrixExp().trace() * v).dx());
+    EXPECT_NE(t_exp.toString().find("expm_dd("), std::string::npos);
+
+    const auto t_log = differentiateResidual((A.matrixLog().trace() * v).dx());
+    EXPECT_NE(t_log.toString().find("logm_dd("), std::string::npos);
+
+    const auto t_sqrt = differentiateResidual((A.matrixSqrt().trace() * v).dx());
+    EXPECT_NE(t_sqrt.toString().find("sqrtm_dd("), std::string::npos);
+
+    const auto t_pow = differentiateResidual((A.matrixPow(FormExpr::constant(Real(2.0))).trace() * v).dx());
+    EXPECT_NE(t_pow.toString().find("powm_dd("), std::string::npos);
+}
+
+TEST(SymbolicDifferentiationNewPhysicsTest, EigenAndHistoryDerivativesUseDirectionalDerivativeNodes)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto A = FormExpr::identity(2) * (u * u + FormExpr::constant(Real(1.0)));
+
+    const auto t_eigvec =
+        differentiateResidual((inner(A.symmetricEigenvector(0), A.symmetricEigenvector(0)) * v).dx());
+    EXPECT_NE(t_eigvec.toString().find("eigvec_sym_dd("), std::string::npos);
+
+    const auto t_spec = differentiateResidual((A.spectralDecomposition().trace() * v).dx());
+    EXPECT_NE(t_spec.toString().find("spectral_decomp_dd("), std::string::npos);
+
+    const auto hist = FormExpr::historyWeightedSum({u, FormExpr::constant(Real(0.0))});
+    const auto t_hist = differentiateResidual((hist * v).dx());
+    EXPECT_NE(t_hist.toString().find("u_prev(1)"), std::string::npos);
+}
+
+TEST(SymbolicDifferentiationNewPhysicsTest, SmoothOpsDifferentiateWithoutThrow)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto eps = FormExpr::constant(Real(1e-3));
+
+    const auto t = differentiateResidual((u.smoothAbs(eps) * v).dx());
+    EXPECT_NE(t.toString().find("smooth_abs("), std::string::npos);
+}
+
 } // namespace test
 } // namespace forms
 } // namespace FE

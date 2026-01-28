@@ -194,6 +194,66 @@ TEST(JITKernelArgsPacking, PacksMultiFieldSolutionTableV3AndChecksAlignment)
     EXPECT_EQ(reinterpret_cast<std::uintptr_t>(args3.side.jit_constants) % align, 0u);
 }
 
+TEST(JITKernelArgsPacking, PacksTimeIntegrationStencilsV4)
+{
+    AssemblyContext ctx;
+    ctx.reserve(/*max_dofs=*/8, /*max_qpts=*/8, /*dim=*/3);
+    setupTwoDofTwoQptScalarContext(ctx);
+
+    // Provide some history solution slots so packers can bind previous_solution_coefficients pointers.
+    std::vector<Real> prev1 = {Real(10.0), Real(11.0)};
+    std::vector<Real> prev2 = {Real(12.0), Real(13.0)};
+    std::vector<Real> prev3 = {Real(14.0), Real(15.0)};
+    ctx.setPreviousSolutionCoefficientsK(/*k=*/1, prev1);
+    ctx.setPreviousSolutionCoefficientsK(/*k=*/2, prev2);
+    ctx.setPreviousSolutionCoefficientsK(/*k=*/3, prev3);
+
+    // Build a time-integration context with dt1, dt2, and dt3 stencils.
+    TimeIntegrationContext ti;
+    ti.integrator_name = "TestTI";
+    ti.time_derivative_term_weight = Real(0.5);
+    ti.non_time_derivative_term_weight = Real(2.0);
+    ti.dt1_term_weight = Real(3.0);
+    ti.dt2_term_weight = Real(4.0);
+    ti.dt_extra_term_weight = {Real(5.0)}; // dt3
+
+    ti.dt1 = TimeDerivativeStencil{.order = 1, .a = {Real(2.0), Real(-2.0)}};
+    ti.dt2 = TimeDerivativeStencil{.order = 2, .a = {Real(4.0), Real(-8.0), Real(4.0)}};
+    ti.dt_extra.resize(1);
+    ti.dt_extra[0] = TimeDerivativeStencil{.order = 3, .a = {Real(8.0), Real(-24.0), Real(24.0), Real(-8.0)}};
+
+    ctx.setTimeIntegrationContext(&ti);
+
+    KernelOutput out;
+    out.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/true);
+
+    jit::PackingChecks checks;
+    checks.validate_alignment = true;
+    const auto args4 = jit::packCellKernelArgsV4(ctx, out, checks);
+
+    EXPECT_EQ(args4.abi_version, jit::kKernelArgsABIVersionV4);
+    EXPECT_EQ(args4.side.max_time_derivative_order, 3u);
+
+    EXPECT_DOUBLE_EQ(args4.side.time_derivative_term_weight, 0.5);
+    EXPECT_DOUBLE_EQ(args4.side.non_time_derivative_term_weight, 2.0);
+
+    EXPECT_DOUBLE_EQ(args4.side.dt_term_weights[0], 3.0);
+    EXPECT_DOUBLE_EQ(args4.side.dt_term_weights[1], 4.0);
+    EXPECT_DOUBLE_EQ(args4.side.dt_term_weights[2], 5.0);
+
+    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[0][0], 2.0);
+    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[0][1], -2.0);
+
+    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[1][0], 4.0);
+    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[1][1], -8.0);
+    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[1][2], 4.0);
+
+    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[2][0], 8.0);
+    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[2][1], -24.0);
+    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[2][2], 24.0);
+    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[2][3], -8.0);
+}
+
 TEST(JITKernelArgsPacking, PacksMaterialStateAlignmentV3)
 {
     AssemblyContext ctx;

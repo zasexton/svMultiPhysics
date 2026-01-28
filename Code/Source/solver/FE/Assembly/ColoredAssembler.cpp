@@ -29,15 +29,17 @@
  */
 
 #include "ColoredAssembler.h"
-#include "Core/FEException.h"
 
-#include <chrono>
+#include "Core/FEException.h"
+#include "StandardAssembler.h"
+
 #include <algorithm>
-#include <numeric>
-#include <unordered_set>
-#include <unordered_map>
-#include <queue>
+#include <chrono>
 #include <limits>
+#include <numeric>
+#include <queue>
+#include <unordered_map>
+#include <unordered_set>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -51,11 +53,13 @@ namespace assembly {
 // ElementGraph Implementation
 // ============================================================================
 
-ElementGraph::ElementGraph(GlobalIndex num_elements) {
+ElementGraph::ElementGraph(GlobalIndex num_elements)
+{
     building_adj_.resize(static_cast<std::size_t>(num_elements));
 }
 
-void ElementGraph::build(const IMeshAccess& mesh, const dofs::DofMap& /*dof_map*/) {
+void ElementGraph::build(const IMeshAccess& mesh, const dofs::DofMap& /*dof_map*/)
+{
     GlobalIndex num_cells = mesh.numCells();
     building_adj_.clear();
     building_adj_.resize(static_cast<std::size_t>(num_cells));
@@ -63,7 +67,7 @@ void ElementGraph::build(const IMeshAccess& mesh, const dofs::DofMap& /*dof_map*
     // Build DOF-to-element map
     std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> dof_to_elements;
 
-    mesh.forEachCell([this, &dof_to_elements, &mesh](GlobalIndex cell_id) {
+    mesh.forEachCell([&dof_to_elements, &mesh](GlobalIndex cell_id) {
         // Get DOFs for this cell
         // In a real implementation, this would use dof_map.getCellDofs(cell_id, dofs)
         // For now, we use node-based connectivity as a proxy
@@ -81,6 +85,7 @@ void ElementGraph::build(const IMeshAccess& mesh, const dofs::DofMap& /*dof_map*
     max_degree_ = 0;
 
     for (const auto& [dof, elements] : dof_to_elements) {
+        (void)dof;
         for (std::size_t i = 0; i < elements.size(); ++i) {
             for (std::size_t j = i + 1; j < elements.size(); ++j) {
                 addEdge(elements[i], elements[j]);
@@ -122,7 +127,8 @@ void ElementGraph::build(const IMeshAccess& mesh, const dofs::DofMap& /*dof_map*
     building_adj_.clear();
 }
 
-void ElementGraph::addEdge(GlobalIndex elem1, GlobalIndex elem2) {
+void ElementGraph::addEdge(GlobalIndex elem1, GlobalIndex elem2)
+{
     if (elem1 == elem2) return;
 
     auto idx1 = static_cast<std::size_t>(elem1);
@@ -132,19 +138,22 @@ void ElementGraph::addEdge(GlobalIndex elem1, GlobalIndex elem2) {
     building_adj_[idx2].push_back(elem1);
 }
 
-std::span<const GlobalIndex> ElementGraph::neighbors(GlobalIndex elem) const {
+std::span<const GlobalIndex> ElementGraph::neighbors(GlobalIndex elem) const
+{
     auto idx = static_cast<std::size_t>(elem);
     auto start = static_cast<std::size_t>(adjacency_offsets_[idx]);
     auto end = static_cast<std::size_t>(adjacency_offsets_[idx + 1]);
     return {adjacency_list_.data() + start, end - start};
 }
 
-int ElementGraph::degree(GlobalIndex elem) const {
+int ElementGraph::degree(GlobalIndex elem) const
+{
     auto idx = static_cast<std::size_t>(elem);
     return static_cast<int>(adjacency_offsets_[idx + 1] - adjacency_offsets_[idx]);
 }
 
-void ElementGraph::clear() {
+void ElementGraph::clear()
+{
     adjacency_offsets_.clear();
     adjacency_list_.clear();
     building_adj_.clear();
@@ -157,14 +166,24 @@ void ElementGraph::clear() {
 // ============================================================================
 
 ColoredAssembler::ColoredAssembler()
-    : options_{}
-    , loop_(std::make_unique<AssemblyLoop>())
+    : DecoratorAssembler(createStandardAssembler()),
+      options_{},
+      loop_(std::make_unique<AssemblyLoop>())
 {
 }
 
-ColoredAssembler::ColoredAssembler(const ColoredAssemblerOptions& options)
-    : options_(options)
-    , loop_(std::make_unique<AssemblyLoop>())
+ColoredAssembler::ColoredAssembler(const ColoringOptions& options)
+    : DecoratorAssembler(createStandardAssembler()),
+      options_(options),
+      loop_(std::make_unique<AssemblyLoop>())
+{
+}
+
+ColoredAssembler::ColoredAssembler(std::unique_ptr<Assembler> base,
+                                   const ColoringOptions& options)
+    : DecoratorAssembler(std::move(base)),
+      options_(options),
+      loop_(std::make_unique<AssemblyLoop>())
 {
 }
 
@@ -174,64 +193,66 @@ ColoredAssembler::ColoredAssembler(ColoredAssembler&& other) noexcept = default;
 
 ColoredAssembler& ColoredAssembler::operator=(ColoredAssembler&& other) noexcept = default;
 
-// ============================================================================
-// Configuration
-// ============================================================================
-
-void ColoredAssembler::setMesh(const IMeshAccess& mesh) {
-    mesh_ = &mesh;
-    loop_->setMesh(mesh);
-    has_coloring_ = false;  // Invalidate coloring when mesh changes
-}
-
-void ColoredAssembler::setDofMap(const dofs::DofMap& dof_map) {
-    dof_map_ = &dof_map;
-    loop_->setDofMap(dof_map);
-    has_coloring_ = false;  // Invalidate coloring when DOF map changes
-}
-
-void ColoredAssembler::setSpace(const spaces::FunctionSpace& space) {
-    test_space_ = &space;
-    trial_space_ = &space;
-}
-
-void ColoredAssembler::setSpaces(
-    const spaces::FunctionSpace& test_space,
-    const spaces::FunctionSpace& trial_space)
+void ColoredAssembler::setDofMap(const dofs::DofMap& dof_map)
 {
-    test_space_ = &test_space;
-    trial_space_ = &trial_space;
+    dof_map_ = &dof_map;
+    invalidateColoring();
+    base().setDofMap(dof_map);
 }
 
-void ColoredAssembler::setConstraints(const constraints::AffineConstraints& constraints) {
-    constraints_ = &constraints;
+void ColoredAssembler::setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset)
+{
+    dof_map_ = &dof_map;
+    invalidateColoring();
+    base().setRowDofMap(dof_map, row_offset);
 }
 
-void ColoredAssembler::setOptions(const ColoredAssemblerOptions& options) {
-    options_ = options;
+void ColoredAssembler::setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset)
+{
+    // Coloring currently uses a single DofMap. Prefer the row map; fall back to
+    // the column map if the row map was not set.
+    if (dof_map_ == nullptr) {
+        dof_map_ = &dof_map;
+    }
+    invalidateColoring();
+    base().setColDofMap(dof_map, col_offset);
 }
 
-bool ColoredAssembler::isConfigured() const noexcept {
-    return mesh_ != nullptr &&
-           dof_map_ != nullptr &&
-           test_space_ != nullptr &&
-           trial_space_ != nullptr;
+void ColoredAssembler::setOptions(const AssemblyOptions& options)
+{
+    const bool changed =
+        (options_.algorithm != options.coloring.algorithm) ||
+        (options_.max_colors != options.coloring.max_colors) ||
+        (options_.balance_colors != options.coloring.balance_colors) ||
+        (options_.reorder_elements != options.coloring.reorder_elements) ||
+        (options_.verbose != options.coloring.verbose);
+
+    options_ = options.coloring;
+    base().setOptions(options);
+
+    if (changed) {
+        invalidateColoring();
+    }
 }
 
-// ============================================================================
-// Coloring
-// ============================================================================
+void ColoredAssembler::reset()
+{
+    base().reset();
+    invalidateColoring();
+    last_num_cells_ = 0;
+}
 
-ColoringStats ColoredAssembler::computeColoring() {
-    FE_THROW_IF(!mesh_ || !dof_map_, "Mesh and DOF map must be set before coloring");
-
+void ColoredAssembler::computeColoring(const IMeshAccess& mesh, const dofs::DofMap& dof_map)
+{
     auto start_time = std::chrono::high_resolution_clock::now();
 
+    last_num_cells_ = mesh.numCells();
+
     // Build element graph
-    buildElementGraph();
+    buildElementGraph(mesh, dof_map);
 
     // Apply coloring algorithm
-    switch (options_.coloring.algorithm) {
+    switch (options_.algorithm) {
         case ColoringAlgorithm::Greedy:
         case ColoringAlgorithm::BalancedGreedy:
             num_colors_ = greedyColoring();
@@ -248,7 +269,7 @@ ColoringStats ColoredAssembler::computeColoring() {
     }
 
     // Balance colors if requested
-    if (options_.coloring.balance_colors) {
+    if (options_.balance_colors) {
         balanceColors();
     }
 
@@ -268,26 +289,23 @@ ColoringStats ColoredAssembler::computeColoring() {
     coloring_stats_.coloring_seconds =
         std::chrono::duration<double>(end_time - start_time).count();
 
-    coloring_stats_.color_sizes.resize(static_cast<std::size_t>(num_colors_), 0);
+    coloring_stats_.color_sizes.assign(static_cast<std::size_t>(num_colors_), 0);
     for (int color : element_colors_) {
         ++coloring_stats_.color_sizes[static_cast<std::size_t>(color)];
     }
 
-    coloring_stats_.min_color_size = *std::min_element(
-        coloring_stats_.color_sizes.begin(), coloring_stats_.color_sizes.end());
-    coloring_stats_.max_color_size = *std::max_element(
-        coloring_stats_.color_sizes.begin(), coloring_stats_.color_sizes.end());
-    coloring_stats_.avg_color_size =
-        static_cast<double>(coloring_stats_.num_elements) / num_colors_;
-
-    if (options_.coloring.verbose) {
-        // Print coloring info
+    if (!coloring_stats_.color_sizes.empty() && num_colors_ > 0) {
+        coloring_stats_.min_color_size = *std::min_element(
+            coloring_stats_.color_sizes.begin(), coloring_stats_.color_sizes.end());
+        coloring_stats_.max_color_size = *std::max_element(
+            coloring_stats_.color_sizes.begin(), coloring_stats_.color_sizes.end());
+        coloring_stats_.avg_color_size =
+            static_cast<double>(coloring_stats_.num_elements) / static_cast<double>(num_colors_);
     }
-
-    return coloring_stats_;
 }
 
-void ColoredAssembler::setColoring(std::span<const int> colors, int num_colors) {
+void ColoredAssembler::setColoring(std::span<const int> colors, int num_colors)
+{
     element_colors_.assign(colors.begin(), colors.end());
     num_colors_ = num_colors;
     has_coloring_ = true;
@@ -296,16 +314,28 @@ void ColoredAssembler::setColoring(std::span<const int> colors, int num_colors) 
     loop_->setColoring(element_colors_, num_colors_);
 }
 
-void ColoredAssembler::buildElementGraph() {
-    element_graph_.build(*mesh_, *dof_map_);
+void ColoredAssembler::invalidateColoring()
+{
+    has_coloring_ = false;
+    num_colors_ = 0;
+    element_colors_.clear();
+    color_elements_.clear();
+    coloring_stats_ = ColoringStats{};
+    element_graph_.clear();
 }
 
-int ColoredAssembler::greedyColoring() {
+void ColoredAssembler::buildElementGraph(const IMeshAccess& mesh, const dofs::DofMap& dof_map)
+{
+    element_graph_.build(mesh, dof_map);
+}
+
+int ColoredAssembler::greedyColoring()
+{
     GlobalIndex n = element_graph_.numElements();
     element_colors_.resize(static_cast<std::size_t>(n), -1);
 
     int max_color = 0;
-    std::vector<bool> used_colors(static_cast<std::size_t>(options_.coloring.max_colors), false);
+    std::vector<bool> used_colors(static_cast<std::size_t>(options_.max_colors), false);
 
     for (GlobalIndex i = 0; i < n; ++i) {
         // Find colors used by neighbors
@@ -320,12 +350,12 @@ int ColoredAssembler::greedyColoring() {
 
         // Find first available color
         int color = 0;
-        while (color < options_.coloring.max_colors && used_colors[static_cast<std::size_t>(color)]) {
+        while (color < options_.max_colors && used_colors[static_cast<std::size_t>(color)]) {
             ++color;
         }
 
-        FE_THROW_IF(color >= options_.coloring.max_colors,
-                   "Coloring requires more colors than max_colors limit");
+        FE_THROW_IF(color >= options_.max_colors,
+                    "Coloring requires more colors than max_colors limit");
 
         element_colors_[static_cast<std::size_t>(i)] = color;
         max_color = std::max(max_color, color);
@@ -334,7 +364,8 @@ int ColoredAssembler::greedyColoring() {
     return max_color + 1;
 }
 
-int ColoredAssembler::dsaturColoring() {
+int ColoredAssembler::dsaturColoring()
+{
     GlobalIndex n = element_graph_.numElements();
     element_colors_.resize(static_cast<std::size_t>(n), -1);
 
@@ -357,10 +388,12 @@ int ColoredAssembler::dsaturColoring() {
     }
 
     int max_color = 0;
-    std::vector<bool> used_colors(static_cast<std::size_t>(options_.coloring.max_colors), false);
+    std::vector<bool> used_colors(static_cast<std::size_t>(options_.max_colors), false);
 
     while (!pq.empty()) {
         auto [sat, deg, elem] = pq.top();
+        (void)sat;
+        (void)deg;
         pq.pop();
 
         auto elem_idx = static_cast<std::size_t>(elem);
@@ -379,12 +412,12 @@ int ColoredAssembler::dsaturColoring() {
 
         // Find first available color
         int color = 0;
-        while (color < options_.coloring.max_colors && used_colors[static_cast<std::size_t>(color)]) {
+        while (color < options_.max_colors && used_colors[static_cast<std::size_t>(color)]) {
             ++color;
         }
 
-        FE_THROW_IF(color >= options_.coloring.max_colors,
-                   "DSatur coloring requires more colors than max_colors limit");
+        FE_THROW_IF(color >= options_.max_colors,
+                    "DSatur coloring requires more colors than max_colors limit");
 
         element_colors_[elem_idx] = color;
         max_color = std::max(max_color, color);
@@ -397,8 +430,8 @@ int ColoredAssembler::dsaturColoring() {
                     ++saturation[neighbor_idx];
                     // Re-insert with updated saturation
                     pq.emplace(saturation[neighbor_idx],
-                              element_graph_.degree(neighbor),
-                              neighbor);
+                               element_graph_.degree(neighbor),
+                               neighbor);
                 }
             }
         }
@@ -407,7 +440,8 @@ int ColoredAssembler::dsaturColoring() {
     return max_color + 1;
 }
 
-int ColoredAssembler::largestFirstColoring() {
+int ColoredAssembler::largestFirstColoring()
+{
     GlobalIndex n = element_graph_.numElements();
     element_colors_.resize(static_cast<std::size_t>(n), -1);
 
@@ -422,7 +456,7 @@ int ColoredAssembler::largestFirstColoring() {
               });
 
     int max_color = 0;
-    std::vector<bool> used_colors(static_cast<std::size_t>(options_.coloring.max_colors), false);
+    std::vector<bool> used_colors(static_cast<std::size_t>(options_.max_colors), false);
 
     for (GlobalIndex elem : order) {
         auto elem_idx = static_cast<std::size_t>(elem);
@@ -438,12 +472,12 @@ int ColoredAssembler::largestFirstColoring() {
 
         // Find first available color
         int color = 0;
-        while (color < options_.coloring.max_colors && used_colors[static_cast<std::size_t>(color)]) {
+        while (color < options_.max_colors && used_colors[static_cast<std::size_t>(color)]) {
             ++color;
         }
 
-        FE_THROW_IF(color >= options_.coloring.max_colors,
-                   "Largest-first coloring requires more colors than max_colors limit");
+        FE_THROW_IF(color >= options_.max_colors,
+                    "Largest-first coloring requires more colors than max_colors limit");
 
         element_colors_[elem_idx] = color;
         max_color = std::max(max_color, color);
@@ -452,7 +486,8 @@ int ColoredAssembler::largestFirstColoring() {
     return max_color + 1;
 }
 
-void ColoredAssembler::balanceColors() {
+void ColoredAssembler::balanceColors()
+{
     // Simple balancing: try to move elements to less-populated colors
 
     std::vector<int> color_counts(static_cast<std::size_t>(num_colors_), 0);
@@ -499,7 +534,8 @@ void ColoredAssembler::balanceColors() {
     }
 }
 
-void ColoredAssembler::buildColorLists() {
+void ColoredAssembler::buildColorLists()
+{
     color_elements_.clear();
     color_elements_.resize(static_cast<std::size_t>(num_colors_));
 
@@ -509,79 +545,98 @@ void ColoredAssembler::buildColorLists() {
     }
 }
 
-// ============================================================================
-// Assembly Operations
-// ============================================================================
-
-LoopStatistics ColoredAssembler::assembleMatrix(
+AssemblyResult ColoredAssembler::assembleMatrix(
+    const IMeshAccess& mesh,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
     AssemblyKernel& kernel,
     GlobalSystemView& matrix_view)
 {
-    FE_THROW_IF(!isConfigured(), "ColoredAssembler not configured");
-    FE_THROW_IF(!has_coloring_, "Must call computeColoring() before assembly");
-
-    // Configure loop for colored mode
-    LoopOptions loop_opts;
-    loop_opts.mode = LoopMode::Colored;
-    loop_opts.num_threads = options_.num_threads;
-    loop_opts.deterministic = true;
-    loop_->setOptions(loop_opts);
-
-    return loop_->cellLoop(*test_space_, *trial_space_, kernel, &matrix_view, nullptr);
+    return assembleCells(mesh, test_space, trial_space, kernel, &matrix_view, nullptr);
 }
 
-LoopStatistics ColoredAssembler::assembleVector(
+AssemblyResult ColoredAssembler::assembleVector(
+    const IMeshAccess& mesh,
+    const spaces::FunctionSpace& space,
     AssemblyKernel& kernel,
     GlobalSystemView& vector_view)
 {
-    FE_THROW_IF(!isConfigured(), "ColoredAssembler not configured");
-    FE_THROW_IF(!has_coloring_, "Must call computeColoring() before assembly");
-
-    LoopOptions loop_opts;
-    loop_opts.mode = LoopMode::Colored;
-    loop_opts.num_threads = options_.num_threads;
-    loop_opts.deterministic = true;
-    loop_->setOptions(loop_opts);
-
-    return loop_->cellLoop(*test_space_, *trial_space_, kernel, nullptr, &vector_view);
+    return assembleCells(mesh, space, space, kernel, nullptr, &vector_view);
 }
 
-LoopStatistics ColoredAssembler::assembleBoth(
+AssemblyResult ColoredAssembler::assembleBoth(
+    const IMeshAccess& mesh,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
     AssemblyKernel& kernel,
     GlobalSystemView& matrix_view,
     GlobalSystemView& vector_view)
 {
-    FE_THROW_IF(!isConfigured(), "ColoredAssembler not configured");
-    FE_THROW_IF(!has_coloring_, "Must call computeColoring() before assembly");
-
-    LoopOptions loop_opts;
-    loop_opts.mode = LoopMode::Colored;
-    loop_opts.num_threads = options_.num_threads;
-    loop_opts.deterministic = true;
-    loop_->setOptions(loop_opts);
-
-    return loop_->cellLoop(*test_space_, *trial_space_, kernel, &matrix_view, &vector_view);
+    return assembleCells(mesh, test_space, trial_space, kernel, &matrix_view, &vector_view);
 }
 
-LoopStatistics ColoredAssembler::assemble(
-    CellCallback compute_callback,
-    CellInsertCallback insert_callback)
+AssemblyResult ColoredAssembler::assembleBoundaryFaces(
+    const IMeshAccess& mesh,
+    int boundary_marker,
+    const spaces::FunctionSpace& space,
+    AssemblyKernel& kernel,
+    GlobalSystemView* matrix_view,
+    GlobalSystemView* vector_view)
 {
-    FE_THROW_IF(!isConfigured(), "ColoredAssembler not configured");
-    FE_THROW_IF(!has_coloring_, "Must call computeColoring() before assembly");
+    return base().assembleBoundaryFaces(mesh, boundary_marker, space, kernel, matrix_view, vector_view);
+}
+
+AssemblyResult ColoredAssembler::assembleInteriorFaces(
+    const IMeshAccess& mesh,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
+    AssemblyKernel& kernel,
+    GlobalSystemView& matrix_view,
+    GlobalSystemView* vector_view)
+{
+    return base().assembleInteriorFaces(mesh, test_space, trial_space, kernel, matrix_view, vector_view);
+}
+
+AssemblyResult ColoredAssembler::assembleCells(
+    const IMeshAccess& mesh,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
+    AssemblyKernel& kernel,
+    GlobalSystemView* matrix_view,
+    GlobalSystemView* vector_view)
+{
+    FE_THROW_IF(dof_map_ == nullptr, FEException,
+                "ColoredAssembler::assembleCells: DOF map not set");
+
+    loop_->setMesh(mesh);
+    loop_->setDofMap(*dof_map_);
+
+    if (!has_coloring_) {
+        computeColoring(mesh, *dof_map_);
+    }
+
+    if (matrix_view) {
+        matrix_view->beginAssemblyPhase();
+    }
+    if (vector_view && vector_view != matrix_view) {
+        vector_view->beginAssemblyPhase();
+    }
 
     LoopOptions loop_opts;
     loop_opts.mode = LoopMode::Colored;
-    loop_opts.num_threads = options_.num_threads;
-    loop_opts.deterministic = true;
+    loop_opts.num_threads = getOptions().num_threads;
+    loop_opts.deterministic = getOptions().deterministic;
+    loop_opts.skip_ghost_cells = (getOptions().ghost_policy == GhostPolicy::ReverseScatter);
+    loop_opts.verbose = getOptions().verbose;
     loop_->setOptions(loop_opts);
 
-    RequiredData required = RequiredData::BasisValues | RequiredData::BasisGradients;
+    const auto stats = loop_->cellLoop(test_space, trial_space, kernel, matrix_view, vector_view);
 
-    last_stats_ = loop_->cellLoop(*test_space_, *trial_space_, required,
-                                  std::move(compute_callback),
-                                  std::move(insert_callback));
-    return last_stats_;
+    AssemblyResult result;
+    result.success = true;
+    result.elements_assembled = stats.total_iterations;
+    result.elapsed_time_seconds = stats.elapsed_seconds;
+    return result;
 }
 
 // ============================================================================

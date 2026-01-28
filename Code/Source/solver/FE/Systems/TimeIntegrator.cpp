@@ -35,19 +35,35 @@ BackwardDifferenceIntegrator::buildContext(int max_time_derivative_order, const 
     FE_THROW_IF(!(dt > 0.0) || !std::isfinite(dt), InvalidArgumentException,
                 "TimeIntegrator '" + name() + "': dt must be finite and > 0");
 
-    if (max_time_derivative_order >= 1) {
-        assembly::TimeDerivativeStencil s;
-        s.order = 1;
-        s.a = {1.0 / dt, -1.0 / dt};
-        ctx.dt1 = s;
+    const int max_order = max_time_derivative_order;
+    ctx.dt_extra.resize(max_order > 2 ? static_cast<std::size_t>(max_order - 2) : 0u);
+
+    std::vector<double> nodes;
+    nodes.reserve(static_cast<std::size_t>(max_order + 1));
+    for (int j = 0; j <= max_order; ++j) {
+        nodes.push_back(-static_cast<double>(dt) * static_cast<double>(j));
     }
 
-    if (max_time_derivative_order >= 2) {
+    for (int k = 1; k <= max_order; ++k) {
+        const auto w = math::finiteDifferenceWeights(/*derivative_order=*/k, /*x0=*/0.0,
+                                                     std::span<const double>(nodes.data(), static_cast<std::size_t>(k + 1)));
+        FE_THROW_IF(static_cast<int>(w.size()) != (k + 1), InvalidArgumentException,
+                    "TimeIntegrator '" + name() + "': internal error computing dt(" + std::to_string(k) + ") weights");
+
         assembly::TimeDerivativeStencil s;
-        s.order = 2;
-        const Real inv_dt2 = 1.0 / (dt * dt);
-        s.a = {1.0 * inv_dt2, -2.0 * inv_dt2, 1.0 * inv_dt2};
-        ctx.dt2 = s;
+        s.order = k;
+        s.a.resize(w.size());
+        for (std::size_t j = 0; j < w.size(); ++j) {
+            s.a[j] = static_cast<Real>(w[j]);
+        }
+
+        if (k == 1) {
+            ctx.dt1 = s;
+        } else if (k == 2) {
+            ctx.dt2 = s;
+        } else {
+            ctx.dt_extra[static_cast<std::size_t>(k - 3)] = s;
+        }
     }
 
     return ctx;
@@ -115,8 +131,8 @@ assembly::TimeIntegrationContext BDFIntegrator::buildContext(int max_time_deriva
                 "TimeIntegrator '" + name() + "': dt must be finite and > 0");
 
     const int available_history = static_cast<int>(state.u_history.size());
-    const int stencil_points = (max_time_derivative_order >= 2) ? (order_ + 2) : (order_ + 1);
-    const int required_history = stencil_points - 1;
+    const int max_stencil_points = order_ + max_time_derivative_order;
+    const int required_history = max_stencil_points - 1;
     FE_THROW_IF(available_history < required_history, InvalidArgumentException,
                 "TimeIntegrator '" + name() + "': requires at least " + std::to_string(required_history) +
                     " history states for dt order " + std::to_string(max_time_derivative_order));
@@ -136,10 +152,10 @@ assembly::TimeIntegrationContext BDFIntegrator::buildContext(int max_time_deriva
     };
 
     std::vector<double> nodes;
-    nodes.reserve(static_cast<std::size_t>(stencil_points));
+    nodes.reserve(static_cast<std::size_t>(max_stencil_points));
     nodes.push_back(0.0);
     double accum = 0.0;
-    for (int j = 1; j < stencil_points; ++j) {
+    for (int j = 1; j < max_stencil_points; ++j) {
         if (j == 1) {
             accum += dt;
         } else {
@@ -148,32 +164,30 @@ assembly::TimeIntegrationContext BDFIntegrator::buildContext(int max_time_deriva
         nodes.push_back(-accum);
     }
 
-    if (max_time_derivative_order >= 1) {
-        const auto w = math::finiteDifferenceWeights(/*derivative_order=*/1, /*x0=*/0.0, nodes);
-        FE_THROW_IF(static_cast<int>(w.size()) != stencil_points, InvalidArgumentException,
-                    "TimeIntegrator '" + name() + "': internal error computing dt weights");
+    const int max_order = max_time_derivative_order;
+    ctx.dt_extra.resize(max_order > 2 ? static_cast<std::size_t>(max_order - 2) : 0u);
+
+    for (int k = 1; k <= max_order; ++k) {
+        const int stencil_points_k = order_ + k;
+        const auto w = math::finiteDifferenceWeights(/*derivative_order=*/k, /*x0=*/0.0,
+                                                     std::span<const double>(nodes.data(), static_cast<std::size_t>(stencil_points_k)));
+        FE_THROW_IF(static_cast<int>(w.size()) != stencil_points_k, InvalidArgumentException,
+                    "TimeIntegrator '" + name() + "': internal error computing dt(" + std::to_string(k) + ") weights");
 
         assembly::TimeDerivativeStencil s;
-        s.order = 1;
-        s.a.resize(static_cast<std::size_t>(stencil_points));
-        for (int j = 0; j < stencil_points; ++j) {
-            s.a[static_cast<std::size_t>(j)] = static_cast<Real>(w[static_cast<std::size_t>(j)]);
+        s.order = k;
+        s.a.resize(w.size());
+        for (std::size_t j = 0; j < w.size(); ++j) {
+            s.a[j] = static_cast<Real>(w[j]);
         }
-        ctx.dt1 = s;
-    }
 
-    if (max_time_derivative_order >= 2) {
-        const auto w = math::finiteDifferenceWeights(/*derivative_order=*/2, /*x0=*/0.0, nodes);
-        FE_THROW_IF(static_cast<int>(w.size()) != stencil_points, InvalidArgumentException,
-                    "TimeIntegrator '" + name() + "': internal error computing dt2 weights");
-
-        assembly::TimeDerivativeStencil s;
-        s.order = 2;
-        s.a.resize(static_cast<std::size_t>(stencil_points));
-        for (int j = 0; j < stencil_points; ++j) {
-            s.a[static_cast<std::size_t>(j)] = static_cast<Real>(w[static_cast<std::size_t>(j)]);
+        if (k == 1) {
+            ctx.dt1 = s;
+        } else if (k == 2) {
+            ctx.dt2 = s;
+        } else {
+            ctx.dt_extra[static_cast<std::size_t>(k - 3)] = s;
         }
-        ctx.dt2 = s;
     }
 
     return ctx;

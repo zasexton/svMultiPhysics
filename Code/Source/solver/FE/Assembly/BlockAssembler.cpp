@@ -30,10 +30,17 @@
 
 #include "BlockAssembler.h"
 #include "Core/FEException.h"
+#include "Dofs/DofMap.h"
+#include "StandardAssembler.h"
 
 #include <chrono>
 #include <algorithm>
-#include <numeric>
+#include <atomic>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <optional>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -90,87 +97,264 @@ void BlockView::addVectorEntries(
     global_view_.addVectorEntries(translated_rows_, values);
 }
 
-// ============================================================================
-// Two-Field Block Kernel Implementation
-// ============================================================================
+namespace {
+
+[[nodiscard]] bool kernelNeedsSolution(const AssemblyKernel& kernel)
+{
+    const auto required = kernel.getRequiredData();
+    return hasFlag(required, RequiredData::SolutionCoefficients) ||
+           hasFlag(required, RequiredData::SolutionValues) ||
+           hasFlag(required, RequiredData::SolutionGradients) ||
+           hasFlag(required, RequiredData::SolutionHessians) ||
+           hasFlag(required, RequiredData::SolutionLaplacians);
+}
+
+[[nodiscard]] std::string blockLabel(FieldId row, FieldId col)
+{
+    return "(" + std::to_string(row) + "," + std::to_string(col) + ")";
+}
 
 /**
- * @brief Block kernel for 2-field systems (e.g., Stokes)
+ * @brief GlobalSystemView adapter that shifts indices before forwarding.
+ *
+ * This is used to support:
+ * - Monolithic assembly when an assembler does not support DOF offsets (shift +offset)
+ * - Block-wise assembly with global-indexed assemblers (shift -offset)
  */
-class TwoFieldBlockKernel : public IBlockKernel {
+class ShiftedSystemView final : public GlobalSystemView {
 public:
-    TwoFieldBlockKernel(AssemblyKernel& a_kernel,
-                        AssemblyKernel& b_kernel,
-                        AssemblyKernel* bt_kernel,
-                        AssemblyKernel* c_kernel)
-        : a_kernel_(a_kernel)
-        , b_kernel_(b_kernel)
-        , bt_kernel_(bt_kernel)
-        , c_kernel_(c_kernel)
+    ShiftedSystemView(GlobalSystemView& base, GlobalIndex row_shift, GlobalIndex col_shift)
+        : base_(base)
+        , row_shift_(row_shift)
+        , col_shift_(col_shift)
     {
     }
 
-    void computeBlock(
-        AssemblyContext& context,
-        FieldId row_field,
-        FieldId col_field,
-        KernelOutput& output) override
+    void addMatrixEntries(
+        std::span<const GlobalIndex> dofs,
+        std::span<const Real> local_matrix,
+        AddMode mode = AddMode::Add) override
     {
-        if (row_field == 0 && col_field == 0) {
-            // A block (velocity-velocity)
-            a_kernel_.computeCell(context, output);
-        } else if (row_field == 0 && col_field == 1) {
-            // B block (velocity-pressure)
-            b_kernel_.computeCell(context, output);
-        } else if (row_field == 1 && col_field == 0) {
-            // B^T block (pressure-velocity)
-            if (bt_kernel_) {
-                bt_kernel_->computeCell(context, output);
-            } else {
-                // Assume B^T is transpose of B
-                // Would need to compute B and transpose
-                output.clear();
-            }
-        } else if (row_field == 1 && col_field == 1) {
-            // C block (pressure-pressure)
-            if (c_kernel_) {
-                c_kernel_->computeCell(context, output);
-            } else {
-                output.clear();  // Zero block
-            }
+        FE_THROW_IF(row_shift_ != col_shift_, FEException,
+                    "ShiftedSystemView::addMatrixEntries(square): row/col shifts differ");
+
+        shifted_dofs_.resize(dofs.size());
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            shifted_dofs_[i] = dofs[i] + row_shift_;
         }
+        base_.addMatrixEntries(shifted_dofs_, local_matrix, mode);
     }
 
-    void computeRhs(
-        AssemblyContext& context,
-        FieldId field,
-        KernelOutput& output) override
+    void addMatrixEntries(
+        std::span<const GlobalIndex> row_dofs,
+        std::span<const GlobalIndex> col_dofs,
+        std::span<const Real> local_matrix,
+        AddMode mode = AddMode::Add) override
     {
-        if (field == 0) {
-            // Velocity RHS
-            a_kernel_.computeCell(context, output);
-        } else {
-            // Pressure RHS (usually zero for Stokes)
-            output.clear();
+        shifted_rows_.resize(row_dofs.size());
+        shifted_cols_.resize(col_dofs.size());
+
+        for (std::size_t i = 0; i < row_dofs.size(); ++i) {
+            shifted_rows_[i] = row_dofs[i] + row_shift_;
         }
+        for (std::size_t i = 0; i < col_dofs.size(); ++i) {
+            shifted_cols_[i] = col_dofs[i] + col_shift_;
+        }
+
+        base_.addMatrixEntries(shifted_rows_, shifted_cols_, local_matrix, mode);
     }
 
-    [[nodiscard]] bool hasBlock(FieldId row_field, FieldId col_field) const override {
-        if (row_field == 0 && col_field == 0) return true;   // A
-        if (row_field == 0 && col_field == 1) return true;   // B
-        if (row_field == 1 && col_field == 0) return true;   // B^T
-        if (row_field == 1 && col_field == 1) return c_kernel_ != nullptr;  // C
-        return false;
+    void addMatrixEntry(GlobalIndex row, GlobalIndex col, Real value, AddMode mode = AddMode::Add) override
+    {
+        base_.addMatrixEntry(row + row_shift_, col + col_shift_, value, mode);
     }
 
-    [[nodiscard]] int numFields() const override { return 2; }
+    void setDiagonal(std::span<const GlobalIndex> dofs, std::span<const Real> values) override
+    {
+        FE_THROW_IF(row_shift_ != col_shift_, FEException,
+                    "ShiftedSystemView::setDiagonal: row/col shifts differ");
+
+        shifted_dofs_.resize(dofs.size());
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            shifted_dofs_[i] = dofs[i] + row_shift_;
+        }
+        base_.setDiagonal(shifted_dofs_, values);
+    }
+
+    void setDiagonal(GlobalIndex dof, Real value) override
+    {
+        FE_THROW_IF(row_shift_ != col_shift_, FEException,
+                    "ShiftedSystemView::setDiagonal(single): row/col shifts differ");
+        base_.setDiagonal(dof + row_shift_, value);
+    }
+
+    void zeroRows(std::span<const GlobalIndex> rows, bool set_diagonal = true) override
+    {
+        shifted_rows_.resize(rows.size());
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            shifted_rows_[i] = rows[i] + row_shift_;
+        }
+        base_.zeroRows(shifted_rows_, set_diagonal);
+    }
+
+    void addVectorEntries(
+        std::span<const GlobalIndex> dofs,
+        std::span<const Real> local_vector,
+        AddMode mode = AddMode::Add) override
+    {
+        shifted_dofs_.resize(dofs.size());
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            shifted_dofs_[i] = dofs[i] + row_shift_;
+        }
+        base_.addVectorEntries(shifted_dofs_, local_vector, mode);
+    }
+
+    void addVectorEntry(GlobalIndex dof, Real value, AddMode mode = AddMode::Add) override
+    {
+        base_.addVectorEntry(dof + row_shift_, value, mode);
+    }
+
+    void setVectorEntries(std::span<const GlobalIndex> dofs, std::span<const Real> values) override
+    {
+        shifted_dofs_.resize(dofs.size());
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            shifted_dofs_[i] = dofs[i] + row_shift_;
+        }
+        base_.setVectorEntries(shifted_dofs_, values);
+    }
+
+    void zeroVectorEntries(std::span<const GlobalIndex> dofs) override
+    {
+        shifted_dofs_.resize(dofs.size());
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            shifted_dofs_[i] = dofs[i] + row_shift_;
+        }
+        base_.zeroVectorEntries(shifted_dofs_);
+    }
+
+    [[nodiscard]] Real getVectorEntry(GlobalIndex dof) const override
+    {
+        return base_.getVectorEntry(dof + row_shift_);
+    }
+
+    void beginAssemblyPhase() override { base_.beginAssemblyPhase(); }
+    void endAssemblyPhase() override { base_.endAssemblyPhase(); }
+    void finalizeAssembly() override { base_.finalizeAssembly(); }
+    [[nodiscard]] AssemblyPhase getPhase() const noexcept override { return base_.getPhase(); }
+
+    [[nodiscard]] bool hasMatrix() const noexcept override { return base_.hasMatrix(); }
+    [[nodiscard]] bool hasVector() const noexcept override { return base_.hasVector(); }
+    [[nodiscard]] GlobalIndex numRows() const noexcept override { return base_.numRows(); }
+    [[nodiscard]] GlobalIndex numCols() const noexcept override { return base_.numCols(); }
+    [[nodiscard]] std::string backendName() const override { return base_.backendName(); }
+    void zero() override { base_.zero(); }
+
+    [[nodiscard]] Real getMatrixEntry(GlobalIndex row, GlobalIndex col) const override
+    {
+        return base_.getMatrixEntry(row + row_shift_, col + col_shift_);
+    }
 
 private:
-    AssemblyKernel& a_kernel_;
-    AssemblyKernel& b_kernel_;
-    AssemblyKernel* bt_kernel_;
-    AssemblyKernel* c_kernel_;
+    GlobalSystemView& base_;
+    GlobalIndex row_shift_{0};
+    GlobalIndex col_shift_{0};
+
+    mutable std::vector<GlobalIndex> shifted_dofs_;
+    mutable std::vector<GlobalIndex> shifted_rows_;
+    mutable std::vector<GlobalIndex> shifted_cols_;
 };
+
+/**
+ * @brief GlobalSystemView adapter that suppresses begin/end/finalize lifecycle calls.
+ *
+ * Useful for orchestrators that want to manage begin/end/finalize externally while
+ * still calling assemblers that unconditionally invoke these methods.
+ */
+class NoFinalizeSystemView final : public GlobalSystemView {
+public:
+    explicit NoFinalizeSystemView(GlobalSystemView& base)
+        : base_(base)
+    {
+    }
+
+    void addMatrixEntries(
+        std::span<const GlobalIndex> dofs,
+        std::span<const Real> local_matrix,
+        AddMode mode = AddMode::Add) override
+    {
+        base_.addMatrixEntries(dofs, local_matrix, mode);
+    }
+
+    void addMatrixEntries(
+        std::span<const GlobalIndex> row_dofs,
+        std::span<const GlobalIndex> col_dofs,
+        std::span<const Real> local_matrix,
+        AddMode mode = AddMode::Add) override
+    {
+        base_.addMatrixEntries(row_dofs, col_dofs, local_matrix, mode);
+    }
+
+    void addMatrixEntry(GlobalIndex row, GlobalIndex col, Real value, AddMode mode = AddMode::Add) override
+    {
+        base_.addMatrixEntry(row, col, value, mode);
+    }
+
+    void setDiagonal(std::span<const GlobalIndex> dofs, std::span<const Real> values) override
+    {
+        base_.setDiagonal(dofs, values);
+    }
+
+    void setDiagonal(GlobalIndex dof, Real value) override { base_.setDiagonal(dof, value); }
+
+    void zeroRows(std::span<const GlobalIndex> rows, bool set_diagonal = true) override
+    {
+        base_.zeroRows(rows, set_diagonal);
+    }
+
+    void addVectorEntries(
+        std::span<const GlobalIndex> dofs,
+        std::span<const Real> local_vector,
+        AddMode mode = AddMode::Add) override
+    {
+        base_.addVectorEntries(dofs, local_vector, mode);
+    }
+
+    void addVectorEntry(GlobalIndex dof, Real value, AddMode mode = AddMode::Add) override
+    {
+        base_.addVectorEntry(dof, value, mode);
+    }
+
+    void setVectorEntries(std::span<const GlobalIndex> dofs, std::span<const Real> values) override
+    {
+        base_.setVectorEntries(dofs, values);
+    }
+
+    void zeroVectorEntries(std::span<const GlobalIndex> dofs) override { base_.zeroVectorEntries(dofs); }
+
+    [[nodiscard]] Real getVectorEntry(GlobalIndex dof) const override { return base_.getVectorEntry(dof); }
+
+    void beginAssemblyPhase() override {}
+    void endAssemblyPhase() override {}
+    void finalizeAssembly() override {}
+    [[nodiscard]] AssemblyPhase getPhase() const noexcept override { return base_.getPhase(); }
+
+    [[nodiscard]] bool hasMatrix() const noexcept override { return base_.hasMatrix(); }
+    [[nodiscard]] bool hasVector() const noexcept override { return base_.hasVector(); }
+    [[nodiscard]] GlobalIndex numRows() const noexcept override { return base_.numRows(); }
+    [[nodiscard]] GlobalIndex numCols() const noexcept override { return base_.numCols(); }
+    [[nodiscard]] std::string backendName() const override { return base_.backendName(); }
+    void zero() override { base_.zero(); }
+
+    [[nodiscard]] Real getMatrixEntry(GlobalIndex row, GlobalIndex col) const override
+    {
+        return base_.getMatrixEntry(row, col);
+    }
+
+private:
+    GlobalSystemView& base_;
+};
+
+} // namespace
 
 // ============================================================================
 // BlockAssembler Implementation
@@ -178,13 +362,11 @@ private:
 
 BlockAssembler::BlockAssembler()
     : options_{}
-    , loop_(std::make_unique<AssemblyLoop>())
 {
 }
 
 BlockAssembler::BlockAssembler(const BlockAssemblerOptions& options)
     : options_(options)
-    , loop_(std::make_unique<AssemblyLoop>())
 {
 }
 
@@ -200,7 +382,6 @@ BlockAssembler& BlockAssembler::operator=(BlockAssembler&& other) noexcept = def
 
 void BlockAssembler::setMesh(const IMeshAccess& mesh) {
     mesh_ = &mesh;
-    loop_->setMesh(mesh);
 }
 
 void BlockAssembler::addField(
@@ -241,33 +422,45 @@ void BlockAssembler::setBlockDofMap(const dofs::BlockDofMap& block_dof_map) {
     block_dof_map_ = &block_dof_map;
 }
 
-void BlockAssembler::setKernel(IBlockKernel& kernel) {
-    kernel_ = &kernel;
-}
-
 void BlockAssembler::setOptions(const BlockAssemblerOptions& options) {
     options_ = options;
 }
 
 bool BlockAssembler::isConfigured() const noexcept {
-    return mesh_ != nullptr &&
-           !config_.fields.empty() &&
-           kernel_ != nullptr;
+    return mesh_ != nullptr && !config_.fields.empty();
 }
 
 void BlockAssembler::computeBlockOffsets() {
-    int n_fields = numFields();
-    field_offsets_.resize(static_cast<std::size_t>(n_fields + 1));
-    field_sizes_.resize(static_cast<std::size_t>(n_fields));
+    if (config_.fields.empty()) {
+        field_offsets_.clear();
+        field_sizes_.clear();
+        return;
+    }
 
-    field_offsets_[0] = 0;
-    for (int i = 0; i < n_fields; ++i) {
-        auto idx = static_cast<std::size_t>(i);
-        // Get field size from DOF map
-        // This is a placeholder - actual implementation would query DofMap
-        GlobalIndex field_size = 100;  // Placeholder
-        field_sizes_[idx] = field_size;
-        field_offsets_[idx + 1] = field_offsets_[idx] + field_size;
+    FieldId max_id = 0;
+    for (const auto& f : config_.fields) {
+        max_id = std::max(max_id, f.id);
+    }
+
+    const auto n_slots = static_cast<std::size_t>(max_id) + 1;
+    field_sizes_.assign(n_slots, 0);
+    field_offsets_.assign(n_slots + 1, 0);
+
+    std::vector<bool> seen(n_slots, false);
+    for (const auto& f : config_.fields) {
+        const auto idx = static_cast<std::size_t>(f.id);
+        FE_THROW_IF(idx >= n_slots, FEException,
+                    "BlockAssembler::computeBlockOffsets: field id out of range");
+        FE_THROW_IF(seen[idx], FEException,
+                    "BlockAssembler::computeBlockOffsets: duplicate field id " + std::to_string(f.id));
+        seen[idx] = true;
+
+        FE_CHECK_NOT_NULL(f.dof_map, "BlockAssembler::computeBlockOffsets: field dof_map");
+        field_sizes_[idx] = f.dof_map->getNumDofs();
+    }
+
+    for (std::size_t i = 0; i < n_slots; ++i) {
+        field_offsets_[i + 1] = field_offsets_[i] + field_sizes_[i];
     }
 }
 
@@ -275,11 +468,18 @@ std::pair<GlobalIndex, GlobalIndex> BlockAssembler::getBlockOffset(
     FieldId row_field,
     FieldId col_field) const
 {
-    auto row_idx = static_cast<std::size_t>(row_field);
-    auto col_idx = static_cast<std::size_t>(col_field);
+    FE_THROW_IF(config_.getField(row_field) == nullptr, FEException,
+                "BlockAssembler::getBlockOffset: row field not found: " + std::to_string(row_field));
+    FE_THROW_IF(config_.getField(col_field) == nullptr, FEException,
+                "BlockAssembler::getBlockOffset: col field not found: " + std::to_string(col_field));
 
-    FE_THROW_IF(row_idx >= field_offsets_.size() - 1, "Invalid row field");
-    FE_THROW_IF(col_idx >= field_offsets_.size() - 1, "Invalid col field");
+    const auto row_idx = static_cast<std::size_t>(row_field);
+    const auto col_idx = static_cast<std::size_t>(col_field);
+
+    FE_THROW_IF(field_offsets_.empty(), FEException,
+                "BlockAssembler::getBlockOffset: offsets not computed");
+    FE_THROW_IF(row_idx >= field_offsets_.size() - 1, FEException, "Invalid row field id");
+    FE_THROW_IF(col_idx >= field_offsets_.size() - 1, FEException, "Invalid col field id");
 
     return {field_offsets_[row_idx], field_offsets_[col_idx]};
 }
@@ -288,11 +488,18 @@ std::pair<GlobalIndex, GlobalIndex> BlockAssembler::getBlockSize(
     FieldId row_field,
     FieldId col_field) const
 {
-    auto row_idx = static_cast<std::size_t>(row_field);
-    auto col_idx = static_cast<std::size_t>(col_field);
+    FE_THROW_IF(config_.getField(row_field) == nullptr, FEException,
+                "BlockAssembler::getBlockSize: row field not found: " + std::to_string(row_field));
+    FE_THROW_IF(config_.getField(col_field) == nullptr, FEException,
+                "BlockAssembler::getBlockSize: col field not found: " + std::to_string(col_field));
 
-    FE_THROW_IF(row_idx >= field_sizes_.size(), "Invalid row field");
-    FE_THROW_IF(col_idx >= field_sizes_.size(), "Invalid col field");
+    const auto row_idx = static_cast<std::size_t>(row_field);
+    const auto col_idx = static_cast<std::size_t>(col_field);
+
+    FE_THROW_IF(field_sizes_.empty(), FEException,
+                "BlockAssembler::getBlockSize: sizes not computed");
+    FE_THROW_IF(row_idx >= field_sizes_.size(), FEException, "Invalid row field id");
+    FE_THROW_IF(col_idx >= field_sizes_.size(), FEException, "Invalid col field id");
 
     return {field_sizes_[row_idx], field_sizes_[col_idx]};
 }
@@ -300,6 +507,187 @@ std::pair<GlobalIndex, GlobalIndex> BlockAssembler::getBlockSize(
 GlobalIndex BlockAssembler::totalSize() const noexcept {
     if (field_offsets_.empty()) return 0;
     return field_offsets_.back();
+}
+
+// ============================================================================
+// Assembler Assignment (per-block)
+// ============================================================================
+
+void BlockAssembler::setBlockAssembler(
+    FieldId row_field,
+    FieldId col_field,
+    std::shared_ptr<Assembler> assembler)
+{
+    FE_THROW_IF(config_.getField(row_field) == nullptr, FEException,
+                "BlockAssembler::setBlockAssembler: row field not found: " + std::to_string(row_field));
+    FE_THROW_IF(config_.getField(col_field) == nullptr, FEException,
+                "BlockAssembler::setBlockAssembler: col field not found: " + std::to_string(col_field));
+
+    if (!assembler) {
+        block_assemblers_.erase({row_field, col_field});
+        return;
+    }
+
+    // Propagate cached state
+    if (!current_solution_.empty()) {
+        assembler->setCurrentSolution(current_solution_);
+    }
+    assembler->setTime(time_);
+    assembler->setTimeStep(dt_);
+
+    block_assemblers_[{row_field, col_field}] = std::move(assembler);
+}
+
+void BlockAssembler::setFieldAssembler(FieldId field, std::shared_ptr<Assembler> assembler)
+{
+    FE_THROW_IF(config_.getField(field) == nullptr, FEException,
+                "BlockAssembler::setFieldAssembler: field not found: " + std::to_string(field));
+
+    for (const auto& f : config_.fields) {
+        setBlockAssembler(field, f.id, assembler);
+        setBlockAssembler(f.id, field, assembler);
+    }
+}
+
+void BlockAssembler::setDiagonalAssembler(FieldId field, std::shared_ptr<Assembler> assembler)
+{
+    FE_THROW_IF(config_.getField(field) == nullptr, FEException,
+                "BlockAssembler::setDiagonalAssembler: field not found: " + std::to_string(field));
+    setBlockAssembler(field, field, std::move(assembler));
+}
+
+void BlockAssembler::setDefaultAssembler(std::shared_ptr<Assembler> assembler)
+{
+    default_assembler_ = std::move(assembler);
+    if (default_assembler_) {
+        if (!current_solution_.empty()) {
+            default_assembler_->setCurrentSolution(current_solution_);
+        }
+        default_assembler_->setTime(time_);
+        default_assembler_->setTimeStep(dt_);
+    }
+}
+
+Assembler& BlockAssembler::getBlockAssembler(FieldId row_field, FieldId col_field)
+{
+    auto it = block_assemblers_.find({row_field, col_field});
+    if (it != block_assemblers_.end() && it->second) {
+        return *it->second;
+    }
+
+    if (!default_assembler_) {
+        default_assembler_ = std::make_shared<StandardAssembler>();
+        if (!current_solution_.empty()) {
+            default_assembler_->setCurrentSolution(current_solution_);
+        }
+        default_assembler_->setTime(time_);
+        default_assembler_->setTimeStep(dt_);
+    }
+
+    return *default_assembler_;
+}
+
+bool BlockAssembler::hasBlockAssembler(FieldId row_field, FieldId col_field) const
+{
+    auto it = block_assemblers_.find({row_field, col_field});
+    return it != block_assemblers_.end() && it->second != nullptr;
+}
+
+// ============================================================================
+// Kernel Assignment (per-block / per-field)
+// ============================================================================
+
+void BlockAssembler::setBlockKernel(
+    FieldId row_field,
+    FieldId col_field,
+    std::shared_ptr<AssemblyKernel> kernel)
+{
+    FE_THROW_IF(config_.getField(row_field) == nullptr, FEException,
+                "BlockAssembler::setBlockKernel: row field not found: " + std::to_string(row_field));
+    FE_THROW_IF(config_.getField(col_field) == nullptr, FEException,
+                "BlockAssembler::setBlockKernel: col field not found: " + std::to_string(col_field));
+
+    const BlockIndex idx{row_field, col_field};
+    if (!kernel) {
+        block_kernels_.erase(idx);
+        return;
+    }
+
+    block_kernels_[idx] = std::move(kernel);
+}
+
+void BlockAssembler::setRhsKernel(FieldId field, std::shared_ptr<AssemblyKernel> kernel)
+{
+    FE_THROW_IF(config_.getField(field) == nullptr, FEException,
+                "BlockAssembler::setRhsKernel: field not found: " + std::to_string(field));
+
+    if (!kernel) {
+        rhs_kernels_.erase(field);
+        return;
+    }
+
+    rhs_kernels_[field] = std::move(kernel);
+}
+
+bool BlockAssembler::hasBlockKernel(FieldId row_field, FieldId col_field) const
+{
+    return block_kernels_.find({row_field, col_field}) != block_kernels_.end();
+}
+
+std::vector<BlockIndex> BlockAssembler::getNonZeroBlocks() const
+{
+    std::vector<BlockIndex> blocks;
+    blocks.reserve(block_kernels_.size());
+    for (const auto& [idx, kernel] : block_kernels_) {
+        if (kernel) {
+            blocks.push_back(idx);
+        }
+    }
+    return blocks;
+}
+
+// ============================================================================
+// State Propagation
+// ============================================================================
+
+void BlockAssembler::setCurrentSolution(std::span<const Real> global_solution)
+{
+    current_solution_ = global_solution;
+
+    for (auto& [_, assembler] : block_assemblers_) {
+        if (assembler) {
+            assembler->setCurrentSolution(global_solution);
+        }
+    }
+    if (default_assembler_) {
+        default_assembler_->setCurrentSolution(global_solution);
+    }
+}
+
+void BlockAssembler::setTime(Real time)
+{
+    time_ = time;
+    for (auto& [_, assembler] : block_assemblers_) {
+        if (assembler) {
+            assembler->setTime(time_);
+        }
+    }
+    if (default_assembler_) {
+        default_assembler_->setTime(time_);
+    }
+}
+
+void BlockAssembler::setTimeStep(Real dt)
+{
+    dt_ = dt;
+    for (auto& [_, assembler] : block_assemblers_) {
+        if (assembler) {
+            assembler->setTimeStep(dt_);
+        }
+    }
+    if (default_assembler_) {
+        default_assembler_->setTimeStep(dt_);
+    }
 }
 
 // ============================================================================
@@ -315,35 +703,21 @@ BlockAssemblyStats BlockAssembler::assembleSystem(
     auto start_time = std::chrono::high_resolution_clock::now();
 
     last_stats_ = BlockAssemblyStats{};
+    last_stats_.num_cells = mesh_->numCells();
 
-    // Begin assembly
-    matrix_view.beginAssemblyPhase();
-    rhs_view.beginAssemblyPhase();
-
-    int n_fields = numFields();
-
-    // Assemble all blocks
-    for (int i = 0; i < n_fields; ++i) {
-        for (int j = 0; j < n_fields; ++j) {
-            FieldId row_field = static_cast<FieldId>(i);
-            FieldId col_field = static_cast<FieldId>(j);
-
-            if (kernel_->hasBlock(row_field, col_field)) {
-                auto [row_offset, col_offset] = getBlockOffset(row_field, col_field);
-                assembleBlockInternal(row_field, col_field, matrix_view,
-                                     row_offset, col_offset);
-            }
+    for (const auto& [idx, kernel] : block_kernels_) {
+        if (!kernel) {
+            continue;
         }
-
-        // Assemble field RHS
-        FieldId field = static_cast<FieldId>(i);
-        GlobalIndex rhs_offset = field_offsets_[static_cast<std::size_t>(i)];
-        assembleFieldRhsInternal(field, rhs_view, rhs_offset);
+        assembleBlockInternal(idx.row_field, idx.col_field, matrix_view, true);
     }
 
-    // Finalize assembly
-    matrix_view.endAssemblyPhase();
-    rhs_view.endAssemblyPhase();
+    for (const auto& [field, kernel] : rhs_kernels_) {
+        if (!kernel) {
+            continue;
+        }
+        assembleFieldRhsInternal(field, rhs_view, true);
+    }
 
     auto end_time = std::chrono::high_resolution_clock::now();
     last_stats_.total_seconds =
@@ -358,25 +732,14 @@ BlockAssemblyStats BlockAssembler::assembleMatrix(GlobalSystemView& matrix_view)
     auto start_time = std::chrono::high_resolution_clock::now();
 
     last_stats_ = BlockAssemblyStats{};
+    last_stats_.num_cells = mesh_->numCells();
 
-    matrix_view.beginAssemblyPhase();
-
-    int n_fields = numFields();
-
-    for (int i = 0; i < n_fields; ++i) {
-        for (int j = 0; j < n_fields; ++j) {
-            FieldId row_field = static_cast<FieldId>(i);
-            FieldId col_field = static_cast<FieldId>(j);
-
-            if (kernel_->hasBlock(row_field, col_field)) {
-                auto [row_offset, col_offset] = getBlockOffset(row_field, col_field);
-                assembleBlockInternal(row_field, col_field, matrix_view,
-                                     row_offset, col_offset);
-            }
+    for (const auto& [idx, kernel] : block_kernels_) {
+        if (!kernel) {
+            continue;
         }
+        assembleBlockInternal(idx.row_field, idx.col_field, matrix_view, true);
     }
-
-    matrix_view.endAssemblyPhase();
 
     auto end_time = std::chrono::high_resolution_clock::now();
     last_stats_.total_seconds =
@@ -391,18 +754,14 @@ BlockAssemblyStats BlockAssembler::assembleRhs(GlobalSystemView& rhs_view) {
     auto start_time = std::chrono::high_resolution_clock::now();
 
     last_stats_ = BlockAssemblyStats{};
+    last_stats_.num_cells = mesh_->numCells();
 
-    rhs_view.beginAssemblyPhase();
-
-    int n_fields = numFields();
-
-    for (int i = 0; i < n_fields; ++i) {
-        FieldId field = static_cast<FieldId>(i);
-        GlobalIndex rhs_offset = field_offsets_[static_cast<std::size_t>(i)];
-        assembleFieldRhsInternal(field, rhs_view, rhs_offset);
+    for (const auto& [field, kernel] : rhs_kernels_) {
+        if (!kernel) {
+            continue;
+        }
+        assembleFieldRhsInternal(field, rhs_view, true);
     }
-
-    rhs_view.endAssemblyPhase();
 
     auto end_time = std::chrono::high_resolution_clock::now();
     last_stats_.total_seconds =
@@ -425,13 +784,9 @@ BlockAssemblyStats BlockAssembler::assembleBlock(
     auto start_time = std::chrono::high_resolution_clock::now();
 
     last_stats_ = BlockAssemblyStats{};
+    last_stats_.num_cells = mesh_->numCells();
 
-    block_view.beginAssemblyPhase();
-
-    // For separate block assembly, offset is 0 (block_view is already the block)
-    assembleBlockInternal(row_field, col_field, block_view, 0, 0);
-
-    block_view.endAssemblyPhase();
+    assembleBlockInternal(row_field, col_field, block_view, false);
 
     auto end_time = std::chrono::high_resolution_clock::now();
 
@@ -452,13 +807,497 @@ BlockAssemblyStats BlockAssembler::assembleFieldRhs(
     auto start_time = std::chrono::high_resolution_clock::now();
 
     last_stats_ = BlockAssemblyStats{};
+    last_stats_.num_cells = mesh_->numCells();
 
-    rhs_view.beginAssemblyPhase();
+    assembleFieldRhsInternal(field, rhs_view, false);
 
-    // For separate field RHS, offset is 0
-    assembleFieldRhsInternal(field, rhs_view, 0);
+    auto end_time = std::chrono::high_resolution_clock::now();
+    last_stats_.total_seconds =
+        std::chrono::duration<double>(end_time - start_time).count();
 
-    rhs_view.endAssemblyPhase();
+    return last_stats_;
+}
+
+// ============================================================================
+// Parallel Block Assembly
+// ============================================================================
+
+BlockAssemblyStats BlockAssembler::assembleBlocksParallel(
+    std::span<const BlockIndex> blocks,
+    GlobalSystemView& matrix_view,
+    GlobalSystemView* rhs_view)
+{
+    FE_THROW_IF(!isConfigured(), "BlockAssembler not configured");
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    last_stats_ = BlockAssemblyStats{};
+    last_stats_.num_cells = mesh_->numCells();
+
+    FE_THROW_IF(field_offsets_.size() < 2 || field_sizes_.empty(), FEException,
+                "BlockAssembler::assembleBlocksParallel: field offsets not computed");
+
+    // Build global field access registry once (used by offset-capable assemblers).
+    std::vector<FieldSolutionAccess> field_access;
+    field_access.reserve(config_.fields.size());
+    for (const auto& f : config_.fields) {
+        if (!f.space || !f.dof_map) {
+            continue;
+        }
+        const auto f_offset = getBlockOffset(f.id, f.id).first;
+        field_access.push_back(FieldSolutionAccess{
+            .field = f.id,
+            .space = f.space,
+            .dof_map = f.dof_map,
+            .dof_offset = f_offset,
+        });
+    }
+
+    // Locks to prevent concurrent use of shared field DOFs / shared assembler instances.
+    const std::size_t n_field_slots = field_offsets_.size() - 1;
+    std::vector<std::mutex> field_mutexes(n_field_slots);
+
+    std::map<const Assembler*, std::size_t> assembler_mutex_index;
+    std::vector<std::unique_ptr<std::mutex>> assembler_mutexes;
+    auto ensureAssemblerMutex = [&](const Assembler* ptr) -> std::size_t {
+        auto it = assembler_mutex_index.find(ptr);
+        if (it != assembler_mutex_index.end()) {
+            return it->second;
+        }
+        const std::size_t idx = assembler_mutexes.size();
+        assembler_mutexes.push_back(std::make_unique<std::mutex>());
+        assembler_mutex_index.emplace(ptr, idx);
+        return idx;
+    };
+
+    struct MatrixJob {
+        BlockIndex idx{};
+        const FieldConfig* row_config{nullptr};
+        const FieldConfig* col_config{nullptr};
+        AssemblyKernel* kernel{nullptr};
+        Assembler* assembler{nullptr};
+        GlobalIndex row_offset{0};
+        GlobalIndex col_offset{0};
+        bool supports_offsets{false};
+        std::size_t assembler_mutex{0};
+    };
+
+    std::vector<MatrixJob> jobs;
+    jobs.reserve(blocks.size());
+
+    for (const auto& b : blocks) {
+        auto kit = block_kernels_.find(b);
+        if (kit == block_kernels_.end() || !kit->second) {
+            continue;
+        }
+
+        const FieldConfig* row_config = config_.getField(b.row_field);
+        const FieldConfig* col_config = config_.getField(b.col_field);
+        FE_THROW_IF(row_config == nullptr, FEException,
+                    "BlockAssembler::assembleBlocksParallel: row field not found: " + std::to_string(b.row_field));
+        FE_THROW_IF(col_config == nullptr, FEException,
+                    "BlockAssembler::assembleBlocksParallel: col field not found: " + std::to_string(b.col_field));
+        FE_CHECK_NOT_NULL(row_config->space, "BlockAssembler::assembleBlocksParallel: row space");
+        FE_CHECK_NOT_NULL(col_config->space, "BlockAssembler::assembleBlocksParallel: col space");
+        FE_CHECK_NOT_NULL(row_config->dof_map, "BlockAssembler::assembleBlocksParallel: row dof map");
+        FE_CHECK_NOT_NULL(col_config->dof_map, "BlockAssembler::assembleBlocksParallel: col dof map");
+
+        Assembler& assembler = getBlockAssembler(b.row_field, b.col_field);
+        const bool supports_offsets = assembler.supportsDofOffsets();
+
+        const auto [row_offset, col_offset] = getBlockOffset(b.row_field, b.col_field);
+
+        jobs.push_back(MatrixJob{
+            .idx = b,
+            .row_config = row_config,
+            .col_config = col_config,
+            .kernel = kit->second.get(),
+            .assembler = &assembler,
+            .row_offset = row_offset,
+            .col_offset = col_offset,
+            .supports_offsets = supports_offsets,
+            .assembler_mutex = ensureAssemblerMutex(&assembler),
+        });
+    }
+
+    // Begin assembly once; per-job finalize is suppressed via NoFinalizeSystemView.
+    matrix_view.beginAssemblyPhase();
+    const bool rhs_is_distinct = (rhs_view != nullptr && rhs_view != &matrix_view);
+    if (rhs_is_distinct) {
+        rhs_view->beginAssemblyPhase();
+    } else if (rhs_view != nullptr && rhs_view == &matrix_view) {
+        // Nothing to do (already begun).
+    }
+
+    int num_threads = options_.num_threads;
+    if (num_threads <= 0) {
+#ifdef _OPENMP
+        num_threads = omp_get_max_threads();
+#else
+        num_threads = 1;
+#endif
+    }
+
+    std::vector<AssemblyResult> results(jobs.size());
+    std::exception_ptr first_error;
+    std::mutex error_mutex;
+    std::atomic<bool> abort{false};
+
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(num_threads) schedule(dynamic)
+#endif
+    for (std::size_t i = 0; i < jobs.size(); ++i) {
+        if (abort.load(std::memory_order_relaxed)) {
+            continue;
+        }
+
+        try {
+            const auto& job = jobs[i];
+
+            const auto row_idx = static_cast<std::size_t>(job.idx.row_field);
+            const auto col_idx = static_cast<std::size_t>(job.idx.col_field);
+            FE_THROW_IF(row_idx >= field_mutexes.size() || col_idx >= field_mutexes.size(), FEException,
+                        "BlockAssembler::assembleBlocksParallel: field id out of range");
+
+            auto& asm_mutex = *assembler_mutexes[job.assembler_mutex];
+
+            // Lock the involved fields (DOF-disjoint criterion) and the assembler instance.
+            if (row_idx == col_idx) {
+                std::scoped_lock lock(field_mutexes[row_idx], asm_mutex);
+
+                NoFinalizeSystemView nofinal(matrix_view);
+                std::optional<ShiftedSystemView> shifted;
+                GlobalSystemView* view = &nofinal;
+
+                const GlobalIndex row_shift = job.supports_offsets ? 0 : job.row_offset;
+                const GlobalIndex col_shift = job.supports_offsets ? 0 : job.col_offset;
+                if (row_shift != 0 || col_shift != 0) {
+                    shifted.emplace(nofinal, row_shift, col_shift);
+                    view = &*shifted;
+                }
+
+                if (job.supports_offsets) {
+                    job.assembler->setRowDofMap(*job.row_config->dof_map, job.row_offset);
+                    job.assembler->setColDofMap(*job.col_config->dof_map, job.col_offset);
+                    job.assembler->setFieldSolutionAccess(field_access);
+                } else {
+                    job.assembler->setRowDofMap(*job.row_config->dof_map, 0);
+                    job.assembler->setColDofMap(*job.col_config->dof_map, 0);
+                }
+
+                const constraints::AffineConstraints* constraints =
+                    (options_.apply_constraints ? job.row_config->constraints : nullptr);
+                job.assembler->setConstraints(constraints);
+                job.assembler->setTime(time_);
+                job.assembler->setTimeStep(dt_);
+
+                if (kernelNeedsSolution(*job.kernel)) {
+                    FE_THROW_IF(!job.assembler->supportsSolution(), FEException,
+                                "BlockAssembler::assembleBlocksParallel: kernel requires solution but assembler '" +
+                                    job.assembler->name() + "' does not support solution");
+                    FE_THROW_IF(current_solution_.empty(), FEException,
+                                "BlockAssembler::assembleBlocksParallel: kernel requires solution but no solution was set");
+                }
+
+                const auto field_reqs = job.kernel->fieldRequirements();
+                if (!field_reqs.empty()) {
+                    FE_THROW_IF(!job.assembler->supportsFieldRequirements(), FEException,
+                                "BlockAssembler::assembleBlocksParallel: kernel declares fieldRequirements() but assembler '" +
+                                    job.assembler->name() + "' does not support field requirements");
+                }
+
+                if (!current_solution_.empty()) {
+                    if (job.supports_offsets) {
+                        job.assembler->setCurrentSolution(current_solution_);
+                    } else {
+                        FE_THROW_IF(!field_reqs.empty(), FEException,
+                                    "BlockAssembler::assembleBlocksParallel: assembler '" + job.assembler->name() +
+                                        "' does not support DOF offsets; cannot satisfy kernel fieldRequirements() for block " +
+                                        blockLabel(job.idx.row_field, job.idx.col_field));
+
+                        const auto trial = static_cast<std::size_t>(job.idx.col_field);
+                        const auto off = static_cast<std::size_t>(field_offsets_[trial]);
+                        const auto sz = static_cast<std::size_t>(field_sizes_[trial]);
+                        FE_THROW_IF(off + sz > current_solution_.size(), FEException,
+                                    "BlockAssembler::assembleBlocksParallel: solution vector too small for field slice");
+                        job.assembler->setCurrentSolution(current_solution_.subspan(off, sz));
+                    }
+                }
+
+                job.assembler->initialize();
+                results[i] = job.assembler->assembleMatrix(*mesh_, *job.row_config->space, *job.col_config->space,
+                                                           *job.kernel, *view);
+                job.assembler->finalize(view, nullptr);
+            } else {
+                std::scoped_lock lock(field_mutexes[row_idx], field_mutexes[col_idx], asm_mutex);
+
+                NoFinalizeSystemView nofinal(matrix_view);
+                std::optional<ShiftedSystemView> shifted;
+                GlobalSystemView* view = &nofinal;
+
+                const GlobalIndex row_shift = job.supports_offsets ? 0 : job.row_offset;
+                const GlobalIndex col_shift = job.supports_offsets ? 0 : job.col_offset;
+                if (row_shift != 0 || col_shift != 0) {
+                    shifted.emplace(nofinal, row_shift, col_shift);
+                    view = &*shifted;
+                }
+
+                if (job.supports_offsets) {
+                    job.assembler->setRowDofMap(*job.row_config->dof_map, job.row_offset);
+                    job.assembler->setColDofMap(*job.col_config->dof_map, job.col_offset);
+                    job.assembler->setFieldSolutionAccess(field_access);
+                } else {
+                    job.assembler->setRowDofMap(*job.row_config->dof_map, 0);
+                    job.assembler->setColDofMap(*job.col_config->dof_map, 0);
+                }
+
+                const constraints::AffineConstraints* constraints =
+                    (options_.apply_constraints ? job.row_config->constraints : nullptr);
+                job.assembler->setConstraints(constraints);
+                job.assembler->setTime(time_);
+                job.assembler->setTimeStep(dt_);
+
+                if (kernelNeedsSolution(*job.kernel)) {
+                    FE_THROW_IF(!job.assembler->supportsSolution(), FEException,
+                                "BlockAssembler::assembleBlocksParallel: kernel requires solution but assembler '" +
+                                    job.assembler->name() + "' does not support solution");
+                    FE_THROW_IF(current_solution_.empty(), FEException,
+                                "BlockAssembler::assembleBlocksParallel: kernel requires solution but no solution was set");
+                }
+
+                const auto field_reqs = job.kernel->fieldRequirements();
+                if (!field_reqs.empty()) {
+                    FE_THROW_IF(!job.assembler->supportsFieldRequirements(), FEException,
+                                "BlockAssembler::assembleBlocksParallel: kernel declares fieldRequirements() but assembler '" +
+                                    job.assembler->name() + "' does not support field requirements");
+                }
+
+                if (!current_solution_.empty()) {
+                    if (job.supports_offsets) {
+                        job.assembler->setCurrentSolution(current_solution_);
+                    } else {
+                        FE_THROW_IF(!field_reqs.empty(), FEException,
+                                    "BlockAssembler::assembleBlocksParallel: assembler '" + job.assembler->name() +
+                                        "' does not support DOF offsets; cannot satisfy kernel fieldRequirements() for block " +
+                                        blockLabel(job.idx.row_field, job.idx.col_field));
+
+                        const auto trial = static_cast<std::size_t>(job.idx.col_field);
+                        const auto off = static_cast<std::size_t>(field_offsets_[trial]);
+                        const auto sz = static_cast<std::size_t>(field_sizes_[trial]);
+                        FE_THROW_IF(off + sz > current_solution_.size(), FEException,
+                                    "BlockAssembler::assembleBlocksParallel: solution vector too small for field slice");
+                        job.assembler->setCurrentSolution(current_solution_.subspan(off, sz));
+                    }
+                }
+
+                job.assembler->initialize();
+                results[i] = job.assembler->assembleMatrix(*mesh_, *job.row_config->space, *job.col_config->space,
+                                                           *job.kernel, *view);
+                job.assembler->finalize(view, nullptr);
+            }
+        } catch (...) {
+            abort.store(true, std::memory_order_relaxed);
+            std::scoped_lock lock(error_mutex);
+            if (!first_error) {
+                first_error = std::current_exception();
+            }
+        }
+    }
+
+    if (first_error) {
+        std::rethrow_exception(first_error);
+    }
+
+    for (std::size_t i = 0; i < jobs.size(); ++i) {
+        last_stats_.block_assembly_seconds[jobs[i].idx] = results[i].elapsed_time_seconds;
+        last_stats_.block_nnz[jobs[i].idx] = results[i].matrix_entries_inserted;
+    }
+
+    // Optionally assemble RHS for fields involved in the requested blocks (row fields only).
+    if (rhs_view != nullptr) {
+        struct RhsJob {
+            FieldId field{0};
+            const FieldConfig* config{nullptr};
+            AssemblyKernel* kernel{nullptr};
+            Assembler* assembler{nullptr};
+            GlobalIndex offset{0};
+            bool supports_offsets{false};
+            std::size_t assembler_mutex{0};
+        };
+
+        std::set<FieldId> fields_to_assemble;
+        for (const auto& b : blocks) {
+            fields_to_assemble.insert(b.row_field);
+        }
+
+        std::vector<RhsJob> rhs_jobs;
+        rhs_jobs.reserve(fields_to_assemble.size());
+        for (FieldId f : fields_to_assemble) {
+            auto it = rhs_kernels_.find(f);
+            if (it == rhs_kernels_.end() || !it->second) {
+                continue;
+            }
+
+            const FieldConfig* cfg = config_.getField(f);
+            FE_THROW_IF(cfg == nullptr, FEException,
+                        "BlockAssembler::assembleBlocksParallel(RHS): field not found: " + std::to_string(f));
+            FE_CHECK_NOT_NULL(cfg->space, "BlockAssembler::assembleBlocksParallel(RHS): space");
+            FE_CHECK_NOT_NULL(cfg->dof_map, "BlockAssembler::assembleBlocksParallel(RHS): dof map");
+
+            Assembler& assembler = getBlockAssembler(f, f);
+            const bool supports_offsets = assembler.supportsDofOffsets();
+            const auto [offset, _] = getBlockOffset(f, f);
+
+            rhs_jobs.push_back(RhsJob{
+                .field = f,
+                .config = cfg,
+                .kernel = it->second.get(),
+                .assembler = &assembler,
+                .offset = offset,
+                .supports_offsets = supports_offsets,
+                .assembler_mutex = ensureAssemblerMutex(&assembler),
+            });
+        }
+
+        // Reset error handling for the RHS pass.
+        abort.store(false, std::memory_order_relaxed);
+        first_error = nullptr;
+
+        std::vector<AssemblyResult> rhs_results(rhs_jobs.size());
+
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(num_threads) schedule(dynamic)
+#endif
+        for (std::size_t i = 0; i < rhs_jobs.size(); ++i) {
+            if (abort.load(std::memory_order_relaxed)) {
+                continue;
+            }
+
+            try {
+                const auto& job = rhs_jobs[i];
+                const auto field_idx = static_cast<std::size_t>(job.field);
+                FE_THROW_IF(field_idx >= field_mutexes.size(), FEException,
+                            "BlockAssembler::assembleBlocksParallel(RHS): field id out of range");
+
+                auto& asm_mutex = *assembler_mutexes[job.assembler_mutex];
+                std::scoped_lock lock(field_mutexes[field_idx], asm_mutex);
+
+                NoFinalizeSystemView nofinal(*rhs_view);
+                std::optional<ShiftedSystemView> shifted;
+                GlobalSystemView* view = &nofinal;
+
+                const GlobalIndex shift = job.supports_offsets ? 0 : job.offset;
+                if (shift != 0) {
+                    shifted.emplace(nofinal, shift, shift);
+                    view = &*shifted;
+                }
+
+                if (job.supports_offsets) {
+                    job.assembler->setRowDofMap(*job.config->dof_map, job.offset);
+                    job.assembler->setColDofMap(*job.config->dof_map, job.offset);
+                    job.assembler->setFieldSolutionAccess(field_access);
+                } else {
+                    job.assembler->setRowDofMap(*job.config->dof_map, 0);
+                    job.assembler->setColDofMap(*job.config->dof_map, 0);
+                }
+
+                const constraints::AffineConstraints* constraints =
+                    (options_.apply_constraints ? job.config->constraints : nullptr);
+                job.assembler->setConstraints(constraints);
+                job.assembler->setTime(time_);
+                job.assembler->setTimeStep(dt_);
+
+                if (kernelNeedsSolution(*job.kernel)) {
+                    FE_THROW_IF(!job.assembler->supportsSolution(), FEException,
+                                "BlockAssembler::assembleBlocksParallel(RHS): kernel requires solution but assembler '" +
+                                    job.assembler->name() + "' does not support solution");
+                    FE_THROW_IF(current_solution_.empty(), FEException,
+                                "BlockAssembler::assembleBlocksParallel(RHS): kernel requires solution but no solution was set");
+                }
+
+                const auto field_reqs = job.kernel->fieldRequirements();
+                if (!field_reqs.empty()) {
+                    FE_THROW_IF(!job.assembler->supportsFieldRequirements(), FEException,
+                                "BlockAssembler::assembleBlocksParallel(RHS): kernel declares fieldRequirements() but assembler '" +
+                                    job.assembler->name() + "' does not support field requirements");
+                }
+
+                if (!current_solution_.empty()) {
+                    if (job.supports_offsets) {
+                        job.assembler->setCurrentSolution(current_solution_);
+                    } else {
+                        FE_THROW_IF(!field_reqs.empty(), FEException,
+                                    "BlockAssembler::assembleBlocksParallel(RHS): assembler '" + job.assembler->name() +
+                                        "' does not support DOF offsets; cannot satisfy kernel fieldRequirements() for field " +
+                                        std::to_string(job.field));
+
+                        const auto off = static_cast<std::size_t>(field_offsets_[field_idx]);
+                        const auto sz = static_cast<std::size_t>(field_sizes_[field_idx]);
+                        FE_THROW_IF(off + sz > current_solution_.size(), FEException,
+                                    "BlockAssembler::assembleBlocksParallel(RHS): solution vector too small for field slice");
+                        job.assembler->setCurrentSolution(current_solution_.subspan(off, sz));
+                    }
+                }
+
+                job.assembler->initialize();
+                rhs_results[i] = job.assembler->assembleVector(*mesh_, *job.config->space, *job.kernel, *view);
+                job.assembler->finalize(nullptr, view);
+            } catch (...) {
+                abort.store(true, std::memory_order_relaxed);
+                std::scoped_lock lock(error_mutex);
+                if (!first_error) {
+                    first_error = std::current_exception();
+                }
+            }
+        }
+
+        if (first_error) {
+            std::rethrow_exception(first_error);
+        }
+    }
+
+    // Finalize views once.
+    matrix_view.endAssemblyPhase();
+    matrix_view.finalizeAssembly();
+
+    if (rhs_is_distinct) {
+        rhs_view->endAssemblyPhase();
+        rhs_view->finalizeAssembly();
+    } else if (rhs_view != nullptr && rhs_view == &matrix_view) {
+        // Already finalized above.
+    }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    last_stats_.total_seconds =
+        std::chrono::duration<double>(end_time - start_time).count();
+
+    return last_stats_;
+}
+
+// ============================================================================
+// Selective Assembly
+// ============================================================================
+
+BlockAssemblyStats BlockAssembler::assembleBlocksIf(
+    std::function<bool(FieldId row, FieldId col)> predicate,
+    GlobalSystemView& matrix_view)
+{
+    FE_THROW_IF(!isConfigured(), "BlockAssembler not configured");
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    last_stats_ = BlockAssemblyStats{};
+    last_stats_.num_cells = mesh_->numCells();
+
+    for (const auto& [idx, kernel] : block_kernels_) {
+        if (!kernel) {
+            continue;
+        }
+        if (!predicate(idx.row_field, idx.col_field)) {
+            continue;
+        }
+        assembleBlockInternal(idx.row_field, idx.col_field, matrix_view, true);
+    }
 
     auto end_time = std::chrono::high_resolution_clock::now();
     last_stats_.total_seconds =
@@ -477,27 +1316,14 @@ BlockAssemblyStats BlockAssembler::assembleCouplingBlocks(GlobalSystemView& matr
     auto start_time = std::chrono::high_resolution_clock::now();
 
     last_stats_ = BlockAssemblyStats{};
+    last_stats_.num_cells = mesh_->numCells();
 
-    matrix_view.beginAssemblyPhase();
-
-    int n_fields = numFields();
-
-    for (int i = 0; i < n_fields; ++i) {
-        for (int j = 0; j < n_fields; ++j) {
-            if (i == j) continue;  // Skip diagonal blocks
-
-            FieldId row_field = static_cast<FieldId>(i);
-            FieldId col_field = static_cast<FieldId>(j);
-
-            if (kernel_->hasBlock(row_field, col_field)) {
-                auto [row_offset, col_offset] = getBlockOffset(row_field, col_field);
-                assembleBlockInternal(row_field, col_field, matrix_view,
-                                     row_offset, col_offset);
-            }
+    for (const auto& [idx, kernel] : block_kernels_) {
+        if (!kernel || idx.isDiagonal()) {
+            continue;
         }
+        assembleBlockInternal(idx.row_field, idx.col_field, matrix_view, true);
     }
-
-    matrix_view.endAssemblyPhase();
 
     auto end_time = std::chrono::high_resolution_clock::now();
     last_stats_.total_seconds =
@@ -512,21 +1338,14 @@ BlockAssemblyStats BlockAssembler::assembleDiagonalBlocks(GlobalSystemView& matr
     auto start_time = std::chrono::high_resolution_clock::now();
 
     last_stats_ = BlockAssemblyStats{};
+    last_stats_.num_cells = mesh_->numCells();
 
-    matrix_view.beginAssemblyPhase();
-
-    int n_fields = numFields();
-
-    for (int i = 0; i < n_fields; ++i) {
-        FieldId field = static_cast<FieldId>(i);
-
-        if (kernel_->hasBlock(field, field)) {
-            auto [row_offset, col_offset] = getBlockOffset(field, field);
-            assembleBlockInternal(field, field, matrix_view, row_offset, col_offset);
+    for (const auto& [idx, kernel] : block_kernels_) {
+        if (!kernel || !idx.isDiagonal()) {
+            continue;
         }
+        assembleBlockInternal(idx.row_field, idx.col_field, matrix_view, true);
     }
-
-    matrix_view.endAssemblyPhase();
 
     auto end_time = std::chrono::high_resolution_clock::now();
     last_stats_.total_seconds =
@@ -542,134 +1361,242 @@ BlockAssemblyStats BlockAssembler::assembleDiagonalBlocks(GlobalSystemView& matr
 void BlockAssembler::assembleBlockInternal(
     FieldId row_field,
     FieldId col_field,
-    GlobalSystemView& matrix_view,
-    GlobalIndex row_offset,
-    GlobalIndex col_offset)
+    GlobalSystemView& output_view,
+    bool is_monolithic)
 {
-    // Initialize thread-local storage if needed
-    int num_threads = options_.num_threads;
-    if (num_threads <= 0) {
-#ifdef _OPENMP
-        num_threads = omp_get_max_threads();
-#else
-        num_threads = 1;
-#endif
+    const FieldConfig* row_config = config_.getField(row_field);
+    const FieldConfig* col_config = config_.getField(col_field);
+    FE_CHECK_NOT_NULL(row_config, "BlockAssembler::assembleBlockInternal: row field config");
+    FE_CHECK_NOT_NULL(col_config, "BlockAssembler::assembleBlockInternal: col field config");
+    FE_CHECK_NOT_NULL(mesh_, "BlockAssembler::assembleBlockInternal: mesh");
+    FE_CHECK_NOT_NULL(row_config->space, "BlockAssembler::assembleBlockInternal: row space");
+    FE_CHECK_NOT_NULL(col_config->space, "BlockAssembler::assembleBlockInternal: col space");
+    FE_CHECK_NOT_NULL(row_config->dof_map, "BlockAssembler::assembleBlockInternal: row dof map");
+    FE_CHECK_NOT_NULL(col_config->dof_map, "BlockAssembler::assembleBlockInternal: col dof map");
+
+    const BlockIndex idx{row_field, col_field};
+    auto kit = block_kernels_.find(idx);
+    if (kit == block_kernels_.end() || !kit->second) {
+        return; // Zero block
     }
 
-    if (thread_contexts_.size() < static_cast<std::size_t>(num_threads)) {
-        thread_contexts_.resize(static_cast<std::size_t>(num_threads));
-        thread_outputs_.resize(static_cast<std::size_t>(num_threads));
-        thread_row_dofs_.resize(static_cast<std::size_t>(num_threads));
-        thread_col_dofs_.resize(static_cast<std::size_t>(num_threads));
+    AssemblyKernel& kernel = *kit->second;
 
-        for (int i = 0; i < num_threads; ++i) {
-            thread_contexts_[static_cast<std::size_t>(i)] =
-                std::make_unique<AssemblyContext>();
+    Assembler& assembler = getBlockAssembler(row_field, col_field);
+
+    const auto offsets = getBlockOffset(row_field, col_field);
+    const GlobalIndex row_offset = offsets.first;
+    const GlobalIndex col_offset = offsets.second;
+    const bool supports_offsets = assembler.supportsDofOffsets();
+
+    // Configure assembler DOF maps
+    if (supports_offsets) {
+        assembler.setRowDofMap(*row_config->dof_map, row_offset);
+        assembler.setColDofMap(*col_config->dof_map, col_offset);
+    } else {
+        assembler.setRowDofMap(*row_config->dof_map, 0);
+        assembler.setColDofMap(*col_config->dof_map, 0);
+    }
+
+    // Constraints are field-wise; apply constraints on the test (row) field.
+    const constraints::AffineConstraints* constraints =
+        (options_.apply_constraints ? row_config->constraints : nullptr);
+    assembler.setConstraints(constraints);
+
+    // Time state (optional)
+    assembler.setTime(time_);
+    assembler.setTimeStep(dt_);
+
+    // Solution state (optional)
+    if (kernelNeedsSolution(kernel)) {
+        FE_THROW_IF(!assembler.supportsSolution(), FEException,
+                    "BlockAssembler::assembleBlockInternal: kernel requires solution but assembler '" +
+                        assembler.name() + "' does not support solution");
+        FE_THROW_IF(current_solution_.empty(), FEException,
+                    "BlockAssembler::assembleBlockInternal: kernel requires solution but no solution was set");
+    }
+
+    const auto field_reqs = kernel.fieldRequirements();
+    if (!field_reqs.empty()) {
+        FE_THROW_IF(!assembler.supportsFieldRequirements(), FEException,
+                    "BlockAssembler::assembleBlockInternal: kernel declares fieldRequirements() but assembler '" +
+                        assembler.name() + "' does not support field requirements");
+    }
+
+    if (!current_solution_.empty()) {
+        if (supports_offsets) {
+            assembler.setCurrentSolution(current_solution_);
+
+            // Provide accessors for kernels requesting additional fields.
+            std::vector<FieldSolutionAccess> access;
+            access.reserve(config_.fields.size());
+            for (const auto& f : config_.fields) {
+                if (!f.space || !f.dof_map) {
+                    continue;
+                }
+                const auto f_offset = getBlockOffset(f.id, f.id).first;
+                access.push_back(FieldSolutionAccess{
+                    .field = f.id,
+                    .space = f.space,
+                    .dof_map = f.dof_map,
+                    .dof_offset = f_offset,
+                });
+            }
+            assembler.setFieldSolutionAccess(access);
+        } else {
+            // Fallback: provide only the trial-field slice.
+            FE_THROW_IF(!field_reqs.empty(), FEException,
+                        "BlockAssembler::assembleBlockInternal: assembler '" + assembler.name() +
+                            "' does not support DOF offsets; cannot satisfy kernel fieldRequirements() for block " +
+                            blockLabel(row_field, col_field));
+
+            const auto col_idx = static_cast<std::size_t>(col_field);
+            FE_THROW_IF(col_idx >= field_offsets_.size() - 1 || col_idx >= field_sizes_.size(), FEException,
+                        "BlockAssembler::assembleBlockInternal: invalid col field id");
+            const auto off = static_cast<std::size_t>(field_offsets_[col_idx]);
+            const auto sz = static_cast<std::size_t>(field_sizes_[col_idx]);
+            FE_THROW_IF(off + sz > current_solution_.size(), FEException,
+                        "BlockAssembler::assembleBlockInternal: solution vector too small for field slice");
+
+            assembler.setCurrentSolution(current_solution_.subspan(off, sz));
         }
     }
 
-    // Cell loop for this block
-    mesh_->forEachCell([this, row_field, col_field, &matrix_view,
-                        row_offset, col_offset](GlobalIndex cell_id) {
-        // Thread ID for sequential case
-        int tid = 0;
-#ifdef _OPENMP
-        tid = omp_get_thread_num();
-#endif
+    // Select view shifting based on output mode and assembler capabilities.
+    GlobalIndex row_shift = 0;
+    GlobalIndex col_shift = 0;
+    if (is_monolithic) {
+        row_shift = supports_offsets ? 0 : row_offset;
+        col_shift = supports_offsets ? 0 : col_offset;
+    } else {
+        row_shift = supports_offsets ? -row_offset : 0;
+        col_shift = supports_offsets ? -col_offset : 0;
+    }
 
-        auto& context = *thread_contexts_[static_cast<std::size_t>(tid)];
-        auto& output = thread_outputs_[static_cast<std::size_t>(tid)];
-        auto& row_dofs = thread_row_dofs_[static_cast<std::size_t>(tid)];
-        auto& col_dofs = thread_col_dofs_[static_cast<std::size_t>(tid)];
+    std::optional<ShiftedSystemView> shifted;
+    GlobalSystemView* view = &output_view;
+    if (row_shift != 0 || col_shift != 0) {
+        shifted.emplace(output_view, row_shift, col_shift);
+        view = &*shifted;
+    }
 
-        // Get DOFs for this cell and fields
-        getCellFieldDofs(cell_id, row_field, row_dofs);
-        getCellFieldDofs(cell_id, col_field, col_dofs);
+    assembler.initialize();
+    const auto result = assembler.assembleMatrix(*mesh_, *row_config->space, *col_config->space, kernel, *view);
+    assembler.finalize(view, nullptr);
 
-        // Skip if no DOFs
-        if (row_dofs.empty() || col_dofs.empty()) return;
-
-        // Prepare context
-        // context.prepare(cell_id, ...);
-
-        // Compute block
-        output.clear();
-        output.reserve(static_cast<LocalIndex>(row_dofs.size()),
-                       static_cast<LocalIndex>(col_dofs.size()), true, false);
-
-        kernel_->computeBlock(context, row_field, col_field, output);
-
-        // Translate DOFs to global and insert
-        for (auto& dof : row_dofs) {
-            dof += row_offset;
-        }
-        for (auto& dof : col_dofs) {
-            dof += col_offset;
-        }
-
-        matrix_view.addMatrixEntries(row_dofs, col_dofs, output.local_matrix);
-    });
-
-    ++last_stats_.num_cells;
+    last_stats_.block_assembly_seconds[idx] = result.elapsed_time_seconds;
+    last_stats_.block_nnz[idx] = result.matrix_entries_inserted;
 }
 
 void BlockAssembler::assembleFieldRhsInternal(
     FieldId field,
     GlobalSystemView& rhs_view,
-    GlobalIndex offset)
+    bool is_monolithic)
 {
-    // Similar to assembleBlockInternal but for RHS
+    const FieldConfig* field_config = config_.getField(field);
+    FE_CHECK_NOT_NULL(field_config, "BlockAssembler::assembleFieldRhsInternal: field config");
+    FE_CHECK_NOT_NULL(mesh_, "BlockAssembler::assembleFieldRhsInternal: mesh");
+    FE_CHECK_NOT_NULL(field_config->space, "BlockAssembler::assembleFieldRhsInternal: space");
+    FE_CHECK_NOT_NULL(field_config->dof_map, "BlockAssembler::assembleFieldRhsInternal: dof map");
 
-    int tid = 0;
-#ifdef _OPENMP
-    tid = omp_get_thread_num();
-#endif
-
-    if (thread_contexts_.empty()) {
-        thread_contexts_.push_back(std::make_unique<AssemblyContext>());
-        thread_outputs_.resize(1);
-        thread_row_dofs_.resize(1);
+    auto kit = rhs_kernels_.find(field);
+    if (kit == rhs_kernels_.end() || !kit->second) {
+        return;
     }
 
-    auto& context = *thread_contexts_[static_cast<std::size_t>(tid)];
-    auto& output = thread_outputs_[static_cast<std::size_t>(tid)];
-    auto& dofs = thread_row_dofs_[static_cast<std::size_t>(tid)];
+    AssemblyKernel& kernel = *kit->second;
+    Assembler& assembler = getBlockAssembler(field, field);
 
-    mesh_->forEachCell([this, field, &rhs_view, offset,
-                        &context, &output, &dofs](GlobalIndex cell_id) {
-        getCellFieldDofs(cell_id, field, dofs);
+    const auto offsets = getBlockOffset(field, field);
+    const GlobalIndex offset = offsets.first;
+    const bool supports_offsets = assembler.supportsDofOffsets();
 
-        if (dofs.empty()) return;
+    if (supports_offsets) {
+        assembler.setRowDofMap(*field_config->dof_map, offset);
+        assembler.setColDofMap(*field_config->dof_map, offset);
+    } else {
+        assembler.setRowDofMap(*field_config->dof_map, 0);
+        assembler.setColDofMap(*field_config->dof_map, 0);
+    }
 
-        // Compute RHS
-        output.clear();
-        output.reserve(static_cast<LocalIndex>(dofs.size()),
-                       static_cast<LocalIndex>(dofs.size()), false, true);
+    const constraints::AffineConstraints* constraints =
+        (options_.apply_constraints ? field_config->constraints : nullptr);
+    assembler.setConstraints(constraints);
 
-        kernel_->computeRhs(context, field, output);
+    assembler.setTime(time_);
+    assembler.setTimeStep(dt_);
 
-        // Translate and insert
-        for (auto& dof : dofs) {
-            dof += offset;
+    if (kernelNeedsSolution(kernel)) {
+        FE_THROW_IF(!assembler.supportsSolution(), FEException,
+                    "BlockAssembler::assembleFieldRhsInternal: kernel requires solution but assembler '" +
+                        assembler.name() + "' does not support solution");
+        FE_THROW_IF(current_solution_.empty(), FEException,
+                    "BlockAssembler::assembleFieldRhsInternal: kernel requires solution but no solution was set");
+    }
+
+    const auto field_reqs = kernel.fieldRequirements();
+    if (!field_reqs.empty()) {
+        FE_THROW_IF(!assembler.supportsFieldRequirements(), FEException,
+                    "BlockAssembler::assembleFieldRhsInternal: kernel declares fieldRequirements() but assembler '" +
+                        assembler.name() + "' does not support field requirements");
+    }
+
+    if (!current_solution_.empty()) {
+        if (supports_offsets) {
+            assembler.setCurrentSolution(current_solution_);
+
+            std::vector<FieldSolutionAccess> access;
+            access.reserve(config_.fields.size());
+            for (const auto& f : config_.fields) {
+                if (!f.space || !f.dof_map) {
+                    continue;
+                }
+                const auto f_offset = getBlockOffset(f.id, f.id).first;
+                access.push_back(FieldSolutionAccess{
+                    .field = f.id,
+                    .space = f.space,
+                    .dof_map = f.dof_map,
+                    .dof_offset = f_offset,
+                });
+            }
+            assembler.setFieldSolutionAccess(access);
+        } else {
+            FE_THROW_IF(!field_reqs.empty(), FEException,
+                        "BlockAssembler::assembleFieldRhsInternal: assembler '" + assembler.name() +
+                            "' does not support DOF offsets; cannot satisfy kernel fieldRequirements() for field " +
+                            std::to_string(field));
+
+            const auto f_idx = static_cast<std::size_t>(field);
+            FE_THROW_IF(f_idx >= field_offsets_.size() - 1 || f_idx >= field_sizes_.size(), FEException,
+                        "BlockAssembler::assembleFieldRhsInternal: invalid field id");
+            const auto off = static_cast<std::size_t>(field_offsets_[f_idx]);
+            const auto sz = static_cast<std::size_t>(field_sizes_[f_idx]);
+            FE_THROW_IF(off + sz > current_solution_.size(), FEException,
+                        "BlockAssembler::assembleFieldRhsInternal: solution vector too small for field slice");
+
+            assembler.setCurrentSolution(current_solution_.subspan(off, sz));
         }
+    }
 
-        rhs_view.addVectorEntries(dofs, output.local_vector);
-    });
-}
+    GlobalIndex row_shift = 0;
+    if (is_monolithic) {
+        row_shift = supports_offsets ? 0 : offset;
+    } else {
+        row_shift = supports_offsets ? -offset : 0;
+    }
 
-void BlockAssembler::getCellFieldDofs(
-    GlobalIndex /*cell_id*/,
-    FieldId /*field*/,
-    std::vector<GlobalIndex>& dofs)
-{
-    // This would query the field's DOF map for DOFs on this cell
-    // Placeholder implementation
+    std::optional<ShiftedSystemView> shifted;
+    GlobalSystemView* view = &rhs_view;
+    if (row_shift != 0) {
+        shifted.emplace(rhs_view, row_shift, row_shift);
+        view = &*shifted;
+    }
 
-    dofs.clear();
+    assembler.initialize();
+    const auto result = assembler.assembleVector(*mesh_, *field_config->space, kernel, *view);
+    assembler.finalize(nullptr, view);
 
-    // In actual implementation:
-    // const auto& field_config = *config_.getField(field);
-    // field_config.dof_map->getCellDofs(cell_id, dofs);
+    (void)result;
 }
 
 // ============================================================================
@@ -680,16 +1607,6 @@ std::unique_ptr<BlockAssembler> createBlockAssembler(
     const BlockAssemblerOptions& options)
 {
     return std::make_unique<BlockAssembler>(options);
-}
-
-std::unique_ptr<IBlockKernel> createTwoFieldBlockKernel(
-    AssemblyKernel& a_kernel,
-    AssemblyKernel& b_kernel,
-    AssemblyKernel* bt_kernel,
-    AssemblyKernel* c_kernel)
-{
-    return std::make_unique<TwoFieldBlockKernel>(
-        a_kernel, b_kernel, bt_kernel, c_kernel);
 }
 
 } // namespace assembly

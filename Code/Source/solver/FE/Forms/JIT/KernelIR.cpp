@@ -102,6 +102,26 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
         case FormExprType::SymmetricEigenvalue: return "SymmetricEigenvalue";
         case FormExprType::SymmetricEigenvalueDirectionalDerivative: return "SymmetricEigenvalueDirectionalDerivative";
         case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA: return "SymmetricEigenvalueDirectionalDerivativeWrtA";
+        case FormExprType::MatrixExponential: return "MatrixExponential";
+        case FormExprType::MatrixLogarithm: return "MatrixLogarithm";
+        case FormExprType::MatrixSqrt: return "MatrixSqrt";
+        case FormExprType::MatrixPower: return "MatrixPower";
+        case FormExprType::MatrixExponentialDirectionalDerivative: return "MatrixExponentialDirectionalDerivative";
+        case FormExprType::MatrixLogarithmDirectionalDerivative: return "MatrixLogarithmDirectionalDerivative";
+        case FormExprType::MatrixSqrtDirectionalDerivative: return "MatrixSqrtDirectionalDerivative";
+        case FormExprType::MatrixPowerDirectionalDerivative: return "MatrixPowerDirectionalDerivative";
+        case FormExprType::SmoothHeaviside: return "SmoothHeaviside";
+        case FormExprType::SmoothAbsoluteValue: return "SmoothAbsoluteValue";
+        case FormExprType::SmoothMin: return "SmoothMin";
+        case FormExprType::SmoothMax: return "SmoothMax";
+        case FormExprType::SmoothSign: return "SmoothSign";
+        case FormExprType::Eigenvalue: return "Eigenvalue";
+        case FormExprType::SymmetricEigenvector: return "SymmetricEigenvector";
+        case FormExprType::SpectralDecomposition: return "SpectralDecomposition";
+        case FormExprType::SymmetricEigenvectorDirectionalDerivative: return "SymmetricEigenvectorDirectionalDerivative";
+        case FormExprType::SpectralDecompositionDirectionalDerivative: return "SpectralDecompositionDirectionalDerivative";
+        case FormExprType::HistoryWeightedSum: return "HistoryWeightedSum";
+        case FormExprType::HistoryConvolution: return "HistoryConvolution";
 
         case FormExprType::Add: return "Add";
         case FormExprType::Subtract: return "Subtract";
@@ -278,7 +298,10 @@ struct ImmPayload {
 
         case FormExprType::SymmetricEigenvalue:
         case FormExprType::SymmetricEigenvalueDirectionalDerivative:
-        case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA: {
+        case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA:
+        case FormExprType::Eigenvalue:
+        case FormExprType::SymmetricEigenvector:
+        case FormExprType::SymmetricEigenvectorDirectionalDerivative: {
             const auto which = node.eigenIndex();
             if (!which) {
                 throw std::invalid_argument("KernelIR: symmetric-eigen node missing eigen index");
