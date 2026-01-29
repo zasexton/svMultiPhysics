@@ -694,38 +694,37 @@ void registerExternalCallSymbols(llvm::orc::LLJIT& jit)
     }
 }
 
-void configureEventListeners(llvm::orc::LLJIT& jit,
-                             std::unique_ptr<llvm::JITEventListener>& gdb_listener,
-                             std::unique_ptr<llvm::JITEventListener>& perf_listener)
+void configureEventListeners(llvm::orc::LLJIT& jit)
 {
-    if (!gdb_listener) {
-        gdb_listener.reset(llvm::JITEventListener::createGDBRegistrationListener());
-    }
-    if (gdb_listener) {
+    // NOTE: Some LLVM builds are sensitive to the lifetime of JITEventListener
+    // instances (notably the GDB registration listener). Keeping listeners alive
+    // for the full process lifetime avoids use-after-free / double-delete issues
+    // when multiple JITEngine instances are created/destroyed.
+    static llvm::JITEventListener* gdb_listener = llvm::JITEventListener::createGDBRegistrationListener();
+    if (gdb_listener != nullptr) {
         if (auto* layer = dynamic_cast<llvm::orc::RTDyldObjectLinkingLayer*>(&jit.getObjLinkingLayer())) {
             layer->registerJITEventListener(*gdb_listener);
         }
     }
 
 #if SVMP_FE_LLVM_HAS_PERF_LISTENER
-    if (!perf_listener) {
-        llvm::JITEventListener* listener = nullptr;
+    static llvm::JITEventListener* perf_listener = []() -> llvm::JITEventListener* {
         if constexpr (requires { llvm::JITEventListener::createPerfJITEventListener(); }) {
-            listener = llvm::JITEventListener::createPerfJITEventListener();
+            return llvm::JITEventListener::createPerfJITEventListener();
         } else if constexpr (requires { llvm::createPerfJITEventListener(); }) {
-            listener = llvm::createPerfJITEventListener();
+            return llvm::createPerfJITEventListener();
         } else if constexpr (requires { llvm::orc::createPerfJITEventListener(); }) {
-            listener = llvm::orc::createPerfJITEventListener();
+            return llvm::orc::createPerfJITEventListener();
         }
-        perf_listener.reset(listener);
-    }
-    if (perf_listener) {
+        return nullptr;
+    }();
+
+    if (perf_listener != nullptr) {
         if (auto* layer = dynamic_cast<llvm::orc::RTDyldObjectLinkingLayer*>(&jit.getObjLinkingLayer())) {
             layer->registerJITEventListener(*perf_listener);
         }
     }
 #else
-    (void)perf_listener;
 #endif
 }
 
@@ -783,8 +782,6 @@ void configureEventListeners(llvm::orc::LLJIT& jit,
 struct JITEngine::Impl {
 #if SVMP_FE_ENABLE_LLVM_JIT
     JITOptions options{};
-    std::unique_ptr<llvm::JITEventListener> gdb_listener{};
-    std::unique_ptr<llvm::JITEventListener> perf_listener{};
     std::unique_ptr<llvm::ObjectCache> object_cache{};
     ObjectCacheCounters object_cache_counters{};
     std::unique_ptr<llvm::orc::LLJIT> jit{};
@@ -815,9 +812,7 @@ std::unique_ptr<JITEngine> JITEngine::create(const JITOptions& options)
         engine->impl_->cpu_name = hostCPUName();
         engine->impl_->cpu_features = hostCPUFeaturesString();
 
-        configureEventListeners(*engine->impl_->jit,
-                                engine->impl_->gdb_listener,
-                                engine->impl_->perf_listener);
+        configureEventListeners(*engine->impl_->jit);
 
         if (!options.cache_directory.empty()) {
             const auto cache_dir =

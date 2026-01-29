@@ -642,6 +642,15 @@ public:
                           std::span<const Real> aux_state) noexcept;
 
     /**
+     * @brief Bind history/convolution weights for history operators
+     *
+     * Indexing convention: weights[k-1] corresponds to u^{n-k}, k >= 1.
+     *
+     * The provided memory must remain valid for the duration of an assembly call.
+     */
+    void setHistoryWeights(std::span<const Real> weights) noexcept;
+
+    /**
      * @brief Set options
      */
     void setOptions(const FunctionalAssemblyOptions& options);
@@ -836,6 +845,7 @@ private:
     std::span<const Real> jit_constants_{};
     std::span<const Real> coupled_integrals_{};
     std::span<const Real> coupled_aux_state_{};
+    std::span<const Real> history_weights_{};
 
     // Working storage
     AssemblyContext context_;

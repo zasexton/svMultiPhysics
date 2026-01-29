@@ -1763,11 +1763,37 @@ if(FE_BUILD_TESTS)
 			                Tests/Unit/Forms/test_FormExpr.cpp
 			                    Tests/Unit/Forms/test_CoupledTerminals.cpp
 			                    Tests/Unit/Forms/test_JITValidation.cpp
+			                    Tests/Unit/Forms/test_KernelIR_Lowering.cpp
 			                    Tests/Unit/Forms/test_ExternalCallsNewPhysics.cpp
-			                    Tests/Unit/Forms/test_PointEvaluator.cpp
-			                Tests/Unit/Forms/test_BoundaryConditionHelpers.cpp
-			                Tests/Unit/Forms/test_FormCompiler.cpp
-		                Tests/Unit/Forms/test_Dual.cpp
+				                    Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp
+					                    Tests/Unit/Forms/test_JITCompiler_ErrorHandling.cpp
+						                    Tests/Unit/Forms/test_JIT_CacheRegression.cpp
+						                    Tests/Unit/Forms/test_JITEngine_Lifecycle.cpp
+					                    Tests/Unit/Forms/test_JIT_CompilationLatency.cpp
+					                    Tests/Unit/Forms/test_JIT_PerformanceRegression.cpp
+					                    Tests/Unit/Forms/test_JIT_MatrixFunctionPerformance.cpp
+					                    Tests/Unit/Forms/test_JIT_Vectorization.cpp
+					                    Tests/Unit/Forms/test_JIT_FacePerformance.cpp
+					                    Tests/Unit/Forms/test_JIT_NonlinearPerformance.cpp
+					                    Tests/Unit/Forms/test_JIT_TensorContractionPerformance.cpp
+					                    Tests/Unit/Forms/test_JIT_Scaling.cpp
+					                    Tests/Unit/Forms/test_JIT_SpecializationPerformance.cpp
+					                    Tests/Unit/Forms/test_JIT_DiskCache.cpp
+					                    Tests/Unit/Forms/test_JIT_MemoryOverhead.cpp
+						                    Tests/Unit/Forms/test_LLVMGen_FunctionalKernels.cpp
+					                    Tests/Unit/Forms/test_LLVMGen_ScalarOps.cpp
+					                    Tests/Unit/Forms/test_LLVMGen_SmoothOps.cpp
+					                    Tests/Unit/Forms/test_LLVMGen_TensorOps.cpp
+				                    Tests/Unit/Forms/test_LLVMGen_DifferentialOps.cpp
+				                    Tests/Unit/Forms/test_LLVMGen_MatrixFunctions.cpp
+				                    Tests/Unit/Forms/test_LLVMGen_MatrixFunctionDerivatives.cpp
+				                    Tests/Unit/Forms/test_LLVMGen_GeometryOps.cpp
+				                    Tests/Unit/Forms/test_LLVMGen_FieldOps.cpp
+				                    Tests/Unit/Forms/test_LLVMGen_TimeOps.cpp
+				                    Tests/Unit/Forms/test_PointEvaluator.cpp
+				                Tests/Unit/Forms/test_BoundaryConditionHelpers.cpp
+				                Tests/Unit/Forms/test_FormCompiler.cpp
+			                Tests/Unit/Forms/test_Dual.cpp
 		                Tests/Unit/Forms/test_DynamicValueShapes.cpp
 		                Tests/Unit/Forms/test_FormKernel_Cell.cpp
 		                Tests/Unit/Forms/test_FormKernel_Boundary.cpp

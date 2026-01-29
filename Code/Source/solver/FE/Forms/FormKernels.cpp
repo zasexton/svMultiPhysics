@@ -6687,13 +6687,39 @@ EvalValue<Real> evalReal(const FormExprNode& node,
         case FormExprType::HistoryConvolution: {
             const auto kids = node.childrenShared();
             if (kids.empty()) {
+                const auto weights = ctx.historyWeights();
+                const auto steps =
+                    std::min<std::size_t>(weights.size(), ctx.previousSolutionHistoryCount());
+                if (steps == 0u) {
+                    if (ctx.trialFieldType() == FieldType::Vector) {
+                        EvalValue<Real> out;
+                        out.kind = EvalValue<Real>::Kind::Vector;
+                        out.resizeVector(static_cast<std::size_t>(ctx.trialValueDimension()));
+                        return out;
+                    }
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, Real(0.0)};
+                }
+
                 if (ctx.trialFieldType() == FieldType::Vector) {
                     EvalValue<Real> out;
                     out.kind = EvalValue<Real>::Kind::Vector;
                     out.resizeVector(static_cast<std::size_t>(ctx.trialValueDimension()));
+                    for (std::size_t kk = 0; kk < steps; ++kk) {
+                        const int k = static_cast<int>(kk + 1u);
+                        const auto prev = ctx.previousSolutionVectorValue(q, k);
+                        for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+                            out.vectorAt(d) += weights[kk] * prev[d];
+                        }
+                    }
                     return out;
                 }
-                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, Real(0.0)};
+
+                Real sum = 0.0;
+                for (std::size_t kk = 0; kk < steps; ++kk) {
+                    const int k = static_cast<int>(kk + 1u);
+                    sum += weights[kk] * ctx.previousSolutionValue(q, k);
+                }
+                return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, sum};
             }
 
             if (ctx.trialFieldType() == FieldType::Vector) {

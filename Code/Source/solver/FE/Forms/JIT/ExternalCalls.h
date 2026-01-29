@@ -148,6 +148,15 @@ extern "C" void svmp_fe_jit_constitutive_eval_batch_v1(const void* side_ptr,
 extern "C" void svmp_fe_jit_eig_sym_2x2_v1(const double* A, double* eigvals2, double* eigvecs4) noexcept;
 extern "C" void svmp_fe_jit_eig_sym_3x3_v1(const double* A, double* eigvals3, double* eigvecs9) noexcept;
 
+// General real-matrix eigendecomposition (3x3), row-major input.
+// - Eigenvalues are returned as separate real/imag arrays (length 3).
+// - Eigenvectors are stored as columns (row-major layout) in separate real/imag arrays (length 9).
+extern "C" void svmp_fe_jit_eig_general_3x3_v1(const double* A,
+                                              double* eigvals_real3,
+                                              double* eigvals_imag3,
+                                              double* eigvecs_real9,
+                                              double* eigvecs_imag9) noexcept;
+
 // Matrix functions for small dense matrices, row-major input/output.
 // - expm is supported for symmetric 2x2/3x3.
 // - logm/sqrtm/powm are restricted to SPD inputs (failure -> NaNs in output).

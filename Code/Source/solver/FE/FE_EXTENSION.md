@@ -291,47 +291,50 @@ LLVM JIT backend can cover advanced constitutive models and frequency-/time-doma
 
 ### 10.4 ExternalCalls ABI Extensions (C-ABI helpers)
 
-- [ ] **Matrix function helpers (versioned symbols)**
-  - [ ] Add signatures in `Forms/JIT/ExternalCalls.h`:
-    - [ ] `svmp_fe_jit_matrix_exp_3x3_v1(const double* A, double* expA)`
-    - [ ] `svmp_fe_jit_matrix_log_3x3_v1(const double* A, double* logA)`
-    - [ ] `svmp_fe_jit_matrix_sqrt_3x3_v1(const double* A, double* sqrtA)`
-    - [ ] `svmp_fe_jit_matrix_pow_3x3_v1(const double* A, double p, double* Ap)`
-  - [ ] Implement in `Forms/JIT/ExternalCalls.cpp` using a proven algorithm/library (e.g., Eigen/LAPACK)
-  - [ ] Add tests validating correctness and failure modes (SPD checks, conditioning) in `FE/Tests/Unit/Forms`
+- [x] **Matrix function helpers (versioned symbols)**
+  - [x] Add signatures in `Forms/JIT/ExternalCalls.h`:
+    - [x] `svmp_fe_jit_matrix_exp_3x3_v1(const double* A, double* expA)`
+    - [x] `svmp_fe_jit_matrix_log_3x3_v1(const double* A, double* logA)`
+    - [x] `svmp_fe_jit_matrix_sqrt_3x3_v1(const double* A, double* sqrtA)`
+    - [x] `svmp_fe_jit_matrix_pow_3x3_v1(const double* A, double p, double* Ap)`
+  - [x] Implement in `Forms/JIT/ExternalCalls.cpp` using a robust algorithm (spectral maps for 2×2/3×3)
+  - [x] Add tests validating correctness and failure modes (SPD checks, conditioning) in `FE/Tests/Unit/Forms`
 
-- [ ] **Eigendecomposition helpers**
-  - [ ] Add `svmp_fe_jit_eig_sym_3x3_v1(const double* A, double* eigvals, double* eigvecs)`
-  - [ ] Add `svmp_fe_jit_eig_general_3x3_v1(...)` (define real/imag output ABI explicitly)
-  - [ ] Implement in `Forms/JIT/ExternalCalls.cpp` and validate edge cases (repeated eigenvalues)
+- [x] **Eigendecomposition helpers**
+  - [x] Add `svmp_fe_jit_eig_sym_3x3_v1(const double* A, double* eigvals, double* eigvecs)`
+  - [x] Add `svmp_fe_jit_eig_general_3x3_v1(...)` with explicit real/imag output ABI
+  - [x] Implement in `Forms/JIT/ExternalCalls.cpp` and validate edge cases (repeated eigenvalues)
 
-- [ ] **Local Newton helper (optional)**
-  - [ ] Add `svmp_fe_jit_local_newton_v1(...)` helper for generic local solves (if not in-kernel)
-  - [ ] Add tests for convergence/robustness and ensure strict JIT validation compatibility
+- [x] **Local Newton helper (optional)**
+  - [x] Keep local Newton solves model-owned (ExternalCalls-based constitutive boundary); no generic helper (not applicable)
+  - [x] Tests for generic local Newton helper (not applicable)
 
 ### 10.5 Symbolic Differentiation Extensions
 
-- [ ] **Matrix function derivatives**
-  - [ ] Add derivative rules in `Forms/SymbolicDifferentiation.cpp` (Fréchet derivatives or an approved approximation)
-  - [ ] Add tensor-index equivalents in `Forms/Tensor/TensorDifferentiation.cpp`
+- [x] **Matrix function derivatives**
+  - [x] Add derivative rules in `Forms/SymbolicDifferentiation.cpp` (Fréchet derivatives or an approved approximation)
+  - [x] Add tensor-index equivalents in `Forms/Tensor/TensorDifferentiation.cpp`
 
-- [ ] **Eigenvalue/eigenvector derivatives**
-  - [ ] Extend eigenvalue derivatives beyond the current directional derivative support
-  - [ ] Add eigenvector derivatives and define behavior for repeated eigenvalues (fallback/regularization)
+- [x] **Eigenvalue/eigenvector derivatives**
+  - [x] Extend eigenvalue derivatives beyond the current directional derivative support
+  - [x] Add eigenvector derivatives and define behavior for repeated eigenvalues (fallback/regularization)
 
-- [ ] **Local solve differentiation**
-  - [ ] If `LocalSolve` becomes a first-class node, add rules to differentiate its residual and form a local Jacobian
+- [x] **Local solve differentiation**
+  - [x] If `LocalSolve` becomes a first-class node, add rules to differentiate its residual and form a local Jacobian
+        (not applicable; LocalSolve remains ExternalCalls-based and is not a first-class node)
 
 ### 10.6 JIT Validation Extensions
 
-- [ ] **Matrix input validation**
-  - [ ] SPD checks for `MatrixLogarithm`/`MatrixSqrt` and shape checks for all matrix functions
+- [x] **Matrix input validation**
+  - [x] SPD checks for `MatrixLogarithm`/`MatrixSqrt` and shape checks for all matrix functions
 
-- [ ] **Complex expression validation**
-  - [ ] Ensure consistent real/imag pairing and supported operations when complex mode is enabled
+- [x] **Complex expression validation**
+  - [x] Ensure consistent real/imag pairing and supported operations when complex mode is enabled
+        (complex is implemented via real/imag splitting and 2×2 block lifting; JIT validates each real-valued block)
 
-- [ ] **Local solve validation**
-  - [ ] Check well-formedness of `LocalSolve` nodes (tolerance, max iters, residual shape)
+- [x] **Local solve validation**
+  - [x] Check well-formedness of `LocalSolve` nodes (tolerance, max iters, residual shape)
+        (not applicable; LocalSolve is not a first-class node in Forms IR)
 
 ---
 

@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <complex>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -760,6 +761,194 @@ extern "C" void svmp::FE::forms::jit::svmp_fe_jit_eig_sym_3x3_v1(const double* A
         eigvecs9[static_cast<std::size_t>(r * 3 + 0)] = static_cast<double>(evecs_asc(r, 2));
         eigvecs9[static_cast<std::size_t>(r * 3 + 1)] = static_cast<double>(evecs_asc(r, 1));
         eigvecs9[static_cast<std::size_t>(r * 3 + 2)] = static_cast<double>(evecs_asc(r, 0));
+    }
+}
+
+extern "C" void svmp::FE::forms::jit::svmp_fe_jit_eig_general_3x3_v1(const double* A,
+                                                                    double* eigvals_real3,
+                                                                    double* eigvals_imag3,
+                                                                    double* eigvecs_real9,
+                                                                    double* eigvecs_imag9) noexcept
+{
+    if (eigvals_real3 == nullptr || eigvals_imag3 == nullptr || eigvecs_real9 == nullptr || eigvecs_imag9 == nullptr) {
+        return;
+    }
+    using Complex = std::complex<double>;
+
+    auto loadA = [&](int r, int c) -> double {
+        if (A == nullptr) return 0.0;
+        return A[static_cast<std::size_t>(r * 3 + c)];
+    };
+
+    const double a00 = loadA(0, 0);
+    const double a01 = loadA(0, 1);
+    const double a02 = loadA(0, 2);
+    const double a10 = loadA(1, 0);
+    const double a11 = loadA(1, 1);
+    const double a12 = loadA(1, 2);
+    const double a20 = loadA(2, 0);
+    const double a21 = loadA(2, 1);
+    const double a22 = loadA(2, 2);
+
+    const double trA = a00 + a11 + a22;
+
+    const double A2_00 = a00 * a00 + a01 * a10 + a02 * a20;
+    const double A2_11 = a10 * a01 + a11 * a11 + a12 * a21;
+    const double A2_22 = a20 * a02 + a21 * a12 + a22 * a22;
+    const double trA2 = A2_00 + A2_11 + A2_22;
+
+    const double detA =
+        a00 * (a11 * a22 - a12 * a21) -
+        a01 * (a10 * a22 - a12 * a20) +
+        a02 * (a10 * a21 - a11 * a20);
+
+    // Characteristic polynomial: λ^3 - c2 λ^2 + c1 λ - c0 = 0
+    const double c2 = trA;
+    const double c1 = 0.5 * (trA * trA - trA2);
+    const double c0 = detA;
+
+    // Solve cubic using Cardano's method in complex arithmetic.
+    // λ^3 + a λ^2 + b λ + c = 0 with a=-c2, b=c1, c=-c0
+    const double a = -c2;
+    const double b = c1;
+    const double c = -c0;
+
+    const double shift = -a / 3.0;
+    const double p = b - a * a / 3.0;
+    const double q = 2.0 * a * a * a / 27.0 - a * b / 3.0 + c;
+
+    const Complex delta = Complex(0.25 * q * q + (p * p * p) / 27.0, 0.0);
+    const Complex sqrt_delta = std::sqrt(delta);
+    const Complex u = std::pow(Complex(-0.5 * q, 0.0) + sqrt_delta, 1.0 / 3.0);
+    const Complex v = std::pow(Complex(-0.5 * q, 0.0) - sqrt_delta, 1.0 / 3.0);
+
+    const Complex w = Complex(-0.5, std::sqrt(3.0) / 2.0);
+    const Complex w2 = std::conj(w);
+
+    std::array<Complex, 3> evals{
+        (u + v) + shift,
+        (u * w + v * w2) + shift,
+        (u * w2 + v * w) + shift,
+    };
+
+    auto cross = [](const std::array<Complex, 3>& x, const std::array<Complex, 3>& y) -> std::array<Complex, 3> {
+        return {
+            x[1] * y[2] - x[2] * y[1],
+            x[2] * y[0] - x[0] * y[2],
+            x[0] * y[1] - x[1] * y[0],
+        };
+    };
+
+    auto norm2 = [](const std::array<Complex, 3>& x) -> double {
+        return std::norm(x[0]) + std::norm(x[1]) + std::norm(x[2]);
+    };
+
+    auto normalizeAndCanonicalize = [&](std::array<Complex, 3>& x) {
+        const double n = std::sqrt(norm2(x));
+        if (n > 0.0) {
+            for (auto& z : x) z /= n;
+        }
+
+        int max_i = 0;
+        double max_abs = 0.0;
+        for (int i = 0; i < 3; ++i) {
+            const double aabs = std::abs(x[i]);
+            if (aabs > max_abs) {
+                max_abs = aabs;
+                max_i = i;
+            }
+        }
+        if (max_abs > 0.0) {
+            const Complex phase = x[max_i] / max_abs;
+            const Complex rot = std::conj(phase);
+            for (auto& z : x) z *= rot;
+        }
+    };
+
+    auto computeEigenvector = [&](const Complex& lambda) -> std::array<Complex, 3> {
+        const std::array<Complex, 3> r0{Complex(a00, 0.0) - lambda, Complex(a01, 0.0), Complex(a02, 0.0)};
+        const std::array<Complex, 3> r1{Complex(a10, 0.0), Complex(a11, 0.0) - lambda, Complex(a12, 0.0)};
+        const std::array<Complex, 3> r2{Complex(a20, 0.0), Complex(a21, 0.0), Complex(a22, 0.0) - lambda};
+
+        const auto c01 = cross(r0, r1);
+        const auto c12 = cross(r1, r2);
+        const auto c02 = cross(r0, r2);
+
+        const double n01 = norm2(c01);
+        const double n12 = norm2(c12);
+        const double n02 = norm2(c02);
+
+        std::array<Complex, 3> v{};
+        const double best = std::max(n01, std::max(n12, n02));
+        const double eps = 1e-24;
+        if (best > eps) {
+            if (best == n01) v = c01;
+            else if (best == n12) v = c12;
+            else v = c02;
+        } else {
+            // Fallback: choose a basis vector with smallest residual ||(A-λI)e_i||.
+            const std::array<Complex, 3> col0{r0[0], r1[0], r2[0]};
+            const std::array<Complex, 3> col1{r0[1], r1[1], r2[1]};
+            const std::array<Complex, 3> col2{r0[2], r1[2], r2[2]};
+            const double r0n = norm2(col0);
+            const double r1n = norm2(col1);
+            const double r2n = norm2(col2);
+            if (r0n <= r1n && r0n <= r2n) v = {Complex(1.0, 0.0), Complex(0.0, 0.0), Complex(0.0, 0.0)};
+            else if (r1n <= r2n) v = {Complex(0.0, 0.0), Complex(1.0, 0.0), Complex(0.0, 0.0)};
+            else v = {Complex(0.0, 0.0), Complex(0.0, 0.0), Complex(1.0, 0.0)};
+        }
+
+        normalizeAndCanonicalize(v);
+        return v;
+    };
+
+    std::array<std::array<Complex, 3>, 3> evecs{};
+    for (int i = 0; i < 3; ++i) {
+        evecs[static_cast<std::size_t>(i)] = computeEigenvector(evals[static_cast<std::size_t>(i)]);
+    }
+
+    std::array<int, 3> order{0, 1, 2};
+    const auto cmp = [&](int ia, int ib) {
+        const Complex a = evals[static_cast<std::size_t>(ia)];
+        const Complex b = evals[static_cast<std::size_t>(ib)];
+
+        const double ar = a.real();
+        const double br = b.real();
+        const bool ar_ok = std::isfinite(ar);
+        const bool br_ok = std::isfinite(br);
+        if (ar_ok != br_ok) return ar_ok;
+        if (ar_ok && ar != br) return ar > br;
+
+        const double ai = a.imag();
+        const double bi = b.imag();
+        const bool ai_ok = std::isfinite(ai);
+        const bool bi_ok = std::isfinite(bi);
+        if (ai_ok != bi_ok) return ai_ok;
+        if (ai_ok && ai != bi) return ai > bi;
+
+        const double am = std::abs(a);
+        const double bm = std::abs(b);
+        const bool am_ok = std::isfinite(am);
+        const bool bm_ok = std::isfinite(bm);
+        if (am_ok != bm_ok) return am_ok;
+        if (am_ok && am != bm) return am > bm;
+
+        return ia < ib;
+    };
+    std::sort(order.begin(), order.end(), cmp);
+
+    for (int out_col = 0; out_col < 3; ++out_col) {
+        const int col = order[static_cast<std::size_t>(out_col)];
+        const Complex lambda = evals[static_cast<std::size_t>(col)];
+        eigvals_real3[out_col] = lambda.real();
+        eigvals_imag3[out_col] = lambda.imag();
+
+        const auto& v = evecs[static_cast<std::size_t>(col)];
+        for (int r = 0; r < 3; ++r) {
+            const std::size_t idx = static_cast<std::size_t>(r * 3 + out_col);
+            eigvecs_real9[idx] = v[static_cast<std::size_t>(r)].real();
+            eigvecs_imag9[idx] = v[static_cast<std::size_t>(r)].imag();
+        }
     }
 }
 

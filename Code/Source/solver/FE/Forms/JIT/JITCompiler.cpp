@@ -549,8 +549,15 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
         }
     };
 
-    static std::mutex registry_mutex;
-    static std::unordered_map<CompilerKey, std::shared_ptr<JITCompiler>, CompilerKeyHash> registry;
+    // NOTE: Keep the registry alive for the lifetime of the process.
+    //
+    // LLVM/ORC teardown is sensitive to static-destruction order on some
+    // platforms/LLVM builds, and can segfault if LLJIT instances are destroyed
+    // during global teardown. Keeping the registry (and thus compilers/engines)
+    // alive avoids running LLJIT destructors at process exit.
+    static auto* registry_mutex = new std::mutex();
+    static auto* registry =
+        new std::unordered_map<CompilerKey, std::shared_ptr<JITCompiler>, CompilerKeyHash>();
 
     CompilerKey key;
     key.optimization_level = options.optimization_level;
@@ -568,8 +575,8 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
     key.specialization_max_unroll_trip_count = options.specialization.max_unroll_trip_count;
     key.tensor = options.tensor;
 
-    std::lock_guard<std::mutex> lock(registry_mutex);
-    if (auto it = registry.find(key); it != registry.end()) {
+    std::lock_guard<std::mutex> lock(*registry_mutex);
+    if (auto it = registry->find(key); it != registry->end()) {
         return it->second;
     }
 
@@ -577,7 +584,7 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
     opt.enable = true;
 
     auto compiler = std::shared_ptr<JITCompiler>(new JITCompiler(std::move(opt)));
-    registry[key] = compiler;
+    (*registry)[key] = compiler;
     return compiler;
 }
 

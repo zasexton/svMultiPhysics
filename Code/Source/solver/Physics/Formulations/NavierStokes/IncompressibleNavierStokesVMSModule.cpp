@@ -19,6 +19,10 @@
 #include <utility>
 #include <vector>
 
+#ifndef SVMP_FE_ENABLE_LLVM_JIT
+#define SVMP_FE_ENABLE_LLVM_JIT 0
+#endif
+
 namespace {
 
 class PressureNullspacePinConstraint final : public svmp::FE::systems::ISystemConstraint {
@@ -292,12 +296,23 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     {
         FE::systems::FormInstallOptions residual_install{};
         residual_install.coupled_residual_install_jacobian_blocks = false;
+#if SVMP_FE_ENABLE_LLVM_JIT
+        // Enable LLVM JIT fast path when available. For nonlinear residuals we
+        // also enable symbolic tangents because the JIT backend does not yet
+        // accelerate the dual-number (NonlinearFormKernel) path.
+        residual_install.compiler_options.jit.enable = true;
+        residual_install.compiler_options.use_symbolic_tangent = true;
+#endif
         (void)FE::systems::installCoupledResidual(system, "residual", fields, fields, residual, residual_install);
     }
     {
         FE::systems::FormInstallOptions jacobian_install{};
         jacobian_install.coupled_residual_install_residual_kernels = false;
         jacobian_install.coupled_residual_from_jacobian_block = true;
+#if SVMP_FE_ENABLE_LLVM_JIT
+        jacobian_install.compiler_options.jit.enable = true;
+        jacobian_install.compiler_options.use_symbolic_tangent = true;
+#endif
         (void)FE::systems::installCoupledResidual(system, "jacobian", fields, fields, residual, jacobian_install);
     }
 }

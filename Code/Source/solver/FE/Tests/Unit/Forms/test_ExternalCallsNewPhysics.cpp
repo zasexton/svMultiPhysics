@@ -10,7 +10,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <complex>
 #include <cstdint>
+#include <limits>
 
 namespace {
 
@@ -48,6 +50,72 @@ void expectNear(const Mat<N>& a, const Mat<N>& b, double tol)
     for (std::size_t i = 0; i < N * N; ++i) {
         EXPECT_NEAR(a[i], b[i], tolRelAbs(a[i], tol));
     }
+}
+
+template <std::size_t N>
+void expectAllNaN(const Mat<N>& a)
+{
+    for (double v : a) {
+        EXPECT_TRUE(std::isnan(v));
+    }
+}
+
+template <std::size_t N>
+void expectIdentity(const Mat<N>& a, double tol)
+{
+    for (std::size_t r = 0; r < N; ++r) {
+        for (std::size_t c = 0; c < N; ++c) {
+            const double expected = (r == c) ? 1.0 : 0.0;
+            EXPECT_NEAR(a[r * N + c], expected, tol);
+        }
+    }
+}
+
+template <std::size_t N>
+Mat<N> symmetrize(const Mat<N>& A)
+{
+    Mat<N> S{};
+    for (std::size_t r = 0; r < N; ++r) {
+        S[r * N + r] = A[r * N + r];
+        for (std::size_t c = r + 1; c < N; ++c) {
+            const double v = 0.5 * (A[r * N + c] + A[c * N + r]);
+            S[r * N + c] = v;
+            S[c * N + r] = v;
+        }
+    }
+    return S;
+}
+
+template <std::size_t N>
+Mat<N> reconstructFromEigSym(const Vec<N>& evals, const Mat<N>& Q)
+{
+    Mat<N> out{};
+    for (std::size_t r = 0; r < N; ++r) {
+        for (std::size_t c = 0; c < N; ++c) {
+            double sum = 0.0;
+            for (std::size_t k = 0; k < N; ++k) {
+                sum += evals[k] * Q[r * N + k] * Q[c * N + k];
+            }
+            out[r * N + c] = sum;
+        }
+    }
+    return out;
+}
+
+template <std::size_t N>
+Mat<N> qtq(const Mat<N>& Q)
+{
+    Mat<N> out{};
+    for (std::size_t i = 0; i < N; ++i) {
+        for (std::size_t j = 0; j < N; ++j) {
+            double sum = 0.0;
+            for (std::size_t r = 0; r < N; ++r) {
+                sum += Q[r * N + i] * Q[r * N + j];
+            }
+            out[i * N + j] = sum;
+        }
+    }
+    return out;
 }
 
 template <std::size_t N>
@@ -202,6 +270,135 @@ TEST(ExternalCallsNewPhysics, MatrixPowDDReturnsZeroWhenPIsZero)
     svmp::FE::forms::jit::svmp_fe_jit_matrix_pow_dd_3x3_v1(A.data(), dA.data(), 0.0, dd.data());
     for (double v : dd) {
         EXPECT_EQ(v, 0.0);
+    }
+}
+
+TEST(ExternalCallsNewPhysics, MatrixLogReturnsNaNsOnNonSPDInput)
+{
+    const Mat<2> A{-1.0, 0.0,
+                   0.0, 2.0};
+    Mat<2> logA{};
+    svmp::FE::forms::jit::svmp_fe_jit_matrix_log_2x2_v1(A.data(), logA.data());
+    expectAllNaN<2>(logA);
+}
+
+TEST(ExternalCallsNewPhysics, MatrixSqrtReturnsNaNsOnNonSPDInput)
+{
+    const Mat<3> A{
+        1.0, 0.0, 0.0,
+        0.0, -2.0, 0.0,
+        0.0, 0.0, 3.0,
+    };
+    Mat<3> sqrtA{};
+    svmp::FE::forms::jit::svmp_fe_jit_matrix_sqrt_3x3_v1(A.data(), sqrtA.data());
+    expectAllNaN<3>(sqrtA);
+}
+
+TEST(ExternalCallsNewPhysics, MatrixPowReturnsIdentityWhenPIsZero)
+{
+    const Mat<3> A{
+        2.0, 0.1, 0.0,
+        0.1, 1.5, 0.0,
+        0.0, 0.0, 3.0,
+    };
+    Mat<3> Ap{};
+    svmp::FE::forms::jit::svmp_fe_jit_matrix_pow_3x3_v1(A.data(), 0.0, Ap.data());
+    expectIdentity<3>(Ap, 1e-14);
+}
+
+TEST(ExternalCallsNewPhysics, MatrixPowReturnsNaNsWhenPNotFinite)
+{
+    const Mat<2> A{2.0, 0.0,
+                   0.0, 1.0};
+    Mat<2> Ap{};
+    svmp::FE::forms::jit::svmp_fe_jit_matrix_pow_2x2_v1(A.data(), std::numeric_limits<double>::infinity(), Ap.data());
+    expectAllNaN<2>(Ap);
+}
+
+TEST(ExternalCallsNewPhysics, MatrixExpMatchesDiagonal)
+{
+    const Mat<3> A{
+        1.0, 0.0, 0.0,
+        0.0, 2.0, 0.0,
+        0.0, 0.0, 3.0,
+    };
+    Mat<3> expA{};
+    svmp::FE::forms::jit::svmp_fe_jit_matrix_exp_3x3_v1(A.data(), expA.data());
+
+    Mat<3> expected{};
+    expected[0] = std::exp(1.0);
+    expected[4] = std::exp(2.0);
+    expected[8] = std::exp(3.0);
+    expectNear<3>(expA, expected, 1e-12);
+}
+
+TEST(ExternalCallsNewPhysics, EigSymReconstructsRepeatedEigenvalueMatrix)
+{
+    const Mat<3> A{
+        2.0, 0.0, 0.0,
+        0.0, 2.0, 0.0,
+        0.0, 0.0, 1.0,
+    };
+
+    Vec<3> evals{};
+    Mat<3> Q{};
+    svmp::FE::forms::jit::svmp_fe_jit_eig_sym_3x3_v1(A.data(), evals.data(), Q.data());
+
+    const auto Arec = reconstructFromEigSym<3>(evals, Q);
+    expectNear<3>(Arec, symmetrize<3>(A), 1e-12);
+
+    const auto I = qtq<3>(Q);
+    Mat<3> Iref{};
+    Iref[0] = 1.0;
+    Iref[4] = 1.0;
+    Iref[8] = 1.0;
+    expectNear<3>(I, Iref, 1e-12);
+}
+
+TEST(ExternalCallsNewPhysics, EigGeneralHandlesComplexConjugatePair)
+{
+    const Mat<3> A{
+        0.0, -1.0, 0.0,
+        1.0,  0.0, 0.0,
+        0.0,  0.0, 2.0,
+    };
+
+    double eval_re[3]{};
+    double eval_im[3]{};
+    double evec_re[9]{};
+    double evec_im[9]{};
+    svmp::FE::forms::jit::svmp_fe_jit_eig_general_3x3_v1(A.data(), eval_re, eval_im, evec_re, evec_im);
+
+    EXPECT_NEAR(eval_re[0], 2.0, 1e-12);
+    EXPECT_NEAR(eval_im[0], 0.0, 1e-12);
+    EXPECT_NEAR(eval_re[1], 0.0, 1e-12);
+    EXPECT_NEAR(eval_im[1], 1.0, 1e-10);
+    EXPECT_NEAR(eval_re[2], 0.0, 1e-12);
+    EXPECT_NEAR(eval_im[2], -1.0, 1e-10);
+
+    for (int i = 0; i < 3; ++i) {
+        const std::complex<double> lambda{eval_re[i], eval_im[i]};
+        std::array<std::complex<double>, 3> v{
+            std::complex<double>(evec_re[0 * 3 + i], evec_im[0 * 3 + i]),
+            std::complex<double>(evec_re[1 * 3 + i], evec_im[1 * 3 + i]),
+            std::complex<double>(evec_re[2 * 3 + i], evec_im[2 * 3 + i]),
+        };
+
+        std::array<std::complex<double>, 3> Av{};
+        for (int r = 0; r < 3; ++r) {
+            std::complex<double> sum{0.0, 0.0};
+            for (int c = 0; c < 3; ++c) {
+                sum += A[static_cast<std::size_t>(r * 3 + c)] * v[c];
+            }
+            Av[r] = sum;
+        }
+
+        double res2 = 0.0;
+        for (int r = 0; r < 3; ++r) {
+            const auto res = Av[r] - lambda * v[r];
+            res2 += std::norm(res);
+        }
+        EXPECT_LT(std::sqrt(res2), 1e-10);
     }
 }
 

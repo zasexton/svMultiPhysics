@@ -7028,14 +7028,43 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                        values[op_idx] = emitMatrixSqrt(getChild(op, 0));
 	                        break;
 
-	                    case FormExprType::MatrixPower:
-	                        values[op_idx] =
-	                            emitMatrixPow(getChild(op, 0), getChild(op, 1).elems[0]);
-	                        break;
+		                    case FormExprType::MatrixPower:
+		                        values[op_idx] =
+		                            emitMatrixPow(getChild(op, 0), getChild(op, 1).elems[0]);
+		                        break;
 
-                    case FormExprType::SmoothAbsoluteValue:
-                        values[op_idx] = smoothAbs(getChild(op, 0), getChild(op, 1));
-                        break;
+		                    case FormExprType::MatrixExponentialDirectionalDerivative:
+		                        values[op_idx] = callMatrixUnaryDD(getChild(op, 0),
+		                                                          getChild(op, 1),
+		                                                          mat_exp_dd_2x2_fn,
+		                                                          mat_exp_dd_3x3_fn);
+		                        break;
+
+		                    case FormExprType::MatrixLogarithmDirectionalDerivative:
+		                        values[op_idx] = callMatrixUnaryDD(getChild(op, 0),
+		                                                          getChild(op, 1),
+		                                                          mat_log_dd_2x2_fn,
+		                                                          mat_log_dd_3x3_fn);
+		                        break;
+
+		                    case FormExprType::MatrixSqrtDirectionalDerivative:
+		                        values[op_idx] = callMatrixUnaryDD(getChild(op, 0),
+		                                                          getChild(op, 1),
+		                                                          mat_sqrt_dd_2x2_fn,
+		                                                          mat_sqrt_dd_3x3_fn);
+		                        break;
+
+		                    case FormExprType::MatrixPowerDirectionalDerivative:
+		                        values[op_idx] = callMatrixPowDD(getChild(op, 0),
+		                                                        getChild(op, 1),
+		                                                        getChild(op, 2).elems[0],
+		                                                        mat_pow_dd_2x2_fn,
+		                                                        mat_pow_dd_3x3_fn);
+		                        break;
+
+	                    case FormExprType::SmoothAbsoluteValue:
+	                        values[op_idx] = smoothAbs(getChild(op, 0), getChild(op, 1));
+	                        break;
 
                     case FormExprType::SmoothSign:
                         values[op_idx] = smoothSign(getChild(op, 0), getChild(op, 1));

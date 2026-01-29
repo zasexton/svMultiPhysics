@@ -145,7 +145,14 @@ void prepareCellContext(AssemblyContext& context,
     scratch.basis_values.resize(static_cast<std::size_t>(n_dofs * n_qpts));
     scratch.ref_gradients.resize(static_cast<std::size_t>(n_dofs * n_qpts));
     scratch.phys_gradients.resize(static_cast<std::size_t>(n_dofs * n_qpts));
-    (void)need_basis_hessians;
+
+    std::vector<basis::Hessian> hessians_at_pt;
+    std::vector<AssemblyContext::Matrix3x3> ref_hessians;
+    std::vector<AssemblyContext::Matrix3x3> phys_hessians;
+    if (need_basis_hessians) {
+        ref_hessians.resize(static_cast<std::size_t>(n_dofs * n_qpts));
+        phys_hessians.resize(static_cast<std::size_t>(n_dofs * n_qpts));
+    }
 
     const auto& quad_points = quad_rule->points();
     const auto& quad_weights = quad_rule->weights();
@@ -185,6 +192,9 @@ void prepareCellContext(AssemblyContext& context,
 
         basis.evaluate_values(xi, values_at_pt);
         basis.evaluate_gradients(xi, gradients_at_pt);
+        if (need_basis_hessians) {
+            basis.evaluate_hessians(xi, hessians_at_pt);
+        }
 
         for (LocalIndex i = 0; i < n_dofs; ++i) {
             const LocalIndex si = is_product ? static_cast<LocalIndex>(i % n_scalar_dofs) : i;
@@ -204,6 +214,34 @@ void prepareCellContext(AssemblyContext& context,
                 }
             }
             scratch.phys_gradients[idx] = grad_phys;
+
+            if (need_basis_hessians) {
+                AssemblyContext::Matrix3x3 H_ref{};
+                for (int r = 0; r < 3; ++r) {
+                    for (int c = 0; c < 3; ++c) {
+                        H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                            hessians_at_pt[static_cast<std::size_t>(si)](
+                                static_cast<std::size_t>(r), static_cast<std::size_t>(c));
+                    }
+                }
+                ref_hessians[idx] = H_ref;
+
+                AssemblyContext::Matrix3x3 H_phys{};
+                for (int r = 0; r < dim; ++r) {
+                    for (int c = 0; c < dim; ++c) {
+                        Real sum = 0.0;
+                        for (int a = 0; a < dim; ++a) {
+                            for (int b = 0; b < dim; ++b) {
+                                sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                       H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                       J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                            }
+                        }
+                        H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                    }
+                }
+                phys_hessians[idx] = H_phys;
+            }
         }
     }
 
@@ -216,6 +254,11 @@ void prepareCellContext(AssemblyContext& context,
     context.setIntegrationWeights(scratch.integration_weights);
     context.setTestBasisData(n_dofs, scratch.basis_values, scratch.ref_gradients);
     context.setPhysicalGradients(scratch.phys_gradients, scratch.phys_gradients);
+
+    if (need_basis_hessians) {
+        context.setTestBasisHessians(n_dofs, ref_hessians);
+        context.setPhysicalHessians(phys_hessians, phys_hessians);
+    }
 
     if (hasFlag(required_data, RequiredData::EntityMeasures)) {
         Real cell_volume = 0.0;
@@ -647,6 +690,11 @@ void FunctionalAssembler::setCoupledValues(std::span<const Real> integrals,
     coupled_aux_state_ = aux_state;
 }
 
+void FunctionalAssembler::setHistoryWeights(std::span<const Real> weights) noexcept
+{
+    history_weights_ = weights;
+}
+
 void FunctionalAssembler::bindFieldSolutionData(AssemblyContext& context,
                                                 std::span<const FieldRequirement> reqs)
 {
@@ -1042,6 +1090,19 @@ Real FunctionalAssembler::assembleCellsCore(
 
     const RequiredData required = kernel.getRequiredData();
     const auto field_reqs = kernel.fieldRequirements();
+
+    RequiredData context_required = required;
+    if (!field_reqs.empty()) {
+        RequiredData field_required = RequiredData::None;
+        for (const auto& fr : field_reqs) {
+            field_required |= fr.required;
+        }
+        context_required |= field_required;
+        if (hasFlag(field_required, RequiredData::SolutionHessians) ||
+            hasFlag(field_required, RequiredData::SolutionLaplacians)) {
+            context_required |= RequiredData::BasisHessians;
+        }
+    }
     const bool need_solution =
         hasFlag(required, RequiredData::SolutionCoefficients) ||
         hasFlag(required, RequiredData::SolutionValues) ||
@@ -1070,38 +1131,58 @@ Real FunctionalAssembler::assembleCellsCore(
 
             std::vector<Real> my_values;
             std::vector<Real> local_solution;
+            std::vector<Real> local_prev_solution;
 
-            #pragma omp for schedule(static)
-            for (GlobalIndex cell_id = 0; cell_id < mesh_->numCells(); ++cell_id) {
-                prepareCellContext(thread_context, *mesh_, cell_id, *space_, required);
-                thread_context.setTimeIntegrationContext(time_integration_);
-                thread_context.setTime(time_);
-                thread_context.setTimeStep(dt_);
-                thread_context.setRealParameterGetter(get_real_param_);
-                thread_context.setParameterGetter(get_param_);
-                thread_context.setUserData(user_data_);
-                thread_context.setJITConstants(jit_constants_);
-                thread_context.setCoupledValues(coupled_integrals_, coupled_aux_state_);
-                if (need_solution) {
-                    FE_THROW_IF(solution_.empty(), FEException,
-                                "FunctionalAssembler::assembleCellsCore: kernel requires solution but no solution was set");
-                    const auto dofs = dof_map_->getCellDofs(cell_id);
-                    local_solution.resize(dofs.size());
-                    for (std::size_t i = 0; i < dofs.size(); ++i) {
-                        const auto dof = dofs[i];
-                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
-                                    "FunctionalAssembler::assembleCellsCore: solution vector too small for DOF " + std::to_string(dof));
-                        local_solution[i] = solution_[static_cast<std::size_t>(dof)];
-                    }
-                    thread_context.setSolutionCoefficients(local_solution);
-                    if (!field_reqs.empty()) {
-                        bindFieldSolutionData(thread_context, field_reqs);
-                    }
-                }
+	            #pragma omp for schedule(static)
+	            for (GlobalIndex cell_id = 0; cell_id < mesh_->numCells(); ++cell_id) {
+	                prepareCellContext(thread_context, *mesh_, cell_id, *space_, context_required);
+	                thread_context.clearAllPreviousSolutionData();
+	                thread_context.setTimeIntegrationContext(time_integration_);
+	                thread_context.setTime(time_);
+	                thread_context.setTimeStep(dt_);
+	                thread_context.setRealParameterGetter(get_real_param_);
+	                thread_context.setParameterGetter(get_param_);
+	                thread_context.setUserData(user_data_);
+	                thread_context.setJITConstants(jit_constants_);
+	                thread_context.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+	                thread_context.setHistoryWeights(history_weights_);
+	                const auto dofs = dof_map_->getCellDofs(cell_id);
+	                if (need_solution) {
+	                    FE_THROW_IF(solution_.empty(), FEException,
+	                                "FunctionalAssembler::assembleCellsCore: kernel requires solution but no solution was set");
+	                    local_solution.resize(dofs.size());
+	                    for (std::size_t i = 0; i < dofs.size(); ++i) {
+	                        const auto dof = dofs[i];
+	                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
+	                                    "FunctionalAssembler::assembleCellsCore: solution vector too small for DOF " + std::to_string(dof));
+	                        local_solution[i] = solution_[static_cast<std::size_t>(dof)];
+	                    }
+	                    thread_context.setSolutionCoefficients(local_solution);
+	                }
+	                if (!previous_solutions_.empty()) {
+	                    for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
+	                        const auto& prev = previous_solutions_[k];
+	                        if (prev.empty()) {
+	                            continue;
+	                        }
+	                        local_prev_solution.resize(dofs.size());
+	                        for (std::size_t i = 0; i < dofs.size(); ++i) {
+	                            const auto dof = dofs[i];
+	                            FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
+	                                        "FunctionalAssembler::assembleCellsCore: previous solution vector too small for DOF " +
+	                                            std::to_string(dof));
+	                            local_prev_solution[i] = prev[static_cast<std::size_t>(dof)];
+	                        }
+	                        thread_context.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
+	                    }
+	                }
+	                if (!field_reqs.empty()) {
+	                    bindFieldSolutionData(thread_context, field_reqs);
+	                }
 
-                Real cell_value = kernel.evaluateCellTotal(thread_context);
-                my_values.push_back(cell_value);
-            }
+	                Real cell_value = kernel.evaluateCellTotal(thread_context);
+	                my_values.push_back(cell_value);
+	            }
 
             // Merge results
             {
@@ -1111,13 +1192,48 @@ Real FunctionalAssembler::assembleCellsCore(
             }
         }
 #else
-        // Sequential fallback
-        mesh_->forEachCell([&](GlobalIndex cell_id) {
-            prepareContext(cell_id, required);
-            Real cell_value = kernel.evaluateCellTotal(context_);
-            local_values.push_back(cell_value);
-            result.elements_processed++;
-        });
+	        // Sequential fallback
+	        std::vector<Real> local_solution;
+	        std::vector<Real> local_prev_solution;
+	        mesh_->forEachCell([&](GlobalIndex cell_id) {
+	            prepareContext(cell_id, context_required);
+	            const auto dofs = dof_map_->getCellDofs(cell_id);
+	            if (need_solution) {
+	                FE_THROW_IF(solution_.empty(), FEException,
+	                            "FunctionalAssembler::assembleCellsCore: kernel requires solution but no solution was set");
+	                local_solution.resize(dofs.size());
+	                for (std::size_t i = 0; i < dofs.size(); ++i) {
+	                    const auto dof = dofs[i];
+	                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
+	                                "FunctionalAssembler::assembleCellsCore: solution vector too small for DOF " + std::to_string(dof));
+	                    local_solution[i] = solution_[static_cast<std::size_t>(dof)];
+	                }
+	                context_.setSolutionCoefficients(local_solution);
+	            }
+	            if (!previous_solutions_.empty()) {
+	                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
+	                    const auto& prev = previous_solutions_[k];
+	                    if (prev.empty()) {
+	                        continue;
+	                    }
+	                    local_prev_solution.resize(dofs.size());
+	                    for (std::size_t i = 0; i < dofs.size(); ++i) {
+	                        const auto dof = dofs[i];
+	                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
+	                                    "FunctionalAssembler::assembleCellsCore: previous solution vector too small for DOF " +
+	                                        std::to_string(dof));
+	                        local_prev_solution[i] = prev[static_cast<std::size_t>(dof)];
+	                    }
+	                    context_.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
+	                }
+	            }
+	            if (!field_reqs.empty()) {
+	                bindFieldSolutionData(context_, field_reqs);
+	            }
+	            Real cell_value = kernel.evaluateCellTotal(context_);
+	            local_values.push_back(cell_value);
+	            result.elements_processed++;
+	        });
 #endif
 
         // Deterministic reduction: sort by element order then sum
@@ -1129,12 +1245,13 @@ Real FunctionalAssembler::assembleCellsCore(
     } else {
         // Sequential assembly
         std::vector<Real> local_solution;
+        std::vector<Real> local_prev_solution;
         mesh_->forEachCell([&](GlobalIndex cell_id) {
-            prepareContext(cell_id, required);
+            prepareContext(cell_id, context_required);
+            const auto dofs = dof_map_->getCellDofs(cell_id);
             if (need_solution) {
                 FE_THROW_IF(solution_.empty(), FEException,
                             "FunctionalAssembler::assembleCellsCore: kernel requires solution but no solution was set");
-                const auto dofs = dof_map_->getCellDofs(cell_id);
                 local_solution.resize(dofs.size());
                 for (std::size_t i = 0; i < dofs.size(); ++i) {
                     const auto dof = dofs[i];
@@ -1143,9 +1260,26 @@ Real FunctionalAssembler::assembleCellsCore(
                     local_solution[i] = solution_[static_cast<std::size_t>(dof)];
                 }
                 context_.setSolutionCoefficients(local_solution);
-                if (!field_reqs.empty()) {
-                    bindFieldSolutionData(context_, field_reqs);
+            }
+            if (!previous_solutions_.empty()) {
+                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
+                    const auto& prev = previous_solutions_[k];
+                    if (prev.empty()) {
+                        continue;
+                    }
+                    local_prev_solution.resize(dofs.size());
+                    for (std::size_t i = 0; i < dofs.size(); ++i) {
+                        const auto dof = dofs[i];
+                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
+                                    "FunctionalAssembler::assembleCellsCore: previous solution vector too small for DOF " +
+                                        std::to_string(dof));
+                        local_prev_solution[i] = prev[static_cast<std::size_t>(dof)];
+                    }
+                    context_.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
                 }
+            }
+            if (!field_reqs.empty()) {
+                bindFieldSolutionData(context_, field_reqs);
             }
 
             Real cell_value = kernel.evaluateCellTotal(context_);
@@ -1193,6 +1327,19 @@ Real FunctionalAssembler::assembleBoundaryCore(
     const RequiredData required = kernel.getRequiredData();
     const auto field_reqs = kernel.fieldRequirements();
 
+    RequiredData context_required = required;
+    if (!field_reqs.empty()) {
+        RequiredData field_required = RequiredData::None;
+        for (const auto& fr : field_reqs) {
+            field_required |= fr.required;
+        }
+        context_required |= field_required;
+        if (hasFlag(field_required, RequiredData::SolutionHessians) ||
+            hasFlag(field_required, RequiredData::SolutionLaplacians)) {
+            context_required |= RequiredData::BasisHessians;
+        }
+    }
+
     const bool need_solution =
         hasFlag(required, RequiredData::SolutionCoefficients) ||
         hasFlag(required, RequiredData::SolutionValues) ||
@@ -1205,42 +1352,62 @@ Real FunctionalAssembler::assembleBoundaryCore(
     KahanAccumulator accumulator;
 
     std::vector<Real> local_solution;
+    std::vector<Real> local_prev_solution;
     mesh_->forEachBoundaryFace(boundary_marker,
-        [&](GlobalIndex face_id, GlobalIndex cell_id) {
-            // Prepare face context
-            const LocalIndex local_face_id = mesh_->getLocalFaceIndex(face_id, cell_id);
-            prepareBoundaryFaceContext(context_, *mesh_, face_id, cell_id, local_face_id, *space_, required);
+	        [&](GlobalIndex face_id, GlobalIndex cell_id) {
+	            // Prepare face context
+	            const LocalIndex local_face_id = mesh_->getLocalFaceIndex(face_id, cell_id);
+	            prepareBoundaryFaceContext(context_, *mesh_, face_id, cell_id, local_face_id, *space_, context_required);
+	            context_.clearAllPreviousSolutionData();
 
-            context_.setTimeIntegrationContext(time_integration_);
-            context_.setTime(time_);
-            context_.setTimeStep(dt_);
-            context_.setRealParameterGetter(get_real_param_);
+	            context_.setTimeIntegrationContext(time_integration_);
+	            context_.setTime(time_);
+	            context_.setTimeStep(dt_);
+	            context_.setRealParameterGetter(get_real_param_);
             context_.setParameterGetter(get_param_);
             context_.setUserData(user_data_);
             context_.setJITConstants(jit_constants_);
-            context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
-            context_.setBoundaryMarker(boundary_marker);
+	            context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+	            context_.setHistoryWeights(history_weights_);
+	            context_.setBoundaryMarker(boundary_marker);
 
-            if (need_solution) {
-                FE_THROW_IF(solution_.empty(), FEException,
-                            "FunctionalAssembler::assembleBoundaryCore: kernel requires solution but no solution was set");
-                const auto dofs = dof_map_->getCellDofs(cell_id);
-                local_solution.resize(dofs.size());
-                for (std::size_t i = 0; i < dofs.size(); ++i) {
-                    const auto dof = dofs[i];
-                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
-                                "FunctionalAssembler::assembleBoundaryCore: solution vector too small for DOF " + std::to_string(dof));
-                    local_solution[i] = solution_[static_cast<std::size_t>(dof)];
-                }
-                context_.setSolutionCoefficients(local_solution);
-                if (!field_reqs.empty()) {
-                    bindFieldSolutionData(context_, field_reqs);
-                }
-            }
+	            const auto dofs = dof_map_->getCellDofs(cell_id);
+	            if (need_solution) {
+	                FE_THROW_IF(solution_.empty(), FEException,
+	                            "FunctionalAssembler::assembleBoundaryCore: kernel requires solution but no solution was set");
+	                local_solution.resize(dofs.size());
+	                for (std::size_t i = 0; i < dofs.size(); ++i) {
+	                    const auto dof = dofs[i];
+	                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
+	                                "FunctionalAssembler::assembleBoundaryCore: solution vector too small for DOF " + std::to_string(dof));
+	                    local_solution[i] = solution_[static_cast<std::size_t>(dof)];
+	                }
+	                context_.setSolutionCoefficients(local_solution);
+	            }
+	            if (!previous_solutions_.empty()) {
+	                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
+	                    const auto& prev = previous_solutions_[k];
+	                    if (prev.empty()) {
+	                        continue;
+	                    }
+	                    local_prev_solution.resize(dofs.size());
+	                    for (std::size_t i = 0; i < dofs.size(); ++i) {
+	                        const auto dof = dofs[i];
+	                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
+	                                    "FunctionalAssembler::assembleBoundaryCore: previous solution vector too small for DOF " +
+	                                        std::to_string(dof));
+	                        local_prev_solution[i] = prev[static_cast<std::size_t>(dof)];
+	                    }
+	                    context_.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
+	                }
+	            }
+	            if (!field_reqs.empty()) {
+	                bindFieldSolutionData(context_, field_reqs);
+	            }
 
-            const Real face_value = kernel.evaluateBoundaryFaceTotal(context_, boundary_marker);
+	            const Real face_value = kernel.evaluateBoundaryFaceTotal(context_, boundary_marker);
 
-            if (options_.use_kahan_summation) {
+	            if (options_.use_kahan_summation) {
                 accumulator.add(face_value);
             } else {
                 total += face_value;
@@ -1266,6 +1433,8 @@ void FunctionalAssembler::prepareContext(
 {
     prepareCellContext(context_, *mesh_, cell_id, *space_, required_data);
 
+    context_.clearAllPreviousSolutionData();
+
     context_.setTimeIntegrationContext(time_integration_);
     context_.setTime(time_);
     context_.setTimeStep(dt_);
@@ -1274,6 +1443,7 @@ void FunctionalAssembler::prepareContext(
     context_.setUserData(user_data_);
     context_.setJITConstants(jit_constants_);
     context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+    context_.setHistoryWeights(history_weights_);
 }
 
 Real FunctionalAssembler::parallelReduce(

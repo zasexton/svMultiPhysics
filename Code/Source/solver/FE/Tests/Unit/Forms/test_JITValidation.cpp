@@ -5,9 +5,12 @@
 
 #include <gtest/gtest.h>
 
+#include "Forms/Complex.h"
+#include "Forms/FormCompiler.h"
 #include "Forms/FormExpr.h"
 #include "Forms/JIT/JITValidation.h"
 #include "Forms/JIT/KernelIR.h"
+#include "Spaces/H1Space.h"
 
 using svmp::FE::Real;
 
@@ -114,6 +117,126 @@ TEST(JITValidation, RejectsMatrixLogarithmOnNonSPDConstantMatrix)
     EXPECT_FALSE(r.ok);
     ASSERT_TRUE(r.first_issue.has_value());
     EXPECT_EQ(r.first_issue->type, FormExprType::MatrixLogarithm);
+}
+
+TEST(JITValidation, RejectsMatrixSqrtOnNonSPDConstantMatrix)
+{
+    using namespace svmp::FE::forms;
+
+    const auto A = FormExpr::asTensor({
+        {FormExpr::constant(Real(-1.0)), FormExpr::constant(Real(0.0))},
+        {FormExpr::constant(Real(0.0)), FormExpr::constant(Real(1.0))},
+    });
+
+    const auto expr = A.matrixSqrt();
+    const auto r = jit::canCompile(expr, jit::ValidationOptions{.strictness = jit::Strictness::Strict});
+    EXPECT_FALSE(r.ok);
+    ASSERT_TRUE(r.first_issue.has_value());
+    EXPECT_EQ(r.first_issue->type, FormExprType::MatrixSqrt);
+}
+
+TEST(JITValidation, RejectsMatrixPowerOnNonSPDConstantMatrixWhenExponentNonZero)
+{
+    using namespace svmp::FE::forms;
+
+    const auto A = FormExpr::asTensor({
+        {FormExpr::constant(Real(-1.0)), FormExpr::constant(Real(0.0))},
+        {FormExpr::constant(Real(0.0)), FormExpr::constant(Real(1.0))},
+    });
+
+    const auto expr = A.matrixPow(FormExpr::constant(Real(1.0)));
+    const auto r = jit::canCompile(expr, jit::ValidationOptions{.strictness = jit::Strictness::Strict});
+    EXPECT_FALSE(r.ok);
+    ASSERT_TRUE(r.first_issue.has_value());
+    EXPECT_EQ(r.first_issue->type, FormExprType::MatrixPower);
+}
+
+TEST(JITValidation, AllowsMatrixPowerOnNonSPDConstantMatrixWhenExponentZero)
+{
+    using namespace svmp::FE::forms;
+
+    const auto A = FormExpr::asTensor({
+        {FormExpr::constant(Real(-1.0)), FormExpr::constant(Real(0.0))},
+        {FormExpr::constant(Real(0.0)), FormExpr::constant(Real(1.0))},
+    });
+
+    const auto expr = A.matrixPow(FormExpr::constant(Real(0.0)));
+    const auto r = jit::canCompile(expr, jit::ValidationOptions{.strictness = jit::Strictness::Strict});
+    EXPECT_TRUE(r.ok);
+}
+
+TEST(JITValidation, RejectsMatrixLogDirectionalDerivativeOnNonSPDConstantMatrix)
+{
+    using namespace svmp::FE::forms;
+
+    const auto A = FormExpr::asTensor({
+        {FormExpr::constant(Real(-1.0)), FormExpr::constant(Real(0.0))},
+        {FormExpr::constant(Real(0.0)), FormExpr::constant(Real(1.0))},
+    });
+    const auto dA = FormExpr::identity(2);
+
+    const auto expr = FormExpr::matrixLogDirectionalDerivative(A, dA);
+    const auto r = jit::canCompile(expr, jit::ValidationOptions{.strictness = jit::Strictness::Strict});
+    EXPECT_FALSE(r.ok);
+    ASSERT_TRUE(r.first_issue.has_value());
+    EXPECT_EQ(r.first_issue->type, FormExprType::MatrixLogarithmDirectionalDerivative);
+}
+
+TEST(JITValidation, RejectsMatrixPowerDirectionalDerivativeWithNonScalarExponent)
+{
+    using namespace svmp::FE::forms;
+
+    const auto A = FormExpr::identity(2);
+    const auto dA = FormExpr::identity(2);
+    const auto p = FormExpr::asVector({FormExpr::constant(Real(1.0)), FormExpr::constant(Real(2.0))});
+
+    const auto expr = FormExpr::matrixPowDirectionalDerivative(A, dA, p);
+    const auto r = jit::canCompile(expr, jit::ValidationOptions{.strictness = jit::Strictness::Strict});
+    EXPECT_FALSE(r.ok);
+    ASSERT_TRUE(r.first_issue.has_value());
+    EXPECT_EQ(r.first_issue->type, FormExprType::MatrixPowerDirectionalDerivative);
+}
+
+TEST(JITValidation, AllowsMatrixPowerDirectionalDerivativeWithZeroExponentEvenForNonSPDConstantMatrix)
+{
+    using namespace svmp::FE::forms;
+
+    const auto A = FormExpr::asTensor({
+        {FormExpr::constant(Real(-1.0)), FormExpr::constant(Real(0.0))},
+        {FormExpr::constant(Real(0.0)), FormExpr::constant(Real(1.0))},
+    });
+    const auto dA = FormExpr::identity(2);
+    const auto p = FormExpr::constant(Real(0.0));
+
+    const auto expr = FormExpr::matrixPowDirectionalDerivative(A, dA, p);
+    const auto r = jit::canCompile(expr, jit::ValidationOptions{.strictness = jit::Strictness::Strict});
+    EXPECT_TRUE(r.ok);
+}
+
+TEST(JITValidation, ComplexBlockLiftingProducesJITValidBlocks)
+{
+    using namespace svmp::FE::forms;
+
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    const auto z = ComplexScalar::constant(Real(2.0), Real(-3.0));
+    const auto w = z * (u * v);
+    const ComplexBilinearForm a{w.re.dx(), w.im.dx()};
+    const auto blocks = toRealBlock2x2(a);
+
+    EXPECT_EQ(blocks.block(0, 0).toString(), blocks.block(1, 1).toString());
+    EXPECT_EQ(blocks.block(0, 1).toString(), (-blocks.block(1, 0)).toString());
+
+    FormCompiler compiler;
+    for (std::size_t i = 0; i < blocks.numTestFields(); ++i) {
+        for (std::size_t j = 0; j < blocks.numTrialFields(); ++j) {
+            auto ir = compiler.compileBilinear(blocks.block(i, j));
+            const auto r = jit::canCompile(ir, jit::ValidationOptions{.strictness = jit::Strictness::Strict});
+            EXPECT_TRUE(r.ok) << (r.first_issue ? r.first_issue->message : "");
+        }
+    }
 }
 
 TEST(JITValidation, RejectsMatrixPowerWithNonScalarExponent)

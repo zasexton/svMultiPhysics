@@ -19,6 +19,10 @@
 #include <string>
 #include <utility>
 
+#ifndef SVMP_FE_ENABLE_LLVM_JIT
+#define SVMP_FE_ENABLE_LLVM_JIT 0
+#endif
+
 namespace svmp {
 namespace Physics {
 namespace formulations {
@@ -80,11 +84,20 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
     weak_form.residual = residual;
     weak_form.strong_constraints = std::move(strong_constraints);
 
+    FE::systems::FormInstallOptions install_opts{};
+#if SVMP_FE_ENABLE_LLVM_JIT
+    // Enable LLVM JIT fast path when available. For nonlinear/coupled cases, we
+    // also prefer symbolic tangents because the JIT backend does not accelerate
+    // the dual-number (NonlinearFormKernel) path yet.
+    install_opts.compiler_options.jit.enable = true;
+    install_opts.compiler_options.use_symbolic_tangent = true;
+#endif
+
     // Register the same weak form on both operator tags used by FESystem.
     // The underlying kernel can produce either vector or matrix outputs
     // depending on the AssemblyRequest (and may auto-select an optimized
     // LinearFormKernel when the residual is affine in the TrialFunction).
-    FE::systems::installWeakForm(system, {"residual", "jacobian"}, u_id, u_id, weak_form);
+    FE::systems::installWeakForm(system, {"residual", "jacobian"}, u_id, u_id, weak_form, install_opts);
 }
 
 } // namespace poisson
