@@ -194,7 +194,7 @@ TEST(JITKernelArgsPacking, PacksMultiFieldSolutionTableV3AndChecksAlignment)
     EXPECT_EQ(reinterpret_cast<std::uintptr_t>(args3.side.jit_constants) % align, 0u);
 }
 
-TEST(JITKernelArgsPacking, PacksTimeIntegrationStencilsV4)
+TEST(JITKernelArgsPacking, PacksTimeIntegrationStencilsV5)
 {
     AssemblyContext ctx;
     ctx.reserve(/*max_dofs=*/8, /*max_qpts=*/8, /*dim=*/3);
@@ -224,34 +224,43 @@ TEST(JITKernelArgsPacking, PacksTimeIntegrationStencilsV4)
 
     ctx.setTimeIntegrationContext(&ti);
 
+    std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> hist_w = {Real(0.25), Real(0.125)};
+    ctx.setHistoryWeights(std::span<const Real>(hist_w.data(), hist_w.size()));
+
     KernelOutput out;
     out.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/true);
 
     jit::PackingChecks checks;
     checks.validate_alignment = true;
-    const auto args4 = jit::packCellKernelArgsV4(ctx, out, checks);
+    const auto args5 = jit::packCellKernelArgsV5(ctx, out, checks);
 
-    EXPECT_EQ(args4.abi_version, jit::kKernelArgsABIVersionV4);
-    EXPECT_EQ(args4.side.max_time_derivative_order, 3u);
+    EXPECT_EQ(args5.abi_version, jit::kKernelArgsABIVersionV5);
+    EXPECT_EQ(args5.side.max_time_derivative_order, 3u);
 
-    EXPECT_DOUBLE_EQ(args4.side.time_derivative_term_weight, 0.5);
-    EXPECT_DOUBLE_EQ(args4.side.non_time_derivative_term_weight, 2.0);
+    EXPECT_DOUBLE_EQ(args5.side.time_derivative_term_weight, 0.5);
+    EXPECT_DOUBLE_EQ(args5.side.non_time_derivative_term_weight, 2.0);
 
-    EXPECT_DOUBLE_EQ(args4.side.dt_term_weights[0], 3.0);
-    EXPECT_DOUBLE_EQ(args4.side.dt_term_weights[1], 4.0);
-    EXPECT_DOUBLE_EQ(args4.side.dt_term_weights[2], 5.0);
+    EXPECT_DOUBLE_EQ(args5.side.dt_term_weights[0], 3.0);
+    EXPECT_DOUBLE_EQ(args5.side.dt_term_weights[1], 4.0);
+    EXPECT_DOUBLE_EQ(args5.side.dt_term_weights[2], 5.0);
 
-    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[0][0], 2.0);
-    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[0][1], -2.0);
+    EXPECT_DOUBLE_EQ(args5.side.dt_stencil_coeffs[0][0], 2.0);
+    EXPECT_DOUBLE_EQ(args5.side.dt_stencil_coeffs[0][1], -2.0);
 
-    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[1][0], 4.0);
-    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[1][1], -8.0);
-    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[1][2], 4.0);
+    EXPECT_DOUBLE_EQ(args5.side.dt_stencil_coeffs[1][0], 4.0);
+    EXPECT_DOUBLE_EQ(args5.side.dt_stencil_coeffs[1][1], -8.0);
+    EXPECT_DOUBLE_EQ(args5.side.dt_stencil_coeffs[1][2], 4.0);
 
-    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[2][0], 8.0);
-    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[2][1], -24.0);
-    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[2][2], 24.0);
-    EXPECT_DOUBLE_EQ(args4.side.dt_stencil_coeffs[2][3], -8.0);
+    EXPECT_DOUBLE_EQ(args5.side.dt_stencil_coeffs[2][0], 8.0);
+    EXPECT_DOUBLE_EQ(args5.side.dt_stencil_coeffs[2][1], -24.0);
+    EXPECT_DOUBLE_EQ(args5.side.dt_stencil_coeffs[2][2], 24.0);
+    EXPECT_DOUBLE_EQ(args5.side.dt_stencil_coeffs[2][3], -8.0);
+
+    EXPECT_EQ(args5.side.num_history_steps, 2u);
+    EXPECT_EQ(args5.side.history_weights, hist_w.data());
+    EXPECT_EQ(args5.side.history_solution_coefficients[0], ctx.previousSolutionCoefficientsRaw(/*k=*/1).data());
+    EXPECT_EQ(args5.side.history_solution_coefficients[1], ctx.previousSolutionCoefficientsRaw(/*k=*/2).data());
+    EXPECT_EQ(args5.side.history_solution_coefficients[2], ctx.previousSolutionCoefficientsRaw(/*k=*/3).data());
 }
 
 TEST(JITKernelArgsPacking, PacksMaterialStateAlignmentV3)

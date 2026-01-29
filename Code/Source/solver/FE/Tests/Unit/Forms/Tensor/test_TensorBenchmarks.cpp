@@ -28,11 +28,21 @@
 #include <memory>
 #include <vector>
 
-namespace svmp::FE::forms::tensor {
-
 #ifndef SVMP_FE_ENABLE_LLVM_JIT
 #define SVMP_FE_ENABLE_LLVM_JIT 0
 #endif
+
+#if SVMP_FE_ENABLE_LLVM_JIT
+#include "Forms/JIT/JITCompiler.h"
+#include "Forms/JIT/JITValidation.h"
+#include "Forms/JIT/LLVMGen.h"
+
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#endif
+
+namespace svmp::FE::forms::tensor {
 
 namespace {
 
@@ -189,14 +199,6 @@ TEST(TensorBenchmarks, DISABLED_InterpreterAssemblyThroughput)
 
 #if SVMP_FE_ENABLE_LLVM_JIT
 
-#include "Forms/JIT/JITCompiler.h"
-#include "Forms/JIT/JITValidation.h"
-#include "Forms/JIT/LLVMGen.h"
-
-#include <filesystem>
-#include <fstream>
-#include <sstream>
-
 namespace {
 
 [[nodiscard]] std::size_t countLLVMInstructionsText(std::string_view ir_text)
@@ -308,7 +310,10 @@ TEST(TensorBenchmarks, DISABLED_JITCompileTimeCacheHitAndLLVMIRSize)
         local.dump_directory = dump_dir.string();
 
         auto engine = forms::jit::JITEngine::create(local);
-        ASSERT_NE(engine, nullptr);
+        if (!engine) {
+            ADD_FAILURE() << "TensorBenchmarks: failed to create JITEngine";
+            return 0u;
+        }
         forms::jit::LLVMGen gen(local);
 
         std::vector<std::size_t> term_indices;
@@ -317,7 +322,10 @@ TEST(TensorBenchmarks, DISABLED_JITCompileTimeCacheHitAndLLVMIRSize)
                 term_indices.push_back(t);
             }
         }
-        ASSERT_FALSE(term_indices.empty());
+        if (term_indices.empty()) {
+            ADD_FAILURE() << "TensorBenchmarks: no Cell terms found in FormIR";
+            return 0u;
+        }
 
         std::uintptr_t addr = 0;
         const auto r = gen.compileAndAddKernel(*engine,
@@ -328,7 +336,10 @@ TEST(TensorBenchmarks, DISABLED_JITCompileTimeCacheHitAndLLVMIRSize)
                                                /*interface_marker=*/-1,
                                                std::string("tensor_bench_") + std::string(tag),
                                                addr);
-        ASSERT_TRUE(r.ok) << r.message;
+        if (!r.ok) {
+            ADD_FAILURE() << r.message;
+            return 0u;
+        }
 
         const fs::path ll = dump_dir / (std::string("tensor_bench_") + std::string(tag) + "_before.ll");
         const auto text = readFileToString(ll);
@@ -350,4 +361,3 @@ TEST(TensorBenchmarks, DISABLED_JITCompileTimeCacheHitAndLLVMIRSize)
 #endif // SVMP_FE_ENABLE_LLVM_JIT
 
 } // namespace svmp::FE::forms::tensor
-

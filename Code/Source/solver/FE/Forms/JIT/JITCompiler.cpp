@@ -258,7 +258,7 @@ struct KernelGroupPlan {
                                                   const JITCompileSpecialization* specialization) noexcept
 {
     std::uint64_t h = kFNVOffset;
-    hashMix(h, static_cast<std::uint64_t>(assembly::jit::kKernelArgsABIVersionV4));
+    hashMix(h, static_cast<std::uint64_t>(assembly::jit::kKernelArgsABIVersionV5));
     hashMix(h, static_cast<std::uint64_t>(ir.kind()));
     hashMix(h, static_cast<std::uint64_t>(group.key.domain));
     hashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(group.key.boundary_marker)));
@@ -449,6 +449,12 @@ struct JITCompiler::Impl {
         std::list<std::uint64_t>::iterator lru_it{};
     };
 
+#if SVMP_FE_ENABLE_LLVM_JIT
+    [[nodiscard]] JITCompileResult compileFormIR(const FormIR& ir,
+                                                 const ValidationOptions& validation,
+                                                 const JITCompileSpecialization* specialization);
+#endif
+
     JITOptions options{};
     std::unique_ptr<JITEngine> engine{};
 
@@ -576,36 +582,33 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
 }
 
 #if SVMP_FE_ENABLE_LLVM_JIT
-namespace {
-
-[[nodiscard]] JITCompileResult compileFormIRImpl(JITCompiler::Impl& impl,
-                                                 const FormIR& ir,
-                                                 const ValidationOptions& validation,
-                                                 const JITCompileSpecialization* specialization)
+JITCompileResult JITCompiler::Impl::compileFormIR(const FormIR& ir,
+                                                  const ValidationOptions& validation,
+                                                  const JITCompileSpecialization* specialization)
 {
     JITCompileResult out;
     out.ok = false;
     out.cacheable = true;
 
-    std::lock_guard<std::mutex> lock(impl.mutex);
+    std::lock_guard<std::mutex> lock(mutex);
 
-    if (!impl.engine || !impl.engine->available()) {
+    if (!engine || !engine->available()) {
         out.message = "JITCompiler: LLVM JIT engine is not available at runtime";
         out.cacheable = false;
         return out;
     }
 
-    const std::string target_triple = impl.engine->targetTriple();
-    const std::string data_layout = impl.engine->dataLayoutString();
-    const std::string cpu_name = impl.engine->cpuName();
-    const std::string cpu_features = impl.engine->cpuFeaturesString();
+    const std::string target_triple = engine->targetTriple();
+    const std::string data_layout = engine->dataLayoutString();
+    const std::string cpu_name = engine->cpuName();
+    const std::string cpu_features = engine->cpuFeaturesString();
     const std::string llvm_version = llvmVersionString();
 
     CompilationPlan plan;
     try {
         plan = buildPlan(ir,
                          validation,
-                         impl.options,
+                         options,
                          target_triple,
                          data_layout,
                          cpu_name,
@@ -634,25 +637,25 @@ namespace {
     std::uint64_t local_stores = 0;
     std::uint64_t local_evictions = 0;
 
-    const auto touch = [&](JITCompiler::Impl::KernelCacheEntry& entry) {
-        impl.kernel_cache_lru.splice(impl.kernel_cache_lru.begin(),
-                                     impl.kernel_cache_lru,
+    const auto touch = [&](KernelCacheEntry& entry) {
+        kernel_cache_lru.splice(kernel_cache_lru.begin(),
+                                     kernel_cache_lru,
                                      entry.lru_it);
-        entry.lru_it = impl.kernel_cache_lru.begin();
+        entry.lru_it = kernel_cache_lru.begin();
     };
 
     const auto evict_if_needed = [&]() {
-        const std::size_t max_entries = impl.options.max_in_memory_kernels;
+        const std::size_t max_entries = options.max_in_memory_kernels;
         if (max_entries == 0u) {
             return;
         }
 
-        while (impl.kernel_cache.size() > max_entries) {
-            const std::uint64_t victim = impl.kernel_cache_lru.back();
-            impl.kernel_cache_lru.pop_back();
-            impl.kernel_cache.erase(victim);
+        while (kernel_cache.size() > max_entries) {
+            const std::uint64_t victim = kernel_cache_lru.back();
+            kernel_cache_lru.pop_back();
+            kernel_cache.erase(victim);
             ++local_evictions;
-            impl.kernel_cache_stats.evictions += 1u;
+            kernel_cache_stats.evictions += 1u;
         }
     };
 
@@ -664,11 +667,11 @@ namespace {
         k.cache_key = group.cache_key;
         k.cacheable = group.cacheable;
 
-        const bool enable_cache = impl.options.cache_kernels && group.cacheable;
+        const bool enable_cache = options.cache_kernels && group.cacheable;
         if (enable_cache) {
-            if (auto it = impl.kernel_cache.find(group.cache_key); it != impl.kernel_cache.end()) {
+            if (auto it = kernel_cache.find(group.cache_key); it != kernel_cache.end()) {
                 ++local_hits;
-                impl.kernel_cache_stats.hits += 1u;
+                kernel_cache_stats.hits += 1u;
                 touch(it->second);
                 out.kernels.push_back(it->second.kernel);
                 continue;
@@ -676,19 +679,19 @@ namespace {
 
             std::uintptr_t addr = 0;
             const std::string stable_symbol = stableSymbolForKernel(group.cache_key);
-            if (impl.engine && impl.engine->tryLookup(stable_symbol, addr)) {
+            if (engine && engine->tryLookup(stable_symbol, addr)) {
                 k.symbol = stable_symbol;
                 k.address = addr;
 
-                impl.kernel_cache_lru.push_front(group.cache_key);
-                JITCompiler::Impl::KernelCacheEntry entry;
+                kernel_cache_lru.push_front(group.cache_key);
+                KernelCacheEntry entry;
                 entry.kernel = k;
-                entry.lru_it = impl.kernel_cache_lru.begin();
-                impl.kernel_cache.emplace(group.cache_key, std::move(entry));
+                entry.lru_it = kernel_cache_lru.begin();
+                kernel_cache.emplace(group.cache_key, std::move(entry));
                 ++local_symbol_hits;
                 ++local_stores;
-                impl.kernel_cache_stats.engine_symbol_hits += 1u;
-                impl.kernel_cache_stats.stores += 1u;
+                kernel_cache_stats.engine_symbol_hits += 1u;
+                kernel_cache_stats.stores += 1u;
                 evict_if_needed();
 
                 out.kernels.push_back(k);
@@ -696,25 +699,25 @@ namespace {
             }
 
             ++local_misses;
-            impl.kernel_cache_stats.misses += 1u;
+            kernel_cache_stats.misses += 1u;
         }
 
         std::string symbol = stableSymbolForKernel(group.cache_key);
         if (!enable_cache) {
-            const auto id = impl.unique_symbol_counter.fetch_add(1, std::memory_order_relaxed);
+            const auto id = unique_symbol_counter.fetch_add(1, std::memory_order_relaxed);
             symbol += "_inst" + std::to_string(id);
         }
 
         try {
             std::uintptr_t addr = 0;
-            LLVMGen gen(impl.options);
+            LLVMGen gen(options);
 
             const JITCompileSpecialization* group_spec = nullptr;
             if (specialization != nullptr && specialization->domain == group.key.domain) {
                 group_spec = specialization;
             }
 
-            const auto r = gen.compileAndAddKernel(*impl.engine,
+            const auto r = gen.compileAndAddKernel(*engine,
                                                    ir,
                                                    group.term_indices,
                                                    group.key.domain,
@@ -743,27 +746,27 @@ namespace {
 
         out.kernels.push_back(k);
         if (enable_cache) {
-            impl.kernel_cache_lru.push_front(group.cache_key);
-            JITCompiler::Impl::KernelCacheEntry entry;
+            kernel_cache_lru.push_front(group.cache_key);
+            KernelCacheEntry entry;
             entry.kernel = k;
-            entry.lru_it = impl.kernel_cache_lru.begin();
-            impl.kernel_cache.emplace(group.cache_key, std::move(entry));
+            entry.lru_it = kernel_cache_lru.begin();
+            kernel_cache.emplace(group.cache_key, std::move(entry));
             ++local_stores;
-            impl.kernel_cache_stats.stores += 1u;
+            kernel_cache_stats.stores += 1u;
             evict_if_needed();
         }
     }
 
-    if (impl.options.cache_diagnostics) {
+    if (options.cache_diagnostics) {
         std::ostringstream oss;
-        const auto object_stats = impl.engine ? impl.engine->objectCacheStats() : JITObjectCacheStats{};
+        const auto object_stats = engine ? engine->objectCacheStats() : JITObjectCacheStats{};
         oss << "JIT cache: groups=" << plan.groups.size()
             << ", hits=" << local_hits
             << ", symbol_hits=" << local_symbol_hits
             << ", misses=" << local_misses
             << ", stores=" << local_stores
             << ", evictions=" << local_evictions
-            << ", kernel_cache_size=" << impl.kernel_cache.size()
+            << ", kernel_cache_size=" << kernel_cache.size()
             << ", objcache_gets=" << object_stats.get_calls
             << ", objcache_mem_hits=" << object_stats.mem_hits
             << ", objcache_disk_hits=" << object_stats.disk_hits
@@ -774,8 +777,6 @@ namespace {
     out.ok = true;
     return out;
 }
-
-} // namespace
 #endif
 
 JITCompileResult JITCompiler::compile(const FormIR& ir, const ValidationOptions& validation)
@@ -796,7 +797,7 @@ JITCompileResult JITCompiler::compile(const FormIR& ir, const ValidationOptions&
 	    out.cacheable = false;
 	    return out;
 #else
-	    return compileFormIRImpl(*impl_, ir, validation, /*specialization=*/nullptr);
+	    return impl_->compileFormIR(ir, validation, /*specialization=*/nullptr);
 #endif
 }
 
@@ -821,7 +822,7 @@ JITCompileResult JITCompiler::compileSpecialized(const FormIR& ir,
     out.cacheable = false;
     return out;
 #else
-    return compileFormIRImpl(*impl_, ir, validation, &specialization);
+    return impl_->compileFormIR(ir, validation, &specialization);
 #endif
 }
 

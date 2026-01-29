@@ -137,117 +137,124 @@ constexpr std::uint32_t kMaxTensor3Dim = 3u;
 constexpr std::uint32_t kMaxTensor4Dim = 3u;
 
 struct ABIV3 {
-    static constexpr std::size_t cell_side_off = offsetof(assembly::jit::CellKernelArgsV4, side);
-    static constexpr std::size_t cell_out_off = offsetof(assembly::jit::CellKernelArgsV4, output);
+    static constexpr std::size_t cell_side_off = offsetof(assembly::jit::CellKernelArgsV5, side);
+    static constexpr std::size_t cell_out_off = offsetof(assembly::jit::CellKernelArgsV5, output);
 
-    static constexpr std::size_t bdry_side_off = offsetof(assembly::jit::BoundaryFaceKernelArgsV4, side);
-    static constexpr std::size_t bdry_out_off = offsetof(assembly::jit::BoundaryFaceKernelArgsV4, output);
+    static constexpr std::size_t bdry_side_off = offsetof(assembly::jit::BoundaryFaceKernelArgsV5, side);
+    static constexpr std::size_t bdry_out_off = offsetof(assembly::jit::BoundaryFaceKernelArgsV5, output);
 
-    static constexpr std::size_t face_minus_side_off = offsetof(assembly::jit::InteriorFaceKernelArgsV4, minus);
-    static constexpr std::size_t face_plus_side_off = offsetof(assembly::jit::InteriorFaceKernelArgsV4, plus);
+    static constexpr std::size_t face_minus_side_off = offsetof(assembly::jit::InteriorFaceKernelArgsV5, minus);
+    static constexpr std::size_t face_plus_side_off = offsetof(assembly::jit::InteriorFaceKernelArgsV5, plus);
 
-    static constexpr std::size_t face_out_minus_off = offsetof(assembly::jit::InteriorFaceKernelArgsV4, output_minus);
-    static constexpr std::size_t face_out_plus_off = offsetof(assembly::jit::InteriorFaceKernelArgsV4, output_plus);
+    static constexpr std::size_t face_out_minus_off = offsetof(assembly::jit::InteriorFaceKernelArgsV5, output_minus);
+    static constexpr std::size_t face_out_plus_off = offsetof(assembly::jit::InteriorFaceKernelArgsV5, output_plus);
     static constexpr std::size_t face_coupling_minus_plus_off =
-        offsetof(assembly::jit::InteriorFaceKernelArgsV4, coupling_minus_plus);
+        offsetof(assembly::jit::InteriorFaceKernelArgsV5, coupling_minus_plus);
     static constexpr std::size_t face_coupling_plus_minus_off =
-        offsetof(assembly::jit::InteriorFaceKernelArgsV4, coupling_plus_minus);
+        offsetof(assembly::jit::InteriorFaceKernelArgsV5, coupling_plus_minus);
 
-    static constexpr std::size_t side_dim_off = offsetof(assembly::jit::KernelSideArgsV4, dim);
-    static constexpr std::size_t side_n_qpts_off = offsetof(assembly::jit::KernelSideArgsV4, n_qpts);
-    static constexpr std::size_t side_n_test_dofs_off = offsetof(assembly::jit::KernelSideArgsV4, n_test_dofs);
-    static constexpr std::size_t side_n_trial_dofs_off = offsetof(assembly::jit::KernelSideArgsV4, n_trial_dofs);
+    static constexpr std::size_t side_dim_off = offsetof(assembly::jit::KernelSideArgsV5, dim);
+    static constexpr std::size_t side_n_qpts_off = offsetof(assembly::jit::KernelSideArgsV5, n_qpts);
+    static constexpr std::size_t side_n_test_dofs_off = offsetof(assembly::jit::KernelSideArgsV5, n_test_dofs);
+    static constexpr std::size_t side_n_trial_dofs_off = offsetof(assembly::jit::KernelSideArgsV5, n_trial_dofs);
 
-    static constexpr std::size_t side_test_field_type_off = offsetof(assembly::jit::KernelSideArgsV4, test_field_type);
-    static constexpr std::size_t side_trial_field_type_off = offsetof(assembly::jit::KernelSideArgsV4, trial_field_type);
-    static constexpr std::size_t side_test_value_dim_off = offsetof(assembly::jit::KernelSideArgsV4, test_value_dim);
-    static constexpr std::size_t side_trial_value_dim_off = offsetof(assembly::jit::KernelSideArgsV4, trial_value_dim);
+    static constexpr std::size_t side_test_field_type_off = offsetof(assembly::jit::KernelSideArgsV5, test_field_type);
+    static constexpr std::size_t side_trial_field_type_off = offsetof(assembly::jit::KernelSideArgsV5, trial_field_type);
+    static constexpr std::size_t side_test_value_dim_off = offsetof(assembly::jit::KernelSideArgsV5, test_value_dim);
+    static constexpr std::size_t side_trial_value_dim_off = offsetof(assembly::jit::KernelSideArgsV5, trial_value_dim);
     static constexpr std::size_t side_test_uses_vector_basis_off =
-        offsetof(assembly::jit::KernelSideArgsV4, test_uses_vector_basis);
+        offsetof(assembly::jit::KernelSideArgsV5, test_uses_vector_basis);
     static constexpr std::size_t side_trial_uses_vector_basis_off =
-        offsetof(assembly::jit::KernelSideArgsV4, trial_uses_vector_basis);
+        offsetof(assembly::jit::KernelSideArgsV5, trial_uses_vector_basis);
 
     static constexpr std::size_t side_integration_weights_off =
-        offsetof(assembly::jit::KernelSideArgsV4, integration_weights);
-    static constexpr std::size_t side_quad_points_xyz_off = offsetof(assembly::jit::KernelSideArgsV4, quad_points_xyz);
+        offsetof(assembly::jit::KernelSideArgsV5, integration_weights);
+    static constexpr std::size_t side_quad_points_xyz_off = offsetof(assembly::jit::KernelSideArgsV5, quad_points_xyz);
     static constexpr std::size_t side_physical_points_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV4, physical_points_xyz);
+        offsetof(assembly::jit::KernelSideArgsV5, physical_points_xyz);
 
-    static constexpr std::size_t side_jacobians_off = offsetof(assembly::jit::KernelSideArgsV4, jacobians);
-    static constexpr std::size_t side_inverse_jacobians_off = offsetof(assembly::jit::KernelSideArgsV4, inverse_jacobians);
-    static constexpr std::size_t side_jacobian_dets_off = offsetof(assembly::jit::KernelSideArgsV4, jacobian_dets);
-    static constexpr std::size_t side_normals_xyz_off = offsetof(assembly::jit::KernelSideArgsV4, normals_xyz);
+    static constexpr std::size_t side_jacobians_off = offsetof(assembly::jit::KernelSideArgsV5, jacobians);
+    static constexpr std::size_t side_inverse_jacobians_off = offsetof(assembly::jit::KernelSideArgsV5, inverse_jacobians);
+    static constexpr std::size_t side_jacobian_dets_off = offsetof(assembly::jit::KernelSideArgsV5, jacobian_dets);
+    static constexpr std::size_t side_normals_xyz_off = offsetof(assembly::jit::KernelSideArgsV5, normals_xyz);
 
-    static constexpr std::size_t side_test_basis_values_off = offsetof(assembly::jit::KernelSideArgsV4, test_basis_values);
+    static constexpr std::size_t side_test_basis_values_off = offsetof(assembly::jit::KernelSideArgsV5, test_basis_values);
     static constexpr std::size_t side_trial_basis_values_off =
-        offsetof(assembly::jit::KernelSideArgsV4, trial_basis_values);
+        offsetof(assembly::jit::KernelSideArgsV5, trial_basis_values);
     static constexpr std::size_t side_test_phys_grads_off =
-        offsetof(assembly::jit::KernelSideArgsV4, test_phys_gradients_xyz);
+        offsetof(assembly::jit::KernelSideArgsV5, test_phys_gradients_xyz);
     static constexpr std::size_t side_trial_phys_grads_off =
-        offsetof(assembly::jit::KernelSideArgsV4, trial_phys_gradients_xyz);
+        offsetof(assembly::jit::KernelSideArgsV5, trial_phys_gradients_xyz);
 
-    static constexpr std::size_t side_test_phys_hess_off = offsetof(assembly::jit::KernelSideArgsV4, test_phys_hessians);
+    static constexpr std::size_t side_test_phys_hess_off = offsetof(assembly::jit::KernelSideArgsV5, test_phys_hessians);
     static constexpr std::size_t side_trial_phys_hess_off =
-        offsetof(assembly::jit::KernelSideArgsV4, trial_phys_hessians);
+        offsetof(assembly::jit::KernelSideArgsV5, trial_phys_hessians);
 
     static constexpr std::size_t side_test_vector_basis_values_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV4, test_basis_vector_values_xyz);
+        offsetof(assembly::jit::KernelSideArgsV5, test_basis_vector_values_xyz);
     static constexpr std::size_t side_test_vector_basis_curls_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV4, test_basis_curls_xyz);
+        offsetof(assembly::jit::KernelSideArgsV5, test_basis_curls_xyz);
     static constexpr std::size_t side_test_vector_basis_divs_off =
-        offsetof(assembly::jit::KernelSideArgsV4, test_basis_divergences);
+        offsetof(assembly::jit::KernelSideArgsV5, test_basis_divergences);
 
     static constexpr std::size_t side_trial_vector_basis_values_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV4, trial_basis_vector_values_xyz);
+        offsetof(assembly::jit::KernelSideArgsV5, trial_basis_vector_values_xyz);
     static constexpr std::size_t side_trial_vector_basis_curls_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV4, trial_basis_curls_xyz);
+        offsetof(assembly::jit::KernelSideArgsV5, trial_basis_curls_xyz);
     static constexpr std::size_t side_trial_vector_basis_divs_off =
-        offsetof(assembly::jit::KernelSideArgsV4, trial_basis_divergences);
+        offsetof(assembly::jit::KernelSideArgsV5, trial_basis_divergences);
 
     static constexpr std::size_t side_solution_coefficients_off =
-        offsetof(assembly::jit::KernelSideArgsV4, solution_coefficients);
+        offsetof(assembly::jit::KernelSideArgsV5, solution_coefficients);
     static constexpr std::size_t side_num_previous_solutions_off =
-        offsetof(assembly::jit::KernelSideArgsV4, num_previous_solutions);
+        offsetof(assembly::jit::KernelSideArgsV5, num_previous_solutions);
     static constexpr std::size_t side_previous_solution_coefficients_off =
-        offsetof(assembly::jit::KernelSideArgsV4, previous_solution_coefficients);
+        offsetof(assembly::jit::KernelSideArgsV5, previous_solution_coefficients);
 
-    static constexpr std::size_t side_field_solutions_off = offsetof(assembly::jit::KernelSideArgsV4, field_solutions);
+    static constexpr std::size_t side_num_history_steps_off =
+        offsetof(assembly::jit::KernelSideArgsV5, num_history_steps);
+    static constexpr std::size_t side_history_weights_off =
+        offsetof(assembly::jit::KernelSideArgsV5, history_weights);
+    static constexpr std::size_t side_history_solution_coefficients_off =
+        offsetof(assembly::jit::KernelSideArgsV5, history_solution_coefficients);
+
+    static constexpr std::size_t side_field_solutions_off = offsetof(assembly::jit::KernelSideArgsV5, field_solutions);
     static constexpr std::size_t side_num_field_solutions_off =
-        offsetof(assembly::jit::KernelSideArgsV4, num_field_solutions);
+        offsetof(assembly::jit::KernelSideArgsV5, num_field_solutions);
 
-    static constexpr std::size_t side_jit_constants_off = offsetof(assembly::jit::KernelSideArgsV4, jit_constants);
-    static constexpr std::size_t side_coupled_integrals_off = offsetof(assembly::jit::KernelSideArgsV4, coupled_integrals);
-    static constexpr std::size_t side_coupled_aux_off = offsetof(assembly::jit::KernelSideArgsV4, coupled_aux);
+    static constexpr std::size_t side_jit_constants_off = offsetof(assembly::jit::KernelSideArgsV5, jit_constants);
+    static constexpr std::size_t side_coupled_integrals_off = offsetof(assembly::jit::KernelSideArgsV5, coupled_integrals);
+    static constexpr std::size_t side_coupled_aux_off = offsetof(assembly::jit::KernelSideArgsV5, coupled_aux);
 
-    static constexpr std::size_t side_time_off = offsetof(assembly::jit::KernelSideArgsV4, time);
-    static constexpr std::size_t side_dt_off = offsetof(assembly::jit::KernelSideArgsV4, dt);
-    static constexpr std::size_t side_cell_domain_id_off = offsetof(assembly::jit::KernelSideArgsV4, cell_domain_id);
-    static constexpr std::size_t side_cell_diameter_off = offsetof(assembly::jit::KernelSideArgsV4, cell_diameter);
-    static constexpr std::size_t side_cell_volume_off = offsetof(assembly::jit::KernelSideArgsV4, cell_volume);
-    static constexpr std::size_t side_facet_area_off = offsetof(assembly::jit::KernelSideArgsV4, facet_area);
+    static constexpr std::size_t side_time_off = offsetof(assembly::jit::KernelSideArgsV5, time);
+    static constexpr std::size_t side_dt_off = offsetof(assembly::jit::KernelSideArgsV5, dt);
+    static constexpr std::size_t side_cell_domain_id_off = offsetof(assembly::jit::KernelSideArgsV5, cell_domain_id);
+    static constexpr std::size_t side_cell_diameter_off = offsetof(assembly::jit::KernelSideArgsV5, cell_diameter);
+    static constexpr std::size_t side_cell_volume_off = offsetof(assembly::jit::KernelSideArgsV5, cell_volume);
+    static constexpr std::size_t side_facet_area_off = offsetof(assembly::jit::KernelSideArgsV5, facet_area);
 
     static constexpr std::size_t side_time_derivative_term_weight_off =
-        offsetof(assembly::jit::KernelSideArgsV4, time_derivative_term_weight);
+        offsetof(assembly::jit::KernelSideArgsV5, time_derivative_term_weight);
     static constexpr std::size_t side_non_time_derivative_term_weight_off =
-        offsetof(assembly::jit::KernelSideArgsV4, non_time_derivative_term_weight);
+        offsetof(assembly::jit::KernelSideArgsV5, non_time_derivative_term_weight);
     static constexpr std::size_t side_dt_stencil_coeffs_off =
-        offsetof(assembly::jit::KernelSideArgsV4, dt_stencil_coeffs);
+        offsetof(assembly::jit::KernelSideArgsV5, dt_stencil_coeffs);
     static constexpr std::size_t side_dt_term_weights_off =
-        offsetof(assembly::jit::KernelSideArgsV4, dt_term_weights);
+        offsetof(assembly::jit::KernelSideArgsV5, dt_term_weights);
     static constexpr std::size_t side_max_time_derivative_order_off =
-        offsetof(assembly::jit::KernelSideArgsV4, max_time_derivative_order);
+        offsetof(assembly::jit::KernelSideArgsV5, max_time_derivative_order);
 
     static constexpr std::size_t side_material_state_old_base_off =
-        offsetof(assembly::jit::KernelSideArgsV4, material_state_old_base);
+        offsetof(assembly::jit::KernelSideArgsV5, material_state_old_base);
     static constexpr std::size_t side_material_state_work_base_off =
-        offsetof(assembly::jit::KernelSideArgsV4, material_state_work_base);
+        offsetof(assembly::jit::KernelSideArgsV5, material_state_work_base);
     static constexpr std::size_t side_material_state_stride_bytes_off =
-        offsetof(assembly::jit::KernelSideArgsV4, material_state_stride_bytes);
+        offsetof(assembly::jit::KernelSideArgsV5, material_state_stride_bytes);
 
-    static constexpr std::size_t out_element_matrix_off = offsetof(assembly::jit::KernelOutputViewV4, element_matrix);
-    static constexpr std::size_t out_element_vector_off = offsetof(assembly::jit::KernelOutputViewV4, element_vector);
-    static constexpr std::size_t out_n_test_dofs_off = offsetof(assembly::jit::KernelOutputViewV4, n_test_dofs);
-    static constexpr std::size_t out_n_trial_dofs_off = offsetof(assembly::jit::KernelOutputViewV4, n_trial_dofs);
+    static constexpr std::size_t out_element_matrix_off = offsetof(assembly::jit::KernelOutputViewV5, element_matrix);
+    static constexpr std::size_t out_element_vector_off = offsetof(assembly::jit::KernelOutputViewV5, element_vector);
+    static constexpr std::size_t out_n_test_dofs_off = offsetof(assembly::jit::KernelOutputViewV5, n_test_dofs);
+    static constexpr std::size_t out_n_trial_dofs_off = offsetof(assembly::jit::KernelOutputViewV5, n_trial_dofs);
 
     static constexpr std::size_t field_entry_field_id_off = offsetof(assembly::jit::FieldSolutionEntryV1, field_id);
     static constexpr std::size_t field_entry_field_type_off = offsetof(assembly::jit::FieldSolutionEntryV1, field_type);
@@ -1280,9 +1287,9 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                 }
                 if (op.type == FormExprType::TimeDerivative) {
                     const int order = static_cast<int>(static_cast<std::int64_t>(op.imm0));
-                    if (order < 1 || order > static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV4)) {
+                    if (order < 1 || order > static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV5)) {
                         return LLVMGenResult{.ok = false, .message = "LLVMGen: dt(·,k) requires 1 <= k <= " +
-                                                                       std::to_string(assembly::jit::kMaxTimeDerivativeOrderV4)};
+                                                                       std::to_string(assembly::jit::kMaxTimeDerivativeOrderV5)};
                     }
                 }
             }
@@ -1804,6 +1811,10 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             llvm::Value* num_previous_solutions{nullptr};
             llvm::Value* previous_solution_coefficients_base{nullptr}; // i8*
 
+            llvm::Value* num_history_steps{nullptr};
+            llvm::Value* history_weights{nullptr};
+            llvm::Value* history_solution_coefficients_base{nullptr}; // i8*
+
             llvm::Value* field_solutions{nullptr};
             llvm::Value* num_field_solutions{nullptr};
 
@@ -1878,6 +1889,10 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             s.solution_coefficients = loadPtr(side_ptr, ABIV3::side_solution_coefficients_off);
             s.num_previous_solutions = loadU32(side_ptr, ABIV3::side_num_previous_solutions_off);
             s.previous_solution_coefficients_base = gepBytes(side_ptr, ABIV3::side_previous_solution_coefficients_off);
+
+            s.num_history_steps = loadU32(side_ptr, ABIV3::side_num_history_steps_off);
+            s.history_weights = loadPtr(side_ptr, ABIV3::side_history_weights_off);
+            s.history_solution_coefficients_base = gepBytes(side_ptr, ABIV3::side_history_solution_coefficients_off);
 
             s.field_solutions = loadPtr(side_ptr, ABIV3::side_field_solutions_off);
             s.num_field_solutions = loadU32(side_ptr, ABIV3::side_num_field_solutions_off);
@@ -2111,7 +2126,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
             if (time_derivative_order > 0) {
                 const int idx = time_derivative_order - 1;
-                if (idx >= 0 && idx < static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV4)) {
+                if (idx >= 0 && idx < static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV5)) {
                     auto* w = loadRealPtrAt(side.dt_term_weights_base, builder.getInt64(static_cast<std::uint64_t>(idx)));
                     return builder.CreateFMul(td, w);
                 }
@@ -2121,17 +2136,21 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             return non_td;
         };
 
-        auto* fabs_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::fabs, {f64});
-        auto* sqrt_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::sqrt, {f64});
-        auto* exp_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::exp, {f64});
-        auto* log_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::log, {f64});
-        auto* pow_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::pow, {f64});
+	        auto* fabs_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::fabs, {f64});
+	        auto* sqrt_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::sqrt, {f64});
+	        auto* exp_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::exp, {f64});
+	        auto* log_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::log, {f64});
+	        auto* pow_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::pow, {f64});
+	        auto* fmuladd_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::fmuladd, {f64});
 
-        auto f_fabs = [&](llvm::Value* v) -> llvm::Value* { return builder.CreateCall(fabs_fn, {v}); };
-        auto f_sqrt = [&](llvm::Value* v) -> llvm::Value* { return builder.CreateCall(sqrt_fn, {v}); };
-        auto f_exp = [&](llvm::Value* v) -> llvm::Value* { return builder.CreateCall(exp_fn, {v}); };
-        auto f_log = [&](llvm::Value* v) -> llvm::Value* { return builder.CreateCall(log_fn, {v}); };
-        auto f_pow = [&](llvm::Value* a, llvm::Value* b) -> llvm::Value* { return builder.CreateCall(pow_fn, {a, b}); };
+	        auto f_fabs = [&](llvm::Value* v) -> llvm::Value* { return builder.CreateCall(fabs_fn, {v}); };
+	        auto f_sqrt = [&](llvm::Value* v) -> llvm::Value* { return builder.CreateCall(sqrt_fn, {v}); };
+	        auto f_exp = [&](llvm::Value* v) -> llvm::Value* { return builder.CreateCall(exp_fn, {v}); };
+	        auto f_log = [&](llvm::Value* v) -> llvm::Value* { return builder.CreateCall(log_fn, {v}); };
+	        auto f_pow = [&](llvm::Value* a, llvm::Value* b) -> llvm::Value* { return builder.CreateCall(pow_fn, {a, b}); };
+	        auto f_fmuladd = [&](llvm::Value* a, llvm::Value* b, llvm::Value* c) -> llvm::Value* {
+	            return builder.CreateCall(fmuladd_fn, {a, b, c});
+	        };
 
         auto f_min = [&](llvm::Value* a, llvm::Value* b) -> llvm::Value* {
             // Match std::min semantics: (b < a) ? b : a
@@ -2149,17 +2168,115 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             std::array<llvm::Value*, 81> elems{};
         };
 
-        auto elemCount = [&](const Shape& s) -> std::size_t {
-            switch (s.kind) {
-                case Shape::Kind::Scalar: return 1u;
-                case Shape::Kind::Vector: return static_cast<std::size_t>(s.dims[0]);
-                case Shape::Kind::Matrix: return static_cast<std::size_t>(s.dims[0] * s.dims[1]);
-                case Shape::Kind::Tensor3: return static_cast<std::size_t>(s.dims[0] * s.dims[1] * s.dims[2]);
-                case Shape::Kind::Tensor4:
-                    return static_cast<std::size_t>(s.dims[0] * s.dims[1] * s.dims[2] * s.dims[3]);
-            }
-            return 1u;
-        };
+	        auto elemCount = [&](const Shape& s) -> std::size_t {
+	            switch (s.kind) {
+	                case Shape::Kind::Scalar: return 1u;
+	                case Shape::Kind::Vector: return static_cast<std::size_t>(s.dims[0]);
+	                case Shape::Kind::Matrix: return static_cast<std::size_t>(s.dims[0] * s.dims[1]);
+	                case Shape::Kind::Tensor3: return static_cast<std::size_t>(s.dims[0] * s.dims[1] * s.dims[2]);
+	                case Shape::Kind::Tensor4:
+	                    return static_cast<std::size_t>(s.dims[0] * s.dims[1] * s.dims[2] * s.dims[3]);
+	            }
+	            return 1u;
+	        };
+
+	        auto kernelIRUseCounts = [&](const KernelIR& kernel_ir) -> std::vector<std::uint32_t> {
+	            std::vector<std::uint32_t> counts(kernel_ir.ops.size(), 0u);
+	            for (std::size_t parent = 0; parent < kernel_ir.ops.size(); ++parent) {
+	                const auto& op = kernel_ir.ops[parent];
+	                for (std::size_t k = 0; k < static_cast<std::size_t>(op.child_count); ++k) {
+	                    const auto child = static_cast<std::size_t>(
+	                        kernel_ir.children[static_cast<std::size_t>(op.first_child) + k]);
+	                    if (child < counts.size()) {
+	                        counts[child] += 1u;
+	                    }
+	                }
+	            }
+	            return counts;
+	        };
+
+	        auto tryFuseMulAddScalar = [&](FormExprType parent_type,
+	                                      const LoweredTerm& term,
+	                                      const std::vector<std::uint32_t>& use_counts,
+	                                      const KernelIROp& op,
+	                                      const std::vector<CodeValue>& values) -> llvm::Value* {
+	            if (options_.optimization_level < 2) {
+	                return nullptr;
+	            }
+	            if (parent_type != FormExprType::Add && parent_type != FormExprType::Subtract) {
+	                return nullptr;
+	            }
+	            if (op.child_count != 2u) {
+	                return nullptr;
+	            }
+
+	            const auto lhs_idx = static_cast<std::size_t>(
+	                term.ir.children[static_cast<std::size_t>(op.first_child)]);
+	            const auto rhs_idx = static_cast<std::size_t>(
+	                term.ir.children[static_cast<std::size_t>(op.first_child) + 1u]);
+	            if (lhs_idx >= values.size() || rhs_idx >= values.size()) {
+	                return nullptr;
+	            }
+	            if (term.shapes[lhs_idx].kind != Shape::Kind::Scalar || term.shapes[rhs_idx].kind != Shape::Kind::Scalar) {
+	                return nullptr;
+	            }
+
+	            auto* lhs_val = values[lhs_idx].elems[0];
+	            auto* rhs_val = values[rhs_idx].elems[0];
+	            if (lhs_val == nullptr || rhs_val == nullptr) {
+	                return nullptr;
+	            }
+
+	            auto mulOperands = [&](std::size_t mul_idx) -> std::optional<std::pair<llvm::Value*, llvm::Value*>> {
+	                if (mul_idx >= term.ir.ops.size() || mul_idx >= use_counts.size()) {
+	                    return std::nullopt;
+	                }
+	                if (term.ir.ops[mul_idx].type != FormExprType::Multiply) {
+	                    return std::nullopt;
+	                }
+	                if (term.shapes[mul_idx].kind != Shape::Kind::Scalar) {
+	                    return std::nullopt;
+	                }
+	                if (use_counts[mul_idx] != 1u) {
+	                    return std::nullopt;
+	                }
+
+	                const auto& mop = term.ir.ops[mul_idx];
+	                if (mop.child_count != 2u) {
+	                    return std::nullopt;
+	                }
+	                const auto a_idx = static_cast<std::size_t>(
+	                    term.ir.children[static_cast<std::size_t>(mop.first_child)]);
+	                const auto b_idx = static_cast<std::size_t>(
+	                    term.ir.children[static_cast<std::size_t>(mop.first_child) + 1u]);
+	                if (a_idx >= values.size() || b_idx >= values.size()) {
+	                    return std::nullopt;
+	                }
+	                if (term.shapes[a_idx].kind != Shape::Kind::Scalar || term.shapes[b_idx].kind != Shape::Kind::Scalar) {
+	                    return std::nullopt;
+	                }
+	                auto* a = values[a_idx].elems[0];
+	                auto* b = values[b_idx].elems[0];
+	                if (a == nullptr || b == nullptr) {
+	                    return std::nullopt;
+	                }
+	                return std::pair{a, b};
+	            };
+
+	            if (const auto mo = mulOperands(lhs_idx)) {
+	                auto* c = (parent_type == FormExprType::Subtract) ? builder.CreateFNeg(rhs_val) : rhs_val;
+	                return f_fmuladd(mo->first, mo->second, c);
+	            }
+	            if (const auto mo = mulOperands(rhs_idx)) {
+	                if (parent_type == FormExprType::Add) {
+	                    return f_fmuladd(mo->first, mo->second, lhs_val);
+	                }
+	                auto* bneg = builder.CreateFNeg(mo->second);
+	                return f_fmuladd(mo->first, bneg, lhs_val);
+	            }
+
+	            return nullptr;
+	        };
 
         auto externalKindU32 = [&](const Shape& s) -> std::uint32_t {
             switch (s.kind) {
@@ -2798,10 +2915,10 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             return out;
         };
 
-        auto callMatrixPow = [&](const CodeValue& a,
-                                 llvm::Value* p,
-                                 llvm::FunctionCallee fn2x2,
-                                 llvm::FunctionCallee fn3x3) -> CodeValue {
+	        auto callMatrixPow = [&](const CodeValue& a,
+	                                 llvm::Value* p,
+	                                 llvm::FunctionCallee fn2x2,
+	                                 llvm::FunctionCallee fn3x3) -> CodeValue {
             if (a.shape.kind != Shape::Kind::Matrix || a.shape.dims[0] != a.shape.dims[1]) {
                 throw std::runtime_error("LLVMGen: matrix pow expects square matrix");
             }
@@ -2822,13 +2939,29 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             for (std::size_t i = 0; i < n * n; ++i) {
                 out.elems[i] = loadRealPtrAt(out_ptr, builder.getInt64(i));
             }
-            return out;
-        };
+	            return out;
+	        };
 
-        auto callMatrixUnaryDD = [&](const CodeValue& a,
-                                     const CodeValue& da,
-                                     llvm::FunctionCallee fn2x2,
-                                     llvm::FunctionCallee fn3x3) -> CodeValue {
+	        auto emitMatrixExp = [&](const CodeValue& a) -> CodeValue {
+	            return callMatrixUnary(a, mat_exp_2x2_fn, mat_exp_3x3_fn);
+	        };
+
+	        auto emitMatrixLog = [&](const CodeValue& a) -> CodeValue {
+	            return callMatrixUnary(a, mat_log_2x2_fn, mat_log_3x3_fn);
+	        };
+
+	        auto emitMatrixSqrt = [&](const CodeValue& a) -> CodeValue {
+	            return callMatrixUnary(a, mat_sqrt_2x2_fn, mat_sqrt_3x3_fn);
+	        };
+
+	        auto emitMatrixPow = [&](const CodeValue& a, llvm::Value* p) -> CodeValue {
+	            return callMatrixPow(a, p, mat_pow_2x2_fn, mat_pow_3x3_fn);
+	        };
+
+	        auto callMatrixUnaryDD = [&](const CodeValue& a,
+	                                     const CodeValue& da,
+	                                     llvm::FunctionCallee fn2x2,
+	                                     llvm::FunctionCallee fn3x3) -> CodeValue {
             if (a.shape.kind != Shape::Kind::Matrix || da.shape.kind != Shape::Kind::Matrix ||
                 a.shape.dims[0] != a.shape.dims[1] || da.shape.dims[0] != da.shape.dims[1] ||
                 a.shape.dims[0] != da.shape.dims[0]) {
@@ -3279,13 +3412,13 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
         };
 
         constexpr std::uint64_t kDtCoeffStride =
-            static_cast<std::uint64_t>(assembly::jit::kMaxPreviousSolutionsV4 + 1u);
+            static_cast<std::uint64_t>(assembly::jit::kMaxPreviousSolutionsV5 + 1u);
 
         auto loadDtCoeff = [&](const SideView& side, int order, int history_index) -> llvm::Value* {
-            if (order < 1 || order > static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV4)) {
+            if (order < 1 || order > static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV5)) {
                 return f64c(0.0);
             }
-            if (history_index < 0 || history_index > static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4)) {
+            if (history_index < 0 || history_index > static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5)) {
                 return f64c(0.0);
             }
             const std::uint64_t idx =
@@ -3309,6 +3442,14 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             const auto idx = static_cast<std::uint64_t>(static_cast<std::int64_t>(k - 1));
             auto* addr = builder.CreateGEP(builder.getInt8Ty(),
                                            side.previous_solution_coefficients_base,
+                                           builder.getInt64(idx * sizeof(void*)));
+            return builder.CreateLoad(i8_ptr, addr);
+        };
+
+        auto loadHistorySolutionCoeffsPtr = [&](const SideView& side, int k) -> llvm::Value* {
+            const auto idx = static_cast<std::uint64_t>(static_cast<std::int64_t>(k - 1));
+            auto* addr = builder.CreateGEP(builder.getInt8Ty(),
+                                           side.history_solution_coefficients_base,
                                            builder.getInt64(idx * sizeof(void*)));
             return builder.CreateLoad(i8_ptr, addr);
         };
@@ -3523,14 +3664,161 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                return out;
 	            }
 
-	            throw std::runtime_error("LLVMGen: PreviousSolutionRef unsupported shape");
-	        };
+		            throw std::runtime_error("LLVMGen: PreviousSolutionRef unsupported shape");
+		        };
 
-	        auto evalCurrentSolution = [&](const SideView& side,
-	                                       const Shape& out_shape,
-	                                       llvm::Value* q_index) -> CodeValue {
-	            auto* coeffs = side.solution_coefficients;
-	            auto* coeffs_null = builder.CreateICmpEQ(coeffs, llvm::ConstantPointerNull::get(i8_ptr));
+		        auto evalHistorySolution = [&](const SideView& side,
+		                                       const Shape& out_shape,
+		                                       int k,
+		                                       llvm::Value* q_index) -> CodeValue {
+		            auto* coeffs = loadHistorySolutionCoeffsPtr(side, k);
+		            auto* coeffs_null = builder.CreateICmpEQ(coeffs, llvm::ConstantPointerNull::get(i8_ptr));
+
+		            const std::string tag = "hist_u" + std::to_string(k);
+		            auto* ok = llvm::BasicBlock::Create(*ctx, tag + ".ok", fn);
+		            auto* zero = llvm::BasicBlock::Create(*ctx, tag + ".zero", fn);
+		            auto* merge = llvm::BasicBlock::Create(*ctx, tag + ".merge", fn);
+
+		            builder.CreateCondBr(coeffs_null, zero, ok);
+
+		            if (out_shape.kind == Shape::Kind::Scalar) {
+		                builder.SetInsertPoint(ok);
+		                auto* sum =
+		                    emitReduceSumScalar(side.n_trial_dofs, tag + ".sum", [&](llvm::Value* j) -> llvm::Value* {
+		                        auto* j64 = builder.CreateZExt(j, i64);
+		                        auto* cj = loadRealPtrAt(coeffs, j64);
+		                        auto* phi = loadBasisScalar(side, side.trial_basis_values, j, q_index);
+		                        return builder.CreateFMul(cj, phi);
+		                    });
+		                builder.CreateBr(merge);
+		                auto* ok_block = builder.GetInsertBlock();
+
+		                builder.SetInsertPoint(zero);
+		                builder.CreateBr(merge);
+		                auto* zero_block = builder.GetInsertBlock();
+
+		                builder.SetInsertPoint(merge);
+		                auto* phi = builder.CreatePHI(f64, 2, tag + ".val");
+		                phi->addIncoming(f64c(0.0), zero_block);
+		                phi->addIncoming(sum, ok_block);
+		                return makeScalar(phi);
+		            }
+
+		            if (out_shape.kind == Shape::Kind::Vector) {
+		                const auto vd = static_cast<std::size_t>(out_shape.dims[0]);
+		                CodeValue out = makeZero(out_shape);
+
+		                builder.SetInsertPoint(ok);
+		                auto* uses_vec_basis =
+		                    builder.CreateICmpNE(side.trial_uses_vector_basis, builder.getInt32(0));
+		                auto* vb = llvm::BasicBlock::Create(*ctx, tag + ".vb", fn);
+		                auto* sb = llvm::BasicBlock::Create(*ctx, tag + ".sb", fn);
+		                auto* ok_merge = llvm::BasicBlock::Create(*ctx, tag + ".ok.merge", fn);
+		                builder.CreateCondBr(uses_vec_basis, vb, sb);
+
+		                builder.SetInsertPoint(vb);
+		                auto vb_sums = emitReduceSum(side.n_trial_dofs, tag + ".vb.sum", vd, [&](llvm::Value* j) {
+		                    auto* j64 = builder.CreateZExt(j, i64);
+		                    auto* cj = loadRealPtrAt(coeffs, j64);
+		                    const auto phi =
+		                        loadVec3FromTable(side.trial_basis_vector_values_xyz, side.n_qpts, j, q_index);
+		                    std::vector<llvm::Value*> terms;
+		                    terms.reserve(vd);
+		                    for (std::size_t c = 0; c < vd; ++c) {
+		                        terms.push_back(builder.CreateFMul(cj, phi[c]));
+		                    }
+		                    return terms;
+		                });
+		                builder.CreateBr(ok_merge);
+		                auto* vb_block = builder.GetInsertBlock();
+
+		                builder.SetInsertPoint(sb);
+		                std::vector<llvm::Value*> sb_sums;
+		                sb_sums.reserve(vd);
+		                auto* dofs_per_comp =
+		                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+		                for (std::size_t comp = 0; comp < vd; ++comp) {
+		                    auto* sum = emitReduceSumScalar(
+		                        dofs_per_comp,
+		                        tag + ".sb.sum_c" + std::to_string(comp),
+		                        [&](llvm::Value* jj) -> llvm::Value* {
+		                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)),
+		                                                           dofs_per_comp);
+		                            auto* j = builder.CreateAdd(base, jj);
+		                            auto* j64 = builder.CreateZExt(j, i64);
+		                            auto* cj = loadRealPtrAt(coeffs, j64);
+		                            auto* phi = loadBasisScalar(side, side.trial_basis_values, j, q_index);
+		                            return builder.CreateFMul(cj, phi);
+		                        });
+		                    sb_sums.push_back(sum);
+		                }
+		                builder.CreateBr(ok_merge);
+		                auto* sb_block = builder.GetInsertBlock();
+
+		                builder.SetInsertPoint(ok_merge);
+		                std::vector<llvm::Value*> ok_vals;
+		                ok_vals.reserve(vd);
+		                for (std::size_t c = 0; c < vd; ++c) {
+		                    auto* phi = builder.CreatePHI(f64, 2, tag + ".ok.phi" + std::to_string(c));
+		                    phi->addIncoming(vb_sums[c], vb_block);
+		                    phi->addIncoming(sb_sums[c], sb_block);
+		                    ok_vals.push_back(phi);
+		                }
+		                builder.CreateBr(merge);
+		                auto* ok_block = builder.GetInsertBlock();
+
+		                builder.SetInsertPoint(zero);
+		                builder.CreateBr(merge);
+		                auto* zero_block = builder.GetInsertBlock();
+
+		                builder.SetInsertPoint(merge);
+		                for (std::size_t c = 0; c < vd; ++c) {
+		                    auto* phi = builder.CreatePHI(f64, 2, tag + ".phi" + std::to_string(c));
+		                    phi->addIncoming(f64c(0.0), zero_block);
+		                    phi->addIncoming(ok_vals[c], ok_block);
+		                    out.elems[c] = phi;
+		                }
+		                return out;
+		            }
+
+		            throw std::runtime_error("LLVMGen: history solution unsupported shape");
+		        };
+
+		        auto loadHistoryWeightOrZero = [&](const SideView& side, int k) -> llvm::Value* {
+		            auto* weights = side.history_weights;
+		            auto* weights_null = builder.CreateICmpEQ(weights, llvm::ConstantPointerNull::get(i8_ptr));
+		            auto* have_k = builder.CreateICmpUGE(side.num_history_steps,
+		                                                 builder.getInt32(static_cast<std::uint32_t>(k)));
+		            auto* cond = builder.CreateAnd(builder.CreateNot(weights_null), have_k);
+
+		            const std::string tag = "hist_w" + std::to_string(k);
+		            auto* ok = llvm::BasicBlock::Create(*ctx, tag + ".ok", fn);
+		            auto* zero = llvm::BasicBlock::Create(*ctx, tag + ".zero", fn);
+		            auto* merge = llvm::BasicBlock::Create(*ctx, tag + ".merge", fn);
+
+		            builder.CreateCondBr(cond, ok, zero);
+
+		            builder.SetInsertPoint(ok);
+		            auto* w = loadRealPtrAt(weights, builder.getInt64(static_cast<std::uint64_t>(k - 1)));
+		            builder.CreateBr(merge);
+		            auto* ok_block = builder.GetInsertBlock();
+
+		            builder.SetInsertPoint(zero);
+		            builder.CreateBr(merge);
+		            auto* zero_block = builder.GetInsertBlock();
+
+		            builder.SetInsertPoint(merge);
+		            auto* phi = builder.CreatePHI(f64, 2, tag + ".val");
+		            phi->addIncoming(f64c(0.0), zero_block);
+		            phi->addIncoming(w, ok_block);
+		            return phi;
+		        };
+
+		        auto evalCurrentSolution = [&](const SideView& side,
+		                                       const Shape& out_shape,
+		                                       llvm::Value* q_index) -> CodeValue {
+		            auto* coeffs = side.solution_coefficients;
+		            auto* coeffs_null = builder.CreateICmpEQ(coeffs, llvm::ConstantPointerNull::get(i8_ptr));
 
 	            constexpr std::string_view tag = "u";
 	            auto* ok = llvm::BasicBlock::Create(*ctx, std::string(tag) + ".ok", fn);
@@ -3805,15 +4093,16 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             throw std::runtime_error("LLVMGen: DiscreteField/StateField history unsupported shape");
         };
 
-        auto evalKernelIRSingleValue = [&](const LoweredTerm& term,
-                                           llvm::Value* q_index,
-                                           llvm::Value* i_index,
-                                           llvm::Value* j_index,
-                                           const SideView& side,
-                                           const std::vector<llvm::Value*>* indexed_env,
-                                           const std::vector<CodeValue>* cached) -> CodeValue {
-            std::vector<CodeValue> values;
-            values.resize(term.ir.ops.size());
+	        auto evalKernelIRSingleValue = [&](const LoweredTerm& term,
+	                                           llvm::Value* q_index,
+	                                           llvm::Value* i_index,
+	                                           llvm::Value* j_index,
+	                                           const SideView& side,
+	                                           const std::vector<llvm::Value*>* indexed_env,
+	                                           const std::vector<CodeValue>* cached) -> CodeValue {
+	            std::vector<CodeValue> values;
+	            values.resize(term.ir.ops.size());
+	            const auto use_counts = kernelIRUseCounts(term.ir);
 
             auto getChild = [&](const KernelIROp& op, std::size_t k) -> const CodeValue& {
                 const auto c = term.ir.children[static_cast<std::size_t>(op.first_child) + k];
@@ -5305,13 +5594,13 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
                             if (kid.type == FormExprType::StateField && fid == 0xffff) {
-                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
                                     acc = add(acc,
                                               mul(makeScalar(loadDtCoeff(side, order, k)),
                                                   evalPreviousSolution(side, shape, k, q_index)));
                                 }
                             } else {
-                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
                                     acc = add(acc,
                                               mul(makeScalar(loadDtCoeff(side, order, k)),
                                                   evalDiscreteOrStateFieldHistoryK(side, /*plus_side=*/false, shape, fid, k, q_index)));
@@ -5341,13 +5630,27 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values[op_idx] = neg(getChild(op, 0));
                         break;
 
-                    case FormExprType::Add:
-                        values[op_idx] = add(getChild(op, 0), getChild(op, 1));
-                        break;
+	                    case FormExprType::Add: {
+	                        if (shape.kind == Shape::Kind::Scalar) {
+	                            if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values)) {
+	                                values[op_idx] = makeScalar(fused);
+	                                break;
+	                            }
+	                        }
+	                        values[op_idx] = add(getChild(op, 0), getChild(op, 1));
+	                        break;
+	                    }
 
-                    case FormExprType::Subtract:
-                        values[op_idx] = sub(getChild(op, 0), getChild(op, 1));
-                        break;
+	                    case FormExprType::Subtract: {
+	                        if (shape.kind == Shape::Kind::Scalar) {
+	                            if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values)) {
+	                                values[op_idx] = makeScalar(fused);
+	                                break;
+	                            }
+	                        }
+	                        values[op_idx] = sub(getChild(op, 0), getChild(op, 1));
+	                        break;
+	                    }
 
                     case FormExprType::Multiply:
                         values[op_idx] = mul(getChild(op, 0), getChild(op, 1));
@@ -5592,38 +5895,22 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values[op_idx] = evalLog(getChild(op, 0));
                         break;
 
-                    case FormExprType::MatrixExponential:
-                        values[op_idx] = callMatrixUnary(getChild(op, 0), mat_exp_2x2_fn, mat_exp_3x3_fn);
-                        break;
+	                    case FormExprType::MatrixExponential:
+	                        values[op_idx] = emitMatrixExp(getChild(op, 0));
+	                        break;
 
-                    case FormExprType::MatrixLogarithm:
-                        values[op_idx] = callMatrixUnary(getChild(op, 0), mat_log_2x2_fn, mat_log_3x3_fn);
-                        break;
+	                    case FormExprType::MatrixLogarithm:
+	                        values[op_idx] = emitMatrixLog(getChild(op, 0));
+	                        break;
 
-                    case FormExprType::MatrixSqrt:
-                        values[op_idx] = callMatrixUnary(getChild(op, 0), mat_sqrt_2x2_fn, mat_sqrt_3x3_fn);
-                        break;
+	                    case FormExprType::MatrixSqrt:
+	                        values[op_idx] = emitMatrixSqrt(getChild(op, 0));
+	                        break;
 
-                    case FormExprType::MatrixPower:
-                        values[op_idx] =
-                            callMatrixPow(getChild(op, 0), getChild(op, 1).elems[0], mat_pow_2x2_fn, mat_pow_3x3_fn);
-                        break;
-
-                    case FormExprType::MatrixExponentialDirectionalDerivative:
-                        values[op_idx] = callMatrixUnaryDD(getChild(op, 0), getChild(op, 1), mat_exp_dd_2x2_fn, mat_exp_dd_3x3_fn);
-                        break;
-
-                    case FormExprType::MatrixLogarithmDirectionalDerivative:
-                        values[op_idx] = callMatrixUnaryDD(getChild(op, 0), getChild(op, 1), mat_log_dd_2x2_fn, mat_log_dd_3x3_fn);
-                        break;
-
-                    case FormExprType::MatrixSqrtDirectionalDerivative:
-                        values[op_idx] = callMatrixUnaryDD(getChild(op, 0), getChild(op, 1), mat_sqrt_dd_2x2_fn, mat_sqrt_dd_3x3_fn);
-                        break;
-
-                    case FormExprType::MatrixPowerDirectionalDerivative:
-                        values[op_idx] = callMatrixPowDD(getChild(op, 0), getChild(op, 1), getChild(op, 2).elems[0], mat_pow_dd_2x2_fn, mat_pow_dd_3x3_fn);
-                        break;
+	                    case FormExprType::MatrixPower:
+	                        values[op_idx] =
+	                            emitMatrixPow(getChild(op, 0), getChild(op, 1).elems[0]);
+	                        break;
 
                     case FormExprType::MatrixExponentialDirectionalDerivative:
                         values[op_idx] = callMatrixUnaryDD(getChild(op, 0), getChild(op, 1), mat_exp_dd_2x2_fn, mat_exp_dd_3x3_fn);
@@ -5697,23 +5984,20 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values[op_idx] = spectralDecompDD(getChild(op, 0), getChild(op, 1));
                         break;
 
-                    case FormExprType::SymmetricEigenvectorDirectionalDerivative: {
-                        const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));
-                        const auto which = static_cast<std::uint32_t>(std::max<std::int32_t>(0, which_i32));
-                        values[op_idx] = eigSymVecDD(getChild(op, 0), getChild(op, 1), which);
-                        break;
-                    }
-
-                    case FormExprType::SpectralDecompositionDirectionalDerivative:
-                        values[op_idx] = spectralDecompDD(getChild(op, 0), getChild(op, 1));
-                        break;
-
                     case FormExprType::HistoryWeightedSum:
                     case FormExprType::HistoryConvolution: {
                         CodeValue acc = makeZero(shape);
-                        for (std::size_t kk = 0; kk < static_cast<std::size_t>(op.child_count); ++kk) {
-                            const int k = static_cast<int>(kk + 1u);
-                            acc = add(acc, mul(getChild(op, kk), evalPreviousSolution(side, shape, k, q_index)));
+                        if (op.child_count != 0u) {
+                            for (std::size_t kk = 0; kk < static_cast<std::size_t>(op.child_count); ++kk) {
+                                const int k = static_cast<int>(kk + 1u);
+                                acc = add(acc, mul(getChild(op, kk), evalHistorySolution(side, shape, k, q_index)));
+                            }
+                        } else {
+                            for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+                                acc = add(acc,
+                                          mul(makeScalar(loadHistoryWeightOrZero(side, k)),
+                                              evalHistorySolution(side, shape, k, q_index)));
+                            }
                         }
                         values[op_idx] = acc;
                         break;
@@ -6000,13 +6284,14 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             return emitSum(emitSum, 0u);
         };
 
-        auto computeCachedSingle = [&](const LoweredTerm& term,
-                                       llvm::Value* q_index,
-                                       const SideView& side) -> std::vector<CodeValue> {
-            std::vector<CodeValue> cached;
-            cached.resize(term.ir.ops.size());
-            std::vector<CodeValue> values;
-            values.resize(term.ir.ops.size());
+	        auto computeCachedSingle = [&](const LoweredTerm& term,
+	                                       llvm::Value* q_index,
+	                                       const SideView& side) -> std::vector<CodeValue> {
+	            std::vector<CodeValue> cached;
+	            cached.resize(term.ir.ops.size());
+	            std::vector<CodeValue> values;
+	            values.resize(term.ir.ops.size());
+	            const auto use_counts = kernelIRUseCounts(term.ir);
 
             auto getChild = [&](const KernelIROp& op, std::size_t k) -> const CodeValue& {
                 const auto c = term.ir.children[static_cast<std::size_t>(op.first_child) + k];
@@ -6549,13 +6834,13 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
                             if (kid.type == FormExprType::StateField && fid == 0xffff) {
-                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
                                     acc = add(acc,
                                               mul(makeScalar(loadDtCoeff(side, order, k)),
                                                   evalPreviousSolution(side, shape, k, q_index)));
                                 }
                             } else {
-                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
                                     acc = add(acc,
                                               mul(makeScalar(loadDtCoeff(side, order, k)),
                                                   evalDiscreteOrStateFieldHistoryK(side, /*plus_side=*/false, shape, fid, k, q_index)));
@@ -6581,12 +6866,26 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                     case FormExprType::Negate:
                         values[op_idx] = neg(getChild(op, 0));
                         break;
-                    case FormExprType::Add:
-                        values[op_idx] = add(getChild(op, 0), getChild(op, 1));
-                        break;
-                    case FormExprType::Subtract:
-                        values[op_idx] = sub(getChild(op, 0), getChild(op, 1));
-                        break;
+	                    case FormExprType::Add: {
+	                        if (shape.kind == Shape::Kind::Scalar) {
+	                            if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values)) {
+	                                values[op_idx] = makeScalar(fused);
+	                                break;
+	                            }
+	                        }
+	                        values[op_idx] = add(getChild(op, 0), getChild(op, 1));
+	                        break;
+	                    }
+	                    case FormExprType::Subtract: {
+	                        if (shape.kind == Shape::Kind::Scalar) {
+	                            if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values)) {
+	                                values[op_idx] = makeScalar(fused);
+	                                break;
+	                            }
+	                        }
+	                        values[op_idx] = sub(getChild(op, 0), getChild(op, 1));
+	                        break;
+	                    }
                     case FormExprType::Multiply:
                         values[op_idx] = mul(getChild(op, 0), getChild(op, 1));
                         break;
@@ -6717,22 +7016,22 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values[op_idx] = evalLog(getChild(op, 0));
                         break;
 
-                    case FormExprType::MatrixExponential:
-                        values[op_idx] = callMatrixUnary(getChild(op, 0), mat_exp_2x2_fn, mat_exp_3x3_fn);
-                        break;
+	                    case FormExprType::MatrixExponential:
+	                        values[op_idx] = emitMatrixExp(getChild(op, 0));
+	                        break;
 
-                    case FormExprType::MatrixLogarithm:
-                        values[op_idx] = callMatrixUnary(getChild(op, 0), mat_log_2x2_fn, mat_log_3x3_fn);
-                        break;
+	                    case FormExprType::MatrixLogarithm:
+	                        values[op_idx] = emitMatrixLog(getChild(op, 0));
+	                        break;
 
-                    case FormExprType::MatrixSqrt:
-                        values[op_idx] = callMatrixUnary(getChild(op, 0), mat_sqrt_2x2_fn, mat_sqrt_3x3_fn);
-                        break;
+	                    case FormExprType::MatrixSqrt:
+	                        values[op_idx] = emitMatrixSqrt(getChild(op, 0));
+	                        break;
 
-                    case FormExprType::MatrixPower:
-                        values[op_idx] =
-                            callMatrixPow(getChild(op, 0), getChild(op, 1).elems[0], mat_pow_2x2_fn, mat_pow_3x3_fn);
-                        break;
+	                    case FormExprType::MatrixPower:
+	                        values[op_idx] =
+	                            emitMatrixPow(getChild(op, 0), getChild(op, 1).elems[0]);
+	                        break;
 
                     case FormExprType::SmoothAbsoluteValue:
                         values[op_idx] = smoothAbs(getChild(op, 0), getChild(op, 1));
@@ -6782,9 +7081,17 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                     case FormExprType::HistoryWeightedSum:
                     case FormExprType::HistoryConvolution: {
                         CodeValue acc = makeZero(shape);
-                        for (std::size_t kk = 0; kk < static_cast<std::size_t>(op.child_count); ++kk) {
-                            const int k = static_cast<int>(kk + 1u);
-                            acc = add(acc, mul(getChild(op, kk), evalPreviousSolution(side, shape, k, q_index)));
+                        if (op.child_count != 0u) {
+                            for (std::size_t kk = 0; kk < static_cast<std::size_t>(op.child_count); ++kk) {
+                                const int k = static_cast<int>(kk + 1u);
+                                acc = add(acc, mul(getChild(op, kk), evalHistorySolution(side, shape, k, q_index)));
+                            }
+                        } else {
+                            for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+                                acc = add(acc,
+                                          mul(makeScalar(loadHistoryWeightOrZero(side, k)),
+                                              evalHistorySolution(side, shape, k, q_index)));
+                            }
                         }
                         values[op_idx] = acc;
                         break;
@@ -6818,16 +7125,17 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             std::vector<CodeValue> plus;
         };
 
-        auto computeCachedFace = [&](const LoweredTerm& term,
-                                     llvm::Value* q_index) -> FaceCached {
-            FaceCached cached;
-            cached.minus.resize(term.ir.ops.size());
-            cached.plus.resize(term.ir.ops.size());
+	        auto computeCachedFace = [&](const LoweredTerm& term,
+	                                     llvm::Value* q_index) -> FaceCached {
+	            FaceCached cached;
+	            cached.minus.resize(term.ir.ops.size());
+	            cached.plus.resize(term.ir.ops.size());
 
-            std::vector<CodeValue> values_minus;
-            std::vector<CodeValue> values_plus;
-            values_minus.resize(term.ir.ops.size());
-            values_plus.resize(term.ir.ops.size());
+	            std::vector<CodeValue> values_minus;
+	            std::vector<CodeValue> values_plus;
+	            values_minus.resize(term.ir.ops.size());
+	            values_plus.resize(term.ir.ops.size());
+	            const auto use_counts = kernelIRUseCounts(term.ir);
 
             auto childIndex = [&](const KernelIROp& op, std::size_t k) -> std::size_t {
                 return static_cast<std::size_t>(
@@ -7457,7 +7765,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
                             if (kid.type == FormExprType::StateField && fid == 0xffff) {
-                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
                                     acc_minus = add(acc_minus,
                                                     mul(makeScalar(loadDtCoeff(side_minus, order, k)),
                                                         evalPreviousSolution(side_minus, shape, k, q_index)));
@@ -7466,7 +7774,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                                        evalPreviousSolution(side_plus, shape, k, q_index)));
                                 }
                             } else {
-                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
                                     acc_minus = add(acc_minus,
                                                     mul(makeScalar(loadDtCoeff(side_minus, order, k)),
                                                         evalDiscreteOrStateFieldHistoryK(side_minus, /*plus_side=*/false, shape, fid, k, q_index)));
@@ -7539,15 +7847,43 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values_plus[op_idx] = neg(childPlus(op, 0));
                         break;
 
-                    case FormExprType::Add:
-                        values_minus[op_idx] = add(childMinus(op, 0), childMinus(op, 1));
-                        values_plus[op_idx] = add(childPlus(op, 0), childPlus(op, 1));
-                        break;
+	                    case FormExprType::Add: {
+	                        if (shape.kind == Shape::Kind::Scalar) {
+	                            if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values_minus)) {
+	                                values_minus[op_idx] = makeScalar(fused);
+	                            } else {
+	                                values_minus[op_idx] = add(childMinus(op, 0), childMinus(op, 1));
+	                            }
+	                            if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values_plus)) {
+	                                values_plus[op_idx] = makeScalar(fused);
+	                            } else {
+	                                values_plus[op_idx] = add(childPlus(op, 0), childPlus(op, 1));
+	                            }
+	                            break;
+	                        }
+	                        values_minus[op_idx] = add(childMinus(op, 0), childMinus(op, 1));
+	                        values_plus[op_idx] = add(childPlus(op, 0), childPlus(op, 1));
+	                        break;
+	                    }
 
-                    case FormExprType::Subtract:
-                        values_minus[op_idx] = sub(childMinus(op, 0), childMinus(op, 1));
-                        values_plus[op_idx] = sub(childPlus(op, 0), childPlus(op, 1));
-                        break;
+	                    case FormExprType::Subtract: {
+	                        if (shape.kind == Shape::Kind::Scalar) {
+	                            if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values_minus)) {
+	                                values_minus[op_idx] = makeScalar(fused);
+	                            } else {
+	                                values_minus[op_idx] = sub(childMinus(op, 0), childMinus(op, 1));
+	                            }
+	                            if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values_plus)) {
+	                                values_plus[op_idx] = makeScalar(fused);
+	                            } else {
+	                                values_plus[op_idx] = sub(childPlus(op, 0), childPlus(op, 1));
+	                            }
+	                            break;
+	                        }
+	                        values_minus[op_idx] = sub(childMinus(op, 0), childMinus(op, 1));
+	                        values_plus[op_idx] = sub(childPlus(op, 0), childPlus(op, 1));
+	                        break;
+	                    }
 
                     case FormExprType::Multiply:
                         values_minus[op_idx] = mul(childMinus(op, 0), childMinus(op, 1));
@@ -7742,25 +8078,25 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values_plus[op_idx] = evalLog(childPlus(op, 0));
                         break;
 
-                    case FormExprType::MatrixExponential:
-                        values_minus[op_idx] = callMatrixUnary(childMinus(op, 0), mat_exp_2x2_fn, mat_exp_3x3_fn);
-                        values_plus[op_idx] = callMatrixUnary(childPlus(op, 0), mat_exp_2x2_fn, mat_exp_3x3_fn);
-                        break;
+	                    case FormExprType::MatrixExponential:
+	                        values_minus[op_idx] = emitMatrixExp(childMinus(op, 0));
+	                        values_plus[op_idx] = emitMatrixExp(childPlus(op, 0));
+	                        break;
 
-                    case FormExprType::MatrixLogarithm:
-                        values_minus[op_idx] = callMatrixUnary(childMinus(op, 0), mat_log_2x2_fn, mat_log_3x3_fn);
-                        values_plus[op_idx] = callMatrixUnary(childPlus(op, 0), mat_log_2x2_fn, mat_log_3x3_fn);
-                        break;
+	                    case FormExprType::MatrixLogarithm:
+	                        values_minus[op_idx] = emitMatrixLog(childMinus(op, 0));
+	                        values_plus[op_idx] = emitMatrixLog(childPlus(op, 0));
+	                        break;
 
-                    case FormExprType::MatrixSqrt:
-                        values_minus[op_idx] = callMatrixUnary(childMinus(op, 0), mat_sqrt_2x2_fn, mat_sqrt_3x3_fn);
-                        values_plus[op_idx] = callMatrixUnary(childPlus(op, 0), mat_sqrt_2x2_fn, mat_sqrt_3x3_fn);
-                        break;
+	                    case FormExprType::MatrixSqrt:
+	                        values_minus[op_idx] = emitMatrixSqrt(childMinus(op, 0));
+	                        values_plus[op_idx] = emitMatrixSqrt(childPlus(op, 0));
+	                        break;
 
-                    case FormExprType::MatrixPower:
-                        values_minus[op_idx] = callMatrixPow(childMinus(op, 0), childMinus(op, 1).elems[0], mat_pow_2x2_fn, mat_pow_3x3_fn);
-                        values_plus[op_idx] = callMatrixPow(childPlus(op, 0), childPlus(op, 1).elems[0], mat_pow_2x2_fn, mat_pow_3x3_fn);
-                        break;
+	                    case FormExprType::MatrixPower:
+	                        values_minus[op_idx] = emitMatrixPow(childMinus(op, 0), childMinus(op, 1).elems[0]);
+	                        values_plus[op_idx] = emitMatrixPow(childPlus(op, 0), childPlus(op, 1).elems[0]);
+	                        break;
 
                     case FormExprType::MatrixExponentialDirectionalDerivative:
                         values_minus[op_idx] = callMatrixUnaryDD(childMinus(op, 0), childMinus(op, 1), mat_exp_dd_2x2_fn, mat_exp_dd_3x3_fn);
@@ -7853,10 +8189,21 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                     case FormExprType::HistoryConvolution: {
                         CodeValue acc_m = makeZero(shape);
                         CodeValue acc_p = makeZero(shape);
-                        for (std::size_t kk = 0; kk < static_cast<std::size_t>(op.child_count); ++kk) {
-                            const int k = static_cast<int>(kk + 1u);
-                            acc_m = add(acc_m, mul(childMinus(op, kk), evalPreviousSolution(side_minus, shape, k, q_index)));
-                            acc_p = add(acc_p, mul(childPlus(op, kk), evalPreviousSolution(side_plus, shape, k, q_index)));
+                        if (op.child_count != 0u) {
+                            for (std::size_t kk = 0; kk < static_cast<std::size_t>(op.child_count); ++kk) {
+                                const int k = static_cast<int>(kk + 1u);
+                                acc_m = add(acc_m, mul(childMinus(op, kk), evalHistorySolution(side_minus, shape, k, q_index)));
+                                acc_p = add(acc_p, mul(childPlus(op, kk), evalHistorySolution(side_plus, shape, k, q_index)));
+                            }
+                        } else {
+                            for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+                                acc_m = add(acc_m,
+                                            mul(makeScalar(loadHistoryWeightOrZero(side_minus, k)),
+                                                evalHistorySolution(side_minus, shape, k, q_index)));
+                                acc_p = add(acc_p,
+                                            mul(makeScalar(loadHistoryWeightOrZero(side_plus, k)),
+                                                evalHistorySolution(side_plus, shape, k, q_index)));
+                            }
                         }
                         values_minus[op_idx] = acc_m;
                         values_plus[op_idx] = acc_p;
@@ -7935,19 +8282,20 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                 builder.SetInsertPoint(term_end);
             }
         } else {
-            auto evalKernelIRFaceValue = [&](const LoweredTerm& term,
-                                             llvm::Value* q_index,
-                                             llvm::Value* i_index,
-                                             llvm::Value* j_index,
-                                             bool eval_plus,
-                                             bool test_active_plus,
-                                             bool trial_active_plus,
-                                             const std::vector<llvm::Value*>* indexed_env,
-                                             const FaceCached* cached) -> CodeValue {
-                std::vector<CodeValue> values_minus;
-                std::vector<CodeValue> values_plus;
-                values_minus.resize(term.ir.ops.size());
-                values_plus.resize(term.ir.ops.size());
+	            auto evalKernelIRFaceValue = [&](const LoweredTerm& term,
+	                                             llvm::Value* q_index,
+	                                             llvm::Value* i_index,
+	                                             llvm::Value* j_index,
+	                                             bool eval_plus,
+	                                             bool test_active_plus,
+	                                             bool trial_active_plus,
+	                                             const std::vector<llvm::Value*>* indexed_env,
+	                                             const FaceCached* cached) -> CodeValue {
+	                std::vector<CodeValue> values_minus;
+	                std::vector<CodeValue> values_plus;
+	                values_minus.resize(term.ir.ops.size());
+	                values_plus.resize(term.ir.ops.size());
+	                const auto use_counts = kernelIRUseCounts(term.ir);
 
                 auto childIndex = [&](const KernelIROp& op, std::size_t k) -> std::size_t {
                     return term.ir.children[static_cast<std::size_t>(op.first_child) + k];
@@ -9508,7 +9856,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                                 const int fid = unpackFieldIdImm1(kid.imm1);
                                 if (kid.type == FormExprType::StateField && fid == 0xffff) {
-                                    for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                    for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
                                         acc_minus = add(acc_minus,
                                                         mul(makeScalar(loadDtCoeff(side_minus, order, k)),
                                                             evalPreviousSolution(side_minus, shape, k, q_index)));
@@ -9517,7 +9865,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                                            evalPreviousSolution(side_plus, shape, k, q_index)));
                                     }
                                 } else {
-                                    for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV4); ++k) {
+                                    for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
                                         acc_minus = add(acc_minus,
                                                         mul(makeScalar(loadDtCoeff(side_minus, order, k)),
                                                             evalDiscreteOrStateFieldHistoryK(side_minus, /*plus_side=*/false, shape, fid, k, q_index)));
@@ -9590,15 +9938,43 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             values_plus[op_idx] = neg(childPlus(op, 0));
                             break;
 
-                        case FormExprType::Add:
-                            values_minus[op_idx] = add(childMinus(op, 0), childMinus(op, 1));
-                            values_plus[op_idx] = add(childPlus(op, 0), childPlus(op, 1));
-                            break;
+	                        case FormExprType::Add: {
+	                            if (shape.kind == Shape::Kind::Scalar) {
+	                                if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values_minus)) {
+	                                    values_minus[op_idx] = makeScalar(fused);
+	                                } else {
+	                                    values_minus[op_idx] = add(childMinus(op, 0), childMinus(op, 1));
+	                                }
+	                                if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values_plus)) {
+	                                    values_plus[op_idx] = makeScalar(fused);
+	                                } else {
+	                                    values_plus[op_idx] = add(childPlus(op, 0), childPlus(op, 1));
+	                                }
+	                                break;
+	                            }
+	                            values_minus[op_idx] = add(childMinus(op, 0), childMinus(op, 1));
+	                            values_plus[op_idx] = add(childPlus(op, 0), childPlus(op, 1));
+	                            break;
+	                        }
 
-                        case FormExprType::Subtract:
-                            values_minus[op_idx] = sub(childMinus(op, 0), childMinus(op, 1));
-                            values_plus[op_idx] = sub(childPlus(op, 0), childPlus(op, 1));
-                            break;
+	                        case FormExprType::Subtract: {
+	                            if (shape.kind == Shape::Kind::Scalar) {
+	                                if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values_minus)) {
+	                                    values_minus[op_idx] = makeScalar(fused);
+	                                } else {
+	                                    values_minus[op_idx] = sub(childMinus(op, 0), childMinus(op, 1));
+	                                }
+	                                if (auto* fused = tryFuseMulAddScalar(op.type, term, use_counts, op, values_plus)) {
+	                                    values_plus[op_idx] = makeScalar(fused);
+	                                } else {
+	                                    values_plus[op_idx] = sub(childPlus(op, 0), childPlus(op, 1));
+	                                }
+	                                break;
+	                            }
+	                            values_minus[op_idx] = sub(childMinus(op, 0), childMinus(op, 1));
+	                            values_plus[op_idx] = sub(childPlus(op, 0), childPlus(op, 1));
+	                            break;
+	                        }
 
                         case FormExprType::Multiply:
                             values_minus[op_idx] = mul(childMinus(op, 0), childMinus(op, 1));
@@ -9889,25 +10265,25 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             values_plus[op_idx] = evalLog(childPlus(op, 0));
                             break;
 
-                        case FormExprType::MatrixExponential:
-                            values_minus[op_idx] = callMatrixUnary(childMinus(op, 0), mat_exp_2x2_fn, mat_exp_3x3_fn);
-                            values_plus[op_idx] = callMatrixUnary(childPlus(op, 0), mat_exp_2x2_fn, mat_exp_3x3_fn);
-                            break;
+	                        case FormExprType::MatrixExponential:
+	                            values_minus[op_idx] = emitMatrixExp(childMinus(op, 0));
+	                            values_plus[op_idx] = emitMatrixExp(childPlus(op, 0));
+	                            break;
 
-                        case FormExprType::MatrixLogarithm:
-                            values_minus[op_idx] = callMatrixUnary(childMinus(op, 0), mat_log_2x2_fn, mat_log_3x3_fn);
-                            values_plus[op_idx] = callMatrixUnary(childPlus(op, 0), mat_log_2x2_fn, mat_log_3x3_fn);
-                            break;
+	                        case FormExprType::MatrixLogarithm:
+	                            values_minus[op_idx] = emitMatrixLog(childMinus(op, 0));
+	                            values_plus[op_idx] = emitMatrixLog(childPlus(op, 0));
+	                            break;
 
-                        case FormExprType::MatrixSqrt:
-                            values_minus[op_idx] = callMatrixUnary(childMinus(op, 0), mat_sqrt_2x2_fn, mat_sqrt_3x3_fn);
-                            values_plus[op_idx] = callMatrixUnary(childPlus(op, 0), mat_sqrt_2x2_fn, mat_sqrt_3x3_fn);
-                            break;
+	                        case FormExprType::MatrixSqrt:
+	                            values_minus[op_idx] = emitMatrixSqrt(childMinus(op, 0));
+	                            values_plus[op_idx] = emitMatrixSqrt(childPlus(op, 0));
+	                            break;
 
-                        case FormExprType::MatrixPower:
-                            values_minus[op_idx] = callMatrixPow(childMinus(op, 0), childMinus(op, 1).elems[0], mat_pow_2x2_fn, mat_pow_3x3_fn);
-                            values_plus[op_idx] = callMatrixPow(childPlus(op, 0), childPlus(op, 1).elems[0], mat_pow_2x2_fn, mat_pow_3x3_fn);
-                            break;
+	                        case FormExprType::MatrixPower:
+	                            values_minus[op_idx] = emitMatrixPow(childMinus(op, 0), childMinus(op, 1).elems[0]);
+	                            values_plus[op_idx] = emitMatrixPow(childPlus(op, 0), childPlus(op, 1).elems[0]);
+	                            break;
 
                         case FormExprType::MatrixExponentialDirectionalDerivative:
                             values_minus[op_idx] = callMatrixUnaryDD(childMinus(op, 0), childMinus(op, 1), mat_exp_dd_2x2_fn, mat_exp_dd_3x3_fn);
@@ -9996,19 +10372,34 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             values_plus[op_idx] = spectralDecompDD(childPlus(op, 0), childPlus(op, 1));
                             break;
 
-                        case FormExprType::HistoryWeightedSum:
-                        case FormExprType::HistoryConvolution: {
-                            CodeValue acc_m = makeZero(shape);
-                            CodeValue acc_p = makeZero(shape);
-                            for (std::size_t kk = 0; kk < static_cast<std::size_t>(op.child_count); ++kk) {
-                                const int k = static_cast<int>(kk + 1u);
-                                acc_m = add(acc_m, mul(childMinus(op, kk), evalPreviousSolution(side_minus, shape, k, q_index)));
-                                acc_p = add(acc_p, mul(childPlus(op, kk), evalPreviousSolution(side_plus, shape, k, q_index)));
-                            }
-                            values_minus[op_idx] = acc_m;
-                            values_plus[op_idx] = acc_p;
-                            break;
-                        }
+	                        case FormExprType::HistoryWeightedSum:
+	                        case FormExprType::HistoryConvolution: {
+	                            CodeValue acc_m = makeZero(shape);
+	                            CodeValue acc_p = makeZero(shape);
+	                            if (op.child_count != 0u) {
+	                                for (std::size_t kk = 0; kk < static_cast<std::size_t>(op.child_count); ++kk) {
+	                                    const int k = static_cast<int>(kk + 1u);
+	                                    acc_m = add(acc_m,
+	                                                mul(childMinus(op, kk),
+	                                                    evalHistorySolution(side_minus, shape, k, q_index)));
+	                                    acc_p = add(acc_p,
+	                                                mul(childPlus(op, kk),
+	                                                    evalHistorySolution(side_plus, shape, k, q_index)));
+	                                }
+	                            } else {
+	                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+	                                    acc_m = add(acc_m,
+	                                                mul(makeScalar(loadHistoryWeightOrZero(side_minus, k)),
+	                                                    evalHistorySolution(side_minus, shape, k, q_index)));
+	                                    acc_p = add(acc_p,
+	                                                mul(makeScalar(loadHistoryWeightOrZero(side_plus, k)),
+	                                                    evalHistorySolution(side_plus, shape, k, q_index)));
+	                                }
+	                            }
+	                            values_minus[op_idx] = acc_m;
+	                            values_plus[op_idx] = acc_p;
+	                            break;
+	                        }
 
                         case FormExprType::SymmetricEigenvalueDirectionalDerivative: {
                             const auto which_i32 = static_cast<std::int32_t>(static_cast<std::int64_t>(op.imm0));

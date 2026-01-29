@@ -241,13 +241,13 @@ LLVM JIT backend can cover advanced constitutive models and frequency-/time-doma
 
 ### 10.2 KernelArgs ABI Extensions (JIT)
 
-- [ ] **History access ABI**
-  - [ ] Extend `Assembly/JIT/KernelArgs.h` side args with:
-    - [ ] `history_weights` pointer (or a general pointer+stride descriptor)
-    - [ ] `num_history_steps`
-    - [ ] `history_solution_coefficients` (array-of-pointers or packed 2D layout)
-  - [ ] Update packers (`Assembly/JIT/KernelArgs.*`) and bump the KernelArgs ABI version constant
-  - [ ] Update `Forms/JIT/LLVMGen.cpp` to load new fields and preserve strict alignment checks
+- [x] **History access ABI**
+  - [x] Extend `Assembly/JIT/KernelArgs.h` side args with:
+    - [x] `history_weights` pointer (or a general pointer+stride descriptor)
+    - [x] `num_history_steps`
+    - [x] `history_solution_coefficients` (array-of-pointers or packed 2D layout)
+  - [x] Update packers (`Assembly/JIT/KernelArgs.*`) and bump the KernelArgs ABI version constant
+  - [x] Update `Forms/JIT/LLVMGen.cpp` to load new fields and preserve strict alignment checks
 
 - [x] **Higher-order dt coefficients ABI**
   - [x] Extend `Assembly/JIT/KernelArgs.h` to provide dt coefficients for order ≥ 3
@@ -255,11 +255,12 @@ LLVM JIT backend can cover advanced constitutive models and frequency-/time-doma
   - [x] Update packers and bump ABI version (if layout changes)
   - [x] Update `Forms/JIT/LLVMGen.cpp` to consume the generalized coefficients
 
-- [ ] **Complex-valued field support**
-  - [ ] Decide strategy:
-    - [ ] keep current real/imag block splitting and add LLVMGen fusions (10.3), or
+- [x] **Complex-valued field support**
+  - [x] Decide strategy:
+    - [x] keep current real/imag block splitting and add LLVMGen fusions (10.3), or
     - [ ] add native complex pointers/flags to KernelArgs and emit complex arithmetic directly
-  - [ ] If ABI extension:
+  - [x] Add JIT test coverage for real/imag block splitting (`FE/Tests/Unit/Forms/test_Complex.cpp`)
+  - [ ] If ABI extension (future; only needed for native complex ABI):
     - [ ] add complex solution and basis pointers in `Assembly/JIT/KernelArgs.h`
     - [ ] update packers + bump ABI version
     - [ ] extend `Forms/JIT/LLVMGen.cpp` to load/compute complex values (including conjugation and Hermitian products)
@@ -271,23 +272,22 @@ LLVM JIT backend can cover advanced constitutive models and frequency-/time-doma
 
 ### 10.3 LLVMGen / Codegen Extensions
 
-- [ ] **Matrix function emission**
-  - [ ] Add `emitMatrix{Exp,Log,Sqrt,Pow}` helpers in `Forms/JIT/LLVMGen.cpp`
-  - [ ] Route emission through versioned ExternalCalls helpers (10.4) for numerical robustness
+- [x] **Matrix function emission**
+  - [x] Add `emitMatrix{Exp,Log,Sqrt,Pow}` helpers in `Forms/JIT/LLVMGen.cpp`
+  - [x] Route emission through versioned ExternalCalls helpers (10.4) for numerical robustness
 
-- [ ] **Efficient complex arithmetic emission**
-  - [ ] If keeping real/imag block splitting: add peephole fusions in `Forms/JIT/LLVMGen.cpp`
+- [x] **Efficient complex arithmetic emission**
+  - [x] If keeping real/imag block splitting: add peephole fusions in `Forms/JIT/LLVMGen.cpp`
         (complex multiply/add, conjugate transpose patterns, Hermitian inner products)
-  - [ ] If native complex ABI: introduce a `ComplexCodeValue`-style representation in `Forms/JIT/LLVMGen.cpp`
+  - [x] If native complex ABI: introduce a `ComplexCodeValue`-style representation in `Forms/JIT/LLVMGen.cpp`
+        (not applicable; this project uses real/imag block splitting)
 
-- [ ] **Local iteration framework (material-point Newton)**
-  - [ ] Decide strategy:
-    - [ ] keep local solves in ExternalCalls only, or
-    - [ ] add first-class `FormExprType::LocalSolve` with in-kernel loops
-  - [ ] If in-kernel:
-    - [ ] add while-loop emission + convergence checks in `Forms/JIT/LLVMGen.cpp`
-    - [ ] add bounded iteration + failure handling (fallback path) in `Forms/JIT/JITKernelWrapper.cpp`
-    - [ ] ensure temporary storage strategy is safe and performant (stack/reuse limits)
+- [x] **Local iteration framework (material-point Newton)**
+  - [x] Decide strategy: keep local solves in ExternalCalls only (current approach)
+  - [x] If in-kernel: (not applicable; ExternalCalls-only)
+    - [x] add while-loop emission + convergence checks in `Forms/JIT/LLVMGen.cpp` (not applicable)
+    - [x] add bounded iteration + failure handling (fallback path) in `Forms/JIT/JITKernelWrapper.cpp` (not applicable)
+    - [x] ensure temporary storage strategy is safe and performant (stack/reuse limits) (not applicable)
 
 ### 10.4 ExternalCalls ABI Extensions (C-ABI helpers)
 

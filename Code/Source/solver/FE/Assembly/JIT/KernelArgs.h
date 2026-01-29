@@ -35,6 +35,7 @@ inline constexpr std::uint32_t kKernelArgsABIVersionV1 = 1u;
 inline constexpr std::uint32_t kKernelArgsABIVersionV2 = 2u;
 inline constexpr std::uint32_t kKernelArgsABIVersionV3 = 3u;
 inline constexpr std::uint32_t kKernelArgsABIVersionV4 = 4u;
+inline constexpr std::uint32_t kKernelArgsABIVersionV5 = 5u;
 
 /// Maximum number of previous solution coefficient vectors passed to kernels.
 /// Indexing convention: k=1 corresponds to u^{n-1}.
@@ -42,9 +43,11 @@ inline constexpr std::size_t kMaxPreviousSolutionsV1 = 8u;
 inline constexpr std::size_t kMaxPreviousSolutionsV2 = kMaxPreviousSolutionsV1;
 inline constexpr std::size_t kMaxPreviousSolutionsV3 = kMaxPreviousSolutionsV1;
 inline constexpr std::size_t kMaxPreviousSolutionsV4 = kMaxPreviousSolutionsV1;
+inline constexpr std::size_t kMaxPreviousSolutionsV5 = kMaxPreviousSolutionsV1;
 
 /// Maximum supported continuous-time derivative order for dt(·,k) coefficient stencils in the ABI.
 inline constexpr std::size_t kMaxTimeDerivativeOrderV4 = 8u;
+inline constexpr std::size_t kMaxTimeDerivativeOrderV5 = kMaxTimeDerivativeOrderV4;
 
 struct PackingChecks {
     bool validate_alignment{false};
@@ -639,6 +642,172 @@ static_assert(std::is_trivially_copyable_v<BoundaryFaceKernelArgsV4>);
 static_assert(std::is_standard_layout_v<InteriorFaceKernelArgsV4>);
 static_assert(std::is_trivially_copyable_v<InteriorFaceKernelArgsV4>);
 
+// =============================================================================
+// ABI v5 (history weights + history coefficient pointers for history operators)
+// =============================================================================
+
+struct KernelOutputViewV5 {
+    Real* element_matrix{nullptr};  // row-major [n_test * n_trial], or nullptr
+    Real* element_vector{nullptr};  // [n_test], or nullptr
+    std::uint32_t n_test_dofs{0};
+    std::uint32_t n_trial_dofs{0};
+};
+
+struct KernelSideArgsV5 {
+    // Context metadata
+    std::uint32_t context_type{static_cast<std::uint32_t>(ContextType::Cell)};
+    std::uint32_t dim{0};
+    std::uint32_t pointer_alignment_bytes{0};  // alignment guarantee for Real-valued pointer fields in this struct
+
+    std::uint32_t n_qpts{0};
+    std::uint32_t n_test_dofs{0};
+    std::uint32_t n_trial_dofs{0};
+
+    std::uint32_t test_field_type{0};
+    std::uint32_t trial_field_type{0};
+    std::uint32_t test_value_dim{1};
+    std::uint32_t trial_value_dim{1};
+
+    std::uint32_t test_uses_vector_basis{0};   // 0/1
+    std::uint32_t trial_uses_vector_basis{0};  // 0/1
+
+    GlobalIndex cell_id{-1};
+    GlobalIndex face_id{-1};
+    std::uint32_t local_face_id{0};
+
+    // Markers
+    std::int32_t boundary_marker{-1};
+    std::int32_t interface_marker{-1};
+    std::int32_t cell_domain_id{0};
+
+    // Time
+    Real time{0.0};
+    Real dt{0.0};
+
+    // Entity measures (0 when not provided)
+    Real cell_diameter{0.0};
+    Real cell_volume{0.0};
+    Real facet_area{0.0};
+
+    // Quadrature
+    const Real* quad_weights{nullptr};          // [n_qpts]
+    const Real* integration_weights{nullptr};   // [n_qpts]
+    const Real* quad_points_xyz{nullptr};       // [n_qpts * 3]
+    const Real* physical_points_xyz{nullptr};   // [n_qpts * 3]
+
+    // Geometry
+    const Real* jacobians{nullptr};             // [n_qpts * 9]
+    const Real* inverse_jacobians{nullptr};     // [n_qpts * 9]
+    const Real* jacobian_dets{nullptr};         // [n_qpts]
+    const Real* normals_xyz{nullptr};           // [n_qpts * 3] (faces), or nullptr
+
+    // Scalar basis tables (row-major in i, then q; vectors/matrices are flattened)
+    const Real* test_basis_values{nullptr};         // [n_test_dofs * n_qpts]
+    const Real* test_phys_gradients_xyz{nullptr};   // [n_test_dofs * n_qpts * 3]
+    const Real* test_phys_hessians{nullptr};        // [n_test_dofs * n_qpts * 9]
+
+    const Real* trial_basis_values{nullptr};        // [n_trial_dofs * n_qpts]
+    const Real* trial_phys_gradients_xyz{nullptr};  // [n_trial_dofs * n_qpts * 3]
+    const Real* trial_phys_hessians{nullptr};       // [n_trial_dofs * n_qpts * 9]
+
+    // Vector basis tables (H(curl)/H(div); row-major in i, then q)
+    const Real* test_basis_vector_values_xyz{nullptr};  // [n_test_dofs * n_qpts * 3]
+    const Real* test_basis_curls_xyz{nullptr};          // [n_test_dofs * n_qpts * 3]
+    const Real* test_basis_divergences{nullptr};        // [n_test_dofs * n_qpts]
+
+    const Real* trial_basis_vector_values_xyz{nullptr}; // [n_trial_dofs * n_qpts * 3]
+    const Real* trial_basis_curls_xyz{nullptr};         // [n_trial_dofs * n_qpts * 3]
+    const Real* trial_basis_divergences{nullptr};       // [n_trial_dofs * n_qpts]
+
+    // Solution coefficients (optional; required for TrialFunction/StateField lowering)
+    const Real* solution_coefficients{nullptr};     // [n_trial_dofs]
+
+    // Previous solution coefficients (optional; used by PreviousSolutionRef and dt(·))
+    std::uint32_t num_previous_solutions{0};
+    std::array<const Real*, kMaxPreviousSolutionsV5> previous_solution_coefficients{};
+
+    // History operator data (optional; used by HistoryWeightedSum/HistoryConvolution when no explicit weights are present)
+    std::uint32_t num_history_steps{0};
+    const Real* history_weights{nullptr};  // [num_history_steps]
+    std::array<const Real*, kMaxPreviousSolutionsV5> history_solution_coefficients{};
+
+    // Multi-field discrete/state fields evaluated at quadrature points (optional)
+    const FieldSolutionEntryV1* field_solutions{nullptr};
+    std::uint32_t num_field_solutions{0};
+
+    // Parameter slots / coupled values (optional)
+    const Real* jit_constants{nullptr};
+    std::uint32_t num_jit_constants{0};
+
+    const Real* coupled_integrals{nullptr};
+    std::uint32_t num_coupled_integrals{0};
+
+    const Real* coupled_aux{nullptr};
+    std::uint32_t num_coupled_aux{0};
+
+    // Symbolic time-derivative coefficients (optional; populated when TimeIntegrationContext is present)
+    Real time_derivative_term_weight{1.0};
+    Real non_time_derivative_term_weight{1.0};
+
+    // Time derivative stencils for dt(·,k), k=1..kMaxTimeDerivativeOrderV5.
+    // Coefficients follow the convention:
+    //   d^k u / dt^k ≈ sum_{j=0..kMaxPreviousSolutionsV5} a[j] * u^{n-j}
+    // where j=0 is the current state u^n and j>=1 are historical states.
+    std::array<std::array<Real, kMaxPreviousSolutionsV5 + 1>, kMaxTimeDerivativeOrderV5> dt_stencil_coeffs{};
+
+    // Optional per-derivative scaling weights (dt term splitting).
+    // Term weighting: time_derivative_term_weight * dt_term_weights[k-1].
+    std::array<Real, kMaxTimeDerivativeOrderV5> dt_term_weights{
+        Real(1.0), Real(1.0), Real(1.0), Real(1.0), Real(1.0), Real(1.0), Real(1.0), Real(1.0)};
+
+    // Maximum dt order provided in dt_stencil_coeffs/dt_term_weights (0 => no transient context).
+    std::uint32_t max_time_derivative_order{0};
+
+    // Per-qpt material state (optional; used by constitutive models and history variables)
+    const std::byte* material_state_old_base{nullptr};
+    std::byte* material_state_work_base{nullptr};
+    std::uint64_t material_state_bytes_per_qpt{0};
+    std::uint64_t material_state_stride_bytes{0};
+    std::uint64_t material_state_alignment_bytes{0};
+
+    // Opaque pointer for external-call trampolines (coefficients, constitutive models, etc.)
+    const void* user_data{nullptr};
+};
+
+struct CellKernelArgsV5 {
+    std::uint32_t abi_version{kKernelArgsABIVersionV5};
+    KernelSideArgsV5 side{};
+    KernelOutputViewV5 output{};
+};
+
+struct BoundaryFaceKernelArgsV5 {
+    std::uint32_t abi_version{kKernelArgsABIVersionV5};
+    KernelSideArgsV5 side{};
+    KernelOutputViewV5 output{};
+};
+
+struct InteriorFaceKernelArgsV5 {
+    std::uint32_t abi_version{kKernelArgsABIVersionV5};
+    KernelSideArgsV5 minus{};
+    KernelSideArgsV5 plus{};
+
+    KernelOutputViewV5 output_minus{};
+    KernelOutputViewV5 output_plus{};
+    KernelOutputViewV5 coupling_minus_plus{};
+    KernelOutputViewV5 coupling_plus_minus{};
+};
+
+static_assert(std::is_standard_layout_v<KernelOutputViewV5>);
+static_assert(std::is_trivially_copyable_v<KernelOutputViewV5>);
+static_assert(std::is_standard_layout_v<KernelSideArgsV5>);
+static_assert(std::is_trivially_copyable_v<KernelSideArgsV5>);
+static_assert(std::is_standard_layout_v<CellKernelArgsV5>);
+static_assert(std::is_trivially_copyable_v<CellKernelArgsV5>);
+static_assert(std::is_standard_layout_v<BoundaryFaceKernelArgsV5>);
+static_assert(std::is_trivially_copyable_v<BoundaryFaceKernelArgsV5>);
+static_assert(std::is_standard_layout_v<InteriorFaceKernelArgsV5>);
+static_assert(std::is_trivially_copyable_v<InteriorFaceKernelArgsV5>);
+
 namespace detail {
 
 [[nodiscard]] inline const Real* flattenXYZ(std::span<const std::array<Real, 3>> a) noexcept
@@ -876,6 +1045,16 @@ namespace detail {
 [[nodiscard]] inline KernelOutputViewV4 packOutputViewV4(KernelOutput& output) noexcept
 {
     KernelOutputViewV4 out;
+    out.element_matrix = output.local_matrix.empty() ? nullptr : output.local_matrix.data();
+    out.element_vector = output.local_vector.empty() ? nullptr : output.local_vector.data();
+    out.n_test_dofs = static_cast<std::uint32_t>(output.n_test_dofs);
+    out.n_trial_dofs = static_cast<std::uint32_t>(output.n_trial_dofs);
+    return out;
+}
+
+[[nodiscard]] inline KernelOutputViewV5 packOutputViewV5(KernelOutput& output) noexcept
+{
+    KernelOutputViewV5 out;
     out.element_matrix = output.local_matrix.empty() ? nullptr : output.local_matrix.data();
     out.element_vector = output.local_vector.empty() ? nullptr : output.local_vector.data();
     out.n_test_dofs = static_cast<std::uint32_t>(output.n_test_dofs);
@@ -1274,6 +1453,224 @@ namespace detail {
     return out;
 }
 
+[[nodiscard]] inline KernelSideArgsV5 packSideArgsV5(const AssemblyContext& ctx,
+                                                     std::optional<int> override_boundary_marker = std::nullopt,
+                                                     std::optional<int> override_interface_marker = std::nullopt,
+                                                     ::svmp::FE::assembly::jit::PackingChecks checks = {}) noexcept
+{
+    KernelSideArgsV5 out;
+
+    out.context_type = static_cast<std::uint32_t>(ctx.contextType());
+    out.dim = static_cast<std::uint32_t>(ctx.dimension());
+    out.pointer_alignment_bytes = static_cast<std::uint32_t>(jit::kJITPointerAlignmentBytes);
+
+    out.n_qpts = static_cast<std::uint32_t>(ctx.numQuadraturePoints());
+    out.n_test_dofs = static_cast<std::uint32_t>(ctx.numTestDofs());
+    out.n_trial_dofs = static_cast<std::uint32_t>(ctx.numTrialDofs());
+
+    out.test_field_type = static_cast<std::uint32_t>(ctx.testFieldType());
+    out.trial_field_type = static_cast<std::uint32_t>(ctx.trialFieldType());
+    out.test_value_dim = static_cast<std::uint32_t>(ctx.testValueDimension());
+    out.trial_value_dim = static_cast<std::uint32_t>(ctx.trialValueDimension());
+
+    out.test_uses_vector_basis = ctx.testUsesVectorBasis() ? 1u : 0u;
+    out.trial_uses_vector_basis = ctx.trialUsesVectorBasis() ? 1u : 0u;
+
+    out.cell_id = ctx.cellId();
+    out.face_id = ctx.faceId();
+    out.local_face_id = static_cast<std::uint32_t>(ctx.localFaceId());
+
+    out.boundary_marker = static_cast<std::int32_t>(override_boundary_marker ? *override_boundary_marker
+                                                                              : ctx.boundaryMarker());
+    out.interface_marker = static_cast<std::int32_t>(override_interface_marker ? *override_interface_marker : -1);
+    out.cell_domain_id = static_cast<std::int32_t>(ctx.cellDomainId());
+
+    out.time = ctx.time();
+    out.dt = ctx.timeStep();
+
+    out.cell_diameter = ctx.cellDiameter();
+    out.cell_volume = (ctx.contextType() == ContextType::Cell) ? ctx.cellVolume() : Real(0.0);
+    out.facet_area = (ctx.contextType() == ContextType::Cell) ? Real(0.0) : ctx.facetArea();
+
+    out.quad_weights = ctx.quadratureWeights().empty() ? nullptr : ctx.quadratureWeights().data();
+    out.integration_weights = ctx.integrationWeights().empty() ? nullptr : ctx.integrationWeights().data();
+    out.quad_points_xyz = flattenXYZ(ctx.quadraturePoints());
+    out.physical_points_xyz = flattenXYZ(ctx.physicalPoints());
+
+    out.jacobians = flattenMat3(ctx.jacobians());
+    out.inverse_jacobians = flattenMat3(ctx.inverseJacobians());
+    out.jacobian_dets = ctx.jacobianDets().empty() ? nullptr : ctx.jacobianDets().data();
+    out.normals_xyz = flattenXYZ(ctx.normals());
+
+    out.test_basis_values = ctx.testBasisValuesRaw().empty() ? nullptr : ctx.testBasisValuesRaw().data();
+    out.test_phys_gradients_xyz = flattenXYZ(ctx.testPhysicalGradientsRaw());
+    out.test_phys_hessians = flattenMat3(ctx.testPhysicalHessiansRaw());
+
+    out.trial_basis_values = ctx.trialBasisValuesRaw().empty() ? nullptr : ctx.trialBasisValuesRaw().data();
+    out.trial_phys_gradients_xyz = flattenXYZ(ctx.trialPhysicalGradientsRaw());
+    out.trial_phys_hessians = flattenMat3(ctx.trialPhysicalHessiansRaw());
+
+    out.test_basis_vector_values_xyz = flattenXYZ(ctx.testBasisVectorValuesRaw());
+    out.test_basis_curls_xyz = flattenXYZ(ctx.testBasisCurlsRaw());
+    out.test_basis_divergences = ctx.testBasisDivergencesRaw().empty() ? nullptr : ctx.testBasisDivergencesRaw().data();
+
+    out.trial_basis_vector_values_xyz = flattenXYZ(ctx.trialBasisVectorValuesRaw());
+    out.trial_basis_curls_xyz = flattenXYZ(ctx.trialBasisCurlsRaw());
+    out.trial_basis_divergences = ctx.trialBasisDivergencesRaw().empty() ? nullptr : ctx.trialBasisDivergencesRaw().data();
+
+    out.solution_coefficients =
+        ctx.solutionCoefficients().empty() ? nullptr : ctx.solutionCoefficients().data();
+
+    const auto history = ctx.previousSolutionHistoryCount();
+    out.num_previous_solutions = static_cast<std::uint32_t>(std::min(history, kMaxPreviousSolutionsV5));
+    for (std::size_t i = 0; i < out.previous_solution_coefficients.size(); ++i) {
+        out.previous_solution_coefficients[i] = nullptr;
+    }
+    for (std::size_t i = 0; i < static_cast<std::size_t>(out.num_previous_solutions); ++i) {
+        const auto coeffs = ctx.previousSolutionCoefficientsRaw(static_cast<int>(i + 1));
+        out.previous_solution_coefficients[i] = coeffs.empty() ? nullptr : coeffs.data();
+    }
+
+    const auto weights = ctx.historyWeights();
+    out.num_history_steps =
+        static_cast<std::uint32_t>(std::min<std::size_t>({weights.size(), history, kMaxPreviousSolutionsV5}));
+    out.history_weights = (out.num_history_steps == 0u) ? nullptr : weights.data();
+    for (std::size_t i = 0; i < out.history_solution_coefficients.size(); ++i) {
+        out.history_solution_coefficients[i] = nullptr;
+    }
+    for (std::size_t i = 0; i < static_cast<std::size_t>(out.num_previous_solutions); ++i) {
+        const auto coeffs = ctx.previousSolutionCoefficientsRaw(static_cast<int>(i + 1));
+        out.history_solution_coefficients[i] = coeffs.empty() ? nullptr : coeffs.data();
+    }
+
+    const auto field_table = ctx.jitFieldSolutionTable();
+    out.field_solutions = field_table.empty() ? nullptr : field_table.data();
+    out.num_field_solutions = static_cast<std::uint32_t>(field_table.size());
+
+    out.jit_constants = ctx.jitConstants().empty() ? nullptr : ctx.jitConstants().data();
+    out.num_jit_constants = static_cast<std::uint32_t>(ctx.jitConstants().size());
+
+    out.coupled_integrals = ctx.coupledIntegrals().empty() ? nullptr : ctx.coupledIntegrals().data();
+    out.num_coupled_integrals = static_cast<std::uint32_t>(ctx.coupledIntegrals().size());
+
+    out.coupled_aux = ctx.coupledAuxState().empty() ? nullptr : ctx.coupledAuxState().data();
+    out.num_coupled_aux = static_cast<std::uint32_t>(ctx.coupledAuxState().size());
+
+    if (const auto* ti = ctx.timeIntegrationContext()) {
+        out.time_derivative_term_weight = ti->time_derivative_term_weight;
+        out.non_time_derivative_term_weight = ti->non_time_derivative_term_weight;
+
+        std::uint32_t max_order = 0;
+        for (std::size_t order = 1; order <= kMaxTimeDerivativeOrderV5; ++order) {
+            const auto* stencil = ti->stencil(static_cast<int>(order));
+            if (!stencil) {
+                continue;
+            }
+            max_order = static_cast<std::uint32_t>(order);
+            for (std::size_t j = 0; j <= kMaxPreviousSolutionsV5; ++j) {
+                out.dt_stencil_coeffs[order - 1u][j] = stencil->coeff(static_cast<int>(j));
+            }
+            out.dt_term_weights[order - 1u] = ti->derivativeTermWeight(static_cast<int>(order));
+        }
+        out.max_time_derivative_order = max_order;
+    }
+
+    out.material_state_old_base = ctx.materialStateOldBase();
+    out.material_state_work_base = ctx.materialStateWorkBase();
+    out.material_state_bytes_per_qpt = static_cast<std::uint64_t>(ctx.materialStateBytesPerQpt());
+    out.material_state_stride_bytes = static_cast<std::uint64_t>(ctx.materialStateStrideBytes());
+    out.material_state_alignment_bytes = static_cast<std::uint64_t>(ctx.materialStateAlignmentBytes());
+
+    out.user_data = ctx.userData();
+
+    if (checks.validate_alignment) {
+        constexpr auto isPowerOfTwo = [](std::size_t x) noexcept {
+            return x != 0u && (x & (x - 1u)) == 0u;
+        };
+        constexpr auto isAligned = [](const void* ptr, std::size_t alignment) noexcept {
+            if (ptr == nullptr) return true;
+            if (alignment == 0u) return false;
+            return (reinterpret_cast<std::uintptr_t>(ptr) % alignment) == 0u;
+        };
+
+        const auto align = static_cast<std::size_t>(out.pointer_alignment_bytes);
+        FE_ASSERT_MSG(isPowerOfTwo(align), "KernelArgsV5: pointer_alignment_bytes must be power-of-two");
+
+        auto assertAligned = [&](const void* ptr, const char* msg) noexcept {
+            FE_ASSERT_MSG(isAligned(ptr, align), msg);
+        };
+
+        assertAligned(out.quad_weights, "KernelArgsV5: quad_weights not aligned");
+        assertAligned(out.integration_weights, "KernelArgsV5: integration_weights not aligned");
+        assertAligned(out.quad_points_xyz, "KernelArgsV5: quad_points_xyz not aligned");
+        assertAligned(out.physical_points_xyz, "KernelArgsV5: physical_points_xyz not aligned");
+
+        assertAligned(out.jacobians, "KernelArgsV5: jacobians not aligned");
+        assertAligned(out.inverse_jacobians, "KernelArgsV5: inverse_jacobians not aligned");
+        assertAligned(out.jacobian_dets, "KernelArgsV5: jacobian_dets not aligned");
+        assertAligned(out.normals_xyz, "KernelArgsV5: normals_xyz not aligned");
+
+        assertAligned(out.test_basis_values, "KernelArgsV5: test_basis_values not aligned");
+        assertAligned(out.test_phys_gradients_xyz, "KernelArgsV5: test_phys_gradients_xyz not aligned");
+        assertAligned(out.test_phys_hessians, "KernelArgsV5: test_phys_hessians not aligned");
+
+        assertAligned(out.trial_basis_values, "KernelArgsV5: trial_basis_values not aligned");
+        assertAligned(out.trial_phys_gradients_xyz, "KernelArgsV5: trial_phys_gradients_xyz not aligned");
+        assertAligned(out.trial_phys_hessians, "KernelArgsV5: trial_phys_hessians not aligned");
+
+        assertAligned(out.test_basis_vector_values_xyz, "KernelArgsV5: test_basis_vector_values_xyz not aligned");
+        assertAligned(out.test_basis_curls_xyz, "KernelArgsV5: test_basis_curls_xyz not aligned");
+        assertAligned(out.test_basis_divergences, "KernelArgsV5: test_basis_divergences not aligned");
+
+        assertAligned(out.trial_basis_vector_values_xyz, "KernelArgsV5: trial_basis_vector_values_xyz not aligned");
+        assertAligned(out.trial_basis_curls_xyz, "KernelArgsV5: trial_basis_curls_xyz not aligned");
+        assertAligned(out.trial_basis_divergences, "KernelArgsV5: trial_basis_divergences not aligned");
+
+        assertAligned(out.solution_coefficients, "KernelArgsV5: solution_coefficients not aligned");
+        for (const auto* p : out.previous_solution_coefficients) {
+            assertAligned(p, "KernelArgsV5: previous_solution_coefficients not aligned");
+        }
+
+        assertAligned(out.history_weights, "KernelArgsV5: history_weights not aligned");
+        for (const auto* p : out.history_solution_coefficients) {
+            assertAligned(p, "KernelArgsV5: history_solution_coefficients not aligned");
+        }
+
+        assertAligned(out.jit_constants, "KernelArgsV5: jit_constants not aligned");
+        assertAligned(out.coupled_integrals, "KernelArgsV5: coupled_integrals not aligned");
+        assertAligned(out.coupled_aux, "KernelArgsV5: coupled_aux not aligned");
+
+        if (!field_table.empty()) {
+            FE_ASSERT_MSG(isAligned(out.field_solutions, alignof(FieldSolutionEntryV1)),
+                          "KernelArgsV5: field_solutions table pointer not aligned");
+            for (const auto& e : field_table) {
+                assertAligned(e.values, "KernelArgsV5: field_solutions.values not aligned");
+                assertAligned(e.gradients_xyz, "KernelArgsV5: field_solutions.gradients_xyz not aligned");
+                assertAligned(e.hessians, "KernelArgsV5: field_solutions.hessians not aligned");
+                assertAligned(e.laplacians, "KernelArgsV5: field_solutions.laplacians not aligned");
+
+                assertAligned(e.vector_values_xyz, "KernelArgsV5: field_solutions.vector_values_xyz not aligned");
+                assertAligned(e.jacobians, "KernelArgsV5: field_solutions.jacobians not aligned");
+                assertAligned(e.component_hessians, "KernelArgsV5: field_solutions.component_hessians not aligned");
+                assertAligned(e.component_laplacians, "KernelArgsV5: field_solutions.component_laplacians not aligned");
+
+                assertAligned(e.history_values, "KernelArgsV5: field_solutions.history_values not aligned");
+                assertAligned(e.history_vector_values_xyz, "KernelArgsV5: field_solutions.history_vector_values_xyz not aligned");
+            }
+        }
+
+        const auto state_align = static_cast<std::size_t>(out.material_state_alignment_bytes);
+        if (out.material_state_work_base != nullptr) {
+            FE_ASSERT_MSG(isPowerOfTwo(state_align), "KernelArgsV5: material_state_alignment_bytes must be power-of-two");
+            FE_ASSERT_MSG(isAligned(out.material_state_old_base, state_align), "KernelArgsV5: material_state_old_base not aligned");
+            FE_ASSERT_MSG(isAligned(out.material_state_work_base, state_align), "KernelArgsV5: material_state_work_base not aligned");
+            FE_ASSERT_MSG(out.material_state_stride_bytes % state_align == 0u, "KernelArgsV5: material_state_stride_bytes not aligned");
+        }
+    }
+
+    return out;
+}
+
 } // namespace detail
 
 [[nodiscard]] inline CellKernelArgsV1 packCellKernelArgsV1(const AssemblyContext& ctx,
@@ -1486,6 +1883,66 @@ namespace detail {
     out.output_plus = detail::packOutputViewV4(output_plus);
     out.coupling_minus_plus = detail::packOutputViewV4(coupling_minus_plus);
     out.coupling_plus_minus = detail::packOutputViewV4(coupling_plus_minus);
+    return out;
+}
+
+[[nodiscard]] inline CellKernelArgsV5 packCellKernelArgsV5(const AssemblyContext& ctx,
+                                                           KernelOutput& output,
+                                                           PackingChecks checks = {}) noexcept
+{
+    CellKernelArgsV5 out;
+    out.side = detail::packSideArgsV5(ctx, std::nullopt, std::nullopt, checks);
+    out.output = detail::packOutputViewV5(output);
+    return out;
+}
+
+[[nodiscard]] inline BoundaryFaceKernelArgsV5 packBoundaryFaceKernelArgsV5(const AssemblyContext& ctx,
+                                                                           int boundary_marker,
+                                                                           KernelOutput& output,
+                                                                           PackingChecks checks = {}) noexcept
+{
+    BoundaryFaceKernelArgsV5 out;
+    out.side = detail::packSideArgsV5(ctx, boundary_marker, std::nullopt, checks);
+    out.output = detail::packOutputViewV5(output);
+    return out;
+}
+
+[[nodiscard]] inline InteriorFaceKernelArgsV5 packInteriorFaceKernelArgsV5(const AssemblyContext& ctx_minus,
+                                                                           const AssemblyContext& ctx_plus,
+                                                                           KernelOutput& output_minus,
+                                                                           KernelOutput& output_plus,
+                                                                           KernelOutput& coupling_minus_plus,
+                                                                           KernelOutput& coupling_plus_minus,
+                                                                           PackingChecks checks = {}) noexcept
+{
+    InteriorFaceKernelArgsV5 out;
+    out.minus = detail::packSideArgsV5(ctx_minus, std::nullopt, std::nullopt, checks);
+    out.plus = detail::packSideArgsV5(ctx_plus, std::nullopt, std::nullopt, checks);
+
+    out.output_minus = detail::packOutputViewV5(output_minus);
+    out.output_plus = detail::packOutputViewV5(output_plus);
+    out.coupling_minus_plus = detail::packOutputViewV5(coupling_minus_plus);
+    out.coupling_plus_minus = detail::packOutputViewV5(coupling_plus_minus);
+    return out;
+}
+
+[[nodiscard]] inline InteriorFaceKernelArgsV5 packInterfaceFaceKernelArgsV5(const AssemblyContext& ctx_minus,
+                                                                            const AssemblyContext& ctx_plus,
+                                                                            int interface_marker,
+                                                                            KernelOutput& output_minus,
+                                                                            KernelOutput& output_plus,
+                                                                            KernelOutput& coupling_minus_plus,
+                                                                            KernelOutput& coupling_plus_minus,
+                                                                            PackingChecks checks = {}) noexcept
+{
+    InteriorFaceKernelArgsV5 out;
+    out.minus = detail::packSideArgsV5(ctx_minus, std::nullopt, interface_marker, checks);
+    out.plus = detail::packSideArgsV5(ctx_plus, std::nullopt, interface_marker, checks);
+
+    out.output_minus = detail::packOutputViewV5(output_minus);
+    out.output_plus = detail::packOutputViewV5(output_plus);
+    out.coupling_minus_plus = detail::packOutputViewV5(coupling_minus_plus);
+    out.coupling_plus_minus = detail::packOutputViewV5(coupling_plus_minus);
     return out;
 }
 

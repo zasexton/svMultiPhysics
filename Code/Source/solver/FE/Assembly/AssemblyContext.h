@@ -1020,6 +1020,17 @@ public:
     // =========================================================================
 
     /**
+     * @brief Bind history/convolution weights for JIT-friendly history operators
+     *
+     * Indexing convention: weights[k-1] corresponds to u^{n-k}, k >= 1.
+     *
+     * The provided memory must remain valid for the duration of a kernel call.
+     */
+    void setHistoryWeights(std::span<const Real> weights) noexcept { history_weights_ = weights; }
+
+    [[nodiscard]] std::span<const Real> historyWeights() const noexcept { return history_weights_; }
+
+    /**
      * @brief Attach a transient time-integration context for symbolic `dt(·,k)` lowering
      *
      * When null, kernels containing `dt(...)` must fail with a clear diagnostic.
@@ -1378,6 +1389,7 @@ private:
     std::span<const Real> jit_constants_{};
     std::span<const Real> coupled_integrals_{};
     std::span<const Real> coupled_aux_state_{};
+    std::span<const Real> history_weights_{};
 
     // Optional transient time integration context (owned by Systems/TimeStepping)
     const TimeIntegrationContext* time_integration_{nullptr};
