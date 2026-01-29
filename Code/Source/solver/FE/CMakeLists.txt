@@ -1775,6 +1775,7 @@ if(FE_BUILD_TESTS)
 					                    Tests/Unit/Forms/test_JIT_Vectorization.cpp
 					                    Tests/Unit/Forms/test_JIT_FacePerformance.cpp
 					                    Tests/Unit/Forms/test_JIT_NonlinearPerformance.cpp
+					                    Tests/Unit/Forms/test_JIT_StokesVMS_Tangent.cpp
 					                    Tests/Unit/Forms/test_JIT_TensorContractionPerformance.cpp
 					                    Tests/Unit/Forms/test_JIT_Scaling.cpp
 					                    Tests/Unit/Forms/test_JIT_SpecializationPerformance.cpp

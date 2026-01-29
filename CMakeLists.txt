@@ -79,6 +79,32 @@ set(ENABLE_ARRAY_INDEX_CHECKING OFF CACHE BOOL "Enable Array index checking")
 set(SV_LOCAL_VTK_PATH "" CACHE STRING "Path to a local build of VTK.")
 set(ENABLE_UNIT_TEST OFF CACHE BOOL "Enable Unit Test by Google Test")
 
+# New OOP solver stack (Mesh/FE/Physics/Application) options.
+#
+# These variables are consumed by Code/Source/solver and its OOP subprojects.
+# They are marked ADVANCED to avoid cluttering the default cmake-gui view.
+set(USE_SYSTEM_VTK ON CACHE BOOL "Use system VTK for OOP Mesh (svmesh)")
+set(MESH_BUILD_TESTS OFF CACHE BOOL "Build OOP Mesh (svmesh) unit tests")
+set(FE_ENABLE_ASSEMBLY ON CACHE BOOL "Enable FE Assembly/Systems/Forms for OOP solver")
+set(FE_ENABLE_LLVM_JIT OFF CACHE BOOL "Enable LLVM OrcJIT backend for FE/Forms")
+set(FE_BUILD_TESTS OFF CACHE BOOL "Build FE (svfe) unit tests")
+set(FE_WITH_MESH ON CACHE BOOL "Enable FE Mesh integration for OOP solver")
+set(PHYSICS_BUILD_TESTS OFF CACHE BOOL "Build Physics (svphysics) unit tests")
+set(PHYSICS_WITH_MESH ON CACHE BOOL "Enable Physics Mesh integration for OOP solver")
+set(APPLICATION_BUILD_TESTS OFF CACHE BOOL "Build Application (svapplication) unit tests")
+
+mark_as_advanced(FORCE
+  USE_SYSTEM_VTK
+  MESH_BUILD_TESTS
+  FE_ENABLE_ASSEMBLY
+  FE_ENABLE_LLVM_JIT
+  FE_BUILD_TESTS
+  FE_WITH_MESH
+  PHYSICS_BUILD_TESTS
+  PHYSICS_WITH_MESH
+  APPLICATION_BUILD_TESTS
+)
+
 #-----------------------------------------------------------------------------
 # RPATH handling
 # No objects built directly with project. Not needed!
@@ -141,6 +167,15 @@ ExternalProject_Add(svMultiPhysics
     -DENABLE_UNIT_TEST:BOOL=${ENABLE_UNIT_TEST}
     -DENABLE_ARRAY_INDEX_CHECKING:BOOL=${ENABLE_ARRAY_INDEX_CHECKING}
     -DSV_LOCAL_VTK_PATH:STRING=${SV_LOCAL_VTK_PATH}
+    -DUSE_SYSTEM_VTK:BOOL=${USE_SYSTEM_VTK}
+    -DMESH_BUILD_TESTS:BOOL=${MESH_BUILD_TESTS}
+    -DFE_ENABLE_ASSEMBLY:BOOL=${FE_ENABLE_ASSEMBLY}
+    -DFE_ENABLE_LLVM_JIT:BOOL=${FE_ENABLE_LLVM_JIT}
+    -DFE_BUILD_TESTS:BOOL=${FE_BUILD_TESTS}
+    -DFE_WITH_MESH:BOOL=${FE_WITH_MESH}
+    -DPHYSICS_BUILD_TESTS:BOOL=${PHYSICS_BUILD_TESTS}
+    -DPHYSICS_WITH_MESH:BOOL=${PHYSICS_WITH_MESH}
+    -DAPPLICATION_BUILD_TESTS:BOOL=${APPLICATION_BUILD_TESTS}
     ${SV_APPLE_CMAKE_ARGS}
     ${SV_ADDITIONAL_CMAKE_ARGS}
     )

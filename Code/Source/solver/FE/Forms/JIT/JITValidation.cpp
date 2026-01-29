@@ -237,17 +237,27 @@ struct ConstantMatrix {
 
         case FormExprType::Coordinate:
         case FormExprType::ReferenceCoordinate:
-        case FormExprType::Normal:
-            out = vectorShape(3u);
+        case FormExprType::Normal: {
+            const std::uint32_t dim = ctx.trial_sig
+                                          ? static_cast<std::uint32_t>(
+                                                std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
+                                          : 3u;
+            out = vectorShape(dim);
             break;
+        }
 
         case FormExprType::Jacobian:
-        case FormExprType::JacobianInverse:
-            out = matrixShape(3u, 3u);
+        case FormExprType::JacobianInverse: {
+            const std::uint32_t dim = ctx.trial_sig
+                                          ? static_cast<std::uint32_t>(
+                                                std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
+                                          : 3u;
+            out = matrixShape(dim, dim);
             break;
+        }
 
         case FormExprType::Identity: {
-            const int dim = node.identityDim().value_or(3);
+            const int dim = node.identityDim().value_or(ctx.trial_sig ? ctx.trial_sig->topological_dimension : 3);
             out = matrixShape(static_cast<std::uint32_t>(std::max(1, dim)),
                               static_cast<std::uint32_t>(std::max(1, dim)));
             break;
@@ -257,13 +267,29 @@ struct ConstantMatrix {
             if (node.scalarCoefficient() != nullptr || node.timeScalarCoefficient() != nullptr) {
                 out = scalarShape();
             } else if (node.vectorCoefficient() != nullptr) {
-                out = vectorShape(3u);
+                const std::uint32_t dim = ctx.trial_sig
+                                              ? static_cast<std::uint32_t>(
+                                                    std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
+                                              : 3u;
+                out = vectorShape(dim);
             } else if (node.matrixCoefficient() != nullptr) {
-                out = matrixShape(3u, 3u);
+                const std::uint32_t dim = ctx.trial_sig
+                                              ? static_cast<std::uint32_t>(
+                                                    std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
+                                              : 3u;
+                out = matrixShape(dim, dim);
             } else if (node.tensor3Coefficient() != nullptr) {
-                out = tensor3Shape(3u, 3u, 3u);
+                const std::uint32_t dim = ctx.trial_sig
+                                              ? static_cast<std::uint32_t>(
+                                                    std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
+                                              : 3u;
+                out = tensor3Shape(dim, dim, dim);
             } else if (node.tensor4Coefficient() != nullptr) {
-                out = tensor4Shape(3u, 3u, 3u, 3u);
+                const std::uint32_t dim = ctx.trial_sig
+                                              ? static_cast<std::uint32_t>(
+                                                    std::min(3, std::max(1, ctx.trial_sig->topological_dimension)))
+                                              : 3u;
+                out = tensor4Shape(dim, dim, dim, dim);
             }
             break;
         }

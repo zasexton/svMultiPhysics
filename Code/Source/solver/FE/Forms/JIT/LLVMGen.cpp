@@ -383,10 +383,32 @@ struct ShapeInferenceResult {
                                                const std::optional<FormExprNode::SpaceSignature>& trial_sig,
                                                bool require_scalar_root = true)
 {
-    (void)test_sig;
     ShapeInferenceResult out;
     out.ok = false;
     out.shapes.resize(ir.ops.size(), scalarShape());
+
+    const auto dim_from_sig = [](const std::optional<FormExprNode::SpaceSignature>& sig) -> std::optional<std::uint32_t> {
+        if (!sig.has_value()) {
+            return std::nullopt;
+        }
+        const int td = sig->topological_dimension;
+        if (td <= 0) {
+            return std::nullopt;
+        }
+        return static_cast<std::uint32_t>(td);
+    };
+
+    // Spatial dimension used for geometric quantities and derivatives.
+    //
+    // The kernel ABI always stores xyz/jacobians in size-3/3x3 buffers, but the
+    // active dimension is provided by the function-space signature.
+    std::uint32_t dim = 3u;
+    if (const auto d = dim_from_sig(test_sig)) {
+        dim = *d;
+    } else if (const auto d = dim_from_sig(trial_sig)) {
+        dim = *d;
+    }
+    dim = std::max<std::uint32_t>(1u, std::min<std::uint32_t>(dim, kMaxVectorDim));
 
     auto fail = [&](std::string msg) -> ShapeInferenceResult {
         out.ok = false;
@@ -441,19 +463,19 @@ struct ShapeInferenceResult {
                     break;
                 }
                 if (node->vectorCoefficient() != nullptr) {
-                    out.shapes[idx] = vectorShape(3u);
+                    out.shapes[idx] = vectorShape(dim);
                     break;
                 }
                 if (node->matrixCoefficient() != nullptr) {
-                    out.shapes[idx] = matrixShape(3u, 3u);
+                    out.shapes[idx] = matrixShape(dim, dim);
                     break;
                 }
                 if (node->tensor3Coefficient() != nullptr) {
-                    out.shapes[idx] = tensor3Shape(3u, 3u, 3u);
+                    out.shapes[idx] = tensor3Shape(dim, dim, dim);
                     break;
                 }
                 if (node->tensor4Coefficient() != nullptr) {
-                    out.shapes[idx] = tensor4Shape(3u, 3u, 3u, 3u);
+                    out.shapes[idx] = tensor4Shape(dim, dim, dim, dim);
                     break;
                 }
 
@@ -536,19 +558,19 @@ struct ShapeInferenceResult {
             case FormExprType::Coordinate:
             case FormExprType::ReferenceCoordinate:
             case FormExprType::Normal:
-                out.shapes[idx] = vectorShape(3u);
+                out.shapes[idx] = vectorShape(dim);
                 break;
 
             case FormExprType::Identity: {
-                const auto dim = static_cast<std::int64_t>(op.imm0);
-                const auto n = (dim > 0) ? static_cast<std::uint32_t>(dim) : 3u;
+                const auto idim = static_cast<std::int64_t>(op.imm0);
+                const auto n = (idim > 0) ? static_cast<std::uint32_t>(idim) : dim;
                 out.shapes[idx] = matrixShape(n, n);
                 break;
             }
 
             case FormExprType::Jacobian:
             case FormExprType::JacobianInverse:
-                out.shapes[idx] = matrixShape(3u, 3u);
+                out.shapes[idx] = matrixShape(dim, dim);
                 break;
 
             case FormExprType::TestFunction:
@@ -568,9 +590,9 @@ struct ShapeInferenceResult {
             case FormExprType::Gradient: {
                 const auto& a = childAt(0);
                 if (a.isScalar()) {
-                    out.shapes[idx] = vectorShape(3u);
+                    out.shapes[idx] = vectorShape(dim);
                 } else if (a.kind == Shape::Kind::Vector) {
-                    out.shapes[idx] = matrixShape(a.dims[0], 3u);
+                    out.shapes[idx] = matrixShape(a.dims[0], dim);
                 } else {
                     return fail("LLVMGen: Gradient expects scalar or vector operand");
                 }
@@ -579,11 +601,15 @@ struct ShapeInferenceResult {
 
             case FormExprType::Divergence: {
                 const auto& a = childAt(0);
-                if (a.kind != Shape::Kind::Vector) {
-                    return fail("LLVMGen: Divergence expects vector operand");
+                if (a.kind == Shape::Kind::Vector) {
+                    out.shapes[idx] = scalarShape();
+                    break;
                 }
-                out.shapes[idx] = scalarShape();
-                break;
+                if (a.kind == Shape::Kind::Matrix) {
+                    out.shapes[idx] = vectorShape(a.dims[0]);
+                    break;
+                }
+                return fail("LLVMGen: Divergence expects vector or matrix operand");
             }
 
             case FormExprType::Curl: {
@@ -600,7 +626,7 @@ struct ShapeInferenceResult {
                 if (!a.isScalar()) {
                     return fail("LLVMGen: Hessian expects scalar operand");
                 }
-                out.shapes[idx] = matrixShape(3u, 3u);
+                out.shapes[idx] = matrixShape(dim, dim);
                 break;
             }
 
@@ -3357,6 +3383,25 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             return out;
         };
 
+        auto loadMatDimFromTable = [&](llvm::Value* base_ptr,
+                                       llvm::Value* n_qpts,
+                                       llvm::Value* dof_index,
+                                       llvm::Value* q_index,
+                                       std::uint32_t dim) -> CodeValue {
+            CodeValue out = makeMatrix(dim, dim);
+            auto* offset = builder.CreateAdd(builder.CreateMul(dof_index, n_qpts), q_index);
+            auto* base9 = builder.CreateMul(offset, builder.getInt32(9));
+            auto* base9_64 = builder.CreateZExt(base9, i64);
+            for (std::uint32_t r = 0; r < dim; ++r) {
+                for (std::uint32_t c = 0; c < dim; ++c) {
+                    const std::uint32_t idx = r * 3u + c;
+                    out.elems[static_cast<std::size_t>(r * dim + c)] =
+                        loadRealPtrAt(base_ptr, builder.CreateAdd(base9_64, builder.getInt64(idx)));
+                }
+            }
+            return out;
+        };
+
 	        auto loadXYZ = [&](llvm::Value* xyz_base,
 	                           llvm::Value* q_index) -> CodeValue {
 	            auto* base3 = builder.CreateMul(q_index, builder.getInt32(3));
@@ -3365,6 +3410,17 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	            auto* y = loadRealPtrAt(xyz_base, builder.CreateAdd(base3_64, builder.getInt64(1)));
 	            auto* z = loadRealPtrAt(xyz_base, builder.CreateAdd(base3_64, builder.getInt64(2)));
 	            return makeVector(3u, x, y, z);
+	        };
+
+	        auto loadXYZDim = [&](llvm::Value* xyz_base,
+	                              llvm::Value* q_index,
+	                              std::uint32_t dim) -> CodeValue {
+	            auto* base3 = builder.CreateMul(q_index, builder.getInt32(3));
+	            auto* base3_64 = builder.CreateZExt(base3, i64);
+	            auto* x = loadRealPtrAt(xyz_base, base3_64);
+	            auto* y = loadRealPtrAt(xyz_base, builder.CreateAdd(base3_64, builder.getInt64(1)));
+	            auto* z = loadRealPtrAt(xyz_base, builder.CreateAdd(base3_64, builder.getInt64(2)));
+	            return makeVector(dim, x, y, z);
 	        };
 
 	        auto loadVec3FromQ = [&](llvm::Value* vec_base,
@@ -3387,6 +3443,22 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             }
             return out;
         };
+
+	        auto loadMatDimFromQ = [&](llvm::Value* mat_base,
+	                                  llvm::Value* q_index,
+	                                  std::uint32_t dim) -> CodeValue {
+	            CodeValue out = makeMatrix(dim, dim);
+	            auto* base9 = builder.CreateMul(q_index, builder.getInt32(9));
+	            auto* base9_64 = builder.CreateZExt(base9, i64);
+	            for (std::uint32_t r = 0; r < dim; ++r) {
+	                for (std::uint32_t c = 0; c < dim; ++c) {
+	                    const std::uint32_t idx = r * 3u + c;
+	                    out.elems[static_cast<std::size_t>(r * dim + c)] =
+	                        loadRealPtrAt(mat_base, builder.CreateAdd(base9_64, builder.getInt64(idx)));
+	                }
+	            }
+	            return out;
+	        };
 
         auto loadMaterialStateReal = [&](llvm::Value* base_ptr,
                                          llvm::Value* stride_bytes,
@@ -4239,23 +4311,23 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         break;
 
                     case FormExprType::Coordinate:
-                        values[op_idx] = loadXYZ(side.physical_points_xyz, q_index);
+                        values[op_idx] = loadXYZDim(side.physical_points_xyz, q_index, shape.dims[0]);
                         break;
 
                     case FormExprType::ReferenceCoordinate:
-                        values[op_idx] = loadXYZ(side.quad_points_xyz, q_index);
+                        values[op_idx] = loadXYZDim(side.quad_points_xyz, q_index, shape.dims[0]);
                         break;
 
                     case FormExprType::Normal:
-                        values[op_idx] = loadXYZ(side.normals_xyz, q_index);
+                        values[op_idx] = loadXYZDim(side.normals_xyz, q_index, shape.dims[0]);
                         break;
 
                     case FormExprType::Jacobian:
-                        values[op_idx] = loadMat3FromQ(side.jacobians, q_index);
+                        values[op_idx] = loadMatDimFromQ(side.jacobians, q_index, shape.dims[0]);
                         break;
 
                     case FormExprType::JacobianInverse:
-                        values[op_idx] = loadMat3FromQ(side.inverse_jacobians, q_index);
+                        values[op_idx] = loadMatDimFromQ(side.inverse_jacobians, q_index, shape.dims[0]);
                         break;
 
                     case FormExprType::Identity: {
@@ -4401,19 +4473,20 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         if (kid.type == FormExprType::TestFunction) {
                             if (shape.kind == Shape::Kind::Vector) {
                                 const auto v = loadVec3FromTable(side.test_phys_grads_xyz, side.n_qpts, i_index, q_index);
-                                values[op_idx] = makeVector(3u, v[0], v[1], v[2]);
+                                values[op_idx] = makeVector(shape.dims[0], v[0], v[1], v[2]);
                                 break;
                             }
                             if (shape.kind == Shape::Kind::Matrix) {
                                 const auto vd = static_cast<std::size_t>(shape.dims[0]);
+                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
                                 CodeValue out = makeZero(shape);
                                 const auto dofs_per_comp = builder.CreateUDiv(side.n_test_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
                                 const auto comp = builder.CreateUDiv(i_index, dofs_per_comp);
                                 const auto g = loadVec3FromTable(side.test_phys_grads_xyz, side.n_qpts, i_index, q_index);
                                 for (std::size_t r = 0; r < vd; ++r) {
                                     auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        out.elems[r * 3 + d] = builder.CreateSelect(is_r, g[d], f64c(0.0));
+                                    for (std::size_t d = 0; d < dim; ++d) {
+                                        out.elems[r * dim + d] = builder.CreateSelect(is_r, g[d], f64c(0.0));
                                     }
                                 }
                                 values[op_idx] = out;
@@ -4421,63 +4494,73 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             }
                             throw std::runtime_error("LLVMGen: grad(TestFunction) unsupported shape");
                         }
-                        if (kid.type == FormExprType::TrialFunction) {
-                            if (is_residual) {
-                                auto* coeffs = side.solution_coefficients;
-                                if (shape.kind == Shape::Kind::Vector) {
-                                    std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                    emitForLoop(side.n_trial_dofs, "grad_u", [&](llvm::Value* j) {
-                                        auto* j64 = builder.CreateZExt(j, i64);
-                                        auto* cj = loadRealPtrAt(coeffs, j64);
-                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                        }
-                                    });
-                                    values[op_idx] = makeVector(3u, acc[0], acc[1], acc[2]);
-                                    break;
-                                }
-                                if (shape.kind == Shape::Kind::Matrix) {
-                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                    CodeValue out = makeZero(shape);
-                                    auto* dofs_per_comp =
-                                        builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                    for (std::size_t comp = 0; comp < vd; ++comp) {
-                                        std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                        emitForLoop(dofs_per_comp, "grad_u_c" + std::to_string(comp), [&](llvm::Value* jj) {
-                                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                            auto* j = builder.CreateAdd(base, jj);
-                                            auto* j64 = builder.CreateZExt(j, i64);
-                                            auto* cj = loadRealPtrAt(coeffs, j64);
-                                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                            for (std::size_t d = 0; d < 3; ++d) {
-                                                acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                            }
-                                        });
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            out.elems[comp * 3 + d] = acc[d];
-                                        }
-                                    }
-                                    values[op_idx] = out;
+	                        if (kid.type == FormExprType::TrialFunction) {
+	                            if (is_residual) {
+	                                auto* coeffs = side.solution_coefficients;
+	                                if (shape.kind == Shape::Kind::Vector) {
+	                                    const auto dim = static_cast<std::size_t>(shape.dims[0]);
+	                                    const auto sums = emitReduceSum(side.n_trial_dofs, "grad_u", dim, [&](llvm::Value* j) {
+	                                        auto* j64 = builder.CreateZExt(j, i64);
+	                                        auto* cj = loadRealPtrAt(coeffs, j64);
+	                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        std::vector<llvm::Value*> terms;
+	                                        terms.reserve(dim);
+	                                        for (std::size_t d = 0; d < dim; ++d) {
+	                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+	                                        }
+	                                        return terms;
+	                                    });
+	                                    auto* x = sums[0];
+	                                    auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
+	                                    auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+	                                    values[op_idx] = makeVector(static_cast<std::uint32_t>(dim), x, y, z);
+	                                    break;
+	                                }
+	                                if (shape.kind == Shape::Kind::Matrix) {
+	                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
+	                                    const auto dim = static_cast<std::size_t>(shape.dims[1]);
+	                                    CodeValue out = makeZero(shape);
+	                                    auto* dofs_per_comp =
+	                                        builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+	                                    for (std::size_t comp = 0; comp < vd; ++comp) {
+	                                        const auto acc = emitReduceSum(dofs_per_comp, "grad_u_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
+	                                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                            auto* j = builder.CreateAdd(base, jj);
+	                                            auto* j64 = builder.CreateZExt(j, i64);
+	                                            auto* cj = loadRealPtrAt(coeffs, j64);
+	                                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                            std::vector<llvm::Value*> terms;
+	                                            terms.reserve(dim);
+	                                            for (std::size_t d = 0; d < dim; ++d) {
+	                                                terms.push_back(builder.CreateFMul(cj, g[d]));
+	                                            }
+	                                            return terms;
+	                                        });
+	                                        for (std::size_t d = 0; d < dim; ++d) {
+	                                            out.elems[comp * dim + d] = acc[d];
+	                                        }
+	                                    }
+	                                    values[op_idx] = out;
                                     break;
                                 }
                                 throw std::runtime_error("LLVMGen: grad(u) unsupported shape");
                             }
                             if (shape.kind == Shape::Kind::Vector) {
                                 const auto v = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
-                                values[op_idx] = makeVector(3u, v[0], v[1], v[2]);
+                                values[op_idx] = makeVector(shape.dims[0], v[0], v[1], v[2]);
                                 break;
                             }
                             if (shape.kind == Shape::Kind::Matrix) {
                                 const auto vd = static_cast<std::size_t>(shape.dims[0]);
+                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
                                 CodeValue out = makeZero(shape);
                                 const auto dofs_per_comp = builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
                                 const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
                                 const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
                                 for (std::size_t r = 0; r < vd; ++r) {
                                     auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        out.elems[r * 3 + d] = builder.CreateSelect(is_r, g[d], f64c(0.0));
+                                    for (std::size_t d = 0; d < dim; ++d) {
+                                        out.elems[r * dim + d] = builder.CreateSelect(is_r, g[d], f64c(0.0));
                                     }
                                 }
                                 values[op_idx] = out;
@@ -4485,93 +4568,118 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             }
                             throw std::runtime_error("LLVMGen: grad(TrialFunction) unsupported shape");
                         }
-                        if (kid.type == FormExprType::PreviousSolutionRef) {
-                            const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
-                            if (shape.kind == Shape::Kind::Vector) {
-                                std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-                                emitForLoop(side.n_trial_dofs, "prev_grad" + std::to_string(k), [&](llvm::Value* j) {
-                                    auto* j64 = builder.CreateZExt(j, i64);
-                                    auto* cj = loadRealPtrAt(coeffs, j64);
-                                    const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                    }
-                                });
-                                values[op_idx] = makeVector(3u, acc[0], acc[1], acc[2]);
-                                break;
-                            }
-                            if (shape.kind == Shape::Kind::Matrix) {
-                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                CodeValue out = makeZero(shape);
-                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-                                auto* dofs_per_comp =
-                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                for (std::size_t comp = 0; comp < vd; ++comp) {
-                                    std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                    emitForLoop(dofs_per_comp, "prev_grad" + std::to_string(k) + "_c" + std::to_string(comp), [&](llvm::Value* jj) {
-                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                        auto* j = builder.CreateAdd(base, jj);
-                                        auto* j64 = builder.CreateZExt(j, i64);
-                                        auto* cj = loadRealPtrAt(coeffs, j64);
-                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                        }
-                                    });
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        out.elems[comp * 3 + d] = acc[d];
-                                    }
-                                }
+	                        if (kid.type == FormExprType::PreviousSolutionRef) {
+	                            const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+	                            if (shape.kind == Shape::Kind::Vector) {
+	                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+	                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+	                                const auto sums =
+	                                    emitReduceSum(side.n_trial_dofs, "prev_grad" + std::to_string(k), dim, [&](llvm::Value* j) {
+	                                        auto* j64 = builder.CreateZExt(j, i64);
+	                                        auto* cj = loadRealPtrAt(coeffs, j64);
+	                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        std::vector<llvm::Value*> terms;
+	                                        terms.reserve(dim);
+	                                        for (std::size_t d = 0; d < dim; ++d) {
+	                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+	                                        }
+	                                        return terms;
+	                                    });
+	                                auto* x = sums[0];
+	                                auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
+	                                auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+	                                values[op_idx] = makeVector(static_cast<std::uint32_t>(dim), x, y, z);
+	                                break;
+	                            }
+	                            if (shape.kind == Shape::Kind::Matrix) {
+	                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
+	                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
+	                                CodeValue out = makeZero(shape);
+	                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+	                                auto* dofs_per_comp =
+	                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+	                                for (std::size_t comp = 0; comp < vd; ++comp) {
+	                                    const auto acc = emitReduceSum(dofs_per_comp,
+	                                                                   "prev_grad" + std::to_string(k) + "_c" + std::to_string(comp),
+	                                                                   dim,
+	                                                                   [&](llvm::Value* jj) {
+	                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                        auto* j = builder.CreateAdd(base, jj);
+	                                        auto* j64 = builder.CreateZExt(j, i64);
+	                                        auto* cj = loadRealPtrAt(coeffs, j64);
+	                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        std::vector<llvm::Value*> terms;
+	                                        terms.reserve(dim);
+	                                        for (std::size_t d = 0; d < dim; ++d) {
+	                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+	                                        }
+	                                        return terms;
+	                                    });
+	                                    for (std::size_t d = 0; d < dim; ++d) {
+	                                        out.elems[comp * dim + d] = acc[d];
+	                                    }
+	                                }
                                 values[op_idx] = out;
                                 break;
                             }
                             throw std::runtime_error("LLVMGen: grad(PreviousSolutionRef) unsupported shape");
                         }
-                        if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
-                            const int fid = unpackFieldIdImm1(kid.imm1);
-                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
-                                auto* coeffs = side.solution_coefficients;
-                                if (shape.kind == Shape::Kind::Vector) {
-                                    std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                    emitForLoop(side.n_trial_dofs, "grad_state_u", [&](llvm::Value* j) {
-                                        auto* j64 = builder.CreateZExt(j, i64);
-                                        auto* cj = loadRealPtrAt(coeffs, j64);
-                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                        }
-                                    });
-                                    values[op_idx] = makeVector(3u, acc[0], acc[1], acc[2]);
-                                    break;
-                                }
-                                if (shape.kind == Shape::Kind::Matrix) {
-                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                    CodeValue out = makeZero(shape);
-                                    auto* dofs_per_comp =
-                                        builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                    for (std::size_t comp = 0; comp < vd; ++comp) {
-                                        std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                        emitForLoop(dofs_per_comp, "grad_state_u_c" + std::to_string(comp), [&](llvm::Value* jj) {
-                                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                            auto* j = builder.CreateAdd(base, jj);
-                                            auto* j64 = builder.CreateZExt(j, i64);
-                                            auto* cj = loadRealPtrAt(coeffs, j64);
-                                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                            for (std::size_t d = 0; d < 3; ++d) {
-                                                acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                            }
-                                        });
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            out.elems[comp * 3 + d] = acc[d];
-                                        }
-                                    }
-                                    values[op_idx] = out;
+	                        if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
+	                            const int fid = unpackFieldIdImm1(kid.imm1);
+	                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
+	                                auto* coeffs = side.solution_coefficients;
+	                                if (shape.kind == Shape::Kind::Vector) {
+	                                    const auto dim = static_cast<std::size_t>(shape.dims[0]);
+	                                    const auto sums =
+	                                        emitReduceSum(side.n_trial_dofs, "grad_state_u", dim, [&](llvm::Value* j) {
+	                                            auto* j64 = builder.CreateZExt(j, i64);
+	                                            auto* cj = loadRealPtrAt(coeffs, j64);
+	                                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                            std::vector<llvm::Value*> terms;
+	                                            terms.reserve(dim);
+	                                            for (std::size_t d = 0; d < dim; ++d) {
+	                                                terms.push_back(builder.CreateFMul(cj, g[d]));
+	                                            }
+	                                            return terms;
+	                                        });
+	                                    auto* x = sums[0];
+	                                    auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
+	                                    auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+	                                    values[op_idx] = makeVector(static_cast<std::uint32_t>(dim), x, y, z);
+	                                    break;
+	                                }
+	                                if (shape.kind == Shape::Kind::Matrix) {
+	                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
+	                                    const auto dim = static_cast<std::size_t>(shape.dims[1]);
+	                                    CodeValue out = makeZero(shape);
+	                                    auto* dofs_per_comp =
+	                                        builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+	                                    for (std::size_t comp = 0; comp < vd; ++comp) {
+	                                        const auto acc = emitReduceSum(
+	                                            dofs_per_comp, "grad_state_u_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
+	                                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                            auto* j = builder.CreateAdd(base, jj);
+	                                            auto* j64 = builder.CreateZExt(j, i64);
+	                                            auto* cj = loadRealPtrAt(coeffs, j64);
+	                                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                            std::vector<llvm::Value*> terms;
+	                                            terms.reserve(dim);
+	                                            for (std::size_t d = 0; d < dim; ++d) {
+	                                                terms.push_back(builder.CreateFMul(cj, g[d]));
+	                                            }
+	                                            return terms;
+	                                        });
+	                                        for (std::size_t d = 0; d < dim; ++d) {
+	                                            out.elems[comp * dim + d] = acc[d];
+	                                        }
+	                                    }
+	                                    values[op_idx] = out;
                                     break;
                                 }
                                 throw std::runtime_error("LLVMGen: grad(StateField(INVALID)) unsupported shape");
                             }
                             if (shape.kind == Shape::Kind::Vector) {
+                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
                                 auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
                                 auto* entry_is_null =
                                     builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
@@ -4601,17 +4709,18 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                                 builder.SetInsertPoint(merge);
                                 std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                for (std::size_t d = 0; d < 3; ++d) {
+                                for (std::size_t d = 0; d < dim; ++d) {
                                     auto* phi = builder.CreatePHI(f64, 2, "field_grad.v" + std::to_string(d));
                                     phi->addIncoming(f64c(0.0), zero_block);
                                     phi->addIncoming(loaded[d], ok2_block);
                                     outv[d] = phi;
                                 }
-                                values[op_idx] = makeVector(3u, outv[0], outv[1], outv[2]);
+                                values[op_idx] = makeVector(static_cast<std::uint32_t>(dim), outv[0], outv[1], outv[2]);
                                 break;
                             }
                             if (shape.kind == Shape::Kind::Matrix) {
                                 const auto vd = static_cast<std::size_t>(shape.dims[0]);
+                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
                                 auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
                                 auto* entry_is_null =
                                     builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
@@ -4641,11 +4750,11 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 builder.SetInsertPoint(merge);
                                 CodeValue out = makeZero(shape);
                                 for (std::size_t r = 0; r < vd; ++r) {
-                                    for (std::size_t c = 0; c < 3; ++c) {
+                                    for (std::size_t c = 0; c < dim; ++c) {
                                         auto* phi = builder.CreatePHI(f64, 2, "field_jac.a");
                                         phi->addIncoming(f64c(0.0), zero_block);
                                         phi->addIncoming(loaded.elems[r * 3 + c], ok2_block);
-                                        out.elems[r * 3 + c] = phi;
+                                        out.elems[r * dim + c] = phi;
                                     }
                                 }
                                 values[op_idx] = out;
@@ -4660,75 +4769,89 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 term.ir.children[static_cast<std::size_t>(kid.first_child)];
                             const auto& dt_child = term.ir.ops[dt_child_idx];
 
-                            auto gradTrialBasis = [&]() -> CodeValue {
-                                CodeValue g = makeZero(shape);
-                                if (shape.kind == Shape::Kind::Vector) {
-                                    const auto v = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
-                                    g = makeVector(3u, v[0], v[1], v[2]);
-                                    return g;
-                                }
-                                if (shape.kind == Shape::Kind::Matrix) {
-                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                    const auto dofs_per_comp = builder.CreateUDiv(
-                                        side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                    const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
-                                    const auto gg = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
-                                    for (std::size_t r = 0; r < vd; ++r) {
-                                        auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            g.elems[r * 3 + d] = builder.CreateSelect(is_r, gg[d], f64c(0.0));
-                                        }
-                                    }
-                                    return g;
-                                }
-                                throw std::runtime_error("LLVMGen: grad(dt(TrialFunction)) unsupported shape");
-                            };
+	                            auto gradTrialBasis = [&]() -> CodeValue {
+	                                CodeValue g = makeZero(shape);
+	                                if (shape.kind == Shape::Kind::Vector) {
+	                                    const auto v = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
+	                                    g = makeVector(shape.dims[0], v[0], v[1], v[2]);
+	                                    return g;
+	                                }
+	                                if (shape.kind == Shape::Kind::Matrix) {
+	                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
+	                                    const auto dim = static_cast<std::size_t>(shape.dims[1]);
+	                                    const auto dofs_per_comp = builder.CreateUDiv(
+	                                        side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+	                                    const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
+	                                    const auto gg = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
+	                                    for (std::size_t r = 0; r < vd; ++r) {
+	                                        auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
+	                                        for (std::size_t d = 0; d < dim; ++d) {
+	                                            g.elems[r * dim + d] = builder.CreateSelect(is_r, gg[d], f64c(0.0));
+	                                        }
+	                                    }
+	                                    return g;
+	                                }
+	                                throw std::runtime_error("LLVMGen: grad(dt(TrialFunction)) unsupported shape");
+	                            };
 
-                            auto gradCurrentSolution = [&]() -> CodeValue {
-                                auto* coeffs = side.solution_coefficients;
-                                if (shape.kind == Shape::Kind::Vector) {
-                                    std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                    emitForLoop(side.n_trial_dofs, "grad_dt_u", [&](llvm::Value* j) {
-                                        auto* j64 = builder.CreateZExt(j, i64);
-                                        auto* cj = loadRealPtrAt(coeffs, j64);
-                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                        }
-                                    });
-                                    return makeVector(3u, acc[0], acc[1], acc[2]);
-                                }
-                                if (shape.kind == Shape::Kind::Matrix) {
-                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                    CodeValue out = makeZero(shape);
-                                    auto* dofs_per_comp =
-                                        builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                    for (std::size_t comp = 0; comp < vd; ++comp) {
-                                        std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                        emitForLoop(dofs_per_comp, "grad_dt_u_c" + std::to_string(comp), [&](llvm::Value* jj) {
-                                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                            auto* j = builder.CreateAdd(base, jj);
-                                            auto* j64 = builder.CreateZExt(j, i64);
-                                            auto* cj = loadRealPtrAt(coeffs, j64);
-                                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                            for (std::size_t d = 0; d < 3; ++d) {
-                                                acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                            }
-                                        });
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            out.elems[comp * 3 + d] = acc[d];
-                                        }
-                                    }
-                                    return out;
-                                }
-                                throw std::runtime_error("LLVMGen: grad(dt(u)) unsupported shape");
-                            };
+		                            auto gradCurrentSolution = [&]() -> CodeValue {
+		                                auto* coeffs = side.solution_coefficients;
+		                                if (shape.kind == Shape::Kind::Vector) {
+		                                    const auto dim = static_cast<std::size_t>(shape.dims[0]);
+		                                    const auto sums =
+		                                        emitReduceSum(side.n_trial_dofs, "grad_dt_u", dim, [&](llvm::Value* j) {
+		                                            auto* j64 = builder.CreateZExt(j, i64);
+		                                            auto* cj = loadRealPtrAt(coeffs, j64);
+		                                            const auto g =
+		                                                loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                            std::vector<llvm::Value*> terms;
+		                                            terms.reserve(dim);
+		                                            for (std::size_t d = 0; d < dim; ++d) {
+		                                                terms.push_back(builder.CreateFMul(cj, g[d]));
+		                                            }
+		                                            return terms;
+		                                        });
+		                                    auto* x = sums[0];
+		                                    auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
+		                                    auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+		                                    return makeVector(static_cast<std::uint32_t>(dim), x, y, z);
+		                                }
+		                                if (shape.kind == Shape::Kind::Matrix) {
+		                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
+		                                    const auto dim = static_cast<std::size_t>(shape.dims[1]);
+		                                    CodeValue out = makeZero(shape);
+		                                    auto* dofs_per_comp =
+		                                        builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+		                                    for (std::size_t comp = 0; comp < vd; ++comp) {
+		                                        const auto acc =
+		                                            emitReduceSum(dofs_per_comp, "grad_dt_u_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
+		                                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+		                                            auto* j = builder.CreateAdd(base, jj);
+		                                            auto* j64 = builder.CreateZExt(j, i64);
+		                                            auto* cj = loadRealPtrAt(coeffs, j64);
+		                                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                            std::vector<llvm::Value*> terms;
+		                                            terms.reserve(dim);
+		                                            for (std::size_t d = 0; d < dim; ++d) {
+		                                                terms.push_back(builder.CreateFMul(cj, g[d]));
+		                                            }
+		                                            return terms;
+		                                        });
+		                                        for (std::size_t d = 0; d < dim; ++d) {
+		                                            out.elems[comp * dim + d] = acc[d];
+		                                        }
+		                                    }
+	                                    return out;
+	                                }
+	                                throw std::runtime_error("LLVMGen: grad(dt(u)) unsupported shape");
+	                            };
 
-                            auto gradDiscreteOrStateField = [&](int fid) -> CodeValue {
-                                if (shape.kind == Shape::Kind::Vector) {
-                                    auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
-                                    auto* entry_is_null =
-                                        builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+	                            auto gradDiscreteOrStateField = [&](int fid) -> CodeValue {
+	                                if (shape.kind == Shape::Kind::Vector) {
+	                                    const auto dim = static_cast<std::size_t>(shape.dims[0]);
+	                                    auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
+	                                    auto* entry_is_null =
+	                                        builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
                                     auto* ok = llvm::BasicBlock::Create(*ctx, "field_grad.ok", fn);
                                     auto* zero = llvm::BasicBlock::Create(*ctx, "field_grad.zero", fn);
                                     auto* merge = llvm::BasicBlock::Create(*ctx, "field_grad.merge", fn);
@@ -4752,21 +4875,22 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                     builder.CreateBr(merge);
                                     auto* zero_block = builder.GetInsertBlock();
 
-                                    builder.SetInsertPoint(merge);
-                                    std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        auto* phi = builder.CreatePHI(f64, 2, "field_grad.g");
-                                        phi->addIncoming(f64c(0.0), zero_block);
-                                        phi->addIncoming(loaded[d], ok2_block);
-                                        outv[d] = phi;
-                                    }
-                                    return makeVector(3u, outv[0], outv[1], outv[2]);
-                                }
-                                if (shape.kind == Shape::Kind::Matrix) {
-                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                    auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
-                                    auto* entry_is_null =
-                                        builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+	                                    builder.SetInsertPoint(merge);
+	                                    std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                                    for (std::size_t d = 0; d < dim; ++d) {
+	                                        auto* phi = builder.CreatePHI(f64, 2, "field_grad.g");
+	                                        phi->addIncoming(f64c(0.0), zero_block);
+	                                        phi->addIncoming(loaded[d], ok2_block);
+	                                        outv[d] = phi;
+	                                    }
+	                                    return makeVector(static_cast<std::uint32_t>(dim), outv[0], outv[1], outv[2]);
+	                                }
+	                                if (shape.kind == Shape::Kind::Matrix) {
+	                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
+	                                    const auto dim = static_cast<std::size_t>(shape.dims[1]);
+	                                    auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
+	                                    auto* entry_is_null =
+	                                        builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
                                     auto* ok = llvm::BasicBlock::Create(*ctx, "field_jac.ok", fn);
                                     auto* zero = llvm::BasicBlock::Create(*ctx, "field_jac.zero", fn);
                                     auto* merge = llvm::BasicBlock::Create(*ctx, "field_jac.merge", fn);
@@ -4790,20 +4914,20 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                     builder.CreateBr(merge);
                                     auto* zero_block = builder.GetInsertBlock();
 
-                                    builder.SetInsertPoint(merge);
-                                    CodeValue out = makeZero(shape);
-                                    for (std::size_t r = 0; r < vd; ++r) {
-                                        for (std::size_t c = 0; c < 3; ++c) {
-                                            auto* phi = builder.CreatePHI(f64, 2, "field_jac.a");
-                                            phi->addIncoming(f64c(0.0), zero_block);
-                                            phi->addIncoming(loaded.elems[r * 3 + c], ok2_block);
-                                            out.elems[r * 3 + c] = phi;
-                                        }
-                                    }
-                                    return out;
-                                }
-                                throw std::runtime_error("LLVMGen: grad(dt(field)) unsupported shape");
-                            };
+	                                    builder.SetInsertPoint(merge);
+	                                    CodeValue out = makeZero(shape);
+	                                    for (std::size_t r = 0; r < vd; ++r) {
+	                                        for (std::size_t c = 0; c < dim; ++c) {
+	                                            auto* phi = builder.CreatePHI(f64, 2, "field_jac.a");
+	                                            phi->addIncoming(f64c(0.0), zero_block);
+	                                            phi->addIncoming(loaded.elems[r * 3 + c], ok2_block);
+	                                            out.elems[r * dim + c] = phi;
+	                                        }
+	                                    }
+	                                    return out;
+	                                }
+	                                throw std::runtime_error("LLVMGen: grad(dt(field)) unsupported shape");
+	                            };
 
                             if (dt_child.type == FormExprType::TrialFunction) {
                                 const auto g = is_residual ? gradCurrentSolution() : gradTrialBasis();
@@ -4825,15 +4949,389 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 break;
                             }
 
-                            throw std::runtime_error("LLVMGen: grad(dt(...)) operand not supported");
-                        }
-                        throw std::runtime_error("LLVMGen: Gradient operand not supported");
-                    }
+	                            throw std::runtime_error("LLVMGen: grad(dt(...)) operand not supported");
+	                        }
 
-                    case FormExprType::Divergence: {
-                        const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
-                        const auto& kid = term.ir.ops[child_idx];
-                        const auto vd = static_cast<std::size_t>(term.shapes[child_idx].dims[0]);
+                        // Gradient is linear; handle the common simplified pattern grad(0 * X) -> 0.
+                        if (kid.type == FormExprType::Multiply && kid.child_count == 2u) {
+                            const auto a_idx = term.ir.children[static_cast<std::size_t>(kid.first_child)];
+                            const auto b_idx = term.ir.children[static_cast<std::size_t>(kid.first_child) + 1u];
+                            const auto& aop = term.ir.ops[a_idx];
+                            const auto& bop = term.ir.ops[b_idx];
+
+                            auto isZeroConstant = [](const KernelIROp& op2) -> bool {
+                                if (op2.type != FormExprType::Constant) {
+                                    return false;
+                                }
+                                const double v = std::bit_cast<double>(op2.imm0);
+                                return v == 0.0;
+                            };
+
+                            if (isZeroConstant(aop) || isZeroConstant(bop)) {
+                                values[op_idx] = makeZero(shape);
+                                break;
+                            }
+                        }
+	                        throw std::runtime_error("LLVMGen: Gradient operand not supported");
+	                    }
+
+	                    case FormExprType::Divergence: {
+	                        const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
+	                        const auto& kid = term.ir.ops[child_idx];
+	                        const auto vd = static_cast<std::size_t>(term.shapes[child_idx].dims[0]);
+
+	                        // Matrix divergence (returns a vector with length = number of matrix rows).
+	                        //
+	                        // Currently implemented for the Navier–Stokes/Stokes VMS strong residual pattern
+	                        //   div( scalar * sym(grad(u)) )
+	                        // where the scalar factor is spatially constant and u is one of:
+	                        //   - TrialFunction  (residual: current solution; tangent: trial basis)
+	                        //   - StateField(INVALID_FIELD_ID) (current solution)
+	                        //   - PreviousSolutionRef
+	                        if (shape.kind == Shape::Kind::Vector) {
+	                            auto isSpatiallyConstantScalar = [&](auto&& self, std::size_t idx) -> bool {
+	                                const auto& op2 = term.ir.ops[idx];
+	                                switch (op2.type) {
+	                                    case FormExprType::Constant:
+	                                    case FormExprType::ParameterRef:
+	                                    case FormExprType::Time:
+	                                    case FormExprType::TimeStep:
+	                                    case FormExprType::EffectiveTimeStep:
+	                                        return true;
+	                                    case FormExprType::Negate:
+	                                    case FormExprType::AbsoluteValue:
+	                                    case FormExprType::Sign:
+	                                    case FormExprType::Sqrt:
+	                                    case FormExprType::Exp:
+	                                    case FormExprType::Log:
+	                                        break;
+	                                    case FormExprType::Add:
+	                                    case FormExprType::Subtract:
+	                                    case FormExprType::Multiply:
+	                                    case FormExprType::Divide:
+	                                    case FormExprType::Power:
+	                                    case FormExprType::Minimum:
+	                                    case FormExprType::Maximum:
+	                                        break;
+	                                    default:
+	                                        return false;
+	                                }
+
+	                                for (std::size_t k = 0; k < static_cast<std::size_t>(op2.child_count); ++k) {
+	                                    const auto c =
+	                                        term.ir.children[static_cast<std::size_t>(op2.first_child) + k];
+	                                    if (!self(self, c)) {
+	                                        return false;
+	                                    }
+	                                }
+	                                return true;
+	                            };
+
+	                            auto traceHessBasis = [&](const CodeValue& H, std::size_t dim) -> llvm::Value* {
+	                                llvm::Value* tr = H.elems[0];
+	                                if (dim >= 2) tr = builder.CreateFAdd(tr, H.elems[4]);
+	                                if (dim >= 3) tr = builder.CreateFAdd(tr, H.elems[8]);
+	                                return tr;
+	                            };
+
+	                            auto divSymGradFromCoeffs = [&](llvm::Value* coeffs_ptr,
+	                                                           std::size_t rows,
+	                                                           std::size_t dim) -> CodeValue {
+	                                CodeValue out = makeZero(vectorShape(static_cast<std::uint32_t>(rows)));
+	                                auto* dofs_per_comp =
+	                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(rows)));
+
+	                                const std::size_t n = std::min(rows, dim);
+		                                for (std::size_t r = 0; r < rows; ++r) {
+		                                    if (r >= dim) {
+		                                        out.elems[r] = f64c(0.0);
+		                                        continue;
+		                                    }
+
+		                                    const auto loop_name = "lap_u_c" + std::to_string(r);
+		                                    auto* lap = emitReduceSumScalar(dofs_per_comp, loop_name, [&](llvm::Value* jj) -> llvm::Value* {
+		                                        auto* base =
+		                                            builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(r)), dofs_per_comp);
+		                                        auto* j = builder.CreateAdd(base, jj);
+		                                        auto* j64 = builder.CreateZExt(j, i64);
+		                                        auto* cj = loadRealPtrAt(coeffs_ptr, j64);
+		                                        const auto H =
+		                                            loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
+		                                        auto* tr = traceHessBasis(H, dim);
+		                                        return builder.CreateFMul(cj, tr);
+		                                    });
+
+		                                    llvm::Value* gd = f64c(0.0);
+		                                    for (std::size_t d = 0; d < n; ++d) {
+		                                        const auto loop_name =
+		                                            "gd_u_r" + std::to_string(r) + "_d" + std::to_string(d);
+		                                        auto* acc = emitReduceSumScalar(dofs_per_comp, loop_name, [&](llvm::Value* jj) -> llvm::Value* {
+		                                            auto* base =
+		                                                builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(d)), dofs_per_comp);
+		                                            auto* j = builder.CreateAdd(base, jj);
+		                                            auto* j64 = builder.CreateZExt(j, i64);
+		                                            auto* cj = loadRealPtrAt(coeffs_ptr, j64);
+		                                            const auto H =
+		                                                loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
+		                                            const auto idxH = static_cast<std::size_t>(r * 3u + d);
+		                                            return builder.CreateFMul(cj, H.elems[idxH]);
+		                                        });
+		                                        gd = builder.CreateFAdd(gd, acc);
+		                                    }
+
+	                                    out.elems[r] = builder.CreateFMul(f64c(0.5), builder.CreateFAdd(lap, gd));
+	                                }
+
+	                                return out;
+	                            };
+
+	                            auto divSymGradTrialBasis = [&](std::size_t rows, std::size_t dim) -> CodeValue {
+	                                CodeValue out = makeZero(vectorShape(static_cast<std::uint32_t>(rows)));
+	                                auto* dofs_per_comp =
+	                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(rows)));
+	                                auto* comp = builder.CreateUDiv(j_index, dofs_per_comp);
+	                                const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index);
+	                                auto* tr = traceHessBasis(H, dim);
+
+	                                for (std::size_t r = 0; r < rows; ++r) {
+	                                    if (r >= dim) {
+	                                        out.elems[r] = f64c(0.0);
+	                                        continue;
+	                                    }
+
+	                                    auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
+	                                    auto* lap = builder.CreateSelect(is_r, tr, f64c(0.0));
+
+	                                    llvm::Value* h_rc = f64c(0.0);
+	                                    if (dim >= 1) {
+	                                        auto* is0 = builder.CreateICmpEQ(comp, builder.getInt32(0));
+	                                        h_rc = builder.CreateSelect(is0, H.elems[r * 3u + 0u], h_rc);
+	                                    }
+	                                    if (dim >= 2) {
+	                                        auto* is1 = builder.CreateICmpEQ(comp, builder.getInt32(1));
+	                                        h_rc = builder.CreateSelect(is1, H.elems[r * 3u + 1u], h_rc);
+	                                    }
+	                                    if (dim >= 3) {
+	                                        auto* is2 = builder.CreateICmpEQ(comp, builder.getInt32(2));
+	                                        h_rc = builder.CreateSelect(is2, H.elems[r * 3u + 2u], h_rc);
+	                                    }
+
+	                                    out.elems[r] = builder.CreateFMul(f64c(0.5), builder.CreateFAdd(lap, h_rc));
+	                                }
+	                                return out;
+	                            };
+
+	                            auto divSymGradForU = [&](std::size_t u_idx,
+	                                                      std::size_t rows,
+	                                                      std::size_t dim) -> CodeValue {
+	                                auto divSymGradFromField = [&](int fid, std::size_t rows2, std::size_t dim2) -> CodeValue {
+	                                    CodeValue out = makeZero(vectorShape(static_cast<std::uint32_t>(rows2)));
+
+	                                    auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
+	                                    auto* entry_is_null = builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+	                                    auto* ok = llvm::BasicBlock::Create(*ctx, "field_divsym.ok", fn);
+	                                    auto* zero = llvm::BasicBlock::Create(*ctx, "field_divsym.zero", fn);
+	                                    auto* merge = llvm::BasicBlock::Create(*ctx, "field_divsym.merge", fn);
+	                                    builder.CreateCondBr(entry_is_null, zero, ok);
+
+	                                    std::array<llvm::Value*, 3> computed{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                                    builder.SetInsertPoint(ok);
+	                                    auto* base = loadPtr(entry, ABIV3::field_entry_component_hessians_off);
+	                                    auto* base_is_null = builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+	                                    auto* ok2 = llvm::BasicBlock::Create(*ctx, "field_divsym.ok2", fn);
+	                                    builder.CreateCondBr(base_is_null, zero, ok2);
+
+	                                    builder.SetInsertPoint(ok2);
+	                                    auto* vd = loadU32(entry, ABIV3::field_entry_value_dim_off);
+	                                    const std::size_t n2 = std::min(rows2, dim2);
+	                                    auto* vd_ok = builder.CreateICmpUGE(vd, builder.getInt32(static_cast<std::uint32_t>(n2)));
+	                                    auto* ok3 = llvm::BasicBlock::Create(*ctx, "field_divsym.ok3", fn);
+	                                    builder.CreateCondBr(vd_ok, ok3, zero);
+
+	                                    builder.SetInsertPoint(ok3);
+	                                    auto loadHessElem = [&](std::size_t comp,
+	                                                            std::size_t d0,
+	                                                            std::size_t d1) -> llvm::Value* {
+	                                        auto* q64 = builder.CreateZExt(q_index, i64);
+	                                        auto* vd64 = builder.CreateZExt(vd, i64);
+	                                        auto* idx = builder.CreateAdd(builder.CreateMul(q64, vd64),
+	                                                                      builder.getInt64(static_cast<std::uint64_t>(comp)));
+	                                        auto* base9 = builder.CreateMul(idx, builder.getInt64(9));
+	                                        const auto elem = static_cast<std::uint64_t>(d0 * 3u + d1);
+	                                        return loadRealPtrAt(base, builder.CreateAdd(base9, builder.getInt64(elem)));
+	                                    };
+
+	                                    for (std::size_t r = 0; r < rows2; ++r) {
+	                                        if (r >= dim2) {
+	                                            computed[r] = f64c(0.0);
+	                                            continue;
+	                                        }
+
+	                                        llvm::Value* lap = loadHessElem(r, 0u, 0u);
+	                                        if (dim2 >= 2u) lap = builder.CreateFAdd(lap, loadHessElem(r, 1u, 1u));
+	                                        if (dim2 >= 3u) lap = builder.CreateFAdd(lap, loadHessElem(r, 2u, 2u));
+
+	                                        llvm::Value* gd = f64c(0.0);
+	                                        for (std::size_t d = 0; d < n2; ++d) {
+	                                            gd = builder.CreateFAdd(gd, loadHessElem(d, r, d));
+	                                        }
+
+	                                        computed[r] = builder.CreateFMul(f64c(0.5), builder.CreateFAdd(lap, gd));
+	                                    }
+
+	                                    builder.CreateBr(merge);
+	                                    auto* ok3_block = builder.GetInsertBlock();
+
+	                                    builder.SetInsertPoint(zero);
+	                                    builder.CreateBr(merge);
+	                                    auto* zero_block = builder.GetInsertBlock();
+
+	                                    builder.SetInsertPoint(merge);
+	                                    for (std::size_t r = 0; r < rows2; ++r) {
+	                                        auto* phi = builder.CreatePHI(f64, 2, "field_divsym." + std::to_string(r));
+	                                        phi->addIncoming(f64c(0.0), zero_block);
+	                                        phi->addIncoming(computed[r], ok3_block);
+	                                        out.elems[r] = phi;
+	                                    }
+	                                    return out;
+	                                };
+
+	                                auto divSymGradForURec = [&](auto&& self,
+	                                                             std::size_t u_idx2,
+	                                                             std::size_t rows2,
+	                                                             std::size_t dim2) -> CodeValue {
+	                                    const auto& uop = term.ir.ops[u_idx2];
+	                                    if (uop.type == FormExprType::TrialFunction) {
+	                                        return is_residual ? divSymGradFromCoeffs(side.solution_coefficients, rows2, dim2)
+	                                                          : divSymGradTrialBasis(rows2, dim2);
+	                                    }
+	                                    if (uop.type == FormExprType::DiscreteField) {
+	                                        const int fid = unpackFieldIdImm1(uop.imm1);
+	                                        return divSymGradFromField(fid, rows2, dim2);
+	                                    }
+	                                    if (uop.type == FormExprType::StateField) {
+	                                        const int fid = unpackFieldIdImm1(uop.imm1);
+	                                        if (fid == 0xffff) {
+	                                            return divSymGradFromCoeffs(side.solution_coefficients, rows2, dim2);
+	                                        }
+	                                        return divSymGradFromField(fid, rows2, dim2);
+	                                    }
+	                                    if (uop.type == FormExprType::PreviousSolutionRef) {
+	                                        const int k = static_cast<int>(static_cast<std::int64_t>(uop.imm0));
+	                                        auto* coeffs_ptr = loadPrevSolutionCoeffsPtr(side, k);
+	                                        return divSymGradFromCoeffs(coeffs_ptr, rows2, dim2);
+	                                    }
+	                                    if (uop.type == FormExprType::Negate) {
+	                                        const auto a_idx = term.ir.children[static_cast<std::size_t>(uop.first_child)];
+	                                        return neg(self(self, a_idx, rows2, dim2));
+	                                    }
+	                                    if (uop.type == FormExprType::Add || uop.type == FormExprType::Subtract) {
+	                                        if (uop.child_count != 2u) {
+	                                            throw std::runtime_error("LLVMGen: div(sym(grad(Add/Subtract))) expects 2 children");
+	                                        }
+	                                        const auto a_idx = term.ir.children[static_cast<std::size_t>(uop.first_child)];
+	                                        const auto b_idx = term.ir.children[static_cast<std::size_t>(uop.first_child) + 1u];
+	                                        return (uop.type == FormExprType::Add) ? add(self(self, a_idx, rows2, dim2), self(self, b_idx, rows2, dim2))
+	                                                                             : sub(self(self, a_idx, rows2, dim2), self(self, b_idx, rows2, dim2));
+	                                    }
+	                                    if (uop.type == FormExprType::Multiply) {
+	                                        if (uop.child_count != 2u) {
+	                                            throw std::runtime_error("LLVMGen: div(sym(grad(Multiply))) expects 2 children");
+	                                        }
+	                                        const auto a_idx = term.ir.children[static_cast<std::size_t>(uop.first_child)];
+	                                        const auto b_idx = term.ir.children[static_cast<std::size_t>(uop.first_child) + 1u];
+	                                        const auto& ash = term.shapes[a_idx];
+	                                        const auto& bsh = term.shapes[b_idx];
+	                                        const bool a_scalar = (ash.kind == Shape::Kind::Scalar);
+	                                        const bool b_scalar = (bsh.kind == Shape::Kind::Scalar);
+	                                        const bool a_vec = (ash.kind == Shape::Kind::Vector);
+	                                        const bool b_vec = (bsh.kind == Shape::Kind::Vector);
+	                                        if (a_scalar && b_vec) {
+	                                            if (!isSpatiallyConstantScalar(isSpatiallyConstantScalar, a_idx)) {
+	                                                throw std::runtime_error("LLVMGen: div(sym(grad(s*u))) requires spatially-constant scalar s in JIT");
+	                                            }
+	                                            return mul(values[a_idx], self(self, b_idx, rows2, dim2));
+	                                        }
+	                                        if (b_scalar && a_vec) {
+	                                            if (!isSpatiallyConstantScalar(isSpatiallyConstantScalar, b_idx)) {
+	                                                throw std::runtime_error("LLVMGen: div(sym(grad(u*s))) requires spatially-constant scalar s in JIT");
+	                                            }
+	                                            return mul(values[b_idx], self(self, a_idx, rows2, dim2));
+	                                        }
+	                                    }
+	                                    throw std::runtime_error(
+	                                        "LLVMGen: div(sym(grad(u))) expects u = TrialFunction, DiscreteField, StateField(INVALID_FIELD_ID), PreviousSolutionRef, or linear scalar*vector ops");
+	                                };
+	                                return divSymGradForURec(divSymGradForURec, u_idx, rows, dim);
+	                            };
+
+	                            auto evalDivMatrix = [&](auto&& self, std::size_t m_idx) -> CodeValue {
+	                                const auto& mop = term.ir.ops[m_idx];
+	                                const auto& msh = term.shapes[m_idx];
+	                                if (msh.kind != Shape::Kind::Matrix) {
+	                                    throw std::runtime_error("LLVMGen: internal error: div(matrix) expected Matrix operand");
+	                                }
+	                                const std::size_t rows = static_cast<std::size_t>(msh.dims[0]);
+	                                const std::size_t dim = static_cast<std::size_t>(msh.dims[1]);
+
+	                                switch (mop.type) {
+	                                    case FormExprType::SymmetricPart: {
+	                                        const auto a_idx = term.ir.children[static_cast<std::size_t>(mop.first_child)];
+	                                        const auto& aop = term.ir.ops[a_idx];
+	                                        if (aop.type != FormExprType::Gradient) {
+	                                            throw std::runtime_error("LLVMGen: div(sym(A)) currently only supports A=grad(u)");
+	                                        }
+	                                        const auto u_idx = term.ir.children[static_cast<std::size_t>(aop.first_child)];
+	                                        return divSymGradForU(u_idx, rows, dim);
+	                                    }
+	                                    case FormExprType::Multiply: {
+	                                        if (mop.child_count != 2u) {
+	                                            throw std::runtime_error("LLVMGen: div(Multiply) expects 2 children");
+	                                        }
+	                                        const auto a_idx = term.ir.children[static_cast<std::size_t>(mop.first_child)];
+	                                        const auto b_idx = term.ir.children[static_cast<std::size_t>(mop.first_child) + 1u];
+	                                        const auto& ash = term.shapes[a_idx];
+	                                        const auto& bsh = term.shapes[b_idx];
+
+	                                        const bool a_scalar = (ash.kind == Shape::Kind::Scalar);
+	                                        const bool b_scalar = (bsh.kind == Shape::Kind::Scalar);
+	                                        const bool a_mat = (ash.kind == Shape::Kind::Matrix);
+	                                        const bool b_mat = (bsh.kind == Shape::Kind::Matrix);
+
+	                                        if (a_scalar && b_mat) {
+	                                            if (!isSpatiallyConstantScalar(isSpatiallyConstantScalar, a_idx)) {
+	                                                throw std::runtime_error("LLVMGen: div(s*A) requires spatially-constant scalar s in JIT");
+	                                            }
+	                                            return mul(values[a_idx], self(self, b_idx));
+	                                        }
+	                                        if (b_scalar && a_mat) {
+	                                            if (!isSpatiallyConstantScalar(isSpatiallyConstantScalar, b_idx)) {
+	                                                throw std::runtime_error("LLVMGen: div(A*s) requires spatially-constant scalar s in JIT");
+	                                            }
+	                                            return mul(values[b_idx], self(self, a_idx));
+	                                        }
+	                                        throw std::runtime_error("LLVMGen: div(Multiply) currently supports scalar-matrix products only");
+	                                    }
+	                                    case FormExprType::Add: {
+	                                        const auto a_idx = term.ir.children[static_cast<std::size_t>(mop.first_child)];
+	                                        const auto b_idx = term.ir.children[static_cast<std::size_t>(mop.first_child) + 1u];
+	                                        return add(self(self, a_idx), self(self, b_idx));
+	                                    }
+	                                    case FormExprType::Subtract: {
+	                                        const auto a_idx = term.ir.children[static_cast<std::size_t>(mop.first_child)];
+	                                        const auto b_idx = term.ir.children[static_cast<std::size_t>(mop.first_child) + 1u];
+	                                        return sub(self(self, a_idx), self(self, b_idx));
+	                                    }
+	                                    default:
+	                                        break;
+	                                }
+
+	                                throw std::runtime_error("LLVMGen: div(matrix) operand not supported");
+	                            };
+
+	                            values[op_idx] = evalDivMatrix(evalDivMatrix, child_idx);
+	                            break;
+	                        }
 
 	                        auto divScalarBasis = [&](llvm::Value* n_dofs,
 	                                                  llvm::Value* dof_index,
@@ -4917,35 +5415,32 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
 	                            builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-	                            llvm::Value* div_vb = f64c(0.0);
-	                            builder.SetInsertPoint(vb);
-	                            {
-	                                llvm::Value* acc = f64c(0.0);
-	                                emitForLoop(side.n_trial_dofs, "div_u_vb", [&](llvm::Value* j) {
-	                                    auto* j64 = builder.CreateZExt(j, i64);
-	                                    auto* cj = loadRealPtrAt(coeffs, j64);
-	                                    auto* div_phi = loadBasisScalar(side, side.trial_basis_divs, j, q_index);
-	                                    acc = builder.CreateFAdd(acc, builder.CreateFMul(cj, div_phi));
-                                });
-                                div_vb = acc;
-                                builder.CreateBr(merge);
-                            }
-                            auto* vb_block = builder.GetInsertBlock();
+		                            llvm::Value* div_vb = f64c(0.0);
+		                            builder.SetInsertPoint(vb);
+		                            {
+		                                div_vb = emitReduceSumScalar(side.n_trial_dofs, "div_u_vb", [&](llvm::Value* j) -> llvm::Value* {
+		                                    auto* j64 = builder.CreateZExt(j, i64);
+		                                    auto* cj = loadRealPtrAt(coeffs, j64);
+		                                    auto* div_phi = loadBasisScalar(side, side.trial_basis_divs, j, q_index);
+		                                    return builder.CreateFMul(cj, div_phi);
+		                                });
+	                                builder.CreateBr(merge);
+		                            }
+		                            auto* vb_block = builder.GetInsertBlock();
 
-	                            llvm::Value* div_sb = f64c(0.0);
-	                            builder.SetInsertPoint(sb);
-	                            {
-	                                llvm::Value* acc = f64c(0.0);
-	                                emitForLoop(side.n_trial_dofs, "div_u_sb", [&](llvm::Value* j) {
-	                                    auto* j64 = builder.CreateZExt(j, i64);
-	                                    auto* cj = loadRealPtrAt(coeffs, j64);
-	                                    auto* div_phi = divScalarBasis(side.n_trial_dofs, j, side.trial_phys_grads_xyz);
-	                                    acc = builder.CreateFAdd(acc, builder.CreateFMul(cj, div_phi));
-                                });
-                                div_sb = acc;
-                                builder.CreateBr(merge);
-                            }
-                            auto* sb_block = builder.GetInsertBlock();
+		                            llvm::Value* div_sb = f64c(0.0);
+		                            builder.SetInsertPoint(sb);
+		                            {
+		                                div_sb = emitReduceSumScalar(
+		                                    side.n_trial_dofs, "div_u_sb", [&](llvm::Value* j) -> llvm::Value* {
+		                                        auto* j64 = builder.CreateZExt(j, i64);
+		                                        auto* cj = loadRealPtrAt(coeffs, j64);
+		                                        auto* div_phi = divScalarBasis(side.n_trial_dofs, j, side.trial_phys_grads_xyz);
+		                                        return builder.CreateFMul(cj, div_phi);
+		                                    });
+	                                builder.CreateBr(merge);
+		                            }
+		                            auto* sb_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
                             auto* phi = builder.CreatePHI(f64, 2, "div.u");
@@ -4967,19 +5462,22 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
 	                            auto* dofs_per_comp = builder.CreateUDiv(
 	                                side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                            llvm::Value* div = f64c(0.0);
-	                            for (std::size_t comp = 0; comp < vd; ++comp) {
-	                                llvm::Value* acc = f64c(0.0);
-	                                emitForLoop(dofs_per_comp, "prev_div" + std::to_string(k) + "_c" + std::to_string(comp), [&](llvm::Value* jj) {
-	                                    auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                    auto* j = builder.CreateAdd(base, jj);
-                                    auto* j64 = builder.CreateZExt(j, i64);
-                                    auto* cj = loadRealPtrAt(coeffs, j64);
-                                    const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                    acc = builder.CreateFAdd(acc, builder.CreateFMul(cj, g[comp]));
-                                });
-                                div = builder.CreateFAdd(div, acc);
-                            }
+		                            llvm::Value* div = f64c(0.0);
+		                            for (std::size_t comp = 0; comp < vd; ++comp) {
+		                                auto* acc = emitReduceSumScalar(
+		                                    dofs_per_comp,
+		                                    "prev_div" + std::to_string(k) + "_c" + std::to_string(comp),
+		                                    [&](llvm::Value* jj) -> llvm::Value* {
+		                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+		                                        auto* j = builder.CreateAdd(base, jj);
+		                                        auto* j64 = builder.CreateZExt(j, i64);
+		                                        auto* cj = loadRealPtrAt(coeffs, j64);
+		                                        const auto g =
+		                                            loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                        return builder.CreateFMul(cj, g[comp]);
+		                                    });
+		                                div = builder.CreateFAdd(div, acc);
+		                            }
                             values[op_idx] = makeScalar(div);
                             break;
                         }
@@ -5090,12 +5588,33 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             throw std::runtime_error("LLVMGen: div(dt(...)) operand not supported");
                             break;
                         }
-                        if (kid.type == FormExprType::Constant) {
-                            values[op_idx] = makeScalar(f64c(0.0));
-                            break;
+	                        if (kid.type == FormExprType::Constant) {
+	                            values[op_idx] = makeScalar(f64c(0.0));
+	                            break;
+	                        }
+
+                        // Divergence is linear; handle the common simplified pattern div(0 * X) -> 0.
+                        if (kid.type == FormExprType::Multiply && kid.child_count == 2u) {
+                            const auto a_idx = term.ir.children[static_cast<std::size_t>(kid.first_child)];
+                            const auto b_idx = term.ir.children[static_cast<std::size_t>(kid.first_child) + 1u];
+                            const auto& aop = term.ir.ops[a_idx];
+                            const auto& bop = term.ir.ops[b_idx];
+
+                            auto isZeroConstant = [](const KernelIROp& op2) -> bool {
+                                if (op2.type != FormExprType::Constant) {
+                                    return false;
+                                }
+                                const double v = std::bit_cast<double>(op2.imm0);
+                                return v == 0.0;
+                            };
+
+                            if (isZeroConstant(aop) || isZeroConstant(bop)) {
+                                values[op_idx] = makeScalar(f64c(0.0));
+                                break;
+                            }
                         }
-                        throw std::runtime_error("LLVMGen: Divergence operand not supported");
-                    }
+	                        throw std::runtime_error("LLVMGen: Divergence operand not supported");
+	                    }
 
                     case FormExprType::Curl: {
                         const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
@@ -5191,48 +5710,53 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             return makeVector(3u, out[0], out[1], out[2]);
                         };
 
-                        auto curlCurrentSolution = [&]() -> CodeValue {
-                            auto* coeffs = side.solution_coefficients;
-                            auto* uses_vec_basis = builder.CreateICmpNE(side.trial_uses_vector_basis, builder.getInt32(0));
-                            auto* vb = llvm::BasicBlock::Create(*ctx, "curl.u.vec_basis", fn);
-                            auto* sb = llvm::BasicBlock::Create(*ctx, "curl.u.scalar_basis", fn);
-                            auto* merge = llvm::BasicBlock::Create(*ctx, "curl.u.merge", fn);
+	                        auto curlCurrentSolution = [&]() -> CodeValue {
+	                            auto* coeffs = side.solution_coefficients;
+	                            auto* uses_vec_basis = builder.CreateICmpNE(side.trial_uses_vector_basis, builder.getInt32(0));
+	                            auto* vb = llvm::BasicBlock::Create(*ctx, "curl.u.vec_basis", fn);
+	                            auto* sb = llvm::BasicBlock::Create(*ctx, "curl.u.scalar_basis", fn);
+	                            auto* merge = llvm::BasicBlock::Create(*ctx, "curl.u.merge", fn);
 
-                            builder.CreateCondBr(uses_vec_basis, vb, sb);
+	                            builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-                            std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
-                            builder.SetInsertPoint(vb);
-                            {
-                                std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                emitForLoop(side.n_trial_dofs, "curl_u_vb", [&](llvm::Value* j) {
-                                    auto* j64 = builder.CreateZExt(j, i64);
-                                    auto* cj = loadRealPtrAt(coeffs, j64);
-                                    const auto phi = loadVec3FromTable(side.trial_basis_curls_xyz, side.n_qpts, j, q_index);
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, phi[d]));
-                                    }
-                                });
-                                vb_vals = acc;
-                                builder.CreateBr(merge);
-                            }
-                            auto* vb_block = builder.GetInsertBlock();
+	                            std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                            builder.SetInsertPoint(vb);
+	                            {
+	                                const auto sums = emitReduceSum(side.n_trial_dofs, "curl_u_vb", 3u, [&](llvm::Value* j) {
+	                                    auto* j64 = builder.CreateZExt(j, i64);
+	                                    auto* cj = loadRealPtrAt(coeffs, j64);
+	                                    const auto phi =
+	                                        loadVec3FromTable(side.trial_basis_curls_xyz, side.n_qpts, j, q_index);
+	                                    std::vector<llvm::Value*> terms;
+	                                    terms.reserve(3u);
+	                                    for (std::size_t d = 0; d < 3u; ++d) {
+	                                        terms.push_back(builder.CreateFMul(cj, phi[d]));
+	                                    }
+	                                    return terms;
+	                                });
+	                                vb_vals = {sums[0], sums[1], sums[2]};
+	                                builder.CreateBr(merge);
+	                            }
+	                            auto* vb_block = builder.GetInsertBlock();
 
-                            std::array<llvm::Value*, 3> sb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
-                            builder.SetInsertPoint(sb);
-                            {
-                                std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                emitForLoop(side.n_trial_dofs, "curl_u_sb", [&](llvm::Value* j) {
-                                    auto* j64 = builder.CreateZExt(j, i64);
-                                    auto* cj = loadRealPtrAt(coeffs, j64);
-                                    const auto phi = curlScalarBasis(side.n_trial_dofs, j, side.trial_phys_grads_xyz);
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, phi[d]));
-                                    }
-                                });
-                                sb_vals = acc;
-                                builder.CreateBr(merge);
-                            }
-                            auto* sb_block = builder.GetInsertBlock();
+	                            std::array<llvm::Value*, 3> sb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                            builder.SetInsertPoint(sb);
+	                            {
+	                                const auto sums = emitReduceSum(side.n_trial_dofs, "curl_u_sb", 3u, [&](llvm::Value* j) {
+	                                    auto* j64 = builder.CreateZExt(j, i64);
+	                                    auto* cj = loadRealPtrAt(coeffs, j64);
+	                                    const auto phi = curlScalarBasis(side.n_trial_dofs, j, side.trial_phys_grads_xyz);
+	                                    std::vector<llvm::Value*> terms;
+	                                    terms.reserve(3u);
+	                                    for (std::size_t d = 0; d < 3u; ++d) {
+	                                        terms.push_back(builder.CreateFMul(cj, phi[d]));
+	                                    }
+	                                    return terms;
+	                                });
+	                                sb_vals = {sums[0], sums[1], sums[2]};
+	                                builder.CreateBr(merge);
+	                            }
+	                            auto* sb_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
                             std::array<llvm::Value*, 3> out{f64c(0.0), f64c(0.0), f64c(0.0)};
@@ -5303,31 +5827,38 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             values[op_idx] = makeVector(3u, out[0], out[1], out[2]);
                             break;
                         }
-                        if (kid.type == FormExprType::PreviousSolutionRef) {
-                            const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
-                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-                            auto* dofs_per_comp = builder.CreateUDiv(
-                                side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+	                        if (kid.type == FormExprType::PreviousSolutionRef) {
+	                            const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+	                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+	                            auto* dofs_per_comp = builder.CreateUDiv(
+	                                side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 
                             std::array<std::array<llvm::Value*, 3>, 3> J{};
                             for (auto& row : J) {
                                 row = {f64c(0.0), f64c(0.0), f64c(0.0)};
                             }
 
-                            for (std::size_t comp = 0; comp < std::min<std::size_t>(vd, 3u); ++comp) {
-                                std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                emitForLoop(dofs_per_comp, "prev_curl" + std::to_string(k) + "_c" + std::to_string(comp), [&](llvm::Value* jj) {
-                                    auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                    auto* j = builder.CreateAdd(base, jj);
-                                    auto* j64 = builder.CreateZExt(j, i64);
-                                    auto* cj = loadRealPtrAt(coeffs, j64);
-                                    const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                    }
-                                });
-                                J[comp] = acc;
-                            }
+	                            for (std::size_t comp = 0; comp < std::min<std::size_t>(vd, 3u); ++comp) {
+	                                const auto acc = emitReduceSum(
+	                                    dofs_per_comp,
+	                                    "prev_curl" + std::to_string(k) + "_c" + std::to_string(comp),
+	                                    3u,
+	                                    [&](llvm::Value* jj) {
+	                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                        auto* j = builder.CreateAdd(base, jj);
+	                                        auto* j64 = builder.CreateZExt(j, i64);
+	                                        auto* cj = loadRealPtrAt(coeffs, j64);
+	                                        const auto g =
+	                                            loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        std::vector<llvm::Value*> terms;
+	                                        terms.reserve(3u);
+	                                        for (std::size_t d = 0; d < 3u; ++d) {
+	                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+	                                        }
+	                                        return terms;
+	                                    });
+	                                J[comp] = {acc[0], acc[1], acc[2]};
+	                            }
 
                             auto* cx = builder.CreateFSub(J[2][1], J[1][2]);
                             auto* cy = builder.CreateFSub(J[0][2], J[2][0]);
@@ -5421,52 +5952,51 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         const auto& kid = term.ir.ops[child_idx];
 
                         auto* zero = f64c(0.0);
+                        const auto dim_u32 = shape.dims[0];
+                        const auto mat_len = elemCount(shape);
+	                        auto matZero = [&]() -> CodeValue { return makeZero(shape); };
 
-                        auto mat3Zero = [&]() -> CodeValue {
-                            CodeValue out = makeMatrix(3u, 3u);
-                            for (std::size_t i = 0; i < 9; ++i) out.elems[i] = zero;
-                            return out;
-                        };
+	                        auto hessFromCoeffs = [&](llvm::Value* coeffs_ptr, const std::string& loop_name) -> CodeValue {
+	                            CodeValue out = makeZero(shape);
+	                            const auto sums = emitReduceSum(side.n_trial_dofs, loop_name, mat_len, [&](llvm::Value* j) {
+	                                auto* j64 = builder.CreateZExt(j, i64);
+	                                auto* cj = loadRealPtrAt(coeffs_ptr, j64);
+	                                const auto H =
+	                                    loadMatDimFromTable(side.trial_phys_hessians, side.n_qpts, j, q_index, dim_u32);
+	                                std::vector<llvm::Value*> terms;
+	                                terms.reserve(mat_len);
+	                                for (std::size_t i = 0; i < mat_len; ++i) {
+	                                    terms.push_back(builder.CreateFMul(cj, H.elems[i]));
+	                                }
+	                                return terms;
+	                            });
+	                            for (std::size_t i = 0; i < mat_len; ++i) {
+	                                out.elems[i] = sums[i];
+	                            }
+	                            return out;
+	                        };
 
-                        auto hessCurrentSolution = [&]() -> CodeValue {
-                            CodeValue out = makeZero(matrixShape(3u, 3u));
-                            auto* coeffs = side.solution_coefficients;
-                            emitForLoop(side.n_trial_dofs, "hess_u", [&](llvm::Value* j) {
-                                auto* j64 = builder.CreateZExt(j, i64);
-                                auto* cj = loadRealPtrAt(coeffs, j64);
-                                const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
-                                for (std::size_t i = 0; i < 9; ++i) {
-                                    out.elems[i] = builder.CreateFAdd(out.elems[i], builder.CreateFMul(cj, H.elems[i]));
-                                }
-                            });
-                            return out;
-                        };
+	                        auto hessCurrentSolution = [&]() -> CodeValue {
+	                            auto* coeffs = side.solution_coefficients;
+	                            return hessFromCoeffs(coeffs, "hess_u");
+	                        };
 
                         if (kid.type == FormExprType::TestFunction) {
-                            values[op_idx] = loadMat3FromTable(side.test_phys_hessians, side.n_qpts, i_index, q_index);
+                            values[op_idx] = loadMatDimFromTable(side.test_phys_hessians, side.n_qpts, i_index, q_index, dim_u32);
                             break;
                         }
                         if (kid.type == FormExprType::TrialFunction) {
                             values[op_idx] =
                                 is_residual ? hessCurrentSolution()
-                                            : loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index);
+                                            : loadMatDimFromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index, dim_u32);
                             break;
                         }
-                        if (kid.type == FormExprType::PreviousSolutionRef) {
-                            const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
-                            CodeValue out = makeZero(matrixShape(3u, 3u));
-                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-                            emitForLoop(side.n_trial_dofs, "prev_hess" + std::to_string(k), [&](llvm::Value* j) {
-                                auto* j64 = builder.CreateZExt(j, i64);
-                                auto* cj = loadRealPtrAt(coeffs, j64);
-                                const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
-                                for (std::size_t i = 0; i < 9; ++i) {
-                                    out.elems[i] = builder.CreateFAdd(out.elems[i], builder.CreateFMul(cj, H.elems[i]));
-                                }
-                            });
-                            values[op_idx] = out;
-                            break;
-                        }
+	                        if (kid.type == FormExprType::PreviousSolutionRef) {
+	                            const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+	                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+	                            values[op_idx] = hessFromCoeffs(coeffs, "prev_hess" + std::to_string(k));
+	                            break;
+	                        }
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
                             if (kid.type == FormExprType::StateField && fid == 0xffff) {
@@ -5482,7 +6012,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                             builder.CreateCondBr(entry_is_null, z, ok);
 
-                            CodeValue loaded = mat3Zero();
+                            CodeValue loaded = matZero();
                             builder.SetInsertPoint(ok);
                             auto* base = loadPtr(entry, ABIV3::field_entry_hessians_off);
                             auto* base_is_null =
@@ -5491,7 +6021,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             builder.CreateCondBr(base_is_null, z, ok2);
 
                             builder.SetInsertPoint(ok2);
-                            loaded = loadMat3FromQ(base, q_index);
+                            loaded = loadMatDimFromQ(base, q_index, dim_u32);
                             builder.CreateBr(merge);
                             auto* ok2_block = builder.GetInsertBlock();
 
@@ -5500,8 +6030,8 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             auto* zero_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
-                            CodeValue out = mat3Zero();
-                            for (std::size_t i = 0; i < 9; ++i) {
+                            CodeValue out = makeZero(shape);
+                            for (std::size_t i = 0; i < mat_len; ++i) {
                                 auto* phi = builder.CreatePHI(f64, 2, "field_hess." + std::to_string(i));
                                 phi->addIncoming(zero, zero_block);
                                 phi->addIncoming(loaded.elems[i], ok2_block);
@@ -5520,7 +6050,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             if (dt_child.type == FormExprType::TrialFunction) {
                                 const auto H =
                                     is_residual ? hessCurrentSolution()
-                                                : loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index);
+                                                : loadMatDimFromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index, dim_u32);
                                 values[op_idx] = mul(makeScalar(coeff0), H);
                                 break;
                             }
@@ -5541,7 +6071,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                                 builder.CreateCondBr(entry_is_null, z, ok);
 
-                                CodeValue loaded = mat3Zero();
+                                CodeValue loaded = matZero();
                                 builder.SetInsertPoint(ok);
                                 auto* base = loadPtr(entry, ABIV3::field_entry_hessians_off);
                                 auto* base_is_null =
@@ -5550,7 +6080,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 builder.CreateCondBr(base_is_null, z, ok2);
 
                                 builder.SetInsertPoint(ok2);
-                                loaded = loadMat3FromQ(base, q_index);
+                                loaded = loadMatDimFromQ(base, q_index, dim_u32);
                                 builder.CreateBr(merge);
                                 auto* ok2_block = builder.GetInsertBlock();
 
@@ -5559,8 +6089,8 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 auto* zero_block = builder.GetInsertBlock();
 
                                 builder.SetInsertPoint(merge);
-                                CodeValue out = mat3Zero();
-                                for (std::size_t i = 0; i < 9; ++i) {
+                                CodeValue out = matZero();
+                                for (std::size_t i = 0; i < mat_len; ++i) {
                                     auto* phi = builder.CreatePHI(f64, 2, "field_dt_hess." + std::to_string(i));
                                     phi->addIncoming(zero, zero_block);
                                     phi->addIncoming(loaded.elems[i], ok2_block);
@@ -5571,7 +6101,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             }
 
                             if (dt_child.type == FormExprType::Constant) {
-                                values[op_idx] = mat3Zero();
+                                values[op_idx] = matZero();
                                 break;
                             }
 
@@ -5579,7 +6109,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             break;
                         }
                         if (kid.type == FormExprType::Constant) {
-                            values[op_idx] = mat3Zero();
+                            values[op_idx] = matZero();
                             break;
                         }
                         throw std::runtime_error("LLVMGen: Hessian operand not supported");
@@ -6410,19 +6940,19 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values[op_idx] = makeScalar(builder.CreateSIToFP(side.cell_domain_id, f64));
                         break;
                     case FormExprType::Coordinate:
-                        values[op_idx] = loadXYZ(side.physical_points_xyz, q_index);
+                        values[op_idx] = loadXYZDim(side.physical_points_xyz, q_index, shape.dims[0]);
                         break;
                     case FormExprType::ReferenceCoordinate:
-                        values[op_idx] = loadXYZ(side.quad_points_xyz, q_index);
+                        values[op_idx] = loadXYZDim(side.quad_points_xyz, q_index, shape.dims[0]);
                         break;
                     case FormExprType::Normal:
-                        values[op_idx] = loadXYZ(side.normals_xyz, q_index);
+                        values[op_idx] = loadXYZDim(side.normals_xyz, q_index, shape.dims[0]);
                         break;
                     case FormExprType::Jacobian:
-                        values[op_idx] = loadMat3FromQ(side.jacobians, q_index);
+                        values[op_idx] = loadMatDimFromQ(side.jacobians, q_index, shape.dims[0]);
                         break;
                     case FormExprType::JacobianInverse:
-                        values[op_idx] = loadMat3FromQ(side.inverse_jacobians, q_index);
+                        values[op_idx] = loadMatDimFromQ(side.inverse_jacobians, q_index, shape.dims[0]);
                         break;
                     case FormExprType::Identity: {
                         CodeValue out = makeZero(shape);
@@ -6443,47 +6973,161 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values[op_idx] = evalPreviousSolution(side, shape, k, q_index);
                         break;
                     }
-                    case FormExprType::Gradient: {
-                        const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
-                        const auto& kid = term.ir.ops[child_idx];
+	                    case FormExprType::Gradient: {
+	                        const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
+	                        const auto& kid = term.ir.ops[child_idx];
 
-                        if (kid.type == FormExprType::PreviousSolutionRef) {
-                            const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
-                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-                            if (shape.kind == Shape::Kind::Vector) {
-                                std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                emitForLoop(side.n_trial_dofs, "prev_grad" + std::to_string(k), [&](llvm::Value* j) {
-                                    auto* j64 = builder.CreateZExt(j, i64);
-                                    auto* cj = loadRealPtrAt(coeffs, j64);
-                                    const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                    }
-                                });
-                                values[op_idx] = makeVector(3u, acc[0], acc[1], acc[2]);
-                                break;
-                            }
-                            if (shape.kind == Shape::Kind::Matrix) {
-                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                CodeValue out = makeZero(shape);
-                                auto* dofs_per_comp =
-                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                for (std::size_t comp = 0; comp < vd; ++comp) {
-                                    std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                    emitForLoop(dofs_per_comp, "prev_grad" + std::to_string(k) + "_c" + std::to_string(comp), [&](llvm::Value* jj) {
-                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                        auto* j = builder.CreateAdd(base, jj);
-                                        auto* j64 = builder.CreateZExt(j, i64);
-                                        auto* cj = loadRealPtrAt(coeffs, j64);
-                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                        }
-                                    });
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        out.elems[comp * 3 + d] = acc[d];
-                                    }
-                                }
+	                        auto gradFromCoeffs = [&](llvm::Value* coeffs_ptr, const std::string& loop_base) -> CodeValue {
+	                            if (shape.kind == Shape::Kind::Vector) {
+	                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+	                                const auto sums = emitReduceSum(side.n_trial_dofs, loop_base, dim, [&](llvm::Value* j) {
+	                                    auto* j64 = builder.CreateZExt(j, i64);
+	                                    auto* cj = loadRealPtrAt(coeffs_ptr, j64);
+	                                    const auto g =
+	                                        loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                    std::vector<llvm::Value*> terms;
+	                                    terms.reserve(dim);
+	                                    for (std::size_t d = 0; d < dim; ++d) {
+	                                        terms.push_back(builder.CreateFMul(cj, g[d]));
+	                                    }
+	                                    return terms;
+	                                });
+	                                auto* x = sums[0];
+	                                auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
+	                                auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+	                                return makeVector(static_cast<std::uint32_t>(dim), x, y, z);
+	                            }
+	                            if (shape.kind == Shape::Kind::Matrix) {
+	                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
+	                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
+	                                CodeValue out = makeZero(shape);
+	                                auto* dofs_per_comp =
+	                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+	                                for (std::size_t comp = 0; comp < vd; ++comp) {
+	                                    const auto acc =
+	                                        emitReduceSum(dofs_per_comp, loop_base + "_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
+	                                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                            auto* j = builder.CreateAdd(base, jj);
+	                                            auto* j64 = builder.CreateZExt(j, i64);
+	                                            auto* cj = loadRealPtrAt(coeffs_ptr, j64);
+	                                            const auto g =
+	                                                loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                            std::vector<llvm::Value*> terms;
+	                                            terms.reserve(dim);
+	                                            for (std::size_t d = 0; d < dim; ++d) {
+	                                                terms.push_back(builder.CreateFMul(cj, g[d]));
+	                                            }
+	                                            return terms;
+	                                        });
+	                                    for (std::size_t d = 0; d < dim; ++d) {
+	                                        out.elems[comp * dim + d] = acc[d];
+	                                    }
+	                                }
+	                                return out;
+	                            }
+	                            throw std::runtime_error("LLVMGen: cached grad(u) unsupported shape");
+	                        };
+
+	                        if (kid.type == FormExprType::TrialFunction) {
+	                            if (!is_residual) {
+	                                throw std::runtime_error(
+	                                    "LLVMGen: cached grad(TrialFunction) only supports residual (current solution)");
+	                            }
+	                            values[op_idx] = gradFromCoeffs(side.solution_coefficients, "grad_u");
+	                            break;
+	                        }
+
+	                        if (kid.type == FormExprType::TimeDerivative) {
+	                            const int order = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+	                            auto* coeff0 = loadDtCoeff0(side, order);
+	                            const auto dt_child_idx =
+	                                term.ir.children[static_cast<std::size_t>(kid.first_child)];
+	                            const auto& dt_child = term.ir.ops[dt_child_idx];
+
+	                            auto gradCurrentSolution = [&]() -> CodeValue {
+	                                return gradFromCoeffs(side.solution_coefficients, "grad_dt_u");
+	                            };
+
+	                            if (dt_child.type == FormExprType::TrialFunction) {
+	                                if (!is_residual) {
+	                                    throw std::runtime_error(
+	                                        "LLVMGen: cached grad(dt(TrialFunction)) only supports residual (current solution)");
+	                                }
+	                                values[op_idx] = mul(makeScalar(coeff0), gradCurrentSolution());
+	                                break;
+	                            }
+	                            if (dt_child.type == FormExprType::StateField) {
+	                                const int fid = unpackFieldIdImm1(dt_child.imm1);
+	                                if (fid == 0xffff) {
+	                                    values[op_idx] = mul(makeScalar(coeff0), gradCurrentSolution());
+	                                    break;
+	                                }
+	                            }
+	                            if (dt_child.type == FormExprType::PreviousSolutionRef) {
+	                                const int k = static_cast<int>(static_cast<std::int64_t>(dt_child.imm0));
+	                                auto* coeffs_ptr = loadPrevSolutionCoeffsPtr(side, k);
+	                                values[op_idx] =
+	                                    mul(makeScalar(coeff0), gradFromCoeffs(coeffs_ptr, "grad_dt_prev" + std::to_string(k)));
+	                                break;
+	                            }
+	                            if (dt_child.type == FormExprType::Constant) {
+	                                values[op_idx] = makeZero(shape);
+	                                break;
+	                            }
+	                            throw std::runtime_error("LLVMGen: cached grad(dt(...)) operand not supported");
+	                        }
+
+	                        if (kid.type == FormExprType::PreviousSolutionRef) {
+	                            const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+	                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+	                            if (shape.kind == Shape::Kind::Vector) {
+	                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+	                                const auto sums =
+	                                    emitReduceSum(side.n_trial_dofs, "prev_grad" + std::to_string(k), dim, [&](llvm::Value* j) {
+	                                        auto* j64 = builder.CreateZExt(j, i64);
+	                                        auto* cj = loadRealPtrAt(coeffs, j64);
+	                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        std::vector<llvm::Value*> terms;
+	                                        terms.reserve(dim);
+	                                        for (std::size_t d = 0; d < dim; ++d) {
+	                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+	                                        }
+	                                        return terms;
+	                                    });
+	                                auto* x = sums[0];
+	                                auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
+	                                auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+	                                values[op_idx] = makeVector(static_cast<std::uint32_t>(dim), x, y, z);
+	                                break;
+	                            }
+	                            if (shape.kind == Shape::Kind::Matrix) {
+	                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
+	                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
+	                                CodeValue out = makeZero(shape);
+	                                auto* dofs_per_comp =
+	                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+	                                for (std::size_t comp = 0; comp < vd; ++comp) {
+	                                    const auto acc = emitReduceSum(dofs_per_comp,
+	                                                                   "prev_grad" + std::to_string(k) + "_c" +
+	                                                                       std::to_string(comp),
+	                                                                   dim,
+	                                                                   [&](llvm::Value* jj) {
+	                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                        auto* j = builder.CreateAdd(base, jj);
+	                                        auto* j64 = builder.CreateZExt(j, i64);
+	                                        auto* cj = loadRealPtrAt(coeffs, j64);
+	                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        std::vector<llvm::Value*> terms;
+	                                        terms.reserve(dim);
+	                                        for (std::size_t d = 0; d < dim; ++d) {
+	                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+	                                        }
+	                                        return terms;
+	                                    });
+	                                    for (std::size_t d = 0; d < dim; ++d) {
+	                                        out.elems[comp * dim + d] = acc[d];
+	                                    }
+	                                }
                                 values[op_idx] = out;
                                 break;
                             }
@@ -6492,6 +7136,10 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
+                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                                values[op_idx] = gradFromCoeffs(side.solution_coefficients, "grad_state_u");
+                                break;
+                            }
                             if (shape.kind == Shape::Kind::Vector) {
                                 auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
                                 auto* entry_is_null =
@@ -6520,22 +7168,24 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 builder.CreateBr(merge);
                                 auto* zero_block = builder.GetInsertBlock();
 
-                                builder.SetInsertPoint(merge);
-                                std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                for (std::size_t d = 0; d < 3; ++d) {
-                                    auto* phi = builder.CreatePHI(f64, 2, "field_grad.v" + std::to_string(d));
-                                    phi->addIncoming(f64c(0.0), zero_block);
-                                    phi->addIncoming(loaded[d], ok2_block);
-                                    outv[d] = phi;
-                                }
-                                values[op_idx] = makeVector(3u, outv[0], outv[1], outv[2]);
-                                break;
-                            }
-                            if (shape.kind == Shape::Kind::Matrix) {
-                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
-                                auto* entry_is_null =
-                                    builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+	                                builder.SetInsertPoint(merge);
+	                                std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+	                                for (std::size_t d = 0; d < dim; ++d) {
+	                                    auto* phi = builder.CreatePHI(f64, 2, "field_grad.v" + std::to_string(d));
+	                                    phi->addIncoming(f64c(0.0), zero_block);
+	                                    phi->addIncoming(loaded[d], ok2_block);
+	                                    outv[d] = phi;
+	                                }
+	                                values[op_idx] = makeVector(shape.dims[0], outv[0], outv[1], outv[2]);
+	                                break;
+	                            }
+	                            if (shape.kind == Shape::Kind::Matrix) {
+	                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
+	                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
+	                                auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
+	                                auto* entry_is_null =
+	                                    builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
                                 auto* ok = llvm::BasicBlock::Create(*ctx, "field_jac.ok", fn);
                                 auto* zero = llvm::BasicBlock::Create(*ctx, "field_jac.zero", fn);
                                 auto* merge = llvm::BasicBlock::Create(*ctx, "field_jac.merge", fn);
@@ -6559,60 +7209,394 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 builder.CreateBr(merge);
                                 auto* zero_block = builder.GetInsertBlock();
 
-                                builder.SetInsertPoint(merge);
-                                CodeValue out = makeZero(shape);
-                                for (std::size_t r = 0; r < vd; ++r) {
-                                    for (std::size_t c = 0; c < 3; ++c) {
-                                        auto* phi = builder.CreatePHI(f64, 2, "field_jac.a");
-                                        phi->addIncoming(f64c(0.0), zero_block);
-                                        phi->addIncoming(loaded.elems[r * 3 + c], ok2_block);
-                                        out.elems[r * 3 + c] = phi;
-                                    }
-                                }
-                                values[op_idx] = out;
-                                break;
-                            }
+	                                builder.SetInsertPoint(merge);
+	                                CodeValue out = makeZero(shape);
+	                                for (std::size_t r = 0; r < vd; ++r) {
+	                                    for (std::size_t c = 0; c < dim; ++c) {
+	                                        auto* phi = builder.CreatePHI(f64, 2, "field_jac.a");
+	                                        phi->addIncoming(f64c(0.0), zero_block);
+	                                        auto* l = (r < 3u && c < 3u) ? loaded.elems[r * 3u + c] : f64c(0.0);
+	                                        phi->addIncoming(l, ok2_block);
+	                                        out.elems[r * dim + c] = phi;
+	                                    }
+	                                }
+	                                values[op_idx] = out;
+	                                break;
+	                            }
                             throw std::runtime_error("LLVMGen: cached grad(DiscreteField) unsupported shape");
                         }
 
-                        if (kid.type == FormExprType::Constant) {
-                            values[op_idx] = makeZero(shape);
-                            break;
+	                        if (kid.type == FormExprType::Constant) {
+	                            values[op_idx] = makeZero(shape);
+	                            break;
+	                        }
+
+                        // Gradient is linear; handle the common simplified pattern grad(0 * X) -> 0.
+                        if (kid.type == FormExprType::Multiply && kid.child_count == 2u) {
+                            const auto a_idx = term.ir.children[static_cast<std::size_t>(kid.first_child)];
+                            const auto b_idx = term.ir.children[static_cast<std::size_t>(kid.first_child) + 1u];
+                            const auto& aop = term.ir.ops[a_idx];
+                            const auto& bop = term.ir.ops[b_idx];
+
+                            auto isZeroConstant = [](const KernelIROp& op2) -> bool {
+                                if (op2.type != FormExprType::Constant) {
+                                    return false;
+                                }
+                                const double v = std::bit_cast<double>(op2.imm0);
+                                return v == 0.0;
+                            };
+
+                            if (isZeroConstant(aop) || isZeroConstant(bop)) {
+                                values[op_idx] = makeZero(shape);
+                                break;
+                            }
                         }
 
-                        throw std::runtime_error("LLVMGen: cached Gradient operand not supported");
-                    }
+	                        throw std::runtime_error("LLVMGen: cached Gradient operand not supported");
+	                    }
 
                     case FormExprType::Divergence: {
                         const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                         const auto& kid = term.ir.ops[child_idx];
                         const auto vd = static_cast<std::size_t>(term.shapes[child_idx].dims[0]);
 
-                        if (kid.type == FormExprType::PreviousSolutionRef) {
-                            const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
-	                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-	                            auto* dofs_per_comp =
-	                                builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                            llvm::Value* div = f64c(0.0);
-	                            for (std::size_t comp = 0; comp < vd; ++comp) {
-	                                llvm::Value* acc = f64c(0.0);
-	                                emitForLoop(dofs_per_comp, "prev_div" + std::to_string(k) + "_c" + std::to_string(comp), [&](llvm::Value* jj) {
-	                                    auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-	                                    auto* j = builder.CreateAdd(base, jj);
-                                    auto* j64 = builder.CreateZExt(j, i64);
-                                    auto* cj = loadRealPtrAt(coeffs, j64);
-                                    const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                    acc = builder.CreateFAdd(acc, builder.CreateFMul(cj, g[comp]));
-                                });
-                                div = builder.CreateFAdd(div, acc);
-                            }
-                            values[op_idx] = makeScalar(div);
+                        // Matrix divergence (returns a vector with length = number of matrix rows).
+                        //
+                        // Currently implemented for the Navier–Stokes/Stokes VMS strong residual pattern
+                        //   div( scalar * sym(grad(u)) )
+                        // where the scalar factor is spatially constant and u is the current solution
+                        // (StateField(INVALID_FIELD_ID)) or a PreviousSolutionRef.
+                        if (shape.kind == Shape::Kind::Vector) {
+                            auto isSpatiallyConstantScalar = [&](auto&& self, std::size_t idx) -> bool {
+                                const auto& op2 = term.ir.ops[idx];
+                                switch (op2.type) {
+                                    case FormExprType::Constant:
+                                    case FormExprType::ParameterRef:
+                                    case FormExprType::Time:
+                                    case FormExprType::TimeStep:
+                                    case FormExprType::EffectiveTimeStep:
+                                        return true;
+                                    case FormExprType::Negate:
+                                    case FormExprType::AbsoluteValue:
+                                    case FormExprType::Sign:
+                                    case FormExprType::Sqrt:
+                                    case FormExprType::Exp:
+                                    case FormExprType::Log:
+                                        break;
+                                    case FormExprType::Add:
+                                    case FormExprType::Subtract:
+                                    case FormExprType::Multiply:
+                                    case FormExprType::Divide:
+                                    case FormExprType::Power:
+                                    case FormExprType::Minimum:
+                                    case FormExprType::Maximum:
+                                        break;
+                                    default:
+                                        return false;
+                                }
+
+                                for (std::size_t k = 0; k < static_cast<std::size_t>(op2.child_count); ++k) {
+                                    const auto c = term.ir.children[static_cast<std::size_t>(op2.first_child) + k];
+                                    if (!self(self, c)) {
+                                        return false;
+                                    }
+                                }
+                                return true;
+                            };
+
+                            auto traceHessBasis = [&](const CodeValue& H, std::size_t dim) -> llvm::Value* {
+                                llvm::Value* tr = H.elems[0];
+                                if (dim >= 2) tr = builder.CreateFAdd(tr, H.elems[4]);
+                                if (dim >= 3) tr = builder.CreateFAdd(tr, H.elems[8]);
+                                return tr;
+                            };
+
+                            auto divSymGradCurrentSolution = [&](llvm::Value* coeffs_ptr,
+                                                                 std::size_t rows,
+                                                                 std::size_t dim) -> CodeValue {
+                                CodeValue out = makeZero(vectorShape(static_cast<std::uint32_t>(rows)));
+                                auto* dofs_per_comp =
+                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(rows)));
+
+                                const std::size_t n = std::min(rows, dim);
+	                                for (std::size_t r = 0; r < rows; ++r) {
+	                                    if (r >= dim) {
+	                                        out.elems[r] = f64c(0.0);
+	                                        continue;
+	                                    }
+
+	                                    const auto loop_name = "lap_u_c" + std::to_string(r);
+	                                    auto* lap = emitReduceSumScalar(dofs_per_comp, loop_name, [&](llvm::Value* jj) -> llvm::Value* {
+	                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(r)), dofs_per_comp);
+	                                        auto* j = builder.CreateAdd(base, jj);
+	                                        auto* j64 = builder.CreateZExt(j, i64);
+	                                        auto* cj = loadRealPtrAt(coeffs_ptr, j64);
+	                                        const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
+	                                        auto* tr = traceHessBasis(H, dim);
+	                                        return builder.CreateFMul(cj, tr);
+	                                    });
+
+	                                    llvm::Value* gd = f64c(0.0);
+	                                    for (std::size_t d = 0; d < n; ++d) {
+	                                        const auto loop_name = "gd_u_r" + std::to_string(r) + "_d" + std::to_string(d);
+	                                        auto* acc = emitReduceSumScalar(dofs_per_comp, loop_name, [&](llvm::Value* jj) -> llvm::Value* {
+	                                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(d)), dofs_per_comp);
+	                                            auto* j = builder.CreateAdd(base, jj);
+	                                            auto* j64 = builder.CreateZExt(j, i64);
+	                                            auto* cj = loadRealPtrAt(coeffs_ptr, j64);
+	                                            const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
+	                                            const auto idxH = static_cast<std::size_t>(r * 3u + d);
+	                                            return builder.CreateFMul(cj, H.elems[idxH]);
+	                                        });
+	                                        gd = builder.CreateFAdd(gd, acc);
+	                                    }
+
+                                    out.elems[r] = builder.CreateFMul(f64c(0.5), builder.CreateFAdd(lap, gd));
+                                }
+
+                                return out;
+                            };
+
+                            auto divSymGradFromField = [&](int fid, std::size_t rows2, std::size_t dim2) -> CodeValue {
+                                CodeValue out = makeZero(vectorShape(static_cast<std::uint32_t>(rows2)));
+
+                                auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
+                                auto* entry_is_null = builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+                                auto* ok = llvm::BasicBlock::Create(*ctx, "field_divsym.ok", fn);
+                                auto* zero = llvm::BasicBlock::Create(*ctx, "field_divsym.zero", fn);
+                                auto* merge = llvm::BasicBlock::Create(*ctx, "field_divsym.merge", fn);
+                                builder.CreateCondBr(entry_is_null, zero, ok);
+
+                                std::array<llvm::Value*, 3> computed{f64c(0.0), f64c(0.0), f64c(0.0)};
+                                builder.SetInsertPoint(ok);
+                                auto* base = loadPtr(entry, ABIV3::field_entry_component_hessians_off);
+                                auto* base_is_null = builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                auto* ok2 = llvm::BasicBlock::Create(*ctx, "field_divsym.ok2", fn);
+                                builder.CreateCondBr(base_is_null, zero, ok2);
+
+                                builder.SetInsertPoint(ok2);
+                                auto* vd = loadU32(entry, ABIV3::field_entry_value_dim_off);
+                                const std::size_t n2 = std::min(rows2, dim2);
+                                auto* vd_ok = builder.CreateICmpUGE(vd, builder.getInt32(static_cast<std::uint32_t>(n2)));
+                                auto* ok3 = llvm::BasicBlock::Create(*ctx, "field_divsym.ok3", fn);
+                                builder.CreateCondBr(vd_ok, ok3, zero);
+
+                                builder.SetInsertPoint(ok3);
+                                auto loadHessElem = [&](std::size_t comp,
+                                                        std::size_t d0,
+                                                        std::size_t d1) -> llvm::Value* {
+                                    auto* q64 = builder.CreateZExt(q_index, i64);
+                                    auto* vd64 = builder.CreateZExt(vd, i64);
+                                    auto* idx = builder.CreateAdd(builder.CreateMul(q64, vd64),
+                                                                  builder.getInt64(static_cast<std::uint64_t>(comp)));
+                                    auto* base9 = builder.CreateMul(idx, builder.getInt64(9));
+                                    const auto elem = static_cast<std::uint64_t>(d0 * 3u + d1);
+                                    return loadRealPtrAt(base, builder.CreateAdd(base9, builder.getInt64(elem)));
+                                };
+
+                                for (std::size_t r = 0; r < rows2; ++r) {
+                                    if (r >= dim2) {
+                                        computed[r] = f64c(0.0);
+                                        continue;
+                                    }
+
+                                    llvm::Value* lap = loadHessElem(r, 0u, 0u);
+                                    if (dim2 >= 2u) lap = builder.CreateFAdd(lap, loadHessElem(r, 1u, 1u));
+                                    if (dim2 >= 3u) lap = builder.CreateFAdd(lap, loadHessElem(r, 2u, 2u));
+
+                                    llvm::Value* gd = f64c(0.0);
+                                    for (std::size_t d = 0; d < n2; ++d) {
+                                        gd = builder.CreateFAdd(gd, loadHessElem(d, r, d));
+                                    }
+
+                                    computed[r] = builder.CreateFMul(f64c(0.5), builder.CreateFAdd(lap, gd));
+                                }
+
+                                builder.CreateBr(merge);
+                                auto* ok3_block = builder.GetInsertBlock();
+
+                                builder.SetInsertPoint(zero);
+                                builder.CreateBr(merge);
+                                auto* zero_block = builder.GetInsertBlock();
+
+                                builder.SetInsertPoint(merge);
+                                for (std::size_t r = 0; r < rows2; ++r) {
+                                    auto* phi = builder.CreatePHI(f64, 2, "field_divsym." + std::to_string(r));
+                                    phi->addIncoming(f64c(0.0), zero_block);
+                                    phi->addIncoming(computed[r], ok3_block);
+                                    out.elems[r] = phi;
+                                }
+                                return out;
+                            };
+
+                            auto divSymGradForU = [&](auto&& self,
+                                                      std::size_t u_idx,
+                                                      std::size_t rows,
+                                                      std::size_t dim) -> CodeValue {
+                                const auto& uop = term.ir.ops[u_idx];
+                                if (uop.type == FormExprType::TrialFunction) {
+                                    if (!is_residual) {
+                                        throw std::runtime_error(
+                                            "LLVMGen: cached div(sym(grad(TrialFunction))) only supports residual (current solution)");
+                                    }
+                                    return divSymGradCurrentSolution(side.solution_coefficients, rows, dim);
+                                }
+                                if (uop.type == FormExprType::DiscreteField) {
+                                    const int fid = unpackFieldIdImm1(uop.imm1);
+                                    return divSymGradFromField(fid, rows, dim);
+                                }
+                                if (uop.type == FormExprType::StateField) {
+                                    const int fid = unpackFieldIdImm1(uop.imm1);
+                                    if (fid == 0xffff) {
+                                        return divSymGradCurrentSolution(side.solution_coefficients, rows, dim);
+                                    }
+                                    return divSymGradFromField(fid, rows, dim);
+                                }
+                                if (uop.type == FormExprType::PreviousSolutionRef) {
+                                    const int k = static_cast<int>(static_cast<std::int64_t>(uop.imm0));
+                                    auto* coeffs_ptr = loadPrevSolutionCoeffsPtr(side, k);
+                                    return divSymGradCurrentSolution(coeffs_ptr, rows, dim);
+                                }
+                                if (uop.type == FormExprType::Negate) {
+                                    const auto a_idx = term.ir.children[static_cast<std::size_t>(uop.first_child)];
+                                    return neg(self(self, a_idx, rows, dim));
+                                }
+                                if (uop.type == FormExprType::Add || uop.type == FormExprType::Subtract) {
+                                    if (uop.child_count != 2u) {
+                                        throw std::runtime_error("LLVMGen: cached div(sym(grad(Add/Subtract))) expects 2 children");
+                                    }
+                                    const auto a_idx = term.ir.children[static_cast<std::size_t>(uop.first_child)];
+                                    const auto b_idx = term.ir.children[static_cast<std::size_t>(uop.first_child) + 1u];
+                                    return (uop.type == FormExprType::Add) ? add(self(self, a_idx, rows, dim), self(self, b_idx, rows, dim))
+                                                                         : sub(self(self, a_idx, rows, dim), self(self, b_idx, rows, dim));
+                                }
+                                if (uop.type == FormExprType::Multiply) {
+                                    if (uop.child_count != 2u) {
+                                        throw std::runtime_error("LLVMGen: cached div(sym(grad(Multiply))) expects 2 children");
+                                    }
+                                    const auto a_idx = term.ir.children[static_cast<std::size_t>(uop.first_child)];
+                                    const auto b_idx = term.ir.children[static_cast<std::size_t>(uop.first_child) + 1u];
+                                    const auto& ash = term.shapes[a_idx];
+                                    const auto& bsh = term.shapes[b_idx];
+                                    const bool a_scalar = (ash.kind == Shape::Kind::Scalar);
+                                    const bool b_scalar = (bsh.kind == Shape::Kind::Scalar);
+                                    const bool a_vec = (ash.kind == Shape::Kind::Vector);
+                                    const bool b_vec = (bsh.kind == Shape::Kind::Vector);
+                                    if (a_scalar && b_vec) {
+                                        if (!isSpatiallyConstantScalar(isSpatiallyConstantScalar, a_idx)) {
+                                            throw std::runtime_error(
+                                                "LLVMGen: cached div(sym(grad(s*u))) requires spatially-constant scalar s in JIT");
+                                        }
+                                        return mul(values[a_idx], self(self, b_idx, rows, dim));
+                                    }
+                                    if (b_scalar && a_vec) {
+                                        if (!isSpatiallyConstantScalar(isSpatiallyConstantScalar, b_idx)) {
+                                            throw std::runtime_error(
+                                                "LLVMGen: cached div(sym(grad(u*s))) requires spatially-constant scalar s in JIT");
+                                        }
+                                        return mul(values[b_idx], self(self, a_idx, rows, dim));
+                                    }
+                                }
+                                throw std::runtime_error(
+                                    "LLVMGen: cached div(sym(grad(u))) expects u = TrialFunction, DiscreteField, StateField, PreviousSolutionRef, or linear scalar*vector ops");
+                            };
+
+                            auto evalDivMatrix = [&](auto&& self, std::size_t m_idx) -> CodeValue {
+                                const auto& mop = term.ir.ops[m_idx];
+                                const auto& msh = term.shapes[m_idx];
+                                if (msh.kind != Shape::Kind::Matrix) {
+                                    throw std::runtime_error("LLVMGen: internal error: div(matrix) expected Matrix operand");
+                                }
+                                const std::size_t rows = static_cast<std::size_t>(msh.dims[0]);
+                                const std::size_t dim = static_cast<std::size_t>(msh.dims[1]);
+
+                                switch (mop.type) {
+                                    case FormExprType::SymmetricPart: {
+                                        const auto a_idx = term.ir.children[static_cast<std::size_t>(mop.first_child)];
+                                        const auto& aop = term.ir.ops[a_idx];
+                                        if (aop.type != FormExprType::Gradient) {
+                                            throw std::runtime_error("LLVMGen: div(sym(A)) currently only supports A=grad(u)");
+                                        }
+                                        const auto u_idx = term.ir.children[static_cast<std::size_t>(aop.first_child)];
+                                        return divSymGradForU(divSymGradForU, u_idx, rows, dim);
+                                    }
+                                    case FormExprType::Multiply: {
+                                        if (mop.child_count != 2u) {
+                                            throw std::runtime_error("LLVMGen: div(Multiply) expects 2 children");
+                                        }
+                                        const auto a_idx = term.ir.children[static_cast<std::size_t>(mop.first_child)];
+                                        const auto b_idx = term.ir.children[static_cast<std::size_t>(mop.first_child) + 1u];
+                                        const auto& ash = term.shapes[a_idx];
+                                        const auto& bsh = term.shapes[b_idx];
+
+                                        const bool a_scalar = (ash.kind == Shape::Kind::Scalar);
+                                        const bool b_scalar = (bsh.kind == Shape::Kind::Scalar);
+                                        const bool a_mat = (ash.kind == Shape::Kind::Matrix);
+                                        const bool b_mat = (bsh.kind == Shape::Kind::Matrix);
+
+                                        if (a_scalar && b_mat) {
+                                            if (!isSpatiallyConstantScalar(isSpatiallyConstantScalar, a_idx)) {
+                                                throw std::runtime_error("LLVMGen: div(s*A) requires spatially-constant scalar s in JIT");
+                                            }
+                                            return mul(values[a_idx], self(self, b_idx));
+                                        }
+                                        if (b_scalar && a_mat) {
+                                            if (!isSpatiallyConstantScalar(isSpatiallyConstantScalar, b_idx)) {
+                                                throw std::runtime_error("LLVMGen: div(A*s) requires spatially-constant scalar s in JIT");
+                                            }
+                                            return mul(values[b_idx], self(self, a_idx));
+                                        }
+                                        throw std::runtime_error("LLVMGen: div(Multiply) currently supports scalar-matrix products only");
+                                    }
+                                    case FormExprType::Add: {
+                                        const auto a_idx = term.ir.children[static_cast<std::size_t>(mop.first_child)];
+                                        const auto b_idx = term.ir.children[static_cast<std::size_t>(mop.first_child) + 1u];
+                                        return add(self(self, a_idx), self(self, b_idx));
+                                    }
+                                    case FormExprType::Subtract: {
+                                        const auto a_idx = term.ir.children[static_cast<std::size_t>(mop.first_child)];
+                                        const auto b_idx = term.ir.children[static_cast<std::size_t>(mop.first_child) + 1u];
+                                        return sub(self(self, a_idx), self(self, b_idx));
+                                    }
+                                    default:
+                                        break;
+                                }
+
+                                throw std::runtime_error("LLVMGen: cached div(matrix) operand not supported");
+                            };
+
+                            values[op_idx] = evalDivMatrix(evalDivMatrix, child_idx);
                             break;
                         }
 
-                        if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
-                            const int fid = unpackFieldIdImm1(kid.imm1);
-                            auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
+	                        if (kid.type == FormExprType::PreviousSolutionRef) {
+	                            const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+	                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+	                            auto* dofs_per_comp =
+	                                builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+		                            llvm::Value* div = f64c(0.0);
+		                            for (std::size_t comp = 0; comp < vd; ++comp) {
+		                                auto* acc = emitReduceSumScalar(
+		                                    dofs_per_comp,
+		                                    "prev_div" + std::to_string(k) + "_c" + std::to_string(comp),
+		                                    [&](llvm::Value* jj) -> llvm::Value* {
+		                                        auto* base =
+		                                            builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+		                                        auto* j = builder.CreateAdd(base, jj);
+		                                        auto* j64 = builder.CreateZExt(j, i64);
+		                                        auto* cj = loadRealPtrAt(coeffs, j64);
+		                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                        return builder.CreateFMul(cj, g[comp]);
+		                                    });
+		                                div = builder.CreateFAdd(div, acc);
+		                            }
+		                            values[op_idx] = makeScalar(div);
+		                            break;
+	                        }
+
+	                        if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
+	                            const int fid = unpackFieldIdImm1(kid.imm1);
+	                            auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
                             auto* entry_is_null =
                                 builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
                             auto* ok = llvm::BasicBlock::Create(*ctx, "field_div.ok", fn);
@@ -6645,14 +7629,35 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             auto* phi = builder.CreatePHI(f64, 2, "field_div");
                             phi->addIncoming(f64c(0.0), zero_block);
                             phi->addIncoming(div, ok2_block);
-                            values[op_idx] = makeScalar(phi);
-                            break;
+	                            values[op_idx] = makeScalar(phi);
+	                            break;
+	                        }
+
+                        // Divergence is linear; handle the common simplified pattern div(0 * X) -> 0.
+                        if (kid.type == FormExprType::Multiply && kid.child_count == 2u) {
+                            const auto a_idx = term.ir.children[static_cast<std::size_t>(kid.first_child)];
+                            const auto b_idx = term.ir.children[static_cast<std::size_t>(kid.first_child) + 1u];
+                            const auto& aop = term.ir.ops[a_idx];
+                            const auto& bop = term.ir.ops[b_idx];
+
+                            auto isZeroConstant = [](const KernelIROp& op2) -> bool {
+                                if (op2.type != FormExprType::Constant) {
+                                    return false;
+                                }
+                                const double v = std::bit_cast<double>(op2.imm0);
+                                return v == 0.0;
+                            };
+
+                            if (isZeroConstant(aop) || isZeroConstant(bop)) {
+                                values[op_idx] = makeScalar(f64c(0.0));
+                                break;
+                            }
                         }
 
-                        if (kid.type == FormExprType::Constant) {
-                            values[op_idx] = makeScalar(f64c(0.0));
-                            break;
-                        }
+	                        if (kid.type == FormExprType::Constant) {
+	                            values[op_idx] = makeScalar(f64c(0.0));
+	                            break;
+	                        }
 
                         throw std::runtime_error("LLVMGen: cached Divergence operand not supported");
                     }
@@ -6720,20 +7725,27 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 row = {f64c(0.0), f64c(0.0), f64c(0.0)};
                             }
 
-                            for (std::size_t comp = 0; comp < std::min<std::size_t>(vd, 3u); ++comp) {
-                                std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                emitForLoop(dofs_per_comp, "prev_curl" + std::to_string(k) + "_c" + std::to_string(comp), [&](llvm::Value* jj) {
-                                    auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                    auto* j = builder.CreateAdd(base, jj);
-                                    auto* j64 = builder.CreateZExt(j, i64);
-                                    auto* cj = loadRealPtrAt(coeffs, j64);
-                                    const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                    }
-                                });
-                                J[comp] = acc;
-                            }
+	                            for (std::size_t comp = 0; comp < std::min<std::size_t>(vd, 3u); ++comp) {
+	                                const auto acc =
+	                                    emitReduceSum(dofs_per_comp,
+	                                                 "prev_curl" + std::to_string(k) + "_c" + std::to_string(comp),
+	                                                 3u,
+	                                                 [&](llvm::Value* jj) {
+	                                                     auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                                     auto* j = builder.CreateAdd(base, jj);
+	                                                     auto* j64 = builder.CreateZExt(j, i64);
+	                                                     auto* cj = loadRealPtrAt(coeffs, j64);
+	                                                     const auto g =
+	                                                         loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                                     std::vector<llvm::Value*> terms;
+	                                                     terms.reserve(3u);
+	                                                     for (std::size_t d = 0; d < 3u; ++d) {
+	                                                         terms.push_back(builder.CreateFMul(cj, g[d]));
+	                                                     }
+	                                                     return terms;
+	                                                 });
+	                                J[comp] = {acc[0], acc[1], acc[2]};
+	                            }
 
                             auto* cx = builder.CreateFSub(J[2][1], J[1][2]);
                             auto* cy = builder.CreateFSub(J[0][2], J[2][0]);
@@ -6750,32 +7762,35 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         throw std::runtime_error("LLVMGen: cached Curl operand not supported");
                     }
 
-                    case FormExprType::Hessian: {
-                        const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
-                        const auto& kid = term.ir.ops[child_idx];
+	                    case FormExprType::Hessian: {
+	                        const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
+	                        const auto& kid = term.ir.ops[child_idx];
+	                        const auto dim_u32 = shape.dims[0];
+	                        const auto mat_len = elemCount(shape);
 
-                        auto* zero = f64c(0.0);
-                        auto mat3Zero = [&]() -> CodeValue {
-                            CodeValue out = makeMatrix(3u, 3u);
-                            for (std::size_t i = 0; i < 9; ++i) out.elems[i] = zero;
-                            return out;
-                        };
-
-                        if (kid.type == FormExprType::PreviousSolutionRef) {
-                            const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
-                            CodeValue out = makeZero(matrixShape(3u, 3u));
-                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-                            emitForLoop(side.n_trial_dofs, "prev_hess" + std::to_string(k), [&](llvm::Value* j) {
-                                auto* j64 = builder.CreateZExt(j, i64);
-                                auto* cj = loadRealPtrAt(coeffs, j64);
-                                const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
-                                for (std::size_t i = 0; i < 9; ++i) {
-                                    out.elems[i] = builder.CreateFAdd(out.elems[i], builder.CreateFMul(cj, H.elems[i]));
-                                }
-                            });
-                            values[op_idx] = out;
-                            break;
-                        }
+		                        if (kid.type == FormExprType::PreviousSolutionRef) {
+		                            const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+		                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+		                            CodeValue out = makeZero(shape);
+		                            const auto sums =
+		                                emitReduceSum(side.n_trial_dofs, "prev_hess" + std::to_string(k), mat_len, [&](llvm::Value* j) {
+		                                    auto* j64 = builder.CreateZExt(j, i64);
+		                                    auto* cj = loadRealPtrAt(coeffs, j64);
+		                                    const auto H = loadMatDimFromTable(
+		                                        side.trial_phys_hessians, side.n_qpts, j, q_index, dim_u32);
+		                                    std::vector<llvm::Value*> terms;
+		                                    terms.reserve(mat_len);
+		                                    for (std::size_t i = 0; i < mat_len; ++i) {
+		                                        terms.push_back(builder.CreateFMul(cj, H.elems[i]));
+		                                    }
+		                                    return terms;
+		                                });
+		                            for (std::size_t i = 0; i < mat_len; ++i) {
+		                                out.elems[i] = sums[i];
+		                            }
+		                            values[op_idx] = out;
+		                            break;
+		                        }
 
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
@@ -6786,41 +7801,41 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             auto* z = llvm::BasicBlock::Create(*ctx, "field_hess.zero", fn);
                             auto* merge = llvm::BasicBlock::Create(*ctx, "field_hess.merge", fn);
 
-                            builder.CreateCondBr(entry_is_null, z, ok);
+	                            builder.CreateCondBr(entry_is_null, z, ok);
 
-                            CodeValue loaded = mat3Zero();
-                            builder.SetInsertPoint(ok);
-                            auto* base = loadPtr(entry, ABIV3::field_entry_hessians_off);
-                            auto* base_is_null =
-                                builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+	                            CodeValue loaded = makeZero(shape);
+	                            builder.SetInsertPoint(ok);
+	                            auto* base = loadPtr(entry, ABIV3::field_entry_hessians_off);
+	                            auto* base_is_null =
+	                                builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
                             auto* ok2 = llvm::BasicBlock::Create(*ctx, "field_hess.mat.ok", fn);
                             builder.CreateCondBr(base_is_null, z, ok2);
 
-                            builder.SetInsertPoint(ok2);
-                            loaded = loadMat3FromQ(base, q_index);
-                            builder.CreateBr(merge);
-                            auto* ok2_block = builder.GetInsertBlock();
+	                            builder.SetInsertPoint(ok2);
+	                            loaded = loadMatDimFromQ(base, q_index, dim_u32);
+	                            builder.CreateBr(merge);
+	                            auto* ok2_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(z);
                             builder.CreateBr(merge);
                             auto* zero_block = builder.GetInsertBlock();
 
-                            builder.SetInsertPoint(merge);
-                            CodeValue out = mat3Zero();
-                            for (std::size_t i = 0; i < 9; ++i) {
-                                auto* phi = builder.CreatePHI(f64, 2, "field_hess." + std::to_string(i));
-                                phi->addIncoming(zero, zero_block);
-                                phi->addIncoming(loaded.elems[i], ok2_block);
-                                out.elems[i] = phi;
-                            }
-                            values[op_idx] = out;
-                            break;
-                        }
+	                            builder.SetInsertPoint(merge);
+	                            CodeValue out = makeZero(shape);
+	                            for (std::size_t i = 0; i < mat_len; ++i) {
+	                                auto* phi = builder.CreatePHI(f64, 2, "field_hess." + std::to_string(i));
+	                                phi->addIncoming(f64c(0.0), zero_block);
+	                                phi->addIncoming(loaded.elems[i], ok2_block);
+	                                out.elems[i] = phi;
+	                            }
+	                            values[op_idx] = out;
+	                            break;
+	                        }
 
-                        if (kid.type == FormExprType::Constant) {
-                            values[op_idx] = mat3Zero();
-                            break;
-                        }
+	                        if (kid.type == FormExprType::Constant) {
+	                            values[op_idx] = makeZero(shape);
+	                            break;
+	                        }
 
                         throw std::runtime_error("LLVMGen: cached Hessian operand not supported");
                     }
@@ -7342,30 +8357,30 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values_plus[op_idx] = makeScalar(builder.CreateSIToFP(side_plus.cell_domain_id, f64));
                         break;
 
-                    case FormExprType::Coordinate:
-                        values_minus[op_idx] = loadXYZ(side_minus.physical_points_xyz, q_index);
-                        values_plus[op_idx] = loadXYZ(side_plus.physical_points_xyz, q_index);
-                        break;
+	                    case FormExprType::Coordinate:
+	                        values_minus[op_idx] = loadXYZDim(side_minus.physical_points_xyz, q_index, shape.dims[0]);
+	                        values_plus[op_idx] = loadXYZDim(side_plus.physical_points_xyz, q_index, shape.dims[0]);
+	                        break;
 
-                    case FormExprType::ReferenceCoordinate:
-                        values_minus[op_idx] = loadXYZ(side_minus.quad_points_xyz, q_index);
-                        values_plus[op_idx] = loadXYZ(side_plus.quad_points_xyz, q_index);
-                        break;
+	                    case FormExprType::ReferenceCoordinate:
+	                        values_minus[op_idx] = loadXYZDim(side_minus.quad_points_xyz, q_index, shape.dims[0]);
+	                        values_plus[op_idx] = loadXYZDim(side_plus.quad_points_xyz, q_index, shape.dims[0]);
+	                        break;
 
-                    case FormExprType::Normal:
-                        values_minus[op_idx] = loadXYZ(side_minus.normals_xyz, q_index);
-                        values_plus[op_idx] = loadXYZ(side_plus.normals_xyz, q_index);
-                        break;
+	                    case FormExprType::Normal:
+	                        values_minus[op_idx] = loadXYZDim(side_minus.normals_xyz, q_index, shape.dims[0]);
+	                        values_plus[op_idx] = loadXYZDim(side_plus.normals_xyz, q_index, shape.dims[0]);
+	                        break;
 
-                    case FormExprType::Jacobian:
-                        values_minus[op_idx] = loadMat3FromQ(side_minus.jacobians, q_index);
-                        values_plus[op_idx] = loadMat3FromQ(side_plus.jacobians, q_index);
-                        break;
+	                    case FormExprType::Jacobian:
+	                        values_minus[op_idx] = loadMatDimFromQ(side_minus.jacobians, q_index, shape.dims[0]);
+	                        values_plus[op_idx] = loadMatDimFromQ(side_plus.jacobians, q_index, shape.dims[0]);
+	                        break;
 
-                    case FormExprType::JacobianInverse:
-                        values_minus[op_idx] = loadMat3FromQ(side_minus.inverse_jacobians, q_index);
-                        values_plus[op_idx] = loadMat3FromQ(side_plus.inverse_jacobians, q_index);
-                        break;
+	                    case FormExprType::JacobianInverse:
+	                        values_minus[op_idx] = loadMatDimFromQ(side_minus.inverse_jacobians, q_index, shape.dims[0]);
+	                        values_plus[op_idx] = loadMatDimFromQ(side_plus.inverse_jacobians, q_index, shape.dims[0]);
+	                        break;
 
                     case FormExprType::Identity: {
                         CodeValue out = makeZero(shape);
@@ -7397,53 +8412,69 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         const auto& kid = term.ir.ops[child_idx];
 
                         auto evalSide = [&](const SideView& side, bool plus_side) -> CodeValue {
-                            if (kid.type == FormExprType::PreviousSolutionRef) {
-                                const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
-                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-                                if (shape.kind == Shape::Kind::Vector) {
-                                    std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                    emitForLoop(side.n_trial_dofs, "prev_grad" + std::to_string(k), [&](llvm::Value* j) {
-                                        auto* j64 = builder.CreateZExt(j, i64);
-                                        auto* cj = loadRealPtrAt(coeffs, j64);
-                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                        }
-                                    });
-                                    return makeVector(3u, acc[0], acc[1], acc[2]);
-                                }
-                                if (shape.kind == Shape::Kind::Matrix) {
-                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                    CodeValue out = makeZero(shape);
-                                    auto* dofs_per_comp =
-                                        builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                    for (std::size_t comp = 0; comp < vd; ++comp) {
-                                        std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                        emitForLoop(dofs_per_comp, "prev_grad" + std::to_string(k) + "_c" + std::to_string(comp), [&](llvm::Value* jj) {
-                                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                            auto* j = builder.CreateAdd(base, jj);
-                                            auto* j64 = builder.CreateZExt(j, i64);
-                                            auto* cj = loadRealPtrAt(coeffs, j64);
-                                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                            for (std::size_t d = 0; d < 3; ++d) {
-                                                acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                            }
-                                        });
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            out.elems[comp * 3 + d] = acc[d];
-                                        }
-                                    }
-                                    return out;
-                                }
-                                throw std::runtime_error("LLVMGen: cached grad(PreviousSolutionRef) unsupported shape");
-                            }
+		                            if (kid.type == FormExprType::PreviousSolutionRef) {
+		                                const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+		                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+		                                if (shape.kind == Shape::Kind::Vector) {
+		                                    const auto dim = static_cast<std::size_t>(shape.dims[0]);
+		                                    const auto sums =
+		                                        emitReduceSum(side.n_trial_dofs, "prev_grad" + std::to_string(k), dim, [&](llvm::Value* j) {
+		                                            auto* j64 = builder.CreateZExt(j, i64);
+		                                            auto* cj = loadRealPtrAt(coeffs, j64);
+		                                            const auto g =
+		                                                loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                            std::vector<llvm::Value*> terms;
+		                                            terms.reserve(dim);
+		                                            for (std::size_t d = 0; d < dim; ++d) {
+		                                                terms.push_back(builder.CreateFMul(cj, g[d]));
+		                                            }
+		                                            return terms;
+		                                        });
+		                                    auto* x = sums[0];
+		                                    auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
+		                                    auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+		                                    return makeVector(shape.dims[0], x, y, z);
+		                                }
+		                                if (shape.kind == Shape::Kind::Matrix) {
+		                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
+		                                    const auto dim = static_cast<std::size_t>(shape.dims[1]);
+		                                    CodeValue out = makeZero(shape);
+		                                    auto* dofs_per_comp =
+		                                        builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+		                                    for (std::size_t comp = 0; comp < vd; ++comp) {
+	                                        const auto acc = emitReduceSum(dofs_per_comp,
+	                                                                       "prev_grad" + std::to_string(k) + "_c" +
+	                                                                           std::to_string(comp),
+	                                                                       dim,
+	                                                                       [&](llvm::Value* jj) {
+	                                            auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                            auto* j = builder.CreateAdd(base, jj);
+		                                            auto* j64 = builder.CreateZExt(j, i64);
+		                                            auto* cj = loadRealPtrAt(coeffs, j64);
+		                                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                            std::vector<llvm::Value*> terms;
+	                                            terms.reserve(dim);
+		                                            for (std::size_t d = 0; d < dim; ++d) {
+		                                                terms.push_back(builder.CreateFMul(cj, g[d]));
+		                                            }
+	                                            return terms;
+		                                        });
+		                                        for (std::size_t d = 0; d < dim; ++d) {
+		                                            out.elems[comp * dim + d] = acc[d];
+		                                        }
+		                                    }
+	                                    return out;
+	                                }
+	                                throw std::runtime_error("LLVMGen: cached grad(PreviousSolutionRef) unsupported shape");
+	                            }
 
-                            if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
-                                const int fid = unpackFieldIdImm1(kid.imm1);
-                                if (shape.kind == Shape::Kind::Vector) {
-                                    auto* entry = fieldEntryPtrFor(plus_side, fid);
-                                    auto* entry_is_null =
-                                        builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+	                            if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
+	                                const int fid = unpackFieldIdImm1(kid.imm1);
+	                                if (shape.kind == Shape::Kind::Vector) {
+	                                    const auto dim = static_cast<std::size_t>(shape.dims[0]);
+	                                    auto* entry = fieldEntryPtrFor(plus_side, fid);
+	                                    auto* entry_is_null =
+	                                        builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
                                     auto* ok = llvm::BasicBlock::Create(*ctx, "field_grad.ok", fn);
                                     auto* zero = llvm::BasicBlock::Create(*ctx, "field_grad.zero", fn);
                                     auto* merge = llvm::BasicBlock::Create(*ctx, "field_grad.merge", fn);
@@ -7468,21 +8499,22 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                     builder.CreateBr(merge);
                                     auto* zero_block = builder.GetInsertBlock();
 
-                                    builder.SetInsertPoint(merge);
-                                    std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        auto* phi = builder.CreatePHI(f64, 2, "field_grad.v" + std::to_string(d));
-                                        phi->addIncoming(f64c(0.0), zero_block);
-                                        phi->addIncoming(loaded[d], ok2_block);
-                                        outv[d] = phi;
-                                    }
-                                    return makeVector(3u, outv[0], outv[1], outv[2]);
-                                }
-                                if (shape.kind == Shape::Kind::Matrix) {
-                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                    auto* entry = fieldEntryPtrFor(plus_side, fid);
-                                    auto* entry_is_null =
-                                        builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+	                                    builder.SetInsertPoint(merge);
+	                                    std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                                    for (std::size_t d = 0; d < dim; ++d) {
+	                                        auto* phi = builder.CreatePHI(f64, 2, "field_grad.v" + std::to_string(d));
+	                                        phi->addIncoming(f64c(0.0), zero_block);
+	                                        phi->addIncoming(loaded[d], ok2_block);
+	                                        outv[d] = phi;
+	                                    }
+	                                    return makeVector(shape.dims[0], outv[0], outv[1], outv[2]);
+	                                }
+	                                if (shape.kind == Shape::Kind::Matrix) {
+	                                    const auto vd = static_cast<std::size_t>(shape.dims[0]);
+	                                    const auto dim = static_cast<std::size_t>(shape.dims[1]);
+	                                    auto* entry = fieldEntryPtrFor(plus_side, fid);
+	                                    auto* entry_is_null =
+	                                        builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
                                     auto* ok = llvm::BasicBlock::Create(*ctx, "field_jac.ok", fn);
                                     auto* zero = llvm::BasicBlock::Create(*ctx, "field_jac.zero", fn);
                                     auto* merge = llvm::BasicBlock::Create(*ctx, "field_jac.merge", fn);
@@ -7506,18 +8538,20 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                     builder.CreateBr(merge);
                                     auto* zero_block = builder.GetInsertBlock();
 
-                                    builder.SetInsertPoint(merge);
-                                    CodeValue out = makeZero(shape);
-                                    for (std::size_t r = 0; r < vd; ++r) {
-                                        for (std::size_t c = 0; c < 3; ++c) {
-                                            auto* phi = builder.CreatePHI(f64, 2, "field_jac.a");
-                                            phi->addIncoming(f64c(0.0), zero_block);
-                                            phi->addIncoming(loaded.elems[r * 3 + c], ok2_block);
-                                            out.elems[r * 3 + c] = phi;
-                                        }
-                                    }
-                                    return out;
-                                }
+	                                    builder.SetInsertPoint(merge);
+	                                    CodeValue out = makeZero(shape);
+	                                    for (std::size_t r = 0; r < vd; ++r) {
+	                                        for (std::size_t c = 0; c < dim; ++c) {
+	                                            auto* phi = builder.CreatePHI(f64, 2, "field_jac.a");
+	                                            phi->addIncoming(f64c(0.0), zero_block);
+	                                            auto* l =
+	                                                (r < 3u && c < 3u) ? loaded.elems[r * 3u + c] : f64c(0.0);
+	                                            phi->addIncoming(l, ok2_block);
+	                                            out.elems[r * dim + c] = phi;
+	                                        }
+	                                    }
+	                                    return out;
+	                                }
                                 throw std::runtime_error("LLVMGen: cached grad(DiscreteField) unsupported shape");
                             }
 
@@ -7542,23 +8576,27 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             if (kid.type == FormExprType::PreviousSolutionRef) {
                                 const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
 	                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-	                                auto* dofs_per_comp =
-	                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                                llvm::Value* div = f64c(0.0);
-	                                for (std::size_t comp = 0; comp < vd; ++comp) {
-	                                    llvm::Value* acc = f64c(0.0);
-	                                    emitForLoop(dofs_per_comp, "prev_div" + std::to_string(k) + "_c" + std::to_string(comp), [&](llvm::Value* jj) {
-	                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-	                                        auto* j = builder.CreateAdd(base, jj);
-                                        auto* j64 = builder.CreateZExt(j, i64);
-                                        auto* cj = loadRealPtrAt(coeffs, j64);
-                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                        acc = builder.CreateFAdd(acc, builder.CreateFMul(cj, g[comp]));
-                                    });
-                                    div = builder.CreateFAdd(div, acc);
-                                }
-                                return makeScalar(div);
-                            }
+		                                auto* dofs_per_comp =
+		                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+		                                llvm::Value* div = f64c(0.0);
+		                                for (std::size_t comp = 0; comp < vd; ++comp) {
+		                                    auto* acc = emitReduceSumScalar(
+		                                        dofs_per_comp,
+		                                        "prev_div" + std::to_string(k) + "_c" + std::to_string(comp),
+		                                        [&](llvm::Value* jj) -> llvm::Value* {
+		                                            auto* base =
+		                                                builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+		                                            auto* j = builder.CreateAdd(base, jj);
+		                                            auto* j64 = builder.CreateZExt(j, i64);
+		                                            auto* cj = loadRealPtrAt(coeffs, j64);
+		                                            const auto g =
+		                                                loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                            return builder.CreateFMul(cj, g[comp]);
+		                                        });
+		                                    div = builder.CreateFAdd(div, acc);
+		                                }
+		                                return makeScalar(div);
+		                            }
 
                             if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                                 const int fid = unpackFieldIdImm1(kid.imm1);
@@ -7673,20 +8711,27 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                     row = {f64c(0.0), f64c(0.0), f64c(0.0)};
                                 }
 
-                                for (std::size_t comp = 0; comp < std::min<std::size_t>(vd, 3u); ++comp) {
-                                    std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                    emitForLoop(dofs_per_comp, "prev_curl" + std::to_string(k) + "_c" + std::to_string(comp), [&](llvm::Value* jj) {
-                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                        auto* j = builder.CreateAdd(base, jj);
-                                        auto* j64 = builder.CreateZExt(j, i64);
-                                        auto* cj = loadRealPtrAt(coeffs, j64);
-                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                        }
-                                    });
-                                    J[comp] = acc;
-                                }
+	                                for (std::size_t comp = 0; comp < std::min<std::size_t>(vd, 3u); ++comp) {
+	                                    const auto acc =
+	                                        emitReduceSum(dofs_per_comp,
+	                                                     "prev_curl" + std::to_string(k) + "_c" + std::to_string(comp),
+	                                                     3u,
+	                                                     [&](llvm::Value* jj) {
+	                                                         auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                                         auto* j = builder.CreateAdd(base, jj);
+	                                                         auto* j64 = builder.CreateZExt(j, i64);
+	                                                         auto* cj = loadRealPtrAt(coeffs, j64);
+	                                                         const auto g =
+	                                                             loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                                         std::vector<llvm::Value*> terms;
+	                                                         terms.reserve(3u);
+	                                                         for (std::size_t d = 0; d < 3u; ++d) {
+	                                                             terms.push_back(builder.CreateFMul(cj, g[d]));
+	                                                         }
+	                                                         return terms;
+	                                                     });
+	                                    J[comp] = {acc[0], acc[1], acc[2]};
+	                                }
 
                                 auto* cx = builder.CreateFSub(J[2][1], J[1][2]);
                                 auto* cy = builder.CreateFSub(J[0][2], J[2][0]);
@@ -7706,32 +8751,35 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         break;
                     }
 
-                    case FormExprType::Hessian: {
-                        const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
-                        const auto& kid = term.ir.ops[child_idx];
+	                    case FormExprType::Hessian: {
+	                        const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
+	                        const auto& kid = term.ir.ops[child_idx];
+	                        const auto dim_u32 = shape.dims[0];
+	                        const auto mat_len = elemCount(shape);
 
-                        auto evalSide = [&](const SideView& side, bool plus_side) -> CodeValue {
-                            auto* zero = f64c(0.0);
-                            auto mat3Zero = [&]() -> CodeValue {
-                                CodeValue out = makeMatrix(3u, 3u);
-                                for (std::size_t i = 0; i < 9; ++i) out.elems[i] = zero;
-                                return out;
-                            };
-
-                            if (kid.type == FormExprType::PreviousSolutionRef) {
-                                const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
-                                CodeValue out = makeZero(matrixShape(3u, 3u));
-                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-                                emitForLoop(side.n_trial_dofs, "prev_hess" + std::to_string(k), [&](llvm::Value* j) {
-                                    auto* j64 = builder.CreateZExt(j, i64);
-                                    auto* cj = loadRealPtrAt(coeffs, j64);
-                                    const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
-                                    for (std::size_t i = 0; i < 9; ++i) {
-                                        out.elems[i] = builder.CreateFAdd(out.elems[i], builder.CreateFMul(cj, H.elems[i]));
-                                    }
-                                });
-                                return out;
-                            }
+		                        auto evalSide = [&](const SideView& side, bool plus_side) -> CodeValue {
+		                            if (kid.type == FormExprType::PreviousSolutionRef) {
+		                                const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+		                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+		                                CodeValue out = makeZero(shape);
+		                                const auto sums =
+		                                    emitReduceSum(side.n_trial_dofs, "prev_hess" + std::to_string(k), mat_len, [&](llvm::Value* j) {
+		                                        auto* j64 = builder.CreateZExt(j, i64);
+		                                        auto* cj = loadRealPtrAt(coeffs, j64);
+		                                        const auto H = loadMatDimFromTable(
+		                                            side.trial_phys_hessians, side.n_qpts, j, q_index, dim_u32);
+		                                        std::vector<llvm::Value*> terms;
+		                                        terms.reserve(mat_len);
+		                                        for (std::size_t i = 0; i < mat_len; ++i) {
+		                                            terms.push_back(builder.CreateFMul(cj, H.elems[i]));
+		                                        }
+		                                        return terms;
+		                                    });
+		                                for (std::size_t i = 0; i < mat_len; ++i) {
+		                                    out.elems[i] = sums[i];
+		                                }
+		                                return out;
+		                            }
 
                             if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                                 const int fid = unpackFieldIdImm1(kid.imm1);
@@ -7740,41 +8788,41 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                     builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
                                 auto* ok = llvm::BasicBlock::Create(*ctx, "field_hess.ok", fn);
                                 auto* z = llvm::BasicBlock::Create(*ctx, "field_hess.zero", fn);
-                                auto* merge = llvm::BasicBlock::Create(*ctx, "field_hess.merge", fn);
+	                                auto* merge = llvm::BasicBlock::Create(*ctx, "field_hess.merge", fn);
 
-                                builder.CreateCondBr(entry_is_null, z, ok);
+	                                builder.CreateCondBr(entry_is_null, z, ok);
 
-                                CodeValue loaded = mat3Zero();
-                                builder.SetInsertPoint(ok);
-                                auto* base = loadPtr(entry, ABIV3::field_entry_hessians_off);
-                                auto* base_is_null =
-                                    builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+	                                CodeValue loaded = makeZero(shape);
+	                                builder.SetInsertPoint(ok);
+	                                auto* base = loadPtr(entry, ABIV3::field_entry_hessians_off);
+	                                auto* base_is_null =
+	                                    builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
                                 auto* ok2 = llvm::BasicBlock::Create(*ctx, "field_hess.mat.ok", fn);
                                 builder.CreateCondBr(base_is_null, z, ok2);
 
-                                builder.SetInsertPoint(ok2);
-                                loaded = loadMat3FromQ(base, q_index);
-                                builder.CreateBr(merge);
-                                auto* ok2_block = builder.GetInsertBlock();
+	                                builder.SetInsertPoint(ok2);
+	                                loaded = loadMatDimFromQ(base, q_index, dim_u32);
+	                                builder.CreateBr(merge);
+	                                auto* ok2_block = builder.GetInsertBlock();
 
                                 builder.SetInsertPoint(z);
                                 builder.CreateBr(merge);
-                                auto* zero_block = builder.GetInsertBlock();
+	                                auto* zero_block = builder.GetInsertBlock();
 
-                                builder.SetInsertPoint(merge);
-                                CodeValue out = mat3Zero();
-                                for (std::size_t i = 0; i < 9; ++i) {
-                                    auto* phi = builder.CreatePHI(f64, 2, "field_hess." + std::to_string(i));
-                                    phi->addIncoming(zero, zero_block);
-                                    phi->addIncoming(loaded.elems[i], ok2_block);
-                                    out.elems[i] = phi;
-                                }
-                                return out;
-                            }
+	                                builder.SetInsertPoint(merge);
+	                                CodeValue out = makeZero(shape);
+	                                for (std::size_t i = 0; i < mat_len; ++i) {
+	                                    auto* phi = builder.CreatePHI(f64, 2, "field_hess." + std::to_string(i));
+	                                    phi->addIncoming(f64c(0.0), zero_block);
+	                                    phi->addIncoming(loaded.elems[i], ok2_block);
+	                                    out.elems[i] = phi;
+	                                }
+	                                return out;
+	                            }
 
-                            if (kid.type == FormExprType::Constant) {
-                                return mat3Zero();
-                            }
+	                            if (kid.type == FormExprType::Constant) {
+	                                return makeZero(shape);
+	                            }
 
                             throw std::runtime_error("LLVMGen: cached Hessian operand not supported");
                         };
@@ -8464,181 +9512,220 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                     const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                     const auto& kid = term.ir.ops[child_idx];
 
-                    if (kid.type == FormExprType::TestFunction) {
-                        if (is_plus != test_active_plus) return makeZero(shape);
+	                    if (kid.type == FormExprType::TestFunction) {
+	                        if (is_plus != test_active_plus) return makeZero(shape);
 
-                        if (shape.kind == Shape::Kind::Vector) {
-                            const auto v = loadVec3FromTable(side.test_phys_grads_xyz, side.n_qpts, i_index, q_index);
-                            return makeVector(3u, v[0], v[1], v[2]);
-                        }
-                        if (shape.kind == Shape::Kind::Matrix) {
-                            const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                            CodeValue out = makeZero(shape);
-                            const auto dofs_per_comp = builder.CreateUDiv(
-                                side.n_test_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                            const auto comp = builder.CreateUDiv(i_index, dofs_per_comp);
-                            const auto g = loadVec3FromTable(side.test_phys_grads_xyz, side.n_qpts, i_index, q_index);
-                            for (std::size_t r = 0; r < vd; ++r) {
-                                auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
-                                for (std::size_t d = 0; d < 3; ++d) {
-                                    out.elems[r * 3 + d] = builder.CreateSelect(is_r, g[d], f64c(0.0));
-                                }
-                            }
-                            return out;
-                        }
+	                        if (shape.kind == Shape::Kind::Vector) {
+	                            const auto v = loadVec3FromTable(side.test_phys_grads_xyz, side.n_qpts, i_index, q_index);
+	                            return makeVector(shape.dims[0], v[0], v[1], v[2]);
+	                        }
+	                        if (shape.kind == Shape::Kind::Matrix) {
+	                            const auto vd = static_cast<std::size_t>(shape.dims[0]);
+	                            const auto dim = static_cast<std::size_t>(shape.dims[1]);
+	                            CodeValue out = makeZero(shape);
+	                            const auto dofs_per_comp = builder.CreateUDiv(
+	                                side.n_test_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+	                            const auto comp = builder.CreateUDiv(i_index, dofs_per_comp);
+	                            const auto g = loadVec3FromTable(side.test_phys_grads_xyz, side.n_qpts, i_index, q_index);
+	                            for (std::size_t r = 0; r < vd; ++r) {
+	                                auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
+	                                for (std::size_t d = 0; d < dim; ++d) {
+	                                    out.elems[r * dim + d] = builder.CreateSelect(is_r, g[d], f64c(0.0));
+	                                }
+	                            }
+	                            return out;
+	                        }
                         throw std::runtime_error("LLVMGen: grad(TestFunction) unsupported shape");
                     }
 
                     if (kid.type == FormExprType::TrialFunction) {
-                        if (is_residual) {
-                            // Residual: grad(u_h) computed from current solution coefficients.
-                            auto* coeffs = side.solution_coefficients;
-                            if (shape.kind == Shape::Kind::Vector) {
-                                std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                emitForLoop(side.n_trial_dofs, "grad_u", [&](llvm::Value* j) {
-                                    auto* j64 = builder.CreateZExt(j, i64);
-                                    auto* cj = loadRealPtrAt(coeffs, j64);
-                                    const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                    }
-                                });
-                                return makeVector(3u, acc[0], acc[1], acc[2]);
-                            }
-                            if (shape.kind == Shape::Kind::Matrix) {
-                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                CodeValue out = makeZero(shape);
-                                auto* dofs_per_comp =
-                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                for (std::size_t comp = 0; comp < vd; ++comp) {
-                                    std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                    emitForLoop(dofs_per_comp, "grad_u_c" + std::to_string(comp), [&](llvm::Value* jj) {
-                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                        auto* j = builder.CreateAdd(base, jj);
-                                        auto* j64 = builder.CreateZExt(j, i64);
-                                        auto* cj = loadRealPtrAt(coeffs, j64);
-                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                        }
-                                    });
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        out.elems[comp * 3 + d] = acc[d];
-                                    }
-                                }
-                                return out;
-                            }
+	                        if (is_residual) {
+	                            // Residual: grad(u_h) computed from current solution coefficients.
+		                            auto* coeffs = side.solution_coefficients;
+		                            if (shape.kind == Shape::Kind::Vector) {
+		                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+		                                const auto sums =
+		                                    emitReduceSum(side.n_trial_dofs, "grad_u", dim, [&](llvm::Value* j) {
+		                                        auto* j64 = builder.CreateZExt(j, i64);
+		                                        auto* cj = loadRealPtrAt(coeffs, j64);
+		                                        const auto g =
+		                                            loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                        std::vector<llvm::Value*> terms;
+		                                        terms.reserve(dim);
+		                                        for (std::size_t d = 0; d < dim; ++d) {
+		                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+		                                        }
+		                                        return terms;
+		                                    });
+		                                auto* x = sums[0];
+		                                auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
+		                                auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+		                                return makeVector(shape.dims[0], x, y, z);
+		                            }
+		                            if (shape.kind == Shape::Kind::Matrix) {
+		                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
+		                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
+		                                CodeValue out = makeZero(shape);
+		                                auto* dofs_per_comp =
+		                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+		                                for (std::size_t comp = 0; comp < vd; ++comp) {
+	                                    const auto acc = emitReduceSum(dofs_per_comp, "grad_u_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
+	                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                        auto* j = builder.CreateAdd(base, jj);
+	                                        auto* j64 = builder.CreateZExt(j, i64);
+		                                        auto* cj = loadRealPtrAt(coeffs, j64);
+		                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        std::vector<llvm::Value*> terms;
+	                                        terms.reserve(dim);
+		                                        for (std::size_t d = 0; d < dim; ++d) {
+		                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+		                                        }
+	                                        return terms;
+		                                    });
+		                                    for (std::size_t d = 0; d < dim; ++d) {
+		                                        out.elems[comp * dim + d] = acc[d];
+		                                    }
+		                                }
+	                                return out;
+	                            }
                             throw std::runtime_error("LLVMGen: grad(u) unsupported shape (residual)");
                         }
 
-                        if (is_plus != trial_active_plus) return makeZero(shape);
+	                        if (is_plus != trial_active_plus) return makeZero(shape);
 
-                        if (shape.kind == Shape::Kind::Vector) {
-                            const auto v = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
-                            return makeVector(3u, v[0], v[1], v[2]);
-                        }
-                        if (shape.kind == Shape::Kind::Matrix) {
-                            const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                            CodeValue out = makeZero(shape);
-                            const auto dofs_per_comp = builder.CreateUDiv(
-                                side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                            const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
-                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
-                            for (std::size_t r = 0; r < vd; ++r) {
-                                auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
-                                for (std::size_t d = 0; d < 3; ++d) {
-                                    out.elems[r * 3 + d] = builder.CreateSelect(is_r, g[d], f64c(0.0));
-                                }
-                            }
-                            return out;
-                        }
+	                        if (shape.kind == Shape::Kind::Vector) {
+	                            const auto v = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
+	                            return makeVector(shape.dims[0], v[0], v[1], v[2]);
+	                        }
+	                        if (shape.kind == Shape::Kind::Matrix) {
+	                            const auto vd = static_cast<std::size_t>(shape.dims[0]);
+	                            const auto dim = static_cast<std::size_t>(shape.dims[1]);
+	                            CodeValue out = makeZero(shape);
+	                            const auto dofs_per_comp = builder.CreateUDiv(
+	                                side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+	                            const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
+	                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
+	                            for (std::size_t r = 0; r < vd; ++r) {
+	                                auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
+	                                for (std::size_t d = 0; d < dim; ++d) {
+	                                    out.elems[r * dim + d] = builder.CreateSelect(is_r, g[d], f64c(0.0));
+	                                }
+	                            }
+	                            return out;
+	                        }
                         throw std::runtime_error("LLVMGen: grad(TrialFunction) unsupported shape");
                     }
 
-                    if (kid.type == FormExprType::PreviousSolutionRef) {
-                        const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
-                        auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-                        if (shape.kind == Shape::Kind::Vector) {
-                            std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                            emitForLoop(side.n_trial_dofs, "prev_grad" + std::to_string(k), [&](llvm::Value* j) {
-                                auto* j64 = builder.CreateZExt(j, i64);
-                                auto* cj = loadRealPtrAt(coeffs, j64);
-                                const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                for (std::size_t d = 0; d < 3; ++d) {
-                                    acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                }
-                            });
-                            return makeVector(3u, acc[0], acc[1], acc[2]);
-                        }
-                        if (shape.kind == Shape::Kind::Matrix) {
-                            const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                            CodeValue out = makeZero(shape);
-                            auto* dofs_per_comp =
-                                builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                            for (std::size_t comp = 0; comp < vd; ++comp) {
-                                std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                emitForLoop(dofs_per_comp, "prev_grad" + std::to_string(k) + "_c" + std::to_string(comp), [&](llvm::Value* jj) {
-                                    auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                    auto* j = builder.CreateAdd(base, jj);
-                                    auto* j64 = builder.CreateZExt(j, i64);
-                                    auto* cj = loadRealPtrAt(coeffs, j64);
-                                    const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                    }
-                                });
-                                for (std::size_t d = 0; d < 3; ++d) {
-                                    out.elems[comp * 3 + d] = acc[d];
-                                }
-                            }
-                            return out;
-                        }
+	                    if (kid.type == FormExprType::PreviousSolutionRef) {
+	                        const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+		                        auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+		                        if (shape.kind == Shape::Kind::Vector) {
+		                            const auto dim = static_cast<std::size_t>(shape.dims[0]);
+		                            const auto sums =
+		                                emitReduceSum(side.n_trial_dofs, "prev_grad" + std::to_string(k), dim, [&](llvm::Value* j) {
+		                                    auto* j64 = builder.CreateZExt(j, i64);
+		                                    auto* cj = loadRealPtrAt(coeffs, j64);
+		                                    const auto g =
+		                                        loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                    std::vector<llvm::Value*> terms;
+		                                    terms.reserve(dim);
+		                                    for (std::size_t d = 0; d < dim; ++d) {
+		                                        terms.push_back(builder.CreateFMul(cj, g[d]));
+		                                    }
+		                                    return terms;
+		                                });
+		                            auto* x = sums[0];
+		                            auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
+		                            auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+		                            return makeVector(shape.dims[0], x, y, z);
+		                        }
+		                        if (shape.kind == Shape::Kind::Matrix) {
+		                            const auto vd = static_cast<std::size_t>(shape.dims[0]);
+		                            const auto dim = static_cast<std::size_t>(shape.dims[1]);
+		                            CodeValue out = makeZero(shape);
+		                            auto* dofs_per_comp =
+		                                builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+		                            for (std::size_t comp = 0; comp < vd; ++comp) {
+	                                const auto acc = emitReduceSum(dofs_per_comp,
+	                                                               "prev_grad" + std::to_string(k) + "_c" + std::to_string(comp),
+	                                                               dim,
+	                                                               [&](llvm::Value* jj) {
+	                                    auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                    auto* j = builder.CreateAdd(base, jj);
+	                                    auto* j64 = builder.CreateZExt(j, i64);
+		                                    auto* cj = loadRealPtrAt(coeffs, j64);
+		                                    const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                    std::vector<llvm::Value*> terms;
+	                                    terms.reserve(dim);
+		                                    for (std::size_t d = 0; d < dim; ++d) {
+		                                        terms.push_back(builder.CreateFMul(cj, g[d]));
+		                                    }
+	                                    return terms;
+		                                });
+		                                for (std::size_t d = 0; d < dim; ++d) {
+		                                    out.elems[comp * dim + d] = acc[d];
+		                                }
+		                            }
+	                            return out;
+	                        }
                         throw std::runtime_error("LLVMGen: grad(PreviousSolutionRef) unsupported shape");
                     }
 
-                    if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
-                        const int fid = unpackFieldIdImm1(kid.imm1);
-                        if (kid.type == FormExprType::StateField && fid == 0xffff) {
-                            // Current solution state u.
-                            auto* coeffs = side.solution_coefficients;
-                            if (shape.kind == Shape::Kind::Vector) {
-                                std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                emitForLoop(side.n_trial_dofs, "grad_state_u", [&](llvm::Value* j) {
-                                    auto* j64 = builder.CreateZExt(j, i64);
-                                    auto* cj = loadRealPtrAt(coeffs, j64);
-                                    const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                    }
-                                });
-                                return makeVector(3u, acc[0], acc[1], acc[2]);
-                            }
-                            if (shape.kind == Shape::Kind::Matrix) {
-                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                CodeValue out = makeZero(shape);
-                                auto* dofs_per_comp =
-                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                for (std::size_t comp = 0; comp < vd; ++comp) {
-                                    std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                    emitForLoop(dofs_per_comp, "grad_state_u_c" + std::to_string(comp), [&](llvm::Value* jj) {
-                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                        auto* j = builder.CreateAdd(base, jj);
-                                        auto* j64 = builder.CreateZExt(j, i64);
-                                        auto* cj = loadRealPtrAt(coeffs, j64);
-                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                        }
-                                    });
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        out.elems[comp * 3 + d] = acc[d];
-                                    }
-                                }
-                                return out;
-                            }
-                            throw std::runtime_error("LLVMGen: grad(StateField(INVALID)) unsupported shape");
-                        }
-                        if (shape.kind == Shape::Kind::Vector) {
+	                    if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
+	                        const int fid = unpackFieldIdImm1(kid.imm1);
+	                        if (kid.type == FormExprType::StateField && fid == 0xffff) {
+	                            // Current solution state u.
+		                            auto* coeffs = side.solution_coefficients;
+		                            if (shape.kind == Shape::Kind::Vector) {
+		                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+		                                const auto sums =
+		                                    emitReduceSum(side.n_trial_dofs, "grad_state_u", dim, [&](llvm::Value* j) {
+		                                        auto* j64 = builder.CreateZExt(j, i64);
+		                                        auto* cj = loadRealPtrAt(coeffs, j64);
+		                                        const auto g =
+		                                            loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                        std::vector<llvm::Value*> terms;
+		                                        terms.reserve(dim);
+		                                        for (std::size_t d = 0; d < dim; ++d) {
+		                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+		                                        }
+		                                        return terms;
+		                                    });
+		                                auto* x = sums[0];
+		                                auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
+		                                auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+		                                return makeVector(shape.dims[0], x, y, z);
+		                            }
+		                            if (shape.kind == Shape::Kind::Matrix) {
+		                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
+		                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
+		                                CodeValue out = makeZero(shape);
+		                                auto* dofs_per_comp =
+		                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+		                                for (std::size_t comp = 0; comp < vd; ++comp) {
+	                                    const auto acc =
+	                                        emitReduceSum(dofs_per_comp, "grad_state_u_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
+	                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                        auto* j = builder.CreateAdd(base, jj);
+		                                        auto* j64 = builder.CreateZExt(j, i64);
+		                                        auto* cj = loadRealPtrAt(coeffs, j64);
+		                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        std::vector<llvm::Value*> terms;
+	                                        terms.reserve(dim);
+		                                        for (std::size_t d = 0; d < dim; ++d) {
+		                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+		                                        }
+	                                        return terms;
+		                                    });
+		                                    for (std::size_t d = 0; d < dim; ++d) {
+		                                        out.elems[comp * dim + d] = acc[d];
+		                                    }
+		                                }
+	                                return out;
+	                            }
+	                            throw std::runtime_error("LLVMGen: grad(StateField(INVALID)) unsupported shape");
+	                        }
+	                        if (shape.kind == Shape::Kind::Vector) {
                             auto* entry = fieldEntryPtrFor(is_plus, fid);
                             auto* entry_is_null =
                                 builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
@@ -8666,21 +9753,23 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             builder.CreateBr(merge);
                             auto* zero_block = builder.GetInsertBlock();
 
-                            builder.SetInsertPoint(merge);
-                            std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
-                            for (std::size_t d = 0; d < 3; ++d) {
-                                auto* phi = builder.CreatePHI(f64, 2, "field_grad.v" + std::to_string(d));
-                                phi->addIncoming(f64c(0.0), zero_block);
-                                phi->addIncoming(loaded[d], ok2_block);
-                                outv[d] = phi;
-                            }
-                            return makeVector(3u, outv[0], outv[1], outv[2]);
-                        }
-                        if (shape.kind == Shape::Kind::Matrix) {
-                            const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                            auto* entry = fieldEntryPtrFor(is_plus, fid);
-                            auto* entry_is_null =
-                                builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+	                            builder.SetInsertPoint(merge);
+	                            std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                            const auto dim = static_cast<std::size_t>(shape.dims[0]);
+	                            for (std::size_t d = 0; d < dim; ++d) {
+	                                auto* phi = builder.CreatePHI(f64, 2, "field_grad.v" + std::to_string(d));
+	                                phi->addIncoming(f64c(0.0), zero_block);
+	                                phi->addIncoming(loaded[d], ok2_block);
+	                                outv[d] = phi;
+	                            }
+	                            return makeVector(shape.dims[0], outv[0], outv[1], outv[2]);
+	                        }
+	                        if (shape.kind == Shape::Kind::Matrix) {
+	                            const auto vd = static_cast<std::size_t>(shape.dims[0]);
+	                            const auto dim = static_cast<std::size_t>(shape.dims[1]);
+	                            auto* entry = fieldEntryPtrFor(is_plus, fid);
+	                            auto* entry_is_null =
+	                                builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
                             auto* ok = llvm::BasicBlock::Create(*ctx, "field_jac.ok", fn);
                             auto* zero = llvm::BasicBlock::Create(*ctx, "field_jac.zero", fn);
                             auto* merge = llvm::BasicBlock::Create(*ctx, "field_jac.merge", fn);
@@ -8704,18 +9793,20 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             builder.CreateBr(merge);
                             auto* zero_block = builder.GetInsertBlock();
 
-                            builder.SetInsertPoint(merge);
-                            CodeValue out = makeZero(shape);
-                            for (std::size_t r = 0; r < vd; ++r) {
-                                for (std::size_t c = 0; c < 3; ++c) {
-                                    auto* phi = builder.CreatePHI(f64, 2, "field_jac.a");
-                                    phi->addIncoming(f64c(0.0), zero_block);
-                                    phi->addIncoming(loaded.elems[r * 3 + c], ok2_block);
-                                    out.elems[r * 3 + c] = phi;
-                                }
-                            }
-                            return out;
-                        }
+	                            builder.SetInsertPoint(merge);
+	                            CodeValue out = makeZero(shape);
+	                            for (std::size_t r = 0; r < vd; ++r) {
+	                                for (std::size_t c = 0; c < dim; ++c) {
+	                                    auto* phi = builder.CreatePHI(f64, 2, "field_jac.a");
+	                                    phi->addIncoming(f64c(0.0), zero_block);
+	                                    auto* l =
+	                                        (r < 3u && c < 3u) ? loaded.elems[r * 3u + c] : f64c(0.0);
+	                                    phi->addIncoming(l, ok2_block);
+	                                    out.elems[r * dim + c] = phi;
+	                                }
+	                            }
+	                            return out;
+	                        }
                         throw std::runtime_error("LLVMGen: grad(DiscreteField) unsupported shape");
                     }
 
@@ -8726,69 +9817,82 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             term.ir.children[static_cast<std::size_t>(kid.first_child)];
                         const auto& dt_child = term.ir.ops[dt_child_idx];
 
-                        auto gradTrialBasis = [&]() -> CodeValue {
-                            if (is_plus != trial_active_plus) {
-                                return makeZero(shape);
-                            }
-                            CodeValue g = makeZero(shape);
-                            if (shape.kind == Shape::Kind::Vector) {
-                                const auto v = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
-                                return makeVector(3u, v[0], v[1], v[2]);
-                            }
-                            if (shape.kind == Shape::Kind::Matrix) {
-                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                const auto dofs_per_comp = builder.CreateUDiv(
-                                    side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
-                                const auto gg = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
-                                for (std::size_t r = 0; r < vd; ++r) {
-                                    auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        g.elems[r * 3 + d] = builder.CreateSelect(is_r, gg[d], f64c(0.0));
-                                    }
-                                }
-                                return g;
-                            }
+	                        auto gradTrialBasis = [&]() -> CodeValue {
+	                            if (is_plus != trial_active_plus) {
+	                                return makeZero(shape);
+	                            }
+	                            CodeValue g = makeZero(shape);
+	                            if (shape.kind == Shape::Kind::Vector) {
+	                                const auto v = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
+	                                return makeVector(shape.dims[0], v[0], v[1], v[2]);
+	                            }
+	                            if (shape.kind == Shape::Kind::Matrix) {
+	                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
+	                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
+	                                const auto dofs_per_comp = builder.CreateUDiv(
+	                                    side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+	                                const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
+	                                const auto gg = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
+	                                for (std::size_t r = 0; r < vd; ++r) {
+	                                    auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
+	                                    for (std::size_t d = 0; d < dim; ++d) {
+	                                        g.elems[r * dim + d] = builder.CreateSelect(is_r, gg[d], f64c(0.0));
+	                                    }
+	                                }
+	                                return g;
+	                            }
                             throw std::runtime_error("LLVMGen: grad(dt(TrialFunction)) unsupported shape");
                         };
 
-                        auto gradCurrentSolution = [&]() -> CodeValue {
-                            auto* coeffs = side.solution_coefficients;
-                            if (shape.kind == Shape::Kind::Vector) {
-                                std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                emitForLoop(side.n_trial_dofs, "grad_dt_u", [&](llvm::Value* j) {
-                                    auto* j64 = builder.CreateZExt(j, i64);
-                                    auto* cj = loadRealPtrAt(coeffs, j64);
-                                    const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                    }
-                                });
-                                return makeVector(3u, acc[0], acc[1], acc[2]);
-                            }
-                            if (shape.kind == Shape::Kind::Matrix) {
-                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                CodeValue out = makeZero(shape);
-                                auto* dofs_per_comp =
-                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                for (std::size_t comp = 0; comp < vd; ++comp) {
-                                    std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                    emitForLoop(dofs_per_comp, "grad_dt_u_c" + std::to_string(comp), [&](llvm::Value* jj) {
-                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                        auto* j = builder.CreateAdd(base, jj);
-                                        auto* j64 = builder.CreateZExt(j, i64);
-                                        auto* cj = loadRealPtrAt(coeffs, j64);
-                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                        for (std::size_t d = 0; d < 3; ++d) {
-                                            acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                        }
-                                    });
-                                    for (std::size_t d = 0; d < 3; ++d) {
-                                        out.elems[comp * 3 + d] = acc[d];
-                                    }
-                                }
-                                return out;
-                            }
+		                        auto gradCurrentSolution = [&]() -> CodeValue {
+		                            auto* coeffs = side.solution_coefficients;
+		                            if (shape.kind == Shape::Kind::Vector) {
+		                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+		                                const auto sums =
+		                                    emitReduceSum(side.n_trial_dofs, "grad_dt_u", dim, [&](llvm::Value* j) {
+		                                        auto* j64 = builder.CreateZExt(j, i64);
+		                                        auto* cj = loadRealPtrAt(coeffs, j64);
+		                                        const auto g =
+		                                            loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                        std::vector<llvm::Value*> terms;
+		                                        terms.reserve(dim);
+		                                        for (std::size_t d = 0; d < dim; ++d) {
+		                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+		                                        }
+		                                        return terms;
+		                                    });
+		                                auto* x = sums[0];
+		                                auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
+		                                auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+		                                return makeVector(shape.dims[0], x, y, z);
+		                            }
+		                            if (shape.kind == Shape::Kind::Matrix) {
+		                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
+		                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
+		                                CodeValue out = makeZero(shape);
+		                                auto* dofs_per_comp =
+		                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+		                                for (std::size_t comp = 0; comp < vd; ++comp) {
+	                                    const auto acc = emitReduceSum(
+	                                        dofs_per_comp, "grad_dt_u_c" + std::to_string(comp), dim, [&](llvm::Value* jj) {
+	                                        auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                        auto* j = builder.CreateAdd(base, jj);
+		                                        auto* j64 = builder.CreateZExt(j, i64);
+		                                        auto* cj = loadRealPtrAt(coeffs, j64);
+		                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        std::vector<llvm::Value*> terms;
+	                                        terms.reserve(dim);
+		                                        for (std::size_t d = 0; d < dim; ++d) {
+		                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+		                                        }
+	                                        return terms;
+		                                    });
+		                                    for (std::size_t d = 0; d < dim; ++d) {
+		                                        out.elems[comp * dim + d] = acc[d];
+		                                    }
+		                                }
+	                                return out;
+	                            }
                             throw std::runtime_error("LLVMGen: grad(dt(u)) unsupported shape");
                         };
 
@@ -8821,21 +9925,23 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 builder.CreateBr(merge);
                                 auto* zero_block = builder.GetInsertBlock();
 
-                                builder.SetInsertPoint(merge);
-                                std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
-                                for (std::size_t d = 0; d < 3; ++d) {
-                                    auto* phi = builder.CreatePHI(f64, 2, "field_dt_grad.v" + std::to_string(d));
-                                    phi->addIncoming(f64c(0.0), zero_block);
-                                    phi->addIncoming(loaded[d], ok2_block);
-                                    outv[d] = phi;
-                                }
-                                return makeVector(3u, outv[0], outv[1], outv[2]);
-                            }
-                            if (shape.kind == Shape::Kind::Matrix) {
-                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
-                                auto* entry = fieldEntryPtrFor(is_plus, fid);
-                                auto* entry_is_null =
-                                    builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+	                                builder.SetInsertPoint(merge);
+	                                std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+	                                for (std::size_t d = 0; d < dim; ++d) {
+	                                    auto* phi = builder.CreatePHI(f64, 2, "field_dt_grad.v" + std::to_string(d));
+	                                    phi->addIncoming(f64c(0.0), zero_block);
+	                                    phi->addIncoming(loaded[d], ok2_block);
+	                                    outv[d] = phi;
+	                                }
+	                                return makeVector(shape.dims[0], outv[0], outv[1], outv[2]);
+	                            }
+	                            if (shape.kind == Shape::Kind::Matrix) {
+	                                const auto vd = static_cast<std::size_t>(shape.dims[0]);
+	                                const auto dim = static_cast<std::size_t>(shape.dims[1]);
+	                                auto* entry = fieldEntryPtrFor(is_plus, fid);
+	                                auto* entry_is_null =
+	                                    builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
                                 auto* ok = llvm::BasicBlock::Create(*ctx, "field_dt_jac.ok", fn);
                                 auto* zero = llvm::BasicBlock::Create(*ctx, "field_dt_jac.zero", fn);
                                 auto* merge = llvm::BasicBlock::Create(*ctx, "field_dt_jac.merge", fn);
@@ -8859,18 +9965,20 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 builder.CreateBr(merge);
                                 auto* zero_block = builder.GetInsertBlock();
 
-                                builder.SetInsertPoint(merge);
-                                CodeValue out = makeZero(shape);
-                                for (std::size_t r = 0; r < vd; ++r) {
-                                    for (std::size_t c = 0; c < 3; ++c) {
-                                        auto* phi = builder.CreatePHI(f64, 2, "field_dt_jac.a");
-                                        phi->addIncoming(f64c(0.0), zero_block);
-                                        phi->addIncoming(loaded.elems[r * 3 + c], ok2_block);
-                                        out.elems[r * 3 + c] = phi;
-                                    }
-                                }
-                                return out;
-                            }
+	                                builder.SetInsertPoint(merge);
+	                                CodeValue out = makeZero(shape);
+	                                for (std::size_t r = 0; r < vd; ++r) {
+	                                    for (std::size_t c = 0; c < dim; ++c) {
+	                                        auto* phi = builder.CreatePHI(f64, 2, "field_dt_jac.a");
+	                                        phi->addIncoming(f64c(0.0), zero_block);
+	                                        auto* l =
+	                                            (r < 3u && c < 3u) ? loaded.elems[r * 3u + c] : f64c(0.0);
+	                                        phi->addIncoming(l, ok2_block);
+	                                        out.elems[r * dim + c] = phi;
+	                                    }
+	                                }
+	                                return out;
+	                            }
                             throw std::runtime_error("LLVMGen: grad(dt(field)) unsupported shape");
                         };
 
@@ -8988,35 +10096,32 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                         builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-	                        llvm::Value* div_vb = f64c(0.0);
-	                        builder.SetInsertPoint(vb);
-	                        {
-	                            llvm::Value* acc = f64c(0.0);
-	                            emitForLoop(side.n_trial_dofs, "div_u_vb", [&](llvm::Value* j) {
-	                                auto* j64 = builder.CreateZExt(j, i64);
-	                                auto* cj = loadRealPtrAt(coeffs, j64);
-	                                auto* div_phi = loadBasisScalar(side, side.trial_basis_divs, j, q_index);
-	                                acc = builder.CreateFAdd(acc, builder.CreateFMul(cj, div_phi));
-                            });
-                            div_vb = acc;
-                            builder.CreateBr(merge);
-                        }
-                        auto* vb_block = builder.GetInsertBlock();
+		                        llvm::Value* div_vb = f64c(0.0);
+		                        builder.SetInsertPoint(vb);
+		                        {
+		                            div_vb = emitReduceSumScalar(side.n_trial_dofs, "div_u_vb", [&](llvm::Value* j) -> llvm::Value* {
+		                                auto* j64 = builder.CreateZExt(j, i64);
+		                                auto* cj = loadRealPtrAt(coeffs, j64);
+		                                auto* div_phi = loadBasisScalar(side, side.trial_basis_divs, j, q_index);
+		                                return builder.CreateFMul(cj, div_phi);
+		                            });
+	                            builder.CreateBr(merge);
+	                        }
+	                        auto* vb_block = builder.GetInsertBlock();
 
-	                        llvm::Value* div_sb = f64c(0.0);
-	                        builder.SetInsertPoint(sb);
-	                        {
-	                            llvm::Value* acc = f64c(0.0);
-	                            emitForLoop(side.n_trial_dofs, "div_u_sb", [&](llvm::Value* j) {
-	                                auto* j64 = builder.CreateZExt(j, i64);
-	                                auto* cj = loadRealPtrAt(coeffs, j64);
-	                                auto* div_phi = divScalarBasis(side.n_trial_dofs, j, side.trial_phys_grads_xyz);
-	                                acc = builder.CreateFAdd(acc, builder.CreateFMul(cj, div_phi));
-                            });
-                            div_sb = acc;
-                            builder.CreateBr(merge);
-                        }
-                        auto* sb_block = builder.GetInsertBlock();
+		                        llvm::Value* div_sb = f64c(0.0);
+		                        builder.SetInsertPoint(sb);
+		                        {
+		                            div_sb = emitReduceSumScalar(
+		                                side.n_trial_dofs, "div_u_sb", [&](llvm::Value* j) -> llvm::Value* {
+		                                    auto* j64 = builder.CreateZExt(j, i64);
+		                                    auto* cj = loadRealPtrAt(coeffs, j64);
+		                                    auto* div_phi = divScalarBasis(side.n_trial_dofs, j, side.trial_phys_grads_xyz);
+		                                    return builder.CreateFMul(cj, div_phi);
+		                                });
+	                            builder.CreateBr(merge);
+	                        }
+	                        auto* sb_block = builder.GetInsertBlock();
 
                         builder.SetInsertPoint(merge);
                         auto* phi = builder.CreatePHI(f64, 2, "div.u");
@@ -9034,23 +10139,26 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                    if (kid.type == FormExprType::PreviousSolutionRef) {
 	                        const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
 	                        auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-	                        auto* dofs_per_comp =
-	                            builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                        llvm::Value* div = f64c(0.0);
-	                        for (std::size_t comp = 0; comp < vd; ++comp) {
-	                            llvm::Value* acc = f64c(0.0);
-	                            emitForLoop(dofs_per_comp, "prev_div" + std::to_string(k) + "_c" + std::to_string(comp), [&](llvm::Value* jj) {
-	                                auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-	                                auto* j = builder.CreateAdd(base, jj);
-                                auto* j64 = builder.CreateZExt(j, i64);
-                                auto* cj = loadRealPtrAt(coeffs, j64);
-                                const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                acc = builder.CreateFAdd(acc, builder.CreateFMul(cj, g[comp]));
-                            });
-                            div = builder.CreateFAdd(div, acc);
-                        }
-                        return makeScalar(div);
-                    }
+		                        auto* dofs_per_comp =
+		                            builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+		                        llvm::Value* div = f64c(0.0);
+		                        for (std::size_t comp = 0; comp < vd; ++comp) {
+		                            auto* acc = emitReduceSumScalar(
+		                                dofs_per_comp,
+		                                "prev_div" + std::to_string(k) + "_c" + std::to_string(comp),
+		                                [&](llvm::Value* jj) -> llvm::Value* {
+		                                    auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+		                                    auto* j = builder.CreateAdd(base, jj);
+		                                    auto* j64 = builder.CreateZExt(j, i64);
+		                                    auto* cj = loadRealPtrAt(coeffs, j64);
+		                                    const auto g =
+		                                        loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                    return builder.CreateFMul(cj, g[comp]);
+		                                });
+		                            div = builder.CreateFAdd(div, acc);
+		                        }
+		                        return makeScalar(div);
+		                    }
                     if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                         const int fid = unpackFieldIdImm1(kid.imm1);
                         if (kid.type == FormExprType::StateField && fid == 0xffff) {
@@ -9264,39 +10372,44 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                         builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-                        std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
-                        builder.SetInsertPoint(vb);
-                        {
-                            std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                            emitForLoop(side.n_trial_dofs, "curl_u_vb", [&](llvm::Value* j) {
-                                auto* j64 = builder.CreateZExt(j, i64);
-                                auto* cj = loadRealPtrAt(coeffs, j64);
-                                const auto phi = loadVec3FromTable(side.trial_basis_curls_xyz, side.n_qpts, j, q_index);
-                                for (std::size_t d = 0; d < 3; ++d) {
-                                    acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, phi[d]));
-                                }
-                            });
-                            vb_vals = acc;
-                            builder.CreateBr(merge);
-                        }
-                        auto* vb_block = builder.GetInsertBlock();
+	                        std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                        builder.SetInsertPoint(vb);
+	                        {
+	                            const auto sums = emitReduceSum(side.n_trial_dofs, "curl_u_vb", 3u, [&](llvm::Value* j) {
+	                                auto* j64 = builder.CreateZExt(j, i64);
+	                                auto* cj = loadRealPtrAt(coeffs, j64);
+	                                const auto phi =
+	                                    loadVec3FromTable(side.trial_basis_curls_xyz, side.n_qpts, j, q_index);
+	                                std::vector<llvm::Value*> terms;
+	                                terms.reserve(3u);
+	                                for (std::size_t d = 0; d < 3u; ++d) {
+	                                    terms.push_back(builder.CreateFMul(cj, phi[d]));
+	                                }
+	                                return terms;
+	                            });
+	                            vb_vals = {sums[0], sums[1], sums[2]};
+	                            builder.CreateBr(merge);
+	                        }
+	                        auto* vb_block = builder.GetInsertBlock();
 
-                        std::array<llvm::Value*, 3> sb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
-                        builder.SetInsertPoint(sb);
-                        {
-                            std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                            emitForLoop(side.n_trial_dofs, "curl_u_sb", [&](llvm::Value* j) {
-                                auto* j64 = builder.CreateZExt(j, i64);
-                                auto* cj = loadRealPtrAt(coeffs, j64);
-                                const auto phi = curlScalarBasis(side.n_trial_dofs, j, side.trial_phys_grads_xyz);
-                                for (std::size_t d = 0; d < 3; ++d) {
-                                    acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, phi[d]));
-                                }
-                            });
-                            sb_vals = acc;
-                            builder.CreateBr(merge);
-                        }
-                        auto* sb_block = builder.GetInsertBlock();
+	                        std::array<llvm::Value*, 3> sb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                        builder.SetInsertPoint(sb);
+	                        {
+	                            const auto sums = emitReduceSum(side.n_trial_dofs, "curl_u_sb", 3u, [&](llvm::Value* j) {
+	                                auto* j64 = builder.CreateZExt(j, i64);
+	                                auto* cj = loadRealPtrAt(coeffs, j64);
+	                                const auto phi = curlScalarBasis(side.n_trial_dofs, j, side.trial_phys_grads_xyz);
+	                                std::vector<llvm::Value*> terms;
+	                                terms.reserve(3u);
+	                                for (std::size_t d = 0; d < 3u; ++d) {
+	                                    terms.push_back(builder.CreateFMul(cj, phi[d]));
+	                                }
+	                                return terms;
+	                            });
+	                            sb_vals = {sums[0], sums[1], sums[2]};
+	                            builder.CreateBr(merge);
+	                        }
+	                        auto* sb_block = builder.GetInsertBlock();
 
                         builder.SetInsertPoint(merge);
                         std::array<llvm::Value*, 3> out{f64c(0.0), f64c(0.0), f64c(0.0)};
@@ -9374,20 +10487,27 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             row = {f64c(0.0), f64c(0.0), f64c(0.0)};
                         }
 
-                        for (std::size_t comp = 0; comp < std::min<std::size_t>(vd, 3u); ++comp) {
-                            std::array<llvm::Value*, 3> acc{f64c(0.0), f64c(0.0), f64c(0.0)};
-                            emitForLoop(dofs_per_comp, "prev_curl" + std::to_string(k) + "_c" + std::to_string(comp), [&](llvm::Value* jj) {
-                                auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
-                                auto* j = builder.CreateAdd(base, jj);
-                                auto* j64 = builder.CreateZExt(j, i64);
-                                auto* cj = loadRealPtrAt(coeffs, j64);
-                                const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
-                                for (std::size_t d = 0; d < 3; ++d) {
-                                    acc[d] = builder.CreateFAdd(acc[d], builder.CreateFMul(cj, g[d]));
-                                }
-                            });
-                            J[comp] = acc;
-                        }
+	                        for (std::size_t comp = 0; comp < std::min<std::size_t>(vd, 3u); ++comp) {
+	                            const auto acc =
+	                                emitReduceSum(dofs_per_comp,
+	                                             "prev_curl" + std::to_string(k) + "_c" + std::to_string(comp),
+	                                             3u,
+	                                             [&](llvm::Value* jj) {
+	                                                 auto* base = builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                                 auto* j = builder.CreateAdd(base, jj);
+	                                                 auto* j64 = builder.CreateZExt(j, i64);
+	                                                 auto* cj = loadRealPtrAt(coeffs, j64);
+	                                                 const auto g =
+	                                                     loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                                 std::vector<llvm::Value*> terms;
+	                                                 terms.reserve(3u);
+	                                                 for (std::size_t d = 0; d < 3u; ++d) {
+	                                                     terms.push_back(builder.CreateFMul(cj, g[d]));
+	                                                 }
+	                                                 return terms;
+	                                             });
+	                            J[comp] = {acc[0], acc[1], acc[2]};
+	                        }
 
                         auto* cx = builder.CreateFSub(J[2][1], J[1][2]);
                         auto* cy = builder.CreateFSub(J[0][2], J[2][0]);
@@ -9470,111 +10590,110 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                     throw std::runtime_error("LLVMGen: Curl operand not supported");
                 };
 
-                auto evalHessian = [&](const SideView& side, bool is_plus, const KernelIROp& op) -> CodeValue {
-                    const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
-                    const auto& kid = term.ir.ops[child_idx];
+	                auto evalHessian = [&](const SideView& side, bool is_plus, const KernelIROp& op, const Shape& shape) -> CodeValue {
+	                    const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
+	                    const auto& kid = term.ir.ops[child_idx];
+		                    const auto dim_u32 = shape.dims[0];
+		                    const auto mat_len = elemCount(shape);
+		                    auto matZero = [&]() -> CodeValue { return makeZero(shape); };
 
-                    auto* zero = f64c(0.0);
-                    auto mat3Zero = [&]() -> CodeValue {
-                        CodeValue out = makeMatrix(3u, 3u);
-                        for (std::size_t i = 0; i < 9; ++i) out.elems[i] = zero;
-                        return out;
-                    };
+		                    auto hessFromCoeffs = [&](llvm::Value* coeffs_ptr, const std::string& loop_name) -> CodeValue {
+		                        CodeValue out = makeZero(shape);
+		                        const auto sums =
+		                            emitReduceSum(side.n_trial_dofs, loop_name, mat_len, [&](llvm::Value* j) {
+		                                auto* j64 = builder.CreateZExt(j, i64);
+		                                auto* cj = loadRealPtrAt(coeffs_ptr, j64);
+		                                const auto H =
+		                                    loadMatDimFromTable(side.trial_phys_hessians, side.n_qpts, j, q_index, dim_u32);
+		                                std::vector<llvm::Value*> terms;
+		                                terms.reserve(mat_len);
+		                                for (std::size_t i = 0; i < mat_len; ++i) {
+		                                    terms.push_back(builder.CreateFMul(cj, H.elems[i]));
+		                                }
+		                                return terms;
+		                            });
+		                        for (std::size_t i = 0; i < mat_len; ++i) {
+		                            out.elems[i] = sums[i];
+		                        }
+		                        return out;
+		                    };
 
-                    auto hessCurrentSolution = [&]() -> CodeValue {
-                        CodeValue out = makeZero(matrixShape(3u, 3u));
-                        auto* coeffs = side.solution_coefficients;
-                        emitForLoop(side.n_trial_dofs, "hess_u", [&](llvm::Value* j) {
-                            auto* j64 = builder.CreateZExt(j, i64);
-                            auto* cj = loadRealPtrAt(coeffs, j64);
-                            const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
-                            for (std::size_t i = 0; i < 9; ++i) {
-                                out.elems[i] = builder.CreateFAdd(out.elems[i], builder.CreateFMul(cj, H.elems[i]));
-                            }
-                        });
-                        return out;
-                    };
+		                    auto hessCurrentSolution = [&]() -> CodeValue {
+		                        auto* coeffs = side.solution_coefficients;
+		                        return hessFromCoeffs(coeffs, "hess_u");
+		                    };
 
-                    if (kid.type == FormExprType::TestFunction) {
-                        if (is_plus != test_active_plus) return mat3Zero();
-                        return loadMat3FromTable(side.test_phys_hessians, side.n_qpts, i_index, q_index);
-                    }
-                    if (kid.type == FormExprType::TrialFunction) {
-                        if (is_residual) {
-                            return hessCurrentSolution();
-                        }
-                        if (is_plus != trial_active_plus) return mat3Zero();
-                        return loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index);
-                    }
-                    if (kid.type == FormExprType::PreviousSolutionRef) {
-                        const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
-                        CodeValue out = makeZero(matrixShape(3u, 3u));
-                        auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-                        emitForLoop(side.n_trial_dofs, "prev_hess" + std::to_string(k), [&](llvm::Value* j) {
-                            auto* j64 = builder.CreateZExt(j, i64);
-                            auto* cj = loadRealPtrAt(coeffs, j64);
-                            const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
-                            for (std::size_t i = 0; i < 9; ++i) {
-                                out.elems[i] = builder.CreateFAdd(out.elems[i], builder.CreateFMul(cj, H.elems[i]));
-                            }
-                        });
-                        return out;
-                    }
-                    if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
-                        const int fid = unpackFieldIdImm1(kid.imm1);
-                        if (kid.type == FormExprType::StateField && fid == 0xffff) {
-                            return hessCurrentSolution();
-                        }
-                        auto* entry = fieldEntryPtrFor(is_plus, fid);
-                        auto* entry_is_null =
-                            builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
-                        auto* ok = llvm::BasicBlock::Create(*ctx, "field_hess.ok", fn);
-                        auto* z = llvm::BasicBlock::Create(*ctx, "field_hess.zero", fn);
-                        auto* merge = llvm::BasicBlock::Create(*ctx, "field_hess.merge", fn);
+	                    if (kid.type == FormExprType::TestFunction) {
+	                        if (is_plus != test_active_plus) return matZero();
+	                        return loadMatDimFromTable(side.test_phys_hessians, side.n_qpts, i_index, q_index, dim_u32);
+	                    }
+	                    if (kid.type == FormExprType::TrialFunction) {
+	                        if (is_residual) {
+	                            return hessCurrentSolution();
+	                        }
+	                        if (is_plus != trial_active_plus) return matZero();
+	                        return loadMatDimFromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index, dim_u32);
+	                    }
+		                    if (kid.type == FormExprType::PreviousSolutionRef) {
+		                        const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+		                        auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+		                        return hessFromCoeffs(coeffs, "prev_hess" + std::to_string(k));
+		                    }
+	                    if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
+	                        const int fid = unpackFieldIdImm1(kid.imm1);
+	                        if (kid.type == FormExprType::StateField && fid == 0xffff) {
+	                            return hessCurrentSolution();
+	                        }
+	                        auto* entry = fieldEntryPtrFor(is_plus, fid);
+	                        auto* entry_is_null =
+	                            builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+	                        auto* ok = llvm::BasicBlock::Create(*ctx, "field_hess.ok", fn);
+	                        auto* z = llvm::BasicBlock::Create(*ctx, "field_hess.zero", fn);
+	                        auto* merge = llvm::BasicBlock::Create(*ctx, "field_hess.merge", fn);
 
-                        builder.CreateCondBr(entry_is_null, z, ok);
+	                        builder.CreateCondBr(entry_is_null, z, ok);
 
-                        CodeValue loaded = mat3Zero();
-                        builder.SetInsertPoint(ok);
-                        auto* base = loadPtr(entry, ABIV3::field_entry_hessians_off);
-                        auto* base_is_null =
-                            builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
-                        auto* ok2 = llvm::BasicBlock::Create(*ctx, "field_hess.mat.ok", fn);
-                        builder.CreateCondBr(base_is_null, z, ok2);
+	                        CodeValue loaded = matZero();
+	                        builder.SetInsertPoint(ok);
+	                        auto* base = loadPtr(entry, ABIV3::field_entry_hessians_off);
+	                        auto* base_is_null =
+	                            builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+	                        auto* ok2 = llvm::BasicBlock::Create(*ctx, "field_hess.mat.ok", fn);
+	                        builder.CreateCondBr(base_is_null, z, ok2);
 
-                        builder.SetInsertPoint(ok2);
-                        loaded = loadMat3FromQ(base, q_index);
-                        builder.CreateBr(merge);
-                        auto* ok2_block = builder.GetInsertBlock();
+	                        builder.SetInsertPoint(ok2);
+	                        loaded = loadMatDimFromQ(base, q_index, dim_u32);
+	                        builder.CreateBr(merge);
+	                        auto* ok2_block = builder.GetInsertBlock();
 
-                        builder.SetInsertPoint(z);
-                        builder.CreateBr(merge);
-                        auto* zero_block = builder.GetInsertBlock();
+	                        builder.SetInsertPoint(z);
+	                        builder.CreateBr(merge);
+	                        auto* zero_block = builder.GetInsertBlock();
 
-                        builder.SetInsertPoint(merge);
-                        CodeValue out = mat3Zero();
-                        for (std::size_t i = 0; i < 9; ++i) {
-                            auto* phi = builder.CreatePHI(f64, 2, "field_hess." + std::to_string(i));
-                            phi->addIncoming(zero, zero_block);
-                            phi->addIncoming(loaded.elems[i], ok2_block);
-                            out.elems[i] = phi;
-                        }
-                        return out;
-                    }
-                    if (kid.type == FormExprType::TimeDerivative) {
-                        const int order = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
-                        auto* coeff0 = loadDtCoeff0(side, order);
-                        const auto dt_child_idx =
-                            term.ir.children[static_cast<std::size_t>(kid.first_child)];
-                        const auto& dt_child = term.ir.ops[dt_child_idx];
-                        if (dt_child.type == FormExprType::TrialFunction) {
-                            if (is_residual) {
-                                return mul(makeScalar(coeff0), hessCurrentSolution());
-                            }
-                            if (is_plus != trial_active_plus) return mat3Zero();
-                            return mul(makeScalar(coeff0),
-                                       loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index));
-                        }
+	                        builder.SetInsertPoint(merge);
+	                        CodeValue out = matZero();
+	                        for (std::size_t i = 0; i < mat_len; ++i) {
+	                            auto* phi = builder.CreatePHI(f64, 2, "field_hess." + std::to_string(i));
+	                            phi->addIncoming(f64c(0.0), zero_block);
+	                            phi->addIncoming(loaded.elems[i], ok2_block);
+	                            out.elems[i] = phi;
+	                        }
+	                        return out;
+	                    }
+	                    if (kid.type == FormExprType::TimeDerivative) {
+	                        const int order = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+	                        auto* coeff0 = loadDtCoeff0(side, order);
+	                        const auto dt_child_idx =
+	                            term.ir.children[static_cast<std::size_t>(kid.first_child)];
+	                        const auto& dt_child = term.ir.ops[dt_child_idx];
+	                        if (dt_child.type == FormExprType::TrialFunction) {
+	                            if (is_residual) {
+	                                return mul(makeScalar(coeff0), hessCurrentSolution());
+	                            }
+	                            if (is_plus != trial_active_plus) return matZero();
+	                            return mul(makeScalar(coeff0),
+	                                       loadMatDimFromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index, dim_u32));
+	                        }
 
                         if (dt_child.type == FormExprType::DiscreteField || dt_child.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(dt_child.imm1);
@@ -9589,47 +10708,47 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             auto* z = llvm::BasicBlock::Create(*ctx, "field_dt_hess.zero", fn);
                             auto* merge = llvm::BasicBlock::Create(*ctx, "field_dt_hess.merge", fn);
 
-                            builder.CreateCondBr(entry_is_null, z, ok);
+	                            builder.CreateCondBr(entry_is_null, z, ok);
 
-                            CodeValue loaded = mat3Zero();
-                            builder.SetInsertPoint(ok);
-                            auto* base = loadPtr(entry, ABIV3::field_entry_hessians_off);
-                            auto* base_is_null =
-                                builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+	                            CodeValue loaded = matZero();
+	                            builder.SetInsertPoint(ok);
+	                            auto* base = loadPtr(entry, ABIV3::field_entry_hessians_off);
+	                            auto* base_is_null =
+	                                builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
                             auto* ok2 = llvm::BasicBlock::Create(*ctx, "field_dt_hess.mat.ok", fn);
                             builder.CreateCondBr(base_is_null, z, ok2);
 
-                            builder.SetInsertPoint(ok2);
-                            loaded = loadMat3FromQ(base, q_index);
-                            builder.CreateBr(merge);
-                            auto* ok2_block = builder.GetInsertBlock();
+	                            builder.SetInsertPoint(ok2);
+	                            loaded = loadMatDimFromQ(base, q_index, dim_u32);
+	                            builder.CreateBr(merge);
+	                            auto* ok2_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(z);
                             builder.CreateBr(merge);
                             auto* zero_block = builder.GetInsertBlock();
 
-                            builder.SetInsertPoint(merge);
-                            CodeValue out = mat3Zero();
-                            for (std::size_t i = 0; i < 9; ++i) {
-                                auto* phi = builder.CreatePHI(f64, 2, "field_dt_hess." + std::to_string(i));
-                                phi->addIncoming(zero, zero_block);
-                                phi->addIncoming(loaded.elems[i], ok2_block);
-                                out.elems[i] = phi;
-                            }
-                            return mul(makeScalar(coeff0), out);
-                        }
+	                            builder.SetInsertPoint(merge);
+	                            CodeValue out = matZero();
+	                            for (std::size_t i = 0; i < mat_len; ++i) {
+	                                auto* phi = builder.CreatePHI(f64, 2, "field_dt_hess." + std::to_string(i));
+	                                phi->addIncoming(f64c(0.0), zero_block);
+	                                phi->addIncoming(loaded.elems[i], ok2_block);
+	                                out.elems[i] = phi;
+	                            }
+	                            return mul(makeScalar(coeff0), out);
+	                        }
 
-                        if (dt_child.type == FormExprType::Constant) {
-                            return mat3Zero();
-                        }
+	                        if (dt_child.type == FormExprType::Constant) {
+	                            return matZero();
+	                        }
 
                         throw std::runtime_error("LLVMGen: H(dt(...)) operand not supported");
-                    }
-                    if (kid.type == FormExprType::Constant) {
-                        return mat3Zero();
-                    }
-                    throw std::runtime_error("LLVMGen: Hessian operand not supported");
-                };
+	                    }
+	                    if (kid.type == FormExprType::Constant) {
+	                        return matZero();
+	                    }
+	                    throw std::runtime_error("LLVMGen: Hessian operand not supported");
+	                };
 
                 for (std::size_t op_idx = 0; op_idx < term.ir.ops.size(); ++op_idx) {
                     if (cached != nullptr && term.dep_mask[op_idx] == 0u) {
@@ -9795,30 +10914,30 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             values_plus[op_idx] = makeScalar(builder.CreateSIToFP(side_plus.cell_domain_id, f64));
                             break;
 
-                        case FormExprType::Coordinate:
-                            values_minus[op_idx] = loadXYZ(side_minus.physical_points_xyz, q_index);
-                            values_plus[op_idx] = loadXYZ(side_plus.physical_points_xyz, q_index);
-                            break;
+	                        case FormExprType::Coordinate:
+	                            values_minus[op_idx] = loadXYZDim(side_minus.physical_points_xyz, q_index, shape.dims[0]);
+	                            values_plus[op_idx] = loadXYZDim(side_plus.physical_points_xyz, q_index, shape.dims[0]);
+	                            break;
 
-                        case FormExprType::ReferenceCoordinate:
-                            values_minus[op_idx] = loadXYZ(side_minus.quad_points_xyz, q_index);
-                            values_plus[op_idx] = loadXYZ(side_plus.quad_points_xyz, q_index);
-                            break;
+	                        case FormExprType::ReferenceCoordinate:
+	                            values_minus[op_idx] = loadXYZDim(side_minus.quad_points_xyz, q_index, shape.dims[0]);
+	                            values_plus[op_idx] = loadXYZDim(side_plus.quad_points_xyz, q_index, shape.dims[0]);
+	                            break;
 
-                        case FormExprType::Normal:
-                            values_minus[op_idx] = loadXYZ(side_minus.normals_xyz, q_index);
-                            values_plus[op_idx] = loadXYZ(side_plus.normals_xyz, q_index);
-                            break;
+	                        case FormExprType::Normal:
+	                            values_minus[op_idx] = loadXYZDim(side_minus.normals_xyz, q_index, shape.dims[0]);
+	                            values_plus[op_idx] = loadXYZDim(side_plus.normals_xyz, q_index, shape.dims[0]);
+	                            break;
 
-                        case FormExprType::Jacobian:
-                            values_minus[op_idx] = loadMat3FromQ(side_minus.jacobians, q_index);
-                            values_plus[op_idx] = loadMat3FromQ(side_plus.jacobians, q_index);
-                            break;
+	                        case FormExprType::Jacobian:
+	                            values_minus[op_idx] = loadMatDimFromQ(side_minus.jacobians, q_index, shape.dims[0]);
+	                            values_plus[op_idx] = loadMatDimFromQ(side_plus.jacobians, q_index, shape.dims[0]);
+	                            break;
 
-                        case FormExprType::JacobianInverse:
-                            values_minus[op_idx] = loadMat3FromQ(side_minus.inverse_jacobians, q_index);
-                            values_plus[op_idx] = loadMat3FromQ(side_plus.inverse_jacobians, q_index);
-                            break;
+	                        case FormExprType::JacobianInverse:
+	                            values_minus[op_idx] = loadMatDimFromQ(side_minus.inverse_jacobians, q_index, shape.dims[0]);
+	                            values_plus[op_idx] = loadMatDimFromQ(side_plus.inverse_jacobians, q_index, shape.dims[0]);
+	                            break;
 
                         case FormExprType::Identity: {
                             CodeValue out = makeZero(shape);
@@ -9870,10 +10989,10 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             values_plus[op_idx] = evalCurl(side_plus, /*is_plus=*/true, op);
                             break;
 
-                        case FormExprType::Hessian:
-                            values_minus[op_idx] = evalHessian(side_minus, /*is_plus=*/false, op);
-                            values_plus[op_idx] = evalHessian(side_plus, /*is_plus=*/true, op);
-                            break;
+	                        case FormExprType::Hessian:
+	                            values_minus[op_idx] = evalHessian(side_minus, /*is_plus=*/false, op, shape);
+	                            values_plus[op_idx] = evalHessian(side_plus, /*is_plus=*/true, op, shape);
+	                            break;
 
                         case FormExprType::TimeDerivative: {
                             const int order = static_cast<int>(static_cast<std::int64_t>(op.imm0));
