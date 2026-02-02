@@ -742,7 +742,9 @@ void VTKWriter::create_vtk_cells(const MeshBase& mesh, vtkDataSet* dataset) {
   vtkPoints* points = ugrid->GetPoints();
 
   for (size_t c = 0; c < mesh.n_cells(); ++c) {
-    auto [vertices_ptr, n_vertices] = mesh.cell_vertices_span(static_cast<index_t>(c));
+    auto vertices_span = mesh.cell_vertices_span(static_cast<index_t>(c));
+    const index_t* vertices_ptr = vertices_span.first;
+    const size_t n_vertices = vertices_span.second;
     const auto& shape = mesh.cell_shape(static_cast<index_t>(c));
 
     // Get VTK cell type (consider higher-order variants via vertex count)

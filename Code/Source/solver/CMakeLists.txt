@@ -26,6 +26,64 @@
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
+#------------------------------------------------------------------------------
+# Clang/libstdc++ compatibility (Ubuntu Clang 14 vs libstdc++ 13)
+#
+# Ubuntu's Clang 14 cannot compile some C++20 headers from newer libstdc++
+# (notably <chrono> with std::chrono::hh_mm_ss), producing errors like:
+#   "call to consteval function ... is not a constant expression"
+#
+# Work around this by forcing Clang (<16) to use the libstdc++-11 headers.
+# We keep the system libstdc++ runtime (typically newer) for linking.
+#------------------------------------------------------------------------------
+set(_SVMP_SOLVER_IS_CLANG FALSE)
+set(_SVMP_SOLVER_CLANG_MAJOR 0)
+
+# Prefer CMake's compiler ID when accurate.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  set(_SVMP_SOLVER_IS_CLANG TRUE)
+  if(CMAKE_CXX_COMPILER_VERSION MATCHES "^([0-9]+)\\.")
+    set(_SVMP_SOLVER_CLANG_MAJOR "${CMAKE_MATCH_1}")
+  endif()
+endif()
+
+# Fallback: if the compiler at CMAKE_CXX_COMPILER changed since the build dir
+# was generated (e.g., /usr/bin/c++ switched from g++ to clang), CMake's cached
+# compiler ID/version can be stale. Probe the binary to detect Clang.
+if(NOT _SVMP_SOLVER_IS_CLANG AND NOT CMAKE_CROSSCOMPILING)
+  execute_process(
+    COMMAND "${CMAKE_CXX_COMPILER}" "--version"
+    RESULT_VARIABLE _svmp_solver_cxx_version_rc
+    OUTPUT_VARIABLE _svmp_solver_cxx_version_out
+    ERROR_VARIABLE _svmp_solver_cxx_version_err
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_STRIP_TRAILING_WHITESPACE
+  )
+  if(_svmp_solver_cxx_version_rc EQUAL 0)
+    set(_svmp_solver_cxx_version_text "${_svmp_solver_cxx_version_out}\n${_svmp_solver_cxx_version_err}")
+    if(_svmp_solver_cxx_version_text MATCHES "clang version")
+      set(_SVMP_SOLVER_IS_CLANG TRUE)
+      if(_svmp_solver_cxx_version_text MATCHES "clang version ([0-9]+)\\.")
+        set(_SVMP_SOLVER_CLANG_MAJOR "${CMAKE_MATCH_1}")
+      endif()
+      message(STATUS "svMultiPhysics: NOTE: CMake reports compiler ID '${CMAKE_CXX_COMPILER_ID}', but '${CMAKE_CXX_COMPILER}' identifies as Clang; consider deleting the build directory to refresh compiler detection")
+    endif()
+  endif()
+endif()
+
+if(_SVMP_SOLVER_IS_CLANG AND _SVMP_SOLVER_CLANG_MAJOR LESS 16 AND
+   EXISTS "/usr/include/c++/11" AND
+   EXISTS "/usr/include/x86_64-linux-gnu/c++/11")
+  message(STATUS "svMultiPhysics: Clang <16 detected; using libstdc++-11 headers to avoid <chrono> build failure with newer libstdc++")
+  set(SVMP_CLANG_LIBSTDCXX11_HEADERS TRUE)
+  add_compile_options(
+    $<$<COMPILE_LANGUAGE:CXX>:-nostdinc++>
+    $<$<COMPILE_LANGUAGE:CXX>:-isystem/usr/include/c++/11>
+    $<$<COMPILE_LANGUAGE:CXX>:-isystem/usr/include/x86_64-linux-gnu/c++/11>
+    $<$<COMPILE_LANGUAGE:CXX>:-isystem/usr/include/c++/11/backward>
+  )
+endif()
+
 include_directories(${SV_SOURCE_DIR}/ThirdParty/eigen/include)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/parmetis_internal/simvascular_parmetis_internal/ParMETISLib)
 include_directories(${SV_SOURCE_DIR}/ThirdParty/tetgen/simvascular_tetgen)

@@ -32,6 +32,7 @@
 #define VECTOR_H 
 
 #include <algorithm>
+#include <cstring>
 #include <float.h>
 #include <iostream>
 #include <string>
@@ -197,7 +198,7 @@ class Vector
       for (int i = 0; i < size; i++) {
         new_data[i+size_] = value;
       }
-      memcpy(new_data, data_, sizeof(T)*size_);
+      std::memcpy(new_data, data_, sizeof(T)*size_);
       if (reference_data_) { 
         throw std::runtime_error("[Vector] Can't grow a Vector with reference data.");
       }
@@ -281,7 +282,7 @@ class Vector
         allocate(rhs.size_);
       }
 
-      memcpy(data_, rhs.data_, sizeof(T) * size_);
+      std::memcpy(data_, rhs.data_, sizeof(T) * size_);
 
       return *this;
     }
@@ -595,7 +596,7 @@ class Vector
 
       size_ = size;
       data_ = new T [size_];
-      memset(data_, 0, sizeof(T)*(size_));
+      std::memset(data_, 0, sizeof(T)*(size_));
       memory_in_use += sizeof(T)*size_;
     }
 
@@ -640,4 +641,3 @@ class Vector
 };
 
 #endif
-

@@ -2303,6 +2303,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     stage1_prev_state.u = scratch_vec1->localSpan();
                     stage1_prev_state.u_prev = scratch_vec1->localSpan();
                     stage1_prev_state.u_prev2 = scratch_vec2->localSpan();
+                    stage1_prev_state.u_vector = scratch_vec1.get();
+                    stage1_prev_state.u_prev_vector = scratch_vec1.get();
+                    stage1_prev_state.u_prev2_vector = scratch_vec2.get();
                     stage1_prev_state.u_history = history.uHistorySpans();
                     stage1_prev_state.dt_history = history.dtHistory();
 
@@ -2651,6 +2654,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     state.u = history.uSpan();
                     state.u_prev = history.uPrevSpan();
                     state.u_prev2 = history.uPrev2Span();
+                    state.u_vector = &history.u();
+                    state.u_prev_vector = &history.uPrev();
+                    state.u_prev2_vector = &history.uPrev2();
                     state.u_history = history.uHistorySpans();
                     state.dt_history = history.dtHistory();
 

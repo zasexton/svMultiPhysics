@@ -128,7 +128,7 @@ class Parameter
     bool defined() const { return value_set_; };
 
     /// @brief Get the value of a parameter as a string.
-    std::string svalue()
+    std::string svalue() const
     {
       std::ostringstream str_stream;
       str_stream << value_;
@@ -210,7 +210,7 @@ class VectorParameter
     const double& operator[](const int i) const { return value_[i]; };
 
     /// @brief Get the string representation of the parameter value.
-    std::string svalue() 
+    std::string svalue() const
     {
       std::string str;
 

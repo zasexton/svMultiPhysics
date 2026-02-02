@@ -378,7 +378,9 @@ BoundaryDetector::BoundaryInfo BoundaryDetector::detect_boundary_global(const Di
     };
 
     for (index_t c : owned_cells) {
-        auto [vertices_ptr, n_vertices] = local.cell_vertices_span(c);
+        auto vertices_span = local.cell_vertices_span(c);
+        const index_t* vertices_ptr = vertices_span.first;
+        const size_t n_vertices = vertices_span.second;
         const CellShape& shape = local.cell_shape(c);
         if (cell_topological_dim(shape.family) != topo_dim) {
             continue;
@@ -487,7 +489,7 @@ BoundaryDetector::BoundaryInfo BoundaryDetector::detect_boundary_global(const Di
                 }
             }
 
-            auto local_to_global = [&](index_t local_idx) -> index_t {
+            auto local_to_global = [vertices_ptr, n_vertices](index_t local_idx) -> index_t {
                 const size_t idx = static_cast<size_t>(local_idx);
                 if (idx >= n_vertices) {
                     throw std::runtime_error("BoundaryDetector::detect_boundary_global: local node index out of range");

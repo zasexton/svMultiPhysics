@@ -804,7 +804,15 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     }
 
     // Synchronize in MPI before closing.
+    //
+    // NOTE: The partition-only ParallelConstraints ctor is a serial/no-op helper (world_size=1).
+    // In MPI runs we must construct with an MPI communicator so constraints on shared/ghost DOFs
+    // are imported from the owning rank before close()/assembly.
+#if FE_HAS_MPI
+    constraints::ParallelConstraints parallel(MPI_COMM_WORLD, dof_handler_.getPartition());
+#else
     constraints::ParallelConstraints parallel(dof_handler_.getPartition());
+#endif
     if (parallel.isParallel()) {
         parallel.synchronize(affine_constraints_);
     }
