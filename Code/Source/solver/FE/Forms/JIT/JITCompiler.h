@@ -55,6 +55,11 @@ public:
 
     [[nodiscard]] JITCompileResult compileFunctional(const FormExpr& integrand,
                                                      IntegralDomain domain,
+                                                     std::uint32_t dim_hint,
+                                                     const ValidationOptions& validation = {});
+
+    [[nodiscard]] JITCompileResult compileFunctional(const FormExpr& integrand,
+                                                     IntegralDomain domain,
                                                      const ValidationOptions& validation = {});
 
     [[nodiscard]] JITCacheStats cacheStats() const;

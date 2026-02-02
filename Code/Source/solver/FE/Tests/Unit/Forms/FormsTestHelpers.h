@@ -454,6 +454,81 @@ private:
     std::array<GlobalIndex, 8> hex_{};
 };
 
+class SingleTriangleMeshAccess final : public assembly::IMeshAccess {
+public:
+    SingleTriangleMeshAccess()
+    {
+        nodes_ = {
+            {0.0, 0.0, 0.0},  // 0
+            {1.0, 0.0, 0.0},  // 1
+            {0.0, 1.0, 0.0}   // 2
+        };
+        cell_ = {0, 1, 2};
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override
+    {
+        return ElementType::Triangle3;
+    }
+
+    void getCellNodes(GlobalIndex /*cell_id*/, std::vector<GlobalIndex>& nodes) const override
+    {
+        nodes.assign(cell_.begin(), cell_.end());
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords.resize(cell_.size());
+        for (std::size_t i = 0; i < cell_.size(); ++i) {
+            coords[i] = nodes_.at(static_cast<std::size_t>(cell_[i]));
+        }
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/,
+                                               GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return -1; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+
+    void forEachBoundaryFace(int /*marker*/,
+                             std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+private:
+    std::vector<std::array<Real, 3>> nodes_;
+    std::array<GlobalIndex, 3> cell_{};
+};
+
 inline dofs::DofMap createSingleTetraDofMap()
 {
     dofs::DofMap dof_map(1, 4, 4);
@@ -461,6 +536,17 @@ inline dofs::DofMap createSingleTetraDofMap()
     dof_map.setCellDofs(0, cell_dofs);
     dof_map.setNumDofs(4);
     dof_map.setNumLocalDofs(4);
+    dof_map.finalize();
+    return dof_map;
+}
+
+inline dofs::DofMap createSingleTriangleDofMap()
+{
+    dofs::DofMap dof_map(1, 3, 3);
+    std::vector<GlobalIndex> cell_dofs = {0, 1, 2};
+    dof_map.setCellDofs(0, cell_dofs);
+    dof_map.setNumDofs(3);
+    dof_map.setNumLocalDofs(3);
     dof_map.finalize();
     return dof_map;
 }

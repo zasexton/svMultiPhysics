@@ -147,6 +147,24 @@ TEST(FormCompilerTest, MultipleDtFactorsRejected)
     EXPECT_THROW((void)compiler.compileBilinear((dt(u) * dt(u) * v).dx()), std::invalid_argument);
 }
 
+TEST(FormCompilerTest, MultipleDtOccurrencesInAdditiveContextAllowed)
+{
+    FormCompiler compiler;
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    // Ensure dt(u) can appear multiple times as long as it is not multiplied by itself.
+    // The scalar factor intentionally prevents collectIntegralTerms() from splitting the addends.
+    const auto form = (FormExpr::constant(2.0) * (dt(u) * v + dt(u) * v)).dx();
+    EXPECT_NO_THROW((void)compiler.compileBilinear(form));
+
+    const auto ir = compiler.compileBilinear(form);
+    EXPECT_EQ(ir.maxTimeDerivativeOrder(), 1);
+    ASSERT_EQ(ir.terms().size(), 1u);
+    EXPECT_EQ(ir.terms()[0].time_derivative_order, 1);
+}
+
 TEST(FormCompilerTest, MultipleDtFactorsAllowedInResidual)
 {
     FormCompiler compiler;

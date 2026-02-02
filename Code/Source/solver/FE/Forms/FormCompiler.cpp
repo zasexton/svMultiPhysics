@@ -11,6 +11,7 @@
 #include "Forms/BlockForm.h"
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <sstream>
 #include <stdexcept>
@@ -430,7 +431,6 @@ int analyzeTimeDerivativeOrder(const FormExprNode& node, FormKind kind)
 {
     int max_order = 0;
     int dt_count = 0;
-    int dt_trial_count = 0;
     std::optional<int> dt_order{};
 
     const auto visit = [&](const auto& self, const FormExprNode& n) -> void {
@@ -458,7 +458,6 @@ int analyzeTimeDerivativeOrder(const FormExprNode& node, FormKind kind)
             bool ok = false;
             if (operand_type == FormExprType::TrialFunction) {
                 ok = true;
-                ++dt_trial_count;
             } else if (operand_type == FormExprType::DiscreteField || operand_type == FormExprType::StateField) {
                 // dt(field) is treated as a coefficient value and includes history contributions.
                 ok = true;
@@ -477,15 +476,181 @@ int analyzeTimeDerivativeOrder(const FormExprNode& node, FormKind kind)
 
     visit(visit, node);
 
-    // For bilinear forms, dt(TrialFunction) must remain affine (at most one dt applied to the unknown).
-    // Allow additional dt(...) nodes on DiscreteField/StateField, which behave as coefficient values.
-    if (dt_count > 1 && kind == FormKind::Bilinear && dt_trial_count > 1) {
-        throw std::invalid_argument("FormCompiler: multiple dt(TrialFunction) factors in one integral term are not supported");
-    }
+    // For bilinear forms, dt(TrialFunction) must remain affine:
+    // allow multiple dt(TrialFunction) occurrences in *additive* contexts, but reject
+    // dt(TrialFunction) multiplied by dt(TrialFunction) (or any expression that can expand
+    // to such a product).
+    if (kind == FormKind::Bilinear && dt_count > 1) {
+        std::unordered_map<const FormExprNode*, int> memo;
 
-    // For linear forms, keep the conservative restriction (historically only one dt per term).
-    if (dt_count > 1 && kind == FormKind::Linear) {
-        throw std::invalid_argument("FormCompiler: multiple dt() factors in one integral term are not supported");
+        const auto dt_trial_degree = [&](const auto& self, const FormExprNode& n) -> int {
+            if (auto it = memo.find(&n); it != memo.end()) {
+                return it->second;
+            }
+
+            const auto kids = n.childrenShared();
+            auto child_degree = [&](std::size_t k) -> int {
+                if (kids.size() <= k || !kids[k]) {
+                    return 0;
+                }
+                return self(self, *kids[k]);
+            };
+
+            int deg = 0;
+            switch (n.type()) {
+                case FormExprType::TimeDerivative: {
+                    // dt(...) nodes are only allowed on TrialFunction and DiscreteField/StateField (validated above).
+                    if (kids.size() == 1u && kids[0] && kids[0]->type() == FormExprType::TrialFunction) {
+                        deg = 1;
+                    }
+                    break;
+                }
+
+                // Sum-like nodes: degree is the max over branches.
+                case FormExprType::Add:
+                case FormExprType::Subtract:
+                    deg = std::max(child_degree(0), child_degree(1));
+                    break;
+                case FormExprType::Negate:
+                    deg = child_degree(0);
+                    break;
+                case FormExprType::Conditional:
+                    deg = std::max({child_degree(0), child_degree(1), child_degree(2)});
+                    break;
+                case FormExprType::Minimum:
+                case FormExprType::Maximum:
+                    deg = std::max(child_degree(0), child_degree(1));
+                    break;
+                case FormExprType::SmoothMin:
+                case FormExprType::SmoothMax:
+                    deg = std::max({child_degree(0), child_degree(1), child_degree(2)});
+                    break;
+
+                // Product-like nodes: degree adds (distributivity means degrees combine).
+                case FormExprType::Multiply:
+                case FormExprType::Divide:
+                case FormExprType::InnerProduct:
+                case FormExprType::DoubleContraction:
+                case FormExprType::OuterProduct:
+                case FormExprType::CrossProduct:
+                    deg = child_degree(0) + child_degree(1);
+                    break;
+
+                case FormExprType::Power: {
+                    // Conservative: allow pow(x,1) to preserve degree, reject higher integer powers.
+                    const int a = child_degree(0);
+                    const int b = child_degree(1);
+                    if (a == 0 && b == 0) {
+                        deg = 0;
+                        break;
+                    }
+                    if (b == 0 && kids.size() == 2u && kids[1] && kids[1]->type() == FormExprType::Constant) {
+                        const auto exp = kids[1]->constantValue();
+                        if (exp.has_value()) {
+                            const Real e = *exp;
+                            const Real ei = std::round(e);
+                            if (std::abs(e - ei) < 1e-12 && ei >= 0.0 && ei <= 100.0) {
+                                deg = a * static_cast<int>(ei);
+                                break;
+                            }
+                        }
+                    }
+                    // Non-integer or variable exponent: treat as nonlinear in dt(TrialFunction).
+                    deg = (a > 0 || b > 0) ? 2 : 0;
+                    break;
+                }
+
+                // Constructors: degree is max over components.
+                case FormExprType::AsVector:
+                case FormExprType::AsTensor: {
+                    int mx = 0;
+                    for (const auto& k : kids) {
+                        if (!k) continue;
+                        mx = std::max(mx, self(self, *k));
+                    }
+                    deg = mx;
+                    break;
+                }
+
+                // Linear/unary transforms: propagate child degree.
+                case FormExprType::Gradient:
+                case FormExprType::Divergence:
+                case FormExprType::Curl:
+                case FormExprType::Hessian:
+                case FormExprType::RestrictMinus:
+                case FormExprType::RestrictPlus:
+                case FormExprType::Jump:
+                case FormExprType::Average:
+                case FormExprType::Component:
+                case FormExprType::IndexedAccess:
+                case FormExprType::Transpose:
+                case FormExprType::Trace:
+                case FormExprType::Determinant:
+                case FormExprType::Inverse:
+                case FormExprType::Cofactor:
+                case FormExprType::Deviator:
+                case FormExprType::SymmetricPart:
+                case FormExprType::SkewPart:
+                case FormExprType::Norm:
+                case FormExprType::Normalize:
+                case FormExprType::AbsoluteValue:
+                case FormExprType::Sign:
+                case FormExprType::Sqrt:
+                case FormExprType::Exp:
+                case FormExprType::Log:
+                case FormExprType::MatrixExponential:
+                case FormExprType::MatrixLogarithm:
+                case FormExprType::MatrixSqrt:
+                case FormExprType::MatrixPower:
+                case FormExprType::MatrixExponentialDirectionalDerivative:
+                case FormExprType::MatrixLogarithmDirectionalDerivative:
+                case FormExprType::MatrixSqrtDirectionalDerivative:
+                case FormExprType::MatrixPowerDirectionalDerivative:
+                case FormExprType::HistoryWeightedSum:
+                case FormExprType::HistoryConvolution:
+                case FormExprType::SymmetricEigenvalue:
+                case FormExprType::SymmetricEigenvalueDirectionalDerivative:
+                case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA:
+                case FormExprType::Eigenvalue:
+                case FormExprType::SymmetricEigenvector:
+                case FormExprType::SpectralDecomposition:
+                case FormExprType::SymmetricEigenvectorDirectionalDerivative:
+                case FormExprType::SpectralDecompositionDirectionalDerivative:
+                case FormExprType::SmoothHeaviside:
+                case FormExprType::SmoothAbsoluteValue:
+                case FormExprType::SmoothSign:
+                    if (!kids.empty() && kids[0]) {
+                        deg = child_degree(0);
+                    }
+                    break;
+
+                // Comparisons / predicates: treat as max over children (rare in dt(Trial) contexts).
+                case FormExprType::Less:
+                case FormExprType::LessEqual:
+                case FormExprType::Greater:
+                case FormExprType::GreaterEqual:
+                case FormExprType::Equal:
+                case FormExprType::NotEqual:
+                    deg = std::max(child_degree(0), child_degree(1));
+                    break;
+
+                // Terminals and geometry nodes: degree 0.
+                default:
+                    deg = 0;
+                    for (const auto& k : kids) {
+                        if (!k) continue;
+                        deg = std::max(deg, self(self, *k));
+                    }
+                    break;
+            }
+
+            memo.emplace(&n, deg);
+            return deg;
+        };
+
+        if (dt_trial_degree(dt_trial_degree, node) > 1) {
+            throw std::invalid_argument("FormCompiler: multiple dt(TrialFunction) factors in one integral term are not supported");
+        }
     }
 
     return max_order;

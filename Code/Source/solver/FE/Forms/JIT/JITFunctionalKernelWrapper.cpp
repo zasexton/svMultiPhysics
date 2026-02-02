@@ -88,7 +88,7 @@ Real JITFunctionalKernelWrapper::evaluateCellTotal(const assembly::AssemblyConte
         return fallback_->evaluateCellTotal(ctx);
     }
 
-    maybeCompile();
+    maybeCompile(ctx);
     if (!canUseJIT()) {
         return fallback_->evaluateCellTotal(ctx);
     }
@@ -123,7 +123,7 @@ Real JITFunctionalKernelWrapper::evaluateBoundaryFaceTotal(const assembly::Assem
         return fallback_->evaluateBoundaryFaceTotal(ctx, boundary_marker);
     }
 
-    maybeCompile();
+    maybeCompile(ctx);
     if (!canUseJIT()) {
         return fallback_->evaluateBoundaryFaceTotal(ctx, boundary_marker);
     }
@@ -178,7 +178,7 @@ void JITFunctionalKernelWrapper::markRuntimeFailureOnce(std::string_view where, 
     FE_LOG_WARNING(full);
 }
 
-void JITFunctionalKernelWrapper::maybeCompile()
+void JITFunctionalKernelWrapper::maybeCompile(const assembly::AssemblyContext& ctx)
 {
     if (!options_.enable) {
         return;
@@ -189,6 +189,7 @@ void JITFunctionalKernelWrapper::maybeCompile()
         return;
     }
     attempted_ = true;
+    compiled_dim_ = static_cast<std::uint32_t>(ctx.dimension());
 
     if (!compiler_) {
         compiler_ = JITCompiler::getOrCreate(options_);
@@ -208,7 +209,7 @@ void JITFunctionalKernelWrapper::maybeCompile()
     const IntegralDomain jit_domain =
         (domain_ == Domain::Cell) ? IntegralDomain::Cell : IntegralDomain::Boundary;
 
-    const auto r = compiler_->compileFunctional(integrand_, jit_domain, vopt);
+    const auto r = compiler_->compileFunctional(integrand_, jit_domain, compiled_dim_, vopt);
     if (!r.ok || r.kernels.empty()) {
         if (!warned_compile_failure_) {
             warned_compile_failure_ = true;

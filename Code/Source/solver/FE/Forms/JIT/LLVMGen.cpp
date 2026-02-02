@@ -7596,6 +7596,62 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
 	                        if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
 	                            const int fid = unpackFieldIdImm1(kid.imm1);
+	                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
+	                                // StateField(INVALID_FIELD_ID) represents the current solution state u.
+	                                // Compute div(u_h) directly from current solution coefficients.
+	                                auto* coeffs = side.solution_coefficients;
+	                                auto* uses_vec_basis =
+	                                    builder.CreateICmpNE(side.trial_uses_vector_basis, builder.getInt32(0));
+	                                auto* vb = llvm::BasicBlock::Create(*ctx, "div.state_u.vec_basis", fn);
+	                                auto* sb = llvm::BasicBlock::Create(*ctx, "div.state_u.scalar_basis", fn);
+	                                auto* merge = llvm::BasicBlock::Create(*ctx, "div.state_u.merge", fn);
+
+	                                builder.CreateCondBr(uses_vec_basis, vb, sb);
+
+	                                llvm::Value* div_vb = f64c(0.0);
+	                                builder.SetInsertPoint(vb);
+	                                div_vb = emitReduceSumScalar(
+	                                    side.n_trial_dofs, "div_state_u_vb", [&](llvm::Value* j) -> llvm::Value* {
+	                                        auto* j64 = builder.CreateZExt(j, i64);
+	                                        auto* cj = loadRealPtrAt(coeffs, j64);
+	                                        auto* div_phi = loadBasisScalar(side, side.trial_basis_divs, j, q_index);
+	                                        return builder.CreateFMul(cj, div_phi);
+	                                    });
+	                                builder.CreateBr(merge);
+	                                auto* vb_block = builder.GetInsertBlock();
+
+	                                llvm::Value* div_sb = f64c(0.0);
+	                                builder.SetInsertPoint(sb);
+	                                auto* dofs_per_comp =
+	                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+	                                llvm::Value* div_sum = f64c(0.0);
+	                                for (std::size_t comp = 0; comp < vd; ++comp) {
+	                                    auto* acc = emitReduceSumScalar(
+	                                        dofs_per_comp,
+	                                        "div_state_u_c" + std::to_string(comp),
+	                                        [&](llvm::Value* jj) -> llvm::Value* {
+	                                            auto* base =
+	                                                builder.CreateMul(builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+	                                            auto* j = builder.CreateAdd(base, jj);
+	                                            auto* j64 = builder.CreateZExt(j, i64);
+	                                            auto* cj = loadRealPtrAt(coeffs, j64);
+	                                            const auto g =
+	                                                loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                            return builder.CreateFMul(cj, g[comp]);
+	                                        });
+	                                    div_sum = builder.CreateFAdd(div_sum, acc);
+	                                }
+	                                div_sb = div_sum;
+	                                builder.CreateBr(merge);
+	                                auto* sb_block = builder.GetInsertBlock();
+
+	                                builder.SetInsertPoint(merge);
+	                                auto* phi = builder.CreatePHI(f64, 2, "div.state_u");
+	                                phi->addIncoming(div_vb, vb_block);
+	                                phi->addIncoming(div_sb, sb_block);
+	                                values[op_idx] = makeScalar(phi);
+	                                break;
+	                            }
 	                            auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
                             auto* entry_is_null =
                                 builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));

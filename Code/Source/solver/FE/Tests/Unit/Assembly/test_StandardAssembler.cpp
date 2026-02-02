@@ -784,11 +784,12 @@ protected:
 /**
  * @brief Minimal single-cell tetra mesh exposing one boundary face.
  *
- * Face 0 is reported as local_face_id=0 on cell 0.
+ * The boundary face is reported as local_face_id on cell 0.
  */
 class SingleTetraBoundaryMeshAccess : public IMeshAccess {
 public:
-    SingleTetraBoundaryMeshAccess()
+    explicit SingleTetraBoundaryMeshAccess(LocalIndex local_face_id = 0)
+        : local_face_id_(local_face_id)
     {
         // Reference tetra vertices: (0,0,0), (1,0,0), (0,1,0), (0,0,1)
         nodes_ = {
@@ -832,7 +833,7 @@ public:
     [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/,
                                                GlobalIndex /*cell_id*/) const override
     {
-        return 0;  // Face 0
+        return local_face_id_;
     }
 
     [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override {
@@ -867,6 +868,7 @@ public:
     }
 
 private:
+    LocalIndex local_face_id_{0};
     std::vector<std::array<Real, 3>> nodes_;
     std::array<GlobalIndex, 4> cell_{};
 };
@@ -1061,6 +1063,44 @@ public:
     }
 };
 
+/**
+ * @brief Boundary face kernel that records only the physical face measure.
+ *
+ * local_vector[0] = sum_q integrationWeight(q)
+ */
+class BoundaryFaceMeasureKernel : public AssemblyKernel {
+public:
+    [[nodiscard]] RequiredData getRequiredData() const override {
+        return RequiredData::IntegrationWeights;
+    }
+
+    void computeCell(const AssemblyContext& /*ctx*/, KernelOutput& /*output*/) override {}
+
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+
+    void computeBoundaryFace(const AssemblyContext& ctx,
+                             int /*boundary_marker*/,
+                             KernelOutput& output) override
+    {
+        const auto n = ctx.numTestDofs();
+        output.local_vector.assign(static_cast<std::size_t>(n), 0.0);
+        output.has_vector = true;
+        output.has_matrix = false;
+        output.n_test_dofs = n;
+        output.n_trial_dofs = n;
+
+        Real sum_w = 0.0;
+        const LocalIndex n_qpts = ctx.numQuadraturePoints();
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            sum_w += ctx.integrationWeight(q);
+        }
+
+        if (n > 0) {
+            output.local_vector[0] = sum_w;
+        }
+    }
+};
+
 class InteriorFaceDiagnosticsKernel : public AssemblyKernel {
 public:
     [[nodiscard]] RequiredData getRequiredData() const override {
@@ -1144,8 +1184,245 @@ public:
     }
 };
 
+/**
+ * @brief Minimal single-cell Triangle3 mesh exposing one boundary edge.
+ *
+ * Edge 0 is reported as local_face_id=0 on cell 0.
+ * The physical coordinates match the Triangle3 reference element:
+ *   (0,0), (1,0), (0,1) so the boundary edge length is 1.
+ */
+class SingleTriangleBoundaryMeshAccess : public IMeshAccess {
+public:
+    explicit SingleTriangleBoundaryMeshAccess(LocalIndex local_face_id)
+        : local_face_id_(local_face_id)
+    {
+        nodes_ = {
+            {0.0, 0.0, 0.0}, // 0
+            {1.0, 0.0, 0.0}, // 1
+            {0.0, 1.0, 0.0}  // 2
+        };
+        cell_nodes_ = {0, 1, 2};
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 1; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override { return cell_id == 0; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Triangle3; }
+
+    void getCellNodes(GlobalIndex /*cell_id*/, std::vector<GlobalIndex>& nodes) const override { nodes = cell_nodes_; }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/, std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords = {nodes_[0], nodes_[1], nodes_[2]};
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex face_id, GlobalIndex /*cell_id*/) const override
+    {
+        // Single boundary edge, configurable local edge id.
+        if (face_id != 0) {
+            throw std::runtime_error("SingleTriangleBoundaryMeshAccess: unknown face id");
+        }
+        return local_face_id_;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex face_id) const override
+    {
+        return (face_id == 0) ? 1 : -1;
+    }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {static_cast<GlobalIndex>(-1), static_cast<GlobalIndex>(-1)};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+
+    void forEachBoundaryFace(int marker, std::function<void(GlobalIndex, GlobalIndex)> callback) const override
+    {
+        if (marker == 1) {
+            callback(0, 0);
+        }
+    }
+
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override {}
+
+private:
+    LocalIndex local_face_id_{0};
+    std::vector<std::array<Real, 3>> nodes_{};
+    std::vector<GlobalIndex> cell_nodes_{};
+};
+
+/**
+ * @brief Minimal single-cell Wedge6 mesh exposing one boundary face.
+ *
+ * The physical coordinates match the Wedge6 reference element:
+ *   bottom: (0,0,-1), (1,0,-1), (0,1,-1)
+ *   top:    (0,0,+1), (1,0,+1), (0,1,+1)
+ */
+class SingleWedgeBoundaryMeshAccess : public IMeshAccess {
+public:
+    explicit SingleWedgeBoundaryMeshAccess(LocalIndex local_face_id)
+        : local_face_id_(local_face_id)
+    {
+        nodes_ = {
+            {0.0, 0.0, -1.0}, // 0
+            {1.0, 0.0, -1.0}, // 1
+            {0.0, 1.0, -1.0}, // 2
+            {0.0, 0.0, 1.0},  // 3
+            {1.0, 0.0, 1.0},  // 4
+            {0.0, 1.0, 1.0}   // 5
+        };
+        cell_nodes_ = {0, 1, 2, 3, 4, 5};
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 1; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override { return cell_id == 0; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Wedge6; }
+
+    void getCellNodes(GlobalIndex /*cell_id*/, std::vector<GlobalIndex>& nodes) const override { nodes = cell_nodes_; }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/, std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords = {nodes_[0], nodes_[1], nodes_[2], nodes_[3], nodes_[4], nodes_[5]};
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex face_id, GlobalIndex /*cell_id*/) const override
+    {
+        if (face_id != 0) {
+            throw std::runtime_error("SingleWedgeBoundaryMeshAccess: unknown face id");
+        }
+        return local_face_id_;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex face_id) const override
+    {
+        return (face_id == 0) ? 1 : -1;
+    }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {static_cast<GlobalIndex>(-1), static_cast<GlobalIndex>(-1)};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+
+    void forEachBoundaryFace(int marker, std::function<void(GlobalIndex, GlobalIndex)> callback) const override
+    {
+        if (marker == 1) {
+            callback(0, 0);
+        }
+    }
+
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override {}
+
+private:
+    LocalIndex local_face_id_{0};
+    std::vector<std::array<Real, 3>> nodes_{};
+    std::vector<GlobalIndex> cell_nodes_{};
+};
+
+/**
+ * @brief Minimal single-cell Pyramid5 mesh exposing one boundary face.
+ *
+ * The physical coordinates match the Pyramid5 reference element:
+ *   base: (-1,-1,0), (1,-1,0), (1,1,0), (-1,1,0)
+ *   apex: (0,0,1)
+ */
+class SinglePyramidBoundaryMeshAccess : public IMeshAccess {
+public:
+    explicit SinglePyramidBoundaryMeshAccess(LocalIndex local_face_id)
+        : local_face_id_(local_face_id)
+    {
+        nodes_ = {
+            {-1.0, -1.0, 0.0}, // 0
+            {1.0, -1.0, 0.0},  // 1
+            {1.0, 1.0, 0.0},   // 2
+            {-1.0, 1.0, 0.0},  // 3
+            {0.0, 0.0, 1.0}    // 4
+        };
+        cell_nodes_ = {0, 1, 2, 3, 4};
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 1; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override { return cell_id == 0; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Pyramid5; }
+
+    void getCellNodes(GlobalIndex /*cell_id*/, std::vector<GlobalIndex>& nodes) const override { nodes = cell_nodes_; }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/, std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords = {nodes_[0], nodes_[1], nodes_[2], nodes_[3], nodes_[4]};
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex face_id, GlobalIndex /*cell_id*/) const override
+    {
+        if (face_id != 0) {
+            throw std::runtime_error("SinglePyramidBoundaryMeshAccess: unknown face id");
+        }
+        return local_face_id_;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex face_id) const override
+    {
+        return (face_id == 0) ? 1 : -1;
+    }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {static_cast<GlobalIndex>(-1), static_cast<GlobalIndex>(-1)};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+
+    void forEachBoundaryFace(int marker, std::function<void(GlobalIndex, GlobalIndex)> callback) const override
+    {
+        if (marker == 1) {
+            callback(0, 0);
+        }
+    }
+
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override {}
+
+private:
+    LocalIndex local_face_id_{0};
+    std::vector<std::array<Real, 3>> nodes_{};
+    std::vector<GlobalIndex> cell_nodes_{};
+};
+
 TEST(StandardAssemblerFaces, BoundaryFaceUsesFaceQuadratureAndNormals) {
-    SingleTetraBoundaryMeshAccess mesh;
+    SingleTetraBoundaryMeshAccess mesh(/*local_face_id=*/0);
 
     // One tetra cell, 4 DOFs
     dofs::DofMap dof_map(1, 4, 4);
@@ -1171,6 +1448,170 @@ TEST(StandardAssemblerFaces, BoundaryFaceUsesFaceQuadratureAndNormals) {
     EXPECT_NEAR(rhs.getVectorEntry(0), 0.5, 1e-12);         // sum of integration weights
     EXPECT_NEAR(rhs.getVectorEntry(1), 0.0, 1e-12);         // max |xi.z|
     EXPECT_NEAR(rhs.getVectorEntry(2), -1.0, 1e-12);        // avg normal z component
+}
+
+TEST(StandardAssemblerFaces, Tetra3D_ObliqueFace2MeasureMatchesPhysicalArea) {
+    SingleTetraBoundaryMeshAccess mesh(/*local_face_id=*/2);
+
+    // One tetra cell, 4 DOFs
+    dofs::DofMap dof_map(1, 4, 4);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2, 3});
+    dof_map.setNumDofs(4);
+    dof_map.setNumLocalDofs(4);
+    dof_map.finalize();
+
+    MockFunctionSpace space;
+    DenseVectorView rhs(4);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    BoundaryFaceMeasureKernel kernel;
+
+    auto result = assembler.assembleBoundaryFaces(mesh, 1, space, kernel, nullptr, &rhs);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.boundary_faces_assembled, 1);
+
+    // Face 2 of the reference tetra is the oblique triangle (1,0,0)-(0,1,0)-(0,0,1),
+    // with area sqrt(3)/2.
+    EXPECT_NEAR(rhs.getVectorEntry(0), std::sqrt(3.0) / 2.0, 1e-12);
+}
+
+TEST(StandardAssemblerFaces, Triangle2D_BoundaryEdge0MeasureMatchesPhysicalLength) {
+    SingleTriangleBoundaryMeshAccess mesh(/*local_face_id=*/0);
+
+    // One Triangle3 cell, 3 DOFs.
+    dofs::DofMap dof_map(1, 3, 3);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2});
+    dof_map.setNumDofs(3);
+    dof_map.setNumLocalDofs(3);
+    dof_map.finalize();
+
+    spaces::H1Space space(ElementType::Triangle3, 1);
+    DenseVectorView rhs(3);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    BoundaryFaceDiagnosticsKernel kernel;
+
+    auto result = assembler.assembleBoundaryFaces(mesh, /*marker=*/1, space, kernel, nullptr, &rhs);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.boundary_faces_assembled, 1);
+
+    // Edge 0 is (0,0)-(1,0): physical length is 1.
+    EXPECT_NEAR(rhs.getVectorEntry(0), 1.0, 1e-12);
+    EXPECT_NEAR(rhs.getVectorEntry(1), 0.0, 1e-12);
+    EXPECT_NEAR(rhs.getVectorEntry(2), 0.0, 1e-12);
+}
+
+TEST(StandardAssemblerFaces, Triangle2D_BoundaryEdge1MeasureMatchesPhysicalLength) {
+    SingleTriangleBoundaryMeshAccess mesh(/*local_face_id=*/1);
+
+    // One Triangle3 cell, 3 DOFs.
+    dofs::DofMap dof_map(1, 3, 3);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2});
+    dof_map.setNumDofs(3);
+    dof_map.setNumLocalDofs(3);
+    dof_map.finalize();
+
+    spaces::H1Space space(ElementType::Triangle3, 1);
+    DenseVectorView rhs(3);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    BoundaryFaceDiagnosticsKernel kernel;
+
+    auto result = assembler.assembleBoundaryFaces(mesh, /*marker=*/1, space, kernel, nullptr, &rhs);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.boundary_faces_assembled, 1);
+
+    // Edge 1 is (1,0)-(0,1): physical length is sqrt(2).
+    EXPECT_NEAR(rhs.getVectorEntry(0), std::sqrt(2.0), 1e-12);
+    EXPECT_NEAR(rhs.getVectorEntry(1), 0.0, 1e-12);
+    EXPECT_NEAR(rhs.getVectorEntry(2), 0.0, 1e-12);
+}
+
+TEST(StandardAssemblerFaces, Wedge3D_QuadFace2MeasureMatchesPhysicalArea) {
+    SingleWedgeBoundaryMeshAccess mesh(/*local_face_id=*/2);
+
+    dofs::DofMap dof_map(1, 6, 6);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2, 3, 4, 5});
+    dof_map.setNumDofs(6);
+    dof_map.setNumLocalDofs(6);
+    dof_map.finalize();
+
+    spaces::H1Space space(ElementType::Wedge6, 1);
+    DenseVectorView rhs(6);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    BoundaryFaceMeasureKernel kernel;
+
+    auto result = assembler.assembleBoundaryFaces(mesh, /*marker=*/1, space, kernel, nullptr, &rhs);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.boundary_faces_assembled, 1);
+
+    // Wedge face 2: rectangle with sides 1 (x) and 2 (z), area 2.
+    EXPECT_NEAR(rhs.getVectorEntry(0), 2.0, 1e-12);
+}
+
+TEST(StandardAssemblerFaces, Wedge3D_ObliqueQuadFace3MeasureMatchesPhysicalArea) {
+    SingleWedgeBoundaryMeshAccess mesh(/*local_face_id=*/3);
+
+    dofs::DofMap dof_map(1, 6, 6);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2, 3, 4, 5});
+    dof_map.setNumDofs(6);
+    dof_map.setNumLocalDofs(6);
+    dof_map.finalize();
+
+    spaces::H1Space space(ElementType::Wedge6, 1);
+    DenseVectorView rhs(6);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    BoundaryFaceMeasureKernel kernel;
+
+    auto result = assembler.assembleBoundaryFaces(mesh, /*marker=*/1, space, kernel, nullptr, &rhs);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.boundary_faces_assembled, 1);
+
+    // Wedge face 3: rectangle with sides sqrt(2) (in x-y) and 2 (z), area 2*sqrt(2).
+    EXPECT_NEAR(rhs.getVectorEntry(0), 2.0 * std::sqrt(2.0), 1e-12);
+}
+
+TEST(StandardAssemblerFaces, Pyramid3D_TriFace1MeasureMatchesPhysicalArea) {
+    SinglePyramidBoundaryMeshAccess mesh(/*local_face_id=*/1);
+
+    dofs::DofMap dof_map(1, 5, 5);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2, 3, 4});
+    dof_map.setNumDofs(5);
+    dof_map.setNumLocalDofs(5);
+    dof_map.finalize();
+
+    spaces::H1Space space(ElementType::Pyramid5, 1);
+    DenseVectorView rhs(5);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    BoundaryFaceMeasureKernel kernel;
+
+    auto result = assembler.assembleBoundaryFaces(mesh, /*marker=*/1, space, kernel, nullptr, &rhs);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.boundary_faces_assembled, 1);
+
+    // Pyramid face 1: triangle (-1,-1,0)-(1,-1,0)-(0,0,1), area sqrt(2).
+    EXPECT_NEAR(rhs.getVectorEntry(0), std::sqrt(2.0), 1e-12);
 }
 
 TEST(StandardAssemblerFaces, InteriorFacePreparesBothSidesConsistently) {

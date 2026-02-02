@@ -113,6 +113,81 @@ namespace {
     return true;
 }
 
+[[nodiscard]] math::Vector<Real, 3> cross3(const math::Vector<Real, 3>& a,
+                                           const math::Vector<Real, 3>& b) noexcept
+{
+    return math::Vector<Real, 3>{
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    };
+}
+
+[[nodiscard]] Real norm3(const math::Vector<Real, 3>& v) noexcept
+{
+    return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+
+[[nodiscard]] Real canonicalFaceJacobianToReference(
+    ElementType face_type,
+    std::span<const math::Vector<Real, 3>> ref_face_coords,
+    const math::Vector<Real, 3>& facet_coords)
+{
+    // Convert canonical face quadrature weights to the element-reference facet measure.
+    //
+    // Face quadrature rules are defined on canonical domains:
+    //   - Line2:    s in [-1, 1]
+    //   - Quad4:    (xi,eta) in [-1,1]^2
+    //   - Triangle: (x,y) on reference simplex (area 0.5)
+    //
+    // ElementTransform::facet_to_reference() expects facet-local parameters:
+    //   - edges:    t in [0, 1]
+    //   - quad:     (s,t) in [0,1]^2
+    //   - triangle: (x,y) on reference simplex
+    //
+    // This function returns |dX_ref/du| where u is the canonical quadrature coordinate,
+    // so that dS_ref = jac * du. Multiply quadrature weights by this factor.
+    switch (face_type) {
+        case ElementType::Line2: {
+            FE_THROW_IF(ref_face_coords.size() < 2, FEException,
+                        "canonicalFaceJacobianToReference(Line2): missing vertices");
+            const math::Vector<Real, 3> dx = ref_face_coords[1] - ref_face_coords[0];
+            // t = (s+1)/2 => dt/ds = 1/2
+            return Real(0.5) * norm3(dx);
+        }
+        case ElementType::Triangle3: {
+            FE_THROW_IF(ref_face_coords.size() < 3, FEException,
+                        "canonicalFaceJacobianToReference(Triangle3): missing vertices");
+            (void)facet_coords;
+            const math::Vector<Real, 3> e1 = ref_face_coords[1] - ref_face_coords[0];
+            const math::Vector<Real, 3> e2 = ref_face_coords[2] - ref_face_coords[0];
+            // xi(x,y) = v0 + x*(v1-v0) + y*(v2-v0) => jac = |e1 x e2|
+            return norm3(cross3(e1, e2));
+        }
+        case ElementType::Quad4: {
+            FE_THROW_IF(ref_face_coords.size() < 4, FEException,
+                        "canonicalFaceJacobianToReference(Quad4): missing vertices");
+            const Real s = facet_coords[0];
+            const Real t = facet_coords[1];
+            // X_ref(s,t) is bilinear on [0,1]^2; canonical quad weights are on [-1,1]^2.
+            // (s,t) = ((xi+1)/2, (eta+1)/2) => dxi deta = 4 ds dt, so:
+            // |dX/dxi x dX/deta| = 0.25 * |dX/ds x dX/dt|
+            math::Vector<Real, 3> dXds{};
+            math::Vector<Real, 3> dXdt{};
+            for (std::size_t i = 0; i < 3; ++i) {
+                dXds[i] = (Real(1) - t) * (ref_face_coords[1][i] - ref_face_coords[0][i]) +
+                          t * (ref_face_coords[2][i] - ref_face_coords[3][i]);
+                dXdt[i] = (Real(1) - s) * (ref_face_coords[3][i] - ref_face_coords[0][i]) +
+                          s * (ref_face_coords[2][i] - ref_face_coords[1][i]);
+            }
+            return Real(0.25) * norm3(cross3(dXds, dXdt));
+        }
+        default:
+            break;
+    }
+    return Real(1);
+}
+
 int requiredHistoryStates(const TimeIntegrationContext* ctx) noexcept
 {
     if (ctx == nullptr) {
@@ -2892,6 +2967,10 @@ void StandardAssembler::prepareContextFace(
     const auto& quad_points = quad_rule->points();
     const auto& quad_weights = quad_rule->weights();
 
+    auto [vtx, ref_face_coords] =
+        elements::ElementTransform::facet_vertices(cell_type, static_cast<int>(local_face_id));
+    (void)vtx;
+
     const AssemblyContext::Vector3D n_ref = computeFaceNormal(local_face_id, cell_type, dim);
 
     for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -2976,7 +3055,13 @@ void StandardAssembler::prepareContextFace(
         computeSurfaceMeasureAndNormal(n_ref, scratch_inv_jacobians_[q], det_J, dim,
                                        surface_measure, n_phys);
 
-        scratch_integration_weights_[q] = quad_weights[q] * surface_measure;
+        // Convert canonical face weights to element-reference facet measure, then map to physical.
+        Real w = quad_weights[q] *
+                 canonicalFaceJacobianToReference(face_type,
+                                                  std::span<const math::Vector<Real, 3>>(ref_face_coords),
+                                                  facet_coords);
+
+        scratch_integration_weights_[q] = w * surface_measure;
         scratch_normals_[q] = n_phys;
     }
 
@@ -3369,18 +3454,6 @@ AssemblyContext::Vector3D StandardAssembler::computeFaceNormal(
     (void)dim;
     auto n = elements::ElementTransform::reference_facet_normal(
         cell_type, static_cast<int>(local_face_id));
-    // NOTE: Face quadrature points/weights are defined on canonical face
-    // reference domains (e.g., Triangle3 has area 0.5). For some reference
-    // element facets (e.g., the oblique tetra face), the mapping from the
-    // canonical face to the element-reference face carries a constant metric
-    // factor. Scaling the reference normal by that factor yields correct
-    // surface measures via the cofactor (det(J) * J^{-T}) formula.
-    if ((cell_type == ElementType::Tetra4 || cell_type == ElementType::Tetra10) && local_face_id == 2) {
-        const Real scale = std::sqrt(Real(3));
-        n[0] *= scale;
-        n[1] *= scale;
-        n[2] *= scale;
-    }
     return {n[0], n[1], n[2]};
 }
 

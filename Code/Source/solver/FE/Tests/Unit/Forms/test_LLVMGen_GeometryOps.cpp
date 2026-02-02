@@ -40,6 +40,24 @@ struct CellEnv {
     }
 };
 
+struct CellEnv2D {
+    SingleTriangleMeshAccess mesh{};
+    dofs::DofMap dof_map{createSingleTriangleDofMap()};
+    spaces::H1Space space{ElementType::Triangle3, 1};
+    assembly::FunctionalAssembler assembler{};
+    Real area{0.0};
+
+    CellEnv2D()
+    {
+        assembler.setMesh(mesh);
+        assembler.setDofMap(dof_map);
+        assembler.setSpace(space);
+
+        const auto one = FormExpr::constant(Real(1.0));
+        area = assembler.assembleScalar(*makeFunctionalFormKernel(one, FunctionalFormKernel::Domain::Cell));
+    }
+};
+
 struct BoundaryEnv {
     static constexpr int marker = 2;
 
@@ -68,7 +86,24 @@ Real assembleJITCell(const FormExpr& integrand, CellEnv& env)
     return env.assembler.assembleScalar(jit_kernel);
 }
 
+Real assembleJITCell(const FormExpr& integrand, CellEnv2D& env)
+{
+    auto throw_fallback = makeThrowingTotalKernelFor(integrand, /*has_cell=*/true, /*has_boundary=*/false);
+    auto jit_opts = makeUnitTestJITOptions();
+    jit_opts.optimization_level = 2;
+    jit_opts.vectorize = true;
+    jit::JITFunctionalKernelWrapper jit_kernel(
+        throw_fallback, integrand, jit::JITFunctionalKernelWrapper::Domain::Cell, jit_opts);
+    return env.assembler.assembleScalar(jit_kernel);
+}
+
 Real assembleInterpCell(const FormExpr& integrand, CellEnv& env)
+{
+    auto interp = makeFunctionalFormKernel(integrand, FunctionalFormKernel::Domain::Cell);
+    return env.assembler.assembleScalar(*interp);
+}
+
+Real assembleInterpCell(const FormExpr& integrand, CellEnv2D& env)
 {
     auto interp = makeFunctionalFormKernel(integrand, FunctionalFormKernel::Domain::Cell);
     return env.assembler.assembleScalar(*interp);
@@ -153,6 +188,46 @@ TEST(LLVMGenGeometryOps, JacobianInverse_MatchesInterpreter)
     EXPECT_NEAR(jit, ref, 1e-12);
 
     EXPECT_NEAR(jit / env.volume, Real(111.0), 1e-12);
+}
+
+TEST(LLVMGenGeometryOps, JacobianInverse2D_Triangle3_MatchesInterpreter)
+{
+    requireLLVMJITOrSkip();
+    CellEnv2D env;
+    ASSERT_GT(env.area, Real(0.0));
+
+    const auto Jinv = FormExpr::jacobianInverse();
+    const auto integrand = Jinv.component(0, 0) + Jinv.component(1, 1) * Real(10.0);
+
+    const Real ref = assembleInterpCell(integrand, env);
+    const Real jit = assembleJITCell(integrand, env);
+    EXPECT_NEAR(jit, ref, 1e-12);
+
+    // For the unit triangle, Jinv = I (in 2D).
+    EXPECT_NEAR(jit / env.area, Real(11.0), 1e-12);
+}
+
+TEST(LLVMGenGeometryOps, MetricTensorKxi2D_Triangle3_MatchesInterpreter)
+{
+    requireLLVMJITOrSkip();
+    CellEnv2D env;
+    ASSERT_GT(env.area, Real(0.0));
+
+    const auto Jinv = FormExpr::jacobianInverse();
+    const auto K = transpose(Jinv) * Jinv;
+
+    const auto trK = trace(K);
+    const auto kxx = K.doubleContraction(K);
+
+    const Real ref_tr = assembleInterpCell(trK, env);
+    const Real jit_tr = assembleJITCell(trK, env);
+    EXPECT_NEAR(jit_tr, ref_tr, 1e-12);
+    EXPECT_NEAR(jit_tr / env.area, Real(2.0), 1e-12);
+
+    const Real ref_dc = assembleInterpCell(kxx, env);
+    const Real jit_dc = assembleJITCell(kxx, env);
+    EXPECT_NEAR(jit_dc, ref_dc, 1e-12);
+    EXPECT_NEAR(jit_dc / env.area, Real(2.0), 1e-12);
 }
 
 TEST(LLVMGenGeometryOps, Normal_MatchesInterpreter)

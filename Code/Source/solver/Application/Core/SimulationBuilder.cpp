@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cctype>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace {
@@ -62,6 +63,10 @@ svmp::FE::backends::PreconditionerType toPreconditioner(const std::string& legac
 
   if (v.empty() || v == "none") {
     return PreconditionerType::None;
+  }
+  if (v == "fsils") {
+    // Legacy FSILS "fsils" preconditioner corresponds to the built-in diagonal scaling.
+    return PreconditionerType::Diagonal;
   }
   if (v == "row-column-scaling" || v == "petsc-rcs") {
     return PreconditionerType::RowColumnScaling;
@@ -137,9 +142,15 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
   }
   if (eq->linear_solver.absolute_tolerance.defined()) {
     opts.abs_tol = static_cast<svmp::FE::Real>(eq->linear_solver.absolute_tolerance.value());
+  } else {
+    // Match legacy defaults (LinearSolverParameters::Absolute_tolerance) when not explicitly set.
+    opts.abs_tol = static_cast<svmp::FE::Real>(1.0e-10);
   }
   if (eq->linear_solver.max_iterations.defined()) {
     opts.max_iter = eq->linear_solver.max_iterations.value();
+  }
+  if (eq->linear_solver.krylov_space_dimension.defined()) {
+    opts.krylov_dim = eq->linear_solver.krylov_space_dimension.value();
   }
 
   if (eq->linear_solver.linear_algebra.defined()) {
@@ -149,6 +160,30 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
 
     if (backend_kind == svmp::FE::backends::BackendKind::Trilinos && la.configuration_file.defined()) {
       opts.trilinos_xml_file = la.configuration_file.value();
+    }
+  }
+
+  // Legacy XML semantics: for FSILS GMRES, <Max_iterations> is the outer restart count (RI.mItr), while
+  // <Krylov_space_dimension> sets the restart length (RI.sD). The FE backend contract uses max_iter as
+  // a total-iteration budget, so convert the legacy parameters accordingly.
+  if (backend_kind == svmp::FE::backends::BackendKind::FSILS &&
+      (opts.method == svmp::FE::backends::SolverMethod::GMRES || opts.method == svmp::FE::backends::SolverMethod::FGMRES) &&
+      eq->linear_solver.max_iterations.defined()) {
+    int restart_len = opts.krylov_dim;
+    if (restart_len <= 0) {
+      // FSILS default for GMRES when RI.sD is not explicitly specified.
+      restart_len = 250;
+      opts.krylov_dim = restart_len;
+    }
+
+    using i64 = long long;
+    const i64 outer = static_cast<i64>(eq->linear_solver.max_iterations.value());
+    const i64 per_restart = static_cast<i64>(restart_len) + 1LL;
+    const i64 total = outer * per_restart;
+    if (total > static_cast<i64>(std::numeric_limits<int>::max())) {
+      opts.max_iter = std::numeric_limits<int>::max();
+    } else if (total > 0) {
+      opts.max_iter = static_cast<int>(total);
     }
   }
 

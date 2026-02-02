@@ -982,6 +982,58 @@ TEST(SymbolicNonlinearFormKernelTest, JITMatchesInterpreter)
     expectDenseNear(R_jit, R_interp, 1e-12);
     expectDenseNear(J_jit, J_interp, 1e-12);
 }
+
+TEST(SymbolicNonlinearFormKernelTest, JITMatchesInterpreter_Triangle3_GradAndGeometryOps)
+{
+    SingleTriangleMeshAccess mesh;
+    auto dof_map = createSingleTriangleDofMap();
+    spaces::H1Space space(ElementType::Triangle3, 1);
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    // Exercise 2D geometry terminals (Jinv) and differential ops (grad) together.
+    const auto Jinv = FormExpr::jacobianInverse();
+    const auto K = transpose(Jinv) * Jinv;
+    const auto residual = (inner(grad(u), grad(u)) * v + trace(K) * u * u * v).dx();
+
+    auto ir_interp = compiler.compileResidual(residual);
+    auto ir_jit = compiler.compileResidual(residual);
+
+    SymbolicNonlinearFormKernel interp_kernel(std::move(ir_interp), NonlinearKernelOutput::Both);
+    interp_kernel.resolveInlinableConstitutives();
+
+    auto jit_fallback = std::make_shared<SymbolicNonlinearFormKernel>(std::move(ir_jit), NonlinearKernelOutput::Both);
+    forms::JITOptions jit_opts;
+    jit_opts.enable = true;
+    jit_opts.optimization_level = 2;
+    jit_opts.vectorize = true;
+
+    forms::jit::JITKernelWrapper jit_kernel(jit_fallback, jit_opts);
+    jit_kernel.resolveInlinableConstitutives();
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    std::vector<Real> U = {0.1, -0.2, 0.3};
+    assembler.setCurrentSolution(U);
+
+    assembly::DenseMatrixView J_interp(3);
+    assembly::DenseVectorView R_interp(3);
+    J_interp.zero();
+    R_interp.zero();
+    (void)assembler.assembleBoth(mesh, space, space, interp_kernel, J_interp, R_interp);
+
+    assembly::DenseMatrixView J_jit(3);
+    assembly::DenseVectorView R_jit(3);
+    J_jit.zero();
+    R_jit.zero();
+    (void)assembler.assembleBoth(mesh, space, space, jit_kernel, J_jit, R_jit);
+
+    expectDenseNear(R_jit, R_interp, 1e-12);
+    expectDenseNear(J_jit, J_interp, 1e-12);
+}
 #endif
 
 TEST(SymbolicDifferentiationNewPhysicsTest, MatrixFunctionDerivativesUseDirectionalDerivativeNodes)

@@ -81,7 +81,7 @@ public:
     [[nodiscard]] std::string name() const override;
 
 private:
-    void maybeCompile();
+    void maybeCompile(const assembly::AssemblyContext& ctx);
     [[nodiscard]] bool canUseJIT() const noexcept;
     void markRuntimeFailureOnce(std::string_view where, std::string_view msg) noexcept;
 
@@ -91,6 +91,7 @@ private:
     JITOptions options_{};
 
     std::mutex jit_mutex_{};
+    std::uint32_t compiled_dim_{0u};
     bool attempted_{false};
     bool compiled_{false};
     std::string compile_message_{};

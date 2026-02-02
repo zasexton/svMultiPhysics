@@ -835,11 +835,15 @@ JITCompileResult JITCompiler::compileSpecialized(const FormIR& ir,
 
 JITCompileResult JITCompiler::compileFunctional(const FormExpr& integrand,
                                                 IntegralDomain domain,
+                                                std::uint32_t dim_hint,
                                                 const ValidationOptions& validation)
 {
     JITCompileResult out;
     out.ok = false;
     out.cacheable = true;
+
+    const auto safe_dim = static_cast<int>(
+        std::max<std::uint32_t>(1u, std::min<std::uint32_t>(dim_hint, 3u)));
 
     if (domain != IntegralDomain::Cell && domain != IntegralDomain::Boundary) {
         out.message = "JITCompiler::compileFunctional: only Cell and Boundary domains are supported";
@@ -862,7 +866,7 @@ JITCompileResult JITCompiler::compileFunctional(const FormExpr& integrand,
     }
 
     bool conflict = false;
-    const auto trial_sig = inferFunctionalTrialSpaceSignature(root, conflict);
+    auto trial_sig = inferFunctionalTrialSpaceSignature(root, conflict);
     if (conflict) {
         out.message =
             "JITCompiler::compileFunctional: multiple distinct DiscreteField/StateField space signatures found; multi-field functional kernels are not supported";
@@ -875,6 +879,17 @@ JITCompileResult JITCompiler::compileFunctional(const FormExpr& integrand,
             "JITCompiler::compileFunctional: PreviousSolutionRef requires a DiscreteField/StateField operand (to infer scalar vs vector shape)";
         out.cacheable = false;
         return out;
+    }
+
+    if (!trial_sig.has_value()) {
+        FormExprNode::SpaceSignature dim_only{};
+        dim_only.field_type = FieldType::Scalar;
+        dim_only.continuity = Continuity::C0;
+        dim_only.value_dimension = 1;
+        dim_only.topological_dimension = safe_dim;
+        dim_only.polynomial_order = 0;
+        dim_only.element_type = ElementType::Unknown;
+        trial_sig = dim_only;
     }
 
     FormIR ir;
@@ -901,6 +916,15 @@ JITCompileResult JITCompiler::compileFunctional(const FormExpr& integrand,
     ir.setDump("JIT synthetic functional FormIR");
 
     return compile(ir, validation);
+}
+
+JITCompileResult JITCompiler::compileFunctional(const FormExpr& integrand,
+                                                IntegralDomain domain,
+                                                const ValidationOptions& validation)
+{
+    // Default to 3D when there is no DiscreteField/StateField signature to infer a spatial dimension.
+    // Callers with access to an AssemblyContext should prefer the overload with dim_hint.
+    return compileFunctional(integrand, domain, /*dim_hint=*/3u, validation);
 }
 
 JITCacheStats JITCompiler::cacheStats() const
