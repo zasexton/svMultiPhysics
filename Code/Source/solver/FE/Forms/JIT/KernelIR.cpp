@@ -158,9 +158,12 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
 
 [[nodiscard]] bool isCommutative(FormExprType t) noexcept
 {
+    // NOTE: FormExprType::Multiply is intentionally not treated as commutative.
+    // In the FE form language it can represent non-commutative tensor products
+    // (e.g. matrix-vector multiplication), so operand reordering can change the
+    // numerical result and break residual/Jacobian consistency.
     switch (t) {
         case FormExprType::Add:
-        case FormExprType::Multiply:
         case FormExprType::InnerProduct:
         case FormExprType::DoubleContraction:
         case FormExprType::Minimum:

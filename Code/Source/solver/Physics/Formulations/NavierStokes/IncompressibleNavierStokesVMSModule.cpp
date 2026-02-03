@@ -296,21 +296,24 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     {
         FE::systems::FormInstallOptions residual_install{};
         residual_install.coupled_residual_install_jacobian_blocks = false;
-        // Prefer the dual-number kernel for robustness: Navier–Stokes VMS introduces
-        // highly nonlinear residual terms (subscales/stabilization) where an
-        // incomplete symbolic tangent can stall Newton iterations (e.g. vortex
-        // shedding). The LLVM JIT wrapper currently does not accelerate the
-        // dual-number path, so keep JIT disabled here.
-        residual_install.compiler_options.jit.enable = false;
-        residual_install.compiler_options.use_symbolic_tangent = false;
+        // Prefer symbolic tangents for performance. The dual-number (NonlinearFormKernel)
+        // path is not JIT-accelerated and builds a large AD AST for complex fluid terms.
+        residual_install.compiler_options.use_symbolic_tangent = true;
+#if SVMP_FE_ENABLE_LLVM_JIT
+        residual_install.compiler_options.jit.enable = true;
+        residual_install.compiler_options.jit.optimization_level = 3;
+#endif
         (void)FE::systems::installCoupledResidual(system, "residual", fields, fields, residual, residual_install);
     }
     {
         FE::systems::FormInstallOptions jacobian_install{};
         jacobian_install.coupled_residual_install_residual_kernels = false;
         jacobian_install.coupled_residual_from_jacobian_block = true;
-        jacobian_install.compiler_options.jit.enable = false;
-        jacobian_install.compiler_options.use_symbolic_tangent = false;
+        jacobian_install.compiler_options.use_symbolic_tangent = true;
+#if SVMP_FE_ENABLE_LLVM_JIT
+        jacobian_install.compiler_options.jit.enable = true;
+        jacobian_install.compiler_options.jit.optimization_level = 3;
+#endif
         (void)FE::systems::installCoupledResidual(system, "jacobian", fields, fields, residual, jacobian_install);
     }
 }
