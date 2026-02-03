@@ -247,8 +247,12 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
     if (eq->tolerance.defined()) {
       const double tol = eq->tolerance.value();
       if (tol > 0.0) {
-        newton_opts.abs_tolerance = tol;
-        newton_opts.rel_tolerance = 0.0;
+        // Legacy semantics: <Add_equation><Tolerance> is a *relative* tolerance (see eqType::tol).
+        //
+        // The FE Newton driver checks both absolute and relative tolerances, so use a very loose
+        // absolute tolerance here and let the relative criterion control convergence.
+        newton_opts.rel_tolerance = tol;
+        newton_opts.abs_tolerance = 1.0e30;
       }
     }
   }
@@ -333,8 +337,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     if (eq->tolerance.defined()) {
       const double tol = eq->tolerance.value();
       if (tol > 0.0) {
-        opts.newton.abs_tolerance = tol;
-        opts.newton.rel_tolerance = 0.0;
+        // Legacy semantics: <Add_equation><Tolerance> is a *relative* tolerance (see eqType::tol).
+        //
+        // The FE Newton driver checks both absolute and relative tolerances, so use a very loose
+        // absolute tolerance here and let the relative criterion control convergence.
+        opts.newton.rel_tolerance = tol;
+        opts.newton.abs_tolerance = 1.0e30;
       }
     }
   }

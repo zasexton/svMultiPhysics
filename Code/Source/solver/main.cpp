@@ -876,9 +876,21 @@ int main(int argc, char *argv[])
   // Early dispatch: if enabled, run the new OOP solver path and return before any legacy
   // simulation infrastructure is created (ComMod is never constructed/populated).
   if (application::core::ApplicationDriver::shouldUseNewSolver(file_name)) {
-    application::core::ApplicationDriver::run(file_name);
-    MPI_Finalize();
-    return 0;
+    try {
+      application::core::ApplicationDriver::run(file_name);
+      MPI_Finalize();
+      return 0;
+    } catch (const std::exception& e) {
+      std::cerr << "[svMultiPhysics] ERROR: New OOP solver failed: " << e.what() << std::endl;
+      MPI_Abort(MPI_COMM_WORLD, 1);
+      MPI_Finalize();
+      return 1;
+    } catch (...) {
+      std::cerr << "[svMultiPhysics] ERROR: New OOP solver failed with an unknown exception." << std::endl;
+      MPI_Abort(MPI_COMM_WORLD, 1);
+      MPI_Finalize();
+      return 1;
+    }
   }
 
   // Create a Simulation object that stores all data structures for a simulation.
