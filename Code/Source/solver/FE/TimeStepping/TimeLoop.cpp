@@ -302,6 +302,27 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     }
     history.primeDtHistory(history.dtPrev() > 0.0 ? history.dtPrev() : history.dt());
 
+    // Ensure the initial time-history states satisfy strong constraints (Dirichlet, etc.).
+    //
+    // Many transient formulations include dt(u) terms that use uPrev/uPrev2. If the history
+    // states do not satisfy inhomogeneous Dirichlet data at t0 (e.g., nonzero inlet velocity),
+    // the first nonlinear solve can start from an inconsistent dt(u) jump and fail to converge.
+    //
+    // For fresh runs (stepIndex==0), treat all allocated history states as the initial condition
+    // at t0 and distribute constraints accordingly.
+    if (history.stepIndex() == 0) {
+        auto& sys = transient.system();
+        const auto& constraints = sys.constraints();
+        if (!constraints.empty()) {
+            sys.updateConstraints(t0, history.dt());
+            constraints.distribute(history.u());
+            for (int k = 1; k <= history.historyDepth(); ++k) {
+                constraints.distribute(history.uPrevK(k));
+            }
+            history.updateGhosts();
+        }
+    }
+
     auto scratch_vec0 = factory.createVector(n_dofs);
     auto scratch_vec1 = factory.createVector(n_dofs);
     auto scratch_vec2 = factory.createVector(n_dofs);
