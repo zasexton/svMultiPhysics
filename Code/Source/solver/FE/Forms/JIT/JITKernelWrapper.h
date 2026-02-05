@@ -87,6 +87,9 @@ public:
     [[nodiscard]] bool isMatrixOnly() const noexcept override;
     [[nodiscard]] bool isVectorOnly() const noexcept override;
 
+    [[nodiscard]] const assembly::AssemblyKernel& fallbackKernel() const noexcept { return *fallback_; }
+    [[nodiscard]] std::shared_ptr<const assembly::AssemblyKernel> fallbackKernelShared() const noexcept { return fallback_; }
+
 private:
     enum class WrappedKind : std::uint8_t {
         Unknown = 0u,

@@ -392,7 +392,7 @@ TEST(GhostBufferTest, Clear) {
     GhostBuffer buffer;
     buffer.dest_rank = 1;
     buffer.entries.push_back({1, 2, 1.0});
-    buffer.vector_entries.push_back(3.0);
+    buffer.vector_entries.push_back({/*global_row=*/3, /*value=*/3.0});
 
     buffer.clear();
 
@@ -550,13 +550,16 @@ TEST(GhostContributionManagerMPITest, TwoRankGhostExchange) {
 
     if (rank == 0) {
         EXPECT_FALSE(manager.addMatrixContribution(/*row=*/10, /*col=*/0, /*value=*/2.0));
+        EXPECT_FALSE(manager.addVectorContribution(/*row=*/10, /*value=*/-1.5));
     } else {
         EXPECT_FALSE(manager.addMatrixContribution(/*row=*/8, /*col=*/10, /*value=*/3.0));
+        EXPECT_FALSE(manager.addVectorContribution(/*row=*/8, /*value=*/4.5));
     }
 
     manager.exchangeContributions();
 
     const auto received = manager.getReceivedMatrixContributions();
+    const auto received_vec = manager.getReceivedVectorContributions();
     if (rank == 0) {
         bool found = false;
         for (const auto& e : received) {
@@ -565,6 +568,14 @@ TEST(GhostContributionManagerMPITest, TwoRankGhostExchange) {
             }
         }
         EXPECT_TRUE(found);
+
+        bool found_vec = false;
+        for (const auto& e : received_vec) {
+            if (e.global_row == 8 && e.value == 4.5) {
+                found_vec = true;
+            }
+        }
+        EXPECT_TRUE(found_vec);
     } else {
         bool found = false;
         for (const auto& e : received) {
@@ -573,6 +584,14 @@ TEST(GhostContributionManagerMPITest, TwoRankGhostExchange) {
             }
         }
         EXPECT_TRUE(found);
+
+        bool found_vec = false;
+        for (const auto& e : received_vec) {
+            if (e.global_row == 10 && e.value == -1.5) {
+                found_vec = true;
+            }
+        }
+        EXPECT_TRUE(found_vec);
     }
 }
 

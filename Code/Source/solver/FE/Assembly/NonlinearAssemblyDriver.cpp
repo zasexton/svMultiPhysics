@@ -32,11 +32,13 @@
 #include "AssemblyConstraintDistributor.h"
 #include "Constraints/AffineConstraints.h"
 #include "Core/FEException.h"
+#include "Dofs/DofMap.h"
 
 #include <chrono>
 #include <cmath>
 #include <algorithm>
 #include <sstream>
+#include <utility>
 
 namespace svmp {
 namespace FE {
@@ -269,8 +271,8 @@ void NonlinearAssemblyDriver::residualCellLoop(GlobalSystemView& residual_view) 
     loop_->cellLoop(
         *test_space_, *trial_space_, required,
         // Compute callback
-        [this](const CellWorkItem& cell, AssemblyContext& context, KernelOutput& output) {
-            prepareSolutionValues(context, cell.cell_id);
+        [this, required](const CellWorkItem& cell, AssemblyContext& context, KernelOutput& output) {
+            prepareSolutionValues(context, cell.cell_id, required);
             output.clear();
             output.reserve(context.numTestDofs(), context.numTrialDofs(), false, true);
             kernel_->computeResidual(context, output);
@@ -301,8 +303,8 @@ void NonlinearAssemblyDriver::jacobianCellLoop(GlobalSystemView& jacobian_view) 
     loop_->cellLoop(
         *test_space_, *trial_space_, required,
         // Compute callback
-        [this](const CellWorkItem& cell, AssemblyContext& context, KernelOutput& output) {
-            prepareSolutionValues(context, cell.cell_id);
+        [this, required](const CellWorkItem& cell, AssemblyContext& context, KernelOutput& output) {
+            prepareSolutionValues(context, cell.cell_id, required);
             output.clear();
             output.reserve(context.numTestDofs(), context.numTrialDofs(), true, false);
             kernel_->computeJacobian(context, output);
@@ -338,8 +340,8 @@ void NonlinearAssemblyDriver::combinedCellLoop(
     loop_->cellLoop(
         *test_space_, *trial_space_, required,
         // Compute callback
-        [this](const CellWorkItem& cell, AssemblyContext& context, KernelOutput& output) {
-            prepareSolutionValues(context, cell.cell_id);
+        [this, required](const CellWorkItem& cell, AssemblyContext& context, KernelOutput& output) {
+            prepareSolutionValues(context, cell.cell_id, required);
             output.clear();
             output.reserve(context.numTestDofs(), context.numTrialDofs(), true, true);
 
@@ -390,15 +392,40 @@ void NonlinearAssemblyDriver::jacobianBoundaryLoop(GlobalSystemView& /*jacobian_
 
 void NonlinearAssemblyDriver::prepareSolutionValues(
     AssemblyContext& context,
-    GlobalIndex /*cell_id*/)
+    GlobalIndex cell_id,
+    RequiredData required_data)
 {
-    // This would extract solution values for the cell DOFs and store in context
-    // The actual implementation depends on AssemblyContext and DofMap APIs
+    const bool need_solution =
+        hasFlag(required_data, RequiredData::SolutionCoefficients) ||
+        hasFlag(required_data, RequiredData::SolutionValues) ||
+        hasFlag(required_data, RequiredData::SolutionGradients) ||
+        hasFlag(required_data, RequiredData::SolutionHessians) ||
+        hasFlag(required_data, RequiredData::SolutionLaplacians);
 
-    // Placeholder: context should be configured with:
-    // - Solution values at DOFs
-    // - Solution gradients at quadrature points (if needed)
-    context.setSolutionValues(current_solution_);
+    if (!need_solution) {
+        return;
+    }
+
+    FE_THROW_IF(dof_map_ == nullptr, "NonlinearAssemblyDriver::prepareSolutionValues: DofMap not configured");
+    FE_THROW_IF(current_solution_.empty(), "NonlinearAssemblyDriver::prepareSolutionValues: current solution not set");
+
+    const auto cell_dofs = dof_map_->getCellDofs(cell_id);
+    const auto n_trial = context.numTrialDofs();
+    FE_THROW_IF(cell_dofs.size() < static_cast<std::size_t>(n_trial),
+                "NonlinearAssemblyDriver::prepareSolutionValues: cell DOF list is smaller than trial DOFs");
+
+    thread_local std::vector<Real> local_coefficients;
+    local_coefficients.resize(static_cast<std::size_t>(n_trial));
+
+    for (LocalIndex j = 0; j < n_trial; ++j) {
+        const GlobalIndex gdof = cell_dofs[static_cast<std::size_t>(j)];
+        FE_THROW_IF(gdof < 0, "NonlinearAssemblyDriver::prepareSolutionValues: negative DOF id");
+        FE_THROW_IF(static_cast<std::size_t>(gdof) >= current_solution_.size(),
+                    "NonlinearAssemblyDriver::prepareSolutionValues: solution vector is too small for cell DOFs");
+        local_coefficients[static_cast<std::size_t>(j)] = current_solution_[static_cast<std::size_t>(gdof)];
+    }
+
+    context.setSolutionCoefficients(local_coefficients);
 }
 
 void NonlinearAssemblyDriver::applyConstraints(
@@ -459,15 +486,34 @@ JacobianVerificationResult NonlinearAssemblyDriver::verifyJacobianFD(
     FE_THROW_IF(!isConfigured(), "Driver not configured for verification");
     FE_THROW_IF(current_solution_.empty(), "Solution not set for verification");
 
-    GlobalIndex n = jacobian_view.numRows();
+    const GlobalIndex n = jacobian_view.numRows();
+    FE_THROW_IF(n <= 0, "verifyJacobianFD: invalid Jacobian size");
+    FE_THROW_IF(static_cast<std::size_t>(n) != current_solution_.size(),
+                "verifyJacobianFD: solution size does not match Jacobian size");
 
-    // Compute base residual
-    residual_base_.resize(static_cast<std::size_t>(n), 0.0);
-    residual_perturbed_.resize(static_cast<std::size_t>(n), 0.0);
+    // Compute base residual F(u)
+    residual_base_.assign(static_cast<std::size_t>(n), 0.0);
+    {
+        DenseVectorView base_residual_view(n);
+        base_residual_view.zero();
+
+        residualCellLoop(base_residual_view);
+        if (options_.include_boundary && !options_.boundary_markers.empty()) {
+            residualBoundaryLoop(base_residual_view);
+        }
+        if (options_.apply_constraints && constraints_ != nullptr) {
+            applyConstraints(nullptr, &base_residual_view);
+        }
+        base_residual_view.endAssemblyPhase();
+
+        const auto base = base_residual_view.data();
+        FE_THROW_IF(base.size() != residual_base_.size(),
+                    "verifyJacobianFD: base residual size mismatch");
+        std::copy(base.begin(), base.end(), residual_base_.begin());
+    }
+
+    residual_perturbed_.assign(static_cast<std::size_t>(n), 0.0);
     perturbed_solution_ = current_solution_;
-
-    // We need a temporary view for residual computation
-    // For verification, we compute residual difference
 
     Real max_abs_err = 0.0;
     Real max_rel_err = 0.0;
@@ -548,13 +594,38 @@ NonlinearAssemblyStats NonlinearAssemblyDriver::assembleJacobianFD(
 
     last_stats_ = NonlinearAssemblyStats{};
 
-    GlobalIndex n = static_cast<GlobalIndex>(current_solution_.size());
+    const GlobalIndex n = fd_jacobian_view.numRows();
+    FE_THROW_IF(n <= 0, "assembleJacobianFD: invalid Jacobian size");
+    FE_THROW_IF(fd_jacobian_view.numCols() != n, "assembleJacobianFD: FD Jacobian view must be square");
+    FE_THROW_IF(static_cast<std::size_t>(n) != current_solution_.size(),
+                "assembleJacobianFD: solution size does not match Jacobian size");
 
     // Zero Jacobian
     fd_jacobian_view.zero();
     fd_jacobian_view.beginAssemblyPhase();
 
     perturbed_solution_ = current_solution_;
+
+    // Base residual F(u)
+    residual_base_.assign(static_cast<std::size_t>(n), 0.0);
+    {
+        DenseVectorView base_residual_view(n);
+        base_residual_view.zero();
+
+        residualCellLoop(base_residual_view);
+        if (options_.include_boundary && !options_.boundary_markers.empty()) {
+            residualBoundaryLoop(base_residual_view);
+        }
+        if (options_.apply_constraints && constraints_ != nullptr) {
+            applyConstraints(nullptr, &base_residual_view);
+        }
+        base_residual_view.endAssemblyPhase();
+
+        const auto base = base_residual_view.data();
+        FE_THROW_IF(base.size() != residual_base_.size(),
+                    "assembleJacobianFD: base residual size mismatch");
+        std::copy(base.begin(), base.end(), residual_base_.begin());
+    }
 
     // For each column
     for (GlobalIndex j = 0; j < n; ++j) {
@@ -602,42 +673,36 @@ void NonlinearAssemblyDriver::computeFDColumn(
     std::vector<Real>& column,
     Real h)
 {
-    // This requires computing residuals with perturbed and base solutions
-    // For a proper implementation, we would:
-    // 1. Set solution to perturbed_solution_
-    // 2. Assemble residual F(u + h*e_j)
-    // 3. Compute (F(u + h*e_j) - F(u)) / h
+    FE_THROW_IF(h == 0.0, "computeFDColumn: perturbation step is zero");
+    FE_THROW_IF(residual_base_.size() != column.size(),
+                "computeFDColumn: base residual not available (callers must compute F(u) first)");
 
-    // Simplified placeholder - actual implementation needs temporary residual views
-    GlobalIndex n = static_cast<GlobalIndex>(column.size());
+    const GlobalIndex n = static_cast<GlobalIndex>(column.size());
 
-    // Compute base residual (should be cached)
-    std::vector<Real> save_solution = current_solution_;
-    current_solution_ = perturbed_solution_;
+    // Assemble residual at perturbed solution, then difference.
+    DenseVectorView perturbed_residual_view(n);
+    perturbed_residual_view.zero();
 
-    // Note: This is a placeholder. Real implementation needs a proper
-    // residual assembly that returns the result as a vector.
-    // We would need to:
-    // - Create a temporary vector view
-    // - Assemble residual with perturbed solution
-    // - Subtract base residual
-    // - Divide by h
+    std::swap(current_solution_, perturbed_solution_);
 
-    // For now, return zeros (placeholder)
-    std::fill(column.begin(), column.end(), Real(0));
+    residualCellLoop(perturbed_residual_view);
+    if (options_.include_boundary && !options_.boundary_markers.empty()) {
+        residualBoundaryLoop(perturbed_residual_view);
+    }
+    if (options_.apply_constraints && constraints_ != nullptr) {
+        applyConstraints(nullptr, &perturbed_residual_view);
+    }
+    perturbed_residual_view.endAssemblyPhase();
 
-    current_solution_ = save_solution;
+    std::swap(current_solution_, perturbed_solution_);
 
-    // Real implementation:
-    // DenseSystemView temp_residual(n);
-    // setCurrentSolution(perturbed_solution_);
-    // assembleResidual(temp_residual);
-    // for (GlobalIndex i = 0; i < n; ++i) {
-    //     column[i] = (temp_residual.getVectorEntry(i) - residual_base_[i]) / h;
-    // }
+    const auto pert = perturbed_residual_view.data();
+    FE_THROW_IF(pert.size() != column.size(), "computeFDColumn: residual size mismatch");
 
-    (void)h; // Suppress unused warning in placeholder
-    (void)n;
+    for (GlobalIndex i = 0; i < n; ++i) {
+        column[static_cast<std::size_t>(i)] =
+            (pert[static_cast<std::size_t>(i)] - residual_base_[static_cast<std::size_t>(i)]) / h;
+    }
 }
 
 // ============================================================================

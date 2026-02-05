@@ -18,6 +18,7 @@
 #include "Backends/Interfaces/GenericVector.h"
 
 #include "Forms/FormKernels.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 
 #include "Spaces/FunctionSpace.h"
 #include "Sparsity/DistributedSparsityPattern.h"
@@ -509,7 +510,7 @@ void gatherTimeDerivativeFieldsFromIR(const forms::FormIR& ir,
     }
 }
 
-void gatherTimeDerivativeFieldsFromKernel(const std::shared_ptr<assembly::AssemblyKernel>& kernel,
+void gatherTimeDerivativeFieldsFromKernel(const assembly::AssemblyKernel* kernel,
                                           FieldId kernel_trial_field,
                                           std::unordered_set<FieldId>& out)
 {
@@ -517,17 +518,28 @@ void gatherTimeDerivativeFieldsFromKernel(const std::shared_ptr<assembly::Assemb
         return;
     }
 
-    if (const auto* k = dynamic_cast<const forms::NonlinearFormKernel*>(kernel.get())) {
+    if (const auto* k = dynamic_cast<const forms::jit::JITKernelWrapper*>(kernel)) {
+        gatherTimeDerivativeFieldsFromKernel(&k->fallbackKernel(), kernel_trial_field, out);
+        return;
+    }
+
+    if (const auto* k = dynamic_cast<const forms::SymbolicNonlinearFormKernel*>(kernel)) {
+        gatherTimeDerivativeFieldsFromIR(k->residualIR(), kernel_trial_field, out);
+        gatherTimeDerivativeFieldsFromIR(k->tangentIR(), kernel_trial_field, out);
+        return;
+    }
+
+    if (const auto* k = dynamic_cast<const forms::NonlinearFormKernel*>(kernel)) {
         gatherTimeDerivativeFieldsFromIR(k->residualIR(), kernel_trial_field, out);
         return;
     }
 
-    if (const auto* k = dynamic_cast<const forms::FormKernel*>(kernel.get())) {
+    if (const auto* k = dynamic_cast<const forms::FormKernel*>(kernel)) {
         gatherTimeDerivativeFieldsFromIR(k->ir(), kernel_trial_field, out);
         return;
     }
 
-    if (const auto* k = dynamic_cast<const forms::LinearFormKernel*>(kernel.get())) {
+    if (const auto* k = dynamic_cast<const forms::LinearFormKernel*>(kernel)) {
         gatherTimeDerivativeFieldsFromIR(k->bilinearIR(), kernel_trial_field, out);
         if (k->linearIR().has_value()) {
             gatherTimeDerivativeFieldsFromIR(*k->linearIR(), kernel_trial_field, out);
@@ -556,16 +568,16 @@ std::vector<FieldId> FESystem::timeDerivativeFields(const OperatorTag& op) const
     const auto& def = operator_registry_.get(op);
 
     for (const auto& term : def.cells) {
-        gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+        gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
     }
     for (const auto& term : def.boundary) {
-        gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+        gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
     }
     for (const auto& term : def.interior) {
-        gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+        gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
     }
     for (const auto& term : def.interface_faces) {
-        gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+        gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
     }
 
     return sortedUnique(std::move(fields));
@@ -577,16 +589,16 @@ std::vector<FieldId> FESystem::timeDerivativeFields() const
     for (const auto& op : operator_registry_.list()) {
         const auto& def = operator_registry_.get(op);
         for (const auto& term : def.cells) {
-            gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+            gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
         }
         for (const auto& term : def.boundary) {
-            gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+            gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
         }
         for (const auto& term : def.interior) {
-            gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+            gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
         }
         for (const auto& term : def.interface_faces) {
-            gatherTimeDerivativeFieldsFromKernel(term.kernel, term.trial_field, fields);
+            gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
         }
     }
     return sortedUnique(std::move(fields));

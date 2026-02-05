@@ -104,12 +104,24 @@ struct GhostContribution {
 };
 
 /**
+ * @brief Single ghost vector contribution entry
+ */
+struct GhostVectorContribution {
+    GlobalIndex global_row;  ///< Global row index
+    Real value;              ///< Contribution value
+
+    bool operator<(const GhostVectorContribution& other) const noexcept {
+        return global_row < other.global_row;
+    }
+};
+
+/**
  * @brief Buffer for ghost contributions destined for a single rank
  */
 struct GhostBuffer {
     int dest_rank;                          ///< Destination rank
     std::vector<GhostContribution> entries; ///< Contributions to send
-    std::vector<Real> vector_entries;       ///< Vector contributions (row, value pairs)
+    std::vector<GhostVectorContribution> vector_entries; ///< Vector contributions to send
 
     void clear() {
         entries.clear();
@@ -234,6 +246,26 @@ public:
      */
     void setDeterministic(bool deterministic) { deterministic_ = deterministic; }
 
+    /**
+     * @brief Set an offset applied to system DOF indices for ownership queries
+     *
+     * Some workflows assemble into a larger global system using a row DOF offset
+     * (multi-field block assembly). In those cases the indices inserted into the
+     * global matrix/vector are `row_offset + local_dof`, while DOF ownership is
+     * often defined on the underlying row DofMap indexed by `local_dof`.
+     *
+     * This offset is subtracted from any row index passed to isOwned()/getOwnerRank()
+     * before querying ownership.
+     *
+     * Default is 0 (no offset).
+     */
+    void setOwnershipOffset(GlobalIndex offset) noexcept { ownership_offset_ = offset; }
+
+    /**
+     * @brief Get the current ownership-query offset
+     */
+    [[nodiscard]] GlobalIndex ownershipOffset() const noexcept { return ownership_offset_; }
+
     // =========================================================================
     // Initialization
     // =========================================================================
@@ -353,7 +385,7 @@ public:
     /**
      * @brief Get received vector contributions
      */
-    [[nodiscard]] std::span<const std::pair<GlobalIndex, Real>> getReceivedVectorContributions() const;
+    [[nodiscard]] std::span<const GhostVectorContribution> getReceivedVectorContributions() const;
 
     /**
      * @brief Clear received contributions after processing
@@ -433,6 +465,7 @@ private:
     // Configuration
     const dofs::DofMap* dof_map_{nullptr};
     const dofs::GhostDofManager* ghost_dof_manager_{nullptr};
+    GlobalIndex ownership_offset_{0};
     GhostPolicy policy_{GhostPolicy::ReverseScatter};
     bool deterministic_{true};
 
@@ -455,7 +488,7 @@ private:
 
     // Receive buffers
     std::vector<GhostContribution> received_matrix_;
-    std::vector<std::pair<GlobalIndex, Real>> received_vector_;
+    std::vector<GhostVectorContribution> received_vector_;
 
     // State
     bool initialized_{false};
@@ -471,10 +504,7 @@ private:
     std::vector<std::vector<char>> recv_buffers_raw_;
 #endif
 
-    // Local ownership range (for fast ownership check)
-    GlobalIndex owned_begin_{0};
-    GlobalIndex owned_end_{0};
-    bool has_contiguous_ownership_{false};
+    // Note: ownership is queried via dof_map_->isOwnedDof().
 };
 
 } // namespace assembly

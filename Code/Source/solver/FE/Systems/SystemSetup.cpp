@@ -726,9 +726,57 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
 
     monolithic_map.setNumLocalDofs(part.localOwnedSize());
 
+    // Systems assembly relies on DOF ownership queries for both OwnedRowsOnly and ReverseScatter
+    // ghost policies. The monolithic DofMap is built by offsetting per-field DOF indices, so we
+    // re-expose ownership by forwarding to each field's DofMap ownership function.
+    monolithic_map.setMyRank(opts.dof_options.my_rank);
+    {
+        std::vector<GlobalIndex> offsets;
+        std::vector<GlobalIndex> sizes;
+        std::vector<const dofs::DofMap*> maps;
+        offsets.reserve(field_registry_.size());
+        sizes.reserve(field_registry_.size());
+        maps.reserve(field_registry_.size());
+
+        for (const auto& rec : field_registry_.records()) {
+            const auto idx = static_cast<std::size_t>(rec.id);
+            offsets.push_back(field_dof_offsets_[idx]);
+            sizes.push_back(field_dof_handlers_[idx].getNumDofs());
+            maps.push_back(&field_dof_handlers_[idx].getDofMap());
+        }
+
+        monolithic_map.setDofOwnership(
+            [offsets = std::move(offsets),
+             sizes = std::move(sizes),
+             maps = std::move(maps)](GlobalIndex global_dof) -> int {
+                if (global_dof < 0 || offsets.empty()) {
+                    return 0;
+                }
+
+                const auto it = std::upper_bound(offsets.begin(), offsets.end(), global_dof);
+                const std::size_t block =
+                    (it == offsets.begin()) ? 0u : static_cast<std::size_t>(std::distance(offsets.begin(), it) - 1);
+                if (block >= offsets.size() || block >= sizes.size() || block >= maps.size()) {
+                    return 0;
+                }
+
+                const GlobalIndex local = global_dof - offsets[block];
+                if (local < 0 || local >= sizes[block]) {
+                    return 0;
+                }
+
+                const auto* map = maps[block];
+                if (!map) {
+                    return 0;
+                }
+                return map->getDofOwner(local);
+            });
+    }
+
     dof_handler_ = dofs::DofHandler{};
     dof_handler_.setDofMap(std::move(monolithic_map));
     dof_handler_.setPartition(std::move(part));
+    dof_handler_.setRankInfo(opts.dof_options.my_rank, opts.dof_options.world_size);
     if (merged_entity_map) {
         dof_handler_.setEntityDofMap(std::move(merged_entity_map));
     }
@@ -809,12 +857,20 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     // In MPI runs we must construct with an MPI communicator so constraints on shared/ghost DOFs
     // are imported from the owning rank before close()/assembly.
 #if FE_HAS_MPI
-    constraints::ParallelConstraints parallel(MPI_COMM_WORLD, dof_handler_.getPartition());
+    int mpi_initialized_constraints = 0;
+    MPI_Initialized(&mpi_initialized_constraints);
+    std::optional<constraints::ParallelConstraints> parallel;
+    if (mpi_initialized_constraints) {
+        parallel.emplace(MPI_COMM_WORLD, dof_handler_.getPartition());
+    } else {
+        parallel.emplace(dof_handler_.getPartition());
+    }
 #else
-    constraints::ParallelConstraints parallel(dof_handler_.getPartition());
+    std::optional<constraints::ParallelConstraints> parallel;
+    parallel.emplace(dof_handler_.getPartition());
 #endif
-    if (parallel.isParallel()) {
-        parallel.synchronize(affine_constraints_);
+    if (parallel && parallel->isParallel()) {
+        parallel->synchronize(affine_constraints_);
     }
 
     affine_constraints_.close();

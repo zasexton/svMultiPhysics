@@ -1805,6 +1805,12 @@ if(FE_BUILD_TESTS)
 			                Tests/Unit/Forms/test_Einsum.cpp
 			                Tests/Unit/Forms/test_FormsPerformance.cpp
 			                Tests/Unit/Forms/test_NonlinearFormKernel.cpp
+			                Tests/Unit/Forms/test_NonlinearFormKernel_ElementCoverage.cpp
+			                Tests/Unit/Forms/test_NonlinearFormKernel_Triangle3.cpp
+			                Tests/Unit/Forms/test_NonlinearFormKernel_Boundary.cpp
+			                Tests/Unit/Forms/test_NonlinearFormKernel_TimeAndHistory.cpp
+			                Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_MatrixAndEigenOps.cpp
+			                Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_SmoothOps.cpp
 			                Tests/Unit/Forms/test_SymbolicDifferentiation.cpp
 	                    Tests/Unit/Forms/test_HessianVectorProduct.cpp
 		                Tests/Unit/Forms/Tensor/test_TensorIndex.cpp
@@ -1874,7 +1880,9 @@ if(FE_BUILD_TESTS)
             # Phase 2: HIGH priority tests
             Tests/Unit/Assembly/test_AssemblyLoop.cpp
             Tests/Unit/Assembly/test_AssemblyConstraintDistributor.cpp
+            Tests/Unit/Assembly/test_AssemblyConstraintDistributor_Integration.cpp
             Tests/Unit/Assembly/test_NonlinearAssemblyDriver.cpp
+            Tests/Unit/Assembly/test_NonlinearAssemblyDriver_EndToEnd.cpp
             Tests/Unit/Assembly/test_ColoredAssembler.cpp
             Tests/Unit/Assembly/test_MatrixFreeAssembler.cpp
             Tests/Unit/Assembly/test_BlockAssembler.cpp
@@ -1885,6 +1893,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/Assembly/test_VectorizationHelper.cpp
             Tests/Unit/Assembly/test_SymbolicAssembler.cpp
             Tests/Unit/Assembly/test_DeviceAssembler.cpp
+            Tests/Unit/Assembly/test_ManufacturedSolutionConvergence.cpp
             # Phase 4: LOW priority / Advanced tests
             Tests/Unit/Assembly/test_AssemblyScheduler.cpp
             Tests/Unit/Assembly/test_AssemblyStatistics.cpp
@@ -1919,6 +1928,7 @@ if(FE_BUILD_TESTS)
 	                Tests/Unit/Systems/test_AssemblerSelection.cpp
 	                Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp
                 Tests/Unit/Systems/test_NavierStokesCoupled.cpp
+                Tests/Unit/Systems/test_JacobianVerification.cpp
                 Tests/Unit/Systems/test_SystemConstraints.cpp
                 Tests/Unit/Systems/test_VectorBasisConstraints.cpp
                 Tests/Unit/Systems/test_StrongDirichletConstraint.cpp
@@ -1995,7 +2005,7 @@ if(FE_BUILD_TESTS)
         file(GLOB FE_CONSTRAINTS_MPI_TEST_SOURCES
             Tests/Unit/Constraints/test_*MPI*.cpp
 	        )
-	        if(FE_CONSTRAINTS_MPI_TEST_SOURCES)
+        if(FE_CONSTRAINTS_MPI_TEST_SOURCES)
 	            add_executable(test_fe_constraints_mpi ${FE_CONSTRAINTS_MPI_TEST_SOURCES})
 	            _svmp_fe_target_enable_warnings(test_fe_constraints_mpi)
 	            # MPI tests provide their own main() to call MPI_Init/MPI_Finalize,
@@ -2015,6 +2025,33 @@ if(FE_BUILD_TESTS)
             )
             add_fe_mpi_test(test_fe_constraints_mpi 2)
             add_fe_mpi_test(test_fe_constraints_mpi 4)
+        endif()
+
+        if(FE_ENABLE_ASSEMBLY)
+            file(GLOB FE_ASSEMBLY_MPI_TEST_SOURCES
+                Tests/Unit/Assembly/test_*MPI*.cpp
+            )
+            if(FE_ASSEMBLY_MPI_TEST_SOURCES)
+                add_executable(test_fe_assembly_mpi ${FE_ASSEMBLY_MPI_TEST_SOURCES})
+                _svmp_fe_target_enable_warnings(test_fe_assembly_mpi)
+                # MPI tests provide their own main() to call MPI_Init/MPI_Finalize,
+                # so do not link gtest_main here.
+                if(TARGET GTest::gtest)
+                    target_link_libraries(test_fe_assembly_mpi PRIVATE svfe GTest::gtest)
+                else()
+                    set(_fe_assembly_mpi_gtest_libs ${GTEST_LIBRARIES})
+                    list(REMOVE_ITEM _fe_assembly_mpi_gtest_libs gtest_main GTest::gtest_main)
+                    target_link_libraries(test_fe_assembly_mpi PRIVATE svfe ${_fe_assembly_mpi_gtest_libs})
+                endif()
+                # Avoid leaking environment-specific RUNPATHs into test executables.
+                set_target_properties(test_fe_assembly_mpi PROPERTIES
+                    SKIP_BUILD_RPATH TRUE
+                    BUILD_RPATH ""
+                    INSTALL_RPATH ""
+                )
+                add_fe_mpi_test(test_fe_assembly_mpi 2)
+                add_fe_mpi_test(test_fe_assembly_mpi 4)
+            endif()
         endif()
 
 	        if(FE_ENABLE_ASSEMBLY)

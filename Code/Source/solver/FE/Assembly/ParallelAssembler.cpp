@@ -38,6 +38,239 @@ void set_mpi_rank_and_size(MPI_Comm comm, int& rank, int& size)
 } // namespace
 #endif
 
+namespace {
+
+class GhostRoutingView final : public GlobalSystemView {
+public:
+    GhostRoutingView(GlobalSystemView& base,
+                     GhostContributionManager& ghost_manager,
+                     GhostPolicy policy)
+        : base_(&base)
+        , ghost_manager_(&ghost_manager)
+        , policy_(policy)
+    {
+    }
+
+    // Matrix operations
+    void addMatrixEntries(std::span<const GlobalIndex> dofs,
+                          std::span<const Real> local_matrix,
+                          AddMode mode = AddMode::Add) override
+    {
+        addMatrixEntries(dofs, dofs, local_matrix, mode);
+    }
+
+    void addMatrixEntries(std::span<const GlobalIndex> row_dofs,
+                          std::span<const GlobalIndex> col_dofs,
+                          std::span<const Real> local_matrix,
+                          AddMode mode = AddMode::Add) override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+
+        if (policy_ != GhostPolicy::ReverseScatter) {
+            base_->addMatrixEntries(row_dofs, col_dofs, local_matrix, mode);
+            return;
+        }
+
+        owned_contributions_.clear();
+        ghost_manager_->addMatrixContributions(row_dofs, col_dofs, local_matrix, owned_contributions_);
+        for (const auto& c : owned_contributions_) {
+            base_->addMatrixEntry(c.global_row, c.global_col, c.value, mode);
+        }
+    }
+
+    void addMatrixEntry(GlobalIndex row,
+                        GlobalIndex col,
+                        Real value,
+                        AddMode mode = AddMode::Add) override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+
+        if (ghost_manager_->isOwned(row)) {
+            base_->addMatrixEntry(row, col, value, mode);
+            return;
+        }
+
+        if (policy_ == GhostPolicy::OwnedRowsOnly) {
+            return;
+        }
+
+        // Non-additive operations (e.g. Dirichlet row setDiagonal via constraints) must be
+        // applied only by the owning rank to avoid over-counting under ReverseScatter.
+        if (mode == AddMode::Insert) {
+            return;
+        }
+
+        ghost_manager_->addMatrixContribution(row, col, value);
+    }
+
+    void setDiagonal(std::span<const GlobalIndex> dofs,
+                     std::span<const Real> values) override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+        FE_THROW_IF(dofs.size() != values.size(), FEException,
+                    "GhostRoutingView::setDiagonal: size mismatch");
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            setDiagonal(dofs[i], values[i]);
+        }
+    }
+
+    void setDiagonal(GlobalIndex dof, Real value) override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+        if (!ghost_manager_->isOwned(dof)) {
+            return;
+        }
+        base_->setDiagonal(dof, value);
+    }
+
+    void zeroRows(std::span<const GlobalIndex> rows,
+                  bool set_diagonal = true) override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+        owned_rows_.clear();
+        owned_rows_.reserve(rows.size());
+        for (const auto r : rows) {
+            if (ghost_manager_->isOwned(r)) {
+                owned_rows_.push_back(r);
+            }
+        }
+        if (!owned_rows_.empty()) {
+            base_->zeroRows(std::span<const GlobalIndex>(owned_rows_), set_diagonal);
+        }
+    }
+
+    // Vector operations
+    void addVectorEntries(std::span<const GlobalIndex> dofs,
+                          std::span<const Real> local_vector,
+                          AddMode mode = AddMode::Add) override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+        FE_THROW_IF(dofs.size() != local_vector.size(), FEException,
+                    "GhostRoutingView::addVectorEntries: size mismatch");
+
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            addVectorEntry(dofs[i], local_vector[i], mode);
+        }
+    }
+
+    void addVectorEntry(GlobalIndex dof,
+                        Real value,
+                        AddMode mode = AddMode::Add) override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+
+        if (ghost_manager_->isOwned(dof)) {
+            base_->addVectorEntry(dof, value, mode);
+            return;
+        }
+
+        if (policy_ == GhostPolicy::OwnedRowsOnly) {
+            return;
+        }
+
+        // Insert semantics (used by constraints to set Dirichlet values) must not be
+        // reverse-scattered additively from non-owning ranks.
+        if (mode == AddMode::Insert) {
+            return;
+        }
+
+        ghost_manager_->addVectorContribution(dof, value);
+    }
+
+    void setVectorEntries(std::span<const GlobalIndex> dofs,
+                          std::span<const Real> values) override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+        FE_THROW_IF(dofs.size() != values.size(), FEException,
+                    "GhostRoutingView::setVectorEntries: size mismatch");
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            if (!ghost_manager_->isOwned(dofs[i])) {
+                continue;
+            }
+            base_->setVectorEntries(std::span<const GlobalIndex>(&dofs[i], 1u),
+                                    std::span<const Real>(&values[i], 1u));
+        }
+    }
+
+    void zeroVectorEntries(std::span<const GlobalIndex> dofs) override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+        owned_rows_.clear();
+        owned_rows_.reserve(dofs.size());
+        for (const auto d : dofs) {
+            if (ghost_manager_->isOwned(d)) {
+                owned_rows_.push_back(d);
+            }
+        }
+        if (!owned_rows_.empty()) {
+            base_->zeroVectorEntries(std::span<const GlobalIndex>(owned_rows_));
+        }
+    }
+
+    [[nodiscard]] Real getVectorEntry(GlobalIndex dof) const override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+        return base_->getVectorEntry(dof);
+    }
+
+    // Assembly lifecycle
+    void beginAssemblyPhase() override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+        base_->beginAssemblyPhase();
+    }
+
+    void endAssemblyPhase() override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+        base_->endAssemblyPhase();
+    }
+
+    void finalizeAssembly() override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+        base_->finalizeAssembly();
+    }
+
+    [[nodiscard]] AssemblyPhase getPhase() const noexcept override
+    {
+        return base_ ? base_->getPhase() : AssemblyPhase::NotStarted;
+    }
+
+    // Properties
+    [[nodiscard]] bool hasMatrix() const noexcept override { return base_ && base_->hasMatrix(); }
+    [[nodiscard]] bool hasVector() const noexcept override { return base_ && base_->hasVector(); }
+    [[nodiscard]] GlobalIndex numRows() const noexcept override { return base_ ? base_->numRows() : 0; }
+    [[nodiscard]] GlobalIndex numCols() const noexcept override { return base_ ? base_->numCols() : 0; }
+    [[nodiscard]] std::string backendName() const override
+    {
+        return base_ ? ("GhostRouting(" + base_->backendName() + ")") : "GhostRouting(null)";
+    }
+
+    // Zero and access
+    void zero() override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+        base_->zero();
+    }
+
+    [[nodiscard]] Real getMatrixEntry(GlobalIndex row, GlobalIndex col) const override
+    {
+        FE_CHECK_NOT_NULL(base_, "GhostRoutingView::base");
+        return base_->getMatrixEntry(row, col);
+    }
+
+private:
+    GlobalSystemView* base_{nullptr};
+    GhostContributionManager* ghost_manager_{nullptr};
+    GhostPolicy policy_{GhostPolicy::ReverseScatter};
+
+    std::vector<GhostContribution> owned_contributions_;
+    std::vector<GlobalIndex> owned_rows_;
+};
+
+} // namespace
+
 // ============================================================================
 // Construction
 // ============================================================================
@@ -46,6 +279,7 @@ ParallelAssembler::ParallelAssembler()
 {
 #if FE_HAS_MPI
     set_mpi_rank_and_size(comm_, my_rank_, world_size_);
+    ghost_manager_.setComm(comm_);
 #endif
 }
 
@@ -54,6 +288,7 @@ ParallelAssembler::ParallelAssembler(MPI_Comm comm)
     : comm_(comm)
 {
     set_mpi_rank_and_size(comm_, my_rank_, world_size_);
+    ghost_manager_.setComm(comm_);
 }
 #endif
 
@@ -64,6 +299,7 @@ ParallelAssembler::ParallelAssembler(const AssemblyOptions& options)
 {
 #if FE_HAS_MPI
     set_mpi_rank_and_size(comm_, my_rank_, world_size_);
+    ghost_manager_.setComm(comm_);
 #endif
 }
 
@@ -82,6 +318,29 @@ void ParallelAssembler::setDofMap(const dofs::DofMap& dof_map)
     dof_map_ = &dof_map;
     local_assembler_.setDofMap(dof_map);
     ghost_manager_.setDofMap(dof_map);
+    ghost_manager_.setOwnershipOffset(0);
+}
+
+void ParallelAssembler::setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset)
+{
+    local_assembler_.setRowDofMap(dof_map, row_offset);
+
+    // If no system-level DOF handler is configured, fall back to using the row map
+    // for ghost ownership queries. This mode cannot safely switch row maps during an
+    // active assembly phase (ghost buffers would become inconsistent).
+    if (dof_handler_ == nullptr) {
+        FE_THROW_IF(assembly_in_progress_, FEException,
+                    "ParallelAssembler::setRowDofMap: cannot change row DOF map during an active assembly phase "
+                    "unless a system-level DofHandler is configured");
+        dof_map_ = &dof_map;
+        ghost_manager_.setDofMap(dof_map);
+        ghost_manager_.setOwnershipOffset(row_offset);
+    }
+}
+
+void ParallelAssembler::setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset)
+{
+    local_assembler_.setColDofMap(dof_map, col_offset);
 }
 
 void ParallelAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
@@ -90,6 +349,7 @@ void ParallelAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
     dof_map_ = &dof_handler.getDofMap();
     local_assembler_.setDofHandler(dof_handler);
     ghost_manager_.setDofMap(*dof_map_);
+    ghost_manager_.setOwnershipOffset(0);
 
     // Also set ghost DOF manager if available
     if (dof_handler.getGhostManager()) {
@@ -115,6 +375,101 @@ void ParallelAssembler::setOptions(const AssemblyOptions& options)
     ghost_policy_ = options.ghost_policy;
     overlap_comm_ = options.overlap_communication;
     local_assembler_.setOptions(options);
+    ghost_manager_.setPolicy(ghost_policy_);
+    ghost_manager_.setDeterministic(options_.deterministic);
+}
+
+void ParallelAssembler::setCurrentSolution(std::span<const Real> solution)
+{
+    local_assembler_.setCurrentSolution(solution);
+}
+
+void ParallelAssembler::setCurrentSolutionView(const GlobalSystemView* solution_view)
+{
+    local_assembler_.setCurrentSolutionView(solution_view);
+}
+
+void ParallelAssembler::setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields)
+{
+    local_assembler_.setFieldSolutionAccess(fields);
+}
+
+void ParallelAssembler::setPreviousSolution(std::span<const Real> solution)
+{
+    local_assembler_.setPreviousSolution(solution);
+}
+
+void ParallelAssembler::setPreviousSolution2(std::span<const Real> solution)
+{
+    local_assembler_.setPreviousSolution2(solution);
+}
+
+void ParallelAssembler::setPreviousSolutionView(const GlobalSystemView* solution_view)
+{
+    local_assembler_.setPreviousSolutionView(solution_view);
+}
+
+void ParallelAssembler::setPreviousSolution2View(const GlobalSystemView* solution_view)
+{
+    local_assembler_.setPreviousSolution2View(solution_view);
+}
+
+void ParallelAssembler::setPreviousSolutionK(int k, std::span<const Real> solution)
+{
+    local_assembler_.setPreviousSolutionK(k, solution);
+}
+
+void ParallelAssembler::setPreviousSolutionViewK(int k, const GlobalSystemView* solution_view)
+{
+    local_assembler_.setPreviousSolutionViewK(k, solution_view);
+}
+
+void ParallelAssembler::setTimeIntegrationContext(const TimeIntegrationContext* ctx)
+{
+    local_assembler_.setTimeIntegrationContext(ctx);
+}
+
+void ParallelAssembler::setTime(Real time)
+{
+    local_assembler_.setTime(time);
+}
+
+void ParallelAssembler::setTimeStep(Real dt)
+{
+    local_assembler_.setTimeStep(dt);
+}
+
+void ParallelAssembler::setRealParameterGetter(
+    const std::function<std::optional<Real>(std::string_view)>* get_real_param) noexcept
+{
+    local_assembler_.setRealParameterGetter(get_real_param);
+}
+
+void ParallelAssembler::setParameterGetter(
+    const std::function<std::optional<params::Value>(std::string_view)>* get_param) noexcept
+{
+    local_assembler_.setParameterGetter(get_param);
+}
+
+void ParallelAssembler::setUserData(const void* user_data) noexcept
+{
+    local_assembler_.setUserData(user_data);
+}
+
+void ParallelAssembler::setJITConstants(std::span<const Real> constants) noexcept
+{
+    local_assembler_.setJITConstants(constants);
+}
+
+void ParallelAssembler::setCoupledValues(std::span<const Real> integrals,
+                                         std::span<const Real> aux_state) noexcept
+{
+    local_assembler_.setCoupledValues(integrals, aux_state);
+}
+
+void ParallelAssembler::setMaterialStateProvider(IMaterialStateProvider* provider) noexcept
+{
+    local_assembler_.setMaterialStateProvider(provider);
 }
 
 const AssemblyOptions& ParallelAssembler::getOptions() const noexcept
@@ -140,7 +495,9 @@ void ParallelAssembler::setGhostDofManager(const dofs::GhostDofManager& ghost_ma
 void ParallelAssembler::setGhostPolicy(GhostPolicy policy)
 {
     ghost_policy_ = policy;
+    options_.ghost_policy = policy;
     ghost_manager_.setPolicy(policy);
+    local_assembler_.setOptions(options_);
 }
 
 bool ParallelAssembler::isConfigured() const noexcept
@@ -176,6 +533,7 @@ void ParallelAssembler::initialize()
     ghost_manager_.reserveBuffers(1000);  // Heuristic
 
     initialized_ = true;
+    assembly_in_progress_ = false;
 }
 
 void ParallelAssembler::finalize(GlobalSystemView* matrix_view, GlobalSystemView* vector_view)
@@ -196,6 +554,11 @@ void ParallelAssembler::finalize(GlobalSystemView* matrix_view, GlobalSystemView
         vector_view->endAssemblyPhase();
         vector_view->finalizeAssembly();
     }
+
+    // Reset ghost assembly state for the next operator.
+    ghost_manager_.clearSendBuffers();
+    ghost_manager_.clearReceivedContributions();
+    assembly_in_progress_ = false;
 }
 
 void ParallelAssembler::reset()
@@ -207,6 +570,7 @@ void ParallelAssembler::reset()
     col_dofs_.clear();
     owned_contributions_.clear();
     initialized_ = false;
+    assembly_in_progress_ = false;
 }
 
 // ============================================================================
@@ -266,9 +630,74 @@ AssemblyResult ParallelAssembler::assembleBoundaryFaces(
     GlobalSystemView* matrix_view,
     GlobalSystemView* vector_view)
 {
-    // Delegate to local assembler - boundary faces are typically owned locally
-    return local_assembler_.assembleBoundaryFaces(
-        mesh, boundary_marker, space, kernel, matrix_view, vector_view);
+    if (!initialized_) {
+        initialize();
+    }
+    beginGhostAssemblyIfNeeded();
+
+    if (matrix_view && vector_view) {
+        if (matrix_view == vector_view) {
+            GhostRoutingView routed(*matrix_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleBoundaryFaces(mesh, boundary_marker, space, kernel, &routed, &routed);
+        }
+        GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+        return local_assembler_.assembleBoundaryFaces(mesh, boundary_marker, space, kernel,
+                                                     &routed_matrix, &routed_vector);
+    }
+
+    if (matrix_view) {
+        GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+        return local_assembler_.assembleBoundaryFaces(mesh, boundary_marker, space, kernel, &routed_matrix, nullptr);
+    }
+
+    if (vector_view) {
+        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+        return local_assembler_.assembleBoundaryFaces(mesh, boundary_marker, space, kernel, nullptr, &routed_vector);
+    }
+
+    return {};
+}
+
+AssemblyResult ParallelAssembler::assembleBoundaryFaces(
+    const IMeshAccess& mesh,
+    int boundary_marker,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
+    AssemblyKernel& kernel,
+    GlobalSystemView* matrix_view,
+    GlobalSystemView* vector_view)
+{
+    if (!initialized_) {
+        initialize();
+    }
+    beginGhostAssemblyIfNeeded();
+
+    if (matrix_view && vector_view) {
+        if (matrix_view == vector_view) {
+            GhostRoutingView routed(*matrix_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleBoundaryFaces(mesh, boundary_marker, test_space, trial_space, kernel,
+                                                         &routed, &routed);
+        }
+        GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+        return local_assembler_.assembleBoundaryFaces(mesh, boundary_marker, test_space, trial_space, kernel,
+                                                     &routed_matrix, &routed_vector);
+    }
+
+    if (matrix_view) {
+        GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+        return local_assembler_.assembleBoundaryFaces(mesh, boundary_marker, test_space, trial_space, kernel,
+                                                     &routed_matrix, nullptr);
+    }
+
+    if (vector_view) {
+        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+        return local_assembler_.assembleBoundaryFaces(mesh, boundary_marker, test_space, trial_space, kernel,
+                                                     nullptr, &routed_vector);
+    }
+
+    return {};
 }
 
 AssemblyResult ParallelAssembler::assembleInteriorFaces(
@@ -279,16 +708,49 @@ AssemblyResult ParallelAssembler::assembleInteriorFaces(
     GlobalSystemView& matrix_view,
     GlobalSystemView* vector_view)
 {
-    // Interior face assembly is more complex in parallel
-    // For now, delegate to local assembler
-    // Full implementation would handle shared faces specially
-    return local_assembler_.assembleInteriorFaces(
-        mesh, test_space, trial_space, kernel, matrix_view, vector_view);
+    if (!initialized_) {
+        initialize();
+    }
+    beginGhostAssemblyIfNeeded();
+
+    if (vector_view != nullptr) {
+        if (&matrix_view == vector_view) {
+            GhostRoutingView routed(matrix_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleInteriorFaces(mesh, test_space, trial_space, kernel, routed, &routed);
+        }
+        GhostRoutingView routed_matrix(matrix_view, ghost_manager_, ghost_policy_);
+        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+        return local_assembler_.assembleInteriorFaces(mesh, test_space, trial_space, kernel,
+                                                     routed_matrix, &routed_vector);
+    }
+
+    GhostRoutingView routed_matrix(matrix_view, ghost_manager_, ghost_policy_);
+    return local_assembler_.assembleInteriorFaces(mesh, test_space, trial_space, kernel, routed_matrix, nullptr);
 }
 
 // ============================================================================
 // Internal Implementation
 // ============================================================================
+
+void ParallelAssembler::beginGhostAssemblyIfNeeded()
+{
+    if (assembly_in_progress_) {
+        return;
+    }
+
+    // Start a new assembly phase: clear any buffered ghost data from the previous operator.
+    ghost_manager_.clearSendBuffers();
+    ghost_manager_.clearReceivedContributions();
+
+    // Ensure ghost communication patterns are initialized before any buffering occurs.
+    if (ghost_policy_ == GhostPolicy::ReverseScatter && !ghost_manager_.isInitialized()) {
+        ghost_manager_.setPolicy(ghost_policy_);
+        ghost_manager_.setDeterministic(options_.deterministic);
+        ghost_manager_.initialize();
+    }
+
+    assembly_in_progress_ = true;
+}
 
 AssemblyResult ParallelAssembler::assembleCellsParallel(
     const IMeshAccess& mesh,
@@ -300,95 +762,34 @@ AssemblyResult ParallelAssembler::assembleCellsParallel(
     bool assemble_matrix,
     bool assemble_vector)
 {
-    AssemblyResult result;
-    auto start_time = std::chrono::steady_clock::now();
-
     if (!initialized_) {
         initialize();
     }
 
-    // Clear ghost buffers from previous assembly
-    ghost_manager_.clearSendBuffers();
+    beginGhostAssemblyIfNeeded();
 
-    // Begin assembly phases
-    if (matrix_view && assemble_matrix) {
-        matrix_view->beginAssemblyPhase();
-    }
-    if (vector_view && assemble_vector && vector_view != matrix_view) {
-        vector_view->beginAssemblyPhase();
-    }
-
-    const auto required_data = kernel.getRequiredData();
-
-    // Iterate over OWNED cells only for parallel assembly
-    mesh.forEachOwnedCell([&](GlobalIndex cell_id) {
-        // Get element DOFs
-        auto test_dofs = dof_map_->getCellDofs(cell_id);
-        row_dofs_.assign(test_dofs.begin(), test_dofs.end());
-        col_dofs_.assign(test_dofs.begin(), test_dofs.end());
-
-        // Get cell type
-        ElementType cell_type = mesh.getCellType(cell_id);
-
-        // Prepare context
-        const auto& test_element = test_space.getElement(cell_type, cell_id);
-        const auto& trial_element = trial_space.getElement(cell_type, cell_id);
-        context_.configure(cell_id, test_element, trial_element, required_data);
-
-        // Compute local matrix/vector
-        kernel_output_.clear();
-        kernel.computeCell(context_, kernel_output_);
-
-        // Insert with ghost handling
-        insertLocalWithGhostHandling(
-            kernel_output_, row_dofs_, col_dofs_,
-            assemble_matrix ? matrix_view : nullptr,
-            assemble_vector ? vector_view : nullptr);
-
-        result.elements_assembled++;
-
-        if (kernel_output_.has_matrix) {
-            result.matrix_entries_inserted +=
-                static_cast<GlobalIndex>(row_dofs_.size() * col_dofs_.size());
+    if (assemble_matrix && matrix_view && assemble_vector && vector_view) {
+        if (matrix_view == vector_view) {
+            GhostRoutingView routed(*matrix_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleBoth(mesh, test_space, trial_space, kernel, routed, routed);
         }
-        if (kernel_output_.has_vector) {
-            result.vector_entries_inserted +=
-                static_cast<GlobalIndex>(row_dofs_.size());
-        }
-    });
-
-    // Also assemble ghost cells (contributions to owned DOFs)
-    // This is important for ReverseScatter policy
-    if (ghost_policy_ == GhostPolicy::ReverseScatter) {
-        mesh.forEachCell([&](GlobalIndex cell_id) {
-            // Skip owned cells (already processed)
-            if (mesh.isOwnedCell(cell_id)) return;
-
-            auto test_dofs = dof_map_->getCellDofs(cell_id);
-            row_dofs_.assign(test_dofs.begin(), test_dofs.end());
-            col_dofs_.assign(test_dofs.begin(), test_dofs.end());
-
-            ElementType cell_type = mesh.getCellType(cell_id);
-
-            const auto& test_element = test_space.getElement(cell_type, cell_id);
-            const auto& trial_element = trial_space.getElement(cell_type, cell_id);
-            context_.configure(cell_id, test_element, trial_element, required_data);
-
-            kernel_output_.clear();
-            kernel.computeCell(context_, kernel_output_);
-
-            insertLocalWithGhostHandling(
-                kernel_output_, row_dofs_, col_dofs_,
-                assemble_matrix ? matrix_view : nullptr,
-                assemble_vector ? vector_view : nullptr);
-        });
+        GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+        return local_assembler_.assembleBoth(mesh, test_space, trial_space, kernel,
+                                             routed_matrix, routed_vector);
     }
 
-    auto end_time = std::chrono::steady_clock::now();
-    result.elapsed_time_seconds =
-        std::chrono::duration<double>(end_time - start_time).count();
+    if (assemble_matrix && matrix_view) {
+        GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+        return local_assembler_.assembleMatrix(mesh, test_space, trial_space, kernel, routed_matrix);
+    }
 
-    return result;
+    if (assemble_vector && vector_view) {
+        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+        return local_assembler_.assembleVector(mesh, test_space, kernel, routed_vector);
+    }
+
+    return {};
 }
 
 void ParallelAssembler::insertLocalWithGhostHandling(
@@ -485,7 +886,7 @@ void ParallelAssembler::applyReceivedContributions(
     if (vector_view) {
         auto received = ghost_manager_.getReceivedVectorContributions();
         for (const auto& entry : received) {
-            vector_view->addVectorEntry(entry.first, entry.second);
+            vector_view->addVectorEntry(entry.global_row, entry.value);
         }
     }
 

@@ -153,10 +153,33 @@ public:
     // =========================================================================
 
     void setDofMap(const dofs::DofMap& dof_map) override;
+    void setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset = 0) override;
+    void setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset = 0) override;
     void setDofHandler(const dofs::DofHandler& dof_handler) override;
     void setConstraints(const constraints::AffineConstraints* constraints) override;
     void setSparsityPattern(const sparsity::SparsityPattern* sparsity) override;
     void setOptions(const AssemblyOptions& options) override;
+    void setCurrentSolution(std::span<const Real> solution) override;
+    void setCurrentSolutionView(const GlobalSystemView* solution_view) override;
+    void setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields) override;
+    void setPreviousSolution(std::span<const Real> solution) override;
+    void setPreviousSolution2(std::span<const Real> solution) override;
+    void setPreviousSolutionView(const GlobalSystemView* solution_view) override;
+    void setPreviousSolution2View(const GlobalSystemView* solution_view) override;
+    void setPreviousSolutionK(int k, std::span<const Real> solution) override;
+    void setPreviousSolutionViewK(int k, const GlobalSystemView* solution_view) override;
+    void setTimeIntegrationContext(const TimeIntegrationContext* ctx) override;
+    void setTime(Real time) override;
+    void setTimeStep(Real dt) override;
+    void setRealParameterGetter(
+        const std::function<std::optional<Real>(std::string_view)>* get_real_param) noexcept override;
+    void setParameterGetter(
+        const std::function<std::optional<params::Value>(std::string_view)>* get_param) noexcept override;
+    void setUserData(const void* user_data) noexcept override;
+    void setJITConstants(std::span<const Real> constants) noexcept override;
+    void setCoupledValues(std::span<const Real> integrals,
+                          std::span<const Real> aux_state) noexcept override;
+    void setMaterialStateProvider(IMaterialStateProvider* provider) noexcept override;
     [[nodiscard]] const AssemblyOptions& getOptions() const noexcept override;
 
     // =========================================================================
@@ -242,6 +265,15 @@ public:
         GlobalSystemView* matrix_view,
         GlobalSystemView* vector_view) override;
 
+    [[nodiscard]] AssemblyResult assembleBoundaryFaces(
+        const IMeshAccess& mesh,
+        int boundary_marker,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        AssemblyKernel& kernel,
+        GlobalSystemView* matrix_view,
+        GlobalSystemView* vector_view) override;
+
     [[nodiscard]] AssemblyResult assembleInteriorFaces(
         const IMeshAccess& mesh,
         const spaces::FunctionSpace& test_space,
@@ -266,13 +298,13 @@ public:
     [[nodiscard]] bool isConfigured() const noexcept override;
     [[nodiscard]] bool supportsRectangular() const noexcept override { return true; }
     [[nodiscard]] bool supportsDG() const noexcept override { return true; }
-    [[nodiscard]] bool supportsFullContext() const noexcept override { return false; }
-    [[nodiscard]] bool supportsSolution() const noexcept override { return false; }
-    [[nodiscard]] bool supportsSolutionHistory() const noexcept override { return false; }
-    [[nodiscard]] bool supportsTimeIntegrationContext() const noexcept override { return false; }
-    [[nodiscard]] bool supportsDofOffsets() const noexcept override { return false; }
-    [[nodiscard]] bool supportsFieldRequirements() const noexcept override { return false; }
-    [[nodiscard]] bool supportsMaterialState() const noexcept override { return false; }
+    [[nodiscard]] bool supportsFullContext() const noexcept override { return true; }
+    [[nodiscard]] bool supportsSolution() const noexcept override { return true; }
+    [[nodiscard]] bool supportsSolutionHistory() const noexcept override { return true; }
+    [[nodiscard]] bool supportsTimeIntegrationContext() const noexcept override { return true; }
+    [[nodiscard]] bool supportsDofOffsets() const noexcept override { return true; }
+    [[nodiscard]] bool supportsFieldRequirements() const noexcept override { return true; }
+    [[nodiscard]] bool supportsMaterialState() const noexcept override { return true; }
     [[nodiscard]] bool isThreadSafe() const noexcept override { return false; }
 
     /**
@@ -296,6 +328,8 @@ private:
     // =========================================================================
     // Internal Implementation
     // =========================================================================
+
+    void beginGhostAssemblyIfNeeded();
 
     /**
      * @brief Core assembly loop for cells (parallel version)
@@ -364,6 +398,7 @@ private:
 
     // State
     bool initialized_{false};
+    bool assembly_in_progress_{false};
 };
 
 // ============================================================================

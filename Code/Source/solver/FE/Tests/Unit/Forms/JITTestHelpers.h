@@ -25,12 +25,16 @@ namespace test {
 #define SVMP_FE_ENABLE_LLVM_JIT 0
 #endif
 
-inline void requireLLVMJITOrSkip()
-{
 #if !SVMP_FE_ENABLE_LLVM_JIT
-    GTEST_SKIP() << "FE was built without LLVM JIT support (SVMP_FE_ENABLE_LLVM_JIT=0)";
+#define requireLLVMJITOrSkip() \
+    do {                       \
+        GTEST_SKIP() << "FE was built without LLVM JIT support (SVMP_FE_ENABLE_LLVM_JIT=0)"; \
+    } while (0)
+#else
+#define requireLLVMJITOrSkip() \
+    do {                       \
+    } while (0)
 #endif
-}
 
 class ThrowingTotalKernel final : public assembly::FunctionalKernel {
 public:

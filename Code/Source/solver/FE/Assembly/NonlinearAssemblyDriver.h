@@ -537,7 +537,7 @@ private:
     /**
      * @brief Prepare assembly context with solution values
      */
-    void prepareSolutionValues(AssemblyContext& context, GlobalIndex cell_id);
+    void prepareSolutionValues(AssemblyContext& context, GlobalIndex cell_id, RequiredData required_data);
 
     /**
      * @brief Cell loop for residual assembly

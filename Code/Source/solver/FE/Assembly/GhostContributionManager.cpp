@@ -96,19 +96,10 @@ void GhostContributionManager::initialize()
         throw std::runtime_error("GhostContributionManager: DOF map not set");
     }
 
-    // For contiguous ownership, use local DOF count
-    // In many cases, DOFs 0..n_local-1 are owned locally when using a standard partition
-    // This is a heuristic - more robust ownership requires DofHandler or partition info
-    GlobalIndex n_local = dof_map_->getNumLocalDofs();
-    if (n_local > 0) {
-        // Assume contiguous ownership starting from 0 for this rank
-        // This is a simplification - real implementation needs proper partition info
-        owned_begin_ = 0;
-        owned_end_ = n_local;
-        has_contiguous_ownership_ = true;
-    } else {
-        has_contiguous_ownership_ = false;
-    }
+#if FE_HAS_MPI
+    // Ensure rank/size are consistent even when constructed without explicit setComm().
+    set_mpi_rank_and_size(comm_, my_rank_, world_size_);
+#endif
 
     // Build communication graph (determine neighbors)
     buildCommunicationGraph();
@@ -134,9 +125,26 @@ void GhostContributionManager::buildCommunicationGraph()
     rank_to_neighbor_idx_.clear();
     ghost_owner_rank_.clear();
 
-    // Determine ghost DOFs and their owners
-    if (ghost_dof_manager_) {
-        // Use ghost DOF manager for ownership info
+    // Determine ghost DOFs and their owners.
+    //
+    // Prefer the GhostDofManager when it matches the currently configured DOF map.
+    // In multi-field/block workflows, callers may keep a system-level GhostDofManager
+    // while switching the row DofMap; in that case the GhostDofManager's indices may
+    // be out of range for the row DofMap and we must fall back to the DofMap itself.
+    bool can_use_ghost_manager = (ghost_dof_manager_ != nullptr);
+    if (can_use_ghost_manager) {
+        FE_CHECK_NOT_NULL(dof_map_, "GhostContributionManager::buildCommunicationGraph: dof_map");
+        const auto n = dof_map_->getNumDofs();
+        const auto& ghost_dofs = ghost_dof_manager_->getGhostDofs();
+        for (const auto g : ghost_dofs) {
+            if (g < 0 || g >= n) {
+                can_use_ghost_manager = false;
+                break;
+            }
+        }
+    }
+
+    if (can_use_ghost_manager) {
         const auto& ghost_dofs = ghost_dof_manager_->getGhostDofs();
 
         for (GlobalIndex ghost : ghost_dofs) {
@@ -175,6 +183,39 @@ void GhostContributionManager::buildCommunicationGraph()
         }
     }
 
+#if FE_HAS_MPI
+    // The point-to-point exchange in exchangeContributions() requires a symmetric neighbor list.
+    // Building neighbors from "owners of my ghost DOFs" is not symmetric in general (e.g. when this
+    // rank owns all shared interface DOFs, it may have no ghost DOFs owned by the neighbor, yet the
+    // neighbor must still send contributions to this rank). Symmetrize the communication graph via
+    // a lightweight all-to-all handshake on the computed send targets.
+    if (world_size_ > 1) {
+        std::vector<int> send_flags(static_cast<std::size_t>(world_size_), 0);
+        for (const int r : neighbor_ranks_) {
+            if (r >= 0 && r < world_size_ && r != my_rank_) {
+                send_flags[static_cast<std::size_t>(r)] = 1;
+            }
+        }
+
+        std::vector<int> recv_flags(static_cast<std::size_t>(world_size_), 0);
+        MPI_Alltoall(send_flags.data(), 1, MPI_INT,
+                     recv_flags.data(), 1, MPI_INT,
+                     comm_);
+
+        std::vector<int> symmetric;
+        symmetric.reserve(static_cast<std::size_t>(world_size_));
+        for (int r = 0; r < world_size_; ++r) {
+            if (r == my_rank_) {
+                continue;
+            }
+            if (send_flags[static_cast<std::size_t>(r)] || recv_flags[static_cast<std::size_t>(r)]) {
+                symmetric.push_back(r);
+            }
+        }
+        neighbor_ranks_ = std::move(symmetric);
+    }
+#endif
+
     // Sort neighbors for deterministic communication order
     std::sort(neighbor_ranks_.begin(), neighbor_ranks_.end());
 
@@ -194,15 +235,8 @@ bool GhostContributionManager::addMatrixContribution(
     GlobalIndex global_col,
     Real value)
 {
-    // Quick ownership check for contiguous case
-    if (has_contiguous_ownership_) {
-        if (global_row >= owned_begin_ && global_row < owned_end_) {
-            return true;  // Locally owned, caller inserts directly
-        }
-    } else {
-        if (dof_map_->isOwnedDof(global_row)) {
-            return true;
-        }
+    if (isOwned(global_row)) {
+        return true;  // Locally owned, caller inserts directly
     }
 
     // Ghost row - buffer for later exchange
@@ -226,14 +260,8 @@ bool GhostContributionManager::addVectorContribution(
     GlobalIndex global_row,
     Real value)
 {
-    if (has_contiguous_ownership_) {
-        if (global_row >= owned_begin_ && global_row < owned_end_) {
-            return true;
-        }
-    } else {
-        if (dof_map_->isOwnedDof(global_row)) {
-            return true;
-        }
+    if (isOwned(global_row)) {
+        return true;  // Locally owned, caller inserts directly
     }
 
     if (policy_ == GhostPolicy::OwnedRowsOnly) {
@@ -245,10 +273,7 @@ bool GhostContributionManager::addVectorContribution(
 
     if (neighbor_idx >= 0) {
         auto& buffer = send_buffers_[static_cast<std::size_t>(neighbor_idx)];
-        buffer.vector_entries.push_back(value);
-        // Store row index - we use pairs (row, value) packed in vector_entries
-        // For simplicity, store as two consecutive values
-        // Better: use a separate structure
+        buffer.vector_entries.push_back({global_row, value});
     }
 
     return false;
@@ -289,21 +314,28 @@ void GhostContributionManager::addMatrixContributions(
 
 bool GhostContributionManager::isOwned(GlobalIndex global_dof) const
 {
-    if (has_contiguous_ownership_) {
-        return global_dof >= owned_begin_ && global_dof < owned_end_;
-    }
-    return dof_map_->isOwnedDof(global_dof);
+    FE_CHECK_NOT_NULL(dof_map_, "GhostContributionManager::isOwned: dof_map");
+    FE_THROW_IF(global_dof < ownership_offset_, FEException,
+                "GhostContributionManager::isOwned: global DOF index is below ownershipOffset()");
+    const auto local = global_dof - ownership_offset_;
+    return dof_map_->isOwnedDof(local);
 }
 
 int GhostContributionManager::getOwnerRank(GlobalIndex global_dof) const
 {
-    auto it = ghost_owner_rank_.find(global_dof);
+    FE_CHECK_NOT_NULL(dof_map_, "GhostContributionManager::getOwnerRank: dof_map");
+    FE_THROW_IF(global_dof < ownership_offset_, FEException,
+                "GhostContributionManager::getOwnerRank: global DOF index is below ownershipOffset()");
+    const auto local = global_dof - ownership_offset_;
+
+    auto it = ghost_owner_rank_.find(local);
     if (it != ghost_owner_rank_.end()) {
         return it->second;
     }
 
-    // If not in ghost map, it's locally owned
-    return my_rank_;
+    // Fall back to the DOF map ownership function if available.
+    const int owner = dof_map_->getDofOwner(local);
+    return owner >= 0 ? owner : my_rank_;
 }
 
 int GhostContributionManager::findNeighborIndex(int rank) const
@@ -340,11 +372,14 @@ void GhostContributionManager::exchangeContributions()
 
         // Calculate packed size
         std::size_t matrix_size = buffer.entries.size() * sizeof(GhostContribution);
-        std::size_t total_size = sizeof(std::size_t) + matrix_size;
+        std::size_t vector_size = buffer.vector_entries.size() * sizeof(GhostVectorContribution);
+        std::size_t total_size =
+            sizeof(std::size_t) + matrix_size +
+            sizeof(std::size_t) + vector_size;
 
         send_data[i].resize(total_size);
 
-        // Pack: [num_entries][entries...]
+        // Pack: [num_matrix][matrix...][num_vector][vector...]
         char* ptr = send_data[i].data();
         std::size_t num_entries = buffer.entries.size();
         std::memcpy(ptr, &num_entries, sizeof(std::size_t));
@@ -353,9 +388,18 @@ void GhostContributionManager::exchangeContributions()
         if (!buffer.entries.empty()) {
             std::memcpy(ptr, buffer.entries.data(), matrix_size);
         }
+        ptr += matrix_size;
+
+        std::size_t num_vector_entries = buffer.vector_entries.size();
+        std::memcpy(ptr, &num_vector_entries, sizeof(std::size_t));
+        ptr += sizeof(std::size_t);
+        if (!buffer.vector_entries.empty()) {
+            std::memcpy(ptr, buffer.vector_entries.data(), vector_size);
+        }
 
         last_stats_.bytes_sent += send_data[i].size();
         last_stats_.matrix_entries_sent += buffer.entries.size();
+        last_stats_.vector_entries_sent += buffer.vector_entries.size();
     }
 
     // Exchange sizes first
@@ -401,29 +445,43 @@ void GhostContributionManager::exchangeContributions()
 
     // Unpack received data
     received_matrix_.clear();
+    received_vector_.clear();
 
     for (std::size_t i = 0; i < neighbor_ranks_.size(); ++i) {
         if (recv_buffers_raw_[i].empty()) continue;
 
         const char* ptr = recv_buffers_raw_[i].data();
 
-        std::size_t num_entries;
-        std::memcpy(&num_entries, ptr, sizeof(std::size_t));
+        std::size_t num_matrix_entries = 0;
+        std::memcpy(&num_matrix_entries, ptr, sizeof(std::size_t));
         ptr += sizeof(std::size_t);
 
-        last_stats_.matrix_entries_received += num_entries;
+        last_stats_.matrix_entries_received += num_matrix_entries;
 
-        for (std::size_t j = 0; j < num_entries; ++j) {
+        for (std::size_t j = 0; j < num_matrix_entries; ++j) {
             GhostContribution entry;
             std::memcpy(&entry, ptr, sizeof(GhostContribution));
             ptr += sizeof(GhostContribution);
             received_matrix_.push_back(entry);
+        }
+
+        std::size_t num_vector_entries = 0;
+        std::memcpy(&num_vector_entries, ptr, sizeof(std::size_t));
+        ptr += sizeof(std::size_t);
+        last_stats_.vector_entries_received += num_vector_entries;
+
+        for (std::size_t j = 0; j < num_vector_entries; ++j) {
+            GhostVectorContribution entry;
+            std::memcpy(&entry, ptr, sizeof(GhostVectorContribution));
+            ptr += sizeof(GhostVectorContribution);
+            received_vector_.push_back(entry);
         }
     }
 
     // Sort received for deterministic accumulation
     if (deterministic_) {
         std::sort(received_matrix_.begin(), received_matrix_.end());
+        std::sort(received_vector_.begin(), received_vector_.end());
     }
 
 #endif // FE_HAS_MPI
@@ -450,6 +508,7 @@ void GhostContributionManager::sortBuffersForDeterminism()
 {
     for (auto& buffer : send_buffers_) {
         std::sort(buffer.entries.begin(), buffer.entries.end());
+        std::sort(buffer.vector_entries.begin(), buffer.vector_entries.end());
     }
 }
 
@@ -462,7 +521,7 @@ std::span<const GhostContribution> GhostContributionManager::getReceivedMatrixCo
     return received_matrix_;
 }
 
-std::span<const std::pair<GlobalIndex, Real>> GhostContributionManager::getReceivedVectorContributions() const
+std::span<const GhostVectorContribution> GhostContributionManager::getReceivedVectorContributions() const
 {
     return received_vector_;
 }

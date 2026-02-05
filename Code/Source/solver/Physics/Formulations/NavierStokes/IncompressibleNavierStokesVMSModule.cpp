@@ -17,10 +17,15 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 #ifndef SVMP_FE_ENABLE_LLVM_JIT
 #define SVMP_FE_ENABLE_LLVM_JIT 0
+#endif
+
+#if FE_HAS_MPI
+#  include <mpi.h>
 #endif
 
 namespace {
@@ -280,8 +285,56 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         // If any traction/outflow-like boundary condition is present, the constant mode is typically
         // fixed by the boundary data and pinning can unnecessarily force a specific nodal pressure
         // value (e.g., p=0 at the first pressure DOF).
-        const bool has_natural_momentum_bc = !options_.traction_neumann.empty() || !options_.traction_robin.empty() ||
-                                            !options_.pressure_outflow.empty() || !options_.coupled_outflow_rcr.empty();
+        bool has_natural_momentum_bc = !options_.traction_neumann.empty() || !options_.traction_robin.empty() ||
+                                       !options_.pressure_outflow.empty() || !options_.coupled_outflow_rcr.empty();
+
+        // Even when the user does not explicitly configure a traction/outflow BC for a boundary marker,
+        // the weak form still imposes a default homogeneous natural traction on any boundary where the
+        // velocity test space is not strongly essential (i.e., no strong Dirichlet constraint).
+        //
+        // In that case, the pressure level is typically fixed by the boundary traction condition and
+        // pinning can change the problem (and, in MPI, lead to rank-dependent solutions if the chosen
+        // pin DOF is not deterministic). Avoid pinning whenever any such unconstrained boundary exists.
+        if (!has_natural_momentum_bc) {
+            std::unordered_set<int> essential_velocity_markers;
+            essential_velocity_markers.reserve(options_.velocity_dirichlet.size());
+            for (const auto& bc : options_.velocity_dirichlet) {
+                essential_velocity_markers.insert(bc.boundary_marker);
+            }
+
+            bool local_has_unconstrained_boundary = false;
+            const auto& mesh = system.meshAccess();
+            mesh.forEachBoundaryFace(/*marker=*/-1, [&](FE::GlobalIndex face_id, FE::GlobalIndex /*cell_id*/) {
+                if (local_has_unconstrained_boundary) {
+                    return;
+                }
+                const int marker = mesh.getBoundaryFaceMarker(face_id);
+                if (marker == svmp::INVALID_LABEL) {
+                    local_has_unconstrained_boundary = true;
+                    return;
+                }
+                if (essential_velocity_markers.find(marker) == essential_velocity_markers.end()) {
+                    local_has_unconstrained_boundary = true;
+                }
+            });
+
+            bool global_has_unconstrained_boundary = local_has_unconstrained_boundary;
+#if FE_HAS_MPI
+            {
+                int mpi_initialized = 0;
+                MPI_Initialized(&mpi_initialized);
+                if (mpi_initialized) {
+                    int local = local_has_unconstrained_boundary ? 1 : 0;
+                    int global = 0;
+                    MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
+                    global_has_unconstrained_boundary = (global != 0);
+                }
+            }
+#endif
+
+            has_natural_momentum_bc = global_has_unconstrained_boundary;
+        }
+
         if (!has_natural_momentum_bc) {
             system.addSystemConstraint(std::make_unique<PressureNullspacePinConstraint>(p_id, /*value=*/0.0));
         }
