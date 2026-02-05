@@ -194,6 +194,22 @@ struct DistributedSparsityStats {
  */
 class DistributedSparsityPattern {
 public:
+    /**
+     * @brief Which global DOF indexing this pattern uses.
+     *
+     * - Natural: indices refer to the FE/system global DOF numbering.
+     * - NodalInterleaved: indices refer to a node-interleaved permutation (DOFs for each node are contiguous).
+     *
+     * This metadata allows overlap-style backends (e.g., FSILS) to interpret the index space correctly.
+     */
+    enum class DofIndexing : std::uint8_t {
+        Natural,
+        NodalInterleaved
+    };
+
+    [[nodiscard]] DofIndexing dofIndexing() const noexcept { return dof_indexing_; }
+    void setDofIndexing(DofIndexing indexing) noexcept { dof_indexing_ = indexing; }
+
     // =========================================================================
     // Construction and lifecycle
     // =========================================================================
@@ -723,6 +739,7 @@ private:
     // Ownership ranges
     IndexRange owned_rows_;
     IndexRange owned_cols_;
+    DofIndexing dof_indexing_{DofIndexing::Natural};
 
     // Building phase: store global column indices per owned row
     // Entry classification (diag vs offdiag) happens at finalization

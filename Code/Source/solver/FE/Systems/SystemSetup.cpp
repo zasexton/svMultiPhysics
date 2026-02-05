@@ -908,16 +908,19 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     const auto& ghost_set = partition.ghost();
     const auto& relevant_set = partition.locallyRelevant();
 
-		    for (const auto& tag : op_tags) {
-		        auto pattern = std::make_unique<sparsity::SparsityPattern>(
-		            n_total_dofs, n_total_dofs);
+    for (const auto& tag : op_tags) {
+        auto pattern = std::make_unique<sparsity::SparsityPattern>(
+            n_total_dofs, n_total_dofs);
 
-			        std::unique_ptr<sparsity::DistributedSparsityPattern> dist_pattern;
-			        std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> ghost_row_cols;
-			        if (dist_mode != DistSparsityMode::None) {
-			            dist_pattern = std::make_unique<sparsity::DistributedSparsityPattern>(
-			                owned_range, owned_range, n_total_dofs, n_total_dofs);
-			        }
+        std::unique_ptr<sparsity::DistributedSparsityPattern> dist_pattern;
+        std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> ghost_row_cols;
+        if (dist_mode != DistSparsityMode::None) {
+            dist_pattern = std::make_unique<sparsity::DistributedSparsityPattern>(
+                owned_range, owned_range, n_total_dofs, n_total_dofs);
+            dist_pattern->setDofIndexing(dist_mode == DistSparsityMode::NodalInterleaved
+                                             ? sparsity::DistributedSparsityPattern::DofIndexing::NodalInterleaved
+                                             : sparsity::DistributedSparsityPattern::DofIndexing::Natural);
+        }
 
 		        const auto& def = operator_registry_.get(tag);
 

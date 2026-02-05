@@ -79,6 +79,7 @@ DistributedSparsityPattern::DistributedSparsityPattern(DistributedSparsityPatter
       global_cols_(other.global_cols_),
       owned_rows_(other.owned_rows_),
       owned_cols_(other.owned_cols_),
+      dof_indexing_(other.dof_indexing_),
       building_rows_(std::move(other.building_rows_)),
       diag_pattern_(std::move(other.diag_pattern_)),
       offdiag_pattern_(std::move(other.offdiag_pattern_)),
@@ -107,6 +108,7 @@ DistributedSparsityPattern& DistributedSparsityPattern::operator=(DistributedSpa
         global_cols_ = other.global_cols_;
         owned_rows_ = other.owned_rows_;
         owned_cols_ = other.owned_cols_;
+        dof_indexing_ = other.dof_indexing_;
         building_rows_ = std::move(other.building_rows_);
         diag_pattern_ = std::move(other.diag_pattern_);
         offdiag_pattern_ = std::move(other.offdiag_pattern_);
@@ -122,6 +124,7 @@ DistributedSparsityPattern& DistributedSparsityPattern::operator=(DistributedSpa
         other.global_cols_ = 0;
         other.owned_rows_ = IndexRange{};
         other.owned_cols_ = IndexRange{};
+        other.dof_indexing_ = DofIndexing::Natural;
         other.ghost_row_map_.clear();
         other.ghost_row_ptr_.clear();
         other.ghost_row_cols_.clear();
@@ -136,6 +139,7 @@ DistributedSparsityPattern::DistributedSparsityPattern(const DistributedSparsity
       global_cols_(other.global_cols_),
       owned_rows_(other.owned_rows_),
       owned_cols_(other.owned_cols_),
+      dof_indexing_(other.dof_indexing_),
       ghost_row_map_(other.ghost_row_map_),
       ghost_row_ptr_(other.ghost_row_ptr_),
       ghost_row_cols_(other.ghost_row_cols_),
@@ -172,6 +176,7 @@ DistributedSparsityPattern& DistributedSparsityPattern::operator=(const Distribu
         global_cols_ = other.global_cols_;
         owned_rows_ = other.owned_rows_;
         owned_cols_ = other.owned_cols_;
+        dof_indexing_ = other.dof_indexing_;
         ghost_row_map_ = other.ghost_row_map_;
         ghost_row_ptr_ = other.ghost_row_ptr_;
         ghost_row_cols_ = other.ghost_row_cols_;
@@ -221,6 +226,7 @@ DistributedSparsityPattern DistributedSparsityPattern::cloneFinalized() const {
     copy.global_cols_ = global_cols_;
     copy.owned_rows_ = owned_rows_;
     copy.owned_cols_ = owned_cols_;
+    copy.dof_indexing_ = dof_indexing_;
 
     copy.building_rows_.clear();
 

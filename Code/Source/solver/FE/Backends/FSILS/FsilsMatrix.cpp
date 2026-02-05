@@ -24,6 +24,7 @@
 #include <mpi.h>
 #include <numeric>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -64,6 +65,35 @@ namespace {
 [[nodiscard]] std::size_t block_entry_index(int dof, int row_comp, int col_comp)
 {
     return static_cast<std::size_t>(row_comp * dof + col_comp);
+}
+
+[[nodiscard]] bool ghost_rows_look_nodal_interleaved(std::span<const GlobalIndex> ghost_rows, int dof)
+{
+    if (dof <= 0) {
+        return false;
+    }
+    if (ghost_rows.empty()) {
+        return false;
+    }
+
+    const std::size_t per_node = static_cast<std::size_t>(dof);
+    if (ghost_rows.size() % per_node != 0u) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < ghost_rows.size(); i += per_node) {
+        const GlobalIndex base = ghost_rows[i];
+        if (base < 0 || (base % dof) != 0) {
+            return false;
+        }
+        for (int c = 1; c < dof; ++c) {
+            const std::size_t idx = i + static_cast<std::size_t>(c);
+            if (idx >= ghost_rows.size() || ghost_rows[idx] != base + c) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 void sort_row_columns_and_values(FsilsShared& shared, std::vector<Real>& values)
@@ -437,44 +467,123 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
 
     const auto& owned_rows = pattern.ownedRows();
     const auto& owned_cols = pattern.ownedCols();
-    FE_THROW_IF(owned_rows.first % dof != 0 || owned_rows.size() % dof != 0,
+    FE_THROW_IF(owned_rows.size() % dof != 0,
                 InvalidArgumentException,
-                "FsilsMatrix: owned row range must align with dof_per_node blocks");
+                "FsilsMatrix: owned row count must be divisible by dof_per_node");
     FE_THROW_IF(owned_cols.first != owned_rows.first || owned_cols.last != owned_rows.last,
                 InvalidArgumentException,
                 "FsilsMatrix: FSILS backend requires identical row/column ownership ranges");
 
-    const int owned_node_start = as_int(owned_rows.first / dof, "owned node start");
-    const int owned_node_count = as_int(owned_rows.size() / dof, "owned node count");
+    const bool pattern_indices_are_backend =
+        (pattern.dofIndexing() == sparsity::DistributedSparsityPattern::DofIndexing::NodalInterleaved);
+
+    if (pattern_indices_are_backend && pattern.numGhostRows() > 0) {
+        FE_THROW_IF(!ghost_rows_look_nodal_interleaved(pattern.getGhostRowMap(), dof),
+                    InvalidArgumentException,
+                    "FsilsMatrix: nodal-interleaved distributed sparsity must store ghost rows in node-block ordering");
+    }
+
+    auto map_pattern_to_backend = [&](GlobalIndex dof_pat) -> GlobalIndex {
+        if (!have_perm || pattern_indices_are_backend) {
+            return dof_pat;
+        }
+        if (dof_pat < 0 || dof_pat >= global_rows_) {
+            return INVALID_GLOBAL_INDEX;
+        }
+        return dof_permutation->forward[static_cast<std::size_t>(dof_pat)];
+    };
+
+    auto map_backend_to_pattern = [&](GlobalIndex dof_fs) -> GlobalIndex {
+        if (!have_perm || pattern_indices_are_backend) {
+            return dof_fs;
+        }
+        if (dof_fs < 0 || dof_fs >= global_rows_) {
+            return INVALID_GLOBAL_INDEX;
+        }
+        return dof_permutation->inverse[static_cast<std::size_t>(dof_fs)];
+    };
+
+    int owned_node_start = 0;
+    int owned_node_count = 0;
+    std::vector<int> owned_nodes;
+
+    if (pattern_indices_are_backend) {
+        FE_THROW_IF(owned_rows.first % dof != 0, InvalidArgumentException,
+                    "FsilsMatrix: owned row range must align with dof_per_node blocks in nodal-interleaved indexing");
+        owned_node_start = as_int(owned_rows.first / dof, "owned node start");
+        owned_node_count = as_int(owned_rows.size() / dof, "owned node count");
+    } else {
+        std::unordered_map<int, int> count_per_node;
+        count_per_node.reserve(static_cast<std::size_t>(owned_rows.size() / dof) + 1u);
+
+        for (GlobalIndex row_pat = owned_rows.first; row_pat < owned_rows.last; ++row_pat) {
+            const GlobalIndex row_fs = map_pattern_to_backend(row_pat);
+            FE_THROW_IF(row_fs < 0 || row_fs >= global_rows_, InvalidArgumentException,
+                        "FsilsMatrix: DOF permutation produced out-of-range backend row");
+            const int node = static_cast<int>(row_fs / dof);
+            FE_THROW_IF(node < 0 || node >= gnNo, InvalidArgumentException,
+                        "FsilsMatrix: DOF permutation mapped owned row to out-of-range node");
+            ++count_per_node[node];
+        }
+
+        owned_nodes.reserve(count_per_node.size());
+        for (const auto& kv : count_per_node) {
+            const int node = kv.first;
+            const int count = kv.second;
+            FE_THROW_IF(count != dof, InvalidArgumentException,
+                        "FsilsMatrix: owned DOFs do not form complete node blocks after applying DOF permutation");
+            owned_nodes.push_back(node);
+        }
+
+        std::sort(owned_nodes.begin(), owned_nodes.end());
+        owned_node_count = static_cast<int>(owned_nodes.size());
+        FE_THROW_IF(owned_node_count <= 0, InvalidArgumentException, "FsilsMatrix: no owned nodes");
+
+        owned_node_start = owned_nodes.front();
+        const bool contiguous = (owned_nodes.back() - owned_nodes.front() + 1) == owned_node_count;
+        if (contiguous) {
+            owned_nodes.clear();
+        }
+    }
+
+    auto is_owned_node = [&](int node) -> bool {
+        if (!owned_nodes.empty()) {
+            return std::binary_search(owned_nodes.begin(), owned_nodes.end(), node);
+        }
+        return node >= owned_node_start && node < owned_node_start + owned_node_count;
+    };
 
     // Derive ghost nodes from stored ghost rows (overlap model).
     std::vector<int> ghost_nodes;
     if (pattern.numGhostRows() > 0) {
         auto ghost_row_map = pattern.getGhostRowMap();
-        ghost_nodes.reserve(static_cast<std::size_t>(ghost_row_map.size()));
 
-        std::vector<int> count_per_node;
-        count_per_node.assign(static_cast<std::size_t>(gnNo), 0);
+        std::unordered_map<int, int> count_per_node;
+        count_per_node.reserve(static_cast<std::size_t>(ghost_row_map.size() / dof) + 1u);
 
-        for (const GlobalIndex row_dof : ghost_row_map) {
-            FE_THROW_IF(row_dof % dof < 0, FEException, "FsilsMatrix: invalid ghost row index");
-            const int node = static_cast<int>(row_dof / dof);
+        for (const GlobalIndex row_pat : ghost_row_map) {
+            const GlobalIndex row_fs = map_pattern_to_backend(row_pat);
+            FE_THROW_IF(row_fs < 0 || row_fs >= global_rows_, InvalidArgumentException,
+                        "FsilsMatrix: invalid ghost row index after applying DOF permutation");
+            const int node = static_cast<int>(row_fs / dof);
             FE_THROW_IF(node < 0 || node >= gnNo, InvalidArgumentException,
                         "FsilsMatrix: ghost row out of range");
-            count_per_node[static_cast<std::size_t>(node)] += 1;
+            ++count_per_node[node];
+        }
+
+        ghost_nodes.reserve(count_per_node.size());
+        for (const auto& kv : count_per_node) {
+            const int node = kv.first;
+            const int count = kv.second;
+            FE_THROW_IF(is_owned_node(node), InvalidArgumentException,
+                        "FsilsMatrix: ghost rows must not overlap owned rows");
+            FE_THROW_IF(count != dof, InvalidArgumentException,
+                        "FsilsMatrix: ghost rows must include all dof components for each ghost node");
             ghost_nodes.push_back(node);
         }
 
         std::sort(ghost_nodes.begin(), ghost_nodes.end());
         ghost_nodes.erase(std::unique(ghost_nodes.begin(), ghost_nodes.end()), ghost_nodes.end());
-
-        for (const int node : ghost_nodes) {
-            FE_THROW_IF(node >= owned_node_start && node < owned_node_start + owned_node_count,
-                        InvalidArgumentException,
-                        "FsilsMatrix: ghost rows must not overlap owned rows");
-            FE_THROW_IF(count_per_node[static_cast<std::size_t>(node)] != dof, InvalidArgumentException,
-                        "FsilsMatrix: ghost rows must include all dof components for each ghost node");
-        }
     }
 
     const int nNo = owned_node_count + static_cast<int>(ghost_nodes.size());
@@ -491,35 +600,53 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     shared->gnNo = gnNo;
     shared->owned_node_start = owned_node_start;
     shared->owned_node_count = owned_node_count;
+    shared->owned_nodes = std::move(owned_nodes);
     shared->ghost_nodes = ghost_nodes;
-    shared->dof_permutation = std::move(dof_permutation);
+    shared->dof_permutation = dof_permutation;
 
-    auto gather_row_nodes = [&](GlobalIndex global_row_dof, std::vector<int>& out_nodes) {
+    auto gather_row_nodes = [&](GlobalIndex row_fs, std::vector<int>& out_nodes) {
         out_nodes.clear();
-        if (owned_rows.contains(global_row_dof)) {
-            const GlobalIndex local_row = global_row_dof - owned_rows.first;
+
+        const GlobalIndex row_pat = map_backend_to_pattern(row_fs);
+        if (row_pat < 0 || row_pat >= global_rows_) {
+            return;
+        }
+
+        auto push_col_node = [&](GlobalIndex col_pat) {
+            if (col_pat < 0 || col_pat >= global_cols_) {
+                return;
+            }
+            const GlobalIndex col_fs = map_pattern_to_backend(col_pat);
+            if (col_fs < 0 || col_fs >= global_cols_) {
+                return;
+            }
+            out_nodes.push_back(static_cast<int>(col_fs / dof));
+        };
+
+        if (owned_rows.contains(row_pat)) {
+            const GlobalIndex local_row = row_pat - owned_rows.first;
             const auto diag_cols = pattern.getRowDiagCols(local_row);
             const auto offdiag_cols = pattern.getRowOffdiagCols(local_row);
             out_nodes.reserve(static_cast<std::size_t>(diag_cols.size() + offdiag_cols.size()));
 
             for (const GlobalIndex local_col : diag_cols) {
-                const GlobalIndex global_col = local_col + owned_cols.first;
-                out_nodes.push_back(static_cast<int>(global_col / dof));
+                const GlobalIndex col_pat = local_col + owned_cols.first;
+                push_col_node(col_pat);
             }
             for (const GlobalIndex ghost_idx : offdiag_cols) {
-                const GlobalIndex global_col = pattern.ghostColToGlobal(ghost_idx);
-                out_nodes.push_back(static_cast<int>(global_col / dof));
+                const GlobalIndex col_pat = pattern.ghostColToGlobal(ghost_idx);
+                push_col_node(col_pat);
             }
             return;
         }
 
-        const GlobalIndex ghost_row = pattern.globalToGhostRow(global_row_dof);
+        const GlobalIndex ghost_row = pattern.globalToGhostRow(row_pat);
         FE_THROW_IF(ghost_row < 0, InvalidArgumentException,
-                    "FsilsMatrix: missing ghost row sparsity for row " + std::to_string(global_row_dof));
+                    "FsilsMatrix: missing ghost row sparsity for row " + std::to_string(row_pat));
         const auto cols = pattern.getGhostRowCols(ghost_row);
         out_nodes.reserve(cols.size());
-        for (const GlobalIndex global_col : cols) {
-            out_nodes.push_back(static_cast<int>(global_col / dof));
+        for (const GlobalIndex col_pat : cols) {
+            push_col_node(col_pat);
         }
     };
 
@@ -527,9 +654,9 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     std::vector<int> node_cols;
 
     for (int old = 0; old < nNo; ++old) {
-        const int global_node = (old < owned_node_count)
-                                    ? (owned_node_start + old)
-                                    : ghost_nodes[static_cast<std::size_t>(old - owned_node_count)];
+        const int global_node = shared->oldToGlobalNode(old);
+        FE_THROW_IF(global_node < 0, InvalidArgumentException,
+                    "FsilsMatrix: invalid old->global node mapping");
 
         node_cols.clear();
         for (int r = 0; r < dof; ++r) {
@@ -563,9 +690,9 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
 
     Vector<int> gNodes(nNo);
     for (int old = 0; old < nNo; ++old) {
-        const int global_node = (old < owned_node_count)
-                                    ? (owned_node_start + old)
-                                    : ghost_nodes[static_cast<std::size_t>(old - owned_node_count)];
+        const int global_node = shared->oldToGlobalNode(old);
+        FE_THROW_IF(global_node < 0, InvalidArgumentException,
+                    "FsilsMatrix: invalid old->global node mapping");
         gNodes(old) = global_node;
     }
 

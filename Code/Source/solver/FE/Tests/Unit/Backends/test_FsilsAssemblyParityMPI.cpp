@@ -342,6 +342,7 @@ TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithPermutation)
     // FSILS distributed sparsity must be specified in backend (node-block) ordering.
     const IndexRange owned_backend = (rank == 0) ? IndexRange{0, 3} : IndexRange{3, 9};
     DistributedSparsityPattern pattern(owned_backend, owned_backend, n_global, n_global);
+    pattern.setDofIndexing(DistributedSparsityPattern::DofIndexing::NodalInterleaved);
 
     if (rank == 0) {
         const std::array<GlobalIndex, 6> edofs_backend = {0, 1, 2, 3, 4, 5};
@@ -417,6 +418,184 @@ TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithPermutation)
         assembleElement(Ad, bd, edofs_fe, Ke, be);
     } else {
         const std::array<GlobalIndex, 6> edofs_fe = {u1, v1, p1, u2, v2, p2};
+        assembleElement(Ad, bd, edofs_fe, Ke, be);
+    }
+    Ad.finalizeAssembly();
+    bd.finalizeAssembly();
+
+    const auto dense_global_A = allreduceSum(Ad.data(), comm);
+    const auto dense_global_b = allreduceSum(bd.data(), comm);
+
+    const auto fsils_local_A = gatherLocalMatrixEntries(*A, n_global);
+    const auto fsils_local_b = gatherLocalVectorEntries(*b, n_global);
+    const auto fsils_global_A = allreduceSum(fsils_local_A, comm);
+    const auto fsils_global_b = allreduceSum(fsils_local_b, comm);
+
+    if (rank == 0) {
+        constexpr Real tol = 1e-14;
+        const auto dA = maxAbsDiffWithIndex(dense_global_A, fsils_global_A);
+        const auto db = maxAbsDiffWithIndex(dense_global_b, fsils_global_b);
+        EXPECT_LT(dA.max_abs, tol) << "Max |A_dense-A_fsils|=" << dA.max_abs
+                                  << " at idx=" << dA.idx
+                                  << " (dense=" << dA.a << ", fsils=" << dA.b << ")";
+        EXPECT_LT(db.max_abs, tol) << "Max |b_dense-b_fsils|=" << db.max_abs
+                                  << " at idx=" << db.idx
+                                  << " (dense=" << db.a << ", fsils=" << db.b << ")";
+    }
+
+    SolverOptions opts;
+    opts.method = SolverMethod::CG;
+    opts.preconditioner = PreconditionerType::Diagonal;
+    opts.rel_tol = 1e-12;
+    opts.abs_tol = 1e-14;
+    opts.max_iter = 200;
+
+    auto solver = factory.createLinearSolver(opts);
+    const auto rep = solver->solve(*A, *x, *b);
+    EXPECT_TRUE(rep.converged);
+
+    x->updateGhosts();
+    auto* fx = dynamic_cast<FsilsVector*>(x.get());
+    ASSERT_TRUE(fx);
+    const auto* shared = fx->shared();
+    ASSERT_TRUE(shared);
+
+    const auto perm_x = shared->dof_permutation;
+    auto viewx = x->createAssemblyView();
+    std::vector<int> local_nodes;
+    local_nodes.reserve(static_cast<std::size_t>(shared->owned_node_count) + shared->ghost_nodes.size());
+    for (int i = 0; i < shared->owned_node_count; ++i) {
+        local_nodes.push_back(shared->owned_node_start + i);
+    }
+    local_nodes.insert(local_nodes.end(), shared->ghost_nodes.begin(), shared->ghost_nodes.end());
+
+    for (const int node : local_nodes) {
+        for (int c = 0; c < dof; ++c) {
+            const GlobalIndex backend_dof = static_cast<GlobalIndex>(node) * dof + c;
+            const GlobalIndex fe_dof = (perm_x && !perm_x->empty())
+                                           ? perm_x->inverse[static_cast<std::size_t>(backend_dof)]
+                                           : backend_dof;
+            EXPECT_NEAR(viewx->getVectorEntry(fe_dof), 1.0, 1e-10);
+        }
+    }
+}
+
+TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithPermutationNaturalIndexing)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 3;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    // FE ordering (rank-contiguous, but not node-interleaved on rank 1):
+    //   [u0 v0 p0 | u1 u2 v1 v2 p1 p2]
+    // Backend ordering (node-block):
+    //   [u0 v0 p0 | u1 v1 p1 | u2 v2 p2]
+    //
+    // This exercises the FSILS distributed layout builder when the distributed sparsity is in FE
+    // index space, requiring the DOF permutation to construct the node adjacency graph.
+    auto perm = std::make_shared<DofPermutation>();
+    perm->forward.resize(static_cast<std::size_t>(n_global));
+    perm->inverse.resize(static_cast<std::size_t>(n_global));
+
+    // FE indices:
+    // 0:u0 1:v0 2:p0 3:u1 4:u2 5:v1 6:v2 7:p1 8:p2
+    // Backend indices:
+    // 0:u0 1:v0 2:p0 3:u1 4:v1 5:p1 6:u2 7:v2 8:p2
+    perm->forward[0] = 0;
+    perm->forward[1] = 1;
+    perm->forward[2] = 2;
+    perm->forward[3] = 3;
+    perm->forward[4] = 6;
+    perm->forward[5] = 4;
+    perm->forward[6] = 7;
+    perm->forward[7] = 5;
+    perm->forward[8] = 8;
+
+    for (GlobalIndex fe = 0; fe < n_global; ++fe) {
+        const GlobalIndex be = perm->forward[static_cast<std::size_t>(fe)];
+        perm->inverse[static_cast<std::size_t>(be)] = fe;
+    }
+    for (GlobalIndex i = 0; i < n_global; ++i) {
+        ASSERT_EQ(perm->inverse[static_cast<std::size_t>(perm->forward[static_cast<std::size_t>(i)])], i);
+    }
+
+    // Distributed sparsity is specified in FE index space with rank-contiguous ownership.
+    const IndexRange owned_fe = (rank == 0) ? IndexRange{0, 3} : IndexRange{3, 9};
+    DistributedSparsityPattern pattern(owned_fe, owned_fe, n_global, n_global);
+    pattern.setDofIndexing(DistributedSparsityPattern::DofIndexing::Natural);
+
+    if (rank == 0) {
+        // Element between nodes 0-1 in FE index space: [u0 v0 p0 | u1 v1 p1] -> {0,1,2,3,5,7}
+        const std::array<GlobalIndex, 6> edofs_fe = {0, 1, 2, 3, 5, 7};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs_fe.data(), edofs_fe.size()));
+    } else {
+        // Element between nodes 1-2 in FE index space: [u1 v1 p1 | u2 v2 p2] -> {3,5,7,4,6,8}
+        const std::array<GlobalIndex, 6> edofs_fe = {3, 5, 7, 4, 6, 8};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs_fe.data(), edofs_fe.size()));
+    }
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    // Ghost rows for shared node 1 on rank 0 (overlap model), in FE index space.
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{3, 5, 7};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 6, 12, 18};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(18);
+        const std::array<GlobalIndex, 6> cols = {0, 1, 2, 3, 5, 7};
+        for (int r = 0; r < dof; ++r) {
+            ghost_cols.insert(ghost_cols.end(), cols.begin(), cols.end());
+        }
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    const std::array<Real, dof> scales = {2.0, 3.0, 5.0};
+    const auto Ke = makeScaledComponentTwoNodeMatrix(dof, scales);
+    const std::vector<Real> ones(6, 1.0);
+    const auto be = matVec(Ke, /*n=*/6, ones);
+
+    FsilsFactory factory(dof, perm);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+    auto x = factory.createVector(n_global);
+
+    A->zero();
+    b->zero();
+    x->zero();
+
+    auto viewA = A->createAssemblyView();
+    auto viewb = b->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    viewb->beginAssemblyPhase();
+    if (rank == 0) {
+        const std::array<GlobalIndex, 6> edofs_fe = {0, 1, 2, 3, 5, 7};
+        assembleElement(*viewA, *viewb, edofs_fe, Ke, be);
+    } else {
+        const std::array<GlobalIndex, 6> edofs_fe = {3, 5, 7, 4, 6, 8};
+        assembleElement(*viewA, *viewb, edofs_fe, Ke, be);
+    }
+    viewA->finalizeAssembly();
+    viewb->finalizeAssembly();
+    A->finalizeAssembly();
+
+    DenseMatrixView Ad(n_global);
+    DenseVectorView bd(n_global);
+    Ad.zero();
+    bd.zero();
+    Ad.beginAssemblyPhase();
+    bd.beginAssemblyPhase();
+    if (rank == 0) {
+        const std::array<GlobalIndex, 6> edofs_fe = {0, 1, 2, 3, 5, 7};
+        assembleElement(Ad, bd, edofs_fe, Ke, be);
+    } else {
+        const std::array<GlobalIndex, 6> edofs_fe = {3, 5, 7, 4, 6, 8};
         assembleElement(Ad, bd, edofs_fe, Ke, be);
     }
     Ad.finalizeAssembly();

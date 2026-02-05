@@ -258,6 +258,7 @@ DistributedSparsityPattern buildFsilsPatternForStrip(MPI_Comm comm,
     };
 
     DistributedSparsityPattern pattern(owned_rows, owned_rows, n_dofs, n_dofs);
+    pattern.setDofIndexing(DistributedSparsityPattern::DofIndexing::NodalInterleaved);
 
     // Element (cell) owned by this rank: c = rank, with nodes at x=rank and x=rank+1.
     const int c = rank;
