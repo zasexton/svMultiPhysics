@@ -1808,13 +1808,15 @@ if(FE_BUILD_TESTS)
 			                Tests/Unit/Forms/test_NonlinearFormKernel_ElementCoverage.cpp
 			                Tests/Unit/Forms/test_NonlinearFormKernel_Triangle3.cpp
 			                Tests/Unit/Forms/test_NonlinearFormKernel_Boundary.cpp
-			                Tests/Unit/Forms/test_NonlinearFormKernel_TimeAndHistory.cpp
-			                Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_MatrixAndEigenOps.cpp
-			                Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_SmoothOps.cpp
-			                Tests/Unit/Forms/test_SymbolicDifferentiation.cpp
-	                    Tests/Unit/Forms/test_HessianVectorProduct.cpp
-		                Tests/Unit/Forms/Tensor/test_TensorIndex.cpp
-		                Tests/Unit/Forms/Tensor/test_TensorSymmetry.cpp
+			                Tests/Unit/Forms/test_NonlinearFormKernel_DGHelpers.cpp
+				                Tests/Unit/Forms/test_NonlinearFormKernel_TimeAndHistory.cpp
+				                Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_MatrixAndEigenOps.cpp
+				                Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_SmoothOps.cpp
+				                Tests/Unit/Forms/test_JIT_ExtendedParity.cpp
+				                Tests/Unit/Forms/test_SymbolicDifferentiation.cpp
+		                    Tests/Unit/Forms/test_HessianVectorProduct.cpp
+			                Tests/Unit/Forms/Tensor/test_TensorIndex.cpp
+			                Tests/Unit/Forms/Tensor/test_TensorSymmetry.cpp
 			                Tests/Unit/Forms/Tensor/test_TensorContraction.cpp
 			                Tests/Unit/Forms/Tensor/test_TensorCanonicalize.cpp
 			                Tests/Unit/Forms/Tensor/test_TensorSimplify.cpp

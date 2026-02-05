@@ -12139,8 +12139,6 @@ void NonlinearFormKernel::computeInteriorFace(
     auto assembleResidualJacBlock = [&](Side eval_side,
                                         Side test_active,
                                         Side trial_active,
-                                        const assembly::AssemblyContext& ctx_eval,
-                                        const assembly::AssemblyContext& ctx_other,
                                         assembly::KernelOutput& out,
                                         LocalIndex n_test,
                                         LocalIndex n_trial) {
@@ -12149,6 +12147,7 @@ void NonlinearFormKernel::computeInteriorFace(
         if (!want_matrix && !want_vector) {
             return;
         }
+        const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
         const auto* time_ctx = ctx_eval.timeIntegrationContext();
         for (LocalIndex i = 0; i < n_test; ++i) {
             std::span<Real> row{};
@@ -12169,7 +12168,7 @@ void NonlinearFormKernel::computeInteriorFace(
                 ws.reset(n_trial_ad);
 
                 ConstitutiveCallCacheDual constitutive_cache;
-                EvalEnvDual env{ctx_eval, &ctx_other, test_active, trial_active, i,
+                EvalEnvDual env{ctx_minus, &ctx_plus, test_active, trial_active, i,
                                 n_trial_ad, &ws, constitutive_state_.get(), &constitutive_cache};
 
                 Dual sum_q = makeDualConstant(0.0, ws.alloc());
@@ -12204,28 +12203,24 @@ void NonlinearFormKernel::computeInteriorFace(
     if (want_minus_matrix || want_minus_vector) {
         // minus equations, derivatives w.r.t minus dofs (residual + minus-minus block)
         assembleResidualJacBlock(Side::Minus, Side::Minus, Side::Minus,
-                                 ctx_minus, ctx_plus,
                                  output_minus, n_test_minus, n_trial_minus);
     }
 
     if (want_mp_matrix) {
         // minus equations, derivatives w.r.t plus dofs (minus-plus coupling)
         assembleResidualJacBlock(Side::Minus, Side::Minus, Side::Plus,
-                                 ctx_minus, ctx_plus,
                                  coupling_mp, n_test_minus, n_trial_plus);
     }
 
     if (want_plus_matrix || want_plus_vector) {
         // plus equations, derivatives w.r.t plus dofs (residual + plus-plus block)
         assembleResidualJacBlock(Side::Plus, Side::Plus, Side::Plus,
-                                 ctx_plus, ctx_minus,
                                  output_plus, n_test_plus, n_trial_plus);
     }
 
     if (want_pm_matrix) {
         // plus equations, derivatives w.r.t minus dofs (plus-minus coupling)
         assembleResidualJacBlock(Side::Plus, Side::Plus, Side::Minus,
-                                 ctx_plus, ctx_minus,
                                  coupling_pm, n_test_plus, n_trial_minus);
     }
 }
@@ -12286,8 +12281,6 @@ void NonlinearFormKernel::computeInterfaceFace(
     auto assembleResidualJacBlock = [&](Side eval_side,
                                         Side test_active,
                                         Side trial_active,
-                                        const assembly::AssemblyContext& ctx_eval,
-                                        const assembly::AssemblyContext& ctx_other,
                                         assembly::KernelOutput& out,
                                         LocalIndex n_test,
                                         LocalIndex n_trial) {
@@ -12296,6 +12289,7 @@ void NonlinearFormKernel::computeInterfaceFace(
         if (!want_matrix && !want_vector) {
             return;
         }
+        const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
         const auto* time_ctx = ctx_eval.timeIntegrationContext();
         for (LocalIndex i = 0; i < n_test; ++i) {
             std::span<Real> row{};
@@ -12316,7 +12310,7 @@ void NonlinearFormKernel::computeInterfaceFace(
                 ws.reset(n_trial_ad);
 
                 ConstitutiveCallCacheDual constitutive_cache;
-                EvalEnvDual env{ctx_eval, &ctx_other, test_active, trial_active, i,
+                EvalEnvDual env{ctx_minus, &ctx_plus, test_active, trial_active, i,
                                 n_trial_ad, &ws, constitutive_state_.get(), &constitutive_cache};
 
                 Dual sum_q = makeDualConstant(0.0, ws.alloc());
@@ -12351,28 +12345,24 @@ void NonlinearFormKernel::computeInterfaceFace(
     if (want_minus_matrix || want_minus_vector) {
         // minus equations, derivatives w.r.t minus dofs (residual + minus-minus block)
         assembleResidualJacBlock(Side::Minus, Side::Minus, Side::Minus,
-                                 ctx_minus, ctx_plus,
                                  output_minus, n_test_minus, n_trial_minus);
     }
 
     if (want_mp_matrix) {
         // minus equations, derivatives w.r.t plus dofs (minus-plus coupling)
         assembleResidualJacBlock(Side::Minus, Side::Minus, Side::Plus,
-                                 ctx_minus, ctx_plus,
                                  coupling_mp, n_test_minus, n_trial_plus);
     }
 
     if (want_plus_matrix || want_plus_vector) {
         // plus equations, derivatives w.r.t plus dofs (residual + plus-plus block)
         assembleResidualJacBlock(Side::Plus, Side::Plus, Side::Plus,
-                                 ctx_plus, ctx_minus,
                                  output_plus, n_test_plus, n_trial_plus);
     }
 
     if (want_pm_matrix) {
         // plus equations, derivatives w.r.t minus dofs (plus-minus coupling)
         assembleResidualJacBlock(Side::Plus, Side::Plus, Side::Minus,
-                                 ctx_plus, ctx_minus,
                                  coupling_pm, n_test_plus, n_trial_minus);
     }
 }

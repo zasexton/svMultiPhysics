@@ -101,6 +101,20 @@ FormExpr spd2x2FromGradU(const FormExpr& u)
     return (2.0 * I) + outer(g, g);
 }
 
+FormExpr spd3x3FromGradU(const FormExpr& u)
+{
+    // SPD matrix: A = diag(2,3,5) + (∇u)(∇u)^T (3x3 on 3D cells).
+    // Use distinct baseline eigenvalues to avoid repeated-eigenvalue kinks in symmetricEigenvalue().
+    const auto z = FormExpr::constant(Real(0.0));
+    const auto A0 = FormExpr::asTensor({
+        {FormExpr::constant(Real(2.0)), z, z},
+        {z, FormExpr::constant(Real(3.0)), z},
+        {z, z, FormExpr::constant(Real(5.0))},
+    });
+    const auto g = grad(u);
+    return A0 + outer(g, g);
+}
+
 } // namespace
 
 TEST(SymbolicMatrixFunctionJacobianTest, MatrixExpInFormMatchesCentralDifferences)
@@ -178,8 +192,82 @@ TEST(SymbolicEigenJacobianTest, SymmetricEigenvalueInFormMatchesCentralDifferenc
     expectSymbolicJacobianMatchesCentralDifferences(mesh, space, residual, U, /*eps=*/1e-6, /*tol=*/5e-6);
 }
 
+TEST(SymbolicMatrixFunctionJacobianTest, MatrixExpInForm_Tetra4_3x3_MatchesCentralDifferences)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto A = spd3x3FromGradU(u);
+
+    const auto residual = (A.matrixExp().trace() * v).dx();
+    const std::vector<Real> U = {0.12, -0.08, 0.15, 0.02};
+
+    expectSymbolicJacobianMatchesCentralDifferences(mesh, space, residual, U, /*eps=*/1e-6, /*tol=*/5e-6);
+}
+
+TEST(SymbolicMatrixFunctionJacobianTest, MatrixLogInForm_Tetra4_3x3_MatchesCentralDifferences)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto A = spd3x3FromGradU(u);
+
+    const auto residual = (A.matrixLog().trace() * v).dx();
+    const std::vector<Real> U = {0.12, -0.08, 0.15, 0.02};
+
+    expectSymbolicJacobianMatchesCentralDifferences(mesh, space, residual, U, /*eps=*/1e-6, /*tol=*/5e-6);
+}
+
+TEST(SymbolicEigenJacobianTest, SymmetricEigenvalue_Tetra4_3x3_Index0_MatchesCentralDifferences)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto A = spd3x3FromGradU(u);
+
+    const auto residual = (A.symmetricEigenvalue(0) * v).dx();
+    const std::vector<Real> U = {0.12, -0.08, 0.15, 0.02};
+
+    expectSymbolicJacobianMatchesCentralDifferences(mesh, space, residual, U, /*eps=*/1e-6, /*tol=*/5e-6);
+}
+
+TEST(SymbolicEigenJacobianTest, SymmetricEigenvalue_Tetra4_3x3_Index1_MatchesCentralDifferences)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto A = spd3x3FromGradU(u);
+
+    const auto residual = (A.symmetricEigenvalue(1) * v).dx();
+    const std::vector<Real> U = {0.12, -0.08, 0.15, 0.02};
+
+    expectSymbolicJacobianMatchesCentralDifferences(mesh, space, residual, U, /*eps=*/1e-6, /*tol=*/5e-6);
+}
+
+TEST(SymbolicEigenJacobianTest, SymmetricEigenvalue_Tetra4_3x3_Index2_MatchesCentralDifferences)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto A = spd3x3FromGradU(u);
+
+    const auto residual = (A.symmetricEigenvalue(2) * v).dx();
+    const std::vector<Real> U = {0.12, -0.08, 0.15, 0.02};
+
+    expectSymbolicJacobianMatchesCentralDifferences(mesh, space, residual, U, /*eps=*/1e-6, /*tol=*/5e-6);
+}
+
 } // namespace test
 } // namespace forms
 } // namespace FE
 } // namespace svmp
-

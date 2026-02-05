@@ -14,11 +14,16 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
+#include "Basis/NodeOrderingConventions.h"
+#include "Basis/SerendipityBasis.h"
 #include "Dofs/DofMap.h"
+#include "Elements/ReferenceElement.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/Vocabulary.h"
+#include "Quadrature/QuadratureFactory.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/IsogeometricSpace.h"
 #include "Spaces/SpaceFactory.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
@@ -337,6 +342,85 @@ private:
     std::array<GlobalIndex, 5> cell_{};
 };
 
+class CanonicalSingleElementMeshAccess final : public assembly::IMeshAccess {
+public:
+    explicit CanonicalSingleElementMeshAccess(ElementType elem_type)
+        : elem_type_(elem_type)
+    {
+        const auto ref = elements::ReferenceElement::create(elem_type_);
+        dim_ = ref.dimension();
+
+        const auto n_nodes = basis::NodeOrdering::num_nodes(elem_type_);
+        nodes_.reserve(n_nodes);
+        cell_.reserve(n_nodes);
+
+        for (std::size_t i = 0; i < n_nodes; ++i) {
+            const auto xi = basis::NodeOrdering::get_node_coords(elem_type_, i);
+            nodes_.push_back({xi[0], xi[1], xi[2]});
+            cell_.push_back(static_cast<GlobalIndex>(i));
+        }
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return dim_; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return elem_type_; }
+
+    void getCellNodes(GlobalIndex /*cell_id*/, std::vector<GlobalIndex>& nodes) const override
+    {
+        nodes.assign(cell_.begin(), cell_.end());
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex /*cell_id*/,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        coords.resize(cell_.size());
+        for (std::size_t i = 0; i < cell_.size(); ++i) {
+            coords[i] = nodes_.at(static_cast<std::size_t>(cell_[i]));
+        }
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/,
+                                               GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return -1; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+
+    void forEachBoundaryFace(int /*marker*/,
+                             std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+private:
+    ElementType elem_type_{ElementType::Unknown};
+    int dim_{-1};
+    std::vector<std::array<Real, 3>> nodes_;
+    std::vector<GlobalIndex> cell_;
+};
+
 void expectJacobianMatchesCentralDifferences(const assembly::IMeshAccess& mesh,
                                              const spaces::FunctionSpace& space,
                                              const FormExpr& residual,
@@ -584,6 +668,100 @@ TEST(NonlinearFormKernelElementCoverageTest, Convection_Triangle3_P2_Vector_Matc
     }
 
     expectJacobianMatchesCentralDifferences(mesh, *vec_space, residual, U, /*eps=*/1e-6, /*tol=*/5e-8);
+}
+
+TEST(NonlinearFormKernelElementCoverageTest, PoissonJacobian_Hex20_MatchesCentralDifferences)
+{
+    CanonicalSingleElementMeshAccess mesh(ElementType::Hex20);
+    auto basis = std::make_shared<basis::SerendipityBasis>(ElementType::Hex20, /*order=*/2, /*geometry_mode=*/false);
+    const int qord = quadrature::QuadratureFactory::recommended_order(/*basis_order=*/2, /*is_mass_matrix=*/false);
+    auto quad = quadrature::QuadratureFactory::create(ElementType::Hex20, qord);
+    spaces::IsogeometricSpace space(std::move(basis), std::move(quad));
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto residual = inner(grad(u), grad(v)).dx();
+
+    std::vector<Real> U(static_cast<std::size_t>(space.dofs_per_element()));
+    for (std::size_t i = 0; i < U.size(); ++i) {
+        U[i] = Real(0.01) * static_cast<Real>(i + 1);
+    }
+
+    expectJacobianMatchesCentralDifferences(mesh, space, residual, U, /*eps=*/1e-6, /*tol=*/5e-10);
+}
+
+TEST(NonlinearFormKernelElementCoverageTest, PoissonJacobian_Quad8_MatchesCentralDifferences)
+{
+    CanonicalSingleElementMeshAccess mesh(ElementType::Quad8);
+    auto basis = std::make_shared<basis::SerendipityBasis>(ElementType::Quad8, /*order=*/2, /*geometry_mode=*/false);
+    const int qord = quadrature::QuadratureFactory::recommended_order(/*basis_order=*/2, /*is_mass_matrix=*/false);
+    auto quad = quadrature::QuadratureFactory::create(ElementType::Quad8, qord);
+    spaces::IsogeometricSpace space(std::move(basis), std::move(quad));
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto residual = inner(grad(u), grad(v)).dx();
+
+    std::vector<Real> U(static_cast<std::size_t>(space.dofs_per_element()));
+    for (std::size_t i = 0; i < U.size(); ++i) {
+        U[i] = Real(-0.02) * static_cast<Real>(i + 1);
+    }
+
+    expectJacobianMatchesCentralDifferences(mesh, space, residual, U, /*eps=*/1e-6, /*tol=*/1e-10);
+}
+
+TEST(NonlinearFormKernelElementCoverageTest, PoissonJacobian_Quad9_MatchesCentralDifferences)
+{
+    CanonicalSingleElementMeshAccess mesh(ElementType::Quad9);
+    spaces::H1Space space(ElementType::Quad9, /*order=*/2);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto residual = inner(grad(u), grad(v)).dx();
+
+    std::vector<Real> U(static_cast<std::size_t>(space.dofs_per_element()));
+    for (std::size_t i = 0; i < U.size(); ++i) {
+        U[i] = Real(0.015) * static_cast<Real>(i + 1);
+    }
+
+    expectJacobianMatchesCentralDifferences(mesh, space, residual, U, /*eps=*/1e-6, /*tol=*/1e-10);
+}
+
+TEST(NonlinearFormKernelElementCoverageTest, PoissonJacobian_Triangle6_MatchesCentralDifferences)
+{
+    CanonicalSingleElementMeshAccess mesh(ElementType::Triangle6);
+    spaces::H1Space space(ElementType::Triangle6, /*order=*/2);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto residual = inner(grad(u), grad(v)).dx();
+
+    std::vector<Real> U(static_cast<std::size_t>(space.dofs_per_element()));
+    for (std::size_t i = 0; i < U.size(); ++i) {
+        U[i] = Real(-0.03) * static_cast<Real>(i + 1);
+    }
+
+    expectJacobianMatchesCentralDifferences(mesh, space, residual, U, /*eps=*/1e-6, /*tol=*/1e-10);
+}
+
+TEST(NonlinearFormKernelElementCoverageTest, PoissonJacobian_Wedge15_MatchesCentralDifferences)
+{
+    CanonicalSingleElementMeshAccess mesh(ElementType::Wedge15);
+    auto basis = std::make_shared<basis::SerendipityBasis>(ElementType::Wedge15, /*order=*/2, /*geometry_mode=*/false);
+    const int qord = quadrature::QuadratureFactory::recommended_order(/*basis_order=*/2, /*is_mass_matrix=*/false);
+    auto quad = quadrature::QuadratureFactory::create(ElementType::Wedge15, qord);
+    spaces::IsogeometricSpace space(std::move(basis), std::move(quad));
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto residual = inner(grad(u), grad(v)).dx();
+
+    std::vector<Real> U(static_cast<std::size_t>(space.dofs_per_element()));
+    for (std::size_t i = 0; i < U.size(); ++i) {
+        U[i] = Real(0.008) * static_cast<Real>(i + 1);
+    }
+
+    expectJacobianMatchesCentralDifferences(mesh, space, residual, U, /*eps=*/1e-6, /*tol=*/1e-10);
 }
 
 } // namespace test

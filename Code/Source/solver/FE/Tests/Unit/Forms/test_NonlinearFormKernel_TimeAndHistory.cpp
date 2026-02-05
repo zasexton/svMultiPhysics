@@ -298,6 +298,92 @@ TEST(HistoryOpsTest, HistoryConvolutionMatchesExplicitSumAndHasNoJacobianContrib
     }
 }
 
+TEST(HistoryOpsTest, HistoryWeightedSumMatchesExplicitSumAndHasNoJacobianContribution)
+{
+    SingleTetraMeshAccess mesh;
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    constexpr Real w1 = 1.0;
+    constexpr Real w2 = -0.5;
+
+    FormCompiler compiler;
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+
+    const auto hist = FormExpr::historyWeightedSum({FormExpr::constant(w1), FormExpr::constant(w2)});
+    const auto hist_ex = FormExpr::constant(w1) * FormExpr::previousSolution(1) +
+                         FormExpr::constant(w2) * FormExpr::previousSolution(2);
+
+    // Add a TrialFunction term so FormCompiler treats this as a proper residual form.
+    const auto residual = ((u + hist) * v).dx();
+    const auto residual_ex = ((u + hist_ex) * v).dx();
+    const auto residual_mass = (u * v).dx();
+
+    auto ir = compiler.compileResidual(residual);
+    auto ir_ex = compiler.compileResidual(residual_ex);
+    auto ir_mass = compiler.compileResidual(residual_mass);
+
+    SymbolicNonlinearFormKernel kernel(std::move(ir), NonlinearKernelOutput::Both);
+    SymbolicNonlinearFormKernel kernel_ex(std::move(ir_ex), NonlinearKernelOutput::Both);
+    SymbolicNonlinearFormKernel kernel_mass(std::move(ir_mass), NonlinearKernelOutput::Both);
+    kernel.resolveInlinableConstitutives();
+    kernel_ex.resolveInlinableConstitutives();
+    kernel_mass.resolveInlinableConstitutives();
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    // Provide a dummy transient context so previousSolution(k) values are available at quadrature.
+    assembly::TimeIntegrationContext ti;
+    ti.integrator_name = "unit_history_weighted_sum";
+    assembly::TimeDerivativeStencil dt1;
+    dt1.order = 1;
+    dt1.a = {Real(1.0), Real(-1.0), Real(1.0)};
+    ti.dt1 = dt1;
+    assembler.setTimeIntegrationContext(&ti);
+
+    std::vector<Real> U = {0.1, -0.2, 0.3, -0.1};
+    std::vector<Real> U_prev = {0.07, -0.01, 0.02, 0.05};
+    std::vector<Real> U_prev2 = {0.09, 0.03, -0.04, 0.01};
+    assembler.setCurrentSolution(U);
+    assembler.setPreviousSolution(U_prev);
+    assembler.setPreviousSolution2(U_prev2);
+
+    assembly::DenseMatrixView J(4);
+    assembly::DenseVectorView R(4);
+    J.zero();
+    R.zero();
+    (void)assembler.assembleBoth(mesh, space, space, kernel, J, R);
+
+    assembly::DenseVectorView R_ex(4);
+    R_ex.zero();
+    (void)assembler.assembleVector(mesh, space, kernel_ex, R_ex);
+
+    assembly::DenseMatrixView J_mass(4);
+    J_mass.zero();
+    (void)assembler.assembleMatrix(mesh, space, space, kernel_mass, J_mass);
+
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        EXPECT_NEAR(R.getVectorEntry(i), R_ex.getVectorEntry(i), 1e-12);
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            EXPECT_NEAR(J.getMatrixEntry(i, j), J_mass.getMatrixEntry(i, j), 1e-12);
+        }
+    }
+
+    // Ensure the explicit form also produces the same Jacobian as the full form.
+    assembly::DenseMatrixView J_ex(4);
+    assembly::DenseVectorView R_tmp(4);
+    J_ex.zero();
+    R_tmp.zero();
+    (void)assembler.assembleBoth(mesh, space, space, kernel_ex, J_ex, R_tmp);
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            EXPECT_NEAR(J_ex.getMatrixEntry(i, j), J_mass.getMatrixEntry(i, j), 1e-12);
+        }
+    }
+}
+
 } // namespace test
 } // namespace forms
 } // namespace FE
