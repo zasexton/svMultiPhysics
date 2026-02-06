@@ -16,9 +16,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <fstream>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <vector>
 #include <sstream>
 #include <stdexcept>
 
@@ -108,6 +110,44 @@ public:
 
 namespace application {
 namespace core {
+
+struct VtkTimeSeriesCollection {
+  struct Entry {
+    double time{};
+    std::string file{};
+  };
+
+  std::filesystem::path pvd_path{};
+  std::vector<Entry> entries{};
+};
+
+namespace {
+
+void write_pvd_collection(const VtkTimeSeriesCollection& pvd)
+{
+  if (pvd.pvd_path.empty() || pvd.entries.empty()) {
+    return;
+  }
+
+  std::ofstream out(pvd.pvd_path);
+  if (!out.is_open()) {
+    throw std::runtime_error("[svMultiPhysics::Application] Failed to open PVD file '" + pvd.pvd_path.string() + "'.");
+  }
+
+  out << "<?xml version=\"1.0\"?>\n";
+  out << "<VTKFile type=\"Collection\" version=\"0.1\" byte_order=\"LittleEndian\">\n";
+  out << "  <Collection>\n";
+
+  out << std::setprecision(16) << std::fixed;
+  for (const auto& e : pvd.entries) {
+    out << "    <DataSet timestep=\"" << e.time << "\" group=\"\" part=\"0\" file=\"" << e.file << "\"/>\n";
+  }
+
+  out << "  </Collection>\n";
+  out << "</VTKFile>\n";
+}
+
+} // namespace
 
 bool ApplicationDriver::shouldUseNewSolver(const std::string& xml_file)
 {
@@ -211,16 +251,45 @@ void ApplicationDriver::runWithParameters(const Parameters& params)
   const double dt = params.general_simulation_parameters.time_step_size.value();
   oopCout() << "[svMultiPhysics::Application] Time stepping: Number_of_time_steps=" << num_steps
             << " Time_step_size=" << dt << std::endl;
+
+  VtkTimeSeriesCollection pvd{};
+  VtkTimeSeriesCollection* pvd_ptr = nullptr;
+  if (params.general_simulation_parameters.combine_time_series.defined() &&
+      params.general_simulation_parameters.combine_time_series.value()) {
+    const bool vtk_enabled = params.general_simulation_parameters.save_results_to_vtk_format.defined() &&
+                             params.general_simulation_parameters.save_results_to_vtk_format.value();
+    if (!vtk_enabled) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] <Combine_time_series> is only implemented for VTK output "
+          "(.pvd collection file). Other output formats are not implemented.");
+    }
+
+    std::filesystem::path out_dir = ".";
+    if (params.general_simulation_parameters.save_results_in_folder.defined() &&
+        !params.general_simulation_parameters.save_results_in_folder.value().empty()) {
+      out_dir = params.general_simulation_parameters.save_results_in_folder.value();
+    }
+
+    std::string prefix = "result";
+    if (params.general_simulation_parameters.name_prefix_of_saved_vtk_files.defined() &&
+        !params.general_simulation_parameters.name_prefix_of_saved_vtk_files.value().empty()) {
+      prefix = params.general_simulation_parameters.name_prefix_of_saved_vtk_files.value();
+    }
+
+    pvd.pvd_path = out_dir / (prefix + ".pvd");
+    pvd_ptr = &pvd;
+  }
+
   if (num_steps <= 1) {
     oopCout() << "[svMultiPhysics::Application] Starting steady-state solve." << std::endl;
-    runSteadyState(sim, params);
+    runSteadyState(sim, params, pvd_ptr);
   } else {
     oopCout() << "[svMultiPhysics::Application] Starting transient solve." << std::endl;
-    runTransient(sim, params);
+    runTransient(sim, params, pvd_ptr);
   }
 }
 
-void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Parameters& params)
+void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Parameters& params, VtkTimeSeriesCollection* pvd)
 {
   if (!sim.fe_system) {
     throw std::runtime_error("[svMultiPhysics::Application] Steady solve requires an FE system.");
@@ -288,10 +357,18 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   }
 
   sim.fe_system->commitTimeStep();
-  outputResults(sim, params, /*step=*/1, solve_time);
+  outputResults(sim, params, /*step=*/1, solve_time, pvd);
+
+  const auto comm = svmp::MeshComm::world();
+  if (pvd && comm.rank() == 0) {
+    write_pvd_collection(*pvd);
+    if (!pvd->entries.empty()) {
+      oopCout() << "[svMultiPhysics::Application] Wrote PVD: " << pvd->pvd_path.string() << std::endl;
+    }
+  }
 }
 
-void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters& params)
+void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters& params, VtkTimeSeriesCollection* pvd)
 {
   if (!sim.fe_system) {
     throw std::runtime_error("[svMultiPhysics::Application] Transient solve requires an FE system.");
@@ -383,7 +460,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   callbacks.on_step_accepted = [&](const svmp::FE::timestepping::TimeHistory& h) {
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_accepted step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
-    outputResults(sim, params, h.stepIndex(), h.time());
+    outputResults(sim, params, h.stepIndex(), h.time(), pvd);
   };
   callbacks.on_step_rejected = [&](const svmp::FE::timestepping::TimeHistory& h,
                                   svmp::FE::timestepping::StepRejectReason reason,
@@ -412,9 +489,18 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     throw std::runtime_error("[svMultiPhysics::Application] Transient solve failed: " + rep.message +
                              ". Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
   }
+
+  const auto comm = svmp::MeshComm::world();
+  if (pvd && comm.rank() == 0) {
+    write_pvd_collection(*pvd);
+    if (!pvd->entries.empty()) {
+      oopCout() << "[svMultiPhysics::Application] Wrote PVD: " << pvd->pvd_path.string() << std::endl;
+    }
+  }
 }
 
-void ApplicationDriver::outputResults(const SimulationComponents& sim, const Parameters& params, int step, double time)
+void ApplicationDriver::outputResults(const SimulationComponents& sim, const Parameters& params, int step, double time,
+                                      VtkTimeSeriesCollection* pvd)
 {
   if (!params.general_simulation_parameters.save_results_to_vtk_format.defined() ||
       !params.general_simulation_parameters.save_results_to_vtk_format.value()) {
@@ -541,6 +627,17 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
 
   if (is_root) {
     oopCout() << "[svMultiPhysics::Application] Wrote VTK: " << out_path.string() << std::endl;
+    if (pvd && !pvd->pvd_path.empty()) {
+      std::error_code ec;
+      auto rel = std::filesystem::relative(out_path, pvd->pvd_path.parent_path(), ec);
+      if (ec) {
+        rel = out_path.filename();
+      }
+      const std::string rel_file = rel.generic_string();
+      if (pvd->entries.empty() || pvd->entries.back().file != rel_file) {
+        pvd->entries.push_back(VtkTimeSeriesCollection::Entry{time, rel_file});
+      }
+    }
   }
   if (oopTraceEnabled() && is_root) {
     oopCout() << "[svMultiPhysics::Application] VTK output: done step=" << step << " time=" << time << std::endl;

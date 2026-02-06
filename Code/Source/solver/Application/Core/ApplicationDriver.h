@@ -8,6 +8,7 @@ namespace application {
 namespace core {
 
 struct SimulationComponents;
+struct VtkTimeSeriesCollection;
 
 class ApplicationDriver {
 public:
@@ -16,12 +17,11 @@ public:
 
 private:
   static void runWithParameters(const Parameters& params);
-  static void runSteadyState(SimulationComponents& sim, const Parameters& params);
-  static void runTransient(SimulationComponents& sim, const Parameters& params);
+  static void runSteadyState(SimulationComponents& sim, const Parameters& params, VtkTimeSeriesCollection* pvd);
+  static void runTransient(SimulationComponents& sim, const Parameters& params, VtkTimeSeriesCollection* pvd);
   static void outputResults(const SimulationComponents& sim, const Parameters& params, int step,
-                            double time);
+                            double time, VtkTimeSeriesCollection* pvd);
 };
 
 } // namespace core
 } // namespace application
-

@@ -58,10 +58,10 @@ def _load_pvd_series(pvd_path: Path):
 
 def _extract_step_from_result_name(path: Path) -> Optional[int]:
     """
-    Extract the integer time step from filenames like ``result_002.vtu``.
+    Extract the integer time step from filenames like ``result_002.vtu`` or ``result_002.pvtu``.
     Returns None when the pattern is not matched.
     """
-    match = re.search(r"result_(\d+)\.(?:vtu|vtp)$", Path(path).name)
+    match = re.search(r"result_(\d+)\.(?:vtu|vtp|pvtu|pvtp)$", Path(path).name)
     if not match:
         return None
     return int(match.group(1))
@@ -143,13 +143,23 @@ def _amplitude_at_frequency_fft(t: np.ndarray, y: np.ndarray, f_target: float) -
     k = int(np.argmin(np.abs(freq - f_target)))
     return float(amp[k])
 
-def _require_timevalue(mesh: pv.DataSet, *, src: Path) -> float:
-    if "TimeValue" not in mesh.field_data:
-        raise ValueError(
-            f"Missing FieldData 'TimeValue' in {src}; "
-            f"regenerate the series with TimeValue populated (e.g. combine_time_results.py --write-timevalue)."
-        )
-    return float(np.asarray(mesh.field_data["TimeValue"]).ravel()[0])
+def _time_from_mesh_field_data(mesh: pv.DataSet, *, src: Path) -> Optional[float]:
+    """
+    Extract time from common FieldData keys if present.
+
+    Notes:
+    - Serial VTU time series created by helper scripts may include FieldData/TimeValue.
+    - Parallel PVTU datasets commonly do *not* include FieldData, so callers should
+      provide a fallback (e.g. the timestep attribute from a .pvd Collection file).
+    """
+    for key in ("TimeValue", "time"):
+        if key not in mesh.field_data:
+            continue
+        try:
+            return float(np.asarray(mesh.field_data[key]).ravel()[0])
+        except Exception:
+            raise ValueError(f"Invalid FieldData '{key}' in {src}")
+    return None
 
 def _require_solution_fields(mesh: pv.DataSet, *, src: Path, vel_name: str, p_name: str) -> None:
     missing = []
@@ -627,9 +637,10 @@ def analyze_vortex_shedding_series(
     for t_pvd, f in series:
         m = pv.read(str(f))
         _require_solution_fields(m, src=f, vel_name=vel_name, p_name=p_name)
-        t = _require_timevalue(m, src=f)
-        if not np.isclose(t, t_pvd, rtol=1e-12, atol=1e-12):
-            raise ValueError(f"Time mismatch for {f}: pvd={t_pvd}, FieldData/TimeValue={t}")
+        t_mesh = _time_from_mesh_field_data(m, src=f)
+        if t_mesh is not None and not np.isclose(t_mesh, t_pvd, rtol=1e-12, atol=1e-12):
+            raise ValueError(f"Time mismatch for {f}: pvd={t_pvd}, FieldData={t_mesh}")
+        t = float(t_pvd)
 
         step_list.append(_extract_step_from_result_name(f))
 

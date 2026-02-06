@@ -2206,6 +2206,7 @@ GeneralSimulationParameters::GeneralSimulationParameters()
   set_parameter("Restart_file_name", "stFile", !required, restart_file_name);
 
   set_parameter("Save_averaged_results", false, !required, save_averaged_results);
+  set_parameter("Combine_time_series", false, !required, combine_time_series);
   set_parameter("Save_results_in_folder", "", !required, save_results_in_folder);
   set_parameter("Save_results_to_VTK_format", false, required, save_results_to_vtk_format);
   set_parameter("Searched_file_name_to_trigger_stop", "", !required, searched_file_name_to_trigger_stop);

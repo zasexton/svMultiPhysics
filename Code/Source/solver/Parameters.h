@@ -1401,6 +1401,7 @@ class EquationParameters : public ParameterLists
 ///   <Spectral_radius_of_infinite_time_step> 0.50 </Spectral_radius_of_infinite_time_step>
 ///   <Searched_file_name_to_trigger_stop> STOP_SIM </Searched_file_name_to_trigger_stop>
 ///   <Save_results_to_VTK_format> true </Save_results_to_VTK_format>
+///   <Combine_time_series> true </Combine_time_series>
 ///   <Name_prefix_of_saved_VTK_files> result </Name_prefix_of_saved_VTK_files>
 ///   <Increment_in_saving_VTK_files> 1 </Increment_in_saving_VTK_files>
 ///   <Start_saving_after_time_step> 1 </Start_saving_after_time_step>
@@ -1428,6 +1429,7 @@ class GeneralSimulationParameters : public ParameterLists
     Parameter<bool> debug;
     Parameter<bool> overwrite_restart_file;
     Parameter<bool> save_averaged_results;
+    Parameter<bool> combine_time_series;
     Parameter<bool> save_results_to_vtk_format;
     Parameter<bool> simulation_requires_remeshing;
     Parameter<bool> start_averaging_from_zero;
