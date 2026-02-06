@@ -16,6 +16,7 @@
 
 #include <chrono>
 #include <algorithm>
+#include <iterator>
 
 namespace svmp {
 namespace FE {
@@ -267,6 +268,80 @@ private:
 
     std::vector<GhostContribution> owned_contributions_;
     std::vector<GlobalIndex> owned_rows_;
+};
+
+class CellListMeshAccess final : public IMeshAccess {
+public:
+    CellListMeshAccess(const IMeshAccess& base, std::span<const GlobalIndex> cell_ids)
+        : base_(&base), cell_ids_(cell_ids)
+    {
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return static_cast<GlobalIndex>(cell_ids_.size()); }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return static_cast<GlobalIndex>(cell_ids_.size()); }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return base_->numBoundaryFaces(); }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return base_->numInteriorFaces(); }
+    [[nodiscard]] int dimension() const override { return base_->dimension(); }
+    [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override { return base_->isOwnedCell(cell_id); }
+    [[nodiscard]] ElementType getCellType(GlobalIndex cell_id) const override { return base_->getCellType(cell_id); }
+    [[nodiscard]] int getCellDomainId(GlobalIndex cell_id) const override { return base_->getCellDomainId(cell_id); }
+
+    void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override
+    {
+        base_->getCellNodes(cell_id, nodes);
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return base_->getNodeCoordinates(node_id);
+    }
+
+    void getCellCoordinates(GlobalIndex cell_id, std::vector<std::array<Real, 3>>& coords) const override
+    {
+        base_->getCellCoordinates(cell_id, coords);
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex face_id, GlobalIndex cell_id) const override
+    {
+        return base_->getLocalFaceIndex(face_id, cell_id);
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex face_id) const override
+    {
+        return base_->getBoundaryFaceMarker(face_id);
+    }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex face_id) const override
+    {
+        return base_->getInteriorFaceCells(face_id);
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        for (const auto cell : cell_ids_) {
+            callback(cell);
+        }
+    }
+
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        forEachCell(std::move(callback));
+    }
+
+    void forEachBoundaryFace(int marker,
+                             std::function<void(GlobalIndex, GlobalIndex)> callback) const override
+    {
+        base_->forEachBoundaryFace(marker, std::move(callback));
+    }
+
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> callback) const override
+    {
+        base_->forEachInteriorFace(std::move(callback));
+    }
+
+private:
+    const IMeshAccess* base_{nullptr};
+    std::span<const GlobalIndex> cell_ids_{};
 };
 
 } // namespace
@@ -541,7 +616,47 @@ void ParallelAssembler::finalize(GlobalSystemView* matrix_view, GlobalSystemView
     // Exchange ghost contributions
     if (ghost_policy_ == GhostPolicy::ReverseScatter) {
         exchangeGhostContributions();
-        applyReceivedContributions(matrix_view, vector_view);
+
+        auto recv_matrix = ghost_manager_.takeReceivedMatrixContributions();
+        if (!recv_matrix.empty()) {
+            if (pending_received_matrix_.empty()) {
+                pending_received_matrix_ = std::move(recv_matrix);
+            } else {
+                pending_received_matrix_.insert(pending_received_matrix_.end(),
+                                                std::make_move_iterator(recv_matrix.begin()),
+                                                std::make_move_iterator(recv_matrix.end()));
+            }
+        }
+
+        auto recv_vector = ghost_manager_.takeReceivedVectorContributions();
+        if (!recv_vector.empty()) {
+            if (pending_received_vector_.empty()) {
+                pending_received_vector_ = std::move(recv_vector);
+            } else {
+                pending_received_vector_.insert(pending_received_vector_.end(),
+                                                std::make_move_iterator(recv_vector.begin()),
+                                                std::make_move_iterator(recv_vector.end()));
+            }
+        }
+
+        if (options_.deterministic) {
+            std::sort(pending_received_matrix_.begin(), pending_received_matrix_.end());
+            std::sort(pending_received_vector_.begin(), pending_received_vector_.end());
+        }
+
+        if (matrix_view) {
+            for (const auto& entry : pending_received_matrix_) {
+                matrix_view->addMatrixEntry(entry.global_row, entry.global_col, entry.value);
+            }
+        }
+        if (vector_view) {
+            for (const auto& entry : pending_received_vector_) {
+                vector_view->addVectorEntry(entry.global_row, entry.value);
+            }
+        }
+
+        pending_received_matrix_.clear();
+        pending_received_vector_.clear();
     }
 
     // End assembly phases
@@ -569,6 +684,8 @@ void ParallelAssembler::reset()
     row_dofs_.clear();
     col_dofs_.clear();
     owned_contributions_.clear();
+    pending_received_matrix_.clear();
+    pending_received_vector_.clear();
     initialized_ = false;
     assembly_in_progress_ = false;
 }
@@ -741,6 +858,8 @@ void ParallelAssembler::beginGhostAssemblyIfNeeded()
     // Start a new assembly phase: clear any buffered ghost data from the previous operator.
     ghost_manager_.clearSendBuffers();
     ghost_manager_.clearReceivedContributions();
+    pending_received_matrix_.clear();
+    pending_received_vector_.clear();
 
     // Ensure ghost communication patterns are initialized before any buffering occurs.
     if (ghost_policy_ == GhostPolicy::ReverseScatter && !ghost_manager_.isInitialized()) {
@@ -768,28 +887,108 @@ AssemblyResult ParallelAssembler::assembleCellsParallel(
 
     beginGhostAssemblyIfNeeded();
 
-    if (assemble_matrix && matrix_view && assemble_vector && vector_view) {
-        if (matrix_view == vector_view) {
-            GhostRoutingView routed(*matrix_view, ghost_manager_, ghost_policy_);
-            return local_assembler_.assembleBoth(mesh, test_space, trial_space, kernel, routed, routed);
+    auto assemble_with_routing = [&](const IMeshAccess& mesh_view) -> AssemblyResult {
+        if (assemble_matrix && matrix_view && assemble_vector && vector_view) {
+            if (matrix_view == vector_view) {
+                GhostRoutingView routed(*matrix_view, ghost_manager_, ghost_policy_);
+                return local_assembler_.assembleBoth(mesh_view, test_space, trial_space, kernel, routed, routed);
+            }
+            GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+            GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleBoth(mesh_view, test_space, trial_space, kernel,
+                                                 routed_matrix, routed_vector);
         }
-        GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
-        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
-        return local_assembler_.assembleBoth(mesh, test_space, trial_space, kernel,
-                                             routed_matrix, routed_vector);
+
+        if (assemble_matrix && matrix_view) {
+            GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleMatrix(mesh_view, test_space, trial_space, kernel, routed_matrix);
+        }
+
+        if (assemble_vector && vector_view) {
+            GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleVector(mesh_view, test_space, kernel, routed_vector);
+        }
+
+        return {};
+    };
+
+#if FE_HAS_MPI
+    const bool can_overlap =
+        overlap_comm_ && (ghost_policy_ == GhostPolicy::ReverseScatter) && (world_size_ > 1);
+#else
+    const bool can_overlap = false;
+#endif
+
+    if (!can_overlap) {
+        return assemble_with_routing(mesh);
     }
 
-    if (assemble_matrix && matrix_view) {
-        GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
-        return local_assembler_.assembleMatrix(mesh, test_space, trial_space, kernel, routed_matrix);
+    FE_CHECK_NOT_NULL(dof_map_, "ParallelAssembler::assembleCellsParallel: dof_map");
+
+    std::vector<GlobalIndex> boundary_cells;
+    std::vector<GlobalIndex> interior_cells;
+    const auto owned_count = mesh.numOwnedCells();
+    if (owned_count > 0) {
+        const auto n = static_cast<std::size_t>(owned_count);
+        boundary_cells.reserve(n);
+        interior_cells.reserve(n);
     }
 
-    if (assemble_vector && vector_view) {
-        GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
-        return local_assembler_.assembleVector(mesh, test_space, kernel, routed_vector);
+    mesh.forEachOwnedCell([&](GlobalIndex cell_id) {
+        const auto dofs = dof_map_->getCellDofs(cell_id);
+        bool has_ghost_rows = false;
+        for (const auto dof : dofs) {
+            if (!dof_map_->isOwnedDof(dof)) {
+                has_ghost_rows = true;
+                break;
+            }
+        }
+        (has_ghost_rows ? boundary_cells : interior_cells).push_back(cell_id);
+    });
+
+    const CellListMeshAccess boundary_mesh(mesh, std::span<const GlobalIndex>(boundary_cells));
+    const CellListMeshAccess interior_mesh(mesh, std::span<const GlobalIndex>(interior_cells));
+
+    AssemblyResult boundary_result = assemble_with_routing(boundary_mesh);
+    ghost_manager_.startExchange();
+    AssemblyResult interior_result = assemble_with_routing(interior_mesh);
+    ghost_manager_.waitExchange();
+
+    auto recv_matrix = ghost_manager_.takeReceivedMatrixContributions();
+    if (!recv_matrix.empty()) {
+        if (pending_received_matrix_.empty()) {
+            pending_received_matrix_ = std::move(recv_matrix);
+        } else {
+            pending_received_matrix_.insert(pending_received_matrix_.end(),
+                                            std::make_move_iterator(recv_matrix.begin()),
+                                            std::make_move_iterator(recv_matrix.end()));
+        }
     }
 
-    return {};
+    auto recv_vector = ghost_manager_.takeReceivedVectorContributions();
+    if (!recv_vector.empty()) {
+        if (pending_received_vector_.empty()) {
+            pending_received_vector_ = std::move(recv_vector);
+        } else {
+            pending_received_vector_.insert(pending_received_vector_.end(),
+                                            std::make_move_iterator(recv_vector.begin()),
+                                            std::make_move_iterator(recv_vector.end()));
+        }
+    }
+
+    if (boundary_result.success && !interior_result.success) {
+        boundary_result.success = false;
+        boundary_result.error_message = interior_result.error_message;
+    }
+    boundary_result.elements_assembled += interior_result.elements_assembled;
+    boundary_result.boundary_faces_assembled += interior_result.boundary_faces_assembled;
+    boundary_result.interior_faces_assembled += interior_result.interior_faces_assembled;
+    boundary_result.interface_faces_assembled += interior_result.interface_faces_assembled;
+    boundary_result.elapsed_time_seconds += interior_result.elapsed_time_seconds;
+    boundary_result.matrix_entries_inserted += interior_result.matrix_entries_inserted;
+    boundary_result.vector_entries_inserted += interior_result.vector_entries_inserted;
+
+    return boundary_result;
 }
 
 void ParallelAssembler::insertLocalWithGhostHandling(
@@ -867,6 +1066,13 @@ void ParallelAssembler::insertLocalWithGhostHandling(
 
 void ParallelAssembler::exchangeGhostContributions()
 {
+    if (overlap_comm_) {
+        if (!ghost_manager_.isExchangeInProgress()) {
+            ghost_manager_.startExchange();
+        }
+        ghost_manager_.waitExchange();
+        return;
+    }
     ghost_manager_.exchangeContributions();
 }
 

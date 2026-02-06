@@ -10,6 +10,7 @@
 #include "Dofs/GhostDofManager.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <numeric>
 #include <cstring>
@@ -34,6 +35,86 @@ void set_mpi_rank_and_size(MPI_Comm comm, int& rank, int& size)
 }
 } // namespace
 #endif
+
+namespace {
+
+constexpr std::size_t kRadixSortThreshold = 2048u;
+
+[[nodiscard]] inline std::uint64_t sortableKey(GlobalIndex v) noexcept
+{
+    using Signed = std::int64_t;
+    using Unsigned = std::uint64_t;
+    return static_cast<Unsigned>(static_cast<Signed>(v)) ^ (Unsigned(1) << 63);
+}
+
+template <typename T, typename KeyFn>
+void radixSortByUint64(std::vector<T>& data, std::vector<T>& scratch, KeyFn key_fn)
+{
+    const std::size_t n = data.size();
+    if (n < 2u) {
+        return;
+    }
+
+    constexpr std::size_t kRadix = 256u;
+    scratch.resize(n);
+
+    std::vector<T>* src = &data;
+    std::vector<T>* dst = &scratch;
+
+    for (std::size_t pass = 0u; pass < 8u; ++pass) {
+        std::array<std::size_t, kRadix> counts{};
+        for (const auto& v : *src) {
+            const auto key = key_fn(v);
+            const auto bucket = static_cast<std::size_t>((key >> (pass * 8u)) & 0xFFu);
+            ++counts[bucket];
+        }
+
+        std::array<std::size_t, kRadix> pos{};
+        std::size_t sum = 0u;
+        for (std::size_t i = 0u; i < kRadix; ++i) {
+            pos[i] = sum;
+            sum += counts[i];
+        }
+
+        for (auto& v : *src) {
+            const auto key = key_fn(v);
+            const auto bucket = static_cast<std::size_t>((key >> (pass * 8u)) & 0xFFu);
+            (*dst)[pos[bucket]++] = std::move(v);
+        }
+
+        std::swap(src, dst);
+    }
+
+    if (src != &data) {
+        data.swap(*src);
+    }
+}
+
+void sortGhostMatrixEntries(std::vector<GhostContribution>& entries,
+                            std::vector<GhostContribution>& scratch)
+{
+    if (entries.size() < kRadixSortThreshold) {
+        std::sort(entries.begin(), entries.end());
+        return;
+    }
+
+    // Stable radix by secondary key first, then primary.
+    radixSortByUint64(entries, scratch, [](const GhostContribution& e) { return sortableKey(e.global_col); });
+    radixSortByUint64(entries, scratch, [](const GhostContribution& e) { return sortableKey(e.global_row); });
+}
+
+void sortGhostVectorEntries(std::vector<GhostVectorContribution>& entries,
+                            std::vector<GhostVectorContribution>& scratch)
+{
+    if (entries.size() < kRadixSortThreshold) {
+        std::sort(entries.begin(), entries.end());
+        return;
+    }
+
+    radixSortByUint64(entries, scratch, [](const GhostVectorContribution& e) { return sortableKey(e.global_row); });
+}
+
+} // namespace
 
 // ============================================================================
 // Construction
@@ -112,8 +193,6 @@ void GhostContributionManager::initialize()
 
 #if FE_HAS_MPI
     recv_buffers_raw_.resize(neighbor_ranks_.size());
-    send_requests_.resize(neighbor_ranks_.size(), MPI_REQUEST_NULL);
-    recv_requests_.resize(neighbor_ranks_.size(), MPI_REQUEST_NULL);
 #endif
 
     initialized_ = true;
@@ -353,101 +432,171 @@ int GhostContributionManager::findNeighborIndex(int rank) const
 
 void GhostContributionManager::exchangeContributions()
 {
-    if (world_size_ == 1 || neighbor_ranks_.empty()) {
-        return;  // Nothing to exchange in serial
-    }
+    startExchange();
+    waitExchange();
+}
 
-    auto start_time = std::chrono::steady_clock::now();
+void GhostContributionManager::startExchange()
+{
+    FE_THROW_IF(exchange_in_progress_, FEException,
+                "GhostContributionManager::startExchange: exchange already in progress");
+
+    exchange_start_time_ = std::chrono::steady_clock::now();
+    last_stats_ = ExchangeStats{};
 
     if (deterministic_) {
         sortBuffersForDeterminism();
     }
 
-#if FE_HAS_MPI
-    // Pack send buffers into byte arrays
-    std::vector<std::vector<char>> send_data(neighbor_ranks_.size());
+    received_matrix_.clear();
+    received_vector_.clear();
 
-    for (std::size_t i = 0; i < neighbor_ranks_.size(); ++i) {
+    // Mark as in progress even for single-rank / non-MPI builds so callers can
+    // treat startExchange()/waitExchange() as a consistent state machine.
+    exchange_in_progress_ = true;
+
+#if FE_HAS_MPI
+    if (world_size_ == 1 || neighbor_ranks_.empty()) {
+        return;  // Trivial/loopback exchange; waitExchange() will complete it.
+    }
+
+    // Pack send buffers into byte arrays that remain alive until waitExchange().
+    const std::size_t n_neighbors = neighbor_ranks_.size();
+    send_buffers_raw_.resize(n_neighbors);
+    send_sizes_.assign(n_neighbors, 0);
+    recv_sizes_.assign(n_neighbors, 0);
+    recv_buffers_raw_.resize(n_neighbors);
+
+    for (std::size_t i = 0; i < n_neighbors; ++i) {
         const auto& buffer = send_buffers_[i];
 
-        // Calculate packed size
-        std::size_t matrix_size = buffer.entries.size() * sizeof(GhostContribution);
-        std::size_t vector_size = buffer.vector_entries.size() * sizeof(GhostVectorContribution);
-        std::size_t total_size =
+        const std::size_t matrix_size = buffer.entries.size() * sizeof(GhostContribution);
+        const std::size_t vector_size = buffer.vector_entries.size() * sizeof(GhostVectorContribution);
+        const std::size_t total_size =
             sizeof(std::size_t) + matrix_size +
             sizeof(std::size_t) + vector_size;
 
-        send_data[i].resize(total_size);
+        send_buffers_raw_[i].resize(total_size);
 
         // Pack: [num_matrix][matrix...][num_vector][vector...]
-        char* ptr = send_data[i].data();
-        std::size_t num_entries = buffer.entries.size();
+        char* ptr = send_buffers_raw_[i].data();
+        const std::size_t num_entries = buffer.entries.size();
         std::memcpy(ptr, &num_entries, sizeof(std::size_t));
         ptr += sizeof(std::size_t);
-
-        if (!buffer.entries.empty()) {
+        if (matrix_size > 0u) {
             std::memcpy(ptr, buffer.entries.data(), matrix_size);
+            ptr += matrix_size;
         }
-        ptr += matrix_size;
 
-        std::size_t num_vector_entries = buffer.vector_entries.size();
+        const std::size_t num_vector_entries = buffer.vector_entries.size();
         std::memcpy(ptr, &num_vector_entries, sizeof(std::size_t));
         ptr += sizeof(std::size_t);
-        if (!buffer.vector_entries.empty()) {
+        if (vector_size > 0u) {
             std::memcpy(ptr, buffer.vector_entries.data(), vector_size);
         }
 
-        last_stats_.bytes_sent += send_data[i].size();
+        send_sizes_[i] = static_cast<int>(send_buffers_raw_[i].size());
+        last_stats_.bytes_sent += send_buffers_raw_[i].size();
         last_stats_.matrix_entries_sent += buffer.entries.size();
         last_stats_.vector_entries_sent += buffer.vector_entries.size();
     }
 
-    // Exchange sizes first
-    std::vector<int> send_sizes(neighbor_ranks_.size());
-    std::vector<int> recv_sizes(neighbor_ranks_.size());
+    received_matrix_.clear();
+    received_vector_.clear();
 
-    for (std::size_t i = 0; i < neighbor_ranks_.size(); ++i) {
-        send_sizes[i] = static_cast<int>(send_data[i].size());
+    size_requests_.resize(2 * n_neighbors);
+    data_send_requests_.resize(n_neighbors);
+    for (std::size_t i = 0; i < n_neighbors; ++i) {
+        MPI_Isend(&send_sizes_[i], 1, MPI_INT, neighbor_ranks_[i], 0, comm_,
+                  &size_requests_[i]);
+        MPI_Irecv(&recv_sizes_[i], 1, MPI_INT, neighbor_ranks_[i], 0, comm_,
+                  &size_requests_[n_neighbors + i]);
+
+        const int count = send_sizes_[i];
+        const char* buf = send_buffers_raw_[i].empty() ? nullptr : send_buffers_raw_[i].data();
+        MPI_Isend(const_cast<char*>(buf), count, MPI_CHAR, neighbor_ranks_[i], 1, comm_,
+                  &data_send_requests_[i]);
     }
 
-    std::vector<MPI_Request> size_requests(2 * neighbor_ranks_.size());
-
-    for (std::size_t i = 0; i < neighbor_ranks_.size(); ++i) {
-        MPI_Isend(&send_sizes[i], 1, MPI_INT, neighbor_ranks_[i], 0, comm_,
-                  &size_requests[i]);
-        MPI_Irecv(&recv_sizes[i], 1, MPI_INT, neighbor_ranks_[i], 0, comm_,
-                  &size_requests[neighbor_ranks_.size() + i]);
+    // After packing, clear the user-facing send buffers so subsequent assembly
+    // can continue buffering while this exchange is in-flight.
+    for (auto& buffer : send_buffers_) {
+        buffer.clear();
     }
 
-    MPI_Waitall(static_cast<int>(size_requests.size()), size_requests.data(),
-                MPI_STATUSES_IGNORE);
+    exchange_in_progress_ = true;
+#endif // FE_HAS_MPI
+}
 
-    // Allocate receive buffers
-    recv_buffers_raw_.resize(neighbor_ranks_.size());
-    for (std::size_t i = 0; i < neighbor_ranks_.size(); ++i) {
-        recv_buffers_raw_[i].resize(static_cast<std::size_t>(recv_sizes[i]));
-        last_stats_.bytes_received += static_cast<std::size_t>(recv_sizes[i]);
+void GhostContributionManager::waitExchange()
+{
+    if (!exchange_in_progress_) {
+        return;
     }
 
-    // Exchange data
-    std::vector<MPI_Request> data_requests(2 * neighbor_ranks_.size());
+#if FE_HAS_MPI
+    if (world_size_ == 1 || neighbor_ranks_.empty()) {
+        // Loopback: treat buffered contributions as locally received.
+        for (auto& buffer : send_buffers_) {
+            last_stats_.matrix_entries_sent += buffer.entries.size();
+            last_stats_.vector_entries_sent += buffer.vector_entries.size();
 
-    for (std::size_t i = 0; i < neighbor_ranks_.size(); ++i) {
-        MPI_Isend(send_data[i].data(), static_cast<int>(send_data[i].size()),
-                  MPI_CHAR, neighbor_ranks_[i], 1, comm_, &data_requests[i]);
-        MPI_Irecv(recv_buffers_raw_[i].data(), recv_sizes[i], MPI_CHAR,
-                  neighbor_ranks_[i], 1, comm_,
-                  &data_requests[neighbor_ranks_.size() + i]);
+            last_stats_.matrix_entries_received += buffer.entries.size();
+            last_stats_.vector_entries_received += buffer.vector_entries.size();
+
+            received_matrix_.insert(received_matrix_.end(),
+                                    buffer.entries.begin(), buffer.entries.end());
+            received_vector_.insert(received_vector_.end(),
+                                    buffer.vector_entries.begin(), buffer.vector_entries.end());
+            buffer.clear();
+        }
+
+        if (deterministic_) {
+            std::vector<GhostContribution> matrix_scratch;
+            std::vector<GhostVectorContribution> vector_scratch;
+            sortGhostMatrixEntries(received_matrix_, matrix_scratch);
+            sortGhostVectorEntries(received_vector_, vector_scratch);
+        }
+
+        auto end_time = std::chrono::steady_clock::now();
+        last_stats_.exchange_time_seconds =
+            std::chrono::duration<double>(end_time - exchange_start_time_).count();
+        exchange_in_progress_ = false;
+        return;
     }
 
-    MPI_Waitall(static_cast<int>(data_requests.size()), data_requests.data(),
-                MPI_STATUSES_IGNORE);
+    // Wait for size exchange to learn receive sizes.
+    if (!size_requests_.empty()) {
+        MPI_Waitall(static_cast<int>(size_requests_.size()), size_requests_.data(),
+                    MPI_STATUSES_IGNORE);
+    }
+
+    const std::size_t n_neighbors = neighbor_ranks_.size();
+    data_recv_requests_.resize(n_neighbors);
+    for (std::size_t i = 0; i < n_neighbors; ++i) {
+        recv_buffers_raw_[i].resize(static_cast<std::size_t>(recv_sizes_[i]));
+        last_stats_.bytes_received += recv_buffers_raw_[i].size();
+
+        const int count = recv_sizes_[i];
+        char* buf = recv_buffers_raw_[i].empty() ? nullptr : recv_buffers_raw_[i].data();
+        MPI_Irecv(buf, count, MPI_CHAR, neighbor_ranks_[i], 1, comm_,
+                  &data_recv_requests_[i]);
+    }
+
+    if (!data_send_requests_.empty()) {
+        MPI_Waitall(static_cast<int>(data_send_requests_.size()), data_send_requests_.data(),
+                    MPI_STATUSES_IGNORE);
+    }
+    if (!data_recv_requests_.empty()) {
+        MPI_Waitall(static_cast<int>(data_recv_requests_.size()), data_recv_requests_.data(),
+                    MPI_STATUSES_IGNORE);
+    }
 
     // Unpack received data
     received_matrix_.clear();
     received_vector_.clear();
 
-    for (std::size_t i = 0; i < neighbor_ranks_.size(); ++i) {
+    for (std::size_t i = 0; i < n_neighbors; ++i) {
         if (recv_buffers_raw_[i].empty()) continue;
 
         const char* ptr = recv_buffers_raw_[i].data();
@@ -457,58 +606,80 @@ void GhostContributionManager::exchangeContributions()
         ptr += sizeof(std::size_t);
 
         last_stats_.matrix_entries_received += num_matrix_entries;
-
-        for (std::size_t j = 0; j < num_matrix_entries; ++j) {
-            GhostContribution entry;
-            std::memcpy(&entry, ptr, sizeof(GhostContribution));
-            ptr += sizeof(GhostContribution);
-            received_matrix_.push_back(entry);
+        const auto old_m = received_matrix_.size();
+        received_matrix_.resize(old_m + num_matrix_entries);
+        if (num_matrix_entries > 0u) {
+            std::memcpy(received_matrix_.data() + old_m, ptr,
+                        num_matrix_entries * sizeof(GhostContribution));
+            ptr += num_matrix_entries * sizeof(GhostContribution);
         }
 
         std::size_t num_vector_entries = 0;
         std::memcpy(&num_vector_entries, ptr, sizeof(std::size_t));
         ptr += sizeof(std::size_t);
-        last_stats_.vector_entries_received += num_vector_entries;
 
-        for (std::size_t j = 0; j < num_vector_entries; ++j) {
-            GhostVectorContribution entry;
-            std::memcpy(&entry, ptr, sizeof(GhostVectorContribution));
-            ptr += sizeof(GhostVectorContribution);
-            received_vector_.push_back(entry);
+        last_stats_.vector_entries_received += num_vector_entries;
+        const auto old_v = received_vector_.size();
+        received_vector_.resize(old_v + num_vector_entries);
+        if (num_vector_entries > 0u) {
+            std::memcpy(received_vector_.data() + old_v, ptr,
+                        num_vector_entries * sizeof(GhostVectorContribution));
         }
     }
 
     // Sort received for deterministic accumulation
     if (deterministic_) {
-        std::sort(received_matrix_.begin(), received_matrix_.end());
-        std::sort(received_vector_.begin(), received_vector_.end());
+        std::vector<GhostContribution> matrix_scratch;
+        std::vector<GhostVectorContribution> vector_scratch;
+        sortGhostMatrixEntries(received_matrix_, matrix_scratch);
+        sortGhostVectorEntries(received_vector_, vector_scratch);
     }
-
-#endif // FE_HAS_MPI
 
     auto end_time = std::chrono::steady_clock::now();
     last_stats_.exchange_time_seconds =
-        std::chrono::duration<double>(end_time - start_time).count();
-}
+        std::chrono::duration<double>(end_time - exchange_start_time_).count();
 
-void GhostContributionManager::startExchange()
-{
-    // Non-blocking version - similar to exchangeContributions but split
-    exchange_in_progress_ = true;
-    // Implementation would post MPI_Isend/Irecv without waiting
-}
-
-void GhostContributionManager::waitExchange()
-{
-    // Complete non-blocking exchange
     exchange_in_progress_ = false;
+#endif // FE_HAS_MPI
+
+#if !FE_HAS_MPI
+    // Non-MPI build: treat buffered contributions as locally received.
+    for (auto& buffer : send_buffers_) {
+        last_stats_.matrix_entries_sent += buffer.entries.size();
+        last_stats_.vector_entries_sent += buffer.vector_entries.size();
+
+        last_stats_.matrix_entries_received += buffer.entries.size();
+        last_stats_.vector_entries_received += buffer.vector_entries.size();
+
+        received_matrix_.insert(received_matrix_.end(),
+                                buffer.entries.begin(), buffer.entries.end());
+        received_vector_.insert(received_vector_.end(),
+                                buffer.vector_entries.begin(), buffer.vector_entries.end());
+        buffer.clear();
+    }
+
+    if (deterministic_) {
+        std::vector<GhostContribution> matrix_scratch;
+        std::vector<GhostVectorContribution> vector_scratch;
+        sortGhostMatrixEntries(received_matrix_, matrix_scratch);
+        sortGhostVectorEntries(received_vector_, vector_scratch);
+    }
+
+    auto end_time = std::chrono::steady_clock::now();
+    last_stats_.exchange_time_seconds =
+        std::chrono::duration<double>(end_time - exchange_start_time_).count();
+
+    exchange_in_progress_ = false;
+#endif // !FE_HAS_MPI
 }
 
 void GhostContributionManager::sortBuffersForDeterminism()
 {
+    std::vector<GhostContribution> matrix_scratch;
+    std::vector<GhostVectorContribution> vector_scratch;
     for (auto& buffer : send_buffers_) {
-        std::sort(buffer.entries.begin(), buffer.entries.end());
-        std::sort(buffer.vector_entries.begin(), buffer.vector_entries.end());
+        sortGhostMatrixEntries(buffer.entries, matrix_scratch);
+        sortGhostVectorEntries(buffer.vector_entries, vector_scratch);
     }
 }
 
@@ -524,6 +695,16 @@ std::span<const GhostContribution> GhostContributionManager::getReceivedMatrixCo
 std::span<const GhostVectorContribution> GhostContributionManager::getReceivedVectorContributions() const
 {
     return received_vector_;
+}
+
+std::vector<GhostContribution> GhostContributionManager::takeReceivedMatrixContributions()
+{
+    return std::move(received_matrix_);
+}
+
+std::vector<GhostVectorContribution> GhostContributionManager::takeReceivedVectorContributions()
+{
+    return std::move(received_vector_);
 }
 
 void GhostContributionManager::clearReceivedContributions()

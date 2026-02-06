@@ -192,7 +192,12 @@ TEST(EinsumTest, CompileRejectsUnloweredIndexedAccess)
     const auto v = FormExpr::testFunction(space, "v");
     const Index i("i");
 
-    FormCompiler compiler;
+    // Force interpreter compilation path regardless of build-time JIT availability.
+    // This test verifies that unlowered IndexedAccess is rejected unless the JIT/tensor pipeline
+    // explicitly opts in to accepting it in the IR.
+    SymbolicOptions opts;
+    opts.jit.enable = false;
+    FormCompiler compiler(opts);
 
     try {
         (void)compiler.compileBilinear((grad(u)(i) * grad(v)(i)).dx());

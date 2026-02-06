@@ -527,6 +527,92 @@ public:
     }
 };
 
+class BatchedIdentityKernel final : public AssemblyKernel {
+public:
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        ++compute_cell_calls_;
+        fillOutput(ctx, output);
+    }
+
+    void computeCellBatch(std::span<const AssemblyContext* const> contexts,
+                          std::span<KernelOutput> outputs) override
+    {
+        EXPECT_EQ(contexts.size(), outputs.size());
+        ++compute_batch_calls_;
+        for (std::size_t idx = 0; idx < contexts.size(); ++idx) {
+            ASSERT_NE(contexts[idx], nullptr);
+            fillOutput(*contexts[idx], outputs[idx]);
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override { return RequiredData::None; }
+    [[nodiscard]] int computeCellCalls() const noexcept { return compute_cell_calls_; }
+    [[nodiscard]] int computeCellBatchCalls() const noexcept { return compute_batch_calls_; }
+
+private:
+    static void fillOutput(const AssemblyContext& ctx, KernelOutput& output)
+    {
+        const auto n = ctx.numTestDofs();
+        output.local_matrix.resize(static_cast<std::size_t>(n * n), 0.0);
+        output.local_vector.resize(static_cast<std::size_t>(n), 0.0);
+        for (LocalIndex i = 0; i < n; ++i) {
+            output.local_matrix[static_cast<std::size_t>(i * n + i)] = 1.0;
+            output.local_vector[static_cast<std::size_t>(i)] = 1.0;
+        }
+        output.has_matrix = true;
+        output.has_vector = true;
+    }
+
+    int compute_cell_calls_{0};
+    int compute_batch_calls_{0};
+};
+
+class NonBatchedIdentityKernel final : public AssemblyKernel {
+public:
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return false; }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        ++compute_cell_calls_;
+        fillOutput(ctx, output);
+    }
+
+    void computeCellBatch(std::span<const AssemblyContext* const> contexts,
+                          std::span<KernelOutput> outputs) override
+    {
+        EXPECT_EQ(contexts.size(), outputs.size());
+        ++compute_batch_calls_;
+        for (std::size_t idx = 0; idx < contexts.size(); ++idx) {
+            ASSERT_NE(contexts[idx], nullptr);
+            fillOutput(*contexts[idx], outputs[idx]);
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override { return RequiredData::None; }
+    [[nodiscard]] int computeCellCalls() const noexcept { return compute_cell_calls_; }
+    [[nodiscard]] int computeCellBatchCalls() const noexcept { return compute_batch_calls_; }
+
+private:
+    static void fillOutput(const AssemblyContext& ctx, KernelOutput& output)
+    {
+        const auto n = ctx.numTestDofs();
+        output.local_matrix.resize(static_cast<std::size_t>(n * n), 0.0);
+        output.local_vector.resize(static_cast<std::size_t>(n), 0.0);
+        for (LocalIndex i = 0; i < n; ++i) {
+            output.local_matrix[static_cast<std::size_t>(i * n + i)] = 1.0;
+            output.local_vector[static_cast<std::size_t>(i)] = 1.0;
+        }
+        output.has_matrix = true;
+        output.has_vector = true;
+    }
+
+    int compute_cell_calls_{0};
+    int compute_batch_calls_{0};
+};
+
 /**
  * @brief Mass matrix kernel - computes local mass matrix
  * M_ij = integral(phi_i * phi_j)
@@ -1732,6 +1818,60 @@ TEST_F(StandardAssemblerTest, AssembleBoth) {
     EXPECT_EQ(result.elements_assembled, 2);
     EXPECT_GT(result.matrix_entries_inserted, 0);
     EXPECT_GT(result.vector_entries_inserted, 0);
+}
+
+TEST_F(StandardAssemblerTest, UsesBatchedCellPathWhenEnabled)
+{
+    assembler_->initialize();
+
+    AssemblyOptions options = assembler_->getOptions();
+    options.use_batching = true;
+    options.batch_size = 8;
+    assembler_->setOptions(options);
+
+    BatchedIdentityKernel kernel;
+    auto result = assembler_->assembleBoth(*mesh_, *space_, *space_, kernel, *system_, *system_);
+
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.elements_assembled, 2);
+    EXPECT_EQ(kernel.computeCellCalls(), 0);
+    EXPECT_EQ(kernel.computeCellBatchCalls(), 1);
+}
+
+TEST_F(StandardAssemblerTest, FallsBackToScalarCellPathWhenBatchingDisabled)
+{
+    assembler_->initialize();
+
+    AssemblyOptions options = assembler_->getOptions();
+    options.use_batching = false;
+    options.batch_size = 8;
+    assembler_->setOptions(options);
+
+    BatchedIdentityKernel kernel;
+    auto result = assembler_->assembleBoth(*mesh_, *space_, *space_, kernel, *system_, *system_);
+
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.elements_assembled, 2);
+    EXPECT_EQ(kernel.computeCellCalls(), 2);
+    EXPECT_EQ(kernel.computeCellBatchCalls(), 0);
+}
+
+TEST_F(StandardAssemblerTest, FallsBackToScalarWhenKernelDoesNotSupportBatch)
+{
+    assembler_->initialize();
+
+    AssemblyOptions options = assembler_->getOptions();
+    options.use_batching = true;
+    options.batch_size = 8;
+    assembler_->setOptions(options);
+
+    NonBatchedIdentityKernel kernel;
+    auto result = assembler_->assembleBoth(*mesh_, *space_, *space_, kernel, *system_, *system_);
+
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.elements_assembled, 2);
+    EXPECT_EQ(kernel.computeCellCalls(), 2);
+    EXPECT_EQ(kernel.computeCellBatchCalls(), 0);
 }
 
 TEST_F(StandardAssemblerTest, Finalize) {

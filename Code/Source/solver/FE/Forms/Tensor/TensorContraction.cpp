@@ -507,8 +507,79 @@ ContractionPlan optimalContractionOrder(const std::vector<TensorOperand>& operan
         return out;
     }
     if (n > 16u) {
-        out.ok = false;
-        out.message = "optimalContractionOrder: operand count > 16 not supported by DP in this build";
+        // Greedy fallback for large operand counts. DP becomes prohibitively expensive for n>16.
+        struct Node {
+            TensorOperand meta{};
+            std::vector<int> indices_sorted{};
+            int id{-1};
+        };
+
+        std::vector<Node> nodes;
+        nodes.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            Node node;
+            node.meta = operands[i];
+            node.meta.indices = sortedUnique(node.meta.indices);
+            node.indices_sorted = node.meta.indices;
+            node.id = static_cast<int>(i);
+            nodes.push_back(std::move(node));
+        }
+
+        int next_tmp_id = static_cast<int>(n);
+
+        while (nodes.size() > 1u) {
+            double best_cost = std::numeric_limits<double>::infinity();
+            CostEstimate best_est{};
+            std::size_t best_i = 0u;
+            std::size_t best_j = 1u;
+
+            for (std::size_t i = 0; i < nodes.size(); ++i) {
+                for (std::size_t j = i + 1u; j < nodes.size(); ++j) {
+                    CostEstimate c = estimateContractionCost(nodes[i].meta, nodes[i].indices_sorted,
+                                                            nodes[j].meta, nodes[j].indices_sorted,
+                                                            index_extents, model);
+                    const double cost = c.weighted;
+
+                    const int lhs_id = nodes[i].id;
+                    const int rhs_id = nodes[j].id;
+                    const int best_lhs_id = nodes[best_i].id;
+                    const int best_rhs_id = nodes[best_j].id;
+
+                    if (cost < best_cost - 1e-12 ||
+                        (std::abs(cost - best_cost) <= 1e-12 &&
+                         (lhs_id < best_lhs_id || (lhs_id == best_lhs_id && rhs_id < best_rhs_id)))) {
+                        best_cost = cost;
+                        best_est = c;
+                        best_i = i;
+                        best_j = j;
+                    }
+                }
+            }
+
+            out.steps.push_back(ContractionPlan::Step{.lhs = nodes[best_i].id, .rhs = nodes[best_j].id});
+            out.estimated_flops += best_est.flops;
+            out.estimated_reads += best_est.reads;
+            out.estimated_writes += best_est.writes;
+
+            Node combined;
+            combined.indices_sorted = symmetricDifferenceSorted(nodes[best_i].indices_sorted,
+                                                               nodes[best_j].indices_sorted);
+            combined.meta.indices = combined.indices_sorted;
+            combined.meta.is_delta = false;
+            combined.meta.is_symmetric = false;
+            combined.meta.is_antisymmetric = false;
+            combined.id = next_tmp_id++;
+
+            if (best_j > best_i) {
+                nodes.erase(nodes.begin() + static_cast<std::vector<Node>::difference_type>(best_j));
+                nodes.erase(nodes.begin() + static_cast<std::vector<Node>::difference_type>(best_i));
+            } else {
+                nodes.erase(nodes.begin() + static_cast<std::vector<Node>::difference_type>(best_i));
+                nodes.erase(nodes.begin() + static_cast<std::vector<Node>::difference_type>(best_j));
+            }
+            nodes.push_back(std::move(combined));
+        }
+
         return out;
     }
 

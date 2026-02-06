@@ -19,6 +19,12 @@
 #include <utility>
 #include <vector>
 
+// Build flag (set by FE CMake). Default to 0 for non-JIT builds and for
+// translation units that include this header without the library definitions.
+#ifndef SVMP_FE_ENABLE_LLVM_JIT
+#define SVMP_FE_ENABLE_LLVM_JIT 0
+#endif
+
 namespace svmp {
 namespace FE {
 
@@ -83,6 +89,11 @@ struct TensorJITOptions {
 
     // Optional: enable Polly-related loop metadata / passes.
     bool enable_polly{false};
+
+    // Optional: emit tiled loop nests in LLVM tensor codegen.
+    bool enable_loop_tiling{true};
+    std::uint32_t tile_size{32};        // 0 => auto
+    std::uint32_t min_tiling_extent{64};
 };
 
 struct JITSpecializationOptions {
@@ -106,7 +117,9 @@ struct JITSpecializationOptions {
 };
 
 struct JITOptions {
-    bool enable{false};
+    // Default-on when FE is built with LLVM JIT support; the interpreter remains
+    // available as a fallback and for debugging.
+    bool enable{SVMP_FE_ENABLE_LLVM_JIT != 0};
     int optimization_level{2};
     bool cache_kernels{true};
     bool vectorize{true};

@@ -30,6 +30,7 @@
 
 #include "SparsityPattern.h"
 #include <algorithm>
+#include <iterator>
 #include <numeric>
 #include <sstream>
 #include <cmath>
@@ -37,6 +38,41 @@
 namespace svmp {
 namespace FE {
 namespace sparsity {
+
+namespace {
+
+inline void sortUnique(std::vector<GlobalIndex>& values) {
+    std::sort(values.begin(), values.end());
+    values.erase(std::unique(values.begin(), values.end()), values.end());
+}
+
+inline void insertSortedUnique(std::vector<GlobalIndex>& row, GlobalIndex col) {
+    auto it = std::lower_bound(row.begin(), row.end(), col);
+    if (it == row.end() || *it != col) {
+        row.insert(it, col);
+    }
+}
+
+inline void unionSortedUniqueInto(std::vector<GlobalIndex>& row,
+                                  const std::vector<GlobalIndex>& add_sorted_unique,
+                                  std::vector<GlobalIndex>& scratch) {
+    if (add_sorted_unique.empty()) {
+        return;
+    }
+    if (row.empty()) {
+        row = add_sorted_unique;
+        return;
+    }
+
+    scratch.clear();
+    scratch.reserve(row.size() + add_sorted_unique.size());
+    std::set_union(row.begin(), row.end(),
+                   add_sorted_unique.begin(), add_sorted_unique.end(),
+                   std::back_inserter(scratch));
+    row.swap(scratch);
+}
+
+} // namespace
 
 // ============================================================================
 // Construction and lifecycle
@@ -90,37 +126,38 @@ SparsityPattern::SparsityPattern(const SparsityPattern& other)
       n_cols_(other.n_cols_),
       state_(SparsityState::Building)
 {
-    // Always copy to building state - reconstruct from CSR if needed
     if (other.isFinalized()) {
-        row_sets_.resize(static_cast<std::size_t>(n_rows_));
-        for (GlobalIndex row = 0; row < n_rows_; ++row) {
-            auto span = other.getRowSpan(row);
-            row_sets_[static_cast<std::size_t>(row)].insert(span.begin(), span.end());
-        }
+        row_ptr_ = other.row_ptr_;
+        col_idx_ = other.col_idx_;
+        cached_nnz_ = (other.cached_nnz_ >= 0)
+                          ? other.cached_nnz_
+                          : static_cast<GlobalIndex>(other.col_idx_.size());
+        state_.store(SparsityState::Finalized, std::memory_order_release);
     } else {
         row_sets_ = other.row_sets_;
+        cached_nnz_ = other.cached_nnz_;
+        state_.store(SparsityState::Building, std::memory_order_release);
     }
-    cached_nnz_ = -1;
 }
 
 SparsityPattern& SparsityPattern::operator=(const SparsityPattern& other) {
     if (this != &other) {
         n_rows_ = other.n_rows_;
         n_cols_ = other.n_cols_;
-        row_ptr_.clear();
-        col_idx_.clear();
-        cached_nnz_ = -1;
-        state_.store(SparsityState::Building, std::memory_order_release);
-
         if (other.isFinalized()) {
             row_sets_.clear();
-            row_sets_.resize(static_cast<std::size_t>(n_rows_));
-            for (GlobalIndex row = 0; row < n_rows_; ++row) {
-                auto span = other.getRowSpan(row);
-                row_sets_[static_cast<std::size_t>(row)].insert(span.begin(), span.end());
-            }
+            row_ptr_ = other.row_ptr_;
+            col_idx_ = other.col_idx_;
+            cached_nnz_ = (other.cached_nnz_ >= 0)
+                              ? other.cached_nnz_
+                              : static_cast<GlobalIndex>(other.col_idx_.size());
+            state_.store(SparsityState::Finalized, std::memory_order_release);
         } else {
             row_sets_ = other.row_sets_;
+            row_ptr_.clear();
+            col_idx_.clear();
+            cached_nnz_ = other.cached_nnz_;
+            state_.store(SparsityState::Building, std::memory_order_release);
         }
     }
     return *this;
@@ -170,16 +207,22 @@ void SparsityPattern::clear() {
     state_.store(SparsityState::Building, std::memory_order_release);
 }
 
-void SparsityPattern::reservePerRow(GlobalIndex /*entries_per_row*/) {
-    // std::set doesn't have reserve(), but this is a hint for future optimization
-    // Could switch to sorted vector with reserve
+void SparsityPattern::reservePerRow(GlobalIndex entries_per_row) {
+    checkNotFinalized();
+    if (entries_per_row <= 0) {
+        return;
+    }
+    const auto reserve_size = static_cast<std::size_t>(entries_per_row);
+    for (auto& row_cols : row_sets_) {
+        row_cols.reserve(reserve_size);
+    }
 }
 
 void SparsityPattern::addEntry(GlobalIndex row, GlobalIndex col) {
     checkNotFinalized();
     checkIndices(row, col);
 
-    row_sets_[static_cast<std::size_t>(row)].insert(col);
+    insertSortedUnique(row_sets_[static_cast<std::size_t>(row)], col);
     cached_nnz_ = -1;  // Invalidate cache
 }
 
@@ -187,11 +230,17 @@ void SparsityPattern::addEntries(GlobalIndex row, std::span<const GlobalIndex> c
     checkNotFinalized();
     checkRowIndex(row);
 
-    auto& row_set = row_sets_[static_cast<std::size_t>(row)];
+    std::vector<GlobalIndex> cols_sorted;
+    cols_sorted.reserve(cols.size());
     for (GlobalIndex col : cols) {
         checkColIndex(col);
-        row_set.insert(col);
+        cols_sorted.push_back(col);
     }
+
+    sortUnique(cols_sorted);
+
+    std::vector<GlobalIndex> scratch;
+    unionSortedUniqueInto(row_sets_[static_cast<std::size_t>(row)], cols_sorted, scratch);
     cached_nnz_ = -1;
 }
 
@@ -203,11 +252,15 @@ void SparsityPattern::addBlock(GlobalIndex row_begin, GlobalIndex row_end,
     FE_CHECK_ARG(col_begin >= 0 && col_begin <= col_end && col_end <= n_cols_,
                  "Invalid column range");
 
+    std::vector<GlobalIndex> cols_sorted;
+    cols_sorted.reserve(static_cast<std::size_t>(col_end - col_begin));
+    for (GlobalIndex col = col_begin; col < col_end; ++col) {
+        cols_sorted.push_back(col);
+    }
+
+    std::vector<GlobalIndex> scratch;
     for (GlobalIndex row = row_begin; row < row_end; ++row) {
-        auto& row_set = row_sets_[static_cast<std::size_t>(row)];
-        for (GlobalIndex col = col_begin; col < col_end; ++col) {
-            row_set.insert(col);
-        }
+        unionSortedUniqueInto(row_sets_[static_cast<std::size_t>(row)], cols_sorted, scratch);
     }
     cached_nnz_ = -1;
 }
@@ -215,14 +268,19 @@ void SparsityPattern::addBlock(GlobalIndex row_begin, GlobalIndex row_end,
 void SparsityPattern::addElementCouplings(std::span<const GlobalIndex> dofs) {
     checkNotFinalized();
 
+    std::vector<GlobalIndex> cols_sorted;
+    cols_sorted.reserve(dofs.size());
+    for (GlobalIndex col_dof : dofs) {
+        if (col_dof >= 0 && col_dof < n_cols_) {
+            cols_sorted.push_back(col_dof);
+        }
+    }
+    sortUnique(cols_sorted);
+
+    std::vector<GlobalIndex> scratch;
     for (GlobalIndex row_dof : dofs) {
         if (row_dof < 0 || row_dof >= n_rows_) continue;  // Skip out-of-range
-        auto& row_set = row_sets_[static_cast<std::size_t>(row_dof)];
-        for (GlobalIndex col_dof : dofs) {
-            if (col_dof >= 0 && col_dof < n_cols_) {
-                row_set.insert(col_dof);
-            }
-        }
+        unionSortedUniqueInto(row_sets_[static_cast<std::size_t>(row_dof)], cols_sorted, scratch);
     }
     cached_nnz_ = -1;
 }
@@ -231,14 +289,19 @@ void SparsityPattern::addElementCouplings(std::span<const GlobalIndex> row_dofs,
                                           std::span<const GlobalIndex> col_dofs) {
     checkNotFinalized();
 
+    std::vector<GlobalIndex> cols_sorted;
+    cols_sorted.reserve(col_dofs.size());
+    for (GlobalIndex col_dof : col_dofs) {
+        if (col_dof >= 0 && col_dof < n_cols_) {
+            cols_sorted.push_back(col_dof);
+        }
+    }
+    sortUnique(cols_sorted);
+
+    std::vector<GlobalIndex> scratch;
     for (GlobalIndex row_dof : row_dofs) {
         if (row_dof < 0 || row_dof >= n_rows_) continue;
-        auto& row_set = row_sets_[static_cast<std::size_t>(row_dof)];
-        for (GlobalIndex col_dof : col_dofs) {
-            if (col_dof >= 0 && col_dof < n_cols_) {
-                row_set.insert(col_dof);
-            }
-        }
+        unionSortedUniqueInto(row_sets_[static_cast<std::size_t>(row_dof)], cols_sorted, scratch);
     }
     cached_nnz_ = -1;
 }
@@ -248,7 +311,7 @@ void SparsityPattern::ensureDiagonal() {
     FE_CHECK_ARG(isSquare(), "ensureDiagonal() requires square pattern");
 
     for (GlobalIndex i = 0; i < n_rows_; ++i) {
-        row_sets_[static_cast<std::size_t>(i)].insert(i);
+        insertSortedUnique(row_sets_[static_cast<std::size_t>(i)], i);
     }
     cached_nnz_ = -1;
 }
@@ -261,7 +324,7 @@ void SparsityPattern::ensureNonEmptyRows() {
             // Add diagonal for square, column 0 for rectangular
             GlobalIndex col = isSquare() ? i : 0;
             if (col < n_cols_) {
-                row_sets_[static_cast<std::size_t>(i)].insert(col);
+                row_sets_[static_cast<std::size_t>(i)].push_back(col);
             }
         }
     }
@@ -281,12 +344,12 @@ void SparsityPattern::finalize() {
     row_ptr_.resize(static_cast<std::size_t>(n_rows_) + 1);
     col_idx_.resize(static_cast<std::size_t>(nnz));
 
-    // Build CSR arrays - sets are already sorted
+    // Build CSR arrays - row vectors are already sorted and unique
     row_ptr_[0] = 0;
     GlobalIndex idx = 0;
     for (GlobalIndex row = 0; row < n_rows_; ++row) {
-        const auto& row_set = row_sets_[static_cast<std::size_t>(row)];
-        for (GlobalIndex col : row_set) {
+        const auto& row_cols = row_sets_[static_cast<std::size_t>(row)];
+        for (GlobalIndex col : row_cols) {
             col_idx_[static_cast<std::size_t>(idx++)] = col;
         }
         row_ptr_[static_cast<std::size_t>(row) + 1] = idx;
@@ -361,8 +424,8 @@ bool SparsityPattern::hasEntry(GlobalIndex row, GlobalIndex col) const {
         return std::binary_search(row_span.begin(), row_span.end(), col);
     }
 
-    const auto& row_set = row_sets_[static_cast<std::size_t>(row)];
-    return row_set.find(col) != row_set.end();
+    const auto& row_cols = row_sets_[static_cast<std::size_t>(row)];
+    return std::binary_search(row_cols.begin(), row_cols.end(), col);
 }
 
 bool SparsityPattern::hasDiagonal(GlobalIndex row) const {
@@ -452,12 +515,13 @@ SparsityStats SparsityPattern::computeStats() const {
                 stats.has_diagonal = false;
             }
         } else {
-            const auto& row_set = row_sets_[static_cast<std::size_t>(row)];
-            for (GlobalIndex col : row_set) {
+            const auto& row_cols = row_sets_[static_cast<std::size_t>(row)];
+            for (GlobalIndex col : row_cols) {
                 GlobalIndex bw = std::abs(row - col);
                 stats.bandwidth = std::max(stats.bandwidth, bw);
             }
-            if (isSquare() && row_set.find(row) == row_set.end()) {
+            if (isSquare() &&
+                !std::binary_search(row_cols.begin(), row_cols.end(), row)) {
                 stats.has_diagonal = false;
             }
         }
@@ -489,8 +553,8 @@ GlobalIndex SparsityPattern::computeBandwidth() const {
                 bandwidth = std::max(bandwidth, std::abs(row - col));
             }
         } else {
-            const auto& row_set = row_sets_[static_cast<std::size_t>(row)];
-            for (GlobalIndex col : row_set) {
+            const auto& row_cols = row_sets_[static_cast<std::size_t>(row)];
+            for (GlobalIndex col : row_cols) {
                 bandwidth = std::max(bandwidth, std::abs(row - col));
             }
         }
@@ -513,8 +577,8 @@ bool SparsityPattern::isSymmetric() const {
                 }
             }
         } else {
-            const auto& row_set = row_sets_[static_cast<std::size_t>(row)];
-            for (GlobalIndex col : row_set) {
+            const auto& row_cols = row_sets_[static_cast<std::size_t>(row)];
+            for (GlobalIndex col : row_cols) {
                 if (!hasEntry(col, row)) {
                     return false;
                 }
@@ -795,10 +859,9 @@ std::size_t SparsityPattern::memoryUsageBytes() const noexcept {
         bytes += row_ptr_.capacity() * sizeof(GlobalIndex);
         bytes += col_idx_.capacity() * sizeof(GlobalIndex);
     } else {
-        bytes += row_sets_.capacity() * sizeof(std::set<GlobalIndex>);
-        // Approximate set overhead: ~40 bytes per node on 64-bit systems
-        for (const auto& row_set : row_sets_) {
-            bytes += row_set.size() * (sizeof(GlobalIndex) + 40);
+        bytes += row_sets_.capacity() * sizeof(std::vector<GlobalIndex>);
+        for (const auto& row_cols : row_sets_) {
+            bytes += row_cols.capacity() * sizeof(GlobalIndex);
         }
     }
 

@@ -189,8 +189,9 @@ std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options,
         reportLine("Decorator enabled: CachedAssembler");
     }
 
-    // Vectorization last (currently a structural decorator).
-    if (options.use_batching) {
+    // Optional structural vectorization decorator (kept explicit to avoid
+    // changing default assembler identities when batching is enabled).
+    if (options.use_vectorized_decorator) {
         assembled = std::make_unique<VectorizedAssembler>(std::move(assembled), options.batch_size);
         reportLine("Decorator enabled: VectorizedAssembler");
     }

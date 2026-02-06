@@ -333,6 +333,7 @@ void prepareCellContext(AssemblyContext& context,
 
         for (LocalIndex i = 0; i < n_test_dofs; ++i) {
             const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
+            const std::size_t idx_phys = static_cast<std::size_t>(q * n_test_dofs + i);
             scratch.test_basis_values[idx] = values_at_pt[i];
             scratch.test_ref_gradients[idx] = {
                 gradients_at_pt[i][0],
@@ -347,7 +348,7 @@ void prepareCellContext(AssemblyContext& context,
                     grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
                 }
             }
-            scratch.test_phys_gradients[idx] = grad_phys;
+            scratch.test_phys_gradients[idx_phys] = grad_phys;
         }
 
         if (different_spaces) {
@@ -357,6 +358,7 @@ void prepareCellContext(AssemblyContext& context,
 
             for (LocalIndex j = 0; j < n_trial_dofs; ++j) {
                 const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
+                const std::size_t idx_phys = static_cast<std::size_t>(q * n_trial_dofs + j);
                 scratch.trial_basis_values[idx] = values_at_pt[j];
                 scratch.trial_ref_gradients[idx] = {
                     gradients_at_pt[j][0],
@@ -371,7 +373,7 @@ void prepareCellContext(AssemblyContext& context,
                         grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
                     }
                 }
-                scratch.trial_phys_gradients[idx] = grad_phys;
+                scratch.trial_phys_gradients[idx_phys] = grad_phys;
             }
         }
     }

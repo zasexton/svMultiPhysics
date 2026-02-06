@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -104,6 +105,50 @@ void writeTextFile(const std::filesystem::path& path, std::string_view contents)
     return dir / (sanitizeFilename(symbol) + std::string(suffix));
 }
 
+[[nodiscard]] bool hasCpuFeature(std::string_view features, std::string_view needle) noexcept
+{
+    std::size_t pos = 0;
+    while (pos <= features.size()) {
+        const auto end = features.find(',', pos);
+        std::string_view tok =
+            (end == std::string_view::npos) ? features.substr(pos) : features.substr(pos, end - pos);
+        while (!tok.empty() && tok.front() == ' ') {
+            tok.remove_prefix(1);
+        }
+        while (!tok.empty() && tok.back() == ' ') {
+            tok.remove_suffix(1);
+        }
+        if (!tok.empty() && (tok.front() == '+' || tok.front() == '-')) {
+            tok.remove_prefix(1);
+        }
+        if (tok == needle) {
+            return true;
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        pos = end + 1;
+    }
+    return false;
+}
+
+[[nodiscard]] int preferredVectorWidthFromCpuFeatures(std::string_view cpu_features) noexcept
+{
+    if (hasCpuFeature(cpu_features, "avx512f")) {
+        return 8;
+    }
+    if (hasCpuFeature(cpu_features, "avx2") || hasCpuFeature(cpu_features, "avx")) {
+        return 4;
+    }
+    if (hasCpuFeature(cpu_features, "sse2") ||
+        hasCpuFeature(cpu_features, "neon") ||
+        hasCpuFeature(cpu_features, "sve") ||
+        hasCpuFeature(cpu_features, "sve2")) {
+        return 2;
+    }
+    return 1;
+}
+
 struct Shape {
     enum class Kind : std::uint8_t {
         Scalar,
@@ -137,124 +182,138 @@ constexpr std::uint32_t kMaxTensor3Dim = 3u;
 constexpr std::uint32_t kMaxTensor4Dim = 3u;
 
 struct ABIV3 {
-    static constexpr std::size_t cell_side_off = offsetof(assembly::jit::CellKernelArgsV5, side);
-    static constexpr std::size_t cell_out_off = offsetof(assembly::jit::CellKernelArgsV5, output);
+    static constexpr std::size_t cell_side_off = offsetof(assembly::jit::CellKernelArgsV6, side);
+    static constexpr std::size_t cell_out_off = offsetof(assembly::jit::CellKernelArgsV6, output);
 
-    static constexpr std::size_t bdry_side_off = offsetof(assembly::jit::BoundaryFaceKernelArgsV5, side);
-    static constexpr std::size_t bdry_out_off = offsetof(assembly::jit::BoundaryFaceKernelArgsV5, output);
+    static constexpr std::size_t bdry_side_off = offsetof(assembly::jit::BoundaryFaceKernelArgsV6, side);
+    static constexpr std::size_t bdry_out_off = offsetof(assembly::jit::BoundaryFaceKernelArgsV6, output);
 
-    static constexpr std::size_t face_minus_side_off = offsetof(assembly::jit::InteriorFaceKernelArgsV5, minus);
-    static constexpr std::size_t face_plus_side_off = offsetof(assembly::jit::InteriorFaceKernelArgsV5, plus);
+    static constexpr std::size_t face_minus_side_off = offsetof(assembly::jit::InteriorFaceKernelArgsV6, minus);
+    static constexpr std::size_t face_plus_side_off = offsetof(assembly::jit::InteriorFaceKernelArgsV6, plus);
 
-    static constexpr std::size_t face_out_minus_off = offsetof(assembly::jit::InteriorFaceKernelArgsV5, output_minus);
-    static constexpr std::size_t face_out_plus_off = offsetof(assembly::jit::InteriorFaceKernelArgsV5, output_plus);
+    static constexpr std::size_t face_out_minus_off = offsetof(assembly::jit::InteriorFaceKernelArgsV6, output_minus);
+    static constexpr std::size_t face_out_plus_off = offsetof(assembly::jit::InteriorFaceKernelArgsV6, output_plus);
     static constexpr std::size_t face_coupling_minus_plus_off =
-        offsetof(assembly::jit::InteriorFaceKernelArgsV5, coupling_minus_plus);
+        offsetof(assembly::jit::InteriorFaceKernelArgsV6, coupling_minus_plus);
     static constexpr std::size_t face_coupling_plus_minus_off =
-        offsetof(assembly::jit::InteriorFaceKernelArgsV5, coupling_plus_minus);
+        offsetof(assembly::jit::InteriorFaceKernelArgsV6, coupling_plus_minus);
 
-    static constexpr std::size_t side_dim_off = offsetof(assembly::jit::KernelSideArgsV5, dim);
-    static constexpr std::size_t side_n_qpts_off = offsetof(assembly::jit::KernelSideArgsV5, n_qpts);
-    static constexpr std::size_t side_n_test_dofs_off = offsetof(assembly::jit::KernelSideArgsV5, n_test_dofs);
-    static constexpr std::size_t side_n_trial_dofs_off = offsetof(assembly::jit::KernelSideArgsV5, n_trial_dofs);
+    static constexpr std::size_t side_dim_off = offsetof(assembly::jit::KernelSideArgsV6, dim);
+    static constexpr std::size_t side_n_qpts_off = offsetof(assembly::jit::KernelSideArgsV6, n_qpts);
+    static constexpr std::size_t side_n_test_dofs_off = offsetof(assembly::jit::KernelSideArgsV6, n_test_dofs);
+    static constexpr std::size_t side_n_trial_dofs_off = offsetof(assembly::jit::KernelSideArgsV6, n_trial_dofs);
 
-    static constexpr std::size_t side_test_field_type_off = offsetof(assembly::jit::KernelSideArgsV5, test_field_type);
-    static constexpr std::size_t side_trial_field_type_off = offsetof(assembly::jit::KernelSideArgsV5, trial_field_type);
-    static constexpr std::size_t side_test_value_dim_off = offsetof(assembly::jit::KernelSideArgsV5, test_value_dim);
-    static constexpr std::size_t side_trial_value_dim_off = offsetof(assembly::jit::KernelSideArgsV5, trial_value_dim);
+    static constexpr std::size_t side_test_field_type_off = offsetof(assembly::jit::KernelSideArgsV6, test_field_type);
+    static constexpr std::size_t side_trial_field_type_off = offsetof(assembly::jit::KernelSideArgsV6, trial_field_type);
+    static constexpr std::size_t side_test_value_dim_off = offsetof(assembly::jit::KernelSideArgsV6, test_value_dim);
+    static constexpr std::size_t side_trial_value_dim_off = offsetof(assembly::jit::KernelSideArgsV6, trial_value_dim);
     static constexpr std::size_t side_test_uses_vector_basis_off =
-        offsetof(assembly::jit::KernelSideArgsV5, test_uses_vector_basis);
+        offsetof(assembly::jit::KernelSideArgsV6, test_uses_vector_basis);
     static constexpr std::size_t side_trial_uses_vector_basis_off =
-        offsetof(assembly::jit::KernelSideArgsV5, trial_uses_vector_basis);
+        offsetof(assembly::jit::KernelSideArgsV6, trial_uses_vector_basis);
 
     static constexpr std::size_t side_integration_weights_off =
-        offsetof(assembly::jit::KernelSideArgsV5, integration_weights);
-    static constexpr std::size_t side_quad_points_xyz_off = offsetof(assembly::jit::KernelSideArgsV5, quad_points_xyz);
+        offsetof(assembly::jit::KernelSideArgsV6, integration_weights);
+    static constexpr std::size_t side_quad_points_xyz_off = offsetof(assembly::jit::KernelSideArgsV6, quad_points_xyz);
     static constexpr std::size_t side_physical_points_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV5, physical_points_xyz);
+        offsetof(assembly::jit::KernelSideArgsV6, physical_points_xyz);
 
-    static constexpr std::size_t side_jacobians_off = offsetof(assembly::jit::KernelSideArgsV5, jacobians);
-    static constexpr std::size_t side_inverse_jacobians_off = offsetof(assembly::jit::KernelSideArgsV5, inverse_jacobians);
-    static constexpr std::size_t side_jacobian_dets_off = offsetof(assembly::jit::KernelSideArgsV5, jacobian_dets);
-    static constexpr std::size_t side_normals_xyz_off = offsetof(assembly::jit::KernelSideArgsV5, normals_xyz);
+    static constexpr std::size_t side_jacobians_off = offsetof(assembly::jit::KernelSideArgsV6, jacobians);
+    static constexpr std::size_t side_inverse_jacobians_off = offsetof(assembly::jit::KernelSideArgsV6, inverse_jacobians);
+    static constexpr std::size_t side_jacobian_dets_off = offsetof(assembly::jit::KernelSideArgsV6, jacobian_dets);
+    static constexpr std::size_t side_normals_xyz_off = offsetof(assembly::jit::KernelSideArgsV6, normals_xyz);
+    static constexpr std::size_t side_interleaved_geom_off =
+        offsetof(assembly::jit::KernelSideArgsV6, interleaved_qpoint_geometry);
+    static constexpr std::size_t side_interleaved_geom_stride_off =
+        offsetof(assembly::jit::KernelSideArgsV6, interleaved_qpoint_geometry_stride_reals);
+    static constexpr std::size_t side_interleaved_geom_phys_off =
+        offsetof(assembly::jit::KernelSideArgsV6, interleaved_qpoint_geometry_physical_offset);
+    static constexpr std::size_t side_interleaved_geom_jac_off =
+        offsetof(assembly::jit::KernelSideArgsV6, interleaved_qpoint_geometry_jacobian_offset);
+    static constexpr std::size_t side_interleaved_geom_jinv_off =
+        offsetof(assembly::jit::KernelSideArgsV6, interleaved_qpoint_geometry_inverse_jacobian_offset);
+    static constexpr std::size_t side_interleaved_geom_det_off =
+        offsetof(assembly::jit::KernelSideArgsV6, interleaved_qpoint_geometry_det_offset);
+    static constexpr std::size_t side_interleaved_geom_normal_off =
+        offsetof(assembly::jit::KernelSideArgsV6, interleaved_qpoint_geometry_normal_offset);
 
-    static constexpr std::size_t side_test_basis_values_off = offsetof(assembly::jit::KernelSideArgsV5, test_basis_values);
+    static constexpr std::size_t side_test_basis_values_off = offsetof(assembly::jit::KernelSideArgsV6, test_basis_values);
     static constexpr std::size_t side_trial_basis_values_off =
-        offsetof(assembly::jit::KernelSideArgsV5, trial_basis_values);
+        offsetof(assembly::jit::KernelSideArgsV6, trial_basis_values);
     static constexpr std::size_t side_test_phys_grads_off =
-        offsetof(assembly::jit::KernelSideArgsV5, test_phys_gradients_xyz);
+        offsetof(assembly::jit::KernelSideArgsV6, test_phys_gradients_xyz);
     static constexpr std::size_t side_trial_phys_grads_off =
-        offsetof(assembly::jit::KernelSideArgsV5, trial_phys_gradients_xyz);
+        offsetof(assembly::jit::KernelSideArgsV6, trial_phys_gradients_xyz);
 
-    static constexpr std::size_t side_test_phys_hess_off = offsetof(assembly::jit::KernelSideArgsV5, test_phys_hessians);
+    static constexpr std::size_t side_test_phys_hess_off = offsetof(assembly::jit::KernelSideArgsV6, test_phys_hessians);
     static constexpr std::size_t side_trial_phys_hess_off =
-        offsetof(assembly::jit::KernelSideArgsV5, trial_phys_hessians);
+        offsetof(assembly::jit::KernelSideArgsV6, trial_phys_hessians);
 
     static constexpr std::size_t side_test_vector_basis_values_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV5, test_basis_vector_values_xyz);
+        offsetof(assembly::jit::KernelSideArgsV6, test_basis_vector_values_xyz);
     static constexpr std::size_t side_test_vector_basis_curls_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV5, test_basis_curls_xyz);
+        offsetof(assembly::jit::KernelSideArgsV6, test_basis_curls_xyz);
     static constexpr std::size_t side_test_vector_basis_divs_off =
-        offsetof(assembly::jit::KernelSideArgsV5, test_basis_divergences);
+        offsetof(assembly::jit::KernelSideArgsV6, test_basis_divergences);
 
     static constexpr std::size_t side_trial_vector_basis_values_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV5, trial_basis_vector_values_xyz);
+        offsetof(assembly::jit::KernelSideArgsV6, trial_basis_vector_values_xyz);
     static constexpr std::size_t side_trial_vector_basis_curls_xyz_off =
-        offsetof(assembly::jit::KernelSideArgsV5, trial_basis_curls_xyz);
+        offsetof(assembly::jit::KernelSideArgsV6, trial_basis_curls_xyz);
     static constexpr std::size_t side_trial_vector_basis_divs_off =
-        offsetof(assembly::jit::KernelSideArgsV5, trial_basis_divergences);
+        offsetof(assembly::jit::KernelSideArgsV6, trial_basis_divergences);
 
     static constexpr std::size_t side_solution_coefficients_off =
-        offsetof(assembly::jit::KernelSideArgsV5, solution_coefficients);
+        offsetof(assembly::jit::KernelSideArgsV6, solution_coefficients);
     static constexpr std::size_t side_num_previous_solutions_off =
-        offsetof(assembly::jit::KernelSideArgsV5, num_previous_solutions);
+        offsetof(assembly::jit::KernelSideArgsV6, num_previous_solutions);
     static constexpr std::size_t side_previous_solution_coefficients_off =
-        offsetof(assembly::jit::KernelSideArgsV5, previous_solution_coefficients);
+        offsetof(assembly::jit::KernelSideArgsV6, previous_solution_coefficients);
 
     static constexpr std::size_t side_num_history_steps_off =
-        offsetof(assembly::jit::KernelSideArgsV5, num_history_steps);
+        offsetof(assembly::jit::KernelSideArgsV6, num_history_steps);
     static constexpr std::size_t side_history_weights_off =
-        offsetof(assembly::jit::KernelSideArgsV5, history_weights);
+        offsetof(assembly::jit::KernelSideArgsV6, history_weights);
     static constexpr std::size_t side_history_solution_coefficients_off =
-        offsetof(assembly::jit::KernelSideArgsV5, history_solution_coefficients);
+        offsetof(assembly::jit::KernelSideArgsV6, history_solution_coefficients);
 
-    static constexpr std::size_t side_field_solutions_off = offsetof(assembly::jit::KernelSideArgsV5, field_solutions);
+    static constexpr std::size_t side_field_solutions_off = offsetof(assembly::jit::KernelSideArgsV6, field_solutions);
     static constexpr std::size_t side_num_field_solutions_off =
-        offsetof(assembly::jit::KernelSideArgsV5, num_field_solutions);
+        offsetof(assembly::jit::KernelSideArgsV6, num_field_solutions);
 
-    static constexpr std::size_t side_jit_constants_off = offsetof(assembly::jit::KernelSideArgsV5, jit_constants);
-    static constexpr std::size_t side_coupled_integrals_off = offsetof(assembly::jit::KernelSideArgsV5, coupled_integrals);
-    static constexpr std::size_t side_coupled_aux_off = offsetof(assembly::jit::KernelSideArgsV5, coupled_aux);
+    static constexpr std::size_t side_jit_constants_off = offsetof(assembly::jit::KernelSideArgsV6, jit_constants);
+    static constexpr std::size_t side_coupled_integrals_off = offsetof(assembly::jit::KernelSideArgsV6, coupled_integrals);
+    static constexpr std::size_t side_coupled_aux_off = offsetof(assembly::jit::KernelSideArgsV6, coupled_aux);
 
-    static constexpr std::size_t side_time_off = offsetof(assembly::jit::KernelSideArgsV5, time);
-    static constexpr std::size_t side_dt_off = offsetof(assembly::jit::KernelSideArgsV5, dt);
-    static constexpr std::size_t side_cell_domain_id_off = offsetof(assembly::jit::KernelSideArgsV5, cell_domain_id);
-    static constexpr std::size_t side_cell_diameter_off = offsetof(assembly::jit::KernelSideArgsV5, cell_diameter);
-    static constexpr std::size_t side_cell_volume_off = offsetof(assembly::jit::KernelSideArgsV5, cell_volume);
-    static constexpr std::size_t side_facet_area_off = offsetof(assembly::jit::KernelSideArgsV5, facet_area);
+    static constexpr std::size_t side_time_off = offsetof(assembly::jit::KernelSideArgsV6, time);
+    static constexpr std::size_t side_dt_off = offsetof(assembly::jit::KernelSideArgsV6, dt);
+    static constexpr std::size_t side_cell_domain_id_off = offsetof(assembly::jit::KernelSideArgsV6, cell_domain_id);
+    static constexpr std::size_t side_cell_diameter_off = offsetof(assembly::jit::KernelSideArgsV6, cell_diameter);
+    static constexpr std::size_t side_cell_volume_off = offsetof(assembly::jit::KernelSideArgsV6, cell_volume);
+    static constexpr std::size_t side_facet_area_off = offsetof(assembly::jit::KernelSideArgsV6, facet_area);
 
     static constexpr std::size_t side_time_derivative_term_weight_off =
-        offsetof(assembly::jit::KernelSideArgsV5, time_derivative_term_weight);
+        offsetof(assembly::jit::KernelSideArgsV6, time_derivative_term_weight);
     static constexpr std::size_t side_non_time_derivative_term_weight_off =
-        offsetof(assembly::jit::KernelSideArgsV5, non_time_derivative_term_weight);
+        offsetof(assembly::jit::KernelSideArgsV6, non_time_derivative_term_weight);
     static constexpr std::size_t side_dt_stencil_coeffs_off =
-        offsetof(assembly::jit::KernelSideArgsV5, dt_stencil_coeffs);
+        offsetof(assembly::jit::KernelSideArgsV6, dt_stencil_coeffs);
     static constexpr std::size_t side_dt_term_weights_off =
-        offsetof(assembly::jit::KernelSideArgsV5, dt_term_weights);
+        offsetof(assembly::jit::KernelSideArgsV6, dt_term_weights);
     static constexpr std::size_t side_max_time_derivative_order_off =
-        offsetof(assembly::jit::KernelSideArgsV5, max_time_derivative_order);
+        offsetof(assembly::jit::KernelSideArgsV6, max_time_derivative_order);
 
     static constexpr std::size_t side_material_state_old_base_off =
-        offsetof(assembly::jit::KernelSideArgsV5, material_state_old_base);
+        offsetof(assembly::jit::KernelSideArgsV6, material_state_old_base);
     static constexpr std::size_t side_material_state_work_base_off =
-        offsetof(assembly::jit::KernelSideArgsV5, material_state_work_base);
+        offsetof(assembly::jit::KernelSideArgsV6, material_state_work_base);
     static constexpr std::size_t side_material_state_stride_bytes_off =
-        offsetof(assembly::jit::KernelSideArgsV5, material_state_stride_bytes);
+        offsetof(assembly::jit::KernelSideArgsV6, material_state_stride_bytes);
 
-    static constexpr std::size_t out_element_matrix_off = offsetof(assembly::jit::KernelOutputViewV5, element_matrix);
-    static constexpr std::size_t out_element_vector_off = offsetof(assembly::jit::KernelOutputViewV5, element_vector);
-    static constexpr std::size_t out_n_test_dofs_off = offsetof(assembly::jit::KernelOutputViewV5, n_test_dofs);
-    static constexpr std::size_t out_n_trial_dofs_off = offsetof(assembly::jit::KernelOutputViewV5, n_trial_dofs);
+    static constexpr std::size_t out_element_matrix_off = offsetof(assembly::jit::KernelOutputViewV6, element_matrix);
+    static constexpr std::size_t out_element_vector_off = offsetof(assembly::jit::KernelOutputViewV6, element_vector);
+    static constexpr std::size_t out_n_test_dofs_off = offsetof(assembly::jit::KernelOutputViewV6, n_test_dofs);
+    static constexpr std::size_t out_n_trial_dofs_off = offsetof(assembly::jit::KernelOutputViewV6, n_trial_dofs);
 
     static constexpr std::size_t field_entry_field_id_off = offsetof(assembly::jit::FieldSolutionEntryV1, field_id);
     static constexpr std::size_t field_entry_field_type_off = offsetof(assembly::jit::FieldSolutionEntryV1, field_type);
@@ -1226,6 +1285,9 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             std::vector<std::pair<std::uint16_t, std::uint8_t>> bound_indices{};
         };
 
+        const int preferred_vector_width =
+            preferredVectorWidthFromCpuFeatures(engine.cpuFeaturesString());
+
         std::vector<LoweredTerm> terms;
         terms.reserve(term_indices.size());
 
@@ -1250,7 +1312,8 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                     tensor_opts.loop.enable_symmetry_lowering = options_.tensor.enable_symmetry_lowering;
                     tensor_opts.loop.enable_optimal_contraction_order = options_.tensor.enable_optimal_contraction_order;
-                    tensor_opts.loop.enable_vectorization_hints = options_.vectorize && options_.tensor.enable_vectorization_hints;
+                    tensor_opts.loop.enable_vectorization_hints = options_.vectorize;
+                    tensor_opts.loop.preferred_vector_width = preferred_vector_width;
                     tensor_opts.loop.enable_delta_shortcuts = options_.tensor.enable_delta_shortcuts;
                     tensor_opts.loop.scalar_expansion_term_threshold = options_.tensor.scalar_expansion_term_threshold;
 
@@ -1313,9 +1376,9 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                 }
                 if (op.type == FormExprType::TimeDerivative) {
                     const int order = static_cast<int>(static_cast<std::int64_t>(op.imm0));
-                    if (order < 1 || order > static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV5)) {
+                    if (order < 1 || order > static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV6)) {
                         return LLVMGenResult{.ok = false, .message = "LLVMGen: dt(·,k) requires 1 <= k <= " +
-                                                                       std::to_string(assembly::jit::kMaxTimeDerivativeOrderV5)};
+                                                                       std::to_string(assembly::jit::kMaxTimeDerivativeOrderV6)};
                     }
                 }
             }
@@ -1817,6 +1880,13 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             llvm::Value* inverse_jacobians{nullptr};
             llvm::Value* jacobian_dets{nullptr};
             llvm::Value* normals_xyz{nullptr};
+            llvm::Value* interleaved_qpoint_geometry{nullptr};
+            llvm::Value* interleaved_qpoint_geometry_stride_reals{nullptr}; // i32
+            llvm::Value* interleaved_qpoint_geometry_physical_offset{nullptr}; // i32
+            llvm::Value* interleaved_qpoint_geometry_jacobian_offset{nullptr}; // i32
+            llvm::Value* interleaved_qpoint_geometry_inverse_jacobian_offset{nullptr}; // i32
+            llvm::Value* interleaved_qpoint_geometry_det_offset{nullptr}; // i32
+            llvm::Value* interleaved_qpoint_geometry_normal_offset{nullptr}; // i32
 
             llvm::Value* test_basis_values{nullptr};
             llvm::Value* trial_basis_values{nullptr};
@@ -1896,6 +1966,14 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             s.inverse_jacobians = loadPtr(side_ptr, ABIV3::side_inverse_jacobians_off);
             s.jacobian_dets = loadPtr(side_ptr, ABIV3::side_jacobian_dets_off);
             s.normals_xyz = loadPtr(side_ptr, ABIV3::side_normals_xyz_off);
+            s.interleaved_qpoint_geometry = loadPtr(side_ptr, ABIV3::side_interleaved_geom_off);
+            s.interleaved_qpoint_geometry_stride_reals = loadU32(side_ptr, ABIV3::side_interleaved_geom_stride_off);
+            s.interleaved_qpoint_geometry_physical_offset = loadU32(side_ptr, ABIV3::side_interleaved_geom_phys_off);
+            s.interleaved_qpoint_geometry_jacobian_offset = loadU32(side_ptr, ABIV3::side_interleaved_geom_jac_off);
+            s.interleaved_qpoint_geometry_inverse_jacobian_offset =
+                loadU32(side_ptr, ABIV3::side_interleaved_geom_jinv_off);
+            s.interleaved_qpoint_geometry_det_offset = loadU32(side_ptr, ABIV3::side_interleaved_geom_det_off);
+            s.interleaved_qpoint_geometry_normal_offset = loadU32(side_ptr, ABIV3::side_interleaved_geom_normal_off);
 
             s.test_basis_values = loadPtr(side_ptr, ABIV3::side_test_basis_values_off);
             s.trial_basis_values = loadPtr(side_ptr, ABIV3::side_trial_basis_values_off);
@@ -1997,6 +2075,52 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             out_coupling_pm_ptr = gepBytes(args_ptr, ABIV3::face_coupling_plus_minus_off);
         }
 
+        auto attachLoopUnrollMetadata = [&](llvm::BranchInst* backedge,
+                                            llvm::Value* end) -> void {
+            if (!options_.specialization.enable_loop_unroll_metadata) {
+                return;
+            }
+            auto* c = llvm::dyn_cast<llvm::ConstantInt>(end);
+            if (c == nullptr) {
+                return;
+            }
+
+            const auto trip = c->getZExtValue();
+            if (trip == 0u) {
+                return;
+            }
+
+            const auto max_full = static_cast<std::uint64_t>(options_.specialization.max_unroll_trip_count);
+            const auto max_partial = (max_full <= (std::numeric_limits<std::uint64_t>::max)() / 4u)
+                                         ? (max_full * 4u)
+                                         : max_full;
+
+            llvm::SmallVector<llvm::Metadata*, 4> md_args;
+            llvm::TempMDNode tmp = llvm::MDNode::getTemporary(*ctx, {});
+            md_args.push_back(tmp.get());
+
+            if (trip <= max_full) {
+                md_args.push_back(llvm::MDNode::get(
+                    *ctx, {llvm::MDString::get(*ctx, "llvm.loop.unroll.full")}));
+            } else if (trip <= max_partial) {
+                std::uint64_t count = (trip <= 64u) ? 4u : 8u;
+                count = std::min(count, trip);
+                if (count <= 1u) {
+                    return;
+                }
+                md_args.push_back(llvm::MDNode::get(
+                    *ctx,
+                    {llvm::MDString::get(*ctx, "llvm.loop.unroll.count"),
+                     llvm::ConstantAsMetadata::get(builder.getInt32(static_cast<std::uint32_t>(count)))}));
+            } else {
+                return;
+            }
+
+            auto* loop_id = llvm::MDNode::get(*ctx, md_args);
+            loop_id->replaceOperandWith(0, loop_id);
+            backedge->setMetadata("llvm.loop", loop_id);
+        };
+
 	        auto emitForLoop = [&](llvm::Value* end,
 	                               std::string_view name,
 	                               const auto& body_fn) -> void {
@@ -2020,22 +2144,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	            auto* body_end = builder.GetInsertBlock();
 	            auto* next = builder.CreateAdd(idx_phi, builder.getInt32(1));
 	            auto* backedge = builder.CreateBr(header);
-	            if (options_.specialization.enable_loop_unroll_metadata) {
-	                if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(end)) {
-	                    const auto trip = c->getZExtValue();
-	                    if (trip > 0u &&
-	                        trip <= static_cast<std::uint64_t>(options_.specialization.max_unroll_trip_count)) {
-	                        llvm::SmallVector<llvm::Metadata*, 4> md_args;
-	                        llvm::TempMDNode tmp = llvm::MDNode::getTemporary(*ctx, {});
-	                        md_args.push_back(tmp.get());
-	                        md_args.push_back(llvm::MDNode::get(
-	                            *ctx, {llvm::MDString::get(*ctx, "llvm.loop.unroll.full")}));
-	                        auto* loop_id = llvm::MDNode::get(*ctx, md_args);
-	                        loop_id->replaceOperandWith(0, loop_id);
-	                        backedge->setMetadata("llvm.loop", loop_id);
-	                    }
-	                }
-	            }
+	            attachLoopUnrollMetadata(backedge, end);
 	            idx_phi->addIncoming(next, body_end);
 
 	            builder.SetInsertPoint(exit);
@@ -2087,22 +2196,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                acc_phi[k]->addIncoming(next, latch);
 	            }
 	            auto* backedge = builder.CreateBr(header);
-	            if (options_.specialization.enable_loop_unroll_metadata) {
-	                if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(end)) {
-	                    const auto trip = c->getZExtValue();
-	                    if (trip > 0u &&
-	                        trip <= static_cast<std::uint64_t>(options_.specialization.max_unroll_trip_count)) {
-	                        llvm::SmallVector<llvm::Metadata*, 4> md_args;
-	                        llvm::TempMDNode tmp = llvm::MDNode::getTemporary(*ctx, {});
-	                        md_args.push_back(tmp.get());
-	                        md_args.push_back(llvm::MDNode::get(
-	                            *ctx, {llvm::MDString::get(*ctx, "llvm.loop.unroll.full")}));
-	                        auto* loop_id = llvm::MDNode::get(*ctx, md_args);
-	                        loop_id->replaceOperandWith(0, loop_id);
-	                        backedge->setMetadata("llvm.loop", loop_id);
-	                    }
-	                }
-	            }
+	            attachLoopUnrollMetadata(backedge, end);
 
 	            builder.SetInsertPoint(exit);
 	            std::vector<llvm::Value*> out;
@@ -2152,7 +2246,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
             if (time_derivative_order > 0) {
                 const int idx = time_derivative_order - 1;
-                if (idx >= 0 && idx < static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV5)) {
+                if (idx >= 0 && idx < static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV6)) {
                     auto* w = loadRealPtrAt(side.dt_term_weights_base, builder.getInt64(static_cast<std::uint64_t>(idx)));
                     return builder.CreateFMul(td, w);
                 }
@@ -3369,6 +3463,19 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             return {x, y, z};
         };
 
+        auto loadVec3FromTableQMajor = [&](llvm::Value* base_ptr,
+                                           llvm::Value* n_dofs,
+                                           llvm::Value* dof_index,
+                                           llvm::Value* q_index) -> std::array<llvm::Value*, 3> {
+            auto* offset = builder.CreateAdd(builder.CreateMul(q_index, n_dofs), dof_index);
+            auto* base3 = builder.CreateMul(offset, builder.getInt32(3));
+            auto* base3_64 = builder.CreateZExt(base3, i64);
+            auto* x = loadRealPtrAt(base_ptr, base3_64);
+            auto* y = loadRealPtrAt(base_ptr, builder.CreateAdd(base3_64, builder.getInt64(1)));
+            auto* z = loadRealPtrAt(base_ptr, builder.CreateAdd(base3_64, builder.getInt64(2)));
+            return {x, y, z};
+        };
+
         auto loadMat3FromTable = [&](llvm::Value* base_ptr,
                                      llvm::Value* n_qpts,
                                      llvm::Value* dof_index,
@@ -3460,6 +3567,76 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	            return out;
 	        };
 
+        auto loadInterleavedReal = [&](const SideView& side,
+                                       llvm::Value* q_index,
+                                       llvm::Value* field_offset,
+                                       llvm::Value* component_offset) -> llvm::Value* {
+            auto* q_stride = builder.CreateMul(q_index, side.interleaved_qpoint_geometry_stride_reals);
+            auto* idx = builder.CreateAdd(q_stride, builder.CreateAdd(field_offset, component_offset));
+            return loadRealPtrAt(side.interleaved_qpoint_geometry, builder.CreateZExt(idx, i64));
+        };
+
+        auto useInterleavedGeometry = [&](const SideView& side) -> llvm::Value* {
+            auto* has_ptr = builder.CreateIsNotNull(side.interleaved_qpoint_geometry);
+            auto* has_stride =
+                builder.CreateICmpUGT(side.interleaved_qpoint_geometry_stride_reals, builder.getInt32(0));
+            return builder.CreateAnd(has_ptr, has_stride);
+        };
+
+        auto loadXYZDimFromSide = [&](const SideView& side,
+                                      llvm::Value* legacy_xyz_base,
+                                      llvm::Value* q_index,
+                                      std::uint32_t dim,
+                                      llvm::Value* interleaved_offset) -> CodeValue {
+            const auto legacy = loadXYZDim(legacy_xyz_base, q_index, dim);
+            auto inter = makeVector(dim, f64c(0.0), f64c(0.0), f64c(0.0));
+            inter.elems[0] = loadInterleavedReal(side, q_index, interleaved_offset, builder.getInt32(0));
+            inter.elems[1] = loadInterleavedReal(side, q_index, interleaved_offset, builder.getInt32(1));
+            inter.elems[2] = loadInterleavedReal(side, q_index, interleaved_offset, builder.getInt32(2));
+            auto out = makeVector(dim, f64c(0.0), f64c(0.0), f64c(0.0));
+            auto* use_interleaved = useInterleavedGeometry(side);
+            for (std::uint32_t d = 0; d < dim; ++d) {
+                out.elems[d] = builder.CreateSelect(use_interleaved, inter.elems[d], legacy.elems[d]);
+            }
+            return out;
+        };
+
+        auto loadMatDimFromSide = [&](const SideView& side,
+                                      llvm::Value* legacy_mat_base,
+                                      llvm::Value* q_index,
+                                      std::uint32_t dim,
+                                      llvm::Value* interleaved_offset) -> CodeValue {
+            const auto legacy = loadMatDimFromQ(legacy_mat_base, q_index, dim);
+            auto inter = makeMatrix(dim, dim);
+            for (std::uint32_t r = 0; r < dim; ++r) {
+                for (std::uint32_t c = 0; c < dim; ++c) {
+                    const std::uint32_t idx = r * 3u + c;
+                    inter.elems[static_cast<std::size_t>(r * dim + c)] =
+                        loadInterleavedReal(side, q_index, interleaved_offset, builder.getInt32(idx));
+                }
+            }
+            auto out = makeMatrix(dim, dim);
+            auto* use_interleaved = useInterleavedGeometry(side);
+            for (std::uint32_t r = 0; r < dim; ++r) {
+                for (std::uint32_t c = 0; c < dim; ++c) {
+                    const std::size_t idx = static_cast<std::size_t>(r * dim + c);
+                    out.elems[idx] = builder.CreateSelect(use_interleaved, inter.elems[idx], legacy.elems[idx]);
+                }
+            }
+            return out;
+        };
+
+        auto loadScalarFromSide = [&](const SideView& side,
+                                      llvm::Value* legacy_base,
+                                      llvm::Value* q_index,
+                                      llvm::Value* interleaved_offset) -> llvm::Value* {
+            auto* legacy = loadRealPtrAt(legacy_base, builder.CreateZExt(q_index, i64));
+            auto* inter =
+                loadInterleavedReal(side, q_index, interleaved_offset, builder.getInt32(0));
+            auto* use_interleaved = useInterleavedGeometry(side);
+            return builder.CreateSelect(use_interleaved, inter, legacy);
+        };
+
         auto loadMaterialStateReal = [&](llvm::Value* base_ptr,
                                          llvm::Value* stride_bytes,
                                          llvm::Value* q_index,
@@ -3484,13 +3661,13 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
         };
 
         constexpr std::uint64_t kDtCoeffStride =
-            static_cast<std::uint64_t>(assembly::jit::kMaxPreviousSolutionsV5 + 1u);
+            static_cast<std::uint64_t>(assembly::jit::kMaxPreviousSolutionsV6 + 1u);
 
         auto loadDtCoeff = [&](const SideView& side, int order, int history_index) -> llvm::Value* {
-            if (order < 1 || order > static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV5)) {
+            if (order < 1 || order > static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV6)) {
                 return f64c(0.0);
             }
-            if (history_index < 0 || history_index > static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5)) {
+            if (history_index < 0 || history_index > static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6)) {
                 return f64c(0.0);
             }
             const std::uint64_t idx =
@@ -4311,7 +4488,9 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         break;
 
                     case FormExprType::Coordinate:
-                        values[op_idx] = loadXYZDim(side.physical_points_xyz, q_index, shape.dims[0]);
+                        values[op_idx] =
+                            loadXYZDimFromSide(side, side.physical_points_xyz, q_index, shape.dims[0],
+                                               side.interleaved_qpoint_geometry_physical_offset);
                         break;
 
                     case FormExprType::ReferenceCoordinate:
@@ -4319,15 +4498,21 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         break;
 
                     case FormExprType::Normal:
-                        values[op_idx] = loadXYZDim(side.normals_xyz, q_index, shape.dims[0]);
+                        values[op_idx] =
+                            loadXYZDimFromSide(side, side.normals_xyz, q_index, shape.dims[0],
+                                               side.interleaved_qpoint_geometry_normal_offset);
                         break;
 
                     case FormExprType::Jacobian:
-                        values[op_idx] = loadMatDimFromQ(side.jacobians, q_index, shape.dims[0]);
+                        values[op_idx] =
+                            loadMatDimFromSide(side, side.jacobians, q_index, shape.dims[0],
+                                               side.interleaved_qpoint_geometry_jacobian_offset);
                         break;
 
                     case FormExprType::JacobianInverse:
-                        values[op_idx] = loadMatDimFromQ(side.inverse_jacobians, q_index, shape.dims[0]);
+                        values[op_idx] =
+                            loadMatDimFromSide(side, side.inverse_jacobians, q_index, shape.dims[0],
+                                               side.interleaved_qpoint_geometry_inverse_jacobian_offset);
                         break;
 
                     case FormExprType::Identity: {
@@ -4342,7 +4527,9 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                     case FormExprType::JacobianDeterminant: {
                         auto* q64 = builder.CreateZExt(q_index, i64);
-                        values[op_idx] = makeScalar(loadRealPtrAt(side.jacobian_dets, q64));
+                        values[op_idx] =
+                            makeScalar(loadScalarFromSide(side, side.jacobian_dets, q_index,
+                                                          side.interleaved_qpoint_geometry_det_offset));
                         break;
                     }
 
@@ -4472,7 +4659,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         const auto& kid = term.ir.ops[child_idx];
                         if (kid.type == FormExprType::TestFunction) {
                             if (shape.kind == Shape::Kind::Vector) {
-                                const auto v = loadVec3FromTable(side.test_phys_grads_xyz, side.n_qpts, i_index, q_index);
+                                const auto v = loadVec3FromTableQMajor(side.test_phys_grads_xyz, side.n_test_dofs, i_index, q_index);
                                 values[op_idx] = makeVector(shape.dims[0], v[0], v[1], v[2]);
                                 break;
                             }
@@ -4482,7 +4669,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 CodeValue out = makeZero(shape);
                                 const auto dofs_per_comp = builder.CreateUDiv(side.n_test_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
                                 const auto comp = builder.CreateUDiv(i_index, dofs_per_comp);
-                                const auto g = loadVec3FromTable(side.test_phys_grads_xyz, side.n_qpts, i_index, q_index);
+                                const auto g = loadVec3FromTableQMajor(side.test_phys_grads_xyz, side.n_test_dofs, i_index, q_index);
                                 for (std::size_t r = 0; r < vd; ++r) {
                                     auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
                                     for (std::size_t d = 0; d < dim; ++d) {
@@ -4502,7 +4689,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                    const auto sums = emitReduceSum(side.n_trial_dofs, "grad_u", dim, [&](llvm::Value* j) {
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 	                                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                        std::vector<llvm::Value*> terms;
 	                                        terms.reserve(dim);
 	                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -4528,7 +4715,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                            auto* j = builder.CreateAdd(base, jj);
 	                                            auto* j64 = builder.CreateZExt(j, i64);
 	                                            auto* cj = loadRealPtrAt(coeffs, j64);
-	                                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                            std::vector<llvm::Value*> terms;
 	                                            terms.reserve(dim);
 	                                            for (std::size_t d = 0; d < dim; ++d) {
@@ -4546,7 +4733,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 throw std::runtime_error("LLVMGen: grad(u) unsupported shape");
                             }
                             if (shape.kind == Shape::Kind::Vector) {
-                                const auto v = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
+                                const auto v = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
                                 values[op_idx] = makeVector(shape.dims[0], v[0], v[1], v[2]);
                                 break;
                             }
@@ -4556,7 +4743,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 CodeValue out = makeZero(shape);
                                 const auto dofs_per_comp = builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
                                 const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
-                                const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
+                                const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
                                 for (std::size_t r = 0; r < vd; ++r) {
                                     auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
                                     for (std::size_t d = 0; d < dim; ++d) {
@@ -4577,7 +4764,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                    emitReduceSum(side.n_trial_dofs, "prev_grad" + std::to_string(k), dim, [&](llvm::Value* j) {
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 	                                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                        std::vector<llvm::Value*> terms;
 	                                        terms.reserve(dim);
 	                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -4607,7 +4794,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                        auto* j = builder.CreateAdd(base, jj);
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 	                                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                        std::vector<llvm::Value*> terms;
 	                                        terms.reserve(dim);
 	                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -4634,7 +4821,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                        emitReduceSum(side.n_trial_dofs, "grad_state_u", dim, [&](llvm::Value* j) {
 	                                            auto* j64 = builder.CreateZExt(j, i64);
 	                                            auto* cj = loadRealPtrAt(coeffs, j64);
-	                                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                            std::vector<llvm::Value*> terms;
 	                                            terms.reserve(dim);
 	                                            for (std::size_t d = 0; d < dim; ++d) {
@@ -4661,7 +4848,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                            auto* j = builder.CreateAdd(base, jj);
 	                                            auto* j64 = builder.CreateZExt(j, i64);
 	                                            auto* cj = loadRealPtrAt(coeffs, j64);
-	                                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                            std::vector<llvm::Value*> terms;
 	                                            terms.reserve(dim);
 	                                            for (std::size_t d = 0; d < dim; ++d) {
@@ -4772,7 +4959,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                            auto gradTrialBasis = [&]() -> CodeValue {
 	                                CodeValue g = makeZero(shape);
 	                                if (shape.kind == Shape::Kind::Vector) {
-	                                    const auto v = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
+	                                    const auto v = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
 	                                    g = makeVector(shape.dims[0], v[0], v[1], v[2]);
 	                                    return g;
 	                                }
@@ -4782,7 +4969,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                    const auto dofs_per_comp = builder.CreateUDiv(
 	                                        side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                                    const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
-	                                    const auto gg = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
+	                                    const auto gg = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
 	                                    for (std::size_t r = 0; r < vd; ++r) {
 	                                        auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
 	                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -4803,7 +4990,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                                            auto* j64 = builder.CreateZExt(j, i64);
 		                                            auto* cj = loadRealPtrAt(coeffs, j64);
 		                                            const auto g =
-		                                                loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                                loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 		                                            std::vector<llvm::Value*> terms;
 		                                            terms.reserve(dim);
 		                                            for (std::size_t d = 0; d < dim; ++d) {
@@ -4829,7 +5016,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                                            auto* j = builder.CreateAdd(base, jj);
 		                                            auto* j64 = builder.CreateZExt(j, i64);
 		                                            auto* cj = loadRealPtrAt(coeffs, j64);
-		                                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 		                                            std::vector<llvm::Value*> terms;
 		                                            terms.reserve(dim);
 		                                            for (std::size_t d = 0; d < dim; ++d) {
@@ -5338,7 +5525,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                                  llvm::Value* grads_xyz) -> llvm::Value* {
 	                            auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                            auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
-	                            const auto g = loadVec3FromTable(grads_xyz, side.n_qpts, dof_index, q_index);
+	                            const auto g = loadVec3FromTableQMajor(grads_xyz, n_dofs, dof_index, q_index);
 	                            llvm::Value* out = f64c(0.0);
 	                            if (vd >= 1) {
 	                                out = builder.CreateSelect(builder.CreateICmpEQ(comp, builder.getInt32(0)), g[0], out);
@@ -5473,7 +5660,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
 		                                        const auto g =
-		                                            loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                            loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 		                                        return builder.CreateFMul(cj, g[comp]);
 		                                    });
 		                                div = builder.CreateFAdd(div, acc);
@@ -5626,7 +5813,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                                    llvm::Value* grads_xyz) -> std::array<llvm::Value*, 3> {
 	                        auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                        auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
-	                        const auto g = loadVec3FromTable(grads_xyz, side.n_qpts, dof_index, q_index);
+	                        const auto g = loadVec3FromTableQMajor(grads_xyz, n_dofs, dof_index, q_index);
 	                        llvm::Value* x = f64c(0.0);
 	                        llvm::Value* y = f64c(0.0);
 	                        llvm::Value* z = f64c(0.0);
@@ -5849,7 +6036,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 	                                        auto* cj = loadRealPtrAt(coeffs, j64);
 	                                        const auto g =
-	                                            loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                            loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                        std::vector<llvm::Value*> terms;
 	                                        terms.reserve(3u);
 	                                        for (std::size_t d = 0; d < 3u; ++d) {
@@ -6124,13 +6311,13 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
                             if (kid.type == FormExprType::StateField && fid == 0xffff) {
-                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                     acc = add(acc,
                                               mul(makeScalar(loadDtCoeff(side, order, k)),
                                                   evalPreviousSolution(side, shape, k, q_index)));
                                 }
                             } else {
-                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                     acc = add(acc,
                                               mul(makeScalar(loadDtCoeff(side, order, k)),
                                                   evalDiscreteOrStateFieldHistoryK(side, /*plus_side=*/false, shape, fid, k, q_index)));
@@ -6523,7 +6710,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 acc = add(acc, mul(getChild(op, kk), evalHistorySolution(side, shape, k, q_index)));
                             }
                         } else {
-                            for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+                            for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                 acc = add(acc,
                                           mul(makeScalar(loadHistoryWeightOrZero(side, k)),
                                               evalHistorySolution(side, shape, k, q_index)));
@@ -6586,6 +6773,9 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                          LLVMTensorGenOptions{
                                              .vectorize = options_.vectorize,
                                              .enable_polly = options_.tensor.enable_polly,
+                                             .enable_tiling = options_.tensor.enable_loop_tiling,
+                                             .tile_size = static_cast<int>(options_.tensor.tile_size),
+                                             .min_tiling_extent = static_cast<int>(options_.tensor.min_tiling_extent),
                                          });
 
                 const auto eval_scalar = [&](const FormExpr& scalar_expr) -> llvm::Value* {
@@ -6940,19 +7130,27 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         values[op_idx] = makeScalar(builder.CreateSIToFP(side.cell_domain_id, f64));
                         break;
                     case FormExprType::Coordinate:
-                        values[op_idx] = loadXYZDim(side.physical_points_xyz, q_index, shape.dims[0]);
+                        values[op_idx] =
+                            loadXYZDimFromSide(side, side.physical_points_xyz, q_index, shape.dims[0],
+                                               side.interleaved_qpoint_geometry_physical_offset);
                         break;
                     case FormExprType::ReferenceCoordinate:
                         values[op_idx] = loadXYZDim(side.quad_points_xyz, q_index, shape.dims[0]);
                         break;
                     case FormExprType::Normal:
-                        values[op_idx] = loadXYZDim(side.normals_xyz, q_index, shape.dims[0]);
+                        values[op_idx] =
+                            loadXYZDimFromSide(side, side.normals_xyz, q_index, shape.dims[0],
+                                               side.interleaved_qpoint_geometry_normal_offset);
                         break;
                     case FormExprType::Jacobian:
-                        values[op_idx] = loadMatDimFromQ(side.jacobians, q_index, shape.dims[0]);
+                        values[op_idx] =
+                            loadMatDimFromSide(side, side.jacobians, q_index, shape.dims[0],
+                                               side.interleaved_qpoint_geometry_jacobian_offset);
                         break;
                     case FormExprType::JacobianInverse:
-                        values[op_idx] = loadMatDimFromQ(side.inverse_jacobians, q_index, shape.dims[0]);
+                        values[op_idx] =
+                            loadMatDimFromSide(side, side.inverse_jacobians, q_index, shape.dims[0],
+                                               side.interleaved_qpoint_geometry_inverse_jacobian_offset);
                         break;
                     case FormExprType::Identity: {
                         CodeValue out = makeZero(shape);
@@ -6964,8 +7162,9 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         break;
                     }
                     case FormExprType::JacobianDeterminant: {
-                        auto* q64 = builder.CreateZExt(q_index, i64);
-                        values[op_idx] = makeScalar(loadRealPtrAt(side.jacobian_dets, q64));
+                        values[op_idx] =
+                            makeScalar(loadScalarFromSide(side, side.jacobian_dets, q_index,
+                                                          side.interleaved_qpoint_geometry_det_offset));
                         break;
                     }
                     case FormExprType::PreviousSolutionRef: {
@@ -6984,7 +7183,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                    auto* j64 = builder.CreateZExt(j, i64);
 	                                    auto* cj = loadRealPtrAt(coeffs_ptr, j64);
 	                                    const auto g =
-	                                        loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                    std::vector<llvm::Value*> terms;
 	                                    terms.reserve(dim);
 	                                    for (std::size_t d = 0; d < dim; ++d) {
@@ -7011,7 +7210,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                            auto* j64 = builder.CreateZExt(j, i64);
 	                                            auto* cj = loadRealPtrAt(coeffs_ptr, j64);
 	                                            const auto g =
-	                                                loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                                loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                            std::vector<llvm::Value*> terms;
 	                                            terms.reserve(dim);
 	                                            for (std::size_t d = 0; d < dim; ++d) {
@@ -7086,7 +7285,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                    emitReduceSum(side.n_trial_dofs, "prev_grad" + std::to_string(k), dim, [&](llvm::Value* j) {
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 	                                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                        std::vector<llvm::Value*> terms;
 	                                        terms.reserve(dim);
 	                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -7116,7 +7315,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                        auto* j = builder.CreateAdd(base, jj);
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 	                                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                        std::vector<llvm::Value*> terms;
 	                                        terms.reserve(dim);
 	                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -7585,7 +7784,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                                        auto* j = builder.CreateAdd(base, jj);
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
-		                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 		                                        return builder.CreateFMul(cj, g[comp]);
 		                                    });
 		                                div = builder.CreateFAdd(div, acc);
@@ -7636,7 +7835,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                            auto* j64 = builder.CreateZExt(j, i64);
 	                                            auto* cj = loadRealPtrAt(coeffs, j64);
 	                                            const auto g =
-	                                                loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                                loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                            return builder.CreateFMul(cj, g[comp]);
 	                                        });
 	                                    div_sum = builder.CreateFAdd(div_sum, acc);
@@ -7792,7 +7991,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                                     auto* j64 = builder.CreateZExt(j, i64);
 	                                                     auto* cj = loadRealPtrAt(coeffs, j64);
 	                                                     const auto g =
-	                                                         loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                                         loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                                     std::vector<llvm::Value*> terms;
 	                                                     terms.reserve(3u);
 	                                                     for (std::size_t d = 0; d < 3u; ++d) {
@@ -7905,13 +8104,13 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
                             if (kid.type == FormExprType::StateField && fid == 0xffff) {
-                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                     acc = add(acc,
                                               mul(makeScalar(loadDtCoeff(side, order, k)),
                                                   evalPreviousSolution(side, shape, k, q_index)));
                                 }
                             } else {
-                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                     acc = add(acc,
                                               mul(makeScalar(loadDtCoeff(side, order, k)),
                                                   evalDiscreteOrStateFieldHistoryK(side, /*plus_side=*/false, shape, fid, k, q_index)));
@@ -8187,7 +8386,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 acc = add(acc, mul(getChild(op, kk), evalHistorySolution(side, shape, k, q_index)));
                             }
                         } else {
-                            for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+                            for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                 acc = add(acc,
                                           mul(makeScalar(loadHistoryWeightOrZero(side, k)),
                                               evalHistorySolution(side, shape, k, q_index)));
@@ -8414,8 +8613,12 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         break;
 
 	                    case FormExprType::Coordinate:
-	                        values_minus[op_idx] = loadXYZDim(side_minus.physical_points_xyz, q_index, shape.dims[0]);
-	                        values_plus[op_idx] = loadXYZDim(side_plus.physical_points_xyz, q_index, shape.dims[0]);
+	                        values_minus[op_idx] =
+	                            loadXYZDimFromSide(side_minus, side_minus.physical_points_xyz, q_index, shape.dims[0],
+	                                               side_minus.interleaved_qpoint_geometry_physical_offset);
+	                        values_plus[op_idx] =
+	                            loadXYZDimFromSide(side_plus, side_plus.physical_points_xyz, q_index, shape.dims[0],
+	                                               side_plus.interleaved_qpoint_geometry_physical_offset);
 	                        break;
 
 	                    case FormExprType::ReferenceCoordinate:
@@ -8424,18 +8627,30 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                        break;
 
 	                    case FormExprType::Normal:
-	                        values_minus[op_idx] = loadXYZDim(side_minus.normals_xyz, q_index, shape.dims[0]);
-	                        values_plus[op_idx] = loadXYZDim(side_plus.normals_xyz, q_index, shape.dims[0]);
+	                        values_minus[op_idx] =
+	                            loadXYZDimFromSide(side_minus, side_minus.normals_xyz, q_index, shape.dims[0],
+	                                               side_minus.interleaved_qpoint_geometry_normal_offset);
+	                        values_plus[op_idx] =
+	                            loadXYZDimFromSide(side_plus, side_plus.normals_xyz, q_index, shape.dims[0],
+	                                               side_plus.interleaved_qpoint_geometry_normal_offset);
 	                        break;
 
 	                    case FormExprType::Jacobian:
-	                        values_minus[op_idx] = loadMatDimFromQ(side_minus.jacobians, q_index, shape.dims[0]);
-	                        values_plus[op_idx] = loadMatDimFromQ(side_plus.jacobians, q_index, shape.dims[0]);
+	                        values_minus[op_idx] =
+	                            loadMatDimFromSide(side_minus, side_minus.jacobians, q_index, shape.dims[0],
+	                                               side_minus.interleaved_qpoint_geometry_jacobian_offset);
+	                        values_plus[op_idx] =
+	                            loadMatDimFromSide(side_plus, side_plus.jacobians, q_index, shape.dims[0],
+	                                               side_plus.interleaved_qpoint_geometry_jacobian_offset);
 	                        break;
 
 	                    case FormExprType::JacobianInverse:
-	                        values_minus[op_idx] = loadMatDimFromQ(side_minus.inverse_jacobians, q_index, shape.dims[0]);
-	                        values_plus[op_idx] = loadMatDimFromQ(side_plus.inverse_jacobians, q_index, shape.dims[0]);
+	                        values_minus[op_idx] =
+	                            loadMatDimFromSide(side_minus, side_minus.inverse_jacobians, q_index, shape.dims[0],
+	                                               side_minus.interleaved_qpoint_geometry_inverse_jacobian_offset);
+	                        values_plus[op_idx] =
+	                            loadMatDimFromSide(side_plus, side_plus.inverse_jacobians, q_index, shape.dims[0],
+	                                               side_plus.interleaved_qpoint_geometry_inverse_jacobian_offset);
 	                        break;
 
                     case FormExprType::Identity: {
@@ -8450,9 +8665,12 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                     }
 
                     case FormExprType::JacobianDeterminant: {
-                        auto* q64 = builder.CreateZExt(q_index, i64);
-                        values_minus[op_idx] = makeScalar(loadRealPtrAt(side_minus.jacobian_dets, q64));
-                        values_plus[op_idx] = makeScalar(loadRealPtrAt(side_plus.jacobian_dets, q64));
+                        values_minus[op_idx] =
+                            makeScalar(loadScalarFromSide(side_minus, side_minus.jacobian_dets, q_index,
+                                                          side_minus.interleaved_qpoint_geometry_det_offset));
+                        values_plus[op_idx] =
+                            makeScalar(loadScalarFromSide(side_plus, side_plus.jacobian_dets, q_index,
+                                                          side_plus.interleaved_qpoint_geometry_det_offset));
                         break;
                     }
 
@@ -8478,7 +8696,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                                            auto* j64 = builder.CreateZExt(j, i64);
 		                                            auto* cj = loadRealPtrAt(coeffs, j64);
 		                                            const auto g =
-		                                                loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                                loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 		                                            std::vector<llvm::Value*> terms;
 		                                            terms.reserve(dim);
 		                                            for (std::size_t d = 0; d < dim; ++d) {
@@ -8507,7 +8725,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                            auto* j = builder.CreateAdd(base, jj);
 		                                            auto* j64 = builder.CreateZExt(j, i64);
 		                                            auto* cj = loadRealPtrAt(coeffs, j64);
-		                                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                            std::vector<llvm::Value*> terms;
 	                                            terms.reserve(dim);
 		                                            for (std::size_t d = 0; d < dim; ++d) {
@@ -8646,7 +8864,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                                            auto* j64 = builder.CreateZExt(j, i64);
 		                                            auto* cj = loadRealPtrAt(coeffs, j64);
 		                                            const auto g =
-		                                                loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                                loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 		                                            return builder.CreateFMul(cj, g[comp]);
 		                                        });
 		                                    div = builder.CreateFAdd(div, acc);
@@ -8778,7 +8996,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                                         auto* j64 = builder.CreateZExt(j, i64);
 	                                                         auto* cj = loadRealPtrAt(coeffs, j64);
 	                                                         const auto g =
-	                                                             loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                                             loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                                         std::vector<llvm::Value*> terms;
 	                                                         terms.reserve(3u);
 	                                                         for (std::size_t d = 0; d < 3u; ++d) {
@@ -8898,7 +9116,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
                             if (kid.type == FormExprType::StateField && fid == 0xffff) {
-                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                     acc_minus = add(acc_minus,
                                                     mul(makeScalar(loadDtCoeff(side_minus, order, k)),
                                                         evalPreviousSolution(side_minus, shape, k, q_index)));
@@ -8907,7 +9125,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                                        evalPreviousSolution(side_plus, shape, k, q_index)));
                                 }
                             } else {
-                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                     acc_minus = add(acc_minus,
                                                     mul(makeScalar(loadDtCoeff(side_minus, order, k)),
                                                         evalDiscreteOrStateFieldHistoryK(side_minus, /*plus_side=*/false, shape, fid, k, q_index)));
@@ -9329,7 +9547,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 acc_p = add(acc_p, mul(childPlus(op, kk), evalHistorySolution(side_plus, shape, k, q_index)));
                             }
                         } else {
-                            for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+                            for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                 acc_m = add(acc_m,
                                             mul(makeScalar(loadHistoryWeightOrZero(side_minus, k)),
                                                 evalHistorySolution(side_minus, shape, k, q_index)));
@@ -9572,7 +9790,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                        if (is_plus != test_active_plus) return makeZero(shape);
 
 	                        if (shape.kind == Shape::Kind::Vector) {
-	                            const auto v = loadVec3FromTable(side.test_phys_grads_xyz, side.n_qpts, i_index, q_index);
+	                            const auto v = loadVec3FromTableQMajor(side.test_phys_grads_xyz, side.n_test_dofs, i_index, q_index);
 	                            return makeVector(shape.dims[0], v[0], v[1], v[2]);
 	                        }
 	                        if (shape.kind == Shape::Kind::Matrix) {
@@ -9582,7 +9800,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                            const auto dofs_per_comp = builder.CreateUDiv(
 	                                side.n_test_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                            const auto comp = builder.CreateUDiv(i_index, dofs_per_comp);
-	                            const auto g = loadVec3FromTable(side.test_phys_grads_xyz, side.n_qpts, i_index, q_index);
+	                            const auto g = loadVec3FromTableQMajor(side.test_phys_grads_xyz, side.n_test_dofs, i_index, q_index);
 	                            for (std::size_t r = 0; r < vd; ++r) {
 	                                auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
 	                                for (std::size_t d = 0; d < dim; ++d) {
@@ -9605,7 +9823,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
 		                                        const auto g =
-		                                            loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                            loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 		                                        std::vector<llvm::Value*> terms;
 		                                        terms.reserve(dim);
 		                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -9630,7 +9848,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                        auto* j = builder.CreateAdd(base, jj);
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
-		                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                        std::vector<llvm::Value*> terms;
 	                                        terms.reserve(dim);
 		                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -9650,7 +9868,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                        if (is_plus != trial_active_plus) return makeZero(shape);
 
 	                        if (shape.kind == Shape::Kind::Vector) {
-	                            const auto v = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
+	                            const auto v = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
 	                            return makeVector(shape.dims[0], v[0], v[1], v[2]);
 	                        }
 	                        if (shape.kind == Shape::Kind::Matrix) {
@@ -9660,7 +9878,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                            const auto dofs_per_comp = builder.CreateUDiv(
 	                                side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                            const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
-	                            const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
+	                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
 	                            for (std::size_t r = 0; r < vd; ++r) {
 	                                auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
 	                                for (std::size_t d = 0; d < dim; ++d) {
@@ -9682,7 +9900,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                                    auto* j64 = builder.CreateZExt(j, i64);
 		                                    auto* cj = loadRealPtrAt(coeffs, j64);
 		                                    const auto g =
-		                                        loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                        loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 		                                    std::vector<llvm::Value*> terms;
 		                                    terms.reserve(dim);
 		                                    for (std::size_t d = 0; d < dim; ++d) {
@@ -9710,7 +9928,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                    auto* j = builder.CreateAdd(base, jj);
 	                                    auto* j64 = builder.CreateZExt(j, i64);
 		                                    auto* cj = loadRealPtrAt(coeffs, j64);
-		                                    const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                    const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                    std::vector<llvm::Value*> terms;
 	                                    terms.reserve(dim);
 		                                    for (std::size_t d = 0; d < dim; ++d) {
@@ -9739,7 +9957,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
 		                                        const auto g =
-		                                            loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                            loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 		                                        std::vector<llvm::Value*> terms;
 		                                        terms.reserve(dim);
 		                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -9765,7 +9983,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                        auto* j = builder.CreateAdd(base, jj);
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
-		                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                        std::vector<llvm::Value*> terms;
 	                                        terms.reserve(dim);
 		                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -9879,7 +10097,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                            }
 	                            CodeValue g = makeZero(shape);
 	                            if (shape.kind == Shape::Kind::Vector) {
-	                                const auto v = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
+	                                const auto v = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
 	                                return makeVector(shape.dims[0], v[0], v[1], v[2]);
 	                            }
 	                            if (shape.kind == Shape::Kind::Matrix) {
@@ -9888,7 +10106,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                const auto dofs_per_comp = builder.CreateUDiv(
 	                                    side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                                const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
-	                                const auto gg = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j_index, q_index);
+	                                const auto gg = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
 	                                for (std::size_t r = 0; r < vd; ++r) {
 	                                    auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
 	                                    for (std::size_t d = 0; d < dim; ++d) {
@@ -9909,7 +10127,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
 		                                        const auto g =
-		                                            loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                            loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 		                                        std::vector<llvm::Value*> terms;
 		                                        terms.reserve(dim);
 		                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -9935,7 +10153,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                        auto* j = builder.CreateAdd(base, jj);
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
-		                                        const auto g = loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                        std::vector<llvm::Value*> terms;
 	                                        terms.reserve(dim);
 		                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -10071,7 +10289,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                              llvm::Value* grads_xyz) -> llvm::Value* {
 	                        auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                        auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
-	                        const auto g = loadVec3FromTable(grads_xyz, side.n_qpts, dof_index, q_index);
+	                        const auto g = loadVec3FromTableQMajor(grads_xyz, n_dofs, dof_index, q_index);
 	                        llvm::Value* out = f64c(0.0);
 	                        if (vd >= 1) {
 	                            out = builder.CreateSelect(builder.CreateICmpEQ(comp, builder.getInt32(0)), g[0], out);
@@ -10208,7 +10426,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                                    auto* j64 = builder.CreateZExt(j, i64);
 		                                    auto* cj = loadRealPtrAt(coeffs, j64);
 		                                    const auto g =
-		                                        loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+		                                        loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 		                                    return builder.CreateFMul(cj, g[comp]);
 		                                });
 		                            div = builder.CreateFAdd(div, acc);
@@ -10331,7 +10549,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                               llvm::Value* grads_xyz) -> std::array<llvm::Value*, 3> {
 	                        auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                        auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
-	                        const auto g = loadVec3FromTable(grads_xyz, side.n_qpts, dof_index, q_index);
+	                        const auto g = loadVec3FromTableQMajor(grads_xyz, n_dofs, dof_index, q_index);
 	                        llvm::Value* x = f64c(0.0);
 	                        llvm::Value* y = f64c(0.0);
 	                        llvm::Value* z = f64c(0.0);
@@ -10554,7 +10772,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                                 auto* j64 = builder.CreateZExt(j, i64);
 	                                                 auto* cj = loadRealPtrAt(coeffs, j64);
 	                                                 const auto g =
-	                                                     loadVec3FromTable(side.trial_phys_grads_xyz, side.n_qpts, j, q_index);
+	                                                     loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
 	                                                 std::vector<llvm::Value*> terms;
 	                                                 terms.reserve(3u);
 	                                                 for (std::size_t d = 0; d < 3u; ++d) {
@@ -10971,8 +11189,12 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             break;
 
 	                        case FormExprType::Coordinate:
-	                            values_minus[op_idx] = loadXYZDim(side_minus.physical_points_xyz, q_index, shape.dims[0]);
-	                            values_plus[op_idx] = loadXYZDim(side_plus.physical_points_xyz, q_index, shape.dims[0]);
+	                            values_minus[op_idx] =
+	                                loadXYZDimFromSide(side_minus, side_minus.physical_points_xyz, q_index, shape.dims[0],
+	                                                   side_minus.interleaved_qpoint_geometry_physical_offset);
+	                            values_plus[op_idx] =
+	                                loadXYZDimFromSide(side_plus, side_plus.physical_points_xyz, q_index, shape.dims[0],
+	                                                   side_plus.interleaved_qpoint_geometry_physical_offset);
 	                            break;
 
 	                        case FormExprType::ReferenceCoordinate:
@@ -10981,18 +11203,30 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                            break;
 
 	                        case FormExprType::Normal:
-	                            values_minus[op_idx] = loadXYZDim(side_minus.normals_xyz, q_index, shape.dims[0]);
-	                            values_plus[op_idx] = loadXYZDim(side_plus.normals_xyz, q_index, shape.dims[0]);
+	                            values_minus[op_idx] =
+	                                loadXYZDimFromSide(side_minus, side_minus.normals_xyz, q_index, shape.dims[0],
+	                                                   side_minus.interleaved_qpoint_geometry_normal_offset);
+	                            values_plus[op_idx] =
+	                                loadXYZDimFromSide(side_plus, side_plus.normals_xyz, q_index, shape.dims[0],
+	                                                   side_plus.interleaved_qpoint_geometry_normal_offset);
 	                            break;
 
 	                        case FormExprType::Jacobian:
-	                            values_minus[op_idx] = loadMatDimFromQ(side_minus.jacobians, q_index, shape.dims[0]);
-	                            values_plus[op_idx] = loadMatDimFromQ(side_plus.jacobians, q_index, shape.dims[0]);
+	                            values_minus[op_idx] =
+	                                loadMatDimFromSide(side_minus, side_minus.jacobians, q_index, shape.dims[0],
+	                                                   side_minus.interleaved_qpoint_geometry_jacobian_offset);
+	                            values_plus[op_idx] =
+	                                loadMatDimFromSide(side_plus, side_plus.jacobians, q_index, shape.dims[0],
+	                                                   side_plus.interleaved_qpoint_geometry_jacobian_offset);
 	                            break;
 
 	                        case FormExprType::JacobianInverse:
-	                            values_minus[op_idx] = loadMatDimFromQ(side_minus.inverse_jacobians, q_index, shape.dims[0]);
-	                            values_plus[op_idx] = loadMatDimFromQ(side_plus.inverse_jacobians, q_index, shape.dims[0]);
+	                            values_minus[op_idx] =
+	                                loadMatDimFromSide(side_minus, side_minus.inverse_jacobians, q_index, shape.dims[0],
+	                                                   side_minus.interleaved_qpoint_geometry_inverse_jacobian_offset);
+	                            values_plus[op_idx] =
+	                                loadMatDimFromSide(side_plus, side_plus.inverse_jacobians, q_index, shape.dims[0],
+	                                                   side_plus.interleaved_qpoint_geometry_inverse_jacobian_offset);
 	                            break;
 
                         case FormExprType::Identity: {
@@ -11007,9 +11241,12 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         }
 
                         case FormExprType::JacobianDeterminant: {
-                            auto* q64 = builder.CreateZExt(q_index, i64);
-                            values_minus[op_idx] = makeScalar(loadRealPtrAt(side_minus.jacobian_dets, q64));
-                            values_plus[op_idx] = makeScalar(loadRealPtrAt(side_plus.jacobian_dets, q64));
+                            values_minus[op_idx] =
+                                makeScalar(loadScalarFromSide(side_minus, side_minus.jacobian_dets, q_index,
+                                                              side_minus.interleaved_qpoint_geometry_det_offset));
+                            values_plus[op_idx] =
+                                makeScalar(loadScalarFromSide(side_plus, side_plus.jacobian_dets, q_index,
+                                                              side_plus.interleaved_qpoint_geometry_det_offset));
                             break;
                         }
 
@@ -11060,7 +11297,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                                 const int fid = unpackFieldIdImm1(kid.imm1);
                                 if (kid.type == FormExprType::StateField && fid == 0xffff) {
-                                    for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+                                    for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                         acc_minus = add(acc_minus,
                                                         mul(makeScalar(loadDtCoeff(side_minus, order, k)),
                                                             evalPreviousSolution(side_minus, shape, k, q_index)));
@@ -11069,7 +11306,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                                            evalPreviousSolution(side_plus, shape, k, q_index)));
                                     }
                                 } else {
-                                    for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+                                    for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                         acc_minus = add(acc_minus,
                                                         mul(makeScalar(loadDtCoeff(side_minus, order, k)),
                                                             evalDiscreteOrStateFieldHistoryK(side_minus, /*plus_side=*/false, shape, fid, k, q_index)));
@@ -11591,7 +11828,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                                    evalHistorySolution(side_plus, shape, k, q_index)));
 	                                }
 	                            } else {
-	                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV5); ++k) {
+	                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
 	                                    acc_m = add(acc_m,
 	                                                mul(makeScalar(loadHistoryWeightOrZero(side_minus, k)),
 	                                                    evalHistorySolution(side_minus, shape, k, q_index)));
@@ -11672,6 +11909,9 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                              LLVMTensorGenOptions{
                                                  .vectorize = options_.vectorize,
                                                  .enable_polly = options_.tensor.enable_polly,
+                                                 .enable_tiling = options_.tensor.enable_loop_tiling,
+                                                 .tile_size = static_cast<int>(options_.tensor.tile_size),
+                                                 .min_tiling_extent = static_cast<int>(options_.tensor.min_tiling_extent),
                                              });
 
                     const auto eval_scalar = [&](const FormExpr& scalar_expr) -> llvm::Value* {

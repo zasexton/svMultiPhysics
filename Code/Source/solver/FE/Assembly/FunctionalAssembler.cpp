@@ -199,6 +199,7 @@ void prepareCellContext(AssemblyContext& context,
         for (LocalIndex i = 0; i < n_dofs; ++i) {
             const LocalIndex si = is_product ? static_cast<LocalIndex>(i % n_scalar_dofs) : i;
             const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
+            const std::size_t idx_phys = static_cast<std::size_t>(q * n_dofs + i);
             scratch.basis_values[idx] = values_at_pt[static_cast<std::size_t>(si)];
             scratch.ref_gradients[idx] = {
                 gradients_at_pt[static_cast<std::size_t>(si)][0],
@@ -213,7 +214,7 @@ void prepareCellContext(AssemblyContext& context,
                     grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
                 }
             }
-            scratch.phys_gradients[idx] = grad_phys;
+            scratch.phys_gradients[idx_phys] = grad_phys;
 
             if (need_basis_hessians) {
                 AssemblyContext::Matrix3x3 H_ref{};
@@ -494,6 +495,7 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
         for (LocalIndex i = 0; i < n_dofs; ++i) {
             const LocalIndex si = is_product ? static_cast<LocalIndex>(i % n_scalar_dofs) : i;
             const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
+            const std::size_t idx_phys = static_cast<std::size_t>(q * n_dofs + i);
             scratch.basis_values[idx] = values_at_pt[static_cast<std::size_t>(si)];
             scratch.ref_gradients[idx] = {
                 gradients_at_pt[static_cast<std::size_t>(si)][0],
@@ -507,7 +509,7 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
                     grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
                 }
             }
-            scratch.phys_gradients[idx] = grad_phys;
+            scratch.phys_gradients[idx_phys] = grad_phys;
 
             if (need_basis_hessians) {
                 AssemblyContext::Matrix3x3 H_ref{};

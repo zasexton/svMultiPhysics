@@ -60,7 +60,13 @@ BasisCacheEntry BasisCache::compute(const BasisFunction& basis,
                                     bool hessians) const {
     BasisCacheEntry entry;
     const auto& points = quad.points();
-    entry.values.resize(points.size());
+    entry.num_qpts = points.size();
+    entry.num_dofs = basis.size();
+
+    const bool vector_basis = basis.is_vector_valued();
+    if (!vector_basis) {
+        entry.scalar_values.assign(entry.num_dofs * entry.num_qpts, Real(0));
+    }
     if (basis.is_vector_valued()) {
         entry.vector_values.resize(points.size());
     }
@@ -71,17 +77,25 @@ BasisCacheEntry BasisCache::compute(const BasisFunction& basis,
         entry.hessians.resize(points.size());
     }
 
+    std::vector<Real> scalar_values;
+    if (!vector_basis) {
+        scalar_values.resize(entry.num_dofs);
+    }
+
     for (std::size_t qp = 0; qp < points.size(); ++qp) {
-        if (basis.is_vector_valued()) {
+        if (vector_basis) {
             basis.evaluate_vector_values(points[qp], entry.vector_values[qp]);
         } else {
-            basis.evaluate_values(points[qp], entry.values[qp]);
+            basis.evaluate_values(points[qp], scalar_values);
+            for (std::size_t dof = 0; dof < entry.num_dofs; ++dof) {
+                entry.scalar_values[dof * entry.num_qpts + qp] = scalar_values[dof];
+            }
         }
 
-        if (gradients && !basis.is_vector_valued()) {
+        if (gradients && !vector_basis) {
             basis.evaluate_gradients(points[qp], entry.gradients[qp]);
         }
-        if (hessians && !basis.is_vector_valued()) {
+        if (hessians && !vector_basis) {
             basis.evaluate_hessians(points[qp], entry.hessians[qp]);
         }
     }

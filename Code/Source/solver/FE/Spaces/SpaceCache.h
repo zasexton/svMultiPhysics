@@ -21,8 +21,9 @@
 
 #include "Core/Types.h"
 #include "Elements/Element.h"
-#include <unordered_map>
 #include <mutex>
+#include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace svmp {
@@ -57,8 +58,17 @@ public:
     struct CachedData {
         std::size_t num_dofs{0};
         std::size_t num_qpts{0};
-        // basis_values[i][q] = phi_i(x_q)
-        std::vector<std::vector<Real>> basis_values;
+        // basis_values[i * num_qpts + q] = phi_i(x_q)
+        std::vector<Real> basis_values;
+
+        [[nodiscard]] Real basisValue(std::size_t dof, std::size_t qpt) const noexcept {
+            return basis_values[dof * num_qpts + qpt];
+        }
+
+        [[nodiscard]] std::span<const Real> basisValuesForDof(std::size_t dof) const noexcept {
+            if (num_qpts == 0) return {};
+            return std::span<const Real>(basis_values.data() + dof * num_qpts, num_qpts);
+        }
     };
 
     /// Get or compute cached data for element and polynomial order
@@ -82,4 +92,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_SPACES_SPACECACHE_H
-

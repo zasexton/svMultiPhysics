@@ -26,15 +26,31 @@ public:
                                           const math::Vector<Real, 3>& grad_ref,
                                           const math::Vector<Real, 3>& xi);
 
+    /// Transform reference gradient using a precomputed inverse Jacobian.
+    static math::Vector<Real, 3> gradient(const GeometryMapping& mapping,
+                                          const math::Vector<Real, 3>& grad_ref,
+                                          const math::Matrix<Real, 3, 3>& jacobian_inverse);
+
     /// H(div) Piola transform (contravariant): v_phys = (1/detJ) * J * v_ref
     static math::Vector<Real, 3> hdiv_vector(const GeometryMapping& mapping,
                                              const math::Vector<Real, 3>& v_ref,
                                              const math::Vector<Real, 3>& xi);
 
+    /// H(div) Piola transform using a precomputed Jacobian and determinant.
+    static math::Vector<Real, 3> hdiv_vector(const GeometryMapping& mapping,
+                                             const math::Vector<Real, 3>& v_ref,
+                                             const math::Matrix<Real, 3, 3>& jacobian,
+                                             Real det_jacobian);
+
     /// H(curl) Piola transform (covariant): v_phys = J^{-T} * v_ref
     static math::Vector<Real, 3> hcurl_vector(const GeometryMapping& mapping,
                                               const math::Vector<Real, 3>& v_ref,
                                               const math::Vector<Real, 3>& xi);
+
+    /// H(curl) Piola transform using a precomputed inverse Jacobian.
+    static math::Vector<Real, 3> hcurl_vector(const GeometryMapping& mapping,
+                                              const math::Vector<Real, 3>& v_ref,
+                                              const math::Matrix<Real, 3, 3>& jacobian_inverse);
 };
 
 } // namespace geometry

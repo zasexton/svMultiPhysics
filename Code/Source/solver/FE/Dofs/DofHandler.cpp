@@ -3014,6 +3014,8 @@ struct DofHandler::MeshCacheState : MeshObserver {
         std::size_t cell2vertex_size{0};
         const void* vertex_gids{nullptr};
         std::size_t vertex_gids_size{0};
+        const void* vertex_coords{nullptr};
+        std::size_t vertex_coords_size{0};
         const void* cell_gids{nullptr};
         std::size_t cell_gids_size{0};
         const void* edge2vertex{nullptr};
@@ -3034,6 +3036,8 @@ struct DofHandler::MeshCacheState : MeshObserver {
                    cell2vertex_size == other.cell2vertex_size &&
                    vertex_gids == other.vertex_gids &&
                    vertex_gids_size == other.vertex_gids_size &&
+                   vertex_coords == other.vertex_coords &&
+                   vertex_coords_size == other.vertex_coords_size &&
                    cell_gids == other.cell_gids &&
                    cell_gids_size == other.cell_gids_size &&
                    edge2vertex == other.edge2vertex &&
@@ -3052,6 +3056,8 @@ struct DofHandler::MeshCacheState : MeshObserver {
     struct Signature {
         DofLayoutInfo layout{};
         DofNumberingStrategy numbering{DofNumberingStrategy::Sequential};
+        bool enable_spatial_locality_ordering{true};
+        SpatialCurveType spatial_curve{SpatialCurveType::Morton};
         OwnershipStrategy ownership{OwnershipStrategy::LowestRank};
         GlobalNumberingMode global_numbering{GlobalNumberingMode::OwnerContiguous};
         TopologyCompletion topology_completion{TopologyCompletion::DeriveMissing};
@@ -3079,6 +3085,8 @@ struct DofHandler::MeshCacheState : MeshObserver {
         bool operator==(const Signature& other) const noexcept {
             return layout_equal(layout, other.layout) &&
                    numbering == other.numbering &&
+                   enable_spatial_locality_ordering == other.enable_spatial_locality_ordering &&
+                   spatial_curve == other.spatial_curve &&
                    ownership == other.ownership &&
                    global_numbering == other.global_numbering &&
                    topology_completion == other.topology_completion &&
@@ -3135,6 +3143,8 @@ struct DofHandler::MeshCacheState : MeshObserver {
         snap.cell2vertex_size = mesh.cell2vertex().size();
         snap.vertex_gids = mesh.vertex_gids().data();
         snap.vertex_gids_size = mesh.vertex_gids().size();
+        snap.vertex_coords = mesh.X_ref().data();
+        snap.vertex_coords_size = mesh.X_ref().size();
         snap.cell_gids = mesh.cell_gids().data();
         snap.cell_gids_size = mesh.cell_gids().size();
         snap.edge2vertex = mesh.edge2vertex().data();
@@ -3154,6 +3164,8 @@ struct DofHandler::MeshCacheState : MeshObserver {
         Signature sig;
         sig.layout = layout;
         sig.numbering = options.numbering;
+        sig.enable_spatial_locality_ordering = options.enable_spatial_locality_ordering;
+        sig.spatial_curve = options.spatial_curve;
         sig.ownership = options.ownership;
         sig.global_numbering = options.global_numbering;
         sig.topology_completion = options.topology_completion;
@@ -3232,10 +3244,13 @@ DofHandler::DofHandler(DofHandler&& other) noexcept
     , cell_edge_orient_data_(std::move(other.cell_edge_orient_data_))
     , cell_face_orient_offsets_(std::move(other.cell_face_orient_offsets_))
     , cell_face_orient_data_(std::move(other.cell_face_orient_data_))
+    , spatial_dof_coords_(std::move(other.spatial_dof_coords_))
+    , spatial_dof_coord_dim_(other.spatial_dof_coord_dim_)
 {
     other.finalized_ = false;
     other.ghost_cache_valid_ = false;
     other.dof_state_revision_ = 0;
+    other.spatial_dof_coord_dim_ = 0;
 }
 
 DofHandler& DofHandler::operator=(DofHandler&& other) noexcept {
@@ -3267,10 +3282,13 @@ DofHandler& DofHandler::operator=(DofHandler&& other) noexcept {
         cell_edge_orient_data_ = std::move(other.cell_edge_orient_data_);
         cell_face_orient_offsets_ = std::move(other.cell_face_orient_offsets_);
         cell_face_orient_data_ = std::move(other.cell_face_orient_data_);
+        spatial_dof_coords_ = std::move(other.spatial_dof_coords_);
+        spatial_dof_coord_dim_ = other.spatial_dof_coord_dim_;
 
         other.finalized_ = false;
         other.ghost_cache_valid_ = false;
         other.dof_state_revision_ = 0;
+        other.spatial_dof_coord_dim_ = 0;
     }
     return *this;
 }
@@ -3617,9 +3635,44 @@ void DofHandler::distributeDofsCore(const MeshTopologyView& topology,
         }
     }
 
+    const bool explicit_spatial =
+        options.numbering == DofNumberingStrategy::Morton ||
+        options.numbering == DofNumberingStrategy::Hilbert;
+    bool apply_default_spatial =
+        options.enable_spatial_locality_ordering &&
+        options.numbering == DofNumberingStrategy::Sequential;
+
+    // In MPI runs we currently rely on owner-contiguous global numbering to build
+    // distributed sparsity patterns (and FSILS matrices) from a contiguous owned range.
+    // Global space-filling-curve renumbering breaks that invariant, so we disable the
+    // "default-on" spatial locality ordering in parallel and reject explicit spatial
+    // numbering requests until we have a backend-safe parallel renumbering path.
+    if (world_size_ > 1) {
+        if (explicit_spatial) {
+            throw FEException(
+                "DofHandler::distributeDofs: Morton/Hilbert DOF numbering is not supported in MPI runs yet; "
+                "it breaks owner-contiguous ranges required for distributed sparsity/FSILS. "
+                "Use Sequential numbering (and, if needed, disable enable_spatial_locality_ordering).");
+        }
+        apply_default_spatial = false;
+    }
+
+    if (explicit_spatial || apply_default_spatial) {
+        cacheSpatialDofCoordinates(*topo, layout);
+    } else {
+        clearSpatialDofCoordinates();
+    }
+
     if (options.numbering != DofNumberingStrategy::Sequential) {
         renumberDofs(options.numbering);
+    } else if (apply_default_spatial) {
+        const auto curve_strategy = (options.spatial_curve == SpatialCurveType::Hilbert)
+                                        ? DofNumberingStrategy::Hilbert
+                                        : DofNumberingStrategy::Morton;
+        renumberDofs(curve_strategy);
     }
+
+    clearSpatialDofCoordinates();
 }
 
 bool DofHandler::hasCellOrientations() const noexcept
@@ -6059,6 +6112,7 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
     topo.cell2vertex_offsets = mesh.cell2vertex_offsets();
     topo.cell2vertex_data = mesh.cell2vertex();
     topo.vertex_gids = mesh.vertex_gids();
+    topo.vertex_coords = mesh.X_ref();
     topo.cell_gids = mesh.cell_gids();
 
     const bool need_edges = layout.is_continuous && layout.dofs_per_edge > 0;
@@ -6319,6 +6373,7 @@ void DofHandler::distributeDofs(const Mesh& mesh,
     topo.cell2vertex_offsets = local_mesh.cell2vertex_offsets();
     topo.cell2vertex_data = local_mesh.cell2vertex();
     topo.vertex_gids = local_mesh.vertex_gids();
+    topo.vertex_coords = local_mesh.X_ref();
     topo.cell_gids = local_mesh.cell_gids();
 
     std::vector<int> cell_owner_ranks(static_cast<std::size_t>(topo.n_cells), opts.my_rank);
@@ -6817,6 +6872,7 @@ void DofHandler::setDofMap(DofMap dof_map) {
     checkNotFinalized();
     ++dof_state_revision_;
     dof_map_ = std::move(dof_map);
+    clearSpatialDofCoordinates();
 }
 
 void DofHandler::setPartition(DofPartition partition) {
@@ -6828,6 +6884,158 @@ void DofHandler::setPartition(DofPartition partition) {
 void DofHandler::setEntityDofMap(std::unique_ptr<EntityDofMap> entity_dof_map) {
     checkNotFinalized();
     entity_dof_map_ = std::move(entity_dof_map);
+    clearSpatialDofCoordinates();
+}
+
+void DofHandler::clearSpatialDofCoordinates() noexcept
+{
+    spatial_dof_coords_.clear();
+    spatial_dof_coord_dim_ = 0;
+}
+
+void DofHandler::cacheSpatialDofCoordinates(const MeshTopologyView& topology,
+                                            const DofLayoutInfo& layout)
+{
+    clearSpatialDofCoordinates();
+
+    const GlobalIndex n_dofs = dof_map_.getNumDofs();
+    if (n_dofs <= 0) {
+        return;
+    }
+
+    const int dim = (topology.dim > 0) ? topology.dim : 3;
+    const std::size_t dim_u = static_cast<std::size_t>(dim);
+    const std::size_t required_coords =
+        static_cast<std::size_t>(std::max<GlobalIndex>(topology.n_vertices, 0)) * dim_u;
+    if (topology.vertex_coords.size() < required_coords || dim_u == 0u) {
+        return;
+    }
+
+    spatial_dof_coord_dim_ = dim;
+    spatial_dof_coords_.assign(static_cast<std::size_t>(n_dofs) * dim_u, 0.0);
+    std::vector<std::uint8_t> assigned(static_cast<std::size_t>(n_dofs), 0u);
+
+    const auto vertex_coords = [&](GlobalIndex v) -> std::array<double, 3> {
+        std::array<double, 3> xyz{0.0, 0.0, 0.0};
+        if (v < 0 || v >= topology.n_vertices) {
+            return xyz;
+        }
+        const auto vv = static_cast<std::size_t>(v);
+        const auto base = vv * dim_u;
+        for (std::size_t d = 0; d < dim_u && d < 3u; ++d) {
+            xyz[d] = static_cast<double>(topology.vertex_coords[base + d]);
+        }
+        return xyz;
+    };
+
+    const auto centroid = [&](std::span<const MeshIndex> verts) -> std::array<double, 3> {
+        std::array<double, 3> xyz{0.0, 0.0, 0.0};
+        if (verts.empty()) {
+            return xyz;
+        }
+        for (const auto v : verts) {
+            const auto p = vertex_coords(static_cast<GlobalIndex>(v));
+            xyz[0] += p[0];
+            xyz[1] += p[1];
+            xyz[2] += p[2];
+        }
+        const auto inv = 1.0 / static_cast<double>(verts.size());
+        xyz[0] *= inv;
+        xyz[1] *= inv;
+        xyz[2] *= inv;
+        return xyz;
+    };
+
+    const auto assign = [&](GlobalIndex dof, const std::array<double, 3>& xyz) {
+        if (dof < 0 || dof >= n_dofs) {
+            return;
+        }
+        const auto did = static_cast<std::size_t>(dof);
+        const auto base = did * dim_u;
+        for (std::size_t d = 0; d < dim_u; ++d) {
+            spatial_dof_coords_[base + d] = xyz[d];
+        }
+        assigned[did] = 1u;
+    };
+
+    if (entity_dof_map_) {
+        for (GlobalIndex v = 0; v < entity_dof_map_->numVertices(); ++v) {
+            const auto xyz = vertex_coords(v);
+            for (const auto d : entity_dof_map_->getVertexDofs(v)) {
+                assign(d, xyz);
+            }
+        }
+
+        if (layout.dofs_per_edge > 0 && !topology.edge2vertex_data.empty()) {
+            const GlobalIndex n_edges = std::min<GlobalIndex>(entity_dof_map_->numEdges(),
+                                                              static_cast<GlobalIndex>(topology.edge2vertex_data.size() / 2u));
+            for (GlobalIndex e = 0; e < n_edges; ++e) {
+                const auto [v0, v1] = topology.getEdgeVertices(e);
+                if (v0 < 0 || v1 < 0) {
+                    continue;
+                }
+                const auto p0 = vertex_coords(static_cast<GlobalIndex>(v0));
+                const auto p1 = vertex_coords(static_cast<GlobalIndex>(v1));
+                const std::array<double, 3> xyz{
+                    0.5 * (p0[0] + p1[0]),
+                    0.5 * (p0[1] + p1[1]),
+                    0.5 * (p0[2] + p1[2]),
+                };
+                for (const auto d : entity_dof_map_->getEdgeDofs(e)) {
+                    assign(d, xyz);
+                }
+            }
+        }
+
+        if (layout.dofs_per_face > 0 &&
+            !topology.face2vertex_offsets.empty() &&
+            !topology.face2vertex_data.empty()) {
+            const GlobalIndex n_faces = std::min<GlobalIndex>(entity_dof_map_->numFaces(), topology.n_faces);
+            for (GlobalIndex f = 0; f < n_faces; ++f) {
+                const auto xyz = centroid(topology.getFaceVertices(f));
+                for (const auto d : entity_dof_map_->getFaceDofs(f)) {
+                    assign(d, xyz);
+                }
+            }
+        }
+
+        if (layout.dofs_per_cell > 0) {
+            const GlobalIndex n_cells = std::min<GlobalIndex>(entity_dof_map_->numCells(), topology.n_cells);
+            for (GlobalIndex c = 0; c < n_cells; ++c) {
+                const auto xyz = centroid(topology.getCellVertices(c));
+                for (const auto d : entity_dof_map_->getCellInteriorDofs(c)) {
+                    assign(d, xyz);
+                }
+            }
+        }
+    }
+
+    // Fallback assignment for any unassigned DOFs (e.g., DG layouts).
+    for (GlobalIndex c = 0; c < topology.n_cells; ++c) {
+        const auto xyz = centroid(topology.getCellVertices(c));
+        for (const auto d : dof_map_.getCellDofs(c)) {
+            if (d < 0 || d >= n_dofs) {
+                continue;
+            }
+            if (assigned[static_cast<std::size_t>(d)] != 0u) {
+                continue;
+            }
+            assign(d, xyz);
+        }
+    }
+
+    // Final deterministic fallback when topology data is incomplete.
+    for (GlobalIndex d = 0; d < n_dofs; ++d) {
+        if (assigned[static_cast<std::size_t>(d)] != 0u) {
+            continue;
+        }
+        const std::array<double, 3> xyz{
+            static_cast<double>(d),
+            static_cast<double>(d),
+            static_cast<double>(d),
+        };
+        assign(d, xyz);
+    }
 }
 
 void DofHandler::renumberDofs(DofNumberingStrategy strategy) {
@@ -6959,6 +7167,26 @@ void DofHandler::renumberDofs(DofNumberingStrategy strategy) {
                     v = next++;
                 }
             }
+            break;
+        }
+
+        case DofNumberingStrategy::Morton:
+        case DofNumberingStrategy::Hilbert: {
+            SpaceFillingCurveNumbering strategy_impl(
+                (strategy == DofNumberingStrategy::Hilbert)
+                    ? SpaceFillingCurveNumbering::CurveType::Hilbert
+                    : SpaceFillingCurveNumbering::CurveType::Morton,
+                spatial_dof_coord_dim_ > 0 ? spatial_dof_coord_dim_ : 3);
+
+            const std::size_t required_coords =
+                static_cast<std::size_t>(n_dofs) *
+                static_cast<std::size_t>(std::max(1, spatial_dof_coord_dim_));
+            if (!spatial_dof_coords_.empty() && spatial_dof_coords_.size() >= required_coords) {
+                strategy_impl.setCoordinates(std::span<const double>(spatial_dof_coords_.data(),
+                                                                     required_coords),
+                                             std::max(1, spatial_dof_coord_dim_));
+            }
+            perm = strategy_impl.computeNumbering(n_dofs, {}, {});
             break;
         }
 

@@ -135,7 +135,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
             }
 	        }
 
-	        const auto args = assembly::jit::packCellKernelArgsV5(ctx, output, checks);
+	        const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
 	        const auto disp = getSpecializedDispatch(KernelRole::Form, k->ir(), IntegralDomain::Cell, ctx, nullptr);
 	        const auto& compiled = disp ? *disp : compiled_form_;
 	        callJIT(compiled.cell, &args);
@@ -173,7 +173,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
 	            getSpecializedDispatch(KernelRole::Bilinear, k->bilinearIR(), IntegralDomain::Cell, ctx, nullptr);
 	        const auto& compiled_bi = disp_bi ? *disp_bi : compiled_bilinear_;
 	        if (want_matrix) {
-	            const auto args_bi = assembly::jit::packCellKernelArgsV5(ctx, output, checks);
+	            const auto args_bi = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
 	            callJIT(compiled_bi.cell, &args_bi);
 	        }
 
@@ -187,7 +187,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
 	                const auto disp_lin =
 	                    getSpecializedDispatch(KernelRole::Linear, *k->linearIR(), IntegralDomain::Cell, ctx, nullptr);
 	                const auto& compiled_lin = disp_lin ? *disp_lin : compiled_linear_;
-	                const auto args_lin = assembly::jit::packCellKernelArgsV5(ctx, output, checks);
+	                const auto args_lin = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
 	                callJIT(compiled_lin.cell, &args_lin);
 	            }
 
@@ -205,7 +205,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
 	                tmp.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
 	                tmp.clear();
 
-	                const auto args_bi = assembly::jit::packCellKernelArgsV5(ctx, tmp, checks);
+	                const auto args_bi = assembly::jit::packCellKernelArgsV6(ctx, tmp, checks);
 	                callJIT(compiled_bi.cell, &args_bi);
 
                 for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
@@ -251,7 +251,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
 	                fallback_->computeCell(ctx, output);
 	                return;
 	            }
-	            const auto args = assembly::jit::packCellKernelArgsV5(ctx, output, checks);
+	            const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
 	            const auto disp =
 	                getSpecializedDispatch(KernelRole::Tangent, k->tangentIR(), IntegralDomain::Cell, ctx, nullptr);
 	            const auto& compiled = disp ? *disp : compiled_tangent_;
@@ -262,7 +262,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
 	                fallback_->computeCell(ctx, output);
 	                return;
 	            }
-	            const auto args = assembly::jit::packCellKernelArgsV5(ctx, output, checks);
+	            const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
 	            const auto disp =
 	                getSpecializedDispatch(KernelRole::Residual, k->residualIR(), IntegralDomain::Cell, ctx, nullptr);
 	            const auto& compiled = disp ? *disp : compiled_residual_;
@@ -281,6 +281,40 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
     } catch (...) {
         markRuntimeFailureOnce("computeCell", "unknown exception");
         fallback_->computeCell(ctx, output);
+    }
+}
+
+void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContext* const> contexts,
+                                        std::span<assembly::KernelOutput> outputs)
+{
+    const std::size_t n = (contexts.size() < outputs.size()) ? contexts.size() : outputs.size();
+    if (n == 0u) {
+        return;
+    }
+
+    maybeCompile();
+    if (!canUseJIT()) {
+        if (fallback_->supportsCellBatch()) {
+            fallback_->computeCellBatch(
+                std::span<const assembly::AssemblyContext* const>(contexts.data(), n),
+                std::span<assembly::KernelOutput>(outputs.data(), n));
+            return;
+        }
+
+        for (std::size_t idx = 0; idx < n; ++idx) {
+            if (contexts[idx] == nullptr) {
+                continue;
+            }
+            fallback_->computeCell(*contexts[idx], outputs[idx]);
+        }
+        return;
+    }
+
+    for (std::size_t idx = 0; idx < n; ++idx) {
+        if (contexts[idx] == nullptr) {
+            continue;
+        }
+        computeCell(*contexts[idx], outputs[idx]);
     }
 }
 
@@ -333,7 +367,7 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
             }
 	        }
 
-	        const auto args = assembly::jit::packBoundaryFaceKernelArgsV5(ctx, boundary_marker, output, checks);
+	        const auto args = assembly::jit::packBoundaryFaceKernelArgsV6(ctx, boundary_marker, output, checks);
 	        const auto disp =
 	            getSpecializedDispatch(KernelRole::Form, k->ir(), IntegralDomain::Boundary, ctx, nullptr);
 	        const auto& compiled = disp ? *disp : compiled_form_;
@@ -391,7 +425,7 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
 
 	        // 1) Jacobian (bilinear boundary part).
 	        if (want_matrix) {
-	            const auto args_bi = assembly::jit::packBoundaryFaceKernelArgsV5(ctx, boundary_marker, output, checks);
+	            const auto args_bi = assembly::jit::packBoundaryFaceKernelArgsV6(ctx, boundary_marker, output, checks);
 	            callJIT(compiled_bi.boundary_all, &args_bi);
 	            if (const auto it = compiled_bi.boundary_by_marker.find(boundary_marker);
 	                it != compiled_bi.boundary_by_marker.end()) {
@@ -412,7 +446,7 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
 	                                                             ctx,
 	                                                             nullptr);
 	                const auto& compiled_lin = disp_lin ? *disp_lin : compiled_linear_;
-	                const auto args_lin = assembly::jit::packBoundaryFaceKernelArgsV5(ctx, boundary_marker, output, checks);
+	                const auto args_lin = assembly::jit::packBoundaryFaceKernelArgsV6(ctx, boundary_marker, output, checks);
 	                callJIT(compiled_lin.boundary_all, &args_lin);
 	                if (const auto it = compiled_lin.boundary_by_marker.find(boundary_marker);
 	                    it != compiled_lin.boundary_by_marker.end()) {
@@ -433,7 +467,7 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
                 tmp.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
                 tmp.clear();
 
-	                const auto args_bi = assembly::jit::packBoundaryFaceKernelArgsV5(ctx, boundary_marker, tmp, checks);
+	                const auto args_bi = assembly::jit::packBoundaryFaceKernelArgsV6(ctx, boundary_marker, tmp, checks);
 	                callJIT(compiled_bi.boundary_all, &args_bi);
 	                if (const auto it = compiled_bi.boundary_by_marker.find(boundary_marker);
 	                    it != compiled_bi.boundary_by_marker.end()) {
@@ -491,7 +525,7 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
             }
         }
 
-	        const auto args = assembly::jit::packBoundaryFaceKernelArgsV5(ctx, boundary_marker, output, checks);
+	        const auto args = assembly::jit::packBoundaryFaceKernelArgsV6(ctx, boundary_marker, output, checks);
 
 	        if (want_matrix) {
 	            const auto disp =
@@ -594,7 +628,7 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
         }
 
 	        const auto args =
-	            assembly::jit::packInteriorFaceKernelArgsV5(ctx_minus, ctx_plus,
+	            assembly::jit::packInteriorFaceKernelArgsV6(ctx_minus, ctx_plus,
 	                                                        output_minus, output_plus,
 	                                                        coupling_minus_plus, coupling_plus_minus,
 	                                                        checks);
@@ -661,7 +695,7 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
         }
 
 	        const auto args =
-	            assembly::jit::packInteriorFaceKernelArgsV5(ctx_minus, ctx_plus,
+	            assembly::jit::packInteriorFaceKernelArgsV6(ctx_minus, ctx_plus,
 	                                                        output_minus, output_plus,
 	                                                        coupling_minus_plus, coupling_plus_minus,
 	                                                        checks);
@@ -768,7 +802,7 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
         }
 
 	        const auto args =
-	            assembly::jit::packInterfaceFaceKernelArgsV5(ctx_minus, ctx_plus, interface_marker,
+	            assembly::jit::packInterfaceFaceKernelArgsV6(ctx_minus, ctx_plus, interface_marker,
 	                                                         output_minus, output_plus,
 	                                                         coupling_minus_plus, coupling_plus_minus,
 	                                                         checks);
@@ -840,7 +874,7 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
         }
 
         const auto args =
-            assembly::jit::packInterfaceFaceKernelArgsV5(ctx_minus, ctx_plus, interface_marker,
+            assembly::jit::packInterfaceFaceKernelArgsV6(ctx_minus, ctx_plus, interface_marker,
                                                          output_minus, output_plus,
                                                          coupling_minus_plus, coupling_plus_minus,
                                                          checks);

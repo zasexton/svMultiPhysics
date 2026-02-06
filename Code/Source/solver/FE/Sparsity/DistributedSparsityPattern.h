@@ -63,7 +63,6 @@
 
 #include <vector>
 #include <unordered_map>
-#include <unordered_set>
 #include <span>
 #include <cstdint>
 #include <atomic>
@@ -743,7 +742,8 @@ private:
 
     // Building phase: store global column indices per owned row
     // Entry classification (diag vs offdiag) happens at finalization
-    std::vector<std::set<GlobalIndex>> building_rows_;
+    // Stored as sorted, unique vectors for low overhead and cache locality.
+    std::vector<std::vector<GlobalIndex>> building_rows_;
 
     // Finalized patterns (local indices)
     SparsityPattern diag_pattern_;     // n_owned_rows x n_owned_cols

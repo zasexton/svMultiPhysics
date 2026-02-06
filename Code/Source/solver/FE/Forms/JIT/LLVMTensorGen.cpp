@@ -76,6 +76,40 @@ namespace {
     return loop_id;
 }
 
+[[nodiscard]] int effectiveTileSize(const forms::tensor::LoopIndex& li,
+                                    const LLVMTensorGenOptions& options) noexcept
+{
+    if (!options.enable_tiling) {
+        return 1;
+    }
+    if (li.extent <= 1 || li.lower_bound_id >= 0) {
+        return 1;
+    }
+
+    const int min_extent = std::max(2, options.min_tiling_extent);
+    if (li.extent < min_extent) {
+        return 1;
+    }
+
+    int tile = options.tile_size;
+    if (tile <= 0) {
+        tile = (li.vectorize && li.vector_width > 1)
+                   ? std::max(li.vector_width * 8, 16)
+                   : 32;
+    }
+    if (li.vectorize && li.vector_width > 1) {
+        tile = std::max(tile, li.vector_width);
+        tile = (tile / li.vector_width) * li.vector_width;
+        if (tile < li.vector_width) {
+            tile = li.vector_width;
+        }
+    }
+
+    tile = std::max(1, tile);
+    tile = std::min(tile, li.extent);
+    return tile;
+}
+
 struct LoopBlocks {
     llvm::BasicBlock* preheader{nullptr};
     llvm::BasicBlock* header{nullptr};
@@ -342,14 +376,96 @@ llvm::Value* LLVMTensorGen::emitScalar(const forms::tensor::TensorIR& ir,
         }
 
         const std::string prefix = "t.sum." + std::to_string(sum_level);
-        auto blocks = createLoopBlocks(ctx, fn, prefix);
-        blocks.preheader = builder.GetInsertBlock();
-
         llvm::Value* start = i32c(0);
         if (li.lower_bound_id >= 0) {
             auto* lb = indexValueForId(li.lower_bound_id);
             start = builder.CreateAdd(lb, i32c(static_cast<std::uint32_t>(std::max(0, li.lower_bound_offset))));
         }
+
+        const int tile_size = effectiveTileSize(li, options_);
+        if (tile_size > 1) {
+            auto outer = createLoopBlocks(ctx, fn, prefix + ".to");
+            outer.preheader = builder.GetInsertBlock();
+
+            builder.CreateBr(outer.header);
+            builder.SetInsertPoint(outer.header);
+            auto* tile_phi = builder.CreatePHI(i32, 2, prefix + ".tile");
+            tile_phi->addIncoming(start, outer.preheader);
+            auto* acc_outer_phi = builder.CreatePHI(f64, 2, prefix + ".acc.outer");
+            acc_outer_phi->addIncoming(f64c(0.0), outer.preheader);
+            auto* cond_outer = builder.CreateICmpULT(tile_phi, i32c(static_cast<std::uint32_t>(li.extent)));
+            builder.CreateCondBr(cond_outer, outer.body, outer.exit);
+
+            builder.SetInsertPoint(outer.body);
+            auto* tile_end_raw = builder.CreateAdd(tile_phi, i32c(static_cast<std::uint32_t>(tile_size)));
+            auto* tile_end = builder.CreateSelect(
+                builder.CreateICmpULT(tile_end_raw, i32c(static_cast<std::uint32_t>(li.extent))),
+                tile_end_raw,
+                i32c(static_cast<std::uint32_t>(li.extent)));
+
+            auto inner = createLoopBlocks(ctx, fn, prefix + ".ti");
+            inner.preheader = builder.GetInsertBlock();
+            builder.CreateBr(inner.header);
+
+            builder.SetInsertPoint(inner.header);
+            auto* idx_phi = builder.CreatePHI(i32, 2, prefix + ".i");
+            idx_phi->addIncoming(tile_phi, inner.preheader);
+            auto* acc_inner_phi = builder.CreatePHI(f64, 2, prefix + ".acc.inner");
+            acc_inner_phi->addIncoming(acc_outer_phi, inner.preheader);
+            auto* cond_inner = builder.CreateICmpULT(idx_phi, tile_end);
+            builder.CreateCondBr(cond_inner, inner.body, inner.exit);
+
+            builder.SetInsertPoint(inner.body);
+            llvm::Value* prev = nullptr;
+            {
+                const std::size_t id = static_cast<std::size_t>(li.id);
+                prev = (id < idx_env.size()) ? idx_env[id] : nullptr;
+                if (id >= idx_env.size()) idx_env.resize(id + 1u, nullptr);
+                idx_env[id] = idx_phi;
+            }
+
+            auto* inner_val = self(self, op, sum_level + 1u);
+
+            {
+                const std::size_t id = static_cast<std::size_t>(li.id);
+                idx_env[id] = prev;
+            }
+
+            builder.CreateBr(inner.latch);
+            builder.SetInsertPoint(inner.latch);
+            auto* acc_next = builder.CreateFAdd(acc_inner_phi, inner_val);
+            auto* idx_next = builder.CreateAdd(idx_phi, i32c(1));
+            auto* inner_backedge = builder.CreateBr(inner.header);
+            if (options_.vectorize && li.vectorize) {
+                auto* md = makeLoopMetadata(ctx, /*vectorize=*/true, li.vector_width, options_.enable_polly);
+                inner_backedge->setMetadata("llvm.loop", md);
+            } else if (options_.enable_polly) {
+                auto* md = makeLoopMetadata(ctx, /*vectorize=*/false, /*vector_width=*/1, /*polly=*/true);
+                inner_backedge->setMetadata("llvm.loop", md);
+            }
+            idx_phi->addIncoming(idx_next, inner.latch);
+            acc_inner_phi->addIncoming(acc_next, inner.latch);
+
+            builder.SetInsertPoint(inner.exit);
+            auto* inner_acc = acc_inner_phi;
+            builder.CreateBr(outer.latch);
+
+            builder.SetInsertPoint(outer.latch);
+            auto* tile_next = builder.CreateAdd(tile_phi, i32c(static_cast<std::uint32_t>(tile_size)));
+            auto* outer_backedge = builder.CreateBr(outer.header);
+            if (options_.enable_polly) {
+                auto* md = makeLoopMetadata(ctx, /*vectorize=*/false, /*vector_width=*/1, /*polly=*/true);
+                outer_backedge->setMetadata("llvm.loop", md);
+            }
+            tile_phi->addIncoming(tile_next, outer.latch);
+            acc_outer_phi->addIncoming(inner_acc, outer.latch);
+
+            builder.SetInsertPoint(outer.exit);
+            return acc_outer_phi;
+        }
+
+        auto blocks = createLoopBlocks(ctx, fn, prefix);
+        blocks.preheader = builder.GetInsertBlock();
 
         builder.CreateBr(blocks.header);
 
@@ -432,6 +548,80 @@ llvm::Value* LLVMTensorGen::emitScalar(const forms::tensor::TensorIR& ir,
         if (li.lower_bound_id >= 0) {
             auto* lb = indexValueForId(li.lower_bound_id);
             start = builder.CreateAdd(lb, i32c(static_cast<std::uint32_t>(std::max(0, li.lower_bound_offset))));
+        }
+
+        const int tile_size = effectiveTileSize(li, options_);
+        if (tile_size > 1) {
+            auto outer = createLoopBlocks(ctx, fn, prefix + ".to");
+            outer.preheader = builder.GetInsertBlock();
+            builder.CreateBr(outer.header);
+
+            builder.SetInsertPoint(outer.header);
+            auto* tile_phi = builder.CreatePHI(i32, 2, prefix + ".tile");
+            tile_phi->addIncoming(start, outer.preheader);
+            auto* cond_outer = builder.CreateICmpULT(tile_phi, i32c(static_cast<std::uint32_t>(li.extent)));
+            builder.CreateCondBr(cond_outer, outer.body, outer.exit);
+
+            builder.SetInsertPoint(outer.body);
+            auto* tile_end_raw = builder.CreateAdd(tile_phi, i32c(static_cast<std::uint32_t>(tile_size)));
+            auto* tile_end = builder.CreateSelect(
+                builder.CreateICmpULT(tile_end_raw, i32c(static_cast<std::uint32_t>(li.extent))),
+                tile_end_raw,
+                i32c(static_cast<std::uint32_t>(li.extent)));
+
+            auto inner = createLoopBlocks(ctx, fn, prefix + ".ti");
+            inner.preheader = builder.GetInsertBlock();
+            builder.CreateBr(inner.header);
+
+            builder.SetInsertPoint(inner.header);
+            auto* idx_phi = builder.CreatePHI(i32, 2, prefix + ".i");
+            idx_phi->addIncoming(tile_phi, inner.preheader);
+            auto* cond_inner = builder.CreateICmpULT(idx_phi, tile_end);
+            builder.CreateCondBr(cond_inner, inner.body, inner.exit);
+
+            builder.SetInsertPoint(inner.body);
+            llvm::Value* prev = nullptr;
+            {
+                const std::size_t id = static_cast<std::size_t>(li.id);
+                prev = (id < idx_env.size()) ? idx_env[id] : nullptr;
+                if (id >= idx_env.size()) idx_env.resize(id + 1u, nullptr);
+                idx_env[id] = idx_phi;
+            }
+
+            self(self, op, out_level + 1u);
+
+            {
+                const std::size_t id = static_cast<std::size_t>(li.id);
+                idx_env[id] = prev;
+            }
+
+            builder.CreateBr(inner.latch);
+            builder.SetInsertPoint(inner.latch);
+            auto* idx_next = builder.CreateAdd(idx_phi, i32c(1));
+            auto* inner_backedge = builder.CreateBr(inner.header);
+            if (options_.vectorize && li.vectorize) {
+                auto* md = makeLoopMetadata(ctx, /*vectorize=*/true, li.vector_width, options_.enable_polly);
+                inner_backedge->setMetadata("llvm.loop", md);
+            } else if (options_.enable_polly) {
+                auto* md = makeLoopMetadata(ctx, /*vectorize=*/false, /*vector_width=*/1, /*polly=*/true);
+                inner_backedge->setMetadata("llvm.loop", md);
+            }
+            idx_phi->addIncoming(idx_next, inner.latch);
+
+            builder.SetInsertPoint(inner.exit);
+            builder.CreateBr(outer.latch);
+
+            builder.SetInsertPoint(outer.latch);
+            auto* tile_next = builder.CreateAdd(tile_phi, i32c(static_cast<std::uint32_t>(tile_size)));
+            auto* outer_backedge = builder.CreateBr(outer.header);
+            if (options_.enable_polly) {
+                auto* md = makeLoopMetadata(ctx, /*vectorize=*/false, /*vector_width=*/1, /*polly=*/true);
+                outer_backedge->setMetadata("llvm.loop", md);
+            }
+            tile_phi->addIncoming(tile_next, outer.latch);
+
+            builder.SetInsertPoint(outer.exit);
+            return;
         }
 
         builder.CreateBr(blocks.header);

@@ -35,6 +35,7 @@ public:
     math::Vector<Real, 3> map_to_reference(const math::Vector<Real, 3>& x_phys,
                                            const math::Vector<Real, 3>& initial_guess = math::Vector<Real, 3>{}) const override;
     math::Matrix<Real, 3, 3> jacobian(const math::Vector<Real, 3>& xi) const override;
+    bool isAffine() const noexcept override { return true; }
 
 private:
     ElementType element_type_;

@@ -11,6 +11,7 @@
 
 #include <stdexcept>
 #include <algorithm>
+#include <type_traits>
 
 namespace svmp {
 namespace FE {
@@ -32,52 +33,232 @@ void AssemblyContext::reserve(LocalIndex max_dofs, LocalIndex max_qpts, int dim)
 {
     dim_ = dim;
 
-    const auto n_dofs = static_cast<std::size_t>(max_dofs);
-    const auto n_qpts = static_cast<std::size_t>(max_qpts);
+    const LocalIndex clamped_max_dofs = std::max<LocalIndex>(max_dofs, 0);
+    const LocalIndex clamped_max_qpts = std::max<LocalIndex>(max_qpts, 0);
+    const LocalIndex target_max_dofs = std::max(arena_max_dofs_, clamped_max_dofs);
+    const LocalIndex target_max_qpts = std::max(arena_max_qpts_, clamped_max_qpts);
+
+    if (target_max_dofs == arena_max_dofs_ &&
+        target_max_qpts == arena_max_qpts_ &&
+        !arena_storage_.empty()) {
+        return;
+    }
+
+    const auto n_dofs = static_cast<std::size_t>(target_max_dofs);
+    const auto n_qpts = static_cast<std::size_t>(target_max_qpts);
     const auto n_basis = n_dofs * n_qpts;
 
-    // Quadrature data
-    quad_points_.reserve(n_qpts);
-    quad_weights_.reserve(n_qpts);
-    integration_weights_.reserve(n_qpts);
+    constexpr std::size_t arena_align = jit::kJITPointerAlignmentBytes;
+    const auto align_up = [](std::size_t value, std::size_t alignment) -> std::size_t {
+        const std::size_t mask = alignment - 1u;
+        return (value + mask) & ~mask;
+    };
 
-    // Geometry data
-    physical_points_.reserve(n_qpts);
-    jacobians_.reserve(n_qpts);
-    inverse_jacobians_.reserve(n_qpts);
-    jacobian_dets_.reserve(n_qpts);
-    normals_.reserve(n_qpts);
+    std::size_t arena_bytes = 0;
+    const auto reserve_block = [&](std::size_t bytes) -> std::size_t {
+        arena_bytes = align_up(arena_bytes, arena_align);
+        const std::size_t offset = arena_bytes;
+        arena_bytes += bytes;
+        return offset;
+    };
 
-    // Basis data
-    test_basis_values_.reserve(n_basis);
-    test_ref_gradients_.reserve(n_basis);
-    test_phys_gradients_.reserve(n_basis);
-    test_basis_vector_values_.reserve(n_basis);
-    test_basis_curls_.reserve(n_basis);
-    test_basis_divergences_.reserve(n_basis);
-    trial_basis_values_.reserve(n_basis);
-    trial_ref_gradients_.reserve(n_basis);
-    trial_phys_gradients_.reserve(n_basis);
-    trial_basis_vector_values_.reserve(n_basis);
-    trial_basis_curls_.reserve(n_basis);
-    trial_basis_divergences_.reserve(n_basis);
+    const std::size_t off_quad_points = reserve_block(sizeof(Point3D) * n_qpts);
+    const std::size_t off_quad_weights = reserve_block(sizeof(Real) * n_qpts);
+    const std::size_t off_integration_weights = reserve_block(sizeof(Real) * n_qpts);
 
-    test_ref_hessians_.reserve(n_basis);
-    test_phys_hessians_.reserve(n_basis);
-    trial_ref_hessians_.reserve(n_basis);
-    trial_phys_hessians_.reserve(n_basis);
+    const std::size_t off_physical_points = reserve_block(sizeof(Point3D) * n_qpts);
+    const std::size_t off_jacobians = reserve_block(sizeof(Matrix3x3) * n_qpts);
+    const std::size_t off_inverse_jacobians = reserve_block(sizeof(Matrix3x3) * n_qpts);
+    const std::size_t off_jacobian_dets = reserve_block(sizeof(Real) * n_qpts);
+    const std::size_t off_normals = reserve_block(sizeof(Vector3D) * n_qpts);
+    const std::size_t off_interleaved_qpoint_geometry = reserve_block(
+        sizeof(Real) * n_qpts * static_cast<std::size_t>(AssemblyContext::kInterleavedQPointGeometryStride));
 
-    // Solution data
-    solution_coefficients_.reserve(n_dofs);
-    solution_values_.reserve(n_qpts);
-    solution_vector_values_.reserve(n_qpts);
-	    solution_gradients_.reserve(n_qpts);
-	    solution_jacobians_.reserve(n_qpts);
-	    solution_hessians_.reserve(n_qpts);
-	    solution_laplacians_.reserve(n_qpts);
-	    solution_component_hessians_.reserve(n_qpts * 3u);
-	    solution_component_laplacians_.reserve(n_qpts * 3u);
-	}
+    const std::size_t off_test_basis_values = reserve_block(sizeof(Real) * n_basis);
+    const std::size_t off_test_ref_gradients = reserve_block(sizeof(Vector3D) * n_basis);
+    const std::size_t off_test_phys_gradients = reserve_block(sizeof(Vector3D) * n_basis);
+    const std::size_t off_test_basis_vector_values = reserve_block(sizeof(Vector3D) * n_basis);
+    const std::size_t off_test_basis_curls = reserve_block(sizeof(Vector3D) * n_basis);
+    const std::size_t off_test_basis_divergences = reserve_block(sizeof(Real) * n_basis);
+
+    const std::size_t off_trial_basis_values = reserve_block(sizeof(Real) * n_basis);
+    const std::size_t off_trial_ref_gradients = reserve_block(sizeof(Vector3D) * n_basis);
+    const std::size_t off_trial_phys_gradients = reserve_block(sizeof(Vector3D) * n_basis);
+    const std::size_t off_trial_basis_vector_values = reserve_block(sizeof(Vector3D) * n_basis);
+    const std::size_t off_trial_basis_curls = reserve_block(sizeof(Vector3D) * n_basis);
+    const std::size_t off_trial_basis_divergences = reserve_block(sizeof(Real) * n_basis);
+
+    const std::size_t off_test_ref_hessians = reserve_block(sizeof(Matrix3x3) * n_basis);
+    const std::size_t off_test_phys_hessians = reserve_block(sizeof(Matrix3x3) * n_basis);
+    const std::size_t off_trial_ref_hessians = reserve_block(sizeof(Matrix3x3) * n_basis);
+    const std::size_t off_trial_phys_hessians = reserve_block(sizeof(Matrix3x3) * n_basis);
+
+    const std::size_t off_solution_coefficients = reserve_block(sizeof(Real) * n_dofs);
+    const std::size_t off_solution_values = reserve_block(sizeof(Real) * n_qpts);
+    const std::size_t off_solution_vector_values = reserve_block(sizeof(Vector3D) * n_qpts);
+    const std::size_t off_solution_gradients = reserve_block(sizeof(Vector3D) * n_qpts);
+    const std::size_t off_solution_jacobians = reserve_block(sizeof(Matrix3x3) * n_qpts);
+    const std::size_t off_solution_hessians = reserve_block(sizeof(Matrix3x3) * n_qpts);
+    const std::size_t off_solution_laplacians = reserve_block(sizeof(Real) * n_qpts);
+    const std::size_t off_solution_component_hessians = reserve_block(sizeof(Matrix3x3) * n_qpts * 3u);
+    const std::size_t off_solution_component_laplacians = reserve_block(sizeof(Real) * n_qpts * 3u);
+
+    if (arena_storage_.size() < arena_bytes) {
+        arena_storage_.resize(arena_bytes);
+    }
+
+    const auto bind = [&](auto& view, std::size_t offset, std::size_t count) {
+        using ViewType = std::remove_reference_t<decltype(view)>;
+        using T = typename ViewType::value_type;
+        auto* ptr = (count == 0 || arena_storage_.empty())
+                        ? nullptr
+                        : reinterpret_cast<T*>(arena_storage_.data() + offset);
+        view.bind(ptr, count);
+    };
+
+    bind(quad_points_, off_quad_points, n_qpts);
+    bind(quad_weights_, off_quad_weights, n_qpts);
+    bind(integration_weights_, off_integration_weights, n_qpts);
+
+    bind(physical_points_, off_physical_points, n_qpts);
+    bind(jacobians_, off_jacobians, n_qpts);
+    bind(inverse_jacobians_, off_inverse_jacobians, n_qpts);
+    bind(jacobian_dets_, off_jacobian_dets, n_qpts);
+    bind(normals_, off_normals, n_qpts);
+    bind(interleaved_qpoint_geometry_, off_interleaved_qpoint_geometry,
+         n_qpts * static_cast<std::size_t>(AssemblyContext::kInterleavedQPointGeometryStride));
+
+    bind(test_basis_values_, off_test_basis_values, n_basis);
+    bind(test_ref_gradients_, off_test_ref_gradients, n_basis);
+    bind(test_phys_gradients_, off_test_phys_gradients, n_basis);
+    bind(test_basis_vector_values_, off_test_basis_vector_values, n_basis);
+    bind(test_basis_curls_, off_test_basis_curls, n_basis);
+    bind(test_basis_divergences_, off_test_basis_divergences, n_basis);
+
+    bind(trial_basis_values_, off_trial_basis_values, n_basis);
+    bind(trial_ref_gradients_, off_trial_ref_gradients, n_basis);
+    bind(trial_phys_gradients_, off_trial_phys_gradients, n_basis);
+    bind(trial_basis_vector_values_, off_trial_basis_vector_values, n_basis);
+    bind(trial_basis_curls_, off_trial_basis_curls, n_basis);
+    bind(trial_basis_divergences_, off_trial_basis_divergences, n_basis);
+
+    bind(test_ref_hessians_, off_test_ref_hessians, n_basis);
+    bind(test_phys_hessians_, off_test_phys_hessians, n_basis);
+    bind(trial_ref_hessians_, off_trial_ref_hessians, n_basis);
+    bind(trial_phys_hessians_, off_trial_phys_hessians, n_basis);
+
+    bind(solution_coefficients_, off_solution_coefficients, n_dofs);
+    bind(solution_values_, off_solution_values, n_qpts);
+    bind(solution_vector_values_, off_solution_vector_values, n_qpts);
+    bind(solution_gradients_, off_solution_gradients, n_qpts);
+    bind(solution_jacobians_, off_solution_jacobians, n_qpts);
+    bind(solution_hessians_, off_solution_hessians, n_qpts);
+    bind(solution_laplacians_, off_solution_laplacians, n_qpts);
+    bind(solution_component_hessians_, off_solution_component_hessians, n_qpts * 3u);
+    bind(solution_component_laplacians_, off_solution_component_laplacians, n_qpts * 3u);
+
+    arena_max_dofs_ = target_max_dofs;
+    arena_max_qpts_ = target_max_qpts;
+}
+
+void AssemblyContext::ensureArenaCapacity(LocalIndex required_dofs, LocalIndex required_qpts)
+{
+    const LocalIndex clamped_required_dofs = std::max<LocalIndex>(required_dofs, 0);
+    const LocalIndex clamped_required_qpts = std::max<LocalIndex>(required_qpts, 0);
+    if (clamped_required_dofs <= arena_max_dofs_ && clamped_required_qpts <= arena_max_qpts_) {
+        return;
+    }
+
+    const auto snapshot = [](const auto& src) {
+        using SrcType = std::remove_reference_t<decltype(src)>;
+        using Value = typename SrcType::value_type;
+        return std::vector<Value>(src.begin(), src.end());
+    };
+
+    const auto quad_points = snapshot(quad_points_);
+    const auto quad_weights = snapshot(quad_weights_);
+    const auto integration_weights = snapshot(integration_weights_);
+    const auto physical_points = snapshot(physical_points_);
+    const auto jacobians = snapshot(jacobians_);
+    const auto inverse_jacobians = snapshot(inverse_jacobians_);
+    const auto jacobian_dets = snapshot(jacobian_dets_);
+    const auto normals = snapshot(normals_);
+    const auto interleaved_qpoint_geometry = snapshot(interleaved_qpoint_geometry_);
+
+    const auto test_basis_values = snapshot(test_basis_values_);
+    const auto test_ref_gradients = snapshot(test_ref_gradients_);
+    const auto test_phys_gradients = snapshot(test_phys_gradients_);
+    const auto test_basis_vector_values = snapshot(test_basis_vector_values_);
+    const auto test_basis_curls = snapshot(test_basis_curls_);
+    const auto test_basis_divergences = snapshot(test_basis_divergences_);
+
+    const auto trial_basis_values = snapshot(trial_basis_values_);
+    const auto trial_ref_gradients = snapshot(trial_ref_gradients_);
+    const auto trial_phys_gradients = snapshot(trial_phys_gradients_);
+    const auto trial_basis_vector_values = snapshot(trial_basis_vector_values_);
+    const auto trial_basis_curls = snapshot(trial_basis_curls_);
+    const auto trial_basis_divergences = snapshot(trial_basis_divergences_);
+
+    const auto test_ref_hessians = snapshot(test_ref_hessians_);
+    const auto test_phys_hessians = snapshot(test_phys_hessians_);
+    const auto trial_ref_hessians = snapshot(trial_ref_hessians_);
+    const auto trial_phys_hessians = snapshot(trial_phys_hessians_);
+
+    const auto solution_coefficients = snapshot(solution_coefficients_);
+    const auto solution_values = snapshot(solution_values_);
+    const auto solution_vector_values = snapshot(solution_vector_values_);
+    const auto solution_gradients = snapshot(solution_gradients_);
+    const auto solution_jacobians = snapshot(solution_jacobians_);
+    const auto solution_hessians = snapshot(solution_hessians_);
+    const auto solution_laplacians = snapshot(solution_laplacians_);
+    const auto solution_component_hessians = snapshot(solution_component_hessians_);
+    const auto solution_component_laplacians = snapshot(solution_component_laplacians_);
+
+    reserve(clamped_required_dofs, clamped_required_qpts, dim_);
+
+    const auto restore = [](auto& dst, const auto& src) {
+        dst.assign(src.begin(), src.end());
+    };
+
+    restore(quad_points_, quad_points);
+    restore(quad_weights_, quad_weights);
+    restore(integration_weights_, integration_weights);
+    restore(physical_points_, physical_points);
+    restore(jacobians_, jacobians);
+    restore(inverse_jacobians_, inverse_jacobians);
+    restore(jacobian_dets_, jacobian_dets);
+    restore(normals_, normals);
+    restore(interleaved_qpoint_geometry_, interleaved_qpoint_geometry);
+
+    restore(test_basis_values_, test_basis_values);
+    restore(test_ref_gradients_, test_ref_gradients);
+    restore(test_phys_gradients_, test_phys_gradients);
+    restore(test_basis_vector_values_, test_basis_vector_values);
+    restore(test_basis_curls_, test_basis_curls);
+    restore(test_basis_divergences_, test_basis_divergences);
+
+    restore(trial_basis_values_, trial_basis_values);
+    restore(trial_ref_gradients_, trial_ref_gradients);
+    restore(trial_phys_gradients_, trial_phys_gradients);
+    restore(trial_basis_vector_values_, trial_basis_vector_values);
+    restore(trial_basis_curls_, trial_basis_curls);
+    restore(trial_basis_divergences_, trial_basis_divergences);
+
+    restore(test_ref_hessians_, test_ref_hessians);
+    restore(test_phys_hessians_, test_phys_hessians);
+    restore(trial_ref_hessians_, trial_ref_hessians);
+    restore(trial_phys_hessians_, trial_phys_hessians);
+
+    restore(solution_coefficients_, solution_coefficients);
+    restore(solution_values_, solution_values);
+    restore(solution_vector_values_, solution_vector_values);
+    restore(solution_gradients_, solution_gradients);
+    restore(solution_jacobians_, solution_jacobians);
+    restore(solution_hessians_, solution_hessians);
+    restore(solution_laplacians_, solution_laplacians);
+    restore(solution_component_hessians_, solution_component_hessians);
+    restore(solution_component_laplacians_, solution_component_laplacians);
+}
 
 void AssemblyContext::configure(
     GlobalIndex cell_id,
@@ -324,6 +505,7 @@ void AssemblyContext::clear()
     inverse_jacobians_.clear();
     jacobian_dets_.clear();
     normals_.clear();
+    interleaved_qpoint_geometry_.clear();
     test_basis_values_.clear();
     test_ref_gradients_.clear();
     test_phys_gradients_.clear();
@@ -551,7 +733,7 @@ AssemblyContext::Vector3D AssemblyContext::physicalGradient(LocalIndex i, LocalI
     if (i >= n_test_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::physicalGradient: index out of range");
     }
-    return test_phys_gradients_[static_cast<std::size_t>(i * n_qpts_ + q)];
+    return test_phys_gradients_[static_cast<std::size_t>(q * n_test_dofs_ + i)];
 }
 
 AssemblyContext::Vector3D AssemblyContext::basisVectorValue(LocalIndex i, LocalIndex q) const
@@ -698,9 +880,9 @@ AssemblyContext::Vector3D AssemblyContext::trialPhysicalGradient(LocalIndex j, L
     }
 
     if (trial_is_test_) {
-        return test_phys_gradients_[static_cast<std::size_t>(j * n_qpts_ + q)];
+        return test_phys_gradients_[static_cast<std::size_t>(q * n_test_dofs_ + j)];
     }
-    return trial_phys_gradients_[static_cast<std::size_t>(j * n_qpts_ + q)];
+    return trial_phys_gradients_[static_cast<std::size_t>(q * n_trial_dofs_ + j)];
 }
 
 AssemblyContext::Matrix3x3 AssemblyContext::trialReferenceHessian(LocalIndex j, LocalIndex q) const
@@ -746,6 +928,8 @@ void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients
     if (coefficients.size() < static_cast<std::size_t>(n_trial_dofs_)) {
         throw std::invalid_argument("AssemblyContext::setSolutionCoefficients: coefficient size does not match trial DOFs");
     }
+
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
 
     solution_coefficients_.assign(coefficients.begin(),
                                   coefficients.begin() + static_cast<std::size_t>(n_trial_dofs_));
@@ -1885,6 +2069,69 @@ std::span<const std::byte> AssemblyContext::materialStateOld(LocalIndex q) const
 // Data Setting Methods (called by assembler)
 // ============================================================================
 
+void AssemblyContext::rebuildInterleavedQPointGeometry()
+{
+    const auto n_qpts = static_cast<std::size_t>(n_qpts_);
+    if (n_qpts == 0u) {
+        interleaved_qpoint_geometry_.clear();
+        return;
+    }
+
+    const std::size_t stride =
+        static_cast<std::size_t>(AssemblyContext::kInterleavedQPointGeometryStride);
+    interleaved_qpoint_geometry_.assign(n_qpts * stride, Real(0.0));
+
+    const auto write_vec3 = [&](std::size_t base,
+                                const std::array<Real, 3>& v,
+                                std::size_t offset) {
+        interleaved_qpoint_geometry_[base + offset + 0u] = v[0];
+        interleaved_qpoint_geometry_[base + offset + 1u] = v[1];
+        interleaved_qpoint_geometry_[base + offset + 2u] = v[2];
+    };
+
+    for (std::size_t q = 0; q < n_qpts; ++q) {
+        const std::size_t base = q * stride;
+
+        if (q < physical_points_.size()) {
+            write_vec3(base,
+                       physical_points_[q],
+                       static_cast<std::size_t>(AssemblyContext::kInterleavedQPointPhysicalOffset));
+        }
+
+        if (q < jacobians_.size()) {
+            const auto& J = jacobians_[q];
+            const std::size_t off = base + static_cast<std::size_t>(AssemblyContext::kInterleavedQPointJacobianOffset);
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    interleaved_qpoint_geometry_[off + r * 3u + c] = J[r][c];
+                }
+            }
+        }
+
+        if (q < inverse_jacobians_.size()) {
+            const auto& Jinv = inverse_jacobians_[q];
+            const std::size_t off =
+                base + static_cast<std::size_t>(AssemblyContext::kInterleavedQPointInverseJacobianOffset);
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    interleaved_qpoint_geometry_[off + r * 3u + c] = Jinv[r][c];
+                }
+            }
+        }
+
+        if (q < jacobian_dets_.size()) {
+            interleaved_qpoint_geometry_[base + static_cast<std::size_t>(AssemblyContext::kInterleavedQPointDetOffset)] =
+                jacobian_dets_[q];
+        }
+
+        if (q < normals_.size()) {
+            write_vec3(base,
+                       normals_[q],
+                       static_cast<std::size_t>(AssemblyContext::kInterleavedQPointNormalOffset));
+        }
+    }
+}
+
 void AssemblyContext::setQuadratureData(
     std::span<const Point3D> points,
     std::span<const Real> weights)
@@ -1893,14 +2140,22 @@ void AssemblyContext::setQuadratureData(
         throw std::invalid_argument("AssemblyContext::setQuadratureData: size mismatch");
     }
 
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_),
+                        static_cast<LocalIndex>(points.size()));
+
     n_qpts_ = static_cast<LocalIndex>(points.size());
     quad_points_.assign(points.begin(), points.end());
     quad_weights_.assign(weights.begin(), weights.end());
+    rebuildInterleavedQPointGeometry();
 }
 
 void AssemblyContext::setPhysicalPoints(std::span<const Point3D> points)
 {
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_),
+                        static_cast<LocalIndex>(std::max<std::size_t>(points.size(),
+                                                                      static_cast<std::size_t>(n_qpts_))));
     physical_points_.assign(points.begin(), points.end());
+    rebuildInterleavedQPointGeometry();
 }
 
 void AssemblyContext::setJacobianData(
@@ -1908,13 +2163,24 @@ void AssemblyContext::setJacobianData(
     std::span<const Matrix3x3> inverse_jacobians,
     std::span<const Real> determinants)
 {
+    const auto required_qpts = static_cast<LocalIndex>(
+        std::max({static_cast<std::size_t>(n_qpts_),
+                  jacobians.size(),
+                  inverse_jacobians.size(),
+                  determinants.size()}));
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), required_qpts);
+
     jacobians_.assign(jacobians.begin(), jacobians.end());
     inverse_jacobians_.assign(inverse_jacobians.begin(), inverse_jacobians.end());
     jacobian_dets_.assign(determinants.begin(), determinants.end());
+    rebuildInterleavedQPointGeometry();
 }
 
 void AssemblyContext::setIntegrationWeights(std::span<const Real> weights)
 {
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_),
+                        static_cast<LocalIndex>(std::max<std::size_t>(weights.size(),
+                                                                      static_cast<std::size_t>(n_qpts_))));
     integration_weights_.assign(weights.begin(), weights.end());
 }
 
@@ -1930,6 +2196,7 @@ void AssemblyContext::setTestBasisData(
     if (trial_is_test_) {
         n_trial_dofs_ = n_dofs;
     }
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     test_basis_values_.assign(values.begin(), values.end());
     test_ref_gradients_.assign(gradients.begin(), gradients.end());
     test_basis_vector_values_.clear();
@@ -1947,6 +2214,7 @@ void AssemblyContext::setTrialBasisData(
     }
     n_trial_dofs_ = n_dofs;
     trial_is_test_ = false;
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     trial_basis_values_.assign(values.begin(), values.end());
     trial_ref_gradients_.assign(gradients.begin(), gradients.end());
     trial_basis_vector_values_.clear();
@@ -1963,6 +2231,7 @@ void AssemblyContext::setTestVectorBasisValues(LocalIndex n_dofs, std::span<cons
     if (trial_is_test_) {
         n_trial_dofs_ = n_dofs;
     }
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     test_basis_vector_values_.assign(values.begin(), values.end());
     test_basis_values_.clear();
     test_ref_gradients_.clear();
@@ -1976,6 +2245,7 @@ void AssemblyContext::setTrialVectorBasisValues(LocalIndex n_dofs, std::span<con
     }
     n_trial_dofs_ = n_dofs;
     trial_is_test_ = false;
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     trial_basis_vector_values_.assign(values.begin(), values.end());
     trial_basis_values_.clear();
     trial_ref_gradients_.clear();
@@ -1988,6 +2258,7 @@ void AssemblyContext::setTestBasisCurls(LocalIndex n_dofs, std::span<const Vecto
     if (!test_is_vector_basis_) {
         throw std::logic_error("AssemblyContext::setTestBasisCurls: test space does not use a vector basis");
     }
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     test_basis_curls_.assign(curls.begin(), curls.end());
 }
 
@@ -1998,6 +2269,7 @@ void AssemblyContext::setTrialBasisCurls(LocalIndex n_dofs, std::span<const Vect
         throw std::logic_error("AssemblyContext::setTrialBasisCurls: trial space does not use a vector basis");
     }
     trial_is_test_ = false;
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     trial_basis_curls_.assign(curls.begin(), curls.end());
 }
 
@@ -2007,6 +2279,7 @@ void AssemblyContext::setTestBasisDivergences(LocalIndex n_dofs, std::span<const
     if (!test_is_vector_basis_) {
         throw std::logic_error("AssemblyContext::setTestBasisDivergences: test space does not use a vector basis");
     }
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     test_basis_divergences_.assign(divergences.begin(), divergences.end());
 }
 
@@ -2017,6 +2290,7 @@ void AssemblyContext::setTrialBasisDivergences(LocalIndex n_dofs, std::span<cons
         throw std::logic_error("AssemblyContext::setTrialBasisDivergences: trial space does not use a vector basis");
     }
     trial_is_test_ = false;
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     trial_basis_divergences_.assign(divergences.begin(), divergences.end());
 }
 
@@ -2028,6 +2302,7 @@ void AssemblyContext::setTestBasisHessians(
     if (test_is_vector_basis_) {
         throw std::logic_error("AssemblyContext::setTestBasisHessians: scalar basis Hessians not valid for vector-basis spaces");
     }
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     test_ref_hessians_.assign(hessians.begin(), hessians.end());
 }
 
@@ -2039,6 +2314,7 @@ void AssemblyContext::setTrialBasisHessians(
     if (trial_is_vector_basis_) {
         throw std::logic_error("AssemblyContext::setTrialBasisHessians: scalar basis Hessians not valid for vector-basis spaces");
     }
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     trial_ref_hessians_.assign(hessians.begin(), hessians.end());
 }
 
@@ -2046,9 +2322,19 @@ void AssemblyContext::setPhysicalGradients(
     std::span<const Vector3D> test_gradients,
     std::span<const Vector3D> trial_gradients)
 {
+    const auto expected_test = static_cast<std::size_t>(n_test_dofs_) * static_cast<std::size_t>(n_qpts_);
+    if (!test_gradients.empty() && test_gradients.size() != expected_test) {
+        throw std::invalid_argument("AssemblyContext::setPhysicalGradients: test gradient size mismatch");
+    }
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     test_phys_gradients_.assign(test_gradients.begin(), test_gradients.end());
 
     if (!trial_is_test_) {
+        const auto expected_trial = static_cast<std::size_t>(n_trial_dofs_) * static_cast<std::size_t>(n_qpts_);
+        if (!trial_gradients.empty() && trial_gradients.size() != expected_trial) {
+            throw std::invalid_argument("AssemblyContext::setPhysicalGradients: trial gradient size mismatch");
+        }
+        ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
         trial_phys_gradients_.assign(trial_gradients.begin(), trial_gradients.end());
     }
 }
@@ -2057,24 +2343,36 @@ void AssemblyContext::setPhysicalHessians(
     std::span<const Matrix3x3> test_hessians,
     std::span<const Matrix3x3> trial_hessians)
 {
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
     test_phys_hessians_.assign(test_hessians.begin(), test_hessians.end());
     if (!trial_is_test_) {
+        ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
         trial_phys_hessians_.assign(trial_hessians.begin(), trial_hessians.end());
     }
 }
 
 void AssemblyContext::setNormals(std::span<const Vector3D> normals)
 {
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_),
+                        static_cast<LocalIndex>(std::max<std::size_t>(normals.size(),
+                                                                      static_cast<std::size_t>(n_qpts_))));
     normals_.assign(normals.begin(), normals.end());
+    rebuildInterleavedQPointGeometry();
 }
 
 void AssemblyContext::setSolutionValues(std::span<const Real> values)
 {
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_),
+                        static_cast<LocalIndex>(std::max<std::size_t>(values.size(),
+                                                                      static_cast<std::size_t>(n_qpts_))));
     solution_values_.assign(values.begin(), values.end());
 }
 
 void AssemblyContext::setSolutionGradients(std::span<const Vector3D> gradients)
 {
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_),
+                        static_cast<LocalIndex>(std::max<std::size_t>(gradients.size(),
+                                                                      static_cast<std::size_t>(n_qpts_))));
     solution_gradients_.assign(gradients.begin(), gradients.end());
 }
 

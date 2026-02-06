@@ -395,6 +395,8 @@ private:
     std::vector<GlobalIndex> row_dofs_;
     std::vector<GlobalIndex> col_dofs_;
     std::vector<GhostContribution> owned_contributions_;
+    std::vector<GhostContribution> pending_received_matrix_;
+    std::vector<GhostVectorContribution> pending_received_vector_;
 
     // State
     bool initialized_{false};

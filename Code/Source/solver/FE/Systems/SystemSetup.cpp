@@ -379,6 +379,8 @@ dofs::FieldLayout toFieldLayout(dofs::DofNumberingStrategy numbering)
             // DofHandler's default CG numbering assigns component blocks; no additional renumbering is applied.
             return dofs::FieldLayout::Block;
         case dofs::DofNumberingStrategy::Block:
+        case dofs::DofNumberingStrategy::Morton:
+        case dofs::DofNumberingStrategy::Hilbert:
             return dofs::FieldLayout::Block;
         case dofs::DofNumberingStrategy::Interleaved:
             return dofs::FieldLayout::Interleaved;

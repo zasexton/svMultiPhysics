@@ -156,6 +156,52 @@ inferFunctionalTrialSpaceSignature(const FormExprNode& node, bool& out_conflict)
 }
 
 #if SVMP_FE_ENABLE_LLVM_JIT
+[[nodiscard]] bool hasCpuFeature(std::string_view features, std::string_view needle) noexcept
+{
+    std::size_t pos = 0;
+    while (pos <= features.size()) {
+        const auto end = features.find(',', pos);
+        std::string_view tok =
+            (end == std::string_view::npos) ? features.substr(pos) : features.substr(pos, end - pos);
+        while (!tok.empty() && tok.front() == ' ') {
+            tok.remove_prefix(1);
+        }
+        while (!tok.empty() && tok.back() == ' ') {
+            tok.remove_suffix(1);
+        }
+        if (!tok.empty() && (tok.front() == '+' || tok.front() == '-')) {
+            tok.remove_prefix(1);
+        }
+        if (tok == needle) {
+            return true;
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        pos = end + 1;
+    }
+    return false;
+}
+
+[[nodiscard]] int preferredVectorWidthFromCpuFeatures(std::string_view cpu_features) noexcept
+{
+    if (hasCpuFeature(cpu_features, "avx512f")) {
+        return 8;
+    }
+    if (hasCpuFeature(cpu_features, "avx2") || hasCpuFeature(cpu_features, "avx")) {
+        return 4;
+    }
+    if (hasCpuFeature(cpu_features, "sse2") ||
+        hasCpuFeature(cpu_features, "neon") ||
+        hasCpuFeature(cpu_features, "sve") ||
+        hasCpuFeature(cpu_features, "sve2")) {
+        return 2;
+    }
+    return 1;
+}
+#endif
+
+#if SVMP_FE_ENABLE_LLVM_JIT
 [[nodiscard]] std::uint64_t hashTensorOptions(const TensorJITOptions& opt) noexcept
 {
     std::uint64_t h = kFNVOffset;
@@ -170,6 +216,9 @@ inferFunctionalTrialSpaceSignature(const FormExprNode& node, bool& out_conflict)
     hashMix(h, static_cast<std::uint64_t>(opt.temp_alignment_bytes));
     hashMix(h, static_cast<std::uint64_t>(opt.temp_enable_reuse ? 1u : 0u));
     hashMix(h, static_cast<std::uint64_t>(opt.enable_polly ? 1u : 0u));
+    hashMix(h, static_cast<std::uint64_t>(opt.enable_loop_tiling ? 1u : 0u));
+    hashMix(h, static_cast<std::uint64_t>(opt.tile_size));
+    hashMix(h, static_cast<std::uint64_t>(opt.min_tiling_extent));
     return h;
 }
 
@@ -258,7 +307,7 @@ struct KernelGroupPlan {
                                                   const JITCompileSpecialization* specialization) noexcept
 {
     std::uint64_t h = kFNVOffset;
-    hashMix(h, static_cast<std::uint64_t>(assembly::jit::kKernelArgsABIVersionV5));
+    hashMix(h, static_cast<std::uint64_t>(assembly::jit::kKernelArgsABIVersionV6));
     hashMix(h, static_cast<std::uint64_t>(ir.kind()));
     hashMix(h, static_cast<std::uint64_t>(group.key.domain));
     hashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(group.key.boundary_marker)));
@@ -357,6 +406,7 @@ struct CompilationPlan {
 
     const auto test_sig_hash = hashSpaceSig(ir.testSpace());
     const auto trial_sig_hash = hashSpaceSig(ir.trialSpace());
+    const int preferred_vector_width = preferredVectorWidthFromCpuFeatures(cpu_features);
 
     plan.groups.reserve(groups_by_key.size());
 
@@ -378,7 +428,8 @@ struct CompilationPlan {
 
                 tensor_opts.loop.enable_symmetry_lowering = jit_options.tensor.enable_symmetry_lowering;
                 tensor_opts.loop.enable_optimal_contraction_order = jit_options.tensor.enable_optimal_contraction_order;
-                tensor_opts.loop.enable_vectorization_hints = jit_options.vectorize && jit_options.tensor.enable_vectorization_hints;
+                tensor_opts.loop.enable_vectorization_hints = jit_options.vectorize;
+                tensor_opts.loop.preferred_vector_width = preferred_vector_width;
                 tensor_opts.loop.enable_delta_shortcuts = jit_options.tensor.enable_delta_shortcuts;
                 tensor_opts.loop.scalar_expansion_term_threshold = jit_options.tensor.scalar_expansion_term_threshold;
 
@@ -513,7 +564,10 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
                    tensor.temp_stack_max_entries == other.tensor.temp_stack_max_entries &&
                    tensor.temp_alignment_bytes == other.tensor.temp_alignment_bytes &&
                    tensor.temp_enable_reuse == other.tensor.temp_enable_reuse &&
-                   tensor.enable_polly == other.tensor.enable_polly;
+                   tensor.enable_polly == other.tensor.enable_polly &&
+                   tensor.enable_loop_tiling == other.tensor.enable_loop_tiling &&
+                   tensor.tile_size == other.tensor.tile_size &&
+                   tensor.min_tiling_extent == other.tensor.min_tiling_extent;
         }
     };
 
@@ -545,6 +599,9 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
             hashMix(h, static_cast<std::uint64_t>(k.tensor.temp_alignment_bytes));
             hashMix(h, static_cast<std::uint64_t>(k.tensor.temp_enable_reuse ? 1u : 0u));
             hashMix(h, static_cast<std::uint64_t>(k.tensor.enable_polly ? 1u : 0u));
+            hashMix(h, static_cast<std::uint64_t>(k.tensor.enable_loop_tiling ? 1u : 0u));
+            hashMix(h, static_cast<std::uint64_t>(k.tensor.tile_size));
+            hashMix(h, static_cast<std::uint64_t>(k.tensor.min_tiling_extent));
             return static_cast<std::size_t>(h);
         }
     };

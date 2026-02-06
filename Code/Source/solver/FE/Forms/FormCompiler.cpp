@@ -789,10 +789,10 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
         throw std::invalid_argument("FormCompiler: cannot compile invalid form");
     }
 
+    detail::requireNoCoupledPlaceholders(*form.node());
     if (!impl_->options.jit.enable) {
         detail::requireNoIndexedAccess(*form.node());
     }
-    detail::requireNoCoupledPlaceholders(*form.node());
 
     FormIR ir;
     ir.setCompiled(false);

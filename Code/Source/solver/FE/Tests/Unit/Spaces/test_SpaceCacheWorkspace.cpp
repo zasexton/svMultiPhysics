@@ -47,7 +47,7 @@ TEST_F(SpaceCacheTest, ScalarBasisCaching) {
 
     EXPECT_EQ(data.num_dofs, elem.num_dofs());
     EXPECT_EQ(data.num_qpts, quad->num_points());
-    ASSERT_EQ(data.basis_values.size(), elem.num_dofs());
+    ASSERT_EQ(data.basis_values.size(), elem.num_dofs() * data.num_qpts);
 
     // Verify that cached basis values match direct evaluations
     const auto& basis = elem.basis();
@@ -55,7 +55,7 @@ TEST_F(SpaceCacheTest, ScalarBasisCaching) {
     for (std::size_t q = 0; q < data.num_qpts; ++q) {
         basis.evaluate_values(quad->point(q), vals);
         for (std::size_t i = 0; i < elem.num_dofs(); ++i) {
-            EXPECT_NEAR(data.basis_values[i][q], vals[i], tol);
+            EXPECT_NEAR(data.basisValue(i, q), vals[i], tol);
         }
     }
 }
@@ -121,4 +121,3 @@ TEST_F(SpaceWorkspaceTest, DifferentSlotsIndependent) {
     EXPECT_NE(&v0, &v1);
     EXPECT_NE(v0.data(), v1.data());
 }
-

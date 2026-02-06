@@ -49,10 +49,27 @@ JacobianCacheEntry JacobianCache::compute(const GeometryMapping& mapping,
     entry.J_inv.resize(pts.size());
     entry.detJ.resize(pts.size());
 
+    if (pts.empty()) {
+        return entry;
+    }
+
+    if (mapping.isAffine()) {
+        const auto J = mapping.jacobian(pts.front());
+        const auto J_inv = J.inverse();
+        const auto detJ = J.determinant();
+
+        for (std::size_t i = 0; i < pts.size(); ++i) {
+            entry.J[i] = J;
+            entry.J_inv[i] = J_inv;
+            entry.detJ[i] = detJ;
+        }
+        return entry;
+    }
+
     for (std::size_t i = 0; i < pts.size(); ++i) {
         entry.J[i] = mapping.jacobian(pts[i]);
         entry.J_inv[i] = entry.J[i].inverse();
-        entry.detJ[i] = mapping.jacobian_determinant(pts[i]);
+        entry.detJ[i] = entry.J[i].determinant();
     }
     return entry;
 }

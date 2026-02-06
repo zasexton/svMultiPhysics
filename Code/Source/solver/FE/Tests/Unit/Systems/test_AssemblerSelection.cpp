@@ -194,6 +194,7 @@ TEST(SystemSetup, DecoratorsComposeViaAssemblyOptions)
     opts.assembly_options.cache_element_data = true;
     opts.assembly_options.use_batching = true;
     opts.assembly_options.batch_size = 8;
+    opts.assembly_options.use_vectorized_decorator = true;
 
     SetupInputs inputs;
     inputs.topology_override = buildTopology();

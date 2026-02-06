@@ -395,15 +395,23 @@ void GhostDofManager::syncGhostValues(std::span<const double> local_values,
     // This is a high-level interface - actual MPI calls are in comm_func
     // We just orchestrate the data packing/unpacking
 
+    thread_local std::vector<std::vector<double>> send_buffers;
+    thread_local std::vector<std::vector<double>> recv_buffers;
+    if (send_buffers.size() != comm_schedule_.neighbor_ranks.size()) {
+        send_buffers.resize(comm_schedule_.neighbor_ranks.size());
+        recv_buffers.resize(comm_schedule_.neighbor_ranks.size());
+    }
+
     for (std::size_t i = 0; i < comm_schedule_.neighbor_ranks.size(); ++i) {
         int neighbor = comm_schedule_.neighbor_ranks[i];
         const auto& send_list = comm_schedule_.send_lists[i];
         const auto& recv_list = comm_schedule_.recv_lists[i];
 
         // Pack send data
-        std::vector<double> send_data;
-        send_data.reserve(send_list.size());
-        for (auto dof : send_list) {
+        auto& send_data = send_buffers[i];
+        send_data.resize(send_list.size());
+        for (std::size_t j = 0; j < send_list.size(); ++j) {
+            const auto dof = send_list[j];
             if (!owned_dof_to_index_.empty()) {
                 const auto it = owned_dof_to_index_.find(dof);
                 if (it == owned_dof_to_index_.end()) {
@@ -413,18 +421,19 @@ void GhostDofManager::syncGhostValues(std::span<const double> local_values,
                 if (idx >= local_values.size()) {
                     throw FEException("GhostDofManager::syncGhostValues: local_values too small for owned ordering map");
                 }
-                send_data.push_back(local_values[idx]);
+                send_data[j] = local_values[idx];
             } else {
                 // Fallback: interpret local_values as globally indexed.
                 if (dof < 0 || dof >= static_cast<GlobalIndex>(local_values.size())) {
                     throw FEException("GhostDofManager::syncGhostValues: local_values does not provide global-indexed access for send DOF");
                 }
-                send_data.push_back(local_values[static_cast<std::size_t>(dof)]);
+                send_data[j] = local_values[static_cast<std::size_t>(dof)];
             }
         }
 
-        // Allocate recv buffer
-        std::vector<double> recv_data(recv_list.size());
+        // Reuse recv buffer for this neighbor.
+        auto& recv_data = recv_buffers[i];
+        recv_data.resize(recv_list.size());
 
         // Call user-provided communication
         comm_func(neighbor, send_data, neighbor, recv_data);

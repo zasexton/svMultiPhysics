@@ -75,6 +75,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
+#include <algorithm>
+#include <iterator>
+#include <stdexcept>
 
 namespace svmp {
 namespace FE {
@@ -447,6 +450,24 @@ public:
         return normals_;
     }
 
+    // Interleaved quadrature-point geometry (SoA->AoSoA bridge for JIT kernels):
+    //   [q * stride +  0.. 2] physical point xyz
+    //   [q * stride +  3..11] Jacobian (row-major 3x3)
+    //   [q * stride + 12..20] inverse Jacobian (row-major 3x3)
+    //   [q * stride +    21 ] det(J)
+    //   [q * stride + 22..24] normal xyz (zero for cell contexts)
+    static constexpr std::uint32_t kInterleavedQPointGeometryStride{25u};
+    static constexpr std::uint32_t kInterleavedQPointPhysicalOffset{0u};
+    static constexpr std::uint32_t kInterleavedQPointJacobianOffset{3u};
+    static constexpr std::uint32_t kInterleavedQPointInverseJacobianOffset{12u};
+    static constexpr std::uint32_t kInterleavedQPointDetOffset{21u};
+    static constexpr std::uint32_t kInterleavedQPointNormalOffset{22u};
+
+    [[nodiscard]] std::span<const Real> interleavedQPointGeometryRaw() const noexcept
+    {
+        return interleaved_qpoint_geometry_;
+    }
+
     // =========================================================================
     // Entity Measures (optional; prepared if RequiredData::EntityMeasures)
     // =========================================================================
@@ -524,7 +545,7 @@ public:
     [[nodiscard]] Vector3D physicalGradient(LocalIndex i, LocalIndex q) const;
 
     /**
-     * @brief Raw test physical gradients storage (layout: [i * n_qpts + q])
+     * @brief Raw test physical gradients storage (layout: [q * n_test_dofs + i])
      *
      * Intended for JIT/kernel ABI packing. Empty when PhysicalGradients were not requested.
      */
@@ -681,7 +702,7 @@ public:
     [[nodiscard]] Vector3D trialPhysicalGradient(LocalIndex j, LocalIndex q) const;
 
     /**
-     * @brief Raw trial physical gradients storage (layout: [j * n_qpts + q])
+     * @brief Raw trial physical gradients storage (layout: [q * n_trial_dofs + j])
      *
      * When the trial space aliases the test space, this returns the test storage.
      */
@@ -1217,7 +1238,7 @@ public:
         std::span<const Matrix3x3> hessians);
 
     /**
-     * @brief Set physical gradients (after Jacobian transformation)
+     * @brief Set physical gradients (after Jacobian transformation, layout: [q * n_dofs + dof])
      */
     void setPhysicalGradients(
         std::span<const Vector3D> test_gradients,
@@ -1254,9 +1275,95 @@ public:
 
 private:
     template <class T>
+    class ArenaArray {
+    public:
+        using value_type = T;
+        using pointer = T*;
+        using const_pointer = const T*;
+        using iterator = T*;
+        using const_iterator = const T*;
+
+        void bind(pointer ptr, std::size_t capacity) noexcept
+        {
+            data_ = ptr;
+            size_ = 0;
+            capacity_ = capacity;
+        }
+
+        void clear() noexcept { size_ = 0; }
+
+        [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
+        [[nodiscard]] std::size_t size() const noexcept { return size_; }
+        [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
+        [[nodiscard]] pointer data() noexcept { return data_; }
+        [[nodiscard]] const_pointer data() const noexcept { return data_; }
+
+        [[nodiscard]] iterator begin() noexcept { return data_; }
+        [[nodiscard]] iterator end() noexcept { return data_ + size_; }
+        [[nodiscard]] const_iterator begin() const noexcept { return data_; }
+        [[nodiscard]] const_iterator end() const noexcept { return data_ + size_; }
+
+        [[nodiscard]] T& operator[](std::size_t index) noexcept { return data_[index]; }
+        [[nodiscard]] const T& operator[](std::size_t index) const noexcept { return data_[index]; }
+
+        template <class It>
+        void assign(It first, It last)
+        {
+            const auto n = static_cast<std::size_t>(std::distance(first, last));
+            checkCapacity(n);
+            std::copy(first, last, data_);
+            size_ = n;
+        }
+
+        void assign(std::size_t n, const T& value)
+        {
+            checkCapacity(n);
+            std::fill_n(data_, n, value);
+            size_ = n;
+        }
+
+        void resize(std::size_t n)
+        {
+            checkCapacity(n);
+            if (n > size_) {
+                std::fill(data_ + size_, data_ + n, T{});
+            }
+            size_ = n;
+        }
+
+        void resize(std::size_t n, const T& value)
+        {
+            checkCapacity(n);
+            if (n > size_) {
+                std::fill(data_ + size_, data_ + n, value);
+            }
+            size_ = n;
+        }
+
+        [[nodiscard]] std::span<T> span() noexcept { return {data_, size_}; }
+        [[nodiscard]] std::span<const T> span() const noexcept { return {data_, size_}; }
+        [[nodiscard]] operator std::span<const T>() const noexcept { return span(); }
+
+    private:
+        void checkCapacity(std::size_t n) const
+        {
+            if (n > capacity_) {
+                throw std::length_error(
+                    "AssemblyContext::ArenaArray: requested size exceeds reserved arena capacity");
+            }
+        }
+
+        pointer data_{nullptr};
+        std::size_t size_{0};
+        std::size_t capacity_{0};
+    };
+
+    template <class T>
     using JITAlignedVector = std::vector<T, AlignedAllocator<T, jit::kJITPointerAlignmentBytes>>;
 
     void rebuildJITFieldSolutionTable();
+    void rebuildInterleavedQPointGeometry();
+    void ensureArenaCapacity(LocalIndex required_dofs, LocalIndex required_qpts);
 
     // Context type and identification
     ContextType type_{ContextType::Cell};
@@ -1281,18 +1388,24 @@ private:
     bool trial_is_vector_basis_{false};
     int test_value_dim_{1};
     int trial_value_dim_{1};
+    LocalIndex arena_max_dofs_{0};
+    LocalIndex arena_max_qpts_{0};
+
+    // Single contiguous storage arena for high-frequency context arrays.
+    JITAlignedVector<std::byte> arena_storage_;
 
     // Quadrature data
-    JITAlignedVector<Point3D> quad_points_;
-    JITAlignedVector<Real> quad_weights_;
-    JITAlignedVector<Real> integration_weights_;
+    ArenaArray<Point3D> quad_points_;
+    ArenaArray<Real> quad_weights_;
+    ArenaArray<Real> integration_weights_;
 
     // Geometry data
-    JITAlignedVector<Point3D> physical_points_;
-    JITAlignedVector<Matrix3x3> jacobians_;
-    JITAlignedVector<Matrix3x3> inverse_jacobians_;
-    JITAlignedVector<Real> jacobian_dets_;
-    JITAlignedVector<Vector3D> normals_;
+    ArenaArray<Point3D> physical_points_;
+    ArenaArray<Matrix3x3> jacobians_;
+    ArenaArray<Matrix3x3> inverse_jacobians_;
+    ArenaArray<Real> jacobian_dets_;
+    ArenaArray<Vector3D> normals_;
+    ArenaArray<Real> interleaved_qpoint_geometry_;
 
     // Entity measures (optional)
     Real cell_diameter_{0.0};
@@ -1300,40 +1413,40 @@ private:
     Real facet_area_{0.0};
 
     // Test basis data (n_test_dofs * n_qpts arrays)
-    JITAlignedVector<Real> test_basis_values_;           // [i * n_qpts + q]
-    JITAlignedVector<Vector3D> test_ref_gradients_;      // [i * n_qpts + q]
-    JITAlignedVector<Vector3D> test_phys_gradients_;     // [i * n_qpts + q]
+    ArenaArray<Real> test_basis_values_;           // [i * n_qpts + q]
+    ArenaArray<Vector3D> test_ref_gradients_;      // [i * n_qpts + q]
+    ArenaArray<Vector3D> test_phys_gradients_;     // [q * n_test_dofs + i]
 
     // Test vector-basis data (H(curl)/H(div)) (n_test_dofs * n_qpts arrays)
-    JITAlignedVector<Vector3D> test_basis_vector_values_; // [i * n_qpts + q]
-    JITAlignedVector<Vector3D> test_basis_curls_;         // [i * n_qpts + q]
-    JITAlignedVector<Real> test_basis_divergences_;       // [i * n_qpts + q]
+    ArenaArray<Vector3D> test_basis_vector_values_; // [i * n_qpts + q]
+    ArenaArray<Vector3D> test_basis_curls_;         // [i * n_qpts + q]
+    ArenaArray<Real> test_basis_divergences_;       // [i * n_qpts + q]
 
     // Trial basis data (may be same as test for square)
-    JITAlignedVector<Real> trial_basis_values_;
-    JITAlignedVector<Vector3D> trial_ref_gradients_;
-    JITAlignedVector<Vector3D> trial_phys_gradients_;
-    JITAlignedVector<Vector3D> trial_basis_vector_values_;
-    JITAlignedVector<Vector3D> trial_basis_curls_;
-    JITAlignedVector<Real> trial_basis_divergences_;
+    ArenaArray<Real> trial_basis_values_;
+    ArenaArray<Vector3D> trial_ref_gradients_;
+    ArenaArray<Vector3D> trial_phys_gradients_;    // [q * n_trial_dofs + j]
+    ArenaArray<Vector3D> trial_basis_vector_values_;
+    ArenaArray<Vector3D> trial_basis_curls_;
+    ArenaArray<Real> trial_basis_divergences_;
     bool trial_is_test_{true};  // Optimization flag
 
     // Optional basis Hessians (n_dofs * n_qpts arrays)
-    JITAlignedVector<Matrix3x3> test_ref_hessians_;
-    JITAlignedVector<Matrix3x3> test_phys_hessians_;
-    JITAlignedVector<Matrix3x3> trial_ref_hessians_;
-    JITAlignedVector<Matrix3x3> trial_phys_hessians_;
+    ArenaArray<Matrix3x3> test_ref_hessians_;
+    ArenaArray<Matrix3x3> test_phys_hessians_;
+    ArenaArray<Matrix3x3> trial_ref_hessians_;
+    ArenaArray<Matrix3x3> trial_phys_hessians_;
 
     // Solution data (for nonlinear problems)
-    JITAlignedVector<Real> solution_coefficients_;
-    JITAlignedVector<Real> solution_values_;
-    JITAlignedVector<Vector3D> solution_vector_values_;
-    JITAlignedVector<Vector3D> solution_gradients_;
-    JITAlignedVector<Matrix3x3> solution_jacobians_;
-    JITAlignedVector<Matrix3x3> solution_hessians_;
-    JITAlignedVector<Real> solution_laplacians_;
-    JITAlignedVector<Matrix3x3> solution_component_hessians_;  // [q * trial_value_dim + c]
-    JITAlignedVector<Real> solution_component_laplacians_;     // [q * trial_value_dim + c]
+    ArenaArray<Real> solution_coefficients_;
+    ArenaArray<Real> solution_values_;
+    ArenaArray<Vector3D> solution_vector_values_;
+    ArenaArray<Vector3D> solution_gradients_;
+    ArenaArray<Matrix3x3> solution_jacobians_;
+    ArenaArray<Matrix3x3> solution_hessians_;
+    ArenaArray<Real> solution_laplacians_;
+    ArenaArray<Matrix3x3> solution_component_hessians_;  // [q * trial_value_dim + c]
+    ArenaArray<Real> solution_component_laplacians_;     // [q * trial_value_dim + c]
 
     struct FieldSolutionData {
         FieldId id{INVALID_FIELD_ID};

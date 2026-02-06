@@ -21,6 +21,8 @@
 #include "Geometry/GeometryMapping.h"
 #include "Basis/BasisFunction.h"
 #include "Basis/VectorBasis.h"
+#include "Forms/FormKernels.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 #include "Math/Vector.h"
 #include "Math/Matrix.h"
 
@@ -527,6 +529,55 @@ private:
     std::vector<Real> owned_vector_;
 };
 
+// Resolve dynamic kernel type once (outside element/face loops) so the compiler
+// can devirtualize hot `compute*` calls for common final kernels.
+template <typename F>
+decltype(auto) withDevirtualizedKernel(AssemblyKernel& kernel, F&& fn)
+{
+    if (auto* mass_kernel = dynamic_cast<MassKernel*>(&kernel); mass_kernel != nullptr) {
+        return std::forward<F>(fn)(*mass_kernel);
+    }
+    if (auto* stiffness_kernel = dynamic_cast<StiffnessKernel*>(&kernel); stiffness_kernel != nullptr) {
+        return std::forward<F>(fn)(*stiffness_kernel);
+    }
+    if (auto* source_kernel = dynamic_cast<SourceKernel*>(&kernel); source_kernel != nullptr) {
+        return std::forward<F>(fn)(*source_kernel);
+    }
+    if (auto* poisson_kernel = dynamic_cast<PoissonKernel*>(&kernel); poisson_kernel != nullptr) {
+        return std::forward<F>(fn)(*poisson_kernel);
+    }
+    if (auto* composite_kernel = dynamic_cast<CompositeKernel*>(&kernel); composite_kernel != nullptr) {
+        return std::forward<F>(fn)(*composite_kernel);
+    }
+
+    if (auto* form_kernel = dynamic_cast<forms::FormKernel*>(&kernel); form_kernel != nullptr) {
+        return std::forward<F>(fn)(*form_kernel);
+    }
+    if (auto* linear_kernel = dynamic_cast<forms::LinearFormKernel*>(&kernel); linear_kernel != nullptr) {
+        return std::forward<F>(fn)(*linear_kernel);
+    }
+    if (auto* nonlinear_kernel = dynamic_cast<forms::NonlinearFormKernel*>(&kernel); nonlinear_kernel != nullptr) {
+        return std::forward<F>(fn)(*nonlinear_kernel);
+    }
+    if (auto* symbolic_nonlinear_kernel = dynamic_cast<forms::SymbolicNonlinearFormKernel*>(&kernel);
+        symbolic_nonlinear_kernel != nullptr) {
+        return std::forward<F>(fn)(*symbolic_nonlinear_kernel);
+    }
+    if (auto* coupled_sensitivity_kernel = dynamic_cast<forms::CoupledResidualSensitivityKernel*>(&kernel);
+        coupled_sensitivity_kernel != nullptr) {
+        return std::forward<F>(fn)(*coupled_sensitivity_kernel);
+    }
+    if (auto* boundary_gradient_kernel = dynamic_cast<forms::BoundaryFunctionalGradientKernel*>(&kernel);
+        boundary_gradient_kernel != nullptr) {
+        return std::forward<F>(fn)(*boundary_gradient_kernel);
+    }
+    if (auto* jit_kernel = dynamic_cast<forms::jit::JITKernelWrapper*>(&kernel); jit_kernel != nullptr) {
+        return std::forward<F>(fn)(*jit_kernel);
+    }
+
+    return std::forward<F>(fn)(kernel);
+}
+
 } // namespace
 
 // ============================================================================
@@ -895,9 +946,11 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
     }
 
     // Ensure AssemblyContext uses the mesh spatial dimension (2D/3D).
-    context_.reserve(std::max(row_dof_map_->getMaxDofsPerCell(),
-                              col_dof_map_->getMaxDofsPerCell()),
-                     /*max_qpts=*/27, mesh.dimension());
+    const LocalIndex max_dofs =
+        std::max(row_dof_map_->getMaxDofsPerCell(),
+                 col_dof_map_->getMaxDofsPerCell());
+    constexpr LocalIndex max_qpts = 27;
+    context_.reserve(max_dofs, max_qpts, mesh.dimension());
 
     const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
     std::optional<OwnedRowOnlyView> owned_row_matrix;
@@ -919,41 +972,42 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
         }
     }
 
-    // Iterate over boundary faces with given marker
-    mesh.forEachBoundaryFace(boundary_marker,
-        [&](GlobalIndex face_id, GlobalIndex cell_id) {
-            if (!owned_rows_only && !mesh.isOwnedCell(cell_id)) {
-                return;
-            }
-            // Get cell DOFs (rows/cols may come from different maps)
-            auto row_cell_dofs = row_dof_map_->getCellDofs(cell_id);
-            auto col_cell_dofs = col_dof_map_->getCellDofs(cell_id);
+    auto assemble_boundary_faces_with_kernel = [&](auto& kernel_impl) {
+        // Iterate over boundary faces with given marker
+        mesh.forEachBoundaryFace(boundary_marker,
+            [&](GlobalIndex face_id, GlobalIndex cell_id) {
+                if (!owned_rows_only && !mesh.isOwnedCell(cell_id)) {
+                    return;
+                }
+                // Get cell DOFs (rows/cols may come from different maps)
+                auto row_cell_dofs = row_dof_map_->getCellDofs(cell_id);
+                auto col_cell_dofs = col_dof_map_->getCellDofs(cell_id);
 
-            row_dofs_.resize(row_cell_dofs.size());
-            for (std::size_t i = 0; i < row_cell_dofs.size(); ++i) {
-                row_dofs_[i] = row_cell_dofs[i] + row_dof_offset_;
-            }
+                row_dofs_.resize(row_cell_dofs.size());
+                for (std::size_t i = 0; i < row_cell_dofs.size(); ++i) {
+                    row_dofs_[i] = row_cell_dofs[i] + row_dof_offset_;
+                }
 
-            col_dofs_.resize(col_cell_dofs.size());
-            for (std::size_t j = 0; j < col_cell_dofs.size(); ++j) {
-                col_dofs_[j] = col_cell_dofs[j] + col_dof_offset_;
-            }
+                col_dofs_.resize(col_cell_dofs.size());
+                for (std::size_t j = 0; j < col_cell_dofs.size(); ++j) {
+                    col_dofs_[j] = col_cell_dofs[j] + col_dof_offset_;
+                }
 
-            // Prepare context for face
-            LocalIndex local_face_id = mesh.getLocalFaceIndex(face_id, cell_id);
-            prepareContextFace(context_, mesh, face_id, cell_id, local_face_id, test_space, trial_space,
-                               required_data, ContextType::BoundaryFace);
-            context_.setMaterialState(nullptr, nullptr, 0u, 0u);
-            context_.setTimeIntegrationContext(time_integration_);
-            context_.setTime(time_);
-            context_.setTimeStep(dt_);
-            context_.setRealParameterGetter(get_real_param_);
-            context_.setParameterGetter(get_param_);
-            context_.setUserData(user_data_);
-            context_.setJITConstants(jit_constants_);
-            context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
-            context_.clearAllPreviousSolutionData();
-            context_.setBoundaryMarker(boundary_marker);
+                // Prepare context for face
+                LocalIndex local_face_id = mesh.getLocalFaceIndex(face_id, cell_id);
+                prepareContextFace(context_, mesh, face_id, cell_id, local_face_id, test_space, trial_space,
+                                   required_data, ContextType::BoundaryFace);
+                context_.setMaterialState(nullptr, nullptr, 0u, 0u);
+                context_.setTimeIntegrationContext(time_integration_);
+                context_.setTime(time_);
+                context_.setTimeStep(dt_);
+                context_.setRealParameterGetter(get_real_param_);
+                context_.setParameterGetter(get_param_);
+                context_.setUserData(user_data_);
+                context_.setJITConstants(jit_constants_);
+                context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+                context_.clearAllPreviousSolutionData();
+                context_.setBoundaryMarker(boundary_marker);
 
 	            if (need_solution) {
 	                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
@@ -1026,40 +1080,45 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
                 }
             }
 
-            if (need_field_solutions) {
-                populateFieldSolutionData(context_, mesh, cell_id, field_requirements);
-            }
+                if (need_field_solutions) {
+                    populateFieldSolutionData(context_, mesh, cell_id, field_requirements);
+                }
 
-            if (need_material_state) {
-                auto view = material_state_provider_->getBoundaryFaceState(kernel, face_id, context_.numQuadraturePoints());
-                FE_THROW_IF(!view, FEException,
-                            "StandardAssembler::assembleBoundaryFaces: material state provider returned null storage");
-                FE_THROW_IF(view.bytes_per_qpt != material_state_spec.bytes_per_qpt, FEException,
-                            "StandardAssembler::assembleBoundaryFaces: material state bytes_per_qpt mismatch");
-                FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
-                            "StandardAssembler::assembleBoundaryFaces: invalid material state stride");
-                context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
-            }
+                if (need_material_state) {
+                    auto view = material_state_provider_->getBoundaryFaceState(kernel, face_id, context_.numQuadraturePoints());
+                    FE_THROW_IF(!view, FEException,
+                                "StandardAssembler::assembleBoundaryFaces: material state provider returned null storage");
+                    FE_THROW_IF(view.bytes_per_qpt != material_state_spec.bytes_per_qpt, FEException,
+                                "StandardAssembler::assembleBoundaryFaces: material state bytes_per_qpt mismatch");
+                    FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
+                                "StandardAssembler::assembleBoundaryFaces: invalid material state stride");
+                    context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
+                }
 
-            // Compute local contributions
-            kernel_output_.clear();
-            kernel.computeBoundaryFace(context_, boundary_marker, kernel_output_);
+                // Compute local contributions
+                kernel_output_.clear();
+                kernel_impl.computeBoundaryFace(context_, boundary_marker, kernel_output_);
 
-            if (context_.testUsesVectorBasis() || context_.trialUsesVectorBasis()) {
-                applyVectorBasisOutputOrientation(mesh, cell_id, test_space, cell_id, trial_space, kernel_output_);
-            }
+                if (context_.testUsesVectorBasis() || context_.trialUsesVectorBasis()) {
+                    applyVectorBasisOutputOrientation(mesh, cell_id, test_space, cell_id, trial_space, kernel_output_);
+                }
 
-            // Insert into global system
-            if (options_.use_constraints && constraint_distributor_) {
-                insertLocalConstrained(kernel_output_, row_dofs_, col_dofs_,
-                                       insert_matrix_view, insert_vector_view);
-            } else {
-                insertLocal(kernel_output_, row_dofs_, col_dofs_,
-                            insert_matrix_view, insert_vector_view);
-            }
+                // Insert into global system
+                if (options_.use_constraints && constraint_distributor_) {
+                    insertLocalConstrained(kernel_output_, row_dofs_, col_dofs_,
+                                           insert_matrix_view, insert_vector_view);
+                } else {
+                    insertLocal(kernel_output_, row_dofs_, col_dofs_,
+                                insert_matrix_view, insert_vector_view);
+                }
 
-            result.boundary_faces_assembled++;
-        });
+                result.boundary_faces_assembled++;
+            });
+    };
+
+    withDevirtualizedKernel(kernel, [&](auto& kernel_impl) {
+        assemble_boundary_faces_with_kernel(kernel_impl);
+    });
 
     auto end_time = std::chrono::steady_clock::now();
     result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
@@ -1164,8 +1223,9 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     std::vector<GlobalIndex> cell_nodes_minus;
     std::vector<GlobalIndex> cell_nodes_plus;
 
-    mesh.forEachInteriorFace(
-        [&](GlobalIndex face_id, GlobalIndex cell_minus, GlobalIndex cell_plus) {
+    withDevirtualizedKernel(kernel, [&](auto& kernel_impl) {
+        mesh.forEachInteriorFace(
+            [&](GlobalIndex face_id, GlobalIndex cell_minus, GlobalIndex cell_plus) {
             if (!should_process(cell_minus, cell_plus)) {
                 return;
             }
@@ -1417,9 +1477,9 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             coupling_mp.clear();
             coupling_pm.clear();
 
-            kernel.computeInteriorFace(context_, context_plus,
-                                       output_minus, output_plus,
-                                       coupling_mp, coupling_pm);
+            kernel_impl.computeInteriorFace(context_, context_plus,
+                                            output_minus, output_plus,
+                                            coupling_mp, coupling_pm);
 
             if (output_minus.has_matrix || output_minus.has_vector) {
                 applyVectorBasisOutputOrientation(mesh, cell_minus, test_space, cell_minus, trial_space, output_minus);
@@ -1459,6 +1519,7 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
 
             result.interior_faces_assembled++;
         });
+    });
 
     auto end_time = std::chrono::steady_clock::now();
     result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
@@ -1566,7 +1627,8 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         }
     }
 
-    for (std::size_t local_iface = 0; local_iface < interface_mesh.n_faces(); ++local_iface) {
+    withDevirtualizedKernel(kernel, [&](auto& kernel_impl) {
+        for (std::size_t local_iface = 0; local_iface < interface_mesh.n_faces(); ++local_iface) {
         const auto iface = static_cast<svmp::index_t>(local_iface);
         const GlobalIndex face_id = static_cast<GlobalIndex>(interface_mesh.volume_face(iface));
         const GlobalIndex cell_minus = static_cast<GlobalIndex>(interface_mesh.volume_cell_minus(iface));
@@ -1830,9 +1892,9 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         coupling_mp.clear();
         coupling_pm.clear();
 
-        kernel.computeInterfaceFace(context_, context_plus, interface_marker,
-                                   output_minus, output_plus,
-                                   coupling_mp, coupling_pm);
+        kernel_impl.computeInterfaceFace(context_, context_plus, interface_marker,
+                                         output_minus, output_plus,
+                                         coupling_mp, coupling_pm);
 
         if (output_minus.has_matrix || output_minus.has_vector) {
             applyVectorBasisOutputOrientation(mesh, cell_minus, test_space, cell_minus, trial_space, output_minus);
@@ -1864,7 +1926,8 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         }
 
         result.interface_faces_assembled++;
-    }
+        }
+    });
 
     auto end_time = std::chrono::steady_clock::now();
     result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
@@ -1895,10 +1958,11 @@ AssemblyResult StandardAssembler::assembleCellsCore(
     }
 
     // Begin assembly phase
-    if (matrix_view && assemble_matrix) {
+    if (matrix_view && assemble_matrix && matrix_view->getPhase() == AssemblyPhase::NotStarted) {
         matrix_view->beginAssemblyPhase();
     }
-    if (vector_view && assemble_vector && vector_view != matrix_view) {
+    if (vector_view && assemble_vector && vector_view != matrix_view &&
+        vector_view->getPhase() == AssemblyPhase::NotStarted) {
         vector_view->beginAssemblyPhase();
     }
 
@@ -1928,11 +1992,13 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         col_dof_offset_ = row_dof_offset_;
     }
 
+    const LocalIndex max_dofs =
+        std::max(row_dof_map_->getMaxDofsPerCell(), col_dof_map_->getMaxDofsPerCell());
+    constexpr LocalIndex max_qpts = 27;
+
     // Ensure AssemblyContext uses the mesh spatial dimension (2D/3D). This affects
     // the runtime shapes of geometry tensors (J, Jinv, normals, etc.) used by Forms.
-    context_.reserve(std::max(row_dof_map_->getMaxDofsPerCell(),
-                              col_dof_map_->getMaxDofsPerCell()),
-                     /*max_qpts=*/27, mesh.dimension());
+    context_.reserve(max_dofs, max_qpts, mesh.dimension());
 
     const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
     std::optional<OwnedRowOnlyView> owned_row_matrix;
@@ -1964,65 +2030,76 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         }
     };
 
-    // Iterate over cells
+    std::vector<GlobalIndex> cell_ids;
     for_each_cell([&](GlobalIndex cell_id) {
-        // Get element DOFs (rows/cols may differ)
+        cell_ids.push_back(cell_id);
+    });
+
+    const std::size_t requested_batch_size =
+        (options_.use_batching && options_.batch_size > 1)
+            ? static_cast<std::size_t>(options_.batch_size)
+            : 1u;
+
+    auto prepare_cell_data = [&](GlobalIndex cell_id,
+                                 AssemblyContext& ctx,
+                                 std::vector<GlobalIndex>& row_dofs,
+                                 std::vector<GlobalIndex>& col_dofs) {
         auto row_local = row_dof_map_->getCellDofs(cell_id);
         auto col_local = col_dof_map_->getCellDofs(cell_id);
 
-        row_dofs_.resize(row_local.size());
+        row_dofs.resize(row_local.size());
         for (std::size_t i = 0; i < row_local.size(); ++i) {
-            row_dofs_[i] = row_local[i] + row_dof_offset_;
+            row_dofs[i] = row_local[i] + row_dof_offset_;
         }
 
-        col_dofs_.resize(col_local.size());
+        col_dofs.resize(col_local.size());
         for (std::size_t j = 0; j < col_local.size(); ++j) {
-            col_dofs_[j] = col_local[j] + col_dof_offset_;
+            col_dofs[j] = col_local[j] + col_dof_offset_;
         }
 
-        // Prepare assembly context
-        prepareContext(context_, mesh, cell_id, test_space, trial_space, required_data);
-        context_.setMaterialState(nullptr, nullptr, 0u, 0u);
-        context_.setTimeIntegrationContext(time_integration_);
-        context_.setTime(time_);
-        context_.setTimeStep(dt_);
-        context_.setRealParameterGetter(get_real_param_);
-        context_.setParameterGetter(get_param_);
-        context_.setUserData(user_data_);
-        context_.setJITConstants(jit_constants_);
-        context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
-        context_.clearAllPreviousSolutionData();
-        FE_THROW_IF(row_dofs_.size() != static_cast<std::size_t>(context_.numTestDofs()), FEException,
+        prepareContext(ctx, mesh, cell_id, test_space, trial_space, required_data);
+        ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
+        ctx.setTimeIntegrationContext(time_integration_);
+        ctx.setTime(time_);
+        ctx.setTimeStep(dt_);
+        ctx.setRealParameterGetter(get_real_param_);
+        ctx.setParameterGetter(get_param_);
+        ctx.setUserData(user_data_);
+        ctx.setJITConstants(jit_constants_);
+        ctx.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+        ctx.clearAllPreviousSolutionData();
+
+        FE_THROW_IF(row_dofs.size() != static_cast<std::size_t>(ctx.numTestDofs()), FEException,
                     "StandardAssembler::assembleCellsCore: row DOF count does not match test space element DOFs");
-        FE_THROW_IF(col_dofs_.size() != static_cast<std::size_t>(context_.numTrialDofs()), FEException,
+        FE_THROW_IF(col_dofs.size() != static_cast<std::size_t>(ctx.numTrialDofs()), FEException,
                     "StandardAssembler::assembleCellsCore: column DOF count does not match trial space element DOFs");
 
-	        if (need_solution) {
-	            FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
-	                        "StandardAssembler::assembleCellsCore: kernel requires solution but no solution was set");
-	            local_solution_coeffs_.resize(col_dofs_.size());
-	            if (current_solution_view_ != nullptr) {
-	                for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
-	                    const auto dof = col_dofs_[i];
-	                    if (dof < 0) {
-	                        FE_THROW(FEException, "StandardAssembler::assembleCellsCore: negative DOF index");
-	                    }
-	                    local_solution_coeffs_[i] = current_solution_view_->getVectorEntry(dof);
-	                }
-	            } else {
-	                for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
-	                    const auto dof = col_dofs_[i];
-	                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-	                                "StandardAssembler::assembleCellsCore: solution vector too small for DOF " +
-	                                    std::to_string(dof));
-	                    local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
-	                }
-	            }
-	            if (context_.trialUsesVectorBasis()) {
-	                applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
-	                                              std::span<Real>(local_solution_coeffs_));
-	            }
-	            context_.setSolutionCoefficients(local_solution_coeffs_);
+        if (need_solution) {
+            FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+                        "StandardAssembler::assembleCellsCore: kernel requires solution but no solution was set");
+            local_solution_coeffs_.resize(col_dofs.size());
+            if (current_solution_view_ != nullptr) {
+                for (std::size_t i = 0; i < col_dofs.size(); ++i) {
+                    const auto dof = col_dofs[i];
+                    if (dof < 0) {
+                        FE_THROW(FEException, "StandardAssembler::assembleCellsCore: negative DOF index");
+                    }
+                    local_solution_coeffs_[i] = current_solution_view_->getVectorEntry(dof);
+                }
+            } else {
+                for (std::size_t i = 0; i < col_dofs.size(); ++i) {
+                    const auto dof = col_dofs[i];
+                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+                                "StandardAssembler::assembleCellsCore: solution vector too small for DOF " +
+                                    std::to_string(dof));
+                    local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
+                }
+            }
+            if (ctx.trialUsesVectorBasis()) {
+                applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
+                                              std::span<Real>(local_solution_coeffs_));
+            }
+            ctx.setSolutionCoefficients(local_solution_coeffs_);
 
             if (time_integration_ != nullptr) {
                 const int required = requiredHistoryStates(time_integration_);
@@ -2034,85 +2111,178 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                     if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
                         local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
                     }
-	                    for (int k = 1; k <= required; ++k) {
-	                        const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
-	                        const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
-	                                                    ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
-	                                                    : nullptr;
-	                        FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
-	                                    "StandardAssembler::assembleCellsCore: previous solution (k=" +
-	                                        std::to_string(k) + ") not set");
-	                        auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
-	                        local_prev.resize(col_dofs_.size());
-	                        for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
-	                            const auto dof = col_dofs_[i];
-	                            if (dof < 0) {
-	                                FE_THROW(FEException,
-	                                         "StandardAssembler::assembleCellsCore: negative DOF index (prev)");
-	                            }
-	                            if (prev_view != nullptr) {
-	                                local_prev[i] = prev_view->getVectorEntry(dof);
-	                            } else {
-	                                FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
-	                                            "StandardAssembler::assembleCellsCore: previous solution vector too small for DOF " +
-	                                                std::to_string(dof));
-	                                local_prev[i] = prev[static_cast<std::size_t>(dof)];
-	                            }
-	                        }
-	                        if (context_.trialUsesVectorBasis()) {
-	                            applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
-	                                                          std::span<Real>(local_prev));
-	                        }
-                        context_.setPreviousSolutionCoefficientsK(k, local_prev);
+                    for (int k = 1; k <= required; ++k) {
+                        const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                        const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+                                                    ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+                                                    : nullptr;
+                        FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+                                    "StandardAssembler::assembleCellsCore: previous solution (k=" +
+                                        std::to_string(k) + ") not set");
+                        auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                        local_prev.resize(col_dofs.size());
+                        for (std::size_t i = 0; i < col_dofs.size(); ++i) {
+                            const auto dof = col_dofs[i];
+                            if (dof < 0) {
+                                FE_THROW(FEException,
+                                         "StandardAssembler::assembleCellsCore: negative DOF index (prev)");
+                            }
+                            if (prev_view != nullptr) {
+                                local_prev[i] = prev_view->getVectorEntry(dof);
+                            } else {
+                                FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
+                                            "StandardAssembler::assembleCellsCore: previous solution vector too small for DOF " +
+                                                std::to_string(dof));
+                                local_prev[i] = prev[static_cast<std::size_t>(dof)];
+                            }
+                        }
+                        if (ctx.trialUsesVectorBasis()) {
+                            applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
+                                                          std::span<Real>(local_prev));
+                        }
+                        ctx.setPreviousSolutionCoefficientsK(k, local_prev);
                     }
                 }
             }
         }
 
         if (need_field_solutions) {
-            populateFieldSolutionData(context_, mesh, cell_id, field_requirements);
+            populateFieldSolutionData(ctx, mesh, cell_id, field_requirements);
         }
 
         if (need_material_state) {
-            auto view = material_state_provider_->getCellState(kernel, cell_id, context_.numQuadraturePoints());
+            auto view = material_state_provider_->getCellState(kernel, cell_id, ctx.numQuadraturePoints());
             FE_THROW_IF(!view, FEException,
                         "StandardAssembler::assembleCellsCore: material state provider returned null storage");
             FE_THROW_IF(view.bytes_per_qpt != material_state_spec.bytes_per_qpt, FEException,
                         "StandardAssembler::assembleCellsCore: material state bytes_per_qpt mismatch");
             FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
                         "StandardAssembler::assembleCellsCore: invalid material state stride");
-            context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
+            ctx.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
+        }
+    };
+
+    auto insert_cell_output = [&](GlobalIndex cell_id,
+                                  AssemblyContext& ctx,
+                                  std::vector<GlobalIndex>& row_dofs,
+                                  std::vector<GlobalIndex>& col_dofs,
+                                  KernelOutput& output) {
+        if (ctx.testUsesVectorBasis() || ctx.trialUsesVectorBasis()) {
+            applyVectorBasisOutputOrientation(mesh, cell_id, test_space, cell_id, trial_space, output);
         }
 
-        // Compute local matrix/vector via kernel
-        kernel_output_.clear();
-        kernel.computeCell(context_, kernel_output_);
-
-        if (context_.testUsesVectorBasis() || context_.trialUsesVectorBasis()) {
-            applyVectorBasisOutputOrientation(mesh, cell_id, test_space, cell_id, trial_space, kernel_output_);
-        }
-
-        // Insert into global system
         if (options_.use_constraints && constraint_distributor_) {
-            insertLocalConstrained(kernel_output_, row_dofs_, col_dofs_,
+            insertLocalConstrained(output, row_dofs, col_dofs,
                                    assemble_matrix ? insert_matrix_view : nullptr,
                                    assemble_vector ? insert_vector_view : nullptr);
         } else {
-            insertLocal(kernel_output_, row_dofs_, col_dofs_,
+            insertLocal(output, row_dofs, col_dofs,
                         assemble_matrix ? insert_matrix_view : nullptr,
                         assemble_vector ? insert_vector_view : nullptr);
         }
 
         result.elements_assembled++;
-
-        if (kernel_output_.has_matrix) {
+        if (output.has_matrix) {
             result.matrix_entries_inserted +=
-                static_cast<GlobalIndex>(row_dofs_.size() * col_dofs_.size());
+                static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
         }
-        if (kernel_output_.has_vector) {
-            result.vector_entries_inserted +=
-                static_cast<GlobalIndex>(row_dofs_.size());
+        if (output.has_vector) {
+            result.vector_entries_inserted += static_cast<GlobalIndex>(row_dofs.size());
         }
+    };
+
+    auto assemble_cells_with_kernel = [&](auto& kernel_impl) {
+        const bool use_batch_path =
+            (requested_batch_size > 1u) && kernel_impl.supportsCellBatch();
+
+        if (!use_batch_path) {
+            for (const auto cell_id : cell_ids) {
+                prepare_cell_data(cell_id, context_, row_dofs_, col_dofs_);
+                kernel_output_.clear();
+                kernel_impl.computeCell(context_, kernel_output_);
+                insert_cell_output(cell_id, context_, row_dofs_, col_dofs_, kernel_output_);
+            }
+            return;
+        }
+
+        std::vector<AssemblyContext> batch_contexts(requested_batch_size);
+        for (auto& ctx : batch_contexts) {
+            ctx.reserve(max_dofs, max_qpts, mesh.dimension());
+        }
+        std::vector<std::vector<GlobalIndex>> batch_row_dofs(requested_batch_size);
+        std::vector<std::vector<GlobalIndex>> batch_col_dofs(requested_batch_size);
+        std::vector<KernelOutput> batch_outputs(requested_batch_size);
+        std::vector<const AssemblyContext*> batch_context_ptrs(requested_batch_size, nullptr);
+
+        auto assemble_batch_range = [&](std::span<const GlobalIndex> grouped_cell_ids) {
+            for (std::size_t begin = 0; begin < grouped_cell_ids.size(); begin += requested_batch_size) {
+                const std::size_t active = std::min(requested_batch_size, grouped_cell_ids.size() - begin);
+                for (std::size_t slot = 0; slot < active; ++slot) {
+                    const auto cell_id = grouped_cell_ids[begin + slot];
+                    prepare_cell_data(cell_id,
+                                      batch_contexts[slot],
+                                      batch_row_dofs[slot],
+                                      batch_col_dofs[slot]);
+                    batch_outputs[slot].clear();
+                    batch_context_ptrs[slot] = &batch_contexts[slot];
+                }
+
+                kernel_impl.computeCellBatch(
+                    std::span<const AssemblyContext* const>(batch_context_ptrs.data(), active),
+                    std::span<KernelOutput>(batch_outputs.data(), active));
+
+                for (std::size_t slot = 0; slot < active; ++slot) {
+                    const auto cell_id = grouped_cell_ids[begin + slot];
+                    insert_cell_output(cell_id,
+                                       batch_contexts[slot],
+                                       batch_row_dofs[slot],
+                                       batch_col_dofs[slot],
+                                       batch_outputs[slot]);
+                }
+            }
+        };
+
+        const bool allow_topology_reorder =
+            !options_.stable_insertion_order && (options_.default_mode == AssemblyMode::Add);
+
+        if (!allow_topology_reorder) {
+            // Preserve traversal order: only form homogeneous batches over
+            // contiguous runs of identical element topology.
+            std::size_t run_begin = 0u;
+            while (run_begin < cell_ids.size()) {
+                const auto run_type = mesh.getCellType(cell_ids[run_begin]);
+                std::size_t run_end = run_begin + 1u;
+                while (run_end < cell_ids.size() && mesh.getCellType(cell_ids[run_end]) == run_type) {
+                    ++run_end;
+                }
+                assemble_batch_range(std::span<const GlobalIndex>(cell_ids.data() + run_begin,
+                                                                  run_end - run_begin));
+                run_begin = run_end;
+            }
+            return;
+        }
+
+        // Higher-throughput path: globally group by topology when stable
+        // insertion order is explicitly relaxed.
+        std::vector<std::pair<ElementType, std::vector<GlobalIndex>>> topology_groups;
+        for (const auto cell_id : cell_ids) {
+            const auto cell_type = mesh.getCellType(cell_id);
+            auto it = std::find_if(topology_groups.begin(), topology_groups.end(),
+                                   [&](const auto& group) { return group.first == cell_type; });
+            if (it == topology_groups.end()) {
+                topology_groups.emplace_back(cell_type, std::vector<GlobalIndex>{});
+                it = topology_groups.end() - 1;
+            }
+            it->second.push_back(cell_id);
+        }
+
+        for (const auto& group : topology_groups) {
+            assemble_batch_range(std::span<const GlobalIndex>(group.second));
+        }
+    };
+
+    withDevirtualizedKernel(kernel, [&](auto& kernel_impl) {
+        assemble_cells_with_kernel(kernel_impl);
     });
 
     auto end_time = std::chrono::steady_clock::now();
@@ -2483,6 +2653,7 @@ void StandardAssembler::prepareContext(
             for (LocalIndex i = 0; i < n_test_dofs; ++i) {
                 const LocalIndex si = test_is_product ? static_cast<LocalIndex>(i % n_test_scalar_dofs) : i;
                 const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
+                const std::size_t idx_phys = static_cast<std::size_t>(q * n_test_dofs + i);
                 scratch_basis_values_[idx] = scalar_values_at_pt[static_cast<std::size_t>(si)];
                 scratch_ref_gradients_[idx] = {
                     scalar_gradients_at_pt[static_cast<std::size_t>(si)][0],
@@ -2497,7 +2668,7 @@ void StandardAssembler::prepareContext(
                         grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
                     }
                 }
-                scratch_phys_gradients_[idx] = grad_phys;
+                scratch_phys_gradients_[idx_phys] = grad_phys;
 
                 if (need_basis_hessians) {
                     AssemblyContext::Matrix3x3 H_ref{};
@@ -2603,6 +2774,7 @@ void StandardAssembler::prepareContext(
                 for (LocalIndex j = 0; j < n_trial_dofs; ++j) {
                     const LocalIndex sj = trial_is_product ? static_cast<LocalIndex>(j % n_trial_scalar_dofs) : j;
                     const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
+                    const std::size_t idx_phys = static_cast<std::size_t>(q * n_trial_dofs + j);
                     trial_basis_values[idx] = scalar_values_at_pt[static_cast<std::size_t>(sj)];
                     trial_ref_gradients[idx] = {
                         scalar_gradients_at_pt[static_cast<std::size_t>(sj)][0],
@@ -2617,7 +2789,7 @@ void StandardAssembler::prepareContext(
                             grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
                         }
                     }
-                    trial_phys_gradients[idx] = grad_phys;
+                    trial_phys_gradients[idx_phys] = grad_phys;
 
                     if (need_basis_hessians) {
                         AssemblyContext::Matrix3x3 H_ref{};
@@ -3178,6 +3350,7 @@ void StandardAssembler::prepareContextFace(
             for (LocalIndex i = 0; i < n_test_dofs; ++i) {
                 const LocalIndex si = test_is_product ? static_cast<LocalIndex>(i % n_test_scalar_dofs) : i;
                 const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
+                const std::size_t idx_phys = static_cast<std::size_t>(q * n_test_dofs + i);
                 scratch_basis_values_[idx] = scalar_values_at_pt[static_cast<std::size_t>(si)];
                 scratch_ref_gradients_[idx] = {
                     scalar_gradients_at_pt[static_cast<std::size_t>(si)][0],
@@ -3192,7 +3365,7 @@ void StandardAssembler::prepareContextFace(
                         grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
                     }
                 }
-                scratch_phys_gradients_[idx] = grad_phys;
+                scratch_phys_gradients_[idx_phys] = grad_phys;
 
                 if (need_basis_hessians) {
                     AssemblyContext::Matrix3x3 H_ref{};
@@ -3299,6 +3472,7 @@ void StandardAssembler::prepareContextFace(
                 for (LocalIndex j = 0; j < n_trial_dofs; ++j) {
                     const LocalIndex sj = trial_is_product ? static_cast<LocalIndex>(j % n_trial_scalar_dofs) : j;
                     const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
+                    const std::size_t idx_phys = static_cast<std::size_t>(q * n_trial_dofs + j);
                     trial_basis_values[idx] = scalar_values_at_pt[static_cast<std::size_t>(sj)];
                     trial_ref_gradients[idx] = {
                         scalar_gradients_at_pt[static_cast<std::size_t>(sj)][0],
@@ -3313,7 +3487,7 @@ void StandardAssembler::prepareContextFace(
                             grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
                         }
                     }
-                    trial_phys_gradients[idx] = grad_phys;
+                    trial_phys_gradients[idx_phys] = grad_phys;
 
                     if (need_basis_hessians) {
                         AssemblyContext::Matrix3x3 H_ref{};

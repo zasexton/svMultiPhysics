@@ -47,16 +47,11 @@ SpaceCache::get(const elements::Element& elem, int poly_order) {
 
         data.num_dofs = ndofs;
         data.num_qpts = nq;
-        data.basis_values.assign(ndofs, std::vector<Real>(nq, Real(0)));
-
-        for (std::size_t q = 0; q < nq; ++q) {
-            FE_CHECK_ARG(q < entry.values.size(), "SpaceCache: BasisCache entry size mismatch");
-            const auto& values = entry.values[q];
-            FE_CHECK_ARG(values.size() == ndofs, "SpaceCache: BasisCache values size mismatch");
-            for (std::size_t i = 0; i < ndofs; ++i) {
-                data.basis_values[i][q] = values[i];
-            }
-        }
+        FE_CHECK_ARG(entry.num_dofs == ndofs, "SpaceCache: BasisCache dof count mismatch");
+        FE_CHECK_ARG(entry.num_qpts == nq, "SpaceCache: BasisCache quadrature size mismatch");
+        FE_CHECK_ARG(entry.scalar_values.size() == ndofs * nq,
+                     "SpaceCache: BasisCache scalar storage size mismatch");
+        data.basis_values = entry.scalar_values;
     }
 
     std::lock_guard<std::mutex> lock(mutex_);

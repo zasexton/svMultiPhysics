@@ -30,12 +30,48 @@
 
 #include "DistributedSparsityPattern.h"
 #include <algorithm>
+#include <iterator>
 #include <sstream>
 #include <numeric>
 
 namespace svmp {
 namespace FE {
 namespace sparsity {
+
+namespace {
+
+inline void sortUnique(std::vector<GlobalIndex>& values) {
+    std::sort(values.begin(), values.end());
+    values.erase(std::unique(values.begin(), values.end()), values.end());
+}
+
+inline void insertSortedUnique(std::vector<GlobalIndex>& row, GlobalIndex col) {
+    auto it = std::lower_bound(row.begin(), row.end(), col);
+    if (it == row.end() || *it != col) {
+        row.insert(it, col);
+    }
+}
+
+inline void unionSortedUniqueInto(std::vector<GlobalIndex>& row,
+                                  const std::vector<GlobalIndex>& add_sorted_unique,
+                                  std::vector<GlobalIndex>& scratch) {
+    if (add_sorted_unique.empty()) {
+        return;
+    }
+    if (row.empty()) {
+        row = add_sorted_unique;
+        return;
+    }
+
+    scratch.clear();
+    scratch.reserve(row.size() + add_sorted_unique.size());
+    std::set_union(row.begin(), row.end(),
+                   add_sorted_unique.begin(), add_sorted_unique.end(),
+                   std::back_inserter(scratch));
+    row.swap(scratch);
+}
+
+} // namespace
 
 // ============================================================================
 // Construction and lifecycle
@@ -147,26 +183,19 @@ DistributedSparsityPattern::DistributedSparsityPattern(const DistributedSparsity
       state_(SparsityState::Building)
 {
     if (other.isFinalized()) {
-        // Reconstruct building data from finalized patterns
-        building_rows_.resize(static_cast<std::size_t>(owned_rows_.size()));
-
-        // Add diagonal entries (convert local cols back to global)
-        for (GlobalIndex local_row = 0; local_row < other.numOwnedRows(); ++local_row) {
-            auto diag_cols = other.getRowDiagCols(local_row);
-            for (GlobalIndex local_col : diag_cols) {
-                GlobalIndex global_col = local_col + other.owned_cols_.first;
-                building_rows_[static_cast<std::size_t>(local_row)].insert(global_col);
-            }
-
-            // Add off-diagonal entries (convert ghost indices to global)
-            auto offdiag_cols = other.getRowOffdiagCols(local_row);
-            for (GlobalIndex ghost_idx : offdiag_cols) {
-                GlobalIndex global_col = other.ghostColToGlobal(ghost_idx);
-                building_rows_[static_cast<std::size_t>(local_row)].insert(global_col);
-            }
-        }
+        building_rows_.clear();
+        diag_pattern_ = other.diag_pattern_;
+        offdiag_pattern_ = other.offdiag_pattern_;
+        ghost_col_map_ = other.ghost_col_map_;
+        global_to_ghost_ = other.global_to_ghost_;
+        state_.store(SparsityState::Finalized, std::memory_order_release);
     } else {
         building_rows_ = other.building_rows_;
+        diag_pattern_ = SparsityPattern();
+        offdiag_pattern_ = SparsityPattern();
+        ghost_col_map_.clear();
+        global_to_ghost_.clear();
+        state_.store(SparsityState::Building, std::memory_order_release);
     }
 }
 
@@ -182,33 +211,20 @@ DistributedSparsityPattern& DistributedSparsityPattern::operator=(const Distribu
         ghost_row_cols_ = other.ghost_row_cols_;
         global_to_ghost_row_ = other.global_to_ghost_row_;
 
-        // Clear finalized data
-        diag_pattern_ = SparsityPattern();
-        offdiag_pattern_ = SparsityPattern();
-        ghost_col_map_.clear();
-        global_to_ghost_.clear();
-        state_.store(SparsityState::Building, std::memory_order_release);
-
         if (other.isFinalized()) {
-            // Reconstruct building data from finalized patterns
             building_rows_.clear();
-            building_rows_.resize(static_cast<std::size_t>(owned_rows_.size()));
-
-            for (GlobalIndex local_row = 0; local_row < other.numOwnedRows(); ++local_row) {
-                auto diag_cols = other.getRowDiagCols(local_row);
-                for (GlobalIndex local_col : diag_cols) {
-                    GlobalIndex global_col = local_col + other.owned_cols_.first;
-                    building_rows_[static_cast<std::size_t>(local_row)].insert(global_col);
-                }
-
-                auto offdiag_cols = other.getRowOffdiagCols(local_row);
-                for (GlobalIndex ghost_idx : offdiag_cols) {
-                    GlobalIndex global_col = other.ghostColToGlobal(ghost_idx);
-                    building_rows_[static_cast<std::size_t>(local_row)].insert(global_col);
-                }
-            }
+            diag_pattern_ = other.diag_pattern_;
+            offdiag_pattern_ = other.offdiag_pattern_;
+            ghost_col_map_ = other.ghost_col_map_;
+            global_to_ghost_ = other.global_to_ghost_;
+            state_.store(SparsityState::Finalized, std::memory_order_release);
         } else {
             building_rows_ = other.building_rows_;
+            diag_pattern_ = SparsityPattern();
+            offdiag_pattern_ = SparsityPattern();
+            ghost_col_map_.clear();
+            global_to_ghost_.clear();
+            state_.store(SparsityState::Building, std::memory_order_release);
         }
     }
     return *this;
@@ -267,7 +283,7 @@ void DistributedSparsityPattern::addEntry(GlobalIndex global_row, GlobalIndex gl
                  "Column index out of range");
 
     GlobalIndex local_row = global_row - owned_rows_.first;
-    building_rows_[static_cast<std::size_t>(local_row)].insert(global_col);
+    insertSortedUnique(building_rows_[static_cast<std::size_t>(local_row)], global_col);
 }
 
 void DistributedSparsityPattern::addEntries(GlobalIndex global_row,
@@ -276,29 +292,37 @@ void DistributedSparsityPattern::addEntries(GlobalIndex global_row,
     checkOwnedRow(global_row);
 
     GlobalIndex local_row = global_row - owned_rows_.first;
-    auto& row_set = building_rows_[static_cast<std::size_t>(local_row)];
-
+    std::vector<GlobalIndex> cols_sorted;
+    cols_sorted.reserve(global_cols.size());
     for (GlobalIndex col : global_cols) {
         FE_CHECK_ARG(col >= 0 && col < global_cols_, "Column index out of range");
-        row_set.insert(col);
+        cols_sorted.push_back(col);
     }
+    sortUnique(cols_sorted);
+
+    std::vector<GlobalIndex> scratch;
+    unionSortedUniqueInto(building_rows_[static_cast<std::size_t>(local_row)], cols_sorted, scratch);
 }
 
 void DistributedSparsityPattern::addElementCouplings(std::span<const GlobalIndex> global_dofs) {
     checkNotFinalized();
 
+    std::vector<GlobalIndex> cols_sorted;
+    cols_sorted.reserve(global_dofs.size());
+    for (GlobalIndex col_dof : global_dofs) {
+        if (col_dof >= 0 && col_dof < global_cols_) {
+            cols_sorted.push_back(col_dof);
+        }
+    }
+    sortUnique(cols_sorted);
+
+    std::vector<GlobalIndex> scratch;
     for (GlobalIndex row_dof : global_dofs) {
         // Only add entries for owned rows
         if (!owned_rows_.contains(row_dof)) continue;
 
         GlobalIndex local_row = row_dof - owned_rows_.first;
-        auto& row_set = building_rows_[static_cast<std::size_t>(local_row)];
-
-        for (GlobalIndex col_dof : global_dofs) {
-            if (col_dof >= 0 && col_dof < global_cols_) {
-                row_set.insert(col_dof);
-            }
-        }
+        unionSortedUniqueInto(building_rows_[static_cast<std::size_t>(local_row)], cols_sorted, scratch);
     }
 }
 
@@ -306,17 +330,21 @@ void DistributedSparsityPattern::addElementCouplings(std::span<const GlobalIndex
                                                      std::span<const GlobalIndex> col_dofs) {
     checkNotFinalized();
 
+    std::vector<GlobalIndex> cols_sorted;
+    cols_sorted.reserve(col_dofs.size());
+    for (GlobalIndex col_dof : col_dofs) {
+        if (col_dof >= 0 && col_dof < global_cols_) {
+            cols_sorted.push_back(col_dof);
+        }
+    }
+    sortUnique(cols_sorted);
+
+    std::vector<GlobalIndex> scratch;
     for (GlobalIndex row_dof : row_dofs) {
         if (!owned_rows_.contains(row_dof)) continue;
 
         GlobalIndex local_row = row_dof - owned_rows_.first;
-        auto& row_set = building_rows_[static_cast<std::size_t>(local_row)];
-
-        for (GlobalIndex col_dof : col_dofs) {
-            if (col_dof >= 0 && col_dof < global_cols_) {
-                row_set.insert(col_dof);
-            }
-        }
+        unionSortedUniqueInto(building_rows_[static_cast<std::size_t>(local_row)], cols_sorted, scratch);
     }
 }
 
@@ -328,7 +356,7 @@ void DistributedSparsityPattern::ensureDiagonal() {
         GlobalIndex global_row = local_row + owned_rows_.first;
         // Only add diagonal if this column exists
         if (global_row < global_cols_) {
-            building_rows_[static_cast<std::size_t>(local_row)].insert(global_row);
+            insertSortedUnique(building_rows_[static_cast<std::size_t>(local_row)], global_row);
         }
     }
 }
@@ -341,11 +369,11 @@ void DistributedSparsityPattern::ensureNonEmptyRows() {
             GlobalIndex global_row = local_row + owned_rows_.first;
             // Add diagonal for square, or first owned column, or column 0
             if (global_row < global_cols_) {
-                building_rows_[static_cast<std::size_t>(local_row)].insert(global_row);
+                building_rows_[static_cast<std::size_t>(local_row)].push_back(global_row);
             } else if (owned_cols_.size() > 0) {
-                building_rows_[static_cast<std::size_t>(local_row)].insert(owned_cols_.first);
+                building_rows_[static_cast<std::size_t>(local_row)].push_back(owned_cols_.first);
             } else if (global_cols_ > 0) {
-                building_rows_[static_cast<std::size_t>(local_row)].insert(0);
+                building_rows_[static_cast<std::size_t>(local_row)].push_back(0);
             }
         }
     }
@@ -358,17 +386,18 @@ void DistributedSparsityPattern::finalize() {
     GlobalIndex n_owned_cols = numOwnedCols();
 
     // Step 1: Collect all ghost columns (columns not in owned range)
-    std::set<GlobalIndex> ghost_cols_set;
-    for (const auto& row_set : building_rows_) {
-        for (GlobalIndex col : row_set) {
+    std::vector<GlobalIndex> ghost_cols;
+    for (const auto& row_cols : building_rows_) {
+        for (GlobalIndex col : row_cols) {
             if (!owned_cols_.contains(col)) {
-                ghost_cols_set.insert(col);
+                ghost_cols.push_back(col);
             }
         }
     }
+    sortUnique(ghost_cols);
 
     // Step 2: Build ghost column map (sorted for determinism)
-    ghost_col_map_.assign(ghost_cols_set.begin(), ghost_cols_set.end());
+    ghost_col_map_ = std::move(ghost_cols);
     GlobalIndex n_ghost_cols = static_cast<GlobalIndex>(ghost_col_map_.size());
 
     // Build reverse map
@@ -383,9 +412,9 @@ void DistributedSparsityPattern::finalize() {
 
     // Step 4: Classify entries into diag/offdiag patterns
     for (GlobalIndex local_row = 0; local_row < n_owned_rows; ++local_row) {
-        const auto& row_set = building_rows_[static_cast<std::size_t>(local_row)];
+        const auto& row_cols = building_rows_[static_cast<std::size_t>(local_row)];
 
-        for (GlobalIndex global_col : row_set) {
+        for (GlobalIndex global_col : row_cols) {
             if (owned_cols_.contains(global_col)) {
                 // Diagonal entry: convert global col to local col
                 GlobalIndex local_col = global_col - owned_cols_.first;
@@ -638,8 +667,8 @@ bool DistributedSparsityPattern::hasEntry(GlobalIndex global_row, GlobalIndex gl
             return offdiag_pattern_.hasEntry(local_row, ghost_idx);
         }
     } else {
-        const auto& row_set = building_rows_[static_cast<std::size_t>(local_row)];
-        return row_set.find(global_col) != row_set.end();
+        const auto& row_cols = building_rows_[static_cast<std::size_t>(local_row)];
+        return std::binary_search(row_cols.begin(), row_cols.end(), global_col);
     }
 }
 
@@ -883,9 +912,9 @@ std::size_t DistributedSparsityPattern::memoryUsageBytes() const noexcept {
         bytes += ghost_row_cols_.capacity() * sizeof(GlobalIndex);
         bytes += global_to_ghost_row_.size() * (sizeof(GlobalIndex) * 2 + 32);
     } else {
-        bytes += building_rows_.capacity() * sizeof(std::set<GlobalIndex>);
-        for (const auto& row_set : building_rows_) {
-            bytes += row_set.size() * (sizeof(GlobalIndex) + 40);  // ~40 bytes per set node
+        bytes += building_rows_.capacity() * sizeof(std::vector<GlobalIndex>);
+        for (const auto& row_cols : building_rows_) {
+            bytes += row_cols.capacity() * sizeof(GlobalIndex);
         }
     }
 

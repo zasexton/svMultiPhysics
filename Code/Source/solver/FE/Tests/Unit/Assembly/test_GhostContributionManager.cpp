@@ -515,6 +515,12 @@ TEST(GhostContributionManagerBufferTest, NonContiguousDofRangesBufferedCorrectly
 
 #if FE_HAS_MPI
 TEST(GhostContributionManagerMPITest, TwoRankGhostExchange) {
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (!mpi_initialized) {
+        GTEST_SKIP() << "MPI not initialized";
+    }
+
     int rank = 0;
     int size = 1;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -596,6 +602,12 @@ TEST(GhostContributionManagerMPITest, TwoRankGhostExchange) {
 }
 
 TEST(GhostContributionManagerMPITest, MultiRankGhostExchange) {
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (!mpi_initialized) {
+        GTEST_SKIP() << "MPI not initialized";
+    }
+
     int rank = 0;
     int size = 1;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -657,6 +669,12 @@ TEST(GhostContributionManagerMPITest, MultiRankGhostExchange) {
 }
 
 TEST(GhostContributionManagerMPITest, LargeMessageHandling) {
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (!mpi_initialized) {
+        GTEST_SKIP() << "MPI not initialized";
+    }
+
     int size = 1;
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     if (size < 2) {

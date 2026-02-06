@@ -69,6 +69,7 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
     hashMix(h, hashBool(opt.enable_symmetry_lowering));
     hashMix(h, hashBool(opt.enable_optimal_contraction_order));
     hashMix(h, hashBool(opt.enable_vectorization_hints));
+    hashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(opt.preferred_vector_width)));
     hashMix(h, hashBool(opt.enable_delta_shortcuts));
     hashMix(h, opt.scalar_expansion_term_threshold);
 

@@ -31,7 +31,6 @@
 #include "SparsityOps.h"
 #include <algorithm>
 #include <unordered_set>
-#include <set>
 #include <numeric>
 
 namespace svmp {
@@ -421,7 +420,7 @@ SparsityPattern multiplyPatterns(const SparsityPattern& a, const SparsityPattern
 
     // For each row of A
     for (GlobalIndex i = 0; i < a.numRows(); ++i) {
-        std::set<GlobalIndex> result_cols;
+        std::vector<GlobalIndex> result_cols;
 
         // For each k where A[i,k] is non-zero
         if (a.isFinalized()) {
@@ -429,12 +428,12 @@ SparsityPattern multiplyPatterns(const SparsityPattern& a, const SparsityPattern
                 // Add all j where B[k,j] is non-zero
                 if (b.isFinalized()) {
                     for (GlobalIndex j : b.getRowSpan(k)) {
-                        result_cols.insert(j);
+                        result_cols.push_back(j);
                     }
                 } else {
                     for (GlobalIndex j = 0; j < b.numCols(); ++j) {
                         if (b.hasEntry(k, j)) {
-                            result_cols.insert(j);
+                            result_cols.push_back(j);
                         }
                     }
                 }
@@ -444,18 +443,21 @@ SparsityPattern multiplyPatterns(const SparsityPattern& a, const SparsityPattern
                 if (a.hasEntry(i, k)) {
                     if (b.isFinalized()) {
                         for (GlobalIndex j : b.getRowSpan(k)) {
-                            result_cols.insert(j);
+                            result_cols.push_back(j);
                         }
                     } else {
                         for (GlobalIndex j = 0; j < b.numCols(); ++j) {
                             if (b.hasEntry(k, j)) {
-                                result_cols.insert(j);
+                                result_cols.push_back(j);
                             }
                         }
                     }
                 }
             }
         }
+
+        std::sort(result_cols.begin(), result_cols.end());
+        result_cols.erase(std::unique(result_cols.begin(), result_cols.end()), result_cols.end());
 
         for (GlobalIndex j : result_cols) {
             result.addEntry(i, j);

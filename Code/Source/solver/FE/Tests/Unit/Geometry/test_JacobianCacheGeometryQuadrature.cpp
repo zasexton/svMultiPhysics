@@ -66,6 +66,76 @@ public:
     }
 };
 
+class CountingAffineLineMapping final : public GeometryMapping {
+public:
+    ElementType element_type() const noexcept override { return ElementType::Line2; }
+    int dimension() const noexcept override { return 1; }
+    std::size_t num_nodes() const noexcept override { return nodes_.size(); }
+    const std::vector<math::Vector<Real, 3>>& nodes() const noexcept override { return nodes_; }
+    bool isAffine() const noexcept override { return true; }
+
+    math::Vector<Real, 3> map_to_physical(const math::Vector<Real, 3>& xi) const override {
+        return math::Vector<Real, 3>{xi[0], Real(0), Real(0)};
+    }
+
+    math::Vector<Real, 3> map_to_reference(const math::Vector<Real, 3>& x_phys,
+                                           const math::Vector<Real, 3>&) const override {
+        return math::Vector<Real, 3>{x_phys[0], Real(0), Real(0)};
+    }
+
+    math::Matrix<Real, 3, 3> jacobian(const math::Vector<Real, 3>&) const override {
+        ++jacobian_calls;
+        math::Matrix<Real, 3, 3> J{};
+        J(0, 0) = Real(1);
+        J(1, 1) = Real(1);
+        J(2, 2) = Real(1);
+        return J;
+    }
+
+    mutable int jacobian_calls{0};
+
+private:
+    std::vector<math::Vector<Real, 3>> nodes_{
+        {Real(0), Real(0), Real(0)},
+        {Real(1), Real(0), Real(0)},
+    };
+};
+
+class CountingNonAffineLineMapping final : public GeometryMapping {
+public:
+    ElementType element_type() const noexcept override { return ElementType::Line2; }
+    int dimension() const noexcept override { return 1; }
+    std::size_t num_nodes() const noexcept override { return nodes_.size(); }
+    const std::vector<math::Vector<Real, 3>>& nodes() const noexcept override { return nodes_; }
+
+    math::Vector<Real, 3> map_to_physical(const math::Vector<Real, 3>& xi) const override {
+        const Real x = xi[0];
+        return math::Vector<Real, 3>{x + Real(0.5) * x * x, Real(0), Real(0)};
+    }
+
+    math::Vector<Real, 3> map_to_reference(const math::Vector<Real, 3>& x_phys,
+                                           const math::Vector<Real, 3>&) const override {
+        return math::Vector<Real, 3>{x_phys[0], Real(0), Real(0)};
+    }
+
+    math::Matrix<Real, 3, 3> jacobian(const math::Vector<Real, 3>& xi) const override {
+        ++jacobian_calls;
+        math::Matrix<Real, 3, 3> J{};
+        J(0, 0) = Real(1) + xi[0];
+        J(1, 1) = Real(1);
+        J(2, 2) = Real(1);
+        return J;
+    }
+
+    mutable int jacobian_calls{0};
+
+private:
+    std::vector<math::Vector<Real, 3>> nodes_{
+        {Real(0), Real(0), Real(0)},
+        {Real(1), Real(0), Real(0)},
+    };
+};
+
 } // namespace
 
 TEST(JacobianCache, DistinctQuadratureRulesDoNotCollide) {
@@ -94,6 +164,28 @@ TEST(JacobianCache, DistinctQuadratureRulesDoNotCollide) {
 
     EXPECT_NE(&a, &b);
     EXPECT_EQ(cache.size(), 2u);
+}
+
+TEST(JacobianCache, AffineMappingComputesJacobianOnce) {
+    CountingAffineLineMapping map;
+    quadrature::GaussQuadrature1D quad(4);
+    auto& cache = JacobianCache::instance();
+    cache.clear();
+
+    const auto& entry = cache.get_or_compute(map, quad);
+    ASSERT_EQ(entry.J.size(), quad.num_points());
+    EXPECT_EQ(map.jacobian_calls, 1);
+}
+
+TEST(JacobianCache, NonAffineMappingComputesJacobianPerQuadraturePoint) {
+    CountingNonAffineLineMapping map;
+    quadrature::GaussQuadrature1D quad(4);
+    auto& cache = JacobianCache::instance();
+    cache.clear();
+
+    const auto& entry = cache.get_or_compute(map, quad);
+    ASSERT_EQ(entry.J.size(), quad.num_points());
+    EXPECT_EQ(map.jacobian_calls, static_cast<int>(quad.num_points()));
 }
 
 TEST(JacobianCache, QuadIdentityEntriesAndInverse) {

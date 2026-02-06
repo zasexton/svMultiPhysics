@@ -15,9 +15,11 @@
 
 #include "BasisFunction.h"
 #include "Quadrature/QuadratureRule.h"
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <typeindex>
 #include <unordered_map>
 
@@ -62,10 +64,22 @@ struct BasisCacheKeyHash {
 };
 
 struct BasisCacheEntry {
-    std::vector<std::vector<Real>> values;
+    std::size_t num_qpts{0};
+    std::size_t num_dofs{0};
+    // Scalar basis values in dof-major SoA layout: [dof * num_qpts + qp].
+    std::vector<Real> scalar_values;
     std::vector<std::vector<Gradient>> gradients;
     std::vector<std::vector<Hessian>> hessians;
     std::vector<std::vector<math::Vector<Real,3>>> vector_values;
+
+    [[nodiscard]] Real scalarValue(std::size_t dof, std::size_t qp) const noexcept {
+        return scalar_values[dof * num_qpts + qp];
+    }
+
+    [[nodiscard]] std::span<const Real> scalarValuesForDof(std::size_t dof) const noexcept {
+        if (num_qpts == 0) return {};
+        return std::span<const Real>(scalar_values.data() + dof * num_qpts, num_qpts);
+    }
 };
 
 class BasisCache {

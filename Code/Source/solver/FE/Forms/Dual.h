@@ -10,9 +10,11 @@
  */
 
 #include "Core/Types.h"
+#include "Core/AlignedAllocator.h"
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cmath>
 #include <vector>
 #include <span>
@@ -20,6 +22,16 @@
 namespace svmp {
 namespace FE {
 namespace forms {
+
+inline constexpr std::size_t kDualDerivativeAlignmentBytes = 64u;
+
+#if defined(__clang__)
+#define SVMP_DUAL_VECTORIZE _Pragma("clang loop vectorize(enable)")
+#elif defined(__GNUC__)
+#define SVMP_DUAL_VECTORIZE _Pragma("GCC ivdep")
+#else
+#define SVMP_DUAL_VECTORIZE
+#endif
 
 /**
  * @brief Forward-mode dual number with externally managed derivative storage
@@ -44,6 +56,7 @@ public:
         if (num_dofs != num_dofs_) {
             blocks_.clear();
             num_dofs_ = num_dofs;
+            stride_ = paddedStride(num_dofs_);
         }
         block_index_ = 0;
         offset_ = 0;
@@ -64,12 +77,12 @@ public:
         }
 
         auto& block = blocks_[block_index_];
-        if (offset_ + num_dofs_ > block.size()) {
+        if (offset_ + stride_ > block.size()) {
             ++block_index_;
             offset_ = 0;
 
             if (block_index_ >= blocks_.size()) {
-                const auto prev_slots = blocks_.back().size() / num_dofs_;
+                const auto prev_slots = blocks_.back().size() / stride_;
                 const auto next_slots = std::max(prev_slots * 2, kInitialSlots);
                 allocateBlock(next_slots);
             }
@@ -77,20 +90,33 @@ public:
 
         auto& current = blocks_[block_index_];
         auto span = std::span<Real>(current.data() + offset_, num_dofs_);
-        offset_ += num_dofs_;
+        offset_ += stride_;
         return span;
     }
 
 private:
     static constexpr std::size_t kInitialSlots = 64;
+    using AlignedRealVector = std::vector<Real, AlignedAllocator<Real, kDualDerivativeAlignmentBytes>>;
+
+    [[nodiscard]] static std::size_t paddedStride(std::size_t num_dofs) noexcept
+    {
+        if (num_dofs == 0u) return 0u;
+        constexpr std::size_t reals_per_alignment =
+            (kDualDerivativeAlignmentBytes / sizeof(Real)) > 0u
+                ? (kDualDerivativeAlignmentBytes / sizeof(Real))
+                : 1u;
+        const auto blocks = (num_dofs + reals_per_alignment - 1u) / reals_per_alignment;
+        return blocks * reals_per_alignment;
+    }
 
     void allocateBlock(std::size_t slots)
     {
-        blocks_.emplace_back(std::vector<Real>(slots * num_dofs_));
+        blocks_.emplace_back(AlignedRealVector(slots * stride_, 0.0));
     }
 
-    std::vector<std::vector<Real>> blocks_{};
+    std::vector<AlignedRealVector> blocks_{};
     std::size_t num_dofs_{0};
+    std::size_t stride_{0};
     std::size_t block_index_{0};
     std::size_t offset_{0};
 };
@@ -114,6 +140,7 @@ inline Dual makeDualConstant(Real value, std::span<Real> deriv) {
 inline Dual add(const Dual& a, const Dual& b, Dual out) {
     out.value = a.value + b.value;
     const std::size_t n = out.deriv.size();
+    SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = a.deriv[k] + b.deriv[k];
     }
@@ -123,6 +150,7 @@ inline Dual add(const Dual& a, const Dual& b, Dual out) {
 inline Dual sub(const Dual& a, const Dual& b, Dual out) {
     out.value = a.value - b.value;
     const std::size_t n = out.deriv.size();
+    SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = a.deriv[k] - b.deriv[k];
     }
@@ -132,6 +160,7 @@ inline Dual sub(const Dual& a, const Dual& b, Dual out) {
 inline Dual mul(const Dual& a, const Dual& b, Dual out) {
     out.value = a.value * b.value;
     const std::size_t n = out.deriv.size();
+    SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = a.deriv[k] * b.value + a.value * b.deriv[k];
     }
@@ -141,6 +170,7 @@ inline Dual mul(const Dual& a, const Dual& b, Dual out) {
 inline Dual mul(const Dual& a, Real b, Dual out) {
     out.value = a.value * b;
     const std::size_t n = out.deriv.size();
+    SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = a.deriv[k] * b;
     }
@@ -154,6 +184,7 @@ inline Dual mul(Real a, const Dual& b, Dual out) {
 inline Dual neg(const Dual& a, Dual out) {
     out.value = -a.value;
     const std::size_t n = out.deriv.size();
+    SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = -a.deriv[k];
     }
@@ -164,6 +195,7 @@ inline Dual copy(const Dual& a, Dual out)
 {
     out.value = a.value;
     const std::size_t n = out.deriv.size();
+    SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = a.deriv[k];
     }
@@ -176,6 +208,7 @@ inline Dual div(const Dual& a, const Dual& b, Dual out)
     const Real inv_b = 1.0 / b.value;
     const Real inv_b2 = inv_b * inv_b;
     const std::size_t n = out.deriv.size();
+    SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = (a.deriv[k] * b.value - a.value * b.deriv[k]) * inv_b2;
     }
@@ -187,6 +220,7 @@ inline Dual div(const Dual& a, Real b, Dual out)
     out.value = a.value / b;
     const Real inv_b = 1.0 / b;
     const std::size_t n = out.deriv.size();
+    SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = a.deriv[k] * inv_b;
     }
@@ -199,6 +233,7 @@ inline Dual div(Real a, const Dual& b, Dual out)
     const Real inv_b = 1.0 / b.value;
     const Real inv_b2 = inv_b * inv_b;
     const std::size_t n = out.deriv.size();
+    SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = (-a) * b.deriv[k] * inv_b2;
     }
@@ -225,6 +260,7 @@ inline Dual sqrt(const Dual& a, Dual out)
     out.value = std::sqrt(a.value);
     const Real denom = (out.value != 0.0) ? (2.0 * out.value) : 1.0;
     const std::size_t n = out.deriv.size();
+    SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = a.deriv[k] / denom;
     }
@@ -235,6 +271,7 @@ inline Dual exp(const Dual& a, Dual out)
 {
     out.value = std::exp(a.value);
     const std::size_t n = out.deriv.size();
+    SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = out.value * a.deriv[k];
     }
@@ -246,6 +283,7 @@ inline Dual log(const Dual& a, Dual out)
     out.value = std::log(a.value);
     const Real inv = 1.0 / a.value;
     const std::size_t n = out.deriv.size();
+    SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = a.deriv[k] * inv;
     }
@@ -263,6 +301,7 @@ inline Dual pow(const Dual& a, const Dual& b, Dual out)
     const Real inv_a = 1.0 / a.value;
     const Real log_a = std::log(a.value);
     const std::size_t n = out.deriv.size();
+    SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = out.value * (b.deriv[k] * log_a + b.value * a.deriv[k] * inv_a);
     }
@@ -278,11 +317,14 @@ inline Dual pow(const Dual& a, Real b, Dual out)
         return out;
     }
     const Real scale = b * std::pow(a.value, b - 1.0);
+    SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = scale * a.deriv[k];
     }
     return out;
 }
+
+#undef SVMP_DUAL_VECTORIZE
 
 } // namespace forms
 } // namespace FE

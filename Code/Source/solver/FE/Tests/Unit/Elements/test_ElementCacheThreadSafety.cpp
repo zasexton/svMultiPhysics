@@ -49,8 +49,12 @@ TEST(ElementCacheThreadSafety, ConcurrentGetAndBatchGet) {
                 ok.store(false, std::memory_order_relaxed);
                 return;
             }
-            if (!entry.basis->values.empty() &&
-                entry.basis->values[0].size() != quad->num_points()) {
+            if (entry.basis->num_qpts != quad->num_points()) {
+                ok.store(false, std::memory_order_relaxed);
+                return;
+            }
+            if (entry.basis->num_dofs > 0 &&
+                entry.basis->scalarValuesForDof(0).size() != quad->num_points()) {
                 ok.store(false, std::memory_order_relaxed);
                 return;
             }

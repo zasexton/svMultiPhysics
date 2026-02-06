@@ -736,4 +736,33 @@ TEST(LoopStructure, EvaluatesSymmetricOutputInPackedForm)
     EXPECT_NEAR(out[5], 9.0, 1e-12); // (2,2)
 }
 
+TEST(LoopStructure, IncrementalLoweringUsesCSEAwareTermEstimate)
+{
+    const auto A = FormExpr::asVector({FormExpr::constant(1.0), FormExpr::constant(2.0), FormExpr::constant(3.0)});
+    const auto B = FormExpr::asVector({FormExpr::constant(4.0), FormExpr::constant(5.0), FormExpr::constant(6.0)});
+
+    forms::Index i("i");
+    forms::Index j("j");
+
+    const auto expr = (A(i) * B(i)) + (A(j) * B(j));
+
+    LoopStructureOptions no_cse;
+    no_cse.scalar_expansion_term_threshold = 5u;
+    no_cse.enable_cse_term_estimation = false;
+    const auto raw = lowerTensorExpressionIncremental(expr, no_cse);
+    ASSERT_TRUE(raw.ok);
+    EXPECT_TRUE(raw.preferred_loop_nest);
+    EXPECT_EQ(raw.decision_reason, "threshold");
+    EXPECT_GT(raw.estimated_scalar_terms, no_cse.scalar_expansion_term_threshold);
+
+    LoopStructureOptions with_cse = no_cse;
+    with_cse.enable_cse_term_estimation = true;
+    with_cse.cse_options.min_subtree_nodes = 1u;
+    const auto reduced = lowerTensorExpressionIncremental(expr, with_cse);
+    ASSERT_TRUE(reduced.ok);
+    EXPECT_FALSE(reduced.preferred_loop_nest);
+    EXPECT_EQ(reduced.decision_reason, "cse");
+    EXPECT_LT(reduced.estimated_scalar_terms, raw.estimated_scalar_terms);
+}
+
 } // namespace svmp::FE::forms::tensor

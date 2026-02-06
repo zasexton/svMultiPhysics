@@ -105,10 +105,10 @@ public:
         // Physical gradients = Jinv^T * ref_grad
         // For our case: phys_grad = 2 * ref_grad
         std::vector<AssemblyContext::Vector3D> phys_grads(n_dofs * n_qpts);
-        for (LocalIndex i = 0; i < n_dofs; ++i) {
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            for (LocalIndex i = 0; i < n_dofs; ++i) {
                 auto& rg = ref_grads[i * n_qpts + q];
-                phys_grads[i * n_qpts + q] = {2.0 * rg[0], 2.0 * rg[1], 0.0};
+                phys_grads[q * n_dofs + i] = {2.0 * rg[0], 2.0 * rg[1], 0.0};
             }
         }
 
@@ -365,6 +365,39 @@ TEST_F(MassKernelTest, WithCoefficient) {
     }
 }
 
+TEST_F(MassKernelTest, ComputeCellBatchMatchesScalar)
+{
+    MassKernel kernel;
+    EXPECT_TRUE(kernel.supportsCellBatch());
+
+    AssemblyContext ctx2;
+    ctx2.reserve(10, 10, 2);
+    TestContextHelper::setupUnitSquareP1(ctx2);
+
+    KernelOutput scalar_0;
+    KernelOutput scalar_1;
+    kernel.computeCell(ctx_, scalar_0);
+    kernel.computeCell(ctx2, scalar_1);
+
+    std::vector<const AssemblyContext*> contexts = {&ctx_, &ctx2};
+    std::vector<KernelOutput> batched(2);
+    kernel.computeCellBatch(contexts, batched);
+
+    ASSERT_TRUE(batched[0].has_matrix);
+    ASSERT_TRUE(batched[1].has_matrix);
+    ASSERT_EQ(batched[0].n_test_dofs, scalar_0.n_test_dofs);
+    ASSERT_EQ(batched[0].n_trial_dofs, scalar_0.n_trial_dofs);
+    ASSERT_EQ(batched[1].n_test_dofs, scalar_1.n_test_dofs);
+    ASSERT_EQ(batched[1].n_trial_dofs, scalar_1.n_trial_dofs);
+
+    for (LocalIndex i = 0; i < scalar_0.n_test_dofs; ++i) {
+        for (LocalIndex j = 0; j < scalar_0.n_trial_dofs; ++j) {
+            EXPECT_NEAR(batched[0].matrixEntry(i, j), scalar_0.matrixEntry(i, j), 1e-12);
+            EXPECT_NEAR(batched[1].matrixEntry(i, j), scalar_1.matrixEntry(i, j), 1e-12);
+        }
+    }
+}
+
 // ============================================================================
 // StiffnessKernel Tests
 // ============================================================================
@@ -421,6 +454,35 @@ TEST_F(StiffnessKernelTest, ComputeCell) {
     }
 }
 
+TEST_F(StiffnessKernelTest, ComputeCellBatchMatchesScalar)
+{
+    StiffnessKernel kernel;
+    EXPECT_TRUE(kernel.supportsCellBatch());
+
+    AssemblyContext ctx2;
+    ctx2.reserve(10, 10, 2);
+    TestContextHelper::setupUnitSquareP1(ctx2);
+
+    KernelOutput scalar_0;
+    KernelOutput scalar_1;
+    kernel.computeCell(ctx_, scalar_0);
+    kernel.computeCell(ctx2, scalar_1);
+
+    std::vector<const AssemblyContext*> contexts = {&ctx_, &ctx2};
+    std::vector<KernelOutput> batched(2);
+    kernel.computeCellBatch(contexts, batched);
+
+    ASSERT_TRUE(batched[0].has_matrix);
+    ASSERT_TRUE(batched[1].has_matrix);
+
+    for (LocalIndex i = 0; i < scalar_0.n_test_dofs; ++i) {
+        for (LocalIndex j = 0; j < scalar_0.n_trial_dofs; ++j) {
+            EXPECT_NEAR(batched[0].matrixEntry(i, j), scalar_0.matrixEntry(i, j), 1e-12);
+            EXPECT_NEAR(batched[1].matrixEntry(i, j), scalar_1.matrixEntry(i, j), 1e-12);
+        }
+    }
+}
+
 // ============================================================================
 // SourceKernel Tests
 // ============================================================================
@@ -467,6 +529,32 @@ TEST_F(SourceKernelTest, FunctionSource) {
         total += output.vectorEntry(i);
     }
     EXPECT_NEAR(total, 0.5, 1e-10);
+}
+
+TEST_F(SourceKernelTest, ComputeCellBatchMatchesScalar)
+{
+    SourceKernel kernel([](Real x, Real y, Real) { return 2.0 * x + y; });
+    EXPECT_TRUE(kernel.supportsCellBatch());
+
+    AssemblyContext ctx2;
+    ctx2.reserve(10, 10, 2);
+    TestContextHelper::setupUnitSquareP1(ctx2);
+
+    KernelOutput scalar_0;
+    KernelOutput scalar_1;
+    kernel.computeCell(ctx_, scalar_0);
+    kernel.computeCell(ctx2, scalar_1);
+
+    std::vector<const AssemblyContext*> contexts = {&ctx_, &ctx2};
+    std::vector<KernelOutput> batched(2);
+    kernel.computeCellBatch(contexts, batched);
+
+    ASSERT_TRUE(batched[0].has_vector);
+    ASSERT_TRUE(batched[1].has_vector);
+    for (LocalIndex i = 0; i < scalar_0.n_test_dofs; ++i) {
+        EXPECT_NEAR(batched[0].vectorEntry(i), scalar_0.vectorEntry(i), 1e-12);
+        EXPECT_NEAR(batched[1].vectorEntry(i), scalar_1.vectorEntry(i), 1e-12);
+    }
 }
 
 // ============================================================================
@@ -521,6 +609,39 @@ TEST_F(PoissonKernelTest, EquivalentToSeparateKernels) {
     }
 }
 
+TEST_F(PoissonKernelTest, ComputeCellBatchMatchesScalar)
+{
+    PoissonKernel kernel([](Real x, Real y, Real) { return x + 0.5 * y; });
+    EXPECT_TRUE(kernel.supportsCellBatch());
+
+    AssemblyContext ctx2;
+    ctx2.reserve(10, 10, 2);
+    TestContextHelper::setupUnitSquareP1(ctx2);
+
+    KernelOutput scalar_0;
+    KernelOutput scalar_1;
+    kernel.computeCell(ctx_, scalar_0);
+    kernel.computeCell(ctx2, scalar_1);
+
+    std::vector<const AssemblyContext*> contexts = {&ctx_, &ctx2};
+    std::vector<KernelOutput> batched(2);
+    kernel.computeCellBatch(contexts, batched);
+
+    ASSERT_TRUE(batched[0].has_matrix);
+    ASSERT_TRUE(batched[0].has_vector);
+    ASSERT_TRUE(batched[1].has_matrix);
+    ASSERT_TRUE(batched[1].has_vector);
+
+    for (LocalIndex i = 0; i < scalar_0.n_test_dofs; ++i) {
+        EXPECT_NEAR(batched[0].vectorEntry(i), scalar_0.vectorEntry(i), 1e-12);
+        EXPECT_NEAR(batched[1].vectorEntry(i), scalar_1.vectorEntry(i), 1e-12);
+        for (LocalIndex j = 0; j < scalar_0.n_trial_dofs; ++j) {
+            EXPECT_NEAR(batched[0].matrixEntry(i, j), scalar_0.matrixEntry(i, j), 1e-12);
+            EXPECT_NEAR(batched[1].matrixEntry(i, j), scalar_1.matrixEntry(i, j), 1e-12);
+        }
+    }
+}
+
 // ============================================================================
 // CompositeKernel Tests
 // ============================================================================
@@ -569,6 +690,49 @@ TEST(CompositeKernelTest, ThreeSubKernelsMassStiffnessSource) {
             EXPECT_NEAR(out_comp.matrixEntry(i, j), expected, 1e-12);
         }
         EXPECT_NEAR(out_comp.vectorEntry(i), out_src.vectorEntry(i), 1e-12);
+    }
+}
+
+TEST(CompositeKernelTest, ComputeCellBatchMatchesScalar)
+{
+    AssemblyContext ctx0;
+    ctx0.reserve(10, 10, 2);
+    TestContextHelper::setupUnitSquareP1(ctx0);
+
+    AssemblyContext ctx1;
+    ctx1.reserve(10, 10, 2);
+    TestContextHelper::setupUnitSquareP1(ctx1);
+
+    auto mass = std::make_shared<MassKernel>(0.75);
+    auto stiffness = std::make_shared<StiffnessKernel>(1.25);
+    auto source = std::make_shared<SourceKernel>([](Real x, Real y, Real) { return 1.0 + x - y; });
+
+    CompositeKernel composite;
+    composite.addKernel(mass, 1.0);
+    composite.addKernel(stiffness, 1.0);
+    composite.addKernel(source, 1.0);
+
+    KernelOutput scalar_0;
+    KernelOutput scalar_1;
+    composite.computeCell(ctx0, scalar_0);
+    composite.computeCell(ctx1, scalar_1);
+
+    std::vector<const AssemblyContext*> contexts = {&ctx0, &ctx1};
+    std::vector<KernelOutput> batched(2);
+    composite.computeCellBatch(contexts, batched);
+
+    ASSERT_TRUE(batched[0].has_matrix);
+    ASSERT_TRUE(batched[0].has_vector);
+    ASSERT_TRUE(batched[1].has_matrix);
+    ASSERT_TRUE(batched[1].has_vector);
+
+    for (LocalIndex i = 0; i < scalar_0.n_test_dofs; ++i) {
+        EXPECT_NEAR(batched[0].vectorEntry(i), scalar_0.vectorEntry(i), 1e-12);
+        EXPECT_NEAR(batched[1].vectorEntry(i), scalar_1.vectorEntry(i), 1e-12);
+        for (LocalIndex j = 0; j < scalar_0.n_trial_dofs; ++j) {
+            EXPECT_NEAR(batched[0].matrixEntry(i, j), scalar_0.matrixEntry(i, j), 1e-12);
+            EXPECT_NEAR(batched[1].matrixEntry(i, j), scalar_1.matrixEntry(i, j), 1e-12);
+        }
     }
 }
 

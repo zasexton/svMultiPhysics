@@ -27,8 +27,9 @@ TEST(BasisCache, ReusesEntries) {
     const auto& entry2 = cache.get_or_compute(basis, quad, true, false);
 
     EXPECT_EQ(&entry1, &entry2);
-    ASSERT_EQ(entry1.values.size(), quad.num_points());
-    ASSERT_EQ(entry1.values.front().size(), basis.size());
+    EXPECT_EQ(entry1.num_qpts, quad.num_points());
+    EXPECT_EQ(entry1.num_dofs, basis.size());
+    ASSERT_EQ(entry1.scalar_values.size(), basis.size() * quad.num_points());
 }
 
 TEST(BasisCache, VectorBasisPopulatesVectorValues) {
@@ -39,10 +40,7 @@ TEST(BasisCache, VectorBasisPopulatesVectorValues) {
     cache.clear();
     const auto& entry = cache.get_or_compute(basis, quad, false, false);
 
-    EXPECT_EQ(entry.values.size(), quad.num_points());
-    for (const auto& v : entry.values) {
-        EXPECT_TRUE(v.empty());
-    }
+    EXPECT_TRUE(entry.scalar_values.empty());
     ASSERT_EQ(entry.vector_values.size(), quad.num_points());
     ASSERT_EQ(entry.vector_values.front().size(), basis.size());
 }
@@ -89,8 +87,8 @@ TEST(BasisCache, DifferentQuadratureYieldsDifferentEntries) {
     const auto& entry3 = cache.get_or_compute(basis, quad3, true, false);
 
     EXPECT_NE(&entry2, &entry3);
-    EXPECT_EQ(entry2.values.size(), quad2.num_points());
-    EXPECT_EQ(entry3.values.size(), quad3.num_points());
+    EXPECT_EQ(entry2.num_qpts, quad2.num_points());
+    EXPECT_EQ(entry3.num_qpts, quad3.num_points());
 }
 
 TEST(BasisCache, ThreadSafetySingleEntryUnderConcurrency) {
@@ -120,7 +118,7 @@ TEST(BasisCache, ThreadSafetySingleEntryUnderConcurrency) {
         EXPECT_EQ(entries[static_cast<std::size_t>(t)], ref);
     }
     EXPECT_EQ(cache.size(), 1u);
-    ASSERT_EQ(ref->values.size(), quad.num_points());
+    ASSERT_EQ(ref->num_qpts, quad.num_points());
 }
 TEST(BasisFactory, CreatesVectorConformingBasis) {
     BasisRequest req{ElementType::Quad4, BasisType::Lagrange, 0, Continuity::H_div, FieldType::Vector};

@@ -263,6 +263,82 @@ TEST(JITKernelArgsPacking, PacksTimeIntegrationStencilsV5)
     EXPECT_EQ(args5.side.history_solution_coefficients[2], ctx.previousSolutionCoefficientsRaw(/*k=*/3).data());
 }
 
+TEST(JITKernelArgsPacking, PacksInterleavedGeometryV6)
+{
+    AssemblyContext ctx;
+    ctx.reserve(/*max_dofs=*/8, /*max_qpts=*/8, /*dim=*/3);
+    setupTwoDofTwoQptScalarContext(ctx);
+
+    std::vector<AssemblyContext::Point3D> phys = {
+        AssemblyContext::Point3D{Real(1.0), Real(2.0), Real(3.0)},
+        AssemblyContext::Point3D{Real(4.0), Real(5.0), Real(6.0)}};
+    ctx.setPhysicalPoints(std::span<const AssemblyContext::Point3D>(phys.data(), phys.size()));
+
+    AssemblyContext::Matrix3x3 J0 = {{
+        {Real(2.0), Real(0.0), Real(0.0)},
+        {Real(0.0), Real(3.0), Real(0.0)},
+        {Real(0.0), Real(0.0), Real(4.0)},
+    }};
+    AssemblyContext::Matrix3x3 J1 = {{
+        {Real(1.5), Real(0.0), Real(0.0)},
+        {Real(0.0), Real(2.5), Real(0.0)},
+        {Real(0.0), Real(0.0), Real(3.5)},
+    }};
+    AssemblyContext::Matrix3x3 J0inv = {{
+        {Real(0.5), Real(0.0), Real(0.0)},
+        {Real(0.0), Real(1.0 / 3.0), Real(0.0)},
+        {Real(0.0), Real(0.0), Real(0.25)},
+    }};
+    AssemblyContext::Matrix3x3 J1inv = {{
+        {Real(2.0 / 3.0), Real(0.0), Real(0.0)},
+        {Real(0.0), Real(0.4), Real(0.0)},
+        {Real(0.0), Real(0.0), Real(2.0 / 7.0)},
+    }};
+
+    std::vector<AssemblyContext::Matrix3x3> J = {J0, J1};
+    std::vector<AssemblyContext::Matrix3x3> Jinv = {J0inv, J1inv};
+    std::vector<Real> detJ = {Real(24.0), Real(13.125)};
+    ctx.setJacobianData(std::span<const AssemblyContext::Matrix3x3>(J.data(), J.size()),
+                        std::span<const AssemblyContext::Matrix3x3>(Jinv.data(), Jinv.size()),
+                        std::span<const Real>(detJ.data(), detJ.size()));
+
+    std::vector<AssemblyContext::Vector3D> normals = {
+        AssemblyContext::Vector3D{Real(0.0), Real(0.0), Real(1.0)},
+        AssemblyContext::Vector3D{Real(0.0), Real(1.0), Real(0.0)}};
+    ctx.setNormals(std::span<const AssemblyContext::Vector3D>(normals.data(), normals.size()));
+
+    KernelOutput out;
+    out.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/false);
+
+    jit::PackingChecks checks;
+    checks.validate_alignment = true;
+    const auto args6 = jit::packCellKernelArgsV6(ctx, out, checks);
+    EXPECT_EQ(args6.abi_version, jit::kKernelArgsABIVersionV6);
+    EXPECT_NE(args6.side.interleaved_qpoint_geometry, nullptr);
+    EXPECT_EQ(args6.side.interleaved_qpoint_geometry_stride_reals,
+              AssemblyContext::kInterleavedQPointGeometryStride);
+
+    const std::size_t stride = static_cast<std::size_t>(args6.side.interleaved_qpoint_geometry_stride_reals);
+    const Real* g = args6.side.interleaved_qpoint_geometry;
+    ASSERT_NE(g, nullptr);
+
+    const std::size_t q0 = 0u;
+    const std::size_t q1 = stride;
+    EXPECT_DOUBLE_EQ(g[q0 + AssemblyContext::kInterleavedQPointPhysicalOffset + 0u], 1.0);
+    EXPECT_DOUBLE_EQ(g[q0 + AssemblyContext::kInterleavedQPointPhysicalOffset + 1u], 2.0);
+    EXPECT_DOUBLE_EQ(g[q0 + AssemblyContext::kInterleavedQPointPhysicalOffset + 2u], 3.0);
+    EXPECT_DOUBLE_EQ(g[q0 + AssemblyContext::kInterleavedQPointJacobianOffset + 0u], 2.0);
+    EXPECT_DOUBLE_EQ(g[q0 + AssemblyContext::kInterleavedQPointInverseJacobianOffset + 0u], 0.5);
+    EXPECT_DOUBLE_EQ(g[q0 + AssemblyContext::kInterleavedQPointDetOffset], 24.0);
+    EXPECT_DOUBLE_EQ(g[q0 + AssemblyContext::kInterleavedQPointNormalOffset + 2u], 1.0);
+
+    EXPECT_DOUBLE_EQ(g[q1 + AssemblyContext::kInterleavedQPointPhysicalOffset + 0u], 4.0);
+    EXPECT_DOUBLE_EQ(g[q1 + AssemblyContext::kInterleavedQPointJacobianOffset + 0u], 1.5);
+    EXPECT_DOUBLE_EQ(g[q1 + AssemblyContext::kInterleavedQPointInverseJacobianOffset + 0u], 2.0 / 3.0);
+    EXPECT_DOUBLE_EQ(g[q1 + AssemblyContext::kInterleavedQPointDetOffset], 13.125);
+    EXPECT_DOUBLE_EQ(g[q1 + AssemblyContext::kInterleavedQPointNormalOffset + 1u], 1.0);
+}
+
 TEST(JITKernelArgsPacking, PacksMaterialStateAlignmentV3)
 {
     AssemblyContext ctx;

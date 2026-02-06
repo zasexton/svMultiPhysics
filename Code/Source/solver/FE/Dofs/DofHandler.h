@@ -75,7 +75,14 @@ enum class DofNumberingStrategy : std::uint8_t {
     Sequential,     ///< Number DOFs in mesh traversal order
     Interleaved,    ///< Interleave components for vector fields
     Block,          ///< Block all DOFs of same component together
-    Hierarchical    ///< Hierarchy: vertex DOFs, edge DOFs, face DOFs, cell DOFs
+    Hierarchical,   ///< Hierarchy: vertex DOFs, edge DOFs, face DOFs, cell DOFs
+    Morton,         ///< Spatially reorder DOFs via Morton (Z-order) curve
+    Hilbert         ///< Spatially reorder DOFs via Hilbert curve
+};
+
+enum class SpatialCurveType : std::uint8_t {
+    Morton,
+    Hilbert
 };
 
 /**
@@ -116,6 +123,8 @@ enum class TopologyCompletion : std::uint8_t {
  */
 struct DofDistributionOptions {
     DofNumberingStrategy numbering{DofNumberingStrategy::Sequential};
+    bool enable_spatial_locality_ordering{true};
+    SpatialCurveType spatial_curve{SpatialCurveType::Morton};
     OwnershipStrategy ownership{OwnershipStrategy::LowestRank};
     GlobalNumberingMode global_numbering{GlobalNumberingMode::OwnerContiguous};
     TopologyCompletion topology_completion{TopologyCompletion::DeriveMissing};
@@ -159,6 +168,7 @@ struct MeshTopologyInfo {
 
     // Vertex global IDs for canonical ordering on shared entities
     std::vector<gid_t> vertex_gids;   ///< Global ID for each vertex (size = n_vertices)
+    std::vector<Real> vertex_coords; ///< Optional vertex coordinates [n_vertices * dim]
 
     // Optional: Cell global IDs and owners (required for distributed ownership/ghosting)
     std::vector<gid_t> cell_gids;         ///< Global ID for each local cell (size = n_cells)
@@ -254,6 +264,7 @@ struct MeshTopologyView {
     std::span<const MeshOffset> cell2vertex_offsets;
     std::span<const MeshIndex> cell2vertex_data;
     std::span<const gid_t> vertex_gids;
+    std::span<const Real> vertex_coords;
 
     // Optional IDs / ownership.
     std::span<const gid_t> cell_gids;
@@ -286,6 +297,7 @@ struct MeshTopologyView {
         view.cell2vertex_offsets = info.cell2vertex_offsets;
         view.cell2vertex_data = info.cell2vertex_data;
         view.vertex_gids = info.vertex_gids;
+        view.vertex_coords = info.vertex_coords;
 
         view.cell_gids = info.cell_gids;
         view.cell_owner_ranks = info.cell_owner_ranks;
@@ -316,6 +328,7 @@ struct MeshTopologyView {
         info.cell2vertex_offsets.assign(cell2vertex_offsets.begin(), cell2vertex_offsets.end());
         info.cell2vertex_data.assign(cell2vertex_data.begin(), cell2vertex_data.end());
         info.vertex_gids.assign(vertex_gids.begin(), vertex_gids.end());
+        info.vertex_coords.assign(vertex_coords.begin(), vertex_coords.end());
 
         info.cell_gids.assign(cell_gids.begin(), cell_gids.end());
         info.cell_owner_ranks.assign(cell_owner_ranks.begin(), cell_owner_ranks.end());
@@ -785,6 +798,9 @@ private:
     void distributeDofsCore(const MeshTopologyView& topology,
                             const DofLayoutInfo& layout,
                             const DofDistributionOptions& options);
+    void cacheSpatialDofCoordinates(const MeshTopologyView& topology,
+                                    const DofLayoutInfo& layout);
+    void clearSpatialDofCoordinates() noexcept;
 
     // Helper for CG distribution with shared DOFs
     void distributeCGDofs(const MeshTopologyView& topology,
@@ -853,6 +869,8 @@ private:
         std::vector<spaces::OrientationManager::Sign> cell_edge_orient_data_{};
         std::vector<MeshOffset> cell_face_orient_offsets_{};
         std::vector<spaces::OrientationManager::FaceOrientation> cell_face_orient_data_{};
+        std::vector<double> spatial_dof_coords_{};
+        int spatial_dof_coord_dim_{0};
 	};
 
 } // namespace dofs

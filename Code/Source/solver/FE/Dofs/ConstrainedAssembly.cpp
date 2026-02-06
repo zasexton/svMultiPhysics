@@ -66,20 +66,19 @@ void ConstrainedAssembly::distributeLocalToGlobal(
     work_rows_.clear();
     work_cols_.clear();
     work_values_.clear();
+    work_rhs_indices_.clear();
     work_rhs_.clear();
-
-    std::vector<GlobalIndex> rhs_indices;
 
     applyElementConstraints(cell_matrix, cell_rhs, cell_dof_ids,
                             work_rows_, work_cols_, work_values_,
-                            rhs_indices, work_rhs_);
+                            work_rhs_indices_, work_rhs_);
 
     // Assemble modified contributions
     if (!work_values_.empty()) {
         adapter.addMatrixValuesSparse(work_rows_, work_cols_, work_values_);
     }
     if (!work_rhs_.empty()) {
-        adapter.addVectorValues(rhs_indices, work_rhs_);
+        adapter.addVectorValues(work_rhs_indices_, work_rhs_);
     }
 }
 
@@ -89,8 +88,8 @@ void ConstrainedAssembly::distributeMatrixToGlobal(
     BackendAdapter& adapter) const {
 
     // Create zero RHS
-    std::vector<double> zero_rhs(cell_dof_ids.size(), 0.0);
-    distributeLocalToGlobal(cell_matrix, zero_rhs, cell_dof_ids, adapter);
+    work_zero_rhs_.assign(cell_dof_ids.size(), 0.0);
+    distributeLocalToGlobal(cell_matrix, work_zero_rhs_, cell_dof_ids, adapter);
 }
 
 void ConstrainedAssembly::distributeRhsToGlobal(
@@ -104,8 +103,8 @@ void ConstrainedAssembly::distributeRhsToGlobal(
     }
 
     // Apply constraints to RHS
-    std::vector<GlobalIndex> out_indices;
-    std::vector<double> out_values;
+    work_rhs_indices_.clear();
+    work_rhs_.clear();
 
     for (std::size_t i = 0; i < cell_dof_ids.size(); ++i) {
         GlobalIndex dof = cell_dof_ids[i];
@@ -117,19 +116,19 @@ void ConstrainedAssembly::distributeRhsToGlobal(
                 // Distribute to master DOFs
                 double val = cell_rhs[i];
                 for (const auto& entry : constraint_opt->entries) {
-                    out_indices.push_back(entry.dof);
-                    out_values.push_back(entry.coefficient * val);
+                    work_rhs_indices_.push_back(entry.dof);
+                    work_rhs_.push_back(entry.coefficient * val);
                 }
             }
             // For Dirichlet, RHS contribution is dropped
         } else {
-            out_indices.push_back(dof);
-            out_values.push_back(cell_rhs[i]);
+            work_rhs_indices_.push_back(dof);
+            work_rhs_.push_back(cell_rhs[i]);
         }
     }
 
-    if (!out_values.empty()) {
-        adapter.addVectorValues(out_indices, out_values);
+    if (!work_rhs_.empty()) {
+        adapter.addVectorValues(work_rhs_indices_, work_rhs_);
     }
 }
 

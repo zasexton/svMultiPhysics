@@ -51,6 +51,52 @@ namespace {
     return p;
 }
 
+[[nodiscard]] std::uint64_t cappedAddU64(std::uint64_t a,
+                                         std::uint64_t b,
+                                         std::uint64_t cap) noexcept
+{
+    if (a >= cap || b >= cap) {
+        return cap;
+    }
+    if (b > cap - a) {
+        return cap;
+    }
+    return a + b;
+}
+
+[[nodiscard]] std::uint64_t cappedMulU64(std::uint64_t a,
+                                         std::uint64_t b,
+                                         std::uint64_t cap) noexcept
+{
+    if (a == 0u || b == 0u) {
+        return 0u;
+    }
+    if (a >= cap || b >= cap) {
+        return cap;
+    }
+    if (a > cap / b) {
+        return cap;
+    }
+    return a * b;
+}
+
+[[nodiscard]] std::uint64_t estimateScalarExpansionTermsCapped(const FormExpr& expr,
+                                                               std::uint64_t cap)
+{
+    const auto a = analyzeContractions(expr);
+    if (!a.ok) {
+        return cap;
+    }
+
+    std::vector<int> ext;
+    ext.reserve(a.free_indices.size() + a.bound_indices.size());
+    for (const auto& b : a.bound_indices) ext.push_back(b.extent);
+    for (const auto& f : a.free_indices) ext.push_back(f.extent);
+
+    const std::uint64_t terms = productU64(ext);
+    return std::min(cap, terms);
+}
+
 struct SignedTerm {
     FormExpr expr{};
     int sign{1};
@@ -338,10 +384,24 @@ struct IndexedFactor {
     return (out_sz == 0 ? 0 : out_sz) * (sum_sz == 0 ? 0 : sum_sz);
 }
 
+[[nodiscard]] int fallbackPreferredSimdWidthDoubles() noexcept
+{
+#if defined(__AVX512F__)
+    return 8;
+#elif defined(__AVX__) || defined(__AVX2__)
+    return 4;
+#elif defined(__SSE2__)
+    return 2;
+#else
+    return 1;
+#endif
+}
+
 [[nodiscard]] std::vector<LoopIndex> buildLoops(const std::vector<int>& out_axes,
                                                 const std::vector<int>& sum_axes,
                                                 const std::unordered_map<int, tensor::ContractionAnalysis::IndexInfo>& idx_info,
-                                                bool enable_vector_hints)
+                                                bool enable_vector_hints,
+                                                int preferred_vector_width)
 {
     std::vector<LoopIndex> loops;
     loops.reserve(out_axes.size() + sum_axes.size());
@@ -374,7 +434,10 @@ struct IndexedFactor {
     if (enable_vector_hints && !out_axes.empty()) {
         auto& inner = loops[out_axes.size() - 1];
         inner.vectorize = true;
-        inner.vector_width = std::max(1, std::min(4, inner.extent));
+        const int width = (preferred_vector_width > 0)
+                              ? preferred_vector_width
+                              : fallbackPreferredSimdWidthDoubles();
+        inner.vector_width = std::max(1, std::min(width, inner.extent));
     }
 
     return loops;
@@ -662,7 +725,9 @@ LoopNestProgram generateLoopNest(const FormExpr& expr, const LoopStructureOption
             op.out_axes = out_axes;
             op.sum_axes = sum_axes;
             op.estimated_flops = estimateFlops(op.out_axes, op.sum_axes, idx_info);
-            op.loops = buildLoops(op.out_axes, op.sum_axes, idx_info, options.enable_vectorization_hints);
+            op.loops = buildLoops(op.out_axes, op.sum_axes, idx_info,
+                                  options.enable_vectorization_hints,
+                                  options.preferred_vector_width);
 
             program.ops.push_back(op);
             program.estimated_flops += op.estimated_flops;
@@ -702,7 +767,9 @@ LoopNestProgram generateLoopNest(const FormExpr& expr, const LoopStructureOption
                 op.out_axes = free_ids;
                 op.sum_axes = reduce_axes;
                 op.estimated_flops = estimateFlops(op.out_axes, op.sum_axes, idx_info);
-                op.loops = buildLoops(op.out_axes, op.sum_axes, idx_info, options.enable_vectorization_hints);
+                op.loops = buildLoops(op.out_axes, op.sum_axes, idx_info,
+                                      options.enable_vectorization_hints,
+                                      options.preferred_vector_width);
                 program.ops.push_back(op);
                 program.estimated_flops += op.estimated_flops;
                 final_tensor = out_tid;
@@ -761,7 +828,9 @@ LoopNestProgram generateLoopNest(const FormExpr& expr, const LoopStructureOption
     // Output loops iterate over stored components only (e.g., triangular for symmetric/skew).
     program.output_loops.clear();
     if (program.output.rank > 0 && program.output.storage != TensorStorageKind::KroneckerDelta) {
-        program.output_loops = buildLoops(program.output.axes, {}, idx_info, options.enable_vectorization_hints);
+        program.output_loops = buildLoops(program.output.axes, {}, idx_info,
+                                          options.enable_vectorization_hints,
+                                          options.preferred_vector_width);
         if ((program.output.storage == TensorStorageKind::Symmetric2 ||
              program.output.storage == TensorStorageKind::Antisymmetric2) &&
             program.output.axes.size() == 2u && program.output_loops.size() == 2u) {
@@ -870,6 +939,15 @@ void optimizeLoopOrder(LoopNestProgram& program)
                       return score(a) > score(b);
                   });
 
+        const int preferred_vector_width = [&]() {
+            for (const auto& loop : op.loops) {
+                if (loop.vectorize) {
+                    return loop.vector_width;
+                }
+            }
+            return 0;
+        }();
+
         op.loops = buildLoops(op.out_axes, op.sum_axes,
                               [&]() -> std::unordered_map<int, tensor::ContractionAnalysis::IndexInfo> {
                                   std::unordered_map<int, tensor::ContractionAnalysis::IndexInfo> m;
@@ -895,7 +973,8 @@ void optimizeLoopOrder(LoopNestProgram& program)
                                   }
                                   return m;
                               }(),
-                              true);
+                              true,
+                              preferred_vector_width);
     }
 }
 
@@ -936,7 +1015,8 @@ TensorLoweringResult lowerTensorExpressionIncremental(const FormExpr& expr,
     }
 
     // Estimate scalar expansion term count.
-    std::uint64_t est_terms = 0;
+    const std::uint64_t cap = options.scalar_expansion_term_threshold + 1u;
+    std::uint64_t est_terms_raw = 0;
     std::size_t max_indexed_factors = 0;
     int max_rank = 0;
     try {
@@ -966,31 +1046,55 @@ TensorLoweringResult lowerTensorExpressionIncremental(const FormExpr& expr,
             max_indexed_factors = std::max(max_indexed_factors, indexed_count);
             max_rank = std::max(max_rank, term_max_rank);
 
-            const auto a = analyzeContractions(t.expr);
-            if (!a.ok) {
-                est_terms = options.scalar_expansion_term_threshold + 1;
+            const std::uint64_t term_terms = estimateScalarExpansionTermsCapped(t.expr, cap);
+            if (term_terms >= cap) {
+                est_terms_raw = cap;
                 break;
             }
 
-            std::vector<int> ext;
-            ext.reserve(a.free_indices.size() + a.bound_indices.size());
-            for (const auto& b : a.bound_indices) ext.push_back(b.extent);
-            for (const auto& f : a.free_indices) ext.push_back(f.extent);
-
-            const std::uint64_t term_terms = productU64(ext);
-            const std::uint64_t cap = options.scalar_expansion_term_threshold + 1;
-            if (est_terms >= cap || term_terms >= cap) {
-                est_terms = cap;
-                break;
-            }
-            est_terms = std::min<std::uint64_t>(cap, est_terms + term_terms);
-            if (est_terms >= cap) break;
+            est_terms_raw = cappedAddU64(est_terms_raw, term_terms, cap);
+            if (est_terms_raw >= cap) break;
         }
     } catch (...) {
-        est_terms = options.scalar_expansion_term_threshold + 1;
+        est_terms_raw = cap;
+    }
+
+    std::uint64_t est_terms = est_terms_raw;
+    const bool threshold_before_cse = (est_terms_raw > options.scalar_expansion_term_threshold);
+    bool cse_reduced_threshold = false;
+
+    if (options.enable_cse_term_estimation) {
+        try {
+            const auto cse_plan = planTensorCSE(work, options.cse_options);
+            if (cse_plan.ok && !cse_plan.temporaries.empty()) {
+                std::uint64_t cse_saved = 0u;
+                for (const auto& tmp : cse_plan.temporaries) {
+                    if (tmp.use_count <= 1u || !containsIndexedAccess(tmp.expr)) {
+                        continue;
+                    }
+
+                    const std::uint64_t tmp_terms = estimateScalarExpansionTermsCapped(tmp.expr, cap);
+                    const std::uint64_t reuse_count = static_cast<std::uint64_t>(tmp.use_count - 1u);
+                    const std::uint64_t reuse_savings = cappedMulU64(reuse_count, tmp_terms, cap);
+                    cse_saved = cappedAddU64(cse_saved, reuse_savings, cap);
+                    if (cse_saved >= cap) {
+                        break;
+                    }
+                }
+
+                if (cse_saved >= est_terms) {
+                    est_terms = 0u;
+                } else {
+                    est_terms -= cse_saved;
+                }
+            }
+        } catch (...) {
+            // Keep raw estimate on CSE analysis failure.
+        }
     }
 
     const bool prefer_loops_by_threshold = (est_terms > options.scalar_expansion_term_threshold);
+    cse_reduced_threshold = threshold_before_cse && !prefer_loops_by_threshold;
     const bool prefer_loops_by_pattern = (max_rank >= 3) || (max_indexed_factors >= 3);
     const bool prefer_loops = prefer_loops_by_threshold || prefer_loops_by_pattern;
 
@@ -1002,6 +1106,8 @@ TensorLoweringResult lowerTensorExpressionIncremental(const FormExpr& expr,
         out.decision_reason = "pattern";
     } else if (prefer_loops_by_threshold) {
         out.decision_reason = "threshold";
+    } else if (cse_reduced_threshold) {
+        out.decision_reason = "cse";
     } else {
         out.decision_reason = "scalar";
     }

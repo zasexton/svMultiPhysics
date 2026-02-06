@@ -156,6 +156,19 @@ std::size_t hashConstraintQuery(const IConstraintQuery& query) {
     return seed;
 }
 
+SparsityPattern makeBuildingCopy(const SparsityPattern& pattern)
+{
+    if (!pattern.isFinalized()) {
+        return pattern;
+    }
+
+    SparsityPattern building(pattern.numRows(), pattern.numCols());
+    for (GlobalIndex row = 0; row < pattern.numRows(); ++row) {
+        building.addEntries(row, pattern.getRowSpan(row));
+    }
+    return building;
+}
+
 } // anonymous namespace
 
 // ============================================================================
@@ -218,7 +231,7 @@ FactoryResult SparsityFactory::create(
             auto reduced = augmenter.buildReducedPattern(*result.pattern);
             result.pattern = std::make_unique<SparsityPattern>(std::move(reduced));
         } else {
-            SparsityPattern augmented = *result.pattern;  // Copy reconstructs to Building state
+            SparsityPattern augmented = makeBuildingCopy(*result.pattern);
             augmenter.augment(augmented, options.constraint_mode);
             if (options.ensure_diagonal && augmented.isSquare()) {
                 augmented.ensureDiagonal();
@@ -1031,7 +1044,7 @@ SparsityPattern SparsityFactory::applyConstraints(
         return augmenter.buildReducedPattern(pattern);
     }
 
-    SparsityPattern result = pattern;  // Copy reconstructs to Building state
+    SparsityPattern result = makeBuildingCopy(pattern);
     augmenter.augment(result, mode);
     result.finalize();
     return result;

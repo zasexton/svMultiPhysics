@@ -42,12 +42,12 @@
  * - Two-phase lifecycle: Building (insertion) -> Finalized (compressed CSR)
  * - Deterministic finalization: sorted column indices for reproducibility
  * - Thread-safe read access after finalization
- * - Memory-efficient: set-based building, CSR storage after compression
+ * - Memory-efficient: sorted-vector building, CSR storage after compression
  *
  * Complexity notes:
- * - addEntry(): O(log n) per row during building (set insertion)
- * - finalize(): O(NNZ * log(NNZ/nRows)) for sorting
- * - hasEntry(): O(log row_nnz) after finalization (binary search)
+ * - addEntry(): O(row_nnz) per row during building (binary search + insert shift)
+ * - finalize(): O(NNZ) (row vectors already sorted and unique)
+ * - hasEntry(): O(log row_nnz) (binary search)
  * - getRowIndices(): O(1) access to column indices
  *
  * @see DistributedSparsityPattern for MPI-parallel extension
@@ -59,7 +59,6 @@
 #include "Core/FEException.h"
 
 #include <vector>
-#include <set>
 #include <span>
 #include <cstdint>
 #include <atomic>
@@ -222,10 +221,10 @@ public:
     /// Move assignment
     SparsityPattern& operator=(SparsityPattern&& other) noexcept;
 
-    /// Copy constructor (deep copy, resets to Building state)
+    /// Copy constructor (deep copy, preserves source state)
     SparsityPattern(const SparsityPattern& other);
 
-    /// Copy assignment (deep copy, resets to Building state)
+    /// Copy assignment (deep copy, preserves source state)
     SparsityPattern& operator=(const SparsityPattern& other);
 
     /// Destructor
@@ -234,10 +233,9 @@ public:
     /**
      * @brief Clone the pattern preserving Finalized state when possible
      *
-     * Unlike the copy constructor (which always resets to Building state),
-     * this method returns a pattern in Finalized state when the source is
-     * finalized by directly copying CSR storage. If the source is in Building
-     * state, the returned pattern is finalized via finalize().
+     * If the source is already finalized, this returns a finalized clone by
+     * directly copying CSR storage. If the source is in Building state, the
+     * returned pattern is finalized via finalize().
      *
      * This is useful for caching and sharing immutable patterns efficiently.
      */
@@ -629,8 +627,8 @@ private:
     GlobalIndex n_cols_{0};
 
     // Building phase storage: set of column indices per row
-    // Using std::set for deterministic ordering (sorted column indices)
-    std::vector<std::set<GlobalIndex>> row_sets_;
+    // Stored as sorted, unique vectors for low overhead and cache locality.
+    std::vector<std::vector<GlobalIndex>> row_sets_;
 
     // Finalized CSR storage
     std::vector<GlobalIndex> row_ptr_;    // [n_rows + 1] offsets

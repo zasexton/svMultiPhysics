@@ -263,7 +263,9 @@ private:
     mutable std::vector<GlobalIndex> work_rows_;
     mutable std::vector<GlobalIndex> work_cols_;
     mutable std::vector<double> work_values_;
+    mutable std::vector<GlobalIndex> work_rhs_indices_;
     mutable std::vector<double> work_rhs_;
+    mutable std::vector<double> work_zero_rhs_;
 
     // Apply constraints to element matrix/RHS before distribution
     void applyElementConstraints(

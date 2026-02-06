@@ -260,8 +260,9 @@ struct AssemblyOptions {
     bool stable_insertion_order{true};   ///< Stable ordering for floating-point
 
     // Performance hints
-    bool use_batching{false};            ///< Batch element operations
+    bool use_batching{true};             ///< Batch element operations in StandardAssembler
     int batch_size{32};                  ///< Elements per batch
+    bool use_vectorized_decorator{false}; ///< Wrap selected assembler in VectorizedAssembler
     bool cache_element_data{false};      ///< Cache geometry/basis evaluations
 
     // Scheduling / locality (decorator opt-in)

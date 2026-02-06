@@ -61,33 +61,88 @@ void DenseMatrixView::addMatrixEntries(
             "DenseMatrixView::addMatrixEntries: local_matrix size mismatch");
     }
 
-    for (GlobalIndex i = 0; i < n_rows; ++i) {
-        const GlobalIndex row = row_dofs[static_cast<std::size_t>(i)];
-        if (row < 0 || row >= n_rows_) continue;
+    const auto all_rows_in_range = [&]() noexcept {
+        for (const auto row : row_dofs) {
+            if (row < 0 || row >= n_rows_) return false;
+        }
+        return true;
+    }();
 
-        for (GlobalIndex j = 0; j < n_cols; ++j) {
-            const GlobalIndex col = col_dofs[static_cast<std::size_t>(j)];
-            if (col < 0 || col >= n_cols_) continue;
+    const auto all_cols_in_range = [&]() noexcept {
+        for (const auto col : col_dofs) {
+            if (col < 0 || col >= n_cols_) return false;
+        }
+        return true;
+    }();
 
-            const auto local_idx = static_cast<std::size_t>(i * n_cols + j);
-            const auto global_idx = static_cast<std::size_t>(row * n_cols_ + col);
-            const Real value = local_matrix[local_idx];
+    auto add_entries = [&](auto&& op) {
+        for (GlobalIndex i = 0; i < n_rows; ++i) {
+            const GlobalIndex row = row_dofs[static_cast<std::size_t>(i)];
+            if (row < 0 || row >= n_rows_) continue;
 
-            switch (mode) {
-                case AddMode::Add:
-                    data_[global_idx] += value;
-                    break;
-                case AddMode::Insert:
-                    data_[global_idx] = value;
-                    break;
-                case AddMode::Max:
-                    data_[global_idx] = std::max(data_[global_idx], value);
-                    break;
-                case AddMode::Min:
-                    data_[global_idx] = std::min(data_[global_idx], value);
-                    break;
+            const std::size_t global_row_base =
+                static_cast<std::size_t>(row) * static_cast<std::size_t>(n_cols_);
+            const std::size_t local_row_base =
+                static_cast<std::size_t>(i) * static_cast<std::size_t>(n_cols);
+
+            for (GlobalIndex j = 0; j < n_cols; ++j) {
+                const GlobalIndex col = col_dofs[static_cast<std::size_t>(j)];
+                if (col < 0 || col >= n_cols_) continue;
+
+                const auto local_idx = local_row_base + static_cast<std::size_t>(j);
+                const auto global_idx = global_row_base + static_cast<std::size_t>(col);
+                op(data_[global_idx], local_matrix[local_idx]);
             }
         }
+    };
+
+    auto add_entries_no_checks = [&](auto&& op) {
+        for (GlobalIndex i = 0; i < n_rows; ++i) {
+            const GlobalIndex row = row_dofs[static_cast<std::size_t>(i)];
+            const std::size_t global_row_base =
+                static_cast<std::size_t>(row) * static_cast<std::size_t>(n_cols_);
+            const std::size_t local_row_base =
+                static_cast<std::size_t>(i) * static_cast<std::size_t>(n_cols);
+
+            for (GlobalIndex j = 0; j < n_cols; ++j) {
+                const GlobalIndex col = col_dofs[static_cast<std::size_t>(j)];
+                const auto local_idx = local_row_base + static_cast<std::size_t>(j);
+                const auto global_idx = global_row_base + static_cast<std::size_t>(col);
+                op(data_[global_idx], local_matrix[local_idx]);
+            }
+        }
+    };
+
+    const bool fast_path = all_rows_in_range && all_cols_in_range;
+    switch (mode) {
+        case AddMode::Add:
+            if (fast_path) {
+                add_entries_no_checks([](Real& dst, Real value) { dst += value; });
+            } else {
+                add_entries([](Real& dst, Real value) { dst += value; });
+            }
+            break;
+        case AddMode::Insert:
+            if (fast_path) {
+                add_entries_no_checks([](Real& dst, Real value) { dst = value; });
+            } else {
+                add_entries([](Real& dst, Real value) { dst = value; });
+            }
+            break;
+        case AddMode::Max:
+            if (fast_path) {
+                add_entries_no_checks([](Real& dst, Real value) { dst = std::max(dst, value); });
+            } else {
+                add_entries([](Real& dst, Real value) { dst = std::max(dst, value); });
+            }
+            break;
+        case AddMode::Min:
+            if (fast_path) {
+                add_entries_no_checks([](Real& dst, Real value) { dst = std::min(dst, value); });
+            } else {
+                add_entries([](Real& dst, Real value) { dst = std::min(dst, value); });
+            }
+            break;
     }
 }
 

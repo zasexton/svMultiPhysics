@@ -43,6 +43,7 @@ TEST(AssemblerSelectionFactory, Decorators_ComposeInDeterministicOrder)
     options.cache_element_data = true;
     options.use_batching = true;
     options.batch_size = 16;
+    options.use_vectorized_decorator = true;
 
     FormCharacteristics form{};
     SystemCharacteristics sys{};

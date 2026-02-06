@@ -1122,7 +1122,8 @@ TEST(ConstitutiveModelTest, SupportsMultiOutputConstitutiveNodes)
         }
     }
 
-    // Caching: evaluateNaryOutputs should run once per (q,i,j), not once per output.
+    // This constitutive call depends on TrialFunction, so caching reuses values across
+    // test-basis loops but not across trial-basis loops.
     auto quad_rule = space.getElement(ElementType::Tetra4, 0).quadrature();
     if (!quad_rule) {
         const int order = quadrature::QuadratureFactory::recommended_order(
@@ -1131,7 +1132,8 @@ TEST(ConstitutiveModelTest, SupportsMultiOutputConstitutiveNodes)
     }
     ASSERT_TRUE(static_cast<bool>(quad_rule));
     const auto n_qpts = static_cast<std::size_t>(quad_rule->num_points());
-    EXPECT_EQ(model->real_calls, n_qpts * 16u);
+    const auto n_trial = dof_map.getCellDofs(0).size();
+    EXPECT_EQ(model->real_calls, n_qpts * n_trial);
 }
 
 TEST(ConstitutiveModelTest, ProvidesNonlocalInputAccessToConstitutiveContext)

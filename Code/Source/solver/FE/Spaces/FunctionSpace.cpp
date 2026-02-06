@@ -140,12 +140,14 @@ void FunctionSpace::interpolate(const ValueFunction& function,
         } else {
             if (cached) {
                 const auto& values_iq = cached->basis_values;
+                const std::size_t nqp_cached = cached->num_qpts;
                 const Real f_scalar = f_val[0];
                 for (std::size_t i = 0; i < ndofs; ++i) {
-                    const Real phi_i = values_iq[i][q];
+                    const std::size_t row_i = i * nqp_cached;
+                    const Real phi_i = values_iq[row_i + q];
                     b[i] += w * f_scalar * phi_i;
                     for (std::size_t j = 0; j < ndofs; ++j) {
-                        M[i * ndofs + j] += w * phi_i * values_iq[j][q];
+                        M[i * ndofs + j] += w * phi_i * values_iq[j * nqp_cached + q];
                     }
                 }
             } else {

@@ -160,6 +160,10 @@ void sort_row_columns_and_values(FsilsShared& shared, std::vector<Real>& values)
     int* cols = lhs.colPtr.data();
     Real* vals = values.data();
 
+    std::vector<std::pair<int, int>> key_idx;
+    std::vector<int> cols_sorted;
+    std::vector<Real> vals_sorted;
+
     for (int row = 0; row < nNo; ++row) {
         const int start = lhs.rowPtr(0, row);
         const int end = lhs.rowPtr(1, row);
@@ -172,7 +176,7 @@ void sort_row_columns_and_values(FsilsShared& shared, std::vector<Real>& values)
             continue;
         }
 
-        std::vector<std::pair<int, int>> key_idx(static_cast<std::size_t>(len));
+        key_idx.resize(static_cast<std::size_t>(len));
         for (int k = 0; k < len; ++k) {
             const int idx = start + k;
             key_idx[static_cast<std::size_t>(k)] = {cols[idx], idx};
@@ -180,8 +184,8 @@ void sort_row_columns_and_values(FsilsShared& shared, std::vector<Real>& values)
         std::sort(key_idx.begin(), key_idx.end(),
                   [](const auto& a, const auto& b) { return a.first < b.first; });
 
-        std::vector<int> cols_sorted(static_cast<std::size_t>(len));
-        std::vector<Real> vals_sorted(static_cast<std::size_t>(len) * block_size, 0.0);
+        cols_sorted.resize(static_cast<std::size_t>(len));
+        vals_sorted.resize(static_cast<std::size_t>(len) * block_size);
         for (int k = 0; k < len; ++k) {
             const int old_idx = key_idx[static_cast<std::size_t>(k)].second;
             cols_sorted[static_cast<std::size_t>(k)] = cols[old_idx];

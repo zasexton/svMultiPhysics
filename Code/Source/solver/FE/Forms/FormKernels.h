@@ -138,9 +138,12 @@ public:
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
     [[nodiscard]] bool hasInterfaceFace() const noexcept override;
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
 
     void computeCell(const assembly::AssemblyContext& ctx,
                      assembly::KernelOutput& output) override;
+    void computeCellBatch(std::span<const assembly::AssemblyContext* const> contexts,
+                          std::span<assembly::KernelOutput> outputs) override;
 
     void computeBoundaryFace(const assembly::AssemblyContext& ctx,
                              int boundary_marker,
@@ -223,9 +226,12 @@ public:
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
     [[nodiscard]] bool hasInterfaceFace() const noexcept override;
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
 
     void computeCell(const assembly::AssemblyContext& ctx,
                      assembly::KernelOutput& output) override;
+    void computeCellBatch(std::span<const assembly::AssemblyContext* const> contexts,
+                          std::span<assembly::KernelOutput> outputs) override;
 
     void computeBoundaryFace(const assembly::AssemblyContext& ctx,
                              int boundary_marker,
@@ -310,9 +316,12 @@ public:
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
     [[nodiscard]] bool hasInterfaceFace() const noexcept override;
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
 
     void computeCell(const assembly::AssemblyContext& ctx,
                      assembly::KernelOutput& output) override;
+    void computeCellBatch(std::span<const assembly::AssemblyContext* const> contexts,
+                          std::span<assembly::KernelOutput> outputs) override;
 
     void computeBoundaryFace(const assembly::AssemblyContext& ctx,
                              int boundary_marker,
@@ -390,9 +399,12 @@ public:
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
     [[nodiscard]] bool hasInterfaceFace() const noexcept override;
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
 
     void computeCell(const assembly::AssemblyContext& ctx,
                      assembly::KernelOutput& output) override;
+    void computeCellBatch(std::span<const assembly::AssemblyContext* const> contexts,
+                          std::span<assembly::KernelOutput> outputs) override;
 
     void computeBoundaryFace(const assembly::AssemblyContext& ctx,
                              int boundary_marker,
@@ -472,9 +484,12 @@ public:
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
     [[nodiscard]] bool hasInterfaceFace() const noexcept override;
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
 
     void computeCell(const assembly::AssemblyContext& ctx,
                      assembly::KernelOutput& output) override;
+    void computeCellBatch(std::span<const assembly::AssemblyContext* const> contexts,
+                          std::span<assembly::KernelOutput> outputs) override;
 
     void computeBoundaryFace(const assembly::AssemblyContext& ctx,
                              int boundary_marker,

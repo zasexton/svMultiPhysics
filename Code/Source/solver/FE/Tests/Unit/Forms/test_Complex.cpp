@@ -180,7 +180,7 @@ static assembly::KernelOutput evalCellMatrixJIT(const FormIR& ir,
 
     assembly::jit::PackingChecks checks;
     checks.validate_alignment = true;
-    const auto args = assembly::jit::packCellKernelArgsV5(ctx, out, checks);
+    const auto args = assembly::jit::packCellKernelArgsV6(ctx, out, checks);
     callJIT(addr, &args);
     return out;
 }

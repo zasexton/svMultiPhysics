@@ -14,6 +14,7 @@
 
 #include "Forms/FormExpr.h"
 #include "Forms/Tensor/TensorContraction.h"
+#include "Forms/Tensor/TensorCSE.h"
 
 #include <cstdint>
 #include <optional>
@@ -53,11 +54,18 @@ struct LoopStructureOptions {
     bool enable_symmetry_lowering{true};
     bool enable_optimal_contraction_order{true};
     bool enable_vectorization_hints{true};
+    // Preferred vector width in doubles for loop metadata (0 = auto-detect).
+    int preferred_vector_width{0};
     bool enable_delta_shortcuts{true};
 
     // Threshold heuristic for the incremental lowering strategy:
     // if scalar expansion would generate more than this many terms, prefer loops.
     std::uint64_t scalar_expansion_term_threshold{64};
+
+    // If enabled, account for tensor-aware CSE reuse before making the
+    // scalar-vs-loop decision.
+    bool enable_cse_term_estimation{true};
+    TensorCSEOptions cse_options{};
 
     ContractionCostModel cost_model{};
 };

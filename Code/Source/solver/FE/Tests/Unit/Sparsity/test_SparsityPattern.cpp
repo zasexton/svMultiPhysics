@@ -528,11 +528,7 @@ TEST(SparsityPatternTest, CopyConstruction) {
 
     SparsityPattern copy(pattern);
     EXPECT_EQ(copy.numRows(), 5);
-    // Copy goes to Building state
-    EXPECT_FALSE(copy.isFinalized());
-
-    // Should have same entries after finalize
-    copy.finalize();
+    EXPECT_TRUE(copy.isFinalized());
     EXPECT_TRUE(copy.hasEntry(0, 0));
     EXPECT_TRUE(copy.hasEntry(1, 2));
 }

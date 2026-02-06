@@ -25,6 +25,7 @@ void ElementTransform::gradients_to_physical(const geometry::GeometryMapping& ma
                                              std::vector<math::Vector<Real, 3>>& grads_phys) {
     const std::size_t n = grads_ref.size();
     grads_phys.resize(n);
+    const auto J_inv = mapping.jacobian_inverse(xi);
 
     for (std::size_t i = 0; i < n; ++i) {
         math::Vector<Real, 3> g_ref{};
@@ -32,7 +33,7 @@ void ElementTransform::gradients_to_physical(const geometry::GeometryMapping& ma
         for (int d = 0; d < dim; ++d) {
             g_ref[static_cast<std::size_t>(d)] = grads_ref[i][static_cast<std::size_t>(d)];
         }
-        grads_phys[i] = PushForward::gradient(mapping, g_ref, xi);
+        grads_phys[i] = PushForward::gradient(mapping, g_ref, J_inv);
     }
 }
 
@@ -42,8 +43,10 @@ void ElementTransform::hdiv_vectors_to_physical(const geometry::GeometryMapping&
                                                 std::vector<math::Vector<Real, 3>>& v_phys) {
     const std::size_t n = v_ref.size();
     v_phys.resize(n);
+    const auto J = mapping.jacobian(xi);
+    const Real det = J.determinant();
     for (std::size_t i = 0; i < n; ++i) {
-        v_phys[i] = PushForward::hdiv_vector(mapping, v_ref[i], xi);
+        v_phys[i] = PushForward::hdiv_vector(mapping, v_ref[i], J, det);
     }
 }
 
@@ -53,8 +56,9 @@ void ElementTransform::hcurl_vectors_to_physical(const geometry::GeometryMapping
                                                  std::vector<math::Vector<Real, 3>>& v_phys) {
     const std::size_t n = v_ref.size();
     v_phys.resize(n);
+    const auto J_inv = mapping.jacobian_inverse(xi);
     for (std::size_t i = 0; i < n; ++i) {
-        v_phys[i] = PushForward::hcurl_vector(mapping, v_ref[i], xi);
+        v_phys[i] = PushForward::hcurl_vector(mapping, v_ref[i], J_inv);
     }
 }
 
@@ -455,4 +459,3 @@ math::Vector<Real, 3> ElementTransform::reference_facet_normal(
 } // namespace elements
 } // namespace FE
 } // namespace svmp
-

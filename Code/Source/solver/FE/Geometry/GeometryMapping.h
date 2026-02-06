@@ -67,6 +67,9 @@ public:
     /// Jacobian matrix d x / d xi at reference point
     virtual math::Matrix<Real, 3, 3> jacobian(const math::Vector<Real, 3>& xi) const = 0;
 
+    /// True when the mapping Jacobian is constant on the reference element.
+    virtual bool isAffine() const noexcept { return false; }
+
     /**
      * @brief Second derivatives of the mapping x(xi): d^2 x / d xi^2
      *
@@ -88,6 +91,10 @@ public:
     /// Convenience: transform a reference gradient to physical space (J^{-T} * grad)
     math::Vector<Real, 3> transform_gradient(const math::Vector<Real, 3>& grad_ref,
                                              const math::Vector<Real, 3>& xi) const;
+
+    /// Convenience: transform a reference gradient using a precomputed inverse Jacobian.
+    math::Vector<Real, 3> transform_gradient(const math::Vector<Real, 3>& grad_ref,
+                                             const math::Matrix<Real, 3, 3>& jacobian_inverse) const;
 };
 
 // -----------------------------------------------------------------------------
@@ -104,7 +111,12 @@ inline Real GeometryMapping::jacobian_determinant(const math::Vector<Real, 3>& x
 
 inline math::Vector<Real, 3> GeometryMapping::transform_gradient(const math::Vector<Real, 3>& grad_ref,
                                                                  const math::Vector<Real, 3>& xi) const {
-    auto JinvT = jacobian_inverse(xi).transpose();
+    return transform_gradient(grad_ref, jacobian_inverse(xi));
+}
+
+inline math::Vector<Real, 3> GeometryMapping::transform_gradient(const math::Vector<Real, 3>& grad_ref,
+                                                                 const math::Matrix<Real, 3, 3>& jacobian_inverse) const {
+    auto JinvT = jacobian_inverse.transpose();
     math::Vector<Real, 3> g = grad_ref;
     const std::size_t dim = static_cast<std::size_t>(dimension());
     for (std::size_t k = dim; k < 3; ++k) {

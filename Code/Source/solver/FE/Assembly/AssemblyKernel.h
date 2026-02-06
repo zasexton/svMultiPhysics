@@ -70,6 +70,7 @@
 #include <string>
 #include <memory>
 #include <functional>
+#include <algorithm>
 
 namespace svmp {
 namespace FE {
@@ -440,6 +441,32 @@ public:
         KernelOutput& output) = 0;
 
     /**
+     * @brief Whether this kernel provides a dedicated batched cell path
+     *
+     * Default is false. Assemblers may still call `computeCellBatch`; the
+     * default implementation falls back to scalar `computeCell` per element.
+     */
+    [[nodiscard]] virtual bool supportsCellBatch() const noexcept { return false; }
+
+    /**
+     * @brief Compute local outputs for a batch of cells
+     *
+     * The default implementation performs scalar fallback and calls
+     * `computeCell` for each entry in-order.
+     */
+    virtual void computeCellBatch(std::span<const AssemblyContext* const> contexts,
+                                  std::span<KernelOutput> outputs)
+    {
+        const std::size_t n = std::min(contexts.size(), outputs.size());
+        for (std::size_t idx = 0; idx < n; ++idx) {
+            if (contexts[idx] == nullptr) {
+                continue;
+            }
+            computeCell(*contexts[idx], outputs[idx]);
+        }
+    }
+
+    /**
      * @brief Check if kernel supports cell integration
      */
     [[nodiscard]] virtual bool hasCell() const noexcept { return true; }
@@ -602,7 +629,7 @@ public:
  *
  * Computes the mass matrix: M_ij = integral(phi_i * phi_j)
  */
-class MassKernel : public BilinearFormKernel {
+class MassKernel final : public BilinearFormKernel {
 public:
     /**
      * @brief Construct with optional scaling coefficient
@@ -610,7 +637,10 @@ public:
     explicit MassKernel(Real coefficient = 1.0);
 
     [[nodiscard]] RequiredData getRequiredData() const override;
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
     void computeCell(const AssemblyContext& ctx, KernelOutput& output) override;
+    void computeCellBatch(std::span<const AssemblyContext* const> contexts,
+                          std::span<KernelOutput> outputs) override;
     [[nodiscard]] std::string name() const override { return "MassKernel"; }
     [[nodiscard]] bool isSymmetric() const noexcept override { return true; }
 
@@ -623,7 +653,7 @@ private:
  *
  * Computes the stiffness matrix: K_ij = integral(grad phi_i . grad phi_j)
  */
-class StiffnessKernel : public BilinearFormKernel {
+class StiffnessKernel final : public BilinearFormKernel {
 public:
     /**
      * @brief Construct with optional scaling coefficient
@@ -631,7 +661,10 @@ public:
     explicit StiffnessKernel(Real coefficient = 1.0);
 
     [[nodiscard]] RequiredData getRequiredData() const override;
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
     void computeCell(const AssemblyContext& ctx, KernelOutput& output) override;
+    void computeCellBatch(std::span<const AssemblyContext* const> contexts,
+                          std::span<KernelOutput> outputs) override;
     [[nodiscard]] std::string name() const override { return "StiffnessKernel"; }
     [[nodiscard]] bool isSymmetric() const noexcept override { return true; }
 
@@ -644,7 +677,7 @@ private:
  *
  * Computes RHS contribution: b_i = integral(f * phi_i)
  */
-class SourceKernel : public LinearFormKernel {
+class SourceKernel final : public LinearFormKernel {
 public:
     using SourceFunction = std::function<Real(Real, Real, Real)>;
 
@@ -659,7 +692,10 @@ public:
     explicit SourceKernel(Real constant_source);
 
     [[nodiscard]] RequiredData getRequiredData() const override;
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
     void computeCell(const AssemblyContext& ctx, KernelOutput& output) override;
+    void computeCellBatch(std::span<const AssemblyContext* const> contexts,
+                          std::span<KernelOutput> outputs) override;
     [[nodiscard]] std::string name() const override { return "SourceKernel"; }
 
 private:
@@ -671,7 +707,7 @@ private:
  *
  * Computes both stiffness matrix and source RHS.
  */
-class PoissonKernel : public AssemblyKernel {
+class PoissonKernel final : public AssemblyKernel {
 public:
     using SourceFunction = std::function<Real(Real, Real, Real)>;
 
@@ -686,7 +722,10 @@ public:
     explicit PoissonKernel(Real constant_source = 0.0);
 
     [[nodiscard]] RequiredData getRequiredData() const override;
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
     void computeCell(const AssemblyContext& ctx, KernelOutput& output) override;
+    void computeCellBatch(std::span<const AssemblyContext* const> contexts,
+                          std::span<KernelOutput> outputs) override;
     [[nodiscard]] std::string name() const override { return "PoissonKernel"; }
     [[nodiscard]] bool isSymmetric() const noexcept override { return true; }
 
@@ -703,7 +742,7 @@ private:
  *
  * Useful for multi-term weak forms like convection-diffusion.
  */
-class CompositeKernel : public AssemblyKernel {
+class CompositeKernel final : public AssemblyKernel {
 public:
     /**
      * @brief Add a kernel with optional scaling
@@ -711,7 +750,10 @@ public:
     void addKernel(std::shared_ptr<AssemblyKernel> kernel, Real scale = 1.0);
 
     [[nodiscard]] RequiredData getRequiredData() const override;
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
     void computeCell(const AssemblyContext& ctx, KernelOutput& output) override;
+    void computeCellBatch(std::span<const AssemblyContext* const> contexts,
+                          std::span<KernelOutput> outputs) override;
     void computeBoundaryFace(const AssemblyContext& ctx, int boundary_marker,
                              KernelOutput& output) override;
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;

@@ -37,6 +37,9 @@ namespace jit {
 struct LLVMTensorGenOptions {
     bool vectorize{true};
     bool enable_polly{false};
+    bool enable_tiling{true};
+    int tile_size{32};          // 0 => auto
+    int min_tiling_extent{64};
 };
 
 #if SVMP_FE_ENABLE_LLVM_JIT
@@ -86,4 +89,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_FORMS_JIT_LLVM_TENSOR_GEN_H
-

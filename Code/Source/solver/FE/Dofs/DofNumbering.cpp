@@ -7,6 +7,7 @@
 
 #include "DofNumbering.h"
 #include <algorithm>
+#include <array>
 #include <queue>
 #include <stack>
 #include <numeric>
@@ -401,14 +402,47 @@ std::vector<GlobalIndex> SpaceFillingCurveNumbering::computeNumbering(
     // Compute curve index for each DOF
     const std::size_t dim_u = static_cast<std::size_t>(dim_);
     std::size_t n_vertices = coords_.size() / dim_u;
+    std::array<double, 3> min_xyz{
+        std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity()
+    };
+    std::array<double, 3> max_xyz{
+        -std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity()
+    };
+
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+        const std::size_t base = v * dim_u;
+        const double x = coords_[base];
+        const double y = (dim_ >= 2) ? coords_[base + 1] : 0.0;
+        const double z = (dim_ >= 3) ? coords_[base + 2] : 0.0;
+        min_xyz[0] = std::min(min_xyz[0], x);
+        min_xyz[1] = std::min(min_xyz[1], y);
+        min_xyz[2] = std::min(min_xyz[2], z);
+        max_xyz[0] = std::max(max_xyz[0], x);
+        max_xyz[1] = std::max(max_xyz[1], y);
+        max_xyz[2] = std::max(max_xyz[2], z);
+    }
+
+    const auto normalize = [&](double value, int axis) {
+        const double lo = min_xyz[static_cast<std::size_t>(axis)];
+        const double hi = max_xyz[static_cast<std::size_t>(axis)];
+        if (!(hi > lo)) {
+            return 0.0;
+        }
+        return (value - lo) / (hi - lo);
+    };
+
     std::vector<std::pair<uint64_t, GlobalIndex>> curve_indices;
     curve_indices.reserve(n_vertices);
 
     for (std::size_t v = 0; v < n_vertices && v < static_cast<std::size_t>(n_dofs); ++v) {
         const std::size_t base = v * dim_u;
-        double x = coords_[base];
-        double y = (dim_ >= 2) ? coords_[base + 1] : 0.0;
-        double z = (dim_ >= 3) ? coords_[base + 2] : 0.0;
+        const double x = normalize(coords_[base], 0);
+        const double y = (dim_ >= 2) ? normalize(coords_[base + 1], 1) : 0.0;
+        const double z = (dim_ >= 3) ? normalize(coords_[base + 2], 2) : 0.0;
 
         uint64_t index = (type_ == CurveType::Hilbert)
             ? hilbertIndex(x, y, z)

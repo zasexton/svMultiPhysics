@@ -46,7 +46,14 @@ static void setupTwoDofTwoQptScalarContext(AssemblyContext& ctx)
     };
 
     ctx.setTestBasisData(n_dofs, values, grads);
-    ctx.setPhysicalGradients(grads, grads);
+    std::vector<AssemblyContext::Vector3D> phys_grads(static_cast<std::size_t>(n_dofs * n_qpts));
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        for (LocalIndex i = 0; i < n_dofs; ++i) {
+            phys_grads[static_cast<std::size_t>(q * n_dofs + i)] =
+                grads[static_cast<std::size_t>(i * n_qpts + q)];
+        }
+    }
+    ctx.setPhysicalGradients(phys_grads, phys_grads);
 
     // Minimal integration weights to avoid accidental use of unset storage.
     std::vector<Real> int_wts = {0.25, 0.25};

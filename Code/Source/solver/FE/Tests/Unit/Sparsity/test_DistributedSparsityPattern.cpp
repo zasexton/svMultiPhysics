@@ -491,12 +491,7 @@ TEST(DistributedSparsityPatternTest, CopyConstruction) {
     pattern.finalize();
 
     DistributedSparsityPattern copy(pattern);
-
-    // Copy should be in building state
-    EXPECT_FALSE(copy.isFinalized());
-
-    // After finalize, should have same entries
-    copy.finalize();
+    EXPECT_TRUE(copy.isFinalized());
     EXPECT_TRUE(copy.hasEntry(12, 10));
     EXPECT_TRUE(copy.hasEntry(12, 5));
 

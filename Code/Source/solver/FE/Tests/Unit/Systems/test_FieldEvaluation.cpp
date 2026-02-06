@@ -70,9 +70,17 @@ TEST(FieldEvaluation, LocatesPointAndEvaluatesScalarField)
     const auto ndofs = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
     ASSERT_EQ(ndofs, 4u);
 
-    // Vertex values corresponding to the physical x-coordinate at each corner.
-    // For an affine quad, interpolation reproduces x exactly.
-    std::vector<Real> uvec = {0.0, 1.0, 1.0, 0.0};
+    // Assign nodal values through cell-local DOF ordering so the test stays
+    // valid even when global DOF numbering is spatially reordered.
+    std::vector<Real> uvec(ndofs, 0.0);
+    const auto cell_dofs = sys.dofHandler().getCellDofs(0);
+    ASSERT_EQ(cell_dofs.size(), 4u);
+    const std::array<Real, 4> cell_local_x = {0.0, 1.0, 1.0, 0.0};
+    for (std::size_t a = 0; a < cell_local_x.size(); ++a) {
+        const auto dof = static_cast<std::size_t>(cell_dofs[a]);
+        ASSERT_LT(dof, uvec.size());
+        uvec[dof] = cell_local_x[a];
+    }
 
     SystemStateView state;
     state.u = uvec;
@@ -106,4 +114,3 @@ TEST(FieldEvaluation, ExposesNearestVertexQueries)
 }
 
 } // namespace svmp::FE::systems::test
-

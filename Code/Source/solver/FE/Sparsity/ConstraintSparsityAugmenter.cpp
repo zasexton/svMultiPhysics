@@ -40,6 +40,19 @@ namespace svmp {
 namespace FE {
 namespace sparsity {
 
+namespace {
+
+inline bool insertSortedUnique(std::vector<GlobalIndex>& row, GlobalIndex col) {
+    auto it = std::lower_bound(row.begin(), row.end(), col);
+    if (it != row.end() && *it == col) {
+        return false;
+    }
+    row.insert(it, col);
+    return true;
+}
+
+} // namespace
+
 // ============================================================================
 // DofConstraintsAdapter implementation
 // ============================================================================
@@ -299,7 +312,7 @@ AugmentationStats ConstraintSparsityAugmenter::augment(
             if (!owned_rows.contains(cdof)) continue;
 
             const auto local_row = static_cast<std::size_t>(cdof - owned_rows.first);
-            if (pattern.building_rows_[local_row].insert(cdof).second) {
+            if (insertSortedUnique(pattern.building_rows_[local_row], cdof)) {
                 last_stats_.n_diagonal_added++;
             }
         }
@@ -322,7 +335,7 @@ AugmentationStats ConstraintSparsityAugmenter::augment(
 
         // Ensure diagonal for constrained rows if requested.
         if (options_.ensure_diagonal && master_map.find(global_row) != master_map.end()) {
-            if (row_set.insert(global_row).second) {
+            if (insertSortedUnique(row_set, global_row)) {
                 last_stats_.n_diagonal_added++;
             }
         }
@@ -341,13 +354,13 @@ AugmentationStats ConstraintSparsityAugmenter::augment(
             for (GlobalIndex master : it->second) {
                 if (master < 0 || master >= pattern.globalCols()) continue;
                 if (!options_.include_ghost_columns && !owned_cols.contains(master)) continue;
-                const bool inserted = row_set.insert(master).second;
+                const bool inserted = insertSortedUnique(row_set, master);
 
                 if (inserted && options_.symmetric_fill && square && owned_rows.contains(master)) {
                     auto& master_row_set = pattern.building_rows_[
                         static_cast<std::size_t>(master - owned_rows.first)];
                     if (options_.include_ghost_columns || owned_cols.contains(global_row)) {
-                        master_row_set.insert(global_row);
+                        insertSortedUnique(master_row_set, global_row);
                     }
                 }
             }
@@ -372,12 +385,12 @@ AugmentationStats ConstraintSparsityAugmenter::augment(
 
             for (GlobalIndex col : slave_row_set) {
                 if (!options_.include_ghost_columns && !owned_cols.contains(col)) continue;
-                const bool inserted = master_row_set.insert(col).second;
+                const bool inserted = insertSortedUnique(master_row_set, col);
                 if (inserted && options_.symmetric_fill && square && owned_rows.contains(col)) {
                     auto& col_row_set = pattern.building_rows_[
                         static_cast<std::size_t>(col - owned_rows.first)];
                     if (options_.include_ghost_columns || owned_cols.contains(master)) {
-                        col_row_set.insert(master);
+                        insertSortedUnique(col_row_set, master);
                     }
                 }
             }
@@ -862,7 +875,7 @@ void ConstraintSparsityAugmenter::augmentEliminationFill(SparsityPattern& patter
         
         // Ensure diagonal if requested
         if (options_.ensure_diagonal && cdof < n_cols) {
-            if (row_set.insert(cdof).second) {
+            if (insertSortedUnique(row_set, cdof)) {
                 last_stats_.n_diagonal_added++;
             }
         }
@@ -871,13 +884,13 @@ void ConstraintSparsityAugmenter::augmentEliminationFill(SparsityPattern& patter
         const auto& masters = master_map[cdof];
         for (GlobalIndex m : masters) {
             if (m >= 0 && m < n_cols) {
-                if (row_set.insert(m).second) {
+                if (insertSortedUnique(row_set, m)) {
                     last_stats_.n_fill_entries++;
                 }
                 
                 // If symmetric fill, also add (u_m, u_s)
                 if (options_.symmetric_fill && m < n_rows && cdof < n_cols) {
-                    if (pattern.row_sets_[static_cast<std::size_t>(m)].insert(cdof).second) {
+                    if (insertSortedUnique(pattern.row_sets_[static_cast<std::size_t>(m)], cdof)) {
                         last_stats_.n_fill_entries++;
                     }
                 }
@@ -901,13 +914,13 @@ void ConstraintSparsityAugmenter::augmentEliminationFill(SparsityPattern& patter
                 for (GlobalIndex m : masters) {
                     if (m >= 0 && m < n_cols) {
                         // Add (row, m) i.e. (i, u_m)
-                        if (row_set.insert(m).second) {
+                        if (insertSortedUnique(row_set, m)) {
                             last_stats_.n_fill_entries++;
                         }
                         
                         // Symmetric: add (m, row) i.e. (u_m, i)
                         if (options_.symmetric_fill && m < n_rows && row < n_cols) {
-                            if (pattern.row_sets_[static_cast<std::size_t>(m)].insert(row).second) {
+                            if (insertSortedUnique(pattern.row_sets_[static_cast<std::size_t>(m)], row)) {
                                 last_stats_.n_fill_entries++;
                             }
                         }
@@ -937,13 +950,13 @@ void ConstraintSparsityAugmenter::augmentEliminationFill(SparsityPattern& patter
             for (GlobalIndex j : slave_cols) {
                 if (j >= 0 && j < n_cols) {
                     // Add (m, j) i.e. (u_m, j)
-                    if (master_row_set.insert(j).second) {
+                    if (insertSortedUnique(master_row_set, j)) {
                         last_stats_.n_fill_entries++;
                     }
                     
                     // Symmetric: add (j, m) i.e. (j, u_m)
                     if (options_.symmetric_fill && j < n_rows && m < n_cols) {
-                        if (pattern.row_sets_[static_cast<std::size_t>(j)].insert(m).second) {
+                        if (insertSortedUnique(pattern.row_sets_[static_cast<std::size_t>(j)], m)) {
                             last_stats_.n_fill_entries++;
                         }
                     }
@@ -961,8 +974,9 @@ void ConstraintSparsityAugmenter::augmentKeepRowsSetDiag(SparsityPattern& patter
     for (GlobalIndex cdof : constrained_dofs) {
         // Only add diagonal for valid indices
         if (cdof >= 0 && cdof < n_rows && cdof < n_cols) {
-            pattern.addEntry(cdof, cdof);
-            last_stats_.n_diagonal_added++;
+            if (insertSortedUnique(pattern.row_sets_[static_cast<std::size_t>(cdof)], cdof)) {
+                last_stats_.n_diagonal_added++;
+            }
         }
     }
 }

@@ -27,6 +27,7 @@
 #include "Math/Eigensolvers.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstddef>
 #include <cmath>
 #include <cstring>
@@ -77,6 +78,60 @@ const assembly::AssemblyContext& ctxForSide(const assembly::AssemblyContext& ctx
                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
     }
     return *ctx_plus;
+}
+
+template <std::size_t LaneWidth, typename BatchFn, typename ScalarFn>
+void runHomogeneousCellBatches(std::span<const assembly::AssemblyContext* const> contexts,
+                               std::span<assembly::KernelOutput> outputs,
+                               BatchFn&& run_batch,
+                               ScalarFn&& run_scalar)
+{
+    const std::size_t n = std::min(contexts.size(), outputs.size());
+    if (n == 0u) {
+        return;
+    }
+
+    std::size_t begin = 0u;
+    while (begin < n) {
+        std::array<const assembly::AssemblyContext*, LaneWidth> lane_ctx{};
+        std::array<assembly::KernelOutput*, LaneWidth> lane_out{};
+
+        std::size_t active = 0u;
+        while (begin < n && active < LaneWidth) {
+            if (contexts[begin] != nullptr) {
+                lane_ctx[active] = contexts[begin];
+                lane_out[active] = &outputs[begin];
+                ++active;
+            }
+            ++begin;
+        }
+
+        if (active == 0u) {
+            continue;
+        }
+
+        const LocalIndex n_test = lane_ctx[0]->numTestDofs();
+        const LocalIndex n_trial = lane_ctx[0]->numTrialDofs();
+        const LocalIndex n_qpts = lane_ctx[0]->numQuadraturePoints();
+
+        bool homogeneous = true;
+        for (std::size_t lane = 1u; lane < active; ++lane) {
+            homogeneous = homogeneous &&
+                          (lane_ctx[lane]->numTestDofs() == n_test) &&
+                          (lane_ctx[lane]->numTrialDofs() == n_trial) &&
+                          (lane_ctx[lane]->numQuadraturePoints() == n_qpts);
+        }
+
+        if (!homogeneous) {
+            for (std::size_t lane = 0u; lane < active; ++lane) {
+                run_scalar(*lane_ctx[lane], *lane_out[lane]);
+            }
+            continue;
+        }
+
+        run_batch(std::span<const assembly::AssemblyContext* const>(lane_ctx.data(), active),
+                  std::span<assembly::KernelOutput*>(lane_out.data(), active));
+    }
 }
 
 [[nodiscard]] Real termWeightFor(const assembly::TimeIntegrationContext* time_ctx,
@@ -4136,6 +4191,7 @@ struct ConstitutiveCallKey {
     LocalIndex q{0};
     LocalIndex i{0};
     LocalIndex j{0};
+    std::uint8_t dependency_mask{0};
 
     [[nodiscard]] bool operator==(const ConstitutiveCallKey& other) const noexcept
     {
@@ -4143,7 +4199,8 @@ struct ConstitutiveCallKey {
                side == other.side &&
                q == other.q &&
                i == other.i &&
-               j == other.j;
+               j == other.j &&
+               dependency_mask == other.dependency_mask;
     }
 };
 
@@ -4159,15 +4216,59 @@ struct ConstitutiveCallKeyHash {
         mix(static_cast<std::size_t>(key.q));
         mix(static_cast<std::size_t>(key.i));
         mix(static_cast<std::size_t>(key.j));
+        mix(static_cast<std::size_t>(key.dependency_mask));
         return h;
     }
 };
+
+inline constexpr std::uint8_t kConstitutiveDependsOnTest = 1u << 0;
+inline constexpr std::uint8_t kConstitutiveDependsOnTrial = 1u << 1;
+
+[[nodiscard]] std::uint8_t computeConstitutiveDependencyMask(const FormExprNode& call_node)
+{
+    FE_THROW_IF(call_node.type() != FormExprType::Constitutive, FEException,
+                "Forms: computeConstitutiveDependencyMask expects Constitutive node");
+
+    const auto kids = call_node.childrenShared();
+    std::uint8_t mask = 0u;
+    for (const auto& child : kids) {
+        if (!child) {
+            continue;
+        }
+        if (containsTestFunction(*child)) {
+            mask |= kConstitutiveDependsOnTest;
+        }
+        if (containsTrialFunction(*child)) {
+            mask |= kConstitutiveDependsOnTrial;
+        }
+        if (mask == (kConstitutiveDependsOnTest | kConstitutiveDependsOnTrial)) {
+            break;
+        }
+    }
+    return mask;
+}
 
 struct ConstitutiveCallCacheReal {
     std::unordered_map<ConstitutiveCallKey,
                        std::vector<EvalValue<Real>>,
                        ConstitutiveCallKeyHash> values{};
+    std::unordered_map<const FormExprNode*, std::uint8_t> dependency_masks{};
 };
+
+[[nodiscard]] std::uint8_t constitutiveDependencyMask(const FormExprNode& call_node,
+                                                      ConstitutiveCallCacheReal* cache)
+{
+    if (cache == nullptr) {
+        return computeConstitutiveDependencyMask(call_node);
+    }
+    auto it = cache->dependency_masks.find(&call_node);
+    if (it != cache->dependency_masks.end()) {
+        return it->second;
+    }
+    const auto mask = computeConstitutiveDependencyMask(call_node);
+    cache->dependency_masks.emplace(&call_node, mask);
+    return mask;
+}
 
 EvalValue<Real> evalRealUnary(const FormExprNode& node,
                               const EvalEnvReal& env,
@@ -4205,7 +4306,15 @@ EvalValue<Real> evalConstitutiveOutputReal(const FormExprNode& call_node,
     }
 
     if (env.constitutive_cache != nullptr) {
-        ConstitutiveCallKey key{&call_node, side, q, env.i, env.j};
+        const auto dependency_mask = constitutiveDependencyMask(call_node, env.constitutive_cache);
+        ConstitutiveCallKey key{
+            &call_node,
+            side,
+            q,
+            (dependency_mask & kConstitutiveDependsOnTest) ? env.i : LocalIndex{0},
+            (dependency_mask & kConstitutiveDependsOnTrial) ? env.j : LocalIndex{0},
+            dependency_mask
+        };
         auto it = env.constitutive_cache->values.find(key);
         if (it != env.constitutive_cache->values.end()) {
             if (it->second.size() != n_outputs) {
@@ -4369,7 +4478,15 @@ EvalValue<Real> evalConstitutiveOutputReal(const FormExprNode& call_node,
     model->evaluateNaryOutputs({inputs.data(), inputs.size()}, mctx, {outputs.data(), outputs.size()});
 
     if (env.constitutive_cache != nullptr) {
-        ConstitutiveCallKey key{&call_node, side, q, env.i, env.j};
+        const auto dependency_mask = constitutiveDependencyMask(call_node, env.constitutive_cache);
+        ConstitutiveCallKey key{
+            &call_node,
+            side,
+            q,
+            (dependency_mask & kConstitutiveDependsOnTest) ? env.i : LocalIndex{0},
+            (dependency_mask & kConstitutiveDependsOnTrial) ? env.j : LocalIndex{0},
+            dependency_mask
+        };
         auto [it, inserted] = env.constitutive_cache->values.emplace(key, std::move(outputs));
         (void)inserted;
         return it->second[output_index];
@@ -7496,7 +7613,23 @@ struct ConstitutiveCallCacheDual {
     std::unordered_map<ConstitutiveCallKey,
                        std::vector<EvalValue<Dual>>,
                        ConstitutiveCallKeyHash> values{};
+    std::unordered_map<const FormExprNode*, std::uint8_t> dependency_masks{};
 };
+
+[[nodiscard]] std::uint8_t constitutiveDependencyMask(const FormExprNode& call_node,
+                                                      ConstitutiveCallCacheDual* cache)
+{
+    if (cache == nullptr) {
+        return computeConstitutiveDependencyMask(call_node);
+    }
+    auto it = cache->dependency_masks.find(&call_node);
+    if (it != cache->dependency_masks.end()) {
+        return it->second;
+    }
+    const auto mask = computeConstitutiveDependencyMask(call_node);
+    cache->dependency_masks.emplace(&call_node, mask);
+    return mask;
+}
 
 EvalValue<Dual> evalDualUnary(const FormExprNode& node,
                               const EvalEnvDual& env,
@@ -7536,7 +7669,15 @@ EvalValue<Dual> evalConstitutiveOutputDual(const FormExprNode& call_node,
     FE_CHECK_NOT_NULL(env.ws, "Forms: evalConstitutiveOutputDual: workspace");
 
     if (env.constitutive_cache != nullptr) {
-        ConstitutiveCallKey key{&call_node, side, q, env.i, 0};
+        const auto dependency_mask = constitutiveDependencyMask(call_node, env.constitutive_cache);
+        ConstitutiveCallKey key{
+            &call_node,
+            side,
+            q,
+            (dependency_mask & kConstitutiveDependsOnTest) ? env.i : LocalIndex{0},
+            /*j=*/LocalIndex{0},
+            dependency_mask
+        };
         auto it = env.constitutive_cache->values.find(key);
         if (it != env.constitutive_cache->values.end()) {
             if (it->second.size() != n_outputs) {
@@ -7707,7 +7848,15 @@ EvalValue<Dual> evalConstitutiveOutputDual(const FormExprNode& call_node,
     model->evaluateNaryOutputs({inputs.data(), inputs.size()}, mctx, *env.ws, {outputs.data(), outputs.size()});
 
     if (env.constitutive_cache != nullptr) {
-        ConstitutiveCallKey key{&call_node, side, q, env.i, 0};
+        const auto dependency_mask = constitutiveDependencyMask(call_node, env.constitutive_cache);
+        ConstitutiveCallKey key{
+            &call_node,
+            side,
+            q,
+            (dependency_mask & kConstitutiveDependsOnTest) ? env.i : LocalIndex{0},
+            /*j=*/LocalIndex{0},
+            dependency_mask
+        };
         auto [it, inserted] = env.constitutive_cache->values.emplace(key, std::move(outputs));
         (void)inserted;
         return it->second[output_index];
@@ -10849,6 +10998,53 @@ void FormKernel::ensureInterpreterLoweredIndexedAccess()
     });
 }
 
+namespace {
+
+struct TensorInterpreterEvalContextReal {
+    const EvalEnvReal* env{nullptr};
+    Side side{Side::Minus};
+    LocalIndex q{0};
+};
+
+thread_local const TensorInterpreterEvalContextReal* tensor_interpreter_ctx_real = nullptr;
+
+EvalValue<Real> tensorInterpreterEvalValueReal(const FormExpr& e)
+{
+    if (!e.isValid() || e.node() == nullptr) {
+        throw FEException("Forms: tensor interpreter received invalid base expression",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+    FE_CHECK_NOT_NULL(tensor_interpreter_ctx_real, "Forms: tensor interpreter callback context");
+    FE_CHECK_NOT_NULL(tensor_interpreter_ctx_real->env, "Forms: tensor interpreter callback env");
+    return evalReal(*e.node(),
+                    *tensor_interpreter_ctx_real->env,
+                    tensor_interpreter_ctx_real->side,
+                    tensor_interpreter_ctx_real->q);
+}
+
+Real tensorInterpreterEvalScalarReal(const FormExpr& e)
+{
+    const auto v = tensorInterpreterEvalValueReal(e);
+    if (v.kind != EvalValue<Real>::Kind::Scalar) {
+        throw FEException("Forms: tensor interpreter scalar callback did not evaluate to scalar",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+    return v.s;
+}
+
+const tensor::TensorInterpreterCallbacks& tensorInterpreterCallbacksReal()
+{
+    static thread_local tensor::TensorInterpreterCallbacks cb = [] {
+        tensor::TensorInterpreterCallbacks out;
+        out.eval_value = tensorInterpreterEvalValueReal;
+        out.eval_scalar = tensorInterpreterEvalScalarReal;
+        return out;
+    }();
+    return cb;
+}
+
+} // namespace
+
 [[nodiscard]] Real evalScalarIntegrandTensorAware(
     std::size_t term_index,
     const FormExpr& integrand,
@@ -10859,27 +11055,12 @@ void FormKernel::ensureInterpreterLoweredIndexedAccess()
     LocalIndex q)
 {
     if (term_index < tensor_ir.size() && tensor_ir[term_index] != nullptr) {
-        tensor::TensorInterpreterCallbacks cb;
-        cb.eval_value = [&](const FormExpr& e) -> EvalValue<Real> {
-            if (!e.isValid() || e.node() == nullptr) {
-                throw FEException("Forms: tensor interpreter received invalid base expression",
-                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-            }
-            return evalReal(*e.node(), env, side, q);
-        };
-        cb.eval_scalar = [&](const FormExpr& e) -> Real {
-            if (!e.isValid() || e.node() == nullptr) {
-                throw FEException("Forms: tensor interpreter received invalid scalar expression",
-                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-            }
-            const auto v = evalReal(*e.node(), env, side, q);
-            if (v.kind != EvalValue<Real>::Kind::Scalar) {
-                throw FEException("Forms: tensor interpreter scalar callback did not evaluate to scalar",
-                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-            }
-            return v.s;
-        };
-        const auto r = tensor::evalTensorIRScalar(*tensor_ir[term_index], cb);
+        const TensorInterpreterEvalContextReal ctx{&env, side, q};
+        const auto* prev = tensor_interpreter_ctx_real;
+        tensor_interpreter_ctx_real = &ctx;
+        const auto r =
+            tensor::evalTensorIRScalar(*tensor_ir[term_index], tensorInterpreterCallbacksReal());
+        tensor_interpreter_ctx_real = prev;
         if (!r.ok) {
             throw FEException("Forms: tensor interpreter evaluation failed: " + r.message,
                               __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
@@ -10976,6 +11157,114 @@ void FormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::Ker
 
     output.has_matrix = want_matrix;
     output.has_vector = want_vector;
+}
+
+void FormKernel::computeCellBatch(std::span<const assembly::AssemblyContext* const> contexts,
+                                  std::span<assembly::KernelOutput> outputs)
+{
+    ensureInterpreterLoweredIndexedAccess();
+
+    constexpr std::size_t lane_width = 8u;
+    runHomogeneousCellBatches<lane_width>(
+        contexts,
+        outputs,
+        [&](std::span<const assembly::AssemblyContext* const> lane_ctx,
+            std::span<assembly::KernelOutput*> lane_out) {
+            const LocalIndex n_test = lane_ctx[0]->numTestDofs();
+            const LocalIndex n_trial = lane_ctx[0]->numTrialDofs();
+            const LocalIndex n_qpts = lane_ctx[0]->numQuadraturePoints();
+            const bool want_matrix = (ir_.kind() == FormKind::Bilinear);
+            const bool want_vector = (ir_.kind() == FormKind::Linear);
+
+            for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                lane_out[lane]->reserve(n_test, n_trial, want_matrix, want_vector);
+                lane_out[lane]->clear();
+            }
+
+            if (!inlined_state_updates_.cell.empty()) {
+                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        applyInlinedMaterialStateUpdatesReal(*lane_ctx[lane], nullptr, ir_.kind(),
+                                                             constitutive_state_.get(),
+                                                             inlined_state_updates_.cell,
+                                                             Side::Minus, q);
+                    }
+                }
+            }
+
+            std::vector<ConstitutiveCallCacheReal> constitutive_cache(lane_ctx.size());
+            std::vector<EvalEnvReal> envs{};
+            envs.reserve(lane_ctx.size());
+            for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                envs.push_back(EvalEnvReal{
+                    *lane_ctx[lane], nullptr, ir_.kind(), Side::Minus, Side::Minus, 0, 0,
+                    constitutive_state_.get(), &constitutive_cache[lane]
+                });
+            }
+
+            const auto& terms = ir_.terms();
+            for (std::size_t term_index = 0; term_index < terms.size(); ++term_index) {
+                const auto& term = terms[term_index];
+                if (term.domain != IntegralDomain::Cell) continue;
+
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    for (LocalIndex i = 0; i < n_test; ++i) {
+                        for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                            envs[lane].i = i;
+                        }
+
+                        if (want_matrix) {
+                            for (LocalIndex j = 0; j < n_trial; ++j) {
+                                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                                    auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
+                                    const Real term_weight =
+                                        termWeightFor(time_ctx, term.time_derivative_order);
+                                    if (term_weight == 0.0) {
+                                        continue;
+                                    }
+                                    envs[lane].j = j;
+                                    const Real s = evalScalarIntegrandTensorAware(term_index,
+                                                                                  term.integrand,
+                                                                                  tensor_term_ir_,
+                                                                                  tensor_term_fallback_,
+                                                                                  envs[lane],
+                                                                                  Side::Minus,
+                                                                                  q);
+                                    lane_out[lane]->matrixEntry(i, j) +=
+                                        (term_weight * lane_ctx[lane]->integrationWeight(q)) * s;
+                                }
+                            }
+                        } else if (want_vector) {
+                            for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                                auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
+                                const Real term_weight =
+                                    termWeightFor(time_ctx, term.time_derivative_order);
+                                if (term_weight == 0.0) {
+                                    continue;
+                                }
+                                const Real s = evalScalarIntegrandTensorAware(term_index,
+                                                                              term.integrand,
+                                                                              tensor_term_ir_,
+                                                                              tensor_term_fallback_,
+                                                                              envs[lane],
+                                                                              Side::Minus,
+                                                                              q);
+                                lane_out[lane]->vectorEntry(i) +=
+                                    (term_weight * lane_ctx[lane]->integrationWeight(q)) * s;
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                lane_out[lane]->has_matrix = want_matrix;
+                lane_out[lane]->has_vector = want_vector;
+            }
+        },
+        [&](const assembly::AssemblyContext& ctx, assembly::KernelOutput& output) {
+            computeCell(ctx, output);
+        });
 }
 
 void FormKernel::computeBoundaryFace(
@@ -11625,6 +11914,184 @@ void LinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembl
     }
 }
 
+void LinearFormKernel::computeCellBatch(std::span<const assembly::AssemblyContext* const> contexts,
+                                        std::span<assembly::KernelOutput> outputs)
+{
+    ensureInterpreterLoweredIndexedAccess();
+
+    constexpr std::size_t lane_width = 8u;
+    runHomogeneousCellBatches<lane_width>(
+        contexts,
+        outputs,
+        [&](std::span<const assembly::AssemblyContext* const> lane_ctx,
+            std::span<assembly::KernelOutput*> lane_out) {
+            const LocalIndex n_test = lane_ctx[0]->numTestDofs();
+            const LocalIndex n_trial = lane_ctx[0]->numTrialDofs();
+            const LocalIndex n_qpts = lane_ctx[0]->numQuadraturePoints();
+
+            const bool want_matrix = (output_ != LinearKernelOutput::VectorOnly);
+            const bool want_vector = (output_ != LinearKernelOutput::MatrixOnly);
+
+            for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                lane_out[lane]->reserve(n_test, n_trial, want_matrix, want_vector);
+                lane_out[lane]->clear();
+            }
+
+            if (!inlined_state_updates_.cell.empty()) {
+                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        applyInlinedMaterialStateUpdatesReal(*lane_ctx[lane], nullptr, FormKind::Bilinear,
+                                                             constitutive_state_.get(),
+                                                             inlined_state_updates_.cell,
+                                                             Side::Minus, q);
+                    }
+                }
+            }
+
+            std::vector<ConstitutiveCallCacheReal> constitutive_cache(lane_ctx.size());
+
+            if (want_matrix) {
+                std::vector<EvalEnvReal> envs{};
+                envs.reserve(lane_ctx.size());
+                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                    envs.push_back(EvalEnvReal{
+                        *lane_ctx[lane], nullptr, FormKind::Bilinear, Side::Minus, Side::Minus, 0, 0,
+                        constitutive_state_.get(), &constitutive_cache[lane]
+                    });
+                }
+
+                for (const auto& term : bilinear_ir_.terms()) {
+                    if (term.domain != IntegralDomain::Cell) continue;
+
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        for (LocalIndex i = 0; i < n_test; ++i) {
+                            for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                                envs[lane].i = i;
+                            }
+                            for (LocalIndex j = 0; j < n_trial; ++j) {
+                                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                                    const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
+                                    const Real term_weight =
+                                        termWeightFor(time_ctx, term.time_derivative_order);
+                                    if (term_weight == 0.0) {
+                                        continue;
+                                    }
+                                    envs[lane].j = j;
+                                    const auto val = evalReal(*term.integrand.node(), envs[lane], Side::Minus, q);
+                                    if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                                        throw FEException("Forms: cell bilinear integrand did not evaluate to scalar",
+                                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                                    }
+                                    lane_out[lane]->matrixEntry(i, j) +=
+                                        (term_weight * lane_ctx[lane]->integrationWeight(q)) * val.s;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (want_vector) {
+                std::vector<std::span<const Real>> coeffs{};
+                coeffs.reserve(lane_ctx.size());
+                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                    const auto c = lane_ctx[lane]->solutionCoefficients();
+                    FE_THROW_IF(c.size() < static_cast<std::size_t>(n_trial), InvalidArgumentException,
+                                "LinearFormKernel::computeCellBatch: missing solution coefficients");
+                    coeffs.push_back(c);
+                }
+
+                if (linear_ir_.has_value()) {
+                    std::vector<EvalEnvReal> envs{};
+                    envs.reserve(lane_ctx.size());
+                    for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                        envs.push_back(EvalEnvReal{
+                            *lane_ctx[lane], nullptr, FormKind::Linear, Side::Minus, Side::Minus, 0, 0,
+                            constitutive_state_.get(), &constitutive_cache[lane]
+                        });
+                    }
+
+                    for (const auto& term : linear_ir_->terms()) {
+                        if (term.domain != IntegralDomain::Cell) continue;
+                        for (LocalIndex q = 0; q < n_qpts; ++q) {
+                            for (LocalIndex i = 0; i < n_test; ++i) {
+                                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                                    const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
+                                    const Real term_weight =
+                                        termWeightFor(time_ctx, term.time_derivative_order);
+                                    if (term_weight == 0.0) {
+                                        continue;
+                                    }
+                                    envs[lane].i = i;
+                                    const auto val = evalReal(*term.integrand.node(), envs[lane], Side::Minus, q);
+                                    if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                                        throw FEException("Forms: cell linear integrand did not evaluate to scalar",
+                                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                                    }
+                                    lane_out[lane]->vectorEntry(i) +=
+                                        (term_weight * lane_ctx[lane]->integrationWeight(q)) * val.s;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (want_matrix) {
+                    for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                        for (LocalIndex i = 0; i < n_test; ++i) {
+                            Real sum = 0.0;
+                            for (LocalIndex j = 0; j < n_trial; ++j) {
+                                sum += lane_out[lane]->matrixEntry(i, j) * coeffs[lane][static_cast<std::size_t>(j)];
+                            }
+                            lane_out[lane]->vectorEntry(i) += sum;
+                        }
+                    }
+                } else {
+                    std::vector<EvalEnvReal> envs{};
+                    envs.reserve(lane_ctx.size());
+                    for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                        envs.push_back(EvalEnvReal{
+                            *lane_ctx[lane], nullptr, FormKind::Bilinear, Side::Minus, Side::Minus, 0, 0,
+                            constitutive_state_.get(), &constitutive_cache[lane]
+                        });
+                    }
+
+                    for (const auto& term : bilinear_ir_.terms()) {
+                        if (term.domain != IntegralDomain::Cell) continue;
+                        for (LocalIndex q = 0; q < n_qpts; ++q) {
+                            for (LocalIndex i = 0; i < n_test; ++i) {
+                                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                                    const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
+                                    const Real term_weight =
+                                        termWeightFor(time_ctx, term.time_derivative_order);
+                                    if (term_weight == 0.0) {
+                                        continue;
+                                    }
+                                    envs[lane].i = i;
+                                    Real sum = 0.0;
+                                    for (LocalIndex j = 0; j < n_trial; ++j) {
+                                        envs[lane].j = j;
+                                        const auto val = evalReal(*term.integrand.node(), envs[lane], Side::Minus, q);
+                                        if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                                            throw FEException("Forms: cell bilinear integrand did not evaluate to scalar",
+                                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                                        }
+                                        sum += val.s * coeffs[lane][static_cast<std::size_t>(j)];
+                                    }
+                                    lane_out[lane]->vectorEntry(i) +=
+                                        (term_weight * lane_ctx[lane]->integrationWeight(q)) * sum;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        [&](const assembly::AssemblyContext& ctx, assembly::KernelOutput& output) {
+            computeCell(ctx, output);
+        });
+}
+
 void LinearFormKernel::computeBoundaryFace(
     const assembly::AssemblyContext& ctx,
     int boundary_marker,
@@ -11937,30 +12404,24 @@ void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, asse
     }
 
     thread_local DualWorkspace ws;
+    ConstitutiveCallCacheDual constitutive_cache;
 
-    for (LocalIndex i = 0; i < n_test; ++i) {
-        std::span<Real> row{};
-        if (want_matrix) {
-            row = std::span<Real>(
-                output.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
-                static_cast<std::size_t>(n_trial));
-        }
+    const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        const Real w = ctx.integrationWeight(q);
+        ws.reset(n_trial_ad);
+        constitutive_cache.values.clear();
 
-        Dual residual_i;
-        residual_i.value = 0.0;
-        residual_i.deriv = row;
+        for (LocalIndex i = 0; i < n_test; ++i) {
+            std::span<Real> row{};
+            if (want_matrix) {
+                row = std::span<Real>(
+                    output.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
+                    static_cast<std::size_t>(n_trial));
+            }
 
-        for (LocalIndex q = 0; q < n_qpts; ++q) {
-            const Real w = ctx.integrationWeight(q);
-
-            // Reset workspace for this quadrature evaluation.
-            const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
-            ws.reset(n_trial_ad);
-
-            ConstitutiveCallCacheDual constitutive_cache;
             EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, n_trial_ad, &ws,
                             constitutive_state_.get(), &constitutive_cache};
-
             Dual sum_q = makeDualConstant(0.0, ws.alloc());
 
             for (const auto& term : residual_ir_.terms()) {
@@ -11978,16 +12439,122 @@ void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, asse
                 }
             }
 
-            residual_i.value += w * sum_q.value;
-            for (std::size_t j = 0; j < residual_i.deriv.size(); ++j) {
-                residual_i.deriv[j] += w * sum_q.deriv[j];
+            if (want_vector) {
+                output.local_vector[static_cast<std::size_t>(i)] += w * sum_q.value;
+            }
+            for (std::size_t j = 0; j < row.size(); ++j) {
+                row[j] += w * sum_q.deriv[j];
             }
         }
-
-        if (want_vector) {
-            output.local_vector[static_cast<std::size_t>(i)] = residual_i.value;
-        }
     }
+}
+
+void NonlinearFormKernel::computeCellBatch(std::span<const assembly::AssemblyContext* const> contexts,
+                                           std::span<assembly::KernelOutput> outputs)
+{
+    ensureInterpreterLoweredIndexedAccess();
+
+    constexpr std::size_t lane_width = 8u;
+    runHomogeneousCellBatches<lane_width>(
+        contexts,
+        outputs,
+        [&](std::span<const assembly::AssemblyContext* const> lane_ctx,
+            std::span<assembly::KernelOutput*> lane_out) {
+            const LocalIndex n_test = lane_ctx[0]->numTestDofs();
+            const LocalIndex n_trial = lane_ctx[0]->numTrialDofs();
+            const LocalIndex n_qpts = lane_ctx[0]->numQuadraturePoints();
+
+            const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
+            const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+            const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
+
+            for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                lane_out[lane]->reserve(n_test, n_trial, want_matrix, want_vector);
+            }
+
+            if (!inlined_state_updates_.cell.empty()) {
+                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        applyInlinedMaterialStateUpdatesDual(*lane_ctx[lane], nullptr,
+                                                             constitutive_state_.get(),
+                                                             inlined_state_updates_.cell,
+                                                             Side::Minus, q);
+                    }
+                }
+            }
+
+            std::vector<DualWorkspace> workspaces(lane_ctx.size());
+            std::vector<ConstitutiveCallCacheDual> constitutive_cache(lane_ctx.size());
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                    workspaces[lane].reset(n_trial_ad);
+                    constitutive_cache[lane].values.clear();
+                }
+
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    std::vector<std::span<Real>> rows(lane_ctx.size());
+                    for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                        if (!want_matrix) {
+                            continue;
+                        }
+                        rows[lane] = std::span<Real>(
+                            lane_out[lane]->local_matrix.data() + static_cast<std::size_t>(i * n_trial),
+                            static_cast<std::size_t>(n_trial));
+                    }
+
+                    std::vector<EvalEnvDual> envs{};
+                    envs.reserve(lane_ctx.size());
+                    std::vector<Dual> sums{};
+                    sums.reserve(lane_ctx.size());
+                    for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                        envs.push_back(EvalEnvDual{
+                            *lane_ctx[lane], nullptr, Side::Minus, Side::Minus, i,
+                            n_trial_ad, &workspaces[lane], constitutive_state_.get(),
+                            &constitutive_cache[lane]
+                        });
+                        sums.push_back(makeDualConstant(0.0, workspaces[lane].alloc()));
+                    }
+
+                    for (const auto& term : residual_ir_.terms()) {
+                        if (term.domain != IntegralDomain::Cell) continue;
+
+                        for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                            const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
+                            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
+                            if (term_weight == 0.0) {
+                                continue;
+                            }
+
+                            const auto val = evalDual(*term.integrand.node(), envs[lane], Side::Minus, q);
+                            if (val.kind != EvalValue<Dual>::Kind::Scalar) {
+                                throw FEException("Forms: residual cell integrand did not evaluate to scalar",
+                                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                            }
+                            sums[lane].value += term_weight * val.s.value;
+                            for (std::size_t j = 0; j < sums[lane].deriv.size(); ++j) {
+                                sums[lane].deriv[j] += term_weight * val.s.deriv[j];
+                            }
+                        }
+                    }
+
+                    for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                        const Real w = lane_ctx[lane]->integrationWeight(q);
+                        if (want_vector) {
+                            lane_out[lane]->local_vector[static_cast<std::size_t>(i)] += w * sums[lane].value;
+                        }
+                        if (want_matrix) {
+                            for (std::size_t j = 0; j < rows[lane].size(); ++j) {
+                                rows[lane][j] += w * sums[lane].deriv[j];
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        [&](const assembly::AssemblyContext& ctx, assembly::KernelOutput& output) {
+            computeCell(ctx, output);
+        });
 }
 
 void NonlinearFormKernel::computeBoundaryFace(
@@ -12033,25 +12600,22 @@ void NonlinearFormKernel::computeBoundaryFace(
     }
 
     thread_local DualWorkspace ws;
+    ConstitutiveCallCacheDual constitutive_cache;
 
-    for (LocalIndex i = 0; i < n_test; ++i) {
-        std::span<Real> row{};
-        if (want_matrix) {
-            row = std::span<Real>(
-                output.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
-                static_cast<std::size_t>(n_trial));
-        }
+    const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        const Real w = ctx.integrationWeight(q);
+        ws.reset(n_trial_ad);
+        constitutive_cache.values.clear();
 
-        Dual residual_i;
-        residual_i.value = 0.0;
-        residual_i.deriv = row;
+        for (LocalIndex i = 0; i < n_test; ++i) {
+            std::span<Real> row{};
+            if (want_matrix) {
+                row = std::span<Real>(
+                    output.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
+                    static_cast<std::size_t>(n_trial));
+            }
 
-        for (LocalIndex q = 0; q < n_qpts; ++q) {
-            const Real w = ctx.integrationWeight(q);
-            const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
-            ws.reset(n_trial_ad);
-
-            ConstitutiveCallCacheDual constitutive_cache;
             EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, n_trial_ad, &ws,
                             constitutive_state_.get(), &constitutive_cache};
             Dual sum_q = makeDualConstant(0.0, ws.alloc());
@@ -12072,14 +12636,12 @@ void NonlinearFormKernel::computeBoundaryFace(
                 }
             }
 
-            residual_i.value += w * sum_q.value;
-            for (std::size_t j = 0; j < residual_i.deriv.size(); ++j) {
-                residual_i.deriv[j] += w * sum_q.deriv[j];
+            if (want_vector) {
+                output.local_vector[static_cast<std::size_t>(i)] += w * sum_q.value;
             }
-        }
-
-        if (want_vector) {
-            output.local_vector[static_cast<std::size_t>(i)] = residual_i.value;
+            for (std::size_t j = 0; j < row.size(); ++j) {
+                row[j] += w * sum_q.deriv[j];
+            }
         }
     }
 }
@@ -12149,25 +12711,21 @@ void NonlinearFormKernel::computeInteriorFace(
         }
         const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
         const auto* time_ctx = ctx_eval.timeIntegrationContext();
-        for (LocalIndex i = 0; i < n_test; ++i) {
-            std::span<Real> row{};
-            if (want_matrix) {
-                row = std::span<Real>(
-                    out.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
-                    static_cast<std::size_t>(n_trial));
-                std::fill(row.begin(), row.end(), 0.0);
-            }
+        const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
+        ConstitutiveCallCacheDual constitutive_cache;
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx_eval.integrationWeight(q);
+            ws.reset(n_trial_ad);
+            constitutive_cache.values.clear();
 
-            Dual residual_i;
-            residual_i.value = 0.0;
-            residual_i.deriv = row;
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                std::span<Real> row{};
+                if (want_matrix) {
+                    row = std::span<Real>(
+                        out.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
+                        static_cast<std::size_t>(n_trial));
+                }
 
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const Real w = ctx_eval.integrationWeight(q);
-                const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
-                ws.reset(n_trial_ad);
-
-                ConstitutiveCallCacheDual constitutive_cache;
                 EvalEnvDual env{ctx_minus, &ctx_plus, test_active, trial_active, i,
                                 n_trial_ad, &ws, constitutive_state_.get(), &constitutive_cache};
 
@@ -12187,17 +12745,14 @@ void NonlinearFormKernel::computeInteriorFace(
                     }
                 }
 
-                residual_i.value += w * sum_q.value;
-                for (std::size_t j = 0; j < residual_i.deriv.size(); ++j) {
-                    residual_i.deriv[j] += w * sum_q.deriv[j];
+                if (want_vector) {
+                    out.local_vector[static_cast<std::size_t>(i)] += w * sum_q.value;
+                }
+                for (std::size_t j = 0; j < row.size(); ++j) {
+                    row[j] += w * sum_q.deriv[j];
                 }
             }
-
-            if (want_vector) {
-                out.local_vector[static_cast<std::size_t>(i)] = residual_i.value;
-            }
         }
-
     };
 
     if (want_minus_matrix || want_minus_vector) {
@@ -12291,25 +12846,21 @@ void NonlinearFormKernel::computeInterfaceFace(
         }
         const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
         const auto* time_ctx = ctx_eval.timeIntegrationContext();
-        for (LocalIndex i = 0; i < n_test; ++i) {
-            std::span<Real> row{};
-            if (want_matrix) {
-                row = std::span<Real>(
-                    out.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
-                    static_cast<std::size_t>(n_trial));
-                std::fill(row.begin(), row.end(), 0.0);
-            }
+        const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
+        ConstitutiveCallCacheDual constitutive_cache;
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx_eval.integrationWeight(q);
+            ws.reset(n_trial_ad);
+            constitutive_cache.values.clear();
 
-            Dual residual_i;
-            residual_i.value = 0.0;
-            residual_i.deriv = row;
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                std::span<Real> row{};
+                if (want_matrix) {
+                    row = std::span<Real>(
+                        out.local_matrix.data() + static_cast<std::size_t>(i * n_trial),
+                        static_cast<std::size_t>(n_trial));
+                }
 
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const Real w = ctx_eval.integrationWeight(q);
-                const std::size_t n_trial_ad = want_matrix ? static_cast<std::size_t>(n_trial) : 0u;
-                ws.reset(n_trial_ad);
-
-                ConstitutiveCallCacheDual constitutive_cache;
                 EvalEnvDual env{ctx_minus, &ctx_plus, test_active, trial_active, i,
                                 n_trial_ad, &ws, constitutive_state_.get(), &constitutive_cache};
 
@@ -12330,14 +12881,12 @@ void NonlinearFormKernel::computeInterfaceFace(
                     }
                 }
 
-                residual_i.value += w * sum_q.value;
-                for (std::size_t j = 0; j < residual_i.deriv.size(); ++j) {
-                    residual_i.deriv[j] += w * sum_q.deriv[j];
+                if (want_vector) {
+                    out.local_vector[static_cast<std::size_t>(i)] += w * sum_q.value;
                 }
-            }
-
-            if (want_vector) {
-                out.local_vector[static_cast<std::size_t>(i)] = residual_i.value;
+                for (std::size_t j = 0; j < row.size(); ++j) {
+                    row[j] += w * sum_q.deriv[j];
+                }
             }
         }
     };
@@ -12962,15 +13511,15 @@ void SymbolicNonlinearFormKernel::computeCell(const assembly::AssemblyContext& c
     }
 
     if (want_vector) {
-        for (LocalIndex i = 0; i < n_test; ++i) {
-            Real ri = 0.0;
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const Real w = ctx.integrationWeight(q);
+        ConstitutiveCallCacheReal constitutive_cache;
+        EvalEnvReal env{ctx, nullptr, FormKind::Residual, Side::Minus, Side::Minus, 0, 0,
+                        constitutive_state_.get(), &constitutive_cache};
 
-                ConstitutiveCallCacheReal constitutive_cache;
-                EvalEnvReal env{ctx, nullptr, FormKind::Residual, Side::Minus, Side::Minus, i, 0,
-                                constitutive_state_.get(), &constitutive_cache};
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
 
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                env.i = i;
                 Real sum_q = 0.0;
                 for (const auto& term : residual_ir_.terms()) {
                     if (term.domain != IntegralDomain::Cell) continue;
@@ -12984,9 +13533,8 @@ void SymbolicNonlinearFormKernel::computeCell(const assembly::AssemblyContext& c
                     }
                     sum_q += term_weight * val.s;
                 }
-                ri += w * sum_q;
+                output.vectorEntry(i) += w * sum_q;
             }
-            output.vectorEntry(i) += ri;
         }
     }
 
@@ -13021,6 +13569,129 @@ void SymbolicNonlinearFormKernel::computeCell(const assembly::AssemblyContext& c
 
     output.has_matrix = want_matrix;
     output.has_vector = want_vector;
+}
+
+void SymbolicNonlinearFormKernel::computeCellBatch(std::span<const assembly::AssemblyContext* const> contexts,
+                                                   std::span<assembly::KernelOutput> outputs)
+{
+    ensureInterpreterLoweredIndexedAccess();
+
+    const bool want_matrix = (output_ != NonlinearKernelOutput::VectorOnly);
+    const bool want_vector = (output_ != NonlinearKernelOutput::MatrixOnly);
+    FE_THROW_IF(want_matrix && !tangent_ready_, InvalidArgumentException,
+                "SymbolicNonlinearFormKernel: tangent IR not built; call resolveInlinableConstitutives() during setup");
+    FE_THROW_IF((want_vector || material_state_spec_.bytes_per_qpt > 0u) && !residual_scalar_ready_, InvalidArgumentException,
+                "SymbolicNonlinearFormKernel: residual IR not prepared for scalar evaluation; call resolveInlinableConstitutives() during setup");
+
+    constexpr std::size_t lane_width = 8u;
+    runHomogeneousCellBatches<lane_width>(
+        contexts,
+        outputs,
+        [&](std::span<const assembly::AssemblyContext* const> lane_ctx,
+            std::span<assembly::KernelOutput*> lane_out) {
+            const LocalIndex n_test = lane_ctx[0]->numTestDofs();
+            const LocalIndex n_trial = lane_ctx[0]->numTrialDofs();
+            const LocalIndex n_qpts = lane_ctx[0]->numQuadraturePoints();
+
+            for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                lane_out[lane]->reserve(n_test, n_trial, want_matrix, want_vector);
+            }
+
+            if (!inlined_state_updates_.cell.empty()) {
+                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        applyInlinedMaterialStateUpdatesReal(*lane_ctx[lane], nullptr, FormKind::Residual,
+                                                             constitutive_state_.get(),
+                                                             inlined_state_updates_.cell,
+                                                             Side::Minus, q);
+                    }
+                }
+            }
+
+            if (want_vector) {
+                std::vector<ConstitutiveCallCacheReal> constitutive_cache(lane_ctx.size());
+                std::vector<EvalEnvReal> envs{};
+                envs.reserve(lane_ctx.size());
+                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                    envs.push_back(EvalEnvReal{
+                        *lane_ctx[lane], nullptr, FormKind::Residual, Side::Minus, Side::Minus, 0, 0,
+                        constitutive_state_.get(), &constitutive_cache[lane]
+                    });
+                }
+
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    for (LocalIndex i = 0; i < n_test; ++i) {
+                        for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                            envs[lane].i = i;
+                            Real sum_q = 0.0;
+                            const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
+                            for (const auto& term : residual_ir_.terms()) {
+                                if (term.domain != IntegralDomain::Cell) continue;
+                                const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
+                                if (term_weight == 0.0) continue;
+
+                                const auto val = evalReal(*term.integrand.node(), envs[lane], Side::Minus, q);
+                                if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                                    throw FEException("Forms: residual cell integrand did not evaluate to scalar (symbolic kernel)",
+                                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                                }
+                                sum_q += term_weight * val.s;
+                            }
+                            lane_out[lane]->vectorEntry(i) += lane_ctx[lane]->integrationWeight(q) * sum_q;
+                        }
+                    }
+                }
+            }
+
+            if (want_matrix) {
+                std::vector<ConstitutiveCallCacheReal> constitutive_cache(lane_ctx.size());
+                std::vector<EvalEnvReal> envs{};
+                envs.reserve(lane_ctx.size());
+                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                    envs.push_back(EvalEnvReal{
+                        *lane_ctx[lane], nullptr, FormKind::Bilinear, Side::Minus, Side::Minus, 0, 0,
+                        constitutive_state_.get(), &constitutive_cache[lane]
+                    });
+                }
+
+                for (const auto& term : tangent_ir_.terms()) {
+                    if (term.domain != IntegralDomain::Cell) continue;
+
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        for (LocalIndex i = 0; i < n_test; ++i) {
+                            for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                                envs[lane].i = i;
+                            }
+                            for (LocalIndex j = 0; j < n_trial; ++j) {
+                                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                                    const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
+                                    const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
+                                    if (term_weight == 0.0) continue;
+
+                                    envs[lane].j = j;
+                                    const auto val = evalReal(*term.integrand.node(), envs[lane], Side::Minus, q);
+                                    if (val.kind != EvalValue<Real>::Kind::Scalar) {
+                                        throw FEException("Forms: tangent cell integrand did not evaluate to scalar (symbolic kernel). "
+                                                          "Integrand: " + term.integrand.toString(),
+                                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                                    }
+                                    lane_out[lane]->matrixEntry(i, j) +=
+                                        (term_weight * lane_ctx[lane]->integrationWeight(q)) * val.s;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                lane_out[lane]->has_matrix = want_matrix;
+                lane_out[lane]->has_vector = want_vector;
+            }
+        },
+        [&](const assembly::AssemblyContext& ctx, assembly::KernelOutput& output) {
+            computeCell(ctx, output);
+        });
 }
 
 void SymbolicNonlinearFormKernel::computeBoundaryFace(const assembly::AssemblyContext& ctx,
@@ -13066,15 +13737,15 @@ void SymbolicNonlinearFormKernel::computeBoundaryFace(const assembly::AssemblyCo
     }
 
     if (want_vector) {
-        for (LocalIndex i = 0; i < n_test; ++i) {
-            Real ri = 0.0;
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const Real w = ctx.integrationWeight(q);
+        ConstitutiveCallCacheReal constitutive_cache;
+        EvalEnvReal env{ctx, nullptr, FormKind::Residual, Side::Minus, Side::Minus, 0, 0,
+                        constitutive_state_.get(), &constitutive_cache};
 
-                ConstitutiveCallCacheReal constitutive_cache;
-                EvalEnvReal env{ctx, nullptr, FormKind::Residual, Side::Minus, Side::Minus, i, 0,
-                                constitutive_state_.get(), &constitutive_cache};
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
 
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                env.i = i;
                 Real sum_q = 0.0;
                 for (const auto& term : residual_ir_.terms()) {
                     if (term.domain != IntegralDomain::Boundary) continue;
@@ -13090,9 +13761,8 @@ void SymbolicNonlinearFormKernel::computeBoundaryFace(const assembly::AssemblyCo
                     }
                     sum_q += term_weight * val.s;
                 }
-                ri += w * sum_q;
+                output.vectorEntry(i) += w * sum_q;
             }
-            output.vectorEntry(i) += ri;
         }
     }
 
@@ -13484,14 +14154,12 @@ void CoupledResidualSensitivityKernel::computeCell(const assembly::AssemblyConte
 
     thread_local DualWorkspace ws;
 
-    for (LocalIndex i = 0; i < n_test; ++i) {
-        Real dres_i = 0.0;
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        const Real w = ctx.integrationWeight(q);
+        ws.reset(/*num_dofs=*/1u);
 
-        for (LocalIndex q = 0; q < n_qpts; ++q) {
-            const Real w = ctx.integrationWeight(q);
-            ws.reset(/*num_dofs=*/1u);
-
-            ConstitutiveCallCacheDual constitutive_cache;
+        ConstitutiveCallCacheDual constitutive_cache;
+        for (LocalIndex i = 0; i < n_test; ++i) {
             EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, /*n_trial_dofs=*/0u, &ws,
                             constitutive_state, &constitutive_cache};
             env.coupled_integral_seed_slot = coupled_integral_slot_;
@@ -13514,11 +14182,85 @@ void CoupledResidualSensitivityKernel::computeCell(const assembly::AssemblyConte
                 }
             }
 
-            dres_i += w * sum_dq;
+            output.local_vector[static_cast<std::size_t>(i)] += w * sum_dq;
         }
-
-        output.local_vector[static_cast<std::size_t>(i)] = dres_i;
     }
+}
+
+void CoupledResidualSensitivityKernel::computeCellBatch(
+    std::span<const assembly::AssemblyContext* const> contexts,
+    std::span<assembly::KernelOutput> outputs)
+{
+    constexpr std::size_t lane_width = 8u;
+    runHomogeneousCellBatches<lane_width>(
+        contexts,
+        outputs,
+        [&](std::span<const assembly::AssemblyContext* const> lane_ctx,
+            std::span<assembly::KernelOutput*> lane_out) {
+            const LocalIndex n_test = lane_ctx[0]->numTestDofs();
+            const LocalIndex n_trial = lane_ctx[0]->numTrialDofs();
+            const LocalIndex n_qpts = lane_ctx[0]->numQuadraturePoints();
+            const auto* constitutive_state = base_->constitutiveStateLayout();
+
+            for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                lane_out[lane]->reserve(n_test, n_trial, /*need_matrix=*/false, /*need_vector=*/true);
+                std::fill(lane_out[lane]->local_vector.begin(), lane_out[lane]->local_vector.end(), 0.0);
+            }
+
+            const auto& updates = base_->inlinedStateUpdates().cell;
+            if (!updates.empty()) {
+                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        applyInlinedMaterialStateUpdatesDual(*lane_ctx[lane], nullptr,
+                                                             constitutive_state,
+                                                             updates,
+                                                             Side::Minus, q);
+                    }
+                }
+            }
+
+            std::vector<DualWorkspace> workspaces(lane_ctx.size());
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                std::vector<ConstitutiveCallCacheDual> constitutive_cache(lane_ctx.size());
+                for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                    workspaces[lane].reset(/*num_dofs=*/1u);
+                }
+
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                        EvalEnvDual env{*lane_ctx[lane], nullptr, Side::Minus, Side::Minus, i, /*n_trial_dofs=*/0u,
+                                        &workspaces[lane], constitutive_state, &constitutive_cache[lane]};
+                        env.coupled_integral_seed_slot = coupled_integral_slot_;
+                        env.coupled_aux_dseed = daux_dintegrals_;
+                        env.coupled_aux_dseed_cols = num_integrals_;
+
+                        Real sum_dq = 0.0;
+                        const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
+                        for (const auto& term : base_->residualIR().terms()) {
+                            if (term.domain != IntegralDomain::Cell) continue;
+                            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
+                            if (term_weight == 0.0) continue;
+
+                            const auto val = evalDual(*term.integrand.node(), env, Side::Minus, q);
+                            if (val.kind != EvalValue<Dual>::Kind::Scalar) {
+                                throw FEException("Forms: coupled residual sensitivity cell integrand did not evaluate to scalar",
+                                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                            }
+                            if (!val.s.deriv.empty()) {
+                                sum_dq += term_weight * val.s.deriv[0];
+                            }
+                        }
+
+                        lane_out[lane]->local_vector[static_cast<std::size_t>(i)] +=
+                            lane_ctx[lane]->integrationWeight(q) * sum_dq;
+                    }
+                }
+            }
+        },
+        [&](const assembly::AssemblyContext& ctx, assembly::KernelOutput& output) {
+            computeCell(ctx, output);
+        });
 }
 
 void CoupledResidualSensitivityKernel::computeBoundaryFace(const assembly::AssemblyContext& ctx,
@@ -13562,13 +14304,12 @@ void CoupledResidualSensitivityKernel::computeBoundaryFace(const assembly::Assem
 
     thread_local DualWorkspace ws;
 
-    for (LocalIndex i = 0; i < n_test; ++i) {
-        Real dres_i = 0.0;
-        for (LocalIndex q = 0; q < n_qpts; ++q) {
-            const Real w = ctx.integrationWeight(q);
-            ws.reset(/*num_dofs=*/1u);
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        const Real w = ctx.integrationWeight(q);
+        ws.reset(/*num_dofs=*/1u);
 
-            ConstitutiveCallCacheDual constitutive_cache;
+        ConstitutiveCallCacheDual constitutive_cache;
+        for (LocalIndex i = 0; i < n_test; ++i) {
             EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, /*n_trial_dofs=*/0u, &ws,
                             constitutive_state, &constitutive_cache};
             env.coupled_integral_seed_slot = coupled_integral_slot_;
@@ -13592,10 +14333,8 @@ void CoupledResidualSensitivityKernel::computeBoundaryFace(const assembly::Assem
                 }
             }
 
-            dres_i += w * sum_dq;
+            output.local_vector[static_cast<std::size_t>(i)] += w * sum_dq;
         }
-
-        output.local_vector[static_cast<std::size_t>(i)] = dres_i;
     }
 }
 
@@ -13650,13 +14389,12 @@ void CoupledResidualSensitivityKernel::computeInteriorFace(const assembly::Assem
                                      assembly::KernelOutput& out,
                                      LocalIndex n_test) {
         const auto* time_ctx = ctx_eval.timeIntegrationContext();
-        for (LocalIndex i = 0; i < n_test; ++i) {
-            Real dres_i = 0.0;
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const Real w = ctx_eval.integrationWeight(q);
-                ws.reset(/*num_dofs=*/1u);
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx_eval.integrationWeight(q);
+            ws.reset(/*num_dofs=*/1u);
 
-                ConstitutiveCallCacheDual constitutive_cache;
+            ConstitutiveCallCacheDual constitutive_cache;
+            for (LocalIndex i = 0; i < n_test; ++i) {
                 EvalEnvDual env{ctx_eval, &ctx_other, test_active, trial_active, i,
                                 /*n_trial_dofs=*/0u, &ws, constitutive_state, &constitutive_cache};
                 env.coupled_integral_seed_slot = coupled_integral_slot_;
@@ -13678,9 +14416,8 @@ void CoupledResidualSensitivityKernel::computeInteriorFace(const assembly::Assem
                     }
                 }
 
-                dres_i += w * sum_dq;
+                out.local_vector[static_cast<std::size_t>(i)] += w * sum_dq;
             }
-            out.local_vector[static_cast<std::size_t>(i)] = dres_i;
         }
     };
 
@@ -13745,13 +14482,12 @@ void CoupledResidualSensitivityKernel::computeInterfaceFace(const assembly::Asse
                                      assembly::KernelOutput& out,
                                      LocalIndex n_test) {
         const auto* time_ctx = ctx_eval.timeIntegrationContext();
-        for (LocalIndex i = 0; i < n_test; ++i) {
-            Real dres_i = 0.0;
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const Real w = ctx_eval.integrationWeight(q);
-                ws.reset(/*num_dofs=*/1u);
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx_eval.integrationWeight(q);
+            ws.reset(/*num_dofs=*/1u);
 
-                ConstitutiveCallCacheDual constitutive_cache;
+            ConstitutiveCallCacheDual constitutive_cache;
+            for (LocalIndex i = 0; i < n_test; ++i) {
                 EvalEnvDual env{ctx_eval, &ctx_other, test_active, trial_active, i,
                                 /*n_trial_dofs=*/0u, &ws, constitutive_state, &constitutive_cache};
                 env.coupled_integral_seed_slot = coupled_integral_slot_;
@@ -13774,9 +14510,8 @@ void CoupledResidualSensitivityKernel::computeInterfaceFace(const assembly::Asse
                     }
                 }
 
-                dres_i += w * sum_dq;
+                out.local_vector[static_cast<std::size_t>(i)] += w * sum_dq;
             }
-            out.local_vector[static_cast<std::size_t>(i)] = dres_i;
         }
     };
 
