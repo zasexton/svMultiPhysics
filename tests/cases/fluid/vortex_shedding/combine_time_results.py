@@ -50,12 +50,23 @@ def _extract_time_from_mesh_field_data(path: Path) -> Optional[float]:
 
 def _extract_step_from_name(path: Path) -> int:
     """
-    Extract integer step index from a file name like ``result_002.vtu``.
+    Extract integer step index from a file name like ``result_002.vtu`` or ``result_002.pvtu``.
     """
-    match = re.search(r"result_(\d+)\.(?:vtu|vtp)$", path.name)
+    match = re.search(r"result_(\d+)\.(?:vtu|vtp|pvtu|pvtp)$", path.name)
     if not match:
         return 0
     return int(match.group(1))
+
+
+def _find_vtk_dataset_element(root: ET.Element, *, src: Path) -> ET.Element:
+    # Common dataset tags used by this repo's post-processing:
+    # - VTU: <UnstructuredGrid>
+    # - VTP: <PolyData>
+    for tag in ("UnstructuredGrid", "PolyData", "ImageData", "RectilinearGrid", "StructuredGrid"):
+        elem = root.find(tag)
+        if elem is not None:
+            return elem
+    raise RuntimeError(f"Unexpected VTK XML structure (no dataset element found): {src}")
 
 
 def _inject_timevalue_field_data(*, src: Path, dst: Path, time_value: float) -> None:
@@ -66,18 +77,16 @@ def _inject_timevalue_field_data(*, src: Path, dst: Path, time_value: float) -> 
     Notes:
     - This modifies only the XML header; appended binary data offsets remain valid.
     - VTK's PVD format stores time in the DataSet 'timestep' attribute, but adding
-      TimeValue to the VTU is convenient for per-file Python post-processing.
+      TimeValue to each dataset file is convenient for per-file Python post-processing.
     """
     root = ET.parse(src).getroot()
-    ug = root.find("UnstructuredGrid")
-    if ug is None:
-        raise RuntimeError(f"Unexpected VTU structure (no UnstructuredGrid): {src}")
+    dataset = _find_vtk_dataset_element(root, src=src)
 
     # Ensure FieldData exists and is before the first Piece for readability.
-    field_data = ug.find("FieldData")
+    field_data = dataset.find("FieldData")
     if field_data is None:
         field_data = ET.Element("FieldData")
-        ug.insert(0, field_data)
+        dataset.insert(0, field_data)
 
     time_array = None
     for child in field_data.findall("DataArray"):
@@ -96,18 +105,69 @@ def _inject_timevalue_field_data(*, src: Path, dst: Path, time_value: float) -> 
     ET.ElementTree(root).write(dst, xml_declaration=True, encoding="UTF-8")
 
 
+def _write_timevalue_parallel_dataset(*, src: Path, dst: Path, time_value: float) -> None:
+    """
+    Write a copy of a parallel VTK dataset (.pvtu/.pvtp) to `dst`, ensuring that all
+    referenced piece files contain FieldData/TimeValue.
+
+    Notes:
+    - The time value is injected into each piece file (e.g. result_002_p0.vtu).
+      Readers (PyVista/VTK) then propagate this to the assembled .pvtu dataset.
+    - The .pvtu/.pvtp file itself is re-written (small XML) and its Piece Source
+      paths are kept as-is unless they were absolute.
+    """
+    root = ET.parse(src).getroot()
+    pgrid = root.find("PUnstructuredGrid")
+    if pgrid is None:
+        pgrid = root.find("PPolyData")
+    if pgrid is None:
+        raise RuntimeError(f"Unexpected VTK parallel XML structure: {src}")
+
+    pieces = pgrid.findall("Piece")
+    if not pieces:
+        raise RuntimeError(f"No Piece entries found in: {src}")
+
+    for piece in pieces:
+        source = piece.get("Source") or piece.get("source")
+        if not source:
+            raise RuntimeError(f"Parallel dataset Piece missing 'Source' attribute: {src}")
+
+        src_rel = Path(source)
+        src_piece = src_rel if src_rel.is_absolute() else (src.parent / src_rel)
+        if not src_piece.exists():
+            raise FileNotFoundError(f"Missing piece file referenced by {src}: {source}")
+
+        dst_rel = src_rel.name if src_rel.is_absolute() else src_rel
+        dst_piece = dst.parent / dst_rel
+        dst_piece.parent.mkdir(parents=True, exist_ok=True)
+        _inject_timevalue_field_data(src=src_piece, dst=dst_piece, time_value=time_value)
+
+        if src_rel.is_absolute():
+            piece.set("Source", dst_rel.as_posix())
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    ET.ElementTree(root).write(dst, xml_declaration=True, encoding="UTF-8")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build a .pvd time series from svMultiPhysics result_*.vtu files.")
-    parser.add_argument("--results-dir", default="1-procs", help="Directory containing result_*.vtu files.")
+    parser = argparse.ArgumentParser(
+        description="Build a .pvd time series from svMultiPhysics result files (vtu/vtp or pvtu/pvtp)."
+    )
+    parser.add_argument("--results-dir", default="1-procs", help="Directory containing result files (e.g. result_*.vtu).")
     parser.add_argument("--prefix", default="result_", help="Result file prefix (default: result_).")
-    parser.add_argument("--ext", default="vtu", choices=("vtu", "vtp"), help="Result file extension.")
+    parser.add_argument(
+        "--ext",
+        default="vtu",
+        choices=("vtu", "vtp", "pvtu", "pvtp"),
+        help="Result file extension (serial vtu/vtp or parallel pvtu/pvtp).",
+    )
     parser.add_argument("--dt", type=float, default=None, help="Time step size; overrides reading from solver.xml.")
     parser.add_argument("--solver-xml", default="solver.xml", help="Path to solver.xml (used to auto-detect dt).")
     parser.add_argument("--out", default="timeseries.pvd", help="Output .pvd filename (written inside results-dir).")
     parser.add_argument(
         "--write-timevalue",
         action="store_true",
-        help="Write copies of VTU files with FieldData/TimeValue populated and reference those in the .pvd.",
+        help="Write copies of result files with FieldData/TimeValue populated and reference those in the .pvd.",
     )
     parser.add_argument(
         "--timevalue-dir",
@@ -146,7 +206,19 @@ def main() -> None:
     dt = args.dt if args.dt is not None else _read_dt_from_solver_xml(solver_xml)
 
     pattern = str(results_dir / f"{args.prefix}*.{args.ext}")
-    files = sorted((Path(p) for p in glob.glob(pattern)), key=_extract_step_from_name)
+    matched = [Path(p) for p in glob.glob(pattern)]
+    if args.ext in ("vtu", "vtp"):
+        piece_re = re.compile(rf"_p\\d+\\.{re.escape(args.ext)}$", re.IGNORECASE)
+        pieces = [f for f in matched if piece_re.search(f.name)]
+        non_pieces = [f for f in matched if not piece_re.search(f.name)]
+        if pieces and not non_pieces:
+            raise ValueError(
+                f"Matched only per-rank piece files like '{pieces[0].name}'. "
+                f"Use '--ext pvtu'/'--ext pvtp' to build a time series from the parallel wrapper files."
+            )
+        matched = non_pieces if non_pieces else matched
+
+    files = sorted(matched, key=_extract_step_from_name)
     if not files:
         raise FileNotFoundError(f"No files matched: {pattern}")
 
@@ -171,7 +243,10 @@ def main() -> None:
 
         if patched_dir is not None:
             dst = patched_dir / src.name
-            _inject_timevalue_field_data(src=src, dst=dst, time_value=time_value)
+            if args.ext in ("pvtu", "pvtp"):
+                _write_timevalue_parallel_dataset(src=src, dst=dst, time_value=time_value)
+            else:
+                _inject_timevalue_field_data(src=src, dst=dst, time_value=time_value)
             rel_path = os.path.relpath(dst, start=results_dir)
         else:
             rel_path = src.name
