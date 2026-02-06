@@ -1810,11 +1810,12 @@ if(FE_BUILD_TESTS)
 			                Tests/Unit/Forms/test_NonlinearFormKernel_Boundary.cpp
 			                Tests/Unit/Forms/test_NonlinearFormKernel_DGHelpers.cpp
 				                Tests/Unit/Forms/test_NonlinearFormKernel_TimeAndHistory.cpp
-				                Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_MatrixAndEigenOps.cpp
-				                Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_SmoothOps.cpp
-				                Tests/Unit/Forms/test_JIT_ExtendedParity.cpp
-				                Tests/Unit/Forms/test_SymbolicDifferentiation.cpp
-		                    Tests/Unit/Forms/test_HessianVectorProduct.cpp
+					                Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_MatrixAndEigenOps.cpp
+					                Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_SmoothOps.cpp
+					                Tests/Unit/Forms/test_JIT_ExtendedParity.cpp
+					                Tests/Unit/Forms/test_JIT_TangentFiniteDifferences.cpp
+					                Tests/Unit/Forms/test_SymbolicDifferentiation.cpp
+			                    Tests/Unit/Forms/test_HessianVectorProduct.cpp
 			                Tests/Unit/Forms/Tensor/test_TensorIndex.cpp
 			                Tests/Unit/Forms/Tensor/test_TensorSymmetry.cpp
 			                Tests/Unit/Forms/Tensor/test_TensorContraction.cpp
@@ -1896,6 +1897,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/Assembly/test_SymbolicAssembler.cpp
             Tests/Unit/Assembly/test_DeviceAssembler.cpp
             Tests/Unit/Assembly/test_ManufacturedSolutionConvergence.cpp
+            Tests/Unit/Assembly/test_ManufacturedSolutionConvergence_ElementTypes.cpp
             # Phase 4: LOW priority / Advanced tests
             Tests/Unit/Assembly/test_AssemblyScheduler.cpp
             Tests/Unit/Assembly/test_AssemblyStatistics.cpp

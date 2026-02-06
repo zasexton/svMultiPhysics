@@ -24,6 +24,7 @@
 #include <mpi.h>
 #include <numeric>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -94,6 +95,51 @@ namespace {
         }
     }
     return true;
+}
+
+[[nodiscard]] std::shared_ptr<const DofPermutation> normalize_dof_permutation(std::shared_ptr<const DofPermutation> perm,
+                                                                              GlobalIndex global_size,
+                                                                              std::string_view context)
+{
+    if (!perm || perm->empty()) {
+        return perm;
+    }
+
+    FE_THROW_IF(perm->forward.size() != static_cast<std::size_t>(global_size) ||
+                    perm->inverse.size() != static_cast<std::size_t>(global_size),
+                InvalidArgumentException,
+                std::string(context) + ": dof permutation size mismatch with global system size");
+
+    std::vector<GlobalIndex> inverse_from_forward(static_cast<std::size_t>(global_size), INVALID_GLOBAL_INDEX);
+    for (GlobalIndex fe = 0; fe < global_size; ++fe) {
+        const auto fe_idx = static_cast<std::size_t>(fe);
+        const GlobalIndex be = perm->forward[fe_idx];
+        FE_THROW_IF(be < 0 || be >= global_size,
+                    InvalidArgumentException,
+                    std::string(context) + ": dof permutation mapped FE DOF to out-of-range backend DOF");
+
+        const auto be_idx = static_cast<std::size_t>(be);
+        FE_THROW_IF(inverse_from_forward[be_idx] != INVALID_GLOBAL_INDEX,
+                    InvalidArgumentException,
+                    std::string(context) + ": dof permutation is not one-to-one");
+        inverse_from_forward[be_idx] = fe;
+    }
+
+    for (GlobalIndex be = 0; be < global_size; ++be) {
+        if (inverse_from_forward[static_cast<std::size_t>(be)] == INVALID_GLOBAL_INDEX) {
+            FE_THROW(InvalidArgumentException,
+                     std::string(context) + ": dof permutation is not onto");
+        }
+    }
+
+    if (inverse_from_forward == perm->inverse) {
+        return perm;
+    }
+
+    auto normalized = std::make_shared<DofPermutation>();
+    normalized->forward = perm->forward;
+    normalized->inverse = std::move(inverse_from_forward);
+    return normalized;
 }
 
 void sort_row_columns_and_values(FsilsShared& shared, std::vector<Real>& values)
@@ -352,13 +398,8 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
     FE_THROW_IF(global_rows_ % dof != 0, InvalidArgumentException,
                 "FsilsMatrix: global size must be divisible by dof_per_node");
 
+    dof_permutation = normalize_dof_permutation(std::move(dof_permutation), global_rows_, "FsilsMatrix");
     const bool have_perm = dof_permutation && !dof_permutation->empty();
-    if (have_perm) {
-        FE_THROW_IF(dof_permutation->forward.size() != static_cast<std::size_t>(global_rows_) ||
-                        dof_permutation->inverse.size() != static_cast<std::size_t>(global_rows_),
-                    InvalidArgumentException,
-                    "FsilsMatrix: dof permutation size mismatch with global system size");
-    }
 
     const GlobalIndex gnNo_g = global_rows_ / dof;
     const int gnNo = as_int(gnNo_g, "global node count");
@@ -454,13 +495,8 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     FE_THROW_IF(global_rows_ % dof != 0, InvalidArgumentException,
                 "FsilsMatrix: global size must be divisible by dof_per_node");
 
+    dof_permutation = normalize_dof_permutation(std::move(dof_permutation), global_rows_, "FsilsMatrix");
     const bool have_perm = dof_permutation && !dof_permutation->empty();
-    if (have_perm) {
-        FE_THROW_IF(dof_permutation->forward.size() != static_cast<std::size_t>(global_rows_) ||
-                        dof_permutation->inverse.size() != static_cast<std::size_t>(global_rows_),
-                    InvalidArgumentException,
-                    "FsilsMatrix: dof permutation size mismatch with global system size");
-    }
 
     const GlobalIndex gnNo_g = global_rows_ / dof;
     const int gnNo = as_int(gnNo_g, "global node count");

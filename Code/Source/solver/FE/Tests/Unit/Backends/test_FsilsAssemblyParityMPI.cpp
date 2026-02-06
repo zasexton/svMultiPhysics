@@ -658,4 +658,169 @@ TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithPermutationNaturalIn
     }
 }
 
+TEST(FsilsAssemblyParityMPI, OverlapAssemblyMatchesDenseWithPermutationNaturalIndexing_NormalizesInverse)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 3;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+
+    // FE ordering (rank-contiguous, but not node-interleaved on rank 1):
+    //   [u0 v0 p0 | u1 u2 v1 v2 p1 p2]
+    // Backend ordering (node-block):
+    //   [u0 v0 p0 | u1 v1 p1 | u2 v2 p2]
+    auto perm = std::make_shared<DofPermutation>();
+    perm->forward.resize(static_cast<std::size_t>(n_global));
+    perm->inverse.resize(static_cast<std::size_t>(n_global));
+
+    perm->forward[0] = 0;
+    perm->forward[1] = 1;
+    perm->forward[2] = 2;
+    perm->forward[3] = 3;
+    perm->forward[4] = 6;
+    perm->forward[5] = 4;
+    perm->forward[6] = 7;
+    perm->forward[7] = 5;
+    perm->forward[8] = 8;
+
+    // Intentionally corrupt inverse (still a valid permutation) to ensure the FSILS layout builder
+    // recomputes a consistent inverse from the forward mapping.
+    for (GlobalIndex be = 0; be < n_global; ++be) {
+        perm->inverse[static_cast<std::size_t>(be)] = (be + 1) % n_global;
+    }
+
+    const IndexRange owned_fe = (rank == 0) ? IndexRange{0, 3} : IndexRange{3, 9};
+    DistributedSparsityPattern pattern(owned_fe, owned_fe, n_global, n_global);
+    pattern.setDofIndexing(DistributedSparsityPattern::DofIndexing::Natural);
+
+    if (rank == 0) {
+        const std::array<GlobalIndex, 6> edofs_fe = {0, 1, 2, 3, 5, 7};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs_fe.data(), edofs_fe.size()));
+    } else {
+        const std::array<GlobalIndex, 6> edofs_fe = {3, 5, 7, 4, 6, 8};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs_fe.data(), edofs_fe.size()));
+    }
+    pattern.ensureDiagonal();
+    pattern.finalize();
+
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{3, 5, 7};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 6, 12, 18};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(18);
+        const std::array<GlobalIndex, 6> cols = {0, 1, 2, 3, 5, 7};
+        for (int r = 0; r < dof; ++r) {
+            ghost_cols.insert(ghost_cols.end(), cols.begin(), cols.end());
+        }
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    const std::array<Real, dof> scales = {2.0, 3.0, 5.0};
+    const auto Ke = makeScaledComponentTwoNodeMatrix(dof, scales);
+    const std::vector<Real> ones(6, 1.0);
+    const auto be = matVec(Ke, /*n=*/6, ones);
+
+    FsilsFactory factory(dof, perm);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+    auto x = factory.createVector(n_global);
+
+    A->zero();
+    b->zero();
+    x->zero();
+
+    auto viewA = A->createAssemblyView();
+    auto viewb = b->createAssemblyView();
+    viewA->beginAssemblyPhase();
+    viewb->beginAssemblyPhase();
+    if (rank == 0) {
+        const std::array<GlobalIndex, 6> edofs_fe = {0, 1, 2, 3, 5, 7};
+        assembleElement(*viewA, *viewb, edofs_fe, Ke, be);
+    } else {
+        const std::array<GlobalIndex, 6> edofs_fe = {3, 5, 7, 4, 6, 8};
+        assembleElement(*viewA, *viewb, edofs_fe, Ke, be);
+    }
+    viewA->finalizeAssembly();
+    viewb->finalizeAssembly();
+    A->finalizeAssembly();
+
+    DenseMatrixView Ad(n_global);
+    DenseVectorView bd(n_global);
+    Ad.zero();
+    bd.zero();
+    Ad.beginAssemblyPhase();
+    bd.beginAssemblyPhase();
+    if (rank == 0) {
+        const std::array<GlobalIndex, 6> edofs_fe = {0, 1, 2, 3, 5, 7};
+        assembleElement(Ad, bd, edofs_fe, Ke, be);
+    } else {
+        const std::array<GlobalIndex, 6> edofs_fe = {3, 5, 7, 4, 6, 8};
+        assembleElement(Ad, bd, edofs_fe, Ke, be);
+    }
+    Ad.finalizeAssembly();
+    bd.finalizeAssembly();
+
+    const auto dense_global_A = allreduceSum(Ad.data(), comm);
+    const auto dense_global_b = allreduceSum(bd.data(), comm);
+
+    const auto fsils_local_A = gatherLocalMatrixEntries(*A, n_global);
+    const auto fsils_local_b = gatherLocalVectorEntries(*b, n_global);
+    const auto fsils_global_A = allreduceSum(fsils_local_A, comm);
+    const auto fsils_global_b = allreduceSum(fsils_local_b, comm);
+
+    if (rank == 0) {
+        constexpr Real tol = 1e-14;
+        const auto dA = maxAbsDiffWithIndex(dense_global_A, fsils_global_A);
+        const auto db = maxAbsDiffWithIndex(dense_global_b, fsils_global_b);
+        EXPECT_LT(dA.max_abs, tol) << "Max |A_dense-A_fsils|=" << dA.max_abs
+                                  << " at idx=" << dA.idx
+                                  << " (dense=" << dA.a << ", fsils=" << dA.b << ")";
+        EXPECT_LT(db.max_abs, tol) << "Max |b_dense-b_fsils|=" << db.max_abs
+                                  << " at idx=" << db.idx
+                                  << " (dense=" << db.a << ", fsils=" << db.b << ")";
+    }
+
+    SolverOptions opts;
+    opts.method = SolverMethod::CG;
+    opts.preconditioner = PreconditionerType::Diagonal;
+    opts.rel_tol = 1e-12;
+    opts.abs_tol = 1e-14;
+    opts.max_iter = 200;
+
+    auto solver = factory.createLinearSolver(opts);
+    const auto rep = solver->solve(*A, *x, *b);
+    EXPECT_TRUE(rep.converged);
+
+    x->updateGhosts();
+    auto* fx = dynamic_cast<FsilsVector*>(x.get());
+    ASSERT_TRUE(fx);
+    const auto* shared = fx->shared();
+    ASSERT_TRUE(shared);
+
+    const auto perm_x = shared->dof_permutation;
+    auto viewx = x->createAssemblyView();
+    std::vector<int> local_nodes;
+    local_nodes.reserve(static_cast<std::size_t>(shared->owned_node_count) + shared->ghost_nodes.size());
+    for (int i = 0; i < shared->owned_node_count; ++i) {
+        local_nodes.push_back(shared->owned_node_start + i);
+    }
+    local_nodes.insert(local_nodes.end(), shared->ghost_nodes.begin(), shared->ghost_nodes.end());
+
+    for (const int node : local_nodes) {
+        for (int c = 0; c < dof; ++c) {
+            const GlobalIndex backend_dof = static_cast<GlobalIndex>(node) * dof + c;
+            const GlobalIndex fe_dof = (perm_x && !perm_x->empty())
+                                           ? perm_x->inverse[static_cast<std::size_t>(backend_dof)]
+                                           : backend_dof;
+            EXPECT_NEAR(viewx->getVectorEntry(fe_dof), 1.0, 1e-10);
+        }
+    }
+}
+
 } // namespace svmp::FE::backends
