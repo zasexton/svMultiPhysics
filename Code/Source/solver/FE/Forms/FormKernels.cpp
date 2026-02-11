@@ -4495,10 +4495,208 @@ EvalValue<Real> evalConstitutiveOutputReal(const FormExprNode& call_node,
     return outputs[output_index];
 }
 
-EvalValue<Real> evalReal(const FormExprNode& node,
-                         const EvalEnvReal& env,
-                         Side side,
-                         LocalIndex q)
+using EvalRealDispatchFn = EvalValue<Real> (*)(const FormExprNode&, const EvalEnvReal&, Side, LocalIndex);
+constexpr std::size_t kFormExprDispatchSize =
+    static_cast<std::size_t>(FormExprType::HistoryConvolution) + 1u;
+
+EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
+                                   const EvalEnvReal& env,
+                                   Side side,
+                                   LocalIndex q);
+
+EvalValue<Real> evalRealDispatchConstant(const FormExprNode& node,
+                                         const EvalEnvReal&,
+                                         Side,
+                                         LocalIndex)
+{
+    const Real v = node.constantValue().value_or(0.0);
+    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, v};
+}
+
+EvalValue<Real> evalRealDispatchTime(const FormExprNode&,
+                                     const EvalEnvReal& env,
+                                     Side side,
+                                     LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.time()};
+}
+
+EvalValue<Real> evalRealDispatchTimeStep(const FormExprNode&,
+                                         const EvalEnvReal& env,
+                                         Side side,
+                                         LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.timeStep()};
+}
+
+EvalValue<Real> evalRealDispatchEffectiveTimeStep(const FormExprNode&,
+                                                  const EvalEnvReal& env,
+                                                  Side side,
+                                                  LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    Real dt_eff = ctx.timeStep();
+    if (const auto* time_ctx = ctx.timeIntegrationContext(); time_ctx && time_ctx->dt1) {
+        const Real a0 = time_ctx->dt1->coeff(0);
+        if (a0 != 0.0) {
+            dt_eff = static_cast<Real>(1.0 / std::abs(static_cast<double>(a0)));
+        }
+    }
+    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, dt_eff};
+}
+
+EvalValue<Real> evalRealDispatchCoordinate(const FormExprNode&,
+                                           const EvalEnvReal& env,
+                                           Side side,
+                                           LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Real> out;
+    out.kind = EvalValue<Real>::Kind::Vector;
+    out.v = ctx.physicalPoint(q);
+    out.vector_size = ctx.dimension();
+    return out;
+}
+
+EvalValue<Real> evalRealDispatchReferenceCoordinate(const FormExprNode&,
+                                                    const EvalEnvReal& env,
+                                                    Side side,
+                                                    LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Real> out;
+    out.kind = EvalValue<Real>::Kind::Vector;
+    out.v = ctx.quadraturePoint(q);
+    out.vector_size = ctx.dimension();
+    return out;
+}
+
+EvalValue<Real> evalRealDispatchJacobian(const FormExprNode&,
+                                         const EvalEnvReal& env,
+                                         Side side,
+                                         LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+    EvalValue<Real> out;
+    out.kind = EvalValue<Real>::Kind::Matrix;
+    out.m = ctx.jacobian(q);
+    out.matrix_rows = dim;
+    out.matrix_cols = dim;
+    return out;
+}
+
+EvalValue<Real> evalRealDispatchJacobianInverse(const FormExprNode&,
+                                                const EvalEnvReal& env,
+                                                Side side,
+                                                LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+    EvalValue<Real> out;
+    out.kind = EvalValue<Real>::Kind::Matrix;
+    out.m = ctx.inverseJacobian(q);
+    out.matrix_rows = dim;
+    out.matrix_cols = dim;
+    return out;
+}
+
+EvalValue<Real> evalRealDispatchJacobianDeterminant(const FormExprNode&,
+                                                    const EvalEnvReal& env,
+                                                    Side side,
+                                                    LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.jacobianDet(q)};
+}
+
+EvalValue<Real> evalRealDispatchNormal(const FormExprNode&,
+                                       const EvalEnvReal& env,
+                                       Side side,
+                                       LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Real> out;
+    out.kind = EvalValue<Real>::Kind::Vector;
+    out.v = ctx.normal(q);
+    out.vector_size = ctx.dimension();
+    return out;
+}
+
+EvalValue<Real> evalRealDispatchCellDiameter(const FormExprNode&,
+                                             const EvalEnvReal& env,
+                                             Side side,
+                                             LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.cellDiameter()};
+}
+
+EvalValue<Real> evalRealDispatchCellVolume(const FormExprNode&,
+                                           const EvalEnvReal& env,
+                                           Side side,
+                                           LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.cellVolume()};
+}
+
+EvalValue<Real> evalRealDispatchFacetArea(const FormExprNode&,
+                                          const EvalEnvReal& env,
+                                          Side side,
+                                          LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.facetArea()};
+}
+
+EvalValue<Real> evalRealDispatchCellDomainId(const FormExprNode&,
+                                             const EvalEnvReal& env,
+                                             Side side,
+                                             LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, static_cast<Real>(ctx.cellDomainId())};
+}
+
+EvalValue<Real> evalRealDispatchFallback(const FormExprNode& node,
+                                         const EvalEnvReal& env,
+                                         Side side,
+                                         LocalIndex q)
+{
+    return evalRealSwitchImpl(node, env, side, q);
+}
+
+const std::array<EvalRealDispatchFn, kFormExprDispatchSize>& evalRealDispatchTable()
+{
+    static const auto dispatch = [] {
+        std::array<EvalRealDispatchFn, kFormExprDispatchSize> table{};
+        table.fill(&evalRealDispatchFallback);
+        table[static_cast<std::size_t>(FormExprType::Constant)] = &evalRealDispatchConstant;
+        table[static_cast<std::size_t>(FormExprType::Time)] = &evalRealDispatchTime;
+        table[static_cast<std::size_t>(FormExprType::TimeStep)] = &evalRealDispatchTimeStep;
+        table[static_cast<std::size_t>(FormExprType::EffectiveTimeStep)] = &evalRealDispatchEffectiveTimeStep;
+        table[static_cast<std::size_t>(FormExprType::Coordinate)] = &evalRealDispatchCoordinate;
+        table[static_cast<std::size_t>(FormExprType::ReferenceCoordinate)] = &evalRealDispatchReferenceCoordinate;
+        table[static_cast<std::size_t>(FormExprType::Jacobian)] = &evalRealDispatchJacobian;
+        table[static_cast<std::size_t>(FormExprType::JacobianInverse)] = &evalRealDispatchJacobianInverse;
+        table[static_cast<std::size_t>(FormExprType::JacobianDeterminant)] = &evalRealDispatchJacobianDeterminant;
+        table[static_cast<std::size_t>(FormExprType::Normal)] = &evalRealDispatchNormal;
+        table[static_cast<std::size_t>(FormExprType::CellDiameter)] = &evalRealDispatchCellDiameter;
+        table[static_cast<std::size_t>(FormExprType::CellVolume)] = &evalRealDispatchCellVolume;
+        table[static_cast<std::size_t>(FormExprType::FacetArea)] = &evalRealDispatchFacetArea;
+        table[static_cast<std::size_t>(FormExprType::CellDomainId)] = &evalRealDispatchCellDomainId;
+        return table;
+    }();
+    return dispatch;
+}
+
+EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
+                                   const EvalEnvReal& env,
+                                   Side side,
+                                   LocalIndex q)
 {
     const auto& ctx = ctxForSide(env.minus, env.plus, side);
     const int dim = ctx.dimension();
@@ -4896,7 +5094,6 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                               __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
 	        }
 	        case FormExprType::Gradient: {
-	            return evalSpatialJet<Real>(node, env, side, q, 0).value;
 	            const auto kids = node.childrenShared();
 	            if (kids.size() != 1 || !kids[0]) throw std::logic_error("grad must have 1 child");
 	            const auto& child = *kids[0];
@@ -5017,7 +5214,10 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 const auto fid = child.fieldId();
-                if (!fid || *fid == INVALID_FIELD_ID) {
+                const bool state_current =
+                    ((child.type() == FormExprType::StateField || child.type() == FormExprType::DiscreteField) &&
+                     (!fid || *fid == INVALID_FIELD_ID));
+                if (!state_current && (!fid || *fid == INVALID_FIELD_ID)) {
                     throw FEException("Forms: grad(DiscreteField) missing a valid FieldId",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
@@ -5026,7 +5226,7 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                     EvalValue<Real> out;
                     out.kind = EvalValue<Real>::Kind::Vector;
                     out.vector_size = dim;
-                    out.v = ctx.fieldGradient(*fid, q);
+                    out.v = state_current ? ctx.solutionGradient(q) : ctx.fieldGradient(*fid, q);
                     return out;
                 }
                 if (sig->field_type == FieldType::Vector) {
@@ -5039,7 +5239,7 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                     out.kind = EvalValue<Real>::Kind::Matrix;
                     out.matrix_rows = vd;
                     out.matrix_cols = dim;
-                    out.m = ctx.fieldJacobian(*fid, q);
+                    out.m = state_current ? ctx.solutionJacobian(q) : ctx.fieldJacobian(*fid, q);
                     return out;
                 }
 
@@ -5071,11 +5271,10 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 return out;
             }
 
-            throw FEException("Forms: grad() currently supports TestFunction, TrialFunction, Constant, and scalar Coefficient only",
-                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            // Composite gradients (e.g. grad(u*v), grad(det(F))) are handled via spatial jets.
+            return evalSpatialJet<Real>(node, env, side, q, 0).value;
 	        }
 	        case FormExprType::Hessian: {
-	            return evalSpatialJet<Real>(node, env, side, q, 0).value;
 	            const auto kids = node.childrenShared();
 	            if (kids.size() != 1 || !kids[0]) throw std::logic_error("H() must have 1 child");
 	            const auto& child = *kids[0];
@@ -5216,7 +5415,10 @@ EvalValue<Real> evalReal(const FormExprNode& node,
 	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                    }
 	                    const auto fid = base.fieldId();
-	                    if (!fid || *fid == INVALID_FIELD_ID) {
+	                    const bool state_current =
+	                        ((base.type() == FormExprType::StateField || base.type() == FormExprType::DiscreteField) &&
+	                         (!fid || *fid == INVALID_FIELD_ID));
+	                    if (!state_current && (!fid || *fid == INVALID_FIELD_ID)) {
 	                        throw FEException("Forms: H(component(DiscreteField,i)) missing a valid FieldId",
 	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                    }
@@ -5229,7 +5431,7 @@ EvalValue<Real> evalReal(const FormExprNode& node,
 	                        out.kind = EvalValue<Real>::Kind::Matrix;
 	                        out.matrix_rows = dim;
 	                        out.matrix_cols = dim;
-	                        out.m = ctx.fieldHessian(*fid, q);
+	                        out.m = state_current ? ctx.solutionHessian(q) : ctx.fieldHessian(*fid, q);
 	                        return out;
 	                    }
 	                    if (sig->field_type != FieldType::Vector) {
@@ -5251,7 +5453,9 @@ EvalValue<Real> evalReal(const FormExprNode& node,
 	                    out.kind = EvalValue<Real>::Kind::Matrix;
 	                    out.matrix_rows = dim;
 	                    out.matrix_cols = dim;
-	                    out.m = ctx.fieldComponentHessian(*fid, q, comp);
+	                    out.m = state_current
+	                        ? ctx.solutionComponentHessian(q, comp)
+	                        : ctx.fieldComponentHessian(*fid, q, comp);
 	                    return out;
 	                }
 
@@ -5308,7 +5512,10 @@ EvalValue<Real> evalReal(const FormExprNode& node,
 	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                }
 	                const auto fid = child.fieldId();
-	                if (!fid || *fid == INVALID_FIELD_ID) {
+	                const bool state_current =
+	                    ((child.type() == FormExprType::StateField || child.type() == FormExprType::DiscreteField) &&
+	                     (!fid || *fid == INVALID_FIELD_ID));
+	                if (!state_current && (!fid || *fid == INVALID_FIELD_ID)) {
 	                    throw FEException("Forms: H(DiscreteField) missing a valid FieldId",
 	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                }
@@ -5320,7 +5527,7 @@ EvalValue<Real> evalReal(const FormExprNode& node,
 	                out.kind = EvalValue<Real>::Kind::Matrix;
 	                out.matrix_rows = dim;
 	                out.matrix_cols = dim;
-	                out.m = ctx.fieldHessian(*fid, q);
+	                out.m = state_current ? ctx.solutionHessian(q) : ctx.fieldHessian(*fid, q);
 	                return out;
 	            }
 	            if (child.type() == FormExprType::Constant) {
@@ -5351,8 +5558,8 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                 return out;
             }
 
-	            throw FEException("Forms: H() currently supports TestFunction, TrialFunction, DiscreteField, Constant, and scalar Coefficient only",
-	                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	            // Composite Hessians are handled via spatial jets.
+	            return evalSpatialJet<Real>(node, env, side, q, 0).value;
 	        }
         case FormExprType::TimeDerivative: {
             const int order = node.timeDerivativeOrder().value_or(1);
@@ -7580,6 +7787,19 @@ EvalValue<Real> evalReal(const FormExprNode& node,
                       __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
 }
 
+EvalValue<Real> evalReal(const FormExprNode& node,
+                         const EvalEnvReal& env,
+                         Side side,
+                         LocalIndex q)
+{
+    const auto type_index = static_cast<std::size_t>(node.type());
+    const auto& dispatch = evalRealDispatchTable();
+    FE_THROW_IF(type_index >= dispatch.size(),
+                FEException,
+                "Forms: evalReal dispatch index out of range");
+    return dispatch[type_index](node, env, side, q);
+}
+
 // ============================================================================
 // Dual (residual/Jacobian) evaluation
 // ============================================================================
@@ -7865,10 +8085,256 @@ EvalValue<Dual> evalConstitutiveOutputDual(const FormExprNode& call_node,
     return outputs[output_index];
 }
 
-EvalValue<Dual> evalDual(const FormExprNode& node,
-                         const EvalEnvDual& env,
-                         Side side,
-                         LocalIndex q)
+using EvalDualDispatchFn = EvalValue<Dual> (*)(const FormExprNode&, const EvalEnvDual&, Side, LocalIndex);
+
+EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
+                                   const EvalEnvDual& env,
+                                   Side side,
+                                   LocalIndex q);
+
+EvalValue<Dual> evalDualDispatchConstant(const FormExprNode& node,
+                                         const EvalEnvDual& env,
+                                         Side,
+                                         LocalIndex)
+{
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Scalar;
+    out.s = makeDualConstant(node.constantValue().value_or(0.0), env.ws->alloc());
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchTime(const FormExprNode&,
+                                     const EvalEnvDual& env,
+                                     Side side,
+                                     LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Scalar;
+    out.s = makeDualConstant(ctx.time(), env.ws->alloc());
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchTimeStep(const FormExprNode&,
+                                         const EvalEnvDual& env,
+                                         Side side,
+                                         LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Scalar;
+    out.s = makeDualConstant(ctx.timeStep(), env.ws->alloc());
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchEffectiveTimeStep(const FormExprNode&,
+                                                  const EvalEnvDual& env,
+                                                  Side side,
+                                                  LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    Real dt_eff = ctx.timeStep();
+    if (const auto* time_ctx = ctx.timeIntegrationContext(); time_ctx && time_ctx->dt1) {
+        const Real a0 = time_ctx->dt1->coeff(0);
+        if (a0 != 0.0) {
+            dt_eff = static_cast<Real>(1.0 / std::abs(static_cast<double>(a0)));
+        }
+    }
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Scalar;
+    out.s = makeDualConstant(dt_eff, env.ws->alloc());
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchCoordinate(const FormExprNode&,
+                                           const EvalEnvDual& env,
+                                           Side side,
+                                           LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Vector;
+    out.vector_size = dim;
+    const auto x = ctx.physicalPoint(q);
+    for (int d = 0; d < 3; ++d) {
+        out.v[static_cast<std::size_t>(d)] = makeDualConstant(x[static_cast<std::size_t>(d)], env.ws->alloc());
+    }
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchReferenceCoordinate(const FormExprNode&,
+                                                    const EvalEnvDual& env,
+                                                    Side side,
+                                                    LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Vector;
+    out.vector_size = dim;
+    const auto X = ctx.quadraturePoint(q);
+    for (int d = 0; d < 3; ++d) {
+        out.v[static_cast<std::size_t>(d)] = makeDualConstant(X[static_cast<std::size_t>(d)], env.ws->alloc());
+    }
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchJacobian(const FormExprNode&,
+                                         const EvalEnvDual& env,
+                                         Side side,
+                                         LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Matrix;
+    out.matrix_rows = dim;
+    out.matrix_cols = dim;
+    const auto J = ctx.jacobian(q);
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                makeDualConstant(J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+        }
+    }
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchJacobianInverse(const FormExprNode&,
+                                                const EvalEnvDual& env,
+                                                Side side,
+                                                LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Matrix;
+    out.matrix_rows = dim;
+    out.matrix_cols = dim;
+    const auto Jinv = ctx.inverseJacobian(q);
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                makeDualConstant(Jinv[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+        }
+    }
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchJacobianDeterminant(const FormExprNode&,
+                                                    const EvalEnvDual& env,
+                                                    Side side,
+                                                    LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Scalar;
+    out.s = makeDualConstant(ctx.jacobianDet(q), env.ws->alloc());
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchNormal(const FormExprNode&,
+                                       const EvalEnvDual& env,
+                                       Side side,
+                                       LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Vector;
+    out.vector_size = dim;
+    const auto n = ctx.normal(q);
+    for (int d = 0; d < 3; ++d) {
+        out.v[static_cast<std::size_t>(d)] = makeDualConstant(n[static_cast<std::size_t>(d)], env.ws->alloc());
+    }
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchCellDiameter(const FormExprNode&,
+                                             const EvalEnvDual& env,
+                                             Side side,
+                                             LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Scalar;
+    out.s = makeDualConstant(ctx.cellDiameter(), env.ws->alloc());
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchCellVolume(const FormExprNode&,
+                                           const EvalEnvDual& env,
+                                           Side side,
+                                           LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Scalar;
+    out.s = makeDualConstant(ctx.cellVolume(), env.ws->alloc());
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchFacetArea(const FormExprNode&,
+                                          const EvalEnvDual& env,
+                                          Side side,
+                                          LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Scalar;
+    out.s = makeDualConstant(ctx.facetArea(), env.ws->alloc());
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchCellDomainId(const FormExprNode&,
+                                             const EvalEnvDual& env,
+                                             Side side,
+                                             LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    EvalValue<Dual> out;
+    out.kind = EvalValue<Dual>::Kind::Scalar;
+    out.s = makeDualConstant(static_cast<Real>(ctx.cellDomainId()), env.ws->alloc());
+    return out;
+}
+
+EvalValue<Dual> evalDualDispatchFallback(const FormExprNode& node,
+                                         const EvalEnvDual& env,
+                                         Side side,
+                                         LocalIndex q)
+{
+    return evalDualSwitchImpl(node, env, side, q);
+}
+
+const std::array<EvalDualDispatchFn, kFormExprDispatchSize>& evalDualDispatchTable()
+{
+    static const auto dispatch = [] {
+        std::array<EvalDualDispatchFn, kFormExprDispatchSize> table{};
+        table.fill(&evalDualDispatchFallback);
+        table[static_cast<std::size_t>(FormExprType::Constant)] = &evalDualDispatchConstant;
+        table[static_cast<std::size_t>(FormExprType::Time)] = &evalDualDispatchTime;
+        table[static_cast<std::size_t>(FormExprType::TimeStep)] = &evalDualDispatchTimeStep;
+        table[static_cast<std::size_t>(FormExprType::EffectiveTimeStep)] = &evalDualDispatchEffectiveTimeStep;
+        table[static_cast<std::size_t>(FormExprType::Coordinate)] = &evalDualDispatchCoordinate;
+        table[static_cast<std::size_t>(FormExprType::ReferenceCoordinate)] = &evalDualDispatchReferenceCoordinate;
+        table[static_cast<std::size_t>(FormExprType::Jacobian)] = &evalDualDispatchJacobian;
+        table[static_cast<std::size_t>(FormExprType::JacobianInverse)] = &evalDualDispatchJacobianInverse;
+        table[static_cast<std::size_t>(FormExprType::JacobianDeterminant)] = &evalDualDispatchJacobianDeterminant;
+        table[static_cast<std::size_t>(FormExprType::Normal)] = &evalDualDispatchNormal;
+        table[static_cast<std::size_t>(FormExprType::CellDiameter)] = &evalDualDispatchCellDiameter;
+        table[static_cast<std::size_t>(FormExprType::CellVolume)] = &evalDualDispatchCellVolume;
+        table[static_cast<std::size_t>(FormExprType::FacetArea)] = &evalDualDispatchFacetArea;
+        table[static_cast<std::size_t>(FormExprType::CellDomainId)] = &evalDualDispatchCellDomainId;
+        return table;
+    }();
+    return dispatch;
+}
+
+EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
+                                   const EvalEnvDual& env,
+                                   Side side,
+                                   LocalIndex q)
 {
     const auto& ctx = ctxForSide(env.minus, env.plus, side);
     const int dim = ctx.dimension();
@@ -8391,7 +8857,6 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
             return out;
 	        }
 	        case FormExprType::Gradient: {
-	            return evalSpatialJet<Dual>(node, env, side, q, 0).value;
 	            const auto kids = node.childrenShared();
 	            if (kids.size() != 1 || !kids[0]) throw std::logic_error("grad must have 1 child");
 	            const auto& child = *kids[0];
@@ -8532,48 +8997,78 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                                   __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
             }
 
-            if (child.type() == FormExprType::DiscreteField || child.type() == FormExprType::StateField) {
-                const auto* sig = child.spaceSignature();
-                if (!sig) {
-                    throw FEException("Forms: grad(DiscreteField) requires a bound FunctionSpace (dual)",
-                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                }
-                const auto fid = child.fieldId();
-                if (!fid || *fid == INVALID_FIELD_ID) {
-                    throw FEException("Forms: grad(DiscreteField) missing a valid FieldId (dual)",
-                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                }
+	            if (child.type() == FormExprType::DiscreteField || child.type() == FormExprType::StateField) {
+	                const auto* sig = child.spaceSignature();
+	                if (!sig) {
+	                    throw FEException("Forms: grad(DiscreteField) requires a bound FunctionSpace (dual)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                const auto fid = child.fieldId();
+	                const bool state_current =
+	                    ((child.type() == FormExprType::StateField || child.type() == FormExprType::DiscreteField) &&
+	                     (!fid || *fid == INVALID_FIELD_ID));
+	                if (!state_current && (!fid || *fid == INVALID_FIELD_ID)) {
+	                    throw FEException("Forms: grad(DiscreteField) missing a valid FieldId (dual)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
 
-                if (sig->field_type == FieldType::Scalar) {
-                    const auto gval = ctx.fieldGradient(*fid, q);
-                    EvalValue<Dual> out;
-                    out.kind = EvalValue<Dual>::Kind::Vector;
-                    out.vector_size = dim;
-                    for (int d = 0; d < 3; ++d) {
-                        out.v[static_cast<std::size_t>(d)] = makeDualConstant(gval[static_cast<std::size_t>(d)], env.ws->alloc());
-                    }
-                    return out;
-                }
+	                if (sig->field_type == FieldType::Scalar) {
+	                    const auto gval = state_current ? ctx.solutionGradient(q) : ctx.fieldGradient(*fid, q);
+	                    EvalValue<Dual> out;
+	                    out.kind = EvalValue<Dual>::Kind::Vector;
+	                    out.vector_size = dim;
+	                    for (int d = 0; d < 3; ++d) {
+	                        Dual gd = makeDualConstant(gval[static_cast<std::size_t>(d)], env.ws->alloc());
+	                        if (state_current && env.trial_active == side) {
+	                            for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+	                                const auto grad_j = ctx.trialPhysicalGradient(static_cast<LocalIndex>(j), q);
+	                                gd.deriv[j] = grad_j[static_cast<std::size_t>(d)];
+	                            }
+	                        }
+	                        out.v[static_cast<std::size_t>(d)] = gd;
+	                    }
+	                    return out;
+	                }
 
-                if (sig->field_type == FieldType::Vector) {
+	                if (sig->field_type == FieldType::Vector) {
                     const int vd = sig->value_dimension;
                     if (vd <= 0 || vd > 3) {
-                        throw FEException("Forms: grad(DiscreteField) vector value_dimension must be 1..3 (dual)",
-                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                    }
-                    const auto Jval = ctx.fieldJacobian(*fid, q);
-                    EvalValue<Dual> out;
-                    out.kind = EvalValue<Dual>::Kind::Matrix;
-                    out.matrix_rows = vd;
-                    out.matrix_cols = dim;
-                    for (int r = 0; r < 3; ++r) {
-                        for (int c = 0; c < 3; ++c) {
-                            out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                                makeDualConstant(Jval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
-                        }
-                    }
-                    return out;
-                }
+	                        throw FEException("Forms: grad(DiscreteField) vector value_dimension must be 1..3 (dual)",
+	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                    }
+	                    const auto Jval = state_current ? ctx.solutionJacobian(q) : ctx.fieldJacobian(*fid, q);
+	                    EvalValue<Dual> out;
+	                    out.kind = EvalValue<Dual>::Kind::Matrix;
+	                    out.matrix_rows = vd;
+	                    out.matrix_cols = dim;
+	                    LocalIndex dofs_per_component = 0;
+	                    if (state_current && env.trial_active == side) {
+	                        const LocalIndex n_trial = ctx.numTrialDofs();
+	                        if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+	                            throw FEException("Forms: grad(StateField) DOF count is not divisible by value_dimension (dual)",
+	                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                        }
+	                        dofs_per_component =
+	                            static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+	                    }
+	                    for (int r = 0; r < 3; ++r) {
+	                        for (int c = 0; c < 3; ++c) {
+	                            Dual Jrc = makeDualConstant(Jval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+	                            if (state_current && env.trial_active == side && r < vd) {
+	                                for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+	                                    const int comp_j =
+	                                        static_cast<int>(static_cast<LocalIndex>(j) / dofs_per_component);
+	                                    if (comp_j == r) {
+	                                        const auto grad_j = ctx.trialPhysicalGradient(static_cast<LocalIndex>(j), q);
+	                                        Jrc.deriv[j] = grad_j[static_cast<std::size_t>(c)];
+	                                    }
+	                                }
+	                            }
+	                            out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = Jrc;
+	                        }
+	                    }
+	                    return out;
+	                }
 
                 throw FEException("Forms: grad(DiscreteField) field type not supported (dual)",
                                   __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
@@ -8608,11 +9103,10 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 return out;
             }
 
-            throw FEException("Forms: grad() currently supports TestFunction, TrialFunction, Constant, and scalar Coefficient only",
-                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            // Composite gradients are handled via spatial jets.
+            return evalSpatialJet<Dual>(node, env, side, q, 0).value;
 	        }
 	        case FormExprType::Hessian: {
-	            return evalSpatialJet<Dual>(node, env, side, q, 0).value;
 	            const auto kids = node.childrenShared();
 	            if (kids.size() != 1 || !kids[0]) throw std::logic_error("H() must have 1 child (dual)");
 	            const auto& child = *kids[0];
@@ -8770,30 +9264,39 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
 	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                    }
 	                    const auto fid = base.fieldId();
-	                    if (!fid || *fid == INVALID_FIELD_ID) {
+	                    const bool state_current =
+	                        ((base.type() == FormExprType::StateField || base.type() == FormExprType::DiscreteField) &&
+	                         (!fid || *fid == INVALID_FIELD_ID));
+	                    if (!state_current && (!fid || *fid == INVALID_FIELD_ID)) {
 	                        throw FEException("Forms: H(component(DiscreteField,i)) missing a valid FieldId (dual)",
 	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                    }
-	
+		
 	                    if (sig->field_type == FieldType::Scalar) {
 	                        if (comp != 0) {
 	                            throw FEException("Forms: H(component(DiscreteField,i)) invalid component index for scalar-valued DiscreteField (dual)",
 	                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                        }
-	                        const auto Hval = ctx.fieldHessian(*fid, q);
+	                        const auto Hval = state_current ? ctx.solutionHessian(q) : ctx.fieldHessian(*fid, q);
 	                        EvalValue<Dual> out;
 	                        out.kind = EvalValue<Dual>::Kind::Matrix;
 	                        out.matrix_rows = dim;
 	                        out.matrix_cols = dim;
 	                        for (int r = 0; r < 3; ++r) {
 	                            for (int c = 0; c < 3; ++c) {
-	                                out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-	                                    makeDualConstant(Hval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+	                                Dual h = makeDualConstant(Hval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+	                                if (state_current && env.trial_active == side) {
+	                                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+	                                        const auto Hj = ctx.trialPhysicalHessian(static_cast<LocalIndex>(j), q);
+	                                        h.deriv[j] = Hj[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+	                                    }
+	                                }
+	                                out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = h;
 	                            }
 	                        }
 	                        return out;
 	                    }
-	
+		
 	                    if (sig->field_type == FieldType::Vector) {
 	                        const int vd = sig->value_dimension;
 	                        if (vd <= 0 || vd > 3) {
@@ -8804,15 +9307,37 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
 	                            throw FEException("Forms: H(component(DiscreteField,i)) component index out of range (dual)",
 	                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                        }
-	                        const auto Hval = ctx.fieldComponentHessian(*fid, q, comp);
+	                        const auto Hval = state_current
+	                            ? ctx.solutionComponentHessian(q, comp)
+	                            : ctx.fieldComponentHessian(*fid, q, comp);
 	                        EvalValue<Dual> out;
 	                        out.kind = EvalValue<Dual>::Kind::Matrix;
 	                        out.matrix_rows = dim;
 	                        out.matrix_cols = dim;
+	                        LocalIndex dofs_per_component = 0;
+	                        if (state_current && env.trial_active == side) {
+	                            const LocalIndex n_trial = ctx.numTrialDofs();
+	                            if ((n_trial % static_cast<LocalIndex>(vd)) != 0) {
+	                                throw FEException("Forms: H(component(StateField,i)) DOF count is not divisible by value_dimension (dual)",
+	                                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                            }
+	                            dofs_per_component =
+	                                static_cast<LocalIndex>(n_trial / static_cast<LocalIndex>(vd));
+	                        }
 	                        for (int r = 0; r < 3; ++r) {
 	                            for (int c = 0; c < 3; ++c) {
-	                                out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-	                                    makeDualConstant(Hval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+	                                Dual h = makeDualConstant(Hval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+	                                if (state_current && env.trial_active == side) {
+	                                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+	                                        const int comp_j =
+	                                            static_cast<int>(static_cast<LocalIndex>(j) / dofs_per_component);
+	                                        if (comp_j == comp) {
+	                                            const auto Hj = ctx.trialPhysicalHessian(static_cast<LocalIndex>(j), q);
+	                                            h.deriv[j] = Hj[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+	                                        }
+	                                    }
+	                                }
+	                                out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = h;
 	                            }
 	                        }
 	                        return out;
@@ -8887,7 +9412,10 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
 	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                }
 	                const auto fid = child.fieldId();
-	                if (!fid || *fid == INVALID_FIELD_ID) {
+	                const bool state_current =
+	                    ((child.type() == FormExprType::StateField || child.type() == FormExprType::DiscreteField) &&
+	                     (!fid || *fid == INVALID_FIELD_ID));
+	                if (!state_current && (!fid || *fid == INVALID_FIELD_ID)) {
 	                    throw FEException("Forms: H(DiscreteField) missing a valid FieldId (dual)",
 	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                }
@@ -8895,15 +9423,21 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
 	                    throw FEException("Forms: H(DiscreteField) requires a scalar-valued DiscreteField; use H(component(u,i)) for vector-valued spaces (dual)",
 	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                }
-	                const auto Hval = ctx.fieldHessian(*fid, q);
+	                const auto Hval = state_current ? ctx.solutionHessian(q) : ctx.fieldHessian(*fid, q);
 	                EvalValue<Dual> out;
 	                out.kind = EvalValue<Dual>::Kind::Matrix;
 	                out.matrix_rows = dim;
 	                out.matrix_cols = dim;
 	                for (int r = 0; r < 3; ++r) {
 	                    for (int c = 0; c < 3; ++c) {
-	                        out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-	                            makeDualConstant(Hval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+	                        Dual h = makeDualConstant(Hval[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env.ws->alloc());
+	                        if (state_current && env.trial_active == side) {
+	                            for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+	                                const auto Hj = ctx.trialPhysicalHessian(static_cast<LocalIndex>(j), q);
+	                                h.deriv[j] = Hj[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+	                            }
+	                        }
+	                        out.m[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = h;
 	                    }
 	                }
 	                return out;
@@ -8954,8 +9488,8 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
                 return out;
             }
 
-	            throw FEException("Forms: H() currently supports TestFunction, TrialFunction, DiscreteField, Constant, and scalar Coefficient only (dual)",
-	                              __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	            // Composite Hessians are handled via spatial jets.
+	            return evalSpatialJet<Dual>(node, env, side, q, 0).value;
 	        }
         case FormExprType::TimeDerivative: {
             const int order = node.timeDerivativeOrder().value_or(1);
@@ -10743,6 +11277,19 @@ EvalValue<Dual> evalDual(const FormExprNode& node,
 
     throw FEException("Forms: unsupported expression node in dual evaluation",
                       __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+}
+
+EvalValue<Dual> evalDual(const FormExprNode& node,
+                         const EvalEnvDual& env,
+                         Side side,
+                         LocalIndex q)
+{
+    const auto type_index = static_cast<std::size_t>(node.type());
+    const auto& dispatch = evalDualDispatchTable();
+    FE_THROW_IF(type_index >= dispatch.size(),
+                FEException,
+                "Forms: evalDual dispatch index out of range");
+    return dispatch[type_index](node, env, side, q);
 }
 
 } // namespace
@@ -13516,6 +14063,7 @@ void SymbolicNonlinearFormKernel::computeCell(const assembly::AssemblyContext& c
                         constitutive_state_.get(), &constitutive_cache};
 
         for (LocalIndex q = 0; q < n_qpts; ++q) {
+            constitutive_cache.values.clear();
             const Real w = ctx.integrationWeight(q);
 
             for (LocalIndex i = 0; i < n_test; ++i) {
@@ -13549,6 +14097,7 @@ void SymbolicNonlinearFormKernel::computeCell(const assembly::AssemblyContext& c
             if (term_weight == 0.0) continue;
 
             for (LocalIndex q = 0; q < n_qpts; ++q) {
+                constitutive_cache.values.clear();
                 const Real w = ctx.integrationWeight(q);
                 for (LocalIndex i = 0; i < n_test; ++i) {
                     env.i = i;
@@ -13620,6 +14169,9 @@ void SymbolicNonlinearFormKernel::computeCellBatch(std::span<const assembly::Ass
                 }
 
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                        constitutive_cache[lane].values.clear();
+                    }
                     for (LocalIndex i = 0; i < n_test; ++i) {
                         for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
                             envs[lane].i = i;
@@ -13658,6 +14210,9 @@ void SymbolicNonlinearFormKernel::computeCellBatch(std::span<const assembly::Ass
                     if (term.domain != IntegralDomain::Cell) continue;
 
                     for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                            constitutive_cache[lane].values.clear();
+                        }
                         for (LocalIndex i = 0; i < n_test; ++i) {
                             for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
                                 envs[lane].i = i;
@@ -13742,6 +14297,7 @@ void SymbolicNonlinearFormKernel::computeBoundaryFace(const assembly::AssemblyCo
                         constitutive_state_.get(), &constitutive_cache};
 
         for (LocalIndex q = 0; q < n_qpts; ++q) {
+            constitutive_cache.values.clear();
             const Real w = ctx.integrationWeight(q);
 
             for (LocalIndex i = 0; i < n_test; ++i) {
@@ -13779,6 +14335,7 @@ void SymbolicNonlinearFormKernel::computeBoundaryFace(const assembly::AssemblyCo
             if (term_weight == 0.0) continue;
 
             for (LocalIndex q = 0; q < n_qpts; ++q) {
+                constitutive_cache.values.clear();
                 const Real w = ctx.integrationWeight(q);
                 for (LocalIndex i = 0; i < n_test; ++i) {
                     env.i = i;
@@ -13856,12 +14413,12 @@ void SymbolicNonlinearFormKernel::computeInteriorFace(const assembly::AssemblyCo
             ConstitutiveCallCacheReal constitutive_cache;
             EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Residual, test_active, test_active, 0, 0,
                             constitutive_state_.get(), &constitutive_cache};
-            for (LocalIndex i = 0; i < n_test; ++i) {
-                env.i = i;
-                Real ri = 0.0;
-                for (LocalIndex q = 0; q < n_qpts; ++q) {
-                    const Real w = ctx_eval.integrationWeight(q);
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                constitutive_cache.values.clear();
+                const Real w = ctx_eval.integrationWeight(q);
 
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    env.i = i;
                     Real sum_q = 0.0;
                     for (const auto& term : residual_ir_.terms()) {
                         if (term.domain != IntegralDomain::InteriorFace) continue;
@@ -13875,9 +14432,8 @@ void SymbolicNonlinearFormKernel::computeInteriorFace(const assembly::AssemblyCo
                         }
                         sum_q += term_weight * val.s;
                     }
-                    ri += w * sum_q;
+                    out.vectorEntry(i) += w * sum_q;
                 }
-                out.vectorEntry(i) += ri;
             }
         };
 
@@ -13904,6 +14460,7 @@ void SymbolicNonlinearFormKernel::computeInteriorFace(const assembly::AssemblyCo
                 if (term_weight == 0.0) continue;
 
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    constitutive_cache.values.clear();
                     const Real w = ctx_eval.integrationWeight(q);
                     for (LocalIndex i = 0; i < n_test; ++i) {
                         env.i = i;
@@ -13989,12 +14546,12 @@ void SymbolicNonlinearFormKernel::computeInterfaceFace(const assembly::AssemblyC
             ConstitutiveCallCacheReal constitutive_cache;
             EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Residual, test_active, test_active, 0, 0,
                             constitutive_state_.get(), &constitutive_cache};
-            for (LocalIndex i = 0; i < n_test; ++i) {
-                env.i = i;
-                Real ri = 0.0;
-                for (LocalIndex q = 0; q < n_qpts; ++q) {
-                    const Real w = ctx_eval.integrationWeight(q);
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                constitutive_cache.values.clear();
+                const Real w = ctx_eval.integrationWeight(q);
 
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    env.i = i;
                     Real sum_q = 0.0;
                     for (const auto& term : residual_ir_.terms()) {
                         if (term.domain != IntegralDomain::InterfaceFace) continue;
@@ -14009,9 +14566,8 @@ void SymbolicNonlinearFormKernel::computeInterfaceFace(const assembly::AssemblyC
                         }
                         sum_q += term_weight * val.s;
                     }
-                    ri += w * sum_q;
+                    out.vectorEntry(i) += w * sum_q;
                 }
-                out.vectorEntry(i) += ri;
             }
         };
 
@@ -14040,6 +14596,7 @@ void SymbolicNonlinearFormKernel::computeInterfaceFace(const assembly::AssemblyC
                 if (term_weight == 0.0) continue;
 
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    constitutive_cache.values.clear();
                     const Real w = ctx_eval.integrationWeight(q);
                     for (LocalIndex i = 0; i < n_test; ++i) {
                         env.i = i;
@@ -14154,11 +14711,11 @@ void CoupledResidualSensitivityKernel::computeCell(const assembly::AssemblyConte
 
     thread_local DualWorkspace ws;
 
+    ConstitutiveCallCacheDual constitutive_cache;
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const Real w = ctx.integrationWeight(q);
         ws.reset(/*num_dofs=*/1u);
-
-        ConstitutiveCallCacheDual constitutive_cache;
+        constitutive_cache.values.clear();
         for (LocalIndex i = 0; i < n_test; ++i) {
             EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, /*n_trial_dofs=*/0u, &ws,
                             constitutive_state, &constitutive_cache};
@@ -14220,11 +14777,12 @@ void CoupledResidualSensitivityKernel::computeCellBatch(
             }
 
             std::vector<DualWorkspace> workspaces(lane_ctx.size());
+            std::vector<ConstitutiveCallCacheDual> constitutive_cache(lane_ctx.size());
 
             for (LocalIndex q = 0; q < n_qpts; ++q) {
-                std::vector<ConstitutiveCallCacheDual> constitutive_cache(lane_ctx.size());
                 for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
                     workspaces[lane].reset(/*num_dofs=*/1u);
+                    constitutive_cache[lane].values.clear();
                 }
 
                 for (LocalIndex i = 0; i < n_test; ++i) {
@@ -14304,11 +14862,11 @@ void CoupledResidualSensitivityKernel::computeBoundaryFace(const assembly::Assem
 
     thread_local DualWorkspace ws;
 
+    ConstitutiveCallCacheDual constitutive_cache;
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const Real w = ctx.integrationWeight(q);
         ws.reset(/*num_dofs=*/1u);
-
-        ConstitutiveCallCacheDual constitutive_cache;
+        constitutive_cache.values.clear();
         for (LocalIndex i = 0; i < n_test; ++i) {
             EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, /*n_trial_dofs=*/0u, &ws,
                             constitutive_state, &constitutive_cache};
@@ -14389,11 +14947,11 @@ void CoupledResidualSensitivityKernel::computeInteriorFace(const assembly::Assem
                                      assembly::KernelOutput& out,
                                      LocalIndex n_test) {
         const auto* time_ctx = ctx_eval.timeIntegrationContext();
+        ConstitutiveCallCacheDual constitutive_cache;
         for (LocalIndex q = 0; q < n_qpts; ++q) {
             const Real w = ctx_eval.integrationWeight(q);
             ws.reset(/*num_dofs=*/1u);
-
-            ConstitutiveCallCacheDual constitutive_cache;
+            constitutive_cache.values.clear();
             for (LocalIndex i = 0; i < n_test; ++i) {
                 EvalEnvDual env{ctx_eval, &ctx_other, test_active, trial_active, i,
                                 /*n_trial_dofs=*/0u, &ws, constitutive_state, &constitutive_cache};
@@ -14482,11 +15040,11 @@ void CoupledResidualSensitivityKernel::computeInterfaceFace(const assembly::Asse
                                      assembly::KernelOutput& out,
                                      LocalIndex n_test) {
         const auto* time_ctx = ctx_eval.timeIntegrationContext();
+        ConstitutiveCallCacheDual constitutive_cache;
         for (LocalIndex q = 0; q < n_qpts; ++q) {
             const Real w = ctx_eval.integrationWeight(q);
             ws.reset(/*num_dofs=*/1u);
-
-            ConstitutiveCallCacheDual constitutive_cache;
+            constitutive_cache.values.clear();
             for (LocalIndex i = 0; i < n_test; ++i) {
                 EvalEnvDual env{ctx_eval, &ctx_other, test_active, trial_active, i,
                                 /*n_trial_dofs=*/0u, &ws, constitutive_state, &constitutive_cache};

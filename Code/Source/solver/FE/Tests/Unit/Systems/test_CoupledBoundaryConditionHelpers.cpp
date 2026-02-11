@@ -15,6 +15,7 @@
 #include "Spaces/H1Space.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <array>
 #include <memory>
 #include <span>
 #include <vector>
@@ -398,6 +399,97 @@ TEST(CoupledBoundaryConditionHelpers, CoupledAuxiliaryState_JacobianIncludesChai
             } else {
                 EXPECT_NEAR(v, 0.0, 1e-12);
             }
+        }
+    }
+}
+
+TEST(CoupledBoundaryConditionHelpers, CoupledAuxiliaryState_JacobianMatchesFiniteDifference)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(/*boundary_marker=*/2);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("residual");
+
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    auto residual = (svmp::FE::forms::FormExpr::constant(0.0) * u * v).dx();
+
+    svmp::FE::forms::BoundaryFunctional Q;
+    Q.integrand = svmp::FE::forms::FormExpr::discreteField(u_field, *space, "u");
+    Q.boundary_marker = 2;
+    Q.name = "Q";
+    Q.reduction = svmp::FE::forms::BoundaryFunctional::Reduction::Sum;
+
+    svmp::FE::systems::AuxiliaryStateRegistration reg;
+    reg.spec.size = 1;
+    reg.spec.name = "X";
+    reg.spec.associated_markers = {2};
+    reg.initial_values = {0.0};
+    reg.required_integrals = {Q};
+    reg.rhs = svmp::FE::forms::FormExpr::boundaryIntegralValue("Q");
+    reg.integrator = svmp::FE::systems::ODEMethod::ForwardEuler;
+
+    const auto flux = svmp::FE::forms::FormExpr::auxiliaryState("X");
+    residual = svmp::FE::systems::bc::applyCoupledNeumann(
+        sys,
+        u_field,
+        residual,
+        v,
+        /*boundary_marker=*/2,
+        /*flux=*/flux,
+        std::span<const svmp::FE::systems::AuxiliaryStateRegistration>(&reg, 1));
+
+    svmp::FE::systems::installResidualForm(sys, "residual", u_field, u_field, residual);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup(/*opts=*/{}, inputs);
+
+    std::vector<Real> u_n = {1.0, 2.0, 3.0, 4.0};
+    svmp::FE::systems::SystemStateView state;
+    state.time = 0.0;
+    state.dt = 1.0;
+    state.u = std::span<const Real>(u_n.data(), u_n.size());
+
+    svmp::FE::systems::AssemblyRequest req_both;
+    req_both.op = "residual";
+    req_both.want_matrix = true;
+    req_both.want_vector = true;
+    req_both.zero_outputs = true;
+
+    svmp::FE::assembly::DenseSystemView out(4);
+    out.zero();
+    (void)sys.assemble(req_both, state, &out, &out);
+
+    std::array<Real, 4> r0{};
+    for (int i = 0; i < 4; ++i) {
+        r0[static_cast<std::size_t>(i)] = out.getVectorEntry(i);
+    }
+
+    svmp::FE::systems::AssemblyRequest req_vec;
+    req_vec.op = "residual";
+    req_vec.want_vector = true;
+    req_vec.zero_outputs = true;
+
+    constexpr Real eps = 1e-7;
+    for (int j = 0; j < 4; ++j) {
+        auto u_plus = u_n;
+        u_plus[static_cast<std::size_t>(j)] += eps;
+
+        svmp::FE::systems::SystemStateView state_plus;
+        state_plus.time = 0.0;
+        state_plus.dt = 1.0;
+        state_plus.u = std::span<const Real>(u_plus.data(), u_plus.size());
+
+        svmp::FE::assembly::DenseVectorView r_plus(4);
+        r_plus.zero();
+        (void)sys.assemble(req_vec, state_plus, nullptr, &r_plus);
+
+        for (int i = 0; i < 4; ++i) {
+            const Real fd = (r_plus.getVectorEntry(i) - r0[static_cast<std::size_t>(i)]) / eps;
+            EXPECT_NEAR(out.getMatrixEntry(i, j), fd, 5e-6);
         }
     }
 }

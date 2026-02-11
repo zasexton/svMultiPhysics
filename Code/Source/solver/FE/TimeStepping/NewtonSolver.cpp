@@ -508,6 +508,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         req.op = options_.residual_op;
         req.want_matrix = true;
         req.want_vector = true;
+        req.suppress_constraint_inhomogeneity = true;
         const auto ar = transient.assemble(req, state, J_view.get(), r_view.get());
         FE_THROW_IF(!ar.success, FEException,
                     "NewtonSolver: combined (matrix+vector) assembly failed: " + ar.error_message);
@@ -546,6 +547,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         req.op = options_.jacobian_op;
         req.want_matrix = true;
         req.want_vector = true;
+        req.suppress_constraint_inhomogeneity = true;
         const auto ar = transient.assemble(req, state, J_view.get(), r_view.get());
         FE_THROW_IF(!ar.success, FEException,
                     "NewtonSolver: combined (matrix+vector) assembly failed: " + ar.error_message);

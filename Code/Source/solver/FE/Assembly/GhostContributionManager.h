@@ -482,7 +482,7 @@ private:
     const dofs::GhostDofManager* ghost_dof_manager_{nullptr};
     GlobalIndex ownership_offset_{0};
     GhostPolicy policy_{GhostPolicy::ReverseScatter};
-    bool deterministic_{true};
+    bool deterministic_{AssemblyOptions{}.deterministic};
 
     // MPI info
 #if FE_HAS_MPI

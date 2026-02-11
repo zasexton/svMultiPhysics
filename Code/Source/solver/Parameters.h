@@ -1317,6 +1317,12 @@ class EquationParameters : public ParameterLists
 {
   public:
     EquationParameters();
+    ~EquationParameters();
+
+    EquationParameters(const EquationParameters&) = delete;
+    EquationParameters& operator=(const EquationParameters&) = delete;
+    EquationParameters(EquationParameters&&) = delete;
+    EquationParameters& operator=(EquationParameters&&) = delete;
 
     static const std::string xml_element_name_;
 
@@ -1501,6 +1507,12 @@ class MeshParameters : public ParameterLists
 {
   public:
     MeshParameters();
+    ~MeshParameters();
+
+    MeshParameters(const MeshParameters&) = delete;
+    MeshParameters& operator=(const MeshParameters&) = delete;
+    MeshParameters(MeshParameters&&) = delete;
+    MeshParameters& operator=(MeshParameters&&) = delete;
 
     static const std::string xml_element_name_;
 
@@ -1607,6 +1619,12 @@ class URISMeshParameters : public ParameterLists
 {
   public:
     URISMeshParameters();
+    ~URISMeshParameters();
+
+    URISMeshParameters(const URISMeshParameters&) = delete;
+    URISMeshParameters& operator=(const URISMeshParameters&) = delete;
+    URISMeshParameters(URISMeshParameters&&) = delete;
+    URISMeshParameters& operator=(URISMeshParameters&&) = delete;
 
     static const std::string xml_element_name_;
 
@@ -1638,6 +1656,12 @@ class Parameters {
 
   public:
     Parameters();
+    ~Parameters();
+
+    Parameters(const Parameters&) = delete;
+    Parameters& operator=(const Parameters&) = delete;
+    Parameters(Parameters&&) = delete;
+    Parameters& operator=(Parameters&&) = delete;
 
     static const std::set<std::string> constitutive_model_names;
     static const std::set<std::string> equation_names;

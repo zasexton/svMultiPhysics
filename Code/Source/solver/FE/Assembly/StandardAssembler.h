@@ -172,6 +172,7 @@ public:
     void setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset = 0) override;
     void setDofHandler(const dofs::DofHandler& dof_handler) override;
     void setConstraints(const constraints::AffineConstraints* constraints) override;
+    void setSuppressConstraintInhomogeneity(bool suppress) override;
     void setSparsityPattern(const sparsity::SparsityPattern* sparsity) override;
     void setOptions(const AssemblyOptions& options) override;
 	    void setCurrentSolution(std::span<const Real> solution) override;
@@ -532,6 +533,7 @@ private:
     const constraints::AffineConstraints* constraints_{nullptr};
     const sparsity::SparsityPattern* sparsity_{nullptr};
     std::unique_ptr<constraints::ConstraintDistributor> constraint_distributor_;
+    bool suppress_constraint_inhomogeneity_{false};
 
     // Working storage
     AssemblyContext context_;

@@ -47,6 +47,8 @@ Simulation::Simulation()
 
 Simulation::~Simulation() 
 {
+  delete linear_algebra;
+  linear_algebra = nullptr;
 }
 
 const mshType& Simulation::get_msh(const std::string& name)

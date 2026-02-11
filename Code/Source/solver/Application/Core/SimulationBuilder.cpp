@@ -17,9 +17,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace {
 
@@ -191,10 +193,12 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
 }
 
 std::shared_ptr<const svmp::FE::backends::DofPermutation> build_fsils_dof_permutation(const svmp::FE::systems::FESystem& system,
-                                                                                      int dof_per_node)
+                                                                                      int dof_per_node,
+                                                                                      const svmp::FE::dofs::DofDistributionOptions& dof_options)
 {
   using svmp::FE::GlobalIndex;
   using svmp::FE::backends::DofPermutation;
+  (void)dof_options;
 
   if (dof_per_node <= 0) {
     return {};
@@ -205,47 +209,7 @@ std::shared_ptr<const svmp::FE::backends::DofPermutation> build_fsils_dof_permut
     return {};
   }
 
-  // Prefer the merged entity map (robust against component-layout assumptions).
-  if (const auto* emap = system.dofHandler().getEntityDofMap()) {
-    const GlobalIndex n_vertices = emap->numVertices();
-    if (n_vertices > 0 && total_dofs == static_cast<GlobalIndex>(dof_per_node) * n_vertices) {
-      auto perm = std::make_shared<DofPermutation>();
-      perm->forward.assign(static_cast<std::size_t>(total_dofs), svmp::FE::INVALID_GLOBAL_INDEX);
-      perm->inverse.assign(static_cast<std::size_t>(total_dofs), svmp::FE::INVALID_GLOBAL_INDEX);
-
-      for (GlobalIndex v = 0; v < n_vertices; ++v) {
-        const auto vdofs = emap->getVertexDofs(v);
-        if (vdofs.size() != static_cast<std::size_t>(dof_per_node)) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] FSILS backend requires dof_per_node DOFs per vertex for nodal systems.");
-        }
-        for (std::size_t c = 0; c < vdofs.size(); ++c) {
-          const GlobalIndex fe_dof = vdofs[c];
-          const GlobalIndex fs_dof = v * static_cast<GlobalIndex>(dof_per_node) + static_cast<GlobalIndex>(c);
-          if (fe_dof < 0 || fe_dof >= total_dofs) {
-            throw std::runtime_error("[svMultiPhysics::Application] FSILS backend permutation encountered invalid DOF.");
-          }
-          perm->forward[static_cast<std::size_t>(fe_dof)] = fs_dof;
-          perm->inverse[static_cast<std::size_t>(fs_dof)] = fe_dof;
-        }
-      }
-
-      for (std::size_t i = 0; i < perm->forward.size(); ++i) {
-        if (perm->forward[i] == svmp::FE::INVALID_GLOBAL_INDEX) {
-          throw std::runtime_error("[svMultiPhysics::Application] FSILS backend DOF permutation is incomplete.");
-        }
-      }
-      for (std::size_t i = 0; i < perm->inverse.size(); ++i) {
-        if (perm->inverse[i] == svmp::FE::INVALID_GLOBAL_INDEX) {
-          throw std::runtime_error("[svMultiPhysics::Application] FSILS backend DOF permutation is incomplete.");
-        }
-      }
-
-      return perm;
-    }
-  }
-
-  // Fallback: derive node-block permutation from the field map (requires equal-order fields).
+  // Derive node-block permutation from the field map (requires equal-order fields).
   const auto& fmap = system.fieldMap();
   const auto n_fields = fmap.numFields();
   if (n_fields == 0) {
@@ -285,18 +249,31 @@ std::shared_ptr<const svmp::FE::backends::DofPermutation> build_fsils_dof_permut
         "[svMultiPhysics::Application] FSILS backend requires total DOFs == dof_per_node * n_nodes; check field spaces.");
   }
 
+  // In MPI runs the application does not have globally complete node ownership/coordinate information,
+  // so any owner/spatial-based global permutation would be rank-dependent and incorrect. Use the
+  // canonical node ordering (node_id == local_dof index) for a deterministic, globally consistent
+  // node-block permutation.
+  std::vector<GlobalIndex> node_to_backend(static_cast<std::size_t>(n_nodes), svmp::FE::INVALID_GLOBAL_INDEX);
+  for (GlobalIndex node = 0; node < n_nodes; ++node) {
+    node_to_backend[static_cast<std::size_t>(node)] = node;
+  }
+
   auto perm = std::make_shared<DofPermutation>();
   perm->forward.assign(static_cast<std::size_t>(total_dofs), svmp::FE::INVALID_GLOBAL_INDEX);
   perm->inverse.assign(static_cast<std::size_t>(total_dofs), svmp::FE::INVALID_GLOBAL_INDEX);
 
   for (GlobalIndex node = 0; node < n_nodes; ++node) {
+    const GlobalIndex backend_node = node_to_backend[static_cast<std::size_t>(node)];
+    if (backend_node < 0) {
+      throw std::runtime_error("[svMultiPhysics::Application] FSILS permutation: missing backend node id.");
+    }
     int comp_offset = 0;
     for (std::size_t f = 0; f < n_fields; ++f) {
       const auto& field = fmap.getField(f);
       for (svmp::FE::LocalIndex c = 0; c < field.n_components; ++c) {
         const GlobalIndex fe_dof = fmap.componentToGlobal(f, c, node);
         const GlobalIndex fs_dof =
-            node * static_cast<GlobalIndex>(dof_per_node) + static_cast<GlobalIndex>(comp_offset);
+            backend_node * static_cast<GlobalIndex>(dof_per_node) + static_cast<GlobalIndex>(comp_offset);
         perm->forward[static_cast<std::size_t>(fe_dof)] = fs_dof;
         perm->inverse[static_cast<std::size_t>(fs_dof)] = fe_dof;
         ++comp_offset;
@@ -481,6 +458,14 @@ void SimulationBuilder::setupSystem()
   components_.fe_system->setup(setup_opts);
 
   const auto n_dofs = components_.fe_system->dofHandler().getNumDofs();
+  {
+    const auto& part = components_.fe_system->dofHandler().getPartition();
+    const bool owned_contiguous = part.locallyOwned().contiguousRange().has_value();
+    oopCout() << "[svMultiPhysics::Application] SimulationBuilder: DOF partition global=" << part.globalSize()
+              << " owned=" << part.localOwnedSize() << " ghost=" << part.ghostSize()
+              << " relevant=" << part.localRelevantSize() << " owned_contiguous=" << (owned_contiguous ? "true" : "false")
+              << std::endl;
+  }
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: FE system setup complete; ndofs=" << n_dofs
             << " constraints=" << components_.fe_system->constraints().numConstraints() << std::endl;
 
@@ -522,8 +507,30 @@ void SimulationBuilder::createSolvers()
             << std::endl;
 
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS && create_options.dof_per_node > 1) {
-    oopCout() << "[svMultiPhysics::Application] SimulationBuilder: building FSILS DOF permutation." << std::endl;
-    create_options.dof_permutation = build_fsils_dof_permutation(*components_.fe_system, create_options.dof_per_node);
+    oopCout() << "[svMultiPhysics::Application] SimulationBuilder: configuring FSILS DOF permutation." << std::endl;
+    svmp::FE::dofs::DofDistributionOptions dof_options{};
+    {
+      const auto comm = svmp::MeshComm::world();
+      dof_options.my_rank = comm.rank();
+      dof_options.world_size = comm.size();
+#if FE_HAS_MPI
+      dof_options.mpi_comm = comm.native();
+#endif
+    }
+
+    // Prefer the permutation built by the FE system setup (MPI-safe and consistent with any
+    // node-interleaved distributed sparsity / backend indexing).
+    create_options.dof_permutation = components_.fe_system->dofPermutation();
+    if (!create_options.dof_permutation || create_options.dof_permutation->empty()) {
+      if (dof_options.world_size > 1) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] FSILS requires a node-interleaved DOF permutation in MPI runs, but the FE "
+            "system did not provide one. This typically indicates distributed sparsity/permutation setup failed.");
+      }
+      create_options.dof_permutation =
+          build_fsils_dof_permutation(*components_.fe_system, create_options.dof_per_node, dof_options);
+    }
+
     oopCout() << "[svMultiPhysics::Application] SimulationBuilder: FSILS DOF permutation="
               << (create_options.dof_permutation ? "enabled" : "disabled") << std::endl;
   }
@@ -546,14 +553,14 @@ void SimulationBuilder::createSolvers()
 
   // Prime backend layout (notably FSILS) by creating the system matrix once.
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS) {
-    const auto& pat = components_.fe_system->sparsity("jacobian");
+    const auto& pat = components_.fe_system->sparsity("equations");
     oopCout() << "[svMultiPhysics::Application] SimulationBuilder: priming FSILS matrix layout; pattern rows="
               << pat.numRows() << " cols=" << pat.numCols() << " nnz=" << pat.getNnz() << std::endl;
-    const auto* dist = components_.fe_system->distributedSparsityIfAvailable("jacobian");
+    const auto* dist = components_.fe_system->distributedSparsityIfAvailable("equations");
     if (dist) {
       (void)components_.backend->createMatrix(*dist);
     } else {
-      (void)components_.backend->createMatrix(components_.fe_system->sparsity("jacobian"));
+      (void)components_.backend->createMatrix(components_.fe_system->sparsity("equations"));
     }
   }
 }

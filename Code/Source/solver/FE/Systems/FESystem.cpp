@@ -110,6 +110,7 @@ void FESystem::invalidateSetup() noexcept
     global_kernel_state_provider_.reset();
     sparsity_by_op_.clear();
     distributed_sparsity_by_op_.clear();
+    dof_permutation_.reset();
     parameter_registry_.clear();
     if (operator_backends_) {
         operator_backends_->invalidateCache();

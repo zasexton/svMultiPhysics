@@ -313,9 +313,20 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 	        report.final_residual_norm = std::numeric_limits<Real>::infinity();
 	        report.relative_residual = std::numeric_limits<Real>::infinity();
 	        report.message = "fsils (breakdown:" + reason + ")";
-		    } else if (!report.converged) {
-		        report.message = "fsils (not converged; itr=" + std::to_string(report.iterations) +
-		                         ", rel=" + std::to_string(report.relative_residual) + ")";
+		    } else {
+		        // FSILS occasionally reports suc=false even when the FE convergence criteria are met,
+		        // especially for nearly-zero RHS where relative residual is ill-conditioned. Apply the
+		        // FE criteria as a post-check to avoid spurious Newton failures.
+		        const Real rel_tol = std::max<Real>(options_.rel_tol, 0.0);
+		        const Real abs_tol = std::max<Real>(options_.abs_tol, 0.0);
+		        const Real target = std::max(abs_tol, rel_tol * report.initial_residual_norm);
+		        if (!report.converged && report.final_residual_norm <= target) {
+		            report.converged = true;
+		            report.message = "fsils";
+		        } else if (!report.converged) {
+		            report.message = "fsils (not converged; itr=" + std::to_string(report.iterations) +
+		                             ", rel=" + std::to_string(report.relative_residual) + ")";
+		        }
 		    }
 
     if (oopTraceEnabled()) {

@@ -119,8 +119,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     p_spec.components = 1;
     const FE::FieldId p_id = system.addField(std::move(p_spec));
 
-    system.addOperator("residual");
-    system.addOperator("jacobian");
+    system.addOperator("equations");
 
     using namespace svmp::FE::forms;
 
@@ -340,34 +339,29 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         }
     }
 
-    // Install coupled residual on both operator tags used by FESystem convenience calls.
+    // Install Jacobian blocks under a single unified operator tag.  Diagonal blocks
+    // (VV, PP) use Both mode to produce matrix+vector simultaneously, while off-diagonal
+    // blocks (VP, PV) use MatrixOnly.  This allows Newton to use the combined
+    // assembleJacobianAndResidual() path (same_op=true), cutting mesh traversals from
+    // 6 to 4 compared to separate residual/jacobian operators.
     FE::forms::BlockLinearForm residual(/*tests=*/2);
     residual.setBlock(0, momentum_form);
     residual.setBlock(1, continuity_form);
 
     const std::array<FE::FieldId, 2> fields = {u_id, p_id};
     {
-        FE::systems::FormInstallOptions residual_install{};
-        residual_install.coupled_residual_install_jacobian_blocks = false;
+        FE::systems::FormInstallOptions install{};
+        install.coupled_residual_install_residual_kernels = false;
+        install.coupled_residual_install_jacobian_blocks = true;
+        install.coupled_residual_from_jacobian_block = true;
         // Prefer symbolic tangents for performance. The dual-number (NonlinearFormKernel)
         // path is not JIT-accelerated and builds a large AD AST for complex fluid terms.
-        residual_install.compiler_options.use_symbolic_tangent = true;
+        install.compiler_options.use_symbolic_tangent = true;
 #if SVMP_FE_ENABLE_LLVM_JIT
-        residual_install.compiler_options.jit.enable = true;
-        residual_install.compiler_options.jit.optimization_level = 3;
+        install.compiler_options.jit.enable = true;
+        install.compiler_options.jit.optimization_level = 3;
 #endif
-        (void)FE::systems::installCoupledResidual(system, "residual", fields, fields, residual, residual_install);
-    }
-    {
-        FE::systems::FormInstallOptions jacobian_install{};
-        jacobian_install.coupled_residual_install_residual_kernels = false;
-        jacobian_install.coupled_residual_from_jacobian_block = true;
-        jacobian_install.compiler_options.use_symbolic_tangent = true;
-#if SVMP_FE_ENABLE_LLVM_JIT
-        jacobian_install.compiler_options.jit.enable = true;
-        jacobian_install.compiler_options.jit.optimization_level = 3;
-#endif
-        (void)FE::systems::installCoupledResidual(system, "jacobian", fields, fields, residual, jacobian_install);
+        (void)FE::systems::installCoupledResidual(system, "equations", fields, fields, residual, install);
     }
 }
 

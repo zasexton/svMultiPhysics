@@ -64,6 +64,10 @@ class MatrixFreeOperator;
 class FunctionalKernel;
 }
 
+namespace backends {
+struct DofPermutation;
+} // namespace backends
+
 namespace systems {
 
 using BoundaryId = int;
@@ -96,6 +100,12 @@ struct AssemblyRequest {
     bool assemble_interior_face_terms{true};
     bool assemble_interface_face_terms{true};
     bool assemble_global_terms{true};
+
+    /// When true, constrained assembly distributes matrix and vector independently
+    /// (suppressing the -K*g Dirichlet inhomogeneity correction that joint distribution
+    /// adds).  Set to true for nonlinear Newton solves where the residual R(u) is already
+    /// evaluated at the constrained state.
+    bool suppress_constraint_inhomogeneity{false};
 };
 
 class FESystem {
@@ -260,6 +270,7 @@ public:
     [[nodiscard]] const constraints::AffineConstraints& constraints() const noexcept { return affine_constraints_; }
     [[nodiscard]] const sparsity::SparsityPattern& sparsity(const OperatorTag& op) const;
     [[nodiscard]] const sparsity::DistributedSparsityPattern* distributedSparsityIfAvailable(const OperatorTag& op) const noexcept;
+    [[nodiscard]] std::shared_ptr<const backends::DofPermutation> dofPermutation() const noexcept { return dof_permutation_; }
 
 		    [[nodiscard]] bool isSetup() const noexcept { return is_setup_; }
 		    [[nodiscard]] int temporalOrder() const noexcept;
@@ -306,8 +317,9 @@ private:
     std::unique_ptr<dofs::BlockDofMap> block_map_{};
 	    constraints::AffineConstraints affine_constraints_{};
 
-	    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>> sparsity_by_op_{};
-	    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::DistributedSparsityPattern>> distributed_sparsity_by_op_{};
+		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::SparsityPattern>> sparsity_by_op_{};
+		    std::unordered_map<OperatorTag, std::unique_ptr<sparsity::DistributedSparsityPattern>> distributed_sparsity_by_op_{};
+		    std::shared_ptr<const backends::DofPermutation> dof_permutation_{};
 
 		    std::unique_ptr<assembly::Assembler> assembler_{};
 		    std::string assembler_selection_report_{};

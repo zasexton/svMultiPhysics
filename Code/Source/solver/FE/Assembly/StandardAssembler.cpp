@@ -641,6 +641,11 @@ void StandardAssembler::setConstraints(const constraints::AffineConstraints* con
     }
 }
 
+void StandardAssembler::setSuppressConstraintInhomogeneity(bool suppress)
+{
+    suppress_constraint_inhomogeneity_ = suppress;
+}
+
 void StandardAssembler::setSparsityPattern(const sparsity::SparsityPattern* sparsity)
 {
     sparsity_ = sparsity;
@@ -4914,8 +4919,14 @@ void StandardAssembler::insertLocalConstrained(
 
         MatrixOpsAdapter matrix_ops(*matrix_view);
 
-        // Also need vector ops if vector_view is provided
-        if (vector_view && output.has_vector) {
+        // When both matrix and vector are present, the distribution strategy depends
+        // on whether we suppress the Dirichlet inhomogeneity correction:
+        //  - Linear solves (suppress=false): Use joint distributeLocalToGlobal which
+        //    applies the -K*g Dirichlet inhomogeneity correction to the RHS.
+        //  - Newton solves (suppress=true):  Distribute independently because the
+        //    residual R(u) is already evaluated at the constrained state and the
+        //    -K*g correction would double-count the inhomogeneity.
+        if (vector_view && output.has_vector && !suppress_constraint_inhomogeneity_) {
             class VectorOpsAdapter : public constraints::IVectorOperations {
             public:
                 explicit VectorOpsAdapter(GlobalSystemView& view) : view_(view) {}
@@ -4946,7 +4957,6 @@ void StandardAssembler::insertLocalConstrained(
             };
 
             VectorOpsAdapter vector_ops(*vector_view);
-
             constraint_distributor_->distributeLocalToGlobal(
                 output.local_matrix, output.local_vector,
                 row_dofs, col_dofs, matrix_ops, vector_ops);
@@ -4954,8 +4964,12 @@ void StandardAssembler::insertLocalConstrained(
             constraint_distributor_->distributeMatrixToGlobal(
                 output.local_matrix, row_dofs, col_dofs, matrix_ops);
         }
-    } else if (vector_view && output.has_vector && constraint_distributor_) {
-        // Vector-only with constraints
+    }
+
+    // Vector-only distribution: either no matrix present, or suppress mode is active
+    // (in which case matrix was already distributed above independently).
+    if (vector_view && output.has_vector && constraint_distributor_ &&
+        !(matrix_view && output.has_matrix && !suppress_constraint_inhomogeneity_)) {
         class VectorOpsAdapter : public constraints::IVectorOperations {
         public:
             explicit VectorOpsAdapter(GlobalSystemView& view) : view_(view) {}

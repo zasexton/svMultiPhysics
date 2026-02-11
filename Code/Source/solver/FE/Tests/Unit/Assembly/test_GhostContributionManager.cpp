@@ -427,6 +427,29 @@ TEST_F(GhostContributionManagerTest, DeterministicBuffering) {
     EXPECT_NO_THROW(manager_->exchangeContributions());
 }
 
+TEST_F(GhostContributionManagerTest, NonDeterministicModeSkipsSortingInSingleRankExchange) {
+    manager_->setPolicy(GhostPolicy::ReverseScatter);
+    manager_->setDeterministic(false);
+    manager_->initialize();
+
+    // Insert out-of-order ghost entries; in non-deterministic mode the single-rank loopback
+    // path should preserve insertion order.
+    ASSERT_FALSE(manager_->addMatrixContribution(/*row=*/7, /*col=*/3, /*value=*/1.0));
+    ASSERT_FALSE(manager_->addMatrixContribution(/*row=*/6, /*col=*/8, /*value=*/2.0));
+    ASSERT_FALSE(manager_->addMatrixContribution(/*row=*/7, /*col=*/1, /*value=*/3.0));
+
+    manager_->exchangeContributions();
+
+    const auto received = manager_->getReceivedMatrixContributions();
+    ASSERT_EQ(received.size(), 3u);
+    EXPECT_EQ(received[0].global_row, 7);
+    EXPECT_EQ(received[0].global_col, 3);
+    EXPECT_EQ(received[1].global_row, 6);
+    EXPECT_EQ(received[1].global_col, 8);
+    EXPECT_EQ(received[2].global_row, 7);
+    EXPECT_EQ(received[2].global_col, 1);
+}
+
 TEST_F(GhostContributionManagerTest, ReproducibleResults) {
     manager_->setPolicy(GhostPolicy::ReverseScatter);
     manager_->setDeterministic(true);

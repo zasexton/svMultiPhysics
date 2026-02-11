@@ -482,6 +482,16 @@ public:
     virtual void setConstraints(const constraints::AffineConstraints* constraints) = 0;
 
     /**
+     * @brief Suppress -K*g inhomogeneity correction during constrained assembly.
+     *
+     * When true, matrix and vector are distributed independently to the global
+     * system, which suppresses the Dirichlet inhomogeneity correction (-K*g).
+     * Set to true for nonlinear Newton solves where R(u) is already evaluated
+     * at the constrained state.  Default is false (joint distribution with -K*g).
+     */
+    virtual void setSuppressConstraintInhomogeneity(bool /*suppress*/) {}
+
+    /**
      * @brief Set sparsity pattern for matrix assembly
      *
      * @param sparsity The finalized sparsity pattern

@@ -46,8 +46,7 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
     spec.space = space_;
     const FE::FieldId u_id = system.addField(std::move(spec));
 
-    system.addOperator("residual");
-    system.addOperator("jacobian");
+    system.addOperator("equations");
 
     using namespace svmp::FE::forms;
 
@@ -93,11 +92,11 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
     install_opts.compiler_options.use_symbolic_tangent = true;
 #endif
 
-    // Register the same weak form on both operator tags used by FESystem.
+    // Register the weak form under the unified "equations" operator tag.
     // The underlying kernel can produce either vector or matrix outputs
     // depending on the AssemblyRequest (and may auto-select an optimized
     // LinearFormKernel when the residual is affine in the TrialFunction).
-    FE::systems::installWeakForm(system, {"residual", "jacobian"}, u_id, u_id, weak_form, install_opts);
+    FE::systems::installWeakForm(system, {"equations"}, u_id, u_id, weak_form, install_opts);
 }
 
 } // namespace poisson

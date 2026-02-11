@@ -44,6 +44,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstddef>
 #include <limits>
 #include <memory>
@@ -219,7 +220,9 @@ private:
 }
 
 [[nodiscard]] std::shared_ptr<const backends::DofPermutation>
-buildFsilsDofPermutation(const systems::FESystem& system, int dof_per_node)
+buildFsilsDofPermutation(const systems::FESystem& system,
+                         int dof_per_node,
+                         const dofs::DofDistributionOptions& dof_options)
 {
     using backends::DofPermutation;
 
@@ -232,43 +235,7 @@ buildFsilsDofPermutation(const systems::FESystem& system, int dof_per_node)
         return {};
     }
 
-    // Prefer the entity map (robust against FE component-layout assumptions).
-    if (const auto* emap = system.dofHandler().getEntityDofMap()) {
-        const GlobalIndex n_vertices = emap->numVertices();
-        if (n_vertices > 0 && total_dofs == static_cast<GlobalIndex>(dof_per_node) * n_vertices) {
-            auto perm = std::make_shared<DofPermutation>();
-            perm->forward.assign(static_cast<std::size_t>(total_dofs), INVALID_GLOBAL_INDEX);
-            perm->inverse.assign(static_cast<std::size_t>(total_dofs), INVALID_GLOBAL_INDEX);
-
-            for (GlobalIndex v = 0; v < n_vertices; ++v) {
-                const auto vdofs = emap->getVertexDofs(v);
-                if (vdofs.size() != static_cast<std::size_t>(dof_per_node)) {
-                    return {};
-                }
-                for (std::size_t c = 0; c < vdofs.size(); ++c) {
-                    const GlobalIndex fe_dof = vdofs[c];
-                    const GlobalIndex fs_dof = v * static_cast<GlobalIndex>(dof_per_node) + static_cast<GlobalIndex>(c);
-                    if (fe_dof < 0 || fe_dof >= total_dofs) {
-                        return {};
-                    }
-                    perm->forward[static_cast<std::size_t>(fe_dof)] = fs_dof;
-                    perm->inverse[static_cast<std::size_t>(fs_dof)] = fe_dof;
-                }
-            }
-
-            if (std::any_of(perm->forward.begin(), perm->forward.end(),
-                            [](GlobalIndex v) { return v == INVALID_GLOBAL_INDEX; })) {
-                return {};
-            }
-            if (std::any_of(perm->inverse.begin(), perm->inverse.end(),
-                            [](GlobalIndex v) { return v == INVALID_GLOBAL_INDEX; })) {
-                return {};
-            }
-            return perm;
-        }
-    }
-
-    // Fallback: derive node-block permutation from the field map.
+    // Derive node-block permutation from the field map (requires equal-order fields).
     const auto& fmap = system.fieldMap();
     const std::size_t n_fields = fmap.numFields();
     if (n_fields == 0u) {
@@ -304,18 +271,190 @@ buildFsilsDofPermutation(const systems::FESystem& system, int dof_per_node)
         return {};
     }
 
+    const bool explicit_spatial =
+        dof_options.numbering == dofs::DofNumberingStrategy::Morton ||
+        dof_options.numbering == dofs::DofNumberingStrategy::Hilbert;
+    const bool default_spatial =
+        dof_options.enable_spatial_locality_ordering &&
+        dof_options.numbering == dofs::DofNumberingStrategy::Sequential;
+    const bool want_spatial = explicit_spatial || default_spatial;
+    const auto curve =
+        explicit_spatial
+            ? (dof_options.numbering == dofs::DofNumberingStrategy::Hilbert
+                   ? dofs::SpatialCurveType::Hilbert
+                   : dofs::SpatialCurveType::Morton)
+            : dof_options.spatial_curve;
+
+    constexpr std::uint32_t kSfcBits = 21u;
+    constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
+
+    auto morton3d = [](std::uint32_t xi, std::uint32_t yi, std::uint32_t zi) -> std::uint64_t {
+        auto spread = [](std::uint64_t v) -> std::uint64_t {
+            v = (v | (v << 32)) & 0x1f00000000ffffULL;
+            v = (v | (v << 16)) & 0x1f0000ff0000ffULL;
+            v = (v | (v << 8)) & 0x100f00f00f00f00fULL;
+            v = (v | (v << 4)) & 0x10c30c30c30c30c3ULL;
+            v = (v | (v << 2)) & 0x1249249249249249ULL;
+            return v;
+        };
+        return spread(xi) | (spread(yi) << 1) | (spread(zi) << 2);
+    };
+
+    auto hilbert_nd = [](const std::array<std::uint32_t, 3>& coords, std::uint32_t bits) -> std::uint64_t {
+        std::array<std::uint32_t, 3> x = coords;
+        const int n = 3;
+
+        std::uint32_t M = 1u << (bits - 1u);
+        for (std::uint32_t Q = M; Q > 1u; Q >>= 1u) {
+            const std::uint32_t P = Q - 1u;
+            for (int i = 0; i < n; ++i) {
+                if ((x[static_cast<std::size_t>(i)] & Q) != 0u) {
+                    x[0] ^= P;
+                } else {
+                    const std::uint32_t t = (x[0] ^ x[static_cast<std::size_t>(i)]) & P;
+                    x[0] ^= t;
+                    x[static_cast<std::size_t>(i)] ^= t;
+                }
+            }
+        }
+        for (int i = 1; i < n; ++i) {
+            x[static_cast<std::size_t>(i)] ^= x[static_cast<std::size_t>(i - 1)];
+        }
+        std::uint32_t t = 0u;
+        for (std::uint32_t Q = M; Q > 1u; Q >>= 1u) {
+            if ((x[static_cast<std::size_t>(n - 1)] & Q) != 0u) {
+                t ^= (Q - 1u);
+            }
+        }
+        for (int i = 0; i < n; ++i) {
+            x[static_cast<std::size_t>(i)] ^= t;
+        }
+
+        std::uint64_t index = 0;
+        for (int b = static_cast<int>(bits) - 1; b >= 0; --b) {
+            for (int i = 0; i < n; ++i) {
+                index <<= 1u;
+                index |= static_cast<std::uint64_t>((x[static_cast<std::size_t>(i)] >> static_cast<std::uint32_t>(b)) & 1u);
+            }
+        }
+        return index;
+    };
+
+    auto sfc_code = [&](double x, double y, double z) -> std::uint64_t {
+        auto normalize = [](double v) -> std::uint32_t {
+            v = std::max(0.0, std::min(1.0, v));
+            return static_cast<std::uint32_t>(v * static_cast<double>(kSfcMaxCoord));
+        };
+        const std::uint32_t xi = normalize(x);
+        const std::uint32_t yi = normalize(y);
+        const std::uint32_t zi = normalize(z);
+        if (curve == dofs::SpatialCurveType::Hilbert) {
+            return hilbert_nd(std::array<std::uint32_t, 3>{xi, yi, zi}, kSfcBits);
+        }
+        return morton3d(xi, yi, zi);
+    };
+
+    std::vector<int> node_owner(static_cast<std::size_t>(n_nodes), -1);
+    std::vector<std::array<double, 3>> node_xyz(static_cast<std::size_t>(n_nodes),
+                                                std::array<double, 3>{0.0, 0.0, 0.0});
+    const auto* emap = system.dofHandler().getEntityDofMap();
+
+    std::array<double, 3> min_xyz{std::numeric_limits<double>::infinity(),
+                                  std::numeric_limits<double>::infinity(),
+                                  std::numeric_limits<double>::infinity()};
+    std::array<double, 3> max_xyz{-std::numeric_limits<double>::infinity(),
+                                  -std::numeric_limits<double>::infinity(),
+                                  -std::numeric_limits<double>::infinity()};
+    const int dim = std::max(2, system.meshAccess().dimension());
+
+    for (GlobalIndex node = 0; node < n_nodes; ++node) {
+        const GlobalIndex fe0 = fmap.componentToGlobal(0, 0, node);
+        const int owner0 = system.dofHandler().getDofMap().getDofOwner(fe0);
+        if (owner0 < 0) {
+            return {};
+        }
+        for (std::size_t f = 0; f < n_fields; ++f) {
+            const auto& field = fmap.getField(f);
+            for (LocalIndex c = 0; c < field.n_components; ++c) {
+                const GlobalIndex fe = fmap.componentToGlobal(f, c, node);
+                if (system.dofHandler().getDofMap().getDofOwner(fe) != owner0) {
+                    return {};
+                }
+            }
+        }
+
+        node_owner[static_cast<std::size_t>(node)] = owner0;
+
+        std::array<double, 3> xyz{0.0, 0.0, 0.0};
+        bool have_xyz = false;
+        if (want_spatial && emap) {
+            if (const auto ent = emap->getDofEntity(fe0); ent && ent->kind == dofs::EntityKind::Vertex) {
+                const auto p = system.meshAccess().getNodeCoordinates(ent->id);
+                xyz = {static_cast<double>(p[0]), static_cast<double>(p[1]), static_cast<double>(p[2])};
+                have_xyz = true;
+            }
+        }
+        if (!have_xyz) {
+            const double d = static_cast<double>(node);
+            xyz = {d, d, d};
+        }
+        node_xyz[static_cast<std::size_t>(node)] = xyz;
+        for (int a = 0; a < dim && a < 3; ++a) {
+            min_xyz[static_cast<std::size_t>(a)] = std::min(min_xyz[static_cast<std::size_t>(a)], xyz[static_cast<std::size_t>(a)]);
+            max_xyz[static_cast<std::size_t>(a)] = std::max(max_xyz[static_cast<std::size_t>(a)], xyz[static_cast<std::size_t>(a)]);
+        }
+    }
+
+    auto norm = [&](double v, int axis) -> double {
+        const auto ax = static_cast<std::size_t>(axis);
+        const double lo = min_xyz[ax];
+        const double hi = max_xyz[ax];
+        if (!(hi > lo)) return 0.0;
+        return (v - lo) / (hi - lo);
+    };
+
+    struct NodeKey {
+        int owner{0};
+        std::uint64_t code{0};
+        GlobalIndex node{-1};
+    };
+    std::vector<NodeKey> ordering;
+    ordering.reserve(static_cast<std::size_t>(n_nodes));
+    for (GlobalIndex node = 0; node < n_nodes; ++node) {
+        const auto& xyz = node_xyz[static_cast<std::size_t>(node)];
+        const double x = norm(xyz[0], 0);
+        const double y = (dim >= 2) ? norm(xyz[1], 1) : 0.0;
+        const double z = (dim >= 3) ? norm(xyz[2], 2) : 0.0;
+        const std::uint64_t code = want_spatial ? sfc_code(x, y, z) : 0u;
+        ordering.push_back(NodeKey{node_owner[static_cast<std::size_t>(node)], code, node});
+    }
+    std::sort(ordering.begin(), ordering.end(), [&](const NodeKey& a, const NodeKey& b) {
+        if (a.owner != b.owner) return a.owner < b.owner;
+        if (a.code != b.code) return a.code < b.code;
+        return a.node < b.node;
+    });
+
+    std::vector<GlobalIndex> node_to_backend(static_cast<std::size_t>(n_nodes), INVALID_GLOBAL_INDEX);
+    for (GlobalIndex i = 0; i < n_nodes; ++i) {
+        node_to_backend[static_cast<std::size_t>(ordering[static_cast<std::size_t>(i)].node)] = i;
+    }
+
     auto perm = std::make_shared<DofPermutation>();
     perm->forward.assign(static_cast<std::size_t>(total_dofs), INVALID_GLOBAL_INDEX);
     perm->inverse.assign(static_cast<std::size_t>(total_dofs), INVALID_GLOBAL_INDEX);
 
     for (GlobalIndex node = 0; node < n_nodes; ++node) {
+        const GlobalIndex backend_node = node_to_backend[static_cast<std::size_t>(node)];
+        if (backend_node < 0) {
+            return {};
+        }
         int comp_offset = 0;
         for (std::size_t f = 0; f < n_fields; ++f) {
             const auto& field = fmap.getField(f);
             for (LocalIndex c = 0; c < field.n_components; ++c) {
                 const GlobalIndex fe_dof = fmap.componentToGlobal(f, c, node);
                 const GlobalIndex fs_dof =
-                    node * static_cast<GlobalIndex>(dof_per_node) + static_cast<GlobalIndex>(comp_offset);
+                    backend_node * static_cast<GlobalIndex>(dof_per_node) + static_cast<GlobalIndex>(comp_offset);
                 if (fe_dof < 0 || fe_dof >= total_dofs) {
                     return {};
                 }
@@ -366,144 +505,151 @@ TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
         GTEST_SKIP() << "Run with 2+ MPI ranks to enable this test";
     }
 
-    // One owned cell per rank; all cells present as ghosts to enable OwnedRowsOnly-style assembly.
-    const int n_cells = size;
-    auto mesh = std::make_shared<StripQuadMeshAccess>(n_cells, rank);
+    auto run_case = [&](bool deterministic_mode) {
+        SCOPED_TRACE(deterministic_mode ? "deterministic_on" : "deterministic_off");
 
-    const auto u_space = spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Quad4, /*order=*/1, /*components=*/2);
-    const auto p_space = spaces::Space(spaces::SpaceType::H1, ElementType::Quad4, /*order=*/1, /*components=*/1);
-    ASSERT_TRUE(u_space);
-    ASSERT_TRUE(p_space);
+        // One owned cell per rank; all cells present as ghosts to enable OwnedRowsOnly-style assembly.
+        const int n_cells = size;
+        auto mesh = std::make_shared<StripQuadMeshAccess>(n_cells, rank);
 
-    systems::FESystem sys(mesh);
-    const auto u_field = sys.addField(systems::FieldSpec{.name = "u", .space = u_space, .components = 2});
-    const auto p_field = sys.addField(systems::FieldSpec{.name = "p", .space = p_space, .components = 1});
-    sys.addOperator("op");
+        const auto u_space = spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Quad4, /*order=*/1, /*components=*/2);
+        const auto p_space = spaces::Space(spaces::SpaceType::H1, ElementType::Quad4, /*order=*/1, /*components=*/1);
+        ASSERT_TRUE(u_space);
+        ASSERT_TRUE(p_space);
 
-    const auto u = forms::FormExpr::stateField(u_field, *u_space, "u");
-    const auto p = forms::FormExpr::stateField(p_field, *p_space, "p");
-    const auto v = forms::TestFunction(*u_space, "v");
-    const auto q = forms::TestFunction(*p_space, "q");
+        systems::FESystem sys(mesh);
+        const auto u_field = sys.addField(systems::FieldSpec{.name = "u", .space = u_space, .components = 2});
+        const auto p_field = sys.addField(systems::FieldSpec{.name = "p", .space = p_space, .components = 1});
+        sys.addOperator("op");
 
-    // Transient nonlinear reaction for velocity; algebraic pressure mass term.
-    const auto one = forms::FormExpr::constant(Real(1.0));
-    const auto lambda = forms::FormExpr::constant(Real(2.0));
-    const auto eps = forms::FormExpr::constant(Real(0.05));
-    const auto kappa = forms::FormExpr::constant(Real(1.0));
+        const auto u = forms::FormExpr::stateField(u_field, *u_space, "u");
+        const auto p = forms::FormExpr::stateField(p_field, *p_space, "p");
+        const auto v = forms::TestFunction(*u_space, "v");
+        const auto q = forms::TestFunction(*p_space, "q");
 
-    forms::BlockLinearForm residual(/*tests=*/2);
-    residual.setBlock(
-        0,
-        (forms::inner(u.dt(1), v) +
-         lambda * forms::inner(u, v) +
-         eps * (one + forms::inner(u, u)) * forms::inner(u, v))
-            .dx());
-    residual.setBlock(1, (kappa * p * q).dx());
+        // Transient nonlinear reaction for velocity; algebraic pressure mass term.
+        const auto one = forms::FormExpr::constant(Real(1.0));
+        const auto lambda = forms::FormExpr::constant(Real(2.0));
+        const auto eps = forms::FormExpr::constant(Real(0.05));
+        const auto kappa = forms::FormExpr::constant(Real(1.0));
 
-    const std::array<FieldId, 2> fields = {u_field, p_field};
-    (void)systems::installCoupledResidual(
-        sys, "op",
-        fields,
-        fields,
-        residual,
-        systems::FormInstallOptions{.ad_mode = forms::ADMode::Forward});
+        forms::BlockLinearForm residual(/*tests=*/2);
+        residual.setBlock(
+            0,
+            (forms::inner(u.dt(1), v) +
+             lambda * forms::inner(u, v) +
+             eps * (one + forms::inner(u, u)) * forms::inner(u, v))
+                .dx());
+        residual.setBlock(1, (kappa * p * q).dx());
 
-    systems::SetupOptions setup_opts;
-    setup_opts.assembler_name = "StandardAssembler";
-    setup_opts.assembly_options.ghost_policy = GhostPolicy::ReverseScatter;
-    setup_opts.assembly_options.deterministic = true;
-    setup_opts.assembly_options.overlap_communication = false;
+        const std::array<FieldId, 2> fields = {u_field, p_field};
+        (void)systems::installCoupledResidual(
+            sys, "op",
+            fields,
+            fields,
+            residual,
+            systems::FormInstallOptions{.ad_mode = forms::ADMode::Forward});
 
-    // FSILS distributed layout requires each rank's owned nodes to be contiguous in node space.
-    // Use dense, process-count-independent global IDs (non-owner-contiguous) to force the
-    // node-interleaved distributed sparsity path, and a deterministic ownership strategy that
-    // yields contiguous node blocks for this strip topology.
-    setup_opts.dof_options.global_numbering = dofs::GlobalNumberingMode::DenseGlobalIds;
-    setup_opts.dof_options.ownership = dofs::OwnershipStrategy::LowestRank;
-    setup_opts.dof_options.my_rank = rank;
-    setup_opts.dof_options.world_size = size;
-    setup_opts.dof_options.mpi_comm = comm;
+        systems::SetupOptions setup_opts;
+        setup_opts.assembler_name = "StandardAssembler";
+        setup_opts.assembly_options.ghost_policy = GhostPolicy::ReverseScatter;
+        setup_opts.assembly_options.deterministic = deterministic_mode;
+        setup_opts.assembly_options.overlap_communication = false;
 
-    systems::SetupInputs inputs;
-    inputs.topology_override = buildStripTopology(n_cells, rank, size);
+        // FSILS distributed layout requires each rank's owned nodes to be contiguous in node space.
+        // Use dense, process-count-independent global IDs (non-owner-contiguous) to force the
+        // node-interleaved distributed sparsity path, and a deterministic ownership strategy that
+        // yields contiguous node blocks for this strip topology.
+        setup_opts.dof_options.global_numbering = dofs::GlobalNumberingMode::DenseGlobalIds;
+        setup_opts.dof_options.ownership = dofs::OwnershipStrategy::LowestRank;
+        setup_opts.dof_options.my_rank = rank;
+        setup_opts.dof_options.world_size = size;
+        setup_opts.dof_options.mpi_comm = comm;
 
-    sys.setup(setup_opts, inputs);
-    ASSERT_TRUE(sys.isSetup());
+        systems::SetupInputs inputs;
+        inputs.topology_override = buildStripTopology(n_cells, rank, size);
 
-    const GlobalIndex n_dofs = sys.dofHandler().getNumDofs();
-    ASSERT_TRUE(inputs.topology_override.has_value());
-    const GlobalIndex n_nodes = inputs.topology_override->n_vertices;
-    ASSERT_EQ(n_dofs, n_nodes * 3);
+        sys.setup(setup_opts, inputs);
+        ASSERT_TRUE(sys.isSetup());
 
-    constexpr int dof_per_node = 3;
-    auto perm = buildFsilsDofPermutation(sys, dof_per_node);
-    ASSERT_TRUE(perm) << "Failed to build FSILS DOF permutation for test system";
+        const GlobalIndex n_dofs = sys.dofHandler().getNumDofs();
+        ASSERT_TRUE(inputs.topology_override.has_value());
+        const GlobalIndex n_nodes = inputs.topology_override->n_vertices;
+        ASSERT_EQ(n_dofs, n_nodes * 3);
 
-    backends::FsilsFactory factory(dof_per_node, perm);
-    auto linear = factory.createLinearSolver(fsilsGmresDiagOptions());
-    ASSERT_TRUE(linear);
+        constexpr int dof_per_node = 3;
+        auto perm = buildFsilsDofPermutation(sys, dof_per_node, setup_opts.dof_options);
+        ASSERT_TRUE(perm) << "Failed to build FSILS DOF permutation for test system";
 
-    // Allocate history before any matrix exists: this creates local-only vectors that must be repacked.
-    auto history = timestepping::TimeHistory::allocate(factory, n_dofs, /*history_depth=*/2,
-                                                       /*allocate_second_order_state=*/false);
-    const double dt = 0.05;
-    history.setTime(0.0);
-    history.setDt(dt);
-    history.setPrevDt(dt);
-    history.setStepIndex(0);
+        backends::FsilsFactory factory(dof_per_node, perm);
+        auto linear = factory.createLinearSolver(fsilsGmresDiagOptions());
+        ASSERT_TRUE(linear);
 
-    // Initialize u^{n-1}, u^{n-2} (and current u) to a nontrivial state.
-    auto init = [&](backends::GenericVector& vec, double scale) {
-        auto s = vec.localSpan();
-        ASSERT_EQ(static_cast<GlobalIndex>(s.size()), n_dofs);
-        for (GlobalIndex i = 0; i < n_dofs; ++i) {
-            s[static_cast<std::size_t>(i)] = static_cast<Real>(scale) * static_cast<Real>(0.01) * static_cast<Real>(i + 1);
+        // Allocate history before any matrix exists: this creates local-only vectors that must be repacked.
+        auto history = timestepping::TimeHistory::allocate(factory, n_dofs, /*history_depth=*/2,
+                                                           /*allocate_second_order_state=*/false);
+        const double dt = 0.05;
+        history.setTime(0.0);
+        history.setDt(dt);
+        history.setPrevDt(dt);
+        history.setStepIndex(0);
+
+        // Initialize u^{n-1}, u^{n-2} (and current u) to a nontrivial state.
+        auto init = [&](backends::GenericVector& vec, double scale) {
+            auto s = vec.localSpan();
+            ASSERT_EQ(static_cast<GlobalIndex>(s.size()), n_dofs);
+            for (GlobalIndex i = 0; i < n_dofs; ++i) {
+                s[static_cast<std::size_t>(i)] = static_cast<Real>(scale) * static_cast<Real>(0.01) * static_cast<Real>(i + 1);
+            }
+        };
+        init(history.uPrev(), /*scale=*/1.0);
+        init(history.uPrev2(), /*scale=*/1.0);
+        history.resetCurrentToPrevious();
+
+        auto base_integrator = std::make_shared<systems::BackwardDifferenceIntegrator>();
+        systems::TransientSystem transient(sys, std::move(base_integrator));
+
+        timestepping::TimeLoopOptions loop_opts;
+        loop_opts.t0 = 0.0;
+        loop_opts.t_end = 3.0 * dt;
+        loop_opts.dt = dt;
+        loop_opts.max_steps = 3;
+        loop_opts.scheme = timestepping::SchemeKind::GeneralizedAlpha;
+        loop_opts.generalized_alpha_rho_inf = 0.5;
+        loop_opts.newton.residual_op = "op";
+        loop_opts.newton.jacobian_op = "op";
+        loop_opts.newton.max_iterations = 12;
+        loop_opts.newton.abs_tolerance = 1e-12;
+        loop_opts.newton.rel_tolerance = 1e-10;
+
+        timestepping::TimeLoop loop(loop_opts);
+
+        int nonconverged_steps = 0;
+        timestepping::TimeLoopCallbacks callbacks;
+        callbacks.on_nonlinear_done = [&nonconverged_steps](const timestepping::TimeHistory&, const timestepping::NewtonReport& nr) {
+            if (!nr.converged) {
+                ++nonconverged_steps;
+            }
+        };
+
+        timestepping::TimeLoopReport rep{};
+        try {
+            rep = loop.run(transient, factory, *linear, history, callbacks);
+        } catch (const FEException& e) {
+            ADD_FAILURE() << "Rank " << rank << ": TimeLoop threw FEException: " << e.what();
+            return;
+        } catch (const std::exception& e) {
+            ADD_FAILURE() << "Rank " << rank << ": TimeLoop threw std::exception: " << e.what();
+            return;
         }
-    };
-    init(history.uPrev(), /*scale=*/1.0);
-    init(history.uPrev2(), /*scale=*/1.0);
-    history.resetCurrentToPrevious();
 
-    auto base_integrator = std::make_shared<systems::BackwardDifferenceIntegrator>();
-    systems::TransientSystem transient(sys, std::move(base_integrator));
-
-    timestepping::TimeLoopOptions loop_opts;
-    loop_opts.t0 = 0.0;
-    loop_opts.t_end = 3.0 * dt;
-    loop_opts.dt = dt;
-    loop_opts.max_steps = 3;
-    loop_opts.scheme = timestepping::SchemeKind::GeneralizedAlpha;
-    loop_opts.generalized_alpha_rho_inf = 0.5;
-    loop_opts.newton.residual_op = "op";
-    loop_opts.newton.jacobian_op = "op";
-    loop_opts.newton.max_iterations = 12;
-    loop_opts.newton.abs_tolerance = 1e-12;
-    loop_opts.newton.rel_tolerance = 1e-10;
-
-    timestepping::TimeLoop loop(loop_opts);
-
-    int nonconverged_steps = 0;
-    timestepping::TimeLoopCallbacks callbacks;
-    callbacks.on_nonlinear_done = [&nonconverged_steps](const timestepping::TimeHistory&, const timestepping::NewtonReport& nr) {
-        if (!nr.converged) {
-            ++nonconverged_steps;
-        }
+        EXPECT_TRUE(rep.success);
+        EXPECT_NEAR(rep.final_time, loop_opts.t_end, 1e-12);
+        EXPECT_EQ(nonconverged_steps, 0);
     };
 
-    timestepping::TimeLoopReport rep{};
-    try {
-        rep = loop.run(transient, factory, *linear, history, callbacks);
-    } catch (const FEException& e) {
-        ADD_FAILURE() << "Rank " << rank << ": TimeLoop threw FEException: " << e.what();
-        return;
-    } catch (const std::exception& e) {
-        ADD_FAILURE() << "Rank " << rank << ": TimeLoop threw std::exception: " << e.what();
-        return;
-    }
-
-    EXPECT_TRUE(rep.success);
-    EXPECT_NEAR(rep.final_time, loop_opts.t_end, 1e-12);
-    EXPECT_EQ(nonconverged_steps, 0);
+    run_case(/*deterministic_mode=*/true);
+    run_case(/*deterministic_mode=*/false);
 #endif
 }
 

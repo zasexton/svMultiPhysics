@@ -326,6 +326,11 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
     }
   }
 
+  // Use the unified "equations" operator tag (same as transient).
+  newton_opts.residual_op = "equations";
+  newton_opts.jacobian_op = "equations";
+  newton_opts.use_line_search = false;
+
   const auto integrator = std::make_shared<const ZeroTimeDerivativeIntegrator>();
   svmp::FE::systems::TransientSystem transient(*sim.fe_system, integrator);
 
@@ -425,9 +430,20 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   }
   // NOTE: Newton update scaling for dt(·) fields is available in the FE library
   // (NewtonOptions::scale_dt_increments), but enabling it globally can severely
-  // slow convergence for linear problems (e.g., Stokes). Keep it off by default
-  // and rely on line search for globalization.
+  // slow convergence for linear problems (e.g., Stokes). Keep it off by default.
   opts.newton.scale_dt_increments = false;
+
+  // Use the unified "equations" operator tag installed by the NS module (and
+  // Poisson, etc.). Setting both tags equal enables same_op=true in NewtonSolver,
+  // which uses the combined assembleJacobianAndResidual() path and reduces the
+  // number of mesh traversals per Newton iteration.
+  opts.newton.residual_op = "equations";
+  opts.newton.jacobian_op = "equations";
+
+  // Disable backtracking line search to match legacy solver behavior.  The legacy
+  // solver applies a full Newton update without line search.  Disabling it avoids
+  // 2 extra residual assembly passes per Newton iteration.
+  opts.newton.use_line_search = false;
 
   oopCout() << "[svMultiPhysics::Application] Transient solve: t0=" << opts.t0 << " dt=" << opts.dt
             << " t_end=" << opts.t_end << " max_steps=" << opts.max_steps

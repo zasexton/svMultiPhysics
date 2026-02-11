@@ -124,6 +124,34 @@ Parameters::Parameters()
 {
 }
 
+Parameters::~Parameters()
+{
+  for (auto* mesh : mesh_parameters) {
+    delete mesh;
+  }
+  mesh_parameters.clear();
+
+  for (auto* equation : equation_parameters) {
+    delete equation;
+  }
+  equation_parameters.clear();
+
+  for (auto* projection : projection_parameters) {
+    delete projection;
+  }
+  projection_parameters.clear();
+
+  for (auto* ris_projection : RIS_projection_parameters) {
+    delete ris_projection;
+  }
+  RIS_projection_parameters.clear();
+
+  for (auto* uris_mesh : URIS_mesh_parameters) {
+    delete uris_mesh;
+  }
+  URIS_mesh_parameters.clear();
+}
+
 void Parameters::get_logging_levels(int& verbose, int& warning, int& debug)
 { 
   /*
@@ -2022,6 +2050,32 @@ EquationParameters::EquationParameters()
   set_parameter("Use_taylor_hood_type_basis", false, !required, use_taylor_hood_type_basis);
 }
 
+EquationParameters::~EquationParameters()
+{
+  for (auto* bf : body_forces) {
+    delete bf;
+  }
+  body_forces.clear();
+
+  for (auto* bc : boundary_conditions) {
+    delete bc;
+  }
+  boundary_conditions.clear();
+
+  for (auto* domain : domains) {
+    delete domain;
+  }
+  domains.clear();
+
+  for (auto* output : outputs) {
+    delete output;
+  }
+  outputs.clear();
+
+  delete default_domain;
+  default_domain = nullptr;
+}
+
 void EquationParameters::print_parameters()
 { 
   std::cout << std::endl;
@@ -2449,6 +2503,14 @@ MeshParameters::MeshParameters()
   set_parameter("Quadrature_modifier_TET4", (5.0+3.0*sqrt(5.0))/20.0, !required, quadrature_modifier_TET4);
 }
 
+MeshParameters::~MeshParameters()
+{
+  for (auto* face : face_parameters) {
+    delete face;
+  }
+  face_parameters.clear();
+}
+
 void MeshParameters::print_parameters()
 {
   std::cout << std::endl;
@@ -2656,6 +2718,14 @@ URISMeshParameters::URISMeshParameters()
   set_parameter("Closed_resistance", 1.0e5,  !required, resistance_close);
   set_parameter("Valve_starts_as_closed", true,  !required, valve_starts_as_closed);
   set_parameter("Positive_flow_normal_file_path", "",  !required, positive_flow_normal_file_path);
+}
+
+URISMeshParameters::~URISMeshParameters()
+{
+  for (auto* face : URIS_face_parameters) {
+    delete face;
+  }
+  URIS_face_parameters.clear();
 }
 
 void URISMeshParameters::print_parameters()
@@ -2870,6 +2940,7 @@ void LinearAlgebraParameters::check_input_parameters()
 
   auto linear_algebra = LinearAlgebraFactory::create_interface(linear_algebra_type);
   linear_algebra->check_options(prec_cond_type, assembly_type);
+  delete linear_algebra;
 }
 
 //////////////////////////////////////////////////////////

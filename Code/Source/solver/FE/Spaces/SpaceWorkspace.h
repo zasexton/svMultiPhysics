@@ -19,6 +19,7 @@
  */
 
 #include "Core/Types.h"
+#include <deque>
 #include <vector>
 
 namespace svmp {
@@ -34,7 +35,7 @@ public:
     static SpaceWorkspace& local();
 
 private:
-    std::vector<std::vector<Real>> vectors_;
+    std::deque<std::vector<Real>> vectors_;
 };
 
 } // namespace spaces

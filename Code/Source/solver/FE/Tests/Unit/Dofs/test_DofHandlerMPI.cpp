@@ -542,6 +542,99 @@ TEST(DofHandlerMPI, ValidateParallel_DetectsMismatchWhenOwnershipOptionsDiffer) 
     EXPECT_EQ(global_sum, size);
 }
 
+TEST(DofHandlerMPI, SpatialDefaultOnMPI_OwnerContiguousRangeAndGhostIdsStayConsistent) {
+    const MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size != 2) {
+        GTEST_SKIP() << "Requires 2 MPI ranks";
+    }
+
+    MeshTopologyInfo topo = makeTwoRankTriangleP2(rank, /*gid_cell=*/220 + rank);
+    const auto layout = DofLayoutInfo::Lagrange(/*order=*/2, /*dim=*/2, /*num_verts_per_cell=*/3);
+
+    DofDistributionOptions opts;
+    opts.my_rank = rank;
+    opts.world_size = size;
+    opts.mpi_comm = comm;
+    opts.ownership = OwnershipStrategy::LowestRank;
+    opts.global_numbering = GlobalNumberingMode::OwnerContiguous;
+    opts.numbering = svmp::FE::dofs::DofNumberingStrategy::Sequential;
+    opts.enable_spatial_locality_ordering = true;
+    opts.spatial_curve = svmp::FE::dofs::SpatialCurveType::Morton;
+    opts.validate_parallel = true;
+
+    DofHandler dh;
+    dh.distributeDofs(topo, layout, opts);
+    dh.finalize();
+
+    const auto owned = dh.getPartition().locallyOwned().toVector();
+    const auto ghosts = dh.getPartition().ghost().toVector();
+
+    // 1) Owned range is contiguous and matches local-owned count.
+    const auto owned_range = dh.getLocalDofRange();
+    if (!owned.empty()) {
+        ASSERT_TRUE(owned_range.has_value());
+        EXPECT_EQ(owned_range->second - owned_range->first, static_cast<GlobalIndex>(owned.size()));
+        std::vector<GlobalIndex> owned_sorted = owned;
+        std::sort(owned_sorted.begin(), owned_sorted.end());
+        for (std::size_t i = 1; i < owned_sorted.size(); ++i) {
+            EXPECT_EQ(owned_sorted[i], owned_sorted[i - 1] + 1);
+        }
+        EXPECT_EQ(owned_sorted.front(), owned_range->first);
+        EXPECT_EQ(owned_sorted.back() + 1, owned_range->second);
+    }
+
+    // 2) Global ownership/permutation is bijective over [0, n_dofs).
+    const auto owned_all = allgathervInt64<GlobalIndex>(owned, comm);
+    ASSERT_EQ(owned_all.size(), static_cast<std::size_t>(dh.getNumDofs()));
+    std::vector<GlobalIndex> owned_all_sorted = owned_all;
+    std::sort(owned_all_sorted.begin(), owned_all_sorted.end());
+    for (std::size_t i = 0; i < owned_all_sorted.size(); ++i) {
+        EXPECT_EQ(owned_all_sorted[i], static_cast<GlobalIndex>(i));
+    }
+
+    // 3) Ghost copies use exactly the same global IDs as owners.
+    std::vector<GlobalIndex> owned_owner(owned.size(), static_cast<GlobalIndex>(rank));
+    const auto owned_owner_all = allgathervInt64<GlobalIndex>(owned_owner, comm);
+    ASSERT_EQ(owned_owner_all.size(), owned_all.size());
+
+    std::unordered_map<GlobalIndex, int> owner_by_dof;
+    owner_by_dof.reserve(owned_all.size());
+    for (std::size_t i = 0; i < owned_all.size(); ++i) {
+        owner_by_dof.emplace(owned_all[i], static_cast<int>(owned_owner_all[i]));
+    }
+
+    for (auto dof : ghosts) {
+        const auto it = owner_by_dof.find(dof);
+        ASSERT_NE(it, owner_by_dof.end());
+        EXPECT_EQ(it->second, dh.getDofMap().getDofOwner(dof));
+    }
+
+    // Shared entities (v0, v1, edge(0,1)) must have identical global IDs on both ranks.
+    const auto* entity = dh.getEntityDofMap();
+    ASSERT_NE(entity, nullptr);
+    const auto lv0 = findLocalVertexByGid(topo, 0);
+    const auto lv1 = findLocalVertexByGid(topo, 1);
+    const auto le01 = findLocalEdgeByVertexGids(topo, 0, 1);
+    ASSERT_TRUE(lv0.has_value());
+    ASSERT_TRUE(lv1.has_value());
+    ASSERT_TRUE(le01.has_value());
+    const auto v0 = entity->getVertexDofs(*lv0);
+    const auto v1 = entity->getVertexDofs(*lv1);
+    const auto e01 = entity->getEdgeDofs(*le01);
+    ASSERT_EQ(v0.size(), 1u);
+    ASSERT_EQ(v1.size(), 1u);
+    ASSERT_EQ(e01.size(), 1u);
+
+    const std::array<GlobalIndex, 3> shared_local{v0[0], v1[0], e01[0]};
+    const auto shared_all = allgatherGlobalIndices(shared_local, comm);
+    ASSERT_EQ(shared_all.size(), 6u);
+    EXPECT_EQ(shared_all[0], shared_all[3]);
+    EXPECT_EQ(shared_all[1], shared_all[4]);
+    EXPECT_EQ(shared_all[2], shared_all[5]);
+}
+
 TEST(DofHandlerMPI, DistributedCG_P2_TwoRank_SharedEdgeAndGhostSync) {
     const MPI_Comm comm = MPI_COMM_WORLD;
     const int rank = mpiRank(comm);

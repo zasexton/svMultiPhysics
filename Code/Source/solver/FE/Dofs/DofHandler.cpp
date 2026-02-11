@@ -3642,18 +3642,18 @@ void DofHandler::distributeDofsCore(const MeshTopologyView& topology,
         options.enable_spatial_locality_ordering &&
         options.numbering == DofNumberingStrategy::Sequential;
 
-    // In MPI runs we currently rely on owner-contiguous global numbering to build
-    // distributed sparsity patterns (and FSILS matrices) from a contiguous owned range.
-    // Global space-filling-curve renumbering breaks that invariant, so we disable the
-    // "default-on" spatial locality ordering in parallel and reject explicit spatial
-    // numbering requests until we have a backend-safe parallel renumbering path.
-    if (world_size_ > 1) {
-        if (explicit_spatial) {
-            throw FEException(
-                "DofHandler::distributeDofs: Morton/Hilbert DOF numbering is not supported in MPI runs yet; "
-                "it breaks owner-contiguous ranges required for distributed sparsity/FSILS. "
-                "Use Sequential numbering (and, if needed, disable enable_spatial_locality_ordering).");
-        }
+    // MPI-safe spatial renumbering is implemented for OwnerContiguous numbering only.
+    // Keep default behavior compatible with other global numbering modes by
+    // auto-disabling default-on spatial ordering in unsupported MPI configurations.
+    if (world_size_ > 1 && explicit_spatial &&
+        global_numbering_ != GlobalNumberingMode::OwnerContiguous) {
+        throw FEException(
+            "DofHandler::distributeDofs: explicit MPI spatial DOF numbering requires "
+            "GlobalNumberingMode::OwnerContiguous.");
+    }
+    if (world_size_ > 1 &&
+        (global_numbering_ != GlobalNumberingMode::OwnerContiguous ||
+         options.reproducible_across_communicators)) {
         apply_default_spatial = false;
     }
 
@@ -7172,6 +7172,235 @@ void DofHandler::renumberDofs(DofNumberingStrategy strategy) {
 
         case DofNumberingStrategy::Morton:
         case DofNumberingStrategy::Hilbert: {
+            if (world_size_ > 1) {
+                FE_THROW_IF(global_numbering_ != GlobalNumberingMode::OwnerContiguous,
+                            FEException,
+                            "DofHandler::renumberDofs: MPI spatial renumbering requires OwnerContiguous global numbering");
+#if !FE_HAS_MPI
+                throw FEException("DofHandler::renumberDofs: MPI spatial renumbering requires FE_HAS_MPI");
+#else
+                const auto old_owned = partition_.locallyOwned().toVector();
+                std::unordered_map<GlobalIndex, GlobalIndex> owned_old_to_new;
+                owned_old_to_new.reserve(old_owned.size());
+
+                const auto owned_count_local = static_cast<std::int64_t>(old_owned.size());
+                std::vector<std::int64_t> owned_counts(static_cast<std::size_t>(world_size_), 0);
+                fe_mpi_check(MPI_Allgather(&owned_count_local, 1, MPI_INT64_T,
+                                           owned_counts.data(), 1, MPI_INT64_T,
+                                           mpi_comm_),
+                             "MPI_Allgather (owned counts) in DofHandler::renumberDofs");
+
+                GlobalIndex owned_begin = 0;
+                for (int r = 0; r < my_rank_; ++r) {
+                    FE_THROW_IF(owned_counts[static_cast<std::size_t>(r)] < 0,
+                                FEException,
+                                "DofHandler::renumberDofs: negative owned count gathered from rank");
+                    owned_begin += static_cast<GlobalIndex>(owned_counts[static_cast<std::size_t>(r)]);
+                }
+                const GlobalIndex owned_end = owned_begin + static_cast<GlobalIndex>(owned_count_local);
+
+                if (!old_owned.empty()) {
+                    FE_THROW_IF(owned_end < owned_begin,
+                                FEException,
+                                "DofHandler::renumberDofs: invalid owned contiguous range");
+                    FE_THROW_IF(owned_end - owned_begin != static_cast<GlobalIndex>(old_owned.size()),
+                                FEException,
+                                "DofHandler::renumberDofs: owned contiguous range size mismatch");
+
+                    const int curve_dim = std::max(1, std::min(3, spatial_dof_coord_dim_ > 0 ? spatial_dof_coord_dim_ : 3));
+                    std::vector<std::array<double, 3>> raw_coords(old_owned.size(), {0.0, 0.0, 0.0});
+                    std::array<double, 3> min_xyz{
+                        std::numeric_limits<double>::max(),
+                        std::numeric_limits<double>::max(),
+                        std::numeric_limits<double>::max(),
+                    };
+                    std::array<double, 3> max_xyz{
+                        std::numeric_limits<double>::lowest(),
+                        std::numeric_limits<double>::lowest(),
+                        std::numeric_limits<double>::lowest(),
+                    };
+
+                    const bool has_coords =
+                        spatial_dof_coord_dim_ > 0 &&
+                        !spatial_dof_coords_.empty() &&
+                        spatial_dof_coords_.size() >=
+                            static_cast<std::size_t>(n_dofs) * static_cast<std::size_t>(spatial_dof_coord_dim_);
+
+                    for (std::size_t idx = 0; idx < old_owned.size(); ++idx) {
+                        const auto old_dof = old_owned[idx];
+
+                        std::array<double, 3> xyz{
+                            static_cast<double>(old_dof),
+                            static_cast<double>(old_dof),
+                            static_cast<double>(old_dof),
+                        };
+                        if (has_coords && old_dof >= 0) {
+                            const auto base = static_cast<std::size_t>(old_dof) *
+                                              static_cast<std::size_t>(spatial_dof_coord_dim_);
+                            for (int d = 0; d < curve_dim; ++d) {
+                                xyz[static_cast<std::size_t>(d)] =
+                                    spatial_dof_coords_[base + static_cast<std::size_t>(d)];
+                            }
+                        }
+
+                        raw_coords[idx] = xyz;
+                        for (int d = 0; d < curve_dim; ++d) {
+                            min_xyz[static_cast<std::size_t>(d)] =
+                                std::min(min_xyz[static_cast<std::size_t>(d)], xyz[static_cast<std::size_t>(d)]);
+                            max_xyz[static_cast<std::size_t>(d)] =
+                                std::max(max_xyz[static_cast<std::size_t>(d)], xyz[static_cast<std::size_t>(d)]);
+                        }
+                    }
+
+                    std::vector<double> normalized_coords;
+                    normalized_coords.resize(old_owned.size() * static_cast<std::size_t>(curve_dim), 0.0);
+                    for (std::size_t idx = 0; idx < old_owned.size(); ++idx) {
+                        for (int d = 0; d < curve_dim; ++d) {
+                            const double lo = min_xyz[static_cast<std::size_t>(d)];
+                            const double hi = max_xyz[static_cast<std::size_t>(d)];
+                            double u = 0.0;
+                            if (hi > lo) {
+                                u = (raw_coords[idx][static_cast<std::size_t>(d)] - lo) / (hi - lo);
+                            }
+                            u = std::max(0.0, std::min(1.0, u));
+                            normalized_coords[idx * static_cast<std::size_t>(curve_dim) + static_cast<std::size_t>(d)] = u;
+                        }
+                    }
+
+                    SpaceFillingCurveNumbering local_strategy(
+                        (strategy == DofNumberingStrategy::Hilbert)
+                            ? SpaceFillingCurveNumbering::CurveType::Hilbert
+                            : SpaceFillingCurveNumbering::CurveType::Morton,
+                        curve_dim);
+                    local_strategy.setCoordinates(normalized_coords, curve_dim);
+                    const auto local_perm =
+                        local_strategy.computeNumbering(static_cast<GlobalIndex>(old_owned.size()), {}, {});
+
+                    for (std::size_t local_old = 0; local_old < old_owned.size(); ++local_old) {
+                        const auto old_dof = old_owned[local_old];
+                        const auto local_new = local_perm[local_old];
+                        FE_THROW_IF(local_new < 0 ||
+                                        local_new >= static_cast<GlobalIndex>(old_owned.size()),
+                                    FEException,
+                                    "DofHandler::renumberDofs: invalid local spatial permutation entry");
+                        const auto new_dof = owned_begin + local_new;
+                        perm[static_cast<std::size_t>(old_dof)] = new_dof;
+                        owned_old_to_new.emplace(old_dof, new_dof);
+                    }
+                }
+
+                const auto old_ghost = partition_.ghost().toVector();
+                {
+                    std::vector<int> neighbors;
+                    neighbors.reserve(static_cast<std::size_t>(std::max(0, world_size_ - 1)));
+                    for (int r = 0; r < world_size_; ++r) {
+                        if (r != my_rank_) {
+                            neighbors.push_back(r);
+                        }
+                    }
+
+                    std::vector<int> rank_to_neighbor(static_cast<std::size_t>(world_size_), -1);
+                    for (std::size_t i = 0; i < neighbors.size(); ++i) {
+                        rank_to_neighbor[static_cast<std::size_t>(neighbors[i])] = static_cast<int>(i);
+                    }
+
+                    std::vector<std::vector<GlobalIndex>> request_send(neighbors.size());
+                    for (auto old_dof : old_ghost) {
+                        FE_THROW_IF(old_dof < 0 || old_dof >= n_dofs,
+                                    FEException,
+                                    "DofHandler::renumberDofs: ghost DOF out of range");
+                        perm[static_cast<std::size_t>(old_dof)] = INVALID_GLOBAL_INDEX;
+                    }
+                    for (auto old_dof : old_ghost) {
+                        int owner = -1;
+                        if (ghost_manager_) {
+                            owner = ghost_manager_->getDofOwner(old_dof);
+                        }
+                        if (owner < 0 || owner >= world_size_) {
+                            owner = dof_map_.getDofOwner(old_dof);
+                        }
+
+                        if (owner == my_rank_) {
+                            const auto it = owned_old_to_new.find(old_dof);
+                            if (it != owned_old_to_new.end()) {
+                                perm[static_cast<std::size_t>(old_dof)] = it->second;
+                            }
+                            continue;
+                        }
+                        if (owner < 0 || owner >= world_size_) {
+                            continue;
+                        }
+
+                        const int ni = rank_to_neighbor[static_cast<std::size_t>(owner)];
+                        if (ni < 0) {
+                            continue;
+                        }
+                        request_send[static_cast<std::size_t>(ni)].push_back(old_dof);
+                    }
+
+                    std::vector<std::vector<GlobalIndex>> request_recv;
+                    mpi_neighbor_exchange_bytes(mpi_comm_,
+                                                std::span<const int>(neighbors.data(), neighbors.size()),
+                                                std::span<const std::vector<GlobalIndex>>(request_send.data(), request_send.size()),
+                                                request_recv,
+                                                /*tag_counts=*/43910,
+                                                /*tag_data=*/43911);
+
+                    std::vector<std::vector<GlobalIndex>> response_send(neighbors.size());
+                    for (std::size_t ni = 0; ni < neighbors.size(); ++ni) {
+                        const auto& incoming = request_recv[ni];
+                        auto& outgoing = response_send[ni];
+                        outgoing.reserve(incoming.size());
+                        for (auto old_dof : incoming) {
+                            const auto it = owned_old_to_new.find(old_dof);
+                            if (it == owned_old_to_new.end()) {
+                                // Defer the hard failure to the requester side so all ranks still
+                                // complete the response exchange (avoids MPI deadlocks on throw).
+                                outgoing.push_back(INVALID_GLOBAL_INDEX);
+                            } else {
+                                outgoing.push_back(it->second);
+                            }
+                        }
+                    }
+
+                    std::vector<std::vector<GlobalIndex>> response_recv;
+                    mpi_neighbor_exchange_bytes(mpi_comm_,
+                                                std::span<const int>(neighbors.data(), neighbors.size()),
+                                                std::span<const std::vector<GlobalIndex>>(response_send.data(), response_send.size()),
+                                                response_recv,
+                                                /*tag_counts=*/43912,
+                                                /*tag_data=*/43913);
+
+                    for (std::size_t ni = 0; ni < neighbors.size(); ++ni) {
+                        const auto& requested = request_send[ni];
+                        const auto& received = response_recv[ni];
+                        FE_THROW_IF(received.size() != requested.size(),
+                                    FEException,
+                                    "DofHandler::renumberDofs: response size mismatch in ghost ID remap");
+                        for (std::size_t k = 0; k < requested.size(); ++k) {
+                            const auto old_dof = requested[k];
+                            const auto new_dof = received[k];
+                            FE_THROW_IF(old_dof < 0 || old_dof >= n_dofs,
+                                        FEException,
+                                        "DofHandler::renumberDofs: ghost request DOF out of range");
+                            FE_THROW_IF(new_dof == INVALID_GLOBAL_INDEX,
+                                        FEException,
+                                        "DofHandler::renumberDofs: owner failed to resolve ghost DOF remap request");
+                            perm[static_cast<std::size_t>(old_dof)] = new_dof;
+                        }
+                    }
+
+                    for (auto old_dof : old_ghost) {
+                        FE_THROW_IF(perm[static_cast<std::size_t>(old_dof)] == INVALID_GLOBAL_INDEX,
+                                    FEException,
+                                    "DofHandler::renumberDofs: failed to resolve ghost DOF remap");
+                    }
+                }
+
+                break;
+#endif
+            }
+
             SpaceFillingCurveNumbering strategy_impl(
                 (strategy == DofNumberingStrategy::Hilbert)
                     ? SpaceFillingCurveNumbering::CurveType::Hilbert
@@ -7269,6 +7498,7 @@ void DofHandler::renumberDofs(DofNumberingStrategy strategy) {
     }
 
     applyNumbering(dof_map_, perm);
+    dof_map_.setMyRank(my_rank_);
     rebuild_entity_map(perm);
 
     if (world_size_ > 1) {
@@ -7277,12 +7507,55 @@ void DofHandler::renumberDofs(DofNumberingStrategy strategy) {
         partition_ = DofPartition(IndexSet(std::move(new_owned)), IndexSet(new_ghost));
         partition_.setGlobalSize(n_dofs);
 
-        // Update local ownership function to reflect new DOF IDs for locally relevant DOFs.
-        auto owner_map_ptr = std::make_shared<std::unordered_map<GlobalIndex, int>>(std::move(owner_by_new_dof));
-        dof_map_.setDofOwnership([owner_map_ptr](GlobalIndex dof) -> int {
-            const auto it = owner_map_ptr->find(dof);
-            return (it != owner_map_ptr->end()) ? it->second : -1;
-        });
+        // Rebuild ownership lookup.
+        // For OwnerContiguous global numbering we can recover owner rank for any global DOF
+        // from the per-rank owned-range prefix sums, which keeps ownership queries valid even
+        // for DOFs that are not locally relevant on this rank.
+        if (global_numbering_ == GlobalNumberingMode::OwnerContiguous) {
+            std::vector<std::int64_t> owned_counts(static_cast<std::size_t>(world_size_), 0);
+            const auto owned_count_local = static_cast<std::int64_t>(partition_.localOwnedSize());
+#if FE_HAS_MPI
+            fe_mpi_check(MPI_Allgather(&owned_count_local, 1, MPI_INT64_T,
+                                       owned_counts.data(), 1, MPI_INT64_T,
+                                       mpi_comm_),
+                         "MPI_Allgather (owned counts) in DofHandler::renumberDofs ownership rebuild");
+#else
+            owned_counts[0] = owned_count_local;
+#endif
+
+            auto owned_prefix = std::make_shared<std::vector<GlobalIndex>>(
+                static_cast<std::size_t>(world_size_) + 1u, GlobalIndex{0});
+            for (int r = 0; r < world_size_; ++r) {
+                FE_THROW_IF(owned_counts[static_cast<std::size_t>(r)] < 0,
+                            FEException,
+                            "DofHandler::renumberDofs: negative owned count gathered while rebuilding ownership");
+                (*owned_prefix)[static_cast<std::size_t>(r) + 1u] =
+                    (*owned_prefix)[static_cast<std::size_t>(r)] +
+                    static_cast<GlobalIndex>(owned_counts[static_cast<std::size_t>(r)]);
+            }
+
+            dof_map_.setDofOwnership([owned_prefix](GlobalIndex dof) -> int {
+                if (dof < 0 || dof >= owned_prefix->back()) {
+                    return -1;
+                }
+                const auto it = std::upper_bound(owned_prefix->begin() + 1, owned_prefix->end(), dof);
+                return static_cast<int>((it - owned_prefix->begin()) - 1);
+            });
+        } else {
+            // Fallback to locally relevant ownership info when no global owner-contiguous
+            // ranges are available.
+            auto owner_map_ptr = std::make_shared<std::unordered_map<GlobalIndex, int>>(std::move(owner_by_new_dof));
+            dof_map_.setDofOwnership([owner_map_ptr](GlobalIndex dof) -> int {
+                const auto it = owner_map_ptr->find(dof);
+                return (it != owner_map_ptr->end()) ? it->second : -1;
+            });
+        }
+
+        if (global_numbering_ == GlobalNumberingMode::OwnerContiguous) {
+            for (std::size_t i = 0; i < new_ghost.size(); ++i) {
+                new_ghost_owners[i] = dof_map_.getDofOwner(new_ghost[i]);
+            }
+        }
 
         // Reset ghost manager (scatter contexts must be rebuilt after renumbering).
         if (ghost_manager_) {

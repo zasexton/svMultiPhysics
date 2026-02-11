@@ -64,6 +64,22 @@
 #include <cmath>
 #include <fstream>
 
+#if defined(__SANITIZE_ADDRESS__)
+extern "C" const char* __lsan_default_suppressions()
+{
+  // OpenMPI leaves a small amount of process-global state allocated at exit even after MPI_Finalize().
+  // Suppress those known upstream leaks so ASan/LSan stays actionable for svMultiPhysics-owned leaks.
+  return "leak:OpenMPI_libmpi\n"
+         "obj:libmpi.so\n"
+         "\n"
+         "leak:OpenMPI_openpal\n"
+         "obj:libopen-pal.so\n"
+         "\n"
+         "leak:OpenMPI_openrte\n"
+         "obj:libopen-rte.so\n";
+}
+#endif
+
 //------------------------
 // add_eq_linear_algebra
 //------------------------

@@ -99,7 +99,8 @@ namespace {
 
 [[nodiscard]] std::shared_ptr<const DofPermutation> normalize_dof_permutation(std::shared_ptr<const DofPermutation> perm,
                                                                               GlobalIndex global_size,
-                                                                              std::string_view context)
+                                                                              std::string_view context,
+                                                                              bool allow_partial)
 {
     if (!perm || perm->empty()) {
         return perm;
@@ -110,26 +111,56 @@ namespace {
                 InvalidArgumentException,
                 std::string(context) + ": dof permutation size mismatch with global system size");
 
+    if (!allow_partial) {
+        std::vector<GlobalIndex> inverse_from_forward(static_cast<std::size_t>(global_size), INVALID_GLOBAL_INDEX);
+        for (GlobalIndex fe = 0; fe < global_size; ++fe) {
+            const auto fe_idx = static_cast<std::size_t>(fe);
+            const GlobalIndex be = perm->forward[fe_idx];
+            FE_THROW_IF(be < 0 || be >= global_size,
+                        InvalidArgumentException,
+                        std::string(context) + ": dof permutation mapped FE DOF to out-of-range backend DOF");
+
+            const auto be_idx = static_cast<std::size_t>(be);
+            FE_THROW_IF(inverse_from_forward[be_idx] != INVALID_GLOBAL_INDEX,
+                        InvalidArgumentException,
+                        std::string(context) + ": dof permutation is not one-to-one");
+            inverse_from_forward[be_idx] = fe;
+        }
+
+        for (GlobalIndex be = 0; be < global_size; ++be) {
+            if (inverse_from_forward[static_cast<std::size_t>(be)] == INVALID_GLOBAL_INDEX) {
+                FE_THROW(InvalidArgumentException,
+                         std::string(context) + ": dof permutation is not onto");
+            }
+        }
+
+        if (inverse_from_forward == perm->inverse) {
+            return perm;
+        }
+
+        auto normalized = std::make_shared<DofPermutation>();
+        normalized->forward = perm->forward;
+        normalized->inverse = std::move(inverse_from_forward);
+        return normalized;
+    }
+
+    // Partial permutations are allowed for distributed overlap runs: entries not present on this
+    // rank may be left INVALID. Rebuild inverse from forward for mapped entries and normalize it.
+    const auto& fwd = perm->forward;
     std::vector<GlobalIndex> inverse_from_forward(static_cast<std::size_t>(global_size), INVALID_GLOBAL_INDEX);
     for (GlobalIndex fe = 0; fe < global_size; ++fe) {
-        const auto fe_idx = static_cast<std::size_t>(fe);
-        const GlobalIndex be = perm->forward[fe_idx];
+        const GlobalIndex be = fwd[static_cast<std::size_t>(fe)];
+        if (be == INVALID_GLOBAL_INDEX) {
+            continue;
+        }
         FE_THROW_IF(be < 0 || be >= global_size,
                     InvalidArgumentException,
                     std::string(context) + ": dof permutation mapped FE DOF to out-of-range backend DOF");
-
-        const auto be_idx = static_cast<std::size_t>(be);
-        FE_THROW_IF(inverse_from_forward[be_idx] != INVALID_GLOBAL_INDEX,
+        auto& slot = inverse_from_forward[static_cast<std::size_t>(be)];
+        FE_THROW_IF(slot != INVALID_GLOBAL_INDEX && slot != fe,
                     InvalidArgumentException,
-                    std::string(context) + ": dof permutation is not one-to-one");
-        inverse_from_forward[be_idx] = fe;
-    }
-
-    for (GlobalIndex be = 0; be < global_size; ++be) {
-        if (inverse_from_forward[static_cast<std::size_t>(be)] == INVALID_GLOBAL_INDEX) {
-            FE_THROW(InvalidArgumentException,
-                     std::string(context) + ": dof permutation is not onto");
-        }
+                    std::string(context) + ": dof permutation is not one-to-one on mapped entries");
+        slot = fe;
     }
 
     if (inverse_from_forward == perm->inverse) {
@@ -300,21 +331,29 @@ public:
         const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
 	        Real* values = matrix_->fsilsValuesPtr();
 
-	        for (const GlobalIndex row_dof : rows) {
-	            if (row_dof < 0 || row_dof >= matrix_->numRows()) continue;
+		        for (const GlobalIndex row_dof : rows) {
+		            if (row_dof < 0 || row_dof >= matrix_->numRows()) continue;
 
-	            GlobalIndex row_fs = row_dof;
-	            if (const auto perm = shared->dof_permutation; perm && !perm->empty()) {
-	                if (static_cast<std::size_t>(row_dof) >= perm->forward.size()) {
-	                    continue;
-	                }
-	                row_fs = perm->forward[static_cast<std::size_t>(row_dof)];
-	            }
+		            GlobalIndex row_fs = row_dof;
+		            if (const auto perm = shared->dof_permutation; perm && !perm->empty()) {
+		                if (static_cast<std::size_t>(row_dof) >= perm->forward.size()) {
+		                    continue;
+		                }
+		                row_fs = perm->forward[static_cast<std::size_t>(row_dof)];
+		                if (row_fs == INVALID_GLOBAL_INDEX) {
+		                    // Partial permutations are permitted for distributed overlap runs; unmapped DOFs are not
+		                    // locally present on this rank and must be skipped.
+		                    continue;
+		                }
+		            }
+		            if (row_fs < 0 || row_fs >= matrix_->numRows()) {
+		                continue;
+		            }
 
-	            const int global_node = static_cast<int>(row_fs / dof);
-	            const int row_comp = static_cast<int>(row_fs % dof);
+		            const int global_node = static_cast<int>(row_fs / dof);
+		            const int row_comp = static_cast<int>(row_fs % dof);
 
-	            const int old = shared->globalNodeToOld(global_node);
+		            const int old = shared->globalNodeToOld(global_node);
 	            if (old < 0) continue;
 
             const int internal = lhs.map(old);
@@ -402,7 +441,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
     FE_THROW_IF(global_rows_ % dof != 0, InvalidArgumentException,
                 "FsilsMatrix: global size must be divisible by dof_per_node");
 
-    dof_permutation = normalize_dof_permutation(std::move(dof_permutation), global_rows_, "FsilsMatrix");
+    dof_permutation = normalize_dof_permutation(std::move(dof_permutation), global_rows_, "FsilsMatrix", /*allow_partial=*/false);
     const bool have_perm = dof_permutation && !dof_permutation->empty();
 
     const GlobalIndex gnNo_g = global_rows_ / dof;
@@ -499,7 +538,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     FE_THROW_IF(global_rows_ % dof != 0, InvalidArgumentException,
                 "FsilsMatrix: global size must be divisible by dof_per_node");
 
-    dof_permutation = normalize_dof_permutation(std::move(dof_permutation), global_rows_, "FsilsMatrix");
+    dof_permutation = normalize_dof_permutation(std::move(dof_permutation), global_rows_, "FsilsMatrix", /*allow_partial=*/true);
     const bool have_perm = dof_permutation && !dof_permutation->empty();
 
     const GlobalIndex gnNo_g = global_rows_ / dof;
@@ -624,6 +663,47 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
 
         std::sort(ghost_nodes.begin(), ghost_nodes.end());
         ghost_nodes.erase(std::unique(ghost_nodes.begin(), ghost_nodes.end()), ghost_nodes.end());
+    }
+
+    // For distributed overlap runs we allow partial DOF permutations, but the locally present
+    // (owned + ghost) backend DOFs must still be mapped consistently.
+    if (have_perm) {
+        const auto& fwd = dof_permutation->forward;
+        const auto& inv = dof_permutation->inverse;
+
+        auto validate_backend_dof = [&](GlobalIndex dof_fs) {
+            FE_THROW_IF(dof_fs < 0 || dof_fs >= global_rows_, InvalidArgumentException,
+                        "FsilsMatrix: local backend DOF out of range");
+            const GlobalIndex fe = inv[static_cast<std::size_t>(dof_fs)];
+            FE_THROW_IF(fe == INVALID_GLOBAL_INDEX, InvalidArgumentException,
+                        "FsilsMatrix: DOF permutation missing mapping for locally present backend DOF");
+            FE_THROW_IF(fe < 0 || fe >= global_rows_, InvalidArgumentException,
+                        "FsilsMatrix: DOF permutation inverse mapped to out-of-range FE DOF");
+            const GlobalIndex dof_fs_back = fwd[static_cast<std::size_t>(fe)];
+            FE_THROW_IF(dof_fs_back != dof_fs, InvalidArgumentException,
+                        "FsilsMatrix: DOF permutation forward/inverse mismatch for locally present backend DOF");
+        };
+
+        auto validate_node = [&](int global_node) {
+            FE_THROW_IF(global_node < 0 || global_node >= gnNo, InvalidArgumentException,
+                        "FsilsMatrix: local node out of range");
+            for (int r = 0; r < dof; ++r) {
+                validate_backend_dof(static_cast<GlobalIndex>(global_node) * dof + r);
+            }
+        };
+
+        if (!owned_nodes.empty()) {
+            for (const int node : owned_nodes) {
+                validate_node(node);
+            }
+        } else {
+            for (int node = owned_node_start; node < owned_node_start + owned_node_count; ++node) {
+                validate_node(node);
+            }
+        }
+        for (const int node : ghost_nodes) {
+            validate_node(node);
+        }
     }
 
     const int nNo = owned_node_count + static_cast<int>(ghost_nodes.size());
@@ -864,46 +944,59 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
 	    }
 	    FE_THROW_IF(!shared_, FEException, "FsilsMatrix::getEntry: missing FSILS layout");
 
-	    if (const auto perm = shared_->dof_permutation; perm && !perm->empty()) {
-	        const auto& fwd = perm->forward;
-	        if (static_cast<std::size_t>(row) >= fwd.size() || static_cast<std::size_t>(col) >= fwd.size()) {
-	            return 0.0;
-	        }
-	        row = fwd[static_cast<std::size_t>(row)];
-	        col = fwd[static_cast<std::size_t>(col)];
-	    }
+		    if (const auto perm = shared_->dof_permutation; perm && !perm->empty()) {
+		        const auto& fwd = perm->forward;
+		        if (static_cast<std::size_t>(row) >= fwd.size() || static_cast<std::size_t>(col) >= fwd.size()) {
+		            return 0.0;
+		        }
+		        row = fwd[static_cast<std::size_t>(row)];
+		        col = fwd[static_cast<std::size_t>(col)];
+		    }
+		    if (row < 0 || row >= global_rows_ || col < 0 || col >= global_cols_) {
+		        return 0.0;
+		    }
 
-	    const int dof = shared_->dof;
-	    const int global_row_node = static_cast<int>(row / dof);
-	    const int global_col_node = static_cast<int>(col / dof);
-	    const int row_comp = static_cast<int>(row % dof);
+		    const int dof = shared_->dof;
+		    const int global_row_node = static_cast<int>(row / dof);
+		    const int global_col_node = static_cast<int>(col / dof);
+		    const int row_comp = static_cast<int>(row % dof);
 	    const int col_comp = static_cast<int>(col % dof);
 
-    const int row_old = shared_->globalNodeToOld(global_row_node);
-    const int col_old = shared_->globalNodeToOld(global_col_node);
-    if (row_old < 0 || col_old < 0) {
+	    const int row_old = shared_->globalNodeToOld(global_row_node);
+	    const int col_old = shared_->globalNodeToOld(global_col_node);
+	    const int nNo = shared_->lhs.nNo;
+	    if (row_old < 0 || col_old < 0 || row_old >= nNo || col_old >= nNo) {
+	        return 0.0;
+	    }
+
+	    const auto& lhs = shared_->lhs;
+	    const int row_internal = lhs.map(row_old);
+	    const int col_internal = lhs.map(col_old);
+	    if (row_internal < 0 || col_internal < 0 || row_internal >= nNo || col_internal >= nNo) {
+	        return 0.0;
+	    }
+
+	    const int start = lhs.rowPtr(0, row_internal);
+	    const int end = lhs.rowPtr(1, row_internal);
+	    if (start < 0 || end < start || end >= lhs.nnz) {
+	        return 0.0;
+	    }
+	    const int* cols = lhs.colPtr.data();
+	    const auto* begin = cols + start;
+	    const auto* finish = cols + end + 1;
+	    const auto it = std::lower_bound(begin, finish, col_internal);
+	    if (it == finish || *it != col_internal) {
         return 0.0;
     }
 
-    const auto& lhs = shared_->lhs;
-    const int row_internal = lhs.map(row_old);
-    const int col_internal = lhs.map(col_old);
-
-    const int start = lhs.rowPtr(0, row_internal);
-    const int end = lhs.rowPtr(1, row_internal);
-    const int* cols = lhs.colPtr.data();
-    const auto* begin = cols + start;
-    const auto* finish = cols + end + 1;
-    const auto it = std::lower_bound(begin, finish, col_internal);
-    if (it == finish || *it != col_internal) {
-        return 0.0;
-    }
-
-    const int nnz_idx = static_cast<int>(it - cols);
-    const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
-    const std::size_t base = static_cast<std::size_t>(nnz_idx) * block_size;
-    const std::size_t off = block_entry_index(dof, row_comp, col_comp);
-    return values_[base + off];
+	    const int nnz_idx = static_cast<int>(it - cols);
+	    const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
+	    const std::size_t base = static_cast<std::size_t>(nnz_idx) * block_size;
+	    const std::size_t off = block_entry_index(dof, row_comp, col_comp);
+	    if (base + off >= values_.size()) {
+	        return 0.0;
+	    }
+	    return values_[base + off];
 }
 
 	void FsilsMatrix::addValue(GlobalIndex row, GlobalIndex col, Real value, assembly::AddMode mode)
@@ -913,46 +1006,59 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
 	    }
 	    FE_THROW_IF(!shared_, FEException, "FsilsMatrix::addValue: missing FSILS layout");
 
-	    if (const auto perm = shared_->dof_permutation; perm && !perm->empty()) {
-	        const auto& fwd = perm->forward;
-	        if (static_cast<std::size_t>(row) >= fwd.size() || static_cast<std::size_t>(col) >= fwd.size()) {
-	            return;
-	        }
-	        row = fwd[static_cast<std::size_t>(row)];
-	        col = fwd[static_cast<std::size_t>(col)];
-	    }
+		    if (const auto perm = shared_->dof_permutation; perm && !perm->empty()) {
+		        const auto& fwd = perm->forward;
+		        if (static_cast<std::size_t>(row) >= fwd.size() || static_cast<std::size_t>(col) >= fwd.size()) {
+		            return;
+		        }
+		        row = fwd[static_cast<std::size_t>(row)];
+		        col = fwd[static_cast<std::size_t>(col)];
+		    }
+		    if (row < 0 || row >= global_rows_ || col < 0 || col >= global_cols_) {
+		        return;
+		    }
 
-	    const int dof = shared_->dof;
-	    const int global_row_node = static_cast<int>(row / dof);
-	    const int global_col_node = static_cast<int>(col / dof);
-	    const int row_comp = static_cast<int>(row % dof);
+		    const int dof = shared_->dof;
+		    const int global_row_node = static_cast<int>(row / dof);
+		    const int global_col_node = static_cast<int>(col / dof);
+		    const int row_comp = static_cast<int>(row % dof);
 	    const int col_comp = static_cast<int>(col % dof);
 
-    const int row_old = shared_->globalNodeToOld(global_row_node);
-    const int col_old = shared_->globalNodeToOld(global_col_node);
-    if (row_old < 0 || col_old < 0) {
+	    const int row_old = shared_->globalNodeToOld(global_row_node);
+	    const int col_old = shared_->globalNodeToOld(global_col_node);
+	    const int nNo = shared_->lhs.nNo;
+	    if (row_old < 0 || col_old < 0 || row_old >= nNo || col_old >= nNo) {
+	        return;
+	    }
+
+	    const auto& lhs = shared_->lhs;
+	    const int row_internal = lhs.map(row_old);
+	    const int col_internal = lhs.map(col_old);
+	    if (row_internal < 0 || col_internal < 0 || row_internal >= nNo || col_internal >= nNo) {
+	        return;
+	    }
+
+	    const int start = lhs.rowPtr(0, row_internal);
+	    const int end = lhs.rowPtr(1, row_internal);
+	    if (start < 0 || end < start || end >= lhs.nnz) {
+	        return;
+	    }
+	    int* cols = lhs.colPtr.data();
+	    auto* begin = cols + start;
+	    auto* finish = cols + end + 1;
+	    const auto it = std::lower_bound(begin, finish, col_internal);
+	    if (it == finish || *it != col_internal) {
         return;
     }
 
-    const auto& lhs = shared_->lhs;
-    const int row_internal = lhs.map(row_old);
-    const int col_internal = lhs.map(col_old);
-
-    const int start = lhs.rowPtr(0, row_internal);
-    const int end = lhs.rowPtr(1, row_internal);
-    int* cols = lhs.colPtr.data();
-    auto* begin = cols + start;
-    auto* finish = cols + end + 1;
-    const auto it = std::lower_bound(begin, finish, col_internal);
-    if (it == finish || *it != col_internal) {
-        return;
-    }
-
-    const int nnz_idx = static_cast<int>(it - cols);
-    const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
-    const std::size_t base = static_cast<std::size_t>(nnz_idx) * block_size;
-    const std::size_t off = block_entry_index(dof, row_comp, col_comp);
-    Real& dst = values_[base + off];
+	    const int nnz_idx = static_cast<int>(it - cols);
+	    const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
+	    const std::size_t base = static_cast<std::size_t>(nnz_idx) * block_size;
+	    const std::size_t off = block_entry_index(dof, row_comp, col_comp);
+	    if (base + off >= values_.size()) {
+	        return;
+	    }
+	    Real& dst = values_[base + off];
 
     switch (mode) {
         case assembly::AddMode::Add:

@@ -426,6 +426,8 @@ assembly::AssemblyResult assembleOperator(
     }
     const auto& mesh = system.meshAccess();
 
+    assembler.setSuppressConstraintInhomogeneity(request.suppress_constraint_inhomogeneity);
+
     const auto& def = system.operator_registry_.get(request.op);
 
     assembly::AssemblyResult total;
