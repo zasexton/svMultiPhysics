@@ -193,6 +193,15 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
     }
   }
 
+  // FSILS NS solver (block-Schur) legacy knobs: pass GM/CG sub-solver controls through.
+  if (backend_kind == svmp::FE::backends::BackendKind::FSILS &&
+      opts.method == svmp::FE::backends::SolverMethod::BlockSchur) {
+    opts.fsils_ns_gm_max_iter = eq->linear_solver.ns_gm_max_iterations.value();
+    opts.fsils_ns_cg_max_iter = eq->linear_solver.ns_cg_max_iterations.value();
+    opts.fsils_ns_gm_rel_tol = static_cast<svmp::FE::Real>(eq->linear_solver.ns_gm_tolerance.value());
+    opts.fsils_ns_cg_rel_tol = static_cast<svmp::FE::Real>(eq->linear_solver.ns_cg_tolerance.value());
+  }
+
   return opts;
 }
 

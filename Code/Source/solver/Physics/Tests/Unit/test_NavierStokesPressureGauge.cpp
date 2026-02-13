@@ -29,7 +29,7 @@ class TwoQuadStripMeshAccess final : public FE::assembly::IMeshAccess {
 public:
     struct BoundaryFace {
         FE::GlobalIndex cell_id{FE::INVALID_GLOBAL_INDEX};
-        FE::LocalIndex local_face{-1};
+        FE::LocalIndex local_face{FE::INVALID_LOCAL_INDEX};
         int marker{-1};
     };
 
@@ -274,4 +274,3 @@ TEST(NavierStokesPressureGauge, PressurePinnedWhenVelocityIsEssentialOnAllBounda
 } // namespace test
 } // namespace Physics
 } // namespace svmp
-

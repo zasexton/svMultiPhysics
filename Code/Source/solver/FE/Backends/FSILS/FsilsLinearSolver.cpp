@@ -44,6 +44,22 @@ void FsilsLinearSolver::setOptions(const SolverOptions& options)
     FE_THROW_IF(options.rel_tol < 0.0, InvalidArgumentException, "FsilsLinearSolver: rel_tol must be >= 0");
     FE_THROW_IF(options.abs_tol < 0.0, InvalidArgumentException, "FsilsLinearSolver: abs_tol must be >= 0");
     FE_THROW_IF(options.use_initial_guess, NotImplementedException, "FsilsLinearSolver: initial guess not supported");
+    if (options.fsils_ns_gm_max_iter) {
+        FE_THROW_IF(*options.fsils_ns_gm_max_iter <= 0, InvalidArgumentException,
+                    "FsilsLinearSolver: fsils_ns_gm_max_iter must be > 0");
+    }
+    if (options.fsils_ns_cg_max_iter) {
+        FE_THROW_IF(*options.fsils_ns_cg_max_iter <= 0, InvalidArgumentException,
+                    "FsilsLinearSolver: fsils_ns_cg_max_iter must be > 0");
+    }
+    if (options.fsils_ns_gm_rel_tol) {
+        FE_THROW_IF(*options.fsils_ns_gm_rel_tol < 0.0, InvalidArgumentException,
+                    "FsilsLinearSolver: fsils_ns_gm_rel_tol must be >= 0");
+    }
+    if (options.fsils_ns_cg_rel_tol) {
+        FE_THROW_IF(*options.fsils_ns_cg_rel_tol < 0.0, InvalidArgumentException,
+                    "FsilsLinearSolver: fsils_ns_cg_rel_tol must be >= 0");
+    }
     options_ = options;
 }
 
@@ -173,11 +189,38 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 	        // FSILS NS solver uses RI.mItr as a basis dimension and allocates O(nNo * mItr) workspace.
 	        // Treat very large generic max_iter as "unset" and fall back to the FSILS default (10) for safety.
 	        const int safe_max_iter = (options_.max_iter > 50) ? 10 : options_.max_iter;
-	        fsi_linear_solver::fsils_ls_create(ls,
-	                                           fsi_linear_solver::LS_TYPE_NS,
-	                                           options_.rel_tol,
-	                                           options_.abs_tol,
-	                                           safe_max_iter);
+	        if (options_.krylov_dim > 0) {
+	            fsi_linear_solver::fsils_ls_create(ls,
+	                                               fsi_linear_solver::LS_TYPE_NS,
+	                                               options_.rel_tol,
+	                                               options_.abs_tol,
+	                                               safe_max_iter,
+	                                               options_.krylov_dim);
+	        } else {
+	            fsi_linear_solver::fsils_ls_create(ls,
+	                                               fsi_linear_solver::LS_TYPE_NS,
+	                                               options_.rel_tol,
+	                                               options_.abs_tol,
+	                                               safe_max_iter);
+	        }
+
+	        // Legacy semantics: GM/CG inherit absTol and Krylov dimension from RI.
+	        ls.GM.absTol = ls.RI.absTol;
+	        ls.CG.absTol = ls.RI.absTol;
+	        ls.GM.sD = ls.RI.sD;
+
+	        if (options_.fsils_ns_gm_max_iter) {
+	            ls.GM.mItr = *options_.fsils_ns_gm_max_iter;
+	        }
+	        if (options_.fsils_ns_cg_max_iter) {
+	            ls.CG.mItr = *options_.fsils_ns_cg_max_iter;
+	        }
+	        if (options_.fsils_ns_gm_rel_tol) {
+	            ls.GM.relTol = *options_.fsils_ns_gm_rel_tol;
+	        }
+	        if (options_.fsils_ns_cg_rel_tol) {
+	            ls.CG.relTol = *options_.fsils_ns_cg_rel_tol;
+	        }
 		    } else {
 		        const auto method = to_fsils_solver(options_.method);
 		        if (method == fsi_linear_solver::LS_TYPE_GMRES) {

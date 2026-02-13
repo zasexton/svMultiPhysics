@@ -600,6 +600,14 @@ public:
     void setSolution(std::span<const Real> solution);
 
     /**
+     * @brief Provide a global-indexed solution view (MPI-aware)
+     *
+     * When set, the assembler will read coefficients from
+     * `solution_view->getVectorEntry(dof)` instead of indexing the solution span.
+     */
+    void setSolutionView(const GlobalSystemView* solution_view) noexcept;
+
+    /**
      * @brief Set previous-step solution coefficients (u^{n-1})
      */
     void setPreviousSolution(std::span<const Real> solution);
@@ -613,6 +621,10 @@ public:
      * @brief Set k-th previous solution coefficients (u^{n-k}, k>=1)
      */
     void setPreviousSolutionK(int k, std::span<const Real> solution);
+
+    void setPreviousSolutionView(const GlobalSystemView* solution_view) noexcept;
+    void setPreviousSolution2View(const GlobalSystemView* solution_view) noexcept;
+    void setPreviousSolutionViewK(int k, const GlobalSystemView* solution_view);
 
     /**
      * @brief Attach a transient time-integration context for `dt(·,k)` lowering
@@ -834,7 +846,9 @@ private:
     const spaces::FunctionSpace* space_{nullptr};
     FieldId primary_field_{INVALID_FIELD_ID};
     std::vector<Real> solution_;
+    const GlobalSystemView* solution_view_{nullptr};
     std::vector<std::vector<Real>> previous_solutions_{};
+    std::vector<const GlobalSystemView*> previous_solution_views_{};
 
     const TimeIntegrationContext* time_integration_{nullptr};
     Real time_{0.0};

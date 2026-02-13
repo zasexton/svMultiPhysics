@@ -6,6 +6,7 @@
  */
 
 #include "FunctionalAssembler.h"
+#include "GlobalSystemView.h"
 #include "Dofs/DofMap.h"
 #include "Spaces/FunctionSpace.h"
 #include "Elements/Element.h"
@@ -658,6 +659,12 @@ void FunctionalAssembler::setPrimaryField(FieldId field) noexcept
 void FunctionalAssembler::setSolution(std::span<const Real> solution)
 {
     solution_.assign(solution.begin(), solution.end());
+    solution_view_ = nullptr;
+}
+
+void FunctionalAssembler::setSolutionView(const GlobalSystemView* solution_view) noexcept
+{
+    solution_view_ = solution_view;
 }
 
 void FunctionalAssembler::setPreviousSolution(std::span<const Real> solution)
@@ -678,6 +685,35 @@ void FunctionalAssembler::setPreviousSolutionK(int k, std::span<const Real> solu
         previous_solutions_.resize(static_cast<std::size_t>(k));
     }
     previous_solutions_[static_cast<std::size_t>(k - 1)].assign(solution.begin(), solution.end());
+
+    if (previous_solution_views_.size() < static_cast<std::size_t>(k)) {
+        previous_solution_views_.resize(static_cast<std::size_t>(k), nullptr);
+    }
+    previous_solution_views_[static_cast<std::size_t>(k - 1)] = nullptr;
+}
+
+void FunctionalAssembler::setPreviousSolutionView(const GlobalSystemView* solution_view) noexcept
+{
+    setPreviousSolutionViewK(1, solution_view);
+}
+
+void FunctionalAssembler::setPreviousSolution2View(const GlobalSystemView* solution_view) noexcept
+{
+    setPreviousSolutionViewK(2, solution_view);
+}
+
+void FunctionalAssembler::setPreviousSolutionViewK(int k, const GlobalSystemView* solution_view)
+{
+    FE_THROW_IF(k <= 0, InvalidArgumentException,
+                "FunctionalAssembler::setPreviousSolutionViewK: k must be >= 1");
+    if (previous_solution_views_.size() < static_cast<std::size_t>(k)) {
+        previous_solution_views_.resize(static_cast<std::size_t>(k), nullptr);
+    }
+    previous_solution_views_[static_cast<std::size_t>(k - 1)] = solution_view;
+
+    if (previous_solutions_.size() < static_cast<std::size_t>(k)) {
+        previous_solutions_.resize(static_cast<std::size_t>(k));
+    }
 }
 
 void FunctionalAssembler::setTimeIntegrationContext(const TimeIntegrationContext* ctx) noexcept
@@ -943,15 +979,24 @@ std::vector<Real> FunctionalAssembler::assembleMultiple(
         prepareContext(cell_id, all_required);
 
         if (need_solution) {
-            FE_THROW_IF(solution_.empty(), FEException,
+            FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
                         "FunctionalAssembler::assembleMultiple: kernels require solution but no solution was set");
             const auto dofs = dof_map_->getCellDofs(cell_id);
             local_solution.resize(dofs.size());
-            for (std::size_t i = 0; i < dofs.size(); ++i) {
-                const auto dof = dofs[i];
-                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
-                            "FunctionalAssembler::assembleMultiple: solution vector too small for DOF " + std::to_string(dof));
-                local_solution[i] = solution_[static_cast<std::size_t>(dof)];
+            if (solution_view_ != nullptr) {
+                for (std::size_t i = 0; i < dofs.size(); ++i) {
+                    const auto dof = dofs[i];
+                    FE_THROW_IF(dof < 0, FEException,
+                                "FunctionalAssembler::assembleMultiple: negative DOF index");
+                    local_solution[i] = solution_view_->getVectorEntry(dof);
+                }
+            } else {
+                for (std::size_t i = 0; i < dofs.size(); ++i) {
+                    const auto dof = dofs[i];
+                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
+                                "FunctionalAssembler::assembleMultiple: solution vector too small for DOF " + std::to_string(dof));
+                    local_solution[i] = solution_[static_cast<std::size_t>(dof)];
+                }
             }
             context_.setSolutionCoefficients(local_solution);
         }
@@ -1179,38 +1224,55 @@ Real FunctionalAssembler::assembleCellsCore(
 	                thread_context.setUserData(user_data_);
 	                thread_context.setJITConstants(jit_constants_);
 	                thread_context.setCoupledValues(coupled_integrals_, coupled_aux_state_);
-	                thread_context.setHistoryWeights(history_weights_);
-	                const auto dofs = dof_map_->getCellDofs(cell_id);
-	                if (need_solution) {
-	                    FE_THROW_IF(solution_.empty(), FEException,
-	                                "FunctionalAssembler::assembleCellsCore: kernel requires solution but no solution was set");
-	                    local_solution.resize(dofs.size());
-	                    for (std::size_t i = 0; i < dofs.size(); ++i) {
-	                        const auto dof = dofs[i];
-	                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
-	                                    "FunctionalAssembler::assembleCellsCore: solution vector too small for DOF " + std::to_string(dof));
-	                        local_solution[i] = solution_[static_cast<std::size_t>(dof)];
-	                    }
-	                    thread_context.setSolutionCoefficients(local_solution);
-	                }
-	                if (!previous_solutions_.empty()) {
-	                    for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
-	                        const auto& prev = previous_solutions_[k];
-	                        if (prev.empty()) {
-	                            continue;
-	                        }
-	                        local_prev_solution.resize(dofs.size());
-	                        for (std::size_t i = 0; i < dofs.size(); ++i) {
-	                            const auto dof = dofs[i];
-	                            FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
-	                                        "FunctionalAssembler::assembleCellsCore: previous solution vector too small for DOF " +
-	                                            std::to_string(dof));
-	                            local_prev_solution[i] = prev[static_cast<std::size_t>(dof)];
-	                        }
-	                        thread_context.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
-	                    }
-	                }
-	                if (!field_reqs.empty()) {
+		                thread_context.setHistoryWeights(history_weights_);
+		                const auto dofs = dof_map_->getCellDofs(cell_id);
+		                if (need_solution) {
+		                    FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
+		                                "FunctionalAssembler::assembleCellsCore: kernel requires solution but no solution was set");
+		                    local_solution.resize(dofs.size());
+		                    if (solution_view_ != nullptr) {
+		                        for (std::size_t i = 0; i < dofs.size(); ++i) {
+		                            const auto dof = dofs[i];
+		                            FE_THROW_IF(dof < 0, FEException,
+		                                        "FunctionalAssembler::assembleCellsCore: negative DOF index");
+		                            local_solution[i] = solution_view_->getVectorEntry(dof);
+		                        }
+		                    } else {
+		                        for (std::size_t i = 0; i < dofs.size(); ++i) {
+		                            const auto dof = dofs[i];
+		                            FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
+		                                        "FunctionalAssembler::assembleCellsCore: solution vector too small for DOF " + std::to_string(dof));
+		                            local_solution[i] = solution_[static_cast<std::size_t>(dof)];
+		                        }
+		                    }
+		                    thread_context.setSolutionCoefficients(local_solution);
+		                }
+		                if (!previous_solutions_.empty()) {
+		                    for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
+		                        const auto& prev = previous_solutions_[k];
+		                        const auto* prev_view = (k < previous_solution_views_.size()) ? previous_solution_views_[k] : nullptr;
+		                        if (prev_view == nullptr && prev.empty()) continue;
+		                        local_prev_solution.resize(dofs.size());
+		                        if (prev_view != nullptr) {
+		                            for (std::size_t i = 0; i < dofs.size(); ++i) {
+		                                const auto dof = dofs[i];
+		                                FE_THROW_IF(dof < 0, FEException,
+		                                            "FunctionalAssembler::assembleCellsCore: negative DOF index");
+		                                local_prev_solution[i] = prev_view->getVectorEntry(dof);
+		                            }
+		                        } else {
+		                            for (std::size_t i = 0; i < dofs.size(); ++i) {
+		                                const auto dof = dofs[i];
+		                                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
+		                                            "FunctionalAssembler::assembleCellsCore: previous solution vector too small for DOF " +
+		                                                std::to_string(dof));
+		                                local_prev_solution[i] = prev[static_cast<std::size_t>(dof)];
+		                            }
+		                        }
+		                        thread_context.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
+		                    }
+		                }
+		                if (!field_reqs.empty()) {
 	                    bindFieldSolutionData(thread_context, field_reqs);
 	                }
 
@@ -1230,38 +1292,55 @@ Real FunctionalAssembler::assembleCellsCore(
 	        std::vector<Real> local_solution;
 	        std::vector<Real> local_prev_solution;
 	        mesh_->forEachCell([&](GlobalIndex cell_id) {
-	            prepareContext(cell_id, context_required);
-	            const auto dofs = dof_map_->getCellDofs(cell_id);
-	            if (need_solution) {
-	                FE_THROW_IF(solution_.empty(), FEException,
-	                            "FunctionalAssembler::assembleCellsCore: kernel requires solution but no solution was set");
-	                local_solution.resize(dofs.size());
-	                for (std::size_t i = 0; i < dofs.size(); ++i) {
-	                    const auto dof = dofs[i];
-	                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
-	                                "FunctionalAssembler::assembleCellsCore: solution vector too small for DOF " + std::to_string(dof));
-	                    local_solution[i] = solution_[static_cast<std::size_t>(dof)];
-	                }
-	                context_.setSolutionCoefficients(local_solution);
-	            }
-	            if (!previous_solutions_.empty()) {
-	                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
-	                    const auto& prev = previous_solutions_[k];
-	                    if (prev.empty()) {
-	                        continue;
-	                    }
-	                    local_prev_solution.resize(dofs.size());
-	                    for (std::size_t i = 0; i < dofs.size(); ++i) {
-	                        const auto dof = dofs[i];
-	                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
-	                                    "FunctionalAssembler::assembleCellsCore: previous solution vector too small for DOF " +
-	                                        std::to_string(dof));
-	                        local_prev_solution[i] = prev[static_cast<std::size_t>(dof)];
-	                    }
-	                    context_.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
-	                }
-	            }
-	            if (!field_reqs.empty()) {
+		            prepareContext(cell_id, context_required);
+		            const auto dofs = dof_map_->getCellDofs(cell_id);
+		            if (need_solution) {
+		                FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
+		                            "FunctionalAssembler::assembleCellsCore: kernel requires solution but no solution was set");
+		                local_solution.resize(dofs.size());
+		                if (solution_view_ != nullptr) {
+		                    for (std::size_t i = 0; i < dofs.size(); ++i) {
+		                        const auto dof = dofs[i];
+		                        FE_THROW_IF(dof < 0, FEException,
+		                                    "FunctionalAssembler::assembleCellsCore: negative DOF index");
+		                        local_solution[i] = solution_view_->getVectorEntry(dof);
+		                    }
+		                } else {
+		                    for (std::size_t i = 0; i < dofs.size(); ++i) {
+		                        const auto dof = dofs[i];
+		                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
+		                                    "FunctionalAssembler::assembleCellsCore: solution vector too small for DOF " + std::to_string(dof));
+		                        local_solution[i] = solution_[static_cast<std::size_t>(dof)];
+		                    }
+		                }
+		                context_.setSolutionCoefficients(local_solution);
+		            }
+		            if (!previous_solutions_.empty()) {
+		                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
+		                    const auto& prev = previous_solutions_[k];
+		                    const auto* prev_view = (k < previous_solution_views_.size()) ? previous_solution_views_[k] : nullptr;
+		                    if (prev_view == nullptr && prev.empty()) continue;
+		                    local_prev_solution.resize(dofs.size());
+		                    if (prev_view != nullptr) {
+		                        for (std::size_t i = 0; i < dofs.size(); ++i) {
+		                            const auto dof = dofs[i];
+		                            FE_THROW_IF(dof < 0, FEException,
+		                                        "FunctionalAssembler::assembleCellsCore: negative DOF index");
+		                            local_prev_solution[i] = prev_view->getVectorEntry(dof);
+		                        }
+		                    } else {
+		                        for (std::size_t i = 0; i < dofs.size(); ++i) {
+		                            const auto dof = dofs[i];
+		                            FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
+		                                        "FunctionalAssembler::assembleCellsCore: previous solution vector too small for DOF " +
+		                                            std::to_string(dof));
+		                            local_prev_solution[i] = prev[static_cast<std::size_t>(dof)];
+		                        }
+		                    }
+		                    context_.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
+		                }
+		            }
+		            if (!field_reqs.empty()) {
 	                bindFieldSolutionData(context_, field_reqs);
 	            }
 	            Real cell_value = kernel.evaluateCellTotal(context_);
@@ -1280,39 +1359,56 @@ Real FunctionalAssembler::assembleCellsCore(
         // Sequential assembly
         std::vector<Real> local_solution;
         std::vector<Real> local_prev_solution;
-        mesh_->forEachCell([&](GlobalIndex cell_id) {
-            prepareContext(cell_id, context_required);
-            const auto dofs = dof_map_->getCellDofs(cell_id);
-            if (need_solution) {
-                FE_THROW_IF(solution_.empty(), FEException,
-                            "FunctionalAssembler::assembleCellsCore: kernel requires solution but no solution was set");
-                local_solution.resize(dofs.size());
-                for (std::size_t i = 0; i < dofs.size(); ++i) {
-                    const auto dof = dofs[i];
-                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
-                                "FunctionalAssembler::assembleCellsCore: solution vector too small for DOF " + std::to_string(dof));
-                    local_solution[i] = solution_[static_cast<std::size_t>(dof)];
-                }
-                context_.setSolutionCoefficients(local_solution);
-            }
-            if (!previous_solutions_.empty()) {
-                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
-                    const auto& prev = previous_solutions_[k];
-                    if (prev.empty()) {
-                        continue;
-                    }
-                    local_prev_solution.resize(dofs.size());
-                    for (std::size_t i = 0; i < dofs.size(); ++i) {
-                        const auto dof = dofs[i];
-                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
-                                    "FunctionalAssembler::assembleCellsCore: previous solution vector too small for DOF " +
-                                        std::to_string(dof));
-                        local_prev_solution[i] = prev[static_cast<std::size_t>(dof)];
-                    }
-                    context_.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
-                }
-            }
-            if (!field_reqs.empty()) {
+	        mesh_->forEachCell([&](GlobalIndex cell_id) {
+	            prepareContext(cell_id, context_required);
+	            const auto dofs = dof_map_->getCellDofs(cell_id);
+	            if (need_solution) {
+	                FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
+	                            "FunctionalAssembler::assembleCellsCore: kernel requires solution but no solution was set");
+	                local_solution.resize(dofs.size());
+	                if (solution_view_ != nullptr) {
+	                    for (std::size_t i = 0; i < dofs.size(); ++i) {
+	                        const auto dof = dofs[i];
+	                        FE_THROW_IF(dof < 0, FEException,
+	                                    "FunctionalAssembler::assembleCellsCore: negative DOF index");
+	                        local_solution[i] = solution_view_->getVectorEntry(dof);
+	                    }
+	                } else {
+	                    for (std::size_t i = 0; i < dofs.size(); ++i) {
+	                        const auto dof = dofs[i];
+	                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
+	                                    "FunctionalAssembler::assembleCellsCore: solution vector too small for DOF " + std::to_string(dof));
+	                        local_solution[i] = solution_[static_cast<std::size_t>(dof)];
+	                    }
+	                }
+	                context_.setSolutionCoefficients(local_solution);
+	            }
+	            if (!previous_solutions_.empty()) {
+	                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
+	                    const auto& prev = previous_solutions_[k];
+	                    const auto* prev_view = (k < previous_solution_views_.size()) ? previous_solution_views_[k] : nullptr;
+	                    if (prev_view == nullptr && prev.empty()) continue;
+	                    local_prev_solution.resize(dofs.size());
+	                    if (prev_view != nullptr) {
+	                        for (std::size_t i = 0; i < dofs.size(); ++i) {
+	                            const auto dof = dofs[i];
+	                            FE_THROW_IF(dof < 0, FEException,
+	                                        "FunctionalAssembler::assembleCellsCore: negative DOF index");
+	                            local_prev_solution[i] = prev_view->getVectorEntry(dof);
+	                        }
+	                    } else {
+	                        for (std::size_t i = 0; i < dofs.size(); ++i) {
+	                            const auto dof = dofs[i];
+	                            FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
+	                                        "FunctionalAssembler::assembleCellsCore: previous solution vector too small for DOF " +
+	                                            std::to_string(dof));
+	                            local_prev_solution[i] = prev[static_cast<std::size_t>(dof)];
+	                        }
+	                    }
+	                    context_.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
+	                }
+	            }
+	            if (!field_reqs.empty()) {
                 bindFieldSolutionData(context_, field_reqs);
             }
 
@@ -1405,37 +1501,54 @@ Real FunctionalAssembler::assembleBoundaryCore(
 	            context_.setHistoryWeights(history_weights_);
 	            context_.setBoundaryMarker(boundary_marker);
 
-	            const auto dofs = dof_map_->getCellDofs(cell_id);
-	            if (need_solution) {
-	                FE_THROW_IF(solution_.empty(), FEException,
-	                            "FunctionalAssembler::assembleBoundaryCore: kernel requires solution but no solution was set");
-	                local_solution.resize(dofs.size());
-	                for (std::size_t i = 0; i < dofs.size(); ++i) {
-	                    const auto dof = dofs[i];
-	                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
-	                                "FunctionalAssembler::assembleBoundaryCore: solution vector too small for DOF " + std::to_string(dof));
-	                    local_solution[i] = solution_[static_cast<std::size_t>(dof)];
-	                }
-	                context_.setSolutionCoefficients(local_solution);
-	            }
-	            if (!previous_solutions_.empty()) {
-	                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
-	                    const auto& prev = previous_solutions_[k];
-	                    if (prev.empty()) {
-	                        continue;
-	                    }
-	                    local_prev_solution.resize(dofs.size());
-	                    for (std::size_t i = 0; i < dofs.size(); ++i) {
-	                        const auto dof = dofs[i];
-	                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
-	                                    "FunctionalAssembler::assembleBoundaryCore: previous solution vector too small for DOF " +
-	                                        std::to_string(dof));
-	                        local_prev_solution[i] = prev[static_cast<std::size_t>(dof)];
-	                    }
-	                    context_.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
-	                }
-	            }
-	            if (!field_reqs.empty()) {
+		            const auto dofs = dof_map_->getCellDofs(cell_id);
+		            if (need_solution) {
+		                FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
+		                            "FunctionalAssembler::assembleBoundaryCore: kernel requires solution but no solution was set");
+		                local_solution.resize(dofs.size());
+		                if (solution_view_ != nullptr) {
+		                    for (std::size_t i = 0; i < dofs.size(); ++i) {
+		                        const auto dof = dofs[i];
+		                        FE_THROW_IF(dof < 0, FEException,
+		                                    "FunctionalAssembler::assembleBoundaryCore: negative DOF index");
+		                        local_solution[i] = solution_view_->getVectorEntry(dof);
+		                    }
+		                } else {
+		                    for (std::size_t i = 0; i < dofs.size(); ++i) {
+		                        const auto dof = dofs[i];
+		                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= solution_.size(), FEException,
+		                                    "FunctionalAssembler::assembleBoundaryCore: solution vector too small for DOF " + std::to_string(dof));
+		                        local_solution[i] = solution_[static_cast<std::size_t>(dof)];
+		                    }
+		                }
+		                context_.setSolutionCoefficients(local_solution);
+		            }
+		            if (!previous_solutions_.empty()) {
+		                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
+		                    const auto& prev = previous_solutions_[k];
+		                    const auto* prev_view = (k < previous_solution_views_.size()) ? previous_solution_views_[k] : nullptr;
+		                    if (prev_view == nullptr && prev.empty()) continue;
+		                    local_prev_solution.resize(dofs.size());
+		                    if (prev_view != nullptr) {
+		                        for (std::size_t i = 0; i < dofs.size(); ++i) {
+		                            const auto dof = dofs[i];
+		                            FE_THROW_IF(dof < 0, FEException,
+		                                        "FunctionalAssembler::assembleBoundaryCore: negative DOF index");
+		                            local_prev_solution[i] = prev_view->getVectorEntry(dof);
+		                        }
+		                    } else {
+		                        for (std::size_t i = 0; i < dofs.size(); ++i) {
+		                            const auto dof = dofs[i];
+		                            FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= prev.size(), FEException,
+		                                        "FunctionalAssembler::assembleBoundaryCore: previous solution vector too small for DOF " +
+		                                            std::to_string(dof));
+		                            local_prev_solution[i] = prev[static_cast<std::size_t>(dof)];
+		                        }
+		                    }
+		                    context_.setPreviousSolutionCoefficientsK(static_cast<int>(k + 1u), local_prev_solution);
+		                }
+		            }
+		            if (!field_reqs.empty()) {
 	                bindFieldSolutionData(context_, field_reqs);
 	            }
 

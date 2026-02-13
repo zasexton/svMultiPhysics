@@ -11,6 +11,7 @@
 #include "Core/Types.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -72,6 +73,13 @@ struct SolverOptions {
 
     // FSILS: best-effort row/column scaling toggle.
     bool fsils_use_rcs{false};
+
+    // FSILS: Navier–Stokes (BlockSchur) sub-solvers (legacy parameters).
+    // GM: momentum solve, CG: pressure solve.
+    std::optional<int> fsils_ns_gm_max_iter{};
+    std::optional<int> fsils_ns_cg_max_iter{};
+    std::optional<Real> fsils_ns_gm_rel_tol{};
+    std::optional<Real> fsils_ns_cg_rel_tol{};
 
     // Backend-specific pass-through key/value list (optional).
     // - PETSc: key maps to an option name (with or without '-' prefix).

@@ -209,6 +209,7 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_SolidMaterialModels.cpp
         Tests/Unit/test_FormIntegrationJacobian.cpp
         Tests/Unit/test_NavierStokesPressureGauge.cpp
+        Tests/Unit/test_NavierStokesLegacyBCs.cpp
         Tests/Unit/test_CoreUtilities.cpp
         Tests/Unit/test_VtpMeshSupport.cpp
     )

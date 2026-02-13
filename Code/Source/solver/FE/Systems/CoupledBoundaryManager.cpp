@@ -8,6 +8,7 @@
 #include "Systems/CoupledBoundaryManager.h"
 
 #include "Assembly/FunctionalAssembler.h"
+#include "Backends/Interfaces/GenericVector.h"
 #include "Forms/BoundaryFunctional.h"
 #include "Forms/PointEvaluator.h"
 #include "Systems/FESystem.h"
@@ -357,6 +358,13 @@ Real CoupledBoundaryManager::evaluateFunctional(const CompiledFunctional& entry,
     assembler.setSpace(*rec.space);
     assembler.setPrimaryField(primary_field_);
     assembler.setSolution(state.u);
+    std::unique_ptr<assembly::GlobalSystemView> solution_view;
+    if (state.u_vector != nullptr) {
+        // `createAssemblyView()` is non-const for historical reasons; treat this as read-only use.
+        auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
+        solution_view = vec->createAssemblyView();
+        assembler.setSolutionView(solution_view.get());
+    }
     assembler.setTimeIntegrationContext(state.time_integration);
     assembler.setTime(static_cast<Real>(state.time));
     assembler.setTimeStep(static_cast<Real>(state.dt));
@@ -385,6 +393,8 @@ Real CoupledBoundaryManager::evaluateFunctional(const CompiledFunctional& entry,
     }
     assembler.setCoupledValues({}, {});
 
+    std::unique_ptr<assembly::GlobalSystemView> prev_solution_view;
+    std::unique_ptr<assembly::GlobalSystemView> prev2_solution_view;
     if (!state.u_history.empty()) {
         for (std::size_t k = 0; k < state.u_history.size(); ++k) {
             assembler.setPreviousSolutionK(static_cast<int>(k + 1), state.u_history[k]);
@@ -392,6 +402,16 @@ Real CoupledBoundaryManager::evaluateFunctional(const CompiledFunctional& entry,
     } else {
         assembler.setPreviousSolution(state.u_prev);
         assembler.setPreviousSolution2(state.u_prev2);
+    }
+    if (state.u_prev_vector != nullptr) {
+        auto* vec = const_cast<backends::GenericVector*>(state.u_prev_vector);
+        prev_solution_view = vec->createAssemblyView();
+        assembler.setPreviousSolutionView(prev_solution_view.get());
+    }
+    if (state.u_prev2_vector != nullptr) {
+        auto* vec = const_cast<backends::GenericVector*>(state.u_prev2_vector);
+        prev2_solution_view = vec->createAssemblyView();
+        assembler.setPreviousSolution2View(prev2_solution_view.get());
     }
 
     Real raw = assembler.assembleBoundaryScalar(*entry.kernel, entry.def.boundary_marker);
