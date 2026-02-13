@@ -27,6 +27,31 @@ struct NewtonOptions {
     systems::OperatorTag residual_op{"residual"};
     systems::OperatorTag jacobian_op{"jacobian"};
 
+    struct PseudoTransientContinuationOptions {
+        bool enabled{false};
+
+        // If true, activates PTC only after a linear-solve failure.
+        // If false, uses `gamma_initial` from the first Newton iteration.
+        bool activate_on_linear_failure{true};
+
+        // Scaling applied to the lumped dt-only Jacobian diagonal (mass-like term).
+        // Larger values add more diagonal dominance.
+        double gamma_initial{0.0};
+        double gamma_growth{10.0};
+        double gamma_max{1e12};
+
+        // If gamma falls below this, treat it as zero (exact Newton).
+        double gamma_drop_tolerance{1e-14};
+
+        // Max retries of linear.solve() per Newton iteration when PTC is active.
+        int max_linear_retries{8};
+
+        // Switched evolution relaxation update: gamma <- gamma * (||r_k|| / ||r_{k-1}||)
+        bool update_from_residual_ratio{true};
+    };
+
+    PseudoTransientContinuationOptions pseudo_transient{};
+
     int max_iterations{25};
     double abs_tolerance{1e-10};
     double rel_tolerance{1e-8};
@@ -67,6 +92,7 @@ struct NewtonWorkspace {
     std::unique_ptr<backends::GenericVector> u_backup{};
     std::unique_ptr<backends::GenericVector> residual_scratch{};
     std::unique_ptr<backends::GenericVector> residual_base{};
+    std::unique_ptr<backends::GenericVector> ptc_mass_lumped{};
     std::vector<GlobalIndex> dt_field_dofs{};
 
     [[nodiscard]] bool isAllocated() const noexcept

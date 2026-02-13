@@ -7,6 +7,7 @@
 
 #include "Forms/Tensor/TensorDifferentiation.h"
 
+#include "Forms/IndexExtent.h"
 #include "Forms/SymbolicDifferentiation.h"
 #include "Forms/Tensor/TensorSimplify.h"
 
@@ -93,6 +94,8 @@ namespace {
         return expr;
     }
 
+    const int auto_extent = forms::inferAutoIndexExtent(expr);
+
     FormExpr::NodeTransform transform;
     transform = [&](const FormExprNode& node) -> std::optional<FormExpr> {
         if (node.type() != FormExprType::IndexedAccess) {
@@ -141,7 +144,8 @@ namespace {
             }
         }
 
-        return FormExpr::indexedAccessRawWithMetadata(std::move(base), rank, std::move(ids), *ext_opt, vars, std::move(names));
+        const auto ext = forms::resolveAutoIndexExtents(*ext_opt, rank, auto_extent);
+        return FormExpr::indexedAccessRawWithMetadata(std::move(base), rank, std::move(ids), ext, vars, std::move(names));
     };
 
     return expr.transformNodes(transform);

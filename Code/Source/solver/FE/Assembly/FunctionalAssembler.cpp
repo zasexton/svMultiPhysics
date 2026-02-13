@@ -317,6 +317,12 @@ void computeSurfaceMeasureAndNormal(const AssemblyContext::Vector3D& n_ref,
         }
     }
 
+    if (det_J < 0.0) {
+        for (int i = 0; i < dim; ++i) {
+            Jit_n[static_cast<std::size_t>(i)] = -Jit_n[static_cast<std::size_t>(i)];
+        }
+    }
+
     Real norm_Jit_n = 0.0;
     for (int i = 0; i < dim; ++i) {
         const Real v = Jit_n[static_cast<std::size_t>(i)];
@@ -398,6 +404,19 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
             scratch.cell_coords[i][2]};
     }
 
+    AssemblyContext::Vector3D cell_center{0.0, 0.0, 0.0};
+    if (!scratch.cell_coords.empty()) {
+        for (const auto& xc : scratch.cell_coords) {
+            cell_center[0] += xc[0];
+            cell_center[1] += xc[1];
+            cell_center[2] += xc[2];
+        }
+        const Real inv_n = Real(1.0) / static_cast<Real>(scratch.cell_coords.size());
+        cell_center[0] *= inv_n;
+        cell_center[1] *= inv_n;
+        cell_center[2] *= inv_n;
+    }
+
     geometry::MappingRequest map_request;
     map_request.element_type = cell_type;
     map_request.geometry_order = defaultGeometryOrder(cell_type);
@@ -470,6 +489,19 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
         Real surface_measure = 0.0;
         AssemblyContext::Vector3D n_phys = {0.0, 0.0, 0.0};
         computeSurfaceMeasureAndNormal(n_ref, scratch.inv_jacobians[q], det_J, dim, surface_measure, n_phys);
+
+        {
+            const Real dx = cell_center[0] - x_phys[0];
+            const Real dy = cell_center[1] - x_phys[1];
+            const Real dz = cell_center[2] - x_phys[2];
+            const Real dot = dx * n_phys[0] + dy * n_phys[1] + dz * n_phys[2];
+            if (dot > Real(0.0)) {
+                n_phys[0] = -n_phys[0];
+                n_phys[1] = -n_phys[1];
+                n_phys[2] = -n_phys[2];
+            }
+        }
+
         scratch.integration_weights[q] = quad_weights[q] * surface_measure;
         scratch.normals[q] = n_phys;
     }

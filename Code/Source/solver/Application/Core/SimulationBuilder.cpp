@@ -165,18 +165,22 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
     }
   }
 
-  // Legacy XML semantics: for FSILS GMRES, <Max_iterations> is the outer restart count (RI.mItr), while
-  // <Krylov_space_dimension> sets the restart length (RI.sD). The FE backend contract uses max_iter as
-  // a total-iteration budget, so convert the legacy parameters accordingly.
+  // FSILS GMRES legacy semantics:
+  // - <Max_iterations> is the outer restart count (RI.mItr),
+  // - <Krylov_space_dimension> is the restart length (RI.sD, default 50).
+  //
+  // The FE linear-solver contract uses `max_iter` as a total Krylov-step budget, so convert:
+  //   max_iter_total = mItr * (sD + 1)
+  // and ensure krylov_dim is populated even if the XML omitted it (to match legacy defaults).
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS &&
-      (opts.method == svmp::FE::backends::SolverMethod::GMRES || opts.method == svmp::FE::backends::SolverMethod::FGMRES) &&
+      (opts.method == svmp::FE::backends::SolverMethod::GMRES ||
+       opts.method == svmp::FE::backends::SolverMethod::FGMRES) &&
       eq->linear_solver.max_iterations.defined()) {
-    int restart_len = opts.krylov_dim;
-    if (restart_len <= 0) {
-      // FSILS default for GMRES when RI.sD is not explicitly specified.
-      restart_len = 250;
-      opts.krylov_dim = restart_len;
-    }
+    const int legacy_restart_len = eq->linear_solver.krylov_space_dimension.defined()
+                                      ? eq->linear_solver.krylov_space_dimension.value()
+                                      : 50;
+    const int restart_len = std::max(0, legacy_restart_len);
+    opts.krylov_dim = restart_len;
 
     using i64 = long long;
     const i64 outer = static_cast<i64>(eq->linear_solver.max_iterations.value());

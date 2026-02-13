@@ -25,17 +25,18 @@ namespace forms {
 /**
  * @brief Finite index set (range) for Einstein summation
  *
- * By default, FE/Forms uses a 3-component representation for vectors and 3×3 for
- * matrices, with unused components treated as zero in lower-dimensional meshes.
+ * An extent of 0 indicates an "auto" extent that should be inferred from the
+ * form's bound function-space topological dimension during lowering (falling
+ * back to 3 if unknown).
  */
 class IndexSet {
 public:
-    explicit IndexSet(int extent = 3) : extent_(extent) {}
+    explicit IndexSet(int extent = 0) : extent_(extent) {}
 
     [[nodiscard]] int extent() const noexcept { return extent_; }
 
 private:
-    int extent_{3};
+    int extent_{0};
 };
 
 /**

@@ -11,6 +11,7 @@
 #include "Constraints/AffineConstraints.h"
 #include "Core/FEException.h"
 #include "Core/Logger.h"
+#include "Dofs/DofIndexSet.h"
 #include "Systems/SystemsExceptions.h"
 
 #if defined(FE_HAS_FSILS)
@@ -244,6 +245,28 @@ NewtonSolver::NewtonSolver(NewtonOptions options)
                     InvalidArgumentException,
                     "NewtonSolver: line_search_c1 must be finite and in (0,1)");
     }
+
+    if (options_.pseudo_transient.enabled) {
+        FE_THROW_IF(options_.pseudo_transient.gamma_initial < 0.0 ||
+                        !std::isfinite(options_.pseudo_transient.gamma_initial),
+                    InvalidArgumentException,
+                    "NewtonSolver: pseudo_transient.gamma_initial must be finite and >= 0");
+        FE_THROW_IF(!(options_.pseudo_transient.gamma_growth > 1.0) ||
+                        !std::isfinite(options_.pseudo_transient.gamma_growth),
+                    InvalidArgumentException,
+                    "NewtonSolver: pseudo_transient.gamma_growth must be finite and > 1");
+        FE_THROW_IF(options_.pseudo_transient.gamma_max < 0.0 ||
+                        !std::isfinite(options_.pseudo_transient.gamma_max),
+                    InvalidArgumentException,
+                    "NewtonSolver: pseudo_transient.gamma_max must be finite and >= 0");
+        FE_THROW_IF(options_.pseudo_transient.gamma_drop_tolerance < 0.0 ||
+                        !std::isfinite(options_.pseudo_transient.gamma_drop_tolerance),
+                    InvalidArgumentException,
+                    "NewtonSolver: pseudo_transient.gamma_drop_tolerance must be finite and >= 0");
+        FE_THROW_IF(options_.pseudo_transient.max_linear_retries <= 0,
+                    InvalidArgumentException,
+                    "NewtonSolver: pseudo_transient.max_linear_retries must be > 0");
+    }
 }
 
 systems::SystemStateView NewtonSolver::makeStateView(const TimeHistory& history, double solve_time) const
@@ -282,6 +305,7 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
     workspace.u_backup = factory.createVector(n_dofs);
     workspace.residual_scratch = factory.createVector(n_dofs);
     workspace.residual_base = factory.createVector(n_dofs);
+    workspace.ptc_mass_lumped.reset();
     workspace.dt_field_dofs.clear();
 
     FE_CHECK_NOT_NULL(workspace.jacobian.get(), "NewtonSolver workspace.jacobian");
@@ -290,6 +314,11 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
     FE_CHECK_NOT_NULL(workspace.u_backup.get(), "NewtonSolver workspace.u_backup");
     FE_CHECK_NOT_NULL(workspace.residual_scratch.get(), "NewtonSolver workspace.residual_scratch");
     FE_CHECK_NOT_NULL(workspace.residual_base.get(), "NewtonSolver workspace.residual_base");
+
+    if (options_.pseudo_transient.enabled) {
+        workspace.ptc_mass_lumped = factory.createVector(n_dofs);
+        FE_CHECK_NOT_NULL(workspace.ptc_mass_lumped.get(), "NewtonSolver workspace.ptc_mass_lumped");
+    }
 
     if (options_.scale_dt_increments) {
         const auto dt_fields = system.timeDerivativeFields();
@@ -419,6 +448,35 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     auto computeResidualNorm = [&]() -> double {
         return residualNormForConvergence(r, residual_scratch);
     };
+
+    const bool ptc_enabled = options_.pseudo_transient.enabled;
+    std::vector<GlobalIndex> ptc_owned_dofs;
+    if (ptc_enabled && workspace.ptc_mass_lumped != nullptr) {
+        const auto dt_fields = sys.timeDerivativeFields(options_.jacobian_op);
+        if (!dt_fields.empty()) {
+            dofs::IndexSet dt_dofs_all;
+            const auto& fmap = sys.fieldMap();
+            for (const auto fid : dt_fields) {
+                if (fid < 0) {
+                    continue;
+                }
+                const auto idx = static_cast<std::size_t>(fid);
+                if (idx >= fmap.numFields()) {
+                    continue;
+                }
+                const auto range = fmap.getFieldDofRange(idx);
+                dt_dofs_all = dt_dofs_all.unionWith(dofs::IndexSet(range.first, range.second));
+            }
+            const auto& owned = sys.dofHandler().getPartition().locallyOwned();
+            ptc_owned_dofs = dt_dofs_all.intersectionWith(owned).toVector();
+        }
+    }
+
+    const bool ptc_can_run = ptc_enabled && (workspace.ptc_mass_lumped != nullptr) && !ptc_owned_dofs.empty();
+    bool ptc_mass_ready = false;
+    double ptc_gamma = 0.0;
+    double ptc_gamma_applied = 0.0;
+    double ptc_prev_residual_norm = std::numeric_limits<double>::quiet_NaN();
 
     systems::OperatorTag residual_op_used = options_.residual_op;
 
@@ -585,6 +643,85 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         return abs_ok && rel_ok;
     };
 
+    auto assembleDtOnlyJacobianAndLumpedDiagonal = [&](const systems::SystemStateView& state) -> bool {
+        if (!ptc_can_run) {
+            return false;
+        }
+
+        auto* mass_lumped = workspace.ptc_mass_lumped.get();
+        FE_CHECK_NOT_NULL(mass_lumped, "NewtonSolver: PTC mass lumped vector");
+
+        const int max_order = transient.system().temporalOrder();
+        if (max_order <= 0) {
+            return false;
+        }
+
+        auto ctx_base = transient.integrator().buildContext(max_order, state);
+        assembly::TimeIntegrationContext ctx_dt_only = ctx_base;
+        ctx_dt_only.time_derivative_term_weight = static_cast<Real>(1.0);
+        ctx_dt_only.non_time_derivative_term_weight = static_cast<Real>(0.0);
+
+        systems::SystemStateView state_dt = state;
+        state_dt.time_integration = &ctx_dt_only;
+
+        J.zero();
+        auto J_view = J.createAssemblyView();
+        FE_CHECK_NOT_NULL(J_view.get(), "NewtonSolver: PTC dt-only Jacobian view");
+
+        transient.system().beginTimeStep();
+        systems::AssemblyRequest req;
+        req.op = options_.jacobian_op;
+        req.want_matrix = true;
+        req.zero_outputs = true;
+        req.suppress_constraint_inhomogeneity = true;
+        const auto ar = transient.system().assemble(req, state_dt, J_view.get(), /*vector_out=*/nullptr);
+        FE_THROW_IF(!ar.success, FEException,
+                    "NewtonSolver: PTC dt-only Jacobian assembly failed: " + ar.error_message);
+
+        // Lump: m = A_dt * 1  (row sums of dt-only Jacobian).
+        residual_scratch.set(static_cast<Real>(1.0));
+        residual_scratch.updateGhosts();
+        mass_lumped->zero();
+        J.mult(residual_scratch, *mass_lumped);
+        ptc_mass_ready = true;
+        return true;
+    };
+
+    auto applyPtcDiagonalShift = [&](double target_gamma) {
+        if (!ptc_can_run || !ptc_mass_ready) {
+            return;
+        }
+        const double clamped = std::clamp(target_gamma, 0.0, options_.pseudo_transient.gamma_max);
+        const double delta_gamma = clamped - ptc_gamma_applied;
+        if (delta_gamma == 0.0) {
+            ptc_gamma_applied = clamped;
+            return;
+        }
+
+        auto* mass_lumped = workspace.ptc_mass_lumped.get();
+        FE_CHECK_NOT_NULL(mass_lumped, "NewtonSolver: PTC mass lumped vector");
+        auto m_view = mass_lumped->createAssemblyView();
+        FE_CHECK_NOT_NULL(m_view.get(), "NewtonSolver: PTC mass view");
+
+        auto J_mod = J.createAssemblyView();
+        FE_CHECK_NOT_NULL(J_mod.get(), "NewtonSolver: PTC matrix modify view");
+        J_mod->beginAssemblyPhase();
+        for (const auto dof : ptc_owned_dofs) {
+            const Real m = m_view->getVectorEntry(dof);
+            const double md = std::abs(static_cast<double>(m));
+            if (!(md > 0.0) || !std::isfinite(md)) {
+                continue;
+            }
+            const double v = delta_gamma * md;
+            if (v == 0.0 || !std::isfinite(v)) {
+                continue;
+            }
+            J_mod->addMatrixEntry(dof, dof, static_cast<Real>(v), assembly::AddMode::Add);
+        }
+        J_mod->finalizeAssembly();
+        ptc_gamma_applied = clamped;
+    };
+
     bool have_residual = false;
     double current_residual_norm = std::numeric_limits<double>::quiet_NaN();
     bool have_jacobian = false;
@@ -613,6 +750,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (need_jacobian && options_.assemble_both_when_possible && same_op) {
                 // Residual and Jacobian share the same operator tag, so we can assemble both in one pass.
                 current_residual_norm = assembleJacobianAndResidual(state);
+                ptc_gamma_applied = 0.0;
                 jacobian_ready = true;
                 have_jacobian = true;
                 last_jacobian_it = it;
@@ -624,6 +762,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 current_residual_norm = assembleResidualOnly(state, /*phase=*/nullptr);
                 if (need_jacobian) {
                     assembleJacobianOnly(state);
+                    ptc_gamma_applied = 0.0;
                     jacobian_ready = true;
                     have_jacobian = true;
                     last_jacobian_it = it;
@@ -656,8 +795,24 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             return report;
         }
 
+        if (ptc_can_run) {
+            if (options_.pseudo_transient.update_from_residual_ratio && ptc_mass_ready &&
+                std::isfinite(ptc_prev_residual_norm) && ptc_prev_residual_norm > 0.0 &&
+                std::isfinite(current_residual_norm) && current_residual_norm >= 0.0) {
+                const double ratio = current_residual_norm / ptc_prev_residual_norm;
+                if (std::isfinite(ratio) && ratio > 0.0) {
+                    ptc_gamma = std::min(ptc_gamma * ratio, options_.pseudo_transient.gamma_max);
+                    if (ptc_gamma < options_.pseudo_transient.gamma_drop_tolerance) {
+                        ptc_gamma = 0.0;
+                    }
+                }
+            }
+            ptc_prev_residual_norm = current_residual_norm;
+        }
+
         if (need_jacobian && !jacobian_ready) {
             assembleJacobianOnly(state);
+            ptc_gamma_applied = 0.0;
             have_jacobian = true;
             last_jacobian_it = it;
         }
@@ -798,22 +953,105 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
 
         du.zero();
-        if (oopTraceEnabled()) {
-            traceLog("NewtonSolver: calling linear.solve()");
+
+        const bool ptc_always_on = ptc_can_run && !options_.pseudo_transient.activate_on_linear_failure &&
+                                  (options_.pseudo_transient.gamma_initial > 0.0);
+        if (ptc_always_on && !ptc_mass_ready) {
+            // Assemble dt-only Jacobian to build a mass-like diagonal, then restore the physical Jacobian.
+            (void)assembleDtOnlyJacobianAndLumpedDiagonal(state);
+
+            if (options_.assemble_both_when_possible && same_op) {
+                current_residual_norm = assembleJacobianAndResidual(state);
+                have_residual = true;
+                have_jacobian = true;
+                last_jacobian_it = it;
+            } else {
+                current_residual_norm = assembleResidualOnly(state, /*phase=*/"ptc_restore");
+                have_residual = true;
+                assembleJacobianOnly(state);
+                ptc_gamma_applied = 0.0;
+                have_jacobian = true;
+                last_jacobian_it = it;
+            }
+            ptc_gamma_applied = 0.0;
+            ptc_gamma = options_.pseudo_transient.gamma_initial;
         }
-        report.linear = linear.solve(J, du, r);
-        if (oopTraceEnabled()) {
-            std::ostringstream oss;
-            oss << "NewtonSolver: linear solve converged=" << report.linear.converged
-                << " iters=" << report.linear.iterations
-                << " r0=" << report.linear.initial_residual_norm
-                << " rn=" << report.linear.final_residual_norm
-                << " rel=" << report.linear.relative_residual
-                << " msg='" << report.linear.message << "'";
-            traceLog(oss.str());
+
+        // Apply current PTC diagonal shift (may be zero).
+        if (ptc_can_run && ptc_mass_ready) {
+            applyPtcDiagonalShift(ptc_gamma);
         }
-        FE_THROW_IF(!report.linear.converged, FEException,
-                    "NewtonSolver: linear solve did not converge: " + report.linear.message);
+
+        int ptc_retries = 0;
+        while (true) {
+            if (oopTraceEnabled()) {
+                traceLog("NewtonSolver: calling linear.solve()");
+            }
+            report.linear = linear.solve(J, du, r);
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: linear solve converged=" << report.linear.converged
+                    << " iters=" << report.linear.iterations
+                    << " r0=" << report.linear.initial_residual_norm
+                    << " rn=" << report.linear.final_residual_norm
+                    << " rel=" << report.linear.relative_residual
+                    << " msg='" << report.linear.message << "'";
+                traceLog(oss.str());
+            }
+            if (report.linear.converged) {
+                break;
+            }
+
+            const bool can_activate_ptc = ptc_can_run && options_.pseudo_transient.activate_on_linear_failure;
+            if (!can_activate_ptc) {
+                FE_THROW(FEException, "NewtonSolver: linear solve did not converge: " + report.linear.message);
+            }
+
+            // Lazily build the dt-only lumped diagonal when first needed.
+            if (!ptc_mass_ready) {
+                (void)assembleDtOnlyJacobianAndLumpedDiagonal(state);
+
+                // Restore the physical Jacobian (dt-only assembly overwrote `J`).
+                if (options_.assemble_both_when_possible && same_op) {
+                    current_residual_norm = assembleJacobianAndResidual(state);
+                    have_residual = true;
+                    have_jacobian = true;
+                    last_jacobian_it = it;
+                } else {
+                    current_residual_norm = assembleResidualOnly(state, /*phase=*/"ptc_restore");
+                    have_residual = true;
+                    assembleJacobianOnly(state);
+                    ptc_gamma_applied = 0.0;
+                    have_jacobian = true;
+                    last_jacobian_it = it;
+                }
+                ptc_gamma_applied = 0.0;
+            }
+
+            // Increase diagonal dominance and retry.
+            if (!(ptc_gamma > 0.0)) {
+                ptc_gamma = (options_.pseudo_transient.gamma_initial > 0.0)
+                                ? options_.pseudo_transient.gamma_initial
+                                : 1.0;
+            } else {
+                ptc_gamma = std::min(ptc_gamma * options_.pseudo_transient.gamma_growth,
+                                     options_.pseudo_transient.gamma_max);
+            }
+
+            if (oopTraceEnabled()) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: PTC retry linear solve (gamma=" << ptc_gamma
+                    << ", retry=" << (ptc_retries + 1) << "/" << options_.pseudo_transient.max_linear_retries << ")";
+                traceLog(oss.str());
+            }
+
+            applyPtcDiagonalShift(ptc_gamma);
+
+            ++ptc_retries;
+            FE_THROW_IF(ptc_retries >= options_.pseudo_transient.max_linear_retries, FEException,
+                        "NewtonSolver: linear solve did not converge (PTC retries exhausted): " + report.linear.message);
+            du.zero();
+        }
 
         if (options_.scale_dt_increments && !workspace.dt_field_dofs.empty()) {
             double factor = options_.dt_increment_scale;

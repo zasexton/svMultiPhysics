@@ -27,7 +27,7 @@ namespace test {
 TEST(IndexTest, IndexSetDefaultExtent)
 {
     IndexSet set;
-    EXPECT_EQ(set.extent(), 3);
+    EXPECT_EQ(set.extent(), 0);
 }
 
 TEST(IndexTest, IndexSetCustomExtent)
@@ -49,7 +49,7 @@ TEST(IndexTest, IndexNamedConstruction)
 {
     const Index i("i");
     EXPECT_EQ(i.name(), "i");
-    EXPECT_EQ(i.extent(), 3);
+    EXPECT_EQ(i.extent(), 0);
 }
 
 TEST(IndexTest, IndexUniqueIds)
@@ -104,4 +104,3 @@ TEST(IndexTest, IndexIdThreadSafety)
 } // namespace forms
 } // namespace FE
 } // namespace svmp
-

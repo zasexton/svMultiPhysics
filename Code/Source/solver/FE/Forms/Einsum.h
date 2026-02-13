@@ -27,12 +27,20 @@ namespace forms {
  *     - 0 free indices: scalar output
  *     - 1 free index: vector output (`AsVector`)
  *     - 2 free indices: matrix output (`AsTensor`)
- * - Index ranges are finite (from IndexSet extent; default 3).
+ * - Index ranges are finite (from IndexSet extent; extent==0 is inferred from the
+ *   bound function-space topological dimension, falling back to 3 if unknown).
  * - Only rank-1 and rank-2 `IndexedAccess` nodes are supported.
  *
  * @throws std::invalid_argument if the expression contains unsupported indexed patterns.
  */
 [[nodiscard]] FormExpr einsum(const FormExpr& expr);
+
+/**
+ * @brief Lower indexed expressions via Einstein summation, with explicit auto-extent resolution.
+ *
+ * Any IndexSet extents equal to 0 are replaced by @p auto_extent before lowering.
+ */
+[[nodiscard]] FormExpr einsum(const FormExpr& expr, int auto_extent);
 
 } // namespace forms
 } // namespace FE

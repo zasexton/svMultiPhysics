@@ -6,6 +6,8 @@
  */
 
 #include "Forms/Tensor/TensorContraction.h"
+
+#include "Forms/IndexExtent.h"
 #include "Forms/Tensor/TensorIndex.h"
 
 #include <algorithm>
@@ -47,6 +49,8 @@ ContractionAnalysis analyzeContractions(const FormExpr& expr)
         return out;
     }
 
+    const int auto_extent = inferAutoIndexExtent(expr);
+
     std::unordered_map<int, IndexUseState> uses;
     uses.reserve(16);
 
@@ -78,7 +82,7 @@ ContractionAnalysis analyzeContractions(const FormExpr& expr)
                 const int id = ids[static_cast<std::size_t>(k)];
                 const int e = ext[static_cast<std::size_t>(k)];
                 const auto v = vars[static_cast<std::size_t>(k)];
-                if (id < 0 || e <= 0) {
+                if (id < 0 || e < 0) {
                     out.ok = false;
                     out.message = "TensorContraction: invalid index id/extent for IndexedAccess";
                     return;
@@ -98,12 +102,15 @@ ContractionAnalysis analyzeContractions(const FormExpr& expr)
                     if (u.name.empty()) {
                         u.name = fallbackName(id);
                     }
-                } else if (u.extent != e) {
+                } else if (u.extent > 0 && e > 0 && u.extent != e) {
                     out.ok = false;
                     out.message = "TensorContraction: index '" + u.name + "' has extent " +
                                   std::to_string(e) + " but was previously seen with extent " +
                                   std::to_string(u.extent);
                     return;
+                } else if (u.extent == 0 && e > 0) {
+                    // Resolve previously-auto extent to an explicit one.
+                    u.extent = e;
                 } else if (u.count == 1 &&
                            u.variance != tensor::IndexVariance::None &&
                            v != tensor::IndexVariance::None &&
@@ -131,6 +138,17 @@ ContractionAnalysis analyzeContractions(const FormExpr& expr)
     visit(visit, *expr.node());
     if (!out.ok) {
         return out;
+    }
+
+    for (auto& [id, st] : uses) {
+        if (st.extent == 0) {
+            st.extent = auto_extent;
+        }
+        if (st.extent <= 0) {
+            out.ok = false;
+            out.message = "TensorContraction: invalid index extent after auto-extent resolution";
+            return out;
+        }
     }
 
     // Partition indices into free/bound sets.
@@ -358,6 +376,8 @@ ContractionTransformResult contractIndices(const FormExpr& expr,
         return out;
     }
 
+    const int auto_extent = forms::inferAutoIndexExtent(expr);
+
     // Determine canonical name/extent for keep_id (or fall back to eliminate_id extent).
     std::optional<int> keep_extent;
     std::optional<std::string> keep_name;
@@ -382,7 +402,7 @@ ContractionTransformResult contractIndices(const FormExpr& expr,
                 for (int k = 0; k < rank; ++k) {
                     const auto idx = static_cast<std::size_t>(k);
                     if (ids[idx] == keep_id) {
-                        if (!keep_extent.has_value()) keep_extent = ext[idx];
+                        if (!keep_extent.has_value()) keep_extent = (ext[idx] == 0) ? auto_extent : ext[idx];
                         if (!keep_name.has_value() && !names[idx].empty()) keep_name = std::string(names[idx]);
                         if (!keep_var_observed.has_value()) keep_var_observed = vars[idx];
                         return;
@@ -411,7 +431,7 @@ ContractionTransformResult contractIndices(const FormExpr& expr,
                     for (int k = 0; k < rank; ++k) {
                         const auto idx = static_cast<std::size_t>(k);
                         if (ids[idx] == eliminate_id) {
-                            keep_extent = ext[idx];
+                            keep_extent = (ext[idx] == 0) ? auto_extent : ext[idx];
                             return;
                         }
                     }
@@ -483,6 +503,7 @@ ContractionTransformResult contractIndices(const FormExpr& expr,
         if (!changed) {
             return std::nullopt;
         }
+        ext = forms::resolveAutoIndexExtents(ext, rank, auto_extent);
         return FormExpr::indexedAccessRawWithMetadata(std::move(base), rank, std::move(ids), std::move(ext), vars, std::move(names));
     };
 

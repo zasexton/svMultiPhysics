@@ -8,6 +8,7 @@
 #include "Forms/SymbolicDifferentiation.h"
 
 #include "Core/Types.h"
+#include "Forms/IndexExtent.h"
 #include "Forms/Tensor/TensorDifferentiation.h"
 
 #include <cmath>
@@ -541,6 +542,8 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
     std::optional<std::string> wrt_field_delta_name =
         wrt_field_name ? std::optional<std::string>(makeDeltaName(*wrt_field_name)) : std::nullopt;
 
+    const int auto_extent = inferAutoIndexExtent(residual_form);
+
     const auto diff = [&](const auto& self, const std::shared_ptr<FormExprNode>& node) -> DiffPair {
         if (!node) {
             throw std::invalid_argument("differentiateResidual: encountered null node");
@@ -840,9 +843,10 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                     vars = *vars_opt;
                 }
 
+                const auto ext = resolveAutoIndexExtents(*ext_opt, rank, auto_extent);
                 const auto a = diff1(0);
-                out.primal = FormExpr::indexedAccessRawWithMetadata(a.primal, rank, *ids_opt, *ext_opt, vars, names);
-                out.deriv = FormExpr::indexedAccessRawWithMetadata(a.deriv, rank, *ids_opt, *ext_opt, vars, names);
+                out.primal = FormExpr::indexedAccessRawWithMetadata(a.primal, rank, *ids_opt, ext, vars, names);
+                out.deriv = FormExpr::indexedAccessRawWithMetadata(a.deriv, rank, *ids_opt, ext, vars, names);
                 break;
             }
 
@@ -1376,6 +1380,8 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
     std::optional<FormExprNode::SpaceSignature> wrt_field_sig{};
     std::optional<std::string> wrt_field_name{};
 
+    const int auto_extent = inferAutoIndexExtent(expr);
+
     const auto diff = [&](const auto& self, const std::shared_ptr<FormExprNode>& node) -> DiffPair {
         if (!node) {
             throw std::invalid_argument("directionalDerivativeWrtField: encountered null node");
@@ -1626,9 +1632,10 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                     vars = *vars_opt;
                 }
 
+                const auto ext = resolveAutoIndexExtents(*ext_opt, rank, auto_extent);
                 const auto a = diff1(0);
-                out.primal = FormExpr::indexedAccessRawWithMetadata(a.primal, rank, *ids_opt, *ext_opt, vars, names);
-                out.deriv = FormExpr::indexedAccessRawWithMetadata(a.deriv, rank, *ids_opt, *ext_opt, vars, names);
+                out.primal = FormExpr::indexedAccessRawWithMetadata(a.primal, rank, *ids_opt, ext, vars, names);
+                out.deriv = FormExpr::indexedAccessRawWithMetadata(a.deriv, rank, *ids_opt, ext, vars, names);
                 break;
             }
 

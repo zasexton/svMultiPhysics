@@ -7,6 +7,8 @@
 
 #include "Forms/Tensor/SymmetryOptimizer.h"
 
+#include "Forms/IndexExtent.h"
+
 #include <algorithm>
 #include <array>
 #include <stdexcept>
@@ -188,6 +190,8 @@ SymmetryLoweringResult lowerWithSymmetry(const FormExpr& expr)
         return out;
     }
 
+    const int auto_extent = forms::inferAutoIndexExtent(expr);
+
     FormExpr::NodeTransform transform;
     transform = [&](const FormExprNode& node) -> std::optional<FormExpr> {
         if (node.type() != FormExprType::IndexedAccess) {
@@ -222,7 +226,7 @@ SymmetryLoweringResult lowerWithSymmetry(const FormExpr& expr)
         }
 
         auto ids = *ids_opt;
-        const auto ext = *ext_opt;
+        const auto ext = forms::resolveAutoIndexExtents(*ext_opt, rank, auto_extent);
         auto vars = readIndexVariances(node);
         auto names = readIndexNames(node);
 
@@ -259,4 +263,3 @@ SymmetryLoweringResult lowerWithSymmetry(const FormExpr& expr)
 } // namespace forms
 } // namespace FE
 } // namespace svmp
-

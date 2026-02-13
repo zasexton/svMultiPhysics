@@ -8,6 +8,7 @@
 #include "Forms/JIT/KernelIR.h"
 
 #include "Core/FEException.h"
+#include "Forms/IndexExtent.h"
 #include "Forms/Tensor/TensorIndex.h"
 
 #include <algorithm>
@@ -341,6 +342,7 @@ struct ImmPayload {
 struct Builder {
     KernelIRBuildOptions options{};
     KernelIRBuildResult result{};
+    int auto_index_extent{3};
 
     std::vector<KernelIROp> ops{};
     std::vector<std::uint32_t> children{};
@@ -441,7 +443,8 @@ struct Builder {
             std::uint64_t packed_ext = 0;
             for (int k = 0; k < rank; ++k) {
                 const int id = ids[static_cast<std::size_t>(k)];
-                const int e = ext[static_cast<std::size_t>(k)];
+                const int raw = ext[static_cast<std::size_t>(k)];
+                const int e = (raw == 0) ? auto_index_extent : raw;
                 if (e <= 0 || e > 255) {
                     throw std::invalid_argument("KernelIR: IndexedAccess index extent out of supported range (1..255)");
                 }
@@ -595,6 +598,7 @@ KernelIRBuildResult lowerToKernelIR(const FormExprNode& root,
     Builder b;
     b.options = options;
     b.result.cacheable = true;
+    b.auto_index_extent = forms::inferAutoIndexExtent(root);
 
     const auto root_idx = b.lower(root);
     b.result.ir.ops = std::move(b.ops);

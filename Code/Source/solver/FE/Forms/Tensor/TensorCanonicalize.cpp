@@ -7,6 +7,7 @@
 
 #include "Forms/Tensor/TensorCanonicalize.h"
 
+#include "Forms/IndexExtent.h"
 #include "Forms/Tensor/TensorIndex.h"
 
 #include <algorithm>
@@ -70,6 +71,8 @@ std::string toCanonicalString(const FormExpr& expr)
         return "<empty>";
     }
 
+    const int auto_extent = forms::inferAutoIndexExtent(expr);
+
     const auto renaming = computeCanonicalIndexRenaming(expr);
     if (renaming.old_to_canonical.empty()) {
         return expr.toString();
@@ -111,7 +114,8 @@ std::string toCanonicalString(const FormExpr& expr)
         }
 
         std::array<std::string, 4> names{};
-        return FormExpr::indexedAccessRawWithMetadata(std::move(base), rank, std::move(ids), *ext_opt, std::move(vars), std::move(names));
+        const auto ext = forms::resolveAutoIndexExtents(*ext_opt, rank, auto_extent);
+        return FormExpr::indexedAccessRawWithMetadata(std::move(base), rank, std::move(ids), ext, std::move(vars), std::move(names));
     };
 
     const auto canonical = expr.transformNodes(transform);

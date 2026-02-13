@@ -188,8 +188,19 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         const auto ct_c = FormExpr::constant(options_.ct_c);
 
         // Element metric tensor Kxi = J^{-T} J^{-1}.
+        //
+        // Geometry Jacobians are stored internally as 3x3 "frame" matrices so they are invertible
+        // even for dim<3 mappings. Restrict all metric contractions to the physical spatial
+        // dimension so the dummy thickness component does not contribute to trace(K) or (K:K).
         const auto Jinv_expr = Jinv();
-        const auto K = transpose(Jinv_expr) * Jinv_expr;
+        FormExpr Jinv_phys = Jinv_expr;
+        if (dim == 1) {
+            Jinv_phys = FormExpr::asTensor({{Jinv_expr.component(0, 0)}});
+        } else if (dim == 2) {
+            Jinv_phys = FormExpr::asTensor({{Jinv_expr.component(0, 0), Jinv_expr.component(0, 1)},
+                                            {Jinv_expr.component(1, 0), Jinv_expr.component(1, 1)}});
+        }
+        const auto K = transpose(Jinv_phys) * Jinv_phys;
         const auto nu = mu / rho;
 
         // Legacy-inspired tau_M (stored here as tau_M/rho, matching legacy fluid.cpp naming).

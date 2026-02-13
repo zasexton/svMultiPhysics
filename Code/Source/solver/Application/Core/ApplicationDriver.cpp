@@ -445,6 +445,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // 2 extra residual assembly passes per Newton iteration.
   opts.newton.use_line_search = false;
 
+  // Pseudo-transient continuation (PTC): if the linear solve stalls on distorted meshes,
+  // add a lumped dt-only diagonal to regularize early Newton iterations and relax it
+  // as the nonlinear residual decreases.
+  opts.newton.pseudo_transient.enabled = true;
+  opts.newton.pseudo_transient.activate_on_linear_failure = true;
+
   oopCout() << "[svMultiPhysics::Application] Transient solve: t0=" << opts.t0 << " dt=" << opts.dt
             << " t_end=" << opts.t_end << " max_steps=" << opts.max_steps
             << " scheme=GeneralizedAlpha rho_inf=" << opts.generalized_alpha_rho_inf

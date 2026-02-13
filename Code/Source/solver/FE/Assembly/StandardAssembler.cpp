@@ -3037,6 +3037,20 @@ void StandardAssembler::prepareContextFace(
             cell_coords_[i][0], cell_coords_[i][1], cell_coords_[i][2]};
     }
 
+    // Representative interior point for outward-normal consistency checks.
+    AssemblyContext::Vector3D cell_center{0.0, 0.0, 0.0};
+    if (!cell_coords_.empty()) {
+        for (const auto& xc : cell_coords_) {
+            cell_center[0] += xc[0];
+            cell_center[1] += xc[1];
+            cell_center[2] += xc[2];
+        }
+        const Real inv_n = Real(1.0) / static_cast<Real>(cell_coords_.size());
+        cell_center[0] *= inv_n;
+        cell_center[1] *= inv_n;
+        cell_center[2] *= inv_n;
+    }
+
     // 6. Create geometry mapping
     geometry::MappingRequest map_request;
     map_request.element_type = cell_type;
@@ -3231,6 +3245,21 @@ void StandardAssembler::prepareContextFace(
         AssemblyContext::Vector3D n_phys;
         computeSurfaceMeasureAndNormal(n_ref, scratch_inv_jacobians_[q], det_J, dim,
                                        surface_measure, n_phys);
+
+        // Ensure the physical unit normal points outward from the cell interior.
+        // For some meshes, facet vertex ordering can be inconsistent even when det(J) > 0; rely on a
+        // geometric check against an interior point (legacy gnnb-style).
+        {
+            const Real dx = cell_center[0] - x_phys[0];
+            const Real dy = cell_center[1] - x_phys[1];
+            const Real dz = cell_center[2] - x_phys[2];
+            const Real dot = dx * n_phys[0] + dy * n_phys[1] + dz * n_phys[2];
+            if (dot > Real(0.0)) {
+                n_phys[0] = -n_phys[0];
+                n_phys[1] = -n_phys[1];
+                n_phys[2] = -n_phys[2];
+            }
+        }
 
         // Convert canonical face weights to element-reference facet measure, then map to physical.
         Real w = quad_weights[q] *
@@ -3672,6 +3701,15 @@ void StandardAssembler::computeSurfaceMeasureAndNormal(
         for (int k = 0; k < dim; ++k) {
             // J^{-T}_{ik} = J^{-1}_{ki}
             Jit_n[i] += J_inv[k][i] * n_ref[k];
+        }
+    }
+
+    // For orientation-reversing mappings (det(J) < 0), the outward normal must be flipped.
+    // The cofactor identity uses cof(J) = det(J) * J^{-T}, so the sign of det(J) is part
+    // of the correct normal direction even though we use |det(J)| for surface measures.
+    if (det_J < 0.0) {
+        for (int i = 0; i < dim; ++i) {
+            Jit_n[i] = -Jit_n[i];
         }
     }
 

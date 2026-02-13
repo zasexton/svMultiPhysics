@@ -188,6 +188,10 @@ inline FormExpr t() { return FormExpr::time(); }
 inline FormExpr deltat() { return FormExpr::timeStep(); }
 inline FormExpr deltat_eff() { return FormExpr::effectiveTimeStep(); }
 
+// NOTE: Geometry Jacobians are stored internally as 3x3 "frame" matrices so they are invertible
+// even for dim<3 mappings. At the FormExpr level, `J()` / `Jinv()` are shaped as (dim×dim),
+// where dim is the current AssemblyContext spatial dimension, so contractions like `trace(Jinv())`
+// and `trace(transpose(Jinv())*Jinv())` automatically use the physical dimension.
 inline FormExpr J() { return FormExpr::jacobian(); }
 inline FormExpr Jinv() { return FormExpr::jacobianInverse(); }
 inline FormExpr detJ() { return FormExpr::jacobianDeterminant(); }

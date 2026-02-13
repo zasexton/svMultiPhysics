@@ -8,6 +8,7 @@
 #include "Forms/Einsum.h"
 
 #include "Core/FEException.h"
+#include "Forms/IndexExtent.h"
 
 #include <algorithm>
 #include <unordered_map>
@@ -343,12 +344,18 @@ void collectIndexUses(const FormExprNode& node,
                 throw std::invalid_argument("einsum: invalid (negative) index id");
             }
             const int e = ext[static_cast<std::size_t>(k)];
+            if (e < 0) {
+                throw std::invalid_argument("einsum: invalid (negative) index extent");
+            }
             auto& u = uses[id];
-            if (u.extent == 0) {
-                u.extent = e;
+            if (u.count == 0) {
+                u.extent = e; // may be 0 ("auto")
                 u.first_occurrence = visit_counter;
-            } else if (u.extent != e) {
+            } else if (u.extent > 0 && e > 0 && u.extent != e) {
                 throw std::invalid_argument("einsum: inconsistent index extents for a repeated index");
+            } else if (u.extent == 0 && e > 0) {
+                // Resolve previously-auto extent to an explicit one.
+                u.extent = e;
             }
             u.count += 1;
         }
@@ -361,9 +368,12 @@ void collectIndexUses(const FormExprNode& node,
 
 } // namespace
 
-FormExpr einsum(const FormExpr& expr)
+FormExpr einsum(const FormExpr& expr, int auto_extent)
 {
     if (!expr.isValid()) return {};
+    if (auto_extent <= 0) {
+        throw std::invalid_argument("einsum: auto_extent must be > 0");
+    }
 
     std::unordered_map<int, IndexUse> uses;
     std::size_t visit_counter = 0;
@@ -394,6 +404,12 @@ FormExpr einsum(const FormExpr& expr)
                   if (a.first_occurrence != b.first_occurrence) return a.first_occurrence < b.first_occurrence;
                   return a.id < b.id;
               });
+
+    for (auto& u : indices) {
+        if (u.extent == 0) {
+            u.extent = auto_extent;
+        }
+    }
 
     std::vector<int> free_ids;
     std::vector<int> free_extents;
@@ -493,6 +509,12 @@ FormExpr einsum(const FormExpr& expr)
         rows.push_back(std::move(row));
     }
     return FormExpr::asTensor(std::move(rows));
+}
+
+FormExpr einsum(const FormExpr& expr)
+{
+    if (!expr.isValid()) return {};
+    return einsum(expr, inferAutoIndexExtent(expr));
 }
 
 } // namespace forms
