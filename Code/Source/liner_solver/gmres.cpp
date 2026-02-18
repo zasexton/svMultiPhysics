@@ -47,6 +47,7 @@
 #include "Array3.h"
 
 #include <math.h>
+#include <limits>
 
 namespace gmres {
 
@@ -208,8 +209,16 @@ void gmres(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLs
 
       h(i+1,i) = sqrt(fabs(h(i+1,i)));
 
-      u_slice_1 = u.rslice(i+1);
-      omp_la::omp_mul_v(dof, nNo, 1.0/h(i+1,i), u_slice_1);
+      // Guard against (near-)breakdown where the next Krylov vector has near-zero norm.
+      // The FSILS GMRES implementation normalizes by `h(i+1,i)` and will produce NaN/Inf
+      // for small values (especially in small problems with short minimal polynomials).
+      const double breakdown_tol = sqrt(std::numeric_limits<double>::epsilon());
+      if (h(i+1,i) > breakdown_tol) {
+        u_slice_1 = u.rslice(i+1);
+        omp_la::omp_mul_v(dof, nNo, 1.0/h(i+1,i), u_slice_1);
+      } else {
+        h(i+1,i) = 0.0;
+      }
 
       for (int j = 0; j <= i-1; j++) {
         double tmp = c(j)*h(j,i) + s(j)*h(j+1,i);
@@ -218,8 +227,13 @@ void gmres(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLs
       }
 
       double tmp = sqrt(h(i,i)*h(i,i) + h(i+1,i)*h(i+1,i));
-      c(i) = h(i,i) / tmp;
-      s(i) = h(i+1,i) / tmp;
+      if (tmp == 0.0) {
+        c(i) = 1.0;
+        s(i) = 0.0;
+      } else {
+        c(i) = h(i,i) / tmp;
+        s(i) = h(i+1,i) / tmp;
+      }
       h(i,i) = tmp;
       h(i+1,i) = 0.0;
       err(i+1) = -s(i)*err(i);
@@ -622,5 +636,4 @@ void gmres_v(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
 }
 
 };
-
 

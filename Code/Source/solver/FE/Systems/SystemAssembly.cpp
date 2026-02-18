@@ -17,11 +17,14 @@
 #include "Assembly/TimeIntegrationContext.h"
 
 #include "Forms/FormKernels.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 
 #include "Backends/Interfaces/GenericVector.h"
+#include "Backends/FSILS/FsilsMatrix.h"
 #include "Core/Logger.h"
 #include "Core/Alignment.h"
 #include "Core/AlignedAllocator.h"
+#include "Core/FEConfig.h"
 
 #include <algorithm>
 #include <array>
@@ -34,6 +37,10 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#if FE_HAS_MPI
+#  include <mpi.h>
+#endif
 
 namespace svmp {
 namespace FE {
@@ -84,6 +91,100 @@ void mergeAssemblyResult(assembly::AssemblyResult& total, const assembly::Assemb
     total.matrix_entries_inserted += part.matrix_entries_inserted;
     total.vector_entries_inserted += part.vector_entries_inserted;
 }
+
+#if FE_HAS_MPI
+MPI_Datatype mpiRealType()
+{
+    if (sizeof(Real) == sizeof(double)) {
+        return MPI_DOUBLE;
+    }
+    if (sizeof(Real) == sizeof(float)) {
+        return MPI_FLOAT;
+    }
+    return MPI_LONG_DOUBLE;
+}
+
+MPI_Datatype mpiGlobalIndexType()
+{
+    if (sizeof(GlobalIndex) == sizeof(std::int64_t)) {
+        return MPI_INT64_T;
+    }
+    if (sizeof(GlobalIndex) == sizeof(long long)) {
+        return MPI_LONG_LONG;
+    }
+    if (sizeof(GlobalIndex) == sizeof(long)) {
+        return MPI_LONG;
+    }
+    return MPI_LONG_LONG;
+}
+
+std::vector<std::pair<GlobalIndex, Real>> allreduceSumSparsePairs(std::vector<std::pair<GlobalIndex, Real>> local,
+                                                                  MPI_Comm comm)
+{
+    int comm_size = 1;
+    MPI_Comm_size(comm, &comm_size);
+    if (comm_size <= 1) {
+        return local;
+    }
+
+    const int local_n = static_cast<int>(local.size());
+    std::vector<int> counts(static_cast<std::size_t>(comm_size), 0);
+    MPI_Allgather(&local_n, 1, MPI_INT, counts.data(), 1, MPI_INT, comm);
+
+    std::vector<int> displs(static_cast<std::size_t>(comm_size), 0);
+    int total_n = 0;
+    for (int r = 0; r < comm_size; ++r) {
+        displs[static_cast<std::size_t>(r)] = total_n;
+        total_n += counts[static_cast<std::size_t>(r)];
+    }
+
+    std::vector<GlobalIndex> idx_local(static_cast<std::size_t>(local_n), GlobalIndex(0));
+    std::vector<Real> val_local(static_cast<std::size_t>(local_n), Real(0.0));
+    for (int i = 0; i < local_n; ++i) {
+        idx_local[static_cast<std::size_t>(i)] = local[static_cast<std::size_t>(i)].first;
+        val_local[static_cast<std::size_t>(i)] = local[static_cast<std::size_t>(i)].second;
+    }
+
+    std::vector<GlobalIndex> idx_all(static_cast<std::size_t>(total_n), GlobalIndex(0));
+    std::vector<Real> val_all(static_cast<std::size_t>(total_n), Real(0.0));
+    MPI_Allgatherv(idx_local.data(),
+                   local_n,
+                   mpiGlobalIndexType(),
+                   idx_all.data(),
+                   counts.data(),
+                   displs.data(),
+                   mpiGlobalIndexType(),
+                   comm);
+    MPI_Allgatherv(val_local.data(),
+                   local_n,
+                   mpiRealType(),
+                   val_all.data(),
+                   counts.data(),
+                   displs.data(),
+                   mpiRealType(),
+                   comm);
+
+    std::vector<std::pair<GlobalIndex, Real>> merged;
+    merged.reserve(static_cast<std::size_t>(total_n));
+    for (int i = 0; i < total_n; ++i) {
+        merged.emplace_back(idx_all[static_cast<std::size_t>(i)], val_all[static_cast<std::size_t>(i)]);
+    }
+
+    std::sort(merged.begin(), merged.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    std::vector<std::pair<GlobalIndex, Real>> out;
+    out.reserve(merged.size());
+    for (const auto& kv : merged) {
+        if (out.empty() || kv.first != out.back().first) {
+            out.push_back(kv);
+        } else {
+            out.back().second += kv.second;
+        }
+    }
+    return out;
+}
+#endif
 
 class SparseVectorAccumulatorView final : public assembly::GlobalSystemView {
 public:
@@ -244,6 +345,7 @@ assembly::AssemblyResult assembleOperator(
     assembly::GlobalSystemView* vector_out)
 {
     system.requireSetup();
+    system.last_rank_one_updates_.clear();
 
     FE_THROW_IF(request.op.empty(), InvalidArgumentException, "assembleOperator: empty operator tag");
     FE_THROW_IF(!system.operator_registry_.has(request.op), InvalidArgumentException,
@@ -684,24 +786,46 @@ assembly::AssemblyResult assembleOperator(
     }
 
     if (request.want_matrix && matrix_out != nullptr && system.coupled_boundary_) {
-        const auto integrals = system.coupled_boundary_->integrals().all();
-        if (!integrals.empty()) {
-            const auto regs = system.coupled_boundary_->registeredBoundaryFunctionals();
-            if (!regs.empty()) {
-                const auto n_dofs = system.dof_handler_.getDofMap().getNumDofs();
-                const auto& global_map = system.dof_handler_.getDofMap();
-                const auto& opts = assembler.getOptions();
-                const bool owned_rows_only = (opts.ghost_policy == assembly::GhostPolicy::OwnedRowsOnly);
+        bool skip_coupled_jacobian = false;
+        // Coupled BC Jacobian contributions (e.g., resistance/RCR) are dt-free terms.
+        // When assembling a dt-only Jacobian (used for PTC mass-lumping), the caller sets
+        // non_time_derivative_term_weight=0 to suppress dt-free contributions. Skip coupled
+        // BC Jacobian handling in that case to avoid spurious "symmetry check" warnings and
+        // unnecessary work.
+        if (state.time_integration != nullptr) {
+            constexpr Real kWeightTol = 1e-14;
+            const Real w = state.time_integration->non_time_derivative_term_weight;
+            if (std::abs(w) < kWeightTol) {
+                skip_coupled_jacobian = true;
+            }
+        }
+        if (skip_coupled_jacobian) {
+            traceLog("coupled Jacobian: skipped (non_time_derivative_term_weight ~ 0)");
+        } else {
+            const auto integrals = system.coupled_boundary_->integrals().all();
+            if (!integrals.empty()) {
+                const auto regs = system.coupled_boundary_->registeredBoundaryFunctionals();
+                if (!regs.empty()) {
+                    const auto coupling_t0 = std::chrono::steady_clock::now();
+                    const auto dropped_before = backends::FsilsMatrix::droppedEntryCount();
+                    traceLog("coupled Jacobian: " + std::to_string(regs.size()) +
+                             " registered functionals, " + std::to_string(integrals.size()) +
+                             " integral slots");
 
-                const auto& rec = system.fieldRecord(system.coupled_boundary_->primaryField());
-                FE_CHECK_NOT_NULL(rec.space.get(), "assembleOperator: coupled primary field space");
+                    const auto n_dofs = system.dof_handler_.getDofMap().getNumDofs();
+                    const auto& global_map = system.dof_handler_.getDofMap();
+                    const auto& opts = assembler.getOptions();
+                    const bool owned_rows_only = (opts.ghost_policy == assembly::GhostPolicy::OwnedRowsOnly);
 
-                const auto primary_idx = static_cast<std::size_t>(rec.id);
-                FE_THROW_IF(rec.id < 0 || primary_idx >= system.field_dof_handlers_.size(), InvalidStateException,
-                            "assembleOperator: invalid coupled primary field DOF handler index");
+                    const auto& rec = system.fieldRecord(system.coupled_boundary_->primaryField());
+                    FE_CHECK_NOT_NULL(rec.space.get(), "assembleOperator: coupled primary field space");
 
-                const auto& primary_map = system.field_dof_handlers_[primary_idx].getDofMap();
-                const auto primary_offset = system.field_dof_offsets_[primary_idx];
+                    const auto primary_idx = static_cast<std::size_t>(rec.id);
+                    FE_THROW_IF(rec.id < 0 || primary_idx >= system.field_dof_handlers_.size(), InvalidStateException,
+                                "assembleOperator: invalid coupled primary field DOF handler index");
+
+                    const auto& primary_map = system.field_dof_handlers_[primary_idx].getDofMap();
+                    const auto primary_offset = system.field_dof_offsets_[primary_idx];
 
                 auto build_integrand_with_trial = [&](const forms::FormExpr& integrand) -> forms::FormExpr {
                     const auto trial = forms::FormExpr::trialFunction(*rec.space, "u");
@@ -724,12 +848,16 @@ assembly::AssemblyResult assembleOperator(
                         continue;
                     }
 
+                    traceLog("  computing dQ/du for slot " + std::to_string(entry.slot) +
+                             " marker=" + std::to_string(entry.def.boundary_marker));
+
                     const auto integrand_trial = build_integrand_with_trial(entry.def.integrand);
                     forms::BoundaryFunctionalGradientKernel g_kernel(integrand_trial, entry.def.boundary_marker);
 
                     SparseVectorAccumulatorView g_view(n_dofs);
                     assembler.setRowDofMap(primary_map, primary_offset);
                     assembler.setColDofMap(primary_map, primary_offset);
+                    traceLog("    assembleBoundaryFaces start");
                     auto r = assembler.assembleBoundaryFaces(system.meshAccess(),
                                                              entry.def.boundary_marker,
                                                              *rec.space,
@@ -737,18 +865,32 @@ assembly::AssemblyResult assembleOperator(
                                                              g_kernel,
                                                              /*matrix_out=*/nullptr,
                                                              /*vector_out=*/&g_view);
-                    (void)r;
+	                    (void)r;
+                    traceLog("    assembleBoundaryFaces done");
 
-                    auto g_pairs = g_view.entriesSorted(/*abs_tol=*/1e-16);
+	                    auto g_pairs = g_view.entriesSorted(/*abs_tol=*/1e-16);
 
-                    if (entry.def.reduction == forms::BoundaryFunctional::Reduction::Average) {
-                        const Real area = system.coupled_boundary_->boundaryMeasure(entry.def.boundary_marker, state);
-                        FE_THROW_IF(std::abs(area) < 1e-14, InvalidArgumentException,
-                                    "assembleOperator: coupled boundary measure near zero for Average reduction");
-                        for (auto& kv : g_pairs) {
+#if FE_HAS_MPI
+                        {
+                            int mpi_initialized = 0;
+                            MPI_Initialized(&mpi_initialized);
+                            if (mpi_initialized) {
+                                g_pairs = allreduceSumSparsePairs(std::move(g_pairs), MPI_COMM_WORLD);
+                            }
+                        }
+#endif
+
+	                    if (entry.def.reduction == forms::BoundaryFunctional::Reduction::Average) {
+	                        const Real area = system.coupled_boundary_->boundaryMeasure(entry.def.boundary_marker, state);
+	                        FE_THROW_IF(std::abs(area) < 1e-14, InvalidArgumentException,
+	                                    "assembleOperator: coupled boundary measure near zero for Average reduction");
+	                        for (auto& kv : g_pairs) {
                             kv.second /= area;
                         }
                     }
+
+                    traceLog("  slot " + std::to_string(entry.slot) +
+                             " dQ/du: " + std::to_string(g_pairs.size()) + " nonzero entries");
 
                     dQ_du_by_slot[entry.slot] = std::move(g_pairs);
                 }
@@ -777,166 +919,222 @@ assembly::AssemblyResult assembleOperator(
                     if (k >= dQ_du_by_slot.size() || dQ_du_by_slot[k].empty()) {
                         continue;
                     }
+                    traceLog("  dR/dQ sensitivity: slot " + std::to_string(k) + " start");
                     SparseVectorAccumulatorView dR_view(static_cast<GlobalIndex>(n_dofs));
                     assembler.setCoupledValues(integrals_base, aux_state_base);
 
-                    // Cell terms.
-                    for (const auto& term : def.cells) {
-                        if (term.kernel->isMatrixOnly()) {
-                            continue;
-                        }
-                        const auto* base = dynamic_cast<const forms::NonlinearFormKernel*>(term.kernel.get());
-                        if (!base) {
-                            continue;
-                        }
-                        forms::CoupledResidualSensitivityKernel s_kernel(*base,
-                                                                         static_cast<std::uint32_t>(k),
-                                                                         aux_sens_span,
-                                                                         integrals_base.size());
+	                    // Cell terms.
+                    {
+                        int cell_term_idx = 0;
+	                    for (const auto& term : def.cells) {
+	                        if (term.kernel->isMatrixOnly()) {
+                                ++cell_term_idx;
+	                            continue;
+	                        }
 
-                        const auto& test_field = system.field_registry_.get(term.test_field);
-                        const auto& trial_field = system.field_registry_.get(term.trial_field);
+	                        const auto& test_field = system.field_registry_.get(term.test_field);
+	                        const auto& trial_field = system.field_registry_.get(term.trial_field);
+
+                        traceLog("    cell term " + std::to_string(cell_term_idx) +
+                                 " test='" + test_field.name + "' trial='" + trial_field.name + "' start");
 
                         assembler.setRowDofMap(system.field_dof_handlers_[static_cast<std::size_t>(test_field.id)].getDofMap(),
                                                system.field_dof_offsets_[static_cast<std::size_t>(test_field.id)]);
                         assembler.setColDofMap(system.field_dof_handlers_[static_cast<std::size_t>(trial_field.id)].getDofMap(),
                                                system.field_dof_offsets_[static_cast<std::size_t>(trial_field.id)]);
 
-                        if (term.test_field == term.trial_field) {
-                            auto rr = assembler.assembleVector(system.meshAccess(), *test_field.space, s_kernel, dR_view);
-                            FE_THROW_IF(!rr.success, InvalidStateException,
-                                        "assembleOperator: coupled dR/dQ sensitivity assembly failed");
-                        } else {
-                            assembly::DenseVectorView dummy_matrix(0);
-                            auto rr = assembler.assembleBoth(system.meshAccess(), *test_field.space, *trial_field.space, s_kernel,
-                                                             dummy_matrix, dR_view);
-                            FE_THROW_IF(!rr.success, InvalidStateException,
-                                        "assembleOperator: coupled dR/dQ sensitivity assembly failed");
-                        }
+	                        auto assemble_sensitivity = [&](const auto& base_kernel) {
+	                            forms::CoupledResidualSensitivityKernel s_kernel(base_kernel,
+	                                                                             static_cast<std::uint32_t>(k),
+	                                                                             aux_sens_span,
+	                                                                             integrals_base.size());
+	                            if (term.test_field == term.trial_field) {
+	                                auto rr = assembler.assembleVector(system.meshAccess(), *test_field.space, s_kernel, dR_view);
+	                                FE_THROW_IF(!rr.success, InvalidStateException,
+	                                            "assembleOperator: coupled dR/dQ sensitivity assembly failed");
+	                            } else {
+	                                assembly::DenseVectorView dummy_matrix(0);
+	                                auto rr = assembler.assembleBoth(system.meshAccess(), *test_field.space, *trial_field.space, s_kernel,
+	                                                                 dummy_matrix, dR_view);
+	                                FE_THROW_IF(!rr.success, InvalidStateException,
+	                                            "assembleOperator: coupled dR/dQ sensitivity assembly failed");
+	                            }
+	                        };
+
+	                        const auto* kernel = term.kernel.get();
+	                        if (const auto* jit = dynamic_cast<const forms::jit::JITKernelWrapper*>(kernel)) {
+	                            kernel = &jit->fallbackKernel();
+	                        }
+
+	                        if (const auto* base = dynamic_cast<const forms::NonlinearFormKernel*>(kernel)) {
+	                            assemble_sensitivity(*base);
+	                        } else if (const auto* base = dynamic_cast<const forms::SymbolicNonlinearFormKernel*>(kernel)) {
+	                            assemble_sensitivity(*base);
+	                        } else {
+                                ++cell_term_idx;
+	                            continue;
+	                        }
+                        traceLog("    cell term " + std::to_string(cell_term_idx) + " done");
+                        ++cell_term_idx;
+	                    }
                     }
 
                     // Boundary terms.
-                    if (request.assemble_boundary_terms) {
-                        for (const auto& term : def.boundary) {
-                            if (term.kernel->isMatrixOnly()) {
-                                continue;
-                            }
-                            const auto* base = dynamic_cast<const forms::NonlinearFormKernel*>(term.kernel.get());
-                            if (!base) {
-                                continue;
-                            }
-                            forms::CoupledResidualSensitivityKernel s_kernel(*base,
-                                                                             static_cast<std::uint32_t>(k),
-                                                                             aux_sens_span,
-                                                                             integrals_base.size());
+	                    if (request.assemble_boundary_terms) {
+	                        for (const auto& term : def.boundary) {
+	                            if (term.kernel->isMatrixOnly()) {
+	                                continue;
+	                            }
 
-                            const auto& test_field = system.field_registry_.get(term.test_field);
-                            const auto& trial_field = system.field_registry_.get(term.trial_field);
+	                            const auto& test_field = system.field_registry_.get(term.test_field);
+	                            const auto& trial_field = system.field_registry_.get(term.trial_field);
 
                             assembler.setRowDofMap(system.field_dof_handlers_[static_cast<std::size_t>(test_field.id)].getDofMap(),
                                                    system.field_dof_offsets_[static_cast<std::size_t>(test_field.id)]);
                             assembler.setColDofMap(system.field_dof_handlers_[static_cast<std::size_t>(trial_field.id)].getDofMap(),
                                                    system.field_dof_offsets_[static_cast<std::size_t>(trial_field.id)]);
 
-                            auto rr = assembler.assembleBoundaryFaces(system.meshAccess(),
-                                                                      term.marker,
-                                                                      *test_field.space,
-                                                                      *trial_field.space,
-                                                                      s_kernel,
-                                                                      /*matrix_out=*/nullptr,
-                                                                      /*vector_out=*/&dR_view);
-                            FE_THROW_IF(!rr.success, InvalidStateException,
-                                        "assembleOperator: coupled dR/dQ sensitivity assembly failed");
-                        }
-                    }
+	                            auto assemble_sensitivity = [&](const auto& base_kernel) {
+	                                forms::CoupledResidualSensitivityKernel s_kernel(base_kernel,
+	                                                                                 static_cast<std::uint32_t>(k),
+	                                                                                 aux_sens_span,
+	                                                                                 integrals_base.size());
+	                                auto rr = assembler.assembleBoundaryFaces(system.meshAccess(),
+	                                                                          term.marker,
+	                                                                          *test_field.space,
+	                                                                          *trial_field.space,
+	                                                                          s_kernel,
+	                                                                          /*matrix_out=*/nullptr,
+	                                                                          /*vector_out=*/&dR_view);
+	                                FE_THROW_IF(!rr.success, InvalidStateException,
+	                                            "assembleOperator: coupled dR/dQ sensitivity assembly failed");
+	                            };
+
+	                            const auto* kernel = term.kernel.get();
+	                            if (const auto* jit = dynamic_cast<const forms::jit::JITKernelWrapper*>(kernel)) {
+	                                kernel = &jit->fallbackKernel();
+	                            }
+
+	                            if (const auto* base = dynamic_cast<const forms::NonlinearFormKernel*>(kernel)) {
+	                                assemble_sensitivity(*base);
+	                            } else if (const auto* base = dynamic_cast<const forms::SymbolicNonlinearFormKernel*>(kernel)) {
+	                                assemble_sensitivity(*base);
+	                            } else {
+	                                continue;
+	                            }
+	                        }
+	                    }
 
                     // Interior-face terms.
-                    if (request.assemble_interior_face_terms) {
-                        for (const auto& term : def.interior) {
-                            if (term.kernel->isMatrixOnly()) {
-                                continue;
-                            }
-                            const auto* base = dynamic_cast<const forms::NonlinearFormKernel*>(term.kernel.get());
-                            if (!base) {
-                                continue;
-                            }
-                            forms::CoupledResidualSensitivityKernel s_kernel(*base,
-                                                                             static_cast<std::uint32_t>(k),
-                                                                             aux_sens_span,
-                                                                             integrals_base.size());
+	                    if (request.assemble_interior_face_terms) {
+	                        for (const auto& term : def.interior) {
+	                            if (term.kernel->isMatrixOnly()) {
+	                                continue;
+	                            }
 
-                            const auto& test_field = system.field_registry_.get(term.test_field);
-                            const auto& trial_field = system.field_registry_.get(term.trial_field);
+	                            const auto& test_field = system.field_registry_.get(term.test_field);
+	                            const auto& trial_field = system.field_registry_.get(term.trial_field);
 
                             assembler.setRowDofMap(system.field_dof_handlers_[static_cast<std::size_t>(test_field.id)].getDofMap(),
                                                    system.field_dof_offsets_[static_cast<std::size_t>(test_field.id)]);
                             assembler.setColDofMap(system.field_dof_handlers_[static_cast<std::size_t>(trial_field.id)].getDofMap(),
                                                    system.field_dof_offsets_[static_cast<std::size_t>(trial_field.id)]);
 
-                            assembly::DenseVectorView dummy_matrix(0);
-                            auto rr = assembler.assembleInteriorFaces(system.meshAccess(),
-                                                                      *test_field.space,
-                                                                      *trial_field.space,
-                                                                      s_kernel,
-                                                                      dummy_matrix,
-                                                                      &dR_view);
-                            FE_THROW_IF(!rr.success, InvalidStateException,
-                                        "assembleOperator: coupled dR/dQ sensitivity assembly failed");
-                        }
-                    }
+	                            auto assemble_sensitivity = [&](const auto& base_kernel) {
+	                                forms::CoupledResidualSensitivityKernel s_kernel(base_kernel,
+	                                                                                 static_cast<std::uint32_t>(k),
+	                                                                                 aux_sens_span,
+	                                                                                 integrals_base.size());
+	                                assembly::DenseVectorView dummy_matrix(0);
+	                                auto rr = assembler.assembleInteriorFaces(system.meshAccess(),
+	                                                                          *test_field.space,
+	                                                                          *trial_field.space,
+	                                                                          s_kernel,
+	                                                                          dummy_matrix,
+	                                                                          &dR_view);
+	                                FE_THROW_IF(!rr.success, InvalidStateException,
+	                                            "assembleOperator: coupled dR/dQ sensitivity assembly failed");
+	                            };
+
+	                            const auto* kernel = term.kernel.get();
+	                            if (const auto* jit = dynamic_cast<const forms::jit::JITKernelWrapper*>(kernel)) {
+	                                kernel = &jit->fallbackKernel();
+	                            }
+
+	                            if (const auto* base = dynamic_cast<const forms::NonlinearFormKernel*>(kernel)) {
+	                                assemble_sensitivity(*base);
+	                            } else if (const auto* base = dynamic_cast<const forms::SymbolicNonlinearFormKernel*>(kernel)) {
+	                                assemble_sensitivity(*base);
+	                            } else {
+	                                continue;
+	                            }
+	                        }
+	                    }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
                     // Interface-face terms.
-                    if (request.assemble_interface_face_terms) {
-                        for (const auto& term : def.interface_faces) {
-                            if (term.kernel->isMatrixOnly()) {
-                                continue;
-                            }
-                            const auto* base = dynamic_cast<const forms::NonlinearFormKernel*>(term.kernel.get());
-                            if (!base) {
-                                continue;
-                            }
-                            forms::CoupledResidualSensitivityKernel s_kernel(*base,
-                                                                             static_cast<std::uint32_t>(k),
-                                                                             aux_sens_span,
-                                                                             integrals_base.size());
+	                    if (request.assemble_interface_face_terms) {
+	                        for (const auto& term : def.interface_faces) {
+	                            if (term.kernel->isMatrixOnly()) {
+	                                continue;
+	                            }
 
-                            const auto& test_field = system.field_registry_.get(term.test_field);
-                            const auto& trial_field = system.field_registry_.get(term.trial_field);
+	                            const auto& test_field = system.field_registry_.get(term.test_field);
+	                            const auto& trial_field = system.field_registry_.get(term.trial_field);
 
                             assembler.setRowDofMap(system.field_dof_handlers_[static_cast<std::size_t>(test_field.id)].getDofMap(),
                                                    system.field_dof_offsets_[static_cast<std::size_t>(test_field.id)]);
                             assembler.setColDofMap(system.field_dof_handlers_[static_cast<std::size_t>(trial_field.id)].getDofMap(),
                                                    system.field_dof_offsets_[static_cast<std::size_t>(trial_field.id)]);
 
-                            auto assemble_on_marker = [&](int marker) {
-                                auto it = system.interface_meshes_.find(marker);
-                                FE_THROW_IF(it == system.interface_meshes_.end() || !it->second, InvalidArgumentException,
-                                            "assembleOperator: missing InterfaceMesh for interface marker " + std::to_string(marker));
-                                const auto& iface_mesh = *it->second;
-                                assembly::DenseVectorView dummy_matrix(0);
-                                auto rr = assembler.assembleInterfaceFaces(system.meshAccess(),
-                                                                           iface_mesh,
-                                                                           marker,
-                                                                           *test_field.space,
-                                                                           *trial_field.space,
-                                                                           s_kernel,
-                                                                           dummy_matrix,
-                                                                           &dR_view);
-                                FE_THROW_IF(!rr.success, InvalidStateException,
-                                            "assembleOperator: coupled dR/dQ sensitivity assembly failed");
-                            };
+	                            auto assemble_sensitivity = [&](const auto& base_kernel) {
+	                                forms::CoupledResidualSensitivityKernel s_kernel(base_kernel,
+	                                                                                 static_cast<std::uint32_t>(k),
+	                                                                                 aux_sens_span,
+	                                                                                 integrals_base.size());
 
-                            if (term.marker < 0) {
-                                for (const auto& kv : system.interface_meshes_) {
-                                    if (!kv.second) continue;
-                                    assemble_on_marker(kv.first);
-                                }
-                            } else {
-                                assemble_on_marker(term.marker);
-                            }
-                        }
-                    }
+	                                auto assemble_on_marker = [&](int marker) {
+	                                    auto it = system.interface_meshes_.find(marker);
+	                                    FE_THROW_IF(it == system.interface_meshes_.end() || !it->second, InvalidArgumentException,
+	                                                "assembleOperator: missing InterfaceMesh for interface marker " + std::to_string(marker));
+	                                    const auto& iface_mesh = *it->second;
+	                                    assembly::DenseVectorView dummy_matrix(0);
+	                                    auto rr = assembler.assembleInterfaceFaces(system.meshAccess(),
+	                                                                               iface_mesh,
+	                                                                               marker,
+	                                                                               *test_field.space,
+	                                                                               *trial_field.space,
+	                                                                               s_kernel,
+	                                                                               dummy_matrix,
+	                                                                               &dR_view);
+	                                    FE_THROW_IF(!rr.success, InvalidStateException,
+	                                                "assembleOperator: coupled dR/dQ sensitivity assembly failed");
+	                                };
+
+	                                if (term.marker < 0) {
+	                                    for (const auto& kv : system.interface_meshes_) {
+	                                        if (!kv.second) continue;
+	                                        assemble_on_marker(kv.first);
+	                                    }
+	                                } else {
+	                                    assemble_on_marker(term.marker);
+	                                }
+	                            };
+
+	                            const auto* kernel = term.kernel.get();
+	                            if (const auto* jit = dynamic_cast<const forms::jit::JITKernelWrapper*>(kernel)) {
+	                                kernel = &jit->fallbackKernel();
+	                            }
+
+	                            if (const auto* base = dynamic_cast<const forms::NonlinearFormKernel*>(kernel)) {
+	                                assemble_sensitivity(*base);
+	                            } else if (const auto* base = dynamic_cast<const forms::SymbolicNonlinearFormKernel*>(kernel)) {
+	                                assemble_sensitivity(*base);
+	                            } else {
+	                                continue;
+	                            }
+	                        }
+	                    }
 #endif
 
                     auto dR_dQ = dR_view.entriesSorted(kAbsTol);
@@ -947,29 +1145,157 @@ assembly::AssemblyResult assembleOperator(
                                     dR_dQ.end());
                     }
 
+                    // Globally reduce dR_dQ for consistent rank-1 detection across MPI ranks.
+                    // Each rank has only owned-row entries; allreduce merges them so all ranks
+                    // see the same dR_dQ and make identical symmetry decisions.
+                    auto dR_dQ_global = dR_dQ;
+#if FE_HAS_MPI
+                    {
+                        int mpi_initialized = 0;
+                        MPI_Initialized(&mpi_initialized);
+                        if (mpi_initialized) {
+                            dR_dQ_global = allreduceSumSparsePairs(std::move(dR_dQ_global), MPI_COMM_WORLD);
+                        }
+                    }
+#endif
+
                     const auto& g = dQ_du_by_slot[k];
-                    col_dofs.resize(g.size());
-                    col_vals.resize(g.size());
-                    for (std::size_t j = 0; j < g.size(); ++j) {
-                        col_dofs[j] = g[j].first;
-                        col_vals[j] = g[j].second;
+
+                    traceLog("  slot " + std::to_string(k) +
+                             " dR/dQ: " + std::to_string(dR_dQ.size()) +
+                             " (local) " + std::to_string(dR_dQ_global.size()) +
+                             " (global) entries, dQ/du: " + std::to_string(g.size()) +
+                             " -> rank-1 writes " + std::to_string(dR_dQ.size()) + " x " +
+                             std::to_string(g.size()) + " = " +
+                             std::to_string(dR_dQ.size() * g.size()) + " matrix entries");
+
+                    // Detect symmetric rank-1 structure: dR_dQ = sigma * dQ_du
+                    // If so, store as RankOneUpdate{sigma, dQ_du} for preconditioner correction.
+                    // Use globally-reduced dR_dQ so all MPI ranks make the same decision.
+                    bool extracted_rank_one = false;
+                    Real sym_rel_err = -1.0;
+                    if (!g.empty() && !dR_dQ_global.empty()) {
+                        // Build index maps for dQ_du (g) to enable lookup by DOF index.
+                        std::unordered_map<GlobalIndex, Real> g_map;
+                        g_map.reserve(g.size());
+                        Real g_dot_g = 0.0;
+                        for (const auto& kv : g) {
+                            g_map[kv.first] = kv.second;
+                            g_dot_g += kv.second * kv.second;
+                        }
+
+                        if (g_dot_g > kAbsTol * kAbsTol) {
+                            // sigma = (dR_dQ . dQ_du) / (dQ_du . dQ_du)
+                            Real dR_dot_g = 0.0;
+                            for (const auto& kv : dR_dQ_global) {
+                                auto it = g_map.find(kv.first);
+                                if (it != g_map.end()) {
+                                    dR_dot_g += kv.second * it->second;
+                                }
+                            }
+                            const Real sigma = dR_dot_g / g_dot_g;
+
+                            // Compute remainder: w_rem = dR_dQ - sigma * dQ_du
+                            Real rem_norm_sq = 0.0;
+                            Real dR_norm_sq = 0.0;
+                            // Contributions from DOFs in dR_dQ (global)
+                            for (const auto& kv : dR_dQ_global) {
+                                dR_norm_sq += kv.second * kv.second;
+                                auto it = g_map.find(kv.first);
+                                const Real g_val = (it != g_map.end()) ? it->second : Real(0.0);
+                                const Real rem = kv.second - sigma * g_val;
+                                rem_norm_sq += rem * rem;
+                            }
+                            // Contributions from DOFs in dQ_du but not in dR_dQ (global)
+                            std::unordered_map<GlobalIndex, Real> dR_map;
+                            dR_map.reserve(dR_dQ_global.size());
+                            for (const auto& kv : dR_dQ_global) {
+                                dR_map[kv.first] = kv.second;
+                            }
+                            for (const auto& kv : g) {
+                                if (dR_map.find(kv.first) == dR_map.end()) {
+                                    const Real rem = -sigma * kv.second;
+                                    rem_norm_sq += rem * rem;
+                                }
+                            }
+
+                            const Real dR_norm = std::sqrt(dR_norm_sq);
+                            const Real rem_norm = std::sqrt(rem_norm_sq);
+                            sym_rel_err = (dR_norm > kAbsTol) ? (rem_norm / dR_norm) : -1.0;
+                            constexpr Real kSymTol = 1e-2;
+
+                            if (dR_norm > kAbsTol && rem_norm / dR_norm < kSymTol) {
+                                // Symmetric! Store as rank-1 update.
+                                backends::RankOneUpdate update;
+                                update.sigma = sigma;
+                                update.v = g; // dQ_du
+                                system.last_rank_one_updates_.push_back(std::move(update));
+                                extracted_rank_one = true;
+
+                                traceLog("  slot " + std::to_string(k) +
+                                         " -> symmetric rank-1 update: sigma=" + std::to_string(static_cast<double>(sigma)) +
+                                         " |rem|/|dR|=" + std::to_string(static_cast<double>(rem_norm / dR_norm)));
+                            } else {
+                                traceLog("  slot " + std::to_string(k) +
+                                         " -> NOT symmetric: sigma=" + std::to_string(static_cast<double>(sigma)) +
+                                         " |rem|/|dR|=" + std::to_string(
+                                             dR_norm > kAbsTol ? static_cast<double>(rem_norm / dR_norm) : 0.0) +
+                                         " -> assembling full outer product");
+                            }
+                        }
                     }
 
-                    std::vector<Real> row_vals(col_dofs.size());
-                    for (const auto& ri : dR_dQ) {
-                        row_dof[0] = ri.first;
-                        const Real scale = ri.second;
-                        for (std::size_t j = 0; j < col_vals.size(); ++j) {
-                            row_vals[j] = scale * col_vals[j];
+                    // Fallback: assemble full outer product into sparse matrix.
+                    if (!extracted_rank_one) {
+                        if (g.empty() || dR_dQ.empty()) {
+                            // Nothing to assemble (e.g., dt-only Jacobian or inactive coupling).
+                            continue;
                         }
-                        matrix_out->addMatrixEntries(std::span<const GlobalIndex>(row_dof.data(), row_dof.size()),
-                                                     std::span<const GlobalIndex>(col_dofs.data(), col_dofs.size()),
-                                                     std::span<const Real>(row_vals.data(), row_vals.size()),
-                                                     assembly::AddMode::Add);
+                        std::string extra;
+                        if (sym_rel_err >= 0.0 && std::isfinite(static_cast<double>(sym_rel_err))) {
+                            extra = " (rel_err=" + std::to_string(static_cast<double>(sym_rel_err)) + ")";
+                        }
+                        FE_LOG_WARNING("Coupled BC slot " + std::to_string(k) +
+                                       " failed symmetry check" + extra +
+                                       ". Falling back to sparse assembly, which may drop entries in FSILS.");
+
+                        col_dofs.resize(g.size());
+                        col_vals.resize(g.size());
+                        for (std::size_t j = 0; j < g.size(); ++j) {
+                            col_dofs[j] = g[j].first;
+                            col_vals[j] = g[j].second;
+                        }
+
+                        std::vector<Real> row_vals(col_dofs.size());
+                        for (const auto& ri : dR_dQ) {
+                            row_dof[0] = ri.first;
+                            const Real scale = ri.second;
+                            for (std::size_t j = 0; j < col_vals.size(); ++j) {
+                                row_vals[j] = scale * col_vals[j];
+                            }
+                            matrix_out->addMatrixEntries(std::span<const GlobalIndex>(row_dof.data(), row_dof.size()),
+                                                         std::span<const GlobalIndex>(col_dofs.data(), col_dofs.size()),
+                                                         std::span<const Real>(row_vals.data(), row_vals.size()),
+                                                         assembly::AddMode::Add);
+                        }
                     }
                 }
 
+                const auto dropped_after = backends::FsilsMatrix::droppedEntryCount();
+                const auto dropped_coupling = dropped_after - dropped_before;
+                const auto coupling_elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - coupling_t0).count();
+
+                traceLog("coupled Jacobian: completed in " +
+                         std::to_string(coupling_elapsed) + " s, " +
+                         std::to_string(dropped_coupling) + " entries dropped by sparsity filter");
+                if (dropped_coupling > 0) {
+                    FE_LOG_WARNING("coupled Jacobian: " + std::to_string(dropped_coupling) +
+                                   " matrix entries dropped (outside sparsity pattern)");
+                }
+
                 assembler.setCoupledValues(integrals_base, aux_state_base);
+                }
             }
         }
     }

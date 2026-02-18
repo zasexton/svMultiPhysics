@@ -13,6 +13,7 @@
 #include "Forms/PointEvaluator.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemsExceptions.h"
+#include "Core/FEConfig.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -21,11 +22,35 @@
 #include <string>
 #include <utility>
 
+#if FE_HAS_MPI
+#  include <mpi.h>
+#endif
+
 namespace svmp {
 namespace FE {
 namespace systems {
 
 namespace {
+
+#if FE_HAS_MPI
+MPI_Datatype mpiRealType()
+{
+    if (sizeof(Real) == sizeof(double)) {
+        return MPI_DOUBLE;
+    }
+    if (sizeof(Real) == sizeof(float)) {
+        return MPI_FLOAT;
+    }
+    return MPI_LONG_DOUBLE;
+}
+
+Real allreduceSum(Real local, MPI_Comm comm)
+{
+    Real global = local;
+    MPI_Allreduce(&local, &global, 1, mpiRealType(), MPI_SUM, comm);
+    return global;
+}
+#endif
 
 class BoundaryMeasureKernel final : public assembly::FunctionalKernel {
 public:
@@ -339,7 +364,16 @@ Real CoupledBoundaryManager::boundaryMeasure(int boundary_marker, const SystemSt
     assembler.setCoupledValues({}, {});
 
     BoundaryMeasureKernel measure_kernel;
-    const Real area = assembler.assembleBoundaryScalar(measure_kernel, boundary_marker);
+    Real area = assembler.assembleBoundaryScalar(measure_kernel, boundary_marker);
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        area = allreduceSum(area, MPI_COMM_WORLD);
+    }
+#endif
+
     boundary_measure_cache_.emplace(boundary_marker, area);
     return area;
 }
@@ -415,6 +449,14 @@ Real CoupledBoundaryManager::evaluateFunctional(const CompiledFunctional& entry,
     }
 
     Real raw = assembler.assembleBoundaryScalar(*entry.kernel, entry.def.boundary_marker);
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        raw = allreduceSum(raw, MPI_COMM_WORLD);
+    }
+#endif
 
     switch (entry.def.reduction) {
         case forms::BoundaryFunctional::Reduction::Sum:
@@ -793,6 +835,21 @@ CoupledBoundaryManager::registeredBoundaryFunctionals() const
         out.push_back(RegisteredBoundaryFunctional{entry.def, static_cast<std::uint32_t>(idx)});
     }
     return out;
+}
+
+std::vector<int> CoupledBoundaryManager::coupledBoundaryMarkers() const
+{
+    std::vector<int> markers;
+    markers.reserve(coupled_neumann_.size() + coupled_robin_.size());
+    for (const auto& bc : coupled_neumann_) {
+        markers.push_back(bc.boundaryMarker());
+    }
+    for (const auto& bc : coupled_robin_) {
+        markers.push_back(bc.boundaryMarker());
+    }
+    std::sort(markers.begin(), markers.end());
+    markers.erase(std::unique(markers.begin(), markers.end()), markers.end());
+    return markers;
 }
 
 } // namespace systems

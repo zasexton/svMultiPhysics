@@ -47,9 +47,36 @@
 
 #include "Array3.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <math.h>
 
 namespace ns_solver {
+
+namespace {
+
+[[nodiscard]] bool fsilsTraceEnabled() noexcept
+{
+  const char* env = std::getenv("SVMP_FSILS_TRACE");
+  if (env == nullptr) {
+    env = std::getenv("SVMP_FSILS_NS_TRACE");
+  }
+  if (env == nullptr) {
+    env = std::getenv("SVMP_FSILS_NS_SOLVER_TRACE");
+  }
+  if (env == nullptr) {
+    return false;
+  }
+  while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+    ++env;
+  }
+  if (*env == '\0') {
+    return false;
+  }
+  return *env != '0';
+}
+
+} // namespace
 
 /// @brief Modifies: lhs.face[].nS
 //
@@ -221,7 +248,14 @@ void ns_solver(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_l
   ls.RI.iNorm = eps;
   ls.RI.fNorm = eps*eps;
 
-  // Calling duration 
+  if (lhs.commu.masF && fsilsTraceEnabled()) {
+    fprintf(stderr, "[NS_SOLVER] eps(initial)=%e iNorm=%e fNorm=%e nsd=%d dof=%d nNo=%d nnz=%d\n",
+            eps, ls.RI.iNorm, ls.RI.fNorm, nsd, dof, nNo, nnz);
+    fprintf(stderr, "[NS_SOLVER] relTol=%e absTol=%e mItr=%d\n",
+            ls.RI.relTol, ls.RI.absTol, ls.RI.mItr);
+  }
+
+  // Calling duration
   ls.CG.callD = 0.0; 
   ls.GM.callD = 0.0;
   ls.RI.callD = fsi_linear_solver::fsils_cpu_t(); 
@@ -254,6 +288,10 @@ void ns_solver(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_l
     #ifdef debug_ns_solver
     dmsg << "faIn: " << faIn << "  face.nS: " << face.nS;
     #endif
+    if (lhs.commu.masF && fsilsTraceEnabled()) {
+      fprintf(stderr, "[NS_SOLVER] face[%d]: nNo=%d nS=%e coupledFlag=%d incFlag=%d sharedFlag=%d res=%e bGrp=%d\n",
+              faIn, face.nNo, face.nS, face.coupledFlag?1:0, face.incFlag?1:0, face.sharedFlag?1:0, face.res, face.bGrp);
+    }
    }
 
   #ifdef debug_ns_solver
@@ -320,7 +358,6 @@ void ns_solver(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_l
 
     // U = inv(K) * [Rm - G*P]
     //
-    lhs.debug_active = true;
     auto U_i = U.rslice(i);
     gmres::gmres(lhs, ls.GM, nsd, mK, MU.slice(iBB), U_i);
     //U.set_slice(i, U_i);
@@ -381,16 +418,26 @@ void ns_solver(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_l
 
     xB = B;
 
+    if (lhs.commu.masF && fsilsTraceEnabled()) {
+      fprintf(stderr, "[NS_SOLVER] iter=%d Galerkin system (iBB+1=%d):\n", i_count, iBB+1);
+      for (int kk = 0; kk <= iBB; kk++) {
+        fprintf(stderr, "[NS_SOLVER]   A[%d,:] =", kk);
+        for (int jj = 0; jj <= iBB; jj++) {
+          fprintf(stderr, " %e", A(jj,kk));
+        }
+        fprintf(stderr, "  B[%d]=%e\n", kk, B(kk));
+      }
+    }
+
     // Perform Gauss elimination.
     //
     if (ge::ge(nB, iBB+1, A, xB)) {
       oldxB = xB;
 
     } else { 
-      if (lhs.commu.masF) {
-        throw std::runtime_error("FSILS: Singular matrix detected");
-      }
-
+      // In MPI runs, throwing on a single rank can deadlock other ranks that are
+      // still inside collective communication. Treat this as a recoverable
+      // breakdown: revert to the last stable xB and reduce the basis size.
       xB = oldxB;
 
       if (i > 0) {
@@ -402,7 +449,7 @@ void ns_solver(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_l
 
     //dmsg << "Compute sum ... " ;
     double sum = 0.0;
-    for (int i = 0; i <= iBB; i++) { 
+    for (int i = 0; i <= iBB; i++) {
       sum += xB(i) * B(i);
     }
     ls.RI.fNorm = pow(ls.RI.iNorm,2.0) - sum;
@@ -410,6 +457,17 @@ void ns_solver(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_l
     dmsg << "sum: " << sum;
     dmsg << "ls.RI.fNorm: " << ls.RI.fNorm;
     #endif
+
+    if (lhs.commu.masF && fsilsTraceEnabled()) {
+      fprintf(stderr, "[NS_SOLVER] iter=%d iNorm=%e iNorm^2=%e sum=%e fNorm=%e\n",
+              i_count, ls.RI.iNorm, pow(ls.RI.iNorm,2.0), sum, ls.RI.fNorm);
+      for (int ii = 0; ii <= iBB; ii++) {
+        fprintf(stderr, "[NS_SOLVER]   xB(%d)=%e B(%d)=%e product=%e\n",
+                ii, xB(ii), ii, B(ii), xB(ii)*B(ii));
+      }
+      fprintf(stderr, "[NS_SOLVER]   GM.itr=%d GM.fNorm=%e CG.itr=%d CG.fNorm=%e\n",
+              ls.GM.itr, ls.GM.fNorm, ls.CG.itr, ls.CG.fNorm);
+    }
 
     if (ls.RI.fNorm < eps*eps) {
       ls.RI.suc = true;
@@ -466,10 +524,7 @@ void ns_solver(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_l
     ls.Resm = 0;
     ls.RI.dB = 0;
     ls.RI.fNorm = 0.0;
-
-    if (lhs.commu.masF) {
-      throw std::runtime_error("FSILS: unexpected behavior in FSILS (likely due to the ill-conditioned LHS matrix)"); 
-    }
+    ls.RI.suc = false;
   }
 
   ls.RI.fNorm = sqrt(ls.RI.fNorm);
@@ -499,4 +554,3 @@ void ns_solver(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_l
 }
 
 };
-

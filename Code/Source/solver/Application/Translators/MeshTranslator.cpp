@@ -160,6 +160,10 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
                                  << face_path << "'" << std::endl;
 
     // Load face surface mesh (typically .vtp).
+    // Force the face mesh to use at least the same spatial dimension as the volume mesh
+    // so that coordinate keys match during vertex-based face matching.  Without this,
+    // VTP surfaces that lie on a constant-Z plane would be loaded as dim=2 (dropping Z)
+    // and all vertex lookups against the 3D volume mesh would fail.
     svmp::MeshIOOptions face_opts{};
     face_opts.path = face_path;
     face_opts.format = detectFormat(face_path);
@@ -167,6 +171,7 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
       throw std::runtime_error("[svMultiPhysics::Application] Unsupported face mesh extension: '" +
                                face_path + "'.");
     }
+    face_opts.kv["force_min_dim"] = std::to_string(mesh.dim());
 
     svmp::MeshBase face_mesh = svmp::MeshBase::load(face_opts);
 

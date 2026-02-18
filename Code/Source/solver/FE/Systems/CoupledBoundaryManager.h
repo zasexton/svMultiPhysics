@@ -142,6 +142,15 @@ public:
     [[nodiscard]] std::vector<RegisteredBoundaryFunctional> registeredBoundaryFunctionals() const;
 
     /**
+     * @brief Return the set of boundary markers that have coupled BC residual terms registered
+     *
+     * This includes markers referenced by CoupledNeumannBC and CoupledRobinBC registrations.
+     * It is useful for building sparsity patterns for coupled-BC Jacobians without unnecessarily
+     * densifying unrelated boundary terms.
+     */
+    [[nodiscard]] std::vector<int> coupledBoundaryMarkers() const;
+
+    /**
      * @brief Geometric measure (area/length) of a boundary marker
      *
      * Cached per boundary marker. Used for `BoundaryFunctional::Reduction::Average`

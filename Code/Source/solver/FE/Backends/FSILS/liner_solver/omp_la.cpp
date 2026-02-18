@@ -134,12 +134,11 @@ void omp_sum_v(const int dof, const int nNo, const double r, Array<double>& U, c
     break;
 
     default:
-      for (int j = 0; j < U.nrows(); j++) {
-        for (int i = 0; i < nNo; i++) {
+      for (int i = 0; i < nNo; i++) {
+        for (int j = 0; j < U.nrows(); j++) {
           U(j,i) = U(j,i) + r*V(j,i);
         }
-        //U(:,i) = U(:,i) + r*V(:,i)
-      } 
+      }
   }
 }
 

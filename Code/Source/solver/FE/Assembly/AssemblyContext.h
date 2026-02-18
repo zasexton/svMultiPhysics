@@ -1467,6 +1467,11 @@ private:
         JITAlignedVector<Real> component_laplacians{};     // [q * value_dim + c]
     };
 
+    // Active prefix length for `field_solution_data_`. We reuse storage across cells to
+    // avoid repeated heap (de)allocations inside hot assembly loops while still keeping
+    // strict "requested fields only" semantics (inactive entries are ignored).
+    std::size_t field_solution_data_used_{0};
+
     std::vector<FieldSolutionData> field_solution_data_{};
     JITAlignedVector<jit::FieldSolutionEntryV1> jit_field_solution_table_{};
 

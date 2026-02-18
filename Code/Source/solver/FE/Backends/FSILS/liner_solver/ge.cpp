@@ -47,14 +47,14 @@ bool ge(const int nV, const int N, const Array<double>& A, Vector<double>& B)
   double eps = std::numeric_limits<double>::epsilon();
 
   // Constructing a preconditioner.
+  // Skip scaling for near-zero diagonals (pivoting handles this natively).
   //
   for (int i = 0; i < N; i++) {
-    if (fabs(A(i,i)) < tol) { 
-      B = 0.0;
-      return false;
+    if (fabs(A(i,i)) < tol) {
+      W(i) = 1.0;
+    } else {
+      W(i) = 1.0 / sqrt(fabs(A(i,i)));
     }
-
-    W(i) = 1.0 / sqrt(fabs(A(i,i)));
   }
 
   Array<double> C(N,N+1);

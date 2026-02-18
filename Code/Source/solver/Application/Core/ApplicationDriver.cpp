@@ -204,7 +204,7 @@ void ApplicationDriver::runWithParameters(const Parameters& params)
          "single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α)."
       << std::endl;
   oopCout() << "[svMultiPhysics::Application] Not supported yet: Domain_file_path, multiple domains, "
-               "spatial/temporal BC files, profiles/imposed flux, restart/continuation, FSI/etc. "
+               "spatial/temporal BC files, user-defined profiles, restart/continuation, FSI/etc. "
                "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver."
             << std::endl;
 
@@ -280,7 +280,7 @@ void ApplicationDriver::runWithParameters(const Parameters& params)
     pvd_ptr = &pvd;
   }
 
-  if (num_steps <= 1) {
+  if (num_steps == 0) {
     oopCout() << "[svMultiPhysics::Application] Starting steady-state solve." << std::endl;
     runSteadyState(sim, params, pvd_ptr);
   } else {
@@ -317,11 +317,10 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       const double tol = eq->tolerance.value();
       if (tol > 0.0) {
         // Legacy semantics: <Add_equation><Tolerance> is a *relative* tolerance (see eqType::tol).
-        //
-        // The FE Newton driver checks both absolute and relative tolerances, so use a very loose
-        // absolute tolerance here and let the relative criterion control convergence.
         newton_opts.rel_tolerance = tol;
-        newton_opts.abs_tolerance = 1.0e30;
+        // Absolute tolerance: tol^2 provides a sensible floor so Newton declares
+        // convergence immediately when the residual is already negligible.
+        newton_opts.abs_tolerance = tol * tol;
       }
     }
   }
@@ -393,8 +392,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   }
 
   const int num_steps = params.general_simulation_parameters.number_of_time_steps.value();
-  if (num_steps <= 1) {
-    throw std::runtime_error("[svMultiPhysics::Application] runTransient() requires Number_of_time_steps > 1.");
+  if (num_steps < 1) {
+    throw std::runtime_error("[svMultiPhysics::Application] runTransient() requires Number_of_time_steps >= 1.");
   }
 
   const double dt = sim.time_history->dt();
@@ -420,11 +419,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       const double tol = eq->tolerance.value();
       if (tol > 0.0) {
         // Legacy semantics: <Add_equation><Tolerance> is a *relative* tolerance (see eqType::tol).
-        //
-        // The FE Newton driver checks both absolute and relative tolerances, so use a very loose
-        // absolute tolerance here and let the relative criterion control convergence.
         opts.newton.rel_tolerance = tol;
-        opts.newton.abs_tolerance = 1.0e30;
+        // Absolute tolerance: tol^2 provides a sensible floor so Newton declares
+        // convergence immediately when the residual is already negligible.
+        opts.newton.abs_tolerance = tol * tol;
       }
     }
   }

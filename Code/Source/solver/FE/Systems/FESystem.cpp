@@ -314,6 +314,16 @@ CoupledBoundaryManager& FESystem::coupledBoundaryManager(FieldId primary_field)
     return *coupled_boundary_;
 }
 
+std::span<const backends::RankOneUpdate> FESystem::lastRankOneUpdates() const noexcept
+{
+    return last_rank_one_updates_;
+}
+
+void FESystem::clearRankOneUpdates() noexcept
+{
+    last_rank_one_updates_.clear();
+}
+
 const assembly::IMeshAccess& FESystem::meshAccess() const
 {
     FE_CHECK_NOT_NULL(mesh_access_.get(), "FESystem::meshAccess");

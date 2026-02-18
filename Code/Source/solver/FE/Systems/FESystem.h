@@ -23,6 +23,8 @@
 
 #include "Assembly/Assembler.h"
 
+#include "Backends/Interfaces/LinearSolver.h"
+
 #include "Constraints/AffineConstraints.h"
 #include "Constraints/Constraint.h"
 
@@ -281,6 +283,10 @@ public:
 	    // ---- Parameter requirements (optional) ----
 	    [[nodiscard]] const ParameterRegistry& parameterRegistry() const noexcept { return parameter_registry_; }
 
+    // ---- Rank-1 updates from coupled Jacobian assembly ----
+    [[nodiscard]] std::span<const backends::RankOneUpdate> lastRankOneUpdates() const noexcept;
+    void clearRankOneUpdates() noexcept;
+
 private:
     friend assembly::AssemblyResult assembleOperator(
         FESystem& system,
@@ -328,6 +334,7 @@ private:
     std::unique_ptr<OperatorBackends> operator_backends_{};
     std::unique_ptr<CoupledBoundaryManager> coupled_boundary_{};
 	    ParameterRegistry parameter_registry_{};
+    std::vector<backends::RankOneUpdate> last_rank_one_updates_{};
 
 	    bool is_setup_{false};
 	};

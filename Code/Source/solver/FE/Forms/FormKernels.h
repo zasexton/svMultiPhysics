@@ -15,6 +15,7 @@
 #include <optional>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace svmp {
 namespace FE {
@@ -469,6 +470,10 @@ public:
                                      std::uint32_t coupled_integral_slot,
                                      std::span<const Real> daux_dintegrals,
                                      std::size_t num_integrals);
+    CoupledResidualSensitivityKernel(const SymbolicNonlinearFormKernel& base,
+                                     std::uint32_t coupled_integral_slot,
+                                     std::span<const Real> daux_dintegrals,
+                                     std::size_t num_integrals);
     ~CoupledResidualSensitivityKernel() override = default;
 
     CoupledResidualSensitivityKernel(const CoupledResidualSensitivityKernel&) = delete;
@@ -513,10 +518,25 @@ public:
     [[nodiscard]] std::string name() const override { return "Forms::CoupledResidualSensitivityKernel"; }
 
 private:
+    void buildDependencyCache();
+
+    [[nodiscard]] const FormIR& residualIR() const noexcept;
+    [[nodiscard]] const InlinedMaterialStateUpdateProgram& inlinedStateUpdates() const noexcept;
+    [[nodiscard]] const ConstitutiveStateLayout* constitutiveStateLayout() const noexcept;
+
     const NonlinearFormKernel* base_{nullptr};
+    const SymbolicNonlinearFormKernel* base_symbolic_{nullptr};
     std::uint32_t coupled_integral_slot_{0u};
     std::span<const Real> daux_dintegrals_{};
     std::size_t num_integrals_{0u};
+
+    std::vector<std::uint8_t> term_has_coupled_dependency_{};
+    bool has_cell_dependency_{false};
+    bool has_boundary_dependency_{false};
+    bool has_interior_dependency_{false};
+    bool has_interface_dependency_{false};
+    bool boundary_all_dependency_{false};
+    std::unordered_set<int> boundary_marker_dependency_{};
 };
 
 /**

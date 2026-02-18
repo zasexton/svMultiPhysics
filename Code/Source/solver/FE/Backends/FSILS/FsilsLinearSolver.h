@@ -27,8 +27,16 @@ public:
                                      GenericVector& x,
                                      const GenericVector& b) override;
 
+    void setRankOneUpdates(std::span<const RankOneUpdate> updates) override;
+    void setDirichletDofs(std::span<const GlobalIndex> dofs) override;
+    [[nodiscard]] bool supportsNativeRankOneUpdates() const noexcept override { return true; }
+    void setEffectiveTimeStep(double dt_eff) override;
+
 private:
     SolverOptions options_{};
+    std::vector<RankOneUpdate> rank_one_updates_{};
+    std::vector<GlobalIndex> dirichlet_dofs_{};
+    double dt_eff_{1.0};
 };
 
 } // namespace backends

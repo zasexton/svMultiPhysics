@@ -35,6 +35,7 @@
 #include "DebugMsg.h"
 
 #include "mpi.h"
+#include <unordered_map>
 
 namespace fsi_linear_solver {
 
@@ -155,12 +156,12 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
   // Gather data from all processes and deliver it to all. Each process may contribute a different amount of data.
   MPI_Allgatherv(part.data(), maxnNo, cm_mod::mpint, aNodes.data(), sCount.data(), disp.data(), cm_mod::mpint, comm);
 
-  Vector<int> gtlPtr(gnNo); 
-  gtlPtr = -1;
+  std::unordered_map<int,int> gtlPtr;
+  gtlPtr.reserve(nNo);
 
   for (int a = 0; a < nNo; a++) {
      int Ac = gNodes(a);
-     gtlPtr(Ac) = a;
+     gtlPtr[Ac] = a;
   }
 
   // Including the nodes shared by processors with higher ID at the end,
@@ -189,8 +190,9 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
       }
 
       // Corresponding local node in current processor.
-      int localNodeIndex = gtlPtr(Ac);
-      if (localNodeIndex != -1) {
+      auto gtl_it = gtlPtr.find(Ac);
+      if (gtl_it != gtlPtr.end()) {
+        int localNodeIndex = gtl_it->second;
         // If this node has not been included already
         if (aNodes(localNodeIndex,tF) != -1) {
           // If the processor ID is lower, it is appended to the beginning
@@ -233,15 +235,16 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
 
   // Having the new ltg pointer, map is constructed
   //
-  gtlPtr = -1;
+  gtlPtr.clear();
+  gtlPtr.reserve(nNo);
   for (int a = 0; a < nNo; a++) {
      int Ac = ltg(a);
-     gtlPtr(Ac) = a;
+     gtlPtr[Ac] = a;
   }
 
   for (int a = 0; a < nNo; a++) {
      int Ac = gNodes(a);
-     lhs.map(a) = gtlPtr(Ac);
+     lhs.map(a) = gtlPtr[Ac];
   }
 
   // Based on the new ordering of the nodes, rowPtr and colPtr are constructed
@@ -291,8 +294,7 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
         break;
       }
       // Corresponding local node in current processor
-      int localNodeIndex = gtlPtr(Ac);
-      if (localNodeIndex != -1) {
+      if (gtlPtr.count(Ac)) {
         disp(i) = disp(i) + 1;
       }
     }
@@ -341,8 +343,8 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
     if (iP < tF) {
       MPI_Recv(lhs.cS[i].ptr.data(), lhs.cS[i].n, cm_mod::mpint, iP, 1,  comm, &status);
 
-      for (int j = 0; j < lhs.cS[i].n; j++) { 
-        lhs.cS[i].ptr[j] = gtlPtr(lhs.cS[i].ptr[j]);
+      for (int j = 0; j < lhs.cS[i].n; j++) {
+        lhs.cS[i].ptr[j] = gtlPtr[lhs.cS[i].ptr[j]];
       }
     } else {
       // This is a counter for the shared nodes
@@ -355,8 +357,8 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
           break; 
         }
         // Corresponding local node in current processor
-        int localNodeIndex = gtlPtr(Ac);
-        if (localNodeIndex != -1) {
+        auto gtl_it2 = gtlPtr.find(Ac);
+        if (gtl_it2 != gtlPtr.end()) {
           // Just for now global node ID is used. Later on this will be changed
           // to make sure nodes corresponds to each other on both processors
           // and then will be transformed to local node IDs
@@ -368,7 +370,7 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
       MPI_Send(lhs.cS[i].ptr.data(), lhs.cS[i].n, cm_mod::mpint, iP, 1, comm);
 
       for (int j = 0; j < lhs.cS[i].n; j++) {
-        lhs.cS[i].ptr[j] = gtlPtr(lhs.cS[i].ptr[j]);
+        lhs.cS[i].ptr[j] = gtlPtr[lhs.cS[i].ptr[j]];
       }
     }
   }

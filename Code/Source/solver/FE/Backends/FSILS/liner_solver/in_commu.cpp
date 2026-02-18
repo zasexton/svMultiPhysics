@@ -80,25 +80,17 @@ void fsils_commus(const FSILS_lhsType& lhs, Vector<double>& R)
   }
 
   // Wait for the MPI receive to complete.
-  //
-  for (int i = 0; i < nReq; i++) {
-    MPI_Status stat;
-    auto err = MPI_Wait(&rReq[i], &stat);
-  }
+  MPI_Waitall(nReq, rReq.data(), MPI_STATUSES_IGNORE);
 
   for (int i = 0; i < nReq; i++) {
-    for (int j = 0; j < lhs.cS[i].n; j++) { 
+    for (int j = 0; j < lhs.cS[i].n; j++) {
       int k = lhs.cS[i].ptr(j);
       R(k) = R(k) + rB(j,i);
     }
   }
 
   // Wait for the MPI send to complete.
-  //
-  for (int i = 0; i < nReq; i++) {
-    MPI_Status stat;
-    auto err = MPI_Wait(&sReq[i], &stat);
-  }
+  MPI_Waitall(nReq, sReq.data(), MPI_STATUSES_IGNORE);
 }
 
 /// @brief This a both way communication with three main part:
@@ -146,27 +138,19 @@ void fsils_commuv(const FSILS_lhsType& lhs, int dof, Array<double>& R)
   }
 
   // Wait for the MPI receive to complete.
-  //
-  for (int i = 0; i < nReq; i++) {
-    MPI_Status stat;
-    auto err = MPI_Wait(&rReq[i], &stat);
-  }
+  MPI_Waitall(nReq, rReq.data(), MPI_STATUSES_IGNORE);
 
   for (int i = 0; i < nReq; i++) {
-    for (int j = 0; j < lhs.cS[i].n; j++) { 
+    for (int j = 0; j < lhs.cS[i].n; j++) {
       int k = lhs.cS[i].ptr(j);
-      for (int l = 0; l < dof; l++) { 
+      for (int l = 0; l < dof; l++) {
         R(l,k) = R(l,k) + rB(l,j,i);
       }
     }
   }
 
   // Wait for the MPI send to complete.
-  //
-  for (int i = 0; i < nReq; i++) {
-    MPI_Status stat;
-    auto err = MPI_Wait(&sReq[i], &stat);
-  }
+  MPI_Waitall(nReq, sReq.data(), MPI_STATUSES_IGNORE);
 }
 
 };

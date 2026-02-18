@@ -8602,18 +8602,57 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
             throw FEException("Forms: TrialFunction field type not supported (dual)",
                               __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
         }
-        case FormExprType::DiscreteField:
-        case FormExprType::StateField: {
-            const auto* sig = node.spaceSignature();
-            if (!sig) {
-                throw FEException("Forms: DiscreteField must be bound to a FunctionSpace (dual)",
-                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-            }
-            const auto fid = node.fieldId();
-            if (!fid || *fid == INVALID_FIELD_ID) {
-                throw FEException("Forms: DiscreteField node missing a valid FieldId (dual)",
-                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-            }
+	        case FormExprType::DiscreteField:
+	        case FormExprType::StateField: {
+	            const auto* sig = node.spaceSignature();
+	            if (!sig) {
+	                throw FEException("Forms: DiscreteField must be bound to a FunctionSpace (dual)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+	            const auto fid = node.fieldId();
+	            if (!fid) {
+	                throw FEException("Forms: DiscreteField/StateField node missing FieldId (dual)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
+
+	            // Special-case: StateField(INVALID_FIELD_ID) represents the current solution state u
+	            // (used in symbolic residual/tangent forms). This behaves like a coefficient (no derivative seeding).
+	            if (node.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+	                if (sig->field_type == FieldType::Scalar) {
+	                    EvalValue<Dual> out;
+	                    out.kind = EvalValue<Dual>::Kind::Scalar;
+	                    out.s = makeDualConstant(ctx.solutionValue(q), env.ws->alloc());
+	                    return out;
+	                }
+
+	                if (sig->field_type == FieldType::Vector) {
+	                    const int vd = sig->value_dimension;
+	                    if (vd <= 0 || vd > 3) {
+	                        throw FEException("Forms: StateField vector value_dimension must be 1..3 (dual)",
+	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                    }
+	                    const auto u_val = ctx.solutionVectorValue(q);
+	                    EvalValue<Dual> out;
+	                    out.kind = EvalValue<Dual>::Kind::Vector;
+	                    out.vector_size = vd;
+	                    for (int c = 0; c < 3; ++c) {
+	                        out.v[static_cast<std::size_t>(c)] =
+	                            makeDualConstant(u_val[static_cast<std::size_t>(c)], env.ws->alloc());
+	                    }
+	                    for (int c = vd; c < 3; ++c) {
+	                        out.v[static_cast<std::size_t>(c)].value = 0.0;
+	                    }
+	                    return out;
+	                }
+
+	                throw FEException("Forms: StateField field type not supported (dual)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	            }
+
+	            if (*fid == INVALID_FIELD_ID) {
+	                throw FEException("Forms: DiscreteField node missing a valid FieldId (dual)",
+	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	            }
 
             if (sig->field_type == FieldType::Scalar) {
                 EvalValue<Dual> out;
@@ -9518,20 +9557,29 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
             }
             const auto& child = *kids[0];
 
-            const bool trial_dt = (child.type() == FormExprType::TrialFunction);
-            std::optional<FieldId> discrete_fid{};
-            if (!trial_dt) {
-                if (child.type() != FormExprType::DiscreteField && child.type() != FormExprType::StateField) {
-                    throw FEException("Forms: dt() currently supports TrialFunction and DiscreteField operands only (dual)",
-                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                }
-                const auto fid = child.fieldId();
-                if (!fid || *fid == INVALID_FIELD_ID) {
-                    throw FEException("Forms: dt(DiscreteField) missing a valid FieldId (dual)",
-                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                }
-                discrete_fid = *fid;
-            }
+	            bool trial_dt = (child.type() == FormExprType::TrialFunction);
+	            std::optional<FieldId> discrete_fid{};
+	            if (!trial_dt) {
+	                if (child.type() != FormExprType::DiscreteField && child.type() != FormExprType::StateField) {
+	                    throw FEException("Forms: dt() currently supports TrialFunction and DiscreteField operands only (dual)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                const auto fid = child.fieldId();
+	                if (!fid) {
+	                    throw FEException("Forms: dt(field) operand missing FieldId (dual)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                if (child.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+	                    // dt(StateField(INVALID_FIELD_ID)) represents dt(u) for the current solution state.
+	                    trial_dt = true;
+	                } else {
+	                    if (*fid == INVALID_FIELD_ID) {
+	                        throw FEException("Forms: dt(DiscreteField/StateField) missing a valid FieldId (dual)",
+	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                    }
+	                    discrete_fid = *fid;
+	                }
+	            }
 
             const auto current = evalDualUnary(node, env, side, q);
             if (current.kind == EvalValue<Dual>::Kind::Scalar) {
@@ -9703,33 +9751,75 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                 out.s = divu;
                 return out;
             }
-            if (child.type() == FormExprType::DiscreteField || child.type() == FormExprType::StateField) {
-                const auto* sig = child.spaceSignature();
-                if (!sig) {
-                    throw FEException("Forms: div(DiscreteField) requires a bound FunctionSpace (dual)",
-                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                }
-                if (sig->field_type != FieldType::Vector) {
-                    throw FEException("Forms: div(DiscreteField) requires a vector-valued DiscreteField (dual)",
-                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                }
-                const auto fid = child.fieldId();
-                if (!fid || *fid == INVALID_FIELD_ID) {
-                    throw FEException("Forms: div(DiscreteField) missing a valid FieldId (dual)",
-                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-                }
+	            if (child.type() == FormExprType::DiscreteField || child.type() == FormExprType::StateField) {
+	                const auto* sig = child.spaceSignature();
+	                if (!sig) {
+	                    throw FEException("Forms: div(DiscreteField) requires a bound FunctionSpace (dual)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                if (sig->field_type != FieldType::Vector) {
+	                    throw FEException("Forms: div(DiscreteField) requires a vector-valued DiscreteField (dual)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+	                const auto fid = child.fieldId();
+	                if (!fid) {
+	                    throw FEException("Forms: div(DiscreteField/StateField) missing FieldId (dual)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
+
+	                if (child.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+	                    // div(u): current solution state
+	                    if (ctx.trialUsesVectorBasis()) {
+	                        if (sig->continuity != Continuity::H_div) {
+	                            throw FEException("Forms: div(StateField) for vector-basis spaces requires H(div) continuity (dual)",
+	                                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                        }
+	                        const auto coeffs = ctx.solutionCoefficients();
+	                        FE_THROW_IF(coeffs.empty(), InvalidArgumentException,
+	                                    "Forms: div(StateField) requires solution coefficients in AssemblyContext (dual)");
+	                        Real div = 0.0;
+	                        for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+	                            div += coeffs[static_cast<std::size_t>(j)] * ctx.trialBasisDivergence(j, q);
+	                        }
+	                        EvalValue<Dual> out;
+	                        out.kind = EvalValue<Dual>::Kind::Scalar;
+	                        out.s = makeDualConstant(div, env.ws->alloc());
+	                        return out;
+	                    }
+
+	                    const int vd = sig->value_dimension;
+	                    if (vd <= 0 || vd > 3) {
+	                        throw FEException("Forms: div(StateField) vector value_dimension must be 1..3 (dual)",
+	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                    }
+	                    const auto J = ctx.solutionJacobian(q);
+	                    Real div = 0.0;
+	                    const int n = std::min(vd, dim);
+	                    for (int d = 0; d < n; ++d) {
+	                        div += J[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
+	                    }
+	                    EvalValue<Dual> out;
+	                    out.kind = EvalValue<Dual>::Kind::Scalar;
+	                    out.s = makeDualConstant(div, env.ws->alloc());
+	                    return out;
+	                }
+
+	                if (*fid == INVALID_FIELD_ID) {
+	                    throw FEException("Forms: div(DiscreteField) missing a valid FieldId (dual)",
+	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+	                }
 
                 const int vd = sig->value_dimension;
                 if (vd <= 0 || vd > 3) {
                     throw FEException("Forms: div(DiscreteField) vector value_dimension must be 1..3 (dual)",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
-                const auto J = ctx.fieldJacobian(*fid, q);
-                Real div = 0.0;
-                const int n = std::min(vd, dim);
-                for (int d = 0; d < n; ++d) {
-                    div += J[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
-                }
+	                const auto J = ctx.fieldJacobian(*fid, q);
+	                Real div = 0.0;
+	                const int n = std::min(vd, dim);
+	                for (int d = 0; d < n; ++d) {
+	                    div += J[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
+	                }
                 EvalValue<Dual> out;
                 out.kind = EvalValue<Dual>::Kind::Scalar;
                 out.s = makeDualConstant(div, env.ws->alloc());
@@ -14634,57 +14724,186 @@ CoupledResidualSensitivityKernel::CoupledResidualSensitivityKernel(const Nonline
                                                                    std::span<const Real> daux_dintegrals,
                                                                    std::size_t num_integrals)
     : base_(&base)
+    , base_symbolic_(nullptr)
     , coupled_integral_slot_(coupled_integral_slot)
     , daux_dintegrals_(daux_dintegrals)
     , num_integrals_(num_integrals)
 {
     FE_CHECK_NOT_NULL(base_, "CoupledResidualSensitivityKernel: base kernel");
+    buildDependencyCache();
+}
+
+CoupledResidualSensitivityKernel::CoupledResidualSensitivityKernel(const SymbolicNonlinearFormKernel& base,
+                                                                   std::uint32_t coupled_integral_slot,
+                                                                   std::span<const Real> daux_dintegrals,
+                                                                   std::size_t num_integrals)
+    : base_(nullptr)
+    , base_symbolic_(&base)
+    , coupled_integral_slot_(coupled_integral_slot)
+    , daux_dintegrals_(daux_dintegrals)
+    , num_integrals_(num_integrals)
+{
+    FE_CHECK_NOT_NULL(base_symbolic_, "CoupledResidualSensitivityKernel: base symbolic kernel");
+    buildDependencyCache();
+}
+
+void CoupledResidualSensitivityKernel::buildDependencyCache()
+{
+    has_cell_dependency_ = false;
+    has_boundary_dependency_ = false;
+    has_interior_dependency_ = false;
+    has_interface_dependency_ = false;
+    boundary_all_dependency_ = false;
+    boundary_marker_dependency_.clear();
+
+    std::unordered_set<std::uint32_t> aux_slots_with_seed{};
+    if (!daux_dintegrals_.empty()) {
+        FE_THROW_IF(num_integrals_ == 0u, InvalidArgumentException,
+                    "CoupledResidualSensitivityKernel: auxiliary seed matrix missing column count");
+        FE_THROW_IF(static_cast<std::size_t>(coupled_integral_slot_) >= num_integrals_, InvalidArgumentException,
+                    "CoupledResidualSensitivityKernel: coupled integral slot out of range for auxiliary seed matrix");
+        FE_THROW_IF((daux_dintegrals_.size() % num_integrals_) != 0u, InvalidArgumentException,
+                    "CoupledResidualSensitivityKernel: auxiliary seed matrix size is not divisible by column count");
+
+        const std::size_t num_aux = daux_dintegrals_.size() / num_integrals_;
+        for (std::size_t aux = 0u; aux < num_aux; ++aux) {
+            const auto idx = aux * num_integrals_ + static_cast<std::size_t>(coupled_integral_slot_);
+            if (idx < daux_dintegrals_.size() && daux_dintegrals_[idx] != 0.0) {
+                aux_slots_with_seed.insert(static_cast<std::uint32_t>(aux));
+            }
+        }
+    }
+
+    const auto depends_on_seed = [&](const FormExprNode& n, const auto& self) -> bool {
+        if (n.type() == FormExprType::BoundaryIntegralRef) {
+            const auto slot = n.slotIndex().value_or(0u);
+            return slot == coupled_integral_slot_;
+        }
+        if (n.type() == FormExprType::AuxiliaryStateRef) {
+            const auto slot = n.slotIndex().value_or(0u);
+            return aux_slots_with_seed.find(slot) != aux_slots_with_seed.end();
+        }
+        for (const auto& kid : n.childrenShared()) {
+            if (kid && self(*kid, self)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    const auto& terms = residualIR().terms();
+    term_has_coupled_dependency_.assign(terms.size(), 0u);
+
+    for (std::size_t t = 0u; t < terms.size(); ++t) {
+        const auto& term = terms[t];
+        const auto* root = term.integrand.node();
+        if (root == nullptr) {
+            continue;
+        }
+        const bool dep = depends_on_seed(*root, depends_on_seed);
+        term_has_coupled_dependency_[t] = dep ? 1u : 0u;
+        if (!dep) {
+            continue;
+        }
+
+        // Coupled-BC Jacobian chain-rule updates are boundary-local for the currently
+        // supported coupled scalars (boundary integrals / auxiliary state driven by them).
+        // Restrict dR/dQ assembly to boundary-face terms to avoid evaluating expensive
+        // cell/face physics terms that are independent of Q.
+        if (term.domain == IntegralDomain::Boundary) {
+            has_boundary_dependency_ = true;
+            if (term.boundary_marker < 0) {
+                boundary_all_dependency_ = true;
+            } else {
+                boundary_marker_dependency_.insert(term.boundary_marker);
+            }
+        }
+    }
+}
+
+const FormIR& CoupledResidualSensitivityKernel::residualIR() const noexcept
+{
+    if (base_ != nullptr) {
+        return base_->residualIR();
+    }
+    return base_symbolic_->residualIR();
+}
+
+const InlinedMaterialStateUpdateProgram& CoupledResidualSensitivityKernel::inlinedStateUpdates() const noexcept
+{
+    if (base_ != nullptr) {
+        return base_->inlinedStateUpdates();
+    }
+    return base_symbolic_->inlinedStateUpdates();
+}
+
+const ConstitutiveStateLayout* CoupledResidualSensitivityKernel::constitutiveStateLayout() const noexcept
+{
+    if (base_ != nullptr) {
+        return base_->constitutiveStateLayout();
+    }
+    return base_symbolic_->constitutiveStateLayout();
 }
 
 assembly::RequiredData CoupledResidualSensitivityKernel::getRequiredData() const noexcept
 {
     // Mirror the base residual kernel requirements.
-    return base_->getRequiredData();
+    if (base_ != nullptr) {
+        return base_->getRequiredData();
+    }
+    return base_symbolic_->getRequiredData();
 }
 
 std::vector<assembly::FieldRequirement> CoupledResidualSensitivityKernel::fieldRequirements() const
 {
-    return base_->fieldRequirements();
+    if (base_ != nullptr) {
+        return base_->fieldRequirements();
+    }
+    return base_symbolic_->fieldRequirements();
 }
 
 assembly::MaterialStateSpec CoupledResidualSensitivityKernel::materialStateSpec() const noexcept
 {
-    return base_->materialStateSpec();
+    if (base_ != nullptr) {
+        return base_->materialStateSpec();
+    }
+    return base_symbolic_->materialStateSpec();
 }
 
 std::vector<params::Spec> CoupledResidualSensitivityKernel::parameterSpecs() const
 {
-    return base_->parameterSpecs();
+    if (base_ != nullptr) {
+        return base_->parameterSpecs();
+    }
+    return base_symbolic_->parameterSpecs();
 }
 
 int CoupledResidualSensitivityKernel::maxTemporalDerivativeOrder() const noexcept
 {
-    return base_->maxTemporalDerivativeOrder();
+    if (base_ != nullptr) {
+        return base_->maxTemporalDerivativeOrder();
+    }
+    return base_symbolic_->maxTemporalDerivativeOrder();
 }
 
 bool CoupledResidualSensitivityKernel::hasCell() const noexcept
 {
-    return base_->residualIR().hasCellTerms();
+    return has_cell_dependency_;
 }
 
 bool CoupledResidualSensitivityKernel::hasBoundaryFace() const noexcept
 {
-    return base_->residualIR().hasBoundaryTerms();
+    return has_boundary_dependency_;
 }
 
 bool CoupledResidualSensitivityKernel::hasInteriorFace() const noexcept
 {
-    return base_->residualIR().hasInteriorFaceTerms();
+    return has_interior_dependency_;
 }
 
 bool CoupledResidualSensitivityKernel::hasInterfaceFace() const noexcept
 {
-    return base_->residualIR().hasInterfaceFaceTerms();
+    return has_interface_dependency_;
 }
 
 void CoupledResidualSensitivityKernel::computeCell(const assembly::AssemblyContext& ctx,
@@ -14694,12 +14913,15 @@ void CoupledResidualSensitivityKernel::computeCell(const assembly::AssemblyConte
     const auto n_trial = ctx.numTrialDofs();
     output.reserve(n_test, n_trial, /*need_matrix=*/false, /*need_vector=*/true);
     std::fill(output.local_vector.begin(), output.local_vector.end(), 0.0);
+    if (!has_cell_dependency_) {
+        return;
+    }
 
     const auto n_qpts = ctx.numQuadraturePoints();
     const auto* time_ctx = ctx.timeIntegrationContext();
 
-    const auto* constitutive_state = base_->constitutiveStateLayout();
-    const auto& updates = base_->inlinedStateUpdates().cell;
+    const auto* constitutive_state = constitutiveStateLayout();
+    const auto& updates = inlinedStateUpdates().cell;
     if (!updates.empty()) {
         for (LocalIndex q = 0; q < n_qpts; ++q) {
             applyInlinedMaterialStateUpdatesDual(ctx, nullptr,
@@ -14712,6 +14934,8 @@ void CoupledResidualSensitivityKernel::computeCell(const assembly::AssemblyConte
     thread_local DualWorkspace ws;
 
     ConstitutiveCallCacheDual constitutive_cache;
+    const auto& terms = residualIR().terms();
+    const bool have_mask = (term_has_coupled_dependency_.size() == terms.size());
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const Real w = ctx.integrationWeight(q);
         ws.reset(/*num_dofs=*/1u);
@@ -14724,7 +14948,9 @@ void CoupledResidualSensitivityKernel::computeCell(const assembly::AssemblyConte
             env.coupled_aux_dseed_cols = num_integrals_;
 
             Real sum_dq = 0.0;
-            for (const auto& term : base_->residualIR().terms()) {
+            for (std::size_t t = 0u; t < terms.size(); ++t) {
+                if (have_mask && term_has_coupled_dependency_[t] == 0u) continue;
+                const auto& term = terms[t];
                 if (term.domain != IntegralDomain::Cell) continue;
                 const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
@@ -14748,6 +14974,17 @@ void CoupledResidualSensitivityKernel::computeCellBatch(
     std::span<const assembly::AssemblyContext* const> contexts,
     std::span<assembly::KernelOutput> outputs)
 {
+    if (!has_cell_dependency_) {
+        for (std::size_t k = 0u; k < contexts.size() && k < outputs.size(); ++k) {
+            if (contexts[k] == nullptr) continue;
+            const auto n_test = contexts[k]->numTestDofs();
+            const auto n_trial = contexts[k]->numTrialDofs();
+            outputs[k].reserve(n_test, n_trial, /*need_matrix=*/false, /*need_vector=*/true);
+            std::fill(outputs[k].local_vector.begin(), outputs[k].local_vector.end(), 0.0);
+        }
+        return;
+    }
+
     constexpr std::size_t lane_width = 8u;
     runHomogeneousCellBatches<lane_width>(
         contexts,
@@ -14757,14 +14994,14 @@ void CoupledResidualSensitivityKernel::computeCellBatch(
             const LocalIndex n_test = lane_ctx[0]->numTestDofs();
             const LocalIndex n_trial = lane_ctx[0]->numTrialDofs();
             const LocalIndex n_qpts = lane_ctx[0]->numQuadraturePoints();
-            const auto* constitutive_state = base_->constitutiveStateLayout();
+            const auto* constitutive_state = constitutiveStateLayout();
 
             for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
                 lane_out[lane]->reserve(n_test, n_trial, /*need_matrix=*/false, /*need_vector=*/true);
                 std::fill(lane_out[lane]->local_vector.begin(), lane_out[lane]->local_vector.end(), 0.0);
             }
 
-            const auto& updates = base_->inlinedStateUpdates().cell;
+            const auto& updates = inlinedStateUpdates().cell;
             if (!updates.empty()) {
                 for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
                     for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -14793,14 +15030,18 @@ void CoupledResidualSensitivityKernel::computeCellBatch(
                         env.coupled_aux_dseed = daux_dintegrals_;
                         env.coupled_aux_dseed_cols = num_integrals_;
 
-                        Real sum_dq = 0.0;
-                        const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
-                        for (const auto& term : base_->residualIR().terms()) {
-                            if (term.domain != IntegralDomain::Cell) continue;
-                            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
-                            if (term_weight == 0.0) continue;
+	                        Real sum_dq = 0.0;
+	                        const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
+	                        const auto& terms = residualIR().terms();
+	                        const bool have_mask = (term_has_coupled_dependency_.size() == terms.size());
+	                        for (std::size_t t = 0u; t < terms.size(); ++t) {
+	                            if (have_mask && term_has_coupled_dependency_[t] == 0u) continue;
+	                            const auto& term = terms[t];
+	                            if (term.domain != IntegralDomain::Cell) continue;
+	                            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
+	                            if (term_weight == 0.0) continue;
 
-                            const auto val = evalDual(*term.integrand.node(), env, Side::Minus, q);
+	                            const auto val = evalDual(*term.integrand.node(), env, Side::Minus, q);
                             if (val.kind != EvalValue<Dual>::Kind::Scalar) {
                                 throw FEException("Forms: coupled residual sensitivity cell integrand did not evaluate to scalar",
                                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
@@ -14830,14 +15071,22 @@ void CoupledResidualSensitivityKernel::computeBoundaryFace(const assembly::Assem
     output.reserve(n_test, n_trial, /*need_matrix=*/false, /*need_vector=*/true);
     std::fill(output.local_vector.begin(), output.local_vector.end(), 0.0);
 
+    if (!has_boundary_dependency_) {
+        return;
+    }
+    if (!boundary_all_dependency_ &&
+        boundary_marker_dependency_.find(boundary_marker) == boundary_marker_dependency_.end()) {
+        return;
+    }
+
     const auto n_qpts = ctx.numQuadraturePoints();
     const auto* time_ctx = ctx.timeIntegrationContext();
 
-    const auto* constitutive_state = base_->constitutiveStateLayout();
-    const auto& updates_all = base_->inlinedStateUpdates().boundary_all;
+    const auto* constitutive_state = constitutiveStateLayout();
+    const auto& updates_all = inlinedStateUpdates().boundary_all;
     const auto* updates_marker = [&]() -> const std::vector<MaterialStateUpdate>* {
-        const auto it = base_->inlinedStateUpdates().boundary_by_marker.find(boundary_marker);
-        if (it == base_->inlinedStateUpdates().boundary_by_marker.end()) {
+        const auto it = inlinedStateUpdates().boundary_by_marker.find(boundary_marker);
+        if (it == inlinedStateUpdates().boundary_by_marker.end()) {
             return nullptr;
         }
         return &it->second;
@@ -14863,6 +15112,8 @@ void CoupledResidualSensitivityKernel::computeBoundaryFace(const assembly::Assem
     thread_local DualWorkspace ws;
 
     ConstitutiveCallCacheDual constitutive_cache;
+    const auto& terms = residualIR().terms();
+    const bool have_mask = (term_has_coupled_dependency_.size() == terms.size());
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const Real w = ctx.integrationWeight(q);
         ws.reset(/*num_dofs=*/1u);
@@ -14875,7 +15126,9 @@ void CoupledResidualSensitivityKernel::computeBoundaryFace(const assembly::Assem
             env.coupled_aux_dseed_cols = num_integrals_;
 
             Real sum_dq = 0.0;
-            for (const auto& term : base_->residualIR().terms()) {
+            for (std::size_t t = 0u; t < terms.size(); ++t) {
+                if (have_mask && term_has_coupled_dependency_[t] == 0u) continue;
+                const auto& term = terms[t];
                 if (term.domain != IntegralDomain::Boundary) continue;
                 if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
                 const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
@@ -14915,10 +15168,13 @@ void CoupledResidualSensitivityKernel::computeInteriorFace(const assembly::Assem
 
     std::fill(output_minus.local_vector.begin(), output_minus.local_vector.end(), 0.0);
     std::fill(output_plus.local_vector.begin(), output_plus.local_vector.end(), 0.0);
+    if (!has_interior_dependency_) {
+        return;
+    }
 
     const auto n_qpts = ctx_minus.numQuadraturePoints();
-    const auto* constitutive_state = base_->constitutiveStateLayout();
-    const auto& updates = base_->inlinedStateUpdates().interior_face;
+    const auto* constitutive_state = constitutiveStateLayout();
+    const auto& updates = inlinedStateUpdates().interior_face;
     if (!updates.empty()) {
         for (LocalIndex q = 0; q < n_qpts; ++q) {
             applyInlinedMaterialStateUpdatesDual(ctx_minus, &ctx_plus,
@@ -14938,6 +15194,9 @@ void CoupledResidualSensitivityKernel::computeInteriorFace(const assembly::Assem
     }
 
     thread_local DualWorkspace ws;
+
+    const auto& terms = residualIR().terms();
+    const bool have_mask = (term_has_coupled_dependency_.size() == terms.size());
 
     auto assembleResidualBlock = [&](Side eval_side,
                                      Side test_active,
@@ -14960,7 +15219,9 @@ void CoupledResidualSensitivityKernel::computeInteriorFace(const assembly::Assem
                 env.coupled_aux_dseed_cols = num_integrals_;
 
                 Real sum_dq = 0.0;
-                for (const auto& term : base_->residualIR().terms()) {
+                for (std::size_t t = 0u; t < terms.size(); ++t) {
+                    if (have_mask && term_has_coupled_dependency_[t] == 0u) continue;
+                    const auto& term = terms[t];
                     if (term.domain != IntegralDomain::InteriorFace) continue;
                     const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                     if (term_weight == 0.0) continue;
@@ -15008,10 +15269,13 @@ void CoupledResidualSensitivityKernel::computeInterfaceFace(const assembly::Asse
 
     std::fill(output_minus.local_vector.begin(), output_minus.local_vector.end(), 0.0);
     std::fill(output_plus.local_vector.begin(), output_plus.local_vector.end(), 0.0);
+    if (!has_interface_dependency_) {
+        return;
+    }
 
     const auto n_qpts = ctx_minus.numQuadraturePoints();
-    const auto* constitutive_state = base_->constitutiveStateLayout();
-    const auto& updates = base_->inlinedStateUpdates().interface_face;
+    const auto* constitutive_state = constitutiveStateLayout();
+    const auto& updates = inlinedStateUpdates().interface_face;
     if (!updates.empty()) {
         for (LocalIndex q = 0; q < n_qpts; ++q) {
             applyInlinedMaterialStateUpdatesDual(ctx_minus, &ctx_plus,
@@ -15031,6 +15295,9 @@ void CoupledResidualSensitivityKernel::computeInterfaceFace(const assembly::Asse
     }
 
     thread_local DualWorkspace ws;
+
+    const auto& terms = residualIR().terms();
+    const bool have_mask = (term_has_coupled_dependency_.size() == terms.size());
 
     auto assembleResidualBlock = [&](Side eval_side,
                                      Side test_active,
@@ -15053,7 +15320,9 @@ void CoupledResidualSensitivityKernel::computeInterfaceFace(const assembly::Asse
                 env.coupled_aux_dseed_cols = num_integrals_;
 
                 Real sum_dq = 0.0;
-                for (const auto& term : base_->residualIR().terms()) {
+                for (std::size_t t = 0u; t < terms.size(); ++t) {
+                    if (have_mask && term_has_coupled_dependency_[t] == 0u) continue;
+                    const auto& term = terms[t];
                     if (term.domain != IntegralDomain::InterfaceFace) continue;
                     if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
                     const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);

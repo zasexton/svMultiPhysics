@@ -30,8 +30,6 @@
 
 #include "add_bc_mul.h"
 
-#include "dot.h"
-
 namespace add_bc_mul {
 
 /// @brief The contribution of coupled BCs is added to the matrix-vector
@@ -52,8 +50,7 @@ namespace add_bc_mul {
 /// The expression is slightly different if preconditioning.
 void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const Array<double>& X, Array<double>& Y)
 {
-  Vector<double> coef(lhs.nFaces); 
-  Array<double> v(dof,lhs.nNo);
+  Vector<double> coef(lhs.nFaces);
 
   if (op_Type == BcopType::BCOP_TYPE_ADD) {
     for (int i = 0; i < lhs.nFaces; i++) {
@@ -63,7 +60,7 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
     for (int i = 0; i < lhs.nFaces; i++) {
       coef(i) = -lhs.face[i].res / (1.0 + (lhs.face[i].res*lhs.face[i].nS));
     }
-  } else { 
+  } else {
     //PRINT *, "FSILS: op_Type is not defined"
     //STOP "FSILS: FATAL ERROR"
   }
@@ -73,30 +70,38 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
     int nsd = std::min(face.dof, dof);
 
     if (face.coupledFlag) {
-      // If face is shared across procs
+      // If face is shared across procs: compute dot product directly
+      // over boundary nodes and use MPI_Allreduce, avoiding a full-mesh
+      // temporary vector allocation.
       if (face.sharedFlag) {
-        v = 0.0;
-        // Setting vector v = int{N_A n_i} dGamma
+        double local_S = 0.0;
         for (int a = 0; a < face.nNo; a++) {
           int Ac = face.glob(a);
-          for (int i = 0; i < nsd; i++) {
-            v(i,Ac) = face.valM(i,a);
-          }
-        }
-        // Computing S = coef * v^T * X
-        double S = coef(faIn) * dot::fsils_dot_v(dof, lhs.mynNo, lhs.commu, v, X);
-
-        // Computing Y = Y + v * S
-        for (int a = 0; a < face.nNo; a++) {
-          int Ac = face.glob(a);
-          for (int i = 0; i < nsd; i++) {
-            Y(i,Ac) = Y(i,Ac) + v(i,Ac)*S;
+          // Only sum owned nodes (Ac < mynNo) to avoid double-counting
+          if (Ac < lhs.mynNo) {
+            for (int i = 0; i < nsd; i++) {
+              local_S += face.valM(i,a) * X(i,Ac);
+            }
           }
         }
 
-      } 
+        double S = local_S;
+        if (lhs.commu.nTasks > 1) {
+          MPI_Allreduce(&local_S, &S, 1, cm_mod::mpreal, MPI_SUM, lhs.commu.comm);
+        }
+        S *= coef(faIn);
+
+        // Computing Y = Y + valM * S
+        for (int a = 0; a < face.nNo; a++) {
+          int Ac = face.glob(a);
+          for (int i = 0; i < nsd; i++) {
+            Y(i,Ac) = Y(i,Ac) + face.valM(i,a) * S;
+          }
+        }
+
+      }
       // If face is not shared across procs
-      else  {
+      else {
         // Computing S = coef * v^T * X
         double S = 0.0;
         for (int a = 0; a < face.nNo; a++) {
@@ -106,7 +111,7 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
           }
         }
         S = coef(faIn) * S;
-        
+
         // Computing Y = Y + v * S
         for (int a = 0; a < face.nNo; a++) {
           int Ac = face.glob(a);

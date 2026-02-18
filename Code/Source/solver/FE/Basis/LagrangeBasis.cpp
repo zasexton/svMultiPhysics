@@ -119,10 +119,8 @@ inline void simplex_lagrange_factor_sequence(int p,
     const Real t = static_cast<Real>(p) * lambda;
     const Real dt_dlambda = static_cast<Real>(p);
 
-    std::vector<Real> dphi_dt(n, Real(0));
-    std::vector<Real> d2phi_dt2(n, Real(0));
-    dphi_dt[0] = Real(0);
-    d2phi_dt2[0] = Real(0);
+    Real dphi_dt_prev = Real(0);
+    Real d2phi_dt2_prev = Real(0);
 
     for (int a = 1; a <= p; ++a) {
         const std::size_t au = static_cast<std::size_t>(a);
@@ -132,12 +130,15 @@ inline void simplex_lagrange_factor_sequence(int p,
         phi[au] = s * phi[au - 1];
 
         // Derivatives w.r.t. t
-        dphi_dt[au] = inv_a * phi[au - 1] + s * dphi_dt[au - 1];
-        d2phi_dt2[au] = Real(2) * inv_a * dphi_dt[au - 1] + s * d2phi_dt2[au - 1];
+        const Real dphi_dt = inv_a * phi[au - 1] + s * dphi_dt_prev;
+        const Real d2phi_dt2 = Real(2) * inv_a * dphi_dt_prev + s * d2phi_dt2_prev;
 
         // Convert to derivatives w.r.t. lambda (t = p*lambda)
-        dphi[au] = dt_dlambda * dphi_dt[au];
-        d2phi[au] = dt_dlambda * dt_dlambda * d2phi_dt2[au];
+        dphi[au] = dt_dlambda * dphi_dt;
+        d2phi[au] = dt_dlambda * dt_dlambda * d2phi_dt2;
+
+        dphi_dt_prev = dphi_dt;
+        d2phi_dt2_prev = d2phi_dt2;
     }
 }
 
@@ -860,6 +861,30 @@ void LagrangeBasis::evaluate_values(const math::Vector<Real, 3>& xi,
 	        return;
 	    }
 
+	    if (element_type_ == ElementType::Triangle3) {
+            // Linear simplex: barycentric Lagrange basis.
+            const Real l1 = xi[0];
+            const Real l2 = xi[1];
+            const Real l0 = Real(1) - l1 - l2;
+            values[0] = l0;
+            values[1] = l1;
+            values[2] = l2;
+            return;
+        }
+
+        if (element_type_ == ElementType::Tetra4) {
+            // Linear simplex: barycentric Lagrange basis.
+            const Real l1 = xi[0];
+            const Real l2 = xi[1];
+            const Real l3 = xi[2];
+            const Real l0 = Real(1) - l1 - l2 - l3;
+            values[0] = l0;
+            values[1] = l1;
+            values[2] = l2;
+            values[3] = l3;
+            return;
+        }
+
     if (element_type_ == ElementType::Pyramid5) {
         // Linear pyramid (Pyramid5) with canonical identity mapping:
         // reference coordinates xi = (x,y,z) coincide with geometry coordinates.
@@ -972,6 +997,23 @@ void LagrangeBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
             apply_node_ordering();
 	        return;
 	    }
+
+	    if (element_type_ == ElementType::Triangle3) {
+            // Linear simplex: barycentric Lagrange basis.
+            gradients[0] = Gradient{Real(-1), Real(-1), Real(0)};
+            gradients[1] = Gradient{Real(1), Real(0), Real(0)};
+            gradients[2] = Gradient{Real(0), Real(1), Real(0)};
+            return;
+        }
+
+        if (element_type_ == ElementType::Tetra4) {
+            // Linear simplex: barycentric Lagrange basis.
+            gradients[0] = Gradient{Real(-1), Real(-1), Real(-1)};
+            gradients[1] = Gradient{Real(1), Real(0), Real(0)};
+            gradients[2] = Gradient{Real(0), Real(1), Real(0)};
+            gradients[3] = Gradient{Real(0), Real(0), Real(1)};
+            return;
+        }
 
     if (is_line(element_type_)) {
         auto d = evaluate_1d_derivative(xi[0]);
@@ -1240,6 +1282,11 @@ void LagrangeBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
 
     if (element_type_ == ElementType::Point1) {
         apply_node_ordering();
+        return;
+    }
+
+    if (element_type_ == ElementType::Triangle3 || element_type_ == ElementType::Tetra4) {
+        // Linear simplex has identically zero Hessian.
         return;
     }
 

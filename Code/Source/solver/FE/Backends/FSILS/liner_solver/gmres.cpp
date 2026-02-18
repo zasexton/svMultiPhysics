@@ -167,6 +167,10 @@ void gmres(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLs
 
     ls.dB = ls.fNorm;
     auto u_slice = u.rslice(0);
+    if (std::abs(err(0)) <= std::numeric_limits<double>::epsilon()) {
+      ls.suc = true;
+      break;
+    }
     u_slice = u_slice / err(0);
 
     for (int i = 0; i < ls.sD; i++) {
@@ -209,8 +213,16 @@ void gmres(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLs
 
       h(i+1,i) = sqrt(fabs(h(i+1,i)));
 
-      u_slice_1 = u.rslice(i+1);
-      omp_la::omp_mul_v(dof, nNo, 1.0/h(i+1,i), u_slice_1);
+      // Guard against (near-)breakdown where the next Krylov vector has near-zero norm.
+      // The FSILS GMRES implementation normalizes by `h(i+1,i)` and will produce NaN/Inf
+      // for small values (especially in small problems with short minimal polynomials).
+      const double breakdown_tol = sqrt(std::numeric_limits<double>::epsilon());
+      if (h(i+1,i) > breakdown_tol) {
+        u_slice_1 = u.rslice(i+1);
+        omp_la::omp_mul_v(dof, nNo, 1.0/h(i+1,i), u_slice_1);
+      } else {
+        h(i+1,i) = 0.0;
+      }
 
       for (int j = 0; j <= i-1; j++) {
         double tmp = c(j)*h(j,i) + s(j)*h(j+1,i);
@@ -219,8 +231,13 @@ void gmres(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLs
       }
 
       double tmp = sqrt(h(i,i)*h(i,i) + h(i+1,i)*h(i+1,i));
-      c(i) = h(i,i) / tmp;
-      s(i) = h(i+1,i) / tmp;
+      if (tmp == 0.0) {
+        c(i) = 1.0;
+        s(i) = 0.0;
+      } else {
+        c(i) = h(i,i) / tmp;
+        s(i) = h(i+1,i) / tmp;
+      }
       h(i,i) = tmp;
       h(i+1,i) = 0.0;
       err(i+1) = -s(i)*err(i);
@@ -337,12 +354,15 @@ void gmres_s(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
     u.set_col(0, R - u_col);
 
     err[0] = norm::fsi_ls_norms(mynNo, lhs.commu, u.col(0));
+    if (std::abs(err[0]) <= std::numeric_limits<double>::epsilon()) {
+      ls.suc = true;
+      break;
+    }
     u_col = u.col(0) / err[0];
     u.set_col(0, u_col);
     #ifdef debug_gmres_s
     dmsg << "err(1): " << err[0];
     #endif
-
 
     for (int i = 0; i < ls.sD; i++) {
       #ifdef debug_gmres_s
@@ -528,6 +548,10 @@ void gmres_v(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
     }
 
     err[0] = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u.rslice(0));
+    if (std::abs(err[0]) <= std::numeric_limits<double>::epsilon()) {
+      ls.suc = true;
+      break;
+    }
     u_slice = u.rslice(0) / err[0];
     #ifdef debug_gmres_v
     dmsg << "err(1): " << err[0];
@@ -647,4 +671,3 @@ void gmres_v(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
 }
 
 };
-

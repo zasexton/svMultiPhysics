@@ -80,17 +80,17 @@ public:
   /**
    * @brief Read mesh from legacy VTK file
    */
-  static MeshBase read_vtk(const std::string& filename);
+  static MeshBase read_vtk(const std::string& filename, int force_min_dim = 0);
 
   /**
    * @brief Read mesh from VTU (XML UnstructuredGrid) file
    */
-  static MeshBase read_vtu(const std::string& filename);
+  static MeshBase read_vtu(const std::string& filename, int force_min_dim = 0);
 
   /**
    * @brief Read mesh from VTP (XML PolyData) file
    */
-  static MeshBase read_vtp(const std::string& filename);
+  static MeshBase read_vtp(const std::string& filename, int force_min_dim = 0);
 
   /**
    * @brief Read mesh from PVTU (parallel XML UnstructuredGrid) file
@@ -110,8 +110,9 @@ public:
 private:
   /**
    * @brief Convert VTK dataset to MeshBase
+   * @param force_min_dim If > 0, force at least this many spatial dimensions
    */
-  static MeshBase convert_from_vtk_dataset(vtkDataSet* dataset);
+  static MeshBase convert_from_vtk_dataset(vtkDataSet* dataset, int force_min_dim = 0);
 
   /**
    * @brief Extract topology from VTK dataset
@@ -129,8 +130,10 @@ private:
 
   /**
    * @brief Extract coordinates from VTK points
+   * @param force_min_dim If > 0, force at least this many spatial dimensions
    */
-  static std::vector<real_t> extract_coordinates(vtkPoints* points, int& spatial_dim);
+  static std::vector<real_t> extract_coordinates(vtkPoints* points, int& spatial_dim,
+                                                  int force_min_dim = 0);
 
   /**
    * @brief Convert VTK cell type to CellShape

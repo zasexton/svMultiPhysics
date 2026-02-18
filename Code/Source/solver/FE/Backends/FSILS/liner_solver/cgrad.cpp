@@ -39,6 +39,7 @@
 #include "spar_mul.h"
 
 #include <math.h>
+#include <limits>
 
 namespace cgrad {
 
@@ -133,13 +134,13 @@ void schur(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array<d
     dmsg << "err/errO: " << err/errO;
     #endif
 
-    // P = P + errO/err * R 
-    double c1 = errO / err;
-    omp_la::omp_sum_s(nNo, c1, P, R);
-
-    // P = err/errO * P
-    double c2 = err / errO;
-    omp_la::omp_mul_s(nNo, c2, P);
+    // Standard CG update: beta = err/errO, P = R + beta*P
+    if (std::abs(errO) <= std::numeric_limits<double>::epsilon()) {
+      break;
+    }
+    double beta = err / errO;
+    omp_la::omp_mul_s(nNo, beta, P);
+    omp_la::omp_sum_s(nNo, 1.0, P, R);
   }
 
   R = X;
@@ -223,8 +224,13 @@ void cgrad_v(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array
     err = norm::fsi_ls_normv(dof, mynNo, lhs.commu, R);
     err = err * err;
 
-    omp_la::omp_sum_v(dof, nNo, errO/err, P, R);
-    omp_la::omp_mul_v(dof, nNo, err/errO, P);
+    // Standard CG update: beta = err/errO, P = R + beta*P
+    if (std::abs(errO) <= std::numeric_limits<double>::epsilon()) {
+      break;
+    }
+    double beta = err / errO;
+    omp_la::omp_mul_v(dof, nNo, beta, P);
+    omp_la::omp_sum_v(dof, nNo, 1.0, P, R);
   }
 
   R = X;
@@ -308,8 +314,13 @@ void cgrad_s(FSILS_lhsType& lhs, FSILS_subLsType& ls, const Vector<double>& K, V
     err = norm::fsi_ls_norms(mynNo, lhs.commu, R);
     err = err * err;
 
-    omp_la::omp_sum_s(nNo, errO/err, P, R);
-    omp_la::omp_mul_s(nNo, err/errO, P);
+    // Standard CG update: beta = err/errO, P = R + beta*P
+    if (std::abs(errO) <= std::numeric_limits<double>::epsilon()) {
+      break;
+    }
+    double beta = err / errO;
+    omp_la::omp_mul_s(nNo, beta, P);
+    omp_la::omp_sum_s(nNo, 1.0, P, R);
   }
 
   R = X;

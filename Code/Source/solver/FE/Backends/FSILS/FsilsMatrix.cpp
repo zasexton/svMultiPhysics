@@ -33,6 +33,18 @@ namespace svmp {
 namespace FE {
 namespace backends {
 
+std::atomic<std::uint64_t> FsilsMatrix::dropped_entry_count_{0};
+
+std::uint64_t FsilsMatrix::droppedEntryCount() noexcept
+{
+    return dropped_entry_count_.load(std::memory_order_relaxed);
+}
+
+void FsilsMatrix::resetDroppedEntryCount() noexcept
+{
+    dropped_entry_count_.store(0, std::memory_order_relaxed);
+}
+
 namespace {
 
 [[nodiscard]] fsi_linear_solver::FSILS_commuType make_fsils_commu(MPI_Comm comm)
@@ -856,6 +868,7 @@ GlobalIndex FsilsMatrix::numCols() const noexcept
 void FsilsMatrix::zero()
 {
     std::fill(values_.begin(), values_.end(), 0.0);
+    resetDroppedEntryCount();
 }
 
 void FsilsMatrix::finalizeAssembly()
@@ -1048,6 +1061,7 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
 	    auto* finish = cols + end + 1;
 	    const auto it = std::lower_bound(begin, finish, col_internal);
 	    if (it == finish || *it != col_internal) {
+        dropped_entry_count_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 

@@ -237,16 +237,15 @@ void fsils_spar_mul_vv(FSILS_lhsType& lhs, const Array<int>& rowPtr, const Vecto
       }
     break;
 
-    default: 
+    default:
       for (int i = 0; i < nNo; i++) {
         for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
           int col = colPtr(j);
           for (int l = 0; l < dof; l++) {
-            int e = l*dof;
-            int s = e - dof + 1;;
+            int s = l * dof;
             double sum = 0.0;
             for (int k = 0; k < dof; k++) {
-              sum += K(k+s,j) * U(k,col);
+              sum += K(s+k,j) * U(k,col);
             }
             KU(l,i) = KU(l,i) + sum;
           }

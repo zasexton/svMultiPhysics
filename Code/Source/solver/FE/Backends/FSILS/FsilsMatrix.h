@@ -12,6 +12,8 @@
 #include "Backends/Interfaces/DofPermutation.h"
 #include "Backends/FSILS/FsilsShared.h"
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -65,7 +67,13 @@ public:
     [[nodiscard]] const Real* fsilsValuesPtr() const noexcept;
     [[nodiscard]] GlobalIndex fsilsNnz() const noexcept;
 
+    /// Number of entries silently dropped by addValue() since last reset.
+    [[nodiscard]] static std::uint64_t droppedEntryCount() noexcept;
+    /// Reset the dropped-entry counter to zero.
+    static void resetDroppedEntryCount() noexcept;
+
 private:
+    static std::atomic<std::uint64_t> dropped_entry_count_;
     GlobalIndex global_rows_{0};
     GlobalIndex global_cols_{0};
     GlobalIndex nnz_{0};

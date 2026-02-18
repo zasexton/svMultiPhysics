@@ -236,13 +236,24 @@ MeshBase VTKReader::read(const MeshIOOptions& options) {
   }
   file.close();
 
+  // Parse optional force_min_dim from kv map.  Callers (e.g. MeshTranslator) can set
+  // this when loading a surface mesh that must preserve the full 3D coordinate space of
+  // the parent volume mesh.
+  int force_min_dim = 0;
+  {
+    auto it = options.kv.find("force_min_dim");
+    if (it != options.kv.end()) {
+      force_min_dim = std::stoi(it->second);
+    }
+  }
+
   // Dispatch based on format
   if (format == "vtk") {
-    return read_vtk(filename);
+    return read_vtk(filename, force_min_dim);
   } else if (format == "vtu") {
-    return read_vtu(filename);
+    return read_vtu(filename, force_min_dim);
   } else if (format == "vtp") {
-    return read_vtp(filename);
+    return read_vtp(filename, force_min_dim);
   } else if (format == "pvtu") {
     return read_pvtu(filename);
   } else if (format == "pvtp") {
@@ -250,20 +261,20 @@ MeshBase VTKReader::read(const MeshIOOptions& options) {
   } else {
     // Try to determine format from file extension
     if (filename.find(".vtu") != std::string::npos) {
-      return read_vtu(filename);
+      return read_vtu(filename, force_min_dim);
     } else if (filename.find(".vtp") != std::string::npos) {
-      return read_vtp(filename);
+      return read_vtp(filename, force_min_dim);
     } else if (filename.find(".pvtu") != std::string::npos) {
       return read_pvtu(filename);
     } else if (filename.find(".pvtp") != std::string::npos) {
       return read_pvtp(filename);
     } else {
-      return read_vtk(filename); // Default to legacy VTK
+      return read_vtk(filename, force_min_dim); // Default to legacy VTK
     }
   }
 }
 
-MeshBase VTKReader::read_vtk(const std::string& filename) {
+MeshBase VTKReader::read_vtk(const std::string& filename, int force_min_dim) {
   // Read legacy VTK file
   vtkSmartPointer<vtkUnstructuredGridReader> reader =
       vtkSmartPointer<vtkUnstructuredGridReader>::New();
@@ -281,13 +292,13 @@ MeshBase VTKReader::read_vtk(const std::string& filename) {
       throw std::runtime_error("VTKReader: Failed to read VTK file: " + filename);
     }
 
-    return convert_from_vtk_dataset(polyReader->GetOutput());
+    return convert_from_vtk_dataset(polyReader->GetOutput(), force_min_dim);
   }
 
-  return convert_from_vtk_dataset(reader->GetOutput());
+  return convert_from_vtk_dataset(reader->GetOutput(), force_min_dim);
 }
 
-MeshBase VTKReader::read_vtu(const std::string& filename) {
+MeshBase VTKReader::read_vtu(const std::string& filename, int force_min_dim) {
   // Read VTU (XML UnstructuredGrid) file
   vtkSmartPointer<vtkXMLUnstructuredGridReader> reader =
       vtkSmartPointer<vtkXMLUnstructuredGridReader>::New();
@@ -298,10 +309,10 @@ MeshBase VTKReader::read_vtu(const std::string& filename) {
     throw std::runtime_error("VTKReader: Failed to read VTU file: " + filename);
   }
 
-  return convert_from_vtk_dataset(reader->GetOutput());
+  return convert_from_vtk_dataset(reader->GetOutput(), force_min_dim);
 }
 
-MeshBase VTKReader::read_vtp(const std::string& filename) {
+MeshBase VTKReader::read_vtp(const std::string& filename, int force_min_dim) {
   // Read VTP (XML PolyData) file
   vtkSmartPointer<vtkXMLPolyDataReader> reader =
       vtkSmartPointer<vtkXMLPolyDataReader>::New();
@@ -312,7 +323,7 @@ MeshBase VTKReader::read_vtp(const std::string& filename) {
     throw std::runtime_error("VTKReader: Failed to read VTP file: " + filename);
   }
 
-  return convert_from_vtk_dataset(reader->GetOutput());
+  return convert_from_vtk_dataset(reader->GetOutput(), force_min_dim);
 }
 
 MeshBase VTKReader::read_pvtu(const std::string& filename) {
@@ -341,7 +352,7 @@ MeshBase VTKReader::read_pvtp(const std::string& filename) {
   return convert_from_vtk_dataset(reader->GetOutput());
 }
 
-MeshBase VTKReader::convert_from_vtk_dataset(vtkDataSet* dataset) {
+MeshBase VTKReader::convert_from_vtk_dataset(vtkDataSet* dataset, int force_min_dim) {
   if (!dataset) {
     throw std::runtime_error("VTKReader: Null dataset");
   }
@@ -357,7 +368,8 @@ MeshBase VTKReader::convert_from_vtk_dataset(vtkDataSet* dataset) {
 
   // Extract spatial dimension and coordinates
   int spatial_dim = 0;
-  std::vector<real_t> coordinates = extract_coordinates(pointset->GetPoints(), spatial_dim);
+  std::vector<real_t> coordinates = extract_coordinates(pointset->GetPoints(), spatial_dim,
+                                                         force_min_dim);
 
   // Extract topology
   std::vector<CellShape> cell_shapes;
@@ -531,7 +543,8 @@ void VTKReader::extract_topology(
   }
 }
 
-std::vector<real_t> VTKReader::extract_coordinates(vtkPoints* points, int& spatial_dim) {
+std::vector<real_t> VTKReader::extract_coordinates(vtkPoints* points, int& spatial_dim,
+                                                    int force_min_dim) {
   if (!points) {
     throw std::runtime_error("VTKReader: No points in dataset");
   }
@@ -561,6 +574,13 @@ std::vector<real_t> VTKReader::extract_coordinates(vtkPoints* points, int& spati
     spatial_dim = 2;
   } else {
     spatial_dim = 3; // Default to 3D for a single point / degenerate bounds
+  }
+
+  // Honour force_min_dim: callers like MeshTranslator need surface meshes to preserve
+  // all 3 coordinate components so that vertex-matching against a 3D volume mesh works
+  // even when the surface is planar (e.g., a circular inlet cap with constant Z).
+  if (force_min_dim > 0 && spatial_dim < force_min_dim) {
+    spatial_dim = std::min(force_min_dim, 3);
   }
 
   // Extract coordinates

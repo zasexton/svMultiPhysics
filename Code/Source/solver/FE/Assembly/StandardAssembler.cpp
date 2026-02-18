@@ -1971,6 +1971,12 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         vector_view->beginAssemblyPhase();
     }
 
+    if (!kernel.hasCell()) {
+        auto end_time = std::chrono::steady_clock::now();
+        result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
+        return result;
+    }
+
     const auto required_data = kernel.getRequiredData();
     const auto field_requirements = kernel.fieldRequirements();
     const bool need_field_solutions = !field_requirements.empty();

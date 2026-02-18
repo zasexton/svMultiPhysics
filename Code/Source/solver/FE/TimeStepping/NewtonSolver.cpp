@@ -418,14 +418,30 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     const bool same_op = (options_.residual_op == options_.jacobian_op);
 
     std::vector<GlobalIndex> constrained_dofs;
+    std::vector<GlobalIndex> dirichlet_dofs;
     if (!constraints.empty()) {
         constrained_dofs.reserve(constraints.numConstraints());
+        dirichlet_dofs.reserve(constraints.numConstraints());
         constraints.forEach([&constrained_dofs](const constraints::AffineConstraints::ConstraintView& cv) {
             if (cv.slave_dof >= 0) {
                 constrained_dofs.push_back(cv.slave_dof);
             }
         });
+        constraints.forEach([&dirichlet_dofs](const constraints::AffineConstraints::ConstraintView& cv) {
+            if (cv.slave_dof >= 0 && cv.isDirichlet()) {
+                dirichlet_dofs.push_back(cv.slave_dof);
+            }
+        });
+
+        std::sort(constrained_dofs.begin(), constrained_dofs.end());
+        constrained_dofs.erase(std::unique(constrained_dofs.begin(), constrained_dofs.end()),
+                               constrained_dofs.end());
+
+        std::sort(dirichlet_dofs.begin(), dirichlet_dofs.end());
+        dirichlet_dofs.erase(std::unique(dirichlet_dofs.begin(), dirichlet_dofs.end()),
+                             dirichlet_dofs.end());
     }
+    linear.setDirichletDofs(dirichlet_dofs);
 
     auto zeroConstrainedResidualEntries = [&]() {
         if (constrained_dofs.empty()) {
@@ -633,6 +649,52 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         return computeResidualNorm();
     };
 
+    auto bridgeRankOneUpdates = [&]() {
+        const auto updates = transient.system().lastRankOneUpdates();
+        if (updates.empty()) {
+            linear.setRankOneUpdates({});
+            return;
+        }
+        if (oopTraceEnabled()) {
+            traceLog("NewtonSolver: " + std::to_string(updates.size()) +
+                     " rank-1 updates from assembly");
+        }
+        linear.setRankOneUpdates(updates);
+        if (!linear.supportsNativeRankOneUpdates()) {
+            // Fallback: add rank-1 contribution (sigma * v * v^T) to the Jacobian matrix
+            // directly. Correct mat-vec, but no preconditioner correction.
+            auto J_view = J.createAssemblyView();
+            FE_CHECK_NOT_NULL(J_view.get(), "NewtonSolver: rank-1 fallback view");
+            J_view->beginAssemblyPhase();
+            std::vector<GlobalIndex> col_dofs;
+            std::vector<Real> row_vals;
+            std::array<GlobalIndex, 1> row_dof{};
+            for (const auto& upd : updates) {
+                col_dofs.resize(upd.v.size());
+                row_vals.resize(upd.v.size());
+                for (std::size_t j = 0; j < upd.v.size(); ++j) {
+                    col_dofs[j] = upd.v[j].first;
+                }
+                for (const auto& ri : upd.v) {
+                    row_dof[0] = ri.first;
+                    const Real scale = upd.sigma * ri.second;
+                    for (std::size_t j = 0; j < upd.v.size(); ++j) {
+                        row_vals[j] = scale * upd.v[j].second;
+                    }
+                    J_view->addMatrixEntries(
+                        std::span<const GlobalIndex>(row_dof.data(), row_dof.size()),
+                        std::span<const GlobalIndex>(col_dofs.data(), col_dofs.size()),
+                        std::span<const Real>(row_vals.data(), row_vals.size()),
+                        assembly::AddMode::Add);
+                }
+            }
+            J_view->finalizeAssembly();
+            if (oopTraceEnabled()) {
+                traceLog("NewtonSolver: rank-1 fallback -> assembled into matrix (no precond correction)");
+            }
+        }
+    };
+
     auto tolerancesSatisfied = [&](double norm) -> bool {
         const bool abs_ok = norm <= options_.abs_tolerance;
         const bool rel_ok = (options_.rel_tolerance <= 0.0)
@@ -640,7 +702,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             : (report.residual_norm0 > 0.0
                    ? (norm / report.residual_norm0 <= options_.rel_tolerance)
                    : abs_ok);
-        return abs_ok && rel_ok;
+        // Use OR: converge when either absolute or relative criterion is met.
+        // This handles the steady-state regime where the initial residual is already
+        // near machine precision and relative reduction is meaningless.
+        return abs_ok || rel_ok;
     };
 
     auto assembleDtOnlyJacobianAndLumpedDiagonal = [&](const systems::SystemStateView& state) -> bool {
@@ -982,6 +1047,25 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             applyPtcDiagonalShift(ptc_gamma);
         }
 
+        // Bridge rank-1 updates from coupled BC assembly to the linear solver.
+        bridgeRankOneUpdates();
+
+        // Provide the effective stage time step to the linear solver backend.
+        //
+        // For multi-stage schemes (e.g., generalized-α), `solve_time` may be a stage time
+        // t_{n+α}. The legacy solver scales certain coupled-BC linearization terms by the
+        // stage step (α*dt). Passing this here allows backends like FSILS to apply the same
+        // scaling internally without coupling the FE library to specific physics.
+        double dt_eff = base_state.dt;
+        const double stage_dt = solve_time - history.time();
+        if (std::isfinite(stage_dt) && stage_dt > 0.0) {
+            dt_eff = stage_dt;
+        }
+        linear.setEffectiveTimeStep(dt_eff);
+        if (oopTraceEnabled()) {
+            traceLog("NewtonSolver: effective dt for linear backend=" + std::to_string(dt_eff));
+        }
+
         int ptc_retries = 0;
         while (true) {
             if (oopTraceEnabled()) {
@@ -999,6 +1083,17 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 traceLog(oss.str());
             }
             if (report.linear.converged) {
+                break;
+            }
+
+            // Inexact Newton: accept the approximate solution even when the linear
+            // solve doesn't fully converge. This matches the legacy solver behavior
+            // where imprecise linear solutions still produce effective Newton steps.
+            if (options_.accept_inexact_linear_solutions) {
+                if (oopTraceEnabled()) {
+                    traceLog("NewtonSolver: accepting inexact linear solution (rel=" +
+                             std::to_string(report.linear.relative_residual) + ")");
+                }
                 break;
             }
 
@@ -1215,6 +1310,32 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             report.residual_norm = current_residual_norm;
             if (oopTraceEnabled()) {
                 traceLog("NewtonSolver: converged after line search update (tolerances satisfied).");
+            }
+            return report;
+        }
+    }
+
+    // When line search is disabled, we do not evaluate the residual norm after applying the
+    // last Newton update (we normally do it at the start of the next iteration). If we
+    // exit the loop due to reaching `max_it`, perform one final residual-only evaluation
+    // so we don't incorrectly report "not converged" when the last update actually met
+    // the requested tolerances.
+    if (!have_residual) {
+        history.updateGhosts();
+        if (!constraints.empty()) {
+            constraints.distribute(history.u());
+            history.u().updateGhosts();
+        }
+        const systems::SystemStateView final_state = makeStateView(history, solve_time);
+        current_residual_norm = assembleResidualOnly(final_state, /*phase=*/"final_check");
+        have_residual = true;
+        report.residual_norm = current_residual_norm;
+
+        if (tolerancesSatisfied(current_residual_norm)) {
+            report.converged = true;
+            report.iterations = max_it;
+            if (oopTraceEnabled()) {
+                traceLog("NewtonSolver: converged after final update (tolerances satisfied).");
             }
             return report;
         }

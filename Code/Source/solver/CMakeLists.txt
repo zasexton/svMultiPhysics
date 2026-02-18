@@ -360,7 +360,6 @@ target_link_libraries(${SV_MULTIPHYSICS_EXE}
   ${TETGEN_LIBRARY_NAME}
   ${TINYXML_LIBRARY_NAME}
   svapplication
-  ${SV_LIB_LINEAR_SOLVER_NAME}${SV_MPI_NAME_EXT}
   ${VTK_LIBRARIES}
   )
 

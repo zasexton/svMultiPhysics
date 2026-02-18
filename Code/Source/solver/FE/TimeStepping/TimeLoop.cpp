@@ -1361,7 +1361,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 : (rep.residual_norm0 > 0.0
                        ? (rep.residual_norm / rep.residual_norm0 <= options_.newton.rel_tolerance)
                        : abs_ok);
-            if (abs_ok && rel_ok) {
+            if (abs_ok || rel_ok) {
                 rep.converged = true;
                 rep.iterations = it;
                 break;
@@ -1788,15 +1788,45 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                         A_mod->beginAssemblyPhase();
                                         A_mod->zeroRows(nondt_dofs, /*set_diagonal=*/true);
                                         A_mod->finalizeAssembly();
-                                    }
+	                                    }
 
-                                    // Solve A * uDot = b.
-                                    const auto rep = linear.solve(A, history.uDot(), b);
-                                    if (!rep.converged) {
-                                        // Fall back to a finite-difference uDot (may be zero at the first step).
-                                        (void)utils::initializeSecondOrderStateFromDisplacementHistory(
-                                            history,
-                                            history.uDot().localSpan(),
+	                                    // Solve A * uDot = b.
+	                                    // The dt-only Jacobian assembled above can be structurally incompatible with
+	                                    // certain specialized saddle-point solvers (e.g., block-Schur), since it
+	                                    // intentionally disables all non-dt terms and may eliminate required coupling
+	                                    // blocks. For this one-time initialization solve, fall back to a generic Krylov
+	                                    // method when the configured linear solver is block-Schur.
+	                                    const auto saved_opts = linear.getOptions();
+	                                    struct RestoreSolverOptionsGuard {
+	                                        backends::LinearSolver& linear;
+	                                        backends::SolverOptions opts;
+	                                        ~RestoreSolverOptionsGuard() noexcept
+	                                        {
+	                                            try {
+	                                                linear.setOptions(opts);
+	                                            } catch (...) {
+	                                            }
+	                                        }
+	                                    } restore_linear_opts{linear, saved_opts};
+
+	                                    backends::SolverOptions init_opts = saved_opts;
+	                                    if (init_opts.method == backends::SolverMethod::BlockSchur) {
+	                                        init_opts.method = backends::SolverMethod::GMRES;
+	                                        init_opts.max_iter = std::max(init_opts.max_iter, 50);
+	                                        linear.setOptions(init_opts);
+	                                    }
+
+	                                    backends::SolverReport rep{};
+	                                    try {
+	                                        rep = linear.solve(A, history.uDot(), b);
+	                                    } catch (const std::exception&) {
+	                                        rep.converged = false;
+	                                    }
+	                                    if (!rep.converged) {
+	                                        // Fall back to a finite-difference uDot (may be zero at the first step).
+	                                        (void)utils::initializeSecondOrderStateFromDisplacementHistory(
+	                                            history,
+	                                            history.uDot().localSpan(),
                                             history.uDDot().localSpan(),
                                             /*overwrite_u_dot=*/true,
                                             /*overwrite_u_ddot=*/false);

@@ -312,7 +312,8 @@ void AssemblyContext::configure(
     solution_laplacians_.clear();
     solution_component_hessians_.clear();
     solution_component_laplacians_.clear();
-    field_solution_data_.clear();
+    field_solution_data_used_ = 0;
+    jit_field_solution_table_.clear();
 }
 
 void AssemblyContext::configure(
@@ -545,7 +546,7 @@ void AssemblyContext::clear()
     solution_laplacians_.clear();
     solution_component_hessians_.clear();
     solution_component_laplacians_.clear();
-    field_solution_data_.clear();
+    field_solution_data_used_ = 0;
     jit_field_solution_table_.clear();
 }
 
@@ -1527,19 +1528,19 @@ Real AssemblyContext::solutionComponentLaplacian(LocalIndex q, int component) co
 
 void AssemblyContext::clearFieldSolutionData() noexcept
 {
-    field_solution_data_.clear();
+    field_solution_data_used_ = 0;
     jit_field_solution_table_.clear();
 }
 
 void AssemblyContext::rebuildJITFieldSolutionTable()
 {
     jit_field_solution_table_.clear();
-    if (field_solution_data_.empty() || n_qpts_ <= 0) {
+    if (field_solution_data_used_ == 0 || n_qpts_ <= 0) {
         return;
     }
 
     const auto nq = static_cast<std::size_t>(n_qpts_);
-    jit_field_solution_table_.reserve(field_solution_data_.size());
+    jit_field_solution_table_.reserve(field_solution_data_used_);
 
     auto flattenXYZ = [](std::span<const Vector3D> a) noexcept -> const Real* {
         return a.empty() ? nullptr : a.data()->data();
@@ -1549,7 +1550,8 @@ void AssemblyContext::rebuildJITFieldSolutionTable()
         return &(*mats.data())[0][0];
     };
 
-    for (const auto& f : field_solution_data_) {
+    for (std::size_t idx = 0; idx < field_solution_data_used_; ++idx) {
+        const auto& f = field_solution_data_[idx];
         jit::FieldSolutionEntryV1 e;
         e.field_id = static_cast<std::int32_t>(f.id);
         e.field_type = static_cast<std::uint32_t>(f.field_type);
@@ -1602,12 +1604,17 @@ void AssemblyContext::setFieldSolutionScalar(FieldId field,
         throw std::invalid_argument("AssemblyContext::setFieldSolutionScalar: laplacians size does not match quadrature points");
     }
 
-    auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    auto it = std::find_if(field_solution_data_.begin(), active_end,
                            [&](const FieldSolutionData& d) { return d.id == field; });
-    if (it == field_solution_data_.end()) {
-        field_solution_data_.push_back(FieldSolutionData{});
-        it = std::prev(field_solution_data_.end());
+    if (it == active_end) {
+        if (field_solution_data_used_ == field_solution_data_.size()) {
+            field_solution_data_.push_back(FieldSolutionData{});
+        }
+        it = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
         it->id = field;
+        it->field_type = FieldType::Scalar;
+        ++field_solution_data_used_;
     }
     if (it->field_type != FieldType::Scalar) {
         throw std::logic_error("AssemblyContext::setFieldSolutionScalar: field is already bound as vector-valued");
@@ -1620,6 +1627,7 @@ void AssemblyContext::setFieldSolutionScalar(FieldId field,
     it->laplacians.assign(laplacians.begin(), laplacians.end());
 
     it->vector_values.clear();
+    it->history_values.clear();
     it->history_vector_values.clear();
     it->jacobians.clear();
     it->component_hessians.clear();
@@ -1656,14 +1664,18 @@ void AssemblyContext::setFieldSolutionVector(FieldId field,
             "AssemblyContext::setFieldSolutionVector: component_laplacians size does not match quadrature points * value_dimension");
     }
 
-    auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    auto it = std::find_if(field_solution_data_.begin(), active_end,
                            [&](const FieldSolutionData& d) { return d.id == field; });
-    const bool inserted = (it == field_solution_data_.end());
-    if (it == field_solution_data_.end()) {
-        field_solution_data_.push_back(FieldSolutionData{});
-        it = std::prev(field_solution_data_.end());
+    const bool inserted = (it == active_end);
+    if (it == active_end) {
+        if (field_solution_data_used_ == field_solution_data_.size()) {
+            field_solution_data_.push_back(FieldSolutionData{});
+        }
+        it = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
         it->id = field;
         it->field_type = FieldType::Vector;
+        ++field_solution_data_used_;
     }
     if (it->field_type != FieldType::Vector) {
         if (inserted) {
@@ -1680,6 +1692,7 @@ void AssemblyContext::setFieldSolutionVector(FieldId field,
 
     it->values.clear();
     it->history_values.clear();
+    it->history_vector_values.clear();
     it->gradients.clear();
     it->hessians.clear();
     it->laplacians.clear();
@@ -1698,15 +1711,19 @@ void AssemblyContext::setFieldPreviousSolutionScalarK(FieldId field, int k, std:
             "AssemblyContext::setFieldPreviousSolutionScalarK: values size does not match quadrature points");
     }
 
-    auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    auto it = std::find_if(field_solution_data_.begin(), active_end,
                            [&](const FieldSolutionData& d) { return d.id == field; });
-    const bool inserted = (it == field_solution_data_.end());
-    if (it == field_solution_data_.end()) {
-        field_solution_data_.push_back(FieldSolutionData{});
-        it = std::prev(field_solution_data_.end());
+    const bool inserted = (it == active_end);
+    if (it == active_end) {
+        if (field_solution_data_used_ == field_solution_data_.size()) {
+            field_solution_data_.push_back(FieldSolutionData{});
+        }
+        it = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
         it->id = field;
         it->field_type = FieldType::Scalar;
         it->value_dim = 1;
+        ++field_solution_data_used_;
     }
     if (it->field_type != FieldType::Scalar) {
         if (inserted) {
@@ -1747,15 +1764,19 @@ void AssemblyContext::setFieldPreviousSolutionVectorK(FieldId field,
             "AssemblyContext::setFieldPreviousSolutionVectorK: values size does not match quadrature points");
     }
 
-    auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    auto it = std::find_if(field_solution_data_.begin(), active_end,
                            [&](const FieldSolutionData& d) { return d.id == field; });
-    const bool inserted = (it == field_solution_data_.end());
-    if (it == field_solution_data_.end()) {
-        field_solution_data_.push_back(FieldSolutionData{});
-        it = std::prev(field_solution_data_.end());
+    const bool inserted = (it == active_end);
+    if (it == active_end) {
+        if (field_solution_data_used_ == field_solution_data_.size()) {
+            field_solution_data_.push_back(FieldSolutionData{});
+        }
+        it = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
         it->id = field;
         it->field_type = FieldType::Vector;
         it->value_dim = value_dimension;
+        ++field_solution_data_used_;
     }
     if (it->field_type != FieldType::Vector) {
         if (inserted) {
@@ -1783,16 +1804,18 @@ void AssemblyContext::setFieldPreviousSolutionVectorK(FieldId field,
 
 bool AssemblyContext::hasFieldSolutionData(FieldId field) const noexcept
 {
-    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
                                  [&](const FieldSolutionData& d) { return d.id == field; });
-    return it != field_solution_data_.end();
+    return it != active_end;
 }
 
 FieldType AssemblyContext::fieldSolutionFieldType(FieldId field) const
 {
-    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
                                  [&](const FieldSolutionData& d) { return d.id == field; });
-    if (it == field_solution_data_.end()) {
+    if (it == active_end) {
         throw std::logic_error("AssemblyContext::fieldSolutionFieldType: field solution data not set");
     }
     return it->field_type;
@@ -1800,9 +1823,10 @@ FieldType AssemblyContext::fieldSolutionFieldType(FieldId field) const
 
 int AssemblyContext::fieldSolutionValueDimension(FieldId field) const
 {
-    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
                                  [&](const FieldSolutionData& d) { return d.id == field; });
-    if (it == field_solution_data_.end()) {
+    if (it == active_end) {
         throw std::logic_error("AssemblyContext::fieldSolutionValueDimension: field solution data not set");
     }
     return it->value_dim;
@@ -1810,9 +1834,10 @@ int AssemblyContext::fieldSolutionValueDimension(FieldId field) const
 
 Real AssemblyContext::fieldValue(FieldId field, LocalIndex q) const
 {
-    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
                                  [&](const FieldSolutionData& d) { return d.id == field; });
-    if (it == field_solution_data_.end() || it->values.empty()) {
+    if (it == active_end || it->values.empty()) {
         throw std::logic_error("AssemblyContext::fieldValue: field value data not set");
     }
     if (it->field_type != FieldType::Scalar) {
@@ -1826,9 +1851,10 @@ Real AssemblyContext::fieldValue(FieldId field, LocalIndex q) const
 
 AssemblyContext::Vector3D AssemblyContext::fieldVectorValue(FieldId field, LocalIndex q) const
 {
-    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
                                  [&](const FieldSolutionData& d) { return d.id == field; });
-    if (it == field_solution_data_.end() || it->vector_values.empty()) {
+    if (it == active_end || it->vector_values.empty()) {
         throw std::logic_error("AssemblyContext::fieldVectorValue: field vector value data not set");
     }
     if (it->field_type != FieldType::Vector) {
@@ -1842,9 +1868,10 @@ AssemblyContext::Vector3D AssemblyContext::fieldVectorValue(FieldId field, Local
 
 AssemblyContext::Vector3D AssemblyContext::fieldGradient(FieldId field, LocalIndex q) const
 {
-    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
                                  [&](const FieldSolutionData& d) { return d.id == field; });
-    if (it == field_solution_data_.end() || it->gradients.empty()) {
+    if (it == active_end || it->gradients.empty()) {
         throw std::logic_error("AssemblyContext::fieldGradient: field gradient data not set");
     }
     if (it->field_type != FieldType::Scalar) {
@@ -1858,9 +1885,10 @@ AssemblyContext::Vector3D AssemblyContext::fieldGradient(FieldId field, LocalInd
 
 AssemblyContext::Matrix3x3 AssemblyContext::fieldJacobian(FieldId field, LocalIndex q) const
 {
-    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
                                  [&](const FieldSolutionData& d) { return d.id == field; });
-    if (it == field_solution_data_.end() || it->jacobians.empty()) {
+    if (it == active_end || it->jacobians.empty()) {
         throw std::logic_error("AssemblyContext::fieldJacobian: field Jacobian data not set");
     }
     if (it->field_type != FieldType::Vector) {
@@ -1874,9 +1902,10 @@ AssemblyContext::Matrix3x3 AssemblyContext::fieldJacobian(FieldId field, LocalIn
 
 AssemblyContext::Matrix3x3 AssemblyContext::fieldHessian(FieldId field, LocalIndex q) const
 {
-    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
                                  [&](const FieldSolutionData& d) { return d.id == field; });
-    if (it == field_solution_data_.end() || it->hessians.empty()) {
+    if (it == active_end || it->hessians.empty()) {
         throw std::logic_error("AssemblyContext::fieldHessian: field Hessian data not set");
     }
     if (it->field_type != FieldType::Scalar) {
@@ -1890,9 +1919,10 @@ AssemblyContext::Matrix3x3 AssemblyContext::fieldHessian(FieldId field, LocalInd
 
 Real AssemblyContext::fieldLaplacian(FieldId field, LocalIndex q) const
 {
-    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
                                  [&](const FieldSolutionData& d) { return d.id == field; });
-    if (it == field_solution_data_.end() || it->laplacians.empty()) {
+    if (it == active_end || it->laplacians.empty()) {
         throw std::logic_error("AssemblyContext::fieldLaplacian: field Laplacian data not set");
     }
     if (it->field_type != FieldType::Scalar) {
@@ -1906,9 +1936,10 @@ Real AssemblyContext::fieldLaplacian(FieldId field, LocalIndex q) const
 
 AssemblyContext::Matrix3x3 AssemblyContext::fieldComponentHessian(FieldId field, LocalIndex q, int component) const
 {
-    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
                                  [&](const FieldSolutionData& d) { return d.id == field; });
-    if (it == field_solution_data_.end() || it->component_hessians.empty()) {
+    if (it == active_end || it->component_hessians.empty()) {
         throw std::logic_error("AssemblyContext::fieldComponentHessian: field component Hessian data not set");
     }
     if (it->field_type != FieldType::Vector) {
@@ -1930,9 +1961,10 @@ AssemblyContext::Matrix3x3 AssemblyContext::fieldComponentHessian(FieldId field,
 
 Real AssemblyContext::fieldComponentLaplacian(FieldId field, LocalIndex q, int component) const
 {
-    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
                                  [&](const FieldSolutionData& d) { return d.id == field; });
-    if (it == field_solution_data_.end() || it->component_laplacians.empty()) {
+    if (it == active_end || it->component_laplacians.empty()) {
         throw std::logic_error("AssemblyContext::fieldComponentLaplacian: field component Laplacian data not set");
     }
     if (it->field_type != FieldType::Vector) {
@@ -1957,9 +1989,10 @@ Real AssemblyContext::fieldPreviousValue(FieldId field, LocalIndex q, int k) con
     if (k <= 0) {
         throw std::out_of_range("AssemblyContext::fieldPreviousValue: history index k must be >= 1");
     }
-    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
                                  [&](const FieldSolutionData& d) { return d.id == field; });
-    if (it == field_solution_data_.end() || it->history_values.empty()) {
+    if (it == active_end || it->history_values.empty()) {
         throw std::logic_error("AssemblyContext::fieldPreviousValue: field previous value data not set");
     }
     if (it->field_type != FieldType::Scalar) {
@@ -1982,9 +2015,10 @@ AssemblyContext::Vector3D AssemblyContext::fieldPreviousVectorValue(FieldId fiel
     if (k <= 0) {
         throw std::out_of_range("AssemblyContext::fieldPreviousVectorValue: history index k must be >= 1");
     }
-    const auto it = std::find_if(field_solution_data_.begin(), field_solution_data_.end(),
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
                                  [&](const FieldSolutionData& d) { return d.id == field; });
-    if (it == field_solution_data_.end() || it->history_vector_values.empty()) {
+    if (it == active_end || it->history_vector_values.empty()) {
         throw std::logic_error("AssemblyContext::fieldPreviousVectorValue: field previous vector value data not set");
     }
     if (it->field_type != FieldType::Vector) {
