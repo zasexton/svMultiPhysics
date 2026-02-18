@@ -35,7 +35,7 @@
 
 #include "mpi.h"
 
-namespace fsi_linear_solver {
+namespace fe_fsi_linear_solver {
 
 /// @brief Modifies:
 ///   commu.task

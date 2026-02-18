@@ -54,7 +54,7 @@ struct FsilsShared final {
     // Optional global DOF permutation: FE ordering -> FSILS node-block ordering.
     std::shared_ptr<const DofPermutation> dof_permutation{};
 
-    fsi_linear_solver::FSILS_lhsType lhs{};
+    fe_fsi_linear_solver::FSILS_lhsType lhs{};
 
     [[nodiscard]] int localNodeCount() const noexcept { return lhs.nNo; }
 

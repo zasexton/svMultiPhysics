@@ -32,14 +32,19 @@
 
 namespace precond {
 
-void pos_mul(const Array<int>& rowPtr, const Vector<int>& colPtr, const int nNo, const int nnz, const int dof, Array<double>& Val, const Array<double>& W);
+void pos_mul(const Array<fe_fsi_linear_solver::fsils_int>& rowPtr, const Vector<fe_fsi_linear_solver::fsils_int>& colPtr,
+    const fe_fsi_linear_solver::fsils_int nNo, const fe_fsi_linear_solver::fsils_int nnz, const int dof,
+    Array<double>& Val, const Array<double>& W);
 
-void precond_diag(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr, const Vector<int>& colPtr, const Vector<int>& diagPtr, 
+void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fe_fsi_linear_solver::fsils_int>& rowPtr,
+    const Vector<fe_fsi_linear_solver::fsils_int>& colPtr, const Vector<fe_fsi_linear_solver::fsils_int>& diagPtr,
     const int dof, Array<double>& Val, Array<double>& R, Array<double>& W);
 
-void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr, const Vector<int>& colPtr,
-    const Vector<int>& diagPtr, const int dof, Array<double>& Val, Array<double>& R, Array<double>& W1, Array<double>& W2);
+void precond_rcs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fe_fsi_linear_solver::fsils_int>& rowPtr,
+    const Vector<fe_fsi_linear_solver::fsils_int>& colPtr, const Vector<fe_fsi_linear_solver::fsils_int>& diagPtr,
+    const int dof, Array<double>& Val, Array<double>& R, Array<double>& W1, Array<double>& W2);
 
-void pre_mul(const Array<int>& rowPtr, const int nNo, const int nnz, const int dof, Array<double>& Val, const Array<double>& W);
+void pre_mul(const Array<fe_fsi_linear_solver::fsils_int>& rowPtr, const fe_fsi_linear_solver::fsils_int nNo,
+    const fe_fsi_linear_solver::fsils_int nnz, const int dof, Array<double>& Val, const Array<double>& W);
 
 };

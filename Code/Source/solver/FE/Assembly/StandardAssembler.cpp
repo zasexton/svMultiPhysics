@@ -807,6 +807,10 @@ void StandardAssembler::initialize()
     // using IMeshAccess::dimension().
     context_.reserve(max_dofs, est_qpts, 3);
 
+    // Pre-allocate field solution storage to avoid per-cell heap allocations.
+    // Use conservative estimates: 8 fields, 27 qpts, 3D vector values.
+    context_.preAllocateFieldSolutionData(/*max_fields=*/8, /*max_qpts=*/est_qpts, /*max_value_dim=*/3);
+
     initialized_ = true;
 }
 

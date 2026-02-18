@@ -36,7 +36,7 @@
 #ifndef FILS_API_H
 #define FILS_API_H
 
-namespace fsi_linear_solver {
+namespace fe_fsi_linear_solver {
 
 void fsils_bc_create(FSILS_lhsType& lhs, int faIn, int nNo, int dof, BcType BC_type, const Vector<int>& gNodes,
     const Array<double>& Val);
@@ -47,9 +47,15 @@ void fsils_bc_free(FSILS_lhsType& lhs, int faIn);
 
 void fsils_bc_update(FSILS_lhsType& lhs, int faIn, int nNo, int dof, const Array<double>& Val);
     
-void fsils_commus(FSILS_lhsType& lhs, Vector<double>& R);
+void fsils_commus(const FSILS_lhsType& lhs, Vector<double>& R);
 
-void fsils_commuv(FSILS_lhsType& lhs, int dof, Array<double>& R);
+void fsils_commuv(const FSILS_lhsType& lhs, int dof, Array<double>& R);
+
+void fsils_commus_begin(const FSILS_lhsType& lhs, Vector<double>& R);
+void fsils_commus_end(const FSILS_lhsType& lhs, Vector<double>& R);
+
+void fsils_commuv_begin(const FSILS_lhsType& lhs, int dof, Array<double>& R);
+void fsils_commuv_end(const FSILS_lhsType& lhs, int dof, Array<double>& R);
 
 double fsils_cpu_t();
 

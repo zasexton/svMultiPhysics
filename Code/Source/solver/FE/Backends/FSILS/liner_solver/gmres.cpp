@@ -29,8 +29,9 @@
  */
 
 //-------------------------------------------------------------------------
-// Graduate [sic] minimum residual algorithm is implemented here for vector
-// and scaler problems.
+// Generalized minimum residual algorithm.
+// Optimized for VMS consistent tangents using CGS2 (Re-orthogonalization),
+// Cache-Blocked Fused BLAS updates, zero-allocation tracking, and hypot stability.
 //-------------------------------------------------------------------------
 
 #include "gmres.h"
@@ -46,38 +47,47 @@
 
 #include "Array3.h"
 
-#include <math.h>
+#include <cmath>
 #include <limits>
+#include <vector>
+#include <algorithm>
 
 namespace gmres {
 
-void bc_pre(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLsType& ls, const int dof, 
-    const int mynNo, const int nNo)
+/// @brief Pre-calculates the boundary condition normalization factor.
+/// Removed O(N) heap allocation, using fast local accumulations.
+void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
+            const int mynNo, const int nNo)
 {
   int nsd = dof - 1;
-  Array<double> v(nsd,nNo);
-
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
     auto &face = lhs.face[faIn];
+
     if (face.coupledFlag) {
       if (face.sharedFlag) {
-        v = 0.0;
-
+        double local_nS = 0.0;
         for (int a = 0; a < face.nNo; a++) {
           int Ac = face.glob(a);
-          for (int i = 0; i < nsd; i++) {
-            v(i,Ac) = face.valM(i,a);
+          if (Ac < mynNo) {
+            for (int i = 0; i < nsd; i++) {
+              local_nS += face.valM(i,a) * face.valM(i,a);
+            }
           }
         }
 
-        face.nS = pow(norm::fsi_ls_normv(nsd, mynNo, lhs.commu, v), 2.0);
+        double global_nS = 0.0;
+        if (lhs.commu.nTasks > 1) {
+          MPI_Allreduce(&local_nS, &global_nS, 1, cm_mod::mpreal, MPI_SUM, lhs.commu.comm);
+        } else {
+          global_nS = local_nS;
+        }
+        face.nS = global_nS;
 
-      } else { 
+      } else {
         face.nS = 0.0;
         for (int a = 0; a < face.nNo; a++) {
-          int Ac = face.glob(a);
           for (int i = 0; i < nsd; i++) {
-            face.nS = face.nS + pow(face.valM(i,a), 2.0);
+            face.nS += face.valM(i,a) * face.valM(i,a);
           }
         }
       }
@@ -88,29 +98,12 @@ void bc_pre(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subL
 /// @brief Solver the system Val * X = R.
 ///
 /// Reproduces the Fortran 'GMRES' subroutine.
-//
-void gmres(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLsType& ls, const int dof, 
-    const Array<double>& Val, const Array<double>& R, Array<double>& X)
+void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
+           const Array<double>& Val, const Array<double>& R, Array<double>& X)
 {
-  #define n_debug_gmres
-  #ifdef debug_gmres
-  DebugMsg dmsg(__func__,  lhs.commu.task);
-  dmsg.banner();
-  #endif
-
-  using namespace fsi_linear_solver;
-
-  int nNo = lhs.nNo;
-  int mynNo = lhs.mynNo;
-  #ifdef debug_gmres
-  dmsg << "dof: " << dof;
-  dmsg << "nNo: " << nNo;
-  dmsg << "mynNo: " << mynNo;
-  dmsg << "ls.sD: " << ls.sD;
-  dmsg << "ls.mItr: " << ls.mItr;
-  dmsg << "ls.absTol: " << ls.absTol;
-  dmsg << "ls.relTol: " << ls.relTol;
-  #endif
+  using namespace fe_fsi_linear_solver;
+  fsils_int nNo = lhs.nNo;
+  fsils_int mynNo = lhs.mynNo;
 
   ls.ws.ensure_gmres_v(dof, nNo, ls.sD);
   auto& h = ls.ws.h;
@@ -121,43 +114,38 @@ void gmres(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLs
   auto& s = ls.ws.s;
   auto& err = ls.ws.err;
 
-  double time = fsi_linear_solver::fsils_cpu_t();
+  double time = fe_fsi_linear_solver::fsils_cpu_t();
   ls.suc = false;
   double eps = 0.0;
   int last_i = 0;
   X = 0.0;
 
+  // Pre-allocate workspace for Hessenberg column (avoids per-iteration heap allocation)
+  std::vector<double> h_col(ls.sD + 1);
+
   for (int l = 0; l < ls.mItr; l++) {
-    #ifdef debug_gmres
-    dmsg;
-    dmsg << "---------- l " << l+1 << " ----------";
-    #endif
+    auto u_slice = u.rslice(0);
 
     if (l == 0) {
       u.set_slice(0, R);
     } else {
-      auto u_slice = u.rslice(0);
-      spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof,  Val, X, u_slice);
-
+      spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, X, u_slice);
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, X, u_slice);
-
       ls.itr = ls.itr + 1;
-      u.set_slice(0, R - u_slice);
+
+      // Zero-allocation residual: u_slice = R - u_slice
+      omp_la::omp_axpby_v(dof, nNo, u_slice, R, -1.0, u_slice);
     }
 
     for (auto& face : lhs.face) {
       if (face.coupledFlag) {
-        auto u_slice = u.rslice(0);
-        auto unCondU = u.rslice(0);
-        add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, unCondU, u_slice);
-        break; 
+        auto unCondU_ref = u.rslice(0);
+        add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, unCondU_ref, u_slice);
+        break;
       }
     }
 
-    err[0] = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u.rslice(0));
-    #ifdef debug_gmres
-    dmsg << "err(1): " << err[0];
-    #endif
+    err[0] = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u_slice);
 
     if (l == 0) {
       eps = err[0];
@@ -165,133 +153,146 @@ void gmres(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLs
       ls.fNorm = eps;
       eps = std::max(ls.absTol, ls.relTol*eps);
     }
-    #ifdef debug_gmres
-    dmsg << "eps: " << eps;
-    #endif
 
     ls.dB = ls.fNorm;
-    auto u_slice = u.rslice(0);
-    if (std::abs(err(0)) <= std::numeric_limits<double>::epsilon()) {
+
+    if (std::abs(err[0]) <= std::numeric_limits<double>::epsilon()) {
       ls.suc = true;
       break;
     }
-    u_slice = u_slice / err(0);
+
+    omp_la::omp_mul_v(dof, nNo, 1.0 / err[0], u_slice);
 
     for (int i = 0; i < ls.sD; i++) {
-      #ifdef debug_gmres
-      dmsg;
-      dmsg << "----- i " << i+1 << " -----";
-      #endif
       last_i = i;
-      auto u_slice = u.rslice(i);
-      auto u_slice_1 = u.rslice(i+1);
-      spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof,  Val, u_slice, u_slice_1);
+      auto u_slice_prev = u.rslice(i);
+      auto u_slice_next = u.rslice(i+1);
 
-      add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, u_slice, u_slice_1);
-
+      spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, u_slice_prev, u_slice_next);
+      add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, u_slice_prev, u_slice_next);
       ls.itr = ls.itr + 1;
 
       for (auto& face : lhs.face) {
         if (face.coupledFlag) {
-          auto u_slice_1 = u.rslice(i+1);
-          auto unCondU = u.rslice(i+1);
-          add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, unCondU, u_slice_1);
+          auto unCondU_ref = u.rslice(i+1);
+          add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, unCondU_ref, u_slice_next);
           break;
         }
       }
 
-      for (int j = 0; j <= i+1; j++) {
-        h(j,i) = dot::fsils_nc_dot_v(dof, mynNo, u.rslice(j), u.rslice(i+1));
-      }
-
-      // h_col is modofied here so don't use 'rcol() method'.
-      auto h_col = h.col(i);
-      bcast::fsils_bcast_v(i+2, h_col, lhs.commu);
-      h.set_col(i, h_col);
-
+      // ----------------------------------------------------------------------
+      // CGS2: Classical Gram-Schmidt with Re-orthogonalization
+      // ----------------------------------------------------------------------
       for (int j = 0; j <= i; j++) {
-        auto u_slice_1 = u.rslice(i+1);
-        omp_la::omp_sum_v(dof, nNo, -h(j,i), u_slice_1, u.rslice(j));
-        h(i+1,i) = h(i+1,i) - h(j,i)*h(j,i);
+        h_col[j] = dot::fsils_nc_dot_v(dof, mynNo, u.rslice(j), u_slice_next);
       }
 
-      h(i+1,i) = sqrt(fabs(h(i+1,i)));
+      bcast::fsils_bcast_v(i+1, h_col, lhs.commu);
 
-      // Guard against (near-)breakdown where the next Krylov vector has near-zero norm.
-      // The FSILS GMRES implementation normalizes by `h(i+1,i)` and will produce NaN/Inf
-      // for small values (especially in small problems with short minimal polynomials).
-      const double breakdown_tol = std::numeric_limits<double>::epsilon() * 1e2;
+      double proj_sq_norm = 0.0;
+      for (int j = 0; j <= i; j++) {
+        h(j,i) = h_col[j];
+        proj_sq_norm += h_col[j] * h_col[j];
+      }
+
+      // Cache-Fused Pass 1
+      for (int j = 0; j <= i; ) {
+        if (j + 1 <= i) {
+          omp_la::omp_axpbypgz_v(dof, nNo, u_slice_next, u_slice_next, -h(j,i), u.rslice(j), -h(j+1,i), u.rslice(j+1));
+          j += 2;
+        } else {
+          omp_la::omp_sum_v(dof, nNo, -h(j,i), u_slice_next, u.rslice(j));
+          j++;
+        }
+      }
+
+      double new_norm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u_slice_next);
+
+      // CGS2: Iterated Gram-Schmidt Correction
+      // Pythagorean identity: ||v||^2 = sum(h^2) + ||v_new||^2
+      // Check: ||v_new||^2 < sum(h^2) ≡ ||v_new|| < (1/√2)||v||
+      if (new_norm * new_norm < proj_sq_norm && new_norm > std::numeric_limits<double>::epsilon()) {
+        for (int j = 0; j <= i; j++) h_col[j] = dot::fsils_nc_dot_v(dof, mynNo, u.rslice(j), u_slice_next);
+        bcast::fsils_bcast_v(i+1, h_col, lhs.commu);
+
+        for (int j = 0; j <= i; ) {
+          if (j + 1 <= i) {
+            omp_la::omp_axpbypgz_v(dof, nNo, u_slice_next, u_slice_next, -h_col[j], u.rslice(j), -h_col[j+1], u.rslice(j+1));
+            h(j,i) += h_col[j];
+            h(j+1,i) += h_col[j+1];
+            j += 2;
+          } else {
+            omp_la::omp_sum_v(dof, nNo, -h_col[j], u_slice_next, u.rslice(j));
+            h(j,i) += h_col[j];
+            j++;
+          }
+        }
+        new_norm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u_slice_next);
+      }
+
+      h(i+1,i) = new_norm;
+
+      // Happy Breakdown Protection & Safe Givens Rotation
+      bool breakdown = false;
+      const double breakdown_tol = std::numeric_limits<double>::epsilon() * std::max(ls.iNorm, 1.0) * 1e2;
       if (h(i+1,i) > breakdown_tol) {
-        u_slice_1 = u.rslice(i+1);
-        omp_la::omp_mul_v(dof, nNo, 1.0/h(i+1,i), u_slice_1);
+        omp_la::omp_mul_v(dof, nNo, 1.0/h(i+1,i), u_slice_next);
       } else {
         h(i+1,i) = 0.0;
+        breakdown = true;
       }
 
       for (int j = 0; j <= i-1; j++) {
-        double tmp = c(j)*h(j,i) + s(j)*h(j+1,i);
+        double tmp_h = c(j)*h(j,i) + s(j)*h(j+1,i);
         h(j+1,i) = -s(j)*h(j,i) + c(j)*h(j+1,i);
-        h(j,i) = tmp;
+        h(j,i) = tmp_h;
       }
 
-      double tmp = sqrt(h(i,i)*h(i,i) + h(i+1,i)*h(i+1,i));
-      if (tmp == 0.0) {
-        c(i) = 1.0;
-        s(i) = 0.0;
+      double tmp_hypot = std::hypot(h(i,i), h(i+1,i));
+      if (tmp_hypot == 0.0) {
+        c(i) = 1.0; s(i) = 0.0;
       } else {
-        c(i) = h(i,i) / tmp;
-        s(i) = h(i+1,i) / tmp;
+        c(i) = h(i,i) / tmp_hypot; s(i) = h(i+1,i) / tmp_hypot;
       }
-      h(i,i) = tmp;
+
+      h(i,i) = tmp_hypot;
       h(i+1,i) = 0.0;
+
       err(i+1) = -s(i)*err(i);
       err(i) = c(i)*err(i);
-      #ifdef debug_gmres
-      dmsg;
-      dmsg << "tmp: " << tmp;
-      dmsg << "err(i): " << err(i);
-      dmsg << "err(i+1): " << err(i+1);
-      dmsg << "eps: " << eps;
-      #endif
 
-      if (fabs(err(i+1)) < eps) {
+      if (std::abs(err(i+1)) < eps || breakdown) {
         ls.suc = true;
         break;
       }
-    } // for int i = 0; i < ls.sD
-
-    if (last_i >= ls.sD) {
-      last_i = ls.sD - 1;
     }
 
-    for (int i = 0; i <= last_i; i++) {
-      y(i) = err(i);
+    if (last_i >= ls.sD) last_i = ls.sD - 1;
+
+    for (int i = 0; i <= last_i; i++) y(i) = err(i);
+
+    for (int j = last_i; j >= 0; j--) {
+      for (int k = j+1; k <= last_i; k++) y(j) -= h(j,k)*y(k);
+      y(j) /= h(j,j);
     }
 
-    for (int j = last_i; j >= 0; j--) { 
-      for (int k = j+1; k <= last_i; k++) {
-        y(j) = y(j) - h(j,k)*y(k);
+    // Cache-Fused Solution Reconstruction
+    for (int j = 0; j <= last_i; ) {
+      if (j + 1 <= last_i) {
+        omp_la::omp_axpbypgz_v(dof, nNo, X, X, y(j), u.rslice(j), y(j+1), u.rslice(j+1));
+        j += 2;
+      } else {
+        omp_la::omp_sum_v(dof, nNo, y(j), X, u.rslice(j));
+        j++;
       }
-      y(j) = y(j) / h(j,j);
     }
 
-    for (int j = 0; j <= last_i; j++) {
-      omp_la::omp_sum_v(dof, nNo, y(j), X, u.rslice(j));
-    }
+    ls.fNorm = std::abs(err(last_i+1));
+    if (ls.suc) break;
+  }
 
-    ls.fNorm = fabs(err(last_i+1));
-    if (ls.suc) {
-      break;
-    }
-
-  } // for l = 0; l < ls.mItr
-
-  ls.callD = fsi_linear_solver::fsils_cpu_t() - time + ls.callD;
-  ls.dB  = 10.0 * log(ls.fNorm / ls.dB);
-
-  #ifdef debug_gmres
-  dmsg << "Done";
-  #endif
+  ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - time + ls.callD;
+  ls.dB  = 10.0 * std::log(ls.fNorm / ls.dB);
 }
 
 //---------
@@ -299,29 +300,12 @@ void gmres(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLs
 //---------
 // Reproduces the Fortran 'GMRESS' subroutine.
 //
-void gmres_s(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLsType& ls, const int dof,
-    const Vector<double>& Val, Vector<double>& R)
+void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
+             const Vector<double>& Val, Vector<double>& R)
 {
-  #define n_debug_gmres_s
-  #ifdef debug_gmres_s
-  DebugMsg dmsg(__func__,  lhs.commu.task);
-  dmsg.banner();
-  #endif
-
-  using namespace fsi_linear_solver;
-
-  bool flag = false;
-  int nNo = lhs.nNo;
-  int mynNo = lhs.mynNo;
-  #ifdef debug_gmres_s
-  dmsg << "dof: " << dof;
-  dmsg << "nNo: " << nNo;
-  dmsg << "mynNo: " << mynNo;
-  dmsg << "ls.sD: " << ls.sD;
-  dmsg << "ls.mItr: " << ls.mItr;
-  dmsg << "ls.absTol: " << ls.absTol;
-  dmsg << "ls.relTol: " << ls.relTol;
-  #endif
+  using namespace fe_fsi_linear_solver;
+  fsils_int nNo = lhs.nNo;
+  fsils_int mynNo = lhs.mynNo;
 
   ls.ws.ensure_gmres_s(nNo, ls.sD);
   auto& h = ls.ws.h;
@@ -332,8 +316,9 @@ void gmres_s(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
   auto& s = ls.ws.s;
   auto& err = ls.ws.err;
 
-  ls.callD = fsi_linear_solver::fsils_cpu_t();
+  ls.callD = fe_fsi_linear_solver::fsils_cpu_t();
   ls.suc = false;
+
   double eps = norm::fsi_ls_norms(mynNo, lhs.commu, R);
   ls.iNorm = eps;
   ls.fNorm = eps;
@@ -341,171 +326,166 @@ void gmres_s(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
   ls.itr = 0;
   int last_i = 0;
   X = 0.0;
-  #ifdef debug_gmres_s
-  dmsg << "ls.iNorm: " << ls.iNorm;
-  dmsg << "eps: " << eps;
-  #endif
 
   if (ls.iNorm <= ls.absTol) {
     ls.callD = std::numeric_limits<double>::epsilon();
     ls.dB = 0.0;
-    return; 
+    return;
   }
 
-  for (int l = 0; l < ls.mItr; l++) {
-    #ifdef debug_gmres_s
-    dmsg;
-    dmsg << "======== l " << l+1 << " ======== ";
-    #endif
-    ls.dB = ls.fNorm;
-    ls.itr = ls.itr + 1;
-    auto u_col = u.col(0);
-    spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, Val, X, u_col);
-    u.set_col(0, R - u_col);
+  // Pre-allocate workspace for Hessenberg column
+  std::vector<double> h_local(ls.sD + 1);
 
-    err[0] = norm::fsi_ls_norms(mynNo, lhs.commu, u.col(0));
+  for (int l = 0; l < ls.mItr; l++) {
+    ls.dB = ls.fNorm;
+    ls.itr++;
+
+    auto u_col_curr = u.col(0);
+
+    spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, Val, X, u_col_curr);
+    omp_la::omp_axpby_s(nNo, u_col_curr, R, -1.0, u_col_curr);
+
+    err[0] = norm::fsi_ls_norms(mynNo, lhs.commu, u_col_curr);
     if (std::abs(err[0]) <= std::numeric_limits<double>::epsilon()) {
-      ls.suc = true;
-      break;
+      ls.suc = true; break;
     }
-    u_col = u.col(0) / err[0];
-    u.set_col(0, u_col);
-    #ifdef debug_gmres_s
-    dmsg << "err(1): " << err[0];
-    #endif
+
+    omp_la::omp_mul_s(nNo, 1.0 / err[0], u_col_curr);
+    u.set_col(0, u_col_curr);
 
     for (int i = 0; i < ls.sD; i++) {
-      #ifdef debug_gmres_s
-      dmsg;
-      dmsg << "----- i " << i+1 << " ----- ";
-      #endif
-      ls.itr = ls.itr + 1;
+      ls.itr++;
       last_i = i;
-      auto u_col = u.col(i);
-      auto u_col_1 = u.col(i+1);
-      spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, Val, u_col, u_col_1);
-      u.set_col(i+1, u_col_1);
 
-      for (int j = 0; j <= i+1; j++) {
-        h(j,i) = dot::fsils_nc_dot_s(mynNo, u.col(j), u.col(i+1));
-      }
+      auto u_col_prev = u.col(i);
+      auto u_col_next = u.col(i+1);
+      spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, Val, u_col_prev, u_col_next);
 
-      auto h_col = h.col(i);
-      bcast::fsils_bcast_v(i+2, h_col, lhs.commu);
-      h.set_col(i, h_col);
-
+      // --- CGS Step 1 ---
       for (int j = 0; j <= i; j++) {
-        auto u_col_1 = u.col(i+1);
-        omp_la::omp_sum_s(nNo, -h(j,i), u_col_1, u.col(j));
-        u.set_col(i+1, u_col_1);
-        h(i+1,i) = h(i+1,i) - h(j,i)*h(j,i);
+        h_local[j] = dot::fsils_nc_dot_s(mynNo, u.col(j), u_col_next);
       }
-      h(i+1,i) = sqrt(fabs(h(i+1,i)));
 
-      // Guard against (near-)breakdown where the next Krylov vector has near-zero norm.
-      const double breakdown_tol = std::numeric_limits<double>::epsilon() * 1e2;
+      bcast::fsils_bcast_v(i+1, h_local, lhs.commu);
+
+      double proj_sq_norm = 0.0;
+      for (int j = 0; j <= i; j++) {
+        h(j,i) = h_local[j];
+        proj_sq_norm += h_local[j] * h_local[j];
+      }
+
+      // Cache-Fused Pass 1
+      for (int j = 0; j <= i; ) {
+        if (j + 1 <= i) {
+          omp_la::omp_axpbypgz_s(nNo, u_col_next, u_col_next, -h(j,i), u.col(j), -h(j+1,i), u.col(j+1));
+          j += 2;
+        } else {
+          omp_la::omp_sum_s(nNo, -h(j,i), u_col_next, u.col(j));
+          j++;
+        }
+      }
+
+      double new_norm = norm::fsi_ls_norms(mynNo, lhs.commu, u_col_next);
+
+      // CGS2: Iterated Gram-Schmidt Correction (Pythagorean check)
+      if (new_norm * new_norm < proj_sq_norm && new_norm > std::numeric_limits<double>::epsilon()) {
+        for (int j = 0; j <= i; j++) h_local[j] = dot::fsils_nc_dot_s(mynNo, u.col(j), u_col_next);
+        bcast::fsils_bcast_v(i+1, h_local, lhs.commu);
+
+        for (int j = 0; j <= i; ) {
+          if (j + 1 <= i) {
+            omp_la::omp_axpbypgz_s(nNo, u_col_next, u_col_next, -h_local[j], u.col(j), -h_local[j+1], u.col(j+1));
+            h(j,i) += h_local[j];
+            h(j+1,i) += h_local[j+1];
+            j += 2;
+          } else {
+            omp_la::omp_sum_s(nNo, -h_local[j], u_col_next, u.col(j));
+            h(j,i) += h_local[j];
+            j++;
+          }
+        }
+        new_norm = norm::fsi_ls_norms(mynNo, lhs.commu, u_col_next);
+      }
+
+      h(i+1,i) = new_norm;
+
+      // Happy Breakdown Check
+      bool breakdown = false;
+      const double breakdown_tol = std::numeric_limits<double>::epsilon() * std::max(ls.iNorm, 1.0) * 1e2;
       if (h(i+1,i) > breakdown_tol) {
-        u_col_1 = u.col(i+1);
-        omp_la::omp_mul_s(nNo, 1.0/h(i+1,i), u_col_1);
-        u.set_col(i+1, u_col_1);
+        omp_la::omp_mul_s(nNo, 1.0/h(i+1,i), u_col_next);
       } else {
         h(i+1,i) = 0.0;
+        breakdown = true;
       }
+      u.set_col(i+1, u_col_next);
 
       for (int j = 0; j <= i-1; j++) {
-        double tmp = c(j)*h(j,i) + s(j)*h(j+1,i);
+        double tmp_h = c(j)*h(j,i) + s(j)*h(j+1,i);
         h(j+1,i) = -s(j)*h(j,i) + c(j)*h(j+1,i);
-        h(j,i) = tmp;
+        h(j,i) = tmp_h;
       }
 
-      double tmp = sqrt(h(i,i)*h(i,i) + h(i+1,i)*h(i+1,i));
-      if (tmp == 0.0) {
-        c(i) = 1.0;
-        s(i) = 0.0;
+      double tmp_hypot = std::hypot(h(i,i), h(i+1,i));
+      if (tmp_hypot == 0.0) {
+        c(i) = 1.0; s(i) = 0.0;
       } else {
-        c(i) = h(i,i) / tmp;
-        s(i) = h(i+1,i) / tmp;
+        c(i) = h(i,i) / tmp_hypot; s(i) = h(i+1,i) / tmp_hypot;
       }
-      h(i,i) = tmp;
+
+      h(i,i) = tmp_hypot;
       h(i+1,i) = 0.0;
       err(i+1) = -s(i)*err(i);
       err(i) = c(i)*err(i);
-      #ifdef debug_gmres_s
-      dmsg << "err(i+1): " << err(i+1);
-      dmsg << "tmp: " << tmp;
-      #endif
 
-      if (fabs(err(i+1)) < eps) {
+      if (std::abs(err(i+1)) < eps || breakdown) {
         ls.suc = true;
         break;
       }
-    } // for int i = 0; i < ls.sD
-
-    if (last_i >= ls.sD) {
-      last_i = ls.sD - 1;
     }
 
-    for (int i = 0; i <= last_i; i++) {
-      y(i) = err(i);
+    if (last_i >= ls.sD) last_i = ls.sD - 1;
+
+    for (int i = 0; i <= last_i; i++) y(i) = err(i);
+
+    for (int j = last_i; j >= 0; j--) {
+      for (int k = j+1; k <= last_i; k++) y(j) -= h(j,k)*y(k);
+      y(j) /= h(j,j);
     }
 
-    for (int j = last_i; j >= 0; j--) { 
-      for (int k = j+1; k <= last_i; k++) {
-        y(j) = y(j) - h(j,k)*y(k);
+    // Cache-Fused Reconstruction
+    for (int j = 0; j <= last_i; ) {
+      if (j + 1 <= last_i) {
+        omp_la::omp_axpbypgz_s(nNo, X, X, y(j), u.col(j), y(j+1), u.col(j+1));
+        j += 2;
+      } else {
+        omp_la::omp_sum_s(nNo, y(j), X, u.col(j));
+        j++;
       }
-      y(j) = y(j) / h(j,j);
     }
 
-    for (int j = 0; j <= last_i; j++) {
-      omp_la::omp_sum_s(nNo, y(j), X, u.col(j));
-    }
-
-    ls.fNorm = fabs(err(last_i+1));
-    if (ls.suc) {
-      break;
-    }
+    ls.fNorm = std::abs(err(last_i+1));
+    if (ls.suc) break;
   }
 
   R = X;
-  ls.callD = fsi_linear_solver::fsils_cpu_t() - ls.callD;
-  ls.dB  = 10.0 * log(ls.fNorm / ls.dB);
+  ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.callD;
+  ls.dB  = 10.0 * std::log(ls.fNorm / ls.dB);
 }
 
 //---------
 // gmres_v
 //---------
-// Generalized minimum residual algorithm implemented vector problems.
-//
-// The Array3::rslice() method is used to create an Array object with 
-// data directly referenced to the Array3 data. This eliminates the overhead 
-// of copying data to and from an Array3 object.
+// Generalized minimum residual algorithm implemented for vector problems.
 //
 // Reproduces the Fortran 'GMRESV' subroutine.
 //
-void gmres_v(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLsType& ls, const int dof,
-    const Array<double>& Val, Array<double>& R)
+void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
+             const Array<double>& Val, Array<double>& R)
 {
-  using namespace fsi_linear_solver;
-
-  #define n_debug_gmres_v
-  #ifdef debug_gmres_v
-  DebugMsg dmsg(__func__,  lhs.commu.task);
-  dmsg.banner();
-  double time = fsi_linear_solver::fsils_cpu_t();
-  #endif
-
-  bool flag = false;
-  int nNo = lhs.nNo;
-  int mynNo = lhs.mynNo;
-  #ifdef debug_gmres_v
-  dmsg << "dof: " << dof;
-  dmsg << "nNo: " << nNo;
-  dmsg << "mynNo: " << mynNo;
-  dmsg << "ls.sD: " << ls.sD;
-  dmsg << "ls.mItr: " << ls.mItr;
-  dmsg << "ls.absTol: " << ls.absTol;
-  dmsg << "ls.relTol: " << ls.relTol;
-  #endif
+  using namespace fe_fsi_linear_solver;
+  fsils_int nNo = lhs.nNo;
+  fsils_int mynNo = lhs.mynNo;
 
   ls.ws.ensure_gmres_v(dof, nNo, ls.sD);
   auto& h = ls.ws.h;
@@ -517,8 +497,9 @@ void gmres_v(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
   auto& s = ls.ws.s;
   auto& err = ls.ws.err;
 
-  ls.callD = fsi_linear_solver::fsils_cpu_t();
+  ls.callD = fe_fsi_linear_solver::fsils_cpu_t();
   ls.suc = false;
+
   double eps = norm::fsi_ls_normv(dof, mynNo, lhs.commu, R);
   ls.iNorm = eps;
   ls.fNorm = eps;
@@ -526,10 +507,6 @@ void gmres_v(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
   ls.itr = 0;
   int last_i = 0;
   X = 0.0;
-  #ifdef debug_gmres_v
-  dmsg << "ls.iNorm: " << ls.iNorm;
-  dmsg << "eps: " << eps;
-  #endif
 
   bc_pre(lhs, ls, dof, mynNo, nNo);
 
@@ -539,149 +516,161 @@ void gmres_v(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
     return;
   }
 
-  for (int l = 0; l < ls.mItr; l++) {
-    #ifdef debug_gmres_v
-    dmsg << "===== l " << l+1 << " ===== ";
-    #endif
-    ls.dB = ls.fNorm;
-    ls.itr = ls.itr + 1;
-    auto u_slice = u.rslice(0);
-    spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof,  Val, X, u_slice);
+  // Pre-allocate workspace for Hessenberg column
+  std::vector<double> h_col(ls.sD + 1);
 
+  for (int l = 0; l < ls.mItr; l++) {
+    ls.dB = ls.fNorm;
+    ls.itr++;
+
+    auto u_slice = u.rslice(0);
+    spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, X, u_slice);
     add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, X, u_slice);
 
-    u_slice = R - u_slice;
+    omp_la::omp_axpby_v(dof, nNo, u_slice, R, -1.0, u_slice);
 
     for (auto& face : lhs.face) {
-      if (face.coupledFlag && flag) {
-        auto u_slice = u.rslice(0);
-        auto unCondU = u.rslice(0);
-        add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, unCondU, u_slice);
+      if (face.coupledFlag) {
+        auto unCondU_ref = u.rslice(0);
+        add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, unCondU_ref, u_slice);
         break;
       }
     }
 
     err[0] = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u.rslice(0));
     if (std::abs(err[0]) <= std::numeric_limits<double>::epsilon()) {
-      ls.suc = true;
-      break;
+      ls.suc = true; break;
     }
-    u_slice = u.rslice(0) / err[0];
-    #ifdef debug_gmres_v
-    dmsg << "err(1): " << err[0];
-    #endif
+
+    omp_la::omp_mul_v(dof, nNo, 1.0 / err[0], u_slice);
 
     for (int i = 0; i < ls.sD; i++) {
-      #ifdef debug_gmres_v
-      dmsg << "----- i " << i+1 << " ----- ";
-      #endif
-      ls.itr = ls.itr + 1;
+      ls.itr++;
       last_i = i;
-      auto u_slice = u.rslice(i);
-      auto u_slice_1 = u.rslice(i+1);
-      spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof,  Val, u_slice, u_slice_1);
+      auto u_slice_prev = u.rslice(i);
+      auto u_slice_next = u.rslice(i+1);
 
-      add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, u_slice, u_slice_1);
+      spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, u_slice_prev, u_slice_next);
+      add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, u_slice_prev, u_slice_next);
 
       for (auto& face : lhs.face) {
-        if (face.coupledFlag && flag) {
-          auto u_slice_1 = u.rslice(i+1);
-          auto unCondU = u.rslice(i+1);
-          add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, unCondU, u_slice_1);
+        if (face.coupledFlag) {
+          auto unCondU_ref = u.rslice(i+1);
+          add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, unCondU_ref, u_slice_next);
           break;
         }
       }
 
-      for (int j = 0; j <= i+1; j++) {
-        h(j,i) = dot::fsils_nc_dot_v(dof, mynNo, u.rslice(j), u.rslice(i+1));
-        #ifdef debug_gmres_v
-        dmsg << "h(j,i): " << h(j,i);
-        #endif
-      }
-
-      auto h_col = h.col(i);
-      bcast::fsils_bcast_v(i+2, h_col, lhs.commu);
-      h.set_col(i, h_col);
-
+      // --- CGS Step 1 ---
       for (int j = 0; j <= i; j++) {
-        auto u_slice_1 = u.rslice(i+1);
-        omp_la::omp_sum_v(dof, nNo, -h(j,i), u_slice_1, u.rslice(j));
-        h(i+1,i) = h(i+1,i) - h(j,i)*h(j,i);
+        h_col[j] = dot::fsils_nc_dot_v(dof, mynNo, u.rslice(j), u_slice_next);
       }
-      h(i+1,i) = sqrt(fabs(h(i+1,i)));
 
-      // Guard against (near-)breakdown where the next Krylov vector has near-zero norm.
-      const double breakdown_tol = std::numeric_limits<double>::epsilon() * 1e2;
+      bcast::fsils_bcast_v(i+1, h_col, lhs.commu);
+
+      double proj_sq_norm = 0.0;
+      for (int j = 0; j <= i; j++) {
+        h(j,i) = h_col[j];
+        proj_sq_norm += h_col[j] * h_col[j];
+      }
+
+      // Cache-Fused Pass 1
+      for (int j = 0; j <= i; ) {
+        if (j + 1 <= i) {
+          omp_la::omp_axpbypgz_v(dof, nNo, u_slice_next, u_slice_next, -h(j,i), u.rslice(j), -h(j+1,i), u.rslice(j+1));
+          j += 2;
+        } else {
+          omp_la::omp_sum_v(dof, nNo, -h(j,i), u_slice_next, u.rslice(j));
+          j++;
+        }
+      }
+
+      double new_norm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u_slice_next);
+
+      // CGS2: Iterated Gram-Schmidt Correction (Pythagorean check)
+      if (new_norm * new_norm < proj_sq_norm && new_norm > std::numeric_limits<double>::epsilon()) {
+        for (int j = 0; j <= i; j++) h_col[j] = dot::fsils_nc_dot_v(dof, mynNo, u.rslice(j), u_slice_next);
+        bcast::fsils_bcast_v(i+1, h_col, lhs.commu);
+
+        for (int j = 0; j <= i; ) {
+          if (j + 1 <= i) {
+            omp_la::omp_axpbypgz_v(dof, nNo, u_slice_next, u_slice_next, -h_col[j], u.rslice(j), -h_col[j+1], u.rslice(j+1));
+            h(j,i) += h_col[j];
+            h(j+1,i) += h_col[j+1];
+            j += 2;
+          } else {
+            omp_la::omp_sum_v(dof, nNo, -h_col[j], u_slice_next, u.rslice(j));
+            h(j,i) += h_col[j];
+            j++;
+          }
+        }
+        new_norm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u_slice_next);
+      }
+
+      h(i+1,i) = new_norm;
+
+      // Happy Breakdown Protection
+      bool breakdown = false;
+      const double breakdown_tol = std::numeric_limits<double>::epsilon() * std::max(ls.iNorm, 1.0) * 1e2;
       if (h(i+1,i) > breakdown_tol) {
-        u_slice_1 = u.rslice(i+1);
-        omp_la::omp_mul_v(dof, nNo, 1.0/h(i+1,i), u_slice_1);
+        omp_la::omp_mul_v(dof, nNo, 1.0/h(i+1,i), u_slice_next);
       } else {
         h(i+1,i) = 0.0;
+        breakdown = true;
       }
 
       for (int j = 0; j <= i-1; j++) {
-        double tmp = c(j)*h(j,i) + s(j)*h(j+1,i);
+        double tmp_h = c(j)*h(j,i) + s(j)*h(j+1,i);
         h(j+1,i) = -s(j)*h(j,i) + c(j)*h(j+1,i);
-        h(j,i) = tmp;
+        h(j,i) = tmp_h;
       }
 
-      double tmp = sqrt(h(i,i)*h(i,i) + h(i+1,i)*h(i+1,i));
-      if (tmp == 0.0) {
-        c(i) = 1.0;
-        s(i) = 0.0;
+      double tmp_hypot = std::hypot(h(i,i), h(i+1,i));
+      if (tmp_hypot == 0.0) {
+        c(i) = 1.0; s(i) = 0.0;
       } else {
-        c(i) = h(i,i) / tmp;
-        s(i) = h(i+1,i) / tmp;
+        c(i) = h(i,i) / tmp_hypot; s(i) = h(i+1,i) / tmp_hypot;
       }
-      h(i,i) = tmp;
+
+      h(i,i) = tmp_hypot;
       h(i+1,i) = 0.0;
+
       err(i+1) = -s(i)*err(i);
       err(i) = c(i)*err(i);
-      #ifdef debug_gmres_v
-      dmsg << "err(i+1): " << err(i+1);
-      dmsg << "tmp: " << tmp;
-      #endif
 
-      if (fabs(err(i+1)) < eps) {
+      if (std::abs(err(i+1)) < eps || breakdown) {
         ls.suc = true;
         break;
       }
-    } // for int i = 0; i < ls.sD
-
-    if (last_i >= ls.sD) {
-      last_i = ls.sD - 1;
     }
 
-    for (int i = 0; i <= last_i; i++) {
-      y(i) = err(i);
+    if (last_i >= ls.sD) last_i = ls.sD - 1;
+
+    for (int i = 0; i <= last_i; i++) y(i) = err(i);
+
+    for (int j = last_i; j >= 0; j--) {
+      for (int k = j+1; k <= last_i; k++) y(j) -= h(j,k)*y(k);
+      y(j) /= h(j,j);
     }
 
-    for (int j = last_i; j >= 0; j--) { 
-      for (int k = j+1; k <= last_i; k++) {
-        y(j) = y(j) - h(j,k)*y(k);
+    // Cache-Fused Reconstruction
+    for (int j = 0; j <= last_i; ) {
+      if (j + 1 <= last_i) {
+        omp_la::omp_axpbypgz_v(dof, nNo, X, X, y(j), u.rslice(j), y(j+1), u.rslice(j+1));
+        j += 2;
+      } else {
+        omp_la::omp_sum_v(dof, nNo, y(j), X, u.rslice(j));
+        j++;
       }
-      y(j) = y(j) / h(j,j);
     }
 
-    for (int j = 0; j <= last_i; j++) {
-      omp_la::omp_sum_v(dof, nNo, y(j), X, u.rslice(j));
-    }
-
-    ls.fNorm = fabs(err(last_i+1));
-    if (ls.suc) {
-      break;
-    }
+    ls.fNorm = std::abs(err(last_i+1));
+    if (ls.suc) break;
   }
 
   R = X;
-  ls.callD = fsi_linear_solver::fsils_cpu_t() - ls.callD;
-  ls.dB  = 10.0 * log(ls.fNorm / ls.dB);
-
-  #ifdef debug_gmres_v
-  double exec_time = fsi_linear_solver::fsils_cpu_t() - time;
-  dmsg << "Execution time: " << exec_time;
-  dmsg << "Done";
-  #endif
+  ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.callD;
+  ls.dB  = 10.0 * std::log(ls.fNorm / ls.dB);
 }
 
-};
+}; // namespace gmres

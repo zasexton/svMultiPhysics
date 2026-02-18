@@ -123,3 +123,37 @@ void Array<int>::stats(const std::string& prefix)
 template<>
 bool Array<int>::write_enabled = false;
 
+// long (int64_t / fsils_int) //
+template<>
+bool Array<long>::show_index_check_message = true;
+
+template<>
+int Array<long>::id = 0;
+
+template<>
+double Array<long>::memory_in_use = 0;
+
+template<>
+double Array<long>::memory_returned = 0;
+
+template<>
+int Array<long>::num_allocated = 0;
+
+template<>
+int Array<long>::active = 0;
+
+template<>
+void Array<long>::memory(const std::string& prefix)
+{
+  utils::print_mem("Array<long>", prefix, memory_in_use, memory_returned);
+}
+
+template<>
+void Array<long>::stats(const std::string& prefix)
+{
+  utils::print_stats("Array<long>", prefix, num_allocated, active);
+}
+
+template<>
+bool Array<long>::write_enabled = false;
+

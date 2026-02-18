@@ -47,10 +47,10 @@ namespace pc_gmres {
 
 /// \todo [NOTE] Not implemented.
 //
-void pc_gmres(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLsType& ls, const int dof, 
+void pc_gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof, 
     const Array<double>& Val, const Array<double>& R)
 {
-  using namespace fsi_linear_solver;
+  using namespace fe_fsi_linear_solver;
 
 }
 

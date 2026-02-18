@@ -700,19 +700,19 @@ Real AssemblyContext::basisValue(LocalIndex i, LocalIndex q) const
     if (i >= n_test_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::basisValue: index out of range");
     }
-    return test_basis_values_[static_cast<std::size_t>(i * n_qpts_ + q)];
+    return test_basis_values_[static_cast<std::size_t>(q * n_test_dofs_ + i)];
 }
 
-std::span<const Real> AssemblyContext::basisValues(LocalIndex i) const
+std::span<const Real> AssemblyContext::basisValuesAtQpt(LocalIndex q) const
 {
     if (test_is_vector_basis_) {
-        throw std::logic_error("AssemblyContext::basisValues: scalar basis values not available for vector-basis spaces");
+        throw std::logic_error("AssemblyContext::basisValuesAtQpt: scalar basis values not available for vector-basis spaces");
     }
-    if (i >= n_test_dofs_) {
-        throw std::out_of_range("AssemblyContext::basisValues: index out of range");
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::basisValuesAtQpt: index out of range");
     }
-    const auto offset = static_cast<std::size_t>(i * n_qpts_);
-    return {test_basis_values_.data() + offset, static_cast<std::size_t>(n_qpts_)};
+    const auto offset = static_cast<std::size_t>(q * n_test_dofs_);
+    return {test_basis_values_.data() + offset, static_cast<std::size_t>(n_test_dofs_)};
 }
 
 AssemblyContext::Vector3D AssemblyContext::referenceGradient(LocalIndex i, LocalIndex q) const
@@ -723,7 +723,7 @@ AssemblyContext::Vector3D AssemblyContext::referenceGradient(LocalIndex i, Local
     if (i >= n_test_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::referenceGradient: index out of range");
     }
-    return test_ref_gradients_[static_cast<std::size_t>(i * n_qpts_ + q)];
+    return test_ref_gradients_[static_cast<std::size_t>(q * n_test_dofs_ + i)];
 }
 
 AssemblyContext::Vector3D AssemblyContext::physicalGradient(LocalIndex i, LocalIndex q) const
@@ -748,7 +748,7 @@ AssemblyContext::Vector3D AssemblyContext::basisVectorValue(LocalIndex i, LocalI
     if (i >= n_test_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::basisVectorValue: index out of range");
     }
-    return test_basis_vector_values_[static_cast<std::size_t>(i * n_qpts_ + q)];
+    return test_basis_vector_values_[static_cast<std::size_t>(q * n_test_dofs_ + i)];
 }
 
 AssemblyContext::Vector3D AssemblyContext::basisCurl(LocalIndex i, LocalIndex q) const
@@ -762,7 +762,7 @@ AssemblyContext::Vector3D AssemblyContext::basisCurl(LocalIndex i, LocalIndex q)
     if (i >= n_test_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::basisCurl: index out of range");
     }
-    return test_basis_curls_[static_cast<std::size_t>(i * n_qpts_ + q)];
+    return test_basis_curls_[static_cast<std::size_t>(q * n_test_dofs_ + i)];
 }
 
 Real AssemblyContext::basisDivergence(LocalIndex i, LocalIndex q) const
@@ -776,7 +776,7 @@ Real AssemblyContext::basisDivergence(LocalIndex i, LocalIndex q) const
     if (i >= n_test_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::basisDivergence: index out of range");
     }
-    return test_basis_divergences_[static_cast<std::size_t>(i * n_qpts_ + q)];
+    return test_basis_divergences_[static_cast<std::size_t>(q * n_test_dofs_ + i)];
 }
 
 AssemblyContext::Matrix3x3 AssemblyContext::referenceHessian(LocalIndex i, LocalIndex q) const
@@ -790,7 +790,7 @@ AssemblyContext::Matrix3x3 AssemblyContext::referenceHessian(LocalIndex i, Local
     if (i >= n_test_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::referenceHessian: index out of range");
     }
-    return test_ref_hessians_[static_cast<std::size_t>(i * n_qpts_ + q)];
+    return test_ref_hessians_[static_cast<std::size_t>(q * n_test_dofs_ + i)];
 }
 
 AssemblyContext::Matrix3x3 AssemblyContext::physicalHessian(LocalIndex i, LocalIndex q) const
@@ -804,7 +804,7 @@ AssemblyContext::Matrix3x3 AssemblyContext::physicalHessian(LocalIndex i, LocalI
     if (i >= n_test_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::physicalHessian: index out of range");
     }
-    return test_phys_hessians_[static_cast<std::size_t>(i * n_qpts_ + q)];
+    return test_phys_hessians_[static_cast<std::size_t>(q * n_test_dofs_ + i)];
 }
 
 // ============================================================================
@@ -821,9 +821,9 @@ Real AssemblyContext::trialBasisValue(LocalIndex j, LocalIndex q) const
     }
 
     if (trial_is_test_) {
-        return test_basis_values_[static_cast<std::size_t>(j * n_qpts_ + q)];
+        return test_basis_values_[static_cast<std::size_t>(q * n_test_dofs_ + j)];
     }
-    return trial_basis_values_[static_cast<std::size_t>(j * n_qpts_ + q)];
+    return trial_basis_values_[static_cast<std::size_t>(q * n_trial_dofs_ + j)];
 }
 
 AssemblyContext::Vector3D AssemblyContext::trialBasisVectorValue(LocalIndex j, LocalIndex q) const
@@ -838,7 +838,7 @@ AssemblyContext::Vector3D AssemblyContext::trialBasisVectorValue(LocalIndex j, L
     if (j >= n_trial_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::trialBasisVectorValue: index out of range");
     }
-    return storage[static_cast<std::size_t>(j * n_qpts_ + q)];
+    return storage[static_cast<std::size_t>(q * n_trial_dofs_ + j)];
 }
 
 AssemblyContext::Vector3D AssemblyContext::trialBasisCurl(LocalIndex j, LocalIndex q) const
@@ -853,7 +853,7 @@ AssemblyContext::Vector3D AssemblyContext::trialBasisCurl(LocalIndex j, LocalInd
     if (j >= n_trial_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::trialBasisCurl: index out of range");
     }
-    return storage[static_cast<std::size_t>(j * n_qpts_ + q)];
+    return storage[static_cast<std::size_t>(q * n_trial_dofs_ + j)];
 }
 
 Real AssemblyContext::trialBasisDivergence(LocalIndex j, LocalIndex q) const
@@ -868,7 +868,7 @@ Real AssemblyContext::trialBasisDivergence(LocalIndex j, LocalIndex q) const
     if (j >= n_trial_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::trialBasisDivergence: index out of range");
     }
-    return storage[static_cast<std::size_t>(j * n_qpts_ + q)];
+    return storage[static_cast<std::size_t>(q * n_trial_dofs_ + j)];
 }
 
 AssemblyContext::Vector3D AssemblyContext::trialPhysicalGradient(LocalIndex j, LocalIndex q) const
@@ -900,7 +900,7 @@ AssemblyContext::Matrix3x3 AssemblyContext::trialReferenceHessian(LocalIndex j, 
     if (j >= n_trial_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::trialReferenceHessian: index out of range");
     }
-    return trial_ref_hessians_[static_cast<std::size_t>(j * n_qpts_ + q)];
+    return trial_ref_hessians_[static_cast<std::size_t>(q * n_trial_dofs_ + j)];
 }
 
 AssemblyContext::Matrix3x3 AssemblyContext::trialPhysicalHessian(LocalIndex j, LocalIndex q) const
@@ -917,7 +917,7 @@ AssemblyContext::Matrix3x3 AssemblyContext::trialPhysicalHessian(LocalIndex j, L
     if (j >= n_trial_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::trialPhysicalHessian: index out of range");
     }
-    return trial_phys_hessians_[static_cast<std::size_t>(j * n_qpts_ + q)];
+    return trial_phys_hessians_[static_cast<std::size_t>(q * n_trial_dofs_ + j)];
 }
 
 // ============================================================================
@@ -1530,6 +1530,30 @@ void AssemblyContext::clearFieldSolutionData() noexcept
 {
     field_solution_data_used_ = 0;
     jit_field_solution_table_.clear();
+}
+
+void AssemblyContext::preAllocateFieldSolutionData(std::size_t max_fields, std::size_t max_qpts,
+                                                   std::size_t max_value_dim)
+{
+    field_solution_data_.resize(max_fields);
+    const std::size_t cap_scalar = max_qpts;
+    const std::size_t cap_vec    = max_qpts;
+    const std::size_t cap_comp   = max_qpts * max_value_dim;
+
+    for (auto& f : field_solution_data_) {
+        f.values.reserve(cap_scalar);
+        f.vector_values.reserve(cap_vec);
+        f.history_values.reserve(cap_scalar);
+        f.history_vector_values.reserve(cap_vec);
+        f.gradients.reserve(cap_vec);
+        f.jacobians.reserve(cap_vec);
+        f.hessians.reserve(cap_vec);
+        f.laplacians.reserve(cap_scalar);
+        f.component_hessians.reserve(cap_comp);
+        f.component_laplacians.reserve(cap_comp);
+    }
+
+    jit_field_solution_table_.reserve(max_fields);
 }
 
 void AssemblyContext::rebuildJITFieldSolutionTable()
@@ -2231,8 +2255,19 @@ void AssemblyContext::setTestBasisData(
         n_trial_dofs_ = n_dofs;
     }
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
-    test_basis_values_.assign(values.begin(), values.end());
-    test_ref_gradients_.assign(gradients.begin(), gradients.end());
+
+    // Transpose from dof-major [i * n_qpts + q] to qpt-major [q * n_dofs + i]
+    const auto nd = static_cast<std::size_t>(n_test_dofs_);
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    test_basis_values_.resize(values.size());
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            test_basis_values_[q * nd + i] = values[i * nq + q];
+    test_ref_gradients_.resize(gradients.size());
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            test_ref_gradients_[q * nd + i] = gradients[i * nq + q];
+
     test_basis_vector_values_.clear();
     test_basis_curls_.clear();
     test_basis_divergences_.clear();
@@ -2249,8 +2284,18 @@ void AssemblyContext::setTrialBasisData(
     n_trial_dofs_ = n_dofs;
     trial_is_test_ = false;
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
-    trial_basis_values_.assign(values.begin(), values.end());
-    trial_ref_gradients_.assign(gradients.begin(), gradients.end());
+
+    const auto nd = static_cast<std::size_t>(n_trial_dofs_);
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    trial_basis_values_.resize(values.size());
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            trial_basis_values_[q * nd + i] = values[i * nq + q];
+    trial_ref_gradients_.resize(gradients.size());
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            trial_ref_gradients_[q * nd + i] = gradients[i * nq + q];
+
     trial_basis_vector_values_.clear();
     trial_basis_curls_.clear();
     trial_basis_divergences_.clear();
@@ -2266,7 +2311,12 @@ void AssemblyContext::setTestVectorBasisValues(LocalIndex n_dofs, std::span<cons
         n_trial_dofs_ = n_dofs;
     }
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
-    test_basis_vector_values_.assign(values.begin(), values.end());
+    const auto nd = static_cast<std::size_t>(n_test_dofs_);
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    test_basis_vector_values_.resize(values.size());
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            test_basis_vector_values_[q * nd + i] = values[i * nq + q];
     test_basis_values_.clear();
     test_ref_gradients_.clear();
     test_phys_gradients_.clear();
@@ -2280,7 +2330,12 @@ void AssemblyContext::setTrialVectorBasisValues(LocalIndex n_dofs, std::span<con
     n_trial_dofs_ = n_dofs;
     trial_is_test_ = false;
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
-    trial_basis_vector_values_.assign(values.begin(), values.end());
+    const auto nd = static_cast<std::size_t>(n_trial_dofs_);
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    trial_basis_vector_values_.resize(values.size());
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            trial_basis_vector_values_[q * nd + i] = values[i * nq + q];
     trial_basis_values_.clear();
     trial_ref_gradients_.clear();
     trial_phys_gradients_.clear();
@@ -2293,7 +2348,12 @@ void AssemblyContext::setTestBasisCurls(LocalIndex n_dofs, std::span<const Vecto
         throw std::logic_error("AssemblyContext::setTestBasisCurls: test space does not use a vector basis");
     }
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
-    test_basis_curls_.assign(curls.begin(), curls.end());
+    const auto nd = static_cast<std::size_t>(n_test_dofs_);
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    test_basis_curls_.resize(curls.size());
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            test_basis_curls_[q * nd + i] = curls[i * nq + q];
 }
 
 void AssemblyContext::setTrialBasisCurls(LocalIndex n_dofs, std::span<const Vector3D> curls)
@@ -2304,7 +2364,12 @@ void AssemblyContext::setTrialBasisCurls(LocalIndex n_dofs, std::span<const Vect
     }
     trial_is_test_ = false;
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
-    trial_basis_curls_.assign(curls.begin(), curls.end());
+    const auto nd = static_cast<std::size_t>(n_trial_dofs_);
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    trial_basis_curls_.resize(curls.size());
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            trial_basis_curls_[q * nd + i] = curls[i * nq + q];
 }
 
 void AssemblyContext::setTestBasisDivergences(LocalIndex n_dofs, std::span<const Real> divergences)
@@ -2314,7 +2379,12 @@ void AssemblyContext::setTestBasisDivergences(LocalIndex n_dofs, std::span<const
         throw std::logic_error("AssemblyContext::setTestBasisDivergences: test space does not use a vector basis");
     }
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
-    test_basis_divergences_.assign(divergences.begin(), divergences.end());
+    const auto nd = static_cast<std::size_t>(n_test_dofs_);
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    test_basis_divergences_.resize(divergences.size());
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            test_basis_divergences_[q * nd + i] = divergences[i * nq + q];
 }
 
 void AssemblyContext::setTrialBasisDivergences(LocalIndex n_dofs, std::span<const Real> divergences)
@@ -2325,7 +2395,12 @@ void AssemblyContext::setTrialBasisDivergences(LocalIndex n_dofs, std::span<cons
     }
     trial_is_test_ = false;
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
-    trial_basis_divergences_.assign(divergences.begin(), divergences.end());
+    const auto nd = static_cast<std::size_t>(n_trial_dofs_);
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    trial_basis_divergences_.resize(divergences.size());
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            trial_basis_divergences_[q * nd + i] = divergences[i * nq + q];
 }
 
 void AssemblyContext::setTestBasisHessians(
@@ -2337,7 +2412,12 @@ void AssemblyContext::setTestBasisHessians(
         throw std::logic_error("AssemblyContext::setTestBasisHessians: scalar basis Hessians not valid for vector-basis spaces");
     }
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
-    test_ref_hessians_.assign(hessians.begin(), hessians.end());
+    const auto nd = static_cast<std::size_t>(n_test_dofs_);
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    test_ref_hessians_.resize(hessians.size());
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            test_ref_hessians_[q * nd + i] = hessians[i * nq + q];
 }
 
 void AssemblyContext::setTrialBasisHessians(
@@ -2349,7 +2429,12 @@ void AssemblyContext::setTrialBasisHessians(
         throw std::logic_error("AssemblyContext::setTrialBasisHessians: scalar basis Hessians not valid for vector-basis spaces");
     }
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
-    trial_ref_hessians_.assign(hessians.begin(), hessians.end());
+    const auto nd = static_cast<std::size_t>(n_trial_dofs_);
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    trial_ref_hessians_.resize(hessians.size());
+    for (std::size_t i = 0; i < nd; ++i)
+        for (std::size_t q = 0; q < nq; ++q)
+            trial_ref_hessians_[q * nd + i] = hessians[i * nq + q];
 }
 
 void AssemblyContext::setPhysicalGradients(
@@ -2378,10 +2463,22 @@ void AssemblyContext::setPhysicalHessians(
     std::span<const Matrix3x3> trial_hessians)
 {
     ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
-    test_phys_hessians_.assign(test_hessians.begin(), test_hessians.end());
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+
+    // Transpose from dof-major [i * n_qpts + q] to qpt-major [q * n_dofs + i]
+    {
+        const auto nd = static_cast<std::size_t>(n_test_dofs_);
+        test_phys_hessians_.resize(test_hessians.size());
+        for (std::size_t i = 0; i < nd; ++i)
+            for (std::size_t q = 0; q < nq; ++q)
+                test_phys_hessians_[q * nd + i] = test_hessians[i * nq + q];
+    }
     if (!trial_is_test_) {
-        ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
-        trial_phys_hessians_.assign(trial_hessians.begin(), trial_hessians.end());
+        const auto nd = static_cast<std::size_t>(n_trial_dofs_);
+        trial_phys_hessians_.resize(trial_hessians.size());
+        for (std::size_t i = 0; i < nd; ++i)
+            for (std::size_t q = 0; q < nq; ++q)
+                trial_phys_hessians_[q * nd + i] = trial_hessians[i * nq + q];
     }
 }
 

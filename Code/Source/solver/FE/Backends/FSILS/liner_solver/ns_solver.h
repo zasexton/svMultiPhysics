@@ -1,7 +1,5 @@
 /* Copyright (c) Stanford University, The Regents of the University of California, and others.
- *
  * All Rights Reserved.
- *
  * See Copyright-SimVascular.txt for additional details.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
@@ -28,16 +26,25 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#ifndef FSI_LINEAR_SOLVER_NS_SOLVER_H
+#define FSI_LINEAR_SOLVER_NS_SOLVER_H
+
 #include "fils_struct.hpp"
 
 namespace ns_solver {
 
-void bc_pre(fsi_linear_solver::FSILS_lhsType& lhs, const int nsd, const int dof, const int nNo, const int mynNo);
+void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int nsd, const int dof,
+            const fe_fsi_linear_solver::fsils_int nNo, const fe_fsi_linear_solver::fsils_int mynNo);
 
-void depart(fsi_linear_solver::FSILS_lhsType& lhs, const int nsd, const int dof, const int nNo, const int nnz, 
-    const Array<double>& Val, Array<double>& Gt, Array<double>& mK, Array<double>& mG, Array<double>& mD, Vector<double>& mL);
+// NOTE: Gt argument removed. Exact mD is now preserved.
+void depart(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int nsd, const int dof,
+            const fe_fsi_linear_solver::fsils_int nNo, const fe_fsi_linear_solver::fsils_int nnz,
+            const Array<double>& Val, Array<double>& mK, Array<double>& mG,
+            Array<double>& mD, Vector<double>& mL);
 
-void ns_solver(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_lsType& ls, const int dof, const Array<double>& Val, Array<double>& Ri);
+void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_lsType& ls,
+               const int dof, const Array<double>& Val, Array<double>& Ri);
 
+} // namespace ns_solver
 
-};
+#endif

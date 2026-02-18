@@ -34,126 +34,146 @@
 
 namespace omp_la {
 
+using fe_fsi_linear_solver::fsils_int;
+
 /// @brief Reproduces 'SUBROUTINE OMPMULS (nNo, r, U)'.
 //
-void omp_mul_s(const int nNo, const double r, Vector<double>& U)
+void omp_mul_s(const fsils_int nNo, const double r, Vector<double>& U)
 {
   #pragma omp parallel for schedule(static)
-  for (int i = 0; i < nNo; i++) {
+  for (fsils_int i = 0; i < nNo; i++) {
     U(i) = r * U(i);
   }
 }
 
-/// @brief Reproduces 'SUBROUTINE OMPMULV (dof, nNo, r, U)'.
-//
-void omp_mul_v(const int dof, const int nNo, const double r, Array<double>& U)
+//====================================================================
+// Templated omp_mul_v
+//====================================================================
+
+template <int DOF>
+static void omp_mul_v_impl(const fsils_int nNo, const double r, Array<double>& U)
+{
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = 0; i < nNo; i++) {
+    for (int j = 0; j < DOF; j++) {
+      U(j,i) = r * U(j,i);
+    }
+  }
+}
+
+static void omp_mul_v_dyn(const fsils_int nNo, const double r, Array<double>& U)
+{
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = 0; i < nNo; i++) {
+    for (int j = 0; j < U.nrows(); j++) {
+      U(j,i) = r * U(j,i);
+    }
+  }
+}
+
+void omp_mul_v(const int dof, const fsils_int nNo, const double r, Array<double>& U)
 {
   switch (dof) {
-    case 1:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        U(0,i) = r * U(0,i);
-      }
-    break;
-
-    case 2:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        U(0,i) = r*U(0,i);
-        U(1,i) = r*U(1,i);
-      }
-    break;
-
-    case 3:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        U(0,i) = r*U(0,i);
-        U(1,i) = r*U(1,i);
-        U(2,i) = r*U(2,i);
-      }
-    break;
-
-    case 4:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        U(0,i) = r*U(0,i);
-        U(1,i) = r*U(1,i);
-        U(2,i) = r*U(2,i);
-        U(3,i) = r*U(3,i);
-      }
-    break;
-
-    default:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = 0; j < U.nrows(); j++) {
-          U(j,i) = r*U(j,i);
-        }
-      }
+    case 1: omp_mul_v_impl<1>(nNo, r, U); break;
+    case 2: omp_mul_v_impl<2>(nNo, r, U); break;
+    case 3: omp_mul_v_impl<3>(nNo, r, U); break;
+    case 4: omp_mul_v_impl<4>(nNo, r, U); break;
+    default: omp_mul_v_dyn(nNo, r, U); break;
   }
 }
 
 /// @brief Reproduces 'SUBROUTINE OMPSUMS (nNo, r, U, V)'.
 //
-void omp_sum_s(const int nNo, const double r, Vector<double>& U, const Vector<double>& V)
+void omp_sum_s(const fsils_int nNo, const double r, Vector<double>& U, const Vector<double>& V)
 {
   #pragma omp parallel for schedule(static)
-  for (int i = 0; i < nNo; i++) {
+  for (fsils_int i = 0; i < nNo; i++) {
     U(i) = U(i) + r*V(i);
   }
 }
 
-/// @brief Reproduces 'SUBROUTINE OMPSUMV (dof, nNo, r, U, V)'.
-//
-void omp_sum_v(const int dof, const int nNo, const double r, Array<double>& U, const Array<double>& V)
+//====================================================================
+// Templated omp_sum_v
+//====================================================================
+
+template <int DOF>
+static void omp_sum_v_impl(const fsils_int nNo, const double r, Array<double>& U, const Array<double>& V)
 {
-  switch (dof) {
-
-    case 1:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        U(0,i) = U(0,i) + r*V(0,i);
-      }
-    break;
-
-    case 2:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        U(0,i) = U(0,i) + r*V(0,i);
-        U(1,i) = U(1,i) + r*V(1,i);
-      }
-    break;
-
-    case 3:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        U(0,i) = U(0,i) + r*V(0,i);
-        U(1,i) = U(1,i) + r*V(1,i);
-        U(2,i) = U(2,i) + r*V(2,i);
-      }
-    break;
-
-    case 4:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        U(0,i) = U(0,i) + r*V(0,i);
-        U(1,i) = U(1,i) + r*V(1,i);
-        U(2,i) = U(2,i) + r*V(2,i);
-        U(3,i) = U(3,i) + r*V(3,i);
-      }
-    break;
-
-    default:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = 0; j < U.nrows(); j++) {
-          U(j,i) = U(j,i) + r*V(j,i);
-        }
-      }
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = 0; i < nNo; i++) {
+    for (int j = 0; j < DOF; j++) {
+      U(j,i) = U(j,i) + r * V(j,i);
+    }
   }
 }
 
+static void omp_sum_v_dyn(const fsils_int nNo, const double r, Array<double>& U, const Array<double>& V)
+{
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = 0; i < nNo; i++) {
+    for (int j = 0; j < U.nrows(); j++) {
+      U(j,i) = U(j,i) + r * V(j,i);
+    }
+  }
+}
+
+void omp_sum_v(const int dof, const fsils_int nNo, const double r, Array<double>& U, const Array<double>& V)
+{
+  switch (dof) {
+    case 1: omp_sum_v_impl<1>(nNo, r, U, V); break;
+    case 2: omp_sum_v_impl<2>(nNo, r, U, V); break;
+    case 3: omp_sum_v_impl<3>(nNo, r, U, V); break;
+    case 4: omp_sum_v_impl<4>(nNo, r, U, V); break;
+    default: omp_sum_v_dyn(nNo, r, U, V); break;
+  }
+}
+
+//====================================================================
+// Fused vector operations
+//====================================================================
+
+/// @brief Y = A + alpha*B (vector version)
+void omp_axpby_v(const int dof, const fsils_int nNo, Array<double>& Y,
+                 const Array<double>& A, const double alpha, const Array<double>& B)
+{
+  fsils_int n = dof * nNo;
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = 0; i < n; i++) {
+    Y(i) = A(i) + alpha * B(i);
+  }
+}
+
+/// @brief Y = A + alpha*B + beta*C (vector version)
+void omp_axpbypgz_v(const int dof, const fsils_int nNo, Array<double>& Y,
+                     const Array<double>& A, const double alpha, const Array<double>& B,
+                     const double beta, const Array<double>& C)
+{
+  fsils_int n = dof * nNo;
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = 0; i < n; i++) {
+    Y(i) = A(i) + alpha * B(i) + beta * C(i);
+  }
+}
+
+/// @brief Y = A + alpha*B (scalar version)
+void omp_axpby_s(const fsils_int nNo, Vector<double>& Y,
+                 const Vector<double>& A, const double alpha, const Vector<double>& B)
+{
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = 0; i < nNo; i++) {
+    Y(i) = A(i) + alpha * B(i);
+  }
+}
+
+/// @brief Y = A + alpha*B + beta*C (scalar version)
+void omp_axpbypgz_s(const fsils_int nNo, Vector<double>& Y,
+                     const Vector<double>& A, const double alpha, const Vector<double>& B,
+                     const double beta, const Vector<double>& C)
+{
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = 0; i < nNo; i++) {
+    Y(i) = A(i) + alpha * B(i) + beta * C(i);
+  }
+}
 
 };
-
-

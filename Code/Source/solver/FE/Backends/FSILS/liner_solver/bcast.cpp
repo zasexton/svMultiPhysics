@@ -34,29 +34,28 @@
 
 namespace bcast {
 
-/// @brief To broadcast a variable to all processors
-///
-/// Reproduces code in BCAST.f.
-//
+/// @brief To broadcast a scalar to all processors
 void fsils_bcast(double& u, FSILS_commuType& commu)
 {
-  if (commu.nTasks > 1) { 
-    double uG;
-    MPI_Allreduce(&u, &uG, 1, cm_mod::mpreal, MPI_SUM, commu.comm);
-    u = uG;
-  } 
+  if (commu.nTasks > 1) {
+    MPI_Allreduce(MPI_IN_PLACE, &u, 1, cm_mod::mpreal, MPI_SUM, commu.comm);
+  }
 }
 
-
+/// @brief To broadcast a Vector to all processors (MPI_IN_PLACE, zero-allocation)
 void fsils_bcast_v(const int n, Vector<double>& u, FSILS_commuType& commu)
 {
-  if (commu.nTasks > 1) { 
-    Vector<double> uG(n);
-    MPI_Allreduce(u.data(), uG.data(), n, cm_mod::mpreal, MPI_SUM, commu.comm);
-    u = uG;
-  } 
+  if (commu.nTasks > 1) {
+    MPI_Allreduce(MPI_IN_PLACE, u.data(), n, cm_mod::mpreal, MPI_SUM, commu.comm);
+  }
+}
+
+/// @brief To broadcast a std::vector to all processors (MPI_IN_PLACE, zero-allocation)
+void fsils_bcast_v(const int n, std::vector<double>& u, FSILS_commuType& commu)
+{
+  if (commu.nTasks > 1) {
+    MPI_Allreduce(MPI_IN_PLACE, u.data(), n, cm_mod::mpreal, MPI_SUM, commu.comm);
+  }
 }
 
 };
-
-

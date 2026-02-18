@@ -51,7 +51,7 @@ SpaceCache::get(const elements::Element& elem, int poly_order) {
         FE_CHECK_ARG(entry.num_qpts == nq, "SpaceCache: BasisCache quadrature size mismatch");
         FE_CHECK_ARG(entry.scalar_values.size() == ndofs * nq,
                      "SpaceCache: BasisCache scalar storage size mismatch");
-        data.basis_values = entry.scalar_values;
+        data.basis_values = std::span<const Real>(entry.scalar_values.data(), entry.scalar_values.size());
     }
 
     std::lock_guard<std::mutex> lock(mutex_);

@@ -45,7 +45,7 @@ TEST(ElementCacheThreadSafety, ConcurrentGetAndBatchGet) {
                 ok.store(false, std::memory_order_relaxed);
                 return;
             }
-            if (entry.jacobian->detJ.size() != quad->num_points()) {
+            if (entry.jacobian->size() != quad->num_points()) {
                 ok.store(false, std::memory_order_relaxed);
                 return;
             }

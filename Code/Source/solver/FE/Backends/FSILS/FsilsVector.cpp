@@ -299,7 +299,7 @@ void FsilsVector::updateGhosts()
     }
 
     Array<double> U(dof, nNo, u_internal.data());
-    fsi_linear_solver::fsils_commuv(lhs, dof, U);
+    fe_fsi_linear_solver::fsils_commuv(lhs, dof, U);
 
     // Map back to old local ordering (owned + ghost).
     for (int old = 0; old < nNo; ++old) {
@@ -346,7 +346,7 @@ void FsilsVector::accumulateOverlap()
     }
 
     Array<double> U(dof, nNo, u_internal.data());
-    fsi_linear_solver::fsils_commuv(lhs, dof, U);
+    fe_fsi_linear_solver::fsils_commuv(lhs, dof, U);
 
     for (int old = 0; old < nNo; ++old) {
         const int internal = lhs.map(old);

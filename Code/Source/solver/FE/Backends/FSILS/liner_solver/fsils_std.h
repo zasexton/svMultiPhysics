@@ -35,7 +35,7 @@
 
 #include "mpi.h"
 
-namespace fsi_linear_solver {
+namespace fe_fsi_linear_solver {
 
 // Set MPI data type names.
 const decltype(MPI_LOGICAL) mplog  = MPI_LOGICAL;

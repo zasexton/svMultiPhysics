@@ -3440,21 +3440,20 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             return makeScalar(f_log(a.elems[0]));
         };
 
-        auto loadBasisScalar = [&](const SideView& side,
-                                   llvm::Value* basis_base,
+        auto loadBasisScalar = [&](llvm::Value* basis_base,
+                                   llvm::Value* n_dofs,
                                    llvm::Value* dof_index,
                                    llvm::Value* q_index) -> llvm::Value* {
-            auto* stride = side.n_qpts;
-            auto* offset = builder.CreateAdd(builder.CreateMul(dof_index, stride), q_index);
+            auto* offset = builder.CreateAdd(builder.CreateMul(q_index, n_dofs), dof_index);
             auto* offset64 = builder.CreateZExt(offset, i64);
             return loadRealPtrAt(basis_base, offset64);
         };
 
         auto loadVec3FromTable = [&](llvm::Value* base_ptr,
-                                     llvm::Value* n_qpts,
+                                     llvm::Value* n_dofs,
                                      llvm::Value* dof_index,
                                      llvm::Value* q_index) -> std::array<llvm::Value*, 3> {
-            auto* offset = builder.CreateAdd(builder.CreateMul(dof_index, n_qpts), q_index);
+            auto* offset = builder.CreateAdd(builder.CreateMul(q_index, n_dofs), dof_index);
             auto* base3 = builder.CreateMul(offset, builder.getInt32(3));
             auto* base3_64 = builder.CreateZExt(base3, i64);
             auto* x = loadRealPtrAt(base_ptr, base3_64);
@@ -3823,7 +3822,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                auto* sum = emitReduceSumScalar(side.n_trial_dofs, tag + ".sum", [&](llvm::Value* j) -> llvm::Value* {
 	                    auto* j64 = builder.CreateZExt(j, i64);
 	                    auto* cj = loadRealPtrAt(coeffs, j64);
-	                    auto* phi = loadBasisScalar(side, side.trial_basis_values, j, q_index);
+	                    auto* phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j, q_index);
 	                    return builder.CreateFMul(cj, phi);
 	                });
 	                builder.CreateBr(merge);
@@ -3855,7 +3854,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                auto vb_sums = emitReduceSum(side.n_trial_dofs, tag + ".vb.sum", vd, [&](llvm::Value* j) {
 	                    auto* j64 = builder.CreateZExt(j, i64);
 	                    auto* cj = loadRealPtrAt(coeffs, j64);
-	                    const auto phi = loadVec3FromTable(side.trial_basis_vector_values_xyz, side.n_qpts, j, q_index);
+	                    const auto phi = loadVec3FromTable(side.trial_basis_vector_values_xyz, side.n_trial_dofs, j, q_index);
 	                    std::vector<llvm::Value*> terms;
 	                    terms.reserve(vd);
 	                    for (std::size_t c = 0; c < vd; ++c) {
@@ -3879,7 +3878,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                        auto* j = builder.CreateAdd(base, jj);
 	                        auto* j64 = builder.CreateZExt(j, i64);
 	                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                        auto* phi = loadBasisScalar(side, side.trial_basis_values, j, q_index);
+	                        auto* phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j, q_index);
 	                        return builder.CreateFMul(cj, phi);
 	                    });
 	                    sb_sums.push_back(sum);
@@ -3936,7 +3935,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                    emitReduceSumScalar(side.n_trial_dofs, tag + ".sum", [&](llvm::Value* j) -> llvm::Value* {
 		                        auto* j64 = builder.CreateZExt(j, i64);
 		                        auto* cj = loadRealPtrAt(coeffs, j64);
-		                        auto* phi = loadBasisScalar(side, side.trial_basis_values, j, q_index);
+		                        auto* phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j, q_index);
 		                        return builder.CreateFMul(cj, phi);
 		                    });
 		                builder.CreateBr(merge);
@@ -3970,7 +3969,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                    auto* j64 = builder.CreateZExt(j, i64);
 		                    auto* cj = loadRealPtrAt(coeffs, j64);
 		                    const auto phi =
-		                        loadVec3FromTable(side.trial_basis_vector_values_xyz, side.n_qpts, j, q_index);
+		                        loadVec3FromTable(side.trial_basis_vector_values_xyz, side.n_trial_dofs, j, q_index);
 		                    std::vector<llvm::Value*> terms;
 		                    terms.reserve(vd);
 		                    for (std::size_t c = 0; c < vd; ++c) {
@@ -3996,7 +3995,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                            auto* j = builder.CreateAdd(base, jj);
 		                            auto* j64 = builder.CreateZExt(j, i64);
 		                            auto* cj = loadRealPtrAt(coeffs, j64);
-		                            auto* phi = loadBasisScalar(side, side.trial_basis_values, j, q_index);
+		                            auto* phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j, q_index);
 		                            return builder.CreateFMul(cj, phi);
 		                        });
 		                    sb_sums.push_back(sum);
@@ -4081,7 +4080,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                auto* sum = emitReduceSumScalar(side.n_trial_dofs, std::string(tag) + ".sum", [&](llvm::Value* j) -> llvm::Value* {
 	                    auto* j64 = builder.CreateZExt(j, i64);
 	                    auto* cj = loadRealPtrAt(coeffs, j64);
-	                    auto* phi = loadBasisScalar(side, side.trial_basis_values, j, q_index);
+	                    auto* phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j, q_index);
 	                    return builder.CreateFMul(cj, phi);
 	                });
 	                builder.CreateBr(merge);
@@ -4113,7 +4112,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                auto vb_sums = emitReduceSum(side.n_trial_dofs, std::string(tag) + ".vb.sum", vd, [&](llvm::Value* j) {
 	                    auto* j64 = builder.CreateZExt(j, i64);
 	                    auto* cj = loadRealPtrAt(coeffs, j64);
-	                    const auto phi = loadVec3FromTable(side.trial_basis_vector_values_xyz, side.n_qpts, j, q_index);
+	                    const auto phi = loadVec3FromTable(side.trial_basis_vector_values_xyz, side.n_trial_dofs, j, q_index);
 	                    std::vector<llvm::Value*> terms;
 	                    terms.reserve(vd);
 	                    for (std::size_t c = 0; c < vd; ++c) {
@@ -4137,7 +4136,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                        auto* j = builder.CreateAdd(base, jj);
 	                        auto* j64 = builder.CreateZExt(j, i64);
 	                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                        auto* phi = loadBasisScalar(side, side.trial_basis_values, j, q_index);
+	                        auto* phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j, q_index);
 	                        return builder.CreateFMul(cj, phi);
 	                    });
 	                    sb_sums.push_back(sum);
@@ -4535,7 +4534,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                     case FormExprType::TestFunction: {
                         if (shape.kind == Shape::Kind::Scalar) {
-                            values[op_idx] = makeScalar(loadBasisScalar(side, side.test_basis_values, i_index, q_index));
+                            values[op_idx] = makeScalar(loadBasisScalar(side.test_basis_values, side.n_test_dofs, i_index, q_index));
                             break;
                         }
                         if (shape.kind != Shape::Kind::Vector) {
@@ -4555,7 +4554,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                         builder.SetInsertPoint(vb);
                         {
-                            const auto v = loadVec3FromTable(side.test_basis_vector_values_xyz, side.n_qpts, i_index, q_index);
+                            const auto v = loadVec3FromTable(side.test_basis_vector_values_xyz, side.n_test_dofs, i_index, q_index);
                             for (std::size_t c = 0; c < vd; ++c) {
                                 vb_vals[c] = v[c];
                             }
@@ -4567,7 +4566,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         {
                             const auto dofs_per_comp = builder.CreateUDiv(side.n_test_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
                             const auto comp = builder.CreateUDiv(i_index, dofs_per_comp);
-                            const auto phi = loadBasisScalar(side, side.test_basis_values, i_index, q_index);
+                            const auto phi = loadBasisScalar(side.test_basis_values, side.n_test_dofs, i_index, q_index);
                             for (std::size_t c = 0; c < vd; ++c) {
                                 auto* is_c = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(c)));
                                 sb_vals[c] = builder.CreateSelect(is_c, phi, f64c(0.0));
@@ -4595,7 +4594,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                             break;
                         }
                         if (shape.kind == Shape::Kind::Scalar) {
-                            values[op_idx] = makeScalar(loadBasisScalar(side, side.trial_basis_values, j_index, q_index));
+                            values[op_idx] = makeScalar(loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j_index, q_index));
                             break;
                         }
                         if (shape.kind != Shape::Kind::Vector) {
@@ -4615,7 +4614,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                         builder.SetInsertPoint(vb);
                         {
-                            const auto v = loadVec3FromTable(side.trial_basis_vector_values_xyz, side.n_qpts, j_index, q_index);
+                            const auto v = loadVec3FromTable(side.trial_basis_vector_values_xyz, side.n_trial_dofs, j_index, q_index);
                             for (std::size_t c = 0; c < vd; ++c) {
                                 vb_vals[c] = v[c];
                             }
@@ -4627,7 +4626,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         {
                             const auto dofs_per_comp = builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
                             const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
-                            const auto phi = loadBasisScalar(side, side.trial_basis_values, j_index, q_index);
+                            const auto phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j_index, q_index);
                             for (std::size_t c = 0; c < vd; ++c) {
                                 auto* is_c = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(c)));
                                 sb_vals[c] = builder.CreateSelect(is_c, phi, f64c(0.0));
@@ -5549,7 +5548,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                             llvm::Value* v_vb = f64c(0.0);
                             builder.SetInsertPoint(vb);
-                            v_vb = loadBasisScalar(side, side.test_basis_divs, i_index, q_index);
+                            v_vb = loadBasisScalar(side.test_basis_divs, side.n_test_dofs, i_index, q_index);
                             builder.CreateBr(merge);
                             auto* vb_block = builder.GetInsertBlock();
 
@@ -5576,7 +5575,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                             llvm::Value* v_vb = f64c(0.0);
                             builder.SetInsertPoint(vb);
-                            v_vb = loadBasisScalar(side, side.trial_basis_divs, j_index, q_index);
+                            v_vb = loadBasisScalar(side.trial_basis_divs, side.n_trial_dofs, j_index, q_index);
                             builder.CreateBr(merge);
                             auto* vb_block = builder.GetInsertBlock();
 
@@ -5608,7 +5607,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                                div_vb = emitReduceSumScalar(side.n_trial_dofs, "div_u_vb", [&](llvm::Value* j) -> llvm::Value* {
 		                                    auto* j64 = builder.CreateZExt(j, i64);
 		                                    auto* cj = loadRealPtrAt(coeffs, j64);
-		                                    auto* div_phi = loadBasisScalar(side, side.trial_basis_divs, j, q_index);
+		                                    auto* div_phi = loadBasisScalar(side.trial_basis_divs, side.n_trial_dofs, j, q_index);
 		                                    return builder.CreateFMul(cj, div_phi);
 		                                });
 	                                builder.CreateBr(merge);
@@ -5845,7 +5844,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                             std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
                             builder.SetInsertPoint(vb);
-                            vb_vals = loadVec3FromTable(side.test_basis_curls_xyz, side.n_qpts, i_index, q_index);
+                            vb_vals = loadVec3FromTable(side.test_basis_curls_xyz, side.n_test_dofs, i_index, q_index);
                             builder.CreateBr(merge);
                             auto* vb_block = builder.GetInsertBlock();
 
@@ -5876,7 +5875,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                             std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
                             builder.SetInsertPoint(vb);
-                            vb_vals = loadVec3FromTable(side.trial_basis_curls_xyz, side.n_qpts, j_index, q_index);
+                            vb_vals = loadVec3FromTable(side.trial_basis_curls_xyz, side.n_trial_dofs, j_index, q_index);
                             builder.CreateBr(merge);
                             auto* vb_block = builder.GetInsertBlock();
 
@@ -5913,7 +5912,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                    auto* j64 = builder.CreateZExt(j, i64);
 	                                    auto* cj = loadRealPtrAt(coeffs, j64);
 	                                    const auto phi =
-	                                        loadVec3FromTable(side.trial_basis_curls_xyz, side.n_qpts, j, q_index);
+	                                        loadVec3FromTable(side.trial_basis_curls_xyz, side.n_trial_dofs, j, q_index);
 	                                    std::vector<llvm::Value*> terms;
 	                                    terms.reserve(3u);
 	                                    for (std::size_t d = 0; d < 3u; ++d) {
@@ -7813,7 +7812,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                    side.n_trial_dofs, "div_state_u_vb", [&](llvm::Value* j) -> llvm::Value* {
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 	                                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                                        auto* div_phi = loadBasisScalar(side, side.trial_basis_divs, j, q_index);
+	                                        auto* div_phi = loadBasisScalar(side.trial_basis_divs, side.n_trial_dofs, j, q_index);
 	                                        return builder.CreateFMul(cj, div_phi);
 	                                    });
 	                                builder.CreateBr(merge);
@@ -9665,7 +9664,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                     }
 
                     if (shape.kind == Shape::Kind::Scalar) {
-                        return makeScalar(loadBasisScalar(side, side.test_basis_values, i_index, q_index));
+                        return makeScalar(loadBasisScalar(side.test_basis_values, side.n_test_dofs, i_index, q_index));
                     }
 
                     if (shape.kind != Shape::Kind::Vector) {
@@ -9685,7 +9684,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                     builder.SetInsertPoint(vb);
                     {
-                        const auto v = loadVec3FromTable(side.test_basis_vector_values_xyz, side.n_qpts, i_index, q_index);
+                        const auto v = loadVec3FromTable(side.test_basis_vector_values_xyz, side.n_test_dofs, i_index, q_index);
                         for (std::size_t c = 0; c < vd; ++c) {
                             vb_vals[c] = v[c];
                         }
@@ -9698,7 +9697,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         const auto dofs_per_comp =
                             builder.CreateUDiv(side.n_test_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
                         const auto comp = builder.CreateUDiv(i_index, dofs_per_comp);
-                        const auto phi = loadBasisScalar(side, side.test_basis_values, i_index, q_index);
+                        const auto phi = loadBasisScalar(side.test_basis_values, side.n_test_dofs, i_index, q_index);
                         for (std::size_t c = 0; c < vd; ++c) {
                             auto* is_c = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(c)));
                             sb_vals[c] = builder.CreateSelect(is_c, phi, f64c(0.0));
@@ -9729,7 +9728,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                     }
 
                     if (shape.kind == Shape::Kind::Scalar) {
-                        return makeScalar(loadBasisScalar(side, side.trial_basis_values, j_index, q_index));
+                        return makeScalar(loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j_index, q_index));
                     }
 
                     if (shape.kind != Shape::Kind::Vector) {
@@ -9749,7 +9748,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                     builder.SetInsertPoint(vb);
                     {
-                        const auto v = loadVec3FromTable(side.trial_basis_vector_values_xyz, side.n_qpts, j_index, q_index);
+                        const auto v = loadVec3FromTable(side.trial_basis_vector_values_xyz, side.n_trial_dofs, j_index, q_index);
                         for (std::size_t c = 0; c < vd; ++c) {
                             vb_vals[c] = v[c];
                         }
@@ -9762,7 +9761,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         const auto dofs_per_comp =
                             builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
                         const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
-                        const auto phi = loadBasisScalar(side, side.trial_basis_values, j_index, q_index);
+                        const auto phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j_index, q_index);
                         for (std::size_t c = 0; c < vd; ++c) {
                             auto* is_c = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(c)));
                             sb_vals[c] = builder.CreateSelect(is_c, phi, f64c(0.0));
@@ -10315,7 +10314,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                         llvm::Value* v_vb = f64c(0.0);
                         builder.SetInsertPoint(vb);
-                        v_vb = loadBasisScalar(side, side.test_basis_divs, i_index, q_index);
+                        v_vb = loadBasisScalar(side.test_basis_divs, side.n_test_dofs, i_index, q_index);
                         builder.CreateBr(merge);
                         auto* vb_block = builder.GetInsertBlock();
 
@@ -10344,7 +10343,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                         llvm::Value* v_vb = f64c(0.0);
                         builder.SetInsertPoint(vb);
-                        v_vb = loadBasisScalar(side, side.trial_basis_divs, j_index, q_index);
+                        v_vb = loadBasisScalar(side.trial_basis_divs, side.n_trial_dofs, j_index, q_index);
                         builder.CreateBr(merge);
                         auto* vb_block = builder.GetInsertBlock();
 
@@ -10376,7 +10375,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 		                            div_vb = emitReduceSumScalar(side.n_trial_dofs, "div_u_vb", [&](llvm::Value* j) -> llvm::Value* {
 		                                auto* j64 = builder.CreateZExt(j, i64);
 		                                auto* cj = loadRealPtrAt(coeffs, j64);
-		                                auto* div_phi = loadBasisScalar(side, side.trial_basis_divs, j, q_index);
+		                                auto* div_phi = loadBasisScalar(side.trial_basis_divs, side.n_trial_dofs, j, q_index);
 		                                return builder.CreateFMul(cj, div_phi);
 		                            });
 	                            builder.CreateBr(merge);
@@ -10583,7 +10582,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                         std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
                         builder.SetInsertPoint(vb);
-                        vb_vals = loadVec3FromTable(side.test_basis_curls_xyz, side.n_qpts, i_index, q_index);
+                        vb_vals = loadVec3FromTable(side.test_basis_curls_xyz, side.n_test_dofs, i_index, q_index);
                         builder.CreateBr(merge);
                         auto* vb_block = builder.GetInsertBlock();
 
@@ -10616,7 +10615,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
                         std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
                         builder.SetInsertPoint(vb);
-                        vb_vals = loadVec3FromTable(side.trial_basis_curls_xyz, side.n_qpts, j_index, q_index);
+                        vb_vals = loadVec3FromTable(side.trial_basis_curls_xyz, side.n_trial_dofs, j_index, q_index);
                         builder.CreateBr(merge);
                         auto* vb_block = builder.GetInsertBlock();
 
@@ -10653,7 +10652,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	                                auto* j64 = builder.CreateZExt(j, i64);
 	                                auto* cj = loadRealPtrAt(coeffs, j64);
 	                                const auto phi =
-	                                    loadVec3FromTable(side.trial_basis_curls_xyz, side.n_qpts, j, q_index);
+	                                    loadVec3FromTable(side.trial_basis_curls_xyz, side.n_trial_dofs, j, q_index);
 	                                std::vector<llvm::Value*> terms;
 	                                terms.reserve(3u);
 	                                for (std::size_t d = 0; d < 3u; ++d) {

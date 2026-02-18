@@ -12,6 +12,7 @@
 
 #include "VectorExpr.h"
 #include "MathConstants.h"
+#include "../Core/Alignment.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -38,7 +39,7 @@ class Vector : public VectorExpr<Vector<T, N>> {
     static_assert(N > 0, "Vector dimension must be positive");
 
 private:
-    alignas(32) T data_[N];  // 32-byte alignment for AVX/AVX2
+    alignas(kFEPreferredAlignmentBytes) T data_[N];  // Cache-line/SIMD alignment
 
 public:
     // Type definitions

@@ -45,9 +45,7 @@ JacobianCacheEntry JacobianCache::compute(const GeometryMapping& mapping,
                                           const quadrature::QuadratureRule& quad) const {
     JacobianCacheEntry entry;
     const auto& pts = quad.points();
-    entry.J.resize(pts.size());
-    entry.J_inv.resize(pts.size());
-    entry.detJ.resize(pts.size());
+    entry.data.resize(pts.size());
 
     if (pts.empty()) {
         return entry;
@@ -56,20 +54,25 @@ JacobianCacheEntry JacobianCache::compute(const GeometryMapping& mapping,
     if (mapping.isAffine()) {
         const auto J = mapping.jacobian(pts.front());
         const auto J_inv = J.inverse();
+        const auto J_invT = J_inv.transpose();
         const auto detJ = J.determinant();
 
         for (std::size_t i = 0; i < pts.size(); ++i) {
-            entry.J[i] = J;
-            entry.J_inv[i] = J_inv;
-            entry.detJ[i] = detJ;
+            auto& d = entry.data[i];
+            d.J = J;
+            d.J_inv = J_inv;
+            d.J_invT = J_invT;
+            d.detJ = detJ;
         }
         return entry;
     }
 
     for (std::size_t i = 0; i < pts.size(); ++i) {
-        entry.J[i] = mapping.jacobian(pts[i]);
-        entry.J_inv[i] = entry.J[i].inverse();
-        entry.detJ[i] = entry.J[i].determinant();
+        auto& d = entry.data[i];
+        d.J = mapping.jacobian(pts[i]);
+        d.J_inv = d.J.inverse();
+        d.J_invT = d.J_inv.transpose();
+        d.detJ = d.J.determinant();
     }
     return entry;
 }

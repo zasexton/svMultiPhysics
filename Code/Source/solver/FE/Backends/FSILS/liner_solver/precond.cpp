@@ -36,41 +36,44 @@
 #include "fsils_api.hpp"
 
 #include <math.h>
+#include <limits>
 
 namespace precond {
+
+using fe_fsi_linear_solver::fsils_int;
 
 /// @brief Post-multipling Val by W: Val = Val*W
 ///
 /// Modifies: Val
 //
-void pos_mul(const Array<int>& rowPtr, const Vector<int>& colPtr, const int nNo, const int nnz, const int dof, Array<double>& Val, const Array<double>& W)
+void pos_mul(const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr, const fsils_int nNo, const fsils_int nnz, const int dof, Array<double>& Val, const Array<double>& W)
 {
   switch (dof) {
     case 1: {
-      for (int Ac = 0; Ac < nNo; Ac++) { 
-        for (int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
-          int a = colPtr(i);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
+          fsils_int a = colPtr(i);
           Val(0,i) = Val(0,i)*W(0,a);
         }
       }
-    } break; 
+    } break;
 
     case 2: {
-      for (int Ac = 0; Ac < nNo; Ac++) { 
-        for (int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
-          int a = colPtr(i);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
+          fsils_int a = colPtr(i);
           for (int j = 0; j < 3; j += 2) {
             Val(j+0,i) = Val(j+0,i)*W(0,a);
             Val(j+1,i) = Val(j+1,i)*W(1,a);
           }
         }
       }
-    } break; 
+    } break;
 
     case 3: {
-      for (int Ac = 0; Ac < nNo; Ac++) { 
-        for (int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
-          int a = colPtr(i);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
+          fsils_int a = colPtr(i);
           for (int j = 0; j < 7; j += 3) {
             Val(j+0,i) = Val(j+0,i)*W(0,a);
             Val(j+1,i) = Val(j+1,i)*W(1,a);
@@ -78,12 +81,12 @@ void pos_mul(const Array<int>& rowPtr, const Vector<int>& colPtr, const int nNo,
           }
         }
       }
-    } break; 
+    } break;
 
     case 4: {
-      for (int Ac = 0; Ac < nNo; Ac++) { 
-        for (int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
-          int a = colPtr(i);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
+          fsils_int a = colPtr(i);
           for (int j = 0; j < 13; j += 4) {
             Val(j+0,i) = Val(j+0,i)*W(0,a);
             Val(j+1,i) = Val(j+1,i)*W(1,a);
@@ -92,12 +95,12 @@ void pos_mul(const Array<int>& rowPtr, const Vector<int>& colPtr, const int nNo,
           }
         }
       }
-    } break; 
+    } break;
 
     default: {
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        for (int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
-          int a = colPtr(i);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
+          fsils_int a = colPtr(i);
           for (int b = 0; b < dof; b++) {
             int j = dof*(dof-1) + b;
             for (int k = b; k <= j; k += dof) {
@@ -106,7 +109,7 @@ void pos_mul(const Array<int>& rowPtr, const Vector<int>& colPtr, const int nNo,
           }
         }
       }
-    } break; 
+    } break;
   }
 }
 
@@ -119,8 +122,8 @@ void pos_mul(const Array<int>& rowPtr, const Vector<int>& colPtr, const int nNo,
 //
 // Reproduces Fortran 'PRECONDDIAG'.
 //
-void precond_diag(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr, const Vector<int>& colPtr, 
-    const Vector<int>& diagPtr, const int dof, Array<double>& Val, Array<double>& R, Array<double>& W)
+void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
+    const Vector<fsils_int>& diagPtr, const int dof, Array<double>& Val, Array<double>& R, Array<double>& W)
 {
   #define n_debug_precond_diag
   #ifdef debug_precond_diag
@@ -128,7 +131,7 @@ void precond_diag(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPt
   dmsg.banner();
   #endif
 
-  int nNo = lhs.nNo;
+  fsils_int nNo = lhs.nNo;
   #ifdef debug_precond_diag
   dmsg << "lhs.nFaces: " << lhs.nFaces;
   dmsg << "nNo: " << nNo;
@@ -143,22 +146,22 @@ void precond_diag(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPt
   //
   switch (dof) {
     case 1: {
-      for (int Ac = 0; Ac < nNo; Ac++) {
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
         W(0,Ac) = Val(0,diagPtr(Ac));
       }
     } break;
 
     case 2: {
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        int d = diagPtr(Ac);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        fsils_int d = diagPtr(Ac);
         W(0,Ac) = Val(0,d);
         W(1,Ac) = Val(3,d);
       }
     } break;
 
     case 3: {
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        int d = diagPtr(Ac);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        fsils_int d = diagPtr(Ac);
         W(0,Ac) = Val(0,d);
         W(1,Ac) = Val(4,d);
         W(2,Ac) = Val(8,d);
@@ -166,8 +169,8 @@ void precond_diag(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPt
     } break;
 
     case 4: {
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        int d = diagPtr(Ac);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        fsils_int d = diagPtr(Ac);
         W(0,Ac) = Val(0,d);
         W(1,Ac) = Val(5,d);
         W(2,Ac) = Val(10,d);
@@ -176,8 +179,8 @@ void precond_diag(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPt
     } break;
 
     default: {
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        int d = diagPtr(Ac);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        fsils_int d = diagPtr(Ac);
         for (int i = 0; i < dof; i++) {
           W(i,Ac) = Val(i*dof+i,d);
         }
@@ -189,7 +192,7 @@ void precond_diag(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPt
 
   // Accounting for Dirichlet BC and inversing W = W^{-1/2}
   //
-  for (int Ac = 0; Ac < nNo; Ac++) {
+  for (fsils_int Ac = 0; Ac < nNo; Ac++) {
     for (int i = 0; i < dof; i++) {
       if (W(i,Ac) == 0.0) {
         W(i,Ac) = 1.0;
@@ -197,8 +200,10 @@ void precond_diag(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPt
     }
   }
 
-  for (int i = 0; i < W.size(); i++) {
-    W(i) = 1.0 / sqrt(fabs(W(i)));
+  for (fsils_int i = 0; i < W.size(); i++) {
+    double absW = fabs(W(i));
+    double sign = (W(i) >= 0.0) ? 1.0 : -1.0;
+    W(i) = sign / sqrt(absW + std::numeric_limits<double>::min());
   }
 
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
@@ -214,7 +219,7 @@ void precond_diag(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPt
 
     int n = std::min(face.dof,dof);
 
-    if (face.bGrp == fsi_linear_solver::BcType::BC_TYPE_Dir) {
+    if (face.bGrp == fe_fsi_linear_solver::BcType::BC_TYPE_Dir) {
       for (int a = 0; a < face.nNo; a++) {
         int Ac = face.glob(a);
         for (int i = 0; i < n; i++) {
@@ -235,7 +240,7 @@ void precond_diag(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPt
   //
   // ELement-wise multiplication.
   //
-  for (int i = 0; i < W.size(); i++) {
+  for (fsils_int i = 0; i < W.size(); i++) {
     R(i) = W(i) * R(i);
   }
 
@@ -263,10 +268,10 @@ void precond_diag(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPt
 //
 // Reproduces Fortran 'PRECONDRCS'.
 //
-void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr, const Vector<int>& colPtr,
-    const Vector<int>& diagPtr, const int dof, Array<double>& Val, Array<double>& R, Array<double>& W1, Array<double>& W2)
+void precond_rcs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
+    const Vector<fsils_int>& diagPtr, const int dof, Array<double>& Val, Array<double>& R, Array<double>& W1, Array<double>& W2)
 {
-  const int nNo = lhs.nNo;
+  const fsils_int nNo = lhs.nNo;
   int maxiter = 10;
   double tol = 2.0;
   int iter = 0;
@@ -289,7 +294,7 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
 
     int n = std::min(face.dof,dof);
 
-    if (face.bGrp == fsi_linear_solver::BcType::BC_TYPE_Dir) {
+    if (face.bGrp == fe_fsi_linear_solver::BcType::BC_TYPE_Dir) {
       for (int a = 0; a < face.nNo; a++) {
         int Ac = face.glob(a);
         for (int i = 0; i < n; i++) {
@@ -304,7 +309,7 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
   // For parallel case, val and Wr can be larger than 1 due to
   // the addition operator in FSILS_COMMUV. Hence need renormalization.
   //
-  for (int i = 0; i < Wr.size(); i++) {
+  for (fsils_int i = 0; i < Wr.size(); i++) {
     Wr(i) = (Wr(i) > 0.5) ? 1.0 : 0.0;
   }
 
@@ -322,42 +327,42 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
   //
   switch (dof) {
     case 1:
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        int d = diagPtr(Ac);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        fsils_int d = diagPtr(Ac);
         Val(0,d) = Wr(0,Ac) * (Val(0,d) - 1.0) + 1.0;
       }
-    break; 
+    break;
 
     case 2:
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        int d = diagPtr(Ac);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        fsils_int d = diagPtr(Ac);
         Val(0,d) = Wr(0,Ac)*(Val(0,d)-1.0) + 1.0;
         Val(3,d) = Wr(1,Ac)*(Val(3,d)-1.0) + 1.0;
       }
-    break; 
+    break;
 
     case 3:
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        int d = diagPtr(Ac);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        fsils_int d = diagPtr(Ac);
         Val(0,d) = Wr(0,Ac)*(Val(0,d)-1.0) + 1.0;
         Val(4,d) = Wr(1,Ac)*(Val(4,d)-1.0) + 1.0;
         Val(8,d) = Wr(2,Ac)*(Val(8,d)-1.0) + 1.0;
       }
-    break; 
+    break;
 
     case 4:
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        int d = diagPtr(Ac);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        fsils_int d = diagPtr(Ac);
         Val(0 ,d) = Wr(0,Ac)*(Val(0 ,d)-1.0) + 1.0;
         Val(5 ,d) = Wr(1,Ac)*(Val(5 ,d)-1.0) + 1.0;
         Val(10,d) = Wr(2,Ac)*(Val(10,d)-1.0) + 1.0;
         Val(15,d) = Wr(3,Ac)*(Val(15,d)-1.0) + 1.0;
       }
-    break; 
+    break;
 
-    default: 
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        int d = diagPtr(Ac);
+    default:
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        fsils_int d = diagPtr(Ac);
         for (int i = 0; i < dof; i++) {
           Val(i*dof+i,d) = Wr(i,Ac)*(Val(i*dof+i,d) - 1.0) + 1.0;
         }
@@ -383,12 +388,12 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
     //
     switch (dof) {
       case 1:
-        for (int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int Ac = 0; Ac < nNo; Ac++) {
           double mx = 0.0;
-          for (int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
+          for (fsils_int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
             double av = fabs(Val(0,j));
             if (av > mx) mx = av;
-            int a = colPtr(j);
+            fsils_int a = colPtr(j);
             if (av > Wc(0,a)) Wc(0,a) = av;
           }
           Wr(0,Ac) = mx;
@@ -396,9 +401,9 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
       break;
 
       case 2:
-        for (int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int Ac = 0; Ac < nNo; Ac++) {
           double mx0 = 0.0, mx1 = 0.0;
-          for (int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
+          for (fsils_int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
             // Row max: rows 0-1 for dof 0, rows 2-3 for dof 1
             double av;
             av = fabs(Val(0,j)); if (av > mx0) mx0 = av;
@@ -406,7 +411,7 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
             av = fabs(Val(2,j)); if (av > mx1) mx1 = av;
             av = fabs(Val(3,j)); if (av > mx1) mx1 = av;
             // Col max: columns 0,2 for dof 0; columns 1,3 for dof 1
-            int a = colPtr(j);
+            fsils_int a = colPtr(j);
             av = fabs(Val(0,j)); if (av > Wc(0,a)) Wc(0,a) = av;
             av = fabs(Val(2,j)); if (av > Wc(0,a)) Wc(0,a) = av;
             av = fabs(Val(1,j)); if (av > Wc(1,a)) Wc(1,a) = av;
@@ -418,9 +423,9 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
       break;
 
       case 3:
-        for (int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int Ac = 0; Ac < nNo; Ac++) {
           double mx0 = 0.0, mx1 = 0.0, mx2 = 0.0;
-          for (int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
+          for (fsils_int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
             double av;
             // Row max: rows 0-2 for dof 0, rows 3-5 for dof 1, rows 6-8 for dof 2
             av = fabs(Val(0,j)); if (av > mx0) mx0 = av;
@@ -433,7 +438,7 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
             av = fabs(Val(7,j)); if (av > mx2) mx2 = av;
             av = fabs(Val(8,j)); if (av > mx2) mx2 = av;
             // Col max: stride-3 columns
-            int a = colPtr(j);
+            fsils_int a = colPtr(j);
             av = fabs(Val(0,j)); if (av > Wc(0,a)) Wc(0,a) = av;
             av = fabs(Val(3,j)); if (av > Wc(0,a)) Wc(0,a) = av;
             av = fabs(Val(6,j)); if (av > Wc(0,a)) Wc(0,a) = av;
@@ -451,9 +456,9 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
       break;
 
       case 4:
-        for (int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int Ac = 0; Ac < nNo; Ac++) {
           double mx0 = 0.0, mx1 = 0.0, mx2 = 0.0, mx3 = 0.0;
-          for (int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
+          for (fsils_int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
             double av;
             // Row max: rows 0-3 for dof 0, 4-7 for dof 1, 8-11 for dof 2, 12-15 for dof 3
             av = fabs(Val(0,j));  if (av > mx0) mx0 = av;
@@ -473,7 +478,7 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
             av = fabs(Val(14,j)); if (av > mx3) mx3 = av;
             av = fabs(Val(15,j)); if (av > mx3) mx3 = av;
             // Col max: stride-4 columns
-            int a = colPtr(j);
+            fsils_int a = colPtr(j);
             av = fabs(Val(0,j));  if (av > Wc(0,a)) Wc(0,a) = av;
             av = fabs(Val(4,j));  if (av > Wc(0,a)) Wc(0,a) = av;
             av = fabs(Val(8,j));  if (av > Wc(0,a)) Wc(0,a) = av;
@@ -499,13 +504,13 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
       break;
 
       default:
-        for (int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int Ac = 0; Ac < nNo; Ac++) {
           // Row max: for each dof row i, scan entries [i*dof .. (i+1)*dof-1] across all columns
           for (int i = 0; i < dof; i++) {
             double mx = 0.0;
             int r0 = i * dof;
             int r1 = r0 + dof - 1;
-            for (int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
+            for (fsils_int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
               for (int r = r0; r <= r1; r++) {
                 double av = fabs(Val(r,j));
                 if (av > mx) mx = av;
@@ -515,8 +520,8 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
           }
 
           // Col max: for each dof column b, scan entries b, b+dof, b+2*dof, ...
-          for (int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
-            int a = colPtr(j);
+          for (fsils_int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
+            fsils_int a = colPtr(j);
             for (int b = 0; b < dof; b++) {
               double mx = 0.0;
               for (int k = b; k < dof*dof; k += dof) {
@@ -568,25 +573,25 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
 //
 // W(dof,nNo)
 //
-void pre_mul(const Array<int>& rowPtr, const int nNo, const int nnz, const int dof, Array<double>& Val, const Array<double>& W)
+void pre_mul(const Array<fsils_int>& rowPtr, const fsils_int nNo, const fsils_int nnz, const int dof, Array<double>& Val, const Array<double>& W)
 {
   switch (dof) {
     case 1: {
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        int a = rowPtr(0,Ac);
-        int b = rowPtr(1,Ac);
-        for (int j = a; j <= b; j++) {
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        fsils_int a = rowPtr(0,Ac);
+        fsils_int b = rowPtr(1,Ac);
+        for (fsils_int j = a; j <= b; j++) {
           Val(0,j) = Val(0,j)*W(0,Ac);
         }
       }
     } break;
-    
+
     case 2: {
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        int a = rowPtr(0,Ac);
-        int b = rowPtr(1,Ac);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        fsils_int a = rowPtr(0,Ac);
+        fsils_int b = rowPtr(1,Ac);
         for (int i = 0; i < 2; i++) {
-          for (int j = a; j <= b; j++) {
+          for (fsils_int j = a; j <= b; j++) {
             Val(i+0,j) = Val(i+0,j)*W(0,Ac);
             Val(i+2,j) = Val(i+2,j)*W(1,Ac);
           }
@@ -595,11 +600,11 @@ void pre_mul(const Array<int>& rowPtr, const int nNo, const int nnz, const int d
     } break;
 
     case 3: {
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        int a = rowPtr(0,Ac);
-        int b = rowPtr(1,Ac);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        fsils_int a = rowPtr(0,Ac);
+        fsils_int b = rowPtr(1,Ac);
         for (int i = 0; i < 3; i++) {
-          for (int j = a; j <= b; j++) {
+          for (fsils_int j = a; j <= b; j++) {
             Val(i+0,j) = Val(i+0,j)*W(0,Ac);
             Val(i+3,j) = Val(i+3,j)*W(1,Ac);
             Val(i+6,j) = Val(i+6,j)*W(2,Ac);
@@ -609,12 +614,12 @@ void pre_mul(const Array<int>& rowPtr, const int nNo, const int nnz, const int d
     } break;
 
     case 4: {
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        int a = rowPtr(0,Ac);
-        int b = rowPtr(1,Ac);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        fsils_int a = rowPtr(0,Ac);
+        fsils_int b = rowPtr(1,Ac);
 
         for (int i = 0; i < 4; i++) {
-          for (int j = a; j <= b; j++) {
+          for (fsils_int j = a; j <= b; j++) {
             Val(i+0,j) = Val(i+0,j)*W(0,Ac);
             Val(i+4,j) = Val(i+4,j)*W(1,Ac);
             Val(i+8,j) = Val(i+8,j)*W(2,Ac);
@@ -627,15 +632,15 @@ void pre_mul(const Array<int>& rowPtr, const int nNo, const int nnz, const int d
     // Fill rows of 'Val' with length 'dof'.
     //
     default: {
-      for (int Ac = 0; Ac < nNo; Ac++) {
-        int a = rowPtr(0,Ac);
-        int b = rowPtr(1,Ac);
+      for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        fsils_int a = rowPtr(0,Ac);
+        fsils_int b = rowPtr(1,Ac);
 
         for (int i = 0; i < dof; i++) {
           int j = i*dof;
 
           for (int m = j; m < j+dof; m++) {
-            for (int n = a; n <= b; n++) {
+            for (fsils_int n = a; n <= b; n++) {
               Val(m,n) = Val(m,n) * W(i,Ac);
             }
           }

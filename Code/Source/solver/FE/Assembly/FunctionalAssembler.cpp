@@ -1285,6 +1285,7 @@ Real FunctionalAssembler::assembleCellsCore(
             AssemblyContext thread_context;
             thread_context.reserve(dof_map_->getMaxDofsPerCell(), 27,
                                    mesh_->dimension());
+            thread_context.preAllocateFieldSolutionData(8, 27, 3);
 
             std::vector<Real> my_values;
             std::vector<Real> local_solution;

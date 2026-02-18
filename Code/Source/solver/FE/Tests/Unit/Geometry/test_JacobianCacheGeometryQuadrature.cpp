@@ -50,8 +50,8 @@ TEST(JacobianCache, ReusesEntryAcrossThreads) {
         EXPECT_EQ(entries[static_cast<std::size_t>(t)], ref);
     }
     EXPECT_EQ(cache.size(), 1u);
-    ASSERT_EQ(ref->J.size(), quad.num_points());
-    EXPECT_NEAR(ref->detJ.front(), 1.0, 1e-12); // length 2 -> J=1
+    ASSERT_EQ(ref->size(), quad.num_points());
+    EXPECT_NEAR(ref->detJ_val(0), 1.0, 1e-12); // length 2 -> J=1
 }
 
 namespace {
@@ -173,7 +173,7 @@ TEST(JacobianCache, AffineMappingComputesJacobianOnce) {
     cache.clear();
 
     const auto& entry = cache.get_or_compute(map, quad);
-    ASSERT_EQ(entry.J.size(), quad.num_points());
+    ASSERT_EQ(entry.size(), quad.num_points());
     EXPECT_EQ(map.jacobian_calls, 1);
 }
 
@@ -184,7 +184,7 @@ TEST(JacobianCache, NonAffineMappingComputesJacobianPerQuadraturePoint) {
     cache.clear();
 
     const auto& entry = cache.get_or_compute(map, quad);
-    ASSERT_EQ(entry.J.size(), quad.num_points());
+    ASSERT_EQ(entry.size(), quad.num_points());
     EXPECT_EQ(map.jacobian_calls, static_cast<int>(quad.num_points()));
 }
 
@@ -198,12 +198,12 @@ TEST(JacobianCache, QuadIdentityEntriesAndInverse) {
     cache.clear();
     const auto& entry = cache.get_or_compute(map, quad);
 
-    ASSERT_EQ(entry.J.size(), quad.num_points());
+    ASSERT_EQ(entry.size(), quad.num_points());
     for (std::size_t i = 0; i < quad.num_points(); ++i) {
-        auto J = entry.J[i];
-        auto Jinv = entry.J_inv[i];
+        auto J = entry.J(i);
+        auto Jinv = entry.J_inv(i);
         auto I = J * Jinv;
-        EXPECT_NEAR(entry.detJ[i], 1.0, 1e-12);
+        EXPECT_NEAR(entry.detJ_val(i), 1.0, 1e-12);
         EXPECT_NEAR(I(0,0), 1.0, 1e-12);
         EXPECT_NEAR(I(1,1), 1.0, 1e-12);
     }
@@ -222,12 +222,12 @@ TEST(JacobianCache, HexIdentityEntriesAndInverse) {
     cache.clear();
     const auto& entry = cache.get_or_compute(map, quad);
 
-    ASSERT_EQ(entry.J.size(), quad.num_points());
+    ASSERT_EQ(entry.size(), quad.num_points());
     for (std::size_t i = 0; i < quad.num_points(); ++i) {
-        auto J = entry.J[i];
-        auto Jinv = entry.J_inv[i];
+        auto J = entry.J(i);
+        auto Jinv = entry.J_inv(i);
         auto I = J * Jinv;
-        EXPECT_NEAR(entry.detJ[i], 1.0, 1e-12);
+        EXPECT_NEAR(entry.detJ_val(i), 1.0, 1e-12);
         EXPECT_NEAR(I(0,0), 1.0, 1e-12);
         EXPECT_NEAR(I(1,1), 1.0, 1e-12);
         EXPECT_NEAR(I(2,2), 1.0, 1e-12);
@@ -258,8 +258,8 @@ TEST(JacobianCache, HexReuseAcrossThreads) {
         EXPECT_EQ(entries[static_cast<std::size_t>(t)], ref);
     }
     EXPECT_EQ(cache.size(), 1u);
-    ASSERT_EQ(ref->J.size(), quad.num_points());
-    EXPECT_NEAR(ref->detJ.front(), 1.0, 1e-12);
+    ASSERT_EQ(ref->size(), quad.num_points());
+    EXPECT_NEAR(ref->detJ_val(0), 1.0, 1e-12);
 }
 
 TEST(JacobianCache, Quad8SerendipityEntries) {
@@ -279,7 +279,7 @@ TEST(JacobianCache, Quad8SerendipityEntries) {
     auto& cache = JacobianCache::instance();
     cache.clear();
     const auto& entry = cache.get_or_compute(map, quad);
-    ASSERT_EQ(entry.detJ.size(), quad.num_points());
+    ASSERT_EQ(entry.size(), quad.num_points());
 }
 
 TEST(JacobianCache, Hex20SerendipityEntries) {
@@ -312,7 +312,7 @@ TEST(JacobianCache, Hex20SerendipityEntries) {
     auto& cache = JacobianCache::instance();
     cache.clear();
     const auto& entry = cache.get_or_compute(map, quad);
-    ASSERT_EQ(entry.detJ.size(), quad.num_points());
+    ASSERT_EQ(entry.size(), quad.num_points());
 }
 
 TEST(JacobianCache, WedgeIdentityEntries) {
@@ -324,9 +324,9 @@ TEST(JacobianCache, WedgeIdentityEntries) {
     auto& cache = JacobianCache::instance();
     cache.clear();
     const auto& entry = cache.get_or_compute(map, quad);
-    ASSERT_EQ(entry.detJ.size(), quad.num_points());
-    for (Real d : entry.detJ) {
-        EXPECT_GT(d, 0.0);
+    ASSERT_EQ(entry.size(), quad.num_points());
+    for (const auto& qpd : entry.data) {
+        EXPECT_GT(qpd.detJ, 0.0);
     }
 }
 
@@ -339,9 +339,9 @@ TEST(JacobianCache, PyramidIdentityEntries) {
     auto& cache = JacobianCache::instance();
     cache.clear();
     const auto& entry = cache.get_or_compute(map, quad);
-    ASSERT_EQ(entry.detJ.size(), quad.num_points());
-    for (Real d : entry.detJ) {
-        EXPECT_GT(d, 0.0);
+    ASSERT_EQ(entry.size(), quad.num_points());
+    for (const auto& qpd : entry.data) {
+        EXPECT_GT(qpd.detJ, 0.0);
     }
 }
 

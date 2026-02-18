@@ -31,7 +31,7 @@
 #include "fsils_api.hpp"
 #include "fils_struct.hpp"
 
-namespace fsi_linear_solver {
+namespace fe_fsi_linear_solver {
 
 /// @brief Sets up 0D contribution to tangent matrix for 0D-coupled boundary condition.
 /// Modifies

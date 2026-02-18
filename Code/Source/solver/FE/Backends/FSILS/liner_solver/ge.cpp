@@ -77,8 +77,8 @@ bool ge(const int nV, const int N, const Array<double>& A, Vector<double>& B)
   } else if (N == 2) {
     double pivot = C(0,0)*C(1,1) - C(1,0)*C(0,1);
 
-    // Singular matrix
-    if (fabs(pivot) < eps) {
+    // Singular matrix (relative to diagonal product magnitude)
+    if (fabs(pivot) < eps * fabs(C(0,0)*C(1,1))) {
       B  = 0.0;
       return false;
     }
@@ -89,6 +89,8 @@ bool ge(const int nV, const int N, const Array<double>& A, Vector<double>& B)
     B(1) = W(1)*B(1);
     return true;
   }
+
+  double max_pivot = 0.0;
 
   for (int m = 0; m < N-1; m++) {
     int ipv = m;
@@ -101,10 +103,12 @@ bool ge(const int nV, const int N, const Array<double>& A, Vector<double>& B)
       }
     }
 
-    // Singular matrix
-    if (fabs(pivot) < eps) {
+    if (pivot > max_pivot) max_pivot = pivot;
+
+    // Singular matrix (relative to largest pivot seen so far)
+    if (pivot < eps * max_pivot) {
       B = 0.0;
-      return false; 
+      return false;
     }
 
     if (ipv != m) {

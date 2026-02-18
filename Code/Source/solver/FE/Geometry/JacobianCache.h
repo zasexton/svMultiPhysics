@@ -23,10 +23,23 @@ namespace svmp {
 namespace FE {
 namespace geometry {
 
+/// Per-quadrature-point packed Jacobian data for cache-friendly access.
+struct JacobianQPData {
+    math::Matrix<Real, 3, 3> J;
+    math::Matrix<Real, 3, 3> J_inv;
+    math::Matrix<Real, 3, 3> J_invT;  // Pre-computed inverse transpose
+    Real detJ;
+};
+
 struct JacobianCacheEntry {
-    std::vector<math::Matrix<Real, 3, 3>> J;
-    std::vector<math::Matrix<Real, 3, 3>> J_inv;
-    std::vector<Real> detJ;
+    std::vector<JacobianQPData> data;  // packed per-qpt
+
+    // Convenience accessors for backward compatibility
+    const math::Matrix<Real, 3, 3>& J(std::size_t i) const { return data[i].J; }
+    const math::Matrix<Real, 3, 3>& J_inv(std::size_t i) const { return data[i].J_inv; }
+    const math::Matrix<Real, 3, 3>& J_invT(std::size_t i) const { return data[i].J_invT; }
+    Real detJ_val(std::size_t i) const { return data[i].detJ; }
+    std::size_t size() const { return data.size(); }
 };
 
 struct JacobianCacheKey {

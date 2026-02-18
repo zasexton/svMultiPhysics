@@ -28,13 +28,23 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#ifndef FSI_LINEAR_SOLVER_BICGS_H
+#define FSI_LINEAR_SOLVER_BICGS_H
+
 #include "fils_struct.hpp"
 
 namespace bicgs {
 
-void bicgsv(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLsType& ls, const int dof,
-    const Array<double>& K, Array<double>& R);
+void bicgsv(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
+            const Array<double>& K, Array<double>& R);
 
-void bicgss(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLsType& ls, const Vector<double>& K, Vector<double>& R);
+void bicgss(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls,
+            const Vector<double>& K, Vector<double>& R);
 
-};
+// NEW: VMS compatible Asymmetric Schur Complement Solver
+void schur(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int nsd,
+           const Array<double>& D, const Array<double>& G, const Vector<double>& L, Vector<double>& R);
+
+} // namespace bicgs
+
+#endif

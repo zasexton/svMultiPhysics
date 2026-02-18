@@ -47,9 +47,9 @@ void FsilsMatrix::resetDroppedEntryCount() noexcept
 
 namespace {
 
-[[nodiscard]] fsi_linear_solver::FSILS_commuType make_fsils_commu(MPI_Comm comm)
+[[nodiscard]] fe_fsi_linear_solver::FSILS_commuType make_fsils_commu(MPI_Comm comm)
 {
-    fsi_linear_solver::FSILS_commuType commu{};
+    fe_fsi_linear_solver::FSILS_commuType commu{};
     commu.foC = true;
     commu.comm = comm;
     commu.nTasks = 1;
@@ -61,7 +61,7 @@ namespace {
     int mpi_initialized = 0;
     MPI_Initialized(&mpi_initialized);
     if (mpi_initialized) {
-        fsi_linear_solver::fsils_commu_create(commu, comm);
+        fe_fsi_linear_solver::fsils_commu_create(commu, comm);
     }
     return commu;
 }
@@ -200,11 +200,11 @@ void sort_row_columns_and_values(FsilsShared& shared, std::vector<Real>& values)
                 FEException, "FsilsMatrix: values size mismatch");
 
     // Sort within each internal row for efficient binary search insertion.
-    int* cols = lhs.colPtr.data();
+    auto* cols = lhs.colPtr.data();
     Real* vals = values.data();
 
-    std::vector<std::pair<int, int>> key_idx;
-    std::vector<int> cols_sorted;
+    std::vector<std::pair<fe_fsi_linear_solver::fsils_int, int>> key_idx;
+    std::vector<fe_fsi_linear_solver::fsils_int> cols_sorted;
     std::vector<Real> vals_sorted;
 
     for (int row = 0; row < nNo; ++row) {
@@ -338,7 +338,7 @@ public:
 	        const auto shared = matrix_->shared();
 	        if (!shared) return;
 
-        auto& lhs = *static_cast<fsi_linear_solver::FSILS_lhsType*>(matrix_->fsilsLhsPtr());
+        auto& lhs = *static_cast<fe_fsi_linear_solver::FSILS_lhsType*>(matrix_->fsilsLhsPtr());
         const int dof = matrix_->fsilsDof();
         const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
 	        Real* values = matrix_->fsilsValuesPtr();
@@ -524,7 +524,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
     }
 
     auto commu = make_fsils_commu(MPI_COMM_WORLD);
-    fsi_linear_solver::fsils_lhs_create(shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0);
+    fe_fsi_linear_solver::fsils_lhs_create(shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0);
 
     build_old_of_internal(*shared);
 
@@ -839,7 +839,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     }
 
     auto commu = make_fsils_commu(MPI_COMM_WORLD);
-    fsi_linear_solver::fsils_lhs_create(shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0);
+    fe_fsi_linear_solver::fsils_lhs_create(shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0);
 
     build_old_of_internal(*shared);
 
@@ -994,10 +994,10 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
 	    if (start < 0 || end < start || end >= lhs.nnz) {
 	        return 0.0;
 	    }
-	    const int* cols = lhs.colPtr.data();
+	    const auto* cols = lhs.colPtr.data();
 	    const auto* begin = cols + start;
 	    const auto* finish = cols + end + 1;
-	    const auto it = std::lower_bound(begin, finish, col_internal);
+	    const auto it = std::lower_bound(begin, finish, static_cast<fe_fsi_linear_solver::fsils_int>(col_internal));
 	    if (it == finish || *it != col_internal) {
         return 0.0;
     }
@@ -1056,10 +1056,10 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
 	    if (start < 0 || end < start || end >= lhs.nnz) {
 	        return;
 	    }
-	    int* cols = lhs.colPtr.data();
+	    auto* cols = lhs.colPtr.data();
 	    auto* begin = cols + start;
 	    auto* finish = cols + end + 1;
-	    const auto it = std::lower_bound(begin, finish, col_internal);
+	    const auto it = std::lower_bound(begin, finish, static_cast<fe_fsi_linear_solver::fsils_int>(col_internal));
 	    if (it == finish || *it != col_internal) {
         dropped_entry_count_.fetch_add(1, std::memory_order_relaxed);
         return;

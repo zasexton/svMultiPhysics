@@ -134,6 +134,25 @@ int Vector<float>::active = 0;
 template<>
 bool Vector<float>::write_enabled = false;
 
+// long (int64_t / fsils_int) //
+template<>
+bool Vector<long>::show_index_check_message = true;
+
+template<>
+double Vector<long>::memory_in_use = 0;
+
+template<>
+double Vector<long>::memory_returned = 0;
+
+template<>
+int Vector<long>::num_allocated = 0;
+
+template<>
+int Vector<long>::active = 0;
+
+template<>
+bool Vector<long>::write_enabled = false;
+
 /// @brief Build a prefix for a file name from label which may be from a debugging message.
 //
 std::string build_file_prefix(const std::string& label)

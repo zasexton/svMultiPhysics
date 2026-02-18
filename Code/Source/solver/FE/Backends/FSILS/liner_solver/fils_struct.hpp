@@ -32,9 +32,11 @@
 #define FSI_LINEAR_SOLVER_H 
 
 #include "CmMod.h"
+#include "Array3.h"
 
 #include "mpi.h"
 
+#include <cstdint>
 #include <map>
 #include <vector>
 
@@ -54,7 +56,11 @@
 /// The enums here replicate the PARAMETERs defined
 /// in FSILS_STRUCT.h.
 //
-namespace fsi_linear_solver {
+namespace fe_fsi_linear_solver {
+
+/// Index type for large mesh support. Using int64_t allows meshes
+/// with more than 2^31 nodes / non-zeros.
+using fsils_int = int64_t;
 
 enum class BcType
 {
@@ -170,34 +176,34 @@ class FSILS_lhsType
     bool debug_active = false; 
 
     /// Global number of nodes              (IN)
-    int gnNo = 0;
+    fsils_int gnNo = 0;
 
     /// Number of nodes                     (IN)
-    int nNo = 0;
+    fsils_int nNo = 0;
 
     /// Number of non-zero in lhs           (IN)
-    int nnz = 0;
+    fsils_int nnz = 0;
 
     ///  Number of faces                     (IN)
     int nFaces = 0;
 
     /// nNo of this proc                    (USE)
-    int mynNo = 0;
+    fsils_int mynNo = 0;
 
     /// nNo of shared with lower proc       (USE)
-    int shnNo = 0;
+    fsils_int shnNo = 0;
 
     /// Number of communication requests    (USE)
     int nReq = 0;
 
     /// Column pointer                      (USE)
-    Vector<int> colPtr;
+    Vector<fsils_int> colPtr;
 
     /// Row pointer                         (USE)
-    Array<int> rowPtr;
+    Array<fsils_int> rowPtr;
 
     /// Diagonal pointer                    (USE)
-    Vector<int> diagPtr;
+    Vector<fsils_int> diagPtr;
 
     /// Mapping of nodes                    (USE)
     Vector<int> map;
@@ -210,10 +216,10 @@ class FSILS_lhsType
 
     /// Pre-allocated communication buffers (sized once in fsils_lhs_create)
     int nmax_commu = 0;      ///< max shared nodes across all comm partners
-    std::vector<MPI_Request> commu_sReq;
-    std::vector<MPI_Request> commu_rReq;
-    std::vector<double> commu_sB;  ///< send buffer (flat, sized for max usage)
-    std::vector<double> commu_rB;  ///< recv buffer (flat, sized for max usage)
+    mutable std::vector<MPI_Request> commu_sReq;
+    mutable std::vector<MPI_Request> commu_rReq;
+    mutable std::vector<double> commu_sB;  ///< send buffer (flat, sized for max usage)
+    mutable std::vector<double> commu_rB;  ///< recv buffer (flat, sized for max usage)
     int commu_dof_capacity = 0;    ///< current dof capacity for vector buffers
 };
 
@@ -295,6 +301,52 @@ class FSILS_subLsType
         Xs.resize(nNo_);
         y.resize(sD_); c.resize(sD_); s.resize(sD_); err.resize(sD_+1);
         dof = -1; nNo = nNo_; sD_alloc = sD_;
+      }
+
+      // BiCGS workspace (vector version)
+      Array<double> bicgs_P, bicgs_Rh, bicgs_X, bicgs_V, bicgs_S, bicgs_T;
+      int bicgs_v_nNo = 0, bicgs_v_dof = 0;
+
+      void ensure_bicgs_v(int dof_, int nNo_) {
+        if (dof_ == bicgs_v_dof && nNo_ == bicgs_v_nNo) return;
+        bicgs_P.resize(dof_, nNo_); bicgs_Rh.resize(dof_, nNo_);
+        bicgs_X.resize(dof_, nNo_); bicgs_V.resize(dof_, nNo_);
+        bicgs_S.resize(dof_, nNo_); bicgs_T.resize(dof_, nNo_);
+        bicgs_v_dof = dof_; bicgs_v_nNo = nNo_;
+      }
+
+      // BiCGS workspace (scalar version)
+      Vector<double> bicgs_Ps, bicgs_Rhs, bicgs_Xs, bicgs_Vs, bicgs_Ss, bicgs_Ts;
+      int bicgs_s_nNo = 0;
+
+      void ensure_bicgs_s(int nNo_) {
+        if (nNo_ == bicgs_s_nNo) return;
+        bicgs_Ps.resize(nNo_); bicgs_Rhs.resize(nNo_);
+        bicgs_Xs.resize(nNo_); bicgs_Vs.resize(nNo_);
+        bicgs_Ss.resize(nNo_); bicgs_Ts.resize(nNo_);
+        bicgs_s_nNo = nNo_;
+      }
+
+      // CG workspace (vector version)
+      Array<double> cg_P, cg_KP, cg_X;
+      int cg_v_nNo = 0, cg_v_dof = 0;
+
+      void ensure_cg_v(int dof_, int nNo_) {
+        if (dof_ == cg_v_dof && nNo_ == cg_v_nNo) return;
+        cg_P.resize(dof_, nNo_); cg_KP.resize(dof_, nNo_);
+        cg_X.resize(dof_, nNo_);
+        cg_v_dof = dof_; cg_v_nNo = nNo_;
+      }
+
+      // CG workspace (scalar version)
+      Vector<double> cg_Ps, cg_KPs, cg_Xs;
+      int cg_s_nNo = 0;
+
+      void ensure_cg_s(int nNo_) {
+        if (nNo_ == cg_s_nNo) return;
+        cg_Ps.resize(nNo_); cg_KPs.resize(nNo_);
+        cg_Xs.resize(nNo_);
+        cg_s_nNo = nNo_;
       }
     } ws;
 };

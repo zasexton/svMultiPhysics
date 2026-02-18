@@ -32,7 +32,7 @@
 
 #include <chrono>
 
-namespace fsi_linear_solver {
+namespace fe_fsi_linear_solver {
 
 double fsils_cpu_t()
 {

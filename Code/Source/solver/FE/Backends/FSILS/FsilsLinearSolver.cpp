@@ -113,14 +113,14 @@ void traceLog(const std::string& msg)
     FE_LOG_INFO(msg);
 }
 
-fsi_linear_solver::LinearSolverType to_fsils_solver(SolverMethod method)
+fe_fsi_linear_solver::LinearSolverType to_fsils_solver(SolverMethod method)
 {
     switch (method) {
-        case SolverMethod::CG: return fsi_linear_solver::LS_TYPE_CG;
-        case SolverMethod::GMRES: return fsi_linear_solver::LS_TYPE_GMRES;
-        case SolverMethod::FGMRES: return fsi_linear_solver::LS_TYPE_GMRES;
-        case SolverMethod::BiCGSTAB: return fsi_linear_solver::LS_TYPE_BICGS;
-        case SolverMethod::BlockSchur: return fsi_linear_solver::LS_TYPE_NS;
+        case SolverMethod::CG: return fe_fsi_linear_solver::LS_TYPE_CG;
+        case SolverMethod::GMRES: return fe_fsi_linear_solver::LS_TYPE_GMRES;
+        case SolverMethod::FGMRES: return fe_fsi_linear_solver::LS_TYPE_GMRES;
+        case SolverMethod::BiCGSTAB: return fe_fsi_linear_solver::LS_TYPE_BICGS;
+        case SolverMethod::BlockSchur: return fe_fsi_linear_solver::LS_TYPE_NS;
         case SolverMethod::Direct:
         default:
             FE_THROW(NotImplementedException, "FsilsLinearSolver: direct solve not supported by FSILS");
@@ -164,7 +164,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     FE_THROW_IF(b->size() != A->numRows() || x->size() != b->size(), InvalidArgumentException,
                 "FsilsLinearSolver::solve: size mismatch");
 
-    auto& lhs = *static_cast<fsi_linear_solver::FSILS_lhsType*>(const_cast<void*>(A->fsilsLhsPtr()));
+    auto& lhs = *static_cast<fe_fsi_linear_solver::FSILS_lhsType*>(const_cast<void*>(A->fsilsLhsPtr()));
     const int dof = A->fsilsDof();
     const int nsd = dof - 1; // velocity components (FSILS convention: dof = nsd + 1 for NS)
     FE_THROW_IF(dof <= 0, FEException, "FsilsLinearSolver::solve: invalid FSILS dof");
@@ -278,40 +278,40 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         const int nNo = lhs.nNo;
         const int nnz_int = lhs.nnz;
         if (nNo > 0 && nnz_int > 0) {
-            int* cols = lhs.colPtr.data();
-            const auto find_entry = [&](int row, int col) -> int {
-                const int start = lhs.rowPtr(0, row);
-                const int end = lhs.rowPtr(1, row);
+            auto* cols = lhs.colPtr.data();
+            const auto find_entry = [&](int row, int col) -> fe_fsi_linear_solver::fsils_int {
+                const auto start = lhs.rowPtr(0, row);
+                const auto end = lhs.rowPtr(1, row);
                 if (start < 0 || end < start) {
                     return -1;
                 }
-                const int len = end - start + 1;
-                int* begin = cols + start;
-                int* finish = begin + len;
-                const auto it = std::lower_bound(begin, finish, col);
+                const auto len = end - start + 1;
+                auto* begin = cols + start;
+                auto* finish = begin + len;
+                const auto it = std::lower_bound(begin, finish, static_cast<fe_fsi_linear_solver::fsils_int>(col));
                 if (it == finish || *it != col) {
                     return -1;
                 }
-                return static_cast<int>(it - cols);
+                return static_cast<fe_fsi_linear_solver::fsils_int>(it - cols);
             };
 
             const std::size_t blk_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
             double max_abs_diff = 0.0;
             double max_abs_ref = 0.0;
 
-            for (int row = 0; row < nNo; ++row) {
-                const int start = lhs.rowPtr(0, row);
-                const int end = lhs.rowPtr(1, row);
+            for (fe_fsi_linear_solver::fsils_int row = 0; row < nNo; ++row) {
+                const auto start = lhs.rowPtr(0, row);
+                const auto end = lhs.rowPtr(1, row);
                 if (start < 0 || end < start) {
                     continue;
                 }
-                for (int idx = start; idx <= end; ++idx) {
-                    const int col = cols[idx];
+                for (auto idx = start; idx <= end; ++idx) {
+                    const auto col = cols[idx];
                     if (col < 0 || col >= nNo) {
                         continue;
                     }
 
-                    const int idx_t = find_entry(col, row);
+                    const auto idx_t = find_entry(col, row);
                     if (idx_t < 0 || idx_t >= nnz_int) {
                         continue;
                     }
@@ -343,21 +343,21 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
     }
 
-	    fsi_linear_solver::FSILS_lsType ls{};
+	    fe_fsi_linear_solver::FSILS_lsType ls{};
 		    if (options_.method == SolverMethod::BlockSchur) {
 	        // FSILS NS solver uses RI.mItr as a basis dimension and allocates O(nNo * mItr) workspace.
 	        // Treat very large generic max_iter as "unset" and fall back to the FSILS default (10) for safety.
 	        const int safe_max_iter = (options_.max_iter > 50) ? 10 : options_.max_iter;
 	        if (options_.krylov_dim > 0) {
-	            fsi_linear_solver::fsils_ls_create(ls,
-	                                               fsi_linear_solver::LS_TYPE_NS,
+	            fe_fsi_linear_solver::fsils_ls_create(ls,
+	                                               fe_fsi_linear_solver::LS_TYPE_NS,
 	                                               options_.rel_tol,
 	                                               options_.abs_tol,
 	                                               safe_max_iter,
 	                                               options_.krylov_dim);
 	        } else {
-	            fsi_linear_solver::fsils_ls_create(ls,
-	                                               fsi_linear_solver::LS_TYPE_NS,
+	            fe_fsi_linear_solver::fsils_ls_create(ls,
+	                                               fe_fsi_linear_solver::LS_TYPE_NS,
 	                                               options_.rel_tol,
 	                                               options_.abs_tol,
 	                                               safe_max_iter);
@@ -382,7 +382,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 	        }
 		    } else {
 		        const auto method = to_fsils_solver(options_.method);
-		        if (method == fsi_linear_solver::LS_TYPE_GMRES) {
+		        if (method == fe_fsi_linear_solver::LS_TYPE_GMRES) {
 		            // FSILS GMRES counts iterations as `mItr * (sD + 1)` where:
 		            // - RI.mItr: restart count (outer)
 		            // - RI.sD:   Krylov subspace dimension (inner)
@@ -400,14 +400,14 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 		            const int per_restart = sD + 1;
 		            const int mItr = std::max(1, options_.max_iter / std::max(1, per_restart));
 
-		            fsi_linear_solver::fsils_ls_create(ls,
+		            fe_fsi_linear_solver::fsils_ls_create(ls,
 		                                               method,
 		                                               options_.rel_tol,
 		                                               options_.abs_tol,
 		                                               mItr,
 		                                               sD);
 		        } else {
-		        fsi_linear_solver::fsils_ls_create(ls,
+		        fe_fsi_linear_solver::fsils_ls_create(ls,
 		                                           method,
 		                                           options_.rel_tol,
 	                                           options_.abs_tol,
@@ -426,7 +426,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     int dirichlet_face_index = -1;
     int rank_one_face_start = -1;
 
-    auto sort_face_by_glob = [&](fsi_linear_solver::FSILS_faceType& face, int face_dof) {
+    auto sort_face_by_glob = [&](fe_fsi_linear_solver::FSILS_faceType& face, int face_dof) {
         if (face.nNo <= 1) {
             return;
         }
@@ -448,7 +448,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         face.val = sorted_val;
     };
 
-    auto sync_face_val_if_shared = [&](fsi_linear_solver::FSILS_faceType& face, int face_dof) {
+    auto sync_face_val_if_shared = [&](fe_fsi_linear_solver::FSILS_faceType& face, int face_dof) {
         if (lhs.commu.nTasks <= 1) {
             return;
         }
@@ -469,7 +469,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 }
             }
 
-            fsi_linear_solver::fsils_commuv(lhs, face_dof, v);
+            fe_fsi_linear_solver::fsils_commuv(lhs, face_dof, v);
 
             for (int a = 0; a < face.nNo; ++a) {
                 const int Ac = face.glob(a);
@@ -529,7 +529,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             const int face_nNo = static_cast<int>(node_mask.size());
             face.nNo = face_nNo;
             face.dof = dof;
-            face.bGrp = fsi_linear_solver::BcType::BC_TYPE_Dir;
+            face.bGrp = fe_fsi_linear_solver::BcType::BC_TYPE_Dir;
 
 	            if (face_nNo > 0) {
 	                face.glob.resize(face_nNo);
@@ -610,7 +610,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 auto& face = lhs.face[static_cast<std::size_t>(faIn)];
                 face.nNo = face_nNo;
                 face.dof = nsd;
-                face.bGrp = fsi_linear_solver::BcType::BC_TYPE_Neu;
+                face.bGrp = fe_fsi_linear_solver::BcType::BC_TYPE_Neu;
 
 	                if (face_nNo > 0) {
 	                    face.glob.resize(face_nNo);
@@ -691,7 +691,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
 
         Array<double> R_int(dof, lhs.nNo, r_internal.data());
-        fsi_linear_solver::fsils_commuv(lhs, dof, R_int);
+        fe_fsi_linear_solver::fsils_commuv(lhs, dof, R_int);
 
         // Map back to old local ordering expected by fsils_solve.
         for (int a = 0; a < lhs.nNo; ++a) {
@@ -722,7 +722,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     bool ns_threw = false;
     std::string ns_error;
     try {
-        fsi_linear_solver::fsils_solve(lhs, ls, dof, Ri, Val, prec, incL, res);
+        fe_fsi_linear_solver::fsils_solve(lhs, ls, dof, Ri, Val, prec, incL, res);
     } catch (const std::exception& e) {
         ns_threw = true;
         ns_error = e.what();
@@ -776,13 +776,13 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
         const int sD = (options_.krylov_dim > 0) ? options_.krylov_dim : 250;
         const int mItr = std::max(1, std::min(5, options_.max_iter)); // limit restarts for safety
-        fsi_linear_solver::fsils_ls_create(ls,
-                                           fsi_linear_solver::LS_TYPE_GMRES,
+        fe_fsi_linear_solver::fsils_ls_create(ls,
+                                           fe_fsi_linear_solver::LS_TYPE_GMRES,
                                            options_.rel_tol,
                                            options_.abs_tol,
                                            mItr,
                                            sD);
-        fsi_linear_solver::fsils_solve(lhs, ls, dof, Ri, Val, prec, incL, res);
+        fe_fsi_linear_solver::fsils_solve(lhs, ls, dof, Ri, Val, prec, incL, res);
         }
     } else if (ns_threw) {
         // Propagate non-BlockSchur failures (no fallback policy).
@@ -845,7 +845,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 		        }
 		    }
 			    int max_expected_iters = options_.max_iter;
-			    if (ls.LS_type == fsi_linear_solver::LinearSolverType::LS_TYPE_GMRES) {
+			    if (ls.LS_type == fe_fsi_linear_solver::LinearSolverType::LS_TYPE_GMRES) {
 			        // FSILS GMRES counts iterations as `mItr * (sD + 1)` where:
 			        // - RI.mItr: restart count (outer)
 			        // - RI.sD:   Krylov subspace dimension (inner)
@@ -861,9 +861,9 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 			        } else {
 			            max_expected_iters = std::numeric_limits<int>::max();
 			        }
-			    } else if (ls.LS_type == fsi_linear_solver::LinearSolverType::LS_TYPE_CG ||
-			               ls.LS_type == fsi_linear_solver::LinearSolverType::LS_TYPE_BICGS ||
-			               ls.LS_type == fsi_linear_solver::LinearSolverType::LS_TYPE_NS) {
+			    } else if (ls.LS_type == fe_fsi_linear_solver::LinearSolverType::LS_TYPE_CG ||
+			               ls.LS_type == fe_fsi_linear_solver::LinearSolverType::LS_TYPE_BICGS ||
+			               ls.LS_type == fe_fsi_linear_solver::LinearSolverType::LS_TYPE_NS) {
 			        // For these FSILS solvers, RI.mItr is the primary iteration cap.
 			        max_expected_iters = std::max(0, ls.RI.mItr);
 			    }

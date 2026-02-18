@@ -32,14 +32,32 @@
 
 namespace omp_la {
 
-using namespace fsi_linear_solver;
+using namespace fe_fsi_linear_solver;
 
-void omp_mul_s(const int nNo, const double r, Vector<double>& U);
+void omp_mul_s(const fsils_int nNo, const double r, Vector<double>& U);
 
-void omp_mul_v(const int dof, const int nNo, const double r, Array<double>& U);
+void omp_mul_v(const int dof, const fsils_int nNo, const double r, Array<double>& U);
 
-void omp_sum_s(const int nNo, const double r, Vector<double>& U, const Vector<double>& V);
+void omp_sum_s(const fsils_int nNo, const double r, Vector<double>& U, const Vector<double>& V);
 
-void omp_sum_v(const int dof, const int nNo, const double r, Array<double>& U, const Array<double>& V);
+void omp_sum_v(const int dof, const fsils_int nNo, const double r, Array<double>& U, const Array<double>& V);
+
+/// @brief Y = A + alpha*B (vector version)
+void omp_axpby_v(const int dof, const fsils_int nNo, Array<double>& Y,
+                 const Array<double>& A, const double alpha, const Array<double>& B);
+
+/// @brief Y = A + alpha*B + beta*C (vector version)
+void omp_axpbypgz_v(const int dof, const fsils_int nNo, Array<double>& Y,
+                     const Array<double>& A, const double alpha, const Array<double>& B,
+                     const double beta, const Array<double>& C);
+
+/// @brief Y = A + alpha*B (scalar version)
+void omp_axpby_s(const fsils_int nNo, Vector<double>& Y,
+                 const Vector<double>& A, const double alpha, const Vector<double>& B);
+
+/// @brief Y = A + alpha*B + beta*C (scalar version)
+void omp_axpbypgz_s(const fsils_int nNo, Vector<double>& Y,
+                     const Vector<double>& A, const double alpha, const Vector<double>& B,
+                     const double beta, const Vector<double>& C);
 
 };

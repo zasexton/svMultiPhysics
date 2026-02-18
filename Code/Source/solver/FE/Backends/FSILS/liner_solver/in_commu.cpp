@@ -44,9 +44,9 @@
 
 #include "fsils_std.h"
 
-namespace fsi_linear_solver {
+namespace fe_fsi_linear_solver {
 
-void fsils_commus(FSILS_lhsType& lhs, Vector<double>& R)
+void fsils_commus(const FSILS_lhsType& lhs, Vector<double>& R)
 {
   if (lhs.commu.nTasks == 1) {
     return;
@@ -100,7 +100,7 @@ void fsils_commus(FSILS_lhsType& lhs, Vector<double>& R)
 /// 3 - rTmp {in master} = R          {from master}
 /// 4 - R    {in slave}  = rTmp       {from master}
 //
-void fsils_commuv(FSILS_lhsType& lhs, int dof, Array<double>& R)
+void fsils_commuv(const FSILS_lhsType& lhs, int dof, Array<double>& R)
 {
   if (lhs.commu.nTasks == 1) {
     return;
@@ -137,6 +137,120 @@ void fsils_commuv(FSILS_lhsType& lhs, int dof, Array<double>& R)
     MPI_Irecv(&rB[i*slice_sz], lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &rReq[i]);
     MPI_Isend(&sB[i*slice_sz], lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &sReq[i]);
   }
+
+  MPI_Waitall(nReq, rReq.data(), MPI_STATUSES_IGNORE);
+
+  for (int i = 0; i < nReq; i++) {
+    for (int j = 0; j < lhs.cS[i].n; j++) {
+      int k = lhs.cS[i].ptr(j);
+      for (int l = 0; l < dof; l++) {
+        R(l,k) = R(l,k) + rB[l + j*dof + i*slice_sz];
+      }
+    }
+  }
+
+  MPI_Waitall(nReq, sReq.data(), MPI_STATUSES_IGNORE);
+}
+
+/// @brief Begin async scalar communication: pack + post Isend/Irecv.
+void fsils_commus_begin(const FSILS_lhsType& lhs, Vector<double>& R)
+{
+  if (lhs.commu.nTasks == 1) return;
+  if (lhs.cS.size() == 0 || lhs.nReq == 0) return;
+
+  int nReq = lhs.nReq;
+  int nmax = lhs.nmax_commu;
+  auto& sB = lhs.commu_sB;
+  auto& rB = lhs.commu_rB;
+  auto& sReq = lhs.commu_sReq;
+  auto& rReq = lhs.commu_rReq;
+
+  size_t needed = static_cast<size_t>(nmax) * nReq;
+  if (sB.size() < needed) { sB.resize(needed); rB.resize(needed); }
+
+  for (int i = 0; i < nReq; i++) {
+    for (int j = 0; j < lhs.cS[i].n; j++) {
+      int k = lhs.cS[i].ptr(j);
+      sB[j + i*nmax] = R(k);
+    }
+  }
+
+  int mpi_tag = 1;
+  for (int i = 0; i < nReq; i++) {
+    MPI_Irecv(&rB[i*nmax], lhs.cS[i].n, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &rReq[i]);
+    MPI_Isend(&sB[i*nmax], lhs.cS[i].n, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &sReq[i]);
+  }
+}
+
+/// @brief Finish async scalar communication: wait + unpack + accumulate.
+void fsils_commus_end(const FSILS_lhsType& lhs, Vector<double>& R)
+{
+  if (lhs.commu.nTasks == 1) return;
+  if (lhs.cS.size() == 0 || lhs.nReq == 0) return;
+
+  int nReq = lhs.nReq;
+  int nmax = lhs.nmax_commu;
+  auto& rB = lhs.commu_rB;
+  auto& sReq = lhs.commu_sReq;
+  auto& rReq = lhs.commu_rReq;
+
+  MPI_Waitall(nReq, rReq.data(), MPI_STATUSES_IGNORE);
+
+  for (int i = 0; i < nReq; i++) {
+    for (int j = 0; j < lhs.cS[i].n; j++) {
+      int k = lhs.cS[i].ptr(j);
+      R(k) = R(k) + rB[j + i*nmax];
+    }
+  }
+
+  MPI_Waitall(nReq, sReq.data(), MPI_STATUSES_IGNORE);
+}
+
+/// @brief Begin async vector communication: pack + post Isend/Irecv.
+void fsils_commuv_begin(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+{
+  if (lhs.commu.nTasks == 1) return;
+  if (lhs.cS.size() == 0 || lhs.nReq == 0) return;
+
+  int nReq = lhs.nReq;
+  int nmax = lhs.nmax_commu;
+  auto& sB = lhs.commu_sB;
+  auto& rB = lhs.commu_rB;
+  auto& sReq = lhs.commu_sReq;
+  auto& rReq = lhs.commu_rReq;
+
+  size_t needed = static_cast<size_t>(dof) * nmax * nReq;
+  if (sB.size() < needed) { sB.resize(needed); rB.resize(needed); }
+  size_t slice_sz = static_cast<size_t>(dof) * nmax;
+
+  for (int i = 0; i < nReq; i++) {
+    for (int j = 0; j < lhs.cS[i].n; j++) {
+      int k = lhs.cS[i].ptr(j);
+      for (int l = 0; l < dof; l++) {
+        sB[l + j*dof + i*slice_sz] = R(l,k);
+      }
+    }
+  }
+
+  int mpi_tag = 1;
+  for (int i = 0; i < nReq; i++) {
+    MPI_Irecv(&rB[i*slice_sz], lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &rReq[i]);
+    MPI_Isend(&sB[i*slice_sz], lhs.cS[i].n*dof, mpreal, lhs.cS[i].iP, mpi_tag, lhs.commu.comm, &sReq[i]);
+  }
+}
+
+/// @brief Finish async vector communication: wait + unpack + accumulate.
+void fsils_commuv_end(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+{
+  if (lhs.commu.nTasks == 1) return;
+  if (lhs.cS.size() == 0 || lhs.nReq == 0) return;
+
+  int nReq = lhs.nReq;
+  int nmax = lhs.nmax_commu;
+  auto& rB = lhs.commu_rB;
+  auto& sReq = lhs.commu_sReq;
+  auto& rReq = lhs.commu_rReq;
+  size_t slice_sz = static_cast<size_t>(dof) * nmax;
 
   MPI_Waitall(nReq, rReq.data(), MPI_STATUSES_IGNORE);
 

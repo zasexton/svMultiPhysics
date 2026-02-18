@@ -57,13 +57,13 @@ void schur(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array<d
   dmsg.banner();
   #endif
 
-  int nNo = lhs.nNo;
-  int mynNo = lhs.mynNo;
+  fsils_int nNo = lhs.nNo;
+  fsils_int mynNo = lhs.mynNo;
 
   Vector<double> X(nNo), P(nNo), SP(nNo), DGP(nNo); 
   Array<double> GP(dof,nNo), unCondU(dof,nNo);
 
-  double time = fsi_linear_solver::fsils_cpu_t();
+  double time = fe_fsi_linear_solver::fsils_cpu_t();
   ls.suc = false;
   ls.iNorm = norm::fsi_ls_norms(mynNo, lhs.commu, R);
   double eps = pow(std::max(ls.absTol,ls.relTol*ls.iNorm),2.0);
@@ -145,7 +145,7 @@ void schur(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array<d
 
   R = X;
   ls.fNorm = sqrt(err);
-  ls.callD = fsi_linear_solver::fsils_cpu_t() - time + ls.callD;
+  ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - time + ls.callD;
   ls.itr = ls.itr + last_i;
   #ifdef debug_schur
   dmsg << "errO: " << errO;
@@ -170,20 +170,23 @@ void cgrad_v(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array
   #ifdef debug_cgrad_v
   DebugMsg dmsg(__func__,  lhs.commu.task);
   dmsg.banner();
-  double time = fsi_linear_solver::fsils_cpu_t();
+  double time = fe_fsi_linear_solver::fsils_cpu_t();
   #endif
 
-  int nNo = lhs.nNo;
-  int mynNo = lhs.mynNo;
+  fsils_int nNo = lhs.nNo;
+  fsils_int mynNo = lhs.mynNo;
   #ifdef debug_cgrad_v
   dmsg << "nNo: " << nNo;
   dmsg << "mynNo: " << mynNo;
   dmsg << "ls.mItr: " << ls.mItr;
   #endif
 
-  Array<double> P(dof,nNo), KP(dof,nNo), X(dof,nNo);
+  ls.ws.ensure_cg_v(dof, nNo);
+  auto& P = ls.ws.cg_P;
+  auto& KP = ls.ws.cg_KP;
+  auto& X = ls.ws.cg_X;
 
-  ls.callD = fsi_linear_solver::fsils_cpu_t();
+  ls.callD = fe_fsi_linear_solver::fsils_cpu_t();
   ls.suc = false;
   ls.iNorm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, R);
   double eps = pow(std::max(ls.absTol, ls.relTol* ls.iNorm), 2.0);
@@ -236,7 +239,7 @@ void cgrad_v(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array
   R = X;
   ls.itr = last_i;
   ls.fNorm = sqrt(err);
-  ls.callD = fsi_linear_solver::fsils_cpu_t() - ls.callD;
+  ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.callD;
 
   if (errO < std::numeric_limits<double>::epsilon()) {
     ls.dB = 0.0;
@@ -245,7 +248,7 @@ void cgrad_v(FSILS_lhsType& lhs, FSILS_subLsType& ls, const int dof, const Array
   }
 
   #ifdef debug_cgrad_v
-  double exec_time = fsi_linear_solver::fsils_cpu_t() - time;
+  double exec_time = fe_fsi_linear_solver::fsils_cpu_t() - time;
   dmsg << "Execution time: " << exec_time;
   dmsg << "Done";
   #endif
@@ -261,20 +264,23 @@ void cgrad_s(FSILS_lhsType& lhs, FSILS_subLsType& ls, const Vector<double>& K, V
   #ifdef debug_cgrad_s
   DebugMsg dmsg(__func__,  lhs.commu.task);
   dmsg.banner();
-  double time = fsi_linear_solver::fsils_cpu_t();
+  double time = fe_fsi_linear_solver::fsils_cpu_t();
   #endif
 
-  int nNo = lhs.nNo;
-  int mynNo = lhs.mynNo;
+  fsils_int nNo = lhs.nNo;
+  fsils_int mynNo = lhs.mynNo;
   #ifdef debug_cgrad_s
   dmsg << "nNo: " << nNo;
   dmsg << "mynNo: " << mynNo;
   dmsg << "ls.mItr: " << ls.mItr;
   #endif
 
-  Vector<double> P(nNo), KP(nNo), X(nNo);
+  ls.ws.ensure_cg_s(nNo);
+  auto& P = ls.ws.cg_Ps;
+  auto& KP = ls.ws.cg_KPs;
+  auto& X = ls.ws.cg_Xs;
 
-  ls.callD = fsi_linear_solver::fsils_cpu_t();
+  ls.callD = fe_fsi_linear_solver::fsils_cpu_t();
   ls.suc = false;
   ls.iNorm = norm::fsi_ls_norms(mynNo, lhs.commu, R);
   double eps = pow(std::max(ls.absTol, ls.relTol* ls.iNorm), 2.0);
@@ -326,7 +332,7 @@ void cgrad_s(FSILS_lhsType& lhs, FSILS_subLsType& ls, const Vector<double>& K, V
   R = X;
   ls.itr = last_i;
   ls.fNorm = sqrt(err);
-  ls.callD = fsi_linear_solver::fsils_cpu_t() - ls.callD;
+  ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.callD;
 
   if (errO < std::numeric_limits<double>::epsilon()) {
     ls.dB = 0.0;
@@ -335,7 +341,7 @@ void cgrad_s(FSILS_lhsType& lhs, FSILS_subLsType& ls, const Vector<double>& K, V
   }
 
   #ifdef debug_cgrad_s
-  double exec_time = fsi_linear_solver::fsils_cpu_t() - time;
+  double exec_time = fe_fsi_linear_solver::fsils_cpu_t() - time;
   dmsg << "Execution time: " << exec_time;
   dmsg << "Done";
   #endif

@@ -41,235 +41,258 @@
 
 namespace spar_mul {
 
-/// @brief Reproduces 'SUBROUTINE FSILS_SPARMULSS(lhs, rowPtr, colPtr, K, U, KU)'
-//
-void fsils_spar_mul_ss(FSILS_lhsType& lhs, const Array<int>& rowPtr, const Vector<int>& colPtr, 
+using fe_fsi_linear_solver::fsils_int;
+
+//====================================================================
+// Templated SpMV implementations — DOF known at compile time enables
+// full unrolling and vectorization for the common cases (1–4).
+// All impls take a row range [iStart, iEnd) for overlap support.
+//====================================================================
+
+/// SS: K(nnz) * U(nNo) -> KU(nNo)
+static void fsils_spar_mul_ss_range(fsils_int iStart, fsils_int iEnd,
+    const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
     const Vector<double>& K, const Vector<double>& U, Vector<double>& KU)
 {
-  int nNo = lhs.nNo;
-  KU = 0.0;
-
   #pragma omp parallel for schedule(static)
-  for (int i = 0; i < nNo; i++) {
-    for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-      KU(i) = KU(i) + K(j) * U(colPtr(j));
+  for (fsils_int i = iStart; i < iEnd; i++) {
+    double sum = 0.0;
+    for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
+      sum += K(j) * U(colPtr(j));
+    }
+    KU(i) = sum;
+  }
+}
+
+/// SV: K(dof, nnz) * U(nNo) -> KU(dof, nNo)
+template <int DOF>
+static void fsils_spar_mul_sv_impl(fsils_int iStart, fsils_int iEnd,
+    const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
+    const Array<double>& K, const Vector<double>& U, Array<double>& KU)
+{
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = iStart; i < iEnd; i++) {
+    double sums[DOF] = {};
+    for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
+      double u_col = U(colPtr(j));
+      for (int m = 0; m < DOF; m++) {
+        sums[m] += K(m,j) * u_col;
+      }
+    }
+    for (int m = 0; m < DOF; m++) {
+      KU(m,i) = sums[m];
     }
   }
-
-  fsils_commus(lhs, KU);
 }
 
-/// @brief Reproduces 'SUBROUTINE FSILS_SPARMULSV(lhs, rowPtr, colPtr, dof, K, U, KU)'. 
-//
-void fsils_spar_mul_sv(FSILS_lhsType& lhs, const Array<int>& rowPtr, const Vector<int>& colPtr,
-    const int dof, const Array<double>& K, const Vector<double>& U, Array<double>& KU)
+static void fsils_spar_mul_sv_dyn(fsils_int iStart, fsils_int iEnd, int dof,
+    const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
+    const Array<double>& K, const Vector<double>& U, Array<double>& KU)
 {
-  int nNo = lhs.nNo;
-  KU = 0.0;
-
-  switch (dof) {
-
-    case 1:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          KU(0,i) = KU(0,i) + K(0,j)*U(colPtr(j));
-        }
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = iStart; i < iEnd; i++) {
+    for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
+      double u_col = U(colPtr(j));
+      for (int m = 0; m < dof; m++) {
+        KU(m,i) += K(m,j) * u_col;
       }
-    break;
-
-    case 2: {
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          int col = colPtr(j);
-          KU(0,i) = KU(0,i) + K(0,j)*U(col);
-          KU(1,i) = KU(1,i) + K(1,j)*U(col);
-        }
-      }
-    } break;
-
-    case 3: {
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          int col = colPtr(j);
-          KU(0,i) += K(0,j) * U(col);
-          KU(1,i) += K(1,j) * U(col);
-          KU(2,i) += K(2,j) * U(col);
-        }
-      }
-    } break;
-
-    case 4:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          int col = colPtr(j);
-          KU(0,i) = KU(0,i) + K(0,j)*U(col);
-          KU(1,i) = KU(1,i) + K(1,j)*U(col);
-          KU(2,i) = KU(2,i) + K(2,j)*U(col);
-          KU(3,i) = KU(3,i) + K(3,j)*U(col);
-        }
-      }
-    break;
-
-    default:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          int col = colPtr(j);
-          for (int m = 0; m < KU.nrows(); m++) {
-            KU(m,i) = KU(m,i) + K(m,j) * U(col);
-          }
-        }
-      }
+    }
   }
-
-  fsils_commuv(lhs, dof, KU);
 }
 
-/// @brief Reproduces 'SUBROUTINE FSILS_SPARMULVS(lhs, rowPtr, colPtr, dof, K, U, KU)'.
-//
-void fsils_spar_mul_vs(FSILS_lhsType& lhs, const Array<int>& rowPtr, const Vector<int>& colPtr,
-    const int dof, const Array<double>& K, const Array<double>& U, Vector<double>& KU)
+/// VS: K(dof, nnz) * U(dof, nNo) -> KU(nNo) (dot-product per row)
+template <int DOF>
+static void fsils_spar_mul_vs_impl(fsils_int iStart, fsils_int iEnd,
+    const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
+    const Array<double>& K, const Array<double>& U, Vector<double>& KU)
 {
-  int nNo = lhs.nNo;
-  KU = 0.0;
-
-  switch (dof) {
-
-    case 1:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          KU(i) = KU(i) + K(0,j) * U(0,colPtr(j));
-        }
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = iStart; i < iEnd; i++) {
+    double sum = 0.0;
+    for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
+      fsils_int col = colPtr(j);
+      for (int m = 0; m < DOF; m++) {
+        sum += K(m,j) * U(m,col);
       }
-    break;
-
-    case 2:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          int col = colPtr(j);
-          KU(i) = KU(i) + K(0,j)*U(0,col) + K(1,j)*U(1,col);
-        }
-      }
-    break;
-
-    case 3:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          int col = colPtr(j);
-          KU(i) = KU(i) + K(0,j)*U(0,col) + K(1,j)*U(1,col) + K(2,j)*U(2,col);
-        }
-      }
-    break;
-
-    case 4:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          int col = colPtr(j);
-          KU(i) = KU(i) + K(0,j)*U(0,col) + K(1,j)*U(1,col) + K(2,j)*U(2,col) + K(3,j)*U(3,col);
-        }
-      }
-    break;
-
-    default:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          int col = colPtr(j);
-          double sum = 0.0;
-          for (int m = 0; m < K.nrows(); m++) {
-            sum += K(m,j) * U(m,col);
-          }
-          KU(i) = KU(i) + sum;
-        }
-     }
+    }
+    KU(i) = sum;
   }
-
-  fsils_commus(lhs, KU);
 }
 
-/// @brief Reproduces 'SUBROUTINE FSILS_SPARMULVV(lhs, rowPtr, colPtr, dof, K, U, KU)'. 
-//
-void fsils_spar_mul_vv(FSILS_lhsType& lhs, const Array<int>& rowPtr, const Vector<int>& colPtr,
-    const int dof, const Array<double>& K, const Array<double>& U, Array<double>& KU)
+static void fsils_spar_mul_vs_dyn(fsils_int iStart, fsils_int iEnd, int dof,
+    const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
+    const Array<double>& K, const Array<double>& U, Vector<double>& KU)
 {
-  int nNo = lhs.nNo;
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = iStart; i < iEnd; i++) {
+    double sum = 0.0;
+    for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
+      fsils_int col = colPtr(j);
+      for (int m = 0; m < dof; m++) {
+        sum += K(m,j) * U(m,col);
+      }
+    }
+    KU(i) = sum;
+  }
+}
+
+/// VV: K(dof*dof, nnz) * U(dof, nNo) -> KU(dof, nNo)
+template <int DOF>
+static void fsils_spar_mul_vv_impl(fsils_int iStart, fsils_int iEnd,
+    const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
+    const Array<double>& K, const Array<double>& U, Array<double>& KU)
+{
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = iStart; i < iEnd; i++) {
+    double sums[DOF] = {};
+    for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
+      fsils_int col = colPtr(j);
+      for (int l = 0; l < DOF; l++) {
+        double s = 0.0;
+        for (int k = 0; k < DOF; k++) {
+          s += K(l*DOF + k, j) * U(k, col);
+        }
+        sums[l] += s;
+      }
+    }
+    for (int l = 0; l < DOF; l++) {
+      KU(l, i) = sums[l];
+    }
+  }
+}
+
+static void fsils_spar_mul_vv_dyn(fsils_int iStart, fsils_int iEnd, int dof,
+    const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
+    const Array<double>& K, const Array<double>& U, Array<double>& KU)
+{
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = iStart; i < iEnd; i++) {
+    for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
+      fsils_int col = colPtr(j);
+      for (int l = 0; l < dof; l++) {
+        int s = l * dof;
+        double sum = 0.0;
+        for (int k = 0; k < dof; k++) {
+          sum += K(s+k,j) * U(k,col);
+        }
+        KU(l,i) += sum;
+      }
+    }
+  }
+}
+
+//====================================================================
+// Public API — overlaps SpMV with MPI communication when possible.
+//
+// Node ordering from fsils_lhs_create:
+//   [0, shnNo)       shared with lower-rank procs
+//   [shnNo, mynNo)   interior (no communication needed)
+//   [mynNo, nNo)      shared with higher-rank procs
+//
+// Overlap pattern: compute boundary rows -> start async comm ->
+//   compute interior rows -> finish comm.
+//====================================================================
+
+void fsils_spar_mul_ss(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, const Vector<double>& K,
+    const Vector<double>& U, Vector<double>& KU)
+{
+  fsils_int nNo = lhs.nNo;
   KU = 0.0;
 
-  switch (dof) {
-
-    case 1:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          KU(0,i) = KU(0,i) + K(0,j)*U(0,colPtr(j));
-        }
-      }
-    break;
-
-    case 2:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          int col = colPtr(j);
-          KU(0,i) = KU(0,i) + K(0,j)*U(0,col) + K(1,j)*U(1,col);
-          KU(1,i) = KU(1,i) + K(2,j)*U(0,col) + K(3,j)*U(1,col);
-        }
-      }
-    break;
-
-    case 3:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          int col = colPtr(j);
-          KU(0,i) = KU(0,i) + K(0,j)*U(0,col) + K(1,j)*U(1,col) + K(2,j)*U(2,col);
-          KU(1,i) = KU(1,i) + K(3,j)*U(0,col) + K(4,j)*U(1,col) + K(5,j)*U(2,col);
-          KU(2,i) = KU(2,i) + K(6,j)*U(0,col) + K(7,j)*U(1,col) + K(8,j)*U(2,col);
-        }
-      }
-    break;
-
-    case 4:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          int col = colPtr(j);
-          KU(0,i) = KU(0,i) + K(0 ,j)*U(0,col) + K(1 ,j)*U(1,col) + K(2 ,j)*U(2,col) + K(3 ,j)*U(3,col);
-          KU(1,i) = KU(1,i) + K(4 ,j)*U(0,col) + K(5 ,j)*U(1,col) + K(6 ,j)*U(2,col) + K(7 ,j)*U(3,col);
-          KU(2,i) = KU(2,i) + K(8 ,j)*U(0,col) + K(9,j)*U(1,col) + K(10,j)*U(2,col) + K(11,j)*U(3,col);
-          KU(3,i) = KU(3,i) + K(12,j)*U(0,col) + K(13,j)*U(1,col) + K(14,j)*U(2,col) + K(15,j)*U(3,col);
-        }
-      }
-    break;
-
-    default:
-      #pragma omp parallel for schedule(static)
-      for (int i = 0; i < nNo; i++) {
-        for (int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-          int col = colPtr(j);
-          for (int l = 0; l < dof; l++) {
-            int s = l * dof;
-            double sum = 0.0;
-            for (int k = 0; k < dof; k++) {
-              sum += K(s+k,j) * U(k,col);
-            }
-            KU(l,i) = KU(l,i) + sum;
-          }
-        }
-     }
+  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+    fsils_spar_mul_ss_range(0, lhs.shnNo, rowPtr, colPtr, K, U, KU);
+    fsils_spar_mul_ss_range(lhs.mynNo, nNo, rowPtr, colPtr, K, U, KU);
+    fsils_commus_begin(lhs, KU);
+    fsils_spar_mul_ss_range(lhs.shnNo, lhs.mynNo, rowPtr, colPtr, K, U, KU);
+    fsils_commus_end(lhs, KU);
+  } else {
+    fsils_spar_mul_ss_range(0, nNo, rowPtr, colPtr, K, U, KU);
   }
+}
 
-  fsils_commuv(lhs, dof, KU);
+void fsils_spar_mul_sv(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, const int dof, const Array<double>& K,
+    const Vector<double>& U, Array<double>& KU)
+{
+  fsils_int nNo = lhs.nNo;
+  KU = 0.0;
+
+  auto compute_range = [&](fsils_int iStart, fsils_int iEnd) {
+    switch (dof) {
+      case 1: fsils_spar_mul_sv_impl<1>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
+      case 2: fsils_spar_mul_sv_impl<2>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
+      case 3: fsils_spar_mul_sv_impl<3>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
+      case 4: fsils_spar_mul_sv_impl<4>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
+      default: fsils_spar_mul_sv_dyn(iStart, iEnd, dof, rowPtr, colPtr, K, U, KU); break;
+    }
+  };
+
+  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+    compute_range(0, lhs.shnNo);
+    compute_range(lhs.mynNo, nNo);
+    fsils_commuv_begin(lhs, dof, KU);
+    compute_range(lhs.shnNo, lhs.mynNo);
+    fsils_commuv_end(lhs, dof, KU);
+  } else {
+    compute_range(0, nNo);
+  }
+}
+
+void fsils_spar_mul_vs(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, const int dof, const Array<double>& K,
+    const Array<double>& U, Vector<double>& KU)
+{
+  fsils_int nNo = lhs.nNo;
+  KU = 0.0;
+
+  auto compute_range = [&](fsils_int iStart, fsils_int iEnd) {
+    switch (dof) {
+      case 1: fsils_spar_mul_vs_impl<1>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
+      case 2: fsils_spar_mul_vs_impl<2>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
+      case 3: fsils_spar_mul_vs_impl<3>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
+      case 4: fsils_spar_mul_vs_impl<4>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
+      default: fsils_spar_mul_vs_dyn(iStart, iEnd, dof, rowPtr, colPtr, K, U, KU); break;
+    }
+  };
+
+  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+    compute_range(0, lhs.shnNo);
+    compute_range(lhs.mynNo, nNo);
+    fsils_commus_begin(lhs, KU);
+    compute_range(lhs.shnNo, lhs.mynNo);
+    fsils_commus_end(lhs, KU);
+  } else {
+    compute_range(0, nNo);
+  }
+}
+
+void fsils_spar_mul_vv(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, const int dof, const Array<double>& K,
+    const Array<double>& U, Array<double>& KU)
+{
+  fsils_int nNo = lhs.nNo;
+  KU = 0.0;
+
+  auto compute_range = [&](fsils_int iStart, fsils_int iEnd) {
+    switch (dof) {
+      case 1: fsils_spar_mul_vv_impl<1>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
+      case 2: fsils_spar_mul_vv_impl<2>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
+      case 3: fsils_spar_mul_vv_impl<3>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
+      case 4: fsils_spar_mul_vv_impl<4>(iStart, iEnd, rowPtr, colPtr, K, U, KU); break;
+      default: fsils_spar_mul_vv_dyn(iStart, iEnd, dof, rowPtr, colPtr, K, U, KU); break;
+    }
+  };
+
+  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+    compute_range(0, lhs.shnNo);
+    compute_range(lhs.mynNo, nNo);
+    fsils_commuv_begin(lhs, dof, KU);
+    compute_range(lhs.shnNo, lhs.mynNo);
+    fsils_commuv_end(lhs, dof, KU);
+  } else {
+    compute_range(0, nNo);
+  }
 }
 
 };
-
-

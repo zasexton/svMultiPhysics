@@ -513,10 +513,10 @@ public:
      * @param i Test basis function index
      * @return Values at all quadrature points
      */
-    [[nodiscard]] std::span<const Real> basisValues(LocalIndex i) const;
+    [[nodiscard]] std::span<const Real> basisValuesAtQpt(LocalIndex q) const;
 
     /**
-     * @brief Raw test basis values storage (layout: [i * n_qpts + q])
+     * @brief Raw test basis values storage (layout: [q * n_dofs + i], qpt-major)
      *
      * Intended for JIT/kernel ABI packing. Empty when BasisValues were not requested.
      */
@@ -636,7 +636,7 @@ public:
     [[nodiscard]] Real trialBasisValue(LocalIndex j, LocalIndex q) const;
 
     /**
-     * @brief Raw trial basis values storage (layout: [j * n_qpts + q])
+     * @brief Raw trial basis values storage (layout: [q * n_dofs + j], qpt-major)
      *
      * When the trial space aliases the test space, this returns the test storage.
      */
@@ -875,6 +875,15 @@ public:
      * @brief Clear all stored auxiliary field solution data
      */
     void clearFieldSolutionData() noexcept;
+
+    /**
+     * @brief Pre-allocate field solution storage to avoid heap allocations during assembly
+     *
+     * Reserves capacity in all internal vectors so that subsequent setFieldSolutionScalar /
+     * setFieldSolutionVector calls never reallocate.  Call once after configure().
+     */
+    void preAllocateFieldSolutionData(std::size_t max_fields, std::size_t max_qpts,
+                                      std::size_t max_value_dim);
 
     /**
      * @brief Bind scalar field data (values and optional derivatives) at quadrature points
@@ -1412,26 +1421,26 @@ private:
     Real cell_volume_{0.0};
     Real facet_area_{0.0};
 
-    // Test basis data (n_test_dofs * n_qpts arrays)
-    ArenaArray<Real> test_basis_values_;           // [i * n_qpts + q]
-    ArenaArray<Vector3D> test_ref_gradients_;      // [i * n_qpts + q]
-    ArenaArray<Vector3D> test_phys_gradients_;     // [q * n_test_dofs + i]
+    // Test basis data — all qpt-major: [q * n_test_dofs + i]
+    ArenaArray<Real> test_basis_values_;
+    ArenaArray<Vector3D> test_ref_gradients_;
+    ArenaArray<Vector3D> test_phys_gradients_;
 
-    // Test vector-basis data (H(curl)/H(div)) (n_test_dofs * n_qpts arrays)
-    ArenaArray<Vector3D> test_basis_vector_values_; // [i * n_qpts + q]
-    ArenaArray<Vector3D> test_basis_curls_;         // [i * n_qpts + q]
-    ArenaArray<Real> test_basis_divergences_;       // [i * n_qpts + q]
+    // Test vector-basis data (H(curl)/H(div)) — qpt-major: [q * n_test_dofs + i]
+    ArenaArray<Vector3D> test_basis_vector_values_;
+    ArenaArray<Vector3D> test_basis_curls_;
+    ArenaArray<Real> test_basis_divergences_;
 
-    // Trial basis data (may be same as test for square)
+    // Trial basis data (may be same as test for square) — qpt-major: [q * n_trial_dofs + j]
     ArenaArray<Real> trial_basis_values_;
     ArenaArray<Vector3D> trial_ref_gradients_;
-    ArenaArray<Vector3D> trial_phys_gradients_;    // [q * n_trial_dofs + j]
+    ArenaArray<Vector3D> trial_phys_gradients_;
     ArenaArray<Vector3D> trial_basis_vector_values_;
     ArenaArray<Vector3D> trial_basis_curls_;
     ArenaArray<Real> trial_basis_divergences_;
     bool trial_is_test_{true};  // Optimization flag
 
-    // Optional basis Hessians (n_dofs * n_qpts arrays)
+    // Optional basis Hessians — qpt-major: [q * n_dofs + i]
     ArenaArray<Matrix3x3> test_ref_hessians_;
     ArenaArray<Matrix3x3> test_phys_hessians_;
     ArenaArray<Matrix3x3> trial_ref_hessians_;

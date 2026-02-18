@@ -36,7 +36,7 @@
 #include "ns_solver.h"
 #include "precond.h"
 
-namespace fsi_linear_solver {
+namespace fe_fsi_linear_solver {
 
 /// @brief In this routine, the appropriate LS algorithm is called and
 /// the solution is returned.
@@ -58,8 +58,8 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
   dmsg.banner();
   #endif
 
-  const int nNo = lhs.nNo;
-  const int nnz = lhs.nnz;
+  const fsils_int nNo = lhs.nNo;
+  const fsils_int nnz = lhs.nnz;
   const int nFaces = lhs.nFaces;
   #ifdef debug_fsils_solve
   dmsg << "nNo: " << nNo;

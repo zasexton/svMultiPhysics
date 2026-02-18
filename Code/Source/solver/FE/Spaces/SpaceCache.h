@@ -59,7 +59,8 @@ public:
         std::size_t num_dofs{0};
         std::size_t num_qpts{0};
         // basis_values[i * num_qpts + q] = phi_i(x_q)
-        std::vector<Real> basis_values;
+        // Span into BasisCache storage (program-lifetime singleton; safe).
+        std::span<const Real> basis_values;
 
         [[nodiscard]] Real basisValue(std::size_t dof, std::size_t qpt) const noexcept {
             return basis_values[dof * num_qpts + qpt];

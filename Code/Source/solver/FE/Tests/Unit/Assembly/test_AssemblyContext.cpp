@@ -621,10 +621,10 @@ TEST_F(AssemblyContextTest, BasisValuesSpan) {
     std::vector<AssemblyContext::Vector3D> grads(4);
     ctx_.setTestBasisData(n_dofs, values, grads);
 
-    auto vals = ctx_.basisValues(0);
-    EXPECT_EQ(vals.size(), 2u);
-    EXPECT_DOUBLE_EQ(vals[0], 1.0);
-    EXPECT_DOUBLE_EQ(vals[1], 0.5);
+    auto vals = ctx_.basisValuesAtQpt(0);
+    EXPECT_EQ(vals.size(), 2u);       // 2 dofs at qpt 0
+    EXPECT_DOUBLE_EQ(vals[0], 1.0);   // dof 0 at qpt 0
+    EXPECT_DOUBLE_EQ(vals[1], 0.0);   // dof 1 at qpt 0
 }
 
 // ============================================================================

@@ -627,6 +627,7 @@ class Vector
     void check_type() const
     {
       if (!std::is_same<T, double>::value && !std::is_same<T, int>::value &&
+          !std::is_same<T, long>::value &&
           !std::is_same<T, Vector<double>>::value && !std::is_same<T, float>::value) {
         std::string msg = std::string("Cannot use Vector class template for type '") + typeid(T).name() + "'.";
         throw std::runtime_error(msg);
