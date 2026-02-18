@@ -8,6 +8,7 @@
 #include "TimeStepping/TimeLoop.h"
 
 #include "Core/FEException.h"
+#include "Core/Logger.h"
 #include "Math/FiniteDifference.h"
 #include "Sparsity/SparsityPattern.h"
 #include "Systems/SystemsExceptions.h"
@@ -25,11 +26,29 @@
 #include <unordered_map>
 #include <vector>
 
+#if FE_HAS_MPI
+#include <mpi.h>
+#endif
+
 namespace svmp {
 namespace FE {
 namespace timestepping {
 
 namespace {
+
+int worldRank() noexcept
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized) {
+        int rank = 0;
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        return rank;
+    }
+#endif
+    return 0;
+}
 
 void copyVector(backends::GenericVector& dst, const backends::GenericVector& src)
 {
@@ -2401,7 +2420,17 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 callbacks.on_nonlinear_done(history, nr);
             }
 
-            if (nr.converged) {
+            bool accept_step = nr.converged;
+            if (!accept_step && !adaptive && !threw &&
+                nr.iterations >= options_.newton.max_iterations) {
+                accept_step = true;
+                if (worldRank() == 0) {
+                    FE_LOG_WARNING(
+                        "TimeLoop: nonlinear solve did not converge (max_iterations reached); accepting step to match legacy solver behavior");
+                }
+            }
+
+            if (accept_step) {
                 if (adaptive) {
                     StepAttemptInfo info;
                     info.time = t;

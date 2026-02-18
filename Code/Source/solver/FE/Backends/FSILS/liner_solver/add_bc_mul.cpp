@@ -50,26 +50,18 @@ namespace add_bc_mul {
 /// The expression is slightly different if preconditioning.
 void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const Array<double>& X, Array<double>& Y)
 {
-  Vector<double> coef(lhs.nFaces);
-
-  if (op_Type == BcopType::BCOP_TYPE_ADD) {
-    for (int i = 0; i < lhs.nFaces; i++) {
-      coef(i) = lhs.face[i].res;
-    }
-  } else if (op_Type == BcopType::BCOP_TYPE_PRE) {
-    for (int i = 0; i < lhs.nFaces; i++) {
-      coef(i) = -lhs.face[i].res / (1.0 + (lhs.face[i].res*lhs.face[i].nS));
-    }
-  } else {
-    //PRINT *, "FSILS: op_Type is not defined"
-    //STOP "FSILS: FATAL ERROR"
-  }
-
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
     auto& face = lhs.face[faIn];
     int nsd = std::min(face.dof, dof);
 
     if (face.coupledFlag) {
+      double coef;
+      if (op_Type == BcopType::BCOP_TYPE_ADD) {
+        coef = face.res;
+      } else {
+        coef = -face.res / (1.0 + (face.res * face.nS));
+      }
+
       // If face is shared across procs: compute dot product directly
       // over boundary nodes and use MPI_Allreduce, avoiding a full-mesh
       // temporary vector allocation.
@@ -89,7 +81,7 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
         if (lhs.commu.nTasks > 1) {
           MPI_Allreduce(&local_S, &S, 1, cm_mod::mpreal, MPI_SUM, lhs.commu.comm);
         }
-        S *= coef(faIn);
+        S *= coef;
 
         // Computing Y = Y + valM * S
         for (int a = 0; a < face.nNo; a++) {
@@ -110,7 +102,7 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
             S = S + face.valM(i,a)*X(i,Ac);
           }
         }
-        S = coef(faIn) * S;
+        S = coef * S;
 
         // Computing Y = Y + v * S
         for (int a = 0; a < face.nNo; a++) {

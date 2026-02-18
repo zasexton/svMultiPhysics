@@ -47,9 +47,9 @@ void fsils_bc_free(FSILS_lhsType& lhs, int faIn);
 
 void fsils_bc_update(FSILS_lhsType& lhs, int faIn, int nNo, int dof, const Array<double>& Val);
     
-void fsils_commus(const FSILS_lhsType& lhs, Vector<double>& R); 
+void fsils_commus(FSILS_lhsType& lhs, Vector<double>& R);
 
-void fsils_commuv(const FSILS_lhsType& lhs, const int dof, Array<double>& R);
+void fsils_commuv(FSILS_lhsType& lhs, int dof, Array<double>& R);
 
 double fsils_cpu_t();
 

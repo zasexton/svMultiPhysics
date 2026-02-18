@@ -112,12 +112,16 @@ void gmres(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLs
   dmsg << "ls.relTol: " << ls.relTol;
   #endif
 
-  Array<double> h(ls.sD+1,ls.sD); 
-  Array3<double> u(dof,nNo,ls.sD+1); 
-  Array<double> unCondU(dof,nNo);
-  Vector<double> y(ls.sD), c(ls.sD), s(ls.sD), err(ls.sD+1);
+  ls.ws.ensure_gmres_v(dof, nNo, ls.sD);
+  auto& h = ls.ws.h;
+  auto& u = ls.ws.u3;
+  auto& unCondU = ls.ws.unCondU;
+  auto& y = ls.ws.y;
+  auto& c = ls.ws.c;
+  auto& s = ls.ws.s;
+  auto& err = ls.ws.err;
 
-  double time = fsi_linear_solver::fsils_cpu_t(); 
+  double time = fsi_linear_solver::fsils_cpu_t();
   ls.suc = false;
   double eps = 0.0;
   int last_i = 0;
@@ -216,7 +220,7 @@ void gmres(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subLs
       // Guard against (near-)breakdown where the next Krylov vector has near-zero norm.
       // The FSILS GMRES implementation normalizes by `h(i+1,i)` and will produce NaN/Inf
       // for small values (especially in small problems with short minimal polynomials).
-      const double breakdown_tol = sqrt(std::numeric_limits<double>::epsilon());
+      const double breakdown_tol = std::numeric_limits<double>::epsilon() * 1e2;
       if (h(i+1,i) > breakdown_tol) {
         u_slice_1 = u.rslice(i+1);
         omp_la::omp_mul_v(dof, nNo, 1.0/h(i+1,i), u_slice_1);
@@ -319,9 +323,14 @@ void gmres_s(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
   dmsg << "ls.relTol: " << ls.relTol;
   #endif
 
-  Array<double> h(ls.sD+1,ls.sD);
-  Array<double> u(nNo,ls.sD+1);
-  Vector<double> X(nNo), y(ls.sD), c(ls.sD), s(ls.sD), err(ls.sD+1);
+  ls.ws.ensure_gmres_s(nNo, ls.sD);
+  auto& h = ls.ws.h;
+  auto& u = ls.ws.u2;
+  auto& X = ls.ws.Xs;
+  auto& y = ls.ws.y;
+  auto& c = ls.ws.c;
+  auto& s = ls.ws.s;
+  auto& err = ls.ws.err;
 
   ls.callD = fsi_linear_solver::fsils_cpu_t();
   ls.suc = false;
@@ -331,6 +340,7 @@ void gmres_s(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
   eps = std::max(ls.absTol, ls.relTol*eps);
   ls.itr = 0;
   int last_i = 0;
+  X = 0.0;
   #ifdef debug_gmres_s
   dmsg << "ls.iNorm: " << ls.iNorm;
   dmsg << "eps: " << eps;
@@ -393,9 +403,7 @@ void gmres_s(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
       h(i+1,i) = sqrt(fabs(h(i+1,i)));
 
       // Guard against (near-)breakdown where the next Krylov vector has near-zero norm.
-      // The FSILS GMRES implementation normalizes by `h(i+1,i)` and will produce NaN/Inf
-      // for small values (especially in small problems with short minimal polynomials).
-      const double breakdown_tol = sqrt(std::numeric_limits<double>::epsilon());
+      const double breakdown_tol = std::numeric_limits<double>::epsilon() * 1e2;
       if (h(i+1,i) > breakdown_tol) {
         u_col_1 = u.col(i+1);
         omp_la::omp_mul_s(nNo, 1.0/h(i+1,i), u_col_1);
@@ -499,10 +507,15 @@ void gmres_v(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
   dmsg << "ls.relTol: " << ls.relTol;
   #endif
 
-  Array<double> h(ls.sD+1,ls.sD), X(dof,nNo);
-  Array3<double> u(dof,nNo,ls.sD+1);
-  Array<double> unCondU(dof,nNo);
-  Vector<double> y(ls.sD), c(ls.sD), s(ls.sD), err(ls.sD+1);
+  ls.ws.ensure_gmres_v(dof, nNo, ls.sD);
+  auto& h = ls.ws.h;
+  auto& u = ls.ws.u3;
+  auto& X = ls.ws.X2;
+  auto& unCondU = ls.ws.unCondU;
+  auto& y = ls.ws.y;
+  auto& c = ls.ws.c;
+  auto& s = ls.ws.s;
+  auto& err = ls.ws.err;
 
   ls.callD = fsi_linear_solver::fsils_cpu_t();
   ls.suc = false;
@@ -512,6 +525,7 @@ void gmres_v(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
   eps = std::max(ls.absTol, ls.relTol*eps);
   ls.itr = 0;
   int last_i = 0;
+  X = 0.0;
   #ifdef debug_gmres_v
   dmsg << "ls.iNorm: " << ls.iNorm;
   dmsg << "eps: " << eps;
@@ -522,7 +536,7 @@ void gmres_v(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
   if (ls.iNorm <= ls.absTol) {
     ls.callD = std::numeric_limits<double>::epsilon();
     ls.dB = 0.0;
-    return; 
+    return;
   }
 
   for (int l = 0; l < ls.mItr; l++) {
@@ -597,7 +611,7 @@ void gmres_v(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
       h(i+1,i) = sqrt(fabs(h(i+1,i)));
 
       // Guard against (near-)breakdown where the next Krylov vector has near-zero norm.
-      const double breakdown_tol = sqrt(std::numeric_limits<double>::epsilon());
+      const double breakdown_tol = std::numeric_limits<double>::epsilon() * 1e2;
       if (h(i+1,i) > breakdown_tol) {
         u_slice_1 = u.rslice(i+1);
         omp_la::omp_mul_v(dof, nNo, 1.0/h(i+1,i), u_slice_1);

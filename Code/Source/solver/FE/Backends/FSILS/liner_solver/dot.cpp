@@ -47,8 +47,9 @@ namespace dot {
 //
 double fsils_dot_s(const int nNo, FSILS_commuType& commu, const Vector<double>& U, const Vector<double>& V)
 {
-  double result = 0.0; 
+  double result = 0.0;
 
+  #pragma omp parallel for reduction(+:result) schedule(static)
   for (int i = 0; i < nNo; i++) {
     result = result + U(i)*V(i);
   }
@@ -68,34 +69,39 @@ double fsils_dot_s(const int nNo, FSILS_commuType& commu, const Vector<double>& 
 //
 double fsils_dot_v(const int dof, const int nNo, FSILS_commuType& commu, const Array<double>& U, const Array<double>& V)
 {
-  double result = 0.0; 
+  double result = 0.0;
 
   switch (dof) {
     case 1:
+      #pragma omp parallel for reduction(+:result) schedule(static)
       for (int i = 0; i < nNo; i++) {
         result = result + U(0,i)*V(0,i);
       }
     break;
 
     case 2:
+      #pragma omp parallel for reduction(+:result) schedule(static)
       for (int i = 0; i < nNo; i++) {
         result = result + U(0,i)*V(0,i) + U(1,i)*V(1,i);
       }
     break;
 
     case 3:
+      #pragma omp parallel for reduction(+:result) schedule(static)
       for (int i = 0; i < nNo; i++) {
         result = result + U(0,i)*V(0,i) + U(1,i)*V(1,i) +  U(2,i)*V(2,i);
       }
     break;
 
     case 4:
+      #pragma omp parallel for reduction(+:result) schedule(static)
       for (int i = 0; i < nNo; i++) {
         result = result + U(0,i)*V(0,i) + U(1,i)*V(1,i) + U(2,i)*V(2,i) + U(3,i)*V(3,i);
       }
     break;
 
     default:
+      #pragma omp parallel for reduction(+:result) schedule(static)
       for (int i = 0; i < nNo; i++) {
         double sum{0.0};
         for (int j = 0; j < U.nrows(); j++) {
@@ -123,9 +129,10 @@ double fsils_nc_dot_s(const int nNo, const Vector<double>& U, const Vector<doubl
 {
   double result{0.0};
 
-  for (int i = 0; i < nNo; i++) { 
+  #pragma omp parallel for reduction(+:result) schedule(static)
+  for (int i = 0; i < nNo; i++) {
     result = result + U(i)*V(i);
-  } 
+  }
 
   return result;
 }
@@ -138,35 +145,44 @@ double fsils_nc_dot_v(const int dof, const int nNo, const Array<double>& U, cons
 
   switch (dof) {
     case 1: {
-      for (int i = 0; i < nNo; i++) { 
+      #pragma omp parallel for reduction(+:result) schedule(static)
+      for (int i = 0; i < nNo; i++) {
         result = result + U(0,i)*V(0,i);
       }
     } break;
 
     case 2: {
-      for (int i = 0; i < nNo; i++) { 
+      #pragma omp parallel for reduction(+:result) schedule(static)
+      for (int i = 0; i < nNo; i++) {
         result = result + U(0,i)*V(0,i) + U(1,i)*V(1,i);
       }
     } break;
 
     case 3: {
-      for (int i = 0; i < nNo; i++) { 
+      #pragma omp parallel for reduction(+:result) schedule(static)
+      for (int i = 0; i < nNo; i++) {
         result = result + U(0,i)*V(0,i) + U(1,i)*V(1,i) + U(2,i)*V(2,i);
       }
     } break;
 
     case 4: {
-      for (int i = 0; i < nNo; i++) { 
+      #pragma omp parallel for reduction(+:result) schedule(static)
+      for (int i = 0; i < nNo; i++) {
         result = result + U(0,i)*V(0,i) + U(1,i)*V(1,i) +  U(2,i)*V(2,i) + U(3,i)*V(3,i);
       }
     } break;
 
     default: {
-      for (int i = 0; i < nNo; i++) { 
-        result = result + U.col(i) * V.col(i);
+      #pragma omp parallel for reduction(+:result) schedule(static)
+      for (int i = 0; i < nNo; i++) {
+        double sum{0.0};
+        for (int j = 0; j < U.nrows(); j++) {
+          sum += U(j,i) * V(j,i);
+        }
+        result = result + sum;
       }
     } break;
-  } 
+  }
 
   return result;
 }

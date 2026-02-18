@@ -51,9 +51,10 @@ double fsi_ls_norms(const int nNo, FSILS_commuType& commu, const Vector<double>&
 {
   double result = 0.0;
 
+  #pragma omp parallel for reduction(+:result) schedule(static)
   for (int i = 0; i < nNo; i++) {
     result = result + U(i)*U(i);
-  } 
+  }
 
   if (commu.nTasks != 1) {
     double tmp;
@@ -70,37 +71,42 @@ double fsi_ls_normv(const int dof, const int nNo, FSILS_commuType& commu, const 
 
   switch (dof) {
     case 1: {
+      #pragma omp parallel for reduction(+:result) schedule(static)
       for (int i = 0; i < nNo; i++) {
         result = result + U(0,i)*U(0,i);
       }
-    } break; 
+    } break;
 
     case 2: {
+      #pragma omp parallel for reduction(+:result) schedule(static)
       for (int i = 0; i < nNo; i++) {
         result = result + U(0,i)*U(0,i) + U(1,i)*U(1,i);
       }
-    } break; 
+    } break;
 
     case 3: {
+      #pragma omp parallel for reduction(+:result) schedule(static)
       for (int i = 0; i < nNo; i++) {
         result = result + U(0,i)*U(0,i) + U(1,i)*U(1,i) + U(2,i)*U(2,i);
       }
-    } break; 
+    } break;
 
     case 4: {
+      #pragma omp parallel for reduction(+:result) schedule(static)
       for (int i = 0; i < nNo; i++) {
         result = result + U(0,i)*U(0,i) + U(1,i)*U(1,i) + U(2,i)*U(2,i) + U(3,i)*U(3,i);
       }
-    } break; 
+    } break;
 
-    default: { 
+    default: {
+      #pragma omp parallel for reduction(+:result) schedule(static)
       for (int i = 0; i < nNo; i++) {
         for (int j = 0; j < U.nrows(); j++) {
           result = result + U(j,i)*U(j,i);
         }
       }
-    } break; 
-  } 
+    } break;
+  }
 
   if (commu.nTasks != 1) {
     double tmp;

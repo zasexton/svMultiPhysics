@@ -304,9 +304,9 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
   // For parallel case, val and Wr can be larger than 1 due to
   // the addition operator in FSILS_COMMUV. Hence need renormalization.
   //
-  Wr = Wr - 0.5;
-  Wr = Wr / abs(Wr);
-  Wr = (Wr + abs(Wr)) * 0.5;
+  for (int i = 0; i < Wr.size(); i++) {
+    Wr(i) = (Wr(i) > 0.5) ? 1.0 : 0.0;
+  }
 
   // Kill the row and column corresponding to Dirichlet BC
   //
@@ -369,11 +369,6 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
   // Row and column scaling
   //*****************************************************
   //
-  // Define a lambda function for computing the maximum
-  // absolute value of a list of values.
-  //
-  auto max_func = [](const double& a, const double& b) { return fabs(a) < fabs(b); };
-
   while (flag) {
     Wr = 0.0;
     Wc = 0.0;
@@ -389,124 +384,151 @@ void precond_rcs(fsi_linear_solver::FSILS_lhsType& lhs, const Array<int>& rowPtr
     switch (dof) {
       case 1:
         for (int Ac = 0; Ac < nNo; Ac++) {
-          int a = rowPtr(0,Ac);
-          int b = rowPtr(1,Ac);
-          auto values = Val.values({0,0}, {a,b});
-          Wr(0,Ac) = fabs(*std::max_element(values.begin(), values.end(), max_func));
-
-          for (int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
-            a = colPtr(i);
-            Wc(0,a) = std::max(fabs(Val(0,i)), Wc(0,a));
+          double mx = 0.0;
+          for (int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
+            double av = fabs(Val(0,j));
+            if (av > mx) mx = av;
+            int a = colPtr(j);
+            if (av > Wc(0,a)) Wc(0,a) = av;
           }
+          Wr(0,Ac) = mx;
         }
-      break; 
+      break;
 
       case 2:
         for (int Ac = 0; Ac < nNo; Ac++) {
-          int a = rowPtr(0,Ac);
-          int b = rowPtr(1,Ac);
-
-          auto vals1 = Val.values({0,1}, {a,b});
-          Wr(0,Ac) = fabs(*std::max_element(vals1.begin(), vals1.end(), max_func));
-
-          auto vals2 = Val.values({2,3}, {a,b});
-          Wr(1,Ac) = fabs(*std::max_element(vals2.begin(), vals2.end(), max_func));
-
-          for (int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
-            a = colPtr(i);
-            auto vals1 = Val.values({0,2}, {i,i}, 2);
-            Wc(0,a) = std::max(fabs(*std::max_element(vals1.begin(), vals1.end(), max_func)), Wc(0,a));
-
-            auto vals2 = Val.values({1,3}, {i,i}, 2);
-            Wc(1,a) = std::max(fabs(*std::max_element(vals2.begin(), vals2.end(), max_func)), Wc(1,a));
+          double mx0 = 0.0, mx1 = 0.0;
+          for (int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
+            // Row max: rows 0-1 for dof 0, rows 2-3 for dof 1
+            double av;
+            av = fabs(Val(0,j)); if (av > mx0) mx0 = av;
+            av = fabs(Val(1,j)); if (av > mx0) mx0 = av;
+            av = fabs(Val(2,j)); if (av > mx1) mx1 = av;
+            av = fabs(Val(3,j)); if (av > mx1) mx1 = av;
+            // Col max: columns 0,2 for dof 0; columns 1,3 for dof 1
+            int a = colPtr(j);
+            av = fabs(Val(0,j)); if (av > Wc(0,a)) Wc(0,a) = av;
+            av = fabs(Val(2,j)); if (av > Wc(0,a)) Wc(0,a) = av;
+            av = fabs(Val(1,j)); if (av > Wc(1,a)) Wc(1,a) = av;
+            av = fabs(Val(3,j)); if (av > Wc(1,a)) Wc(1,a) = av;
           }
+          Wr(0,Ac) = mx0;
+          Wr(1,Ac) = mx1;
         }
-      break; 
+      break;
 
       case 3:
         for (int Ac = 0; Ac < nNo; Ac++) {
-          int a = rowPtr(0,Ac);
-          int b = rowPtr(1,Ac);
-          auto vals1 = Val.values({0,2}, {a,b});
-          Wr(0,Ac) = fabs(*std::max_element(vals1.begin(), vals1.end(), max_func));
-
-          auto vals2 = Val.values({3,5}, {a,b});
-          Wr(1,Ac) = fabs(*std::max_element(vals2.begin(), vals2.end(), max_func));
-
-          auto vals3 = Val.values({6,8}, {a,b});
-          Wr(2,Ac) = fabs(*std::max_element(vals3.begin(), vals3.end(), max_func));
-
-          for (int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
-            a = colPtr(i);
-            auto vals1 = Val.values({0,6}, {i,i}, 3);
-            Wc(0,a) = std::max(fabs(*std::max_element(vals1.begin(), vals1.end(), max_func)), Wc(0,a));
-
-            auto vals2 = Val.values({1,7}, {i,i}, 3);
-            Wc(1,a) = std::max(fabs(*std::max_element(vals2.begin(), vals2.end(), max_func)), Wc(1,a));
-
-            auto vals3 = Val.values({2,8}, {i,i}, 3);
-            Wc(2,a) = std::max(fabs(*std::max_element(vals3.begin(), vals3.end(), max_func)), Wc(2,a));
+          double mx0 = 0.0, mx1 = 0.0, mx2 = 0.0;
+          for (int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
+            double av;
+            // Row max: rows 0-2 for dof 0, rows 3-5 for dof 1, rows 6-8 for dof 2
+            av = fabs(Val(0,j)); if (av > mx0) mx0 = av;
+            av = fabs(Val(1,j)); if (av > mx0) mx0 = av;
+            av = fabs(Val(2,j)); if (av > mx0) mx0 = av;
+            av = fabs(Val(3,j)); if (av > mx1) mx1 = av;
+            av = fabs(Val(4,j)); if (av > mx1) mx1 = av;
+            av = fabs(Val(5,j)); if (av > mx1) mx1 = av;
+            av = fabs(Val(6,j)); if (av > mx2) mx2 = av;
+            av = fabs(Val(7,j)); if (av > mx2) mx2 = av;
+            av = fabs(Val(8,j)); if (av > mx2) mx2 = av;
+            // Col max: stride-3 columns
+            int a = colPtr(j);
+            av = fabs(Val(0,j)); if (av > Wc(0,a)) Wc(0,a) = av;
+            av = fabs(Val(3,j)); if (av > Wc(0,a)) Wc(0,a) = av;
+            av = fabs(Val(6,j)); if (av > Wc(0,a)) Wc(0,a) = av;
+            av = fabs(Val(1,j)); if (av > Wc(1,a)) Wc(1,a) = av;
+            av = fabs(Val(4,j)); if (av > Wc(1,a)) Wc(1,a) = av;
+            av = fabs(Val(7,j)); if (av > Wc(1,a)) Wc(1,a) = av;
+            av = fabs(Val(2,j)); if (av > Wc(2,a)) Wc(2,a) = av;
+            av = fabs(Val(5,j)); if (av > Wc(2,a)) Wc(2,a) = av;
+            av = fabs(Val(8,j)); if (av > Wc(2,a)) Wc(2,a) = av;
           }
+          Wr(0,Ac) = mx0;
+          Wr(1,Ac) = mx1;
+          Wr(2,Ac) = mx2;
         }
-      break; 
+      break;
 
       case 4:
         for (int Ac = 0; Ac < nNo; Ac++) {
-          int a = rowPtr(0,Ac);
-          int b = rowPtr(1,Ac);
-
-          auto vals1 = Val.values({0,3}, {a,b});
-          Wr(0,Ac) = fabs(*std::max_element(vals1.begin(), vals1.end(), max_func));
-
-          auto vals2 = Val.values({4,7}, {a,b});
-          Wr(1,Ac) = fabs(*std::max_element(vals2.begin(), vals2.end(), max_func));
-
-          auto vals3 = Val.values({8,11}, {a,b});
-          Wr(2,Ac) = fabs(*std::max_element(vals3.begin(), vals3.end(), max_func));
-
-          auto vals4 = Val.values({12,15}, {a,b});
-          Wr(3,Ac) = fabs(*std::max_element(vals4.begin(), vals4.end(), max_func));
-
-          for (int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
-            a = colPtr(i);
-            auto vals1 = Val.values({0,12}, {i,i}, 4);
-            Wc(0,a) = std::max(fabs(*std::max_element(vals1.begin(), vals1.end(), max_func)), Wc(0,a));
-
-            auto vals2 = Val.values({1,13}, {i,i}, 4);
-            Wc(1,a) = std::max(fabs(*std::max_element(vals2.begin(), vals2.end(), max_func)), Wc(1,a));
-
-            auto vals3 = Val.values({2,14}, {i,i}, 4);
-            Wc(2,a) = std::max(fabs(*std::max_element(vals3.begin(), vals3.end(), max_func)), Wc(2,a));
-
-            auto vals4 = Val.values({3,15}, {i,i}, 4);
-            Wc(3,a) = std::max(fabs(*std::max_element(vals4.begin(), vals4.end(), max_func)), Wc(3,a));
+          double mx0 = 0.0, mx1 = 0.0, mx2 = 0.0, mx3 = 0.0;
+          for (int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
+            double av;
+            // Row max: rows 0-3 for dof 0, 4-7 for dof 1, 8-11 for dof 2, 12-15 for dof 3
+            av = fabs(Val(0,j));  if (av > mx0) mx0 = av;
+            av = fabs(Val(1,j));  if (av > mx0) mx0 = av;
+            av = fabs(Val(2,j));  if (av > mx0) mx0 = av;
+            av = fabs(Val(3,j));  if (av > mx0) mx0 = av;
+            av = fabs(Val(4,j));  if (av > mx1) mx1 = av;
+            av = fabs(Val(5,j));  if (av > mx1) mx1 = av;
+            av = fabs(Val(6,j));  if (av > mx1) mx1 = av;
+            av = fabs(Val(7,j));  if (av > mx1) mx1 = av;
+            av = fabs(Val(8,j));  if (av > mx2) mx2 = av;
+            av = fabs(Val(9,j));  if (av > mx2) mx2 = av;
+            av = fabs(Val(10,j)); if (av > mx2) mx2 = av;
+            av = fabs(Val(11,j)); if (av > mx2) mx2 = av;
+            av = fabs(Val(12,j)); if (av > mx3) mx3 = av;
+            av = fabs(Val(13,j)); if (av > mx3) mx3 = av;
+            av = fabs(Val(14,j)); if (av > mx3) mx3 = av;
+            av = fabs(Val(15,j)); if (av > mx3) mx3 = av;
+            // Col max: stride-4 columns
+            int a = colPtr(j);
+            av = fabs(Val(0,j));  if (av > Wc(0,a)) Wc(0,a) = av;
+            av = fabs(Val(4,j));  if (av > Wc(0,a)) Wc(0,a) = av;
+            av = fabs(Val(8,j));  if (av > Wc(0,a)) Wc(0,a) = av;
+            av = fabs(Val(12,j)); if (av > Wc(0,a)) Wc(0,a) = av;
+            av = fabs(Val(1,j));  if (av > Wc(1,a)) Wc(1,a) = av;
+            av = fabs(Val(5,j));  if (av > Wc(1,a)) Wc(1,a) = av;
+            av = fabs(Val(9,j));  if (av > Wc(1,a)) Wc(1,a) = av;
+            av = fabs(Val(13,j)); if (av > Wc(1,a)) Wc(1,a) = av;
+            av = fabs(Val(2,j));  if (av > Wc(2,a)) Wc(2,a) = av;
+            av = fabs(Val(6,j));  if (av > Wc(2,a)) Wc(2,a) = av;
+            av = fabs(Val(10,j)); if (av > Wc(2,a)) Wc(2,a) = av;
+            av = fabs(Val(14,j)); if (av > Wc(2,a)) Wc(2,a) = av;
+            av = fabs(Val(3,j));  if (av > Wc(3,a)) Wc(3,a) = av;
+            av = fabs(Val(7,j));  if (av > Wc(3,a)) Wc(3,a) = av;
+            av = fabs(Val(11,j)); if (av > Wc(3,a)) Wc(3,a) = av;
+            av = fabs(Val(15,j)); if (av > Wc(3,a)) Wc(3,a) = av;
           }
+          Wr(0,Ac) = mx0;
+          Wr(1,Ac) = mx1;
+          Wr(2,Ac) = mx2;
+          Wr(3,Ac) = mx3;
         }
-      break; 
+      break;
 
-      default: 
+      default:
         for (int Ac = 0; Ac < nNo; Ac++) {
-          int a = rowPtr(0,Ac);
-          int b = rowPtr(1,Ac);
-
+          // Row max: for each dof row i, scan entries [i*dof .. (i+1)*dof-1] across all columns
           for (int i = 0; i < dof; i++) {
-            int j = i*dof;
-            int k = (i+1)*dof - 1;
-            auto vals = Val.values({j,k}, {a,b});
-            Wr(i,Ac) = fabs(*std::max_element(vals.begin(), vals.end(), max_func));
+            double mx = 0.0;
+            int r0 = i * dof;
+            int r1 = r0 + dof - 1;
+            for (int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
+              for (int r = r0; r <= r1; r++) {
+                double av = fabs(Val(r,j));
+                if (av > mx) mx = av;
+              }
+            }
+            Wr(i,Ac) = mx;
           }
 
-          for (int i = rowPtr(0,Ac); i <= rowPtr(1,Ac); i++) {
-            a = colPtr(i);
-            for (int b = 0; b < dof; b++) { 
-              int j = dof*(dof-1) + b;
-              auto vals = Val.values({b,j}, {i,i}, dof);
-              Wc(b,a) = std::max(fabs(*std::max_element(vals.begin(), vals.end(), max_func)), Wc(b,a));
+          // Col max: for each dof column b, scan entries b, b+dof, b+2*dof, ...
+          for (int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
+            int a = colPtr(j);
+            for (int b = 0; b < dof; b++) {
+              double mx = 0.0;
+              for (int k = b; k < dof*dof; k += dof) {
+                double av = fabs(Val(k,j));
+                if (av > mx) mx = av;
+              }
+              if (mx > Wc(b,a)) Wc(b,a) = mx;
             }
           }
         }
-      break; 
-    } 
+      break;
+    }
 
     fsils_commuv(lhs, dof, Wr);
     fsils_commuv(lhs, dof, Wc);

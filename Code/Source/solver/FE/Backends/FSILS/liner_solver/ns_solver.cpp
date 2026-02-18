@@ -220,7 +220,8 @@ void ns_solver(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_l
   Ri.write(msg_prefix+"Ri");
   #endif
 
-  Vector<double> Rc(nNo), Rci(nNo), tmp(nB*nB+nB), tmpG(nB*nB+nB), B(nB), xB(nB), oldxB(nB); 
+  Vector<double> Rc(nNo), Rci(nNo), tmp(nB*nB+nB), tmpG(nB*nB+nB), B(nB), xB(nB), oldxB(nB);
+  oldxB = 0.0;
   Array<double> Rm(nsd,nNo), Rmi(nsd,nNo), A(nB,nB), P(nNo,iB), MP(nNo,nB);
   Array3<double> U(nsd,nNo,iB), MU(nsd,nNo,nB);
 
@@ -495,7 +496,9 @@ void ns_solver(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_l
     }
   }
 
-  ls.Resc = static_cast<int>(100.0 * pow(norm::fsi_ls_norms(mynNo, lhs.commu, Rc),2.0) / ls.RI.fNorm);
+  ls.Resc = (ls.RI.fNorm > 0.0)
+      ? static_cast<int>(100.0 * pow(norm::fsi_ls_norms(mynNo, lhs.commu, Rc),2.0) / ls.RI.fNorm)
+      : 0;
   ls.Resm = 100 - ls.Resc;
 
   #ifdef debug_ns_solver

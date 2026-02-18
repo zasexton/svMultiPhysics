@@ -36,6 +36,7 @@
 #include "mpi.h"
 
 #include <map>
+#include <vector>
 
 /// SELECTED_REAL_KIND(P,R) returns the kind value of a real data type with 
 ///
@@ -206,6 +207,14 @@ class FSILS_lhsType
     std::vector<FSILS_cSType> cS;
 
     std::vector<FSILS_faceType> face;
+
+    /// Pre-allocated communication buffers (sized once in fsils_lhs_create)
+    int nmax_commu = 0;      ///< max shared nodes across all comm partners
+    std::vector<MPI_Request> commu_sReq;
+    std::vector<MPI_Request> commu_rReq;
+    std::vector<double> commu_sB;  ///< send buffer (flat, sized for max usage)
+    std::vector<double> commu_rB;  ///< recv buffer (flat, sized for max usage)
+    int commu_dof_capacity = 0;    ///< current dof capacity for vector buffers
 };
 
 class FSILS_subLsType 
@@ -253,7 +262,41 @@ class FSILS_subLsType
     double dB;     
 
     /// Calling duration            (OUT)
-    double callD;  
+    double callD;
+
+    /// Pre-allocated workspace arrays for iterative solvers.
+    /// These are lazily resized on first use and reused on subsequent calls
+    /// when the dimensions (nNo, dof, sD) remain unchanged.
+    struct SolverWorkspace {
+      int nNo = 0, dof = 0, sD_alloc = 0;
+      Array<double> h;
+      Array3<double> u3;        ///< Krylov basis for vector GMRES
+      Array<double> u2;         ///< Krylov basis for scalar GMRES
+      Array<double> X2, unCondU; ///< vector GMRES solution & precond workspace
+      Vector<double> Xs;        ///< scalar GMRES solution
+      Vector<double> y, c, s, err;
+
+      /// Ensure workspace arrays are allocated for given dimensions.
+      /// Only reallocates when dimensions change (typically once).
+      void ensure_gmres_v(int dof_, int nNo_, int sD_) {
+        if (dof_ == dof && nNo_ == nNo && sD_ == sD_alloc) return;
+        h.resize(sD_+1, sD_);
+        u3.resize(dof_, nNo_, sD_+1);
+        X2.resize(dof_, nNo_);
+        unCondU.resize(dof_, nNo_);
+        y.resize(sD_); c.resize(sD_); s.resize(sD_); err.resize(sD_+1);
+        dof = dof_; nNo = nNo_; sD_alloc = sD_;
+      }
+
+      void ensure_gmres_s(int nNo_, int sD_) {
+        if (dof == -1 && nNo_ == nNo && sD_ == sD_alloc) return;
+        h.resize(sD_+1, sD_);
+        u2.resize(nNo_, sD_+1);
+        Xs.resize(nNo_);
+        y.resize(sD_); c.resize(sD_); s.resize(sD_); err.resize(sD_+1);
+        dof = -1; nNo = nNo_; sD_alloc = sD_;
+      }
+    } ws;
 };
 
 class FSILS_lsType 

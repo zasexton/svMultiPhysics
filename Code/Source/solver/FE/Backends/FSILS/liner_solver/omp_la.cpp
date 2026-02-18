@@ -38,6 +38,7 @@ namespace omp_la {
 //
 void omp_mul_s(const int nNo, const double r, Vector<double>& U)
 {
+  #pragma omp parallel for schedule(static)
   for (int i = 0; i < nNo; i++) {
     U(i) = r * U(i);
   }
@@ -49,12 +50,14 @@ void omp_mul_v(const int dof, const int nNo, const double r, Array<double>& U)
 {
   switch (dof) {
     case 1:
+      #pragma omp parallel for schedule(static)
       for (int i = 0; i < nNo; i++) {
         U(0,i) = r * U(0,i);
       }
     break;
 
     case 2:
+      #pragma omp parallel for schedule(static)
       for (int i = 0; i < nNo; i++) {
         U(0,i) = r*U(0,i);
         U(1,i) = r*U(1,i);
@@ -62,6 +65,7 @@ void omp_mul_v(const int dof, const int nNo, const double r, Array<double>& U)
     break;
 
     case 3:
+      #pragma omp parallel for schedule(static)
       for (int i = 0; i < nNo; i++) {
         U(0,i) = r*U(0,i);
         U(1,i) = r*U(1,i);
@@ -70,6 +74,7 @@ void omp_mul_v(const int dof, const int nNo, const double r, Array<double>& U)
     break;
 
     case 4:
+      #pragma omp parallel for schedule(static)
       for (int i = 0; i < nNo; i++) {
         U(0,i) = r*U(0,i);
         U(1,i) = r*U(1,i);
@@ -78,12 +83,12 @@ void omp_mul_v(const int dof, const int nNo, const double r, Array<double>& U)
       }
     break;
 
-    default: 
+    default:
+      #pragma omp parallel for schedule(static)
       for (int i = 0; i < nNo; i++) {
         for (int j = 0; j < U.nrows(); j++) {
           U(j,i) = r*U(j,i);
         }
-        //U(:,i) = r*U(:,i)
       }
   }
 }
@@ -92,6 +97,7 @@ void omp_mul_v(const int dof, const int nNo, const double r, Array<double>& U)
 //
 void omp_sum_s(const int nNo, const double r, Vector<double>& U, const Vector<double>& V)
 {
+  #pragma omp parallel for schedule(static)
   for (int i = 0; i < nNo; i++) {
     U(i) = U(i) + r*V(i);
   }
@@ -104,12 +110,14 @@ void omp_sum_v(const int dof, const int nNo, const double r, Array<double>& U, c
   switch (dof) {
 
     case 1:
+      #pragma omp parallel for schedule(static)
       for (int i = 0; i < nNo; i++) {
         U(0,i) = U(0,i) + r*V(0,i);
       }
     break;
 
     case 2:
+      #pragma omp parallel for schedule(static)
       for (int i = 0; i < nNo; i++) {
         U(0,i) = U(0,i) + r*V(0,i);
         U(1,i) = U(1,i) + r*V(1,i);
@@ -117,6 +125,7 @@ void omp_sum_v(const int dof, const int nNo, const double r, Array<double>& U, c
     break;
 
     case 3:
+      #pragma omp parallel for schedule(static)
       for (int i = 0; i < nNo; i++) {
         U(0,i) = U(0,i) + r*V(0,i);
         U(1,i) = U(1,i) + r*V(1,i);
@@ -125,6 +134,7 @@ void omp_sum_v(const int dof, const int nNo, const double r, Array<double>& U, c
     break;
 
     case 4:
+      #pragma omp parallel for schedule(static)
       for (int i = 0; i < nNo; i++) {
         U(0,i) = U(0,i) + r*V(0,i);
         U(1,i) = U(1,i) + r*V(1,i);
@@ -134,6 +144,7 @@ void omp_sum_v(const int dof, const int nNo, const double r, Array<double>& U, c
     break;
 
     default:
+      #pragma omp parallel for schedule(static)
       for (int i = 0; i < nNo; i++) {
         for (int j = 0; j < U.nrows(); j++) {
           U(j,i) = U(j,i) + r*V(j,i);

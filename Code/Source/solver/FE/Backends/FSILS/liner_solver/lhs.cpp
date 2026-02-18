@@ -328,6 +328,19 @@ void fsils_lhs_create(FSILS_lhsType& lhs, FSILS_commuType& commu, int gnNo, int 
     }
   }
 
+  // Pre-allocate communication buffers
+  if (lhs.nReq > 0) {
+    lhs.nmax_commu = std::max_element(lhs.cS.begin(), lhs.cS.end(),
+        [](const FSILS_cSType& a, const FSILS_cSType& b){ return a.n < b.n; })->n;
+    lhs.commu_sReq.resize(lhs.nReq);
+    lhs.commu_rReq.resize(lhs.nReq);
+    // Pre-allocate scalar comm buffers (nmax * nReq)
+    size_t scalar_sz = static_cast<size_t>(lhs.nmax_commu) * lhs.nReq;
+    lhs.commu_sB.resize(scalar_sz);
+    lhs.commu_rB.resize(scalar_sz);
+    lhs.commu_dof_capacity = 1;
+  }
+
   // Order of nodes in ptr is based on the node order in processor
   // with higher ID. ptr is calculated for tF+1:nTasks and will be
   // sent over.
@@ -398,13 +411,18 @@ void fsils_lhs_free(FSILS_lhsType& lhs)
   lhs.nnz    = 0;
   lhs.nFaces = 0;
 
-  //IF (ALLOCATED(lhs.colPtr)) DEALLOCATE(lhs.colPtr)
-  //IF (ALLOCATED(lhs.rowPtr)) DEALLOCATE(lhs.rowPtr)
-  //IF (ALLOCATED(lhs.diagPtr)) DEALLOCATE(lhs.diagPtr)
-  //IF (ALLOCATED(lhs.cS)) DEALLOCATE(lhs.cS)
-  //IF (ALLOCATED(lhs.map)) DEALLOCATE(lhs.map)
-  //IF (ALLOCATED(lhs.face)) DEALLOCATE(lhs.face)
-
+  lhs.colPtr.clear();
+  lhs.rowPtr.clear();
+  lhs.diagPtr.clear();
+  lhs.map.clear();
+  lhs.cS.clear();
+  lhs.face.clear();
+  lhs.nmax_commu = 0;
+  lhs.commu_sReq.clear();
+  lhs.commu_rReq.clear();
+  lhs.commu_sB.clear();
+  lhs.commu_rB.clear();
+  lhs.commu_dof_capacity = 0;
 }
 
 

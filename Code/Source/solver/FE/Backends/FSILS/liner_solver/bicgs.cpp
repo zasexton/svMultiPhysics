@@ -42,6 +42,7 @@
 #include "Array3.h"
 
 #include <math.h>
+#include <limits>
 
 namespace bicgs {
 
@@ -100,12 +101,15 @@ void bicgsv (fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
     }
 
     spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, K, P, V);
-    double alpha = rho / dot::fsils_dot_v(dof, mynNo, lhs.commu, Rh, V);
+    double denom_alpha = dot::fsils_dot_v(dof, mynNo, lhs.commu, Rh, V);
+    if (std::abs(denom_alpha) < std::numeric_limits<double>::epsilon()) break;
+    double alpha = rho / denom_alpha;
     S = R - alpha*V;
 
     spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, K, S, T);
-    double omega = norm::fsi_ls_normv(dof, mynNo, lhs.commu, T);
-    omega = dot::fsils_dot_v(dof, mynNo, lhs.commu, T, S) / (omega * omega);
+    double t_sq = dot::fsils_dot_v(dof, mynNo, lhs.commu, T, T);
+    if (t_sq < std::numeric_limits<double>::epsilon()) break;
+    double omega = dot::fsils_dot_v(dof, mynNo, lhs.commu, T, S) / t_sq;
 
     X = X + alpha*P + omega*S;
     R = S - omega*T;
@@ -114,7 +118,9 @@ void bicgsv (fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_sub
     err =  norm::fsi_ls_normv(dof, mynNo, lhs.commu, R);
     double rhoO  = rho;
     rho = dot::fsils_dot_v(dof, mynNo, lhs.commu, R, Rh);
-    beta = rho*alpha / (rhoO*omega);
+    double denom_beta = rhoO * omega;
+    if (std::abs(denom_beta) < std::numeric_limits<double>::epsilon()) break;
+    beta = rho*alpha / denom_beta;
 
     #ifdef debug_bicgsv
     dmsg << "alpha: " << alpha;
@@ -199,12 +205,15 @@ void bicgss(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subL
     }
 
     spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, K, P, V);
-    double alpha = rho / dot::fsils_dot_s(mynNo, lhs.commu, Rh, V);
+    double denom_alpha = dot::fsils_dot_s(mynNo, lhs.commu, Rh, V);
+    if (std::abs(denom_alpha) < std::numeric_limits<double>::epsilon()) break;
+    double alpha = rho / denom_alpha;
     S = R - alpha*V;
 
     spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, K, S, T);
-    double omega = norm::fsi_ls_norms(mynNo, lhs.commu, T);
-    omega = dot::fsils_dot_s(mynNo, lhs.commu, T, S) / (omega * omega);
+    double t_sq = dot::fsils_dot_s(mynNo, lhs.commu, T, T);
+    if (t_sq < std::numeric_limits<double>::epsilon()) break;
+    double omega = dot::fsils_dot_s(mynNo, lhs.commu, T, S) / t_sq;
 
     X = X + alpha*P + omega*S;
     R = S - omega*T;
@@ -213,7 +222,9 @@ void bicgss(fsi_linear_solver::FSILS_lhsType& lhs, fsi_linear_solver::FSILS_subL
     err =  norm::fsi_ls_norms(mynNo, lhs.commu, R);
     double rhoO  = rho;
     rho = dot::fsils_dot_s(mynNo, lhs.commu, R, Rh);
-    beta = rho*alpha / (rhoO*omega);
+    double denom_beta = rhoO * omega;
+    if (std::abs(denom_beta) < std::numeric_limits<double>::epsilon()) break;
+    beta = rho*alpha / denom_beta;
 
     #ifdef debug_bicgss
     dmsg << "alpha: " << alpha;
