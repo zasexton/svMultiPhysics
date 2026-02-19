@@ -47,21 +47,21 @@ void FsilsLinearSolver::setOptions(const SolverOptions& options)
     FE_THROW_IF(options.rel_tol < 0.0, InvalidArgumentException, "FsilsLinearSolver: rel_tol must be >= 0");
     FE_THROW_IF(options.abs_tol < 0.0, InvalidArgumentException, "FsilsLinearSolver: abs_tol must be >= 0");
     FE_THROW_IF(options.use_initial_guess, NotImplementedException, "FsilsLinearSolver: initial guess not supported");
-    if (options.fsils_ns_gm_max_iter) {
-        FE_THROW_IF(*options.fsils_ns_gm_max_iter <= 0, InvalidArgumentException,
-                    "FsilsLinearSolver: fsils_ns_gm_max_iter must be > 0");
+    if (options.fsils_blockschur_gm_max_iter) {
+        FE_THROW_IF(*options.fsils_blockschur_gm_max_iter <= 0, InvalidArgumentException,
+                    "FsilsLinearSolver: fsils_blockschur_gm_max_iter must be > 0");
     }
-    if (options.fsils_ns_cg_max_iter) {
-        FE_THROW_IF(*options.fsils_ns_cg_max_iter <= 0, InvalidArgumentException,
-                    "FsilsLinearSolver: fsils_ns_cg_max_iter must be > 0");
+    if (options.fsils_blockschur_cg_max_iter) {
+        FE_THROW_IF(*options.fsils_blockschur_cg_max_iter <= 0, InvalidArgumentException,
+                    "FsilsLinearSolver: fsils_blockschur_cg_max_iter must be > 0");
     }
-    if (options.fsils_ns_gm_rel_tol) {
-        FE_THROW_IF(*options.fsils_ns_gm_rel_tol < 0.0, InvalidArgumentException,
-                    "FsilsLinearSolver: fsils_ns_gm_rel_tol must be >= 0");
+    if (options.fsils_blockschur_gm_rel_tol) {
+        FE_THROW_IF(*options.fsils_blockschur_gm_rel_tol < 0.0, InvalidArgumentException,
+                    "FsilsLinearSolver: fsils_blockschur_gm_rel_tol must be >= 0");
     }
-    if (options.fsils_ns_cg_rel_tol) {
-        FE_THROW_IF(*options.fsils_ns_cg_rel_tol < 0.0, InvalidArgumentException,
-                    "FsilsLinearSolver: fsils_ns_cg_rel_tol must be >= 0");
+    if (options.fsils_blockschur_cg_rel_tol) {
+        FE_THROW_IF(*options.fsils_blockschur_cg_rel_tol < 0.0, InvalidArgumentException,
+                    "FsilsLinearSolver: fsils_blockschur_cg_rel_tol must be >= 0");
     }
     options_ = options;
 }
@@ -167,8 +167,25 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
     auto& lhs = *static_cast<fe_fsi_linear_solver::FSILS_lhsType*>(const_cast<void*>(A->fsilsLhsPtr()));
     const int dof = A->fsilsDof();
-    const int nsd = dof - 1; // velocity components (FSILS convention: dof = nsd + 1 for NS)
     FE_THROW_IF(dof <= 0, FEException, "FsilsLinearSolver::solve: invalid FSILS dof");
+
+    // Derive block structure from metadata. No physics-specific fallbacks —
+    // all saddle-point operations require explicit block_layout with saddle-point annotation.
+    const bool has_block_layout = options_.block_layout.has_value();
+    const bool has_saddle_point = has_block_layout && options_.block_layout->hasSaddlePoint();
+
+    // Saddle-point block indices (only meaningful when has_saddle_point is true).
+    int mom_start = 0, mom_ncomp = 0;
+    int con_start = 0, con_ncomp = 0;
+    if (has_saddle_point) {
+        const auto& layout = *options_.block_layout;
+        const auto& mb = layout.blocks[static_cast<std::size_t>(*layout.momentum_block)];
+        const auto& cb = layout.blocks[static_cast<std::size_t>(*layout.constraint_block)];
+        mom_start = mb.start_component;
+        mom_ncomp = mb.n_components;
+        con_start = cb.start_component;
+        con_ncomp = cb.n_components;
+    }
     FE_THROW_IF(lhs.nNo <= 0, FEException, "FsilsLinearSolver::solve: invalid FSILS lhs.nNo");
 
     const GlobalIndex expected_local = static_cast<GlobalIndex>(lhs.nNo) * static_cast<GlobalIndex>(dof);
@@ -191,9 +208,19 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     }
 
     if (options_.method == SolverMethod::BlockSchur) {
-        // FSILS NS solver is implemented for nsd=2 or nsd=3 (dof = nsd+1).
-        FE_THROW_IF(dof != 3 && dof != 4, NotImplementedException,
-                    "FsilsLinearSolver::solve: BlockSchur requires dof=3 (2D) or dof=4 (3D) for FSILS NS solver");
+        FE_THROW_IF(!has_saddle_point, NotImplementedException,
+                    "FsilsLinearSolver::solve: BlockSchur requires block_layout with saddle-point annotation");
+        const auto& layout = *options_.block_layout;
+        const auto& mb = layout.blocks[static_cast<std::size_t>(*layout.momentum_block)];
+        const auto& cb = layout.blocks[static_cast<std::size_t>(*layout.constraint_block)];
+        FE_THROW_IF(mb.n_components < 1 || cb.n_components < 1,
+                    NotImplementedException,
+                    "FsilsLinearSolver::solve: BlockSchur requires valid saddle-point layout");
+        FE_THROW_IF(mb.n_components + cb.n_components != dof,
+                    NotImplementedException,
+                    "FsilsLinearSolver::solve: BlockSchur saddle-point blocks must cover all DOFs "
+                    "(momentum=" + std::to_string(mb.n_components) + " + constraint=" +
+                    std::to_string(cb.n_components) + " != dof=" + std::to_string(dof) + ")");
     }
 
     // FSILS may modify the matrix values during preconditioning/solve; work on a copy.
@@ -215,20 +242,20 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 "FsilsLinearSolver::solve: nnz exceeds FSILS int index range");
     Array<double> Val(dof * dof, static_cast<int>(nnz), values_work.data());
 
-    // Optional scaling used for the Navier-Stokes (BlockSchur) solver path.
+    // Optional scaling used for the BlockSchur solver path.
     //
     // The legacy solver scales resistance-type coupled BC tangent contributions by (gamma*dt),
     // where gamma is the generalized-α parameter. The OOP solver provides the effective stage
     // dt via LinearSolver::setEffectiveTimeStep().
     //
-    // FSILS' NS solver assumes the saddle-point structure G ≈ -D^T. If we only left-scale the
-    // momentum rows, that relationship is broken. To preserve it while still improving
-    // conditioning, apply:
-    //   - left scaling on momentum rows by `stage_scale`
-    //   - right scaling on pressure columns by `1/stage_scale`
-    // and rescale the solved pressure component back afterward.
+    // The BlockSchur solver assumes the saddle-point structure G ≈ -D^T. If we only left-scale
+    // the field-A (momentum) rows, that relationship is broken. To preserve it while still
+    // improving conditioning, apply:
+    //   - left scaling on field-A (momentum) rows by `stage_scale`
+    //   - right scaling on field-B (constraint) columns by `1/stage_scale`
+    // and rescale the solved constraint unknowns back afterward.
     double stage_scale = 1.0;
-    if (options_.method == SolverMethod::BlockSchur && (dof == 3 || dof == 4)) {
+    if (options_.method == SolverMethod::BlockSchur && has_saddle_point) {
         if (std::isfinite(dt_eff_) && dt_eff_ > 0.0) {
             stage_scale = dt_eff_;
         }
@@ -241,17 +268,19 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         const Real s = static_cast<Real>(stage_scale);
         const Real inv_s = static_cast<Real>(1.0 / stage_scale);
 
-        // Left-scale momentum rows (0..nsd-1).
+        // Left-scale momentum rows.
         for (GlobalIndex bi = 0; bi < nnz; ++bi) {
             Real* blk = values_work.data() + static_cast<std::size_t>(bi) * block_size;
-            for (int r = 0; r < nsd; ++r) {
+            for (int r = mom_start; r < mom_start + mom_ncomp; ++r) {
                 for (int c = 0; c < dof; ++c) {
                     blk[static_cast<std::size_t>(r * dof + c)] *= s;
                 }
             }
-            // Right-scale pressure column (nsd) to preserve G ≈ -D^T.
+            // Right-scale constraint columns to preserve G ≈ -D^T.
             for (int r = 0; r < dof; ++r) {
-                blk[static_cast<std::size_t>(r * dof + nsd)] *= inv_s;
+                for (int c = con_start; c < con_start + con_ncomp; ++c) {
+                    blk[static_cast<std::size_t>(r * dof + c)] *= inv_s;
+                }
             }
         }
     };
@@ -263,19 +292,19 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
     applyStageScalingToMatrix();
 
-    // FSILS' NS (BlockSchur) solver assumes a saddle-point structure where the
-    // pressure-velocity block is the negative transpose of the velocity-pressure
-    // block (up to sparsity transposition). Some FE formulations / linearizations
-    // may introduce small inconsistencies that can destabilize the NS solver's
-    // Schur complement solve (CG requires an SPD operator).
+    // The BlockSchur solver assumes a saddle-point structure where the
+    // constraint-to-momentum off-diagonal block is the negative transpose of the
+    // momentum-to-constraint block (up to sparsity transposition). Some FE
+    // formulations / linearizations may introduce small inconsistencies that can
+    // destabilize the Schur complement solve (CG requires an SPD operator).
     //
     // To match legacy solver expectations and improve robustness, enforce:
     //   D(i<-j) = -G(j<-i)^T
-    // by overwriting the bottom-left block entries at the transposed sparsity
-    // location with the negative of the top-right block entries.
+    // by overwriting the constraint-row block entries at the transposed sparsity
+    // location with the negative of the momentum-row block entries.
     //
     // This is a no-op when the assembled Jacobian already satisfies the relation.
-    if (options_.method == SolverMethod::BlockSchur && (dof == 3 || dof == 4)) {
+    if (options_.method == SolverMethod::BlockSchur && has_saddle_point) {
         const int nNo = lhs.nNo;
         const int nnz_int = lhs.nnz;
         if (nNo > 0 && nnz_int > 0) {
@@ -320,17 +349,21 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                     Real* blk = values_work.data() + static_cast<std::size_t>(idx) * blk_size;
                     Real* blk_t = values_work.data() + static_cast<std::size_t>(idx_t) * blk_size;
 
-                    for (int c = 0; c < nsd; ++c) {
-                        const Real top = blk[static_cast<std::size_t>(c * dof + nsd)];
-                        const std::size_t bl_idx = static_cast<std::size_t>(nsd * dof + c);
-                        const Real bottom = blk_t[bl_idx];
-                        max_abs_ref = std::max(max_abs_ref, static_cast<double>(std::abs(top)));
-                        max_abs_ref = std::max(max_abs_ref, static_cast<double>(std::abs(bottom)));
-                        const double diff = static_cast<double>(bottom + top);
-                        max_abs_diff = std::max(max_abs_diff, std::abs(diff));
+                    // top-right: rows [mom_start..mom_start+mom_ncomp), cols [con_start..con_start+con_ncomp)
+                    // bottom-left at transpose: rows [con_start..con_start+con_ncomp), cols [mom_start..mom_start+mom_ncomp)
+                    for (int vc = 0; vc < mom_ncomp; ++vc) {
+                        for (int cc = 0; cc < con_ncomp; ++cc) {
+                            const Real top = blk[static_cast<std::size_t>((mom_start + vc) * dof + (con_start + cc))];
+                            const std::size_t bl_idx = static_cast<std::size_t>((con_start + cc) * dof + (mom_start + vc));
+                            const Real bottom = blk_t[bl_idx];
+                            max_abs_ref = std::max(max_abs_ref, static_cast<double>(std::abs(top)));
+                            max_abs_ref = std::max(max_abs_ref, static_cast<double>(std::abs(bottom)));
+                            const double diff = static_cast<double>(bottom + top);
+                            max_abs_diff = std::max(max_abs_diff, std::abs(diff));
 
-                        // Enforce bottom-left at transpose == -top-right at original.
-                        blk_t[bl_idx] = -top;
+                            // Enforce bottom-left at transpose == -top-right at original.
+                            blk_t[bl_idx] = -top;
+                        }
                     }
                 }
             }
@@ -346,7 +379,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
 	    fe_fsi_linear_solver::FSILS_lsType ls{};
 		    if (options_.method == SolverMethod::BlockSchur) {
-	        // FSILS NS solver uses RI.mItr as a basis dimension and allocates O(nNo * mItr) workspace.
+	        // FSILS BlockSchur solver uses RI.mItr as a basis dimension and allocates O(nNo * mItr) workspace.
 	        // Treat very large generic max_iter as "unset" and fall back to the FSILS default (10) for safety.
 	        const int safe_max_iter = (options_.max_iter > 50) ? 10 : options_.max_iter;
 	        if (options_.krylov_dim > 0) {
@@ -369,17 +402,17 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 	        ls.CG.absTol = ls.RI.absTol;
 	        ls.GM.sD = ls.RI.sD;
 
-	        if (options_.fsils_ns_gm_max_iter) {
-	            ls.GM.mItr = *options_.fsils_ns_gm_max_iter;
+	        if (options_.fsils_blockschur_gm_max_iter) {
+	            ls.GM.mItr = *options_.fsils_blockschur_gm_max_iter;
 	        }
-	        if (options_.fsils_ns_cg_max_iter) {
-	            ls.CG.mItr = *options_.fsils_ns_cg_max_iter;
+	        if (options_.fsils_blockschur_cg_max_iter) {
+	            ls.CG.mItr = *options_.fsils_blockschur_cg_max_iter;
 	        }
-	        if (options_.fsils_ns_gm_rel_tol) {
-	            ls.GM.relTol = *options_.fsils_ns_gm_rel_tol;
+	        if (options_.fsils_blockschur_gm_rel_tol) {
+	            ls.GM.relTol = *options_.fsils_blockschur_gm_rel_tol;
 	        }
-	        if (options_.fsils_ns_cg_rel_tol) {
-	            ls.CG.relTol = *options_.fsils_ns_cg_rel_tol;
+	        if (options_.fsils_blockschur_cg_rel_tol) {
+	            ls.CG.relTol = *options_.fsils_blockschur_cg_rel_tol;
 	        }
 		    } else {
 		        const auto method = to_fsils_solver(options_.method);
@@ -576,8 +609,34 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             const auto& upd = rank_one_updates_[static_cast<std::size_t>(u)];
             const int faIn = rank_one_face_start + u;
 
-            // Group sparse DOF entries by node, keeping only velocity components.
-            // Map: old_local_node -> [component -> value]
+            // Determine which per-node components participate in this rank-1 update.
+            std::vector<int> face_comps;
+            if (!upd.active_components.empty()) {
+                face_comps = upd.active_components;
+            } else if (has_saddle_point) {
+                // Default: momentum block components only (skip constraint).
+                for (int c = mom_start; c < mom_start + mom_ncomp; ++c) {
+                    face_comps.push_back(c);
+                }
+            } else {
+                // No saddle-point info: all components participate.
+                for (int c = 0; c < dof; ++c) {
+                    face_comps.push_back(c);
+                }
+            }
+            const int face_dof = static_cast<int>(face_comps.size());
+
+            // Build a fast lookup: component index -> face-local index (-1 if not active).
+            std::vector<int> comp_to_face_idx(static_cast<std::size_t>(dof), -1);
+            for (int fi = 0; fi < face_dof; ++fi) {
+                const int c = face_comps[static_cast<std::size_t>(fi)];
+                if (c >= 0 && c < dof) {
+                    comp_to_face_idx[static_cast<std::size_t>(c)] = fi;
+                }
+            }
+
+            // Group sparse DOF entries by node, keeping only active components.
+            // Map: old_local_node -> [face_local_component -> value]
             std::map<int, std::map<int, Real>> node_data;
             for (const auto& [dof_idx, val] : upd.v) {
                 GlobalIndex fsils_dof = dof_idx;
@@ -596,8 +655,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 const int node = static_cast<int>(fsils_dof / dof);
                 const int comp = static_cast<int>(fsils_dof % dof);
 
-                // Only velocity components (0..nsd-1), skip pressure (nsd).
-                if (comp >= nsd) {
+                // Only active components.
+                if (comp < 0 || comp >= dof || comp_to_face_idx[static_cast<std::size_t>(comp)] < 0) {
                     continue;
                 }
 
@@ -605,7 +664,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 if (old_local < 0 || old_local >= lhs.nNo) {
                     continue;
                 }
-                node_data[old_local][comp] = val;
+                node_data[old_local][comp_to_face_idx[static_cast<std::size_t>(comp)]] = val;
             }
 
             const int face_nNo = static_cast<int>(node_data.size());
@@ -615,31 +674,31 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             {
                 auto& face = lhs.face[static_cast<std::size_t>(faIn)];
                 face.nNo = face_nNo;
-                face.dof = nsd;
+                face.dof = face_dof;
                 face.bGrp = fe_fsi_linear_solver::BcType::BC_TYPE_Neu;
 
 	                if (face_nNo > 0) {
 	                    face.glob.resize(face_nNo);
-	                    face.val.resize(nsd, face_nNo);
-	                    face.valM.resize(nsd, face_nNo);
+	                    face.val.resize(face_dof, face_nNo);
+	                    face.valM.resize(face_dof, face_nNo);
 	                    face.val = 0.0;
 	                    face.valM = 0.0;
 
                     int a = 0;
                     for (const auto& [old_local, comp_vals] : node_data) {
                         face.glob(a) = lhs.map(old_local);
-                        for (const auto& [comp, val] : comp_vals) {
-                            face.val(comp, a) = static_cast<double>(val);
+                        for (const auto& [face_comp, val] : comp_vals) {
+                            face.val(face_comp, a) = static_cast<double>(val);
                         }
                         ++a;
                     }
-	
-	                    sort_face_by_glob(face, nsd);
+
+	                    sort_face_by_glob(face, face_dof);
 	                }
 	                // Must be called collectively across ranks (uses MPI_Allreduce / COMMU).
-	                sync_face_val_if_shared(face, nsd);
+	                sync_face_val_if_shared(face, face_dof);
 	                // else: face_nNo=0, glob/val/valM stay default-constructed (empty)
-	
+
 	                face.foC = true;
 	                face.coupledFlag = true;
                 face.incFlag = true;
@@ -713,7 +772,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         if (stage_scale != 1.0) {
             const Real s = static_cast<Real>(stage_scale);
             for (int a = 0; a < lhs.nNo; ++a) {
-                for (int c = 0; c < nsd; ++c) {
+                // Scale momentum rows of the RHS.
+                for (int c = mom_start; c < mom_start + mom_ncomp; ++c) {
                     Ri(c, a) *= s;
                 }
             }
@@ -725,25 +785,25 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     SolverReport report;
     report.initial_residual_norm = x->norm();
 
-    bool ns_threw = false;
-    std::string ns_error;
+    bool solve_threw = false;
+    std::string solve_error;
     try {
         fe_fsi_linear_solver::fsils_solve(lhs, ls, dof, Ri, Val, prec, incL, res);
     } catch (const std::exception& e) {
-        ns_threw = true;
-        ns_error = e.what();
+        solve_threw = true;
+        solve_error = e.what();
     } catch (...) {
-        ns_threw = true;
-        ns_error = "unknown exception";
+        solve_threw = true;
+        solve_error = "unknown exception";
     }
 
     bool used_fallback_gmres = false;
     if (options_.method == SolverMethod::BlockSchur) {
         // FSILS solves are collective. Ensure fallback decisions are consistent across ranks:
         // if any rank throws or reports non-convergence, all ranks must fall back.
-        int local_fail = (ns_threw || !ls.RI.suc) ? 1 : 0;
-        int local_threw = ns_threw ? 1 : 0;
-        int local_not_suc = (!ns_threw && !ls.RI.suc) ? 1 : 0;
+        int local_fail = (solve_threw || !ls.RI.suc) ? 1 : 0;
+        int local_threw = solve_threw ? 1 : 0;
+        int local_not_suc = (!solve_threw && !ls.RI.suc) ? 1 : 0;
 
         int any_fail = local_fail;
         int any_threw = local_threw;
@@ -761,16 +821,16 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         if (oopTraceEnabled()) {
             std::ostringstream oss;
             if (any_threw != 0) {
-                if (ns_threw) {
-                    oss << "FsilsLinearSolver::solve: NS solver threw ('" << ns_error << "'); falling back to GMRES.";
+                if (solve_threw) {
+                    oss << "FsilsLinearSolver::solve: BlockSchur solver threw ('" << solve_error << "'); falling back to GMRES.";
                 } else {
-                    oss << "FsilsLinearSolver::solve: NS solver threw on another rank; falling back to GMRES.";
+                    oss << "FsilsLinearSolver::solve: BlockSchur solver threw on another rank; falling back to GMRES.";
                 }
             } else if (any_not_suc != 0) {
-                oss << "FsilsLinearSolver::solve: NS solver did not converge (itr=" << ls.RI.itr
+                oss << "FsilsLinearSolver::solve: BlockSchur solver did not converge (itr=" << ls.RI.itr
                     << ", fNorm=" << ls.RI.fNorm << "); falling back to GMRES.";
             } else {
-                oss << "FsilsLinearSolver::solve: NS solver failed; falling back to GMRES.";
+                oss << "FsilsLinearSolver::solve: BlockSchur solver failed; falling back to GMRES.";
             }
             traceLog(oss.str());
         }
@@ -790,16 +850,18 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                                            sD);
         fe_fsi_linear_solver::fsils_solve(lhs, ls, dof, Ri, Val, prec, incL, res);
         }
-    } else if (ns_threw) {
+    } else if (solve_threw) {
         // Propagate non-BlockSchur failures (no fallback policy).
-        FE_THROW(FEException, "FsilsLinearSolver::solve: FSILS solve threw: " + ns_error);
+        FE_THROW(FEException, "FsilsLinearSolver::solve: FSILS solve threw: " + solve_error);
     }
 
     if (stage_scale != 1.0) {
         const Real inv_s = static_cast<Real>(1.0 / stage_scale);
         for (int a = 0; a < lhs.nNo; ++a) {
-            // Undo right-scaling of the pressure unknown.
-            Ri(nsd, a) *= inv_s;
+            // Undo right-scaling of constraint unknowns.
+            for (int c = con_start; c < con_start + con_ncomp; ++c) {
+                Ri(c, a) *= inv_s;
+            }
         }
     }
 

@@ -197,13 +197,13 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
     }
   }
 
-  // FSILS NS solver (block-Schur) legacy knobs: pass GM/CG sub-solver controls through.
+  // FSILS BlockSchur sub-solver knobs: pass GM/CG sub-solver controls through.
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS &&
       opts.method == svmp::FE::backends::SolverMethod::BlockSchur) {
-    opts.fsils_ns_gm_max_iter = eq->linear_solver.ns_gm_max_iterations.value();
-    opts.fsils_ns_cg_max_iter = eq->linear_solver.ns_cg_max_iterations.value();
-    opts.fsils_ns_gm_rel_tol = static_cast<svmp::FE::Real>(eq->linear_solver.ns_gm_tolerance.value());
-    opts.fsils_ns_cg_rel_tol = static_cast<svmp::FE::Real>(eq->linear_solver.ns_cg_tolerance.value());
+    opts.fsils_blockschur_gm_max_iter = eq->linear_solver.ns_gm_max_iterations.value();
+    opts.fsils_blockschur_cg_max_iter = eq->linear_solver.ns_cg_max_iterations.value();
+    opts.fsils_blockschur_gm_rel_tol = static_cast<svmp::FE::Real>(eq->linear_solver.ns_gm_tolerance.value());
+    opts.fsils_blockschur_cg_rel_tol = static_cast<svmp::FE::Real>(eq->linear_solver.ns_cg_tolerance.value());
   }
 
   return opts;
@@ -557,12 +557,56 @@ void SimulationBuilder::createSolvers()
     throw std::runtime_error("[svMultiPhysics::Application] Failed to create FE backend factory.");
   }
 
-  const auto solver_options = translateSolverOptions(params_, backend_kind);
+  auto solver_options = translateSolverOptions(params_, backend_kind);
+
+  // Populate block layout from field metadata — available for any multi-field system.
+  {
+    const auto& fmap = components_.fe_system->fieldMap();
+    if (fmap.numFields() > 0) {
+      svmp::FE::backends::BlockLayout layout{};
+      int offset = 0;
+      for (std::size_t i = 0; i < fmap.numFields(); ++i) {
+        const auto& f = fmap.getField(i);
+        const int ncomp = static_cast<int>(f.n_components);
+        layout.blocks.push_back({f.name, offset, ncomp});
+        offset += ncomp;
+      }
+
+      // Auto-detect saddle-point structure for block solvers.
+      // Convention: first multi-component field = momentum, first single-component field = constraint.
+      if (solver_options.method == svmp::FE::backends::SolverMethod::BlockSchur) {
+        for (int bi = 0; bi < static_cast<int>(layout.blocks.size()); ++bi) {
+          if (!layout.momentum_block && layout.blocks[static_cast<std::size_t>(bi)].n_components > 1) {
+            layout.momentum_block = bi;
+          } else if (!layout.constraint_block && layout.blocks[static_cast<std::size_t>(bi)].n_components == 1) {
+            layout.constraint_block = bi;
+          }
+        }
+      }
+
+      solver_options.block_layout = std::move(layout);
+    }
+  }
+
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: linear solver method="
             << svmp::FE::backends::solverMethodToString(solver_options.method)
             << " preconditioner=" << svmp::FE::backends::preconditionerToString(solver_options.preconditioner)
             << " rel_tol=" << solver_options.rel_tol << " abs_tol=" << solver_options.abs_tol
-            << " max_iter=" << solver_options.max_iter << std::endl;
+            << " max_iter=" << solver_options.max_iter;
+  if (solver_options.block_layout) {
+    oopCout() << " block_layout=[";
+    for (std::size_t i = 0; i < solver_options.block_layout->blocks.size(); ++i) {
+      if (i > 0) oopCout() << ", ";
+      const auto& blk = solver_options.block_layout->blocks[i];
+      oopCout() << blk.name << "(" << blk.start_component << ":" << blk.n_components << ")";
+    }
+    oopCout() << "]";
+    if (solver_options.block_layout->hasSaddlePoint()) {
+      oopCout() << " saddle_point=(" << *solver_options.block_layout->momentum_block
+                << "," << *solver_options.block_layout->constraint_block << ")";
+    }
+  }
+  oopCout() << std::endl;
   components_.linear_solver = components_.backend->createLinearSolver(solver_options);
   if (!components_.linear_solver) {
     throw std::runtime_error("[svMultiPhysics::Application] Failed to create FE linear solver.");

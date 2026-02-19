@@ -27,6 +27,10 @@ namespace backends {
 struct RankOneUpdate {
     Real sigma{0.0};
     std::vector<std::pair<GlobalIndex, Real>> v;
+    /// Per-node component indices that participate in this rank-1 update.
+    /// Empty means all components (backward compat). When set, the backend
+    /// uses these instead of inferring from block layout or dof count.
+    std::vector<int> active_components{};
 };
 
 class LinearSolver {
@@ -59,8 +63,7 @@ public:
     ///
     /// Some backends (notably FSILS) use this information to apply the same
     /// boundary-condition handling as the legacy solver (e.g., via FSILS faces)
-    /// to improve robustness of specialized solvers like the Navier-Stokes
-    /// Block-Schur method.
+    /// to improve robustness of specialized solvers like BlockSchur.
     ///
     /// DOF indices are in the FE system's global numbering.
     ///

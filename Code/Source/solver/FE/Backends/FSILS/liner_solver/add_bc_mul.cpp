@@ -52,7 +52,7 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
 {
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
     auto& face = lhs.face[faIn];
-    int nsd = std::min(face.dof, dof);
+    const int face_dof = std::min(face.dof, dof);
 
     if (face.coupledFlag) {
       double coef;
@@ -71,7 +71,7 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
           int Ac = face.glob(a);
           // Only sum owned nodes (Ac < mynNo) to avoid double-counting
           if (Ac < lhs.mynNo) {
-            for (int i = 0; i < nsd; i++) {
+            for (int i = 0; i < face_dof; i++) {
               local_S += face.valM(i,a) * X(i,Ac);
             }
           }
@@ -86,7 +86,7 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
         // Computing Y = Y + valM * S
         for (int a = 0; a < face.nNo; a++) {
           int Ac = face.glob(a);
-          for (int i = 0; i < nsd; i++) {
+          for (int i = 0; i < face_dof; i++) {
             Y(i,Ac) = Y(i,Ac) + face.valM(i,a) * S;
           }
         }
@@ -98,7 +98,7 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
         double S = 0.0;
         for (int a = 0; a < face.nNo; a++) {
           int Ac = face.glob(a);
-          for (int i = 0; i < nsd; i++) {
+          for (int i = 0; i < face_dof; i++) {
             S = S + face.valM(i,a)*X(i,Ac);
           }
         }
@@ -107,7 +107,7 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
         // Computing Y = Y + v * S
         for (int a = 0; a < face.nNo; a++) {
           int Ac = face.glob(a);
-          for (int i = 0; i < nsd; i++) {
+          for (int i = 0; i < face_dof; i++) {
             Y(i,Ac) = Y(i,Ac) + face.valM(i,a)*S;
           }
         }

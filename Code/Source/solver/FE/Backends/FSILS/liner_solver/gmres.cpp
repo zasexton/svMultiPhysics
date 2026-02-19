@@ -1450,17 +1450,21 @@ void gmres_v_pipelined(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_s
 void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
             const int mynNo, const int nNo)
 {
-  int nsd = dof - 1;
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
     auto &face = lhs.face[faIn];
 
     if (face.coupledFlag) {
+      // Use the face's own DOF count (set by the caller based on which
+      // components participate in this coupled BC), clamped to the
+      // system DOF count for safety.
+      const int face_dof = std::min(face.dof, dof);
+
       if (face.sharedFlag) {
         double local_nS = 0.0;
         for (int a = 0; a < face.nNo; a++) {
           int Ac = face.glob(a);
           if (Ac < mynNo) {
-            for (int i = 0; i < nsd; i++) {
+            for (int i = 0; i < face_dof; i++) {
               local_nS += face.valM(i,a) * face.valM(i,a);
             }
           }
@@ -1477,7 +1481,7 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSIL
       } else {
         face.nS = 0.0;
         for (int a = 0; a < face.nNo; a++) {
-          for (int i = 0; i < nsd; i++) {
+          for (int i = 0; i < face_dof; i++) {
             face.nS += face.valM(i,a) * face.valM(i,a);
           }
         }
