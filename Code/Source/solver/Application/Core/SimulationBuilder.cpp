@@ -46,6 +46,9 @@ svmp::FE::backends::SolverMethod toSolverMethod(const std::string& legacy_type)
   if (v == "gmres") {
     return SolverMethod::GMRES;
   }
+  if (v == "pgmres" || v == "ksppgmres") {
+    return SolverMethod::PGMRES;
+  }
   if (v == "bicg" || v == "bicgs" || v == "bi-conjugate-gradient") {
     return SolverMethod::BiCGSTAB;
   }
@@ -174,6 +177,7 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
   // and ensure krylov_dim is populated even if the XML omitted it (to match legacy defaults).
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS &&
       (opts.method == svmp::FE::backends::SolverMethod::GMRES ||
+       opts.method == svmp::FE::backends::SolverMethod::PGMRES ||
        opts.method == svmp::FE::backends::SolverMethod::FGMRES) &&
       eq->linear_solver.max_iterations.defined()) {
     const int legacy_restart_len = eq->linear_solver.krylov_space_dimension.defined()

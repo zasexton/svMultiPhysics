@@ -120,6 +120,7 @@ KSPType toPetscKspType(SolverMethod method)
         case SolverMethod::CG: return KSPCG;
         case SolverMethod::BiCGSTAB: return KSPBCGS;
         case SolverMethod::GMRES: return KSPGMRES;
+        case SolverMethod::PGMRES: return KSPPGMRES;
         case SolverMethod::FGMRES: return KSPFGMRES;
         case SolverMethod::BlockSchur: return KSPFGMRES;
         default: return KSPCG;

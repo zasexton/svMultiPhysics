@@ -90,6 +90,7 @@ void traceLog(const std::string& msg)
 {
     switch (method) {
         case SolverMethod::GMRES:
+        case SolverMethod::PGMRES:
         case SolverMethod::FGMRES: return "PseudoBlockGmres";
         case SolverMethod::CG: return "CG";
         case SolverMethod::BiCGSTAB: return "BiCGStab";

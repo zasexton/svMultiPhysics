@@ -72,7 +72,7 @@
             <Divergence> true </Divergence>
         </Output>
 
-        <LS type="GMRES" >
+        <LS type="PGMRES" >
             <Linear_algebra type="fsils" >
                 <Preconditioner> fsils </Preconditioner>
             </Linear_algebra>

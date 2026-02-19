@@ -17,6 +17,7 @@ TEST(BackendOptions, ToString)
     EXPECT_EQ(solverMethodToString(SolverMethod::CG), "cg");
     EXPECT_EQ(solverMethodToString(SolverMethod::BiCGSTAB), "bicgstab");
     EXPECT_EQ(solverMethodToString(SolverMethod::GMRES), "gmres");
+    EXPECT_EQ(solverMethodToString(SolverMethod::PGMRES), "pgmres");
     EXPECT_EQ(solverMethodToString(SolverMethod::FGMRES), "fgmres");
     EXPECT_EQ(solverMethodToString(SolverMethod::BlockSchur), "block-schur");
 

@@ -18,6 +18,7 @@ std::string_view solverMethodToString(SolverMethod m) noexcept
         case SolverMethod::CG: return "cg";
         case SolverMethod::BiCGSTAB: return "bicgstab";
         case SolverMethod::GMRES: return "gmres";
+        case SolverMethod::PGMRES: return "pgmres";
         case SolverMethod::FGMRES: return "fgmres";
         case SolverMethod::BlockSchur: return "block-schur";
         default: return "unknown";

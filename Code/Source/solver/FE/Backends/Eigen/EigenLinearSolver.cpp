@@ -179,6 +179,7 @@ SolverReport EigenLinearSolver::solve(const GenericMatrix& A_in,
         }
 
         case SolverMethod::GMRES:
+        case SolverMethod::PGMRES:
         case SolverMethod::FGMRES:
         case SolverMethod::BlockSchur: {
             FE_THROW_IF(options_.preconditioner == PreconditionerType::AMG, NotImplementedException,

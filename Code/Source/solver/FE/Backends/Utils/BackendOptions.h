@@ -26,6 +26,7 @@ enum class SolverMethod : std::uint8_t {
     CG,
     BiCGSTAB,
     GMRES,
+    PGMRES,
     FGMRES,
     BlockSchur
 };

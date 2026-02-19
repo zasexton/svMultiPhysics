@@ -118,6 +118,7 @@ fe_fsi_linear_solver::LinearSolverType to_fsils_solver(SolverMethod method)
     switch (method) {
         case SolverMethod::CG: return fe_fsi_linear_solver::LS_TYPE_CG;
         case SolverMethod::GMRES: return fe_fsi_linear_solver::LS_TYPE_GMRES;
+        case SolverMethod::PGMRES: return fe_fsi_linear_solver::LS_TYPE_GMRES;
         case SolverMethod::FGMRES: return fe_fsi_linear_solver::LS_TYPE_GMRES;
         case SolverMethod::BiCGSTAB: return fe_fsi_linear_solver::LS_TYPE_BICGS;
         case SolverMethod::BlockSchur: return fe_fsi_linear_solver::LS_TYPE_NS;
@@ -414,6 +415,11 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 	                                           options_.max_iter);
 	        }
 	    }
+
+    // New OOP solver selection: `<LS type="KSPPGMRES">` requests a pipelined/communication-hiding
+    // GMRES implementation in the FSILS backend. Keep the solver type as GMRES and toggle the
+    // variant via the RI sub-solver settings.
+    ls.RI.pipelined_gmres = (options_.method == SolverMethod::PGMRES);
 
     // Set up FSILS faces from:
     //  - Dirichlet constraints (legacy-equivalent FSILS preconditioner handling)

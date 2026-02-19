@@ -129,6 +129,7 @@ void depart(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int nsd, const int d
 {
   const int stride = nsd + 1;
 
+  #pragma omp parallel for schedule(static)
   for (fsils_int nz = 0; nz < nnz; nz++) {
     for (int i = 0; i < nsd; i++) {
       for (int j = 0; j < nsd; j++) {
@@ -162,6 +163,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   const int nsd = dof - 1;
   const int iB = ls.RI.mItr;
   const int nB = 2*iB;
+  constexpr fsils_int BLOCK_SIZE = 256;
 
   #ifdef debug_ns_solver
   dmsg << "dof: " << dof;
@@ -179,14 +181,12 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   Array<double> Rm(nsd,nNo), Rmi(nsd,nNo), A(nB,nB), P(nNo,iB), MP(nNo,nB);
   Array3<double> U(nsd,nNo,iB), MU(nsd,nNo,nB);
 
-  for (int i = 0; i < nsd; i++) {
-    for (int j = 0; j < Ri.ncols(); j++) {
+  #pragma omp parallel for schedule(static)
+  for (fsils_int j = 0; j < nNo; j++) {
+    for (int i = 0; i < nsd; i++) {
       Rmi(i,j) = Ri(i,j);
     }
-  }
-
-  for (int i = 0; i < Ri.ncols(); i++) {
-    Rci(i) = Ri(dof-1,i);
+    Rci(j) = Ri(dof-1,j);
   }
 
   Rm = Rmi;
@@ -267,20 +267,21 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     #endif
 
     // Solve for U = inv(mK) * Rm
-    auto U_slice = U.slice(i);
+    auto U_slice = U.rslice(i);
     gmres::gmres(lhs, ls.GM, nsd, mK, Rm, U_slice);
-    U.set_slice(i, U_slice);
 
     // P = D*U (using exact analytical mD)
     auto P_col = P.rcol(i);
-    spar_mul::fsils_spar_mul_vs(lhs, lhs.rowPtr, lhs.colPtr, nsd, mD, U.rslice(i), P_col);
+    spar_mul::fsils_spar_mul_vs(lhs, lhs.rowPtr, lhs.colPtr, nsd, mD, U_slice, P_col);
 
     // P = Rc - P
-    P.set_col(i, Rc - P_col);
+    #pragma omp parallel for schedule(static)
+    for (fsils_int n = 0; n < nNo; n++) {
+      P_col(n) = Rc(n) - P_col(n);
+    }
 
     // P = [L - D*H*G]^-1 * P
     // VMS FIX: Solved using asymmetric BiCGStab instead of symmetric CGRAD
-    P_col = P.rcol(i);
     bicgs::schur(lhs, ls.CG, nsd, mD, mG, mL, P_col);
 
     // MU1 = G*P
@@ -293,17 +294,21 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     spar_mul::fsils_spar_mul_sv(lhs, lhs.rowPtr, lhs.colPtr, nsd, mG, P_col, MU_iB);
 
     // MU2 = Rm - G*P
-    MU.set_slice(iBB, Rm - MU_iB);
+    auto MU_iBB = MU.rslice(iBB);
+    #pragma omp parallel for schedule(static)
+    for (fsils_int n = 0; n < nNo; n++) {
+      for (int d = 0; d < nsd; d++) {
+        MU_iBB(d,n) = Rm(d,n) - MU_iB(d,n);
+      }
+    }
 
     // U = inv(K) * [Rm - G*P]
-    auto U_i = U.rslice(i);
-    gmres::gmres(lhs, ls.GM, nsd, mK, MU.slice(iBB), U_i);
+    gmres::gmres(lhs, ls.GM, nsd, mK, MU_iBB, U_slice);
 
     // MU2 = K*U
-    auto MU_iBB = MU.rslice(iBB);
-    spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, nsd, mK, U.rslice(i), MU_iBB);
+    spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, nsd, mK, U_slice, MU_iBB);
 
-    add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, nsd, U.rslice(i), MU_iBB);
+    add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, nsd, U_slice, MU_iBB);
 
     // MP1 = L*P
     auto MP_iB = MP.rcol(iB);
@@ -311,19 +316,22 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
 
     // MP2 = D*U
     auto MP_iBB = MP.rcol(iBB);
-    spar_mul::fsils_spar_mul_vs(lhs, lhs.rowPtr, lhs.colPtr, nsd, mD, U.rslice(i), MP_iBB);
+    spar_mul::fsils_spar_mul_vs(lhs, lhs.rowPtr, lhs.colPtr, nsd, mD, U_slice, MP_iBB);
 
     int c = 0;
 
     for (int k = iB; k <= iBB; k++) {
+      auto MU_k = MU.rslice(k);
+      auto MP_k = MP.rcol(k);
+
       for (int j = 0; j <= k; j++) {
-        tmp(c) = dot::fsils_nc_dot_v(nsd, mynNo, MU.slice(j), MU.slice(k))  +
-                 dot::fsils_nc_dot_s(mynNo, MP.col(j), MP.col(k));
+        tmp(c) = dot::fsils_nc_dot_v(nsd, mynNo, MU.rslice(j), MU_k) +
+                 dot::fsils_nc_dot_s(mynNo, MP.rcol(j), MP_k);
         c = c + 1;
       }
 
-      tmp(c) = dot::fsils_nc_dot_v(nsd, mynNo, MU.slice(k), Rmi)  +
-               dot::fsils_nc_dot_s(mynNo, MP.col(k), Rci);
+      tmp(c) = dot::fsils_nc_dot_v(nsd, mynNo, MU_k, Rmi) +
+               dot::fsils_nc_dot_s(mynNo, MP_k, Rci);
       c = c + 1;
     }
 
@@ -400,12 +408,32 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
       break;
     }
 
-    Rm = Rmi - xB(0)*MU.slice(0);
-    Rc = Rci - xB(0)*MP.col(0);
+    // Cache-blocked residual update: (Rm,Rc) = (Rmi,Rci) - sum_j xB(j)*(MU_j,MP_j)
+    #pragma omp parallel for schedule(static)
+    for (fsils_int nBlock = 0; nBlock < nNo; nBlock += BLOCK_SIZE) {
+      const fsils_int nEnd = std::min(nBlock + BLOCK_SIZE, nNo);
 
-    for (int j = 1; j <= iBB; j++) {
-      Rm = Rm - xB(j)*MU.slice(j);
-      Rc = Rc - xB(j)*MP.col(j);
+      for (int j = 0; j <= iBB; j++) {
+        const double xb_j = xB(j);
+        auto MU_j = MU.rslice(j);
+        auto MP_j = MP.rcol(j);
+
+        if (j == 0) {
+          for (fsils_int n = nBlock; n < nEnd; n++) {
+            for (int d = 0; d < nsd; d++) {
+              Rm(d,n) = Rmi(d,n) - xb_j * MU_j(d,n);
+            }
+            Rc(n) = Rci(n) - xb_j * MP_j(n);
+          }
+        } else if (xb_j != 0.0) {
+          for (fsils_int n = nBlock; n < nEnd; n++) {
+            for (int d = 0; d < nsd; d++) {
+              Rm(d,n) -= xb_j * MU_j(d,n);
+            }
+            Rc(n) -= xb_j * MP_j(n);
+          }
+        }
+      }
     }
 
   } // for i = 0; i < ls.RI.mItr
@@ -414,10 +442,26 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     ls.RI.itr = ls.RI.mItr;
   } else {
     ls.RI.itr = i_count;
-    Rc = Rci - xB(0)*MP.col(0);
 
-    for (int j = 1; j <= iBB; j++) {
-      Rc = Rc - xB(j)*MP.col(j);
+    // Cache-blocked pressure residual update: Rc = Rci - sum_j xB(j)*MP_j
+    #pragma omp parallel for schedule(static)
+    for (fsils_int nBlock = 0; nBlock < nNo; nBlock += BLOCK_SIZE) {
+      const fsils_int nEnd = std::min(nBlock + BLOCK_SIZE, nNo);
+
+      for (int j = 0; j <= iBB; j++) {
+        const double xb_j = xB(j);
+        auto MP_j = MP.rcol(j);
+
+        if (j == 0) {
+          for (fsils_int n = nBlock; n < nEnd; n++) {
+            Rc(n) = Rci(n) - xb_j * MP_j(n);
+          }
+        } else if (xb_j != 0.0) {
+          for (fsils_int n = nBlock; n < nEnd; n++) {
+            Rc(n) -= xb_j * MP_j(n);
+          }
+        }
+      }
     }
   }
 
@@ -432,14 +476,38 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   dmsg << "ls.RI.itr: " << ls.RI.itr;
   #endif
 
-  Rmi = xB(1) * U.slice(0);
-  Rci = xB(0) * P.col(0);
+  // Cache-blocked solution reconstruction.
+  #pragma omp parallel for schedule(static)
+  for (fsils_int nBlock = 0; nBlock < nNo; nBlock += BLOCK_SIZE) {
+    const fsils_int nEnd = std::min(nBlock + BLOCK_SIZE, nNo);
 
-  for (int i = 1; i <= ls.RI.itr; i++) {
-    int iB = 2*i;
-    int iBB = 2*i + 1;
-    Rmi = Rmi + xB(iBB) * U.slice(i);
-    Rci = Rci + xB(iB) * P.col(i);
+    for (int i = 0; i <= ls.RI.itr; i++) {
+      auto U_i = U.rslice(i);
+      auto P_i = P.rcol(i);
+
+      if (i == 0) {
+        const double xb_1 = xB(1);
+        const double xb_0 = xB(0);
+        for (fsils_int n = nBlock; n < nEnd; n++) {
+          for (int d = 0; d < nsd; d++) {
+            Rmi(d,n) = xb_1 * U_i(d,n);
+          }
+          Rci(n) = xb_0 * P_i(n);
+        }
+
+      } else {
+        const int iB = 2*i;
+        const int iBB = 2*i + 1;
+        const double xb_iBB = xB(iBB);
+        const double xb_iB = xB(iB);
+        for (fsils_int n = nBlock; n < nEnd; n++) {
+          for (int d = 0; d < nsd; d++) {
+            Rmi(d,n) += xb_iBB * U_i(d,n);
+          }
+          Rci(n) += xb_iB * P_i(n);
+        }
+      }
+    }
   }
 
   // Set Calling duration.
@@ -462,13 +530,13 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   dmsg << "ls.RI.fNorm: " << ls.RI.fNorm;
   #endif
 
-  for (int i = 0; i < nsd; i++) {
-    for (int j = 0; j < Rmi.ncols(); j++) {
-      Ri(i, j) = Rmi(i, j);
+  #pragma omp parallel for schedule(static)
+  for (fsils_int j = 0; j < nNo; j++) {
+    for (int i = 0; i < nsd; i++) {
+      Ri(i,j) = Rmi(i,j);
     }
+    Ri(dof-1,j) = Rci(j);
   }
-
-  Ri.set_row(dof-1, Rci);
 
   if (lhs.commu.masF) {
     //CALL LOGFILE
