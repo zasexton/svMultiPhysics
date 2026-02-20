@@ -48,6 +48,10 @@ struct FsilsShared final {
     std::vector<int> owned_nodes{};
     std::vector<int> ghost_nodes{}; ///< Sorted global node IDs for ghost nodes
 
+    // Flat O(1) lookup table: global_node -> old local index (-1 if not present).
+    // Size = gnNo when populated. Enables O(1) globalNodeToOld() instead of O(log n) binary search.
+    std::vector<int> global_to_old_{};
+
     // Inverse permutation for convenience: old_of_internal[internal] = old.
     std::vector<int> old_of_internal{};
 
@@ -58,8 +62,45 @@ struct FsilsShared final {
 
     [[nodiscard]] int localNodeCount() const noexcept { return lhs.nNo; }
 
+    /// Build the flat O(1) lookup table from owned/ghost node lists.
+    void buildGlobalToOldTable()
+    {
+        if (gnNo <= 0) return;
+        global_to_old_.assign(static_cast<std::size_t>(gnNo), -1);
+        if (!owned_nodes.empty()) {
+            for (int i = 0; i < static_cast<int>(owned_nodes.size()); ++i) {
+                const auto idx = static_cast<std::size_t>(owned_nodes[static_cast<std::size_t>(i)]);
+                if (idx < global_to_old_.size()) {
+                    global_to_old_[idx] = i;
+                }
+            }
+        } else {
+            for (int i = 0; i < owned_node_count; ++i) {
+                const auto idx = static_cast<std::size_t>(owned_node_start + i);
+                if (idx < global_to_old_.size()) {
+                    global_to_old_[idx] = i;
+                }
+            }
+        }
+        for (int i = 0; i < static_cast<int>(ghost_nodes.size()); ++i) {
+            const auto idx = static_cast<std::size_t>(ghost_nodes[static_cast<std::size_t>(i)]);
+            if (idx < global_to_old_.size()) {
+                global_to_old_[idx] = owned_node_count + i;
+            }
+        }
+    }
+
     [[nodiscard]] int globalNodeToOld(int global_node) const noexcept
     {
+        // Fast path: O(1) flat lookup table.
+        if (!global_to_old_.empty()) {
+            if (global_node < 0 || static_cast<std::size_t>(global_node) >= global_to_old_.size()) {
+                return -1;
+            }
+            return global_to_old_[static_cast<std::size_t>(global_node)];
+        }
+
+        // Fallback: O(log n) binary search (used only if table not yet built).
         if (!owned_nodes.empty()) {
             const auto it = std::lower_bound(owned_nodes.begin(), owned_nodes.end(), global_node);
             if (it != owned_nodes.end() && *it == global_node) {

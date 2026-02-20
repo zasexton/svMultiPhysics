@@ -41,8 +41,68 @@ namespace {
         if (dofs.size() != local_vector.size()) {
             FE_THROW(InvalidArgumentException, "FsilsVectorView::addVectorEntries: size mismatch");
         }
+        FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
+
+        const auto* shared = vec_->shared();
+        if (!shared) {
+            // No shared metadata: fall back to per-entry insertion.
+            for (std::size_t i = 0; i < dofs.size(); ++i) {
+                addVectorEntry(dofs[i], local_vector[i], mode);
+            }
+            return;
+        }
+
+        const int dof_per_node = shared->dof;
+        const auto perm = shared->dof_permutation;
+        const bool have_perm = perm && !perm->empty();
+        const GlobalIndex vec_size = vec_->size();
+        auto& data = vec_->data();
+
+        int cached_global_node = -1;
+        int cached_old = -1;
+
         for (std::size_t i = 0; i < dofs.size(); ++i) {
-            addVectorEntry(dofs[i], local_vector[i], mode);
+            GlobalIndex dof_idx = dofs[i];
+            if (dof_idx < 0 || dof_idx >= vec_size) continue;
+
+            if (have_perm) {
+                if (static_cast<std::size_t>(dof_idx) >= perm->forward.size()) continue;
+                dof_idx = perm->forward[static_cast<std::size_t>(dof_idx)];
+            }
+            if (dof_idx < 0 || dof_idx >= vec_size) continue;
+
+            const int global_node = static_cast<int>(dof_idx / dof_per_node);
+            const int comp = static_cast<int>(dof_idx % dof_per_node);
+
+            // Reuse cached old index if same node as previous DOF.
+            int old;
+            if (global_node == cached_global_node) {
+                old = cached_old;
+            } else {
+                old = shared->globalNodeToOld(global_node);
+                cached_global_node = global_node;
+                cached_old = old;
+            }
+            if (old < 0) continue;
+
+            const std::size_t idx = static_cast<std::size_t>(old) * static_cast<std::size_t>(dof_per_node) +
+                                    static_cast<std::size_t>(comp);
+            if (idx >= data.size()) continue;
+
+            switch (mode) {
+                case assembly::AddMode::Add:
+                    data[idx] += local_vector[i];
+                    break;
+                case assembly::AddMode::Insert:
+                    data[idx] = local_vector[i];
+                    break;
+                case assembly::AddMode::Max:
+                    data[idx] = std::max(data[idx], local_vector[i]);
+                    break;
+                case assembly::AddMode::Min:
+                    data[idx] = std::min(data[idx], local_vector[i]);
+                    break;
+            }
         }
     }
 

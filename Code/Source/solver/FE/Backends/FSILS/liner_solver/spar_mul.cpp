@@ -39,6 +39,9 @@
 
 #include "fsils_api.hpp"
 
+#include <algorithm>
+#include <vector>
+
 namespace spar_mul {
 
 using fe_fsi_linear_solver::fsils_int;
@@ -89,12 +92,23 @@ static void fsils_spar_mul_sv_dyn(fsils_int iStart, fsils_int iEnd, int dof,
     const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
     const Array<double>& K, const Vector<double>& U, Array<double>& KU)
 {
-  #pragma omp parallel for schedule(static)
-  for (fsils_int i = iStart; i < iEnd; i++) {
-    for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-      double u_col = U(colPtr(j));
+  #pragma omp parallel
+  {
+    std::vector<double> sums(static_cast<size_t>(std::max(dof, 0)), 0.0);
+
+    #pragma omp for schedule(static)
+    for (fsils_int i = iStart; i < iEnd; i++) {
+      std::fill(sums.begin(), sums.end(), 0.0);
+
+      for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
+        const double u_col = U(colPtr(j));
+        for (int m = 0; m < dof; m++) {
+          sums[static_cast<size_t>(m)] += K(m,j) * u_col;
+        }
+      }
+
       for (int m = 0; m < dof; m++) {
-        KU(m,i) += K(m,j) * u_col;
+        KU(m,i) = sums[static_cast<size_t>(m)];
       }
     }
   }
@@ -165,17 +179,28 @@ static void fsils_spar_mul_vv_dyn(fsils_int iStart, fsils_int iEnd, int dof,
     const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
     const Array<double>& K, const Array<double>& U, Array<double>& KU)
 {
-  #pragma omp parallel for schedule(static)
-  for (fsils_int i = iStart; i < iEnd; i++) {
-    for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-      fsils_int col = colPtr(j);
-      for (int l = 0; l < dof; l++) {
-        int s = l * dof;
-        double sum = 0.0;
-        for (int k = 0; k < dof; k++) {
-          sum += K(s+k,j) * U(k,col);
+  #pragma omp parallel
+  {
+    std::vector<double> sums(static_cast<size_t>(std::max(dof, 0)), 0.0);
+
+    #pragma omp for schedule(static)
+    for (fsils_int i = iStart; i < iEnd; i++) {
+      std::fill(sums.begin(), sums.end(), 0.0);
+
+      for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
+        const fsils_int col = colPtr(j);
+        for (int l = 0; l < dof; l++) {
+          const int s = l * dof;
+          double sum = 0.0;
+          for (int k = 0; k < dof; k++) {
+            sum += K(s+k,j) * U(k,col);
+          }
+          sums[static_cast<size_t>(l)] += sum;
         }
-        KU(l,i) += sum;
+      }
+
+      for (int l = 0; l < dof; l++) {
+        KU(l,i) = sums[static_cast<size_t>(l)];
       }
     }
   }
@@ -198,7 +223,6 @@ void fsils_spar_mul_ss(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
     const Vector<double>& U, Vector<double>& KU)
 {
   fsils_int nNo = lhs.nNo;
-  KU = 0.0;
 
   if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
     fsils_spar_mul_ss_range(0, lhs.shnNo, rowPtr, colPtr, K, U, KU);
@@ -216,7 +240,6 @@ void fsils_spar_mul_sv(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
     const Vector<double>& U, Array<double>& KU)
 {
   fsils_int nNo = lhs.nNo;
-  KU = 0.0;
 
   auto compute_range = [&](fsils_int iStart, fsils_int iEnd) {
     switch (dof) {
@@ -244,7 +267,6 @@ void fsils_spar_mul_vs(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
     const Array<double>& U, Vector<double>& KU)
 {
   fsils_int nNo = lhs.nNo;
-  KU = 0.0;
 
   auto compute_range = [&](fsils_int iStart, fsils_int iEnd) {
     switch (dof) {
@@ -272,7 +294,6 @@ void fsils_spar_mul_vv(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
     const Array<double>& U, Array<double>& KU)
 {
   fsils_int nNo = lhs.nNo;
-  KU = 0.0;
 
   auto compute_range = [&](fsils_int iStart, fsils_int iEnd) {
     switch (dof) {

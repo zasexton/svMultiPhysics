@@ -32,44 +32,7 @@
 
 #include "gtest/gtest.h"
 
-#include <cstdlib>
-#include <optional>
-#include <string>
-
 namespace {
-
-class EnvGuard {
-public:
-  EnvGuard(const char* name, const char* value)
-    : name_(name)
-  {
-    const char* prev = std::getenv(name);
-    if (prev != nullptr) {
-      prev_ = std::string(prev);
-    }
-    if (value == nullptr) {
-      unsetenv(name);
-    } else {
-      setenv(name, value, 1);
-    }
-  }
-
-  ~EnvGuard()
-  {
-    if (prev_.has_value()) {
-      setenv(name_.c_str(), prev_->c_str(), 1);
-    } else {
-      unsetenv(name_.c_str());
-    }
-  }
-
-  EnvGuard(const EnvGuard&) = delete;
-  EnvGuard& operator=(const EnvGuard&) = delete;
-
-private:
-  std::string name_;
-  std::optional<std::string> prev_;
-};
 
 void build_diag_lhs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const fe_fsi_linear_solver::fsils_int n)
 {
@@ -123,12 +86,10 @@ TEST(FSILS_PipelinedGMRES, ScalarIdentityMatchesClassic)
   classic.sD = 10;
   classic.absTol = 1e-14;
   classic.relTol = 1e-14;
+  classic.pipelined_gmres = false;
 
   Vector<double> r_classic = rhs;
-  {
-    EnvGuard env("SVMP_FSILS_GMRES_PIPELINED", nullptr);
-    gmres::gmres_s(lhs, classic, /*dof*/1, Val, r_classic);
-  }
+  gmres::gmres_s(lhs, classic, /*dof*/1, Val, r_classic);
   ASSERT_TRUE(classic.suc);
 
   FSILS_subLsType piped{};
@@ -136,12 +97,10 @@ TEST(FSILS_PipelinedGMRES, ScalarIdentityMatchesClassic)
   piped.sD = classic.sD;
   piped.absTol = classic.absTol;
   piped.relTol = classic.relTol;
+  piped.pipelined_gmres = true;
 
   Vector<double> r_pipe = rhs;
-  {
-    EnvGuard env("SVMP_FSILS_GMRES_PIPELINED", "1");
-    gmres::gmres_s(lhs, piped, /*dof*/1, Val, r_pipe);
-  }
+  gmres::gmres_s(lhs, piped, /*dof*/1, Val, r_pipe);
   ASSERT_TRUE(piped.suc);
 
   for (fsils_int i = 0; i < nNo; ++i) {
@@ -178,12 +137,10 @@ TEST(FSILS_PipelinedGMRES, VectorIdentityMatchesClassic)
   classic.sD = 10;
   classic.absTol = 1e-14;
   classic.relTol = 1e-14;
+  classic.pipelined_gmres = false;
 
   Array<double> r_classic = rhs;
-  {
-    EnvGuard env("SVMP_FSILS_GMRES_PIPELINED", nullptr);
-    gmres::gmres_v(lhs, classic, dof, Val, r_classic);
-  }
+  gmres::gmres_v(lhs, classic, dof, Val, r_classic);
   ASSERT_TRUE(classic.suc);
 
   FSILS_subLsType piped{};
@@ -191,12 +148,10 @@ TEST(FSILS_PipelinedGMRES, VectorIdentityMatchesClassic)
   piped.sD = classic.sD;
   piped.absTol = classic.absTol;
   piped.relTol = classic.relTol;
+  piped.pipelined_gmres = true;
 
   Array<double> r_pipe = rhs;
-  {
-    EnvGuard env("SVMP_FSILS_GMRES_PIPELINED", "1");
-    gmres::gmres_v(lhs, piped, dof, Val, r_pipe);
-  }
+  gmres::gmres_v(lhs, piped, dof, Val, r_pipe);
   ASSERT_TRUE(piped.suc);
 
   for (fsils_int i = 0; i < nNo; ++i) {
@@ -208,4 +163,3 @@ TEST(FSILS_PipelinedGMRES, VectorIdentityMatchesClassic)
     EXPECT_NEAR(r_pipe(1, i), r_classic(1, i), 1e-12);
   }
 }
-

@@ -288,24 +288,139 @@ public:
                           assembly::AddMode mode) override
     {
         FE_CHECK_NOT_NULL(matrix_, "FsilsMatrixView::matrix");
-        const GlobalIndex n_rows = static_cast<GlobalIndex>(row_dofs.size());
-        const GlobalIndex n_cols = static_cast<GlobalIndex>(col_dofs.size());
+        const auto n_rows = static_cast<GlobalIndex>(row_dofs.size());
+        const auto n_cols = static_cast<GlobalIndex>(col_dofs.size());
 
         if (local_matrix.size() != static_cast<std::size_t>(n_rows * n_cols)) {
             FE_THROW(InvalidArgumentException, "FsilsMatrixView::addMatrixEntries: local_matrix size mismatch");
         }
 
-        for (GlobalIndex i = 0; i < n_rows; ++i) {
-            const GlobalIndex row = row_dofs[static_cast<std::size_t>(i)];
-            if (row < 0 || row >= matrix_->numRows()) continue;
-
-            for (GlobalIndex j = 0; j < n_cols; ++j) {
-                const GlobalIndex col = col_dofs[static_cast<std::size_t>(j)];
-                if (col < 0 || col >= matrix_->numCols()) continue;
-
-                const auto local_idx = static_cast<std::size_t>(i * n_cols + j);
-                matrix_->addValue(row, col, local_matrix[local_idx], mode);
+        const auto shared = matrix_->shared();
+        if (!shared) {
+            // Fallback: no shared metadata, use per-scalar insertion.
+            for (GlobalIndex i = 0; i < n_rows; ++i) {
+                const GlobalIndex row = row_dofs[static_cast<std::size_t>(i)];
+                if (row < 0 || row >= matrix_->numRows()) continue;
+                for (GlobalIndex j = 0; j < n_cols; ++j) {
+                    const GlobalIndex col = col_dofs[static_cast<std::size_t>(j)];
+                    if (col < 0 || col >= matrix_->numCols()) continue;
+                    const auto local_idx = static_cast<std::size_t>(i * n_cols + j);
+                    matrix_->addValue(row, col, local_matrix[local_idx], mode);
+                }
             }
+            return;
+        }
+
+        const int dof = shared->dof;
+        const auto& lhs = shared->lhs;
+        const auto perm = shared->dof_permutation;
+        const bool have_perm = perm && !perm->empty();
+        const GlobalIndex num_rows_global = matrix_->numRows();
+        const GlobalIndex num_cols_global = matrix_->numCols();
+        const int nNo = lhs.nNo;
+
+        // --- Resolve all DOFs upfront: compute (old_node, component, internal_node) ---
+        struct DofInfo {
+            int old_node;
+            int component;
+            int internal_node;
+        };
+
+        thread_local std::vector<DofInfo> row_info;
+        thread_local std::vector<DofInfo> col_info;
+        row_info.resize(static_cast<std::size_t>(n_rows));
+        col_info.resize(static_cast<std::size_t>(n_cols));
+
+        auto resolve_dof = [&](GlobalIndex fe_dof) -> DofInfo {
+            if (fe_dof < 0 || fe_dof >= num_rows_global) {
+                return {-1, -1, -1};
+            }
+            GlobalIndex fs_dof = fe_dof;
+            if (have_perm) {
+                if (static_cast<std::size_t>(fe_dof) >= perm->forward.size()) {
+                    return {-1, -1, -1};
+                }
+                fs_dof = perm->forward[static_cast<std::size_t>(fe_dof)];
+            }
+            if (fs_dof < 0 || fs_dof >= num_rows_global) {
+                return {-1, -1, -1};
+            }
+            const int global_node = static_cast<int>(fs_dof / dof);
+            const int comp = static_cast<int>(fs_dof % dof);
+            const int old = shared->globalNodeToOld(global_node);
+            if (old < 0 || old >= nNo) {
+                return {-1, -1, -1};
+            }
+            return {old, comp, lhs.map(old)};
+        };
+
+        for (GlobalIndex i = 0; i < n_rows; ++i) {
+            row_info[static_cast<std::size_t>(i)] = resolve_dof(row_dofs[static_cast<std::size_t>(i)]);
+        }
+        for (GlobalIndex j = 0; j < n_cols; ++j) {
+            col_info[static_cast<std::size_t>(j)] = resolve_dof(col_dofs[static_cast<std::size_t>(j)]);
+        }
+
+        // --- Iterate by node pairs, building dof*dof sub-blocks ---
+        thread_local std::vector<Real> block_buf;
+        const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
+        block_buf.resize(block_size);
+
+        for (GlobalIndex i0 = 0; i0 < n_rows; ) {
+            const auto& ri0 = row_info[static_cast<std::size_t>(i0)];
+            if (ri0.old_node < 0) { ++i0; continue; }
+
+            // Find run of row DOFs sharing the same node.
+            GlobalIndex i1 = i0 + 1;
+            while (i1 < n_rows && row_info[static_cast<std::size_t>(i1)].old_node == ri0.old_node) {
+                ++i1;
+            }
+
+            for (GlobalIndex j0 = 0; j0 < n_cols; ) {
+                const auto& ci0 = col_info[static_cast<std::size_t>(j0)];
+                if (ci0.old_node < 0) { ++j0; continue; }
+
+                // Find run of col DOFs sharing the same node.
+                GlobalIndex j1 = j0 + 1;
+                while (j1 < n_cols && col_info[static_cast<std::size_t>(j1)].old_node == ci0.old_node) {
+                    ++j1;
+                }
+
+                // Check if this is a complete dof*dof block (common case).
+                const GlobalIndex row_run = i1 - i0;
+                const GlobalIndex col_run = j1 - j0;
+
+                if (row_run == dof && col_run == dof) {
+                    // Build the full dof*dof block.
+                    // Block layout: block_entry_index(dof, r, c) = r * dof + c
+                    std::fill(block_buf.begin(), block_buf.begin() + static_cast<std::ptrdiff_t>(block_size), Real(0));
+                    for (GlobalIndex di = i0; di < i1; ++di) {
+                        const int r = row_info[static_cast<std::size_t>(di)].component;
+                        for (GlobalIndex dj = j0; dj < j1; ++dj) {
+                            const int c = col_info[static_cast<std::size_t>(dj)].component;
+                            const auto local_idx = static_cast<std::size_t>(di * n_cols + dj);
+                            block_buf[block_entry_index(dof, r, c)] = local_matrix[local_idx];
+                        }
+                    }
+                    matrix_->addBlock(ri0.internal_node, ci0.internal_node,
+                                      block_buf.data(), dof, mode);
+                } else {
+                    // Partial block: fall back to per-scalar insertion for this node pair.
+                    for (GlobalIndex di = i0; di < i1; ++di) {
+                        const auto& ri = row_info[static_cast<std::size_t>(di)];
+                        for (GlobalIndex dj = j0; dj < j1; ++dj) {
+                            const auto& ci = col_info[static_cast<std::size_t>(dj)];
+                            const auto local_idx = static_cast<std::size_t>(di * n_cols + dj);
+                            matrix_->addValue(row_dofs[static_cast<std::size_t>(di)],
+                                              col_dofs[static_cast<std::size_t>(dj)],
+                                              local_matrix[local_idx], mode);
+                        }
+                    }
+                }
+
+                j0 = j1;
+            }
+            i0 = i1;
         }
     }
 
@@ -527,6 +642,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
     fe_fsi_linear_solver::fsils_lhs_create(shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0);
 
     build_old_of_internal(*shared);
+    shared->buildGlobalToOldTable();
 
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     values_.assign(static_cast<std::size_t>(nnz) * block_size, 0.0);
@@ -842,6 +958,7 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     fe_fsi_linear_solver::fsils_lhs_create(shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0);
 
     build_old_of_internal(*shared);
+    shared->buildGlobalToOldTable();
 
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     values_.assign(static_cast<std::size_t>(nnz) * block_size, 0.0);
@@ -1086,6 +1203,62 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
             break;
         case assembly::AddMode::Min:
             dst = std::min(dst, value);
+            break;
+    }
+}
+
+void FsilsMatrix::addBlock(int row_internal, int col_internal, const Real* block_data,
+                           int dof, assembly::AddMode mode)
+{
+    const auto& lhs = shared_->lhs;
+    const int nNo = lhs.nNo;
+    if (row_internal < 0 || row_internal >= nNo || col_internal < 0 || col_internal >= nNo) {
+        return;
+    }
+
+    const int start = lhs.rowPtr(0, row_internal);
+    const int end = lhs.rowPtr(1, row_internal);
+    if (start < 0 || end < start || end >= lhs.nnz) {
+        return;
+    }
+    const auto* cols = lhs.colPtr.data();
+    const auto* begin = cols + start;
+    const auto* finish = cols + end + 1;
+    const auto it = std::lower_bound(begin, finish, static_cast<fe_fsi_linear_solver::fsils_int>(col_internal));
+    if (it == finish || *it != col_internal) {
+        dropped_entry_count_.fetch_add(static_cast<std::uint64_t>(dof) * static_cast<std::uint64_t>(dof),
+                                       std::memory_order_relaxed);
+        return;
+    }
+
+    const int nnz_idx = static_cast<int>(it - cols);
+    const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
+    const std::size_t base = static_cast<std::size_t>(nnz_idx) * block_size;
+    if (base + block_size > values_.size()) {
+        return;
+    }
+    Real* dst = values_.data() + base;
+
+    switch (mode) {
+        case assembly::AddMode::Add:
+            for (std::size_t k = 0; k < block_size; ++k) {
+                dst[k] += block_data[k];
+            }
+            break;
+        case assembly::AddMode::Insert:
+            for (std::size_t k = 0; k < block_size; ++k) {
+                dst[k] = block_data[k];
+            }
+            break;
+        case assembly::AddMode::Max:
+            for (std::size_t k = 0; k < block_size; ++k) {
+                dst[k] = std::max(dst[k], block_data[k]);
+            }
+            break;
+        case assembly::AddMode::Min:
+            for (std::size_t k = 0; k < block_size; ++k) {
+                dst[k] = std::min(dst[k], block_data[k]);
+            }
             break;
     }
 }

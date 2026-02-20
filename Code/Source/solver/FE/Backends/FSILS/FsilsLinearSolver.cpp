@@ -227,8 +227,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     const GlobalIndex nnz = A->fsilsNnz();
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     const std::size_t value_count = static_cast<std::size_t>(nnz) * block_size;
-    std::vector<Real> values_work(value_count);
-    std::copy(A->fsilsValuesPtr(), A->fsilsValuesPtr() + value_count, values_work.data());
+    values_work_.resize(value_count);
+    std::copy(A->fsilsValuesPtr(), A->fsilsValuesPtr() + value_count, values_work_.data());
 
     // Copy RHS into solution buffer (FSILS uses Ri as in/out). Avoid reallocation so
     // Array views into `x->data()` remain valid across fallback solves.
@@ -240,7 +240,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     Array<double> Ri(dof, lhs.nNo, x_data.data());
     FE_THROW_IF(nnz > static_cast<GlobalIndex>(std::numeric_limits<int>::max()), InvalidArgumentException,
                 "FsilsLinearSolver::solve: nnz exceeds FSILS int index range");
-    Array<double> Val(dof * dof, static_cast<int>(nnz), values_work.data());
+    Array<double> Val(dof * dof, static_cast<int>(nnz), values_work_.data());
 
     // Optional scaling used for the BlockSchur solver path.
     //
@@ -270,7 +270,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
         // Left-scale momentum rows.
         for (GlobalIndex bi = 0; bi < nnz; ++bi) {
-            Real* blk = values_work.data() + static_cast<std::size_t>(bi) * block_size;
+            Real* blk = values_work_.data() + static_cast<std::size_t>(bi) * block_size;
             for (int r = mom_start; r < mom_start + mom_ncomp; ++r) {
                 for (int c = 0; c < dof; ++c) {
                     blk[static_cast<std::size_t>(r * dof + c)] *= s;
@@ -286,7 +286,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     };
 
     auto restoreAndScaleMatrixValues = [&]() {
-        std::copy(A->fsilsValuesPtr(), A->fsilsValuesPtr() + value_count, values_work.data());
+        std::copy(A->fsilsValuesPtr(), A->fsilsValuesPtr() + value_count, values_work_.data());
         applyStageScalingToMatrix();
     };
 
@@ -346,8 +346,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                         continue;
                     }
 
-                    Real* blk = values_work.data() + static_cast<std::size_t>(idx) * blk_size;
-                    Real* blk_t = values_work.data() + static_cast<std::size_t>(idx_t) * blk_size;
+                    Real* blk = values_work_.data() + static_cast<std::size_t>(idx) * blk_size;
+                    Real* blk_t = values_work_.data() + static_cast<std::size_t>(idx_t) * blk_size;
 
                     // top-right: rows [mom_start..mom_start+mom_ncomp), cols [con_start..con_start+con_ncomp)
                     // bottom-left at transpose: rows [con_start..con_start+con_ncomp), cols [mom_start..mom_start+mom_ncomp)
@@ -377,7 +377,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
     }
 
-	    fe_fsi_linear_solver::FSILS_lsType ls{};
+	    auto& ls = ls_;
 		    if (options_.method == SolverMethod::BlockSchur) {
 	        // FSILS BlockSchur solver uses RI.mItr as a basis dimension and allocates O(nNo * mItr) workspace.
 	        // Treat very large generic max_iter as "unset" and fall back to the FSILS default (10) for safety.
@@ -425,8 +425,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 		            // (mItr, sD) such that the worst-case iteration count does not exceed max_iter.
 		            int sD = options_.krylov_dim;
 		            if (sD <= 0) {
-		                // Keep default restart length modest to limit workspace.
-		                sD = std::max(0, std::min(50, options_.max_iter) - 1);
+		                // Match FSILS default: sD = 250 (see fsils_ls_create).
+		                sD = std::max(0, std::min(250, options_.max_iter) - 1);
 		            }
 		            const int sD_max = std::max(0, options_.max_iter - 1);
 		            sD = std::clamp(sD, 0, sD_max);

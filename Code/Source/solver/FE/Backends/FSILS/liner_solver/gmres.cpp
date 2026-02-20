@@ -89,27 +89,6 @@ constexpr int DOT_THREAD_PAD = 8; // doubles (64 bytes) to reduce false sharing
 #endif
 }
 
-[[nodiscard]] bool gmres_pipelined_enabled() noexcept
-{
-  const char* env = std::getenv("SVMP_FSILS_GMRES_PIPELINED");
-  if (env == nullptr) {
-    env = std::getenv("SVMP_FSILS_PIPE_GMRES");
-  }
-  if (env == nullptr) {
-    env = std::getenv("SVMP_FSILS_PIPEFGMRES");
-  }
-  if (env == nullptr) {
-    return false;
-  }
-  while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
-    ++env;
-  }
-  if (*env == '\0') {
-    return false;
-  }
-  return *env != '0';
-}
-
 // =======================================================================
 // FUSED CACHE-BLOCKED VECTOR KERNELS (GEMV-like Operations)
 // Reduces O(i) DRAM passes over the grid to O(1) during Gram-Schmidt
@@ -536,6 +515,92 @@ void fused_update_v_inplace(const int dof, const fsils_int nNo, Array3<double>& 
 }
 
 template <int DOF>
+void fused_copy_update_v_inplace_impl(const fsils_int nNo, const double* src, Array3<double>& u, const int i, Array<double>& u_next,
+                                      const std::vector<double>& h_factors)
+{
+  const int num_vecs = i + 1;
+  double* v = u_next.data();
+
+  #pragma omp parallel for schedule(static)
+  for (fsils_int k_start = 0; k_start < nNo; k_start += BLOCK_SIZE) {
+    const fsils_int k_end = std::min(k_start + BLOCK_SIZE, nNo);
+    const fsils_int blk_nodes = k_end - k_start;
+    const size_t blk_elems = static_cast<size_t>(blk_nodes) * static_cast<size_t>(DOF);
+
+    alignas(64) double vbuf[DOF * BLOCK_SIZE];
+    const double* src_block = src + static_cast<size_t>(k_start) * static_cast<size_t>(DOF);
+
+    #pragma omp simd
+    for (size_t idx = 0; idx < blk_elems; ++idx) {
+      vbuf[idx] = src_block[idx];
+    }
+
+    for (int j = 0; j < num_vecs; ++j) {
+      const double hj = h_factors[j];
+      if (hj == 0.0) {
+        continue;
+      }
+
+      const double* uj_block = u.slice_data(j) + static_cast<size_t>(k_start) * static_cast<size_t>(DOF);
+      #pragma omp simd
+      for (size_t idx = 0; idx < blk_elems; ++idx) {
+        vbuf[idx] -= hj * uj_block[idx];
+      }
+    }
+
+    double* v_block = v + static_cast<size_t>(k_start) * static_cast<size_t>(DOF);
+    #pragma omp simd
+    for (size_t idx = 0; idx < blk_elems; ++idx) {
+      v_block[idx] = vbuf[idx];
+    }
+  }
+}
+
+void fused_copy_update_v_inplace_dyn(const int dof, const fsils_int nNo, const double* src, Array3<double>& u, const int i, Array<double>& u_next,
+                                     const std::vector<double>& h_factors)
+{
+  const int num_vecs = i + 1;
+  double* v = u_next.data();
+
+  #pragma omp parallel for schedule(static)
+  for (fsils_int k_start = 0; k_start < nNo; k_start += BLOCK_SIZE) {
+    const fsils_int k_end = std::min(k_start + BLOCK_SIZE, nNo);
+    const size_t block_offset = static_cast<size_t>(k_start) * static_cast<size_t>(dof);
+    const size_t blk_elems = static_cast<size_t>(k_end - k_start) * static_cast<size_t>(dof);
+
+    const double* src_block = src + block_offset;
+    double* vv = v + block_offset;
+    for (size_t idx = 0; idx < blk_elems; ++idx) {
+      vv[idx] = src_block[idx];
+    }
+
+    for (int j = 0; j < num_vecs; ++j) {
+      const double hj = h_factors[j];
+      if (hj == 0.0) {
+        continue;
+      }
+
+      const double* uj = u.slice_data(j) + block_offset;
+      for (size_t idx = 0; idx < blk_elems; ++idx) {
+        vv[idx] -= hj * uj[idx];
+      }
+    }
+  }
+}
+
+void fused_copy_update_v_inplace(const int dof, const fsils_int nNo, const double* src, Array3<double>& u, const int i, Array<double>& u_next,
+                                 const std::vector<double>& h_factors)
+{
+  switch (dof) {
+    case 1: fused_copy_update_v_inplace_impl<1>(nNo, src, u, i, u_next, h_factors); break;
+    case 2: fused_copy_update_v_inplace_impl<2>(nNo, src, u, i, u_next, h_factors); break;
+    case 3: fused_copy_update_v_inplace_impl<3>(nNo, src, u, i, u_next, h_factors); break;
+    case 4: fused_copy_update_v_inplace_impl<4>(nNo, src, u, i, u_next, h_factors); break;
+    default: fused_copy_update_v_inplace_dyn(dof, nNo, src, u, i, u_next, h_factors); break;
+  }
+}
+
+template <int DOF>
 void fused_recon_v_impl(const fsils_int nNo, Array3<double>& u, const int last_i, Array<double>& X, const Vector<double>& y)
 {
   const int num_vecs = last_i + 1;
@@ -816,6 +881,46 @@ void fused_update_s_inplace(const fsils_int nNo, Array<double>& u, const int i, 
   }
 }
 
+void fused_copy_update_s_inplace(const fsils_int nNo, const double* src, Array<double>& u, const int i, Vector<double>& u_next,
+                                 const std::vector<double>& h_factors)
+{
+  const int num_vecs = i + 1;
+  double* v = u_next.data();
+
+  #pragma omp parallel for schedule(static)
+  for (fsils_int k_start = 0; k_start < nNo; k_start += BLOCK_SIZE) {
+    const fsils_int k_end = std::min(k_start + BLOCK_SIZE, nNo);
+    const fsils_int blk_nodes = k_end - k_start;
+
+    alignas(64) double vbuf[BLOCK_SIZE];
+    const double* src_block = src + static_cast<size_t>(k_start);
+
+    #pragma omp simd
+    for (fsils_int idx = 0; idx < blk_nodes; ++idx) {
+      vbuf[idx] = src_block[static_cast<size_t>(idx)];
+    }
+
+    for (int j = 0; j < num_vecs; ++j) {
+      const double hj = h_factors[j];
+      if (hj == 0.0) {
+        continue;
+      }
+
+      const double* uj_block = u.col_data(j) + static_cast<size_t>(k_start);
+      #pragma omp simd
+      for (fsils_int idx = 0; idx < blk_nodes; ++idx) {
+        vbuf[idx] -= hj * uj_block[static_cast<size_t>(idx)];
+      }
+    }
+
+    double* v_block = v + static_cast<size_t>(k_start);
+    #pragma omp simd
+    for (fsils_int idx = 0; idx < blk_nodes; ++idx) {
+      v_block[static_cast<size_t>(idx)] = vbuf[idx];
+    }
+  }
+}
+
 void fused_recon_s(const fsils_int nNo, Array<double>& u, const int last_i, Vector<double>& X, const Vector<double>& y)
 {
   const int num_vecs = last_i + 1;
@@ -913,6 +1018,12 @@ void gmres_pipelined(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_sol
   double eps = 0.0;
   int last_i = 0;
   X = 0.0;
+
+  // Stagnation detection (see gmres_v for rationale).
+  double prev_fNorm = 0.0;
+  int stagnation_count = 0;
+  constexpr int max_stagnation_restarts = 5;
+  constexpr double stagnation_ratio = 0.95;
 
   for (int l = 0; l < ls.mItr; l++) {
     auto v0 = v.rslice(0);
@@ -1041,8 +1152,7 @@ void gmres_pipelined(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_sol
       const double inv_tt = 1.0 / tt;
 
       auto vnext = v.rslice(i+1);
-      omp_la::omp_axpby_v(dof, nNo, vnext, zi, 0.0, zi);
-      fused_update_v_inplace(dof, nNo, v, i, vnext, h_col);
+      fused_copy_update_v_inplace(dof, nNo, zi.data(), v, i, vnext, h_col);
       omp_la::omp_mul_v(dof, nNo, inv_tt, vnext);
 
       auto znext = z.rslice(i+1);
@@ -1069,6 +1179,17 @@ void gmres_pipelined(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_sol
 
     ls.fNorm = std::abs(err(last_i+1));
     if (ls.suc) {
+      break;
+    }
+
+    // Stagnation detection (see gmres_v for rationale).
+    if (prev_fNorm > 0.0 && ls.fNorm >= stagnation_ratio * prev_fNorm) {
+      stagnation_count++;
+    } else {
+      stagnation_count = 0;
+    }
+    prev_fNorm = ls.fNorm;
+    if (stagnation_count >= max_stagnation_restarts) {
       break;
     }
   }
@@ -1116,6 +1237,12 @@ void gmres_s_pipelined(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_s
     ls.dB = 0.0;
     return;
   }
+
+  // Stagnation detection (see gmres_v for rationale).
+  double prev_fNorm = ls.fNorm;
+  int stagnation_count = 0;
+  constexpr int max_stagnation_restarts = 5;
+  constexpr double stagnation_ratio = 0.95;
 
   for (int l = 0; l < ls.mItr; l++) {
     ls.dB = ls.fNorm;
@@ -1221,8 +1348,7 @@ void gmres_s_pipelined(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_s
       const double inv_tt = 1.0 / tt;
 
       auto vnext = v.rcol(i+1);
-      omp_la::omp_axpby_s(nNo, vnext, zi, 0.0, zi);
-      fused_update_s_inplace(nNo, v, i, vnext, h_col);
+      fused_copy_update_s_inplace(nNo, zi.data(), v, i, vnext, h_col);
       omp_la::omp_mul_s(nNo, inv_tt, vnext);
 
       auto znext = z.rcol(i+1);
@@ -1249,6 +1375,17 @@ void gmres_s_pipelined(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_s
 
     ls.fNorm = std::abs(err(last_i+1));
     if (ls.suc) {
+      break;
+    }
+
+    // Stagnation detection (see gmres_v for rationale).
+    if (prev_fNorm > 0.0 && ls.fNorm >= stagnation_ratio * prev_fNorm) {
+      stagnation_count++;
+    } else {
+      stagnation_count = 0;
+    }
+    prev_fNorm = ls.fNorm;
+    if (stagnation_count >= max_stagnation_restarts) {
       break;
     }
   }
@@ -1297,6 +1434,12 @@ void gmres_v_pipelined(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_s
     ls.dB = 0.0;
     return;
   }
+
+  // Stagnation detection (see gmres_v for rationale).
+  double prev_fNorm = ls.fNorm;
+  int stagnation_count = 0;
+  constexpr int max_stagnation_restarts = 5;
+  constexpr double stagnation_ratio = 0.95;
 
   for (int l = 0; l < ls.mItr; l++) {
     ls.dB = ls.fNorm;
@@ -1406,8 +1549,7 @@ void gmres_v_pipelined(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_s
       const double inv_tt = 1.0 / tt;
 
       auto vnext = v.rslice(i+1);
-      omp_la::omp_axpby_v(dof, nNo, vnext, zi, 0.0, zi);
-      fused_update_v_inplace(dof, nNo, v, i, vnext, h_col);
+      fused_copy_update_v_inplace(dof, nNo, zi.data(), v, i, vnext, h_col);
       omp_la::omp_mul_v(dof, nNo, inv_tt, vnext);
 
       auto znext = z.rslice(i+1);
@@ -1434,6 +1576,17 @@ void gmres_v_pipelined(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_s
 
     ls.fNorm = std::abs(err(last_i+1));
     if (ls.suc) {
+      break;
+    }
+
+    // Stagnation detection (see gmres_v for rationale).
+    if (prev_fNorm > 0.0 && ls.fNorm >= stagnation_ratio * prev_fNorm) {
+      stagnation_count++;
+    } else {
+      stagnation_count = 0;
+    }
+    prev_fNorm = ls.fNorm;
+    if (stagnation_count >= max_stagnation_restarts) {
       break;
     }
   }
@@ -1502,7 +1655,7 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
   const bool has_coupled_bc = std::any_of(lhs.face.begin(), lhs.face.end(),
       [](const auto& face) { return face.coupledFlag; });
 
-  if (ls.pipelined_gmres || gmres_pipelined_enabled()) {
+  if (ls.pipelined_gmres) {
     gmres_pipelined(lhs, ls, dof, Val, R, X, has_coupled_bc);
     return;
   }
@@ -1527,6 +1680,12 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
   const int num_threads = max_omp_threads();
   ls.ws.ensure_gmres_dot_thread(num_threads, thread_stride);
   auto& dot_thread = ls.ws.dot_thread;
+
+  // Stagnation detection (see gmres_v for rationale).
+  double prev_fNorm = 0.0;
+  int stagnation_count = 0;
+  constexpr int max_stagnation_restarts = 5;
+  constexpr double stagnation_ratio = 0.95;
 
   for (int l = 0; l < ls.mItr; l++) {
     auto u_slice = u.rslice(0);
@@ -1656,6 +1815,17 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
 
     ls.fNorm = std::abs(err(last_i+1));
     if (ls.suc) break;
+
+    // Stagnation detection (see gmres_v for rationale).
+    if (prev_fNorm > 0.0 && ls.fNorm >= stagnation_ratio * prev_fNorm) {
+      stagnation_count++;
+    } else {
+      stagnation_count = 0;
+    }
+    prev_fNorm = ls.fNorm;
+    if (stagnation_count >= max_stagnation_restarts) {
+      break;
+    }
   }
 
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - time + ls.callD;
@@ -1674,7 +1844,7 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
 
-  if (ls.pipelined_gmres || gmres_pipelined_enabled()) {
+  if (ls.pipelined_gmres) {
     gmres_s_pipelined(lhs, ls, Val, R);
     return;
   }
@@ -1710,6 +1880,12 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   const int num_threads = max_omp_threads();
   ls.ws.ensure_gmres_dot_thread(num_threads, thread_stride);
   auto& dot_thread = ls.ws.dot_thread;
+
+  // Stagnation detection (see gmres_v for rationale).
+  double prev_fNorm = ls.fNorm;
+  int stagnation_count = 0;
+  constexpr int max_stagnation_restarts = 5;
+  constexpr double stagnation_ratio = 0.95;
 
   for (int l = 0; l < ls.mItr; l++) {
     ls.dB = ls.fNorm;
@@ -1807,6 +1983,17 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 
     ls.fNorm = std::abs(err(last_i+1));
     if (ls.suc) break;
+
+    // Stagnation detection (see gmres_v for rationale).
+    if (prev_fNorm > 0.0 && ls.fNorm >= stagnation_ratio * prev_fNorm) {
+      stagnation_count++;
+    } else {
+      stagnation_count = 0;
+    }
+    prev_fNorm = ls.fNorm;
+    if (stagnation_count >= max_stagnation_restarts) {
+      break;
+    }
   }
 
   R = X;
@@ -1830,7 +2017,7 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   const bool has_coupled_bc = std::any_of(lhs.face.begin(), lhs.face.end(),
       [](const auto& face) { return face.coupledFlag; });
 
-  if (ls.pipelined_gmres || gmres_pipelined_enabled()) {
+  if (ls.pipelined_gmres) {
     bc_pre(lhs, ls, dof, mynNo, nNo);
     gmres_v_pipelined(lhs, ls, dof, Val, R, has_coupled_bc);
     return;
@@ -1871,6 +2058,14 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   ls.ws.ensure_gmres_dot_thread(num_threads, thread_stride);
   auto& dot_thread = ls.ws.dot_thread;
 
+  // Stagnation detection: terminate early if residual stops improving.
+  // With restarted GMRES and a weak preconditioner, stagnation wastes
+  // thousands of iterations (e.g. 51000 on an ill-conditioned system).
+  double prev_fNorm = ls.fNorm;
+  int stagnation_count = 0;
+  constexpr int max_stagnation_restarts = 5;
+  constexpr double stagnation_ratio = 0.95;
+
   for (int l = 0; l < ls.mItr; l++) {
     ls.dB = ls.fNorm;
     ls.itr++;
@@ -1881,10 +2076,11 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 
     omp_la::omp_axpby_v(dof, nNo, u_slice, R, -1.0, u_slice);
 
-    if (has_coupled_bc) {
-      auto unCondU_ref = u.rslice(0);
-      add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, unCondU_ref, u_slice);
-    }
+    // Note: BCOP_TYPE_PRE is NOT applied in the standard GMRESV path.
+    // The original Fortran GMRESV had `flag = .FALSE.` which prevented PRE
+    // from ever being applied. Only the pipelined GMRES variant applies PRE,
+    // as its two-basis-vector structure (v, z) handles the preconditioner
+    // correction correctly. Applying PRE here causes divergence.
 
     err[0] = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u.rslice(0));
     if (std::abs(err[0]) <= std::numeric_limits<double>::epsilon()) {
@@ -1901,11 +2097,6 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 
       spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, u_slice_prev, u_slice_next);
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, u_slice_prev, u_slice_next);
-
-      if (has_coupled_bc) {
-        auto unCondU_ref = u.rslice(i+1);
-        add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, unCondU_ref, u_slice_next);
-      }
 
       // --- CGS Step 1 ---
       fused_dot_v(dof, mynNo, u, i, u_slice_next, h_col, dot_thread.data(), thread_stride, num_threads);
@@ -1980,6 +2171,19 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 
     ls.fNorm = std::abs(err(last_i+1));
     if (ls.suc) break;
+
+    // Stagnation detection: if residual hasn't improved by at least
+    // (1 - stagnation_ratio) for max_stagnation_restarts consecutive
+    // restarts, the preconditioner is too weak for this system.
+    if (prev_fNorm > 0.0 && ls.fNorm >= stagnation_ratio * prev_fNorm) {
+      stagnation_count++;
+    } else {
+      stagnation_count = 0;
+    }
+    prev_fNorm = ls.fNorm;
+    if (stagnation_count >= max_stagnation_restarts) {
+      break;
+    }
   }
 
   R = X;

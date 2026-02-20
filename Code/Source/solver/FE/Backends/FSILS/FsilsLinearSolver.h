@@ -9,6 +9,7 @@
 #define SVMP_FE_BACKENDS_FSILS_LINEAR_SOLVER_H
 
 #include "Backends/Interfaces/LinearSolver.h"
+#include "Backends/FSILS/liner_solver/fils_struct.hpp"
 
 namespace svmp {
 namespace FE {
@@ -37,6 +38,11 @@ private:
     std::vector<RankOneUpdate> rank_one_updates_{};
     std::vector<GlobalIndex> dirichlet_dofs_{};
     double dt_eff_{1.0};
+
+    // Cached across Newton iterations to avoid re-allocating Krylov workspace.
+    mutable fe_fsi_linear_solver::FSILS_lsType ls_{};
+    // Cached matrix copy buffer to avoid re-allocating each solve.
+    mutable std::vector<Real> values_work_{};
 };
 
 } // namespace backends

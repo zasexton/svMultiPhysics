@@ -180,9 +180,13 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
        opts.method == svmp::FE::backends::SolverMethod::PGMRES ||
        opts.method == svmp::FE::backends::SolverMethod::FGMRES) &&
       eq->linear_solver.max_iterations.defined()) {
+    // FSILS GMRES default: sD = 250 (see fsils_ls_create in ls.cpp).
+    // The old hardcoded default of 50 was too small, causing restarted GMRES
+    // to stagnate on ill-conditioned systems (e.g. 2nd Newton iteration of
+    // Navier-Stokes with diagonal preconditioning).
     const int legacy_restart_len = eq->linear_solver.krylov_space_dimension.defined()
                                       ? eq->linear_solver.krylov_space_dimension.value()
-                                      : 50;
+                                      : 250;
     const int restart_len = std::max(0, legacy_restart_len);
     opts.krylov_dim = restart_len;
 

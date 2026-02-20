@@ -30,6 +30,8 @@
 
 #include "add_bc_mul.h"
 
+#include <vector>
+
 namespace add_bc_mul {
 
 /// @brief The contribution of coupled BCs is added to the matrix-vector
@@ -50,6 +52,14 @@ namespace add_bc_mul {
 /// The expression is slightly different if preconditioning.
 void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const Array<double>& X, Array<double>& Y)
 {
+  thread_local std::vector<int> shared_face_indices;
+  thread_local std::vector<double> shared_face_dot;
+
+  shared_face_indices.clear();
+  shared_face_dot.clear();
+  shared_face_indices.reserve(static_cast<size_t>(lhs.nFaces));
+  shared_face_dot.reserve(static_cast<size_t>(lhs.nFaces));
+
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
     auto& face = lhs.face[faIn];
     const int face_dof = std::min(face.dof, dof);
@@ -76,20 +86,8 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
             }
           }
         }
-
-        double S = local_S;
-        if (lhs.commu.nTasks > 1) {
-          MPI_Allreduce(&local_S, &S, 1, cm_mod::mpreal, MPI_SUM, lhs.commu.comm);
-        }
-        S *= coef;
-
-        // Computing Y = Y + valM * S
-        for (int a = 0; a < face.nNo; a++) {
-          int Ac = face.glob(a);
-          for (int i = 0; i < face_dof; i++) {
-            Y(i,Ac) = Y(i,Ac) + face.valM(i,a) * S;
-          }
-        }
+        shared_face_indices.push_back(faIn);
+        shared_face_dot.push_back(local_S);
 
       }
       // If face is not shared across procs
@@ -110,6 +108,35 @@ void add_bc_mul(FSILS_lhsType& lhs, const BcopType op_Type, const int dof, const
           for (int i = 0; i < face_dof; i++) {
             Y(i,Ac) = Y(i,Ac) + face.valM(i,a)*S;
           }
+        }
+      }
+    }
+  }
+
+  if (!shared_face_indices.empty()) {
+    if (lhs.commu.nTasks > 1) {
+      const int count = static_cast<int>(shared_face_dot.size());
+      MPI_Allreduce(MPI_IN_PLACE, shared_face_dot.data(), count, cm_mod::mpreal, MPI_SUM, lhs.commu.comm);
+    }
+
+    for (size_t idx = 0; idx < shared_face_indices.size(); ++idx) {
+      auto& face = lhs.face[shared_face_indices[idx]];
+      const int face_dof = std::min(face.dof, dof);
+
+      double coef;
+      if (op_Type == BcopType::BCOP_TYPE_ADD) {
+        coef = face.res;
+      } else {
+        coef = -face.res / (1.0 + (face.res * face.nS));
+      }
+
+      const double S = shared_face_dot[idx] * coef;
+
+      // Computing Y = Y + valM * S
+      for (int a = 0; a < face.nNo; a++) {
+        const int Ac = face.glob(a);
+        for (int i = 0; i < face_dof; i++) {
+          Y(i,Ac) = Y(i,Ac) + face.valM(i,a) * S;
         }
       }
     }

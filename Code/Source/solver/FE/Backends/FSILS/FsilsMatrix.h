@@ -72,6 +72,11 @@ public:
     /// Reset the dropped-entry counter to zero.
     static void resetDroppedEntryCount() noexcept;
 
+    /// Insert a dof*dof block for a single (row_internal, col_internal) node pair.
+    /// Does ONE CSR column lookup instead of dof*dof individual lookups.
+    void addBlock(int row_internal, int col_internal, const Real* block_data,
+                  int dof, assembly::AddMode mode);
+
 private:
     static std::atomic<std::uint64_t> dropped_entry_count_;
     GlobalIndex global_rows_{0};
