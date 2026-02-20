@@ -43,6 +43,27 @@ private:
     mutable fe_fsi_linear_solver::FSILS_lsType ls_{};
     // Cached matrix copy buffer to avoid re-allocating each solve.
     mutable std::vector<Real> values_work_{};
+    // Cached RHS permutation buffer to avoid re-allocating each solve.
+    mutable std::vector<double> r_internal_work_{};
+
+    // Cached face data to avoid re-building faces every Newton iteration.
+    // Face construction involves std::map allocation, sorting, and MPI_Allreduce
+    // for shared face sync. The data only changes when setDirichletDofs() or
+    // setRankOneUpdates() is called.
+    struct CachedFace {
+        int nNo = 0;
+        int face_dof = 0;
+        fe_fsi_linear_solver::BcType bGrp{};
+        std::vector<int> glob_data;
+        std::vector<double> val_data;
+        std::vector<double> valM_data;
+        bool sharedFlag = false;
+        bool foC = false;
+        bool coupledFlag = false;
+        bool incFlag = false;
+    };
+    mutable bool faces_dirty_ = true;
+    mutable std::vector<CachedFace> cached_faces_;
 };
 
 } // namespace backends

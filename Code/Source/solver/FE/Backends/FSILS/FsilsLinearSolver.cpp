@@ -68,15 +68,26 @@ void FsilsLinearSolver::setOptions(const SolverOptions& options)
 
 void FsilsLinearSolver::setRankOneUpdates(std::span<const RankOneUpdate> updates)
 {
+    // Only dirty face cache if the update set actually changed.
+    // When both old and new are empty (common case), skip the dirty flag.
+    const bool was_empty = rank_one_updates_.empty();
+    const bool now_empty = updates.empty();
     rank_one_updates_.assign(updates.begin(), updates.end());
+    if (was_empty && now_empty) {
+        return;  // No change — don't dirty face cache.
+    }
+    faces_dirty_ = true;
 }
 
 void FsilsLinearSolver::setDirichletDofs(std::span<const GlobalIndex> dofs)
 {
-    dirichlet_dofs_.assign(dofs.begin(), dofs.end());
-    std::sort(dirichlet_dofs_.begin(), dirichlet_dofs_.end());
-    dirichlet_dofs_.erase(std::unique(dirichlet_dofs_.begin(), dirichlet_dofs_.end()),
-                          dirichlet_dofs_.end());
+    std::vector<GlobalIndex> new_dofs(dofs.begin(), dofs.end());
+    std::sort(new_dofs.begin(), new_dofs.end());
+    new_dofs.erase(std::unique(new_dofs.begin(), new_dofs.end()), new_dofs.end());
+    if (new_dofs != dirichlet_dofs_) {
+        dirichlet_dofs_ = std::move(new_dofs);
+        faces_dirty_ = true;
+    }
 }
 
 void FsilsLinearSolver::setEffectiveTimeStep(double dt_eff)
@@ -223,12 +234,18 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                     std::to_string(cb.n_components) + " != dof=" + std::to_string(dof) + ")");
     }
 
-    // FSILS may modify the matrix values during preconditioning/solve; work on a copy.
+    // FSILS destructively modifies the matrix during preconditioning/solve.
+    // BlockSchur needs a copy for its restoreAndScaleMatrixValues() fallback path.
+    // For other solvers, the OOP assembler rebuilds the matrix each Newton iteration,
+    // so we can let FSILS modify the original values directly (avoids the full copy).
     const GlobalIndex nnz = A->fsilsNnz();
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     const std::size_t value_count = static_cast<std::size_t>(nnz) * block_size;
-    values_work_.resize(value_count);
-    std::copy(A->fsilsValuesPtr(), A->fsilsValuesPtr() + value_count, values_work_.data());
+    const bool need_matrix_copy = (options_.method == SolverMethod::BlockSchur);
+    if (need_matrix_copy) {
+        values_work_.resize(value_count);
+        std::copy(A->fsilsValuesPtr(), A->fsilsValuesPtr() + value_count, values_work_.data());
+    }
 
     // Copy RHS into solution buffer (FSILS uses Ri as in/out). Avoid reallocation so
     // Array views into `x->data()` remain valid across fallback solves.
@@ -240,7 +257,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     Array<double> Ri(dof, lhs.nNo, x_data.data());
     FE_THROW_IF(nnz > static_cast<GlobalIndex>(std::numeric_limits<int>::max()), InvalidArgumentException,
                 "FsilsLinearSolver::solve: nnz exceeds FSILS int index range");
-    Array<double> Val(dof * dof, static_cast<int>(nnz), values_work_.data());
+    Real* val_ptr = need_matrix_copy ? values_work_.data() : const_cast<Real*>(A->fsilsValuesPtr());
+    Array<double> Val(dof * dof, static_cast<int>(nnz), val_ptr);
 
     // Optional scaling used for the BlockSchur solver path.
     //
@@ -519,7 +537,44 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
     };
 
-    if (num_added_faces > 0 && dof > 0) {
+    // Face setup: restore from cache (fast path) or build from scratch.
+    bool faces_from_cache = false;
+    if (num_added_faces > 0 && dof > 0 && !faces_dirty_ &&
+        cached_faces_.size() == static_cast<std::size_t>(num_added_faces)) {
+        // Fast path: restore pre-built face data from cache.
+        const int new_nFaces = original_nFaces + num_added_faces;
+        lhs.face.resize(static_cast<std::size_t>(new_nFaces));
+        lhs.nFaces = new_nFaces;
+
+        int next_face = original_nFaces;
+        if (num_dirichlet_faces > 0) dirichlet_face_index = next_face++;
+        if (num_rank_one > 0) rank_one_face_start = next_face;
+
+        for (int fi = 0; fi < num_added_faces; ++fi) {
+            const auto& cf = cached_faces_[static_cast<std::size_t>(fi)];
+            auto& face = lhs.face[static_cast<std::size_t>(original_nFaces + fi)];
+            face.nNo = cf.nNo;
+            face.dof = cf.face_dof;
+            face.bGrp = cf.bGrp;
+            face.sharedFlag = cf.sharedFlag;
+            face.foC = cf.foC;
+            face.coupledFlag = cf.coupledFlag;
+            face.incFlag = cf.incFlag;
+            face.nS = 0.0;
+            face.res = 0.0;
+            if (cf.nNo > 0) {
+                face.glob.resize(cf.nNo);
+                std::copy(cf.glob_data.begin(), cf.glob_data.end(), face.glob.data());
+                face.val.resize(cf.face_dof, cf.nNo);
+                std::copy(cf.val_data.begin(), cf.val_data.end(), face.val.data());
+                face.valM.resize(cf.face_dof, cf.nNo);
+                std::copy(cf.valM_data.begin(), cf.valM_data.end(), face.valM.data());
+            }
+        }
+        faces_from_cache = true;
+    }
+
+    if (num_added_faces > 0 && dof > 0 && !faces_from_cache) {
         const auto shared = A->shared();
         FE_CHECK_NOT_NULL(shared.get(), "FsilsLinearSolver: FsilsShared for face setup");
 
@@ -714,6 +769,28 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 traceLog(oss.str());
             }
         }
+
+        // Cache the built faces for reuse in subsequent Newton iterations.
+        cached_faces_.clear();
+        cached_faces_.resize(static_cast<std::size_t>(num_added_faces));
+        for (int fi = 0; fi < num_added_faces; ++fi) {
+            const auto& face = lhs.face[static_cast<std::size_t>(original_nFaces + fi)];
+            auto& cf = cached_faces_[static_cast<std::size_t>(fi)];
+            cf.nNo = face.nNo;
+            cf.face_dof = face.dof;
+            cf.bGrp = face.bGrp;
+            cf.sharedFlag = face.sharedFlag;
+            cf.foC = face.foC;
+            cf.coupledFlag = face.coupledFlag;
+            cf.incFlag = face.incFlag;
+            if (face.nNo > 0) {
+                const auto sz = static_cast<std::size_t>(face.dof) * static_cast<std::size_t>(face.nNo);
+                cf.glob_data.assign(face.glob.data(), face.glob.data() + face.nNo);
+                cf.val_data.assign(face.val.data(), face.val.data() + sz);
+                cf.valM_data.assign(face.valM.data(), face.valM.data() + sz);
+            }
+        }
+        faces_dirty_ = false;
     }
 
     // Build incL and res vectors for face activation.
@@ -744,7 +821,10 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     auto prepareRhsForFsils = [&]() {
         // FSILS iterative routines assume overlap contributions have been communicated before
         // norm/dot operations. Apply FSILS COMMU to the working RHS (Ri) in internal ordering.
-        std::vector<double> r_internal(static_cast<std::size_t>(dof) * static_cast<std::size_t>(lhs.nNo), 0.0);
+        const auto r_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(lhs.nNo);
+        r_internal_work_.resize(r_size);
+        std::fill(r_internal_work_.begin(), r_internal_work_.end(), 0.0);
+        auto& r_internal = r_internal_work_;
         for (int a = 0; a < lhs.nNo; ++a) {
             const int internal = lhs.map(a);
             for (int c = 0; c < dof; ++c) {

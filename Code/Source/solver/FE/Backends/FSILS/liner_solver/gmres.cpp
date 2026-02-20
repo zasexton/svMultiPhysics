@@ -1739,10 +1739,14 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
       }
 
       // ----------------------------------------------------------------------
-      // CGS2: Classical Gram-Schmidt with Re-orthogonalization
+      // CGS2: Classical Gram-Schmidt with Pythagorean norm trick
+      // Computes h[0..i] + self-dot in one fused pass, then recovers
+      // ||w_orth||^2 = ||w||^2 - sum(h^2) without a second MPI_Allreduce.
       // ----------------------------------------------------------------------
-      fused_dot_v(dof, mynNo, u, i, u_slice_next, h_col, dot_thread.data(), thread_stride, num_threads);
-      bcast::fsils_bcast_v(i + 1, h_col, lhs.commu);
+      const double zz_local = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
+                                              dot_thread.data(), thread_stride, num_threads);
+      h_col[static_cast<size_t>(i+1)] = zz_local;
+      bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
 
       double proj_sq_norm = 0.0;
       for (int j = 0; j <= i; j++) {
@@ -1750,21 +1754,39 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
         proj_sq_norm += h_col[j] * h_col[j];
       }
 
-      double new_norm = fused_update_norm_v(dof, nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
+      double tt_sq = h_col[static_cast<size_t>(i+1)] - proj_sq_norm;
 
-      // CGS2: Iterated Gram-Schmidt Correction
-      // Pythagorean identity: ||v||^2 = sum(h^2) + ||v_new||^2
-      // Check: ||v_new||^2 < sum(h^2) ≡ ||v_new|| < (1/√2)||v||
-      if (new_norm * new_norm < proj_sq_norm && new_norm > std::numeric_limits<double>::epsilon()) {
-        fused_dot_v(dof, mynNo, u, i, u_slice_next, h_col, dot_thread.data(), thread_stride, num_threads);
-        bcast::fsils_bcast_v(i + 1, h_col, lhs.commu);
-
-        new_norm = fused_update_norm_v(dof, nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
-        for (int j = 0; j <= i; ++j) {
-          h(j,i) += h_col[j];
-        }
+      const double tt_eps = std::numeric_limits<double>::epsilon();
+      if (tt_sq < 0.0 && tt_sq > -tt_eps * h_col[static_cast<size_t>(i+1)]) {
+        tt_sq = 0.0;
       }
 
+      fused_update_v_inplace(dof, nNo, u, i, u_slice_next, h_col);
+
+      // CGS2: Selective reorthogonalization (Pythagorean check)
+      if (tt_sq < proj_sq_norm && tt_sq >= 0.0) {
+        const double zz2_local = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
+                                                  dot_thread.data(), thread_stride, num_threads);
+        h_col[static_cast<size_t>(i+1)] = zz2_local;
+        bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
+
+        double corr_sq = 0.0;
+        for (int j = 0; j <= i; ++j) {
+          h(j,i) += h_col[j];
+          corr_sq += h_col[j] * h_col[j];
+        }
+
+        fused_update_v_inplace(dof, nNo, u, i, u_slice_next, h_col);
+
+        tt_sq = h_col[static_cast<size_t>(i+1)] - corr_sq;
+        if (tt_sq < 0.0 && tt_sq > -tt_eps * h_col[static_cast<size_t>(i+1)]) {
+          tt_sq = 0.0;
+        }
+      } else if (tt_sq < 0.0) {
+        tt_sq = 0.0;
+      }
+
+      double new_norm = std::sqrt(tt_sq);
       h(i+1,i) = new_norm;
 
       // Happy Breakdown Protection & Safe Givens Rotation
@@ -1911,9 +1933,11 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       auto u_col_next = u.rcol(i+1);
       spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, Val, u_col_prev, u_col_next);
 
-      // --- CGS Step 1 ---
-      fused_dot_s(mynNo, u, i, u_col_next, h_col, dot_thread.data(), thread_stride, num_threads);
-      bcast::fsils_bcast_v(i + 1, h_col, lhs.commu);
+      // --- CGS Step 1 with Pythagorean trick ---
+      const double zz_local = fused_dot_zz_s(mynNo, u, i, u_col_next, h_col,
+                                              dot_thread.data(), thread_stride, num_threads);
+      h_col[static_cast<size_t>(i+1)] = zz_local;
+      bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
 
       double proj_sq_norm = 0.0;
       for (int j = 0; j <= i; j++) {
@@ -1921,19 +1945,39 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
         proj_sq_norm += h_col[j] * h_col[j];
       }
 
-      double new_norm = fused_update_norm_s(nNo, mynNo, lhs.commu, u, i, u_col_next, h_col);
+      double tt_sq = h_col[static_cast<size_t>(i+1)] - proj_sq_norm;
 
-      // CGS2: Iterated Gram-Schmidt Correction (Pythagorean check)
-      if (new_norm * new_norm < proj_sq_norm && new_norm > std::numeric_limits<double>::epsilon()) {
-        fused_dot_s(mynNo, u, i, u_col_next, h_col, dot_thread.data(), thread_stride, num_threads);
-        bcast::fsils_bcast_v(i + 1, h_col, lhs.commu);
-
-        new_norm = fused_update_norm_s(nNo, mynNo, lhs.commu, u, i, u_col_next, h_col);
-        for (int j = 0; j <= i; ++j) {
-          h(j,i) += h_col[j];
-        }
+      const double tt_eps = std::numeric_limits<double>::epsilon();
+      if (tt_sq < 0.0 && tt_sq > -tt_eps * h_col[static_cast<size_t>(i+1)]) {
+        tt_sq = 0.0;
       }
 
+      fused_update_s_inplace(nNo, u, i, u_col_next, h_col);
+
+      // CGS2: Selective reorthogonalization (Pythagorean check)
+      if (tt_sq < proj_sq_norm && tt_sq >= 0.0) {
+        const double zz2_local = fused_dot_zz_s(mynNo, u, i, u_col_next, h_col,
+                                                  dot_thread.data(), thread_stride, num_threads);
+        h_col[static_cast<size_t>(i+1)] = zz2_local;
+        bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
+
+        double corr_sq = 0.0;
+        for (int j = 0; j <= i; ++j) {
+          h(j,i) += h_col[j];
+          corr_sq += h_col[j] * h_col[j];
+        }
+
+        fused_update_s_inplace(nNo, u, i, u_col_next, h_col);
+
+        tt_sq = h_col[static_cast<size_t>(i+1)] - corr_sq;
+        if (tt_sq < 0.0 && tt_sq > -tt_eps * h_col[static_cast<size_t>(i+1)]) {
+          tt_sq = 0.0;
+        }
+      } else if (tt_sq < 0.0) {
+        tt_sq = 0.0;
+      }
+
+      double new_norm = std::sqrt(tt_sq);
       h(i+1,i) = new_norm;
 
       // Happy Breakdown Check
@@ -2098,9 +2142,14 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, u_slice_prev, u_slice_next);
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, u_slice_prev, u_slice_next);
 
-      // --- CGS Step 1 ---
-      fused_dot_v(dof, mynNo, u, i, u_slice_next, h_col, dot_thread.data(), thread_stride, num_threads);
-      bcast::fsils_bcast_v(i + 1, h_col, lhs.commu);
+      // --- CGS Step 1 with Pythagorean trick ---
+      // Compute dot products h[0..i] AND self-dot ||w||^2 in one fused pass.
+      // This lets us recover ||w_orth||^2 = ||w||^2 - sum(h^2) without a
+      // second MPI_Allreduce, cutting collectives from 2 to 1 per iteration.
+      const double zz_local = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
+                                              dot_thread.data(), thread_stride, num_threads);
+      h_col[static_cast<size_t>(i+1)] = zz_local;
+      bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
 
       double proj_sq_norm = 0.0;
       for (int j = 0; j <= i; j++) {
@@ -2108,19 +2157,43 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
         proj_sq_norm += h_col[j] * h_col[j];
       }
 
-      double new_norm = fused_update_norm_v(dof, nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
+      double tt_sq = h_col[static_cast<size_t>(i+1)] - proj_sq_norm;
 
-      // CGS2: Iterated Gram-Schmidt Correction (Pythagorean check)
-      if (new_norm * new_norm < proj_sq_norm && new_norm > std::numeric_limits<double>::epsilon()) {
-        fused_dot_v(dof, mynNo, u, i, u_slice_next, h_col, dot_thread.data(), thread_stride, num_threads);
-        bcast::fsils_bcast_v(i + 1, h_col, lhs.commu);
-
-        new_norm = fused_update_norm_v(dof, nNo, mynNo, lhs.commu, u, i, u_slice_next, h_col);
-        for (int j = 0; j <= i; ++j) {
-          h(j,i) += h_col[j];
-        }
+      // Roundoff guard: small negative values from floating-point cancellation
+      const double tt_eps = std::numeric_limits<double>::epsilon();
+      if (tt_sq < 0.0 && tt_sq > -tt_eps * h_col[static_cast<size_t>(i+1)]) {
+        tt_sq = 0.0;
       }
 
+      // Subtract projections in-place (no MPI needed)
+      fused_update_v_inplace(dof, nNo, u, i, u_slice_next, h_col);
+
+      // CGS2: Selective reorthogonalization (Pythagorean check)
+      // tt_sq < proj_sq_norm means ||v_new|| < (1/sqrt(2))||v|| — loss of orthogonality.
+      if (tt_sq < proj_sq_norm && tt_sq >= 0.0) {
+        const double zz2_local = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
+                                                  dot_thread.data(), thread_stride, num_threads);
+        h_col[static_cast<size_t>(i+1)] = zz2_local;
+        bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
+
+        double corr_sq = 0.0;
+        for (int j = 0; j <= i; ++j) {
+          h(j,i) += h_col[j];
+          corr_sq += h_col[j] * h_col[j];
+        }
+
+        fused_update_v_inplace(dof, nNo, u, i, u_slice_next, h_col);
+
+        tt_sq = h_col[static_cast<size_t>(i+1)] - corr_sq;
+        if (tt_sq < 0.0 && tt_sq > -tt_eps * h_col[static_cast<size_t>(i+1)]) {
+          tt_sq = 0.0;
+        }
+      } else if (tt_sq < 0.0) {
+        // True breakdown: Pythagorean identity completely fails
+        tt_sq = 0.0;
+      }
+
+      double new_norm = std::sqrt(tt_sq);
       h(i+1,i) = new_norm;
 
       // Happy Breakdown Protection
