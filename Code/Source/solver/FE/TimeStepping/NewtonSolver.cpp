@@ -19,6 +19,8 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cmath>
 #include <cstdint>
@@ -793,13 +795,53 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     int last_jacobian_it = -1;
     const int jacobian_period = std::max(1, options_.jacobian_rebuild_period);
 
+    // ===== NEWTON TIMING PROFILE =====
+    auto NTP = []() {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    double ntp_assembly = 0.0, ntp_linear = 0.0, ntp_update = 0.0;
+    double ntp_constraints = 0.0, ntp_other = 0.0;
+    double ntp_total_start = NTP();
+    double ntp0;
+    int ntp_assembly_count = 0, ntp_linear_iters_total = 0;
+    auto printNewtonProfile = [&](int newton_iters) {
+        double ntp_total = NTP() - ntp_total_start;
+        ntp_other = ntp_total - ntp_assembly - ntp_linear - ntp_update - ntp_constraints;
+        if (ntp_other < 0.0) ntp_other = 0.0;
+        int mpi_rank = 0;
+#if FE_HAS_MPI
+        MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+#endif
+        if (mpi_rank == 0 && ntp_total > 1e-6) {
+            auto pct = [&](double t) { return 100.0 * t / ntp_total; };
+            fprintf(stderr,
+              "\n+++ NEWTON SOLVER TIMING (rank 0) +++\n"
+              "  Total Newton time:    %10.6f s  (%d Newton iters, %d assemblies, %d linear iters)\n"
+              "  Assembly (J+r):       %10.6f s  (%5.1f%%)\n"
+              "  Linear solve:         %10.6f s  (%5.1f%%)\n"
+              "  Solution update:      %10.6f s  (%5.1f%%)\n"
+              "  Constraint/ghosts:    %10.6f s  (%5.1f%%)\n"
+              "  Other (overhead):     %10.6f s  (%5.1f%%)\n"
+              "+++++++++++++++++++++++++++++++++++++++\n",
+              ntp_total, newton_iters, ntp_assembly_count, ntp_linear_iters_total,
+              ntp_assembly, pct(ntp_assembly),
+              ntp_linear, pct(ntp_linear),
+              ntp_update, pct(ntp_update),
+              ntp_constraints, pct(ntp_constraints),
+              ntp_other, pct(ntp_other));
+        }
+    };
+    // =================================
+
     for (int it = 0; it < max_it; ++it) {
+        ntp0 = NTP();
         history.updateGhosts();
 
         if (!constraints.empty()) {
             constraints.distribute(history.u());
             history.u().updateGhosts();
         }
+        ntp_constraints += NTP() - ntp0;
 
         const systems::SystemStateView state = makeStateView(history, solve_time);
 
@@ -812,6 +854,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         const bool need_jacobian = !have_jacobian || (jacobian_period == 1) || ((it - last_jacobian_it) >= jacobian_period);
         bool jacobian_ready = have_jacobian && !need_jacobian;
         if (!have_residual) {
+            ntp0 = NTP();
             if (need_jacobian && options_.assemble_both_when_possible && same_op) {
                 // Residual and Jacobian share the same operator tag, so we can assemble both in one pass.
                 current_residual_norm = assembleJacobianAndResidual(state);
@@ -833,6 +876,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     last_jacobian_it = it;
                 }
             }
+            ntp_assembly += NTP() - ntp0;
+            ntp_assembly_count++;
             have_residual = true;
         }
 
@@ -857,6 +902,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (oopTraceEnabled()) {
                 traceLog("NewtonSolver: converged before linear solve (tolerances satisfied).");
             }
+            printNewtonProfile(it);
             return report;
         }
 
@@ -1071,7 +1117,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (oopTraceEnabled()) {
                 traceLog("NewtonSolver: calling linear.solve()");
             }
+            ntp0 = NTP();
             report.linear = linear.solve(J, du, r);
+            ntp_linear += NTP() - ntp0;
+            ntp_linear_iters_total += report.linear.iterations;
             if (oopTraceEnabled()) {
                 std::ostringstream oss;
                 oss << "NewtonSolver: linear solve converged=" << report.linear.converged
@@ -1180,11 +1229,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         const double du_norm = du.norm();
 
         if (!options_.use_line_search) {
+            ntp0 = NTP();
             axpy(history.u(), static_cast<Real>(-1.0), du);
             if (!constraints.empty()) {
                 constraints.distribute(history.u());
             }
             history.u().updateGhosts();
+            ntp_update += NTP() - ntp0;
             have_residual = false;
 
             if (options_.step_tolerance > 0.0) {
@@ -1199,6 +1250,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     if (oopTraceEnabled()) {
                         traceLog("NewtonSolver: converged by step tolerance.");
                     }
+                    printNewtonProfile(it + 1);
                     return report;
                 }
             }
@@ -1300,6 +1352,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 if (oopTraceEnabled()) {
                     traceLog("NewtonSolver: converged by step tolerance.");
                 }
+                printNewtonProfile(it + 1);
                 return report;
             }
         }
@@ -1311,6 +1364,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (oopTraceEnabled()) {
                 traceLog("NewtonSolver: converged after line search update (tolerances satisfied).");
             }
+            printNewtonProfile(it + 1);
             return report;
         }
     }
@@ -1337,6 +1391,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (oopTraceEnabled()) {
                 traceLog("NewtonSolver: converged after final update (tolerances satisfied).");
             }
+            printNewtonProfile(max_it);
             return report;
         }
     }
@@ -1349,6 +1404,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     if (oopTraceEnabled()) {
         traceLog("NewtonSolver: reached max iterations without convergence.");
     }
+    printNewtonProfile(max_it);
     return report;
 }
 

@@ -2080,7 +2080,19 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t();
   ls.suc = false;
 
+  // ===== TIMING PROFILE =====
+  double tp_spmv = 0.0, tp_bc_mul = 0.0, tp_dot_gs = 0.0;
+  double tp_allreduce = 0.0, tp_gs_update = 0.0, tp_norm = 0.0;
+  double tp_vecops = 0.0, tp_givens = 0.0, tp_recon = 0.0;
+  int tp_reorth_count = 0, tp_restarts = 0;
+  auto TP = [](){ return fe_fsi_linear_solver::fsils_cpu_t(); };
+  double tp0;
+  // ===========================
+
+  tp0 = TP();
   double eps = norm::fsi_ls_normv(dof, mynNo, lhs.commu, R);
+  tp_norm += TP() - tp0;
+
   ls.iNorm = eps;
   ls.fNorm = eps;
   eps = std::max(ls.absTol, ls.relTol*eps);
@@ -2113,25 +2125,35 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   for (int l = 0; l < ls.mItr; l++) {
     ls.dB = ls.fNorm;
     ls.itr++;
+    if (l > 0) tp_restarts++;
 
     auto u_slice = u.rslice(0);
-    spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, X, u_slice);
-    add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, X, u_slice);
 
+    tp0 = TP();
+    spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, X, u_slice);
+    tp_spmv += TP() - tp0;
+
+    tp0 = TP();
+    add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, X, u_slice);
+    tp_bc_mul += TP() - tp0;
+
+    tp0 = TP();
     omp_la::omp_axpby_v(dof, nNo, u_slice, R, -1.0, u_slice);
+    tp_vecops += TP() - tp0;
 
     // Note: BCOP_TYPE_PRE is NOT applied in the standard GMRESV path.
-    // The original Fortran GMRESV had `flag = .FALSE.` which prevented PRE
-    // from ever being applied. Only the pipelined GMRES variant applies PRE,
-    // as its two-basis-vector structure (v, z) handles the preconditioner
-    // correction correctly. Applying PRE here causes divergence.
 
+    tp0 = TP();
     err[0] = norm::fsi_ls_normv(dof, mynNo, lhs.commu, u.rslice(0));
+    tp_norm += TP() - tp0;
+
     if (std::abs(err[0]) <= std::numeric_limits<double>::epsilon()) {
       ls.suc = true; break;
     }
 
+    tp0 = TP();
     omp_la::omp_mul_v(dof, nNo, 1.0 / err[0], u_slice);
+    tp_vecops += TP() - tp0;
 
     for (int i = 0; i < ls.sD; i++) {
       ls.itr++;
@@ -2139,17 +2161,24 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       auto u_slice_prev = u.rslice(i);
       auto u_slice_next = u.rslice(i+1);
 
+      tp0 = TP();
       spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, u_slice_prev, u_slice_next);
+      tp_spmv += TP() - tp0;
+
+      tp0 = TP();
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, u_slice_prev, u_slice_next);
+      tp_bc_mul += TP() - tp0;
 
       // --- CGS Step 1 with Pythagorean trick ---
-      // Compute dot products h[0..i] AND self-dot ||w||^2 in one fused pass.
-      // This lets us recover ||w_orth||^2 = ||w||^2 - sum(h^2) without a
-      // second MPI_Allreduce, cutting collectives from 2 to 1 per iteration.
+      tp0 = TP();
       const double zz_local = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
                                               dot_thread.data(), thread_stride, num_threads);
       h_col[static_cast<size_t>(i+1)] = zz_local;
+      tp_dot_gs += TP() - tp0;
+
+      tp0 = TP();
       bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
+      tp_allreduce += TP() - tp0;
 
       double proj_sq_norm = 0.0;
       for (int j = 0; j <= i; j++) {
@@ -2166,15 +2195,24 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       }
 
       // Subtract projections in-place (no MPI needed)
+      tp0 = TP();
       fused_update_v_inplace(dof, nNo, u, i, u_slice_next, h_col);
+      tp_gs_update += TP() - tp0;
 
       // CGS2: Selective reorthogonalization (Pythagorean check)
       // tt_sq < proj_sq_norm means ||v_new|| < (1/sqrt(2))||v|| — loss of orthogonality.
       if (tt_sq < proj_sq_norm && tt_sq >= 0.0) {
+        tp_reorth_count++;
+
+        tp0 = TP();
         const double zz2_local = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
                                                   dot_thread.data(), thread_stride, num_threads);
         h_col[static_cast<size_t>(i+1)] = zz2_local;
+        tp_dot_gs += TP() - tp0;
+
+        tp0 = TP();
         bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
+        tp_allreduce += TP() - tp0;
 
         double corr_sq = 0.0;
         for (int j = 0; j <= i; ++j) {
@@ -2182,7 +2220,9 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
           corr_sq += h_col[j] * h_col[j];
         }
 
+        tp0 = TP();
         fused_update_v_inplace(dof, nNo, u, i, u_slice_next, h_col);
+        tp_gs_update += TP() - tp0;
 
         tt_sq = h_col[static_cast<size_t>(i+1)] - corr_sq;
         if (tt_sq < 0.0 && tt_sq > -tt_eps * h_col[static_cast<size_t>(i+1)]) {
@@ -2200,12 +2240,15 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       bool breakdown = false;
       const double breakdown_tol = std::numeric_limits<double>::epsilon() * std::max(ls.iNorm, 1.0) * 1e2;
       if (h(i+1,i) > breakdown_tol) {
+        tp0 = TP();
         omp_la::omp_mul_v(dof, nNo, 1.0/h(i+1,i), u_slice_next);
+        tp_vecops += TP() - tp0;
       } else {
         h(i+1,i) = 0.0;
         breakdown = true;
       }
 
+      tp0 = TP();
       for (int j = 0; j <= i-1; j++) {
         double tmp_h = c(j)*h(j,i) + s(j)*h(j+1,i);
         h(j+1,i) = -s(j)*h(j,i) + c(j)*h(j+1,i);
@@ -2224,6 +2267,7 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 
       err(i+1) = -s(i)*err(i);
       err(i) = c(i)*err(i);
+      tp_givens += TP() - tp0;
 
       if (std::abs(err(i+1)) < eps || breakdown) {
         ls.suc = true;
@@ -2233,6 +2277,7 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 
     if (last_i >= ls.sD) last_i = ls.sD - 1;
 
+    tp0 = TP();
     for (int i = 0; i <= last_i; i++) y(i) = err(i);
 
     for (int j = last_i; j >= 0; j--) {
@@ -2241,6 +2286,7 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
     }
 
     fused_recon_v(dof, nNo, u, last_i, X, y);
+    tp_recon += TP() - tp0;
 
     ls.fNorm = std::abs(err(last_i+1));
     if (ls.suc) break;
@@ -2262,6 +2308,39 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   R = X;
   ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.callD;
   ls.dB  = 10.0 * std::log(ls.fNorm / ls.dB);
+
+  // ===== PRINT TIMING PROFILE =====
+  double tp_total = tp_spmv + tp_bc_mul + tp_dot_gs + tp_allreduce +
+                    tp_gs_update + tp_norm + tp_vecops + tp_givens + tp_recon;
+  if (lhs.commu.task == 0 && tp_total > 0.0) {
+    auto pct = [&](double t) { return 100.0 * t / tp_total; };
+    fprintf(stderr,
+      "\n=== GMRES_V TIMING PROFILE (rank 0) ===\n"
+      "  Total GMRES time:     %10.6f s  (iters=%d, restarts=%d, reorth=%d)\n"
+      "  SpMV:                 %10.6f s  (%5.1f%%)\n"
+      "  BC multiply:          %10.6f s  (%5.1f%%)\n"
+      "  GS dot products:      %10.6f s  (%5.1f%%)\n"
+      "  MPI AllReduce:        %10.6f s  (%5.1f%%)\n"
+      "  GS vector update:     %10.6f s  (%5.1f%%)\n"
+      "  Norm computation:     %10.6f s  (%5.1f%%)\n"
+      "  Vector ops (scale):   %10.6f s  (%5.1f%%)\n"
+      "  Givens rotation:      %10.6f s  (%5.1f%%)\n"
+      "  Reconstruction:       %10.6f s  (%5.1f%%)\n"
+      "  dof=%d  nNo=%lld  mynNo=%lld  nnz=%lld  sD=%d\n"
+      "========================================\n",
+      tp_total, ls.itr, tp_restarts, tp_reorth_count,
+      tp_spmv, pct(tp_spmv),
+      tp_bc_mul, pct(tp_bc_mul),
+      tp_dot_gs, pct(tp_dot_gs),
+      tp_allreduce, pct(tp_allreduce),
+      tp_gs_update, pct(tp_gs_update),
+      tp_norm, pct(tp_norm),
+      tp_vecops, pct(tp_vecops),
+      tp_givens, pct(tp_givens),
+      tp_recon, pct(tp_recon),
+      dof, (long long)nNo, (long long)mynNo, (long long)lhs.nnz, ls.sD);
+  }
+  // ==================================
 }
 
 }; // namespace gmres

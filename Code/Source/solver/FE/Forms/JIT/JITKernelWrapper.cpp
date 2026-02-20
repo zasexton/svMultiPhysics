@@ -310,6 +310,267 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
         return;
     }
 
+    // --- Batch fast-path: hoist per-batch invariant work ---
+    //
+    // All elements in a batch share the same topology, DOF counts, and kernel
+    // configuration.  The per-element computeCell() redundantly performs:
+    //   - kind_ dispatch + dynamic_cast (identical every element)
+    //   - getSpecializedDispatch hash lookup (same key every element)
+    //   - output.reserve() with potential allocation (same sizes every element)
+    //   - individual try/catch per element
+    //
+    // The fast-path below does each of these once per batch, then runs a tight
+    // pack-and-call loop for each element.
+
+    // Find the first non-null context to derive batch-invariant properties.
+    const assembly::AssemblyContext* first_ctx = nullptr;
+    for (std::size_t idx = 0; idx < n; ++idx) {
+        if (contexts[idx] != nullptr) {
+            first_ctx = contexts[idx];
+            break;
+        }
+    }
+    if (first_ctx == nullptr) {
+        return;
+    }
+
+    try {
+        const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+
+        // ---- FormKernel (pure bilinear or pure linear) ----
+        if (kind_ == WrappedKind::FormKernel) {
+            const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
+            if (k) {
+                const bool want_matrix = (k->ir().kind() == FormKind::Bilinear);
+                const bool want_vector = (k->ir().kind() == FormKind::Linear);
+                const auto& updates = k->inlinedStateUpdates().cell;
+                const bool has_updates = !updates.empty();
+
+                // Resolve specialization once for the whole batch.
+                const auto disp = getSpecializedDispatch(
+                    KernelRole::Form, k->ir(), IntegralDomain::Cell, *first_ctx, nullptr);
+                const auto& compiled = disp ? *disp : compiled_form_;
+
+                // Pre-reserve all outputs (Opt B): allocates to correct size
+                // so the per-element loop only needs to clear.
+                const auto n_test = first_ctx->numTestDofs();
+                const auto n_trial = first_ctx->numTrialDofs();
+                for (std::size_t idx = 0; idx < n; ++idx) {
+                    outputs[idx].reserve(n_test, n_trial, want_matrix, want_vector);
+                }
+
+                // Tight per-element loop.
+                for (std::size_t idx = 0; idx < n; ++idx) {
+                    if (contexts[idx] == nullptr) {
+                        continue;
+                    }
+                    const auto& ctx = *contexts[idx];
+                    auto& output = outputs[idx];
+                    output.clear();
+
+                    if (has_updates) {
+                        for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                            applyInlinedMaterialStateUpdatesReal(
+                                ctx, nullptr, k->ir().kind(),
+                                k->constitutiveStateLayout(), updates, Side::Minus, q);
+                        }
+                    }
+
+                    const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
+                    callJIT(compiled.cell, &args);
+
+                    output.has_matrix = want_matrix;
+                    output.has_vector = want_vector;
+                }
+                return;
+            }
+        }
+
+        // ---- LinearFormKernel (bilinear + optional linear + K*u) ----
+        if (kind_ == WrappedKind::LinearFormKernel) {
+            const auto* k = dynamic_cast<const LinearFormKernel*>(fallback_.get());
+            if (k) {
+                const bool want_matrix = !k->isVectorOnly();
+                const bool want_vector = !k->isMatrixOnly();
+                const auto& updates = k->inlinedStateUpdates().cell;
+                const bool has_updates = !updates.empty();
+
+                // Resolve specializations once for the whole batch.
+                const auto disp_bi = getSpecializedDispatch(
+                    KernelRole::Bilinear, k->bilinearIR(), IntegralDomain::Cell, *first_ctx, nullptr);
+                const auto& compiled_bi = disp_bi ? *disp_bi : compiled_bilinear_;
+
+                std::shared_ptr<const CompiledDispatch> disp_lin;
+                const CompiledDispatch* compiled_lin_ptr = nullptr;
+                if (has_compiled_linear_ && k->linearIR().has_value()) {
+                    disp_lin = getSpecializedDispatch(
+                        KernelRole::Linear, *k->linearIR(), IntegralDomain::Cell, *first_ctx, nullptr);
+                    compiled_lin_ptr = disp_lin ? disp_lin.get() : &compiled_linear_;
+                }
+
+                // Pre-reserve all outputs.
+                const auto n_test = first_ctx->numTestDofs();
+                const auto n_trial = first_ctx->numTrialDofs();
+                for (std::size_t idx = 0; idx < n; ++idx) {
+                    outputs[idx].reserve(n_test, n_trial, want_matrix, want_vector);
+                }
+
+                // Scratch output for K*u when matrix-only mode needs a temporary.
+                assembly::KernelOutput tmp;
+                if (want_vector && !want_matrix) {
+                    tmp.reserve(n_test, n_trial, /*need_matrix=*/true, /*need_vector=*/false);
+                }
+
+                // Tight per-element loop.
+                for (std::size_t idx = 0; idx < n; ++idx) {
+                    if (contexts[idx] == nullptr) {
+                        continue;
+                    }
+                    const auto& ctx = *contexts[idx];
+                    auto& output = outputs[idx];
+                    output.clear();
+
+                    if (has_updates) {
+                        for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                            applyInlinedMaterialStateUpdatesReal(
+                                ctx, nullptr, FormKind::Bilinear,
+                                k->constitutiveStateLayout(), updates, Side::Minus, q);
+                        }
+                    }
+
+                    // 1) Jacobian (bilinear part).
+                    if (want_matrix) {
+                        const auto args_bi = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
+                        callJIT(compiled_bi.cell, &args_bi);
+                    }
+
+                    // 2) Residual vector = (linear part) + (K*u).
+                    if (want_vector) {
+                        const auto coeffs = ctx.solutionCoefficients();
+                        FE_THROW_IF(coeffs.size() < static_cast<std::size_t>(ctx.numTrialDofs()),
+                                    InvalidArgumentException,
+                                    "JITKernelWrapper(LinearFormKernel)::computeCellBatch: "
+                                    "missing solution coefficients");
+
+                        if (compiled_lin_ptr != nullptr) {
+                            const auto args_lin = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
+                            callJIT(compiled_lin_ptr->cell, &args_lin);
+                        }
+
+                        // K*u contribution.
+                        if (want_matrix) {
+                            for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                                Real sum = 0.0;
+                                for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+                                    sum += output.matrixEntry(i, j) *
+                                           coeffs[static_cast<std::size_t>(j)];
+                                }
+                                output.vectorEntry(i) += sum;
+                            }
+                        } else {
+                            tmp.clear();
+                            const auto args_bi = assembly::jit::packCellKernelArgsV6(ctx, tmp, checks);
+                            callJIT(compiled_bi.cell, &args_bi);
+
+                            for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                                Real sum = 0.0;
+                                for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+                                    sum += tmp.matrixEntry(i, j) *
+                                           coeffs[static_cast<std::size_t>(j)];
+                                }
+                                output.vectorEntry(i) += sum;
+                            }
+                        }
+                    }
+
+                    output.has_matrix = want_matrix;
+                    output.has_vector = want_vector;
+                }
+                return;
+            }
+        }
+
+        // ---- SymbolicNonlinearFormKernel (tangent + residual) ----
+        if (kind_ == WrappedKind::SymbolicNonlinearFormKernel) {
+            const auto* k = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get());
+            if (k) {
+                const bool want_matrix = !k->isVectorOnly();
+                const bool want_vector = !k->isMatrixOnly();
+
+                // Verify compiled addresses are available before committing to
+                // the batch fast-path.
+                const bool can_batch = (!want_matrix || compiled_tangent_.cell != 0) &&
+                                       (!want_vector || compiled_residual_.cell != 0);
+
+                if (can_batch) {
+                    const auto& updates = k->inlinedStateUpdates().cell;
+                    const bool has_updates = !updates.empty();
+
+                    // Resolve specializations once for the whole batch.
+                    std::shared_ptr<const CompiledDispatch> disp_tan;
+                    const CompiledDispatch* compiled_tan_ptr = &compiled_tangent_;
+                    if (want_matrix) {
+                        disp_tan = getSpecializedDispatch(
+                            KernelRole::Tangent, k->tangentIR(), IntegralDomain::Cell, *first_ctx, nullptr);
+                        if (disp_tan) compiled_tan_ptr = disp_tan.get();
+                    }
+
+                    std::shared_ptr<const CompiledDispatch> disp_res;
+                    const CompiledDispatch* compiled_res_ptr = &compiled_residual_;
+                    if (want_vector) {
+                        disp_res = getSpecializedDispatch(
+                            KernelRole::Residual, k->residualIR(), IntegralDomain::Cell, *first_ctx, nullptr);
+                        if (disp_res) compiled_res_ptr = disp_res.get();
+                    }
+
+                    // Pre-reserve all outputs.
+                    const auto n_test = first_ctx->numTestDofs();
+                    const auto n_trial = first_ctx->numTrialDofs();
+                    for (std::size_t idx = 0; idx < n; ++idx) {
+                        outputs[idx].reserve(n_test, n_trial, want_matrix, want_vector);
+                    }
+
+                    // Tight per-element loop.
+                    for (std::size_t idx = 0; idx < n; ++idx) {
+                        if (contexts[idx] == nullptr) {
+                            continue;
+                        }
+                        const auto& ctx = *contexts[idx];
+                        auto& output = outputs[idx];
+                        output.clear();
+
+                        if (has_updates) {
+                            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                                applyInlinedMaterialStateUpdatesReal(
+                                    ctx, nullptr, FormKind::Residual,
+                                    k->constitutiveStateLayout(), updates, Side::Minus, q);
+                            }
+                        }
+
+                        const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
+                        if (want_matrix) {
+                            callJIT(compiled_tan_ptr->cell, &args);
+                        }
+                        if (want_vector) {
+                            callJIT(compiled_res_ptr->cell, &args);
+                        }
+
+                        output.has_matrix = want_matrix;
+                        output.has_vector = want_vector;
+                    }
+                    return;
+                }
+                // can_batch == false: fall through to per-element fallback.
+            }
+        }
+
+    } catch (const std::exception& e) {
+        markRuntimeFailureOnce("computeCellBatch", e.what());
+    } catch (...) {
+        markRuntimeFailureOnce("computeCellBatch", "unknown exception");
+    }
+
+    // Fallback: per-element dispatch (unknown kind, failed cast, or exception).
     for (std::size_t idx = 0; idx < n; ++idx) {
         if (contexts[idx] == nullptr) {
             continue;

@@ -99,6 +99,10 @@ namespace elements {
     class Element;
 }
 
+namespace geometry {
+    class GeometryMapping;
+}
+
 namespace assembly {
 
 /**
@@ -590,6 +594,12 @@ private:
     std::vector<FieldSolutionAccess> field_solution_access_{};
 
     std::unordered_map<FaceTransformKey, FaceTransform, FaceTransformKeyHash> face_transform_cache_{};
+
+    // Cached geometry mapping to avoid per-cell heap allocation
+    std::shared_ptr<geometry::GeometryMapping> cached_mapping_;
+    ElementType cached_mapping_type_{ElementType::Unknown};
+    int cached_mapping_order_{-1};
+    bool cached_mapping_affine_{false};
 };
 
 // ============================================================================

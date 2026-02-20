@@ -30,6 +30,7 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cmath>
 #include <sstream>
@@ -534,7 +535,16 @@ assembly::AssemblyResult assembleOperator(
 
     assembly::AssemblyResult total;
 
+    auto AO_TP = []() {
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    double ao_setup_end = AO_TP();
+    double ao_cell_time = 0.0, ao_boundary_time = 0.0, ao_other_time = 0.0;
+    double ao0;
+
     // Cell terms
+    ao0 = AO_TP();
     for (const auto& term : def.cells) {
         FE_CHECK_NOT_NULL(term.kernel.get(), "assembleOperator: cell term kernel");
         const auto& test_field = system.field_registry_.get(term.test_field);
@@ -599,8 +609,10 @@ assembly::AssemblyResult assembleOperator(
 	            traceLog(oss.str());
 	        }
 	    }
+	    ao_cell_time += AO_TP() - ao0;
 
 	    // Boundary terms
+	    ao0 = AO_TP();
 	    if (request.assemble_boundary_terms) {
 	        for (const auto& term : def.boundary) {
 	            FE_CHECK_NOT_NULL(term.kernel.get(), "assembleOperator: boundary term kernel");
@@ -649,7 +661,9 @@ assembly::AssemblyResult assembleOperator(
 	            }
 	        }
 	    }
+	    ao_boundary_time += AO_TP() - ao0;
 
+	    ao0 = AO_TP();
 		    // Interior face terms (DG)
 		    if (request.assemble_interior_face_terms) {
 		        for (const auto& term : def.interior) {
@@ -1300,8 +1314,36 @@ assembly::AssemblyResult assembleOperator(
         }
     }
 
+    ao_other_time += AO_TP() - ao0;
+
     assembler.finalize(request.want_matrix ? matrix_out : nullptr,
                        request.want_vector ? vector_out : nullptr);
+
+    {
+        int rank = 0;
+#if FE_HAS_MPI
+        int mpi_init = 0;
+        MPI_Initialized(&mpi_init);
+        if (mpi_init) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+#endif
+        if (rank == 0) {
+            const double ao_total = ao_cell_time + ao_boundary_time + ao_other_time;
+            if (ao_total > 1e-7) {
+                std::fprintf(stderr,
+                    "  === assembleOperator TIMING (rank 0, op='%s') ===\n"
+                    "    Total:              %9.6f s\n"
+                    "    Cell terms:         %9.6f s  (%5.1f%%)\n"
+                    "    Boundary terms:     %9.6f s  (%5.1f%%)\n"
+                    "    Other (DG+global):  %9.6f s  (%5.1f%%)\n"
+                    "  ================================================\n",
+                    request.op.c_str(),
+                    ao_total,
+                    ao_cell_time,     100.0 * ao_cell_time     / ao_total,
+                    ao_boundary_time, 100.0 * ao_boundary_time / ao_total,
+                    ao_other_time,    100.0 * ao_other_time    / ao_total);
+            }
+        }
+    }
 
     return total;
 }

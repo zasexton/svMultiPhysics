@@ -19,7 +19,9 @@
 #include "Quadrature/QuadratureRule.h"
 #include "Geometry/MappingFactory.h"
 #include "Geometry/GeometryMapping.h"
+#include "Geometry/GeometryFrameUtils.h"
 #include "Basis/BasisFunction.h"
+#include "Basis/BasisCache.h"
 #include "Basis/VectorBasis.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
@@ -36,6 +38,11 @@
 #include <stdexcept>
 #include <cmath>
 #include <cmath>
+#include <cstdio>
+
+#if FE_HAS_MPI
+#  include <mpi.h>
+#endif
 
 namespace svmp {
 namespace FE {
@@ -839,6 +846,10 @@ void StandardAssembler::reset()
     local_prev_solution_coeffs_.clear();
     field_solution_access_.clear();
     time_integration_ = nullptr;
+    cached_mapping_.reset();
+    cached_mapping_type_ = ElementType::Unknown;
+    cached_mapping_order_ = -1;
+    cached_mapping_affine_ = false;
     initialized_ = false;
 }
 
@@ -1949,6 +1960,15 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
 // Internal Implementation
 // ============================================================================
 
+// File-scope accumulators for prepareContext sub-phase timing
+static thread_local double g_pc_setup = 0.0;
+static thread_local double g_pc_mapping = 0.0;
+static thread_local double g_pc_resize = 0.0;
+static thread_local double g_pc_jacobian = 0.0;
+static thread_local double g_pc_basis = 0.0;
+static thread_local double g_pc_ctx_config = 0.0;
+static thread_local int g_pc_call_count = 0;
+
 AssemblyResult StandardAssembler::assembleCellsCore(
     const IMeshAccess& mesh,
     const spaces::FunctionSpace& test_space,
@@ -2055,10 +2075,19 @@ AssemblyResult StandardAssembler::assembleCellsCore(
             ? static_cast<std::size_t>(options_.batch_size)
             : 1u;
 
+    // Sub-phase timing accumulators for prepareContext breakdown
+    double tp_sub_dofmap = 0.0, tp_sub_prepare_ctx = 0.0, tp_sub_solution = 0.0;
+    double tp_sub_field_sol = 0.0, tp_sub_material = 0.0, tp_sub_setters = 0.0;
+    auto TP_SUB = []() {
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+
     auto prepare_cell_data = [&](GlobalIndex cell_id,
                                  AssemblyContext& ctx,
                                  std::vector<GlobalIndex>& row_dofs,
                                  std::vector<GlobalIndex>& col_dofs) {
+        double tp_s0 = TP_SUB();
         auto row_local = row_dof_map_->getCellDofs(cell_id);
         auto col_local = col_dof_map_->getCellDofs(cell_id);
 
@@ -2071,8 +2100,13 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         for (std::size_t j = 0; j < col_local.size(); ++j) {
             col_dofs[j] = col_local[j] + col_dof_offset_;
         }
+        tp_sub_dofmap += TP_SUB() - tp_s0;
 
+        tp_s0 = TP_SUB();
         prepareContext(ctx, mesh, cell_id, test_space, trial_space, required_data);
+        tp_sub_prepare_ctx += TP_SUB() - tp_s0;
+
+        tp_s0 = TP_SUB();
         ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
         ctx.setTimeIntegrationContext(time_integration_);
         ctx.setTime(time_);
@@ -2083,12 +2117,14 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         ctx.setJITConstants(jit_constants_);
         ctx.setCoupledValues(coupled_integrals_, coupled_aux_state_);
         ctx.clearAllPreviousSolutionData();
+        tp_sub_setters += TP_SUB() - tp_s0;
 
         FE_THROW_IF(row_dofs.size() != static_cast<std::size_t>(ctx.numTestDofs()), FEException,
                     "StandardAssembler::assembleCellsCore: row DOF count does not match test space element DOFs");
         FE_THROW_IF(col_dofs.size() != static_cast<std::size_t>(ctx.numTrialDofs()), FEException,
                     "StandardAssembler::assembleCellsCore: column DOF count does not match trial space element DOFs");
 
+        tp_s0 = TP_SUB();
         if (need_solution) {
             FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
                         "StandardAssembler::assembleCellsCore: kernel requires solution but no solution was set");
@@ -2161,10 +2197,15 @@ AssemblyResult StandardAssembler::assembleCellsCore(
             }
         }
 
+        tp_sub_solution += TP_SUB() - tp_s0;
+
+        tp_s0 = TP_SUB();
         if (need_field_solutions) {
             populateFieldSolutionData(ctx, mesh, cell_id, field_requirements);
         }
+        tp_sub_field_sol += TP_SUB() - tp_s0;
 
+        tp_s0 = TP_SUB();
         if (need_material_state) {
             auto view = material_state_provider_->getCellState(kernel, cell_id, ctx.numQuadraturePoints());
             FE_THROW_IF(!view, FEException,
@@ -2175,6 +2216,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                         "StandardAssembler::assembleCellsCore: invalid material state stride");
             ctx.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt, view.stride_bytes, view.alignment);
         }
+        tp_sub_material += TP_SUB() - tp_s0;
     };
 
     auto insert_cell_output = [&](GlobalIndex cell_id,
@@ -2211,11 +2253,64 @@ AssemblyResult StandardAssembler::assembleCellsCore(
             (requested_batch_size > 1u) && kernel_impl.supportsCellBatch();
 
         if (!use_batch_path) {
+            double tp_prepare = 0.0, tp_kernel = 0.0, tp_insert = 0.0;
+            auto TP = []() {
+                return std::chrono::duration<double>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+            };
+            double tp0;
+
             for (const auto cell_id : cell_ids) {
+                tp0 = TP();
                 prepare_cell_data(cell_id, context_, row_dofs_, col_dofs_);
+                tp_prepare += TP() - tp0;
+
+                tp0 = TP();
                 kernel_output_.clear();
                 kernel_impl.computeCell(context_, kernel_output_);
+                tp_kernel += TP() - tp0;
+
+                tp0 = TP();
                 insert_cell_output(cell_id, context_, row_dofs_, col_dofs_, kernel_output_);
+                tp_insert += TP() - tp0;
+            }
+
+            {
+                int rank = 0;
+#if FE_HAS_MPI
+                int mpi_init = 0;
+                MPI_Initialized(&mpi_init);
+                if (mpi_init) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+#endif
+                if (rank == 0) {
+                    const double total = tp_prepare + tp_kernel + tp_insert;
+                    if (total > 1e-7) {
+                        std::fprintf(stderr,
+                            "    --- cellLoop TIMING (rank 0, %zu cells) ---\n"
+                            "      Total:            %9.6f s\n"
+                            "      prepareContext:    %9.6f s  (%5.1f%%)\n"
+                            "        dofMap lookup:   %9.6f s  (%5.1f%%)\n"
+                            "        geom+basis:      %9.6f s  (%5.1f%%)\n"
+                            "        ctx setters:     %9.6f s  (%5.1f%%)\n"
+                            "        solution gather: %9.6f s  (%5.1f%%)\n"
+                            "        field solutions: %9.6f s  (%5.1f%%)\n"
+                            "        material state:  %9.6f s  (%5.1f%%)\n"
+                            "      computeCell:      %9.6f s  (%5.1f%%)\n"
+                            "      insertLocal:      %9.6f s  (%5.1f%%)\n"
+                            "    ------------------------------------\n",
+                            cell_ids.size(),
+                            total,
+                            tp_prepare, 100.0 * tp_prepare / total,
+                            tp_sub_dofmap,       100.0 * tp_sub_dofmap       / total,
+                            tp_sub_prepare_ctx,  100.0 * tp_sub_prepare_ctx  / total,
+                            tp_sub_setters,      100.0 * tp_sub_setters      / total,
+                            tp_sub_solution,     100.0 * tp_sub_solution     / total,
+                            tp_sub_field_sol,    100.0 * tp_sub_field_sol    / total,
+                            tp_sub_material,     100.0 * tp_sub_material     / total,
+                            tp_kernel,  100.0 * tp_kernel  / total,
+                            tp_insert,  100.0 * tp_insert  / total);
+                    }
+                }
             }
             return;
         }
@@ -2229,9 +2324,17 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         std::vector<KernelOutput> batch_outputs(requested_batch_size);
         std::vector<const AssemblyContext*> batch_context_ptrs(requested_batch_size, nullptr);
 
+        double tp_prepare = 0.0, tp_kernel = 0.0, tp_insert = 0.0;
+        auto TP = []() {
+            return std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        };
+
         auto assemble_batch_range = [&](std::span<const GlobalIndex> grouped_cell_ids) {
             for (std::size_t begin = 0; begin < grouped_cell_ids.size(); begin += requested_batch_size) {
                 const std::size_t active = std::min(requested_batch_size, grouped_cell_ids.size() - begin);
+
+                double tp0 = TP();
                 for (std::size_t slot = 0; slot < active; ++slot) {
                     const auto cell_id = grouped_cell_ids[begin + slot];
                     prepare_cell_data(cell_id,
@@ -2241,11 +2344,15 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                     batch_outputs[slot].clear();
                     batch_context_ptrs[slot] = &batch_contexts[slot];
                 }
+                tp_prepare += TP() - tp0;
 
+                tp0 = TP();
                 kernel_impl.computeCellBatch(
                     std::span<const AssemblyContext* const>(batch_context_ptrs.data(), active),
                     std::span<KernelOutput>(batch_outputs.data(), active));
+                tp_kernel += TP() - tp0;
 
+                tp0 = TP();
                 for (std::size_t slot = 0; slot < active; ++slot) {
                     const auto cell_id = grouped_cell_ids[begin + slot];
                     insert_cell_output(cell_id,
@@ -2254,6 +2361,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                                        batch_col_dofs[slot],
                                        batch_outputs[slot]);
                 }
+                tp_insert += TP() - tp0;
             }
         };
 
@@ -2274,25 +2382,81 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                                                                   run_end - run_begin));
                 run_begin = run_end;
             }
-            return;
-        }
-
-        // Higher-throughput path: globally group by topology when stable
-        // insertion order is explicitly relaxed.
-        std::vector<std::pair<ElementType, std::vector<GlobalIndex>>> topology_groups;
-        for (const auto cell_id : cell_ids) {
-            const auto cell_type = mesh.getCellType(cell_id);
-            auto it = std::find_if(topology_groups.begin(), topology_groups.end(),
-                                   [&](const auto& group) { return group.first == cell_type; });
-            if (it == topology_groups.end()) {
-                topology_groups.emplace_back(cell_type, std::vector<GlobalIndex>{});
-                it = topology_groups.end() - 1;
+        } else {
+            // Higher-throughput path: globally group by topology when stable
+            // insertion order is explicitly relaxed.
+            std::vector<std::pair<ElementType, std::vector<GlobalIndex>>> topology_groups;
+            for (const auto cell_id : cell_ids) {
+                const auto cell_type = mesh.getCellType(cell_id);
+                auto it = std::find_if(topology_groups.begin(), topology_groups.end(),
+                                       [&](const auto& group) { return group.first == cell_type; });
+                if (it == topology_groups.end()) {
+                    topology_groups.emplace_back(cell_type, std::vector<GlobalIndex>{});
+                    it = topology_groups.end() - 1;
+                }
+                it->second.push_back(cell_id);
             }
-            it->second.push_back(cell_id);
+
+            for (const auto& group : topology_groups) {
+                assemble_batch_range(std::span<const GlobalIndex>(group.second));
+            }
         }
 
-        for (const auto& group : topology_groups) {
-            assemble_batch_range(std::span<const GlobalIndex>(group.second));
+        // Print batch path timing
+        {
+            int rank = 0;
+#if FE_HAS_MPI
+            int mpi_init = 0;
+            MPI_Initialized(&mpi_init);
+            if (mpi_init) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+#endif
+            if (rank == 0) {
+                const double total = tp_prepare + tp_kernel + tp_insert;
+                if (total > 1e-7) {
+                    const double pc_total = g_pc_setup + g_pc_mapping + g_pc_resize
+                                          + g_pc_jacobian + g_pc_basis + g_pc_ctx_config;
+                    std::fprintf(stderr,
+                        "    --- cellLoop TIMING (rank 0, %zu cells, batch=%zu) ---\n"
+                        "      Total:             %9.6f s\n"
+                        "      prepare_cell_data: %9.6f s  (%5.1f%%)\n"
+                        "        dofMap lookup:   %9.6f s  (%5.1f%%)\n"
+                        "        prepareContext:  %9.6f s  (%5.1f%%)\n"
+                        "          elem+quad:     %9.6f s  (%5.1f%%)\n"
+                        "          mapping create:%9.6f s  (%5.1f%%)\n"
+                        "          scratch resize:%9.6f s  (%5.1f%%)\n"
+                        "          jacobian QP:   %9.6f s  (%5.1f%%)\n"
+                        "          basis eval QP: %9.6f s  (%5.1f%%)\n"
+                        "          ctx config:    %9.6f s  (%5.1f%%)\n"
+                        "        ctx setters:     %9.6f s  (%5.1f%%)\n"
+                        "        solution gather: %9.6f s  (%5.1f%%)\n"
+                        "        field solutions: %9.6f s  (%5.1f%%)\n"
+                        "        material state:  %9.6f s  (%5.1f%%)\n"
+                        "      computeCellBatch: %9.6f s  (%5.1f%%)\n"
+                        "      insertLocal:      %9.6f s  (%5.1f%%)\n"
+                        "    ------------------------------------\n",
+                        cell_ids.size(), requested_batch_size,
+                        total,
+                        tp_prepare, 100.0 * tp_prepare / total,
+                        tp_sub_dofmap,       100.0 * tp_sub_dofmap       / total,
+                        tp_sub_prepare_ctx,  100.0 * tp_sub_prepare_ctx  / total,
+                        g_pc_setup,          100.0 * g_pc_setup          / total,
+                        g_pc_mapping,        100.0 * g_pc_mapping        / total,
+                        g_pc_resize,         100.0 * g_pc_resize         / total,
+                        g_pc_jacobian,       100.0 * g_pc_jacobian       / total,
+                        g_pc_basis,          100.0 * g_pc_basis          / total,
+                        g_pc_ctx_config,     100.0 * g_pc_ctx_config     / total,
+                        tp_sub_setters,      100.0 * tp_sub_setters      / total,
+                        tp_sub_solution,     100.0 * tp_sub_solution     / total,
+                        tp_sub_field_sol,    100.0 * tp_sub_field_sol    / total,
+                        tp_sub_material,     100.0 * tp_sub_material     / total,
+                        tp_kernel,  100.0 * tp_kernel  / total,
+                        tp_insert,  100.0 * tp_insert  / total);
+                }
+            }
+            // Reset prepareContext accumulators for next call
+            g_pc_setup = g_pc_mapping = g_pc_resize = 0.0;
+            g_pc_jacobian = g_pc_basis = g_pc_ctx_config = 0.0;
+            g_pc_call_count = 0;
         }
     };
 
@@ -2314,6 +2478,12 @@ void StandardAssembler::prepareContext(
     const spaces::FunctionSpace& trial_space,
     RequiredData required_data)
 {
+    auto PC_TP = []() {
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    double pc_t0 = PC_TP();
+
     // 1. Get element type from mesh
     const ElementType cell_type = mesh.getCellType(cell_id);
     const int dim = mesh.dimension();
@@ -2409,15 +2579,33 @@ void StandardAssembler::prepareContext(
             cell_coords_[i][0], cell_coords_[i][1], cell_coords_[i][2]};
     }
 
-    // 5. Create geometry mapping
-    geometry::MappingRequest map_request;
-    map_request.element_type = cell_type;
-    map_request.geometry_order = defaultGeometryOrder(cell_type);
-    map_request.use_affine = (map_request.geometry_order <= 1);
+    g_pc_setup += PC_TP() - pc_t0;
 
-    auto mapping = geometry::MappingFactory::create(map_request, node_coords);
+    // 5. Create or reuse geometry mapping
+    pc_t0 = PC_TP();
+    const int geom_order = defaultGeometryOrder(cell_type);
+    const bool use_affine = (geom_order <= 1);
+
+    if (cell_type != cached_mapping_type_ ||
+        geom_order != cached_mapping_order_ ||
+        use_affine != cached_mapping_affine_ ||
+        !cached_mapping_) {
+        geometry::MappingRequest map_request;
+        map_request.element_type = cell_type;
+        map_request.geometry_order = geom_order;
+        map_request.use_affine = use_affine;
+        cached_mapping_ = geometry::MappingFactory::create(map_request, node_coords);
+        cached_mapping_type_ = cell_type;
+        cached_mapping_order_ = geom_order;
+        cached_mapping_affine_ = use_affine;
+    } else {
+        cached_mapping_->resetNodes(std::move(node_coords));
+    }
+    const auto& mapping = cached_mapping_;
+    g_pc_mapping += PC_TP() - pc_t0;
 
     // 6. Resize scratch storage
+    pc_t0 = PC_TP();
     scratch_quad_points_.resize(n_qpts);
     scratch_quad_weights_.resize(n_qpts);
     scratch_phys_points_.resize(n_qpts);
@@ -2523,43 +2711,168 @@ void StandardAssembler::prepareContext(
         }
     }
 
+    g_pc_resize += PC_TP() - pc_t0;
+
     // 7. Copy quadrature data and compute physical points and Jacobians
+    //    Use BasisCache for geometry basis evaluations (invariant across cells of same type).
+    //    For affine elements, compute J once and broadcast to all QPs.
+    pc_t0 = PC_TP();
     const auto& quad_points = quad_rule->points();
     const auto& quad_weights = quad_rule->weights();
 
-    for (LocalIndex q = 0; q < n_qpts; ++q) {
-        // Copy reference quadrature point
-        const auto& qpt = quad_points[q];
-        scratch_quad_points_[q] = {qpt[0], qpt[1], qpt[2]};
-        scratch_quad_weights_[q] = quad_weights[q];
+    const auto& geom_bcache = basis::BasisCache::instance().get_or_compute(
+        mapping->geometryBasis(), *quad_rule, /*gradients=*/true, /*hessians=*/false);
+    const auto& geom_nodes = mapping->nodes();
+    const auto n_geom_dofs = geom_bcache.num_dofs;
 
-        // Map to physical space
-        const math::Vector<Real, 3> xi{qpt[0], qpt[1], qpt[2]};
-        const auto x_phys = mapping->map_to_physical(xi);
-        scratch_phys_points_[q] = {x_phys[0], x_phys[1], x_phys[2]};
-
-        // Compute Jacobian
-        const auto J = mapping->jacobian(xi);
-        const auto J_inv = mapping->jacobian_inverse(xi);
-        const Real det_J = mapping->jacobian_determinant(xi);
-
-        // Store as arrays
-        for (int i = 0; i < 3; ++i) {
-            for (int j = 0; j < 3; ++j) {
-                scratch_jacobians_[q][i][j] = J(i, j);
-                scratch_inv_jacobians_[q][i][j] = J_inv(i, j);
+    if (mapping->isAffine()) {
+        // Affine element: Jacobian is constant across all QPs.
+        // Compute J once using cached gradients at QP 0.
+        math::Matrix<Real, 3, 3> J{};
+        for (std::size_t a = 0; a < n_geom_dofs; ++a) {
+            const auto& grad_a = geom_bcache.gradients[0][a];
+            for (int j = 0; j < dim; ++j) {
+                for (int i = 0; i < 3; ++i) {
+                    J(i, j) += geom_nodes[a][i] * grad_a[j];
+                }
             }
         }
-        scratch_jac_dets_[q] = det_J;
 
-        // Integration weight = quadrature weight * |det(J)|
-        scratch_integration_weights_[q] = quad_weights[q] * std::abs(det_J);
+        // Frame completion for embedded geometry (dim < 3)
+        if (dim == 1) {
+            const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
+            math::Vector<Real, 3> n1{}, n2{};
+            geometry::detail::complete_curve_frame(t, n1, n2);
+            J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
+            J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
+        } else if (dim == 2) {
+            const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
+            const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
+            const auto nv = tu.cross(tv);
+            const Real nv_norm = nv.norm();
+            if (nv_norm < geometry::detail::kDegenerateTol) {
+                J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
+            } else {
+                const auto nv_unit = nv / nv_norm;
+                J(0, 2) = nv_unit[0]; J(1, 2) = nv_unit[1]; J(2, 2) = nv_unit[2];
+            }
+        }
+
+        const auto J_inv = J.inverse();
+        const Real det_J = J.determinant();
+        const Real abs_det_J = std::abs(det_J);
+
+        // Pre-compute stored arrays once
+        AssemblyContext::Matrix3x3 J_arr{}, J_inv_arr{};
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) {
+                J_arr[i][j] = J(i, j);
+                J_inv_arr[i][j] = J_inv(i, j);
+            }
+
+        // Broadcast J data to all QPs; only physical points vary per QP.
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const auto& qpt = quad_points[q];
+            scratch_quad_points_[q] = {qpt[0], qpt[1], qpt[2]};
+            scratch_quad_weights_[q] = quad_weights[q];
+
+            // map_to_physical from cached basis values
+            const auto qidx = static_cast<std::size_t>(q);
+            Real x0 = 0, x1 = 0, x2 = 0;
+            for (std::size_t a = 0; a < n_geom_dofs; ++a) {
+                const Real N_a = geom_bcache.scalarValue(a, qidx);
+                x0 += geom_nodes[a][0] * N_a;
+                x1 += geom_nodes[a][1] * N_a;
+                x2 += geom_nodes[a][2] * N_a;
+            }
+            scratch_phys_points_[q] = {x0, x1, x2};
+
+            scratch_jacobians_[q] = J_arr;
+            scratch_inv_jacobians_[q] = J_inv_arr;
+            scratch_jac_dets_[q] = det_J;
+            scratch_integration_weights_[q] = quad_weights[q] * abs_det_J;
+        }
+    } else {
+        // Non-affine element: compute J per QP from cached geometry basis gradients.
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const auto& qpt = quad_points[q];
+            scratch_quad_points_[q] = {qpt[0], qpt[1], qpt[2]};
+            scratch_quad_weights_[q] = quad_weights[q];
+
+            const auto qidx = static_cast<std::size_t>(q);
+
+            // map_to_physical from cached basis values
+            Real x0 = 0, x1 = 0, x2 = 0;
+            for (std::size_t a = 0; a < n_geom_dofs; ++a) {
+                const Real N_a = geom_bcache.scalarValue(a, qidx);
+                x0 += geom_nodes[a][0] * N_a;
+                x1 += geom_nodes[a][1] * N_a;
+                x2 += geom_nodes[a][2] * N_a;
+            }
+            scratch_phys_points_[q] = {x0, x1, x2};
+
+            // Jacobian from cached geometry basis gradients
+            math::Matrix<Real, 3, 3> J{};
+            for (std::size_t a = 0; a < n_geom_dofs; ++a) {
+                const auto& grad_a = geom_bcache.gradients[qidx][a];
+                for (int j = 0; j < dim; ++j) {
+                    for (int i = 0; i < 3; ++i) {
+                        J(i, j) += geom_nodes[a][i] * grad_a[j];
+                    }
+                }
+            }
+
+            // Frame completion for embedded geometry (dim < 3)
+            if (dim == 1) {
+                const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
+                math::Vector<Real, 3> n1{}, n2{};
+                geometry::detail::complete_curve_frame(t, n1, n2);
+                J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
+                J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
+            } else if (dim == 2) {
+                const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
+                const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
+                const auto nv = tu.cross(tv);
+                const Real nv_norm = nv.norm();
+                if (nv_norm < geometry::detail::kDegenerateTol) {
+                    J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
+                } else {
+                    const auto nv_unit = nv / nv_norm;
+                    J(0, 2) = nv_unit[0]; J(1, 2) = nv_unit[1]; J(2, 2) = nv_unit[2];
+                }
+            }
+
+            const auto J_inv = J.inverse();
+            const Real det_J = J.determinant();
+
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j) {
+                    scratch_jacobians_[q][i][j] = J(i, j);
+                    scratch_inv_jacobians_[q][i][j] = J_inv(i, j);
+                }
+            scratch_jac_dets_[q] = det_J;
+            scratch_integration_weights_[q] = quad_weights[q] * std::abs(det_J);
+        }
     }
 
+    g_pc_jacobian += PC_TP() - pc_t0;
+
     // 8. Evaluate basis functions at quadrature points
-    std::vector<Real> scalar_values_at_pt;
-    std::vector<basis::Gradient> scalar_gradients_at_pt;
-    std::vector<basis::Hessian> scalar_hessians_at_pt;
+    //    For scalar bases, use BasisCache to avoid redundant polynomial evaluation.
+    //    Vector-valued bases (H(curl)/H(div)) still use per-QP evaluation.
+    pc_t0 = PC_TP();
+
+    // Pre-fetch cached basis data for scalar bases (invariant across cells of same type)
+    const basis::BasisCacheEntry* test_bcache = nullptr;
+    const basis::BasisCacheEntry* trial_bcache = nullptr;
+    if (!test_is_vector_basis) {
+        test_bcache = &basis::BasisCache::instance().get_or_compute(
+            test_basis, *quad_rule, true, need_basis_hessians);
+    }
+    if (&test_space != &trial_space && !trial_is_vector_basis) {
+        trial_bcache = &basis::BasisCache::instance().get_or_compute(
+            trial_basis, *quad_rule, true, need_basis_hessians);
+    }
 
     std::vector<math::Vector<Real, 3>> vec_values_at_pt;
     std::vector<math::Vector<Real, 3>> vec_curls_at_pt;
@@ -2659,21 +2972,21 @@ void StandardAssembler::prepareContext(
                 }
             }
         } else {
-            test_basis.evaluate_values(xi, scalar_values_at_pt);
-            test_basis.evaluate_gradients(xi, scalar_gradients_at_pt);
-            if (need_basis_hessians) {
-                test_basis.evaluate_hessians(xi, scalar_hessians_at_pt);
-            }
+            // Scalar test basis: read from BasisCache instead of per-QP evaluation
+            const auto qsz = static_cast<std::size_t>(q);
 
             for (LocalIndex i = 0; i < n_test_dofs; ++i) {
                 const LocalIndex si = test_is_product ? static_cast<LocalIndex>(i % n_test_scalar_dofs) : i;
                 const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
                 const std::size_t idx_phys = static_cast<std::size_t>(q * n_test_dofs + i);
-                scratch_basis_values_[idx] = scalar_values_at_pt[static_cast<std::size_t>(si)];
-                scratch_ref_gradients_[idx] = {
-                    scalar_gradients_at_pt[static_cast<std::size_t>(si)][0],
-                    scalar_gradients_at_pt[static_cast<std::size_t>(si)][1],
-                    scalar_gradients_at_pt[static_cast<std::size_t>(si)][2]};
+                const auto sisz = static_cast<std::size_t>(si);
+
+                // Values from cache (dof-major layout matches scratch layout)
+                scratch_basis_values_[idx] = test_bcache->scalarValue(sisz, qsz);
+
+                // Gradients from cache [qp][dof]
+                const auto& g = test_bcache->gradients[qsz][sisz];
+                scratch_ref_gradients_[idx] = {g[0], g[1], g[2]};
 
                 const auto& grad_ref = scratch_ref_gradients_[idx];
                 AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
@@ -2686,12 +2999,12 @@ void StandardAssembler::prepareContext(
                 scratch_phys_gradients_[idx_phys] = grad_phys;
 
                 if (need_basis_hessians) {
+                    const auto& hess = test_bcache->hessians[qsz][sisz];
                     AssemblyContext::Matrix3x3 H_ref{};
                     for (int r = 0; r < 3; ++r) {
                         for (int c = 0; c < 3; ++c) {
                             H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                                scalar_hessians_at_pt[static_cast<std::size_t>(si)](static_cast<std::size_t>(r),
-                                                                                     static_cast<std::size_t>(c));
+                                hess(static_cast<std::size_t>(r), static_cast<std::size_t>(c));
                         }
                     }
                     scratch_ref_hessians_[idx] = H_ref;
@@ -2780,21 +3093,19 @@ void StandardAssembler::prepareContext(
                     }
                 }
             } else {
-                trial_basis.evaluate_values(xi, scalar_values_at_pt);
-                trial_basis.evaluate_gradients(xi, scalar_gradients_at_pt);
-                if (need_basis_hessians) {
-                    trial_basis.evaluate_hessians(xi, scalar_hessians_at_pt);
-                }
+                // Scalar trial basis: read from BasisCache
+                const auto qsz = static_cast<std::size_t>(q);
 
                 for (LocalIndex j = 0; j < n_trial_dofs; ++j) {
                     const LocalIndex sj = trial_is_product ? static_cast<LocalIndex>(j % n_trial_scalar_dofs) : j;
                     const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
                     const std::size_t idx_phys = static_cast<std::size_t>(q * n_trial_dofs + j);
-                    trial_basis_values[idx] = scalar_values_at_pt[static_cast<std::size_t>(sj)];
-                    trial_ref_gradients[idx] = {
-                        scalar_gradients_at_pt[static_cast<std::size_t>(sj)][0],
-                        scalar_gradients_at_pt[static_cast<std::size_t>(sj)][1],
-                        scalar_gradients_at_pt[static_cast<std::size_t>(sj)][2]};
+                    const auto sjsz = static_cast<std::size_t>(sj);
+
+                    trial_basis_values[idx] = trial_bcache->scalarValue(sjsz, qsz);
+
+                    const auto& g = trial_bcache->gradients[qsz][sjsz];
+                    trial_ref_gradients[idx] = {g[0], g[1], g[2]};
 
                     const auto& grad_ref = trial_ref_gradients[idx];
                     AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
@@ -2807,12 +3118,12 @@ void StandardAssembler::prepareContext(
                     trial_phys_gradients[idx_phys] = grad_phys;
 
                     if (need_basis_hessians) {
+                        const auto& hess = trial_bcache->hessians[qsz][sjsz];
                         AssemblyContext::Matrix3x3 H_ref{};
                         for (int r = 0; r < 3; ++r) {
                             for (int c = 0; c < 3; ++c) {
                                 H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                                    scalar_hessians_at_pt[static_cast<std::size_t>(sj)](static_cast<std::size_t>(r),
-                                                                                         static_cast<std::size_t>(c));
+                                    hess(static_cast<std::size_t>(r), static_cast<std::size_t>(c));
                             }
                         }
                         trial_ref_hessians[idx] = H_ref;
@@ -2842,7 +3153,10 @@ void StandardAssembler::prepareContext(
         }
     }
 
+    g_pc_basis += PC_TP() - pc_t0;
+
     // 9. Configure context with basic info
+    pc_t0 = PC_TP();
     context.configure(cell_id, test_space, trial_space, required_data);
     context.setCellDomainId(mesh.getCellDomainId(cell_id));
 
@@ -2924,12 +3238,13 @@ void StandardAssembler::prepareContext(
             cell_volume += scratch_integration_weights_[static_cast<std::size_t>(q)];
         }
 
+        const auto& map_nodes = mapping->nodes();
         Real h = 0.0;
-        for (std::size_t a = 0; a < n_nodes; ++a) {
-            for (std::size_t b = a + 1; b < n_nodes; ++b) {
-                const Real dx = node_coords[a][0] - node_coords[b][0];
-                const Real dy = node_coords[a][1] - node_coords[b][1];
-                const Real dz = node_coords[a][2] - node_coords[b][2];
+        for (std::size_t a = 0; a < map_nodes.size(); ++a) {
+            for (std::size_t b = a + 1; b < map_nodes.size(); ++b) {
+                const Real dx = map_nodes[a][0] - map_nodes[b][0];
+                const Real dy = map_nodes[a][1] - map_nodes[b][1];
+                const Real dz = map_nodes[a][2] - map_nodes[b][2];
                 const Real dist = std::sqrt(dx * dx + dy * dy + dz * dz);
                 if (dist > h) h = dist;
             }
@@ -2937,6 +3252,9 @@ void StandardAssembler::prepareContext(
 
         context.setEntityMeasures(h, cell_volume, /*facet_area=*/0.0);
     }
+
+    g_pc_ctx_config += PC_TP() - pc_t0;
+    g_pc_call_count++;
 }
 
 void StandardAssembler::prepareContextFace(

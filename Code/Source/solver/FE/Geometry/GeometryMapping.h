@@ -22,6 +22,9 @@
 
 namespace svmp {
 namespace FE {
+
+namespace basis { class BasisFunction; }
+
 namespace geometry {
 
 /**
@@ -87,6 +90,17 @@ public:
 
     /// Jacobian determinant at reference point
     virtual Real jacobian_determinant(const math::Vector<Real, 3>& xi) const;
+
+    /// Replace the nodal coordinates for reuse across cells of the same element type.
+    virtual void resetNodes(std::vector<math::Vector<Real, 3>> nodes) {
+        (void)nodes;
+        FE_THROW(FEException, "resetNodes not supported for this mapping type");
+    }
+
+    /// Access the underlying geometry basis function (for BasisCache lookup).
+    virtual const basis::BasisFunction& geometryBasis() const {
+        FE_THROW(FEException, "geometryBasis not supported for this mapping type");
+    }
 
     /// Convenience: transform a reference gradient to physical space (J^{-T} * grad)
     math::Vector<Real, 3> transform_gradient(const math::Vector<Real, 3>& grad_ref,

@@ -37,6 +37,9 @@ public:
     math::Matrix<Real, 3, 3> jacobian(const math::Vector<Real, 3>& xi) const override;
     bool isAffine() const noexcept override { return true; }
 
+    void resetNodes(std::vector<math::Vector<Real, 3>> nodes) override { nodes_ = std::move(nodes); }
+    const basis::BasisFunction& geometryBasis() const override { return *basis_; }
+
 private:
     ElementType element_type_;
     int dimension_;

@@ -36,6 +36,9 @@
 #include "ns_solver.h"
 #include "precond.h"
 
+#include <cstdio>
+#include <chrono>
+
 namespace fe_fsi_linear_solver {
 
 /// @brief In this routine, the appropriate LS algorithm is called and
@@ -111,6 +114,11 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
     }
   }
 
+  auto TP = [](){ return fsils_cpu_t(); };
+  double tp_alloc_and_perm = 0.0, tp_precond = 0.0, tp_solver = 0.0, tp_unprecond = 0.0;
+  double tp0;
+
+  tp0 = TP();
   Array<double> R(dof,nNo), Wr(dof,nNo), Wc(dof,nNo);
 
   for (int a = 0; a < nNo; a++) {
@@ -118,12 +126,14 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
       R(i,lhs.map(a)) = Ri(i,a);
     }
   }
+  tp_alloc_and_perm = TP() - tp0;
 
   // Apply preconditioner.
   //
   // Modifies Val and R.
   //
 
+  tp0 = TP();
   if (prec == PreconditionerType::PREC_FSILS) {
     precond::precond_diag(lhs, lhs.rowPtr, lhs.colPtr, lhs.diagPtr, dof, Val, R, Wc);
   } else if (prec == PreconditionerType::PREC_RCS) {
@@ -131,9 +141,11 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
   } else {
     //PRINT *, "This linear solver and preconditioner combination is not supported."
   }
+  tp_precond = TP() - tp0;
 
   // Solve for 'R'.
   //
+  tp0 = TP();
   switch (ls.LS_type) {
     case LinearSolverType::LS_TYPE_NS:
       ns_solver::ns_solver(lhs, ls, dof, Val, R);
@@ -178,9 +190,11 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
     default:
       throw std::runtime_error("FSILS: LS_type not defined");
   }
+  tp_solver = TP() - tp0;
 
   // Element-wise multiplication.
   //
+  tp0 = TP();
   for (int i = 0; i < Wc.size(); i++) {
     R(i) = Wc(i) * R(i);
   }
@@ -190,6 +204,27 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
       Ri(i,a) = R(i,lhs.map(a));
     }
   }
+  tp_unprecond = TP() - tp0;
+
+  // ===== PRINT OUTER SOLVE PROFILE =====
+  double tp_total = tp_alloc_and_perm + tp_precond + tp_solver + tp_unprecond;
+  if (lhs.commu.task == 0 && tp_total > 0.0) {
+    auto pct = [&](double t) { return 100.0 * t / tp_total; };
+    fprintf(stderr,
+      "\n--- fsils_solve TIMING (rank 0) ---\n"
+      "  Total:                %10.6f s\n"
+      "  Alloc+permute in:     %10.6f s  (%5.1f%%)\n"
+      "  Preconditioner:       %10.6f s  (%5.1f%%)\n"
+      "  Solver (GMRES):       %10.6f s  (%5.1f%%)\n"
+      "  Unprecond+permute:    %10.6f s  (%5.1f%%)\n"
+      "----------------------------------\n",
+      tp_total,
+      tp_alloc_and_perm, pct(tp_alloc_and_perm),
+      tp_precond, pct(tp_precond),
+      tp_solver, pct(tp_solver),
+      tp_unprecond, pct(tp_unprecond));
+  }
+  // ====================================
 }
 
 };

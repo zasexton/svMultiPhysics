@@ -15,6 +15,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <filesystem>
@@ -477,10 +479,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " iters=" << nr.linear.iterations
               << " rel=" << nr.linear.relative_residual << ")" << std::endl;
   };
+  double vtk_total_time = 0.0;
   callbacks.on_step_accepted = [&](const svmp::FE::timestepping::TimeHistory& h) {
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_accepted step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
+    auto vtk_start = std::chrono::steady_clock::now();
     outputResults(sim, params, h.stepIndex(), h.time(), pvd);
+    vtk_total_time += std::chrono::duration<double>(std::chrono::steady_clock::now() - vtk_start).count();
   };
   callbacks.on_step_rejected = [&](const svmp::FE::timestepping::TimeHistory& h,
                                   svmp::FE::timestepping::StepRejectReason reason,
@@ -500,10 +505,30 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
 
   svmp::FE::timestepping::TimeLoop loop(opts);
   oopCout() << "[svMultiPhysics::Application] TimeLoop: entering loop.run()" << std::endl;
+  auto loop_start = std::chrono::steady_clock::now();
   const auto rep = loop.run(transient, *sim.backend, *sim.linear_solver, *sim.time_history, callbacks);
+  double loop_total = std::chrono::duration<double>(std::chrono::steady_clock::now() - loop_start).count();
   oopCout() << "[svMultiPhysics::Application] TimeLoop: loop.run() returned success=" << rep.success
             << " steps_taken=" << rep.steps_taken << " final_time=" << rep.final_time
             << " message='" << rep.message << "'" << std::endl;
+
+  // ===== PRINT TOP-LEVEL TIMING =====
+  {
+    const auto mpi_comm = svmp::MeshComm::world();
+    if (mpi_comm.rank() == 0) {
+      double solve_time = loop_total - vtk_total_time;
+      fprintf(stderr,
+        "\n*** TOP-LEVEL TIMING SUMMARY (rank 0) ***\n"
+        "  Total time loop:      %10.6f s\n"
+        "  Solve (Newton+linear):%10.6f s  (%5.1f%%)\n"
+        "  VTK output:           %10.6f s  (%5.1f%%)\n"
+        "*******************************************\n",
+        loop_total,
+        solve_time, 100.0 * solve_time / loop_total,
+        vtk_total_time, 100.0 * vtk_total_time / loop_total);
+    }
+  }
+  // ====================================
 
   if (!rep.success) {
     throw std::runtime_error("[svMultiPhysics::Application] Transient solve failed: " + rep.message +
