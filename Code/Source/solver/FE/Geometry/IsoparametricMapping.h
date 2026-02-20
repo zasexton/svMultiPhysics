@@ -37,7 +37,7 @@ public:
     math::Matrix<Real, 3, 3> jacobian(const math::Vector<Real, 3>& xi) const override;
     MappingHessian mapping_hessian(const math::Vector<Real, 3>& xi) const override;
 
-    void resetNodes(std::vector<math::Vector<Real, 3>> nodes) override { nodes_ = std::move(nodes); }
+    void resetNodes(const std::vector<math::Vector<Real, 3>>& nodes) override { nodes_ = nodes; }
     const basis::BasisFunction& geometryBasis() const override { return *basis_; }
 
 private:

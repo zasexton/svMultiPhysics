@@ -92,7 +92,7 @@ public:
     virtual Real jacobian_determinant(const math::Vector<Real, 3>& xi) const;
 
     /// Replace the nodal coordinates for reuse across cells of the same element type.
-    virtual void resetNodes(std::vector<math::Vector<Real, 3>> nodes) {
+    virtual void resetNodes(const std::vector<math::Vector<Real, 3>>& nodes) {
         (void)nodes;
         FE_THROW(FEException, "resetNodes not supported for this mapping type");
     }

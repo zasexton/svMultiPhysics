@@ -68,6 +68,8 @@
 #include "AssemblyKernel.h"
 #include "AssemblyContext.h"
 #include "Spaces/OrientationManager.h"
+#include "Geometry/GeometryMapping.h"
+#include "Basis/BasisCache.h"
 
 #include <memory>
 #include <unordered_map>
@@ -99,8 +101,8 @@ namespace elements {
     class Element;
 }
 
-namespace geometry {
-    class GeometryMapping;
+namespace quadrature {
+    class QuadratureRule;
 }
 
 namespace assembly {
@@ -600,6 +602,30 @@ private:
     ElementType cached_mapping_type_{ElementType::Unknown};
     int cached_mapping_order_{-1};
     bool cached_mapping_affine_{false};
+
+    // Cached quad rule from prepareContext (used for BasisCache lookups in populateFieldSolutionData)
+    std::shared_ptr<const quadrature::QuadratureRule> cached_quad_rule_;
+
+    // Scratch storage for node coordinate conversion (avoids per-cell heap allocation)
+    std::vector<math::Vector<Real, 3>> scratch_node_coords_;
+
+    // Cached BasisCacheEntry pointers (hoisted out of per-cell loop).
+    // Invalidated when element type or hessian requirement changes.
+    const basis::BasisCacheEntry* cached_geom_bcache_{nullptr};
+    const basis::BasisCacheEntry* cached_test_bcache_{nullptr};
+    const basis::BasisCacheEntry* cached_trial_bcache_{nullptr};
+    bool cached_need_hessians_{false};
+    const void* cached_quad_rule_ptr_{nullptr}; // identity check for quad rule change
+
+    // Field-solution BasisCache: small flat cache keyed by (BasisFunction*, gradients, hessians).
+    // Typically 1-2 entries (velocity basis, pressure basis). Invalidated with mapping type.
+    struct FieldBCacheEntry {
+        const basis::BasisFunction* basis{nullptr};
+        bool gradients{false};
+        bool hessians{false};
+        const basis::BasisCacheEntry* entry{nullptr};
+    };
+    std::vector<FieldBCacheEntry> cached_field_bcache_;
 };
 
 // ============================================================================

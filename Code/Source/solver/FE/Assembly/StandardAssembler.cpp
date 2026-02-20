@@ -2538,6 +2538,16 @@ void StandardAssembler::prepareContext(
     const bool need_basis_curls = hasFlag(required_data, RequiredData::BasisCurls);
     const bool need_basis_divergences = hasFlag(required_data, RequiredData::BasisDivergences);
 
+    // Invalidate cached BasisCacheEntry pointers when quad rule or hessian requirement changes.
+    if (quad_rule.get() != cached_quad_rule_ptr_ || need_basis_hessians != cached_need_hessians_) {
+        cached_geom_bcache_ = nullptr;
+        cached_test_bcache_ = nullptr;
+        cached_trial_bcache_ = nullptr;
+        cached_field_bcache_.clear();
+        cached_quad_rule_ptr_ = quad_rule.get();
+        cached_need_hessians_ = need_basis_hessians;
+    }
+
     const auto& test_basis = test_element.basis();
     const auto& trial_basis = trial_element.basis();
     const bool test_is_vector_basis = test_basis.is_vector_valued();
@@ -2572,10 +2582,10 @@ void StandardAssembler::prepareContext(
     mesh.getCellCoordinates(cell_id, cell_coords_);
     const auto n_nodes = cell_coords_.size();
 
-    // Convert to math::Vector format for geometry mapping
-    std::vector<math::Vector<Real, 3>> node_coords(n_nodes);
+    // Convert to math::Vector format for geometry mapping (reuse scratch storage)
+    scratch_node_coords_.resize(n_nodes);
     for (std::size_t i = 0; i < n_nodes; ++i) {
-        node_coords[i] = math::Vector<Real, 3>{
+        scratch_node_coords_[i] = math::Vector<Real, 3>{
             cell_coords_[i][0], cell_coords_[i][1], cell_coords_[i][2]};
     }
 
@@ -2594,12 +2604,17 @@ void StandardAssembler::prepareContext(
         map_request.element_type = cell_type;
         map_request.geometry_order = geom_order;
         map_request.use_affine = use_affine;
-        cached_mapping_ = geometry::MappingFactory::create(map_request, node_coords);
+        cached_mapping_ = geometry::MappingFactory::create(map_request, scratch_node_coords_);
         cached_mapping_type_ = cell_type;
         cached_mapping_order_ = geom_order;
         cached_mapping_affine_ = use_affine;
+        // Invalidate cached BasisCacheEntry pointers — will be re-looked-up below.
+        cached_geom_bcache_ = nullptr;
+        cached_test_bcache_ = nullptr;
+        cached_trial_bcache_ = nullptr;
+        cached_field_bcache_.clear();
     } else {
-        cached_mapping_->resetNodes(std::move(node_coords));
+        cached_mapping_->resetNodes(scratch_node_coords_);
     }
     const auto& mapping = cached_mapping_;
     g_pc_mapping += PC_TP() - pc_t0;
@@ -2720,8 +2735,11 @@ void StandardAssembler::prepareContext(
     const auto& quad_points = quad_rule->points();
     const auto& quad_weights = quad_rule->weights();
 
-    const auto& geom_bcache = basis::BasisCache::instance().get_or_compute(
-        mapping->geometryBasis(), *quad_rule, /*gradients=*/true, /*hessians=*/false);
+    if (!cached_geom_bcache_) {
+        cached_geom_bcache_ = &basis::BasisCache::instance().get_or_compute(
+            mapping->geometryBasis(), *quad_rule, /*gradients=*/true, /*hessians=*/false);
+    }
+    const auto& geom_bcache = *cached_geom_bcache_;
     const auto& geom_nodes = mapping->nodes();
     const auto n_geom_dofs = geom_bcache.num_dofs;
 
@@ -2862,17 +2880,18 @@ void StandardAssembler::prepareContext(
     //    Vector-valued bases (H(curl)/H(div)) still use per-QP evaluation.
     pc_t0 = PC_TP();
 
-    // Pre-fetch cached basis data for scalar bases (invariant across cells of same type)
-    const basis::BasisCacheEntry* test_bcache = nullptr;
-    const basis::BasisCacheEntry* trial_bcache = nullptr;
-    if (!test_is_vector_basis) {
-        test_bcache = &basis::BasisCache::instance().get_or_compute(
+    // Pre-fetch cached basis data for scalar bases (invariant across cells of same type).
+    // Use member pointers to avoid repeated mutex+hash lookup on every cell.
+    if (!test_is_vector_basis && !cached_test_bcache_) {
+        cached_test_bcache_ = &basis::BasisCache::instance().get_or_compute(
             test_basis, *quad_rule, true, need_basis_hessians);
     }
-    if (&test_space != &trial_space && !trial_is_vector_basis) {
-        trial_bcache = &basis::BasisCache::instance().get_or_compute(
+    if (&test_space != &trial_space && !trial_is_vector_basis && !cached_trial_bcache_) {
+        cached_trial_bcache_ = &basis::BasisCache::instance().get_or_compute(
             trial_basis, *quad_rule, true, need_basis_hessians);
     }
+    const basis::BasisCacheEntry* test_bcache = cached_test_bcache_;
+    const basis::BasisCacheEntry* trial_bcache = cached_trial_bcache_;
 
     std::vector<math::Vector<Real, 3>> vec_values_at_pt;
     std::vector<math::Vector<Real, 3>> vec_curls_at_pt;
@@ -3252,6 +3271,9 @@ void StandardAssembler::prepareContext(
 
         context.setEntityMeasures(h, cell_volume, /*facet_area=*/0.0);
     }
+
+    // Cache quad_rule for use in populateFieldSolutionData BasisCache lookups
+    cached_quad_rule_ = quad_rule;
 
     g_pc_ctx_config += PC_TP() - pc_t0;
     g_pc_call_count++;
@@ -4715,17 +4737,60 @@ void StandardAssembler::populateFieldSolutionData(
                 scalar_laplacians.clear();
             }
 
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
-                                               qpts[static_cast<std::size_t>(q)][1],
-                                               qpts[static_cast<std::size_t>(q)][2]};
-
-                basis.evaluate_values(xi, values_at_pt);
-                if (need_gradients) {
-                    basis.evaluate_gradients(xi, gradients_at_pt);
+            // Use BasisCache for field basis evaluations when quad rule is available.
+            // Look up in flat cache first to avoid repeated mutex+hash per cell.
+            const basis::BasisCacheEntry* field_bcache = nullptr;
+            if (cached_quad_rule_ &&
+                static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
+                for (const auto& fc : cached_field_bcache_) {
+                    if (fc.basis == &basis && fc.gradients == need_gradients && fc.hessians == need_hessians) {
+                        field_bcache = fc.entry;
+                        break;
+                    }
                 }
-                if (need_hessians) {
-                    basis.evaluate_hessians(xi, hessians_at_pt);
+                if (!field_bcache) {
+                    field_bcache = &basis::BasisCache::instance().get_or_compute(
+                        basis, *cached_quad_rule_, need_gradients, need_hessians);
+                    cached_field_bcache_.push_back({&basis, need_gradients, need_hessians, field_bcache});
+                }
+            }
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                if (field_bcache) {
+                    // Read cached basis data (avoids per-QP polynomial evaluation).
+                    values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
+                    for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
+                        values_at_pt[static_cast<std::size_t>(j)] =
+                            field_bcache->scalarValue(static_cast<std::size_t>(j),
+                                                     static_cast<std::size_t>(q));
+                    }
+                    if (need_gradients) {
+                        gradients_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
+                        for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
+                            gradients_at_pt[static_cast<std::size_t>(j)] =
+                                field_bcache->gradients[static_cast<std::size_t>(q)]
+                                                       [static_cast<std::size_t>(j)];
+                        }
+                    }
+                    if (need_hessians) {
+                        hessians_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
+                        for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
+                            hessians_at_pt[static_cast<std::size_t>(j)] =
+                                field_bcache->hessians[static_cast<std::size_t>(q)]
+                                                      [static_cast<std::size_t>(j)];
+                        }
+                    }
+                } else {
+                    const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                   qpts[static_cast<std::size_t>(q)][1],
+                                                   qpts[static_cast<std::size_t>(q)][2]};
+                    basis.evaluate_values(xi, values_at_pt);
+                    if (need_gradients) {
+                        basis.evaluate_gradients(xi, gradients_at_pt);
+                    }
+                    if (need_hessians) {
+                        basis.evaluate_hessians(xi, hessians_at_pt);
+                    }
                 }
 
                 const auto J_inv = context.inverseJacobian(q);
@@ -4833,10 +4898,19 @@ void StandardAssembler::populateFieldSolutionData(
                     // Values only (dt() needs just value history).
                     scalar_values.assign(static_cast<std::size_t>(n_qpts), 0.0);
                     for (LocalIndex q = 0; q < n_qpts; ++q) {
-                        const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
-                                                       qpts[static_cast<std::size_t>(q)][1],
-                                                       qpts[static_cast<std::size_t>(q)][2]};
-                        basis.evaluate_values(xi, values_at_pt);
+                        if (field_bcache) {
+                            values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
+                            for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
+                                values_at_pt[static_cast<std::size_t>(j)] =
+                                    field_bcache->scalarValue(static_cast<std::size_t>(j),
+                                                             static_cast<std::size_t>(q));
+                            }
+                        } else {
+                            const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                           qpts[static_cast<std::size_t>(q)][1],
+                                                           qpts[static_cast<std::size_t>(q)][2]};
+                            basis.evaluate_values(xi, values_at_pt);
+                        }
                         Real val = 0.0;
                         for (LocalIndex j = 0; j < n_dofs; ++j) {
                             const Real coef = local_coeffs[static_cast<std::size_t>(j)];
@@ -5025,17 +5099,59 @@ void StandardAssembler::populateFieldSolutionData(
                 vector_component_laplacians.clear();
             }
 
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
-                                               qpts[static_cast<std::size_t>(q)][1],
-                                               qpts[static_cast<std::size_t>(q)][2]};
-
-                basis.evaluate_values(xi, values_at_pt);
-                if (need_gradients) {
-                    basis.evaluate_gradients(xi, gradients_at_pt);
+            // Use BasisCache for ProductSpace field basis evaluations.
+            // Look up in flat cache first to avoid repeated mutex+hash per cell.
+            const basis::BasisCacheEntry* field_bcache_ps = nullptr;
+            if (cached_quad_rule_ &&
+                static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
+                for (const auto& fc : cached_field_bcache_) {
+                    if (fc.basis == &basis && fc.gradients == need_gradients && fc.hessians == need_hessians) {
+                        field_bcache_ps = fc.entry;
+                        break;
+                    }
                 }
-                if (need_hessians) {
-                    basis.evaluate_hessians(xi, hessians_at_pt);
+                if (!field_bcache_ps) {
+                    field_bcache_ps = &basis::BasisCache::instance().get_or_compute(
+                        basis, *cached_quad_rule_, need_gradients, need_hessians);
+                    cached_field_bcache_.push_back({&basis, need_gradients, need_hessians, field_bcache_ps});
+                }
+            }
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                if (field_bcache_ps) {
+                    values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
+                    for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
+                        values_at_pt[static_cast<std::size_t>(j)] =
+                            field_bcache_ps->scalarValue(static_cast<std::size_t>(j),
+                                                        static_cast<std::size_t>(q));
+                    }
+                    if (need_gradients) {
+                        gradients_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
+                        for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
+                            gradients_at_pt[static_cast<std::size_t>(j)] =
+                                field_bcache_ps->gradients[static_cast<std::size_t>(q)]
+                                                          [static_cast<std::size_t>(j)];
+                        }
+                    }
+                    if (need_hessians) {
+                        hessians_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
+                        for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
+                            hessians_at_pt[static_cast<std::size_t>(j)] =
+                                field_bcache_ps->hessians[static_cast<std::size_t>(q)]
+                                                         [static_cast<std::size_t>(j)];
+                        }
+                    }
+                } else {
+                    const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                   qpts[static_cast<std::size_t>(q)][1],
+                                                   qpts[static_cast<std::size_t>(q)][2]};
+                    basis.evaluate_values(xi, values_at_pt);
+                    if (need_gradients) {
+                        basis.evaluate_gradients(xi, gradients_at_pt);
+                    }
+                    if (need_hessians) {
+                        basis.evaluate_hessians(xi, hessians_at_pt);
+                    }
                 }
 
                 const auto J_inv = context.inverseJacobian(q);
@@ -5152,10 +5268,19 @@ void StandardAssembler::populateFieldSolutionData(
                     // Values only (dt() needs just value history).
                     vector_values.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Vector3D{0.0, 0.0, 0.0});
                     for (LocalIndex q = 0; q < n_qpts; ++q) {
-                        const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
-                                                       qpts[static_cast<std::size_t>(q)][1],
-                                                       qpts[static_cast<std::size_t>(q)][2]};
-                        basis.evaluate_values(xi, values_at_pt);
+                        if (field_bcache_ps) {
+                            values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
+                            for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
+                                values_at_pt[static_cast<std::size_t>(j)] =
+                                    field_bcache_ps->scalarValue(static_cast<std::size_t>(j),
+                                                                static_cast<std::size_t>(q));
+                            }
+                        } else {
+                            const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                           qpts[static_cast<std::size_t>(q)][1],
+                                                           qpts[static_cast<std::size_t>(q)][2]};
+                            basis.evaluate_values(xi, values_at_pt);
+                        }
 
                         AssemblyContext::Vector3D u_prev = {0.0, 0.0, 0.0};
                         for (int c = 0; c < vd; ++c) {

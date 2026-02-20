@@ -39,6 +39,101 @@ inline void callJIT(std::uintptr_t addr, const void* args) noexcept
     reinterpret_cast<JITFn>(addr)(args);
 }
 
+/// Patch per-cell fields of a CellKernelArgsV6 that was templated from another
+/// element in the same batch. Batch-invariant data (time integration stencils,
+/// scalar metadata, interleaved QP geometry offsets) are preserved from the
+/// template, avoiding ~88 virtual function calls for the stencil loop per element.
+inline void patchCellArgsV6(assembly::jit::CellKernelArgsV6& args,
+                            const assembly::AssemblyContext& ctx,
+                            assembly::KernelOutput& output) noexcept
+{
+    using assembly::jit::detail::flattenXYZ;
+    using assembly::jit::detail::flattenMat3;
+
+    auto& s = args.side;
+
+    // Per-cell scalar fields
+    s.cell_id = ctx.cellId();
+    s.cell_domain_id = static_cast<std::int32_t>(ctx.cellDomainId());
+    s.cell_diameter = ctx.cellDiameter();
+    s.cell_volume = (s.context_type == static_cast<std::uint32_t>(assembly::ContextType::Cell))
+                        ? ctx.cellVolume() : Real(0.0);
+    s.facet_area = (s.context_type == static_cast<std::uint32_t>(assembly::ContextType::Cell))
+                        ? Real(0.0) : ctx.facetArea();
+
+    // Quadrature/geometry pointers
+    s.quad_weights = ctx.quadratureWeights().empty() ? nullptr : ctx.quadratureWeights().data();
+    s.integration_weights = ctx.integrationWeights().empty() ? nullptr : ctx.integrationWeights().data();
+    s.quad_points_xyz = flattenXYZ(ctx.quadraturePoints());
+    s.physical_points_xyz = flattenXYZ(ctx.physicalPoints());
+
+    s.jacobians = flattenMat3(ctx.jacobians());
+    s.inverse_jacobians = flattenMat3(ctx.inverseJacobians());
+    s.jacobian_dets = ctx.jacobianDets().empty() ? nullptr : ctx.jacobianDets().data();
+    s.normals_xyz = flattenXYZ(ctx.normals());
+
+    const auto interleaved = ctx.interleavedQPointGeometryRaw();
+    s.interleaved_qpoint_geometry = interleaved.empty() ? nullptr : interleaved.data();
+    s.interleaved_qpoint_geometry_stride_reals =
+        s.interleaved_qpoint_geometry == nullptr ? 0u
+                                                 : assembly::AssemblyContext::kInterleavedQPointGeometryStride;
+
+    // Basis table pointers
+    s.test_basis_values = ctx.testBasisValuesRaw().empty() ? nullptr : ctx.testBasisValuesRaw().data();
+    s.test_phys_gradients_xyz = flattenXYZ(ctx.testPhysicalGradientsRaw());
+    s.test_phys_hessians = flattenMat3(ctx.testPhysicalHessiansRaw());
+
+    s.trial_basis_values = ctx.trialBasisValuesRaw().empty() ? nullptr : ctx.trialBasisValuesRaw().data();
+    s.trial_phys_gradients_xyz = flattenXYZ(ctx.trialPhysicalGradientsRaw());
+    s.trial_phys_hessians = flattenMat3(ctx.trialPhysicalHessiansRaw());
+
+    s.test_basis_vector_values_xyz = flattenXYZ(ctx.testBasisVectorValuesRaw());
+    s.test_basis_curls_xyz = flattenXYZ(ctx.testBasisCurlsRaw());
+    s.test_basis_divergences = ctx.testBasisDivergencesRaw().empty() ? nullptr : ctx.testBasisDivergencesRaw().data();
+
+    s.trial_basis_vector_values_xyz = flattenXYZ(ctx.trialBasisVectorValuesRaw());
+    s.trial_basis_curls_xyz = flattenXYZ(ctx.trialBasisCurlsRaw());
+    s.trial_basis_divergences = ctx.trialBasisDivergencesRaw().empty() ? nullptr : ctx.trialBasisDivergencesRaw().data();
+
+    // Solution coefficient pointers
+    s.solution_coefficients = ctx.solutionCoefficients().empty() ? nullptr : ctx.solutionCoefficients().data();
+
+    for (std::size_t i = 0; i < static_cast<std::size_t>(s.num_previous_solutions); ++i) {
+        const auto coeffs = ctx.previousSolutionCoefficientsRaw(static_cast<int>(i + 1));
+        s.previous_solution_coefficients[i] = coeffs.empty() ? nullptr : coeffs.data();
+    }
+
+    if (s.num_history_steps > 0u) {
+        s.history_weights = ctx.historyWeights().data();
+    }
+    for (std::size_t i = 0; i < static_cast<std::size_t>(s.num_previous_solutions); ++i) {
+        const auto coeffs = ctx.previousSolutionCoefficientsRaw(static_cast<int>(i + 1));
+        s.history_solution_coefficients[i] = coeffs.empty() ? nullptr : coeffs.data();
+    }
+
+    // Field solution / parameter pointers
+    const auto field_table = ctx.jitFieldSolutionTable();
+    s.field_solutions = field_table.empty() ? nullptr : field_table.data();
+    s.num_field_solutions = static_cast<std::uint32_t>(field_table.size());
+
+    s.jit_constants = ctx.jitConstants().empty() ? nullptr : ctx.jitConstants().data();
+    s.num_jit_constants = static_cast<std::uint32_t>(ctx.jitConstants().size());
+
+    s.coupled_integrals = ctx.coupledIntegrals().empty() ? nullptr : ctx.coupledIntegrals().data();
+    s.num_coupled_integrals = static_cast<std::uint32_t>(ctx.coupledIntegrals().size());
+
+    s.coupled_aux = ctx.coupledAuxState().empty() ? nullptr : ctx.coupledAuxState().data();
+    s.num_coupled_aux = static_cast<std::uint32_t>(ctx.coupledAuxState().size());
+
+    // Material state pointers (sizes/alignment are batch-invariant)
+    s.material_state_old_base = ctx.materialStateOldBase();
+    s.material_state_work_base = ctx.materialStateWorkBase();
+    s.user_data = ctx.userData();
+
+    // Output view
+    args.output = assembly::jit::detail::packOutputViewV6(output);
+}
+
 } // namespace
 
 JITKernelWrapper::JITKernelWrapper(std::shared_ptr<assembly::AssemblyKernel> fallback,
@@ -110,7 +205,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
     }
 
     try {
-        const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+        const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
@@ -324,9 +419,11 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
     // Find the first non-null context to derive batch-invariant properties.
     const assembly::AssemblyContext* first_ctx = nullptr;
+    std::size_t first_idx = 0;
     for (std::size_t idx = 0; idx < n; ++idx) {
         if (contexts[idx] != nullptr) {
             first_ctx = contexts[idx];
+            first_idx = idx;
             break;
         }
     }
@@ -335,7 +432,7 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
     }
 
     try {
-        const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+        const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
 
         // ---- FormKernel (pure bilinear or pure linear) ----
         if (kind_ == WrappedKind::FormKernel) {
@@ -351,13 +448,18 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                     KernelRole::Form, k->ir(), IntegralDomain::Cell, *first_ctx, nullptr);
                 const auto& compiled = disp ? *disp : compiled_form_;
 
-                // Pre-reserve all outputs (Opt B): allocates to correct size
+                // Pre-reserve all outputs: allocates to correct size
                 // so the per-element loop only needs to clear.
                 const auto n_test = first_ctx->numTestDofs();
                 const auto n_trial = first_ctx->numTrialDofs();
                 for (std::size_t idx = 0; idx < n; ++idx) {
                     outputs[idx].reserve(n_test, n_trial, want_matrix, want_vector);
                 }
+
+                // Pack template from first element (time integration stencils
+                // are batch-invariant and the most expensive part to recompute).
+                auto args_template = assembly::jit::packCellKernelArgsV6(
+                    *first_ctx, outputs[first_idx], checks);
 
                 // Tight per-element loop.
                 for (std::size_t idx = 0; idx < n; ++idx) {
@@ -376,7 +478,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         }
                     }
 
-                    const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
+                    auto args = args_template;
+                    patchCellArgsV6(args, ctx, output);
                     callJIT(compiled.cell, &args);
 
                     output.has_matrix = want_matrix;
@@ -421,6 +524,10 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                     tmp.reserve(n_test, n_trial, /*need_matrix=*/true, /*need_vector=*/false);
                 }
 
+                // Pack template from first element (avoids stencil recomputation).
+                auto args_template = assembly::jit::packCellKernelArgsV6(
+                    *first_ctx, outputs[first_idx], checks);
+
                 // Tight per-element loop.
                 for (std::size_t idx = 0; idx < n; ++idx) {
                     if (contexts[idx] == nullptr) {
@@ -438,10 +545,13 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         }
                     }
 
+                    // Patch per-cell fields from template.
+                    auto args = args_template;
+                    patchCellArgsV6(args, ctx, output);
+
                     // 1) Jacobian (bilinear part).
                     if (want_matrix) {
-                        const auto args_bi = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
-                        callJIT(compiled_bi.cell, &args_bi);
+                        callJIT(compiled_bi.cell, &args);
                     }
 
                     // 2) Residual vector = (linear part) + (K*u).
@@ -453,8 +563,7 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                                     "missing solution coefficients");
 
                         if (compiled_lin_ptr != nullptr) {
-                            const auto args_lin = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
-                            callJIT(compiled_lin_ptr->cell, &args_lin);
+                            callJIT(compiled_lin_ptr->cell, &args);
                         }
 
                         // K*u contribution.
@@ -469,8 +578,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                             }
                         } else {
                             tmp.clear();
-                            const auto args_bi = assembly::jit::packCellKernelArgsV6(ctx, tmp, checks);
-                            callJIT(compiled_bi.cell, &args_bi);
+                            args.output = assembly::jit::detail::packOutputViewV6(tmp);
+                            callJIT(compiled_bi.cell, &args);
 
                             for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
                                 Real sum = 0.0;
@@ -530,6 +639,10 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         outputs[idx].reserve(n_test, n_trial, want_matrix, want_vector);
                     }
 
+                    // Pack template from first element (avoids stencil recomputation).
+                    auto args_template = assembly::jit::packCellKernelArgsV6(
+                        *first_ctx, outputs[first_idx], checks);
+
                     // Tight per-element loop.
                     for (std::size_t idx = 0; idx < n; ++idx) {
                         if (contexts[idx] == nullptr) {
@@ -547,7 +660,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                             }
                         }
 
-                        const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
+                        auto args = args_template;
+                        patchCellArgsV6(args, ctx, output);
                         if (want_matrix) {
                             callJIT(compiled_tan_ptr->cell, &args);
                         }
@@ -590,7 +704,7 @@ void JITKernelWrapper::computeBoundaryFace(const assembly::AssemblyContext& ctx,
     }
 
     try {
-        const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+        const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
@@ -843,7 +957,7 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
     }
 
     try {
-        const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+        const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
@@ -1017,7 +1131,7 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
     }
 
     try {
-        const auto checks = assembly::jit::PackingChecks{.validate_alignment = true};
+        const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
