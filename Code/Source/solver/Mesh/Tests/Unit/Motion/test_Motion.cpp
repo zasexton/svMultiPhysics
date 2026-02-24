@@ -238,6 +238,93 @@ public:
   }
 };
 
+class OneThenFailBackend final : public motion::IMotionBackend {
+public:
+  const char* name() const noexcept override { return "OneThenFailBackend"; }
+
+  motion::MotionSolveResult solve(const motion::MotionSolveRequest& request) override
+  {
+    ++calls;
+
+    if (calls == 1) {
+      motion::MotionSolveResult result{};
+      if (!request.displacement.valid()) {
+        result.success = false;
+        result.message = "displacement view invalid";
+        return result;
+      }
+
+      const size_t n = request.displacement.n_entities;
+      const size_t c = request.displacement.components;
+      const real_t a = static_cast<real_t>(request.step_scale);
+
+      for (size_t v = 0; v < n; ++v) {
+        request.displacement.data[v * c + 0] = a;
+        if (c > 1) request.displacement.data[v * c + 1] = 0.0;
+        if (c > 2) request.displacement.data[v * c + 2] = 0.0;
+      }
+
+      result.success = true;
+      result.wrote_velocity = false;
+      return result;
+    }
+
+    motion::MotionSolveResult fail{};
+    fail.success = false;
+    fail.message = "intentional failure after first substep";
+    return fail;
+  }
+
+  int calls{0};
+};
+
+class AngleThresholdBacktrackingBackend final : public motion::IMotionBackend {
+public:
+  const char* name() const noexcept override { return "AngleThresholdBacktrackingBackend"; }
+
+  motion::MotionSolveResult solve(const motion::MotionSolveRequest& request) override
+  {
+    scales.push_back(request.step_scale);
+
+    motion::MotionSolveResult result{};
+    if (!request.displacement.valid()) {
+      result.success = false;
+      result.message = "displacement view invalid";
+      return result;
+    }
+
+    // Nonlinear "motion model" applied to vertex 2 only:
+    // - x, z relax toward 0.5 with an explicit Euler step.
+    // - y decays multiplicatively (with alpha close to 1), so a single full step
+    //   collapses the element angle, while multiple substeps remain acceptable.
+    const auto xyz = request.mesh.get_vertex_coords(2);
+    const real_t x = xyz[0];
+    const real_t y = xyz[1];
+    const real_t z = xyz[2];
+
+    const real_t s = static_cast<real_t>(request.step_scale);
+    const real_t x_new = x + s * (static_cast<real_t>(0.5) - x);
+    const real_t z_new = z + s * (static_cast<real_t>(0.5) - z);
+    constexpr real_t alpha = static_cast<real_t>(0.99);
+    const real_t y_new = y * (static_cast<real_t>(1.0) - alpha * s);
+
+    const real_t dux = x_new - x;
+    const real_t duy = y_new - y;
+    const real_t duz = z_new - z;
+
+    const size_t c = request.displacement.components;
+    request.displacement.data[2 * c + 0] = dux;
+    if (c > 1) request.displacement.data[2 * c + 1] = duy;
+    if (c > 2) request.displacement.data[2 * c + 2] = duz;
+
+    result.success = true;
+    result.wrote_velocity = false;
+    return result;
+  }
+
+  std::vector<double> scales;
+};
+
 } // namespace
 
 TEST(MotionFieldsTest, AttachMotionFieldsCreatesExpectedFields)
@@ -515,6 +602,123 @@ TEST(MeshMotionTest, BackendProvidedVelocityIsNotOverwritten)
     EXPECT_NEAR(vel[base + 1], 0.0, 1e-12);
     EXPECT_NEAR(vel[base + 2], 0.0, 1e-12);
   }
+}
+
+TEST(MeshMotionTest, DtZeroDoesNotComputeVelocityFallbackAndIsDeterministic)
+{
+  auto mesh = make_unit_tet_mesh();
+
+  // Backend provides displacement only.
+  motion::MeshMotion mm(mesh);
+  mm.set_backend(std::make_shared<ConstantDisplacementBackend>());
+
+  ASSERT_TRUE(mm.advance(/*dt=*/0.0));
+
+  const auto hnd = motion::attach_motion_fields(mesh, 3);
+  const auto* vel = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.velocity);
+  ASSERT_NE(vel, nullptr);
+
+  for (size_t i = 0; i < mesh.n_vertices() * 3u; ++i) {
+    EXPECT_NEAR(vel[i], 0.0, 1e-12);
+  }
+
+  // Backend provides both displacement and velocity; dt==0 must preserve backend velocity.
+  motion::MeshMotion mm2(mesh);
+  mm2.set_backend(std::make_shared<DisplacementAndVelocityBackend>());
+
+  ASSERT_TRUE(mm2.advance(/*dt=*/0.0));
+
+  const auto hnd2 = motion::attach_motion_fields(mesh, 3);
+  const auto* vel2 = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd2.velocity);
+  ASSERT_NE(vel2, nullptr);
+  for (size_t v = 0; v < mesh.n_vertices(); ++v) {
+    const size_t base = v * 3u;
+    EXPECT_NEAR(vel2[base + 0], -7.0, 1e-12);
+    EXPECT_NEAR(vel2[base + 1], 0.0, 1e-12);
+    EXPECT_NEAR(vel2[base + 2], 0.0, 1e-12);
+  }
+}
+
+TEST(MeshMotionTest, BackendFailureAfterAcceptedSubstepRestoresEntryCurrentCoordsAndConfig)
+{
+  auto mesh = make_unit_tet_mesh();
+
+  // Create an initial current configuration that differs from reference.
+  std::vector<real_t> X_cur = mesh.X_ref();
+  for (auto& x : X_cur) {
+    x += static_cast<real_t>(0.123);
+  }
+  mesh.set_current_coords(X_cur);
+  mesh.use_reference_configuration();
+  ASSERT_TRUE(mesh.has_current_coords());
+  ASSERT_EQ(mesh.active_configuration(), Configuration::Reference);
+
+  motion::MeshMotion mm(mesh);
+  auto backend = std::make_shared<OneThenFailBackend>();
+  mm.set_backend(backend);
+
+  motion::MotionConfig cfg;
+  cfg.max_step_scale = 0.5; // forces two solve calls to cover partial acceptance + failure path
+  cfg.max_substeps = 10;
+  cfg.enable_quality_guard = false;
+  mm.set_config(cfg);
+
+  EXPECT_FALSE(mm.advance(1.0));
+  EXPECT_EQ(backend->calls, 2);
+
+  // Coordinates are restored to entry current coordinates and configuration.
+  ASSERT_TRUE(mesh.has_current_coords());
+  EXPECT_EQ(mesh.active_configuration(), Configuration::Reference);
+  EXPECT_EQ(mesh.X_cur().size(), X_cur.size());
+  for (size_t i = 0; i < X_cur.size(); ++i) {
+    EXPECT_NEAR(mesh.X_cur()[i], X_cur[i], 1e-12);
+  }
+
+  // Motion fields remain attached but are zeroed on failure.
+  const auto hnd = motion::attach_motion_fields(mesh, 3);
+  const auto* disp = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.displacement);
+  const auto* vel  = MeshFields::field_data_as<real_t>(mesh.local_mesh(), hnd.velocity);
+  ASSERT_NE(disp, nullptr);
+  ASSERT_NE(vel, nullptr);
+
+  for (size_t i = 0; i < mesh.n_vertices() * 3u; ++i) {
+    EXPECT_NEAR(disp[i], 0.0, 1e-12);
+    EXPECT_NEAR(vel[i], 0.0, 1e-12);
+  }
+}
+
+TEST(MeshMotionTest, EnforcedAngleThresholdBacktracksToSmallerSubstepsAndSucceeds)
+{
+  auto mesh = make_unit_tet_mesh();
+
+  motion::MeshMotion mm(mesh);
+  auto backend = std::make_shared<AngleThresholdBacktrackingBackend>();
+  mm.set_backend(backend);
+
+  motion::MotionConfig cfg;
+  cfg.max_step_scale = 1.0;
+  cfg.max_substeps = 10;
+  cfg.enable_quality_guard = true;
+  cfg.enforce_quality_thresholds = true;
+  cfg.quality_min_angle_deg = 20.0;
+  mm.set_config(cfg);
+
+  ASSERT_TRUE(mm.advance(1.0));
+
+  ASSERT_EQ(backend->scales.size(), 3u);
+  EXPECT_NEAR(backend->scales[0], 1.0, 1e-12);
+  EXPECT_NEAR(backend->scales[1], 0.5, 1e-12);
+  EXPECT_NEAR(backend->scales[2], 0.5, 1e-12);
+
+  const auto& X_cur = mesh.X_cur();
+  ASSERT_EQ(X_cur.size(), 12u);
+  // Final vertex 2 coordinates after two half substeps of the nonlinear motion model.
+  EXPECT_NEAR(X_cur[6], 0.375, 1e-12);
+  EXPECT_NEAR(X_cur[7], 0.255025, 1e-12);
+  EXPECT_NEAR(X_cur[8], 0.375, 1e-12);
+
+  const auto report = motion::evaluate_motion_quality(mesh, Configuration::Current);
+  EXPECT_GE(report.min_angle_deg, 20.0);
 }
 
 TEST(MeshMotionTest, SubsteppingAccumulatesTotalDisplacementAndVelocity)

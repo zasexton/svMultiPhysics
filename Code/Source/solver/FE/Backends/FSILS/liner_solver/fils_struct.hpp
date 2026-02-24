@@ -294,6 +294,19 @@ class FSILS_subLsType
       int pipe_v_nNo = 0, pipe_v_dof = 0, pipe_v_sD = 0;
       int pipe_s_nNo = 0, pipe_s_sD = 0;
 
+      // Recycled/deflation subspace for GMRES (vector version).
+      // Stores U (correction space) and C = A*U (orthonormal columns) for
+      // deflated/recycling GMRES variants. Both are stored in the same
+      // (dof, nNo) layout as the GMRES unknown.
+      Array3<double> recycle_U3;
+      Array3<double> recycle_C3;
+      Vector<double> recycle_y;
+      std::vector<double> recycle_score;
+      std::vector<int> recycle_drop_streak;
+      int recycle_v_nNo = 0, recycle_v_dof = 0;
+      int recycle_k_alloc = 0;
+      int recycle_k = 0;
+
       /// Ensure dot-thread scratch has at least nthreads*stride doubles.
       void ensure_gmres_dot_thread(const int nthreads, const int stride)
       {
@@ -348,6 +361,31 @@ class FSILS_subLsType
         z2.resize(nNo_, sD_+1);
         pipe_s_nNo = nNo_;
         pipe_s_sD = sD_;
+      }
+
+      void ensure_recycle_v(int dof_, int nNo_, int k_) {
+        if (k_ <= 0) {
+          recycle_k = 0;
+          return;
+        }
+        if (recycle_v_dof == dof_ && recycle_v_nNo == nNo_ && recycle_k_alloc >= k_) {
+          if (recycle_score.size() < static_cast<size_t>(recycle_k_alloc)) {
+            recycle_score.resize(static_cast<size_t>(recycle_k_alloc), 0.0);
+          }
+          if (recycle_drop_streak.size() < static_cast<size_t>(recycle_k_alloc)) {
+            recycle_drop_streak.resize(static_cast<size_t>(recycle_k_alloc), 0);
+          }
+          return;
+        }
+        recycle_U3.resize(dof_, nNo_, k_);
+        recycle_C3.resize(dof_, nNo_, k_);
+        recycle_y.resize(k_);
+        recycle_score.assign(static_cast<size_t>(k_), 0.0);
+        recycle_drop_streak.assign(static_cast<size_t>(k_), 0);
+        recycle_v_dof = dof_;
+        recycle_v_nNo = nNo_;
+        recycle_k_alloc = k_;
+        recycle_k = 0;
       }
 
       // BiCGS workspace (vector version)

@@ -2470,13 +2470,26 @@ AssemblyResult StandardAssembler::assembleCellsCore(
     return result;
 }
 
-void StandardAssembler::prepareContext(
-    AssemblyContext& context,
+std::shared_ptr<const quadrature::QuadratureRule> StandardAssembler::resolveQuadratureRule(
+    const spaces::FunctionSpace& test_space,
+    GlobalIndex cell_id,
+    ElementType cell_type) const
+{
+    const auto& test_element = getElement(test_space, cell_id, cell_type);
+    auto quad_rule = test_element.quadrature();
+    if (!quad_rule) {
+        const int quad_order = quadrature::QuadratureFactory::recommended_order(
+            test_element.polynomial_order(), false);
+        quad_rule = quadrature::QuadratureFactory::create(cell_type, quad_order);
+    }
+    return quad_rule;
+}
+
+void StandardAssembler::prepareGeometry(
+    AssemblyContext& /*context*/,
     const IMeshAccess& mesh,
     GlobalIndex cell_id,
-    const spaces::FunctionSpace& test_space,
-    const spaces::FunctionSpace& trial_space,
-    RequiredData required_data)
+    const quadrature::QuadratureRule& quad_rule)
 {
     auto PC_TP = []() {
         return std::chrono::duration<double>(
@@ -2484,101 +2497,10 @@ void StandardAssembler::prepareContext(
     };
     double pc_t0 = PC_TP();
 
-    // 1. Get element type from mesh
     const ElementType cell_type = mesh.getCellType(cell_id);
     const int dim = mesh.dimension();
 
-    // 2. Get elements for test and trial spaces
-    const auto& test_element = getElement(test_space, cell_id, cell_type);
-    const auto& trial_element = getElement(trial_space, cell_id, cell_type);
-
-    // 3. Get quadrature rule from the element
-    auto quad_rule = test_element.quadrature();
-    if (!quad_rule) {
-        // Fall back to factory-created quadrature if element doesn't provide one
-        const int quad_order = quadrature::QuadratureFactory::recommended_order(
-            test_element.polynomial_order(), false);
-        quad_rule = quadrature::QuadratureFactory::create(cell_type, quad_order);
-    }
-
-    const auto n_qpts = static_cast<LocalIndex>(quad_rule->num_points());
-    const auto n_test_dofs = static_cast<LocalIndex>(test_space.dofs_per_element());
-    const auto n_trial_dofs = static_cast<LocalIndex>(trial_space.dofs_per_element());
-    const auto n_test_scalar_dofs = static_cast<LocalIndex>(test_element.num_dofs());
-    const auto n_trial_scalar_dofs = static_cast<LocalIndex>(trial_element.num_dofs());
-    const bool test_is_product = (test_space.space_type() == spaces::SpaceType::Product);
-    const bool trial_is_product = (trial_space.space_type() == spaces::SpaceType::Product);
-    if (test_is_product) {
-        FE_CHECK_ARG(test_space.field_type() == FieldType::Vector,
-                     "StandardAssembler::prepareContext: ProductSpace test space must be vector-valued");
-        FE_CHECK_ARG(test_space.value_dimension() > 0,
-                     "StandardAssembler::prepareContext: invalid test space value dimension");
-        FE_CHECK_ARG(n_test_dofs ==
-                         static_cast<LocalIndex>(
-                             n_test_scalar_dofs * static_cast<LocalIndex>(test_space.value_dimension())),
-                     "StandardAssembler::prepareContext: test ProductSpace DOF count mismatch");
-    } else {
-        FE_CHECK_ARG(n_test_dofs == n_test_scalar_dofs,
-                     "StandardAssembler::prepareContext: non-Product test space DOF count mismatch");
-    }
-    if (trial_is_product) {
-        FE_CHECK_ARG(trial_space.field_type() == FieldType::Vector,
-                     "StandardAssembler::prepareContext: ProductSpace trial space must be vector-valued");
-        FE_CHECK_ARG(trial_space.value_dimension() > 0,
-                     "StandardAssembler::prepareContext: invalid trial space value dimension");
-        FE_CHECK_ARG(n_trial_dofs ==
-                         static_cast<LocalIndex>(
-                             n_trial_scalar_dofs * static_cast<LocalIndex>(trial_space.value_dimension())),
-                     "StandardAssembler::prepareContext: trial ProductSpace DOF count mismatch");
-    } else {
-        FE_CHECK_ARG(n_trial_dofs == n_trial_scalar_dofs,
-                     "StandardAssembler::prepareContext: non-Product trial space DOF count mismatch");
-    }
-    const bool need_basis_hessians = hasFlag(required_data, RequiredData::BasisHessians);
-    const bool need_basis_curls = hasFlag(required_data, RequiredData::BasisCurls);
-    const bool need_basis_divergences = hasFlag(required_data, RequiredData::BasisDivergences);
-
-    // Invalidate cached BasisCacheEntry pointers when quad rule or hessian requirement changes.
-    if (quad_rule.get() != cached_quad_rule_ptr_ || need_basis_hessians != cached_need_hessians_) {
-        cached_geom_bcache_ = nullptr;
-        cached_test_bcache_ = nullptr;
-        cached_trial_bcache_ = nullptr;
-        cached_field_bcache_.clear();
-        cached_quad_rule_ptr_ = quad_rule.get();
-        cached_need_hessians_ = need_basis_hessians;
-    }
-
-    const auto& test_basis = test_element.basis();
-    const auto& trial_basis = trial_element.basis();
-    const bool test_is_vector_basis = test_basis.is_vector_valued();
-    const bool trial_is_vector_basis = trial_basis.is_vector_valued();
-
-    const auto validate_vector_basis_requirements =
-        [&](const spaces::FunctionSpace& space, bool is_vector_basis, const char* which) {
-            if (!is_vector_basis) {
-                return;
-            }
-
-            const auto continuity = space.continuity();
-            FE_THROW_IF(continuity != Continuity::H_curl && continuity != Continuity::H_div, FEException,
-                        std::string("StandardAssembler::prepareContext: ") + which +
-                            " space uses a vector-valued basis but is not H(curl)/H(div)");
-
-            if (continuity == Continuity::H_curl) {
-                FE_THROW_IF(need_basis_divergences, FEException,
-                            std::string("StandardAssembler::prepareContext: BasisDivergences requested for ") + which +
-                                " H(curl) space");
-            } else if (continuity == Continuity::H_div) {
-                FE_THROW_IF(need_basis_curls, FEException,
-                            std::string("StandardAssembler::prepareContext: BasisCurls requested for ") + which +
-                                " H(div) space");
-            }
-        };
-
-    validate_vector_basis_requirements(test_space, test_is_vector_basis, "test");
-    validate_vector_basis_requirements(trial_space, trial_is_vector_basis, "trial");
-
-    // 4. Get cell node coordinates from mesh
+    // Get cell node coordinates from mesh
     mesh.getCellCoordinates(cell_id, cell_coords_);
     const auto n_nodes = cell_coords_.size();
 
@@ -2591,7 +2513,7 @@ void StandardAssembler::prepareContext(
 
     g_pc_setup += PC_TP() - pc_t0;
 
-    // 5. Create or reuse geometry mapping
+    // Create or reuse geometry mapping
     pc_t0 = PC_TP();
     const int geom_order = defaultGeometryOrder(cell_type);
     const bool use_affine = (geom_order <= 1);
@@ -2619,8 +2541,9 @@ void StandardAssembler::prepareContext(
     const auto& mapping = cached_mapping_;
     g_pc_mapping += PC_TP() - pc_t0;
 
-    // 6. Resize scratch storage
+    // Resize geometry scratch storage
     pc_t0 = PC_TP();
+    const auto n_qpts = static_cast<LocalIndex>(quad_rule.num_points());
     scratch_quad_points_.resize(n_qpts);
     scratch_quad_weights_.resize(n_qpts);
     scratch_phys_points_.resize(n_qpts);
@@ -2628,9 +2551,252 @@ void StandardAssembler::prepareContext(
     scratch_inv_jacobians_.resize(n_qpts);
     scratch_jac_dets_.resize(n_qpts);
     scratch_integration_weights_.resize(n_qpts);
+    g_pc_resize += PC_TP() - pc_t0;
 
+    // Compute quadrature data, physical points, and Jacobians
+    pc_t0 = PC_TP();
+    const auto& quad_points = quad_rule.points();
+    const auto& quad_weights = quad_rule.weights();
+
+    if (!cached_geom_bcache_) {
+        cached_geom_bcache_ = &basis::BasisCache::instance().get_or_compute(
+            mapping->geometryBasis(), quad_rule, /*gradients=*/true, /*hessians=*/false);
+    }
+    const auto& geom_bcache = *cached_geom_bcache_;
+    const auto& geom_nodes = mapping->nodes();
+    const auto n_geom_dofs = geom_bcache.num_dofs;
+
+    if (mapping->isAffine()) {
+        // Affine element: Jacobian is constant across all QPs.
+        math::Matrix<Real, 3, 3> J{};
+        for (std::size_t a = 0; a < n_geom_dofs; ++a) {
+            const auto& grad_a = geom_bcache.gradients[0][a];
+            for (int j = 0; j < dim; ++j) {
+                for (int i = 0; i < 3; ++i) {
+                    J(i, j) += geom_nodes[a][i] * grad_a[j];
+                }
+            }
+        }
+
+        // Frame completion for embedded geometry (dim < 3)
+        if (dim == 1) {
+            const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
+            math::Vector<Real, 3> n1{}, n2{};
+            geometry::detail::complete_curve_frame(t, n1, n2);
+            J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
+            J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
+        } else if (dim == 2) {
+            const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
+            const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
+            const auto nv = tu.cross(tv);
+            const Real nv_norm = nv.norm();
+            if (nv_norm < geometry::detail::kDegenerateTol) {
+                J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
+            } else {
+                const auto nv_unit = nv / nv_norm;
+                J(0, 2) = nv_unit[0]; J(1, 2) = nv_unit[1]; J(2, 2) = nv_unit[2];
+            }
+        }
+
+        const auto J_inv = J.inverse();
+        const Real det_J = J.determinant();
+        const Real abs_det_J = std::abs(det_J);
+
+        AssemblyContext::Matrix3x3 J_arr{}, J_inv_arr{};
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) {
+                J_arr[i][j] = J(i, j);
+                J_inv_arr[i][j] = J_inv(i, j);
+            }
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const auto& qpt = quad_points[q];
+            scratch_quad_points_[q] = {qpt[0], qpt[1], qpt[2]};
+            scratch_quad_weights_[q] = quad_weights[q];
+
+            const auto qidx = static_cast<std::size_t>(q);
+            Real x0 = 0, x1 = 0, x2 = 0;
+            for (std::size_t a = 0; a < n_geom_dofs; ++a) {
+                const Real N_a = geom_bcache.scalarValue(a, qidx);
+                x0 += geom_nodes[a][0] * N_a;
+                x1 += geom_nodes[a][1] * N_a;
+                x2 += geom_nodes[a][2] * N_a;
+            }
+            scratch_phys_points_[q] = {x0, x1, x2};
+
+            scratch_jacobians_[q] = J_arr;
+            scratch_inv_jacobians_[q] = J_inv_arr;
+            scratch_jac_dets_[q] = det_J;
+            scratch_integration_weights_[q] = quad_weights[q] * abs_det_J;
+        }
+    } else {
+        // Non-affine element: compute J per QP from cached geometry basis gradients.
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const auto& qpt = quad_points[q];
+            scratch_quad_points_[q] = {qpt[0], qpt[1], qpt[2]};
+            scratch_quad_weights_[q] = quad_weights[q];
+
+            const auto qidx = static_cast<std::size_t>(q);
+
+            Real x0 = 0, x1 = 0, x2 = 0;
+            for (std::size_t a = 0; a < n_geom_dofs; ++a) {
+                const Real N_a = geom_bcache.scalarValue(a, qidx);
+                x0 += geom_nodes[a][0] * N_a;
+                x1 += geom_nodes[a][1] * N_a;
+                x2 += geom_nodes[a][2] * N_a;
+            }
+            scratch_phys_points_[q] = {x0, x1, x2};
+
+            math::Matrix<Real, 3, 3> J{};
+            for (std::size_t a = 0; a < n_geom_dofs; ++a) {
+                const auto& grad_a = geom_bcache.gradients[qidx][a];
+                for (int j = 0; j < dim; ++j) {
+                    for (int i = 0; i < 3; ++i) {
+                        J(i, j) += geom_nodes[a][i] * grad_a[j];
+                    }
+                }
+            }
+
+            if (dim == 1) {
+                const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
+                math::Vector<Real, 3> n1{}, n2{};
+                geometry::detail::complete_curve_frame(t, n1, n2);
+                J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
+                J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
+            } else if (dim == 2) {
+                const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
+                const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
+                const auto nv = tu.cross(tv);
+                const Real nv_norm = nv.norm();
+                if (nv_norm < geometry::detail::kDegenerateTol) {
+                    J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
+                } else {
+                    const auto nv_unit = nv / nv_norm;
+                    J(0, 2) = nv_unit[0]; J(1, 2) = nv_unit[1]; J(2, 2) = nv_unit[2];
+                }
+            }
+
+            const auto J_inv = J.inverse();
+            const Real det_J = J.determinant();
+
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j) {
+                    scratch_jacobians_[q][i][j] = J(i, j);
+                    scratch_inv_jacobians_[q][i][j] = J_inv(i, j);
+                }
+            scratch_jac_dets_[q] = det_J;
+            scratch_integration_weights_[q] = quad_weights[q] * std::abs(det_J);
+        }
+    }
+
+    g_pc_jacobian += PC_TP() - pc_t0;
+
+    // Cache quad_rule for use in populateFieldSolutionData BasisCache lookups
+    cached_quad_rule_ = std::shared_ptr<const quadrature::QuadratureRule>(
+        std::shared_ptr<const quadrature::QuadratureRule>{}, &quad_rule);
+}
+
+void StandardAssembler::prepareBasis(
+    AssemblyContext& context,
+    const IMeshAccess& mesh,
+    GlobalIndex cell_id,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
+    RequiredData required_data,
+    const quadrature::QuadratureRule& quad_rule)
+{
+    auto PC_TP = []() {
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+
+    const ElementType cell_type = mesh.getCellType(cell_id);
+    const int dim = mesh.dimension();
+
+    const auto& test_element = getElement(test_space, cell_id, cell_type);
+    const auto& trial_element = getElement(trial_space, cell_id, cell_type);
+
+    const auto n_qpts = static_cast<LocalIndex>(quad_rule.num_points());
+    const auto n_test_dofs = static_cast<LocalIndex>(test_space.dofs_per_element());
+    const auto n_trial_dofs = static_cast<LocalIndex>(trial_space.dofs_per_element());
+    const auto n_test_scalar_dofs = static_cast<LocalIndex>(test_element.num_dofs());
+    const auto n_trial_scalar_dofs = static_cast<LocalIndex>(trial_element.num_dofs());
+    const bool test_is_product = (test_space.space_type() == spaces::SpaceType::Product);
+    const bool trial_is_product = (trial_space.space_type() == spaces::SpaceType::Product);
+    if (test_is_product) {
+        FE_CHECK_ARG(test_space.field_type() == FieldType::Vector,
+                     "StandardAssembler::prepareBasis: ProductSpace test space must be vector-valued");
+        FE_CHECK_ARG(test_space.value_dimension() > 0,
+                     "StandardAssembler::prepareBasis: invalid test space value dimension");
+        FE_CHECK_ARG(n_test_dofs ==
+                         static_cast<LocalIndex>(
+                             n_test_scalar_dofs * static_cast<LocalIndex>(test_space.value_dimension())),
+                     "StandardAssembler::prepareBasis: test ProductSpace DOF count mismatch");
+    } else {
+        FE_CHECK_ARG(n_test_dofs == n_test_scalar_dofs,
+                     "StandardAssembler::prepareBasis: non-Product test space DOF count mismatch");
+    }
+    if (trial_is_product) {
+        FE_CHECK_ARG(trial_space.field_type() == FieldType::Vector,
+                     "StandardAssembler::prepareBasis: ProductSpace trial space must be vector-valued");
+        FE_CHECK_ARG(trial_space.value_dimension() > 0,
+                     "StandardAssembler::prepareBasis: invalid trial space value dimension");
+        FE_CHECK_ARG(n_trial_dofs ==
+                         static_cast<LocalIndex>(
+                             n_trial_scalar_dofs * static_cast<LocalIndex>(trial_space.value_dimension())),
+                     "StandardAssembler::prepareBasis: trial ProductSpace DOF count mismatch");
+    } else {
+        FE_CHECK_ARG(n_trial_dofs == n_trial_scalar_dofs,
+                     "StandardAssembler::prepareBasis: non-Product trial space DOF count mismatch");
+    }
+    const bool need_basis_hessians = hasFlag(required_data, RequiredData::BasisHessians);
+    const bool need_basis_curls = hasFlag(required_data, RequiredData::BasisCurls);
+    const bool need_basis_divergences = hasFlag(required_data, RequiredData::BasisDivergences);
+
+    // Invalidate cached BasisCacheEntry pointers when quad rule or hessian requirement changes.
+    if (&quad_rule != cached_quad_rule_ptr_ || need_basis_hessians != cached_need_hessians_) {
+        cached_geom_bcache_ = nullptr;
+        cached_test_bcache_ = nullptr;
+        cached_trial_bcache_ = nullptr;
+        cached_field_bcache_.clear();
+        cached_quad_rule_ptr_ = &quad_rule;
+        cached_need_hessians_ = need_basis_hessians;
+    }
+
+    const auto& test_basis = test_element.basis();
+    const auto& trial_basis = trial_element.basis();
+    const bool test_is_vector_basis = test_basis.is_vector_valued();
+    const bool trial_is_vector_basis = trial_basis.is_vector_valued();
+
+    const auto validate_vector_basis_requirements =
+        [&](const spaces::FunctionSpace& space, bool is_vector_basis, const char* which) {
+            if (!is_vector_basis) {
+                return;
+            }
+
+            const auto continuity = space.continuity();
+            FE_THROW_IF(continuity != Continuity::H_curl && continuity != Continuity::H_div, FEException,
+                        std::string("StandardAssembler::prepareBasis: ") + which +
+                            " space uses a vector-valued basis but is not H(curl)/H(div)");
+
+            if (continuity == Continuity::H_curl) {
+                FE_THROW_IF(need_basis_divergences, FEException,
+                            std::string("StandardAssembler::prepareBasis: BasisDivergences requested for ") + which +
+                                " H(curl) space");
+            } else if (continuity == Continuity::H_div) {
+                FE_THROW_IF(need_basis_curls, FEException,
+                            std::string("StandardAssembler::prepareBasis: BasisCurls requested for ") + which +
+                                " H(div) space");
+            }
+        };
+
+    validate_vector_basis_requirements(test_space, test_is_vector_basis, "test");
+    validate_vector_basis_requirements(trial_space, trial_is_vector_basis, "trial");
+
+    // Resize basis scratch storage
+    double pc_t0 = PC_TP();
     const auto test_basis_size = static_cast<std::size_t>(n_test_dofs * n_qpts);
-    const auto trial_basis_size = static_cast<std::size_t>(n_trial_dofs * n_qpts);
+
     const bool need_test_vector_values =
         test_is_vector_basis &&
         (hasFlag(required_data, RequiredData::BasisValues) ||
@@ -2692,6 +2858,7 @@ void StandardAssembler::prepareContext(
     std::vector<AssemblyContext::Matrix3x3> trial_phys_hessians;
 
     if (&test_space != &trial_space) {
+        const auto trial_basis_size = static_cast<std::size_t>(n_trial_dofs * n_qpts);
         if (trial_is_vector_basis) {
             trial_basis_values.clear();
             trial_ref_gradients.clear();
@@ -2728,170 +2895,21 @@ void StandardAssembler::prepareContext(
 
     g_pc_resize += PC_TP() - pc_t0;
 
-    // 7. Copy quadrature data and compute physical points and Jacobians
-    //    Use BasisCache for geometry basis evaluations (invariant across cells of same type).
-    //    For affine elements, compute J once and broadcast to all QPs.
-    pc_t0 = PC_TP();
-    const auto& quad_points = quad_rule->points();
-    const auto& quad_weights = quad_rule->weights();
-
-    if (!cached_geom_bcache_) {
-        cached_geom_bcache_ = &basis::BasisCache::instance().get_or_compute(
-            mapping->geometryBasis(), *quad_rule, /*gradients=*/true, /*hessians=*/false);
-    }
-    const auto& geom_bcache = *cached_geom_bcache_;
-    const auto& geom_nodes = mapping->nodes();
-    const auto n_geom_dofs = geom_bcache.num_dofs;
-
-    if (mapping->isAffine()) {
-        // Affine element: Jacobian is constant across all QPs.
-        // Compute J once using cached gradients at QP 0.
-        math::Matrix<Real, 3, 3> J{};
-        for (std::size_t a = 0; a < n_geom_dofs; ++a) {
-            const auto& grad_a = geom_bcache.gradients[0][a];
-            for (int j = 0; j < dim; ++j) {
-                for (int i = 0; i < 3; ++i) {
-                    J(i, j) += geom_nodes[a][i] * grad_a[j];
-                }
-            }
-        }
-
-        // Frame completion for embedded geometry (dim < 3)
-        if (dim == 1) {
-            const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
-            math::Vector<Real, 3> n1{}, n2{};
-            geometry::detail::complete_curve_frame(t, n1, n2);
-            J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
-            J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
-        } else if (dim == 2) {
-            const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
-            const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
-            const auto nv = tu.cross(tv);
-            const Real nv_norm = nv.norm();
-            if (nv_norm < geometry::detail::kDegenerateTol) {
-                J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
-            } else {
-                const auto nv_unit = nv / nv_norm;
-                J(0, 2) = nv_unit[0]; J(1, 2) = nv_unit[1]; J(2, 2) = nv_unit[2];
-            }
-        }
-
-        const auto J_inv = J.inverse();
-        const Real det_J = J.determinant();
-        const Real abs_det_J = std::abs(det_J);
-
-        // Pre-compute stored arrays once
-        AssemblyContext::Matrix3x3 J_arr{}, J_inv_arr{};
-        for (int i = 0; i < 3; ++i)
-            for (int j = 0; j < 3; ++j) {
-                J_arr[i][j] = J(i, j);
-                J_inv_arr[i][j] = J_inv(i, j);
-            }
-
-        // Broadcast J data to all QPs; only physical points vary per QP.
-        for (LocalIndex q = 0; q < n_qpts; ++q) {
-            const auto& qpt = quad_points[q];
-            scratch_quad_points_[q] = {qpt[0], qpt[1], qpt[2]};
-            scratch_quad_weights_[q] = quad_weights[q];
-
-            // map_to_physical from cached basis values
-            const auto qidx = static_cast<std::size_t>(q);
-            Real x0 = 0, x1 = 0, x2 = 0;
-            for (std::size_t a = 0; a < n_geom_dofs; ++a) {
-                const Real N_a = geom_bcache.scalarValue(a, qidx);
-                x0 += geom_nodes[a][0] * N_a;
-                x1 += geom_nodes[a][1] * N_a;
-                x2 += geom_nodes[a][2] * N_a;
-            }
-            scratch_phys_points_[q] = {x0, x1, x2};
-
-            scratch_jacobians_[q] = J_arr;
-            scratch_inv_jacobians_[q] = J_inv_arr;
-            scratch_jac_dets_[q] = det_J;
-            scratch_integration_weights_[q] = quad_weights[q] * abs_det_J;
-        }
-    } else {
-        // Non-affine element: compute J per QP from cached geometry basis gradients.
-        for (LocalIndex q = 0; q < n_qpts; ++q) {
-            const auto& qpt = quad_points[q];
-            scratch_quad_points_[q] = {qpt[0], qpt[1], qpt[2]};
-            scratch_quad_weights_[q] = quad_weights[q];
-
-            const auto qidx = static_cast<std::size_t>(q);
-
-            // map_to_physical from cached basis values
-            Real x0 = 0, x1 = 0, x2 = 0;
-            for (std::size_t a = 0; a < n_geom_dofs; ++a) {
-                const Real N_a = geom_bcache.scalarValue(a, qidx);
-                x0 += geom_nodes[a][0] * N_a;
-                x1 += geom_nodes[a][1] * N_a;
-                x2 += geom_nodes[a][2] * N_a;
-            }
-            scratch_phys_points_[q] = {x0, x1, x2};
-
-            // Jacobian from cached geometry basis gradients
-            math::Matrix<Real, 3, 3> J{};
-            for (std::size_t a = 0; a < n_geom_dofs; ++a) {
-                const auto& grad_a = geom_bcache.gradients[qidx][a];
-                for (int j = 0; j < dim; ++j) {
-                    for (int i = 0; i < 3; ++i) {
-                        J(i, j) += geom_nodes[a][i] * grad_a[j];
-                    }
-                }
-            }
-
-            // Frame completion for embedded geometry (dim < 3)
-            if (dim == 1) {
-                const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
-                math::Vector<Real, 3> n1{}, n2{};
-                geometry::detail::complete_curve_frame(t, n1, n2);
-                J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
-                J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
-            } else if (dim == 2) {
-                const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
-                const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
-                const auto nv = tu.cross(tv);
-                const Real nv_norm = nv.norm();
-                if (nv_norm < geometry::detail::kDegenerateTol) {
-                    J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
-                } else {
-                    const auto nv_unit = nv / nv_norm;
-                    J(0, 2) = nv_unit[0]; J(1, 2) = nv_unit[1]; J(2, 2) = nv_unit[2];
-                }
-            }
-
-            const auto J_inv = J.inverse();
-            const Real det_J = J.determinant();
-
-            for (int i = 0; i < 3; ++i)
-                for (int j = 0; j < 3; ++j) {
-                    scratch_jacobians_[q][i][j] = J(i, j);
-                    scratch_inv_jacobians_[q][i][j] = J_inv(i, j);
-                }
-            scratch_jac_dets_[q] = det_J;
-            scratch_integration_weights_[q] = quad_weights[q] * std::abs(det_J);
-        }
-    }
-
-    g_pc_jacobian += PC_TP() - pc_t0;
-
-    // 8. Evaluate basis functions at quadrature points
-    //    For scalar bases, use BasisCache to avoid redundant polynomial evaluation.
-    //    Vector-valued bases (H(curl)/H(div)) still use per-QP evaluation.
+    // Evaluate basis functions at quadrature points
     pc_t0 = PC_TP();
 
-    // Pre-fetch cached basis data for scalar bases (invariant across cells of same type).
-    // Use member pointers to avoid repeated mutex+hash lookup on every cell.
     if (!test_is_vector_basis && !cached_test_bcache_) {
         cached_test_bcache_ = &basis::BasisCache::instance().get_or_compute(
-            test_basis, *quad_rule, true, need_basis_hessians);
+            test_basis, quad_rule, true, need_basis_hessians);
     }
     if (&test_space != &trial_space && !trial_is_vector_basis && !cached_trial_bcache_) {
         cached_trial_bcache_ = &basis::BasisCache::instance().get_or_compute(
-            trial_basis, *quad_rule, true, need_basis_hessians);
+            trial_basis, quad_rule, true, need_basis_hessians);
     }
     const basis::BasisCacheEntry* test_bcache = cached_test_bcache_;
     const basis::BasisCacheEntry* trial_bcache = cached_trial_bcache_;
+
+    const auto& mapping = cached_mapping_;
 
     std::vector<math::Vector<Real, 3>> vec_values_at_pt;
     std::vector<math::Vector<Real, 3>> vec_curls_at_pt;
@@ -3000,10 +3018,8 @@ void StandardAssembler::prepareContext(
                 const std::size_t idx_phys = static_cast<std::size_t>(q * n_test_dofs + i);
                 const auto sisz = static_cast<std::size_t>(si);
 
-                // Values from cache (dof-major layout matches scratch layout)
                 scratch_basis_values_[idx] = test_bcache->scalarValue(sisz, qsz);
 
-                // Gradients from cache [qp][dof]
                 const auto& g = test_bcache->gradients[qsz][sisz];
                 scratch_ref_gradients_[idx] = {g[0], g[1], g[2]};
 
@@ -3174,12 +3190,12 @@ void StandardAssembler::prepareContext(
 
     g_pc_basis += PC_TP() - pc_t0;
 
-    // 9. Configure context with basic info
+    // Configure context with basic info
     pc_t0 = PC_TP();
     context.configure(cell_id, test_space, trial_space, required_data);
     context.setCellDomainId(mesh.getCellDomainId(cell_id));
 
-    // 10. Set all computed data into context
+    // Set all computed data into context
     context.setQuadratureData(scratch_quad_points_, scratch_quad_weights_);
     context.setPhysicalPoints(scratch_phys_points_);
     context.setJacobianData(scratch_jacobians_, scratch_inv_jacobians_, scratch_jac_dets_);
@@ -3272,11 +3288,830 @@ void StandardAssembler::prepareContext(
         context.setEntityMeasures(h, cell_volume, /*facet_area=*/0.0);
     }
 
-    // Cache quad_rule for use in populateFieldSolutionData BasisCache lookups
-    cached_quad_rule_ = quad_rule;
-
     g_pc_ctx_config += PC_TP() - pc_t0;
     g_pc_call_count++;
+}
+
+void StandardAssembler::prepareContext(
+    AssemblyContext& context,
+    const IMeshAccess& mesh,
+    GlobalIndex cell_id,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
+    RequiredData required_data)
+{
+    const ElementType cell_type = mesh.getCellType(cell_id);
+    auto quad_rule = resolveQuadratureRule(test_space, cell_id, cell_type);
+    prepareGeometry(context, mesh, cell_id, *quad_rule);
+    prepareBasis(context, mesh, cell_id, test_space, trial_space, required_data, *quad_rule);
+}
+
+// ============================================================================
+// Fused Multi-Term Cell Assembly
+// ============================================================================
+
+AssemblyResult StandardAssembler::assembleCellsFused(
+    const IMeshAccess& mesh,
+    std::span<const FusedCellTerm> terms)
+{
+    AssemblyResult result;
+    if (terms.empty()) {
+        return result;
+    }
+
+    auto start_time = std::chrono::steady_clock::now();
+
+    if (!initialized_) {
+        initialize();
+    }
+
+    // Begin assembly phase on all views
+    for (const auto& t : terms) {
+        if (t.matrix_view && t.assemble_matrix &&
+            t.matrix_view->getPhase() == AssemblyPhase::NotStarted) {
+            t.matrix_view->beginAssemblyPhase();
+        }
+        if (t.vector_view && t.assemble_vector &&
+            t.vector_view != t.matrix_view &&
+            t.vector_view->getPhase() == AssemblyPhase::NotStarted) {
+            t.vector_view->beginAssemblyPhase();
+        }
+    }
+
+    // Verify all terms have non-null kernels and spaces
+    for (std::size_t ti = 0; ti < terms.size(); ++ti) {
+        const auto& t = terms[ti];
+        FE_CHECK_NOT_NULL(t.kernel, "assembleCellsFused: kernel");
+        FE_CHECK_NOT_NULL(t.test_space, "assembleCellsFused: test_space");
+        FE_CHECK_NOT_NULL(t.trial_space, "assembleCellsFused: trial_space");
+        FE_CHECK_NOT_NULL(t.row_dof_map, "assembleCellsFused: row_dof_map");
+        FE_CHECK_NOT_NULL(t.col_dof_map, "assembleCellsFused: col_dof_map");
+        if (!t.kernel->hasCell()) continue;
+    }
+
+    // Check if any term actually has work to do
+    bool any_has_cell = false;
+    for (const auto& t : terms) {
+        if (t.kernel->hasCell()) {
+            any_has_cell = true;
+            break;
+        }
+    }
+    if (!any_has_cell) {
+        auto end_time = std::chrono::steady_clock::now();
+        result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
+        return result;
+    }
+
+    // Resolve quadrature rule from first active term's test element.
+    // Verify all terms use the same quad rule; fall back to sequential if mismatched.
+    std::shared_ptr<const quadrature::QuadratureRule> fused_quad_rule;
+    {
+        const auto& first_t = terms[0];
+        // We need a sample cell to resolve the quad rule. Use cell 0 if available.
+        const auto n_cells = mesh.numOwnedCells();
+        if (n_cells == 0) {
+            auto end_time = std::chrono::steady_clock::now();
+            result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
+            return result;
+        }
+        // Get the first owned cell
+        GlobalIndex first_cell = -1;
+        mesh.forEachOwnedCell([&](GlobalIndex cell_id) {
+            if (first_cell < 0) first_cell = cell_id;
+        });
+        const auto cell_type = mesh.getCellType(first_cell);
+        fused_quad_rule = resolveQuadratureRule(*first_t.test_space, first_cell, cell_type);
+
+        // Verify all terms produce the same quad rule
+        for (std::size_t ti = 1; ti < terms.size(); ++ti) {
+            auto other_qr = resolveQuadratureRule(*terms[ti].test_space, first_cell, cell_type);
+            if (other_qr->num_points() != fused_quad_rule->num_points()) {
+                // Quad rule mismatch — fall back to default sequential path
+                return Assembler::assembleCellsFused(mesh, terms);
+            }
+        }
+    }
+
+    // Pre-compute per-term data requirements
+    struct TermData {
+        RequiredData required_data{RequiredData::None};
+        std::vector<FieldRequirement> field_requirements;
+        bool need_solution{false};
+        bool need_field_solutions{false};
+        bool need_material_state{false};
+        MaterialStateSpec material_state_spec{};
+    };
+    std::vector<TermData> term_data(terms.size());
+    for (std::size_t ti = 0; ti < terms.size(); ++ti) {
+        auto& td = term_data[ti];
+        td.required_data = terms[ti].kernel->getRequiredData();
+        td.field_requirements = terms[ti].kernel->fieldRequirements();
+        td.need_field_solutions = !td.field_requirements.empty();
+        td.need_solution =
+            hasFlag(td.required_data, RequiredData::SolutionCoefficients) ||
+            hasFlag(td.required_data, RequiredData::SolutionValues) ||
+            hasFlag(td.required_data, RequiredData::SolutionGradients) ||
+            hasFlag(td.required_data, RequiredData::SolutionHessians) ||
+            hasFlag(td.required_data, RequiredData::SolutionLaplacians);
+        td.need_material_state = hasFlag(td.required_data, RequiredData::MaterialState);
+        td.material_state_spec = terms[ti].kernel->materialStateSpec();
+    }
+
+    // Compute union of field requirements across all terms
+    std::vector<FieldRequirement> union_field_reqs;
+    for (const auto& td : term_data) {
+        for (const auto& fr : td.field_requirements) {
+            bool found = false;
+            for (auto& ufr : union_field_reqs) {
+                if (ufr.field == fr.field) {
+                    ufr.required = ufr.required | fr.required;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                union_field_reqs.push_back(fr);
+            }
+        }
+    }
+    const bool any_need_field_solutions = !union_field_reqs.empty();
+
+    // Determine max DOFs for context reservation
+    LocalIndex max_dofs = 0;
+    for (const auto& t : terms) {
+        max_dofs = std::max(max_dofs, t.row_dof_map->getMaxDofsPerCell());
+        max_dofs = std::max(max_dofs, t.col_dof_map->getMaxDofsPerCell());
+    }
+    constexpr LocalIndex max_qpts = 27;
+    context_.reserve(max_dofs, max_qpts, mesh.dimension());
+
+    // Determine owned-rows-only policy
+    const bool owned_rows_only = (options_.ghost_policy == GhostPolicy::OwnedRowsOnly);
+
+    // Build cell ID list
+    std::vector<GlobalIndex> cell_ids;
+    if (owned_rows_only) {
+        mesh.forEachCell([&](GlobalIndex cell_id) { cell_ids.push_back(cell_id); });
+    } else {
+        mesh.forEachOwnedCell([&](GlobalIndex cell_id) { cell_ids.push_back(cell_id); });
+    }
+
+    // Per-term scratch: DOF vectors and OwnedRowOnlyViews
+    struct TermScratch {
+        std::vector<GlobalIndex> row_dofs;
+        std::vector<GlobalIndex> col_dofs;
+        std::optional<OwnedRowOnlyView> owned_matrix_view;
+        std::optional<OwnedRowOnlyView> owned_vector_view;
+        GlobalSystemView* insert_matrix{nullptr};
+        GlobalSystemView* insert_vector{nullptr};
+    };
+    std::vector<TermScratch> term_scratch(terms.size());
+    for (std::size_t ti = 0; ti < terms.size(); ++ti) {
+        auto& ts = term_scratch[ti];
+        const auto& t = terms[ti];
+        ts.insert_matrix = t.matrix_view;
+        ts.insert_vector = t.vector_view;
+        if (owned_rows_only) {
+            if (t.matrix_view && t.assemble_matrix) {
+                ts.owned_matrix_view.emplace(*t.matrix_view, *t.row_dof_map, t.row_dof_offset);
+                ts.insert_matrix = &*ts.owned_matrix_view;
+            }
+            if (t.vector_view && t.assemble_vector) {
+                if (t.vector_view == t.matrix_view && ts.owned_matrix_view) {
+                    ts.insert_vector = ts.insert_matrix;
+                } else {
+                    ts.owned_vector_view.emplace(*t.vector_view, *t.row_dof_map, t.row_dof_offset);
+                    ts.insert_vector = &*ts.owned_vector_view;
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Check if fused+batched path is viable
+    // ========================================================================
+    const std::size_t requested_batch_size =
+        (options_.use_batching && options_.batch_size > 1)
+            ? static_cast<std::size_t>(options_.batch_size) : 1u;
+    bool all_support_batch = (requested_batch_size > 1);
+    if (all_support_batch) {
+        for (const auto& t : terms) {
+            if (t.kernel->hasCell() && !t.kernel->supportsCellBatch()) {
+                all_support_batch = false;
+                break;
+            }
+        }
+    }
+
+    if (all_support_batch) {
+    // ========================================================================
+    // FUSED + BATCHED PATH: share geometry across terms, batch kernel calls
+    // ========================================================================
+    const std::size_t B = requested_batch_size;
+
+    std::vector<AssemblyContext> batch_contexts(B);
+    for (auto& bctx : batch_contexts)
+        bctx.reserve(max_dofs, max_qpts, mesh.dimension());
+    std::vector<KernelOutput> batch_outputs(B);
+    std::vector<const AssemblyContext*> batch_context_ptrs(B, nullptr);
+    std::vector<SavedCellGeometry> saved_geom(B);
+
+    struct SlotDofs {
+        std::vector<GlobalIndex> row_dofs;
+        std::vector<GlobalIndex> col_dofs;
+    };
+    std::vector<std::vector<SlotDofs>> batch_dofs(terms.size(), std::vector<SlotDofs>(B));
+    std::vector<std::vector<Real>> batch_sol_coeffs(B);
+    std::vector<std::vector<std::vector<Real>>> batch_prev_sol_coeffs(B);
+
+    double tp_fb_geom = 0.0, tp_fb_save = 0.0, tp_fb_restore = 0.0;
+    double tp_fb_basis = 0.0, tp_fb_field = 0.0, tp_fb_dof = 0.0;
+    double tp_fb_sol = 0.0, tp_fb_setters = 0.0;
+    double tp_fb_kernel = 0.0, tp_fb_insert = 0.0;
+    auto TP = []() {
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+
+    // Helper: gather solution coefficients for a term/slot
+    auto gather_solution = [&](std::size_t ti, std::size_t slot,
+                               GlobalIndex cell_id, AssemblyContext& ctx,
+                               std::span<const GlobalIndex> col_dofs) {
+        const auto& t = terms[ti];
+        const auto& td = term_data[ti];
+        if (!td.need_solution) return;
+        FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+                    "assembleCellsFused: kernel requires solution but no solution was set");
+        auto& sol = batch_sol_coeffs[slot];
+        sol.resize(col_dofs.size());
+        if (current_solution_view_ != nullptr) {
+            for (std::size_t i = 0; i < col_dofs.size(); ++i) {
+                const auto dof = col_dofs[i];
+                FE_THROW_IF(dof < 0, FEException, "assembleCellsFused: negative DOF index");
+                sol[i] = current_solution_view_->getVectorEntry(dof);
+            }
+        } else {
+            for (std::size_t i = 0; i < col_dofs.size(); ++i) {
+                const auto dof = col_dofs[i];
+                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+                            "assembleCellsFused: solution vector too small for DOF " + std::to_string(dof));
+                sol[i] = current_solution_[static_cast<std::size_t>(dof)];
+            }
+        }
+        if (ctx.trialUsesVectorBasis()) {
+            applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space, std::span<Real>(sol));
+        }
+        ctx.setSolutionCoefficients(sol);
+        if (time_integration_ != nullptr) {
+            const int required = requiredHistoryStates(time_integration_);
+            if (required > 0) {
+                FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
+                            "assembleCellsFused: time integration requires " + std::to_string(required) + " history states");
+                auto& psc = batch_prev_sol_coeffs[slot];
+                if (psc.size() < static_cast<std::size_t>(required))
+                    psc.resize(static_cast<std::size_t>(required));
+                for (int k = 1; k <= required; ++k) {
+                    const auto& pdata = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                    const auto* pview = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+                                            ? previous_solution_views_[static_cast<std::size_t>(k - 1)] : nullptr;
+                    FE_THROW_IF(pdata.empty() && pview == nullptr, FEException,
+                                "assembleCellsFused: previous solution (k=" + std::to_string(k) + ") not set");
+                    auto& lp = psc[static_cast<std::size_t>(k - 1)];
+                    lp.resize(col_dofs.size());
+                    for (std::size_t i = 0; i < col_dofs.size(); ++i) {
+                        const auto dof = col_dofs[i];
+                        FE_THROW_IF(dof < 0, FEException, "assembleCellsFused: negative DOF index (prev)");
+                        lp[i] = (pview != nullptr) ? pview->getVectorEntry(dof) : pdata[static_cast<std::size_t>(dof)];
+                    }
+                    if (ctx.trialUsesVectorBasis())
+                        applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space, std::span<Real>(lp));
+                    ctx.setPreviousSolutionCoefficientsK(k, lp);
+                }
+            }
+        }
+    };
+
+    // Helper: insert batch outputs for a term
+    auto insert_batch_outputs = [&](std::size_t ti, std::size_t active,
+                                    std::span<const GlobalIndex> gids, std::size_t begin) {
+        const auto& t = terms[ti];
+        auto& ts = term_scratch[ti];
+        for (std::size_t slot = 0; slot < active; ++slot) {
+            const auto cid = gids[begin + slot];
+            auto& ctx = batch_contexts[slot];
+            auto& output = batch_outputs[slot];
+            if (ctx.testUsesVectorBasis() || ctx.trialUsesVectorBasis())
+                applyVectorBasisOutputOrientation(mesh, cid, *t.test_space, cid, *t.trial_space, output);
+            const auto& rd = batch_dofs[ti][slot].row_dofs;
+            const auto& cd = batch_dofs[ti][slot].col_dofs;
+            if (options_.use_constraints && constraint_distributor_) {
+                insertLocalConstrained(output, rd, cd,
+                                       t.assemble_matrix ? ts.insert_matrix : nullptr,
+                                       t.assemble_vector ? ts.insert_vector : nullptr);
+            } else {
+                insertLocal(output, rd, cd,
+                            t.assemble_matrix ? ts.insert_matrix : nullptr,
+                            t.assemble_vector ? ts.insert_vector : nullptr);
+            }
+            result.elements_assembled++;
+            if (output.has_matrix)
+                result.matrix_entries_inserted += static_cast<GlobalIndex>(rd.size() * cd.size());
+            if (output.has_vector)
+                result.vector_entries_inserted += static_cast<GlobalIndex>(rd.size());
+        }
+    };
+
+    // Main fused-batch range processor
+    auto assemble_fused_batch_range = [&](std::span<const GlobalIndex> gids) {
+        for (std::size_t begin = 0; begin < gids.size(); begin += B) {
+            const std::size_t active = std::min(B, gids.size() - begin);
+
+            // === PHASE 1: Geometry + field sols + term[0] basis ===
+            for (std::size_t slot = 0; slot < active; ++slot) {
+                const auto cell_id = gids[begin + slot];
+                auto& ctx = batch_contexts[slot];
+
+                double tp0 = TP();
+                prepareGeometry(ctx, mesh, cell_id, *fused_quad_rule);
+                tp_fb_geom += TP() - tp0;
+
+                tp0 = TP();
+                auto& sg = saved_geom[slot];
+                sg.jacobians = scratch_jacobians_;
+                sg.inv_jacobians = scratch_inv_jacobians_;
+                sg.jac_dets = scratch_jac_dets_;
+                sg.quad_points = scratch_quad_points_;
+                sg.quad_weights = scratch_quad_weights_;
+                sg.phys_points = scratch_phys_points_;
+                sg.integration_weights = scratch_integration_weights_;
+                sg.node_coords = scratch_node_coords_;
+                tp_fb_save += TP() - tp0;
+
+                tp0 = TP();
+                prepareBasis(ctx, mesh, cell_id, *terms[0].test_space, *terms[0].trial_space,
+                             term_data[0].required_data, *fused_quad_rule);
+                tp_fb_basis += TP() - tp0;
+
+                tp0 = TP();
+                ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
+                ctx.setTimeIntegrationContext(time_integration_);
+                ctx.setTime(time_);
+                ctx.setTimeStep(dt_);
+                ctx.setRealParameterGetter(get_real_param_);
+                ctx.setParameterGetter(get_param_);
+                ctx.setUserData(user_data_);
+                ctx.setJITConstants(jit_constants_);
+                ctx.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+                ctx.clearAllPreviousSolutionData();
+                tp_fb_setters += TP() - tp0;
+
+                if (any_need_field_solutions) {
+                    tp0 = TP();
+                    populateFieldSolutionData(ctx, mesh, cell_id, union_field_reqs);
+                    tp_fb_field += TP() - tp0;
+                }
+
+                tp0 = TP();
+                {
+                    const auto& t0 = terms[0];
+                    auto rl = t0.row_dof_map->getCellDofs(cell_id);
+                    auto cl = t0.col_dof_map->getCellDofs(cell_id);
+                    auto& rd = batch_dofs[0][slot].row_dofs;
+                    auto& cd = batch_dofs[0][slot].col_dofs;
+                    rd.resize(rl.size());
+                    for (std::size_t i = 0; i < rl.size(); ++i) rd[i] = rl[i] + t0.row_dof_offset;
+                    cd.resize(cl.size());
+                    for (std::size_t j = 0; j < cl.size(); ++j) cd[j] = cl[j] + t0.col_dof_offset;
+                }
+                tp_fb_dof += TP() - tp0;
+
+                tp0 = TP();
+                gather_solution(0, slot, cell_id, ctx, batch_dofs[0][slot].col_dofs);
+                tp_fb_sol += TP() - tp0;
+
+                if (term_data[0].need_material_state) {
+                    FE_THROW_IF(material_state_provider_ == nullptr, FEException,
+                                "assembleCellsFused: kernel requires material state but no provider was set");
+                    auto view = material_state_provider_->getCellState(*terms[0].kernel, cell_id,
+                                                                       ctx.numQuadraturePoints());
+                    FE_THROW_IF(!view, FEException, "assembleCellsFused: material state provider returned null");
+                    ctx.setMaterialState(view.data_old, view.data_work,
+                                         view.bytes_per_qpt, view.stride_bytes, view.alignment);
+                }
+
+                batch_outputs[slot].clear();
+                batch_context_ptrs[slot] = &ctx;
+            }
+
+            // Batch-compute term[0]
+            if (terms[0].kernel->hasCell() && (terms[0].assemble_matrix || terms[0].assemble_vector)) {
+                double tp0 = TP();
+                terms[0].kernel->computeCellBatch(
+                    std::span<const AssemblyContext* const>(batch_context_ptrs.data(), active),
+                    std::span<KernelOutput>(batch_outputs.data(), active));
+                tp_fb_kernel += TP() - tp0;
+                tp0 = TP();
+                insert_batch_outputs(0, active, gids, begin);
+                tp_fb_insert += TP() - tp0;
+            }
+
+            // === PHASE 2: Remaining terms (restore geometry, re-prepare basis) ===
+            for (std::size_t ti = 1; ti < terms.size(); ++ti) {
+                const auto& t = terms[ti];
+                const auto& td = term_data[ti];
+                if (!t.kernel->hasCell()) continue;
+                if (!t.assemble_matrix && !t.assemble_vector) continue;
+
+                for (std::size_t slot = 0; slot < active; ++slot) {
+                    const auto cell_id = gids[begin + slot];
+                    auto& ctx = batch_contexts[slot];
+
+                    double tp0 = TP();
+                    scratch_jacobians_ = saved_geom[slot].jacobians;
+                    scratch_inv_jacobians_ = saved_geom[slot].inv_jacobians;
+                    scratch_jac_dets_ = saved_geom[slot].jac_dets;
+                    scratch_quad_points_ = saved_geom[slot].quad_points;
+                    scratch_quad_weights_ = saved_geom[slot].quad_weights;
+                    scratch_phys_points_ = saved_geom[slot].phys_points;
+                    scratch_integration_weights_ = saved_geom[slot].integration_weights;
+                    scratch_node_coords_ = saved_geom[slot].node_coords;
+                    cached_mapping_->resetNodes(scratch_node_coords_);
+                    tp_fb_restore += TP() - tp0;
+
+                    tp0 = TP();
+                    prepareBasis(ctx, mesh, cell_id, *t.test_space, *t.trial_space,
+                                 td.required_data, *fused_quad_rule);
+                    tp_fb_basis += TP() - tp0;
+
+                    tp0 = TP();
+                    {
+                        auto rl = t.row_dof_map->getCellDofs(cell_id);
+                        auto cl = t.col_dof_map->getCellDofs(cell_id);
+                        auto& rd = batch_dofs[ti][slot].row_dofs;
+                        auto& cd = batch_dofs[ti][slot].col_dofs;
+                        rd.resize(rl.size());
+                        for (std::size_t i = 0; i < rl.size(); ++i) rd[i] = rl[i] + t.row_dof_offset;
+                        cd.resize(cl.size());
+                        for (std::size_t j = 0; j < cl.size(); ++j) cd[j] = cl[j] + t.col_dof_offset;
+                    }
+                    tp_fb_dof += TP() - tp0;
+
+                    tp0 = TP();
+                    gather_solution(ti, slot, cell_id, ctx, batch_dofs[ti][slot].col_dofs);
+                    tp_fb_sol += TP() - tp0;
+
+                    if (td.need_material_state) {
+                        FE_THROW_IF(material_state_provider_ == nullptr, FEException,
+                                    "assembleCellsFused: kernel requires material state but no provider was set");
+                        auto view = material_state_provider_->getCellState(*t.kernel, cell_id,
+                                                                           ctx.numQuadraturePoints());
+                        FE_THROW_IF(!view, FEException, "assembleCellsFused: material state provider returned null");
+                        ctx.setMaterialState(view.data_old, view.data_work,
+                                             view.bytes_per_qpt, view.stride_bytes, view.alignment);
+                    }
+
+                    batch_outputs[slot].clear();
+                    batch_context_ptrs[slot] = &ctx;
+                }
+
+                double tp0 = TP();
+                t.kernel->computeCellBatch(
+                    std::span<const AssemblyContext* const>(batch_context_ptrs.data(), active),
+                    std::span<KernelOutput>(batch_outputs.data(), active));
+                tp_fb_kernel += TP() - tp0;
+                tp0 = TP();
+                insert_batch_outputs(ti, active, gids, begin);
+                tp_fb_insert += TP() - tp0;
+            }
+        }
+    };
+
+    // Topology grouping (homogeneous batches)
+    const bool allow_topology_reorder =
+        !options_.stable_insertion_order && (options_.default_mode == AssemblyMode::Add);
+    if (!allow_topology_reorder) {
+        std::size_t run_begin = 0u;
+        while (run_begin < cell_ids.size()) {
+            const auto run_type = mesh.getCellType(cell_ids[run_begin]);
+            std::size_t run_end = run_begin + 1u;
+            while (run_end < cell_ids.size() && mesh.getCellType(cell_ids[run_end]) == run_type)
+                ++run_end;
+            assemble_fused_batch_range(std::span<const GlobalIndex>(
+                cell_ids.data() + run_begin, run_end - run_begin));
+            run_begin = run_end;
+        }
+    } else {
+        std::vector<std::pair<ElementType, std::vector<GlobalIndex>>> topo_groups;
+        for (const auto cid : cell_ids) {
+            const auto ct = mesh.getCellType(cid);
+            auto it = std::find_if(topo_groups.begin(), topo_groups.end(),
+                                   [&](const auto& g) { return g.first == ct; });
+            if (it == topo_groups.end()) {
+                topo_groups.emplace_back(ct, std::vector<GlobalIndex>{});
+                it = topo_groups.end() - 1;
+            }
+            it->second.push_back(cid);
+        }
+        for (const auto& g : topo_groups)
+            assemble_fused_batch_range(std::span<const GlobalIndex>(g.second));
+    }
+
+    // Fused+batch timing output
+    {
+        int rank = 0;
+#if FE_HAS_MPI
+        int mpi_init = 0;
+        MPI_Initialized(&mpi_init);
+        if (mpi_init) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+#endif
+        if (rank == 0) {
+            const double total = tp_fb_geom + tp_fb_save + tp_fb_restore + tp_fb_basis +
+                                 tp_fb_field + tp_fb_dof + tp_fb_sol + tp_fb_setters +
+                                 tp_fb_kernel + tp_fb_insert;
+            if (total > 1e-7) {
+                std::fprintf(stderr,
+                    "    --- cellLoop FUSED+BATCH TIMING (rank 0, %zu cells, %zu terms, batch=%zu) ---\n"
+                    "      Total:           %9.6f s\n"
+                    "      geometry:        %9.6f s  (%5.1f%%)\n"
+                    "      save geom:       %9.6f s  (%5.1f%%)\n"
+                    "      restore geom:    %9.6f s  (%5.1f%%)\n"
+                    "      prepareBasis:    %9.6f s  (%5.1f%%)\n"
+                    "      field solutions: %9.6f s  (%5.1f%%)\n"
+                    "      dof lookup:      %9.6f s  (%5.1f%%)\n"
+                    "      sol gather:      %9.6f s  (%5.1f%%)\n"
+                    "      ctx setters:     %9.6f s  (%5.1f%%)\n"
+                    "      kernel (batch):  %9.6f s  (%5.1f%%)\n"
+                    "      insert:          %9.6f s  (%5.1f%%)\n"
+                    "    ------------------------------------\n",
+                    cell_ids.size(), terms.size(), requested_batch_size,
+                    total,
+                    tp_fb_geom, 100.0 * tp_fb_geom / total,
+                    tp_fb_save, 100.0 * tp_fb_save / total,
+                    tp_fb_restore, 100.0 * tp_fb_restore / total,
+                    tp_fb_basis, 100.0 * tp_fb_basis / total,
+                    tp_fb_field, 100.0 * tp_fb_field / total,
+                    tp_fb_dof, 100.0 * tp_fb_dof / total,
+                    tp_fb_sol, 100.0 * tp_fb_sol / total,
+                    tp_fb_setters, 100.0 * tp_fb_setters / total,
+                    tp_fb_kernel, 100.0 * tp_fb_kernel / total,
+                    tp_fb_insert, 100.0 * tp_fb_insert / total);
+            }
+        }
+    }
+
+    } else {
+    // ========================================================================
+    // FUSED PER-CELL PATH (fallback when kernels don't support batch)
+    // ========================================================================
+
+    // Timing
+    double tp_geometry = 0.0, tp_term_loop = 0.0;
+    double tp_fused_dof = 0.0, tp_fused_basis = 0.0, tp_fused_sol = 0.0;
+    double tp_fused_kernel = 0.0, tp_fused_insert = 0.0, tp_fused_field = 0.0;
+    auto TP = []() {
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+
+    // ========================================================================
+    // Main fused cell loop
+    // ========================================================================
+    for (const auto cell_id : cell_ids) {
+        double tp0 = TP();
+
+        // 1. Prepare geometry ONCE for this cell
+        prepareGeometry(context_, mesh, cell_id, *fused_quad_rule);
+
+        // 1b. Configure context with first term's spaces and set geometry data
+        //     so that populateFieldSolutionData can access QP/geometry info.
+        //     prepareBasis will reconfigure per-term later (FunctionSpace configure
+        //     variant does NOT clear field_solution_data).
+        {
+            const auto& ft0 = terms[0];
+            context_.configure(cell_id, *ft0.test_space, *ft0.trial_space,
+                               term_data[0].required_data);
+            context_.setCellDomainId(mesh.getCellDomainId(cell_id));
+            context_.setQuadratureData(scratch_quad_points_, scratch_quad_weights_);
+            context_.setPhysicalPoints(scratch_phys_points_);
+            context_.setJacobianData(scratch_jacobians_, scratch_inv_jacobians_,
+                                     scratch_jac_dets_);
+            context_.setIntegrationWeights(scratch_integration_weights_);
+        }
+
+        // 2. Set context global state ONCE
+        context_.setMaterialState(nullptr, nullptr, 0u, 0u);
+        context_.setTimeIntegrationContext(time_integration_);
+        context_.setTime(time_);
+        context_.setTimeStep(dt_);
+        context_.setRealParameterGetter(get_real_param_);
+        context_.setParameterGetter(get_param_);
+        context_.setUserData(user_data_);
+        context_.setJITConstants(jit_constants_);
+        context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+        context_.clearAllPreviousSolutionData();
+
+        // 3. Populate union of field solution data ONCE
+        if (any_need_field_solutions) {
+            double tp_f0 = TP();
+            populateFieldSolutionData(context_, mesh, cell_id, union_field_reqs);
+            tp_fused_field += TP() - tp_f0;
+        }
+
+        tp_geometry += TP() - tp0;
+
+        // 4. Loop over terms
+        tp0 = TP();
+        for (std::size_t ti = 0; ti < terms.size(); ++ti) {
+            const auto& t = terms[ti];
+            auto& td = term_data[ti];
+            auto& ts = term_scratch[ti];
+
+            if (!t.kernel->hasCell()) continue;
+            if (!t.assemble_matrix && !t.assemble_vector) continue;
+
+            // a. DOF map lookup
+            double tp_a = TP();
+            auto row_local = t.row_dof_map->getCellDofs(cell_id);
+            auto col_local = t.col_dof_map->getCellDofs(cell_id);
+            ts.row_dofs.resize(row_local.size());
+            for (std::size_t i = 0; i < row_local.size(); ++i) {
+                ts.row_dofs[i] = row_local[i] + t.row_dof_offset;
+            }
+            ts.col_dofs.resize(col_local.size());
+            for (std::size_t j = 0; j < col_local.size(); ++j) {
+                ts.col_dofs[j] = col_local[j] + t.col_dof_offset;
+            }
+            tp_fused_dof += TP() - tp_a;
+
+            // b. Prepare basis for this term's test/trial spaces
+            tp_a = TP();
+            prepareBasis(context_, mesh, cell_id, *t.test_space, *t.trial_space,
+                         td.required_data, *fused_quad_rule);
+            tp_fused_basis += TP() - tp_a;
+
+            // c. Solution coefficient gather for this term's trial DOFs
+            tp_a = TP();
+            if (td.need_solution) {
+                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+                            "assembleCellsFused: kernel requires solution but no solution was set");
+                local_solution_coeffs_.resize(ts.col_dofs.size());
+                if (current_solution_view_ != nullptr) {
+                    for (std::size_t i = 0; i < ts.col_dofs.size(); ++i) {
+                        const auto dof = ts.col_dofs[i];
+                        FE_THROW_IF(dof < 0, FEException, "assembleCellsFused: negative DOF index");
+                        local_solution_coeffs_[i] = current_solution_view_->getVectorEntry(dof);
+                    }
+                } else {
+                    for (std::size_t i = 0; i < ts.col_dofs.size(); ++i) {
+                        const auto dof = ts.col_dofs[i];
+                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+                                    "assembleCellsFused: solution vector too small for DOF " +
+                                        std::to_string(dof));
+                        local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
+                    }
+                }
+                if (context_.trialUsesVectorBasis()) {
+                    applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space,
+                                                  std::span<Real>(local_solution_coeffs_));
+                }
+                context_.setSolutionCoefficients(local_solution_coeffs_);
+
+                // d. Previous solution gather
+                if (time_integration_ != nullptr) {
+                    const int required = requiredHistoryStates(time_integration_);
+                    if (required > 0) {
+                        FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
+                                    "assembleCellsFused: time integration requires " +
+                                        std::to_string(required) + " history states");
+                        if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
+                            local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
+                        }
+                        for (int k = 1; k <= required; ++k) {
+                            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                            const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+                                                        ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+                                                        : nullptr;
+                            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+                                        "assembleCellsFused: previous solution (k=" +
+                                            std::to_string(k) + ") not set");
+                            auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                            local_prev.resize(ts.col_dofs.size());
+                            for (std::size_t i = 0; i < ts.col_dofs.size(); ++i) {
+                                const auto dof = ts.col_dofs[i];
+                                FE_THROW_IF(dof < 0, FEException, "assembleCellsFused: negative DOF index (prev)");
+                                if (prev_view != nullptr) {
+                                    local_prev[i] = prev_view->getVectorEntry(dof);
+                                } else {
+                                    FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
+                                                "assembleCellsFused: previous solution vector too small");
+                                    local_prev[i] = prev[static_cast<std::size_t>(dof)];
+                                }
+                            }
+                            if (context_.trialUsesVectorBasis()) {
+                                applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space,
+                                                              std::span<Real>(local_prev));
+                            }
+                            context_.setPreviousSolutionCoefficientsK(k, local_prev);
+                        }
+                    }
+                }
+            }
+
+            tp_fused_sol += TP() - tp_a;
+
+            // e. Material state binding
+            if (td.need_material_state) {
+                FE_THROW_IF(material_state_provider_ == nullptr, FEException,
+                            "assembleCellsFused: kernel requires material state but no provider was set");
+                auto view = material_state_provider_->getCellState(*t.kernel, cell_id,
+                                                                    context_.numQuadraturePoints());
+                FE_THROW_IF(!view, FEException, "assembleCellsFused: material state provider returned null");
+                context_.setMaterialState(view.data_old, view.data_work,
+                                          view.bytes_per_qpt, view.stride_bytes, view.alignment);
+            }
+
+            // f. Compute kernel
+            tp_a = TP();
+            kernel_output_.clear();
+            t.kernel->computeCell(context_, kernel_output_);
+            tp_fused_kernel += TP() - tp_a;
+
+            // g. Apply orientation transforms
+            if (context_.testUsesVectorBasis() || context_.trialUsesVectorBasis()) {
+                applyVectorBasisOutputOrientation(mesh, cell_id, *t.test_space,
+                                                  cell_id, *t.trial_space, kernel_output_);
+            }
+
+            // h. Insert into global system
+            tp_a = TP();
+            if (options_.use_constraints && constraint_distributor_) {
+                insertLocalConstrained(kernel_output_, ts.row_dofs, ts.col_dofs,
+                                       t.assemble_matrix ? ts.insert_matrix : nullptr,
+                                       t.assemble_vector ? ts.insert_vector : nullptr);
+            } else {
+                insertLocal(kernel_output_, ts.row_dofs, ts.col_dofs,
+                            t.assemble_matrix ? ts.insert_matrix : nullptr,
+                            t.assemble_vector ? ts.insert_vector : nullptr);
+            }
+
+            tp_fused_insert += TP() - tp_a;
+
+            result.elements_assembled++;
+            if (kernel_output_.has_matrix) {
+                result.matrix_entries_inserted +=
+                    static_cast<GlobalIndex>(ts.row_dofs.size() * ts.col_dofs.size());
+            }
+            if (kernel_output_.has_vector) {
+                result.vector_entries_inserted += static_cast<GlobalIndex>(ts.row_dofs.size());
+            }
+        }
+        tp_term_loop += TP() - tp0;
+    }
+
+    // Print fused timing
+    {
+        int rank = 0;
+#if FE_HAS_MPI
+        int mpi_init = 0;
+        MPI_Initialized(&mpi_init);
+        if (mpi_init) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+#endif
+        if (rank == 0) {
+            const double total = tp_geometry + tp_term_loop;
+            if (total > 1e-7) {
+                std::fprintf(stderr,
+                    "    --- cellLoop FUSED TIMING (rank 0, %zu cells, %zu terms) ---\n"
+                    "      Total:          %9.6f s\n"
+                    "      geometry+cfg:   %9.6f s  (%5.1f%%)\n"
+                    "        field sols:   %9.6f s  (%5.1f%%)\n"
+                    "      term loop:      %9.6f s  (%5.1f%%)\n"
+                    "        dof lookup:   %9.6f s  (%5.1f%%)\n"
+                    "        prepareBasis: %9.6f s  (%5.1f%%)\n"
+                    "        sol gather:   %9.6f s  (%5.1f%%)\n"
+                    "        kernel:       %9.6f s  (%5.1f%%)\n"
+                    "        insert:       %9.6f s  (%5.1f%%)\n"
+                    "    ------------------------------------\n",
+                    cell_ids.size(), terms.size(),
+                    total,
+                    tp_geometry, 100.0 * tp_geometry / total,
+                    tp_fused_field, 100.0 * tp_fused_field / total,
+                    tp_term_loop, 100.0 * tp_term_loop / total,
+                    tp_fused_dof, 100.0 * tp_fused_dof / total,
+                    tp_fused_basis, 100.0 * tp_fused_basis / total,
+                    tp_fused_sol, 100.0 * tp_fused_sol / total,
+                    tp_fused_kernel, 100.0 * tp_fused_kernel / total,
+                    tp_fused_insert, 100.0 * tp_fused_insert / total);
+            }
+        }
+    }
+
+    } // end if/else fused path selection
+
+    auto end_time = std::chrono::steady_clock::now();
+    result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
+
+    return result;
 }
 
 void StandardAssembler::prepareContextFace(

@@ -85,8 +85,8 @@ foreach(src_rel IN LISTS ALL_TEST_SOURCES)
     continue()
   endif()
 
-  # Special handling for MPI tests in Unit/Core
-  if(_category STREQUAL "Core")
+  # Special handling for MPI tests in Unit/Core and Unit/MotionMPI
+  if(_category STREQUAL "Core" OR _category STREQUAL "MotionMPI")
     if(MESH_ENABLE_MPI AND MPI_FOUND)
       add_executable(${test_name} ${src_abs})
       target_link_libraries(${test_name} PRIVATE svmesh ${MPI_CXX_LIBRARIES})

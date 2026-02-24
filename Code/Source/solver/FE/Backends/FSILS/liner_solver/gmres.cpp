@@ -47,11 +47,17 @@
 
 #include "Array3.h"
 
+#include <eigen3/Eigen/Dense>
+#include <eigen3/Eigen/Eigenvalues>
+
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <limits>
 #include <vector>
 #include <algorithm>
+#include <string>
+#include <cctype>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -87,6 +93,252 @@ constexpr int DOT_THREAD_PAD = 8; // doubles (64 bytes) to reduce false sharing
 #else
   return 0;
 #endif
+}
+
+[[nodiscard]] std::string to_lower(std::string s)
+{
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return s;
+}
+
+[[nodiscard]] bool parse_bool_env(const char* name, bool default_value) noexcept
+{
+  const char* env = std::getenv(name);
+  if (!env) {
+    return default_value;
+  }
+  std::string v(env);
+  v = to_lower(v);
+  if (v.empty()) {
+    return default_value;
+  }
+  if (v == "1" || v == "true" || v == "on" || v == "yes") {
+    return true;
+  }
+  if (v == "0" || v == "false" || v == "off" || v == "no") {
+    return false;
+  }
+  return default_value;
+}
+
+[[nodiscard]] int parse_int_env(const char* name, int default_value) noexcept
+{
+  const char* env = std::getenv(name);
+  if (!env) {
+    return default_value;
+  }
+  try {
+    return std::stoi(env);
+  } catch (...) {
+    return default_value;
+  }
+}
+
+[[nodiscard]] double parse_double_env(const char* name, double default_value) noexcept
+{
+  const char* env = std::getenv(name);
+  if (!env) {
+    return default_value;
+  }
+  try {
+    return std::stod(env);
+  } catch (...) {
+    return default_value;
+  }
+}
+
+struct GmresEnhancements {
+  enum class RecycleUpdateMode { each_restart, once_per_solve, off };
+  int recycle_k = 0;
+  RecycleUpdateMode recycle_update_mode = RecycleUpdateMode::each_restart;
+  bool recycle_adaptive_keep_drop = false;
+  double recycle_drop_tol = 1e-3;       // normalized coefficient threshold
+  double recycle_drop_rel = 0.05;       // relative-to-max threshold
+  double recycle_score_alpha = 0.8;     // EWMA smoothing
+  int recycle_drop_window = 3;          // consecutive "low score" restarts to drop
+  int recycle_drop_min_k = 0;           // never drop below this
+  // When adaptive keep/drop is enabled and the recycle space is full, the update
+  // needs to "make room" for new harmonic Ritz vectors. This controls how many
+  // low-score recycle vectors are replaced each update:
+  //   -1: disable replacement (freeze when full)
+  //    0: auto (replace ~k_req/2)
+  //   >0: replace exactly this many
+  int recycle_replace_n = 0;
+  bool use_mgs_dgks = false;
+  double mgs_dgks_ratio = 0.5;
+  bool verbose = false;
+};
+
+[[nodiscard]] const GmresEnhancements& gmres_enhancements()
+{
+  static const GmresEnhancements cfg = []() {
+    GmresEnhancements c{};
+    c.recycle_k = std::max(0, parse_int_env("SVMP_FSILS_GMRES_RECYCLE_K", 0));
+    c.verbose = parse_bool_env("SVMP_FSILS_GMRES_RECYCLE_VERBOSE", false);
+
+    const char* update = std::getenv("SVMP_FSILS_GMRES_RECYCLE_UPDATE");
+    if (update) {
+      std::string v = to_lower(std::string(update));
+      if (v == "off" || v == "no" || v == "false" || v == "0") {
+        c.recycle_update_mode = GmresEnhancements::RecycleUpdateMode::off;
+      } else if (v == "once" || v == "solve") {
+        c.recycle_update_mode = GmresEnhancements::RecycleUpdateMode::once_per_solve;
+      } else if (v == "each" || v == "restart" || v == "restarts" || v == "on" || v == "true" || v == "1") {
+        c.recycle_update_mode = GmresEnhancements::RecycleUpdateMode::each_restart;
+      }
+    }
+
+    c.recycle_adaptive_keep_drop = parse_bool_env("SVMP_FSILS_GMRES_RECYCLE_ADAPTIVE", false);
+    c.recycle_drop_tol = parse_double_env("SVMP_FSILS_GMRES_RECYCLE_DROP_TOL", 1e-3);
+    if (!(c.recycle_drop_tol >= 0.0 && c.recycle_drop_tol <= 1.0)) {
+      c.recycle_drop_tol = 1e-3;
+    }
+    c.recycle_drop_rel = parse_double_env("SVMP_FSILS_GMRES_RECYCLE_DROP_REL", 0.05);
+    if (!(c.recycle_drop_rel >= 0.0 && c.recycle_drop_rel <= 1.0)) {
+      c.recycle_drop_rel = 0.05;
+    }
+    c.recycle_score_alpha = parse_double_env("SVMP_FSILS_GMRES_RECYCLE_SCORE_ALPHA", 0.8);
+    if (!(c.recycle_score_alpha >= 0.0 && c.recycle_score_alpha <= 1.0)) {
+      c.recycle_score_alpha = 0.8;
+    }
+    c.recycle_drop_window = std::max(1, parse_int_env("SVMP_FSILS_GMRES_RECYCLE_DROP_WINDOW", 3));
+    c.recycle_drop_min_k = std::max(0, parse_int_env("SVMP_FSILS_GMRES_RECYCLE_DROP_MIN_K", 0));
+    c.recycle_replace_n = parse_int_env("SVMP_FSILS_GMRES_RECYCLE_REPLACE_N", 0);
+    if (c.recycle_replace_n < -1) {
+      c.recycle_replace_n = -1;
+    }
+
+    const char* orth = std::getenv("SVMP_FSILS_GMRES_ORTH");
+    if (orth) {
+      std::string v = to_lower(std::string(orth));
+      if (v == "mgs" || v == "modified" || v == "modified-gram-schmidt") {
+        c.use_mgs_dgks = true;
+      }
+    }
+
+    c.mgs_dgks_ratio = parse_double_env("SVMP_FSILS_GMRES_DGKS_RATIO", 0.5);
+    if (!(c.mgs_dgks_ratio > 0.0 && c.mgs_dgks_ratio < 1.0)) {
+      c.mgs_dgks_ratio = 0.5;
+    }
+    return c;
+  }();
+  return cfg;
+}
+
+[[nodiscard]] Eigen::MatrixXd harmonic_ritz_coeffs(const Array<double>& h, const int m, const int k_target)
+{
+  if (m <= 0 || k_target <= 0) {
+    return Eigen::MatrixXd{};
+  }
+
+  // Build H_m from the leading m-by-m block of the (m+1)-by-m Hessenberg Hbar.
+  Eigen::MatrixXd Hm = Eigen::MatrixXd::Zero(m, m);
+  for (int col = 0; col < m; ++col) {
+    for (int row = 0; row < m; ++row) {
+      Hm(row, col) = h(row, col);
+    }
+  }
+
+  // Harmonic Ritz matrix (Morgan 2002):
+  //   Hhat = Hm + h_{m+1,m}^2 * f * e_m^T, where Hm^T f = e_m.
+  // When h_{m+1,m} ~ 0 (happy breakdown), fall back to standard Ritz on Hm.
+  double h_extra = 0.0;
+  if (m >= 2) {
+    h_extra = h(m, m - 1);
+  }
+
+  Eigen::MatrixXd Hhat = Hm;
+  const double extra2 = h_extra * h_extra;
+  if (m >= 2 && std::isfinite(extra2) && extra2 > 0.0) {
+    Eigen::VectorXd e = Eigen::VectorXd::Zero(m);
+    e(m - 1) = 1.0;
+    Eigen::VectorXd f = Hm.transpose().fullPivLu().solve(e);
+    if (f.allFinite()) {
+      Hhat.col(m - 1) += extra2 * f;
+    }
+  }
+
+  Eigen::ComplexEigenSolver<Eigen::MatrixXd> ces;
+  ces.compute(Hhat);
+  if (ces.info() != Eigen::Success) {
+    return Eigen::MatrixXd{};
+  }
+
+  const auto evals = ces.eigenvalues();
+  const auto evecs = ces.eigenvectors(); // columns
+
+  std::vector<int> idx(static_cast<std::size_t>(m));
+  for (int i = 0; i < m; ++i) idx[static_cast<std::size_t>(i)] = i;
+  std::sort(idx.begin(), idx.end(), [&](int a, int b) {
+    return std::abs(evals[a]) < std::abs(evals[b]);
+  });
+
+  // Convert complex eigenvectors to a set of real coefficient vectors.
+  // Use only one vector from each conjugate pair (imag >= 0), and split
+  // into real/imag parts when needed.
+  constexpr double imag_pair_tol = 1e-12;
+  std::vector<Eigen::VectorXd> candidates;
+  candidates.reserve(static_cast<std::size_t>(k_target));
+  for (const int id : idx) {
+    if (static_cast<int>(candidates.size()) >= k_target) {
+      break;
+    }
+    const std::complex<double> lam = evals[id];
+    if (lam.imag() < -imag_pair_tol) {
+      continue; // handle the conjugate with +imag
+    }
+
+    const Eigen::VectorXcd v = evecs.col(id);
+    const double imag_norm = v.imag().norm();
+    if (imag_norm <= imag_pair_tol) {
+      Eigen::VectorXd vr = v.real();
+      if (vr.norm() > 0.0 && vr.allFinite()) {
+        candidates.push_back(std::move(vr));
+      }
+      continue;
+    }
+
+    Eigen::VectorXd vr = v.real();
+    Eigen::VectorXd vi = v.imag();
+    if (vr.norm() > 0.0 && vr.allFinite()) {
+      candidates.push_back(std::move(vr));
+      if (static_cast<int>(candidates.size()) >= k_target) {
+        break;
+      }
+    }
+    if (vi.norm() > 0.0 && vi.allFinite()) {
+      candidates.push_back(std::move(vi));
+    }
+  }
+
+  if (candidates.empty()) {
+    return Eigen::MatrixXd{};
+  }
+
+  // Orthonormalize candidates in coefficient space (MGS).
+  const int k_max = std::min(k_target, static_cast<int>(candidates.size()));
+  Eigen::MatrixXd Q = Eigen::MatrixXd::Zero(m, k_max);
+  int kept = 0;
+  constexpr double drop_tol = 1e-14;
+  for (int c = 0; c < k_max; ++c) {
+    Eigen::VectorXd v = candidates[static_cast<std::size_t>(c)];
+    for (int j = 0; j < kept; ++j) {
+      const double a = Q.col(j).dot(v);
+      v.noalias() -= a * Q.col(j);
+    }
+    const double nrm = v.norm();
+    if (!(nrm > drop_tol) || !std::isfinite(nrm)) {
+      continue;
+    }
+    Q.col(kept) = v / nrm;
+    kept++;
+  }
+
+  if (kept <= 0) {
+    return Eigen::MatrixXd{};
+  }
+  return Q.leftCols(kept);
 }
 
 // =======================================================================
@@ -1650,6 +1902,7 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
            const Array<double>& Val, const Array<double>& R, Array<double>& X)
 {
   using namespace fe_fsi_linear_solver;
+  const auto& enh = gmres_enhancements();
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
   const bool has_coupled_bc = std::any_of(lhs.face.begin(), lhs.face.end(),
@@ -1739,12 +1992,13 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
       }
 
       // ----------------------------------------------------------------------
-      // CGS2: Classical Gram-Schmidt with Pythagorean norm trick
-      // Computes h[0..i] + self-dot in one fused pass, then recovers
-      // ||w_orth||^2 = ||w||^2 - sum(h^2) without a second MPI_Allreduce.
+      // Sequential CGS with Pythagorean norm trick (streaming access pattern).
+      // Each dot product reads one u[j] linearly while u_slice_next stays in L2.
       // ----------------------------------------------------------------------
-      const double zz_local = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
-                                              dot_thread.data(), thread_stride, num_threads);
+      for (int j = 0; j <= i; j++) {
+        h_col[j] = dot::fsils_nc_dot_v(dof, mynNo, u.rslice(j), u_slice_next);
+      }
+      const double zz_local = dot::fsils_nc_dot_v(dof, mynNo, u_slice_next, u_slice_next);
       h_col[static_cast<size_t>(i+1)] = zz_local;
       bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
 
@@ -1761,12 +2015,30 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
         tt_sq = 0.0;
       }
 
-      fused_update_v_inplace(dof, nNo, u, i, u_slice_next, h_col);
+      const double old_norm_sq = h_col[static_cast<size_t>(i+1)];
+
+      for (int j = 0; j <= i; j++) {
+        if (h_col[j] != 0.0) {
+          omp_la::omp_sum_v(dof, nNo, -h_col[j], u_slice_next, u.rslice(j));
+        }
+      }
 
       // CGS2: Selective reorthogonalization (Pythagorean check)
-      if (tt_sq < proj_sq_norm && tt_sq >= 0.0) {
-        const double zz2_local = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
-                                                  dot_thread.data(), thread_stride, num_threads);
+      bool do_reorth = false;
+      if (tt_sq >= 0.0) {
+        if (enh.use_mgs_dgks) {
+          const double ratio2 = enh.mgs_dgks_ratio * enh.mgs_dgks_ratio;
+          do_reorth = tt_sq < ratio2 * old_norm_sq;
+        } else {
+          do_reorth = tt_sq < proj_sq_norm;
+        }
+      }
+
+      if (do_reorth) {
+        for (int j = 0; j <= i; j++) {
+          h_col[j] = dot::fsils_nc_dot_v(dof, mynNo, u.rslice(j), u_slice_next);
+        }
+        const double zz2_local = dot::fsils_nc_dot_v(dof, mynNo, u_slice_next, u_slice_next);
         h_col[static_cast<size_t>(i+1)] = zz2_local;
         bcast::fsils_bcast_v(i + 2, h_col, lhs.commu);
 
@@ -1776,7 +2048,11 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
           corr_sq += h_col[j] * h_col[j];
         }
 
-        fused_update_v_inplace(dof, nNo, u, i, u_slice_next, h_col);
+        for (int j = 0; j <= i; j++) {
+          if (h_col[j] != 0.0) {
+            omp_la::omp_sum_v(dof, nNo, -h_col[j], u_slice_next, u.rslice(j));
+          }
+        }
 
         tt_sq = h_col[static_cast<size_t>(i+1)] - corr_sq;
         if (tt_sq < 0.0 && tt_sq > -tt_eps * h_col[static_cast<size_t>(i+1)]) {
@@ -1863,6 +2139,7 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
              const Vector<double>& Val, Vector<double>& R)
 {
   using namespace fe_fsi_linear_solver;
+  const auto& enh = gmres_enhancements();
   fsils_int nNo = lhs.nNo;
   fsils_int mynNo = lhs.mynNo;
 
@@ -1952,10 +2229,22 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
         tt_sq = 0.0;
       }
 
+      const double old_norm_sq = h_col[static_cast<size_t>(i+1)];
+
       fused_update_s_inplace(nNo, u, i, u_col_next, h_col);
 
       // CGS2: Selective reorthogonalization (Pythagorean check)
-      if (tt_sq < proj_sq_norm && tt_sq >= 0.0) {
+      bool do_reorth = false;
+      if (tt_sq >= 0.0) {
+        if (enh.use_mgs_dgks) {
+          const double ratio2 = enh.mgs_dgks_ratio * enh.mgs_dgks_ratio;
+          do_reorth = tt_sq < ratio2 * old_norm_sq;
+        } else {
+          do_reorth = tt_sq < proj_sq_norm;
+        }
+      }
+
+      if (do_reorth) {
         const double zz2_local = fused_dot_zz_s(mynNo, u, i, u_col_next, h_col,
                                                   dot_thread.data(), thread_stride, num_threads);
         h_col[static_cast<size_t>(i+1)] = zz2_local;
@@ -2114,6 +2403,361 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   ls.ws.ensure_gmres_dot_thread(num_threads, thread_stride);
   auto& dot_thread = ls.ws.dot_thread;
 
+  // ===== RECYCLED/DEFLATED GMRES (optional) =====
+  const auto& enh = gmres_enhancements();
+  const int recycle_k_req = std::min(enh.recycle_k, ls.sD);
+  if (recycle_k_req > 0) {
+    ls.ws.ensure_recycle_v(dof, nNo, recycle_k_req);
+  }
+  auto& recycle_U = ls.ws.recycle_U3;
+  auto& recycle_C = ls.ws.recycle_C3;
+  auto& recycle_y = ls.ws.recycle_y;
+  auto& recycle_score = ls.ws.recycle_score;
+  auto& recycle_drop_streak = ls.ws.recycle_drop_streak;
+  int recycle_k = (recycle_k_req > 0) ? std::min(ls.ws.recycle_k, recycle_k_req) : 0;
+  bool recycle_updated_this_solve = false;
+  std::vector<double> recycle_B;
+  if (recycle_k_req > 0) {
+    recycle_B.resize(static_cast<size_t>(recycle_k_req) * static_cast<size_t>(ls.sD), 0.0);
+  }
+
+  auto orthonormalize_recycle_C_inplace = [&](int k_in) -> int {
+    if (k_in <= 0) {
+      return 0;
+    }
+
+    // Drop near-zero vectors (relative to the initial residual norm).
+    const double drop_tol = std::sqrt(std::numeric_limits<double>::epsilon()) * std::max(ls.iNorm, 1.0);
+    int kept = 0;
+
+    for (int j = 0; j < k_in; ++j) {
+      if (kept != j) {
+        recycle_U.rslice(kept) = recycle_U.rslice(j);
+        recycle_C.rslice(kept) = recycle_C.rslice(j);
+        if (static_cast<int>(recycle_score.size()) > j) {
+          recycle_score[static_cast<size_t>(kept)] = recycle_score[static_cast<size_t>(j)];
+        }
+        if (static_cast<int>(recycle_drop_streak.size()) > j) {
+          recycle_drop_streak[static_cast<size_t>(kept)] = recycle_drop_streak[static_cast<size_t>(j)];
+        }
+      }
+
+      auto cj = recycle_C.rslice(kept);
+      auto uj = recycle_U.rslice(kept);
+
+      // MGS against previous C columns; apply identical transforms to U.
+      for (int i = 0; i < kept; ++i) {
+        const auto ci = recycle_C.rslice(i);
+        const auto ui = recycle_U.rslice(i);
+        double a = dot::fsils_nc_dot_v(dof, mynNo, ci, cj);
+        bcast::fsils_bcast(a, lhs.commu);
+        if (a != 0.0) {
+          omp_la::omp_sum_v(dof, nNo, -a, cj, ci);
+          omp_la::omp_sum_v(dof, nNo, -a, uj, ui);
+        }
+      }
+
+      const double nrm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, cj);
+      if (!(nrm > drop_tol) || !std::isfinite(nrm)) {
+        continue;
+      }
+
+      const double inv = 1.0 / nrm;
+      omp_la::omp_mul_v(dof, nNo, inv, cj);
+      omp_la::omp_mul_v(dof, nNo, inv, uj);
+      kept++;
+      if (kept >= recycle_k_req) {
+        break;
+      }
+    }
+
+    return kept;
+  };
+
+  auto rebuild_recycle_C_from_U = [&]() {
+    if (recycle_k <= 0) {
+      return;
+    }
+
+    // C := A*U for the current matrix.
+    for (int j = 0; j < recycle_k; ++j) {
+      const auto uj = recycle_U.rslice(j);
+      auto cj = recycle_C.rslice(j);
+      spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, uj, cj);
+      add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, uj, cj);
+    }
+
+    recycle_k = orthonormalize_recycle_C_inplace(recycle_k);
+    ls.ws.recycle_k = recycle_k;
+
+    if (enh.verbose && lhs.commu.task == 0) {
+      std::fprintf(stderr, "[gmres_v] recycle space rebuilt: k=%d\n", recycle_k);
+    }
+  };
+
+  if (recycle_k > 0) {
+    rebuild_recycle_C_from_U();
+  }
+  // =============================================
+
+  auto update_recycle_space_from_arnoldi = [&](const int m_iters) {
+    if (recycle_k_req <= 0 || m_iters <= 0) {
+      return;
+    }
+    // Adaptive keep/drop: keep the recycled vectors that have been "useful"
+    // (based on streak/score), and refill dropped slots with new harmonic Ritz
+    // candidates from the current Arnoldi basis.
+    if (enh.recycle_adaptive_keep_drop && recycle_k > 0) {
+      const int k = recycle_k;
+      std::vector<char> keep(static_cast<size_t>(k), 0);
+      int kept = 0;
+      for (int j = 0; j < k; ++j) {
+        const size_t jj = static_cast<size_t>(j);
+        if (recycle_drop_streak[jj] < enh.recycle_drop_window) {
+          keep[jj] = 1;
+          kept++;
+        }
+      }
+
+      const int min_k = std::min(k, enh.recycle_drop_min_k);
+      if (kept < min_k && min_k > 0) {
+        std::vector<double> tmp(static_cast<size_t>(k), 0.0);
+        for (int j = 0; j < k; ++j) {
+          tmp[static_cast<size_t>(j)] = recycle_score[static_cast<size_t>(j)];
+        }
+        std::nth_element(tmp.begin(), tmp.begin() + (min_k - 1), tmp.end(),
+                         [](const double x, const double y) { return x > y; });
+        const double cutoff = tmp[static_cast<size_t>(min_k - 1)];
+        kept = 0;
+        for (int j = 0; j < k; ++j) {
+          const size_t jj = static_cast<size_t>(j);
+          keep[jj] = (recycle_score[jj] >= cutoff) ? 1 : 0;
+          if (keep[jj]) {
+            kept++;
+          }
+        }
+      }
+
+      if (kept < k) {
+        int w = 0;
+        for (int j = 0; j < k; ++j) {
+          if (!keep[static_cast<size_t>(j)]) {
+            continue;
+          }
+          if (w != j) {
+            recycle_U.rslice(w) = recycle_U.rslice(j);
+            recycle_C.rslice(w) = recycle_C.rslice(j);
+            recycle_score[static_cast<size_t>(w)] = recycle_score[static_cast<size_t>(j)];
+            recycle_drop_streak[static_cast<size_t>(w)] = recycle_drop_streak[static_cast<size_t>(j)];
+          }
+          w++;
+        }
+        recycle_k = w;
+        ls.ws.recycle_k = recycle_k;
+      }
+    } else {
+      // Non-adaptive: overwrite the entire recycle space.
+      recycle_k = 0;
+      ls.ws.recycle_k = 0;
+    }
+
+    int slots = recycle_k_req - recycle_k;
+    if (slots <= 0) {
+      // Adaptive replacement: if the recycle space is already full, refresh
+      // a small number of vectors (drop the lowest-score ones) so the space
+      // continues to evolve across restarts (prevents "freezing" the space).
+      if (enh.recycle_adaptive_keep_drop && recycle_k > 0 && enh.recycle_replace_n >= 0) {
+        const int min_k = std::min(recycle_k, enh.recycle_drop_min_k);
+        int replace = enh.recycle_replace_n;
+        if (replace == 0) {
+          replace = std::max(1, recycle_k_req / 2);
+        }
+        replace = std::min(replace, recycle_k - min_k);
+        if (replace > 0 && static_cast<int>(recycle_score.size()) >= recycle_k) {
+          std::vector<int> idx(static_cast<size_t>(recycle_k));
+          for (int j = 0; j < recycle_k; ++j) {
+            idx[static_cast<size_t>(j)] = j;
+          }
+          std::nth_element(idx.begin(), idx.begin() + replace, idx.end(), [&](const int a, const int b) {
+            return recycle_score[static_cast<size_t>(a)] < recycle_score[static_cast<size_t>(b)];
+          });
+
+          std::vector<char> keep(static_cast<size_t>(recycle_k), 1);
+          for (int d = 0; d < replace; ++d) {
+            keep[static_cast<size_t>(idx[static_cast<size_t>(d)])] = 0;
+          }
+
+          int w = 0;
+          for (int j = 0; j < recycle_k; ++j) {
+            if (!keep[static_cast<size_t>(j)]) {
+              continue;
+            }
+            if (w != j) {
+              recycle_U.rslice(w) = recycle_U.rslice(j);
+              recycle_C.rslice(w) = recycle_C.rslice(j);
+              recycle_score[static_cast<size_t>(w)] = recycle_score[static_cast<size_t>(j)];
+              recycle_drop_streak[static_cast<size_t>(w)] = recycle_drop_streak[static_cast<size_t>(j)];
+            }
+            w++;
+          }
+
+          recycle_k = w;
+          ls.ws.recycle_k = recycle_k;
+          slots = recycle_k_req - recycle_k;
+          if (enh.verbose && lhs.commu.task == 0) {
+            std::fprintf(stderr, "[gmres_v] recycle replace: k=%d slots=%d\n", recycle_k, slots);
+          }
+        }
+      }
+
+      if (slots <= 0) {
+        rebuild_recycle_C_from_U();
+        return;
+      }
+    }
+
+    const int k_target = std::min(slots, m_iters);
+    if (k_target <= 0) {
+      return;
+    }
+
+    const Eigen::MatrixXd Q = harmonic_ritz_coeffs(h, m_iters, k_target);
+    if (Q.size() == 0) {
+      return;
+    }
+
+    const int k_add = static_cast<int>(Q.cols());
+    for (int j = 0; j < k_add; ++j) {
+      const int idx = recycle_k + j;
+      if (static_cast<int>(recycle_score.size()) > idx) {
+        recycle_score[static_cast<size_t>(idx)] = 0.0;
+      }
+      if (static_cast<int>(recycle_drop_streak.size()) > idx) {
+        recycle_drop_streak[static_cast<size_t>(idx)] = 0;
+      }
+      for (int i = 0; i < m_iters; ++i) {
+        y(i) = Q(i, j);
+      }
+      auto uj = recycle_U.rslice(idx);
+      uj = 0.0;
+      fused_recon_v(dof, nNo, u, m_iters - 1, uj, y);
+    }
+
+    recycle_k += k_add;
+    ls.ws.recycle_k = recycle_k;
+
+    // Rebuild C := A*U for the current operator, and orthonormalize C in-place.
+    // This is more robust than forming C from the (finite-precision) Arnoldi
+    // relation, and ensures the correction step uses a consistent C = A*U.
+    rebuild_recycle_C_from_U();
+
+    if (enh.verbose && lhs.commu.task == 0) {
+      std::fprintf(stderr, "[gmres_v] recycle space updated: k=%d m=%d\n", recycle_k, m_iters);
+    }
+  };
+
+  auto update_recycle_scores_from_gamma = [&](const double r_proj_norm) {
+    if (!enh.recycle_adaptive_keep_drop || recycle_k <= 0) {
+      return;
+    }
+    const int k = recycle_k;
+    if (static_cast<int>(recycle_score.size()) < k || static_cast<int>(recycle_drop_streak.size()) < k) {
+      return;
+    }
+
+    double gamma_sq = 0.0;
+    for (int j = 0; j < k; ++j) {
+      const double g = recycle_y(j);
+      gamma_sq += g * g;
+    }
+
+    const double r_true_norm = std::hypot(r_proj_norm, std::sqrt(gamma_sq));
+    const double inv_r = (r_true_norm > 0.0) ? (1.0 / r_true_norm) : 0.0;
+
+    double max_score = 0.0;
+    const double a = enh.recycle_score_alpha;
+    for (int j = 0; j < k; ++j) {
+      const double rel = std::abs(recycle_y(j)) * inv_r;
+      const size_t jj = static_cast<size_t>(j);
+      // Use a leaky-max score: score <- max(a*score, rel).
+      recycle_score[jj] = std::max(a * recycle_score[jj], rel);
+      max_score = std::max(max_score, recycle_score[jj]);
+    }
+
+    const double thr = std::max(enh.recycle_drop_tol, enh.recycle_drop_rel * max_score);
+    for (int j = 0; j < k; ++j) {
+      const size_t jj = static_cast<size_t>(j);
+      if (recycle_score[jj] < thr) {
+        recycle_drop_streak[jj] += 1;
+      } else {
+        recycle_drop_streak[jj] = 0;
+      }
+    }
+  };
+
+  auto apply_recycle_keep_drop = [&]() {
+    if (!enh.recycle_adaptive_keep_drop || recycle_k <= 0) {
+      return;
+    }
+    const int k = recycle_k;
+    if (static_cast<int>(recycle_score.size()) < k || static_cast<int>(recycle_drop_streak.size()) < k) {
+      return;
+    }
+
+    std::vector<char> keep(static_cast<size_t>(k), 0);
+    int kept = 0;
+    for (int j = 0; j < k; ++j) {
+      const size_t jj = static_cast<size_t>(j);
+      if (recycle_drop_streak[jj] < enh.recycle_drop_window) {
+        keep[jj] = 1;
+        kept++;
+      }
+    }
+
+    const int min_k = std::min(k, enh.recycle_drop_min_k);
+    if (kept < min_k && min_k > 0) {
+      std::vector<double> tmp(static_cast<size_t>(k), 0.0);
+      for (int j = 0; j < k; ++j) {
+        tmp[static_cast<size_t>(j)] = recycle_score[static_cast<size_t>(j)];
+      }
+      std::nth_element(tmp.begin(), tmp.begin() + (min_k - 1), tmp.end(),
+                       [](const double x, const double y) { return x > y; });
+      const double cutoff = tmp[static_cast<size_t>(min_k - 1)];
+      kept = 0;
+      for (int j = 0; j < k; ++j) {
+        const size_t jj = static_cast<size_t>(j);
+        keep[jj] = (recycle_score[jj] >= cutoff) ? 1 : 0;
+        if (keep[jj]) {
+          kept++;
+        }
+      }
+    }
+
+    if (kept >= k) {
+      return;
+    }
+
+    int w = 0;
+    for (int j = 0; j < k; ++j) {
+      if (!keep[static_cast<size_t>(j)]) {
+        continue;
+      }
+      if (w != j) {
+        recycle_U.rslice(w) = recycle_U.rslice(j);
+        recycle_C.rslice(w) = recycle_C.rslice(j);
+        recycle_score[static_cast<size_t>(w)] = recycle_score[static_cast<size_t>(j)];
+        recycle_drop_streak[static_cast<size_t>(w)] = recycle_drop_streak[static_cast<size_t>(j)];
+      }
+      w++;
+    }
+
+    recycle_k = w;
+    ls.ws.recycle_k = recycle_k;
+    if (enh.verbose && lhs.commu.task == 0) {
+      std::fprintf(stderr, "[gmres_v] recycle keep/drop: k=%d win=%d\n", recycle_k, enh.recycle_drop_window);
+    }
+  };
+
   // Stagnation detection: terminate early if residual stops improving.
   // With restarted GMRES and a weak preconditioner, stagnation wastes
   // thousands of iterations (e.g. 51000 on an ill-conditioned system).
@@ -2128,6 +2772,7 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
     if (l > 0) tp_restarts++;
 
     auto u_slice = u.rslice(0);
+    apply_recycle_keep_drop();
 
     tp0 = TP();
     spar_mul::fsils_spar_mul_vv(lhs, lhs.rowPtr, lhs.colPtr, dof, Val, X, u_slice);
@@ -2141,6 +2786,30 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
     omp_la::omp_axpby_v(dof, nNo, u_slice, R, -1.0, u_slice);
     tp_vecops += TP() - tp0;
 
+    // Deflated/recycling GMRES: project residual and apply correction.
+    if (recycle_k > 0) {
+      tp0 = TP();
+      fused_dot_v(dof, mynNo, recycle_C, recycle_k - 1, u_slice, h_col,
+                  dot_thread.data(), thread_stride, num_threads);
+      tp_dot_gs += TP() - tp0;
+
+      tp0 = TP();
+      bcast::fsils_bcast_v(recycle_k, h_col, lhs.commu);
+      tp_allreduce += TP() - tp0;
+
+      for (int j = 0; j < recycle_k; ++j) {
+        recycle_y(j) = h_col[j];
+      }
+
+      tp0 = TP();
+      fused_recon_v(dof, nNo, recycle_U, recycle_k - 1, X, recycle_y);
+      tp_recon += TP() - tp0;
+
+      tp0 = TP();
+      fused_update_v_inplace(dof, nNo, recycle_C, recycle_k - 1, u_slice, h_col);
+      tp_gs_update += TP() - tp0;
+    }
+
     // Note: BCOP_TYPE_PRE is NOT applied in the standard GMRESV path.
 
     tp0 = TP();
@@ -2150,6 +2819,8 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
     if (std::abs(err[0]) <= std::numeric_limits<double>::epsilon()) {
       ls.suc = true; break;
     }
+
+    update_recycle_scores_from_gamma(err[0]);
 
     tp0 = TP();
     omp_la::omp_mul_v(dof, nNo, 1.0 / err[0], u_slice);
@@ -2169,10 +2840,40 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, u_slice_prev, u_slice_next);
       tp_bc_mul += TP() - tp0;
 
-      // --- CGS Step 1 with Pythagorean trick ---
+      // Deflated/recycling GMRES: project the new Arnoldi vector.
+      if (recycle_k > 0) {
+        tp0 = TP();
+        fused_dot_v(dof, mynNo, recycle_C, recycle_k - 1, u_slice_next, h_col,
+                    dot_thread.data(), thread_stride, num_threads);
+        tp_dot_gs += TP() - tp0;
+
+        tp0 = TP();
+        bcast::fsils_bcast_v(recycle_k, h_col, lhs.commu);
+        tp_allreduce += TP() - tp0;
+
+        // Store coupling coefficients B(:,i) = C^T * (A*v_i) before projection.
+        // These are required to apply the corresponding U-space correction
+        // so that the final residual minimizes the *true* residual norm
+        // (not just the projected residual).
+        for (int j = 0; j < recycle_k; ++j) {
+          recycle_B[static_cast<size_t>(j) + static_cast<size_t>(recycle_k_req) * static_cast<size_t>(i)] = h_col[j];
+        }
+
+        tp0 = TP();
+        fused_update_v_inplace(dof, nNo, recycle_C, recycle_k - 1, u_slice_next, h_col);
+        tp_gs_update += TP() - tp0;
+      }
+
+      // --- Sequential CGS Step 1 with Pythagorean trick ---
+      // Uses streaming memory access: each dot reads one u[j] vector (161 KB)
+      // linearly, keeping u_slice_next hot in L2. This is ~6x fewer LLC loads
+      // than the fused approach which scatters across all Krylov vectors per
+      // node block.
       tp0 = TP();
-      const double zz_local = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
-                                              dot_thread.data(), thread_stride, num_threads);
+      for (int j = 0; j <= i; j++) {
+        h_col[j] = dot::fsils_nc_dot_v(dof, mynNo, u.rslice(j), u_slice_next);
+      }
+      const double zz_local = dot::fsils_nc_dot_v(dof, mynNo, u_slice_next, u_slice_next);
       h_col[static_cast<size_t>(i+1)] = zz_local;
       tp_dot_gs += TP() - tp0;
 
@@ -2194,19 +2895,37 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
         tt_sq = 0.0;
       }
 
-      // Subtract projections in-place (no MPI needed)
+      const double old_norm_sq = h_col[static_cast<size_t>(i+1)];
+
+      // Subtract projections sequentially (streaming access, no MPI needed)
       tp0 = TP();
-      fused_update_v_inplace(dof, nNo, u, i, u_slice_next, h_col);
+      for (int j = 0; j <= i; j++) {
+        if (h_col[j] != 0.0) {
+          omp_la::omp_sum_v(dof, nNo, -h_col[j], u_slice_next, u.rslice(j));
+        }
+      }
       tp_gs_update += TP() - tp0;
 
       // CGS2: Selective reorthogonalization (Pythagorean check)
       // tt_sq < proj_sq_norm means ||v_new|| < (1/sqrt(2))||v|| — loss of orthogonality.
-      if (tt_sq < proj_sq_norm && tt_sq >= 0.0) {
+      bool do_reorth = false;
+      if (tt_sq >= 0.0) {
+        if (enh.use_mgs_dgks) {
+          const double ratio2 = enh.mgs_dgks_ratio * enh.mgs_dgks_ratio;
+          do_reorth = tt_sq < ratio2 * old_norm_sq;
+        } else {
+          do_reorth = tt_sq < proj_sq_norm;
+        }
+      }
+
+      if (do_reorth) {
         tp_reorth_count++;
 
         tp0 = TP();
-        const double zz2_local = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
-                                                  dot_thread.data(), thread_stride, num_threads);
+        for (int j = 0; j <= i; j++) {
+          h_col[j] = dot::fsils_nc_dot_v(dof, mynNo, u.rslice(j), u_slice_next);
+        }
+        const double zz2_local = dot::fsils_nc_dot_v(dof, mynNo, u_slice_next, u_slice_next);
         h_col[static_cast<size_t>(i+1)] = zz2_local;
         tp_dot_gs += TP() - tp0;
 
@@ -2221,7 +2940,11 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
         }
 
         tp0 = TP();
-        fused_update_v_inplace(dof, nNo, u, i, u_slice_next, h_col);
+        for (int j = 0; j <= i; j++) {
+          if (h_col[j] != 0.0) {
+            omp_la::omp_sum_v(dof, nNo, -h_col[j], u_slice_next, u.rslice(j));
+          }
+        }
         tp_gs_update += TP() - tp0;
 
         tt_sq = h_col[static_cast<size_t>(i+1)] - corr_sq;
@@ -2288,7 +3011,40 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
     fused_recon_v(dof, nNo, u, last_i, X, y);
     tp_recon += TP() - tp0;
 
+    // Recycling correction: X += U * ( -B * y ), where B(:,i) = C^T*(A*v_i).
+    // This cancels the C-component of A*(V*y) and ensures ||err|| matches
+    // the true residual norm for the augmented solution.
+    if (recycle_k > 0) {
+      for (int j = 0; j < recycle_k; ++j) {
+        double sum = 0.0;
+        for (int i = 0; i <= last_i; ++i) {
+          const double yi = y(i);
+          if (yi == 0.0) {
+            continue;
+          }
+          sum += recycle_B[static_cast<size_t>(j) + static_cast<size_t>(recycle_k_req) * static_cast<size_t>(i)] * yi;
+        }
+        recycle_y(j) = -sum;
+      }
+
+      tp0 = TP();
+      fused_recon_v(dof, nNo, recycle_U, recycle_k - 1, X, recycle_y);
+      tp_recon += TP() - tp0;
+    }
+
     ls.fNorm = std::abs(err(last_i+1));
+
+    // Update recycling space from the just-built Krylov basis.
+    if (recycle_k_req > 0 && enh.recycle_update_mode != GmresEnhancements::RecycleUpdateMode::off) {
+      const bool do_update =
+          (enh.recycle_update_mode == GmresEnhancements::RecycleUpdateMode::each_restart) ||
+          (enh.recycle_update_mode == GmresEnhancements::RecycleUpdateMode::once_per_solve && !recycle_updated_this_solve);
+      if (do_update) {
+        update_recycle_space_from_arnoldi(last_i + 1);
+        recycle_updated_this_solve = true;
+      }
+    }
+
     if (ls.suc) break;
 
     // Stagnation detection: if residual hasn't improved by at least

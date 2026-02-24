@@ -82,7 +82,19 @@ struct DenseSolveResult {
             }
         }
         if (pivot_val == 0.0) {
-            return {false, "solveDenseWithPartialPivoting: singular matrix", {}};
+            // Diagnostic: print zero rows in original matrix
+            std::string diag = "solveDenseWithPartialPivoting: singular matrix at pivot k=" + std::to_string(k) + " / n=" + std::to_string(n) + "\n";
+            auto orig = std::vector<Real>(A.data().begin(), A.data().end());
+            for (GlobalIndex r = 0; r < n; ++r) {
+                Real row_norm = 0.0;
+                for (GlobalIndex c = 0; c < n; ++c) {
+                    row_norm += std::abs(orig[idx(r, c)]);
+                }
+                if (row_norm == 0.0) {
+                    diag += "  ZERO ROW in original matrix: row " + std::to_string(r) + "\n";
+                }
+            }
+            return {false, diag, {}};
         }
 
         if (pivot != k) {

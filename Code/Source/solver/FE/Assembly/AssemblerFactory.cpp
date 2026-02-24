@@ -6,6 +6,7 @@
  */
 
 #include "Assembly/Assembler.h"
+#include "Assembly/GlobalSystemView.h"
 
 #include "Assembly/AssemblerSelection.h"
 #include "Assembly/CachedAssembler.h"
@@ -58,6 +59,54 @@ std::string normalizeName(std::string_view name)
 }
 
 } // namespace
+
+// ============================================================================
+// Assembler default virtual methods
+// ============================================================================
+
+AssemblyResult Assembler::assembleCellsFused(
+    const IMeshAccess& mesh,
+    std::span<const FusedCellTerm> terms)
+{
+    AssemblyResult total;
+    for (const auto& t : terms) {
+        setRowDofMap(*t.row_dof_map, t.row_dof_offset);
+        setColDofMap(*t.col_dof_map, t.col_dof_offset);
+
+        AssemblyResult r;
+        if (t.assemble_matrix && t.matrix_view && t.assemble_vector && t.vector_view) {
+            r = assembleBoth(mesh, *t.test_space, *t.trial_space, *t.kernel,
+                             *t.matrix_view, *t.vector_view);
+        } else if (t.assemble_matrix && t.matrix_view) {
+            r = assembleMatrix(mesh, *t.test_space, *t.trial_space, *t.kernel,
+                               *t.matrix_view);
+        } else if (t.assemble_vector && t.vector_view) {
+            if (t.test_space == t.trial_space) {
+                r = assembleVector(mesh, *t.test_space, *t.kernel, *t.vector_view);
+            } else {
+                DenseVectorView dummy(0);
+                r = assembleBoth(mesh, *t.test_space, *t.trial_space, *t.kernel,
+                                 dummy, *t.vector_view);
+            }
+        } else {
+            continue;
+        }
+
+        total.elements_assembled += r.elements_assembled;
+        total.matrix_entries_inserted += r.matrix_entries_inserted;
+        total.vector_entries_inserted += r.vector_entries_inserted;
+        total.elapsed_time_seconds += r.elapsed_time_seconds;
+        if (!r.success) {
+            total.success = false;
+            total.error_message = r.error_message;
+        }
+    }
+    return total;
+}
+
+// ============================================================================
+// Assembler Factory
+// ============================================================================
 
 std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options,
                                            std::string_view assembler_name,

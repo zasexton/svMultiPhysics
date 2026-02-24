@@ -597,6 +597,16 @@ AssemblyResult ColoredAssembler::assembleInteriorFaces(
     return base().assembleInteriorFaces(mesh, test_space, trial_space, kernel, matrix_view, vector_view);
 }
 
+AssemblyResult ColoredAssembler::assembleCellsFused(
+    const IMeshAccess& mesh,
+    std::span<const FusedCellTerm> terms)
+{
+    // Delegate to the base assembler's fused path.
+    // The fused loop is inherently serial (single StandardAssembler cell loop),
+    // so coloring is not applied — the fusion savings dominate.
+    return base().assembleCellsFused(mesh, terms);
+}
+
 AssemblyResult ColoredAssembler::assembleCells(
     const IMeshAccess& mesh,
     const spaces::FunctionSpace& test_space,

@@ -238,6 +238,14 @@ public:
         GlobalSystemView& vector_view) override;
 
     // =========================================================================
+    // Fused Multi-Term Cell Assembly
+    // =========================================================================
+
+    [[nodiscard]] AssemblyResult assembleCellsFused(
+        const IMeshAccess& mesh,
+        std::span<const FusedCellTerm> terms) override;
+
+    // =========================================================================
     // Face Assembly
     // =========================================================================
 
@@ -382,6 +390,24 @@ private:
         std::vector<Real> PT{};  // transpose(P)
     };
 
+    /**
+     * @brief Saved per-cell geometry data for fused-batched assembly.
+     *
+     * When processing a batch of cells with multiple fused terms, we compute
+     * geometry once per cell and save it here. Subsequent terms restore the
+     * geometry scratch arrays from this saved data before re-preparing basis.
+     */
+    struct SavedCellGeometry {
+        std::vector<AssemblyContext::Matrix3x3> jacobians;
+        std::vector<AssemblyContext::Matrix3x3> inv_jacobians;
+        std::vector<Real> jac_dets;
+        std::vector<AssemblyContext::Point3D> quad_points;
+        std::vector<Real> quad_weights;
+        std::vector<AssemblyContext::Point3D> phys_points;
+        std::vector<Real> integration_weights;
+        std::vector<math::Vector<Real, 3>> node_coords;
+    };
+
     // =========================================================================
     // Internal Implementation
     // =========================================================================
@@ -408,6 +434,8 @@ private:
      * - Jacobians and determinants at each quadrature point
      * - Basis function values and reference gradients
      * - Physical gradients transformed via inverse Jacobian
+     *
+     * Internally calls prepareGeometry() + prepareBasis().
      */
     void prepareContext(
         AssemblyContext& context,
@@ -416,6 +444,44 @@ private:
         const spaces::FunctionSpace& test_space,
         const spaces::FunctionSpace& trial_space,
         RequiredData required_data);
+
+    /**
+     * @brief Resolve quadrature rule for a test space element on a cell
+     */
+    std::shared_ptr<const quadrature::QuadratureRule> resolveQuadratureRule(
+        const spaces::FunctionSpace& test_space,
+        GlobalIndex cell_id,
+        ElementType cell_type) const;
+
+    /**
+     * @brief Prepare geometry data for a cell (cell-only, space-independent)
+     *
+     * Computes: node coordinates, geometry mapping, Jacobians, physical points,
+     * integration weights at all quadrature points. The results are stored in
+     * scratch arrays and are ready for subsequent prepareBasis() calls.
+     */
+    void prepareGeometry(
+        AssemblyContext& context,
+        const IMeshAccess& mesh,
+        GlobalIndex cell_id,
+        const quadrature::QuadratureRule& quad_rule);
+
+    /**
+     * @brief Prepare basis data and configure context for test/trial spaces
+     *
+     * Evaluates test/trial basis functions at QPs, transforms gradients using
+     * the Jacobians already computed by prepareGeometry(), and sets up the
+     * AssemblyContext with all basis and geometry data.
+     */
+    void prepareBasis(
+        AssemblyContext& context,
+        const IMeshAccess& mesh,
+        GlobalIndex cell_id,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        RequiredData required_data,
+        const quadrature::QuadratureRule& quad_rule);
+
 
     /**
      * @brief Prepare assembly context for a face

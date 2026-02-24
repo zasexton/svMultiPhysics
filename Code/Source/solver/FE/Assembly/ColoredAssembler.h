@@ -198,6 +198,10 @@ public:
         GlobalSystemView& matrix_view,
         GlobalSystemView* vector_view) override;
 
+    [[nodiscard]] AssemblyResult assembleCellsFused(
+        const IMeshAccess& mesh,
+        std::span<const FusedCellTerm> terms) override;
+
     // =========================================================================
     // Coloring API
     // =========================================================================

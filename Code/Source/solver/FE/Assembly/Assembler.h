@@ -391,6 +391,31 @@ public:
 };
 
 // ============================================================================
+// Fused Multi-Term Assembly
+// ============================================================================
+
+/**
+ * @brief Describes a single cell term for fused multi-term assembly
+ *
+ * When a multi-field system produces multiple cell terms (e.g., the 4 blocks
+ * of a 2-field Navier-Stokes Jacobian), the assembler can fuse them into a
+ * single cell loop, preparing shared geometry/field data once per cell.
+ */
+struct FusedCellTerm {
+    const spaces::FunctionSpace* test_space{nullptr};
+    const spaces::FunctionSpace* trial_space{nullptr};
+    AssemblyKernel* kernel{nullptr};
+    const dofs::DofMap* row_dof_map{nullptr};
+    const dofs::DofMap* col_dof_map{nullptr};
+    GlobalIndex row_dof_offset{0};
+    GlobalIndex col_dof_offset{0};
+    GlobalSystemView* matrix_view{nullptr};   ///< nullptr if no matrix
+    GlobalSystemView* vector_view{nullptr};   ///< nullptr if no vector
+    bool assemble_matrix{false};
+    bool assemble_vector{false};
+};
+
+// ============================================================================
 // Assembler Base Interface
 // ============================================================================
 
@@ -880,6 +905,27 @@ public:
         FE_THROW(FEException, "Assembler::assembleInterfaceFaces: not implemented");
     }
 #endif
+
+    // =========================================================================
+    // Fused Multi-Term Cell Assembly
+    // =========================================================================
+
+    /**
+     * @brief Assemble multiple cell terms in a single fused cell loop
+     *
+     * For multi-field systems, this avoids redundant per-cell geometry, Jacobian,
+     * and field solution computation by sharing preparation across terms that
+     * operate on the same mesh cells.
+     *
+     * Default implementation falls back to sequential per-term assembly.
+     *
+     * @param mesh Mesh access interface
+     * @param terms Span of FusedCellTerm descriptors
+     * @return Merged assembly result
+     */
+    [[nodiscard]] virtual AssemblyResult assembleCellsFused(
+        const IMeshAccess& mesh,
+        std::span<const FusedCellTerm> terms);
 
     // =========================================================================
     // Lifecycle

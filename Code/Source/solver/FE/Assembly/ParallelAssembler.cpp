@@ -736,6 +736,48 @@ AssemblyResult ParallelAssembler::assembleBoth(
 }
 
 // ============================================================================
+// Fused Multi-Term Cell Assembly
+// ============================================================================
+
+AssemblyResult ParallelAssembler::assembleCellsFused(
+    const IMeshAccess& mesh,
+    std::span<const FusedCellTerm> terms)
+{
+    if (!initialized_) {
+        initialize();
+    }
+
+    beginGhostAssemblyIfNeeded();
+
+    // Wrap each term's matrix/vector views with GhostRoutingView
+    std::vector<std::unique_ptr<GhostRoutingView>> routed_views;
+    routed_views.reserve(terms.size() * 2);
+
+    std::vector<FusedCellTerm> routed_terms(terms.begin(), terms.end());
+    for (auto& t : routed_terms) {
+        if (t.matrix_view && t.assemble_matrix) {
+            routed_views.push_back(std::make_unique<GhostRoutingView>(
+                *t.matrix_view, ghost_manager_, ghost_policy_));
+            t.matrix_view = routed_views.back().get();
+        }
+        if (t.vector_view && t.assemble_vector) {
+            // Check if vector_view was the same pointer as matrix_view (before routing)
+            // In that case, reuse the same routed view
+            if (t.vector_view == terms[static_cast<std::size_t>(&t - routed_terms.data())].matrix_view &&
+                t.matrix_view != nullptr) {
+                t.vector_view = t.matrix_view;
+            } else {
+                routed_views.push_back(std::make_unique<GhostRoutingView>(
+                    *t.vector_view, ghost_manager_, ghost_policy_));
+                t.vector_view = routed_views.back().get();
+            }
+        }
+    }
+
+    return local_assembler_.assembleCellsFused(mesh, routed_terms);
+}
+
+// ============================================================================
 // Face Assembly
 // ============================================================================
 

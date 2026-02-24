@@ -861,7 +861,7 @@ void LagrangeBasis::evaluate_values(const math::Vector<Real, 3>& xi,
 	        return;
 	    }
 
-	    if (element_type_ == ElementType::Triangle3) {
+	    if (element_type_ == ElementType::Triangle3 && order_ == 1) {
             // Linear simplex: barycentric Lagrange basis.
             const Real l1 = xi[0];
             const Real l2 = xi[1];
@@ -872,7 +872,7 @@ void LagrangeBasis::evaluate_values(const math::Vector<Real, 3>& xi,
             return;
         }
 
-        if (element_type_ == ElementType::Tetra4) {
+        if (element_type_ == ElementType::Tetra4 && order_ == 1) {
             // Linear simplex: barycentric Lagrange basis.
             const Real l1 = xi[0];
             const Real l2 = xi[1];
@@ -998,7 +998,7 @@ void LagrangeBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
 	        return;
 	    }
 
-	    if (element_type_ == ElementType::Triangle3) {
+	    if (element_type_ == ElementType::Triangle3 && order_ == 1) {
             // Linear simplex: barycentric Lagrange basis.
             gradients[0] = Gradient{Real(-1), Real(-1), Real(0)};
             gradients[1] = Gradient{Real(1), Real(0), Real(0)};
@@ -1006,7 +1006,7 @@ void LagrangeBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
             return;
         }
 
-        if (element_type_ == ElementType::Tetra4) {
+        if (element_type_ == ElementType::Tetra4 && order_ == 1) {
             // Linear simplex: barycentric Lagrange basis.
             gradients[0] = Gradient{Real(-1), Real(-1), Real(-1)};
             gradients[1] = Gradient{Real(1), Real(0), Real(0)};
@@ -1285,7 +1285,7 @@ void LagrangeBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
         return;
     }
 
-    if (element_type_ == ElementType::Triangle3 || element_type_ == ElementType::Tetra4) {
+    if ((element_type_ == ElementType::Triangle3 || element_type_ == ElementType::Tetra4) && order_ == 1) {
         // Linear simplex has identically zero Hessian.
         return;
     }
