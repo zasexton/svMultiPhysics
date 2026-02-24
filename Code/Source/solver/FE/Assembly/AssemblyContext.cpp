@@ -2190,6 +2190,20 @@ void AssemblyContext::rebuildInterleavedQPointGeometry()
     }
 }
 
+void AssemblyContext::prepareGeometryStorage(LocalIndex n_qpts)
+{
+    const auto qpts = static_cast<std::size_t>(n_qpts);
+    ensureArenaCapacity(std::max(arena_max_dofs_, std::max(n_test_dofs_, n_trial_dofs_)), n_qpts);
+    n_qpts_ = n_qpts;
+    quad_points_.resize(qpts);
+    quad_weights_.resize(qpts);
+    physical_points_.resize(qpts);
+    jacobians_.resize(qpts);
+    inverse_jacobians_.resize(qpts);
+    jacobian_dets_.resize(qpts);
+    integration_weights_.resize(qpts);
+}
+
 void AssemblyContext::setQuadratureData(
     std::span<const Point3D> points,
     std::span<const Real> weights)
@@ -2204,7 +2218,7 @@ void AssemblyContext::setQuadratureData(
     n_qpts_ = static_cast<LocalIndex>(points.size());
     quad_points_.assign(points.begin(), points.end());
     quad_weights_.assign(weights.begin(), weights.end());
-    rebuildInterleavedQPointGeometry();
+    interleaved_dirty_ = true;
 }
 
 void AssemblyContext::setPhysicalPoints(std::span<const Point3D> points)
@@ -2213,7 +2227,7 @@ void AssemblyContext::setPhysicalPoints(std::span<const Point3D> points)
                         static_cast<LocalIndex>(std::max<std::size_t>(points.size(),
                                                                       static_cast<std::size_t>(n_qpts_))));
     physical_points_.assign(points.begin(), points.end());
-    rebuildInterleavedQPointGeometry();
+    interleaved_dirty_ = true;
 }
 
 void AssemblyContext::setJacobianData(
@@ -2231,7 +2245,7 @@ void AssemblyContext::setJacobianData(
     jacobians_.assign(jacobians.begin(), jacobians.end());
     inverse_jacobians_.assign(inverse_jacobians.begin(), inverse_jacobians.end());
     jacobian_dets_.assign(determinants.begin(), determinants.end());
-    rebuildInterleavedQPointGeometry();
+    interleaved_dirty_ = true;
 }
 
 void AssemblyContext::setIntegrationWeights(std::span<const Real> weights)
@@ -2488,7 +2502,7 @@ void AssemblyContext::setNormals(std::span<const Vector3D> normals)
                         static_cast<LocalIndex>(std::max<std::size_t>(normals.size(),
                                                                       static_cast<std::size_t>(n_qpts_))));
     normals_.assign(normals.begin(), normals.end());
-    rebuildInterleavedQPointGeometry();
+    interleaved_dirty_ = true;
 }
 
 void AssemblyContext::setSolutionValues(std::span<const Real> values)

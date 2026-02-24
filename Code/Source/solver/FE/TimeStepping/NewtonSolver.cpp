@@ -796,15 +796,20 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     const int jacobian_period = std::max(1, options_.jacobian_rebuild_period);
 
     // ===== NEWTON TIMING PROFILE =====
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     auto NTP = []() {
         return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
     };
+#else
+    auto NTP = []() -> double { return 0.0; };
+#endif
     double ntp_assembly = 0.0, ntp_linear = 0.0, ntp_update = 0.0;
     double ntp_constraints = 0.0, ntp_other = 0.0;
     double ntp_total_start = NTP();
     double ntp0;
     int ntp_assembly_count = 0, ntp_linear_iters_total = 0;
     auto printNewtonProfile = [&](int newton_iters) {
+#ifdef SVMP_FE_ASSEMBLY_TIMING
         double ntp_total = NTP() - ntp_total_start;
         ntp_other = ntp_total - ntp_assembly - ntp_linear - ntp_update - ntp_constraints;
         if (ntp_other < 0.0) ntp_other = 0.0;
@@ -830,6 +835,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
               ntp_constraints, pct(ntp_constraints),
               ntp_other, pct(ntp_other));
         }
+#else
+        (void)newton_iters;
+#endif
     };
     // =================================
 

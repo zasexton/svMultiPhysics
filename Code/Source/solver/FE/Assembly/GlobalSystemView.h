@@ -301,6 +301,19 @@ public:
         return 0.0;
     }
 
+    /**
+     * @brief Batch get vector values (for backends that support it)
+     *
+     * @param dofs DOF indices to read
+     * @param out Output span (same size as dofs)
+     */
+    virtual void getVectorEntries(std::span<const GlobalIndex> dofs,
+                                  std::span<Real> out) const {
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            out[i] = getVectorEntry(dofs[i]);
+        }
+    }
+
     // =========================================================================
     // Assembly Lifecycle
     // =========================================================================

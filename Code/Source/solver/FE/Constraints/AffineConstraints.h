@@ -671,6 +671,10 @@ private:
     // Map from slave DOF to index in slave_dofs_
     std::unordered_map<GlobalIndex, std::size_t> slave_to_index_;
 
+    // Dense bitset for O(1) isConstrained() lookup (built in close())
+    std::vector<bool> constrained_bitset_;
+    GlobalIndex constrained_bitset_max_dof_{-1};
+
     // CSR storage for entries
     std::vector<GlobalIndex> entry_offsets_;  // Size: n_constraints + 1
     std::vector<ConstraintEntry> entries_;    // All entries, concatenated

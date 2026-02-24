@@ -67,6 +67,20 @@ int Vector<float>::active = 0;
 template<>
 bool Vector<float>::write_enabled = false;
 
+// long (int64_t / fsils_int) //
+template<>
+bool Vector<long>::show_index_check_message = true;
+template<>
+double Vector<long>::memory_in_use = 0;
+template<>
+double Vector<long>::memory_returned = 0;
+template<>
+int Vector<long>::num_allocated = 0;
+template<>
+int Vector<long>::active = 0;
+template<>
+bool Vector<long>::write_enabled = false;
+
 template<>
 bool Array<bool>::show_index_check_message = true;
 template<>
@@ -112,6 +126,22 @@ int Array<int>::active = 0;
 template<>
 bool Array<int>::write_enabled = false;
 
+// long (int64_t / fsils_int) //
+template<>
+bool Array<long>::show_index_check_message = true;
+template<>
+int Array<long>::id = 0;
+template<>
+double Array<long>::memory_in_use = 0;
+template<>
+double Array<long>::memory_returned = 0;
+template<>
+int Array<long>::num_allocated = 0;
+template<>
+int Array<long>::active = 0;
+template<>
+bool Array<long>::write_enabled = false;
+
 template<>
 bool Array3<double>::show_index_check_message = true;
 template<>
@@ -137,4 +167,3 @@ template<>
 int Array3<int>::active = 0;
 template<>
 bool Array3<int>::write_enabled = false;
-

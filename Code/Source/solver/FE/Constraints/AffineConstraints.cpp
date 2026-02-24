@@ -422,6 +422,18 @@ void AffineConstraints::buildCSRStorage() {
         inhomogeneities_.push_back(line.inhomogeneity);
     }
 
+    // Build dense bitset for O(1) isConstrained() lookup
+    if (!slave_dofs_.empty()) {
+        constrained_bitset_max_dof_ = *std::max_element(slave_dofs_.begin(), slave_dofs_.end());
+        constrained_bitset_.assign(static_cast<std::size_t>(constrained_bitset_max_dof_ + 1), false);
+        for (const auto dof : slave_dofs_) {
+            constrained_bitset_[static_cast<std::size_t>(dof)] = true;
+        }
+    } else {
+        constrained_bitset_max_dof_ = -1;
+        constrained_bitset_.clear();
+    }
+
     // Clear building storage to free memory
     building_lines_.clear();
 }
@@ -432,7 +444,10 @@ void AffineConstraints::buildCSRStorage() {
 
 bool AffineConstraints::isConstrained(GlobalIndex dof) const noexcept {
     if (is_closed_) {
-        return slave_to_index_.find(dof) != slave_to_index_.end();
+        if (dof >= 0 && dof <= constrained_bitset_max_dof_) {
+            return constrained_bitset_[static_cast<std::size_t>(dof)];
+        }
+        return false;
     }
     return building_lines_.find(dof) != building_lines_.end();
 }

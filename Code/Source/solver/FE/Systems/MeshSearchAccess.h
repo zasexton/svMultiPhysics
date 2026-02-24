@@ -14,6 +14,8 @@
 
 #include "Mesh/Mesh.h"
 
+#include <memory>
+
 namespace svmp {
 namespace FE {
 namespace systems {
@@ -29,6 +31,12 @@ class MeshSearchAccess final : public ISearchAccess {
 public:
     explicit MeshSearchAccess(const svmp::Mesh& mesh);
     MeshSearchAccess(const svmp::Mesh& mesh, svmp::Configuration cfg_override);
+    ~MeshSearchAccess() override;
+
+    MeshSearchAccess(const MeshSearchAccess&) = delete;
+    MeshSearchAccess& operator=(const MeshSearchAccess&) = delete;
+    MeshSearchAccess(MeshSearchAccess&&) noexcept = default;
+    MeshSearchAccess& operator=(MeshSearchAccess&&) noexcept = delete;
 
     [[nodiscard]] int dimension() const noexcept override;
     void build() const override;
@@ -64,6 +72,9 @@ private:
     const svmp::Mesh& mesh_;
     bool coord_cfg_override_enabled_{false};
     svmp::Configuration coord_cfg_override_{svmp::Configuration::Reference};
+
+    struct Impl;
+    std::unique_ptr<Impl> impl_{};
 
     [[nodiscard]] svmp::Configuration queryConfig() const noexcept;
 };

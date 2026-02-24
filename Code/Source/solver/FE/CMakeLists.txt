@@ -1922,15 +1922,16 @@ if(FE_BUILD_TESTS)
 
         # Systems module tests (Systems depends on Assembly; tests also require Mesh)
         if(FE_WITH_MESH AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Systems/test_main.cpp)
-            set(FE_SYSTEMS_TEST_SOURCES
-	                Tests/Unit/Systems/test_FieldRegistry.cpp
-	                Tests/Unit/Systems/test_ContactPenaltyKernel.cpp
-	                Tests/Unit/Systems/test_SurfaceContactKernel.cpp
-	                Tests/Unit/Systems/test_ParameterRegistry.cpp
-	                Tests/Unit/Systems/test_FieldEvaluation.cpp
-	                Tests/Unit/Systems/test_FESystem.cpp
-	                Tests/Unit/Systems/test_AssemblerSelection.cpp
-	                Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp
+	            set(FE_SYSTEMS_TEST_SOURCES
+		                Tests/Unit/Systems/test_FieldRegistry.cpp
+		                Tests/Unit/Systems/test_ContactPenaltyKernel.cpp
+		                Tests/Unit/Systems/test_SurfaceContactKernel.cpp
+		                Tests/Unit/Systems/test_SearchAccess.cpp
+		                Tests/Unit/Systems/test_ParameterRegistry.cpp
+		                Tests/Unit/Systems/test_FieldEvaluation.cpp
+		                Tests/Unit/Systems/test_FESystem.cpp
+		                Tests/Unit/Systems/test_AssemblerSelection.cpp
+		                Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp
                 Tests/Unit/Systems/test_NavierStokesCoupled.cpp
                 Tests/Unit/Systems/test_JacobianVerification.cpp
                 Tests/Unit/Systems/test_SystemConstraints.cpp

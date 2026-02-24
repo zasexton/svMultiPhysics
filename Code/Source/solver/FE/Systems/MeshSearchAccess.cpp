@@ -10,12 +10,15 @@
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 
 #include "Mesh/Core/MeshBase.h"
+#include "Mesh/Observer/ScopedSubscription.h"
 #include "Mesh/Search/SearchBuilders.h"
 #include "Mesh/Search/MeshSearch.h"
 #include "Mesh/Search/SearchPrimitives.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <mutex>
 #include <unordered_map>
@@ -51,7 +54,7 @@ struct MarkerBVHNode {
 
 class MarkerBoundaryBVH {
 public:
-    void build(const svmp::Mesh& mesh, int marker, svmp::Configuration cfg)
+    void build(const svmp::Mesh& mesh, int marker, svmp::Configuration cfg, std::uint64_t revision)
     {
         triangles_.clear();
         nodes_.clear();
@@ -62,6 +65,7 @@ public:
             built_ = true;
             marker_ = marker;
             cfg_ = cfg;
+            revision_ = revision;
             return;
         }
 
@@ -112,6 +116,7 @@ public:
             built_ = true;
             marker_ = marker;
             cfg_ = cfg;
+            revision_ = revision;
             return;
         }
 
@@ -119,11 +124,12 @@ public:
         built_ = true;
         marker_ = marker;
         cfg_ = cfg;
+        revision_ = revision;
     }
 
-    [[nodiscard]] bool isBuiltFor(int marker, svmp::Configuration cfg) const noexcept
+    [[nodiscard]] bool isBuiltFor(int marker, svmp::Configuration cfg, std::uint64_t revision) const noexcept
     {
-        return built_ && marker == marker_ && cfg == cfg_;
+        return built_ && marker == marker_ && cfg == cfg_ && revision == revision_;
     }
 
     [[nodiscard]] ISearchAccess::ClosestBoundaryPoint query(const std::array<Real, 3>& point,
@@ -250,13 +256,51 @@ private:
     bool built_{false};
     int marker_{0};
     svmp::Configuration cfg_{svmp::Configuration::Reference};
+    std::uint64_t revision_{0};
 };
 
 } // namespace
 
+struct MeshSearchAccess::Impl {
+    struct RevisionObserver final : public svmp::MeshObserver {
+        explicit RevisionObserver(std::atomic<std::uint64_t>* revision) : revision_(revision) {}
+
+        void on_mesh_event(svmp::MeshEvent event) override
+        {
+            if (!revision_) return;
+            switch (event) {
+                case svmp::MeshEvent::TopologyChanged:
+                case svmp::MeshEvent::GeometryChanged:
+                case svmp::MeshEvent::PartitionChanged:
+                case svmp::MeshEvent::LabelsChanged:
+                case svmp::MeshEvent::AdaptivityApplied:
+                    revision_->fetch_add(1u, std::memory_order_relaxed);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        const char* observer_name() const override { return "MeshSearchAccess::RevisionObserver"; }
+
+    private:
+        std::atomic<std::uint64_t>* revision_{nullptr};
+    };
+
+    std::atomic<std::uint64_t> revision{1u};
+    std::shared_ptr<RevisionObserver> observer{};
+    svmp::ScopedSubscription subscription{};
+
+    std::mutex mutex{};
+    std::unordered_map<int, MarkerBoundaryBVH> bvh_by_marker{};
+};
+
 MeshSearchAccess::MeshSearchAccess(const svmp::Mesh& mesh)
     : mesh_(mesh)
 {
+    impl_ = std::make_unique<Impl>();
+    impl_->observer = std::make_shared<Impl::RevisionObserver>(&impl_->revision);
+    impl_->subscription = svmp::ScopedSubscription(&mesh_.base().event_bus(), impl_->observer);
 }
 
 MeshSearchAccess::MeshSearchAccess(const svmp::Mesh& mesh, svmp::Configuration cfg_override)
@@ -264,7 +308,12 @@ MeshSearchAccess::MeshSearchAccess(const svmp::Mesh& mesh, svmp::Configuration c
       coord_cfg_override_enabled_(true),
       coord_cfg_override_(cfg_override)
 {
+    impl_ = std::make_unique<Impl>();
+    impl_->observer = std::make_shared<Impl::RevisionObserver>(&impl_->revision);
+    impl_->subscription = svmp::ScopedSubscription(&mesh_.base().event_bus(), impl_->observer);
 }
+
+MeshSearchAccess::~MeshSearchAccess() = default;
 
 int MeshSearchAccess::dimension() const noexcept
 {
@@ -403,14 +452,16 @@ ISearchAccess::ClosestBoundaryPoint MeshSearchAccess::closestBoundaryPointOnMark
 {
     const auto cfg = queryConfig();
 
-    // Cache a BVH per (marker, config) for fast closest-point queries on the marker subset.
-    static std::mutex mutex;
-    static std::unordered_map<const svmp::Mesh*, std::unordered_map<int, MarkerBoundaryBVH>> cache;
-    std::lock_guard<std::mutex> lock(mutex);
-    auto& by_marker = cache[&mesh_];
-    auto& entry = by_marker[boundary_marker];
-    if (!entry.isBuiltFor(boundary_marker, cfg)) {
-        entry.build(mesh_, boundary_marker, cfg);
+    if (!impl_) {
+        return {};
+    }
+
+    const std::uint64_t rev = impl_->revision.load(std::memory_order_relaxed);
+
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    auto& entry = impl_->bvh_by_marker[boundary_marker];
+    if (!entry.isBuiltFor(boundary_marker, cfg, rev)) {
+        entry.build(mesh_, boundary_marker, cfg, rev);
     }
     return entry.query(point, max_distance);
 }

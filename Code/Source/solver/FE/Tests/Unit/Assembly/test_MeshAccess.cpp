@@ -308,6 +308,72 @@ TEST(MeshAccess, CoordinateConfigurationOverrideIsDeterministic) {
     EXPECT_NEAR(x0_ref2[0], Real(0.0), 1e-12);
 }
 
+TEST(MeshAccess, DeformedConfigurationOverrideMatchesCurrentWhenPresent) {
+    auto mesh = build_two_triangles_mesh();
+
+    // Make current coordinates different from reference.
+    auto X_cur = mesh.base().X_ref();
+    for (std::size_t i = 0; i < X_cur.size(); i += 2) {
+        X_cur[i] += 10.0; // shift x only
+    }
+    mesh.set_current_coords(X_cur);
+
+    // Deformed is a compatibility alias for Current.
+    MeshAccess use_deformed(mesh, svmp::Configuration::Deformed);
+    MeshAccess use_current(mesh, svmp::Configuration::Current);
+
+    const auto x0_def = use_deformed.getNodeCoordinates(0);
+    const auto x0_cur = use_current.getNodeCoordinates(0);
+    EXPECT_NEAR(x0_def[0], x0_cur[0], 1e-12);
+    EXPECT_NEAR(x0_def[1], x0_cur[1], 1e-12);
+
+    std::vector<std::array<Real, 3>> c0_def;
+    std::vector<std::array<Real, 3>> c0_cur;
+    use_deformed.getCellCoordinates(0, c0_def);
+    use_current.getCellCoordinates(0, c0_cur);
+    ASSERT_EQ(c0_def.size(), c0_cur.size());
+    for (std::size_t i = 0; i < c0_def.size(); ++i) {
+        EXPECT_NEAR(c0_def[i][0], c0_cur[i][0], 1e-12);
+        EXPECT_NEAR(c0_def[i][1], c0_cur[i][1], 1e-12);
+        EXPECT_NEAR(c0_def[i][2], c0_cur[i][2], 1e-12);
+    }
+}
+
+TEST(MeshAccess, WithoutOverrideUsesMeshActiveConfiguration) {
+    auto mesh = build_two_triangles_mesh();
+
+    // Make current coordinates different from reference.
+    auto X_cur = mesh.base().X_ref();
+    for (std::size_t i = 0; i < X_cur.size(); i += 2) {
+        X_cur[i] += 10.0; // shift x only
+    }
+    mesh.set_current_coords(X_cur);
+
+    MeshAccess access(mesh); // no override: follows mesh.active_configuration()
+
+    mesh.use_reference_configuration();
+    const auto x0_ref = access.getNodeCoordinates(0);
+    EXPECT_NEAR(x0_ref[0], Real(0.0), 1e-12);
+    EXPECT_NEAR(x0_ref[1], Real(0.0), 1e-12);
+
+    mesh.use_current_configuration();
+    const auto x0_cur = access.getNodeCoordinates(0);
+    EXPECT_NEAR(x0_cur[0], Real(10.0), 1e-12);
+    EXPECT_NEAR(x0_cur[1], Real(0.0), 1e-12);
+}
+
+TEST(MeshAccess, CurrentActiveConfigurationWithoutCurrentCoordsFallsBackToReference) {
+    auto mesh = build_two_triangles_mesh();
+    ASSERT_FALSE(mesh.base().has_current_coords());
+
+    MeshAccess access(mesh); // no override
+    mesh.use_current_configuration(); // but X_cur is not set
+
+    const auto x0 = access.getNodeCoordinates(0);
+    EXPECT_NEAR(x0[0], Real(0.0), 1e-12);
+    EXPECT_NEAR(x0[1], Real(0.0), 1e-12);
+}
+
 TEST(MeshAccess, OwnedCellIterationRespectsGhosts) {
     auto mesh = build_two_triangles_mesh();
     mesh.set_ownership(/*id=*/1, EntityKind::Volume, Ownership::Ghost, /*owner_rank=*/1);

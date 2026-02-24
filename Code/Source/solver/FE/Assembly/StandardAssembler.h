@@ -647,6 +647,7 @@ private:
 	    std::vector<const GlobalSystemView*> previous_solution_views_{};
 	    std::vector<Real> local_solution_coeffs_{};
 	    std::vector<std::vector<Real>> local_prev_solution_coeffs_{};
+	    std::vector<GlobalIndex> field_dof_scratch_{};
     Real time_{0.0};
     Real dt_{0.0};
     const std::function<std::optional<Real>(std::string_view)>* get_real_param_{nullptr};
@@ -682,6 +683,18 @@ private:
     const basis::BasisCacheEntry* cached_trial_bcache_{nullptr};
     bool cached_need_hessians_{false};
     const void* cached_quad_rule_ptr_{nullptr}; // identity check for quad rule change
+
+    // Per-cell basis caching: when cell type + quad rule + hessian requirement
+    // match the previous cell, skip BasisCache reads and scratch copies —
+    // only recompute physical gradients using new Jacobians.
+    bool basis_scratch_valid_{false};
+    ElementType cached_basis_cell_type_{ElementType::Unknown};
+    LocalIndex cached_basis_n_test_dofs_{0};
+    LocalIndex cached_basis_n_trial_dofs_{0};
+    LocalIndex cached_basis_n_qpts_{0};
+    bool cached_basis_test_is_vector_{false};
+    bool cached_basis_trial_is_vector_{false};
+    bool cached_basis_same_space_{false};
 
     // Field-solution BasisCache: small flat cache keyed by (BasisFunction*, gradients, hessians).
     // Typically 1-2 entries (velocity basis, pressure basis). Invalidated with mapping type.

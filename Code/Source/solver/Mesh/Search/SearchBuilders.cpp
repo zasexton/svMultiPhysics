@@ -68,8 +68,17 @@ std::array<real_t,3> SearchBuilders::get_vertex_coord(
     index_t vertex_id,
     Configuration cfg) {
 
-  const std::vector<real_t>& coords = (cfg == Configuration::Current && mesh.has_current_coords())
-                                     ? mesh.X_cur() : mesh.X_ref();
+  // Treat Deformed as Current (compatibility alias), and fall back to reference
+  // if current coordinates are not available.
+  if (cfg == Configuration::Deformed) {
+    cfg = Configuration::Current;
+  }
+  if (cfg == Configuration::Current && !mesh.has_current_coords()) {
+    cfg = Configuration::Reference;
+  }
+
+  const std::vector<real_t>& coords =
+      (cfg == Configuration::Current && mesh.has_current_coords()) ? mesh.X_cur() : mesh.X_ref();
   int dim = mesh.dim();
 
   std::array<real_t,3> pt = {0, 0, 0};

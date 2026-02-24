@@ -465,6 +465,10 @@ public:
 
     [[nodiscard]] std::span<const Real> interleavedQPointGeometryRaw() const noexcept
     {
+        if (interleaved_dirty_) {
+            const_cast<AssemblyContext*>(this)->rebuildInterleavedQPointGeometry();
+            interleaved_dirty_ = false;
+        }
         return interleaved_qpoint_geometry_;
     }
 
@@ -1265,6 +1269,31 @@ public:
      */
     void setNormals(std::span<const Vector3D> normals);
 
+    // =========================================================================
+    // Direct Geometry Population (zero-copy path)
+    // =========================================================================
+
+    /**
+     * @brief Prepare arena-backed geometry buffers for direct population
+     *
+     * Ensures the arena is large enough and resizes geometry arrays to n_qpts.
+     * After calling this, use the writable accessors to write geometry data
+     * directly into the arena, then call markGeometryDirty().
+     */
+    void prepareGeometryStorage(LocalIndex n_qpts);
+
+    /** @brief Writable spans into arena geometry storage (valid after prepareGeometryStorage) */
+    std::span<Point3D> quadPointsWritable() noexcept { return {quad_points_.data(), quad_points_.size()}; }
+    std::span<Real> quadWeightsWritable() noexcept { return {quad_weights_.data(), quad_weights_.size()}; }
+    std::span<Point3D> physicalPointsWritable() noexcept { return {physical_points_.data(), physical_points_.size()}; }
+    std::span<Matrix3x3> jacobiansWritable() noexcept { return {jacobians_.data(), jacobians_.size()}; }
+    std::span<Matrix3x3> inverseJacobiansWritable() noexcept { return {inverse_jacobians_.data(), inverse_jacobians_.size()}; }
+    std::span<Real> jacobianDetsWritable() noexcept { return {jacobian_dets_.data(), jacobian_dets_.size()}; }
+    std::span<Real> integrationWeightsWritable() noexcept { return {integration_weights_.data(), integration_weights_.size()}; }
+
+    /** @brief Mark geometry arrays as modified (triggers lazy interleaved rebuild) */
+    void markGeometryDirty() noexcept { interleaved_dirty_ = true; }
+
     /**
      * @brief Set entity measures (cell diameter, cell volume, facet area)
      *
@@ -1415,6 +1444,8 @@ private:
     ArenaArray<Real> jacobian_dets_;
     ArenaArray<Vector3D> normals_;
     ArenaArray<Real> interleaved_qpoint_geometry_;
+
+    mutable bool interleaved_dirty_{true};
 
     // Entity measures (optional)
     Real cell_diameter_{0.0};

@@ -211,6 +211,80 @@ namespace {
         return vec_->data()[idx];
     }
 
+    void getVectorEntries(std::span<const GlobalIndex> dofs,
+                          std::span<Real> out) const override
+    {
+        FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
+        const auto* shared = vec_->shared();
+        const auto& data = vec_->data();
+        const auto data_size = data.size();
+        const auto vec_size = vec_->size();
+
+        if (!shared) {
+            for (std::size_t i = 0; i < dofs.size(); ++i) {
+                const auto dof = dofs[i];
+                if (dof < 0 || dof >= vec_size) {
+                    out[i] = 0.0;
+                } else {
+                    const auto idx = static_cast<std::size_t>(dof);
+                    out[i] = (idx < data_size) ? data[idx] : 0.0;
+                }
+            }
+            return;
+        }
+
+        const auto* perm_ptr = shared->dof_permutation.get();
+        const bool has_perm = (perm_ptr != nullptr && !perm_ptr->forward.empty());
+        const auto* fwd_data = has_perm ? perm_ptr->forward.data() : nullptr;
+        const auto fwd_size = has_perm ? perm_ptr->forward.size() : std::size_t{0};
+        const int dof_per_node = shared->dof;
+
+        int cached_global_node = -1;
+        int cached_old_node = -1;
+
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            auto dof = dofs[i];
+            if (dof < 0 || dof >= vec_size) {
+                out[i] = 0.0;
+                continue;
+            }
+
+            if (has_perm) {
+                if (static_cast<std::size_t>(dof) >= fwd_size) {
+                    out[i] = 0.0;
+                    continue;
+                }
+                dof = fwd_data[static_cast<std::size_t>(dof)];
+                if (dof < 0 || dof >= vec_size) {
+                    out[i] = 0.0;
+                    continue;
+                }
+            }
+
+            const int global_node = static_cast<int>(dof / dof_per_node);
+            const int comp = static_cast<int>(dof % dof_per_node);
+
+            int old_node;
+            if (global_node == cached_global_node) {
+                old_node = cached_old_node;
+            } else {
+                old_node = shared->globalNodeToOld(global_node);
+                cached_global_node = global_node;
+                cached_old_node = old_node;
+            }
+
+            if (old_node < 0) {
+                out[i] = 0.0;
+                continue;
+            }
+
+            const auto idx = static_cast<std::size_t>(old_node) *
+                             static_cast<std::size_t>(dof_per_node) +
+                             static_cast<std::size_t>(comp);
+            out[i] = (idx < data_size) ? data[idx] : 0.0;
+        }
+    }
+
     void beginAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Building; }
     void endAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Flushing; }
     void finalizeAssembly() override { phase_ = assembly::AssemblyPhase::Finalized; }

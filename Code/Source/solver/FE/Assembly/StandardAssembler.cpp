@@ -1960,6 +1960,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
 // Internal Implementation
 // ============================================================================
 
+#ifdef SVMP_FE_ASSEMBLY_TIMING
 // File-scope accumulators for prepareContext sub-phase timing
 static thread_local double g_pc_setup = 0.0;
 static thread_local double g_pc_mapping = 0.0;
@@ -1968,6 +1969,7 @@ static thread_local double g_pc_jacobian = 0.0;
 static thread_local double g_pc_basis = 0.0;
 static thread_local double g_pc_ctx_config = 0.0;
 static thread_local int g_pc_call_count = 0;
+#endif
 
 AssemblyResult StandardAssembler::assembleCellsCore(
     const IMeshAccess& mesh,
@@ -2078,10 +2080,14 @@ AssemblyResult StandardAssembler::assembleCellsCore(
     // Sub-phase timing accumulators for prepareContext breakdown
     double tp_sub_dofmap = 0.0, tp_sub_prepare_ctx = 0.0, tp_sub_solution = 0.0;
     double tp_sub_field_sol = 0.0, tp_sub_material = 0.0, tp_sub_setters = 0.0;
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     auto TP_SUB = []() {
         return std::chrono::duration<double>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
     };
+#else
+    auto TP_SUB = []() -> double { return 0.0; };
+#endif
 
     auto prepare_cell_data = [&](GlobalIndex cell_id,
                                  AssemblyContext& ctx,
@@ -2254,10 +2260,14 @@ AssemblyResult StandardAssembler::assembleCellsCore(
 
         if (!use_batch_path) {
             double tp_prepare = 0.0, tp_kernel = 0.0, tp_insert = 0.0;
+#ifdef SVMP_FE_ASSEMBLY_TIMING
             auto TP = []() {
                 return std::chrono::duration<double>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
             };
+#else
+            auto TP = []() -> double { return 0.0; };
+#endif
             double tp0;
 
             for (const auto cell_id : cell_ids) {
@@ -2275,6 +2285,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                 tp_insert += TP() - tp0;
             }
 
+#ifdef SVMP_FE_ASSEMBLY_TIMING
             {
                 int rank = 0;
 #if FE_HAS_MPI
@@ -2312,6 +2323,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                     }
                 }
             }
+#endif
             return;
         }
 
@@ -2325,10 +2337,14 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         std::vector<const AssemblyContext*> batch_context_ptrs(requested_batch_size, nullptr);
 
         double tp_prepare = 0.0, tp_kernel = 0.0, tp_insert = 0.0;
+#ifdef SVMP_FE_ASSEMBLY_TIMING
         auto TP = []() {
             return std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
         };
+#else
+        auto TP = []() -> double { return 0.0; };
+#endif
 
         auto assemble_batch_range = [&](std::span<const GlobalIndex> grouped_cell_ids) {
             for (std::size_t begin = 0; begin < grouped_cell_ids.size(); begin += requested_batch_size) {
@@ -2402,6 +2418,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
             }
         }
 
+#ifdef SVMP_FE_ASSEMBLY_TIMING
         // Print batch path timing
         {
             int rank = 0;
@@ -2415,6 +2432,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                 if (total > 1e-7) {
                     const double pc_total = g_pc_setup + g_pc_mapping + g_pc_resize
                                           + g_pc_jacobian + g_pc_basis + g_pc_ctx_config;
+                    (void)pc_total;
                     std::fprintf(stderr,
                         "    --- cellLoop TIMING (rank 0, %zu cells, batch=%zu) ---\n"
                         "      Total:             %9.6f s\n"
@@ -2458,6 +2476,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
             g_pc_jacobian = g_pc_basis = g_pc_ctx_config = 0.0;
             g_pc_call_count = 0;
         }
+#endif
     };
 
     withDevirtualizedKernel(kernel, [&](auto& kernel_impl) {
@@ -2486,16 +2505,18 @@ std::shared_ptr<const quadrature::QuadratureRule> StandardAssembler::resolveQuad
 }
 
 void StandardAssembler::prepareGeometry(
-    AssemblyContext& /*context*/,
+    AssemblyContext& context,
     const IMeshAccess& mesh,
     GlobalIndex cell_id,
     const quadrature::QuadratureRule& quad_rule)
 {
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     auto PC_TP = []() {
         return std::chrono::duration<double>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
     };
     double pc_t0 = PC_TP();
+#endif
 
     const ElementType cell_type = mesh.getCellType(cell_id);
     const int dim = mesh.dimension();
@@ -2511,10 +2532,14 @@ void StandardAssembler::prepareGeometry(
             cell_coords_[i][0], cell_coords_[i][1], cell_coords_[i][2]};
     }
 
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     g_pc_setup += PC_TP() - pc_t0;
+#endif
 
     // Create or reuse geometry mapping
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     pc_t0 = PC_TP();
+#endif
     const int geom_order = defaultGeometryOrder(cell_type);
     const bool use_affine = (geom_order <= 1);
 
@@ -2539,22 +2564,31 @@ void StandardAssembler::prepareGeometry(
         cached_mapping_->resetNodes(scratch_node_coords_);
     }
     const auto& mapping = cached_mapping_;
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     g_pc_mapping += PC_TP() - pc_t0;
+#endif
 
-    // Resize geometry scratch storage
+    // Prepare context arena geometry storage (zero-copy into arena)
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     pc_t0 = PC_TP();
+#endif
     const auto n_qpts = static_cast<LocalIndex>(quad_rule.num_points());
-    scratch_quad_points_.resize(n_qpts);
-    scratch_quad_weights_.resize(n_qpts);
-    scratch_phys_points_.resize(n_qpts);
-    scratch_jacobians_.resize(n_qpts);
-    scratch_inv_jacobians_.resize(n_qpts);
-    scratch_jac_dets_.resize(n_qpts);
-    scratch_integration_weights_.resize(n_qpts);
+    context.prepareGeometryStorage(n_qpts);
+    auto ctx_quad_pts = context.quadPointsWritable();
+    auto ctx_quad_wts = context.quadWeightsWritable();
+    auto ctx_phys_pts = context.physicalPointsWritable();
+    auto ctx_jacs = context.jacobiansWritable();
+    auto ctx_inv_jacs = context.inverseJacobiansWritable();
+    auto ctx_jac_dets = context.jacobianDetsWritable();
+    auto ctx_int_wts = context.integrationWeightsWritable();
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     g_pc_resize += PC_TP() - pc_t0;
+#endif
 
     // Compute quadrature data, physical points, and Jacobians
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     pc_t0 = PC_TP();
+#endif
     const auto& quad_points = quad_rule.points();
     const auto& quad_weights = quad_rule.weights();
 
@@ -2611,8 +2645,8 @@ void StandardAssembler::prepareGeometry(
 
         for (LocalIndex q = 0; q < n_qpts; ++q) {
             const auto& qpt = quad_points[q];
-            scratch_quad_points_[q] = {qpt[0], qpt[1], qpt[2]};
-            scratch_quad_weights_[q] = quad_weights[q];
+            ctx_quad_pts[q] = {qpt[0], qpt[1], qpt[2]};
+            ctx_quad_wts[q] = quad_weights[q];
 
             const auto qidx = static_cast<std::size_t>(q);
             Real x0 = 0, x1 = 0, x2 = 0;
@@ -2622,19 +2656,19 @@ void StandardAssembler::prepareGeometry(
                 x1 += geom_nodes[a][1] * N_a;
                 x2 += geom_nodes[a][2] * N_a;
             }
-            scratch_phys_points_[q] = {x0, x1, x2};
+            ctx_phys_pts[q] = {x0, x1, x2};
 
-            scratch_jacobians_[q] = J_arr;
-            scratch_inv_jacobians_[q] = J_inv_arr;
-            scratch_jac_dets_[q] = det_J;
-            scratch_integration_weights_[q] = quad_weights[q] * abs_det_J;
+            ctx_jacs[q] = J_arr;
+            ctx_inv_jacs[q] = J_inv_arr;
+            ctx_jac_dets[q] = det_J;
+            ctx_int_wts[q] = quad_weights[q] * abs_det_J;
         }
     } else {
         // Non-affine element: compute J per QP from cached geometry basis gradients.
         for (LocalIndex q = 0; q < n_qpts; ++q) {
             const auto& qpt = quad_points[q];
-            scratch_quad_points_[q] = {qpt[0], qpt[1], qpt[2]};
-            scratch_quad_weights_[q] = quad_weights[q];
+            ctx_quad_pts[q] = {qpt[0], qpt[1], qpt[2]};
+            ctx_quad_wts[q] = quad_weights[q];
 
             const auto qidx = static_cast<std::size_t>(q);
 
@@ -2645,7 +2679,7 @@ void StandardAssembler::prepareGeometry(
                 x1 += geom_nodes[a][1] * N_a;
                 x2 += geom_nodes[a][2] * N_a;
             }
-            scratch_phys_points_[q] = {x0, x1, x2};
+            ctx_phys_pts[q] = {x0, x1, x2};
 
             math::Matrix<Real, 3, 3> J{};
             for (std::size_t a = 0; a < n_geom_dofs; ++a) {
@@ -2681,15 +2715,19 @@ void StandardAssembler::prepareGeometry(
 
             for (int i = 0; i < 3; ++i)
                 for (int j = 0; j < 3; ++j) {
-                    scratch_jacobians_[q][i][j] = J(i, j);
-                    scratch_inv_jacobians_[q][i][j] = J_inv(i, j);
+                    ctx_jacs[q][i][j] = J(i, j);
+                    ctx_inv_jacs[q][i][j] = J_inv(i, j);
                 }
-            scratch_jac_dets_[q] = det_J;
-            scratch_integration_weights_[q] = quad_weights[q] * std::abs(det_J);
+            ctx_jac_dets[q] = det_J;
+            ctx_int_wts[q] = quad_weights[q] * std::abs(det_J);
         }
     }
 
+    context.markGeometryDirty();
+
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     g_pc_jacobian += PC_TP() - pc_t0;
+#endif
 
     // Cache quad_rule for use in populateFieldSolutionData BasisCache lookups
     cached_quad_rule_ = std::shared_ptr<const quadrature::QuadratureRule>(
@@ -2705,11 +2743,6 @@ void StandardAssembler::prepareBasis(
     RequiredData required_data,
     const quadrature::QuadratureRule& quad_rule)
 {
-    auto PC_TP = []() {
-        return std::chrono::duration<double>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    };
-
     const ElementType cell_type = mesh.getCellType(cell_id);
     const int dim = mesh.dimension();
 
@@ -2793,8 +2826,81 @@ void StandardAssembler::prepareBasis(
     validate_vector_basis_requirements(test_space, test_is_vector_basis, "test");
     validate_vector_basis_requirements(trial_space, trial_is_vector_basis, "trial");
 
+    // ---- Fast path: skip BasisCache reads when topology matches previous cell ----
+    const bool same_space = (&test_space == &trial_space);
+    if (basis_scratch_valid_ &&
+        same_space &&
+        !test_is_vector_basis &&
+        cell_type == cached_basis_cell_type_ &&
+        n_test_dofs == cached_basis_n_test_dofs_ &&
+        n_qpts == cached_basis_n_qpts_ &&
+        cached_basis_same_space_ &&
+        !need_basis_hessians &&
+        !need_basis_curls &&
+        !need_basis_divergences)
+    {
+        // Recompute physical gradients from cached scratch_ref_gradients_ + new J_inv
+        const auto ctx_inv_jacs_r = context.inverseJacobians();
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const auto& J_inv = ctx_inv_jacs_r[q];
+            for (LocalIndex i = 0; i < n_test_dofs; ++i) {
+                const std::size_t ref_idx = static_cast<std::size_t>(i * n_qpts + q);
+                const std::size_t phys_idx = static_cast<std::size_t>(q * n_test_dofs + i);
+                const auto& grad_ref = scratch_ref_gradients_[ref_idx];
+                AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
+                for (int d1 = 0; d1 < dim; ++d1) {
+                    for (int d2 = 0; d2 < dim; ++d2) {
+                        grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
+                    }
+                }
+                scratch_phys_gradients_[phys_idx] = grad_phys;
+            }
+        }
+
+        // Configure context metadata
+        context.configure(cell_id, test_space, trial_space, required_data);
+        context.setCellDomainId(mesh.getCellDomainId(cell_id));
+
+        // Re-set basis data from cached scratch (same values, just re-transpose)
+        context.setTestBasisData(n_test_dofs, scratch_basis_values_, scratch_ref_gradients_);
+
+        // Update physical gradients
+        const auto test_phys_span = std::span<const AssemblyContext::Vector3D>(scratch_phys_gradients_);
+        context.setPhysicalGradients(test_phys_span, same_space ? test_phys_span : test_phys_span);
+
+        if (hasFlag(required_data, RequiredData::EntityMeasures)) {
+            Real cell_volume = 0.0;
+            const auto ctx_iw = context.integrationWeights();
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                cell_volume += ctx_iw[static_cast<std::size_t>(q)];
+            }
+            const auto& map_nodes = cached_mapping_->nodes();
+            Real h = 0.0;
+            for (std::size_t a = 0; a < map_nodes.size(); ++a) {
+                for (std::size_t b = a + 1; b < map_nodes.size(); ++b) {
+                    const Real dx = map_nodes[a][0] - map_nodes[b][0];
+                    const Real dy = map_nodes[a][1] - map_nodes[b][1];
+                    const Real dz = map_nodes[a][2] - map_nodes[b][2];
+                    const Real dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (dist > h) h = dist;
+                }
+            }
+            context.setEntityMeasures(h, cell_volume, 0.0);
+        }
+
+        return;
+    }
+    // ---- End fast path ----
+
     // Resize basis scratch storage
+#ifdef SVMP_FE_ASSEMBLY_TIMING
+    auto PC_TP = []() {
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
     double pc_t0 = PC_TP();
+#endif
     const auto test_basis_size = static_cast<std::size_t>(n_test_dofs * n_qpts);
 
     const bool need_test_vector_values =
@@ -2893,10 +2999,14 @@ void StandardAssembler::prepareBasis(
         }
     }
 
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     g_pc_resize += PC_TP() - pc_t0;
+#endif
 
     // Evaluate basis functions at quadrature points
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     pc_t0 = PC_TP();
+#endif
 
     if (!test_is_vector_basis && !cached_test_bcache_) {
         cached_test_bcache_ = &basis::BasisCache::instance().get_or_compute(
@@ -2915,15 +3025,19 @@ void StandardAssembler::prepareBasis(
     std::vector<math::Vector<Real, 3>> vec_curls_at_pt;
     std::vector<Real> vec_divs_at_pt;
 
-    for (LocalIndex q = 0; q < n_qpts; ++q) {
-        const math::Vector<Real, 3> xi{
-            scratch_quad_points_[q][0],
-            scratch_quad_points_[q][1],
-            scratch_quad_points_[q][2]};
+    // Read geometry from context arena (populated by prepareGeometry)
+    const auto ctx_quad_pts_r = context.quadraturePoints();
+    const auto ctx_jacs_r = context.jacobians();
+    const auto ctx_inv_jacs_r = context.inverseJacobians();
+    const auto ctx_jac_dets_r = context.jacobianDets();
 
-        const auto& J = scratch_jacobians_[q];
-        const auto& J_inv = scratch_inv_jacobians_[q];
-        const Real det_J = scratch_jac_dets_[q];
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        const auto& qp = ctx_quad_pts_r[q];
+        const math::Vector<Real, 3> xi{qp[0], qp[1], qp[2]};
+
+        const auto& J = ctx_jacs_r[q];
+        const auto& J_inv = ctx_inv_jacs_r[q];
+        const Real det_J = ctx_jac_dets_r[q];
 
         std::array<AssemblyContext::Matrix3x3, 3> d2xi_dx2{};
         if (need_basis_hessians) {
@@ -3188,18 +3302,16 @@ void StandardAssembler::prepareBasis(
         }
     }
 
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     g_pc_basis += PC_TP() - pc_t0;
+#endif
 
-    // Configure context with basic info
+    // Configure context with basic info (geometry already in arena from prepareGeometry)
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     pc_t0 = PC_TP();
+#endif
     context.configure(cell_id, test_space, trial_space, required_data);
     context.setCellDomainId(mesh.getCellDomainId(cell_id));
-
-    // Set all computed data into context
-    context.setQuadratureData(scratch_quad_points_, scratch_quad_weights_);
-    context.setPhysicalPoints(scratch_phys_points_);
-    context.setJacobianData(scratch_jacobians_, scratch_inv_jacobians_, scratch_jac_dets_);
-    context.setIntegrationWeights(scratch_integration_weights_);
 
     // Basis data
     if (test_is_vector_basis) {
@@ -3269,8 +3381,9 @@ void StandardAssembler::prepareBasis(
 
     if (hasFlag(required_data, RequiredData::EntityMeasures)) {
         Real cell_volume = 0.0;
+        const auto ctx_iw = context.integrationWeights();
         for (LocalIndex q = 0; q < n_qpts; ++q) {
-            cell_volume += scratch_integration_weights_[static_cast<std::size_t>(q)];
+            cell_volume += ctx_iw[static_cast<std::size_t>(q)];
         }
 
         const auto& map_nodes = mapping->nodes();
@@ -3288,8 +3401,22 @@ void StandardAssembler::prepareBasis(
         context.setEntityMeasures(h, cell_volume, /*facet_area=*/0.0);
     }
 
+    // Update basis topology cache for fast-path reuse on next cell
+    if (!test_is_vector_basis && (!trial_is_vector_basis || &test_space == &trial_space)) {
+        basis_scratch_valid_ = true;
+        cached_basis_cell_type_ = cell_type;
+        cached_basis_n_test_dofs_ = n_test_dofs;
+        cached_basis_n_trial_dofs_ = n_trial_dofs;
+        cached_basis_n_qpts_ = n_qpts;
+        cached_basis_same_space_ = (&test_space == &trial_space);
+    } else {
+        basis_scratch_valid_ = false;
+    }
+
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     g_pc_ctx_config += PC_TP() - pc_t0;
     g_pc_call_count++;
+#endif
 }
 
 void StandardAssembler::prepareContext(
@@ -3529,10 +3656,14 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     double tp_fb_basis = 0.0, tp_fb_field = 0.0, tp_fb_dof = 0.0;
     double tp_fb_sol = 0.0, tp_fb_setters = 0.0;
     double tp_fb_kernel = 0.0, tp_fb_insert = 0.0;
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     auto TP = []() {
         return std::chrono::duration<double>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
     };
+#else
+    auto TP = []() -> double { return 0.0; };
+#endif
 
     // Helper: gather solution coefficients for a term/slot
     auto gather_solution = [&](std::size_t ti, std::size_t slot,
@@ -3638,13 +3769,13 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
                 tp0 = TP();
                 auto& sg = saved_geom[slot];
-                sg.jacobians = scratch_jacobians_;
-                sg.inv_jacobians = scratch_inv_jacobians_;
-                sg.jac_dets = scratch_jac_dets_;
-                sg.quad_points = scratch_quad_points_;
-                sg.quad_weights = scratch_quad_weights_;
-                sg.phys_points = scratch_phys_points_;
-                sg.integration_weights = scratch_integration_weights_;
+                sg.jacobians.assign(ctx.jacobians().begin(), ctx.jacobians().end());
+                sg.inv_jacobians.assign(ctx.inverseJacobians().begin(), ctx.inverseJacobians().end());
+                sg.jac_dets.assign(ctx.jacobianDets().begin(), ctx.jacobianDets().end());
+                sg.quad_points.assign(ctx.quadraturePoints().begin(), ctx.quadraturePoints().end());
+                sg.quad_weights.assign(ctx.quadratureWeights().begin(), ctx.quadratureWeights().end());
+                sg.phys_points.assign(ctx.physicalPoints().begin(), ctx.physicalPoints().end());
+                sg.integration_weights.assign(ctx.integrationWeights().begin(), ctx.integrationWeights().end());
                 sg.node_coords = scratch_node_coords_;
                 tp_fb_save += TP() - tp0;
 
@@ -3728,15 +3859,22 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     auto& ctx = batch_contexts[slot];
 
                     double tp0 = TP();
-                    scratch_jacobians_ = saved_geom[slot].jacobians;
-                    scratch_inv_jacobians_ = saved_geom[slot].inv_jacobians;
-                    scratch_jac_dets_ = saved_geom[slot].jac_dets;
-                    scratch_quad_points_ = saved_geom[slot].quad_points;
-                    scratch_quad_weights_ = saved_geom[slot].quad_weights;
-                    scratch_phys_points_ = saved_geom[slot].phys_points;
-                    scratch_integration_weights_ = saved_geom[slot].integration_weights;
-                    scratch_node_coords_ = saved_geom[slot].node_coords;
-                    cached_mapping_->resetNodes(scratch_node_coords_);
+                    {
+                        // Restore geometry from saved_geom into context arena
+                        const auto& sg = saved_geom[slot];
+                        const auto nq = static_cast<LocalIndex>(sg.quad_points.size());
+                        ctx.prepareGeometryStorage(nq);
+                        std::copy(sg.jacobians.begin(), sg.jacobians.end(), ctx.jacobiansWritable().begin());
+                        std::copy(sg.inv_jacobians.begin(), sg.inv_jacobians.end(), ctx.inverseJacobiansWritable().begin());
+                        std::copy(sg.jac_dets.begin(), sg.jac_dets.end(), ctx.jacobianDetsWritable().begin());
+                        std::copy(sg.quad_points.begin(), sg.quad_points.end(), ctx.quadPointsWritable().begin());
+                        std::copy(sg.quad_weights.begin(), sg.quad_weights.end(), ctx.quadWeightsWritable().begin());
+                        std::copy(sg.phys_points.begin(), sg.phys_points.end(), ctx.physicalPointsWritable().begin());
+                        std::copy(sg.integration_weights.begin(), sg.integration_weights.end(), ctx.integrationWeightsWritable().begin());
+                        ctx.markGeometryDirty();
+                        scratch_node_coords_ = sg.node_coords;
+                        cached_mapping_->resetNodes(scratch_node_coords_);
+                    }
                     tp_fb_restore += TP() - tp0;
 
                     tp0 = TP();
@@ -3817,6 +3955,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             assemble_fused_batch_range(std::span<const GlobalIndex>(g.second));
     }
 
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     // Fused+batch timing output
     {
         int rank = 0;
@@ -3859,6 +3998,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             }
         }
     }
+#endif
 
     } else {
     // ========================================================================
@@ -3869,10 +4009,14 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     double tp_geometry = 0.0, tp_term_loop = 0.0;
     double tp_fused_dof = 0.0, tp_fused_basis = 0.0, tp_fused_sol = 0.0;
     double tp_fused_kernel = 0.0, tp_fused_insert = 0.0, tp_fused_field = 0.0;
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     auto TP = []() {
         return std::chrono::duration<double>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
     };
+#else
+    auto TP = []() -> double { return 0.0; };
+#endif
 
     // ========================================================================
     // Main fused cell loop
@@ -3892,11 +4036,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             context_.configure(cell_id, *ft0.test_space, *ft0.trial_space,
                                term_data[0].required_data);
             context_.setCellDomainId(mesh.getCellDomainId(cell_id));
-            context_.setQuadratureData(scratch_quad_points_, scratch_quad_weights_);
-            context_.setPhysicalPoints(scratch_phys_points_);
-            context_.setJacobianData(scratch_jacobians_, scratch_inv_jacobians_,
-                                     scratch_jac_dets_);
-            context_.setIntegrationWeights(scratch_integration_weights_);
+            // Geometry already in arena from prepareGeometry — no copy needed
         }
 
         // 2. Set context global state ONCE
@@ -4069,6 +4209,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         tp_term_loop += TP() - tp0;
     }
 
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     // Print fused timing
     {
         int rank = 0;
@@ -4105,6 +4246,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             }
         }
     }
+#endif
 
     } // end if/else fused path selection
 

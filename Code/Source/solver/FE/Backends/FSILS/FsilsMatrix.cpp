@@ -361,10 +361,15 @@ public:
             col_info[static_cast<std::size_t>(j)] = resolve_dof(col_dofs[static_cast<std::size_t>(j)]);
         }
 
-        // --- Iterate by node pairs, building dof*dof sub-blocks ---
+        // --- Iterate by node pairs with inlined CSR lookup ---
+        // Cache CSR metadata outside the loop to avoid repeated indirection.
+        const auto* col_ptr_base = lhs.colPtr.data();
+        Real* values_ptr = matrix_->fsilsValuesPtr();
+        const std::size_t block_sz = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
+        const auto values_size = static_cast<std::size_t>(matrix_->fsilsNnz()) * block_sz;
+
         thread_local std::vector<Real> block_buf;
-        const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
-        block_buf.resize(block_size);
+        block_buf.resize(block_sz);
 
         for (GlobalIndex i0 = 0; i0 < n_rows; ) {
             const auto& ri0 = row_info[static_cast<std::size_t>(i0)];
@@ -376,6 +381,13 @@ public:
                 ++i1;
             }
 
+            // Cache CSR row range for this row node (reused across col nodes).
+            const int row_int = ri0.internal_node;
+            const int csr_start = lhs.rowPtr(0, row_int);
+            const int csr_end = lhs.rowPtr(1, row_int);
+            const auto* row_col_begin = col_ptr_base + csr_start;
+            const auto* row_col_end = col_ptr_base + csr_end + 1;
+
             for (GlobalIndex j0 = 0; j0 < n_cols; ) {
                 const auto& ci0 = col_info[static_cast<std::size_t>(j0)];
                 if (ci0.old_node < 0) { ++j0; continue; }
@@ -386,14 +398,41 @@ public:
                     ++j1;
                 }
 
+                // Inlined CSR column lookup (replaces matrix_->addBlock call).
+                const int col_int = ci0.internal_node;
+                const auto col_it = std::lower_bound(
+                    row_col_begin, row_col_end,
+                    static_cast<fe_fsi_linear_solver::fsils_int>(col_int));
+                if (col_it == row_col_end || *col_it != col_int) {
+                    j0 = j1;
+                    continue;
+                }
+
+                const std::size_t nnz_idx = static_cast<std::size_t>(col_it - col_ptr_base);
+                const std::size_t base = nnz_idx * block_sz;
+                if (base + block_sz > values_size) {
+                    j0 = j1;
+                    continue;
+                }
+                Real* dst = values_ptr + base;
+
                 // Check if this is a complete dof*dof block (common case).
                 const GlobalIndex row_run = i1 - i0;
                 const GlobalIndex col_run = j1 - j0;
 
-                if (row_run == dof && col_run == dof) {
-                    // Build the full dof*dof block.
-                    // Block layout: block_entry_index(dof, r, c) = r * dof + c
-                    std::fill(block_buf.begin(), block_buf.begin() + static_cast<std::ptrdiff_t>(block_size), Real(0));
+                if (row_run == dof && col_run == dof && mode == assembly::AddMode::Add) {
+                    // Hot path: complete block, Add mode — accumulate directly (no intermediate buffer).
+                    for (GlobalIndex di = i0; di < i1; ++di) {
+                        const int r = row_info[static_cast<std::size_t>(di)].component;
+                        for (GlobalIndex dj = j0; dj < j1; ++dj) {
+                            const int c = col_info[static_cast<std::size_t>(dj)].component;
+                            const auto local_idx = static_cast<std::size_t>(di * n_cols + dj);
+                            dst[block_entry_index(dof, r, c)] += local_matrix[local_idx];
+                        }
+                    }
+                } else if (row_run == dof && col_run == dof) {
+                    // Complete block, non-Add mode: use block_buf for correct semantics.
+                    std::fill(block_buf.begin(), block_buf.begin() + static_cast<std::ptrdiff_t>(block_sz), Real(0));
                     for (GlobalIndex di = i0; di < i1; ++di) {
                         const int r = row_info[static_cast<std::size_t>(di)].component;
                         for (GlobalIndex dj = j0; dj < j1; ++dj) {
@@ -402,18 +441,40 @@ public:
                             block_buf[block_entry_index(dof, r, c)] = local_matrix[local_idx];
                         }
                     }
-                    matrix_->addBlock(ri0.internal_node, ci0.internal_node,
-                                      block_buf.data(), dof, mode);
+                    switch (mode) {
+                        case assembly::AddMode::Insert:
+                            for (std::size_t k = 0; k < block_sz; ++k) dst[k] = block_buf[k];
+                            break;
+                        case assembly::AddMode::Max:
+                            for (std::size_t k = 0; k < block_sz; ++k) dst[k] = std::max(dst[k], block_buf[k]);
+                            break;
+                        case assembly::AddMode::Min:
+                            for (std::size_t k = 0; k < block_sz; ++k) dst[k] = std::min(dst[k], block_buf[k]);
+                            break;
+                        default: break;
+                    }
                 } else {
-                    // Partial block: fall back to per-scalar insertion for this node pair.
+                    // Partial block: accumulate per-scalar at the resolved CSR offset.
                     for (GlobalIndex di = i0; di < i1; ++di) {
-                        const auto& ri = row_info[static_cast<std::size_t>(di)];
+                        const int r = row_info[static_cast<std::size_t>(di)].component;
                         for (GlobalIndex dj = j0; dj < j1; ++dj) {
-                            const auto& ci = col_info[static_cast<std::size_t>(dj)];
+                            const int c = col_info[static_cast<std::size_t>(dj)].component;
                             const auto local_idx = static_cast<std::size_t>(di * n_cols + dj);
-                            matrix_->addValue(row_dofs[static_cast<std::size_t>(di)],
-                                              col_dofs[static_cast<std::size_t>(dj)],
-                                              local_matrix[local_idx], mode);
+                            const std::size_t off = block_entry_index(dof, r, c);
+                            switch (mode) {
+                                case assembly::AddMode::Add:
+                                    dst[off] += local_matrix[local_idx];
+                                    break;
+                                case assembly::AddMode::Insert:
+                                    dst[off] = local_matrix[local_idx];
+                                    break;
+                                case assembly::AddMode::Max:
+                                    dst[off] = std::max(dst[off], local_matrix[local_idx]);
+                                    break;
+                                case assembly::AddMode::Min:
+                                    dst[off] = std::min(dst[off], local_matrix[local_idx]);
+                                    break;
+                            }
                         }
                     }
                 }

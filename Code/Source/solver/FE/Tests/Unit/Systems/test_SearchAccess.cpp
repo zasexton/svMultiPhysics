@@ -275,6 +275,31 @@ TEST(SearchAccess, MeshSearchAccess_LocatePoint_ReturnsNotFoundOutsideMesh)
     EXPECT_FALSE(loc.found);
 }
 
+TEST(SearchAccess, MeshSearchAccess_CoordinateOverride_UsesCurrentCoordinatesForLocatePoint)
+{
+    auto mesh = build_single_quad_mesh();
+
+    // Shift current coordinates in x so reference and current configurations differ.
+    auto X_cur = mesh->local_mesh().X_ref();
+    for (std::size_t i = 0; i < X_cur.size(); i += 2) {
+        X_cur[i] += 10.0;
+    }
+    mesh->set_current_coords(X_cur);
+
+    MeshSearchAccess use_reference(*mesh, svmp::Configuration::Reference);
+    MeshSearchAccess use_current(*mesh, svmp::Configuration::Current);
+
+    // Point in reference quad but not in shifted current quad.
+    const std::array<Real, 3> p_ref{0.25, 0.25, 0.0};
+    EXPECT_TRUE(use_reference.locatePoint(p_ref).found);
+    EXPECT_FALSE(use_current.locatePoint(p_ref).found);
+
+    // Point in shifted current quad but not in reference quad.
+    const std::array<Real, 3> p_cur{10.25, 0.25, 0.0};
+    EXPECT_FALSE(use_reference.locatePoint(p_cur).found);
+    EXPECT_TRUE(use_current.locatePoint(p_cur).found);
+}
+
 TEST(SearchAccess, MeshSearchAccess_LocatePoint_HintCellAcceleratesSearch)
 {
     auto mesh = build_two_quad_mesh();
@@ -368,6 +393,61 @@ TEST(SearchAccess, MeshSearchAccess_ClosestBoundaryPointOnMarker_FiltersCorrectl
 
     const auto missing = access.closestBoundaryPointOnMarker(999, p);
     EXPECT_FALSE(missing.found);
+}
+
+TEST(SearchAccess, MeshSearchAccess_ClosestBoundaryPointOnMarker_RebuildsAfterGeometryChange)
+{
+    const int marker = 77;
+    auto mesh = build_single_quad_mesh();
+    auto& base = mesh->local_mesh();
+    ASSERT_NE(mark_left_edge(base, marker), svmp::INVALID_INDEX);
+
+    // Construct with Current override before current coordinates exist.
+    MeshSearchAccess access(*mesh, svmp::Configuration::Current);
+
+    // First query builds marker BVH on the effective geometry (reference).
+    const std::array<Real, 3> p_ref{-0.1, 0.2, 0.0};
+    const auto cp_ref = access.closestBoundaryPointOnMarker(marker, p_ref);
+    ASSERT_TRUE(cp_ref.found);
+    EXPECT_NEAR(cp_ref.closest_point[0], 0.0, 1e-12);
+    EXPECT_NEAR(cp_ref.closest_point[1], 0.2, 1e-12);
+
+    // Move mesh (simulate mesh motion) and ensure subsequent queries see updated geometry.
+    auto X_cur = base.X_ref();
+    for (std::size_t i = 0; i < X_cur.size(); i += 2) {
+        X_cur[i] += 10.0; // shift x only
+    }
+    mesh->set_current_coords(X_cur);
+
+    const std::array<Real, 3> p_cur{9.9, 0.2, 0.0};
+    const auto cp_cur = access.closestBoundaryPointOnMarker(marker, p_cur);
+    ASSERT_TRUE(cp_cur.found);
+    EXPECT_NEAR(cp_cur.closest_point[0], 10.0, 1e-12);
+    EXPECT_NEAR(cp_cur.closest_point[1], 0.2, 1e-12);
+    EXPECT_NEAR(cp_cur.distance, 0.1, 1e-12);
+}
+
+TEST(SearchAccess, MeshSearchAccess_ClosestBoundaryPointOnMarker_DeformedAliasUsesCurrentCoordinates)
+{
+    const int marker = 78;
+    auto mesh = build_single_quad_mesh();
+    auto& base = mesh->local_mesh();
+    ASSERT_NE(mark_left_edge(base, marker), svmp::INVALID_INDEX);
+
+    auto X_cur = base.X_ref();
+    for (std::size_t i = 0; i < X_cur.size(); i += 2) {
+        X_cur[i] += 10.0; // shift x only
+    }
+    mesh->set_current_coords(X_cur);
+
+    MeshSearchAccess access(*mesh, svmp::Configuration::Deformed);
+    const std::array<Real, 3> p{10.1, 0.2, 0.0};
+
+    const auto cp = access.closestBoundaryPointOnMarker(marker, p);
+    ASSERT_TRUE(cp.found);
+    EXPECT_NEAR(cp.closest_point[0], 10.0, 1e-12);
+    EXPECT_NEAR(cp.closest_point[1], 0.2, 1e-12);
+    EXPECT_NEAR(cp.distance, 0.1, 1e-12);
 }
 
 TEST(SearchAccess, MeshSearchAccess_QueryBeforeBuild_Behavior)

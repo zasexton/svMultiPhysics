@@ -231,6 +231,81 @@ public:
 
 } // namespace
 
+TEST(FESystem, CoordinateConfigurationIsPropagatedToMeshAndSearchAccess)
+{
+    auto mesh = build_single_quad_mesh();
+
+    // Make current coordinates different from reference.
+    auto X_cur = mesh->local_mesh().X_ref();
+    for (std::size_t i = 0; i < X_cur.size(); i += 2) {
+        X_cur[i] += 10.0; // shift x only
+    }
+    mesh->set_current_coords(X_cur);
+
+    // Reference-configured system should deterministically use X_ref for mesh access/search.
+    FESystem sys_ref(mesh, svmp::Configuration::Reference);
+    EXPECT_EQ(sys_ref.coordinateConfiguration(), svmp::Configuration::Reference);
+    const auto x0_ref = sys_ref.meshAccess().getNodeCoordinates(0);
+    EXPECT_NEAR(x0_ref[0], Real(0.0), 1e-12);
+
+    const std::array<Real, 3> p_cur{10.25, 0.25, 0.0};
+    ASSERT_NE(sys_ref.searchAccess(), nullptr);
+    EXPECT_FALSE(sys_ref.searchAccess()->locatePoint(p_cur).found);
+
+    // Current-configured system should deterministically use X_cur.
+    FESystem sys_cur(mesh, svmp::Configuration::Current);
+    EXPECT_EQ(sys_cur.coordinateConfiguration(), svmp::Configuration::Current);
+    const auto x0_cur = sys_cur.meshAccess().getNodeCoordinates(0);
+    EXPECT_NEAR(x0_cur[0], Real(10.0), 1e-12);
+
+    ASSERT_NE(sys_cur.searchAccess(), nullptr);
+    EXPECT_TRUE(sys_cur.searchAccess()->locatePoint(p_cur).found);
+}
+
+TEST(FESystem, MassAssemblyRespectsCoordinateConfiguration)
+{
+    auto mesh = build_single_quad_mesh();
+
+    // Scale x by 2 in the current configuration so the cell area doubles.
+    auto X_cur = mesh->local_mesh().X_ref();
+    for (std::size_t i = 0; i < X_cur.size(); i += 2) {
+        X_cur[i] *= 2.0;
+    }
+    mesh->set_current_coords(X_cur);
+
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    auto build_mass_system = [&](svmp::Configuration cfg) {
+        FESystem sys(mesh, cfg);
+        const auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+        sys.addOperator("mass");
+        sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+        sys.setup();
+        return sys;
+    };
+
+    auto sys_ref = build_mass_system(svmp::Configuration::Reference);
+    auto sys_cur = build_mass_system(svmp::Configuration::Current);
+    auto sys_def = build_mass_system(svmp::Configuration::Deformed);
+
+    DenseMatrixView M_ref(sys_ref.dofHandler().getNumDofs());
+    DenseMatrixView M_cur(sys_cur.dofHandler().getNumDofs());
+    DenseMatrixView M_def(sys_def.dofHandler().getNumDofs());
+    SystemStateView state;
+
+    ASSERT_TRUE(sys_ref.assembleMass(state, M_ref).success);
+    ASSERT_TRUE(sys_cur.assembleMass(state, M_cur).success);
+    ASSERT_TRUE(sys_def.assembleMass(state, M_def).success);
+
+    // With x scaled by 2, the mass matrix scales by 2. Deformed is an alias of Current.
+    for (GlobalIndex i = 0; i < M_ref.numRows(); ++i) {
+        for (GlobalIndex j = 0; j < M_ref.numCols(); ++j) {
+            EXPECT_NEAR(M_cur.getMatrixEntry(i, j), 2.0 * M_ref.getMatrixEntry(i, j), 1e-12);
+            EXPECT_NEAR(M_def.getMatrixEntry(i, j), M_cur.getMatrixEntry(i, j), 1e-12);
+        }
+    }
+}
+
 TEST(FESystem, SetupDistributesDofsFromMesh)
 {
     auto mesh = build_single_quad_mesh();

@@ -536,10 +536,14 @@ assembly::AssemblyResult assembleOperator(
 
     assembly::AssemblyResult total;
 
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     auto AO_TP = []() {
         return std::chrono::duration<double>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
     };
+#else
+    auto AO_TP = []() -> double { return 0.0; };
+#endif
     double ao_setup_end = AO_TP();
     double ao_cell_time = 0.0, ao_boundary_time = 0.0, ao_other_time = 0.0;
     double ao0;
@@ -1319,6 +1323,7 @@ assembly::AssemblyResult assembleOperator(
     assembler.finalize(request.want_matrix ? matrix_out : nullptr,
                        request.want_vector ? vector_out : nullptr);
 
+#ifdef SVMP_FE_ASSEMBLY_TIMING
     {
         int rank = 0;
 #if FE_HAS_MPI
@@ -1344,6 +1349,7 @@ assembly::AssemblyResult assembleOperator(
             }
         }
     }
+#endif
 
     return total;
 }
