@@ -371,6 +371,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
 #if SVMP_FE_ENABLE_LLVM_JIT
         install.compiler_options.jit.enable = true;
         install.compiler_options.jit.optimization_level = 3;
+        install.compiler_options.jit.specialization.enable = true;
+        install.compiler_options.jit.specialization.specialize_n_qpts = true;
+        install.compiler_options.jit.specialization.specialize_dofs = true;
 #endif
         (void)FE::systems::installCoupledResidual(system, "equations", fields, fields, residual, install);
     }

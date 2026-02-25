@@ -2876,10 +2876,9 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       }
 
       // --- Sequential CGS Step 1 with Pythagorean trick ---
-      // Uses streaming memory access: each dot reads one u[j] vector (161 KB)
-      // linearly, keeping u_slice_next hot in L2. This is ~6x fewer LLC loads
-      // than the fused approach which scatters across all Krylov vectors per
-      // node block.
+      // Each dot product reads one u[j] vector (161 KB) linearly while u_slice_next
+      // stays hot in L2. Streaming access pattern is prefetch-friendly and avoids
+      // L2 thrashing that occurs with fused approach for large Krylov spaces.
       tp0 = TP();
       for (int j = 0; j <= i; j++) {
         h_col[j] = dot::fsils_nc_dot_v(dof, mynNo, u.rslice(j), u_slice_next);

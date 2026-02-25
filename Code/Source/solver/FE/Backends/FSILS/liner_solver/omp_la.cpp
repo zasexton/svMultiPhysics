@@ -40,7 +40,7 @@ using fe_fsi_linear_solver::fsils_int;
 //
 void omp_mul_s(const fsils_int nNo, const double r, Vector<double>& U)
 {
-  #pragma omp parallel for schedule(static)
+  #pragma omp parallel for if(nNo >= 10000) schedule(static)
   for (fsils_int i = 0; i < nNo; i++) {
     U(i) = r * U(i);
   }
@@ -50,35 +50,14 @@ void omp_mul_s(const fsils_int nNo, const double r, Vector<double>& U)
 // Templated omp_mul_v
 //====================================================================
 
-template <int DOF>
-static void omp_mul_v_impl(const fsils_int nNo, const double r, Array<double>& U)
-{
-  #pragma omp parallel for schedule(static)
-  for (fsils_int i = 0; i < nNo; i++) {
-    for (int j = 0; j < DOF; j++) {
-      U(j,i) = r * U(j,i);
-    }
-  }
-}
-
-static void omp_mul_v_dyn(const fsils_int nNo, const double r, Array<double>& U)
-{
-  #pragma omp parallel for schedule(static)
-  for (fsils_int i = 0; i < nNo; i++) {
-    for (int j = 0; j < U.nrows(); j++) {
-      U(j,i) = r * U(j,i);
-    }
-  }
-}
-
 void omp_mul_v(const int dof, const fsils_int nNo, const double r, Array<double>& U)
 {
-  switch (dof) {
-    case 1: omp_mul_v_impl<1>(nNo, r, U); break;
-    case 2: omp_mul_v_impl<2>(nNo, r, U); break;
-    case 3: omp_mul_v_impl<3>(nNo, r, U); break;
-    case 4: omp_mul_v_impl<4>(nNo, r, U); break;
-    default: omp_mul_v_dyn(nNo, r, U); break;
+  double* __restrict__ u = U.data();
+  const fsils_int n = static_cast<fsils_int>(dof) * nNo;
+
+  #pragma omp parallel for if(n >= 10000) schedule(static)
+  for (fsils_int i = 0; i < n; i++) {
+    u[i] = r * u[i];
   }
 }
 
@@ -86,45 +65,25 @@ void omp_mul_v(const int dof, const fsils_int nNo, const double r, Array<double>
 //
 void omp_sum_s(const fsils_int nNo, const double r, Vector<double>& U, const Vector<double>& V)
 {
-  #pragma omp parallel for schedule(static)
+  #pragma omp parallel for if(nNo >= 10000) schedule(static)
   for (fsils_int i = 0; i < nNo; i++) {
     U(i) = U(i) + r*V(i);
   }
 }
 
 //====================================================================
-// Templated omp_sum_v
+// Flat-loop omp_sum_v (AXPY on contiguous dof*nNo buffer)
 //====================================================================
-
-template <int DOF>
-static void omp_sum_v_impl(const fsils_int nNo, const double r, Array<double>& U, const Array<double>& V)
-{
-  #pragma omp parallel for schedule(static)
-  for (fsils_int i = 0; i < nNo; i++) {
-    for (int j = 0; j < DOF; j++) {
-      U(j,i) = U(j,i) + r * V(j,i);
-    }
-  }
-}
-
-static void omp_sum_v_dyn(const fsils_int nNo, const double r, Array<double>& U, const Array<double>& V)
-{
-  #pragma omp parallel for schedule(static)
-  for (fsils_int i = 0; i < nNo; i++) {
-    for (int j = 0; j < U.nrows(); j++) {
-      U(j,i) = U(j,i) + r * V(j,i);
-    }
-  }
-}
 
 void omp_sum_v(const int dof, const fsils_int nNo, const double r, Array<double>& U, const Array<double>& V)
 {
-  switch (dof) {
-    case 1: omp_sum_v_impl<1>(nNo, r, U, V); break;
-    case 2: omp_sum_v_impl<2>(nNo, r, U, V); break;
-    case 3: omp_sum_v_impl<3>(nNo, r, U, V); break;
-    case 4: omp_sum_v_impl<4>(nNo, r, U, V); break;
-    default: omp_sum_v_dyn(nNo, r, U, V); break;
+  double* __restrict__ u = U.data();
+  const double* __restrict__ v = V.data();
+  const fsils_int n = static_cast<fsils_int>(dof) * nNo;
+
+  #pragma omp parallel for if(n >= 10000) schedule(static)
+  for (fsils_int i = 0; i < n; i++) {
+    u[i] = u[i] + r * v[i];
   }
 }
 
@@ -137,7 +96,7 @@ void omp_axpby_v(const int dof, const fsils_int nNo, Array<double>& Y,
                  const Array<double>& A, const double alpha, const Array<double>& B)
 {
   fsils_int n = dof * nNo;
-  #pragma omp parallel for schedule(static)
+  #pragma omp parallel for if(nNo >= 10000) schedule(static)
   for (fsils_int i = 0; i < n; i++) {
     Y(i) = A(i) + alpha * B(i);
   }
@@ -149,7 +108,7 @@ void omp_axpbypgz_v(const int dof, const fsils_int nNo, Array<double>& Y,
                      const double beta, const Array<double>& C)
 {
   fsils_int n = dof * nNo;
-  #pragma omp parallel for schedule(static)
+  #pragma omp parallel for if(nNo >= 10000) schedule(static)
   for (fsils_int i = 0; i < n; i++) {
     Y(i) = A(i) + alpha * B(i) + beta * C(i);
   }
@@ -159,7 +118,7 @@ void omp_axpbypgz_v(const int dof, const fsils_int nNo, Array<double>& Y,
 void omp_axpby_s(const fsils_int nNo, Vector<double>& Y,
                  const Vector<double>& A, const double alpha, const Vector<double>& B)
 {
-  #pragma omp parallel for schedule(static)
+  #pragma omp parallel for if(nNo >= 10000) schedule(static)
   for (fsils_int i = 0; i < nNo; i++) {
     Y(i) = A(i) + alpha * B(i);
   }
@@ -170,7 +129,7 @@ void omp_axpbypgz_s(const fsils_int nNo, Vector<double>& Y,
                      const Vector<double>& A, const double alpha, const Vector<double>& B,
                      const double beta, const Vector<double>& C)
 {
-  #pragma omp parallel for schedule(static)
+  #pragma omp parallel for if(nNo >= 10000) schedule(static)
   for (fsils_int i = 0; i < nNo; i++) {
     Y(i) = A(i) + alpha * B(i) + beta * C(i);
   }

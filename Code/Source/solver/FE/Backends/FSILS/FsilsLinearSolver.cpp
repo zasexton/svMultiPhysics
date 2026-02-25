@@ -441,7 +441,17 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 		            //
 		            // FE SolverOptions::max_iter is interpreted as the maximum total Krylov steps, so choose
 		            // (mItr, sD) such that the worst-case iteration count does not exceed max_iter.
-		            int sD = options_.krylov_dim;
+		            // Allow env var override for tuning Krylov subspace dimension.
+		            // Smaller sD reduces O(n^2) orthogonalization cost per restart
+		            // at the expense of more frequent restarts.
+		            int sD = 0;
+		            const char* sd_env = std::getenv("SVMP_FSILS_GMRES_SD");
+		            if (sd_env) {
+		                try { sD = std::stoi(sd_env); } catch (...) { sD = 0; }
+		            }
+		            if (sD <= 0) {
+		                sD = options_.krylov_dim;
+		            }
 		            if (sD <= 0) {
 		                // Match FSILS default: sD = 250 (see fsils_ls_create).
 		                sD = std::max(0, std::min(250, options_.max_iter) - 1);
@@ -471,6 +481,16 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     // GMRES implementation in the FSILS backend. Keep the solver type as GMRES and toggle the
     // variant via the RI sub-solver settings.
     ls.RI.pipelined_gmres = (options_.method == SolverMethod::PGMRES);
+    // Allow env var override for pipelined GMRES
+    {
+        const char* pipe_env = std::getenv("SVMP_FSILS_GMRES_PIPELINED");
+        if (pipe_env) {
+            std::string v(pipe_env);
+            if (v == "1" || v == "true" || v == "on" || v == "yes") {
+                ls.RI.pipelined_gmres = true;
+            }
+        }
+    }
 
     // Set up FSILS faces from:
     //  - Dirichlet constraints (legacy-equivalent FSILS preconditioner handling)
@@ -920,7 +940,12 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         std::copy(b_data.begin(), b_data.end(), x_data.begin());
         prepareRhsForFsils();
 
-        const int sD = (options_.krylov_dim > 0) ? options_.krylov_dim : 250;
+        int sD = options_.krylov_dim;
+        if (sD <= 0) {
+            const char* sd_env = std::getenv("SVMP_FSILS_GMRES_SD");
+            if (sd_env) { try { sD = std::stoi(sd_env); } catch (...) { sD = 0; } }
+            if (sD <= 0) sD = 250;
+        }
         const int mItr = std::max(1, std::min(5, options_.max_iter)); // limit restarts for safety
         fe_fsi_linear_solver::fsils_ls_create(ls,
                                            fe_fsi_linear_solver::LS_TYPE_GMRES,
