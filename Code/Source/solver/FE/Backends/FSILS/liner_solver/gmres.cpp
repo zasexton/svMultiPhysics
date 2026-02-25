@@ -150,6 +150,7 @@ constexpr int DOT_THREAD_PAD = 8; // doubles (64 bytes) to reduce false sharing
 
 struct GmresEnhancements {
   enum class RecycleUpdateMode { each_restart, once_per_solve, off };
+  enum class ReorthMode { selective, off };
   int recycle_k = 0;
   RecycleUpdateMode recycle_update_mode = RecycleUpdateMode::each_restart;
   bool recycle_adaptive_keep_drop = false;
@@ -167,6 +168,7 @@ struct GmresEnhancements {
   int recycle_replace_n = 0;
   bool use_mgs_dgks = false;
   double mgs_dgks_ratio = 0.5;
+  ReorthMode reorth_mode = ReorthMode::selective;  // default: current behavior
   bool verbose = false;
 };
 
@@ -221,6 +223,15 @@ struct GmresEnhancements {
     if (!(c.mgs_dgks_ratio > 0.0 && c.mgs_dgks_ratio < 1.0)) {
       c.mgs_dgks_ratio = 0.5;
     }
+
+    const char* reorth_env = std::getenv("SVMP_FSILS_GMRES_REORTH");
+    if (reorth_env) {
+      std::string v = to_lower(std::string(reorth_env));
+      if (v == "off" || v == "no" || v == "false" || v == "0" || v == "none") {
+        c.reorth_mode = GmresEnhancements::ReorthMode::off;
+      }
+    }
+
     return c;
   }();
   return cfg;
@@ -2025,7 +2036,7 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
 
       // CGS2: Selective reorthogonalization (Pythagorean check)
       bool do_reorth = false;
-      if (tt_sq >= 0.0) {
+      if (enh.reorth_mode != GmresEnhancements::ReorthMode::off && tt_sq >= 0.0) {
         if (enh.use_mgs_dgks) {
           const double ratio2 = enh.mgs_dgks_ratio * enh.mgs_dgks_ratio;
           do_reorth = tt_sq < ratio2 * old_norm_sq;
@@ -2235,7 +2246,7 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 
       // CGS2: Selective reorthogonalization (Pythagorean check)
       bool do_reorth = false;
-      if (tt_sq >= 0.0) {
+      if (enh.reorth_mode != GmresEnhancements::ReorthMode::off && tt_sq >= 0.0) {
         if (enh.use_mgs_dgks) {
           const double ratio2 = enh.mgs_dgks_ratio * enh.mgs_dgks_ratio;
           do_reorth = tt_sq < ratio2 * old_norm_sq;
@@ -2909,7 +2920,7 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       // CGS2: Selective reorthogonalization (Pythagorean check)
       // tt_sq < proj_sq_norm means ||v_new|| < (1/sqrt(2))||v|| — loss of orthogonality.
       bool do_reorth = false;
-      if (tt_sq >= 0.0) {
+      if (enh.reorth_mode != GmresEnhancements::ReorthMode::off && tt_sq >= 0.0) {
         if (enh.use_mgs_dgks) {
           const double ratio2 = enh.mgs_dgks_ratio * enh.mgs_dgks_ratio;
           do_reorth = tt_sq < ratio2 * old_norm_sq;

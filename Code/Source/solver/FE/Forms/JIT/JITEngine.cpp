@@ -814,9 +814,18 @@ std::unique_ptr<JITEngine> JITEngine::create(const JITOptions& options)
 
         configureEventListeners(*engine->impl_->jit);
 
-        if (!options.cache_directory.empty()) {
+        // Resolve effective cache directory: default to ~/.cache/svMultiPhysics/jit_cache/
+        // when no explicit directory is set but caching is enabled.
+        std::string effective_cache_dir = options.cache_directory;
+        if (effective_cache_dir.empty() && options.cache_kernels) {
+            if (const char* home = std::getenv("HOME")) {
+                effective_cache_dir = std::string(home) + "/.cache/svMultiPhysics/jit_cache";
+            }
+        }
+
+        if (!effective_cache_dir.empty()) {
             const auto cache_dir =
-                validatedObjectCacheDirectory(options.cache_directory,
+                validatedObjectCacheDirectory(effective_cache_dir,
                                               llvmVersionString(),
                                               options.cache_diagnostics);
             engine->impl_->object_cache = std::make_unique<FileSystemObjectCache>(cache_dir,

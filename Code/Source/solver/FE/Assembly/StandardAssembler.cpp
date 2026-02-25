@@ -2842,19 +2842,39 @@ void StandardAssembler::prepareBasis(
         // Recompute physical gradients from cached scratch_ref_gradients_ + new J_inv
         const auto ctx_inv_jacs_r = context.inverseJacobians();
 
-        for (LocalIndex q = 0; q < n_qpts; ++q) {
-            const auto& J_inv = ctx_inv_jacs_r[q];
+        if (cached_mapping_affine_) {
+            // Affine fast path: J_inv is constant across all QPs.
+            // Load once and iterate dof-major for sequential ref gradient access.
+            const auto& J_inv = ctx_inv_jacs_r[0];
             for (LocalIndex i = 0; i < n_test_dofs; ++i) {
-                const std::size_t ref_idx = static_cast<std::size_t>(i * n_qpts + q);
-                const std::size_t phys_idx = static_cast<std::size_t>(q * n_test_dofs + i);
-                const auto& grad_ref = scratch_ref_gradients_[ref_idx];
-                AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
-                for (int d1 = 0; d1 < dim; ++d1) {
-                    for (int d2 = 0; d2 < dim; ++d2) {
-                        grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    const std::size_t ref_idx = static_cast<std::size_t>(i * n_qpts + q);
+                    const std::size_t phys_idx = static_cast<std::size_t>(q * n_test_dofs + i);
+                    const auto& grad_ref = scratch_ref_gradients_[ref_idx];
+                    AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
+                    for (int d1 = 0; d1 < dim; ++d1) {
+                        for (int d2 = 0; d2 < dim; ++d2) {
+                            grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
+                        }
                     }
+                    scratch_phys_gradients_[phys_idx] = grad_phys;
                 }
-                scratch_phys_gradients_[phys_idx] = grad_phys;
+            }
+        } else {
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const auto& J_inv = ctx_inv_jacs_r[q];
+                for (LocalIndex i = 0; i < n_test_dofs; ++i) {
+                    const std::size_t ref_idx = static_cast<std::size_t>(i * n_qpts + q);
+                    const std::size_t phys_idx = static_cast<std::size_t>(q * n_test_dofs + i);
+                    const auto& grad_ref = scratch_ref_gradients_[ref_idx];
+                    AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
+                    for (int d1 = 0; d1 < dim; ++d1) {
+                        for (int d2 = 0; d2 < dim; ++d2) {
+                            grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
+                        }
+                    }
+                    scratch_phys_gradients_[phys_idx] = grad_phys;
+                }
             }
         }
 
@@ -5732,32 +5752,11 @@ void StandardAssembler::populateFieldSolutionData(
                 }
             }
 
+            // Get inverse Jacobians span once (avoid per-QP accessor overhead).
+            const auto ctx_inv_jacs_span = context.inverseJacobians();
+
             for (LocalIndex q = 0; q < n_qpts; ++q) {
-                if (field_bcache) {
-                    // Read cached basis data (avoids per-QP polynomial evaluation).
-                    values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
-                    for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
-                        values_at_pt[static_cast<std::size_t>(j)] =
-                            field_bcache->scalarValue(static_cast<std::size_t>(j),
-                                                     static_cast<std::size_t>(q));
-                    }
-                    if (need_gradients) {
-                        gradients_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
-                        for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
-                            gradients_at_pt[static_cast<std::size_t>(j)] =
-                                field_bcache->gradients[static_cast<std::size_t>(q)]
-                                                       [static_cast<std::size_t>(j)];
-                        }
-                    }
-                    if (need_hessians) {
-                        hessians_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
-                        for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
-                            hessians_at_pt[static_cast<std::size_t>(j)] =
-                                field_bcache->hessians[static_cast<std::size_t>(q)]
-                                                      [static_cast<std::size_t>(j)];
-                        }
-                    }
-                } else {
+                if (!field_bcache) {
                     const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
                                                    qpts[static_cast<std::size_t>(q)][1],
                                                    qpts[static_cast<std::size_t>(q)][2]};
@@ -5770,17 +5769,24 @@ void StandardAssembler::populateFieldSolutionData(
                     }
                 }
 
-                const auto J_inv = context.inverseJacobian(q);
+                // For affine elements, J_inv is the same at all QPs.
+                const auto& J_inv = ctx_inv_jacs_span[cached_mapping_affine_ ? 0 : static_cast<std::size_t>(q)];
                 Real val = 0.0;
                 AssemblyContext::Vector3D grad = {0.0, 0.0, 0.0};
                 AssemblyContext::Matrix3x3 H{};
 
                 for (LocalIndex j = 0; j < n_dofs; ++j) {
                     const Real coef = local_coeffs[static_cast<std::size_t>(j)];
-                    val += coef * values_at_pt[static_cast<std::size_t>(j)];
+                    // Read directly from BasisCache when available (skip copy to values_at_pt).
+                    const Real basis_val = field_bcache
+                        ? field_bcache->scalarValue(static_cast<std::size_t>(j), static_cast<std::size_t>(q))
+                        : values_at_pt[static_cast<std::size_t>(j)];
+                    val += coef * basis_val;
 
                     if (need_gradients) {
-                        const auto& gref = gradients_at_pt[static_cast<std::size_t>(j)];
+                        const auto& gref = field_bcache
+                            ? field_bcache->gradients[static_cast<std::size_t>(q)][static_cast<std::size_t>(j)]
+                            : gradients_at_pt[static_cast<std::size_t>(j)];
                         AssemblyContext::Vector3D gphys = {0.0, 0.0, 0.0};
                         for (int d1 = 0; d1 < dim; ++d1) {
                             for (int d2 = 0; d2 < dim; ++d2) {
@@ -5793,12 +5799,15 @@ void StandardAssembler::populateFieldSolutionData(
                     }
 
                     if (need_hessians) {
+                        const auto& hess_j = field_bcache
+                            ? field_bcache->hessians[static_cast<std::size_t>(q)][static_cast<std::size_t>(j)]
+                            : hessians_at_pt[static_cast<std::size_t>(j)];
                         AssemblyContext::Matrix3x3 H_ref{};
                         for (int r = 0; r < 3; ++r) {
                             for (int c = 0; c < 3; ++c) {
                                 H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                                    hessians_at_pt[static_cast<std::size_t>(j)](static_cast<std::size_t>(r),
-                                                                                static_cast<std::size_t>(c));
+                                    hess_j(static_cast<std::size_t>(r),
+                                            static_cast<std::size_t>(c));
                             }
                         }
 
@@ -6094,31 +6103,11 @@ void StandardAssembler::populateFieldSolutionData(
                 }
             }
 
+            // Get inverse Jacobians span once (avoid per-QP accessor overhead).
+            const auto ctx_inv_jacs_ps = context.inverseJacobians();
+
             for (LocalIndex q = 0; q < n_qpts; ++q) {
-                if (field_bcache_ps) {
-                    values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
-                    for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
-                        values_at_pt[static_cast<std::size_t>(j)] =
-                            field_bcache_ps->scalarValue(static_cast<std::size_t>(j),
-                                                        static_cast<std::size_t>(q));
-                    }
-                    if (need_gradients) {
-                        gradients_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
-                        for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
-                            gradients_at_pt[static_cast<std::size_t>(j)] =
-                                field_bcache_ps->gradients[static_cast<std::size_t>(q)]
-                                                          [static_cast<std::size_t>(j)];
-                        }
-                    }
-                    if (need_hessians) {
-                        hessians_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
-                        for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
-                            hessians_at_pt[static_cast<std::size_t>(j)] =
-                                field_bcache_ps->hessians[static_cast<std::size_t>(q)]
-                                                         [static_cast<std::size_t>(j)];
-                        }
-                    }
-                } else {
+                if (!field_bcache_ps) {
                     const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
                                                    qpts[static_cast<std::size_t>(q)][1],
                                                    qpts[static_cast<std::size_t>(q)][2]};
@@ -6131,7 +6120,7 @@ void StandardAssembler::populateFieldSolutionData(
                     }
                 }
 
-                const auto J_inv = context.inverseJacobian(q);
+                const auto& J_inv = ctx_inv_jacs_ps[cached_mapping_affine_ ? 0 : static_cast<std::size_t>(q)];
                 AssemblyContext::Matrix3x3 J{};
 
                 const auto q_base = static_cast<std::size_t>(q) * static_cast<std::size_t>(vd);
@@ -6144,10 +6133,16 @@ void StandardAssembler::populateFieldSolutionData(
                         const LocalIndex jj = base + j;
                         const LocalIndex sj = static_cast<LocalIndex>(jj % n_scalar_dofs);
                         const Real coef = local_coeffs[static_cast<std::size_t>(jj)];
-                        val_c += coef * values_at_pt[static_cast<std::size_t>(sj)];
+                        // Read directly from BasisCache when available (skip copy to values_at_pt).
+                        const Real basis_val = field_bcache_ps
+                            ? field_bcache_ps->scalarValue(static_cast<std::size_t>(sj), static_cast<std::size_t>(q))
+                            : values_at_pt[static_cast<std::size_t>(sj)];
+                        val_c += coef * basis_val;
 
                         if (need_gradients) {
-                            const auto& gref = gradients_at_pt[static_cast<std::size_t>(sj)];
+                            const auto& gref = field_bcache_ps
+                                ? field_bcache_ps->gradients[static_cast<std::size_t>(q)][static_cast<std::size_t>(sj)]
+                                : gradients_at_pt[static_cast<std::size_t>(sj)];
                             AssemblyContext::Vector3D gphys = {0.0, 0.0, 0.0};
                             for (int d1 = 0; d1 < dim; ++d1) {
                                 for (int d2 = 0; d2 < dim; ++d2) {
@@ -6160,12 +6155,15 @@ void StandardAssembler::populateFieldSolutionData(
                         }
 
                         if (need_hessians) {
+                            const auto& hess_sj = field_bcache_ps
+                                ? field_bcache_ps->hessians[static_cast<std::size_t>(q)][static_cast<std::size_t>(sj)]
+                                : hessians_at_pt[static_cast<std::size_t>(sj)];
                             AssemblyContext::Matrix3x3 H_ref{};
                             for (int r = 0; r < 3; ++r) {
                                 for (int c = 0; c < 3; ++c) {
                                     H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                                        hessians_at_pt[static_cast<std::size_t>(sj)](static_cast<std::size_t>(r),
-                                                                                     static_cast<std::size_t>(c));
+                                        hess_sj(static_cast<std::size_t>(r),
+                                                 static_cast<std::size_t>(c));
                                 }
                             }
 

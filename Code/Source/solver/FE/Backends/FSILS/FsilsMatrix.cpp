@@ -399,11 +399,14 @@ public:
                 }
 
                 // Inlined CSR column lookup (replaces matrix_->addBlock call).
+                // Use linear scan for small rows (better branch prediction, no index overhead).
                 const int col_int = ci0.internal_node;
-                const auto col_it = std::lower_bound(
-                    row_col_begin, row_col_end,
-                    static_cast<fe_fsi_linear_solver::fsils_int>(col_int));
-                if (col_it == row_col_end || *col_it != col_int) {
+                const auto col_int_val = static_cast<fe_fsi_linear_solver::fsils_int>(col_int);
+                const auto row_len = row_col_end - row_col_begin;
+                const decltype(row_col_begin) col_it = (row_len <= 32)
+                    ? std::find(row_col_begin, row_col_end, col_int_val)
+                    : std::lower_bound(row_col_begin, row_col_end, col_int_val);
+                if (col_it == row_col_end || *col_it != col_int_val) {
                     j0 = j1;
                     continue;
                 }
