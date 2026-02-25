@@ -774,27 +774,37 @@ JITCompileResult JITCompiler::Impl::compileFormIR(const FormIR& ir,
 
         try {
             std::uintptr_t addr = 0;
-            LLVMGen gen(options);
 
-            const JITCompileSpecialization* group_spec = nullptr;
-            if (specialization != nullptr && specialization->domain == group.key.domain) {
-                group_spec = specialization;
+            if (enable_cache && engine && engine->tryLoadFromObjectCache(symbol)) {
+                if (engine->tryLookup(symbol, addr)) {
+                    k.symbol = symbol;
+                    k.address = addr;
+                }
             }
 
-            const auto r = gen.compileAndAddKernel(*engine,
-                                                   ir,
-                                                   group.term_indices,
-                                                   group.key.domain,
-                                                   group.key.boundary_marker,
-                                                   group.key.interface_marker,
-                                                   symbol,
-                                                   addr,
-                                                   group_spec);
-            if (!r.ok) {
-                throw std::runtime_error(r.message.empty() ? "LLVMGen: kernel generation failed" : r.message);
+            if (k.address == 0) {
+                LLVMGen gen(options);
+
+                const JITCompileSpecialization* group_spec = nullptr;
+                if (specialization != nullptr && specialization->domain == group.key.domain) {
+                    group_spec = specialization;
+                }
+
+                const auto r = gen.compileAndAddKernel(*engine,
+                                                       ir,
+                                                       group.term_indices,
+                                                       group.key.domain,
+                                                       group.key.boundary_marker,
+                                                       group.key.interface_marker,
+                                                       symbol,
+                                                       addr,
+                                                       group_spec);
+                if (!r.ok) {
+                    throw std::runtime_error(r.message.empty() ? "LLVMGen: kernel generation failed" : r.message);
+                }
+                k.symbol = symbol;
+                k.address = addr;
             }
-            k.symbol = symbol;
-            k.address = addr;
         } catch (const std::exception& e) {
             out.message = std::string("JITCompiler: LLVM compilation failed: ") + e.what();
             out.message += "\nKernel symbol: " + symbol;

@@ -11,6 +11,7 @@
 #include "Physics/Core/EquationModuleRegistry.h"
 
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/CoupledBoundaryManager.h"
 
 #include <algorithm>
 #include <filesystem>

@@ -49,6 +49,7 @@ public:
     [[nodiscard]] bool available() const noexcept;
 
     void addModule(llvm::orc::ThreadSafeModule&& module);
+    [[nodiscard]] bool tryLoadFromObjectCache(std::string_view name);
 
     [[nodiscard]] SymbolAddress lookup(std::string_view name);
     [[nodiscard]] bool tryLookup(std::string_view name, SymbolAddress& out) noexcept;

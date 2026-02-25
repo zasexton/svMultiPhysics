@@ -157,17 +157,13 @@ public:
         }
     }
 
-    [[nodiscard]] std::unique_ptr<llvm::MemoryBuffer> getObject(const llvm::Module* module) override
+    [[nodiscard]] std::unique_ptr<llvm::MemoryBuffer> getObjectById(std::string_view module_id)
     {
-        if (module == nullptr) {
-            return nullptr;
-        }
-
         std::lock_guard<std::mutex> lock(mutex_);
         if (counters_ != nullptr) {
             counters_->get_calls.fetch_add(1u, std::memory_order_relaxed);
         }
-        const auto it = objects_by_module_id_.find(module->getModuleIdentifier());
+        const auto it = objects_by_module_id_.find(std::string(module_id));
         if (it == objects_by_module_id_.end() || !it->second) {
             if (counters_ != nullptr) {
                 counters_->misses.fetch_add(1u, std::memory_order_relaxed);
@@ -178,6 +174,14 @@ public:
             counters_->mem_hits.fetch_add(1u, std::memory_order_relaxed);
         }
         return llvm::MemoryBuffer::getMemBufferCopy(it->second->getBuffer(), it->second->getBufferIdentifier());
+    }
+
+    [[nodiscard]] std::unique_ptr<llvm::MemoryBuffer> getObject(const llvm::Module* module) override
+    {
+        if (module == nullptr) {
+            return nullptr;
+        }
+        return getObjectById(module->getModuleIdentifier());
     }
 
 private:
@@ -262,14 +266,9 @@ public:
         }
     }
 
-    [[nodiscard]] std::unique_ptr<llvm::MemoryBuffer> getObject(const llvm::Module* module) override
+    [[nodiscard]] std::unique_ptr<llvm::MemoryBuffer> getObjectById(std::string_view module_id_sv)
     {
-        if (module == nullptr) {
-            return nullptr;
-        }
-
-        const std::string module_id = module->getModuleIdentifier();
-
+        const std::string module_id(module_id_sv);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (counters_ != nullptr) {
@@ -311,6 +310,14 @@ public:
                                             std::memory_order_relaxed);
         }
         return std::move(*buf_or_err);
+    }
+
+    [[nodiscard]] std::unique_ptr<llvm::MemoryBuffer> getObject(const llvm::Module* module) override
+    {
+        if (module == nullptr) {
+            return nullptr;
+        }
+        return getObjectById(module->getModuleIdentifier());
     }
 
 private:
@@ -912,6 +919,37 @@ JITEngine::SymbolAddress JITEngine::lookup(std::string_view name)
 #else
     (void)name;
     FE_THROW(FEException, "JITEngine::lookup: FE was built without LLVM JIT support");
+#endif
+}
+
+bool JITEngine::tryLoadFromObjectCache(std::string_view name)
+{
+#if SVMP_FE_ENABLE_LLVM_JIT
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!impl_ || !impl_->jit || !impl_->object_cache) {
+        return false;
+    }
+
+    std::unique_ptr<llvm::MemoryBuffer> buf;
+    if (auto* fs_cache = dynamic_cast<FileSystemObjectCache*>(impl_->object_cache.get())) {
+        buf = fs_cache->getObjectById(name);
+    } else if (auto* mem_cache = dynamic_cast<InMemoryObjectCache*>(impl_->object_cache.get())) {
+        buf = mem_cache->getObjectById(name);
+    }
+
+    if (!buf) {
+        return false;
+    }
+
+    auto err = impl_->jit->getObjLinkingLayer().add(impl_->jit->getMainJITDylib(), std::move(buf));
+    if (err) {
+        llvm::consumeError(std::move(err));
+        return false;
+    }
+    return true;
+#else
+    (void)name;
+    return false;
 #endif
 }
 

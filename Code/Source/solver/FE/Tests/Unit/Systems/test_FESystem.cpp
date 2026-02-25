@@ -6,6 +6,8 @@
 #include <gtest/gtest.h>
 
 #include "Systems/FESystem.h"
+#include "Systems/OperatorBackends.h"
+#include "Systems/CoupledBoundaryManager.h"
 #include "Systems/SystemsExceptions.h"
 
 #include "Assembly/AssemblyKernel.h"
