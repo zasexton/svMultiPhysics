@@ -12,6 +12,8 @@
 #include "Core/Logger.h"
 
 #include "Forms/FormKernels.h"
+#include "Forms/FormCompiler.h"
+#include "Forms/SymbolicDifferentiation.h"
 #include "Forms/JIT/JITCompiler.h"
 #include "Forms/JIT/JITValidation.h"
 
@@ -318,51 +320,55 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
         return;
     }
 
-    if (kind_ == WrappedKind::SymbolicNonlinearFormKernel) {
-        const auto* k = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get());
-        if (!k) {
+    // ---- Nonlinear kernels (Symbolic or AD-based fallback) ----
+    if (kind_ == WrappedKind::SymbolicNonlinearFormKernel || kind_ == WrappedKind::NonlinearFormKernel) {
+        const auto* k_sym = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get());
+        const auto* k_nl = dynamic_cast<const NonlinearFormKernel*>(fallback_.get());
+
+        if (!k_sym && !k_nl) {
             fallback_->computeCell(ctx, output);
             return;
         }
 
-        const bool want_matrix = !k->isVectorOnly();
-        const bool want_vector = !k->isMatrixOnly();
+        const bool want_matrix = k_sym ? !k_sym->isVectorOnly() : !k_nl->isVectorOnly();
+        const bool want_vector = k_sym ? !k_sym->isMatrixOnly() : !k_nl->isMatrixOnly();
+        const auto& updates = k_sym ? k_sym->inlinedStateUpdates().cell : k_nl->inlinedStateUpdates().cell;
+        const auto* state_layout = k_sym ? k_sym->constitutiveStateLayout() : k_nl->constitutiveStateLayout();
+        const auto& residual_ir = k_sym ? k_sym->residualIR() : k_nl->residualIR();
 
         output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), want_matrix, want_vector);
         output.clear();
 
-        const auto& updates = k->inlinedStateUpdates().cell;
         if (!updates.empty()) {
             for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
                 applyInlinedMaterialStateUpdatesReal(ctx, nullptr, FormKind::Residual,
-                                                     k->constitutiveStateLayout(),
-                                                     updates,
+                                                     state_layout, updates,
                                                      Side::Minus, q);
             }
         }
 
-	        if (want_matrix) {
-	            if (compiled_tangent_.cell == 0) {
-	                fallback_->computeCell(ctx, output);
-	                return;
-	            }
-	            const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
-	            const auto disp =
-	                getSpecializedDispatch(KernelRole::Tangent, k->tangentIR(), IntegralDomain::Cell, ctx, nullptr);
-	            const auto& compiled = disp ? *disp : compiled_tangent_;
-	            callJIT(compiled.cell, &args);
-	        }
-	        if (want_vector) {
-	            if (compiled_residual_.cell == 0) {
-	                fallback_->computeCell(ctx, output);
-	                return;
-	            }
-	            const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
-	            const auto disp =
-	                getSpecializedDispatch(KernelRole::Residual, k->residualIR(), IntegralDomain::Cell, ctx, nullptr);
-	            const auto& compiled = disp ? *disp : compiled_residual_;
-	            callJIT(compiled.cell, &args);
-	        }
+        if (want_matrix) {
+            if (compiled_tangent_.cell == 0) {
+                fallback_->computeCell(ctx, output);
+                return;
+            }
+            const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
+            const auto disp = k_sym ? getSpecializedDispatch(KernelRole::Tangent, k_sym->tangentIR(), IntegralDomain::Cell, ctx, nullptr)
+                                    : nullptr;
+            const auto& compiled = disp ? *disp : compiled_tangent_;
+            callJIT(compiled.cell, &args);
+        }
+
+        if (want_vector) {
+            if (compiled_residual_.cell == 0) {
+                fallback_->computeCell(ctx, output);
+                return;
+            }
+            const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
+            const auto disp = getSpecializedDispatch(KernelRole::Residual, residual_ir, IntegralDomain::Cell, ctx, nullptr);
+            const auto& compiled = disp ? *disp : compiled_residual_;
+            callJIT(compiled.cell, &args);
+        }
 
         output.has_matrix = want_matrix;
         output.has_vector = want_vector;
@@ -462,28 +468,69 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                     *first_ctx, outputs[first_idx], checks);
 
                 // Tight per-element loop.
-                for (std::size_t idx = 0; idx < n; ++idx) {
-                    if (contexts[idx] == nullptr) {
-                        continue;
-                    }
-                    const auto& ctx = *contexts[idx];
-                    auto& output = outputs[idx];
-                    output.clear();
+                if (options_.vectorize && n > 1u) {
+                    std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
+                    std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
 
-                    if (has_updates) {
-                        for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
-                            applyInlinedMaterialStateUpdatesReal(
-                                ctx, nullptr, k->ir().kind(),
-                                k->constitutiveStateLayout(), updates, Side::Minus, q);
+                    for (std::size_t idx = 0; idx < n; ++idx) {
+                        if (contexts[idx] == nullptr) {
+                            continue;
                         }
+
+                        const auto& ctx = *contexts[idx];
+                        auto& output = outputs[idx];
+                        output.clear();
+
+                        if (has_updates) {
+                            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                                applyInlinedMaterialStateUpdatesReal(
+                                    ctx, nullptr, k->ir().kind(),
+                                    k->constitutiveStateLayout(), updates, Side::Minus, q);
+                            }
+                        }
+
+                        // Start with template and patch per-cell fields.
+                        auto args = args_template;
+                        patchCellArgsV6(args, ctx, output);
+                        batch_sides[idx] = args.side;
+                        batch_outputs[idx] = args.output;
+
+                        output.has_matrix = want_matrix;
+                        output.has_vector = want_vector;
                     }
 
-                    auto args = args_template;
-                    patchCellArgsV6(args, ctx, output);
-                    callJIT(compiled.cell, &args);
+                    assembly::jit::CellKernelBatchArgsV1 batch_args;
+                    batch_args.batch_size = static_cast<std::uint32_t>(n);
+                    batch_args.sides = batch_sides.data();
+                    batch_args.outputs = batch_outputs.data();
 
-                    output.has_matrix = want_matrix;
-                    output.has_vector = want_vector;
+                    callJIT(compiled.cell, &batch_args);
+                } else {
+                    for (std::size_t idx = 0; idx < n; ++idx) {
+                        if (contexts[idx] == nullptr) {
+                            continue;
+                        }
+
+                        const auto& ctx = *contexts[idx];
+                        auto& output = outputs[idx];
+                        output.clear();
+
+                        if (has_updates) {
+                            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                                applyInlinedMaterialStateUpdatesReal(
+                                    ctx, nullptr, k->ir().kind(),
+                                    k->constitutiveStateLayout(), updates, Side::Minus, q);
+                            }
+                        }
+
+                        // Patch per-cell fields from template.
+                        auto args = args_template;
+                        patchCellArgsV6(args, ctx, output);
+                        callJIT(compiled.cell, &args);
+
+                        output.has_matrix = want_matrix;
+                        output.has_vector = want_vector;
+                    }
                 }
                 return;
             }
@@ -529,82 +576,167 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                     *first_ctx, outputs[first_idx], checks);
 
                 // Tight per-element loop.
-                for (std::size_t idx = 0; idx < n; ++idx) {
-                    if (contexts[idx] == nullptr) {
-                        continue;
-                    }
-                    const auto& ctx = *contexts[idx];
-                    auto& output = outputs[idx];
-                    output.clear();
+                if (options_.vectorize && n > 1u) {
+                    std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
+                    std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
 
-                    if (has_updates) {
-                        for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
-                            applyInlinedMaterialStateUpdatesReal(
-                                ctx, nullptr, FormKind::Bilinear,
-                                k->constitutiveStateLayout(), updates, Side::Minus, q);
+                    for (std::size_t idx = 0; idx < n; ++idx) {
+                        if (contexts[idx] == nullptr) continue;
+                        const auto& ctx = *contexts[idx];
+                        auto& output = outputs[idx];
+                        output.clear();
+
+                        if (has_updates) {
+                            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                                applyInlinedMaterialStateUpdatesReal(
+                                    ctx, nullptr, FormKind::Bilinear,
+                                    k->constitutiveStateLayout(), updates, Side::Minus, q);
+                            }
                         }
+
+                        auto args = args_template;
+                        patchCellArgsV6(args, ctx, output);
+                        batch_sides[idx] = args.side;
+                        batch_outputs[idx] = args.output;
                     }
 
-                    // Patch per-cell fields from template.
-                    auto args = args_template;
-                    patchCellArgsV6(args, ctx, output);
+                    assembly::jit::CellKernelBatchArgsV1 batch_args;
+                    batch_args.batch_size = static_cast<std::uint32_t>(n);
+                    batch_args.sides = batch_sides.data();
+                    batch_args.outputs = batch_outputs.data();
 
-                    // 1) Jacobian (bilinear part).
                     if (want_matrix) {
-                        callJIT(compiled_bi.cell, &args);
+                        callJIT(compiled_bi.cell, &batch_args);
                     }
 
-                    // 2) Residual vector = (linear part) + (K*u).
                     if (want_vector) {
-                        const auto coeffs = ctx.solutionCoefficients();
-                        FE_THROW_IF(coeffs.size() < static_cast<std::size_t>(ctx.numTrialDofs()),
-                                    InvalidArgumentException,
-                                    "JITKernelWrapper(LinearFormKernel)::computeCellBatch: "
-                                    "missing solution coefficients");
-
                         if (compiled_lin_ptr != nullptr) {
-                            callJIT(compiled_lin_ptr->cell, &args);
+                            callJIT(compiled_lin_ptr->cell, &batch_args);
                         }
 
                         // K*u contribution.
-                        if (want_matrix) {
-                            for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
-                                Real sum = 0.0;
-                                for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
-                                    sum += output.matrixEntry(i, j) *
-                                           coeffs[static_cast<std::size_t>(j)];
-                                }
-                                output.vectorEntry(i) += sum;
-                            }
-                        } else {
-                            tmp.clear();
-                            args.output = assembly::jit::detail::packOutputViewV6(tmp);
-                            callJIT(compiled_bi.cell, &args);
+                        for (std::size_t idx = 0; idx < n; ++idx) {
+                            if (contexts[idx] == nullptr) continue;
+                            const auto& ctx = *contexts[idx];
+                            auto& output = outputs[idx];
+                            const auto coeffs = ctx.solutionCoefficients();
 
-                            for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
-                                Real sum = 0.0;
-                                for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
-                                    sum += tmp.matrixEntry(i, j) *
-                                           coeffs[static_cast<std::size_t>(j)];
+                            if (want_matrix) {
+                                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                                    Real sum = 0.0;
+                                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+                                        sum += output.matrixEntry(i, j) *
+                                               coeffs[static_cast<std::size_t>(j)];
+                                    }
+                                    output.vectorEntry(i) += sum;
                                 }
-                                output.vectorEntry(i) += sum;
+                            } else {
+                                tmp.clear();
+                                auto args = args_template;
+                                patchCellArgsV6(args, ctx, tmp);
+                                args.output = assembly::jit::detail::packOutputViewV6(tmp);
+                                callJIT(compiled_bi.cell, &args);
+
+                                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                                    Real sum = 0.0;
+                                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+                                        sum += tmp.matrixEntry(i, j) *
+                                               coeffs[static_cast<std::size_t>(j)];
+                                    }
+                                    output.vectorEntry(i) += sum;
+                                }
                             }
                         }
                     }
 
-                    output.has_matrix = want_matrix;
-                    output.has_vector = want_vector;
+                    for (std::size_t idx = 0; idx < n; ++idx) {
+                        if (contexts[idx] == nullptr) continue;
+                        outputs[idx].has_matrix = want_matrix;
+                        outputs[idx].has_vector = want_vector;
+                    }
+                } else {
+                    for (std::size_t idx = 0; idx < n; ++idx) {
+                        if (contexts[idx] == nullptr) {
+                            continue;
+                        }
+                        const auto& ctx = *contexts[idx];
+                        auto& output = outputs[idx];
+                        output.clear();
+
+                        if (has_updates) {
+                            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                                applyInlinedMaterialStateUpdatesReal(
+                                    ctx, nullptr, FormKind::Bilinear,
+                                    k->constitutiveStateLayout(), updates, Side::Minus, q);
+                            }
+                        }
+
+                        // Patch per-cell fields from template.
+                        auto args = args_template;
+                        patchCellArgsV6(args, ctx, output);
+
+                        // 1) Jacobian (bilinear part).
+                        if (want_matrix) {
+                            callJIT(compiled_bi.cell, &args);
+                        }
+
+                        // 2) Residual vector = (linear part) + (K*u).
+                        if (want_vector) {
+                            const auto coeffs = ctx.solutionCoefficients();
+                            FE_THROW_IF(coeffs.size() < static_cast<std::size_t>(ctx.numTrialDofs()),
+                                        InvalidArgumentException,
+                                        "JITKernelWrapper(LinearFormKernel)::computeCellBatch: "
+                                        "missing solution coefficients");
+
+                            if (compiled_lin_ptr != nullptr) {
+                                callJIT(compiled_lin_ptr->cell, &args);
+                            }
+
+                            // K*u contribution.
+                            if (want_matrix) {
+                                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                                    Real sum = 0.0;
+                                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+                                        sum += output.matrixEntry(i, j) *
+                                               coeffs[static_cast<std::size_t>(j)];
+                                    }
+                                    output.vectorEntry(i) += sum;
+                                }
+                            } else {
+                                tmp.clear();
+                                args.output = assembly::jit::detail::packOutputViewV6(tmp);
+                                callJIT(compiled_bi.cell, &args);
+
+                                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                                    Real sum = 0.0;
+                                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j) {
+                                        sum += tmp.matrixEntry(i, j) *
+                                               coeffs[static_cast<std::size_t>(j)];
+                                    }
+                                    output.vectorEntry(i) += sum;
+                                }
+                            }
+                        }
+
+                        output.has_matrix = want_matrix;
+                        output.has_vector = want_vector;
+                    }
                 }
                 return;
             }
         }
 
-        // ---- SymbolicNonlinearFormKernel (tangent + residual) ----
-        if (kind_ == WrappedKind::SymbolicNonlinearFormKernel) {
-            const auto* k = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get());
-            if (k) {
-                const bool want_matrix = !k->isVectorOnly();
-                const bool want_vector = !k->isMatrixOnly();
+        // ---- Nonlinear kernels (Symbolic or AD-based fallback) ----
+        if (kind_ == WrappedKind::SymbolicNonlinearFormKernel || kind_ == WrappedKind::NonlinearFormKernel) {
+            const auto* k_sym = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get());
+            const auto* k_nl = dynamic_cast<const NonlinearFormKernel*>(fallback_.get());
+
+            if (k_sym || k_nl) {
+                const bool want_matrix = k_sym ? !k_sym->isVectorOnly() : !k_nl->isVectorOnly();
+                const bool want_vector = k_sym ? !k_sym->isMatrixOnly() : !k_nl->isMatrixOnly();
+                const auto& updates = k_sym ? k_sym->inlinedStateUpdates().cell : k_nl->inlinedStateUpdates().cell;
+                const auto* state_layout = k_sym ? k_sym->constitutiveStateLayout() : k_nl->constitutiveStateLayout();
+                const auto& residual_ir = k_sym ? k_sym->residualIR() : k_nl->residualIR();
 
                 // Verify compiled addresses are available before committing to
                 // the batch fast-path.
@@ -612,23 +744,27 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                                        (!want_vector || compiled_residual_.cell != 0);
 
                 if (can_batch) {
-                    const auto& updates = k->inlinedStateUpdates().cell;
                     const bool has_updates = !updates.empty();
 
                     // Resolve specializations once for the whole batch.
                     std::shared_ptr<const CompiledDispatch> disp_tan;
                     const CompiledDispatch* compiled_tan_ptr = &compiled_tangent_;
                     if (want_matrix) {
-                        disp_tan = getSpecializedDispatch(
-                            KernelRole::Tangent, k->tangentIR(), IntegralDomain::Cell, *first_ctx, nullptr);
-                        if (disp_tan) compiled_tan_ptr = disp_tan.get();
+                        // Note: for NonlinearFormKernel, we don't have the tangent IR for specialization
+                        // lookups readily available here if it was created inside maybeCompile.
+                        // For now, we fall back to the generic tangent if k_nl.
+                        if (k_sym) {
+                            disp_tan = getSpecializedDispatch(
+                                KernelRole::Tangent, k_sym->tangentIR(), IntegralDomain::Cell, *first_ctx, nullptr);
+                            if (disp_tan) compiled_tan_ptr = disp_tan.get();
+                        }
                     }
 
                     std::shared_ptr<const CompiledDispatch> disp_res;
                     const CompiledDispatch* compiled_res_ptr = &compiled_residual_;
                     if (want_vector) {
                         disp_res = getSpecializedDispatch(
-                            KernelRole::Residual, k->residualIR(), IntegralDomain::Cell, *first_ctx, nullptr);
+                            KernelRole::Residual, residual_ir, IntegralDomain::Cell, *first_ctx, nullptr);
                         if (disp_res) compiled_res_ptr = disp_res.get();
                     }
 
@@ -644,37 +780,78 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         *first_ctx, outputs[first_idx], checks);
 
                     // Tight per-element loop.
-                    for (std::size_t idx = 0; idx < n; ++idx) {
-                        if (contexts[idx] == nullptr) {
-                            continue;
-                        }
-                        const auto& ctx = *contexts[idx];
-                        auto& output = outputs[idx];
-                        output.clear();
+                    if (options_.vectorize && n > 1u) {
+                        std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
+                        std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
 
-                        if (has_updates) {
-                            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
-                                applyInlinedMaterialStateUpdatesReal(
-                                    ctx, nullptr, FormKind::Residual,
-                                    k->constitutiveStateLayout(), updates, Side::Minus, q);
+                        for (std::size_t idx = 0; idx < n; ++idx) {
+                            if (contexts[idx] == nullptr) {
+                                continue;
                             }
+                            const auto& ctx = *contexts[idx];
+                            auto& output = outputs[idx];
+                            output.clear();
+
+                            if (has_updates) {
+                                for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                                    applyInlinedMaterialStateUpdatesReal(
+                                        ctx, nullptr, FormKind::Residual,
+                                        state_layout, updates, Side::Minus, q);
+                                }
+                            }
+
+                            auto args = args_template;
+                            patchCellArgsV6(args, ctx, output);
+                            batch_sides[idx] = args.side;
+                            batch_outputs[idx] = args.output;
+
+                            output.has_matrix = want_matrix;
+                            output.has_vector = want_vector;
                         }
 
-                        auto args = args_template;
-                        patchCellArgsV6(args, ctx, output);
+                        assembly::jit::CellKernelBatchArgsV1 batch_args;
+                        batch_args.batch_size = static_cast<std::uint32_t>(n);
+                        batch_args.sides = batch_sides.data();
+                        batch_args.outputs = batch_outputs.data();
+
                         if (want_matrix) {
-                            callJIT(compiled_tan_ptr->cell, &args);
+                            callJIT(compiled_tan_ptr->cell, &batch_args);
                         }
                         if (want_vector) {
-                            callJIT(compiled_res_ptr->cell, &args);
+                            callJIT(compiled_res_ptr->cell, &batch_args);
                         }
+                    } else {
+                        for (std::size_t idx = 0; idx < n; ++idx) {
+                            if (contexts[idx] == nullptr) {
+                                continue;
+                            }
+                            const auto& ctx = *contexts[idx];
+                            auto& output = outputs[idx];
+                            output.clear();
 
-                        output.has_matrix = want_matrix;
-                        output.has_vector = want_vector;
+                            if (has_updates) {
+                                for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                                    applyInlinedMaterialStateUpdatesReal(
+                                        ctx, nullptr, FormKind::Residual,
+                                        state_layout, updates, Side::Minus, q);
+                                }
+                            }
+
+                            auto args = args_template;
+                            patchCellArgsV6(args, ctx, output);
+                            if (want_matrix) {
+                                callJIT(compiled_tan_ptr->cell, &args);
+                            }
+                            if (want_vector) {
+                                callJIT(compiled_res_ptr->cell, &args);
+                            }
+
+                            output.has_matrix = want_matrix;
+                            output.has_vector = want_vector;
+                        }
                     }
                     return;
                 }
-                // can_batch == false: fall through to per-element fallback.
             }
         }
 
@@ -1591,7 +1768,7 @@ void JITKernelWrapper::maybeCompile()
     attempted_revision_ = revision_;
 
     // We currently only JIT-accelerate kernels that are backed by FE/Forms IR.
-    if (kind_ == WrappedKind::Unknown || kind_ == WrappedKind::NonlinearFormKernel) {
+    if (kind_ == WrappedKind::Unknown) {
         if (!warned_unavailable_) {
             warned_unavailable_ = true;
             FE_LOG_WARNING("JIT requested for kernel '" + fallback_->name() +
@@ -1738,6 +1915,80 @@ void JITKernelWrapper::maybeCompile()
                 return;
             }
             fillDispatch(compiled_tangent_, r_tan);
+        } else {
+            compiled_tangent_ = CompiledDispatch{};
+        }
+
+        compiled_revision_ = revision_;
+        return;
+    }
+
+    if (kind_ == WrappedKind::NonlinearFormKernel) {
+        const auto* k = dynamic_cast<const NonlinearFormKernel*>(fallback_.get());
+        if (!k) {
+            warnCompileFailureOnce("NonlinearFormKernel", "dynamic_cast failed");
+            return;
+        }
+
+        const bool want_matrix = !k->isVectorOnly();
+        const bool want_vector = !k->isMatrixOnly();
+
+        // 1) Compile residual
+        if (want_vector) {
+            const auto r_res = compiler_->compile(k->residualIR(), vopt);
+            if (!r_res.ok) {
+                warnCompileFailureOnce("NonlinearFormKernel(residual)", r_res.message);
+                return;
+            }
+            fillDispatch(compiled_residual_, r_res);
+        } else {
+            compiled_residual_ = CompiledDispatch{};
+        }
+
+        // 2) Compile tangent (via symbolic differentiation)
+        if (want_matrix) {
+            try {
+                const auto& res_ir = k->residualIR();
+                FormCompiler fcomp;
+                // Use the same options as the residual compilation
+                SymbolicOptions sopts;
+                sopts.jit = options_;
+                fcomp.setOptions(sopts);
+
+                // Differentiate residual FormIR terms to get tangent FormIR
+                FormIR tan_ir;
+                tan_ir.setKind(FormKind::Bilinear);
+                tan_ir.setTestSpace(res_ir.testSpace());
+                tan_ir.setTrialSpace(res_ir.trialSpace());
+                
+                std::vector<IntegralTerm> tan_terms;
+                for (const auto& term : res_ir.terms()) {
+                    if (canDifferentiateSymbolically(term.integrand)) {
+                        const auto diff = differentiateResidual(term.integrand);
+                        const auto diff_ir = fcomp.compileBilinear(diff);
+                        for (const auto& dt : diff_ir.terms()) {
+                            IntegralTerm nt = dt;
+                            nt.domain = term.domain;
+                            nt.boundary_marker = term.boundary_marker;
+                            nt.interface_marker = term.interface_marker;
+                            tan_terms.push_back(std::move(nt));
+                        }
+                    } else {
+                        throw std::runtime_error("integrand cannot be differentiated symbolically");
+                    }
+                }
+                tan_ir.setTerms(std::move(tan_terms));
+
+                const auto r_tan = compiler_->compile(tan_ir, vopt);
+                if (!r_tan.ok) {
+                    warnCompileFailureOnce("NonlinearFormKernel(tangent-symbolic)", r_tan.message);
+                    return;
+                }
+                fillDispatch(compiled_tangent_, r_tan);
+            } catch (const std::exception& e) {
+                warnCompileFailureOnce("NonlinearFormKernel(symbolic-diff)", e.what());
+                return;
+            }
         } else {
             compiled_tangent_ = CompiledDispatch{};
         }

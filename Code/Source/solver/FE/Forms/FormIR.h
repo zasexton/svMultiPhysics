@@ -20,6 +20,7 @@ namespace forms {
 
 namespace jit {
 class JITCompiler;
+class JITKernelWrapper;
 } // namespace jit
 
 /**
@@ -133,6 +134,7 @@ public:
 private:
     friend class FormCompiler;
     friend class jit::JITCompiler;
+    friend class jit::JITKernelWrapper;
 
     void setCompiled(bool compiled);
     void setKind(FormKind kind);

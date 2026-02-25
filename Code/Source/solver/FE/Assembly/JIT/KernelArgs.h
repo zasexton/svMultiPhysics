@@ -986,6 +986,24 @@ static_assert(std::is_trivially_copyable_v<BoundaryFaceKernelArgsV6>);
 static_assert(std::is_standard_layout_v<InteriorFaceKernelArgsV6>);
 static_assert(std::is_trivially_copyable_v<InteriorFaceKernelArgsV6>);
 
+// =============================================================================
+// Batch ABI v1 (supports processing multiple elements in a single JIT call)
+// =============================================================================
+
+struct CellKernelBatchArgsV1 {
+    std::uint32_t abi_version{kKernelArgsABIVersionV6};
+    std::uint32_t batch_size{0};
+
+    // Array-of-Structs (AoS) pointers.
+    // NOTE: For true SIMD efficiency, we eventually want Struct-of-Arrays (SoA),
+    // but AoS is the most compatible first step for Phase 1.
+    const KernelSideArgsV6* sides{nullptr}; // [batch_size]
+    KernelOutputViewV6* outputs{nullptr};   // [batch_size]
+};
+
+static_assert(std::is_standard_layout_v<CellKernelBatchArgsV1>);
+static_assert(std::is_trivially_copyable_v<CellKernelBatchArgsV1>);
+
 namespace detail {
 
 [[nodiscard]] inline const Real* flattenXYZ(std::span<const std::array<Real, 3>> a) noexcept

@@ -336,6 +336,11 @@ struct ABIV3 {
     static constexpr std::size_t field_entry_history_values_off = offsetof(assembly::jit::FieldSolutionEntryV1, history_values);
     static constexpr std::size_t field_entry_history_vector_values_xyz_off =
         offsetof(assembly::jit::FieldSolutionEntryV1, history_vector_values_xyz);
+
+    // Batch V1
+    static constexpr std::size_t batch_size_off = offsetof(assembly::jit::CellKernelBatchArgsV1, batch_size);
+    static constexpr std::size_t batch_sides_off = offsetof(assembly::jit::CellKernelBatchArgsV1, sides);
+    static constexpr std::size_t batch_outputs_off = offsetof(assembly::jit::CellKernelBatchArgsV1, outputs);
 };
 
 [[nodiscard]] Shape scalarShape() noexcept { return Shape{.kind = Shape::Kind::Scalar, .dims = {1u, 1u, 1u, 1u}}; }
@@ -1492,6 +1497,14 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
         llvm::IRBuilder<> builder(*ctx);
         auto* i8_ptr = builder.getInt8PtrTy();
+        auto* f64 = builder.getDoubleTy();
+        auto* i32 = builder.getInt32Ty();
+        auto* i64 = builder.getInt64Ty();
+        auto* f64_ptr = llvm::PointerType::getUnqual(f64);
+
+        const int vector_width = preferredVectorWidthFromCpuFeatures(engine.cpuFeaturesString());
+        auto* vec_ty = (vector_width > 1) ? llvm::FixedVectorType::get(f64, static_cast<unsigned>(vector_width)) : f64;
+
         auto* fn_ty = llvm::FunctionType::get(builder.getVoidTy(),
                                               {i8_ptr},
                                               /*isVarArg=*/false);
@@ -1522,199 +1535,6 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
         auto* args_ptr = fn->getArg(0);
         args_ptr->setName("args");
-
-#if 0
-        struct ABIV3 {
-            static constexpr std::size_t cell_side_off = offsetof(assembly::jit::CellKernelArgsV3, side);
-            static constexpr std::size_t cell_out_off = offsetof(assembly::jit::CellKernelArgsV3, output);
-
-            static constexpr std::size_t bdry_side_off = offsetof(assembly::jit::BoundaryFaceKernelArgsV3, side);
-            static constexpr std::size_t bdry_out_off = offsetof(assembly::jit::BoundaryFaceKernelArgsV3, output);
-
-            static constexpr std::size_t face_minus_side_off = offsetof(assembly::jit::InteriorFaceKernelArgsV3, minus);
-            static constexpr std::size_t face_plus_side_off = offsetof(assembly::jit::InteriorFaceKernelArgsV3, plus);
-
-            static constexpr std::size_t face_out_minus_off =
-                offsetof(assembly::jit::InteriorFaceKernelArgsV3, output_minus);
-            static constexpr std::size_t face_out_plus_off =
-                offsetof(assembly::jit::InteriorFaceKernelArgsV3, output_plus);
-            static constexpr std::size_t face_coupling_minus_plus_off =
-                offsetof(assembly::jit::InteriorFaceKernelArgsV3, coupling_minus_plus);
-            static constexpr std::size_t face_coupling_plus_minus_off =
-                offsetof(assembly::jit::InteriorFaceKernelArgsV3, coupling_plus_minus);
-
-            static constexpr std::size_t side_dim_off = offsetof(assembly::jit::KernelSideArgsV3, dim);
-            static constexpr std::size_t side_n_qpts_off = offsetof(assembly::jit::KernelSideArgsV3, n_qpts);
-            static constexpr std::size_t side_n_test_dofs_off = offsetof(assembly::jit::KernelSideArgsV3, n_test_dofs);
-            static constexpr std::size_t side_n_trial_dofs_off = offsetof(assembly::jit::KernelSideArgsV3, n_trial_dofs);
-
-            static constexpr std::size_t side_test_field_type_off =
-                offsetof(assembly::jit::KernelSideArgsV3, test_field_type);
-            static constexpr std::size_t side_trial_field_type_off =
-                offsetof(assembly::jit::KernelSideArgsV3, trial_field_type);
-            static constexpr std::size_t side_test_value_dim_off =
-                offsetof(assembly::jit::KernelSideArgsV3, test_value_dim);
-            static constexpr std::size_t side_trial_value_dim_off =
-                offsetof(assembly::jit::KernelSideArgsV3, trial_value_dim);
-            static constexpr std::size_t side_test_uses_vector_basis_off =
-                offsetof(assembly::jit::KernelSideArgsV3, test_uses_vector_basis);
-            static constexpr std::size_t side_trial_uses_vector_basis_off =
-                offsetof(assembly::jit::KernelSideArgsV3, trial_uses_vector_basis);
-
-            static constexpr std::size_t side_integration_weights_off =
-                offsetof(assembly::jit::KernelSideArgsV3, integration_weights);
-
-            static constexpr std::size_t side_quad_points_xyz_off =
-                offsetof(assembly::jit::KernelSideArgsV3, quad_points_xyz);
-            static constexpr std::size_t side_physical_points_xyz_off =
-                offsetof(assembly::jit::KernelSideArgsV3, physical_points_xyz);
-
-            static constexpr std::size_t side_jacobians_off =
-                offsetof(assembly::jit::KernelSideArgsV3, jacobians);
-            static constexpr std::size_t side_inverse_jacobians_off =
-                offsetof(assembly::jit::KernelSideArgsV3, inverse_jacobians);
-            static constexpr std::size_t side_jacobian_dets_off =
-                offsetof(assembly::jit::KernelSideArgsV3, jacobian_dets);
-            static constexpr std::size_t side_normals_xyz_off = offsetof(assembly::jit::KernelSideArgsV3, normals_xyz);
-
-            static constexpr std::size_t side_test_basis_values_off =
-                offsetof(assembly::jit::KernelSideArgsV3, test_basis_values);
-            static constexpr std::size_t side_trial_basis_values_off =
-                offsetof(assembly::jit::KernelSideArgsV3, trial_basis_values);
-            static constexpr std::size_t side_test_phys_grads_off =
-                offsetof(assembly::jit::KernelSideArgsV3, test_phys_gradients_xyz);
-            static constexpr std::size_t side_trial_phys_grads_off =
-                offsetof(assembly::jit::KernelSideArgsV3, trial_phys_gradients_xyz);
-            static constexpr std::size_t side_test_phys_hess_off =
-                offsetof(assembly::jit::KernelSideArgsV3, test_phys_hessians);
-            static constexpr std::size_t side_trial_phys_hess_off =
-                offsetof(assembly::jit::KernelSideArgsV3, trial_phys_hessians);
-
-            static constexpr std::size_t side_test_vector_basis_values_xyz_off =
-                offsetof(assembly::jit::KernelSideArgsV3, test_basis_vector_values_xyz);
-            static constexpr std::size_t side_test_vector_basis_curls_xyz_off =
-                offsetof(assembly::jit::KernelSideArgsV3, test_basis_curls_xyz);
-            static constexpr std::size_t side_test_vector_basis_divs_off =
-                offsetof(assembly::jit::KernelSideArgsV3, test_basis_divergences);
-
-            static constexpr std::size_t side_trial_vector_basis_values_xyz_off =
-                offsetof(assembly::jit::KernelSideArgsV3, trial_basis_vector_values_xyz);
-            static constexpr std::size_t side_trial_vector_basis_curls_xyz_off =
-                offsetof(assembly::jit::KernelSideArgsV3, trial_basis_curls_xyz);
-            static constexpr std::size_t side_trial_vector_basis_divs_off =
-                offsetof(assembly::jit::KernelSideArgsV3, trial_basis_divergences);
-
-            static constexpr std::size_t side_solution_coefficients_off =
-                offsetof(assembly::jit::KernelSideArgsV3, solution_coefficients);
-            static constexpr std::size_t side_num_previous_solutions_off =
-                offsetof(assembly::jit::KernelSideArgsV3, num_previous_solutions);
-            static constexpr std::size_t side_previous_solution_coefficients_off =
-                offsetof(assembly::jit::KernelSideArgsV3, previous_solution_coefficients);
-
-            static constexpr std::size_t side_field_solutions_off =
-                offsetof(assembly::jit::KernelSideArgsV3, field_solutions);
-            static constexpr std::size_t side_num_field_solutions_off =
-                offsetof(assembly::jit::KernelSideArgsV3, num_field_solutions);
-
-            static constexpr std::size_t side_jit_constants_off = offsetof(assembly::jit::KernelSideArgsV3, jit_constants);
-            static constexpr std::size_t side_coupled_integrals_off =
-                offsetof(assembly::jit::KernelSideArgsV3, coupled_integrals);
-            static constexpr std::size_t side_coupled_aux_off = offsetof(assembly::jit::KernelSideArgsV3, coupled_aux);
-
-            static constexpr std::size_t side_time_off = offsetof(assembly::jit::KernelSideArgsV3, time);
-            static constexpr std::size_t side_dt_off = offsetof(assembly::jit::KernelSideArgsV3, dt);
-            static constexpr std::size_t side_cell_domain_id_off = offsetof(assembly::jit::KernelSideArgsV3, cell_domain_id);
-            static constexpr std::size_t side_cell_diameter_off = offsetof(assembly::jit::KernelSideArgsV3, cell_diameter);
-            static constexpr std::size_t side_cell_volume_off = offsetof(assembly::jit::KernelSideArgsV3, cell_volume);
-            static constexpr std::size_t side_facet_area_off = offsetof(assembly::jit::KernelSideArgsV3, facet_area);
-
-            static constexpr std::size_t side_time_derivative_term_weight_off =
-                offsetof(assembly::jit::KernelSideArgsV3, time_derivative_term_weight);
-            static constexpr std::size_t side_non_time_derivative_term_weight_off =
-                offsetof(assembly::jit::KernelSideArgsV3, non_time_derivative_term_weight);
-            static constexpr std::size_t side_dt1_term_weight_off =
-                offsetof(assembly::jit::KernelSideArgsV3, dt1_term_weight);
-            static constexpr std::size_t side_dt2_term_weight_off =
-                offsetof(assembly::jit::KernelSideArgsV3, dt2_term_weight);
-
-            static constexpr std::size_t side_dt1_coeff0_off = offsetof(assembly::jit::KernelSideArgsV3, dt1_coeff0);
-            static constexpr std::size_t side_dt2_coeff0_off = offsetof(assembly::jit::KernelSideArgsV3, dt2_coeff0);
-
-            static constexpr std::size_t side_material_state_old_base_off =
-                offsetof(assembly::jit::KernelSideArgsV3, material_state_old_base);
-            static constexpr std::size_t side_material_state_work_base_off =
-                offsetof(assembly::jit::KernelSideArgsV3, material_state_work_base);
-            static constexpr std::size_t side_material_state_stride_bytes_off =
-                offsetof(assembly::jit::KernelSideArgsV3, material_state_stride_bytes);
-
-            static constexpr std::size_t out_element_matrix_off = offsetof(assembly::jit::KernelOutputViewV3, element_matrix);
-            static constexpr std::size_t out_element_vector_off = offsetof(assembly::jit::KernelOutputViewV3, element_vector);
-            static constexpr std::size_t out_n_test_dofs_off = offsetof(assembly::jit::KernelOutputViewV3, n_test_dofs);
-            static constexpr std::size_t out_n_trial_dofs_off = offsetof(assembly::jit::KernelOutputViewV3, n_trial_dofs);
-
-            static constexpr std::size_t field_entry_field_id_off = offsetof(assembly::jit::FieldSolutionEntryV1, field_id);
-            static constexpr std::size_t field_entry_field_type_off = offsetof(assembly::jit::FieldSolutionEntryV1, field_type);
-            static constexpr std::size_t field_entry_value_dim_off = offsetof(assembly::jit::FieldSolutionEntryV1, value_dim);
-
-            static constexpr std::size_t field_entry_values_off = offsetof(assembly::jit::FieldSolutionEntryV1, values);
-            static constexpr std::size_t field_entry_gradients_xyz_off =
-                offsetof(assembly::jit::FieldSolutionEntryV1, gradients_xyz);
-            static constexpr std::size_t field_entry_hessians_off =
-                offsetof(assembly::jit::FieldSolutionEntryV1, hessians);
-            static constexpr std::size_t field_entry_laplacians_off = offsetof(assembly::jit::FieldSolutionEntryV1, laplacians);
-
-            static constexpr std::size_t field_entry_vector_values_xyz_off =
-                offsetof(assembly::jit::FieldSolutionEntryV1, vector_values_xyz);
-            static constexpr std::size_t field_entry_jacobians_off = offsetof(assembly::jit::FieldSolutionEntryV1, jacobians);
-            static constexpr std::size_t field_entry_component_hessians_off =
-                offsetof(assembly::jit::FieldSolutionEntryV1, component_hessians);
-            static constexpr std::size_t field_entry_component_laplacians_off =
-                offsetof(assembly::jit::FieldSolutionEntryV1, component_laplacians);
-
-            static constexpr std::size_t field_entry_history_count_off =
-                offsetof(assembly::jit::FieldSolutionEntryV1, history_count);
-            static constexpr std::size_t field_entry_history_values_off =
-                offsetof(assembly::jit::FieldSolutionEntryV1, history_values);
-            static constexpr std::size_t field_entry_history_vector_values_xyz_off =
-                offsetof(assembly::jit::FieldSolutionEntryV1, history_vector_values_xyz);
-        };
-#endif
-
-        auto gepBytes = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
-            return builder.CreateGEP(builder.getInt8Ty(),
-                                     base,
-                                     llvm::ConstantInt::get(builder.getInt64Ty(), static_cast<std::uint64_t>(off)));
-        };
-
-        auto loadU32 = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
-            auto* addr = gepBytes(base, off);
-            return builder.CreateLoad(builder.getInt32Ty(), addr);
-        };
-
-        auto loadI32 = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
-            auto* addr = gepBytes(base, off);
-            return builder.CreateLoad(builder.getInt32Ty(), addr);
-        };
-
-        auto loadU64 = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
-            auto* addr = gepBytes(base, off);
-            return builder.CreateLoad(builder.getInt64Ty(), addr);
-        };
-
-        auto loadF64 = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
-            auto* addr = gepBytes(base, off);
-            return builder.CreateLoad(builder.getDoubleTy(), addr);
-        };
-
-        auto loadPtr = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
-            auto* addr = gepBytes(base, off);
-            return builder.CreateLoad(i8_ptr, addr);
-        };
-
-        auto* f64 = builder.getDoubleTy();
-        auto* i32 = builder.getInt32Ty();
-        auto* i64 = builder.getInt64Ty();
-        auto* f64_ptr = llvm::PointerType::getUnqual(f64);
 
         // External-call trampolines (relaxed-mode).
         auto coeff_eval_scalar_fn =
@@ -1838,6 +1658,37 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
         auto f64c = [&](double v) -> llvm::Constant* {
             return llvm::ConstantFP::get(f64, v);
+        };
+
+        auto gepBytes = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
+            return builder.CreateGEP(builder.getInt8Ty(),
+                                     base,
+                                     llvm::ConstantInt::get(builder.getInt64Ty(), static_cast<std::uint64_t>(off)));
+        };
+
+        auto loadU32 = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
+            auto* addr = gepBytes(base, off);
+            return builder.CreateLoad(builder.getInt32Ty(), addr);
+        };
+
+        auto loadI32 = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
+            auto* addr = gepBytes(base, off);
+            return builder.CreateLoad(builder.getInt32Ty(), addr);
+        };
+
+        auto loadU64 = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
+            auto* addr = gepBytes(base, off);
+            return builder.CreateLoad(builder.getInt64Ty(), addr);
+        };
+
+        auto loadF64 = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
+            auto* addr = gepBytes(base, off);
+            return builder.CreateLoad(builder.getDoubleTy(), addr);
+        };
+
+        auto loadPtr = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
+            auto* addr = gepBytes(base, off);
+            return builder.CreateLoad(i8_ptr, addr);
         };
 
         auto loadRealPtrAt = [&](llvm::Value* base_ptr,
@@ -2037,31 +1888,66 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	        const std::optional<std::uint32_t> fixed_n_trial_dofs_plus =
 	            (specialization != nullptr) ? specialization->n_trial_dofs_plus : std::optional<std::uint32_t>{};
 
-	        SideView side_single{};
-	        SideView side_minus{};
-	        SideView side_plus{};
-
-        llvm::Value* out_single_ptr = nullptr;
-        llvm::Value* out_minus_ptr = nullptr;
-        llvm::Value* out_plus_ptr = nullptr;
-        llvm::Value* out_coupling_mp_ptr = nullptr;
-        llvm::Value* out_coupling_pm_ptr = nullptr;
-
-        llvm::Value* element_matrix_single = nullptr;
-        llvm::Value* element_vector_single = nullptr;
-
-        if (!is_face_domain) {
-            const std::size_t side_off = (domain == IntegralDomain::Cell) ? ABIV3::cell_side_off : ABIV3::bdry_side_off;
-	            const std::size_t out_off = (domain == IntegralDomain::Cell) ? ABIV3::cell_out_off : ABIV3::bdry_out_off;
-
-	            auto* side_ptr = gepBytes(args_ptr, side_off);
-	            out_single_ptr = gepBytes(args_ptr, out_off);
-	            side_single = loadSideView(side_ptr, fixed_n_qpts_minus, fixed_n_test_dofs_minus, fixed_n_trial_dofs_minus);
-
-	            element_matrix_single = loadPtr(out_single_ptr, ABIV3::out_element_matrix_off);
-	            element_vector_single = loadPtr(out_single_ptr, ABIV3::out_element_vector_off);
-	        } else {
-            auto* minus_ptr = gepBytes(args_ptr, ABIV3::face_minus_side_off);
+	                // Prepare batch loop
+	                const bool use_batch = options_.vectorize && (domain == IntegralDomain::Cell);
+	        
+	                auto* pre_batch = builder.GetInsertBlock();
+	                auto* batch_hdr = llvm::BasicBlock::Create(*ctx, "batch.hdr", fn);
+	                auto* batch_body = llvm::BasicBlock::Create(*ctx, "batch.body", fn);
+	                auto* batch_exit = llvm::BasicBlock::Create(*ctx, "batch.exit", fn);
+	        
+	                builder.CreateBr(batch_hdr);
+	                builder.SetInsertPoint(batch_hdr);
+	                auto* b_idx = builder.CreatePHI(i32, 2, "batch.idx");
+	                b_idx->addIncoming(builder.getInt32(0), pre_batch);
+	        
+	                llvm::Value* n_batch = builder.getInt32(1);
+	                if (use_batch) {
+	                    n_batch = loadU32(args_ptr, ABIV3::batch_size_off);
+	                }
+	        
+	                auto* has_next = builder.CreateICmpULT(b_idx, n_batch);
+	                builder.CreateCondBr(has_next, batch_body, batch_exit);
+	        
+	                builder.SetInsertPoint(batch_body);
+	        
+	                SideView side_single{};
+	                SideView side_minus{};
+	                SideView side_plus{};
+	        
+	                llvm::Value* out_single_ptr = nullptr;
+	                llvm::Value* out_minus_ptr = nullptr;
+	                llvm::Value* out_plus_ptr = nullptr;
+	                llvm::Value* out_coupling_mp_ptr = nullptr;
+	                llvm::Value* out_coupling_pm_ptr = nullptr;
+	        
+	                llvm::Value* element_matrix_single = nullptr;
+	                llvm::Value* element_vector_single = nullptr;
+	        
+	                if (!is_face_domain) {
+	                    const std::size_t side_off = (domain == IntegralDomain::Cell) ? ABIV3::cell_side_off : ABIV3::bdry_side_off;
+	                    const std::size_t out_off = (domain == IntegralDomain::Cell) ? ABIV3::cell_out_off : ABIV3::bdry_out_off;
+	        
+	                    llvm::Value* side_ptr = nullptr;
+	                    if (use_batch) {
+	                        auto* sides_base = loadPtr(args_ptr, ABIV3::batch_sides_off);
+	                        auto* outputs_base = loadPtr(args_ptr, ABIV3::batch_outputs_off);
+	                        auto* b_idx64 = builder.CreateZExt(b_idx, i64);
+	        
+	                        side_ptr = builder.CreateGEP(builder.getInt8Ty(), sides_base,
+	                            builder.CreateMul(b_idx64, builder.getInt64(sizeof(assembly::jit::KernelSideArgsV6))));
+	                        out_single_ptr = builder.CreateGEP(builder.getInt8Ty(), outputs_base,
+	                            builder.CreateMul(b_idx64, builder.getInt64(sizeof(assembly::jit::KernelOutputViewV6))));
+	                    } else {
+	                        side_ptr = gepBytes(args_ptr, side_off);
+	                        out_single_ptr = gepBytes(args_ptr, out_off);
+	                    }
+	        
+	                    side_single = loadSideView(side_ptr, fixed_n_qpts_minus, fixed_n_test_dofs_minus, fixed_n_trial_dofs_minus);
+	        
+	                    element_matrix_single = loadPtr(out_single_ptr, ABIV3::out_element_matrix_off);
+	                    element_vector_single = loadPtr(out_single_ptr, ABIV3::out_element_vector_off);
+	                } else {            auto* minus_ptr = gepBytes(args_ptr, ABIV3::face_minus_side_off);
             auto* plus_ptr = gepBytes(args_ptr, ABIV3::face_plus_side_off);
 
 	            side_minus =
@@ -2256,22 +2142,24 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             return non_td;
         };
 
-	        auto* fabs_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::fabs, {f64});
-	        auto* sqrt_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::sqrt, {f64});
-	        auto* exp_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::exp, {f64});
-	        auto* log_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::log, {f64});
-	        auto* pow_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::pow, {f64});
-	        auto* fmuladd_fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::fmuladd, {f64});
-
-	        auto f_fabs = [&](llvm::Value* v) -> llvm::Value* { return builder.CreateCall(fabs_fn, {v}); };
-	        auto f_sqrt = [&](llvm::Value* v) -> llvm::Value* { return builder.CreateCall(sqrt_fn, {v}); };
-	        auto f_exp = [&](llvm::Value* v) -> llvm::Value* { return builder.CreateCall(exp_fn, {v}); };
-	        auto f_log = [&](llvm::Value* v) -> llvm::Value* { return builder.CreateCall(log_fn, {v}); };
-	        auto f_pow = [&](llvm::Value* a, llvm::Value* b) -> llvm::Value* { return builder.CreateCall(pow_fn, {a, b}); };
-	        auto f_fmuladd = [&](llvm::Value* a, llvm::Value* b, llvm::Value* c) -> llvm::Value* {
-	            return builder.CreateCall(fmuladd_fn, {a, b, c});
-	        };
-
+	                auto f_fabs = [&](llvm::Value* v) -> llvm::Value* {
+	                    return builder.CreateUnaryIntrinsic(llvm::Intrinsic::fabs, v);
+	                };
+	                auto f_sqrt = [&](llvm::Value* v) -> llvm::Value* {
+	                    return builder.CreateUnaryIntrinsic(llvm::Intrinsic::sqrt, v);
+	                };
+	                auto f_exp = [&](llvm::Value* v) -> llvm::Value* {
+	                    return builder.CreateUnaryIntrinsic(llvm::Intrinsic::exp, v);
+	                };
+	                auto f_log = [&](llvm::Value* v) -> llvm::Value* {
+	                    return builder.CreateUnaryIntrinsic(llvm::Intrinsic::log, v);
+	                };
+	                auto f_pow = [&](llvm::Value* a, llvm::Value* b) -> llvm::Value* {
+	                    return builder.CreateBinaryIntrinsic(llvm::Intrinsic::pow, a, b);
+	                };
+	                auto f_fmuladd = [&](llvm::Value* a, llvm::Value* b, llvm::Value* c) -> llvm::Value* {
+	                    return builder.CreateIntrinsic(llvm::Intrinsic::fmuladd, {a->getType()}, {a, b, c});
+	                };
         auto f_min = [&](llvm::Value* a, llvm::Value* b) -> llvm::Value* {
             // Match std::min semantics: (b < a) ? b : a
             auto* pick_b = builder.CreateFCmpOLT(b, a);
@@ -12299,6 +12187,12 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
             }
         }
 
+        auto* body_end = builder.GetInsertBlock();
+        auto* b_next = builder.CreateAdd(b_idx, builder.getInt32(1));
+        b_idx->addIncoming(b_next, body_end);
+        builder.CreateBr(batch_hdr);
+
+        builder.SetInsertPoint(batch_exit);
         builder.CreateRetVoid();
 
         if (di_builder) {
