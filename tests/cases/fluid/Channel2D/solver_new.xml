@@ -72,11 +72,12 @@
             <Divergence> true </Divergence>
         </Output>
 
-        <LS type="PGMRES" >
+        <LS type="GMRES" >
             <Linear_algebra type="fsils" >
                 <Preconditioner> fsils </Preconditioner>
             </Linear_algebra>
             <Max_iterations> 1000 </Max_iterations>
+            <Krylov_space_dimension> 50 </Krylov_space_dimension>
             <Tolerance> 1e-6 </Tolerance>
         </LS>
 

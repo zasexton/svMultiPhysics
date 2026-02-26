@@ -79,15 +79,15 @@
             <Linear_algebra type="fsils" >
                 <Preconditioner> fsils </Preconditioner>
             </Linear_algebra>
-            <Max_iterations> 5 </Max_iterations>
+            <Max_iterations> 1000 </Max_iterations>
             <Krylov_space_dimension> 50 </Krylov_space_dimension>
             <Tolerance> 1e-6 </Tolerance>
         </LS>
 
         <Add_BC name="left" >
-            <Type> Neumann </Type>
-            <Time_dependence> Steady </Time_dependence>
-            <Value> 1.0 </Value>
+            <Type> Dir </Type>
+            <Time_dependence> General </Time_dependence>
+            <Temporal_and_spatial_values_file_path> left_vbc.dat </Temporal_and_spatial_values_file_path>
         </Add_BC>
 
         <Add_BC name="bottom" >
