@@ -201,7 +201,9 @@ void precond_diag(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_in
   }
 
   for (fsils_int i = 0; i < W.size(); i++) {
-    W(i) = 1.0 / sqrt(fabs(W(i)));
+    double absW = fabs(W(i));
+    double sign = (W(i) >= 0.0) ? 1.0 : -1.0;
+    W(i) = sign / sqrt(absW + std::numeric_limits<double>::min());
   }
 
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
