@@ -19,6 +19,7 @@
 
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Forms/JIT/ExternalCalls.h"
 
 #include "Backends/Interfaces/GenericVector.h"
 #include "Backends/FSILS/FsilsMatrix.h"
@@ -510,7 +511,9 @@ assembly::AssemblyResult assembleOperator(
     assembler.setParameterGetter(have_param_contracts
                                      ? &get_param_wrapped
                                      : (state.getParam ? &state.getParam : nullptr));
-    assembler.setUserData(state.user_data);
+    forms::jit::external::ExternalCallTableV1 jit_table;
+    jit_table.context = state.user_data;
+    assembler.setUserData(&jit_table);
 
     // JIT-friendly constant slots (Real-valued parameters resolved to stable indices).
     std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> jit_constants;

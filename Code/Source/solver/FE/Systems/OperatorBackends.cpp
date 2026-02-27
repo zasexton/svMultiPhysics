@@ -12,7 +12,7 @@
 
 #include "Assembly/MatrixFreeAssembler.h"
 #include "Assembly/FunctionalAssembler.h"
-
+#include "Forms/JIT/ExternalCalls.h"
 #include "Core/Alignment.h"
 #include "Core/AlignedAllocator.h"
 
@@ -188,7 +188,9 @@ Real OperatorBackends::evaluateFunctional(const FESystem& system,
     assembler.setParameterGetter(have_param_contracts
                                      ? &get_param_wrapped
                                      : (state.getParam ? &state.getParam : nullptr));
-    assembler.setUserData(state.user_data);
+    forms::jit::external::ExternalCallTableV1 jit_table;
+    jit_table.context = state.user_data;
+    assembler.setUserData(&jit_table);
     std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> jit_constants;
     if (have_param_contracts && preg.slotCount() > 0u) {
         const auto slots = preg.evaluateRealSlots(state);
@@ -251,7 +253,9 @@ Real OperatorBackends::evaluateBoundaryFunctional(const FESystem& system,
     assembler.setParameterGetter(have_param_contracts
                                      ? &get_param_wrapped
                                      : (state.getParam ? &state.getParam : nullptr));
-    assembler.setUserData(state.user_data);
+    forms::jit::external::ExternalCallTableV1 jit_table;
+    jit_table.context = state.user_data;
+    assembler.setUserData(&jit_table);
     std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> jit_constants;
     if (have_param_contracts && preg.slotCount() > 0u) {
         const auto slots = preg.evaluateRealSlots(state);

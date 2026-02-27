@@ -11,6 +11,7 @@
 #include "Backends/Interfaces/GenericVector.h"
 #include "Forms/BoundaryFunctional.h"
 #include "Forms/PointEvaluator.h"
+#include "Forms/JIT/ExternalCalls.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemsExceptions.h"
 #include "Core/FEConfig.h"
@@ -352,7 +353,9 @@ Real CoupledBoundaryManager::boundaryMeasure(int boundary_marker, const SystemSt
     assembler.setParameterGetter(have_param_contracts
                                      ? &get_param_wrapped
                                      : (state.getParam ? &state.getParam : nullptr));
-    assembler.setUserData(state.user_data);
+    forms::jit::external::ExternalCallTableV1 jit_table;
+    jit_table.context = state.user_data;
+    assembler.setUserData(&jit_table);
     std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> jit_constants;
     if (have_param_contracts && preg.slotCount() > 0u) {
         const auto slots = preg.evaluateRealSlots(state);
@@ -416,7 +419,9 @@ Real CoupledBoundaryManager::evaluateFunctional(const CompiledFunctional& entry,
     assembler.setParameterGetter(have_param_contracts
                                      ? &get_param_wrapped
                                      : (state.getParam ? &state.getParam : nullptr));
-    assembler.setUserData(state.user_data);
+    forms::jit::external::ExternalCallTableV1 jit_table;
+    jit_table.context = state.user_data;
+    assembler.setUserData(&jit_table);
     std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> jit_constants;
     if (have_param_contracts && preg.slotCount() > 0u) {
         const auto slots = preg.evaluateRealSlots(state);

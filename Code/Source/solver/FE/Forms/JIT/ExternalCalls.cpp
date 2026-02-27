@@ -533,7 +533,8 @@ extern "C" void svmp_fe_jit_constitutive_eval_v1(const void* side_ptr,
         ctx.boundary_marker = static_cast<int>(side->boundary_marker);
         ctx.q = static_cast<LocalIndex>(q);
         ctx.num_qpts = static_cast<LocalIndex>(side->n_qpts);
-        ctx.user_data = side->user_data;
+        const auto* table = tryGetExternalCallTable(side);
+        ctx.user_data = table ? table->context : side->user_data;
 
         NonlocalV1 nonlocal_state{side};
         ConstitutiveEvalContext::NonlocalAccess nonlocal;

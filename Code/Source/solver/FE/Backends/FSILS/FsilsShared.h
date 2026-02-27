@@ -59,6 +59,20 @@ struct FsilsShared final {
     std::shared_ptr<const DofPermutation> dof_permutation{};
 
     fe_fsi_linear_solver::FSILS_lhsType lhs{};
+    
+    // Flat O(1) lookup: row_col_to_nnz_[row_internal * max_row_nnz + local_col_offset] -> nnz_index
+    // This allows O(1) matrix insertion instead of binary searches within each row.
+    std::vector<int> row_col_to_nnz_{};
+    int max_row_nnz_{0};
+    
+    // Hash table for fallback if row is too dense. Unordered map is O(1) average.
+    // Use a flat map over internal node numbers.
+    // For each node, we map its non-zero column internal IDs to their NNZ index.
+    // In practice, since row lengths are small (e.g., 81 or 125 for hexes), we can use
+    // a flat CSR-like map: nnz_map[start + i] = {col, nnz}
+    std::vector<int> nnz_map_cols_{};
+    std::vector<int> nnz_map_idx_{};
+    std::vector<int> nnz_map_row_ptr_{};
 
     [[nodiscard]] int localNodeCount() const noexcept { return lhs.nNo; }
 

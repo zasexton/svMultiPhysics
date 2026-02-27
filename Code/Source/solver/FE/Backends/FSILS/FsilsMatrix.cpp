@@ -706,7 +706,72 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
     fe_fsi_linear_solver::fsils_lhs_create(shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0);
 
     build_old_of_internal(*shared);
+
     shared->buildGlobalToOldTable();
+    
+    // Pre-compute an optimized nnz lookup table to replace O(log n) binary searches.
+    // We use a flat hash map since the number of non-zeros per row is small (~81-125).
+    // nnz_map_row_ptr_ marks the start of each row in the flat arrays.
+    if (shared->lhs.nNo > 0) {
+        const int nNo_int = shared->lhs.nNo;
+        shared->nnz_map_row_ptr_.assign(static_cast<std::size_t>(nNo_int + 1), 0);
+        
+        int total_entries = 0;
+        for (int row = 0; row < nNo_int; ++row) {
+            const int start = shared->lhs.rowPtr(0, row);
+            const int end = shared->lhs.rowPtr(1, row);
+            shared->nnz_map_row_ptr_[static_cast<std::size_t>(row)] = total_entries;
+            if (start >= 0 && end >= start) {
+                total_entries += (end - start + 1);
+            }
+        }
+        shared->nnz_map_row_ptr_[static_cast<std::size_t>(nNo_int)] = total_entries;
+        
+        shared->nnz_map_cols_.assign(static_cast<std::size_t>(total_entries), -1);
+        shared->nnz_map_idx_.assign(static_cast<std::size_t>(total_entries), -1);
+        
+        for (int row = 0; row < nNo_int; ++row) {
+            const int start = shared->lhs.rowPtr(0, row);
+            const int end = shared->lhs.rowPtr(1, row);
+            if (start < 0 || end < start) continue;
+            
+            const int n_cols = end - start + 1;
+            // Create a perfect minimal hash for the small row by using a slightly larger table
+            // and linear probing. We size the block at 2x the non-zeros to keep load factor <= 0.5.
+            const int block_size = std::max(2, n_cols * 2);
+            
+            // Adjust row_ptr to hold the block size
+            shared->nnz_map_row_ptr_[static_cast<std::size_t>(row + 1)] = 
+                shared->nnz_map_row_ptr_[static_cast<std::size_t>(row)] + block_size;
+        }
+        
+        // Re-allocate based on blocks
+        const int hash_total = shared->nnz_map_row_ptr_[static_cast<std::size_t>(nNo_int)];
+        shared->nnz_map_cols_.assign(static_cast<std::size_t>(hash_total), -1);
+        shared->nnz_map_idx_.assign(static_cast<std::size_t>(hash_total), -1);
+        
+        for (int row = 0; row < nNo_int; ++row) {
+            const int start = shared->lhs.rowPtr(0, row);
+            const int end = shared->lhs.rowPtr(1, row);
+            if (start < 0 || end < start) continue;
+            
+            const int hash_start = shared->nnz_map_row_ptr_[static_cast<std::size_t>(row)];
+            const int hash_size = shared->nnz_map_row_ptr_[static_cast<std::size_t>(row + 1)] - hash_start;
+            
+            for (int idx = start; idx <= end; ++idx) {
+                const int col = shared->lhs.colPtr[idx];
+                
+                // Linear probing
+                int slot = col % hash_size;
+                while (shared->nnz_map_cols_[static_cast<std::size_t>(hash_start + slot)] != -1) {
+                    slot = (slot + 1) % hash_size;
+                }
+                shared->nnz_map_cols_[static_cast<std::size_t>(hash_start + slot)] = col;
+                shared->nnz_map_idx_[static_cast<std::size_t>(hash_start + slot)] = idx;
+            }
+        }
+    }
+
 
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     values_.assign(static_cast<std::size_t>(nnz) * block_size, 0.0);
@@ -1022,7 +1087,72 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     fe_fsi_linear_solver::fsils_lhs_create(shared->lhs, commu, gnNo, nNo, nnz, gNodes, rowPtr, colPtr, /*nFaces=*/0);
 
     build_old_of_internal(*shared);
+
     shared->buildGlobalToOldTable();
+    
+    // Pre-compute an optimized nnz lookup table to replace O(log n) binary searches.
+    // We use a flat hash map since the number of non-zeros per row is small (~81-125).
+    // nnz_map_row_ptr_ marks the start of each row in the flat arrays.
+    if (shared->lhs.nNo > 0) {
+        const int nNo_int = shared->lhs.nNo;
+        shared->nnz_map_row_ptr_.assign(static_cast<std::size_t>(nNo_int + 1), 0);
+        
+        int total_entries = 0;
+        for (int row = 0; row < nNo_int; ++row) {
+            const int start = shared->lhs.rowPtr(0, row);
+            const int end = shared->lhs.rowPtr(1, row);
+            shared->nnz_map_row_ptr_[static_cast<std::size_t>(row)] = total_entries;
+            if (start >= 0 && end >= start) {
+                total_entries += (end - start + 1);
+            }
+        }
+        shared->nnz_map_row_ptr_[static_cast<std::size_t>(nNo_int)] = total_entries;
+        
+        shared->nnz_map_cols_.assign(static_cast<std::size_t>(total_entries), -1);
+        shared->nnz_map_idx_.assign(static_cast<std::size_t>(total_entries), -1);
+        
+        for (int row = 0; row < nNo_int; ++row) {
+            const int start = shared->lhs.rowPtr(0, row);
+            const int end = shared->lhs.rowPtr(1, row);
+            if (start < 0 || end < start) continue;
+            
+            const int n_cols = end - start + 1;
+            // Create a perfect minimal hash for the small row by using a slightly larger table
+            // and linear probing. We size the block at 2x the non-zeros to keep load factor <= 0.5.
+            const int block_size = std::max(2, n_cols * 2);
+            
+            // Adjust row_ptr to hold the block size
+            shared->nnz_map_row_ptr_[static_cast<std::size_t>(row + 1)] = 
+                shared->nnz_map_row_ptr_[static_cast<std::size_t>(row)] + block_size;
+        }
+        
+        // Re-allocate based on blocks
+        const int hash_total = shared->nnz_map_row_ptr_[static_cast<std::size_t>(nNo_int)];
+        shared->nnz_map_cols_.assign(static_cast<std::size_t>(hash_total), -1);
+        shared->nnz_map_idx_.assign(static_cast<std::size_t>(hash_total), -1);
+        
+        for (int row = 0; row < nNo_int; ++row) {
+            const int start = shared->lhs.rowPtr(0, row);
+            const int end = shared->lhs.rowPtr(1, row);
+            if (start < 0 || end < start) continue;
+            
+            const int hash_start = shared->nnz_map_row_ptr_[static_cast<std::size_t>(row)];
+            const int hash_size = shared->nnz_map_row_ptr_[static_cast<std::size_t>(row + 1)] - hash_start;
+            
+            for (int idx = start; idx <= end; ++idx) {
+                const int col = shared->lhs.colPtr[idx];
+                
+                // Linear probing
+                int slot = col % hash_size;
+                while (shared->nnz_map_cols_[static_cast<std::size_t>(hash_start + slot)] != -1) {
+                    slot = (slot + 1) % hash_size;
+                }
+                shared->nnz_map_cols_[static_cast<std::size_t>(hash_start + slot)] = col;
+                shared->nnz_map_idx_[static_cast<std::size_t>(hash_start + slot)] = idx;
+            }
+        }
+    }
+
 
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     values_.assign(static_cast<std::size_t>(nnz) * block_size, 0.0);
@@ -1170,20 +1300,29 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
 	        return 0.0;
 	    }
 
-	    const int start = lhs.rowPtr(0, row_internal);
-	    const int end = lhs.rowPtr(1, row_internal);
-	    if (start < 0 || end < start || end >= lhs.nnz) {
+	    const int hash_start = shared_->nnz_map_row_ptr_[static_cast<std::size_t>(row_internal)];
+	    const int hash_size = shared_->nnz_map_row_ptr_[static_cast<std::size_t>(row_internal + 1)] - hash_start;
+	    if (hash_size == 0) {
 	        return 0.0;
 	    }
-	    const auto* cols = lhs.colPtr.data();
-	    const auto* begin = cols + start;
-	    const auto* finish = cols + end + 1;
-	    const auto it = std::lower_bound(begin, finish, static_cast<fe_fsi_linear_solver::fsils_int>(col_internal));
-	    if (it == finish || *it != col_internal) {
-        return 0.0;
-    }
-
-	    const int nnz_idx = static_cast<int>(it - cols);
+	    
+	    int slot = col_internal % hash_size;
+	    int nnz_idx = -1;
+	    for (int step = 0; step < hash_size; ++step) {
+	        const int s_idx = hash_start + slot;
+	        if (shared_->nnz_map_cols_[static_cast<std::size_t>(s_idx)] == col_internal) {
+	            nnz_idx = shared_->nnz_map_idx_[static_cast<std::size_t>(s_idx)];
+	            break;
+	        }
+	        if (shared_->nnz_map_cols_[static_cast<std::size_t>(s_idx)] == -1) {
+	            break;
+	        }
+	        slot = (slot + 1) % hash_size;
+	    }
+	    
+	    if (nnz_idx < 0) {
+	        return 0.0;
+	    }
 	    const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
 	    const std::size_t base = static_cast<std::size_t>(nnz_idx) * block_size;
 	    const std::size_t off = block_entry_index(dof, row_comp, col_comp);
@@ -1232,21 +1371,31 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsMatrix::createAssemblyView()
 	        return;
 	    }
 
-	    const int start = lhs.rowPtr(0, row_internal);
-	    const int end = lhs.rowPtr(1, row_internal);
-	    if (start < 0 || end < start || end >= lhs.nnz) {
+	    const int hash_start = shared_->nnz_map_row_ptr_[static_cast<std::size_t>(row_internal)];
+	    const int hash_size = shared_->nnz_map_row_ptr_[static_cast<std::size_t>(row_internal + 1)] - hash_start;
+	    if (hash_size == 0) {
+	        dropped_entry_count_.fetch_add(1, std::memory_order_relaxed);
 	        return;
 	    }
-	    auto* cols = lhs.colPtr.data();
-	    auto* begin = cols + start;
-	    auto* finish = cols + end + 1;
-	    const auto it = std::lower_bound(begin, finish, static_cast<fe_fsi_linear_solver::fsils_int>(col_internal));
-	    if (it == finish || *it != col_internal) {
-        dropped_entry_count_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-
-	    const int nnz_idx = static_cast<int>(it - cols);
+	    
+	    int slot = col_internal % hash_size;
+	    int nnz_idx = -1;
+	    for (int step = 0; step < hash_size; ++step) {
+	        const int s_idx = hash_start + slot;
+	        if (shared_->nnz_map_cols_[static_cast<std::size_t>(s_idx)] == col_internal) {
+	            nnz_idx = shared_->nnz_map_idx_[static_cast<std::size_t>(s_idx)];
+	            break;
+	        }
+	        if (shared_->nnz_map_cols_[static_cast<std::size_t>(s_idx)] == -1) {
+	            break;
+	        }
+	        slot = (slot + 1) % hash_size;
+	    }
+	    
+	    if (nnz_idx < 0) {
+	        dropped_entry_count_.fetch_add(1, std::memory_order_relaxed);
+	        return;
+	    }
 	    const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
 	    const std::size_t base = static_cast<std::size_t>(nnz_idx) * block_size;
 	    const std::size_t off = block_entry_index(dof, row_comp, col_comp);
@@ -1280,22 +1429,31 @@ void FsilsMatrix::addBlock(int row_internal, int col_internal, const Real* block
         return;
     }
 
-    const int start = lhs.rowPtr(0, row_internal);
-    const int end = lhs.rowPtr(1, row_internal);
-    if (start < 0 || end < start || end >= lhs.nnz) {
+    const int hash_start = shared_->nnz_map_row_ptr_[static_cast<std::size_t>(row_internal)];
+    const int hash_size = shared_->nnz_map_row_ptr_[static_cast<std::size_t>(row_internal + 1)] - hash_start;
+    if (hash_size == 0) {
+        dropped_entry_count_.fetch_add(static_cast<std::uint64_t>(dof) * static_cast<std::uint64_t>(dof), std::memory_order_relaxed);
         return;
     }
-    const auto* cols = lhs.colPtr.data();
-    const auto* begin = cols + start;
-    const auto* finish = cols + end + 1;
-    const auto it = std::lower_bound(begin, finish, static_cast<fe_fsi_linear_solver::fsils_int>(col_internal));
-    if (it == finish || *it != col_internal) {
-        dropped_entry_count_.fetch_add(static_cast<std::uint64_t>(dof) * static_cast<std::uint64_t>(dof),
-                                       std::memory_order_relaxed);
+    
+    int slot = col_internal % hash_size;
+    int nnz_idx = -1;
+    for (int step = 0; step < hash_size; ++step) {
+        const int s_idx = hash_start + slot;
+        if (shared_->nnz_map_cols_[static_cast<std::size_t>(s_idx)] == col_internal) {
+            nnz_idx = shared_->nnz_map_idx_[static_cast<std::size_t>(s_idx)];
+            break;
+        }
+        if (shared_->nnz_map_cols_[static_cast<std::size_t>(s_idx)] == -1) {
+            break;
+        }
+        slot = (slot + 1) % hash_size;
+    }
+    
+    if (nnz_idx < 0) {
+        dropped_entry_count_.fetch_add(static_cast<std::uint64_t>(dof) * static_cast<std::uint64_t>(dof), std::memory_order_relaxed);
         return;
     }
-
-    const int nnz_idx = static_cast<int>(it - cols);
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     const std::size_t base = static_cast<std::size_t>(nnz_idx) * block_size;
     if (base + block_size > values_.size()) {
