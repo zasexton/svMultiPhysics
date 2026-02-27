@@ -82,7 +82,7 @@ jobs:
           cmake -DCMAKE_BUILD_TYPE=Release \
                 -DSV_USE_TRILINOS:BOOL=OFF \
                 -DFE_ENABLE_LLVM_JIT:BOOL=ON \
-                -DLLVM_DIR="$(brew --prefix llvm)/lib/cmake/llvm" \
+                -DCMAKE_PREFIX_PATH="$(brew --prefix llvm)" \
                 ..
           make -j$(sysctl -n hw.logicalcpu)
 
