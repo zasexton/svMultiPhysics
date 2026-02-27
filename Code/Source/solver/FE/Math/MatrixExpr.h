@@ -10,6 +10,7 @@
  * of assignment, eliminating intermediate allocations and improving performance.
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <type_traits>
 #include <cmath>
