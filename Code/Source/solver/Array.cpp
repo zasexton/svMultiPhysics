@@ -123,7 +123,7 @@ void Array<int>::stats(const std::string& prefix)
 template<>
 bool Array<int>::write_enabled = false;
 
-// long (int64_t / fsils_int) //
+// long (int64_t on Linux) //
 template<>
 bool Array<long>::show_index_check_message = true;
 
@@ -156,4 +156,38 @@ void Array<long>::stats(const std::string& prefix)
 
 template<>
 bool Array<long>::write_enabled = false;
+
+// long long (int64_t on macOS) — distinct type from long in C++ //
+template<>
+bool Array<long long>::show_index_check_message = true;
+
+template<>
+int Array<long long>::id = 0;
+
+template<>
+double Array<long long>::memory_in_use = 0;
+
+template<>
+double Array<long long>::memory_returned = 0;
+
+template<>
+int Array<long long>::num_allocated = 0;
+
+template<>
+int Array<long long>::active = 0;
+
+template<>
+void Array<long long>::memory(const std::string& prefix)
+{
+  utils::print_mem("Array<long long>", prefix, memory_in_use, memory_returned);
+}
+
+template<>
+void Array<long long>::stats(const std::string& prefix)
+{
+  utils::print_stats("Array<long long>", prefix, num_allocated, active);
+}
+
+template<>
+bool Array<long long>::write_enabled = false;
 

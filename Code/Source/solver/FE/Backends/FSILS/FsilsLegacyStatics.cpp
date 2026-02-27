@@ -67,7 +67,7 @@ int Vector<float>::active = 0;
 template<>
 bool Vector<float>::write_enabled = false;
 
-// long (int64_t / fsils_int) //
+// long (int64_t on Linux) //
 template<>
 bool Vector<long>::show_index_check_message = true;
 template<>
@@ -80,6 +80,20 @@ template<>
 int Vector<long>::active = 0;
 template<>
 bool Vector<long>::write_enabled = false;
+
+// long long (int64_t on macOS) — distinct type from long in C++ //
+template<>
+bool Vector<long long>::show_index_check_message = true;
+template<>
+double Vector<long long>::memory_in_use = 0;
+template<>
+double Vector<long long>::memory_returned = 0;
+template<>
+int Vector<long long>::num_allocated = 0;
+template<>
+int Vector<long long>::active = 0;
+template<>
+bool Vector<long long>::write_enabled = false;
 
 template<>
 bool Array<bool>::show_index_check_message = true;
@@ -126,7 +140,7 @@ int Array<int>::active = 0;
 template<>
 bool Array<int>::write_enabled = false;
 
-// long (int64_t / fsils_int) //
+// long (int64_t on Linux) //
 template<>
 bool Array<long>::show_index_check_message = true;
 template<>
@@ -141,6 +155,22 @@ template<>
 int Array<long>::active = 0;
 template<>
 bool Array<long>::write_enabled = false;
+
+// long long (int64_t on macOS) — distinct type from long in C++ //
+template<>
+bool Array<long long>::show_index_check_message = true;
+template<>
+int Array<long long>::id = 0;
+template<>
+double Array<long long>::memory_in_use = 0;
+template<>
+double Array<long long>::memory_returned = 0;
+template<>
+int Array<long long>::num_allocated = 0;
+template<>
+int Array<long long>::active = 0;
+template<>
+bool Array<long long>::write_enabled = false;
 
 template<>
 bool Array3<double>::show_index_check_message = true;

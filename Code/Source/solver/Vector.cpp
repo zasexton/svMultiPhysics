@@ -134,7 +134,7 @@ int Vector<float>::active = 0;
 template<>
 bool Vector<float>::write_enabled = false;
 
-// long (int64_t / fsils_int) //
+// long (int64_t on Linux) //
 template<>
 bool Vector<long>::show_index_check_message = true;
 
@@ -152,6 +152,25 @@ int Vector<long>::active = 0;
 
 template<>
 bool Vector<long>::write_enabled = false;
+
+// long long (int64_t on macOS) — distinct type from long in C++ //
+template<>
+bool Vector<long long>::show_index_check_message = true;
+
+template<>
+double Vector<long long>::memory_in_use = 0;
+
+template<>
+double Vector<long long>::memory_returned = 0;
+
+template<>
+int Vector<long long>::num_allocated = 0;
+
+template<>
+int Vector<long long>::active = 0;
+
+template<>
+bool Vector<long long>::write_enabled = false;
 
 /// @brief Build a prefix for a file name from label which may be from a debugging message.
 //
