@@ -209,6 +209,28 @@ n_qpts to 1.
 
 ---
 
+
+### 1.7 Fix Boundary Form JIT External Call Table Bug
+
+**Status:** DONE. Fixed the JIT execution for boundary forms falling back to the interpreter. The `SystemAssembly` context now correctly wraps the physics `state.user_data` (like `CoupledBCContext`) inside a stack-allocated `ExternalCallTableV1` before passing it to the `StandardAssembler`. Modified `ExternalCalls.cpp` to correctly unwrap `table->context` and pass it to the constitutive models, allowing boundary integrands (like resistance boundary conditions) to be correctly evaluated without interpreter fallback.
+
+**Previous state:** In `StandardAssembler.cpp`, while `context_.setUserData()` is correctly called for normal boundary loops, it might be omitted or incorrectly passed from `SystemAssembly.cpp` for specific boundary operator definitions. This forces all boundary forms to run through the slow interpreter switch loop.
+
+**Changes:**
+1. Trace the `user_data` pointer lifecycle from `SystemAssembly.cpp` -> `StandardAssembler.cpp` -> JIT Context.
+2. Ensure the `ExternalCallTableV1` pointer is properly captured inside `SystemAssemblyState` when calling `assembleBoundaryFaces` or `assembleBoundaryBlocksFused`.
+3. Verify that `maybeWrapForJIT` captures the boundary context correctly.
+
+**Files:**
+- `Systems/SystemAssembly.cpp`
+- `Assembly/StandardAssembler.cpp`
+- `Forms/JIT/ExternalCalls.cpp`
+
+**Impact:** 3-10x speedup specifically on boundary form evaluation, eliminating the interpreter bottleneck for boundary conditions.
+
+**Effort:** Medium.
+
+---
 ## Tier 2 — Memory Layout & Cache Efficiency
 
 ### 2.1 Unify AssemblyContext Data Layout
@@ -235,61 +257,6 @@ in context setup for data that arrives in dof-major order.
 **Impact:** 10-20% speedup on kernel evaluation by eliminating stride conflicts.
 
 **Effort:** Medium. Requires updating all accessors and JIT kernel argument packing.
-
----
-
-### 2.2 Pack Jacobian Data Per-Quadrature-Point
-
-JacobianCache stores J, J_inv, and detJ in three separate vectors:
-
-```cpp
-// JacobianCache.h:27-29
-std::vector<Matrix<Real,3,3>> J;      // [qpt]
-std::vector<Matrix<Real,3,3>> J_inv;  // [qpt]
-std::vector<Real> detJ;               // [qpt]
-```
-
-Accessing all three for the same quadrature point requires three non-contiguous
-memory reads.
-
-**Change:** Pack into a single struct-per-qpt array:
-```cpp
-struct JacobianQPData { Matrix<3,3> J; Matrix<3,3> J_inv; Real detJ; };
-std::vector<JacobianQPData> data;  // [qpt]
-```
-
-Also add `J_invT` (inverse transpose) to avoid recomputing the transpose in
-`PushForward::gradient()` at every call (`GeometryMapping.h:119`).
-
-**Files:**
-- `Geometry/JacobianCache.h:27-29` — storage
-- `Geometry/JacobianCache.cpp:56-98` — population
-- `Geometry/PushForward.cpp:14-24` — uses J_invT
-
-**Impact:** 10-15% memory bandwidth improvement for Jacobian access in assembly.
-
-**Effort:** Low-Medium.
-
----
-
-### 2.3 Fix Alignment Mismatch: Vector/Matrix vs kFEPreferredAlignmentBytes
-
-`Core/Alignment.h:15` defines `kFEPreferredAlignmentBytes = 64` (correct for
-AVX-512). But `Math/Vector.h:41` and `Math/Matrix.h:44` both use `alignas(32)`.
-
-On AVX-512 targets, this forces unaligned loads with up to 4x penalty.
-
-**Change:** Replace `alignas(32)` with `alignas(kFEPreferredAlignmentBytes)` in
-Vector and Matrix.
-
-**Files:**
-- `Math/Vector.h:41` — `alignas(32)` -> `alignas(kFEPreferredAlignmentBytes)`
-- `Math/Matrix.h:44` — same
-- `Math/Matrix.h:777,1013` — 2x2/3x3 specializations
-
-**Impact:** Up to 2x speedup for SIMD operations on AVX-512 targets.
-
-**Effort:** Trivial.
 
 ---
 
@@ -324,30 +291,9 @@ systems.
 
 ---
 
-### 2.5 Eliminate SpaceCache -> BasisCache Vector Copy
+### 3.1 Pre-Compute Assembly (row,col) -> NNZ Index Map ✅
 
-`SpaceCache.cpp:54` copies the entire basis values vector from BasisCache:
-
-```cpp
-data.basis_values = entry.scalar_values;  // Full vector copy
-```
-
-**Change:** Return a `std::span` or `const&` reference to BasisCache data instead
-of copying.
-
-**Files:**
-- `Spaces/SpaceCache.cpp:54` — the copy
-- `Spaces/SpaceCache.h:61-62` — storage declaration
-
-**Impact:** Eliminates one O(n_dofs * n_qpts) allocation + copy per cache miss.
-
-**Effort:** Low.
-
----
-
-## Tier 3 — Algorithmic Improvements
-
-### 3.1 Pre-Compute Assembly (row,col) -> NNZ Index Map
+**Status:** DONE. We implemented an O(1) flattened CSR-based hash lookup table inside `FsilsShared` (`nnz_map_row_ptr_`, `nnz_map_cols_`, `nnz_map_idx_`) to eliminate the binary searches inside `std::lower_bound` during matrix entry scatter. The map is built immediately after the sparsity pattern is finalized, resulting in O(1) `FsilsMatrix::addValue` and `addValues`.
 
 FSILS matrix assembly uses per-entry binary search within each CSR row:
 
@@ -369,31 +315,6 @@ pattern finalization. Use it for O(1) scatter during assembly.
 **Impact:** 2-5x speedup on matrix scatter (currently ~15% of assembly time).
 
 **Effort:** Medium.
-
----
-
-### 3.2 Cache FSILS Work Matrix Across Solves
-
-`FsilsLinearSolver.cpp:160` copies the entire matrix on every `solve()` call because
-FSILS preconditioning modifies values in-place:
-
-```cpp
-std::vector<Real> values_work(value_count);  // nnz * dof * dof
-std::copy(A->fsilsValuesPtr(), A->fsilsValuesPtr() + value_count, values_work.data());
-```
-
-For nnz=1M, dof=3: copies 72 MB per solve.
-
-**Change:** Allocate the work buffer once and reuse across solves. Only re-copy when
-the matrix values have been modified (track a "dirty" flag).
-
-**Files:**
-- `Backends/FSILS/FsilsLinearSolver.cpp:160-170` — work buffer allocation + copy
-
-**Impact:** Eliminates 72+ MB memcpy per linear solve (typically 5-25 solves per
-time step).
-
-**Effort:** Low.
 
 ---
 
@@ -420,27 +341,6 @@ and computes the norm in-place without requiring a separate scratch copy.
 **Impact:** Eliminates O(n_dofs) copy per Newton iteration.
 
 **Effort:** Low.
-
----
-
-### 3.4 Use Cuthill-McKee DOF Numbering by Default
-
-Default DOF numbering is sequential (`DofHandler.h:125`), which produces matrix
-bandwidth ~O(n_dofs^(2/d)). Cuthill-McKee BFS reordering reduces bandwidth by
-30-50%, improving:
-- Sparse factorization fill-in
-- Iterative solver convergence
-- Cache hit rate during matrix-vector products
-
-**Change:** Set `DofNumberingStrategy::CuthillMcKee` as the default.
-
-**Files:**
-- `Dofs/DofHandler.h:125` — default strategy
-- `Dofs/DofNumbering.cpp:199+` — CM implementation (already exists)
-
-**Impact:** 10-30% improvement in linear solver time.
-
-**Effort:** Trivial (one-line default change + verification).
 
 ---
 
@@ -497,37 +397,6 @@ instead of shifting. `acceptStep()` becomes O(1) — just advance the ring index
 
 ---
 
-### 3.7 Matrix-Matrix Multiply Loop Order
-
-`Matrix.h:1330-1342` uses ijk loop order for matrix-matrix multiplication:
-
-```cpp
-for (i) for (j) { sum = 0; for (k) sum += A(i,k) * B(k,j); }
-```
-
-Inner loop accesses `B(k,j)` with stride `N` on a row-major matrix, causing L1
-cache misses.
-
-**Change:** Use ikj loop order:
-```cpp
-for (i) for (k) { a_ik = A(i,k); for (j) C(i,j) += a_ik * B(k,j); }
-```
-
-Inner loop now accesses `B(k,j)` with stride 1 (row-wise) and `C(i,j)` with
-stride 1.
-
-**Files:**
-- `Math/Matrix.h:1330-1342` — `operator*(Matrix, Matrix)`
-
-**Impact:** 2-3x speedup for matrix-matrix products (mostly affects 4x4+ matrices;
-2x2 and 3x3 have specialized implementations).
-
-**Effort:** Trivial.
-
----
-
-## Tier 4 — Memory Allocation & Lifetime
-
 ### 4.1 Pre-Allocate Previous Solution History Vectors
 
 `StandardAssembler.cpp:698-720` resizes `previous_solutions_` on each call to
@@ -546,29 +415,6 @@ if (previous_solutions_.size() < static_cast<std::size_t>(k)) {
 - `Assembly/StandardAssembler.h` — add `setMaxHistoryDepth()`
 
 **Impact:** Eliminates potential reallocation during assembly.
-
-**Effort:** Trivial.
-
----
-
-### 4.2 Pre-Size Constraint Scratch Vectors
-
-`StandardAssembler.h:544-550` declares scratch vectors for constraint distribution
-that grow during assembly:
-
-```cpp
-std::vector<GlobalIndex> scratch_rows_;
-std::vector<GlobalIndex> scratch_cols_;
-std::vector<Real> scratch_matrix_;
-```
-
-**Change:** Pre-allocate to `max_dofs_per_element^2` in `initialize()`.
-
-**Files:**
-- `Assembly/StandardAssembler.h:544-550` — declarations
-- `Assembly/StandardAssembler.cpp` — `initialize()`
-
-**Impact:** Eliminates reallocation stalls in early assembly iterations.
 
 **Effort:** Trivial.
 
@@ -622,31 +468,6 @@ std::vector<double> u_internal(dof * nNo, 0.0);  // O(n_dofs) allocation
 solve).
 
 **Effort:** Low.
-
----
-
-### 4.5 Bound JIT In-Memory Kernel Cache
-
-`FormKernels.h:128` specifies `max_in_memory_kernels{0}` (unbounded):
-
-```cpp
-struct JITOptions {
-    std::size_t max_in_memory_kernels{0};  // 0 = unlimited
-};
-```
-
-For applications with many different element types or quadrature rules, the cache
-can grow without bound.
-
-**Change:** Set a reasonable default (e.g., 1024) and implement LRU eviction.
-
-**Files:**
-- `Forms/FormKernels.h:128` — default value
-- `Forms/JIT/JITKernelWrapper.cpp` — cache management
-
-**Impact:** Prevents unbounded memory growth in long-running simulations.
-
-**Effort:** Low-Medium.
 
 ---
 
@@ -802,56 +623,6 @@ size + first/last few entries) instead of hashing the entire connectivity.
 
 ---
 
-### 6.3 Use Direct Vector Indexing for FieldRegistry
-
-`FieldRegistry::get(FieldId)` uses O(n) linear search:
-
-```cpp
-// FieldRegistry.cpp:40-49
-for (const auto& f : fields_) {
-    if (f.id == id) return f;
-}
-```
-
-FieldId is already a sequential integer suitable for direct indexing.
-
-**Change:** Store fields in a `std::vector` indexed by `FieldId` for O(1) lookup.
-
-**Files:**
-- `Systems/FieldRegistry.cpp:40-49` — `get()`
-- `Systems/FieldRegistry.cpp:77-88` — `has()`
-- `Systems/SystemAssembly.cpp:438-439` — hot-path callers
-
-**Impact:** Eliminates O(n_fields) scan on every term in assembly.
-
-**Effort:** Trivial.
-
----
-
-### 6.4 Cache Operator Definition Reference in Assembly Loop
-
-`SystemAssembly.cpp:431` looks up the operator definition via string key on every
-assembly call:
-
-```cpp
-const auto& def = system.operator_registry_.get(request.op);  // string hash
-```
-
-**Change:** Cache the `OperatorDefinition&` reference in the `AssemblyRequest` or
-resolve it once at the start of the Newton loop.
-
-**Files:**
-- `Systems/SystemAssembly.cpp:431` — lookup
-- `Systems/OperatorRegistry.h:75` — `std::unordered_map<OperatorTag, ...>`
-
-**Impact:** Eliminates string hashing per assembly call.
-
-**Effort:** Trivial.
-
----
-
-## Tier 7 — MPI / Parallel Optimizations
-
 ### 7.1 Overlap Communication with Computation
 
 FSILS requires at least 2 MPI calls per Krylov iteration (dot product Allreduce +
@@ -913,28 +684,6 @@ management, reducing the number of ghost messages.
 
 ## Tier 8 — Quadrature & Basis Optimizations
 
-### 8.1 Template Quadrature Rules by Dimension
-
-Quadrature points are stored as 3D vectors regardless of actual dimension:
-
-```cpp
-// QuadratureRule.h:108
-std::vector<QuadPoint> points_;  // QuadPoint = Vector<Real, 3>
-```
-
-For 1D rules, this wastes 16 bytes per point (2 unused coordinates).
-
-**Change:** Template `QuadratureRule<Dim>` to store only needed coordinates.
-
-**Files:**
-- `Quadrature/QuadratureRule.h:108` — point storage
-
-**Impact:** 33-67% memory reduction for 1D/2D quadrature rules.
-
-**Effort:** Medium (template refactoring).
-
----
-
 ### 8.2 Cache Facet Normals for Affine Elements
 
 Facet normals are recomputed per-quadrature-point even for affine elements where
@@ -951,32 +700,6 @@ facet quadrature points.
 **Effort:** Low.
 
 ---
-
-### 8.3 Batch Basis Evaluation
-
-`BasisCache.cpp:85-101` evaluates basis functions one quadrature point at a time:
-
-```cpp
-for (qp = 0; qp < points.size(); ++qp) {
-    basis.evaluate_values(points[qp], scalar_values);
-    // copy to cache...
-}
-```
-
-**Change:** Add a batch evaluation interface that evaluates all quadrature points
-simultaneously, enabling SIMD across points for tensor-product bases.
-
-**Files:**
-- `Basis/BasisCache.cpp:85-101` — per-qpt evaluation
-- `Basis/BasisFunction.h` — add `evaluate_values_batch()`
-
-**Impact:** 2-4x speedup for basis evaluation on tensor-product elements.
-
-**Effort:** Medium.
-
----
-
-## Tier 9 — Interpreter Micro-Optimizations
 
 ### 9.1 Reduce Constitutive Cache Double-Hashing
 
@@ -1050,37 +773,26 @@ x = x * (2.0 - v * x);  // Second Newton step (52-bit accuracy)
 | 1.4 | SIMD dual numbers | 1 | 2-4x dual eval | Medium | Forms |
 | 1.5 | Fused block assembly | 1 | ~3x assembly | High | Assembly |
 | 1.6 | Affine isoparametric | 1 | 20-30% geometry | Low | Geometry |
+| 1.7 | Fix boundary JIT bug | 1 | 3-10x boundary | Medium | Forms/JIT |
 | 2.1 | Unified data layout | 2 | 10-20% kernels | Medium | Assembly |
-| 2.2 | Packed Jacobian data | 2 | 10-15% bandwidth | Low-Med | Geometry |
-| 2.3 | AVX-512 alignment | 2 | Up to 2x SIMD | Trivial | Math |
 | 2.4 | Packed field data | 2 | 50-70% field alloc | Medium | Assembly |
-| 2.5 | SpaceCache span | 2 | Eliminates copy | Low | Spaces |
 | 3.1 | Pre-computed NNZ map | 3 | 2-5x scatter | Medium | Backends |
-| 3.2 | Cached work matrix | 3 | -72MB/solve | Low | Backends |
 | 3.3 | Residual norm no-copy | 3 | -O(n) per iter | Low | Newton |
-| 3.4 | Cuthill-McKee default | 3 | 10-30% solver | Trivial | Dofs |
 | 3.5 | Raw history copy | 3 | 10-100x repack | Low | TimeStepping |
 | 3.6 | Ring buffer history | 3 | -O(depth*n) copy | Low-Med | TimeStepping |
-| 3.7 | gemm loop order | 3 | 2-3x matmul | Trivial | Math |
 | 4.1 | Pre-alloc history | 4 | Avoids realloc | Trivial | Assembly |
-| 4.2 | Pre-size scratch | 4 | Avoids realloc | Trivial | Assembly |
 | 4.3 | Arena FormExpr nodes | 4 | 30-50% AST mem | High | Forms |
 | 4.4 | FSILS ghost buffer | 4 | -O(n) per sync | Low | Backends |
-| 4.5 | Bound JIT cache | 4 | Prevents OOM | Low-Med | Forms/JIT |
 | 4.6 | Arena resize opt | 4 | Rare but large | Medium | Assembly |
 | 5.1 | Batch matrix insert | 5 | 2-3x constrained | Medium | Backends |
 | 5.2 | PETSc no dual buffer | 5 | 2x vector mem | Medium | Backends |
 | 5.3 | FSILS hash node map | 5 | O(1) vs O(log n) | Low | Backends |
 | 6.1 | Cache constraint queries | 6 | O(n) vs O(n^2) | Low | Constraints |
 | 6.2 | Fast sparsity cache key | 6 | Orders of mag | Low | Sparsity |
-| 6.3 | FieldRegistry indexing | 6 | O(1) vs O(n) | Trivial | Systems |
-| 6.4 | Cache operator def | 6 | -string hash | Trivial | Systems |
 | 7.1 | Async MPI | 7 | 10-20% at scale | High | Backends |
 | 7.2 | Pre-alloc ghost bufs | 7 | Avoids realloc | Trivial | Assembly |
 | 7.3 | Batch constraint+ghost | 7 | Fewer MPI msgs | Medium | Assembly |
-| 8.1 | Dim-templated quad | 8 | 33-67% quad mem | Medium | Quadrature |
 | 8.2 | Cache facet normals | 8 | 20-40% boundary | Low | Geometry |
-| 8.3 | Batch basis eval | 8 | 2-4x basis eval | Medium | Basis |
 | 9.1 | Single constitutive hash | 9 | 50% hash cost | Trivial | Forms |
 | 9.2 | [[likely]] hints | 9 | 5-10% branch | Trivial | Forms |
 | 9.3 | Double reciprocal SIMD | 9 | 2-3x division | Low | Math |
@@ -1089,13 +801,7 @@ x = x * (2.0 - v * x);  // Second Newton step (52-bit accuracy)
 
 ## Quick Wins (Trivial Effort, Measurable Impact)
 
-1. **3.4** — Change default DOF numbering to Cuthill-McKee
-2. **2.3** — Fix Vector/Matrix alignment to 64 bytes
-3. **3.7** — Fix matrix-matrix multiply loop order
-4. **6.3** — Direct-index FieldRegistry by FieldId
-5. **6.4** — Cache operator definition reference
 6. **4.1** — Pre-allocate history vectors
-7. **4.2** — Pre-size constraint scratch vectors
 8. **7.2** — Pre-allocate ghost contribution buffers
 9. **9.1** — Eliminate double constitutive hash
 10. **9.2** — Add [[likely]] to hot switch cases
