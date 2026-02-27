@@ -157,8 +157,7 @@ static void fsils_spar_mul_vv_impl(fsils_int iStart, fsils_int iEnd,
     const Array<double>& K, const Array<double>& U, Array<double>& KU)
 {
   constexpr int DOF2 = DOF * DOF;
-  const fsils_int* __restrict__ rp0 = rowPtr.data();
-  const fsils_int* __restrict__ rp1 = rp0 + rowPtr.nrows();
+  const fsils_int* __restrict__ rp = rowPtr.data();   // column-major: rowPtr(r,c) = rp[r + c*2]
   const fsils_int* __restrict__ cp = colPtr.data();
   const double* __restrict__ k_data = K.data();
   const double* __restrict__ u_data = U.data();
@@ -167,8 +166,8 @@ static void fsils_spar_mul_vv_impl(fsils_int iStart, fsils_int iEnd,
   #pragma omp parallel for schedule(static)
   for (fsils_int i = iStart; i < iEnd; i++) {
     double sums[DOF] = {};
-    const fsils_int j_start = rp0[i];
-    const fsils_int j_end = rp1[i];
+    const fsils_int j_start = rp[2*i];      // rowPtr(0, i)
+    const fsils_int j_end   = rp[2*i + 1];  // rowPtr(1, i)
     for (fsils_int j = j_start; j <= j_end; j++) {
       const fsils_int col = cp[j];
       const double* __restrict__ kj = k_data + static_cast<size_t>(j) * DOF2;
