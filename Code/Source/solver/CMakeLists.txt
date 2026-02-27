@@ -366,7 +366,11 @@ target_link_libraries(${SV_MULTIPHYSICS_EXE}
 
 # Ensure equation-module registrars inside the static svphysics library are not
 # dropped by the linker (registration is performed via static initialization).
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+if(APPLE)
+  target_link_libraries(${SV_MULTIPHYSICS_EXE}
+    -Wl,-force_load,$<TARGET_FILE:svphysics>
+  )
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_link_libraries(${SV_MULTIPHYSICS_EXE}
     -Wl,--whole-archive
     svphysics
