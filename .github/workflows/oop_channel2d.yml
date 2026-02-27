@@ -2,6 +2,9 @@ name: OOP Solver - Channel2D
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - issue-449-modern-mesh-core
 
 jobs:
   # ---------------------------------------------------------------------------
