@@ -1,0 +1,159 @@
+name: OOP Solver - Channel2D
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux  (ubuntu-latest, pre-built deps container)
+  # ---------------------------------------------------------------------------
+  linux:
+    name: Linux
+    runs-on: ubuntu-latest
+    container: simvascular/libraries:ubuntu22
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Pull LFS objects
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git lfs pull
+
+      - name: Install LLVM
+        shell: bash
+        run: |
+          apt-get update && apt-get install -y llvm-dev
+
+      - name: Build svMultiPhysics
+        shell: bash
+        run: |
+          mkdir build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DSV_USE_TRILINOS:BOOL=OFF \
+                -DFE_ENABLE_LLVM_JIT:BOOL=ON \
+                ..
+          make -j$(nproc)
+
+      - name: Run Channel2D (2 procs, GMRES, diagonal preconditioner)
+        shell: bash
+        run: |
+          cd tests/cases/fluid/Channel2D
+          mpirun --oversubscribe --allow-run-as-root -np 2 \
+            ../../../../build/svMultiPhysics-build/bin/svmultiphysics \
+            solver_new.xml
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-linux
+          path: tests/cases/fluid/Channel2D/2-procs/
+
+  # ---------------------------------------------------------------------------
+  # macOS  (macos-latest, brew deps)
+  # ---------------------------------------------------------------------------
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Pull LFS objects
+        run: git lfs pull
+
+      - name: Install dependencies
+        run: |
+          brew reinstall gcc
+          brew install vtk openblas lapack open-mpi llvm
+
+      - name: Build svMultiPhysics
+        run: |
+          mkdir build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DSV_USE_TRILINOS:BOOL=OFF \
+                -DFE_ENABLE_LLVM_JIT:BOOL=ON \
+                -DLLVM_DIR="$(brew --prefix llvm)/lib/cmake/llvm" \
+                ..
+          make -j$(sysctl -n hw.logicalcpu)
+
+      - name: Run Channel2D (2 procs, GMRES, diagonal preconditioner)
+        run: |
+          cd tests/cases/fluid/Channel2D
+          mpirun --oversubscribe -np 2 \
+            ../../../../build/svMultiPhysics-build/bin/svmultiphysics \
+            solver_new.xml
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-macos
+          path: tests/cases/fluid/Channel2D/2-procs/
+
+  # ---------------------------------------------------------------------------
+  # Windows  (windows-latest, MS-MPI, vcpkg deps)
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Pull LFS objects
+        run: git lfs pull
+
+      - name: Install MS-MPI
+        shell: powershell
+        run: |
+          # Download and install MS-MPI runtime + SDK
+          Invoke-WebRequest -Uri https://github.com/microsoft/Microsoft-MPI/releases/download/v10.1.1/msmpisetup.exe -OutFile msmpisetup.exe
+          Invoke-WebRequest -Uri https://github.com/microsoft/Microsoft-MPI/releases/download/v10.1.1/msmpisdk.msi -OutFile msmpisdk.msi
+          Start-Process -FilePath msmpisetup.exe -ArgumentList "-unattend" -Wait
+          Start-Process -FilePath msiexec.exe -ArgumentList "/i msmpisdk.msi /quiet" -Wait
+          # Add to PATH for subsequent steps
+          echo "C:\Program Files\Microsoft MPI\Bin" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
+          echo "MSMPI_INC=C:\Program Files (x86)\Microsoft SDKs\MPI\Include" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          echo "MSMPI_LIB64=C:\Program Files (x86)\Microsoft SDKs\MPI\Lib\x64" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+
+      - name: Install VTK and dependencies via vcpkg
+        shell: bash
+        run: |
+          vcpkg install vtk openblas lapack llvm
+
+      - name: Build svMultiPhysics
+        shell: bash
+        run: |
+          mkdir build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DSV_USE_TRILINOS:BOOL=OFF \
+                -DFE_ENABLE_LLVM_JIT:BOOL=ON \
+                -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+                ..
+          cmake --build . --config Release --parallel
+
+      - name: Run Channel2D (2 procs, GMRES, diagonal preconditioner)
+        shell: bash
+        run: |
+          cd tests/cases/fluid/Channel2D
+          mpiexec -np 2 \
+            ../../../../build/svMultiPhysics-build/bin/Release/svmultiphysics.exe \
+            solver_new.xml
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-windows
+          path: tests/cases/fluid/Channel2D/2-procs/

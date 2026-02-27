@@ -40,12 +40,8 @@ FieldId FieldRegistry::add(FieldSpec spec)
 const FieldRecord& FieldRegistry::get(FieldId id) const
 {
     FE_THROW_IF(id == INVALID_FIELD_ID, InvalidArgumentException, "FieldRegistry::get: invalid field id");
-    for (const auto& f : fields_) {
-        if (f.id == id) {
-            return f;
-        }
-    }
-    FE_THROW(InvalidArgumentException, "FieldRegistry::get: unknown FieldId");
+    FE_THROW_IF(static_cast<std::size_t>(id) >= fields_.size(), InvalidArgumentException, "FieldRegistry::get: unknown FieldId");
+    return fields_[static_cast<std::size_t>(id)];
 }
 
 void FieldRegistry::markTimeDependent(FieldId id, int max_order)
@@ -55,14 +51,11 @@ void FieldRegistry::markTimeDependent(FieldId id, int max_order)
     }
 
     FE_THROW_IF(id == INVALID_FIELD_ID, InvalidArgumentException, "FieldRegistry::markTimeDependent: invalid field id");
-    for (auto& f : fields_) {
-        if (f.id == id) {
-            f.time_dependent = true;
-            f.max_time_derivative_order = std::max(f.max_time_derivative_order, max_order);
-            return;
-        }
-    }
-    FE_THROW(InvalidArgumentException, "FieldRegistry::markTimeDependent: unknown FieldId");
+    FE_THROW_IF(static_cast<std::size_t>(id) >= fields_.size(), InvalidArgumentException, "FieldRegistry::markTimeDependent: unknown FieldId");
+    
+    auto& f = fields_[static_cast<std::size_t>(id)];
+    f.time_dependent = true;
+    f.max_time_derivative_order = std::max(f.max_time_derivative_order, max_order);
 }
 
 FieldId FieldRegistry::findByName(std::string_view name) const noexcept
@@ -79,12 +72,7 @@ bool FieldRegistry::has(FieldId id) const noexcept
     if (id == INVALID_FIELD_ID) {
         return false;
     }
-    for (const auto& f : fields_) {
-        if (f.id == id) {
-            return true;
-        }
-    }
-    return false;
+    return static_cast<std::size_t>(id) < fields_.size();
 }
 
 } // namespace systems

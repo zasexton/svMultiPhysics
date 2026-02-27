@@ -125,7 +125,7 @@ struct JITOptions {
     bool vectorize{true};
     std::string cache_directory;
     bool cache_diagnostics{false};
-    std::size_t max_in_memory_kernels{0};
+    std::size_t max_in_memory_kernels{1024};  // Default to 1024 to prevent unbounded memory growth
     bool dump_kernel_ir{false};
     bool dump_llvm_ir{false};
     bool dump_llvm_ir_optimized{false};
