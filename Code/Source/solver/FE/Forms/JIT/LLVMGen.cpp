@@ -39,6 +39,7 @@
 #endif
 
 #if SVMP_FE_ENABLE_LLVM_JIT
+#include <llvm/Config/llvm-config.h>
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/IR/BasicBlock.h>
@@ -1489,14 +1490,22 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
         const std::string target_triple = engine.targetTriple();
         const std::string data_layout = engine.dataLayoutString();
         if (!target_triple.empty()) {
+#if LLVM_VERSION_MAJOR >= 18
+            module->setTargetTriple(llvm::Triple(target_triple));
+#else
             module->setTargetTriple(target_triple);
+#endif
         }
         if (!data_layout.empty()) {
             module->setDataLayout(data_layout);
         }
 
         llvm::IRBuilder<> builder(*ctx);
+#if LLVM_VERSION_MAJOR >= 15
+        auto* i8_ptr = builder.getPtrTy();
+#else
         auto* i8_ptr = builder.getInt8PtrTy();
+#endif
         auto* f64 = builder.getDoubleTy();
         auto* i32 = builder.getInt32Ty();
         auto* i64 = builder.getInt64Ty();

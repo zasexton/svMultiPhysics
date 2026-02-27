@@ -496,10 +496,15 @@ void dumpLLVMIRBestEffort(std::string_view dump_directory,
 
 [[nodiscard]] std::string hostCPUFeaturesString()
 {
+#if LLVM_VERSION_MAJOR >= 20
+    // LLVM 20+: getHostCPUFeatures() returns StringMap<bool> directly.
+    auto feats = llvm::sys::getHostCPUFeatures();
+#else
     llvm::StringMap<bool> feats;
     if (!llvm::sys::getHostCPUFeatures(feats)) {
         return {};
     }
+#endif
 
     std::vector<std::string> enabled;
     enabled.reserve(feats.size());
@@ -652,11 +657,19 @@ void registerExternalCallSymbols(llvm::orc::LLJIT& jit)
     llvm::orc::MangleAndInterner mangle(jit.getExecutionSession(), jit.getDataLayout());
     llvm::orc::SymbolMap symbols;
 
+#if LLVM_VERSION_MAJOR >= 16
+    auto add = [&](const char* name, auto fn_ptr) {
+        symbols[mangle(name)] = {
+            llvm::orc::ExecutorAddr::fromPtr(fn_ptr),
+            llvm::JITSymbolFlags::Exported};
+    };
+#else
     auto add = [&](const char* name, auto fn_ptr) {
         symbols[mangle(name)] =
             llvm::JITEvaluatedSymbol(llvm::pointerToJITTargetAddress(fn_ptr),
                                      llvm::JITSymbolFlags::Exported);
     };
+#endif
 
     add("svmp_fe_jit_coeff_eval_scalar_v1", &svmp_fe_jit_coeff_eval_scalar_v1);
     add("svmp_fe_jit_coeff_eval_vector_v1", &svmp_fe_jit_coeff_eval_vector_v1);
@@ -750,21 +763,23 @@ void configureEventListeners(llvm::orc::LLJIT& jit)
     }
 
     auto jtmb = std::move(*jtmb_expected);
+#if LLVM_VERSION_MAJOR >= 18
     switch (sanitizeOptLevel(options.optimization_level)) {
-        case 0:
-            jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::None);
-            break;
-        case 1:
-            jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::Less);
-            break;
-        case 2:
-            jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::Default);
-            break;
+        case 0:  jtmb.setCodeGenOptLevel(llvm::CodeGenOptLevel::None);       break;
+        case 1:  jtmb.setCodeGenOptLevel(llvm::CodeGenOptLevel::Less);       break;
+        case 2:  jtmb.setCodeGenOptLevel(llvm::CodeGenOptLevel::Default);    break;
         case 3:
-        default:
-            jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::Aggressive);
-            break;
+        default: jtmb.setCodeGenOptLevel(llvm::CodeGenOptLevel::Aggressive); break;
     }
+#else
+    switch (sanitizeOptLevel(options.optimization_level)) {
+        case 0:  jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::None);       break;
+        case 1:  jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::Less);       break;
+        case 2:  jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::Default);    break;
+        case 3:
+        default: jtmb.setCodeGenOptLevel(llvm::CodeGenOpt::Aggressive); break;
+    }
+#endif
     out_target_triple = jtmb.getTargetTriple().str();
 
     llvm::orc::LLJITBuilder builder;
@@ -919,7 +934,11 @@ JITEngine::SymbolAddress JITEngine::lookup(std::string_view name)
         FE_THROW(FEException, "LLVM JIT: symbol lookup failed for '" + std::string(name) + "': " +
                                   llvmErrorToString(sym_expected.takeError()));
     }
+#if LLVM_VERSION_MAJOR >= 16
+    return static_cast<SymbolAddress>(sym_expected->getValue());
+#else
     return static_cast<SymbolAddress>(sym_expected->getAddress());
+#endif
 #else
     (void)name;
     FE_THROW(FEException, "JITEngine::lookup: FE was built without LLVM JIT support");
@@ -972,7 +991,11 @@ bool JITEngine::tryLookup(std::string_view name, SymbolAddress& out) noexcept
             return false;
         }
 
+#if LLVM_VERSION_MAJOR >= 16
+        out = static_cast<SymbolAddress>(sym_expected->getValue());
+#else
         out = static_cast<SymbolAddress>(sym_expected->getAddress());
+#endif
         return true;
     } catch (...) {
         return false;
