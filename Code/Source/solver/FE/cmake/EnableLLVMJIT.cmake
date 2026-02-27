@@ -21,7 +21,17 @@ if(FE_ENABLE_LLVM_JIT)
     set(_SVMP_FE_LLVM_JIT_MIN_VERSION "14.0")
 
     # Prefer the LLVM CMake package config (works on Linux/macOS/Windows).
-    find_package(LLVM ${_SVMP_FE_LLVM_JIT_MIN_VERSION} CONFIG REQUIRED)
+    # Do NOT pass the minimum version to find_package because LLVM's
+    # LLVMConfigVersion.cmake uses exact-major-version matching, which
+    # rejects any major version other than the one requested.  Instead we
+    # find any LLVM and check the version manually below.
+    find_package(LLVM CONFIG REQUIRED)
+
+    if(LLVM_PACKAGE_VERSION VERSION_LESS _SVMP_FE_LLVM_JIT_MIN_VERSION)
+        message(FATAL_ERROR
+            "FE: LLVM >= ${_SVMP_FE_LLVM_JIT_MIN_VERSION} required, "
+            "found ${LLVM_PACKAGE_VERSION}")
+    endif()
 
     if(NOT LLVM_PACKAGE_VERSION AND LLVM_VERSION_MAJOR)
         set(LLVM_PACKAGE_VERSION "${LLVM_VERSION_MAJOR}.${LLVM_VERSION_MINOR}.${LLVM_VERSION_PATCH}")
