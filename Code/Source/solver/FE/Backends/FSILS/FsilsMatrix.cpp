@@ -255,6 +255,55 @@ void sort_row_columns_and_values(FsilsShared& shared, std::vector<Real>& values)
     }
 }
 
+/// Build the nnz hash map for O(1) column-index lookup.
+/// Must be called AFTER sort_row_columns_and_values() so that the stored
+/// nnz indices correspond to the final (sorted) positions in colPtr/values_.
+void buildNnzHashMap(FsilsShared& shared)
+{
+    if (shared.lhs.nNo <= 0) return;
+
+    const int nNo_int = shared.lhs.nNo;
+    shared.nnz_map_row_ptr_.assign(static_cast<std::size_t>(nNo_int + 1), 0);
+
+    for (int row = 0; row < nNo_int; ++row) {
+        const int start = shared.lhs.rowPtr(0, row);
+        const int end = shared.lhs.rowPtr(1, row);
+        if (start < 0 || end < start) {
+            shared.nnz_map_row_ptr_[static_cast<std::size_t>(row + 1)] =
+                shared.nnz_map_row_ptr_[static_cast<std::size_t>(row)];
+            continue;
+        }
+        const int n_cols = end - start + 1;
+        const int block_size = std::max(2, n_cols * 2);
+        shared.nnz_map_row_ptr_[static_cast<std::size_t>(row + 1)] =
+            shared.nnz_map_row_ptr_[static_cast<std::size_t>(row)] + block_size;
+    }
+
+    const int hash_total = shared.nnz_map_row_ptr_[static_cast<std::size_t>(nNo_int)];
+    shared.nnz_map_cols_.assign(static_cast<std::size_t>(hash_total), -1);
+    shared.nnz_map_idx_.assign(static_cast<std::size_t>(hash_total), -1);
+
+    for (int row = 0; row < nNo_int; ++row) {
+        const int start = shared.lhs.rowPtr(0, row);
+        const int end = shared.lhs.rowPtr(1, row);
+        if (start < 0 || end < start) continue;
+
+        const int hash_start = shared.nnz_map_row_ptr_[static_cast<std::size_t>(row)];
+        const int hash_size = shared.nnz_map_row_ptr_[static_cast<std::size_t>(row + 1)] - hash_start;
+
+        for (int idx = start; idx <= end; ++idx) {
+            const int col = shared.lhs.colPtr[idx];
+
+            int slot = col % hash_size;
+            while (shared.nnz_map_cols_[static_cast<std::size_t>(hash_start + slot)] != -1) {
+                slot = (slot + 1) % hash_size;
+            }
+            shared.nnz_map_cols_[static_cast<std::size_t>(hash_start + slot)] = col;
+            shared.nnz_map_idx_[static_cast<std::size_t>(hash_start + slot)] = idx;
+        }
+    }
+}
+
 void build_old_of_internal(FsilsShared& shared)
 {
     auto& lhs = shared.lhs;
@@ -708,74 +757,14 @@ FsilsMatrix::FsilsMatrix(const sparsity::SparsityPattern& pattern,
     build_old_of_internal(*shared);
 
     shared->buildGlobalToOldTable();
-    
-    // Pre-compute an optimized nnz lookup table to replace O(log n) binary searches.
-    // We use a flat hash map since the number of non-zeros per row is small (~81-125).
-    // nnz_map_row_ptr_ marks the start of each row in the flat arrays.
-    if (shared->lhs.nNo > 0) {
-        const int nNo_int = shared->lhs.nNo;
-        shared->nnz_map_row_ptr_.assign(static_cast<std::size_t>(nNo_int + 1), 0);
-        
-        int total_entries = 0;
-        for (int row = 0; row < nNo_int; ++row) {
-            const int start = shared->lhs.rowPtr(0, row);
-            const int end = shared->lhs.rowPtr(1, row);
-            shared->nnz_map_row_ptr_[static_cast<std::size_t>(row)] = total_entries;
-            if (start >= 0 && end >= start) {
-                total_entries += (end - start + 1);
-            }
-        }
-        shared->nnz_map_row_ptr_[static_cast<std::size_t>(nNo_int)] = total_entries;
-        
-        shared->nnz_map_cols_.assign(static_cast<std::size_t>(total_entries), -1);
-        shared->nnz_map_idx_.assign(static_cast<std::size_t>(total_entries), -1);
-        
-        for (int row = 0; row < nNo_int; ++row) {
-            const int start = shared->lhs.rowPtr(0, row);
-            const int end = shared->lhs.rowPtr(1, row);
-            if (start < 0 || end < start) continue;
-            
-            const int n_cols = end - start + 1;
-            // Create a perfect minimal hash for the small row by using a slightly larger table
-            // and linear probing. We size the block at 2x the non-zeros to keep load factor <= 0.5.
-            const int block_size = std::max(2, n_cols * 2);
-            
-            // Adjust row_ptr to hold the block size
-            shared->nnz_map_row_ptr_[static_cast<std::size_t>(row + 1)] = 
-                shared->nnz_map_row_ptr_[static_cast<std::size_t>(row)] + block_size;
-        }
-        
-        // Re-allocate based on blocks
-        const int hash_total = shared->nnz_map_row_ptr_[static_cast<std::size_t>(nNo_int)];
-        shared->nnz_map_cols_.assign(static_cast<std::size_t>(hash_total), -1);
-        shared->nnz_map_idx_.assign(static_cast<std::size_t>(hash_total), -1);
-        
-        for (int row = 0; row < nNo_int; ++row) {
-            const int start = shared->lhs.rowPtr(0, row);
-            const int end = shared->lhs.rowPtr(1, row);
-            if (start < 0 || end < start) continue;
-            
-            const int hash_start = shared->nnz_map_row_ptr_[static_cast<std::size_t>(row)];
-            const int hash_size = shared->nnz_map_row_ptr_[static_cast<std::size_t>(row + 1)] - hash_start;
-            
-            for (int idx = start; idx <= end; ++idx) {
-                const int col = shared->lhs.colPtr[idx];
-                
-                // Linear probing
-                int slot = col % hash_size;
-                while (shared->nnz_map_cols_[static_cast<std::size_t>(hash_start + slot)] != -1) {
-                    slot = (slot + 1) % hash_size;
-                }
-                shared->nnz_map_cols_[static_cast<std::size_t>(hash_start + slot)] = col;
-                shared->nnz_map_idx_[static_cast<std::size_t>(hash_start + slot)] = idx;
-            }
-        }
-    }
-
 
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     values_.assign(static_cast<std::size_t>(nnz) * block_size, 0.0);
     sort_row_columns_and_values(*shared, values_);
+
+    // Build the hash map AFTER sort_row_columns_and_values so that
+    // nnz_map_idx_ stores post-sort positions into colPtr/values_.
+    buildNnzHashMap(*shared);
 
     shared_ = std::move(shared);
 }
@@ -1089,74 +1078,14 @@ FsilsMatrix::FsilsMatrix(const sparsity::DistributedSparsityPattern& pattern,
     build_old_of_internal(*shared);
 
     shared->buildGlobalToOldTable();
-    
-    // Pre-compute an optimized nnz lookup table to replace O(log n) binary searches.
-    // We use a flat hash map since the number of non-zeros per row is small (~81-125).
-    // nnz_map_row_ptr_ marks the start of each row in the flat arrays.
-    if (shared->lhs.nNo > 0) {
-        const int nNo_int = shared->lhs.nNo;
-        shared->nnz_map_row_ptr_.assign(static_cast<std::size_t>(nNo_int + 1), 0);
-        
-        int total_entries = 0;
-        for (int row = 0; row < nNo_int; ++row) {
-            const int start = shared->lhs.rowPtr(0, row);
-            const int end = shared->lhs.rowPtr(1, row);
-            shared->nnz_map_row_ptr_[static_cast<std::size_t>(row)] = total_entries;
-            if (start >= 0 && end >= start) {
-                total_entries += (end - start + 1);
-            }
-        }
-        shared->nnz_map_row_ptr_[static_cast<std::size_t>(nNo_int)] = total_entries;
-        
-        shared->nnz_map_cols_.assign(static_cast<std::size_t>(total_entries), -1);
-        shared->nnz_map_idx_.assign(static_cast<std::size_t>(total_entries), -1);
-        
-        for (int row = 0; row < nNo_int; ++row) {
-            const int start = shared->lhs.rowPtr(0, row);
-            const int end = shared->lhs.rowPtr(1, row);
-            if (start < 0 || end < start) continue;
-            
-            const int n_cols = end - start + 1;
-            // Create a perfect minimal hash for the small row by using a slightly larger table
-            // and linear probing. We size the block at 2x the non-zeros to keep load factor <= 0.5.
-            const int block_size = std::max(2, n_cols * 2);
-            
-            // Adjust row_ptr to hold the block size
-            shared->nnz_map_row_ptr_[static_cast<std::size_t>(row + 1)] = 
-                shared->nnz_map_row_ptr_[static_cast<std::size_t>(row)] + block_size;
-        }
-        
-        // Re-allocate based on blocks
-        const int hash_total = shared->nnz_map_row_ptr_[static_cast<std::size_t>(nNo_int)];
-        shared->nnz_map_cols_.assign(static_cast<std::size_t>(hash_total), -1);
-        shared->nnz_map_idx_.assign(static_cast<std::size_t>(hash_total), -1);
-        
-        for (int row = 0; row < nNo_int; ++row) {
-            const int start = shared->lhs.rowPtr(0, row);
-            const int end = shared->lhs.rowPtr(1, row);
-            if (start < 0 || end < start) continue;
-            
-            const int hash_start = shared->nnz_map_row_ptr_[static_cast<std::size_t>(row)];
-            const int hash_size = shared->nnz_map_row_ptr_[static_cast<std::size_t>(row + 1)] - hash_start;
-            
-            for (int idx = start; idx <= end; ++idx) {
-                const int col = shared->lhs.colPtr[idx];
-                
-                // Linear probing
-                int slot = col % hash_size;
-                while (shared->nnz_map_cols_[static_cast<std::size_t>(hash_start + slot)] != -1) {
-                    slot = (slot + 1) % hash_size;
-                }
-                shared->nnz_map_cols_[static_cast<std::size_t>(hash_start + slot)] = col;
-                shared->nnz_map_idx_[static_cast<std::size_t>(hash_start + slot)] = idx;
-            }
-        }
-    }
-
 
     const std::size_t block_size = static_cast<std::size_t>(dof) * static_cast<std::size_t>(dof);
     values_.assign(static_cast<std::size_t>(nnz) * block_size, 0.0);
     sort_row_columns_and_values(*shared, values_);
+
+    // Build the hash map AFTER sort_row_columns_and_values so that
+    // nnz_map_idx_ stores post-sort positions into colPtr/values_.
+    buildNnzHashMap(*shared);
 
     shared_ = std::move(shared);
 }
