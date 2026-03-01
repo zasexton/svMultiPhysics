@@ -3711,11 +3711,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         auto& sol = batch_sol_coeffs[slot];
         sol.resize(col_dofs.size());
         if (current_solution_view_ != nullptr) {
-            for (std::size_t i = 0; i < col_dofs.size(); ++i) {
-                const auto dof = col_dofs[i];
-                FE_THROW_IF(dof < 0, FEException, "assembleCellsFused: negative DOF index");
-                sol[i] = current_solution_view_->getVectorEntry(dof);
-            }
+            current_solution_view_->getVectorEntries(col_dofs, std::span<Real>(sol));
         } else {
             for (std::size_t i = 0; i < col_dofs.size(); ++i) {
                 const auto dof = col_dofs[i];
@@ -3744,10 +3740,14 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                 "assembleCellsFused: previous solution (k=" + std::to_string(k) + ") not set");
                     auto& lp = psc[static_cast<std::size_t>(k - 1)];
                     lp.resize(col_dofs.size());
-                    for (std::size_t i = 0; i < col_dofs.size(); ++i) {
-                        const auto dof = col_dofs[i];
-                        FE_THROW_IF(dof < 0, FEException, "assembleCellsFused: negative DOF index (prev)");
-                        lp[i] = (pview != nullptr) ? pview->getVectorEntry(dof) : pdata[static_cast<std::size_t>(dof)];
+                    if (pview != nullptr) {
+                        pview->getVectorEntries(col_dofs, std::span<Real>(lp));
+                    } else {
+                        for (std::size_t i = 0; i < col_dofs.size(); ++i) {
+                            const auto dof = col_dofs[i];
+                            FE_THROW_IF(dof < 0, FEException, "assembleCellsFused: negative DOF index (prev)");
+                            lp[i] = pdata[static_cast<std::size_t>(dof)];
+                        }
                     }
                     if (ctx.trialUsesVectorBasis())
                         applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space, std::span<Real>(lp));
@@ -5714,20 +5714,26 @@ void StandardAssembler::populateFieldSolutionData(
                     "StandardAssembler::populateFieldSolutionData: field DOF count does not match its space DOFs");
 
 	        local_coeffs.resize(cell_dofs.size());
-	        for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
-	            const auto dof = cell_dofs[i] + access->dof_offset;
-	            if (dof < 0) {
-	                FE_THROW(FEException, "StandardAssembler::populateFieldSolutionData: negative DOF index");
-	            }
-	            if (current_solution_view_ != nullptr) {
-	                local_coeffs[i] = current_solution_view_->getVectorEntry(dof);
-	            } else {
-	                FE_THROW_IF(static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-	                            "StandardAssembler::populateFieldSolutionData: solution vector too small for DOF " +
-	                                std::to_string(dof));
-	                local_coeffs[i] = current_solution_[static_cast<std::size_t>(dof)];
-	            }
-	        }
+            field_dof_scratch_.resize(cell_dofs.size());
+            for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+                const auto dof = cell_dofs[i] + access->dof_offset;
+                if (dof < 0) {
+                    FE_THROW(FEException, "StandardAssembler::populateFieldSolutionData: negative DOF index");
+                }
+                field_dof_scratch_[i] = dof;
+            }
+
+            if (current_solution_view_ != nullptr) {
+                current_solution_view_->getVectorEntries(field_dof_scratch_, std::span<Real>(local_coeffs));
+            } else {
+                for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+                    const auto dof = field_dof_scratch_[i];
+                    FE_THROW_IF(static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
+                                "StandardAssembler::populateFieldSolutionData: solution vector too small for DOF " +
+                                    std::to_string(dof));
+                    local_coeffs[i] = current_solution_[static_cast<std::size_t>(dof)];
+                }
+            }
 
         if (space.field_type() == FieldType::Scalar) {
             FE_THROW_IF(is_product, FEException,
@@ -5885,13 +5891,11 @@ void StandardAssembler::populateFieldSolutionData(
 	                    FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
 	                                "StandardAssembler::populateFieldSolutionData: previous solution data missing");
 
-	                    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
-	                        const auto dof = cell_dofs[i] + access->dof_offset;
-	                        FE_THROW_IF(dof < 0, FEException,
-	                                    "StandardAssembler::populateFieldSolutionData: negative DOF index (prev)");
-	                        if (prev_view != nullptr) {
-	                            local_coeffs[i] = prev_view->getVectorEntry(dof);
-	                        } else {
+                        if (prev_view != nullptr) {
+                            prev_view->getVectorEntries(field_dof_scratch_, std::span<Real>(local_coeffs));
+                        } else {
+	                        for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+                                const auto dof = field_dof_scratch_[i];
 	                            FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
 	                                        "StandardAssembler::populateFieldSolutionData: previous solution vector too small for DOF " +
 	                                            std::to_string(dof));
@@ -6010,13 +6014,11 @@ void StandardAssembler::populateFieldSolutionData(
 	                        FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
 	                                    "StandardAssembler::populateFieldSolutionData: previous solution data missing");
 
-	                        for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
-	                            const auto dof = cell_dofs[i] + access->dof_offset;
-	                            FE_THROW_IF(dof < 0, FEException,
-	                                        "StandardAssembler::populateFieldSolutionData: negative DOF index (prev)");
-	                            if (prev_view != nullptr) {
-	                                local_coeffs[i] = prev_view->getVectorEntry(dof);
-	                            } else {
+                            if (prev_view != nullptr) {
+                                prev_view->getVectorEntries(field_dof_scratch_, std::span<Real>(local_coeffs));
+                            } else {
+	                            for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+                                    const auto dof = field_dof_scratch_[i];
 	                                FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
 	                                            "StandardAssembler::populateFieldSolutionData: previous solution vector too small for DOF " +
 	                                                std::to_string(dof));
@@ -6244,13 +6246,11 @@ void StandardAssembler::populateFieldSolutionData(
 	                    FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
 	                                "StandardAssembler::populateFieldSolutionData: previous solution data missing");
 
-	                    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
-	                        const auto dof = cell_dofs[i] + access->dof_offset;
-	                        FE_THROW_IF(dof < 0, FEException,
-	                                    "StandardAssembler::populateFieldSolutionData: negative DOF index (prev)");
-	                        if (prev_view != nullptr) {
-	                            local_coeffs[i] = prev_view->getVectorEntry(dof);
-	                        } else {
+                        if (prev_view != nullptr) {
+                            prev_view->getVectorEntries(field_dof_scratch_, std::span<Real>(local_coeffs));
+                        } else {
+	                        for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+                                const auto dof = field_dof_scratch_[i];
 	                            FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
 	                                        "StandardAssembler::populateFieldSolutionData: previous solution vector too small for DOF " +
 	                                            std::to_string(dof));
