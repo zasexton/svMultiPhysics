@@ -640,6 +640,15 @@ private:
     std::vector<AssemblyContext::Matrix3x3> scratch_phys_hessians_;
     std::vector<AssemblyContext::Vector3D> scratch_normals_;
 
+    // Point-wise evaluation scratch arrays
+    std::vector<Real> scratch_scalar_values_at_pt_;
+    std::vector<basis::Gradient> scratch_scalar_gradients_at_pt_;
+    std::vector<basis::Hessian> scratch_scalar_hessians_at_pt_;
+    std::vector<math::Vector<Real, 3>> scratch_vec_values_at_pt_;
+    std::vector<math::Vector<Real, 3>> scratch_vec_curls_at_pt_;
+    std::vector<Real> scratch_vec_divs_at_pt_;
+    std::vector<Real> scratch_field_local_coeffs_;
+
 	    // State
 	    std::span<const Real> current_solution_{};
 	    const GlobalSystemView* current_solution_view_{nullptr};

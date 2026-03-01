@@ -3051,9 +3051,9 @@ void StandardAssembler::prepareBasis(
 
     const auto& mapping = cached_mapping_;
 
-    std::vector<math::Vector<Real, 3>> vec_values_at_pt;
-    std::vector<math::Vector<Real, 3>> vec_curls_at_pt;
-    std::vector<Real> vec_divs_at_pt;
+    auto& vec_values_at_pt = scratch_vec_values_at_pt_;
+    auto& vec_curls_at_pt = scratch_vec_curls_at_pt_;
+    auto& vec_divs_at_pt = scratch_vec_divs_at_pt_;
 
     // Read geometry from context arena (populated by prepareGeometry)
     const auto ctx_quad_pts_r = context.quadraturePoints();
@@ -4633,13 +4633,13 @@ void StandardAssembler::prepareContextFace(
     }
 
     // 9. Evaluate basis functions at face quadrature points
-    std::vector<Real> scalar_values_at_pt;
-    std::vector<basis::Gradient> scalar_gradients_at_pt;
-    std::vector<basis::Hessian> scalar_hessians_at_pt;
+    auto& scalar_values_at_pt = scratch_scalar_values_at_pt_;
+    auto& scalar_gradients_at_pt = scratch_scalar_gradients_at_pt_;
+    auto& scalar_hessians_at_pt = scratch_scalar_hessians_at_pt_;
 
-    std::vector<math::Vector<Real, 3>> vec_values_at_pt;
-    std::vector<math::Vector<Real, 3>> vec_curls_at_pt;
-    std::vector<Real> vec_divs_at_pt;
+    auto& vec_values_at_pt = scratch_vec_values_at_pt_;
+    auto& vec_curls_at_pt = scratch_vec_curls_at_pt_;
+    auto& vec_divs_at_pt = scratch_vec_divs_at_pt_;
 
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const math::Vector<Real, 3> xi{
@@ -5667,10 +5667,10 @@ void StandardAssembler::populateFieldSolutionData(
     const int dim = mesh.dimension();
     const auto qpts = context.quadraturePoints();
 
-    std::vector<Real> values_at_pt;
-    std::vector<basis::Gradient> gradients_at_pt;
-    std::vector<basis::Hessian> hessians_at_pt;
-    std::vector<Real> local_coeffs;
+    auto& values_at_pt = scratch_scalar_values_at_pt_;
+    auto& gradients_at_pt = scratch_scalar_gradients_at_pt_;
+    auto& hessians_at_pt = scratch_scalar_hessians_at_pt_;
+    auto& local_coeffs = scratch_field_local_coeffs_;
 
     std::vector<Real> scalar_values;
     std::vector<AssemblyContext::Vector3D> scalar_gradients;
@@ -5957,7 +5957,7 @@ void StandardAssembler::populateFieldSolutionData(
                 vector_component_hessians.clear();
                 vector_component_laplacians.clear();
 
-                std::vector<math::Vector<Real, 3>> vec_values_at_pt;
+                auto& vec_values_at_pt = scratch_vec_values_at_pt_;
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
                     const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
                                                    qpts[static_cast<std::size_t>(q)][1],
