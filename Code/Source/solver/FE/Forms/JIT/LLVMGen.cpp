@@ -1501,6 +1501,11 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
         }
 
         llvm::IRBuilder<> builder(*ctx);
+        llvm::FastMathFlags fmf;
+        fmf.setNoSignedZeros();
+        fmf.setAllowReassoc();
+        fmf.setAllowContract(true);
+        builder.setFastMathFlags(fmf);
 #if LLVM_VERSION_MAJOR >= 15
         auto* i8_ptr = builder.getPtrTy();
 #else
@@ -1544,6 +1549,8 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 
         auto* args_ptr = fn->getArg(0);
         args_ptr->setName("args");
+        fn->addParamAttr(0, llvm::Attribute::NoAlias);
+        fn->addParamAttr(0, llvm::Attribute::NoCapture);
 
         // External-call trampolines (relaxed-mode).
         auto coeff_eval_scalar_fn =
@@ -12199,7 +12206,28 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
         auto* body_end = builder.GetInsertBlock();
         auto* b_next = builder.CreateAdd(b_idx, builder.getInt32(1));
         b_idx->addIncoming(b_next, body_end);
-        builder.CreateBr(batch_hdr);
+        auto* batch_backedge = builder.CreateBr(batch_hdr);
+
+        if (options_.vectorize || options_.specialization.enable_loop_unroll_metadata) {
+            llvm::SmallVector<llvm::Metadata*, 4> md_args;
+            llvm::TempMDNode tmp = llvm::MDNode::getTemporary(*ctx, {});
+            md_args.push_back(tmp.get());
+            if (options_.vectorize) {
+                md_args.push_back(llvm::MDNode::get(*ctx, {
+                    llvm::MDString::get(*ctx, "llvm.loop.vectorize.enable"),
+                    llvm::ConstantAsMetadata::get(builder.getInt1(true))
+                }));
+            }
+            if (options_.specialization.enable_loop_unroll_metadata) {
+                md_args.push_back(llvm::MDNode::get(*ctx, {
+                    llvm::MDString::get(*ctx, "llvm.loop.unroll.count"),
+                    llvm::ConstantAsMetadata::get(builder.getInt32(2)) // Default unroll count for batch loop
+                }));
+            }
+            auto* loop_id = llvm::MDNode::get(*ctx, md_args);
+            loop_id->replaceOperandWith(0, loop_id);
+            batch_backedge->setMetadata("llvm.loop", loop_id);
+        }
 
         builder.SetInsertPoint(batch_exit);
         builder.CreateRetVoid();

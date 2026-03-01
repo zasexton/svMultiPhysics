@@ -2852,10 +2852,15 @@ void StandardAssembler::prepareBasis(
                     const std::size_t phys_idx = static_cast<std::size_t>(q * n_test_dofs + i);
                     const auto& grad_ref = scratch_ref_gradients_[ref_idx];
                     AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
-                    for (int d1 = 0; d1 < dim; ++d1) {
-                        for (int d2 = 0; d2 < dim; ++d2) {
-                            grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
-                        }
+                    if (dim == 3) {
+                        grad_phys[0] = J_inv[0][0] * grad_ref[0] + J_inv[1][0] * grad_ref[1] + J_inv[2][0] * grad_ref[2];
+                        grad_phys[1] = J_inv[0][1] * grad_ref[0] + J_inv[1][1] * grad_ref[1] + J_inv[2][1] * grad_ref[2];
+                        grad_phys[2] = J_inv[0][2] * grad_ref[0] + J_inv[1][2] * grad_ref[1] + J_inv[2][2] * grad_ref[2];
+                    } else if (dim == 2) {
+                        grad_phys[0] = J_inv[0][0] * grad_ref[0] + J_inv[1][0] * grad_ref[1];
+                        grad_phys[1] = J_inv[0][1] * grad_ref[0] + J_inv[1][1] * grad_ref[1];
+                    } else if (dim == 1) {
+                        grad_phys[0] = J_inv[0][0] * grad_ref[0];
                     }
                     scratch_phys_gradients_[phys_idx] = grad_phys;
                 }
@@ -2868,10 +2873,15 @@ void StandardAssembler::prepareBasis(
                     const std::size_t phys_idx = static_cast<std::size_t>(q * n_test_dofs + i);
                     const auto& grad_ref = scratch_ref_gradients_[ref_idx];
                     AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
-                    for (int d1 = 0; d1 < dim; ++d1) {
-                        for (int d2 = 0; d2 < dim; ++d2) {
-                            grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
-                        }
+                    if (dim == 3) {
+                        grad_phys[0] = J_inv[0][0] * grad_ref[0] + J_inv[1][0] * grad_ref[1] + J_inv[2][0] * grad_ref[2];
+                        grad_phys[1] = J_inv[0][1] * grad_ref[0] + J_inv[1][1] * grad_ref[1] + J_inv[2][1] * grad_ref[2];
+                        grad_phys[2] = J_inv[0][2] * grad_ref[0] + J_inv[1][2] * grad_ref[1] + J_inv[2][2] * grad_ref[2];
+                    } else if (dim == 2) {
+                        grad_phys[0] = J_inv[0][0] * grad_ref[0] + J_inv[1][0] * grad_ref[1];
+                        grad_phys[1] = J_inv[0][1] * grad_ref[0] + J_inv[1][1] * grad_ref[1];
+                    } else if (dim == 1) {
+                        grad_phys[0] = J_inv[0][0] * grad_ref[0];
                     }
                     scratch_phys_gradients_[phys_idx] = grad_phys;
                 }
@@ -3159,11 +3169,15 @@ void StandardAssembler::prepareBasis(
 
                 const auto& grad_ref = scratch_ref_gradients_[idx];
                 AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
-
-                for (int d1 = 0; d1 < dim; ++d1) {
-                    for (int d2 = 0; d2 < dim; ++d2) {
-                        grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
-                    }
+                if (dim == 3) {
+                    grad_phys[0] = J_inv[0][0] * grad_ref[0] + J_inv[1][0] * grad_ref[1] + J_inv[2][0] * grad_ref[2];
+                    grad_phys[1] = J_inv[0][1] * grad_ref[0] + J_inv[1][1] * grad_ref[1] + J_inv[2][1] * grad_ref[2];
+                    grad_phys[2] = J_inv[0][2] * grad_ref[0] + J_inv[1][2] * grad_ref[1] + J_inv[2][2] * grad_ref[2];
+                } else if (dim == 2) {
+                    grad_phys[0] = J_inv[0][0] * grad_ref[0] + J_inv[1][0] * grad_ref[1];
+                    grad_phys[1] = J_inv[0][1] * grad_ref[0] + J_inv[1][1] * grad_ref[1];
+                } else if (dim == 1) {
+                    grad_phys[0] = J_inv[0][0] * grad_ref[0];
                 }
                 scratch_phys_gradients_[idx_phys] = grad_phys;
 
@@ -4740,11 +4754,15 @@ void StandardAssembler::prepareContextFace(
 
                 const auto& grad_ref = scratch_ref_gradients_[idx];
                 AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
-
-                for (int d1 = 0; d1 < dim; ++d1) {
-                    for (int d2 = 0; d2 < dim; ++d2) {
-                        grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
-                    }
+                if (dim == 3) {
+                    grad_phys[0] = J_inv[0][0] * grad_ref[0] + J_inv[1][0] * grad_ref[1] + J_inv[2][0] * grad_ref[2];
+                    grad_phys[1] = J_inv[0][1] * grad_ref[0] + J_inv[1][1] * grad_ref[1] + J_inv[2][1] * grad_ref[2];
+                    grad_phys[2] = J_inv[0][2] * grad_ref[0] + J_inv[1][2] * grad_ref[1] + J_inv[2][2] * grad_ref[2];
+                } else if (dim == 2) {
+                    grad_phys[0] = J_inv[0][0] * grad_ref[0] + J_inv[1][0] * grad_ref[1];
+                    grad_phys[1] = J_inv[0][1] * grad_ref[0] + J_inv[1][1] * grad_ref[1];
+                } else if (dim == 1) {
+                    grad_phys[0] = J_inv[0][0] * grad_ref[0];
                 }
                 scratch_phys_gradients_[idx_phys] = grad_phys;
 
