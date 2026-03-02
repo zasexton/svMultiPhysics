@@ -32,6 +32,8 @@ public:
     virtual void add(Real value) = 0;
     virtual void scale(Real alpha) = 0;
 
+    virtual void copyFrom(const GenericVector& other) = 0;
+
     [[nodiscard]] virtual Real dot(const GenericVector& other) const = 0;
     [[nodiscard]] virtual Real norm() const = 0;
 

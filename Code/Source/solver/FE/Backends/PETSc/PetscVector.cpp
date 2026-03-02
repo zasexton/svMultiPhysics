@@ -229,6 +229,17 @@ void PetscVector::scale(Real alpha)
     invalidateLocalCache();
 }
 
+void PetscVector::copyFrom(const GenericVector& other)
+{
+    const auto* o = dynamic_cast<const PetscVector*>(&other);
+    FE_THROW_IF(!o, InvalidArgumentException, "PetscVector::copyFrom: backend mismatch");
+    FE_THROW_IF(size() != o->size(), InvalidArgumentException, "PetscVector::copyFrom: size mismatch");
+    o->ensureVecUpToDate();
+    ensureVecUpToDate();
+    FE_PETSC_CALL(VecCopy(o->vec_, vec_));
+    invalidateLocalCache();
+}
+
 Real PetscVector::dot(const GenericVector& other) const
 {
     const auto* o = dynamic_cast<const PetscVector*>(&other);

@@ -354,6 +354,14 @@ void FsilsVector::scale(Real alpha)
     }
 }
 
+void FsilsVector::copyFrom(const GenericVector& other)
+{
+    const auto* o = dynamic_cast<const FsilsVector*>(&other);
+    FE_THROW_IF(!o, InvalidArgumentException, "FsilsVector::copyFrom: backend mismatch");
+    FE_THROW_IF(size() != o->size(), InvalidArgumentException, "FsilsVector::copyFrom: size mismatch");
+    std::copy(o->data_.begin(), o->data_.end(), data_.begin());
+}
+
 Real FsilsVector::dot(const GenericVector& other) const
 {
     const auto* o = dynamic_cast<const FsilsVector*>(&other);

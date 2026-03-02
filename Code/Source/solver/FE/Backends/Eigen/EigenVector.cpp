@@ -154,6 +154,14 @@ void EigenVector::scale(Real alpha)
     vec_ *= alpha;
 }
 
+void EigenVector::copyFrom(const GenericVector& other)
+{
+    const auto* o = dynamic_cast<const EigenVector*>(&other);
+    FE_THROW_IF(!o, InvalidArgumentException, "EigenVector::copyFrom: backend mismatch");
+    FE_THROW_IF(size() != o->size(), InvalidArgumentException, "EigenVector::copyFrom: size mismatch");
+    vec_ = o->vec_;
+}
+
 Real EigenVector::dot(const GenericVector& other) const
 {
     const auto* o = dynamic_cast<const EigenVector*>(&other);

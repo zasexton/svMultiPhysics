@@ -31,6 +31,8 @@ public:
     void add(Real value) override;
     void scale(Real alpha) override;
 
+    void copyFrom(const GenericVector& other) override;
+
     [[nodiscard]] Real dot(const GenericVector& other) const override;
     [[nodiscard]] Real norm() const override;
 

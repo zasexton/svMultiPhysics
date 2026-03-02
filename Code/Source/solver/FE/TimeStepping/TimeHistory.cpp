@@ -25,20 +25,10 @@ void copySpan(std::span<Real> dst, std::span<const Real> src)
     std::copy(src.begin(), src.end(), dst.begin());
 }
 
-void repackVector(backends::GenericVector& dst, backends::GenericVector& src)
+void repackVector(backends::GenericVector& dst, const backends::GenericVector& src)
 {
     FE_CHECK_ARG(dst.size() == src.size(), "TimeHistory: size mismatch in repackVector");
-
-    auto src_view = src.createAssemblyView();
-    auto dst_view = dst.createAssemblyView();
-    FE_CHECK_NOT_NULL(src_view.get(), "TimeHistory: repack src view");
-    FE_CHECK_NOT_NULL(dst_view.get(), "TimeHistory: repack dst view");
-
-    dst_view->beginAssemblyPhase();
-    for (GlobalIndex dof = 0; dof < dst.size(); ++dof) {
-        dst_view->addVectorEntry(dof, src_view->getVectorEntry(dof), assembly::AddMode::Insert);
-    }
-    dst_view->finalizeAssembly();
+    dst.copyFrom(src);
 }
 
 } // namespace

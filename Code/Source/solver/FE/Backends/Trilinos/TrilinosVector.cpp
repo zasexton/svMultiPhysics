@@ -179,6 +179,17 @@ void TrilinosVector::scale(Real alpha)
     invalidateLocalCache();
 }
 
+void TrilinosVector::copyFrom(const GenericVector& other)
+{
+    const auto* o = dynamic_cast<const TrilinosVector*>(&other);
+    FE_THROW_IF(!o, InvalidArgumentException, "TrilinosVector::copyFrom: backend mismatch");
+    FE_THROW_IF(size() != o->size(), InvalidArgumentException, "TrilinosVector::copyFrom: size mismatch");
+    o->syncVectorFromCache();
+    syncVectorFromCache();
+    Tpetra::deep_copy(*vec_->tpetra(), *o->vec_->tpetra());
+    invalidateLocalCache();
+}
+
 Real TrilinosVector::dot(const GenericVector& other) const
 {
     const auto* o = dynamic_cast<const TrilinosVector*>(&other);
