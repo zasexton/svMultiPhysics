@@ -146,6 +146,7 @@ inline double integrate_parabolic_weight_over_marker(const svmp::MeshBase& mesh,
 {
   using namespace svmp::Mesh::geometry;
   const auto faces = mesh.faces_with_label(static_cast<svmp::label_t>(boundary_marker));
+
   auto tri_area = [](const Vec3d& a, const Vec3d& b, const Vec3d& c) {
     const Vec3d ab = b - a;
     const Vec3d ac = c - a;
@@ -166,8 +167,26 @@ inline double integrate_parabolic_weight_over_marker(const svmp::MeshBase& mesh,
     return a * f;
   };
 
+  auto line_integral = [&](const Vec3d& p0, const Vec3d& p1) {
+    const double len = norm(p1 - p0);
+    if (!(len > 0.0)) {
+      return 0.0;
+    }
+    // 2-point Gauss rule for a line segment (exact for degree 3)
+    const double sqrt3_3 = 0.5773502691896257645; // sqrt(1/3)
+    const double w0 = 0.5 * (1.0 - sqrt3_3);
+    const double w1 = 0.5 * (1.0 + sqrt3_3);
+
+    const Vec3d x1 = (1.0 - w0) * p0 + w0 * p1;
+    const Vec3d x2 = (1.0 - w1) * p0 + w1 * p1;
+
+    // Both Gauss points have a weight of 0.5 relative to the segment length
+    const double f = 0.5 * (parabolic_weight(data, x1) + parabolic_weight(data, x2));
+    return len * f;
+  };
+
   auto face_integral = [&](const std::vector<svmp::index_t>& verts) {
-    if (verts.size() < 3u) {
+    if (verts.size() < 2u) {
       return 0.0;
     }
 
@@ -179,8 +198,13 @@ inline double integrate_parabolic_weight_over_marker(const svmp::MeshBase& mesh,
       }
       pts.push_back(to_vec3(mesh.get_vertex_coords(v)));
     }
-    if (pts.size() < 3u) {
+    
+    if (pts.size() < 2u) {
       return 0.0;
+    }
+
+    if (pts.size() == 2u) {
+      return line_integral(pts[0], pts[1]);
     }
 
     double val = 0.0;
