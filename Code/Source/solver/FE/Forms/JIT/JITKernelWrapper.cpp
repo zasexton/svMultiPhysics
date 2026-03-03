@@ -468,7 +468,7 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                     *first_ctx, outputs[first_idx], checks);
 
                 // Tight per-element loop.
-                if (options_.vectorize && n > 1u) {
+                if (options_.vectorize) {
                     std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
                     std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
 
@@ -576,7 +576,7 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                     *first_ctx, outputs[first_idx], checks);
 
                 // Tight per-element loop.
-                if (options_.vectorize && n > 1u) {
+                if (options_.vectorize) {
                     std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
                     std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
 
@@ -780,7 +780,7 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         *first_ctx, outputs[first_idx], checks);
 
                     // Tight per-element loop.
-                    if (options_.vectorize && n > 1u) {
+                    if (options_.vectorize) {
                         std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
                         std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
 

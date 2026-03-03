@@ -1904,8 +1904,12 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
 	        const std::optional<std::uint32_t> fixed_n_trial_dofs_plus =
 	            (specialization != nullptr) ? specialization->n_trial_dofs_plus : std::optional<std::uint32_t>{};
 
-	                // Prepare batch loop
-	                const bool use_batch = options_.vectorize && (domain == IntegralDomain::Cell);
+	                // Prepare batch loop.
+	                // Functional kernels (no test space) are always invoked through
+	                // JITFunctionalKernelWrapper which packs CellKernelArgsV6, not
+	                // the batch CellKernelBatchArgsV1.  Disable batch mode for them.
+	                const bool is_functional = !ir.testSpace().has_value();
+	                const bool use_batch = options_.vectorize && (domain == IntegralDomain::Cell) && !is_functional;
 	        
 	                auto* pre_batch = builder.GetInsertBlock();
 	                auto* batch_hdr = llvm::BasicBlock::Create(*ctx, "batch.hdr", fn);
