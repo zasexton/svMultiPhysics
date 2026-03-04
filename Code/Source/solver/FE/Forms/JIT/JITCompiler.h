@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -68,6 +69,21 @@ public:
     [[nodiscard]] JITCompileResult compileFused(const FormIR& tangent_ir,
                                                 const FormIR& residual_ir,
                                                 const ValidationOptions& validation = {});
+
+    struct MonolithicBlockSpec {
+        const FormIR* tangent_ir{nullptr};   // Bilinear form (matrix), may be nullptr
+        const FormIR* residual_ir{nullptr};  // Residual form (vector), may be nullptr
+        bool want_matrix{false};
+        bool want_vector{false};
+    };
+
+    /** Compile a monolithic coupled kernel that evaluates all blocks in a
+     *  single pass with shared geometry and QP-level intermediates.
+     *  Uses the CoupledCellKernelArgsV1 ABI. Falls back gracefully if
+     *  monolithic codegen is not available. */
+    [[nodiscard]] JITCompileResult compileMonolithic(
+        std::span<const MonolithicBlockSpec> blocks,
+        const ValidationOptions& validation = {});
 
     [[nodiscard]] JITCacheStats cacheStats() const;
     void resetCacheStats();

@@ -1066,6 +1066,11 @@ struct CoupledCellKernelArgsV1 {
     Real time_derivative_term_weight{1.0};
     Real non_time_derivative_term_weight{1.0};
 
+    // Time derivative stencils for dt(·,k), k=1..kMaxTimeDerivativeOrderV6.
+    std::array<std::array<Real, kMaxPreviousSolutionsV6 + 1>, kMaxTimeDerivativeOrderV6> dt_stencil_coeffs{};
+    std::array<Real, kMaxTimeDerivativeOrderV6> dt_term_weights{};
+    std::uint32_t max_time_derivative_order{0};
+
     // JIT constants & parameters
     const Real* jit_constants{nullptr};
     std::uint32_t num_jit_constants{0};
@@ -2583,6 +2588,20 @@ namespace detail {
     if (const auto* ti = ctx.timeIntegrationContext()) {
         out.time_derivative_term_weight = ti->time_derivative_term_weight;
         out.non_time_derivative_term_weight = ti->non_time_derivative_term_weight;
+
+        std::uint32_t max_order = 0;
+        for (std::size_t order = 1; order <= kMaxTimeDerivativeOrderV6; ++order) {
+            const auto* stencil = ti->stencil(static_cast<int>(order));
+            if (!stencil) {
+                continue;
+            }
+            max_order = static_cast<std::uint32_t>(order);
+            for (std::size_t j = 0; j <= kMaxPreviousSolutionsV6; ++j) {
+                out.dt_stencil_coeffs[order - 1u][j] = stencil->coeff(static_cast<int>(j));
+            }
+            out.dt_term_weights[order - 1u] = ti->derivativeTermWeight(static_cast<int>(order));
+        }
+        out.max_time_derivative_order = max_order;
     }
 
     // JIT constants

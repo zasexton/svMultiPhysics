@@ -64,6 +64,21 @@ public:
                                                          std::string_view symbol,
                                                          std::uintptr_t& out_address) const;
 
+    struct MonolithicBlockInfo {
+        const FormIR* tangent_ir{nullptr};
+        const FormIR* residual_ir{nullptr};
+        bool want_matrix{false};
+        bool want_vector{false};
+    };
+
+    /** Compile a monolithic coupled kernel that evaluates all NxM blocks
+     *  in a single pass with shared geometry and QP-level intermediates.
+     *  The kernel uses the CoupledCellKernelArgsV1 ABI. */
+    [[nodiscard]] LLVMGenResult compileAndAddCoupledKernel(JITEngine& engine,
+                                                           std::span<const MonolithicBlockInfo> blocks,
+                                                           std::string_view symbol,
+                                                           std::uintptr_t& out_address) const;
+
 private:
     [[nodiscard]] LLVMGenResult compileAndAddKernelImpl(JITEngine& engine,
                                                         const FormIR& ir,

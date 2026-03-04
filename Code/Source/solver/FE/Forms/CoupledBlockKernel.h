@@ -105,7 +105,7 @@ public:
     [[nodiscard]] BlockSpec& mutableBlockSpec(std::size_t i) { return blocks_[i]; }
     [[nodiscard]] bool isMonolithicJITAvailable() const noexcept { return has_monolithic_jit_; }
     [[nodiscard]] bool isResolved() const noexcept { return resolved_; }
-    void setResolved() noexcept { resolved_ = true; }
+    void setResolved() { resolved_ = true; maybeCompileMonolithic(); }
 
     /// Tag so assembler can identify this kernel type.
     [[nodiscard]] bool isCoupledBlockKernel() const noexcept { return true; }

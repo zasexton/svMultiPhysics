@@ -23,6 +23,7 @@
 #include <list>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -508,6 +509,10 @@ struct JITCompiler::Impl {
     [[nodiscard]] JITCompileResult compileFusedFormIR(const FormIR& tangent_ir,
                                                       const FormIR& residual_ir,
                                                       const ValidationOptions& validation);
+
+    [[nodiscard]] JITCompileResult compileMonolithicFormIR(
+        std::span<const JITCompiler::MonolithicBlockSpec> blocks,
+        const ValidationOptions& validation);
 #endif
 
     JITOptions options{};
@@ -1055,6 +1060,209 @@ JITCompileResult JITCompiler::Impl::compileFusedFormIR(const FormIR& tangent_ir,
     out.ok = true;
     return out;
 }
+
+JITCompileResult JITCompiler::Impl::compileMonolithicFormIR(
+    std::span<const JITCompiler::MonolithicBlockSpec> blocks,
+    const ValidationOptions& validation)
+{
+    JITCompileResult out;
+    out.ok = false;
+    out.cacheable = true;
+
+    std::lock_guard<std::mutex> lock(mutex);
+
+    if (!engine || !engine->available()) {
+        out.message = "JITCompiler(monolithic): LLVM JIT engine is not available at runtime";
+        out.cacheable = false;
+        return out;
+    }
+
+    if (blocks.empty()) {
+        out.message = "JITCompiler(monolithic): no blocks provided";
+        out.cacheable = false;
+        return out;
+    }
+
+    // Validate all block FormIRs
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        const auto& block = blocks[i];
+        if (block.want_matrix && block.tangent_ir) {
+            const auto vr = canCompile(*block.tangent_ir, validation);
+            if (!vr.ok) {
+                out.message = "JITCompiler(monolithic): block " + std::to_string(i) +
+                              " tangent IR not JIT-compatible";
+                out.cacheable = false;
+                return out;
+            }
+        }
+        if (block.want_vector && block.residual_ir) {
+            const auto vr = canCompile(*block.residual_ir, validation);
+            if (!vr.ok) {
+                out.message = "JITCompiler(monolithic): block " + std::to_string(i) +
+                              " residual IR not JIT-compatible";
+                out.cacheable = false;
+                return out;
+            }
+        }
+    }
+
+    // Build cache key with monolithic discriminator
+    const std::string cpu_features = engine->cpuFeaturesString();
+    const std::string target_triple = engine->targetTriple();
+    const std::string data_layout = engine->dataLayoutString();
+    const std::string cpu_name = engine->cpuName();
+    const std::string llvm_version = llvmVersionString();
+    const int preferred_vector_width = preferredVectorWidthFromCpuFeatures(cpu_features);
+
+    std::uint64_t combined_hash = 0xC0B1'0C00'0000'0000ULL; // "COBLOC" discriminator
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        const auto& block = blocks[i];
+        hashMix(combined_hash, static_cast<std::uint64_t>(block.want_matrix ? 1u : 0u));
+        hashMix(combined_hash, static_cast<std::uint64_t>(block.want_vector ? 1u : 0u));
+
+        auto hashIR = [&](const FormIR& ir) {
+            for (std::size_t tidx = 0; tidx < ir.terms().size(); ++tidx) {
+                const auto& term = ir.terms()[tidx];
+                if (term.domain != IntegralDomain::Cell) continue;
+                std::uint64_t term_hash = 0;
+                if (options.tensor.mode != TensorLoweringMode::Off) {
+                    tensor::TensorIRLoweringOptions tensor_opts;
+                    tensor_opts.enable_cache = true;
+                    tensor_opts.force_loop_nest =
+                        (options.tensor.mode == TensorLoweringMode::On) || options.tensor.force_loop_nest;
+                    tensor_opts.log_decisions = options.tensor.log_decisions;
+                    tensor_opts.loop.enable_symmetry_lowering = options.tensor.enable_symmetry_lowering;
+                    tensor_opts.loop.enable_optimal_contraction_order = options.tensor.enable_optimal_contraction_order;
+                    tensor_opts.loop.enable_vectorization_hints = options.vectorize;
+                    tensor_opts.loop.preferred_vector_width = preferred_vector_width;
+                    tensor_opts.loop.enable_delta_shortcuts = options.tensor.enable_delta_shortcuts;
+                    tensor_opts.loop.scalar_expansion_term_threshold = options.tensor.scalar_expansion_term_threshold;
+                    tensor_opts.alloc.stack_max_entries = options.tensor.temp_stack_max_entries;
+                    tensor_opts.alloc.alignment_bytes = options.tensor.temp_alignment_bytes;
+                    tensor_opts.alloc.enable_reuse = options.tensor.temp_enable_reuse;
+
+                    const auto tl = tensor::lowerToTensorIR(term.integrand, tensor_opts);
+                    if (tl.ok && tl.used_loop_nest) {
+                        term_hash = tl.ir.stableHash64();
+                    } else if (tl.ok && tl.fallback_expr.isValid()) {
+                        const auto lowered = lowerToKernelIR(tl.fallback_expr);
+                        term_hash = lowered.ir.stableHash64();
+                    } else {
+                        const auto lowered = lowerToKernelIR(term.integrand);
+                        term_hash = lowered.ir.stableHash64();
+                    }
+                } else {
+                    const auto lowered = lowerToKernelIR(term.integrand);
+                    term_hash = lowered.ir.stableHash64();
+                }
+                hashMix(combined_hash, term_hash);
+                hashMix(combined_hash, static_cast<std::uint64_t>(
+                            static_cast<std::int64_t>(term.time_derivative_order)));
+            }
+            hashMix(combined_hash, hashSpaceSig(ir.testSpace()).h);
+            hashMix(combined_hash, hashSpaceSig(ir.trialSpace()).h);
+        };
+
+        if (block.tangent_ir) hashIR(*block.tangent_ir);
+        hashMix(combined_hash, 0xBB10'CCCC'0000'0000ULL); // separator
+        if (block.residual_ir) hashIR(*block.residual_ir);
+        hashMix(combined_hash, 0xBB10'DDDD'0000'0000ULL); // block separator
+    }
+
+    // Mix compiler config
+    std::uint64_t cache_key = kFNVOffset;
+    hashMix(cache_key, static_cast<std::uint64_t>(assembly::jit::kCoupledCellKernelABIV1));
+    hashMix(cache_key, combined_hash);
+    hashMix(cache_key, static_cast<std::uint64_t>(static_cast<std::int64_t>(options.optimization_level)));
+    hashMix(cache_key, static_cast<std::uint64_t>(options.vectorize ? 1u : 0u));
+    hashMix(cache_key, hashTensorOptions(options.tensor));
+    hashMix(cache_key, hashSpecializationCodegenOptions(options.specialization));
+    hashMix(cache_key, static_cast<std::uint64_t>(options.debug_info ? 1u : 0u));
+    hashMix(cache_key, hashString(target_triple));
+    hashMix(cache_key, hashString(data_layout));
+    hashMix(cache_key, hashString(cpu_name));
+    hashMix(cache_key, hashString(cpu_features));
+    hashMix(cache_key, hashString(llvm_version));
+
+    // Check cache
+    const bool enable_cache = options.cache_kernels;
+    if (enable_cache) {
+        if (auto it = kernel_cache.find(cache_key); it != kernel_cache.end()) {
+            kernel_cache_stats.hits += 1u;
+            kernel_cache_lru.splice(kernel_cache_lru.begin(), kernel_cache_lru, it->second.lru_it);
+            it->second.lru_it = kernel_cache_lru.begin();
+            out.kernels.push_back(it->second.kernel);
+            out.ok = true;
+            return out;
+        }
+        kernel_cache_stats.misses += 1u;
+    }
+
+    std::string symbol = stableSymbolForKernel(cache_key);
+    if (!enable_cache) {
+        const auto id = unique_symbol_counter.fetch_add(1, std::memory_order_relaxed);
+        symbol += "_inst" + std::to_string(id);
+    }
+
+    try {
+        std::uintptr_t addr = 0;
+
+        if (enable_cache && engine && engine->tryLoadFromObjectCache(symbol)) {
+            if (engine->tryLookup(symbol, addr)) {
+                // Found in disk cache
+            }
+        }
+
+        if (addr == 0) {
+            // Build LLVMGen block info
+            std::vector<LLVMGen::MonolithicBlockInfo> gen_blocks;
+            gen_blocks.reserve(blocks.size());
+            for (const auto& b : blocks) {
+                gen_blocks.push_back(LLVMGen::MonolithicBlockInfo{
+                    .tangent_ir = b.tangent_ir,
+                    .residual_ir = b.residual_ir,
+                    .want_matrix = b.want_matrix,
+                    .want_vector = b.want_vector,
+                });
+            }
+
+            LLVMGen gen(options);
+            const auto r = gen.compileAndAddCoupledKernel(*engine, gen_blocks, symbol, addr);
+            if (!r.ok) {
+                out.message = "JITCompiler(monolithic): " + r.message;
+                out.cacheable = false;
+                return out;
+            }
+        }
+
+        JITCompiledKernel k;
+        k.domain = IntegralDomain::Cell;
+        k.boundary_marker = -1;
+        k.interface_marker = -1;
+        k.cache_key = cache_key;
+        k.cacheable = true;
+        k.symbol = symbol;
+        k.address = addr;
+
+        out.kernels.push_back(k);
+
+        if (enable_cache) {
+            kernel_cache_lru.push_front(cache_key);
+            KernelCacheEntry entry;
+            entry.kernel = k;
+            entry.lru_it = kernel_cache_lru.begin();
+            kernel_cache.emplace(cache_key, std::move(entry));
+            kernel_cache_stats.stores += 1u;
+        }
+    } catch (const std::exception& e) {
+        out.message = std::string("JITCompiler(monolithic): LLVM compilation failed: ") + e.what();
+        out.cacheable = false;
+        return out;
+    }
+
+    out.ok = true;
+    return out;
+}
 #endif
 
 JITCompileResult JITCompiler::compile(const FormIR& ir, const ValidationOptions& validation)
@@ -1126,6 +1334,30 @@ JITCompileResult JITCompiler::compileFused(const FormIR& tangent_ir,
     return out;
 #else
     return impl_->compileFusedFormIR(tangent_ir, residual_ir, validation);
+#endif
+}
+
+JITCompileResult JITCompiler::compileMonolithic(
+    std::span<const MonolithicBlockSpec> blocks,
+    const ValidationOptions& validation)
+{
+    JITCompileResult out;
+    out.ok = false;
+    out.cacheable = true;
+
+    if (!impl_) {
+        out.message = "JITCompiler: internal error (missing impl)";
+        return out;
+    }
+
+#if !SVMP_FE_ENABLE_LLVM_JIT
+    (void)blocks;
+    (void)validation;
+    out.message = "JITCompiler: FE was built without LLVM JIT support";
+    out.cacheable = false;
+    return out;
+#else
+    return impl_->compileMonolithicFormIR(blocks, validation);
 #endif
 }
 

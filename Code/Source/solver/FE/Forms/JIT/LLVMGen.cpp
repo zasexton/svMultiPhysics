@@ -12482,6 +12482,26 @@ LLVMGenResult LLVMGen::compileAndAddFusedKernel(JITEngine& engine,
 #endif
 }
 
+LLVMGenResult LLVMGen::compileAndAddCoupledKernel(JITEngine& engine,
+                                                  std::span<const MonolithicBlockInfo> blocks,
+                                                  std::string_view symbol,
+                                                  std::uintptr_t& out_address) const
+{
+    out_address = 0;
+    (void)engine;
+    (void)blocks;
+    (void)symbol;
+
+    // Monolithic coupled LLVM codegen is not yet implemented.
+    // The coupled assembly path dispatches per-block fallback kernels,
+    // which already share geometry across blocks.  Monolithic codegen
+    // (shared QP-level intermediates) is a future optimization.
+    return LLVMGenResult{
+        .ok = false,
+        .message = "LLVMGen: monolithic coupled codegen not yet implemented"
+    };
+}
+
 } // namespace jit
 } // namespace forms
 } // namespace FE
