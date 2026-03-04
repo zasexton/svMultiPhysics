@@ -17,6 +17,7 @@
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/TimeIntegrationContext.h"
 
+#include "Forms/CoupledBlockKernel.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/JIT/ExternalCalls.h"
@@ -38,6 +39,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -557,8 +559,99 @@ assembly::AssemblyResult assembleOperator(
         std::vector<assembly::FusedCellTerm> fused_terms;
         fused_terms.reserve(def.cells.size());
 
+        // Track which per-block kernels have been covered by a CoupledBlockKernel
+        // so we don't add them twice (once standalone and once as part of the coupled expansion).
+        std::unordered_set<const assembly::AssemblyKernel*> coupled_covered_kernels;
+
+        // First pass: identify CoupledBlockKernel entries and collect their covered fallback kernels.
+        for (const auto& term : def.cells) {
+            if (auto* coupled = dynamic_cast<const forms::CoupledBlockKernel*>(term.kernel.get())) {
+                for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
+                    const auto& bs = coupled->blockSpec(bi);
+                    if (bs.fallback_kernel) {
+                        coupled_covered_kernels.insert(bs.fallback_kernel.get());
+                    }
+                }
+            }
+        }
+
         for (const auto& term : def.cells) {
             FE_CHECK_NOT_NULL(term.kernel.get(), "assembleOperator: cell term kernel");
+
+            // If this kernel is covered by a CoupledBlockKernel, skip it
+            // (it will be expanded below from the coupled kernel's blocks).
+            if (coupled_covered_kernels.count(term.kernel.get()) > 0) {
+                continue;
+            }
+
+            // Detect CoupledBlockKernel: resolve per-block data and register
+            // as a single FusedCellTerm.  The assembler's coupled path handles
+            // per-block dispatch with shared geometry/field solutions.
+            if (auto* coupled = dynamic_cast<forms::CoupledBlockKernel*>(term.kernel.get())) {
+                // Resolve per-block field info (deferred from installation time)
+                if (!coupled->isResolved()) {
+                    for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
+                        auto& bs = coupled->mutableBlockSpec(bi);
+                        const auto& b_test_field = system.field_registry_.get(bs.test_field);
+                        const auto& b_trial_field = system.field_registry_.get(bs.trial_field);
+                        FE_CHECK_NOT_NULL(b_test_field.space.get(), "assembleOperator: coupled block test space");
+                        FE_CHECK_NOT_NULL(b_trial_field.space.get(), "assembleOperator: coupled block trial space");
+                        const auto b_test_idx = static_cast<std::size_t>(b_test_field.id);
+                        const auto b_trial_idx = static_cast<std::size_t>(b_trial_field.id);
+
+                        bs.test_space = b_test_field.space.get();
+                        bs.trial_space = b_trial_field.space.get();
+                        bs.row_dof_map = &system.field_dof_handlers_[b_test_idx].getDofMap();
+                        bs.col_dof_map = &system.field_dof_handlers_[b_trial_idx].getDofMap();
+                        bs.row_dof_offset = system.field_dof_offsets_[b_test_idx];
+                        bs.col_dof_offset = system.field_dof_offsets_[b_trial_idx];
+
+                        if (oopTraceEnabled()) {
+                            std::ostringstream oss;
+                            oss << "assembleOperator: op='" << request.op
+                                << "' coupled block[" << bi << "] test='" << b_test_field.name
+                                << "' trial='" << b_trial_field.name
+                                << "' want_matrix=" << (request.want_matrix && bs.want_matrix ? 1 : 0)
+                                << " want_vector=" << (request.want_vector && bs.want_vector ? 1 : 0);
+                            traceLog(oss.str());
+                        }
+                    }
+                    coupled->setResolved();
+                }
+
+                // Check if any block has work to do
+                bool any_active = false;
+                for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
+                    const auto& bs = coupled->blockSpec(bi);
+                    if (!bs.fallback_kernel || !bs.fallback_kernel->hasCell()) continue;
+                    if ((request.want_matrix && bs.want_matrix) ||
+                        (request.want_vector && bs.want_vector)) {
+                        any_active = true;
+                        break;
+                    }
+                }
+                if (!any_active) continue;
+
+                // Register as single FusedCellTerm using first block's spaces.
+                // The assembler detects CoupledBlockKernel and dispatches per-block.
+                const auto& first_bs = coupled->blockSpec(0);
+                assembly::FusedCellTerm ft;
+                ft.test_space = first_bs.test_space;
+                ft.trial_space = first_bs.trial_space;
+                ft.kernel = coupled;
+                ft.row_dof_map = first_bs.row_dof_map;
+                ft.col_dof_map = first_bs.col_dof_map;
+                ft.row_dof_offset = first_bs.row_dof_offset;
+                ft.col_dof_offset = first_bs.col_dof_offset;
+                ft.matrix_view = request.want_matrix ? matrix_out : nullptr;
+                ft.vector_view = request.want_vector ? vector_out : nullptr;
+                ft.assemble_matrix = request.want_matrix;
+                ft.assemble_vector = request.want_vector;
+                fused_terms.push_back(ft);
+                continue;
+            }
+
+            // Standard single-kernel term (unchanged)
             const auto& test_field = system.field_registry_.get(term.test_field);
             const auto& trial_field = system.field_registry_.get(term.trial_field);
 

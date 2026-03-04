@@ -1004,6 +1004,91 @@ struct CellKernelBatchArgsV1 {
 static_assert(std::is_standard_layout_v<CellKernelBatchArgsV1>);
 static_assert(std::is_trivially_copyable_v<CellKernelBatchArgsV1>);
 
+// =============================================================================
+// Coupled monolithic kernel ABI v1
+//
+// For multi-field coupled systems (e.g., NS-VMS velocity+pressure), these
+// structs allow a single JIT kernel to compute all NxM block contributions
+// in one pass.  Shared geometry data is provided once; per-block basis
+// function tables, solution coefficients, and output buffers are supplied
+// through a CoupledBlockView array.
+// =============================================================================
+
+inline constexpr std::uint32_t kCoupledCellKernelABIV1 = 0xC0B1'0001u;
+
+/// Per-block data within a monolithic coupled kernel call.
+struct CoupledBlockView {
+    // Basis function tables (same layout as KernelSideArgsV6 fields)
+    const Real* test_basis_values{nullptr};           // [n_test_dofs * n_qpts]
+    const Real* test_phys_gradients_xyz{nullptr};     // [n_test_dofs * n_qpts * 3]
+    const Real* trial_basis_values{nullptr};          // [n_trial_dofs * n_qpts]
+    const Real* trial_phys_gradients_xyz{nullptr};    // [n_trial_dofs * n_qpts * 3]
+
+    // DOF counts
+    std::uint32_t n_test_dofs{0};
+    std::uint32_t n_trial_dofs{0};
+    std::uint32_t test_value_dim{1};                  // 1=scalar, 2/3=vector
+    std::uint32_t trial_value_dim{1};
+    std::uint32_t test_uses_vector_basis{0};          // 0/1 for H(curl)/H(div)
+    std::uint32_t trial_uses_vector_basis{0};
+
+    // Solution coefficients for this block's trial field
+    const Real* solution_coefficients{nullptr};       // [n_trial_dofs]
+
+    // Output buffers (caller zero-initializes; kernel accumulates +=)
+    Real* element_matrix{nullptr};                    // [n_test_dofs * n_trial_dofs] row-major, or nullptr
+    Real* element_vector{nullptr};                    // [n_test_dofs], or nullptr
+};
+
+/// Monolithic coupled kernel arguments (single element).
+struct CoupledCellKernelArgsV1 {
+    std::uint32_t abi_version{kCoupledCellKernelABIV1};
+    std::uint32_t num_blocks{0};
+
+    // Shared geometry (same as KernelSideArgsV6 minus basis/solution/output)
+    std::uint32_t dim{0};
+    std::uint32_t n_qpts{0};
+    const Real* integration_weights{nullptr};         // [n_qpts]
+    const Real* jacobians{nullptr};                   // [n_qpts * 9]
+    const Real* inverse_jacobians{nullptr};           // [n_qpts * 9]
+    const Real* jacobian_dets{nullptr};               // [n_qpts]
+    const Real* physical_points_xyz{nullptr};         // [n_qpts * 3]
+    Real cell_diameter{0.0};
+    Real cell_volume{0.0};
+    Real time{0.0};
+    Real dt{0.0};
+
+    // Shared field solution data (all discrete fields)
+    const FieldSolutionEntryV1* field_solutions{nullptr};
+    std::uint32_t num_field_solutions{0};
+
+    // Time integration
+    Real time_derivative_term_weight{1.0};
+    Real non_time_derivative_term_weight{1.0};
+
+    // JIT constants & parameters
+    const Real* jit_constants{nullptr};
+    std::uint32_t num_jit_constants{0};
+
+    // Per-block array
+    const CoupledBlockView* blocks{nullptr};          // [num_blocks]
+};
+
+/// Batch wrapper for coupled monolithic kernel.
+struct CoupledCellKernelBatchArgsV1 {
+    std::uint32_t abi_version{kCoupledCellKernelABIV1};
+    std::uint32_t batch_size{0};
+    std::uint32_t num_blocks{0};
+    const CoupledCellKernelArgsV1* elements{nullptr}; // [batch_size]
+};
+
+static_assert(std::is_standard_layout_v<CoupledBlockView>);
+static_assert(std::is_trivially_copyable_v<CoupledBlockView>);
+static_assert(std::is_standard_layout_v<CoupledCellKernelArgsV1>);
+static_assert(std::is_trivially_copyable_v<CoupledCellKernelArgsV1>);
+static_assert(std::is_standard_layout_v<CoupledCellKernelBatchArgsV1>);
+static_assert(std::is_trivially_copyable_v<CoupledCellKernelBatchArgsV1>);
+
 namespace detail {
 
 [[nodiscard]] inline const Real* flattenXYZ(std::span<const std::array<Real, 3>> a) noexcept
@@ -2438,6 +2523,73 @@ namespace detail {
     out.output_plus = detail::packOutputViewV6(output_plus);
     out.coupling_minus_plus = detail::packOutputViewV6(coupling_minus_plus);
     out.coupling_plus_minus = detail::packOutputViewV6(coupling_plus_minus);
+    return out;
+}
+
+// =============================================================================
+// Coupled monolithic kernel packing helpers
+// =============================================================================
+
+/// Pack a CoupledBlockView from an AssemblyContext that has been prepared with
+/// the block's test/trial spaces (basis, solution coefficients already set).
+[[nodiscard]] inline CoupledBlockView packCoupledBlockView(
+    const AssemblyContext& ctx,
+    KernelOutput& output) noexcept
+{
+    CoupledBlockView bv;
+    bv.test_basis_values = ctx.testBasisValuesRaw().empty() ? nullptr : ctx.testBasisValuesRaw().data();
+    bv.test_phys_gradients_xyz = detail::flattenXYZ(ctx.testPhysicalGradientsRaw());
+    bv.trial_basis_values = ctx.trialBasisValuesRaw().empty() ? nullptr : ctx.trialBasisValuesRaw().data();
+    bv.trial_phys_gradients_xyz = detail::flattenXYZ(ctx.trialPhysicalGradientsRaw());
+    bv.n_test_dofs = static_cast<std::uint32_t>(ctx.numTestDofs());
+    bv.n_trial_dofs = static_cast<std::uint32_t>(ctx.numTrialDofs());
+    bv.test_value_dim = static_cast<std::uint32_t>(ctx.testValueDimension());
+    bv.trial_value_dim = static_cast<std::uint32_t>(ctx.trialValueDimension());
+    bv.test_uses_vector_basis = ctx.testUsesVectorBasis() ? 1u : 0u;
+    bv.trial_uses_vector_basis = ctx.trialUsesVectorBasis() ? 1u : 0u;
+    bv.solution_coefficients = ctx.solutionCoefficients().empty() ? nullptr : ctx.solutionCoefficients().data();
+    bv.element_matrix = output.local_matrix.empty() ? nullptr : output.local_matrix.data();
+    bv.element_vector = output.local_vector.empty() ? nullptr : output.local_vector.data();
+    return bv;
+}
+
+/// Pack the shared (geometry + field solution) portion of CoupledCellKernelArgsV1
+/// from an AssemblyContext whose geometry has been prepared for the current cell.
+[[nodiscard]] inline CoupledCellKernelArgsV1 packCoupledCellKernelArgsV1(
+    const AssemblyContext& ctx,
+    std::span<const CoupledBlockView> blocks) noexcept
+{
+    CoupledCellKernelArgsV1 out;
+    out.abi_version = kCoupledCellKernelABIV1;
+    out.num_blocks = static_cast<std::uint32_t>(blocks.size());
+    out.dim = static_cast<std::uint32_t>(ctx.dimension());
+    out.n_qpts = static_cast<std::uint32_t>(ctx.numQuadraturePoints());
+    out.integration_weights = ctx.integrationWeights().empty() ? nullptr : ctx.integrationWeights().data();
+    out.jacobians = detail::flattenMat3(ctx.jacobians());
+    out.inverse_jacobians = detail::flattenMat3(ctx.inverseJacobians());
+    out.jacobian_dets = ctx.jacobianDets().empty() ? nullptr : ctx.jacobianDets().data();
+    out.physical_points_xyz = detail::flattenXYZ(ctx.physicalPoints());
+    out.cell_diameter = ctx.cellDiameter();
+    out.cell_volume = (ctx.contextType() == ContextType::Cell) ? ctx.cellVolume() : Real(0.0);
+    out.time = ctx.time();
+    out.dt = ctx.timeStep();
+
+    // Field solutions
+    const auto& fs_table = ctx.jitFieldSolutionTable();
+    out.field_solutions = fs_table.empty() ? nullptr : fs_table.data();
+    out.num_field_solutions = static_cast<std::uint32_t>(fs_table.size());
+
+    // Time integration
+    if (const auto* ti = ctx.timeIntegrationContext()) {
+        out.time_derivative_term_weight = ti->time_derivative_term_weight;
+        out.non_time_derivative_term_weight = ti->non_time_derivative_term_weight;
+    }
+
+    // JIT constants
+    out.jit_constants = ctx.jitConstants().empty() ? nullptr : ctx.jitConstants().data();
+    out.num_jit_constants = static_cast<std::uint32_t>(ctx.jitConstants().size());
+
+    out.blocks = blocks.data();
     return out;
 }
 

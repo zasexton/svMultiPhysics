@@ -9,8 +9,10 @@
 
 #include "Core/FEException.h"
 
+#include "Forms/CoupledBlockKernel.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/JIT/JITCompiler.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/WeakForm.h"
 #include "Forms/AffineAnalysis.h"
@@ -529,6 +531,41 @@ CoupledResidualKernels installCoupledResidual(
                     out.residual[i] = kernel;
                 }
             }
+        }
+    }
+
+    // ========================================================================
+    // CoupledBlockKernel: wrap all Jacobian block kernels into a single kernel
+    // so that assembleCellsFused can share geometry across blocks.
+    // ========================================================================
+    if (options.coupled_residual_install_jacobian_blocks &&
+        options.compiler_options.jit.enable)
+    {
+        std::vector<forms::CoupledBlockKernel::BlockSpec> block_specs;
+        for (std::size_t i = 0; i < out.jacobian_blocks.size(); ++i) {
+            for (std::size_t j = 0; j < out.jacobian_blocks[i].size(); ++j) {
+                const auto& kernel = out.jacobian_blocks[i][j];
+                if (!kernel) continue;
+
+                forms::CoupledBlockKernel::BlockSpec bs;
+                bs.test_field = test_fields[i];
+                bs.trial_field = trial_fields[j];
+                bs.want_matrix = !kernel->isVectorOnly();
+                bs.want_vector = !kernel->isMatrixOnly();
+                bs.fallback_kernel = kernel;
+                block_specs.push_back(std::move(bs));
+            }
+        }
+
+        if (block_specs.size() >= 2) {
+            auto jit_compiler = forms::jit::JITCompiler::getOrCreate(options.compiler_options.jit);
+            std::shared_ptr<assembly::AssemblyKernel> coupled =
+                std::make_shared<forms::CoupledBlockKernel>(
+                    std::move(block_specs), std::move(jit_compiler), options.compiler_options.jit);
+
+            // Register as a single cell term for the first (test, trial) pair.
+            // SystemAssembly will detect this and expand into per-block fused terms.
+            system.addCellKernel(op, test_fields[0], trial_fields[0], coupled);
         }
     }
 

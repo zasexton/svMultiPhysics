@@ -773,6 +773,7 @@ set(FE_FORMS_SOURCES
     Forms/FormCompiler.cpp
     Forms/AffineAnalysis.cpp
 	    Forms/BoundaryFunctional.cpp
+	    Forms/CoupledBlockKernel.cpp
 	    Forms/FormKernels.cpp
 	    Forms/SymbolicDifferentiation.cpp
 	    Forms/PointEvaluator.cpp

@@ -23,6 +23,7 @@
 #include "Basis/BasisFunction.h"
 #include "Basis/BasisCache.h"
 #include "Basis/VectorBasis.h"
+#include "Forms/CoupledBlockKernel.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Math/Vector.h"
@@ -3808,6 +3809,201 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         }
     };
 
+    // ========================================================================
+    // Coupled block detection: if terms contains exactly one CoupledBlockKernel,
+    // use a block-sequential batch path that eliminates Phase 2 geometry restore.
+    // ========================================================================
+    const forms::CoupledBlockKernel* coupled_kernel = nullptr;
+    if (terms.size() == 1) {
+        coupled_kernel = dynamic_cast<const forms::CoupledBlockKernel*>(terms[0].kernel);
+    }
+
+    // Coupled block batch range processor (replaces Phase 1 + Phase 2 with
+    // a block-sequential loop: prepare geometry once, then for each block
+    // prepare basis + gather + compute + insert without geometry save/restore).
+    auto assemble_coupled_batch_range = [&](std::span<const GlobalIndex> gids) {
+        if (!coupled_kernel || !coupled_kernel->isResolved()) return;
+        const auto& parent_term = terms[0];
+        const auto& parent_td = term_data[0];
+        const std::size_t n_blocks = coupled_kernel->numBlocks();
+
+        // Ensure batch_dofs has enough room for all blocks
+        if (scratch_batch_dofs_.size() < n_blocks ||
+            (scratch_batch_dofs_.size() > 0 && scratch_batch_dofs_[0].size() < B)) {
+            scratch_batch_dofs_.assign(n_blocks, std::vector<SlotDofs>(B));
+        }
+
+        for (std::size_t begin = 0; begin < gids.size(); begin += B) {
+            const std::size_t active = std::min(B, gids.size() - begin);
+
+            // === Prepare geometry + context for all cells in batch (ONCE) ===
+            for (std::size_t slot = 0; slot < active; ++slot) {
+                const auto cell_id = gids[begin + slot];
+                auto& ctx = batch_contexts[slot];
+
+                double tp0 = TP();
+                prepareGeometry(ctx, mesh, cell_id, *fused_quad_rule);
+                tp_fb_geom += TP() - tp0;
+
+                tp0 = TP();
+                saved_node_coords[slot].node_coords = scratch_node_coords_;
+                tp_fb_save += TP() - tp0;
+
+                tp0 = TP();
+                ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
+                ctx.setTimeIntegrationContext(time_integration_);
+                ctx.setTime(time_);
+                ctx.setTimeStep(dt_);
+                ctx.setRealParameterGetter(get_real_param_);
+                ctx.setParameterGetter(get_param_);
+                ctx.setUserData(user_data_);
+                ctx.setJITConstants(jit_constants_);
+                ctx.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+                ctx.clearAllPreviousSolutionData();
+                tp_fb_setters += TP() - tp0;
+
+                // Field solutions are populated after first block's prepareBasis
+                // (populateFieldSolutionData only needs geometry arrays from
+                // prepareGeometry; it does NOT need prepareBasis. But we defer
+                // to the block loop so there's no extra prepareBasis call.)
+            }
+
+            // === For each block: prepare basis + gather + compute + insert ===
+            for (std::size_t bi = 0; bi < n_blocks; ++bi) {
+                const auto& bs = coupled_kernel->blockSpec(bi);
+                if (!bs.fallback_kernel || !bs.fallback_kernel->hasCell()) continue;
+                const bool block_want_matrix = parent_term.assemble_matrix && bs.want_matrix;
+                const bool block_want_vector = parent_term.assemble_vector && bs.want_vector;
+                if (!block_want_matrix && !block_want_vector) continue;
+
+                for (std::size_t slot = 0; slot < active; ++slot) {
+                    const auto cell_id = gids[begin + slot];
+                    auto& ctx = batch_contexts[slot];
+
+                    double tp0 = TP();
+                    // Restore node coords for prepareBasis (geometry arrays survive)
+                    scratch_node_coords_ = saved_node_coords[slot].node_coords;
+                    cached_mapping_->resetNodes(scratch_node_coords_);
+                    tp_fb_restore += TP() - tp0;
+
+                    tp0 = TP();
+                    prepareBasis(ctx, mesh, cell_id, *bs.test_space, *bs.trial_space,
+                                 bs.fallback_kernel->getRequiredData(), *fused_quad_rule);
+                    tp_fb_basis += TP() - tp0;
+
+                    // Populate field solutions after first block's prepareBasis
+                    // (persists across blocks since FunctionSpace configure() doesn't clear them)
+                    if (bi == 0 && any_need_field_solutions) {
+                        tp0 = TP();
+                        populateFieldSolutionData(ctx, mesh, cell_id, union_field_reqs);
+                        tp_fb_field += TP() - tp0;
+                    }
+
+                    // DOF lookup
+                    tp0 = TP();
+                    {
+                        auto rl = bs.row_dof_map->getCellDofs(cell_id);
+                        auto cl = bs.col_dof_map->getCellDofs(cell_id);
+                        auto& rd = batch_dofs[bi][slot].row_dofs;
+                        auto& cd = batch_dofs[bi][slot].col_dofs;
+                        rd.resize(rl.size());
+                        for (std::size_t i = 0; i < rl.size(); ++i) rd[i] = rl[i] + bs.row_dof_offset;
+                        cd.resize(cl.size());
+                        for (std::size_t j = 0; j < cl.size(); ++j) cd[j] = cl[j] + bs.col_dof_offset;
+                    }
+                    tp_fb_dof += TP() - tp0;
+
+                    // Solution gather using the block's col_dofs and trial_space
+                    tp0 = TP();
+                    if (parent_td.need_solution) {
+                        const auto& cd = batch_dofs[bi][slot].col_dofs;
+                        auto& sol = batch_sol_coeffs[slot];
+                        sol.resize(cd.size());
+                        if (current_solution_view_ != nullptr) {
+                            current_solution_view_->getVectorEntries(
+                                std::span<const GlobalIndex>(cd), std::span<Real>(sol));
+                        } else {
+                            for (std::size_t i = 0; i < cd.size(); ++i) {
+                                const auto dof = cd[i];
+                                sol[i] = current_solution_[static_cast<std::size_t>(dof)];
+                            }
+                        }
+                        if (ctx.trialUsesVectorBasis())
+                            applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
+                                                          std::span<Real>(sol));
+                        ctx.setSolutionCoefficients(std::span<const Real>(sol));
+
+                        // Previous solution coefficients for time integration
+                        if (time_integration_ != nullptr) {
+                            const int required = requiredHistoryStates(time_integration_);
+                            if (required > 0) {
+                                auto& psc = batch_prev_sol_coeffs[slot];
+                                if (psc.size() < static_cast<std::size_t>(required))
+                                    psc.resize(static_cast<std::size_t>(required));
+                                for (int k = 1; k <= required; ++k) {
+                                    const auto& pdata = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                                    const auto* pview = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+                                                            ? previous_solution_views_[static_cast<std::size_t>(k - 1)] : nullptr;
+                                    auto& lp = psc[static_cast<std::size_t>(k - 1)];
+                                    lp.resize(cd.size());
+                                    if (pview != nullptr) {
+                                        pview->getVectorEntries(
+                                            std::span<const GlobalIndex>(cd), std::span<Real>(lp));
+                                    } else {
+                                        for (std::size_t i = 0; i < cd.size(); ++i) {
+                                            lp[i] = pdata[static_cast<std::size_t>(cd[i])];
+                                        }
+                                    }
+                                    if (ctx.trialUsesVectorBasis())
+                                        applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
+                                                                      std::span<Real>(lp));
+                                    ctx.setPreviousSolutionCoefficientsK(k, lp);
+                                }
+                            }
+                        }
+                    }
+                    tp_fb_sol += TP() - tp0;
+
+                    batch_outputs[slot].clear();
+                    batch_context_ptrs[slot] = &ctx;
+                }
+
+                // Batch-compute this block's kernel
+                double tp0 = TP();
+                bs.fallback_kernel->computeCellBatch(
+                    std::span<const AssemblyContext* const>(batch_context_ptrs.data(), active),
+                    std::span<KernelOutput>(batch_outputs.data(), active));
+                tp_fb_kernel += TP() - tp0;
+
+                // Insert this block's outputs
+                tp0 = TP();
+                for (std::size_t slot = 0; slot < active; ++slot) {
+                    const auto cid = gids[begin + slot];
+                    auto& ctx = batch_contexts[slot];
+                    auto& output = batch_outputs[slot];
+                    if (ctx.testUsesVectorBasis() || ctx.trialUsesVectorBasis())
+                        applyVectorBasisOutputOrientation(mesh, cid, *bs.test_space,
+                                                          cid, *bs.trial_space, output);
+                    const auto& rd = batch_dofs[bi][slot].row_dofs;
+                    const auto& cd = batch_dofs[bi][slot].col_dofs;
+                    GlobalSystemView* ins_mat = block_want_matrix ? parent_term.matrix_view : nullptr;
+                    GlobalSystemView* ins_vec = block_want_vector ? parent_term.vector_view : nullptr;
+                    if (options_.use_constraints && constraint_distributor_) {
+                        insertLocalConstrained(output, rd, cd, ins_mat, ins_vec);
+                    } else {
+                        insertLocal(output, rd, cd, ins_mat, ins_vec);
+                    }
+                    result.elements_assembled++;
+                    if (output.has_matrix)
+                        result.matrix_entries_inserted += static_cast<GlobalIndex>(rd.size() * cd.size());
+                    if (output.has_vector)
+                        result.vector_entries_inserted += static_cast<GlobalIndex>(rd.size());
+                }
+                tp_fb_insert += TP() - tp0;
+            }
+        }
+    };
+
     // Main fused-batch range processor
     auto assemble_fused_batch_range = [&](std::span<const GlobalIndex> gids) {
         for (std::size_t begin = 0; begin < gids.size(); begin += B) {
@@ -3955,6 +4151,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     std::span<const AssemblyContext* const>(batch_context_ptrs.data(), active),
                     std::span<KernelOutput>(batch_outputs.data(), active));
                 tp_fb_kernel += TP() - tp0;
+
                 tp0 = TP();
                 insert_batch_outputs(ti, active, gids, begin);
                 tp_fb_insert += TP() - tp0;
@@ -3972,8 +4169,12 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             std::size_t run_end = run_begin + 1u;
             while (run_end < cell_ids.size() && mesh.getCellType(cell_ids[run_end]) == run_type)
                 ++run_end;
-            assemble_fused_batch_range(std::span<const GlobalIndex>(
-                cell_ids.data() + run_begin, run_end - run_begin));
+            const auto batch_span = std::span<const GlobalIndex>(
+                cell_ids.data() + run_begin, run_end - run_begin);
+            if (coupled_kernel)
+                assemble_coupled_batch_range(batch_span);
+            else
+                assemble_fused_batch_range(batch_span);
             run_begin = run_end;
         }
     } else {
@@ -3988,8 +4189,12 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             }
             it->second.push_back(cid);
         }
-        for (const auto& g : topo_groups)
-            assemble_fused_batch_range(std::span<const GlobalIndex>(g.second));
+        for (const auto& g : topo_groups) {
+            if (coupled_kernel)
+                assemble_coupled_batch_range(std::span<const GlobalIndex>(g.second));
+            else
+                assemble_fused_batch_range(std::span<const GlobalIndex>(g.second));
+        }
     }
 
 #ifdef SVMP_FE_ASSEMBLY_TIMING
