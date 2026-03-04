@@ -252,7 +252,6 @@ set(MESH_CORE_SOURCES
     Core/MeshComm.h
     Core/MeshBase.h
     Core/MeshBase.cpp
-    Core/BoundaryGeometry.cpp
     Core/InterfaceMesh.h
     Core/DistributedMesh.h
     Core/DistributedMesh.cpp

@@ -391,21 +391,21 @@ private:
     };
 
     /**
-     * @brief Saved per-cell geometry data for fused-batched assembly.
+     * @brief Saved node coordinates for fused-batched assembly.
      *
-     * When processing a batch of cells with multiple fused terms, we compute
-     * geometry once per cell and save it here. Subsequent terms restore the
-     * geometry scratch arrays from this saved data before re-preparing basis.
+     * Geometry data in the AssemblyContext arena survives prepareBasis() calls
+     * (configure() only clears hessians/vector-basis, not geometry arrays, and
+     * the arena is pre-reserved so no reallocation occurs). Only
+     * scratch_node_coords_ (an assembler member) needs saving per batch slot.
      */
-    struct SavedCellGeometry {
-        std::vector<AssemblyContext::Matrix3x3> jacobians;
-        std::vector<AssemblyContext::Matrix3x3> inv_jacobians;
-        std::vector<Real> jac_dets;
-        std::vector<AssemblyContext::Point3D> quad_points;
-        std::vector<Real> quad_weights;
-        std::vector<AssemblyContext::Point3D> phys_points;
-        std::vector<Real> integration_weights;
+    struct SavedCellNodeCoords {
         std::vector<math::Vector<Real, 3>> node_coords;
+    };
+
+    /** Per-slot DOF indices for fused-batched assembly. */
+    struct SlotDofs {
+        std::vector<GlobalIndex> row_dofs;
+        std::vector<GlobalIndex> col_dofs;
     };
 
     // =========================================================================
@@ -685,6 +685,16 @@ private:
     // Scratch storage for node coordinate conversion (avoids per-cell heap allocation)
     std::vector<math::Vector<Real, 3>> scratch_node_coords_;
 
+    // Scratch storage for populateFieldSolutionData (avoids per-cell heap allocation)
+    std::vector<Real> scratch_fsd_scalar_values_;
+    std::vector<AssemblyContext::Vector3D> scratch_fsd_scalar_gradients_;
+    std::vector<AssemblyContext::Matrix3x3> scratch_fsd_scalar_hessians_;
+    std::vector<Real> scratch_fsd_scalar_laplacians_;
+    std::vector<AssemblyContext::Vector3D> scratch_fsd_vector_values_;
+    std::vector<AssemblyContext::Matrix3x3> scratch_fsd_vector_jacobians_;
+    std::vector<AssemblyContext::Matrix3x3> scratch_fsd_vector_component_hessians_;
+    std::vector<Real> scratch_fsd_vector_component_laplacians_;
+
     // Cached BasisCacheEntry pointers (hoisted out of per-cell loop).
     // Invalidated when element type or hessian requirement changes.
     const basis::BasisCacheEntry* cached_geom_bcache_{nullptr};
@@ -714,6 +724,18 @@ private:
         const basis::BasisCacheEntry* entry{nullptr};
     };
     std::vector<FieldBCacheEntry> cached_field_bcache_;
+
+    // Scratch storage for assembleCellsFused batching (avoids per-batch heap allocation)
+    std::vector<AssemblyContext> scratch_batch_contexts_;
+    std::vector<KernelOutput> scratch_batch_outputs_;
+    std::vector<const AssemblyContext*> scratch_batch_context_ptrs_;
+    std::vector<SavedCellNodeCoords> scratch_saved_node_coords_;
+    std::vector<std::vector<SlotDofs>> scratch_batch_dofs_;
+    std::vector<std::vector<Real>> scratch_batch_sol_coeffs_;
+    std::vector<std::vector<std::vector<Real>>> scratch_batch_prev_sol_coeffs_;
+    std::size_t scratch_batch_reserved_dofs_{0};
+    std::size_t scratch_batch_reserved_qpts_{0};
+    int scratch_batch_reserved_dim_{0};
 };
 
 // ============================================================================

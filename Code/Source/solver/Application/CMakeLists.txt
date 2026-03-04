@@ -9,7 +9,6 @@ add_library(svapplication STATIC
   Core/SimulationBuilder.cpp
   Translators/MeshTranslator.cpp
   Translators/EquationTranslator.cpp
-  IO/TemporalSpatialReader.cpp
 )
 
 set_target_properties(svapplication PROPERTIES

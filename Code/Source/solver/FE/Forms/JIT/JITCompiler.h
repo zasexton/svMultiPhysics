@@ -62,6 +62,13 @@ public:
                                                      IntegralDomain domain,
                                                      const ValidationOptions& validation = {});
 
+    /** Compile a fused tangent+residual kernel. Returns a single Cell-domain
+     *  kernel that computes both element matrix and element vector in one pass.
+     *  Boundary/face terms are not fused and fall back to separate kernels. */
+    [[nodiscard]] JITCompileResult compileFused(const FormIR& tangent_ir,
+                                                const FormIR& residual_ir,
+                                                const ValidationOptions& validation = {});
+
     [[nodiscard]] JITCacheStats cacheStats() const;
     void resetCacheStats();
 

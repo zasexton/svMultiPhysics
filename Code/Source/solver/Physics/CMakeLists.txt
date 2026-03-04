@@ -121,7 +121,6 @@ set(PHYSICS_PUBLIC_HEADERS
 set(PHYSICS_SOURCES
     Physics.cpp
     Core/EquationModuleRegistry.cpp
-    Core/StringUtils.cpp
     Core/ParameterSchema.cpp
 )
 

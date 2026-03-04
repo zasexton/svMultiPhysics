@@ -3671,20 +3671,41 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     // ========================================================================
     const std::size_t B = requested_batch_size;
 
-    std::vector<AssemblyContext> batch_contexts(B);
-    for (auto& bctx : batch_contexts)
-        bctx.reserve(max_dofs, max_qpts, mesh.dimension());
-    std::vector<KernelOutput> batch_outputs(B);
-    std::vector<const AssemblyContext*> batch_context_ptrs(B, nullptr);
-    std::vector<SavedCellGeometry> saved_geom(B);
+    // Grow scratch batch storage on demand; reserve() is a no-op once sized.
+    {
+        const auto old_sz = scratch_batch_contexts_.size();
+        if (old_sz < B) {
+            scratch_batch_contexts_.resize(B);
+            for (std::size_t i = old_sz; i < B; ++i)
+                scratch_batch_contexts_[i].reserve(max_dofs, max_qpts, mesh.dimension());
+        }
+        if (max_dofs > scratch_batch_reserved_dofs_ ||
+            max_qpts > scratch_batch_reserved_qpts_ ||
+            mesh.dimension() != scratch_batch_reserved_dim_) {
+            for (auto& bctx : scratch_batch_contexts_)
+                bctx.reserve(max_dofs, max_qpts, mesh.dimension());
+            scratch_batch_reserved_dofs_ = max_dofs;
+            scratch_batch_reserved_qpts_ = max_qpts;
+            scratch_batch_reserved_dim_ = mesh.dimension();
+        }
+    }
+    scratch_batch_outputs_.resize(B);
+    scratch_batch_context_ptrs_.assign(B, nullptr);
+    scratch_saved_node_coords_.resize(B);
+    if (scratch_batch_dofs_.size() < terms.size() ||
+        (scratch_batch_dofs_.size() > 0 && scratch_batch_dofs_[0].size() < B)) {
+        scratch_batch_dofs_.assign(terms.size(), std::vector<SlotDofs>(B));
+    }
+    scratch_batch_sol_coeffs_.resize(B);
+    scratch_batch_prev_sol_coeffs_.resize(B);
 
-    struct SlotDofs {
-        std::vector<GlobalIndex> row_dofs;
-        std::vector<GlobalIndex> col_dofs;
-    };
-    std::vector<std::vector<SlotDofs>> batch_dofs(terms.size(), std::vector<SlotDofs>(B));
-    std::vector<std::vector<Real>> batch_sol_coeffs(B);
-    std::vector<std::vector<std::vector<Real>>> batch_prev_sol_coeffs(B);
+    auto& batch_contexts = scratch_batch_contexts_;
+    auto& batch_outputs = scratch_batch_outputs_;
+    auto& batch_context_ptrs = scratch_batch_context_ptrs_;
+    auto& saved_node_coords = scratch_saved_node_coords_;
+    auto& batch_dofs = scratch_batch_dofs_;
+    auto& batch_sol_coeffs = scratch_batch_sol_coeffs_;
+    auto& batch_prev_sol_coeffs = scratch_batch_prev_sol_coeffs_;
 
     double tp_fb_geom = 0.0, tp_fb_save = 0.0, tp_fb_restore = 0.0;
     double tp_fb_basis = 0.0, tp_fb_field = 0.0, tp_fb_dof = 0.0;
@@ -3802,15 +3823,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 tp_fb_geom += TP() - tp0;
 
                 tp0 = TP();
-                auto& sg = saved_geom[slot];
-                sg.jacobians.assign(ctx.jacobians().begin(), ctx.jacobians().end());
-                sg.inv_jacobians.assign(ctx.inverseJacobians().begin(), ctx.inverseJacobians().end());
-                sg.jac_dets.assign(ctx.jacobianDets().begin(), ctx.jacobianDets().end());
-                sg.quad_points.assign(ctx.quadraturePoints().begin(), ctx.quadraturePoints().end());
-                sg.quad_weights.assign(ctx.quadratureWeights().begin(), ctx.quadratureWeights().end());
-                sg.phys_points.assign(ctx.physicalPoints().begin(), ctx.physicalPoints().end());
-                sg.integration_weights.assign(ctx.integrationWeights().begin(), ctx.integrationWeights().end());
-                sg.node_coords = scratch_node_coords_;
+                saved_node_coords[slot].node_coords = scratch_node_coords_;
                 tp_fb_save += TP() - tp0;
 
                 tp0 = TP();
@@ -3894,19 +3907,9 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
                     double tp0 = TP();
                     {
-                        // Restore geometry from saved_geom into context arena
-                        const auto& sg = saved_geom[slot];
-                        const auto nq = static_cast<LocalIndex>(sg.quad_points.size());
-                        ctx.prepareGeometryStorage(nq);
-                        std::copy(sg.jacobians.begin(), sg.jacobians.end(), ctx.jacobiansWritable().begin());
-                        std::copy(sg.inv_jacobians.begin(), sg.inv_jacobians.end(), ctx.inverseJacobiansWritable().begin());
-                        std::copy(sg.jac_dets.begin(), sg.jac_dets.end(), ctx.jacobianDetsWritable().begin());
-                        std::copy(sg.quad_points.begin(), sg.quad_points.end(), ctx.quadPointsWritable().begin());
-                        std::copy(sg.quad_weights.begin(), sg.quad_weights.end(), ctx.quadWeightsWritable().begin());
-                        std::copy(sg.phys_points.begin(), sg.phys_points.end(), ctx.physicalPointsWritable().begin());
-                        std::copy(sg.integration_weights.begin(), sg.integration_weights.end(), ctx.integrationWeightsWritable().begin());
-                        ctx.markGeometryDirty();
-                        scratch_node_coords_ = sg.node_coords;
+                        // Geometry arrays survive in the context arena (configure()
+                        // does not clear them). Only scratch_node_coords_ needs restoring.
+                        scratch_node_coords_ = saved_node_coords[slot].node_coords;
                         cached_mapping_->resetNodes(scratch_node_coords_);
                     }
                     tp_fb_restore += TP() - tp0;
@@ -5672,15 +5675,15 @@ void StandardAssembler::populateFieldSolutionData(
     auto& hessians_at_pt = scratch_scalar_hessians_at_pt_;
     auto& local_coeffs = scratch_field_local_coeffs_;
 
-    std::vector<Real> scalar_values;
-    std::vector<AssemblyContext::Vector3D> scalar_gradients;
-    std::vector<AssemblyContext::Matrix3x3> scalar_hessians;
-    std::vector<Real> scalar_laplacians;
+    auto& scalar_values = scratch_fsd_scalar_values_;
+    auto& scalar_gradients = scratch_fsd_scalar_gradients_;
+    auto& scalar_hessians = scratch_fsd_scalar_hessians_;
+    auto& scalar_laplacians = scratch_fsd_scalar_laplacians_;
 
-    std::vector<AssemblyContext::Vector3D> vector_values;
-    std::vector<AssemblyContext::Matrix3x3> vector_jacobians;
-    std::vector<AssemblyContext::Matrix3x3> vector_component_hessians;
-    std::vector<Real> vector_component_laplacians;
+    auto& vector_values = scratch_fsd_vector_values_;
+    auto& vector_jacobians = scratch_fsd_vector_jacobians_;
+    auto& vector_component_hessians = scratch_fsd_vector_component_hessians_;
+    auto& vector_component_laplacians = scratch_fsd_vector_component_laplacians_;
 
     for (const auto& req : requirements) {
         FE_THROW_IF(req.field == INVALID_FIELD_ID, FEException,

@@ -15,6 +15,7 @@
  */
 
 #include "Assembly/AssemblyKernel.h"
+#include "Assembly/JIT/KernelArgs.h"
 #include "Forms/FormExpr.h"
 
 #include <cstdint>
@@ -220,6 +221,8 @@ private:
     CompiledDispatch compiled_linear_{};
 	    CompiledDispatch compiled_residual_{};
 	    CompiledDispatch compiled_tangent_{};
+	    CompiledDispatch compiled_fused_{};
+	    bool has_compiled_fused_{false};
 	    bool has_compiled_linear_{false};
 
 	    std::unordered_map<SpecializationKey, std::shared_ptr<CompiledDispatch>, SpecializationKeyHash>
@@ -232,6 +235,10 @@ private:
 	    bool warned_compile_failure_{false};
 	    bool runtime_failed_{false};
     bool warned_runtime_failure_{false};
+
+    // Scratch storage for computeCellBatch (avoids per-batch heap allocation)
+    std::vector<assembly::jit::KernelSideArgsV6> scratch_batch_sides_;
+    std::vector<assembly::jit::KernelOutputViewV6> scratch_batch_outputs_;
 };
 
 } // namespace jit

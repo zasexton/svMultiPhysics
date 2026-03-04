@@ -347,6 +347,16 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
             }
         }
 
+        // Fused path: single JIT call computes both matrix and vector.
+        if (has_compiled_fused_ && want_matrix && want_vector) {
+            const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
+            callJIT(compiled_fused_.cell, &args);
+            output.has_matrix = true;
+            output.has_vector = true;
+            return;
+        }
+
+        // Separate tangent + residual path (fallback).
         if (want_matrix) {
             if (compiled_tangent_.cell == 0) {
                 fallback_->computeCell(ctx, output);
@@ -469,8 +479,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                 // Tight per-element loop.
                 if (options_.vectorize) {
-                    std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
-                    std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
+                    scratch_batch_sides_.resize(n);
+                    scratch_batch_outputs_.resize(n);
 
                     for (std::size_t idx = 0; idx < n; ++idx) {
                         if (contexts[idx] == nullptr) {
@@ -492,8 +502,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         // Start with template and patch per-cell fields.
                         auto args = args_template;
                         patchCellArgsV6(args, ctx, output);
-                        batch_sides[idx] = args.side;
-                        batch_outputs[idx] = args.output;
+                        scratch_batch_sides_[idx] = args.side;
+                        scratch_batch_outputs_[idx] = args.output;
 
                         output.has_matrix = want_matrix;
                         output.has_vector = want_vector;
@@ -501,8 +511,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                     assembly::jit::CellKernelBatchArgsV1 batch_args;
                     batch_args.batch_size = static_cast<std::uint32_t>(n);
-                    batch_args.sides = batch_sides.data();
-                    batch_args.outputs = batch_outputs.data();
+                    batch_args.sides = scratch_batch_sides_.data();
+                    batch_args.outputs = scratch_batch_outputs_.data();
 
                     callJIT(compiled.cell, &batch_args);
                 } else {
@@ -577,8 +587,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                 // Tight per-element loop.
                 if (options_.vectorize) {
-                    std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
-                    std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
+                    scratch_batch_sides_.resize(n);
+                    scratch_batch_outputs_.resize(n);
 
                     for (std::size_t idx = 0; idx < n; ++idx) {
                         if (contexts[idx] == nullptr) continue;
@@ -596,14 +606,14 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                         auto args = args_template;
                         patchCellArgsV6(args, ctx, output);
-                        batch_sides[idx] = args.side;
-                        batch_outputs[idx] = args.output;
+                        scratch_batch_sides_[idx] = args.side;
+                        scratch_batch_outputs_[idx] = args.output;
                     }
 
                     assembly::jit::CellKernelBatchArgsV1 batch_args;
                     batch_args.batch_size = static_cast<std::uint32_t>(n);
-                    batch_args.sides = batch_sides.data();
-                    batch_args.outputs = batch_outputs.data();
+                    batch_args.sides = scratch_batch_sides_.data();
+                    batch_args.outputs = scratch_batch_outputs_.data();
 
                     if (want_matrix) {
                         callJIT(compiled_bi.cell, &batch_args);
@@ -781,8 +791,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                     // Tight per-element loop.
                     if (options_.vectorize) {
-                        std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
-                        std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
+                        scratch_batch_sides_.resize(n);
+                        scratch_batch_outputs_.resize(n);
 
                         for (std::size_t idx = 0; idx < n; ++idx) {
                             if (contexts[idx] == nullptr) {
@@ -802,8 +812,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                             auto args = args_template;
                             patchCellArgsV6(args, ctx, output);
-                            batch_sides[idx] = args.side;
-                            batch_outputs[idx] = args.output;
+                            scratch_batch_sides_[idx] = args.side;
+                            scratch_batch_outputs_[idx] = args.output;
 
                             output.has_matrix = want_matrix;
                             output.has_vector = want_vector;
@@ -811,14 +821,19 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                         assembly::jit::CellKernelBatchArgsV1 batch_args;
                         batch_args.batch_size = static_cast<std::uint32_t>(n);
-                        batch_args.sides = batch_sides.data();
-                        batch_args.outputs = batch_outputs.data();
+                        batch_args.sides = scratch_batch_sides_.data();
+                        batch_args.outputs = scratch_batch_outputs_.data();
 
-                        if (want_matrix) {
-                            callJIT(compiled_tan_ptr->cell, &batch_args);
-                        }
-                        if (want_vector) {
-                            callJIT(compiled_res_ptr->cell, &batch_args);
+                        // Fused path: single call computes both matrix and vector.
+                        if (has_compiled_fused_ && want_matrix && want_vector) {
+                            callJIT(compiled_fused_.cell, &batch_args);
+                        } else {
+                            if (want_matrix) {
+                                callJIT(compiled_tan_ptr->cell, &batch_args);
+                            }
+                            if (want_vector) {
+                                callJIT(compiled_res_ptr->cell, &batch_args);
+                            }
                         }
                     } else {
                         for (std::size_t idx = 0; idx < n; ++idx) {
@@ -1896,6 +1911,12 @@ void JITKernelWrapper::maybeCompile()
 
         const bool want_matrix = !k->isVectorOnly();
         const bool want_vector = !k->isMatrixOnly();
+
+        // Fused tangent+residual compilation (cell domain only).
+        // Disabled: fused kernel regresses due to register/icache pressure.
+        // Infrastructure kept in compileFused()/compileAndAddFusedKernel()
+        // for future experimentation with smaller form sets.
+        has_compiled_fused_ = false;
 
         if (want_vector) {
             const auto r_res = compiler_->compile(k->residualIR(), vopt);

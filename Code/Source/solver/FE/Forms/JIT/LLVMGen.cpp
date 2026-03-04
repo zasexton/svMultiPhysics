@@ -177,6 +177,23 @@ struct Shape {
     [[nodiscard]] bool isScalar() const noexcept { return kind == Kind::Scalar; }
 };
 
+/** Pre-lowered term for LLVM codegen. Target controls whether the term
+ *  accumulates into the element matrix or element vector. */
+struct LoweredTerm {
+    KernelIR ir{};
+    std::vector<Shape> shapes{};
+    std::vector<std::uint8_t> dep_mask{};
+    int time_derivative_order{0};
+
+    std::optional<tensor::TensorIR> tensor_ir{};
+
+    bool has_indexed_access{false};
+    std::vector<std::pair<std::uint16_t, std::uint8_t>> bound_indices{};
+
+    enum class Target : std::uint8_t { Auto, Matrix, Vector };
+    Target target{Target::Auto};
+};
+
 constexpr std::uint32_t kMaxVectorDim = 3u;
 constexpr std::uint32_t kMaxMatrixDim = 3u;
 constexpr std::uint32_t kMaxTensor3Dim = 3u;
@@ -1230,6 +1247,14 @@ struct ShapeInferenceResult {
 #endif
 } // namespace
 
+#if SVMP_FE_ENABLE_LLVM_JIT
+/** Fused info: holds pre-lowered residual terms for appending to the tangent
+ *  kernel's term list. */
+struct LLVMGenFusedInfo {
+    std::vector<LoweredTerm> extra_terms;
+};
+#endif
+
 LLVMGen::LLVMGen(JITOptions options)
     : options_(std::move(options))
 {
@@ -1245,6 +1270,22 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                            std::uintptr_t& out_address,
                                            const JITCompileSpecialization* specialization) const
 {
+    return compileAndAddKernelImpl(engine, ir, term_indices, domain,
+                                   boundary_marker, interface_marker,
+                                   symbol, out_address, specialization, nullptr);
+}
+
+LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
+                                           const FormIR& ir,
+                                           std::span<const std::size_t> term_indices,
+                                           IntegralDomain domain,
+                                           int boundary_marker,
+                                           int interface_marker,
+                                           std::string_view symbol,
+                                           std::uintptr_t& out_address,
+                                           const JITCompileSpecialization* specialization,
+                                           LLVMGenFusedInfo* fused) const
+{
     (void)engine;
     (void)ir;
     (void)term_indices;
@@ -1253,6 +1294,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
     (void)interface_marker;
     (void)symbol;
     (void)specialization;
+    (void)fused;
     out_address = 0;
 
 #if !SVMP_FE_ENABLE_LLVM_JIT
@@ -1278,19 +1320,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
         }
 
         // Pre-lower terms to deterministic KernelIR and validate shapes.
-        struct LoweredTerm {
-            KernelIR ir{};
-            std::vector<Shape> shapes{};
-            std::vector<std::uint8_t> dep_mask{};
-            int time_derivative_order{0};
-
-            std::optional<tensor::TensorIR> tensor_ir{};
-
-            bool has_indexed_access{false};
-            // Canonical (KernelIR-level) index ids and extents for Einstein-summation loops.
-            std::vector<std::pair<std::uint16_t, std::uint8_t>> bound_indices{};
-        };
-
+        // (LoweredTerm is defined at file scope with per-term Target support.)
         const int preferred_vector_width =
             preferredVectorWidthFromCpuFeatures(engine.cpuFeaturesString());
 
@@ -1465,6 +1495,17 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                 .has_indexed_access = has_indexed_access,
                 .bound_indices = std::move(bound_indices),
             });
+        }
+
+        // --- Fused tangent+residual: tag tangent terms as Matrix,
+        //     append pre-lowered residual terms tagged as Vector.
+        if (fused && !fused->extra_terms.empty()) {
+            for (auto& t : terms) {
+                t.target = LoweredTerm::Target::Matrix;
+            }
+            for (auto& t : fused->extra_terms) {
+                terms.push_back(std::move(t));
+            }
         }
 
         auto ctx = std::make_unique<llvm::LLVMContext>();
@@ -3687,8 +3728,9 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
         };
 
         const bool is_residual = (ir.kind() == FormKind::Residual);
-        const bool want_matrix = (ir.kind() == FormKind::Bilinear);
-        const bool want_vector = (ir.kind() == FormKind::Linear) || is_residual;
+        const bool is_fused = (fused != nullptr && !fused->extra_terms.empty());
+        const bool want_matrix = (ir.kind() == FormKind::Bilinear) || is_fused;
+        const bool want_vector = (ir.kind() == FormKind::Linear) || is_residual || is_fused;
 
         if (is_face_domain) {
             if (ir.kind() == FormKind::Linear) {
@@ -9520,7 +9562,14 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                         cached_ptr = &cached;
                     }
 
-                    if (want_matrix) {
+                    // Per-term target dispatch: Matrix terms accumulate into the
+                    // element matrix; Vector terms into the element vector.
+                    // Target::Auto uses the global want_matrix/want_vector flags
+                    // (non-fused path).
+                    const bool emit_matrix =
+                        (terms[t].target == LoweredTerm::Target::Matrix) ||
+                        (terms[t].target == LoweredTerm::Target::Auto && want_matrix);
+                    if (emit_matrix) {
                         emitForLoop(side_single.n_test_dofs, "i" + std::to_string(t), [&](llvm::Value* i) {
                             emitForLoop(side_single.n_trial_dofs, "j" + std::to_string(t), [&](llvm::Value* j) {
                                 auto* val = evalKernelIRSingle(terms[t], q, i, j, side_single, cached_ptr);
@@ -9528,7 +9577,7 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
                                 emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
                             });
                         });
-                    } else if (want_vector) {
+                    } else {
                         emitForLoop(side_single.n_test_dofs, "i" + std::to_string(t), [&](llvm::Value* i) {
                             auto* val = evalKernelIRSingle(terms[t], q, i, builder.getInt32(0), side_single, cached_ptr);
                             auto* contrib = builder.CreateFMul(scaled_w, val);
@@ -12266,6 +12315,170 @@ LLVMGenResult LLVMGen::compileAndAddKernel(JITEngine& engine,
     } catch (const std::exception& e) {
         return LLVMGenResult{.ok = false, .message = std::string("LLVMGen: exception: ") + e.what()};
     }
+#endif
+}
+
+LLVMGenResult LLVMGen::compileAndAddFusedKernel(JITEngine& engine,
+                                                const FormIR& tangent_ir,
+                                                std::span<const std::size_t> tangent_indices,
+                                                const FormIR& residual_ir,
+                                                std::span<const std::size_t> residual_indices,
+                                                IntegralDomain domain,
+                                                int boundary_marker,
+                                                int interface_marker,
+                                                std::string_view symbol,
+                                                std::uintptr_t& out_address) const
+{
+    out_address = 0;
+#if !SVMP_FE_ENABLE_LLVM_JIT
+    (void)engine; (void)tangent_ir; (void)tangent_indices;
+    (void)residual_ir; (void)residual_indices;
+    (void)domain; (void)boundary_marker; (void)interface_marker; (void)symbol;
+    return LLVMGenResult{.ok = false, .message = "LLVMGen: FE was built without LLVM JIT support"};
+#else
+    // Only fuse Cell-domain terms.
+    if (domain != IntegralDomain::Cell) {
+        return LLVMGenResult{.ok = false,
+                             .message = "LLVMGen: fused kernels only supported for Cell domain"};
+    }
+    if (!residual_ir.isCompiled()) {
+        return LLVMGenResult{.ok = false, .message = "LLVMGen: residual FormIR is not compiled"};
+    }
+
+    // Pre-lower residual terms and tag them as Vector targets.
+    const int preferred_vector_width =
+        preferredVectorWidthFromCpuFeatures(engine.cpuFeaturesString());
+
+    std::vector<LoweredTerm> residual_terms;
+    residual_terms.reserve(residual_indices.size());
+
+    for (const auto tidx : residual_indices) {
+        if (tidx >= residual_ir.terms().size()) {
+            return LLVMGenResult{.ok = false, .message = "LLVMGen: residual term index out of range"};
+        }
+        const auto& term = residual_ir.terms()[tidx];
+        if (term.domain != domain) {
+            continue; // skip non-cell residual terms
+        }
+        FormExpr effective_integrand = term.integrand;
+        std::optional<tensor::TensorIR> tensor_ir;
+
+        if (options_.tensor.mode != TensorLoweringMode::Off) {
+            try {
+                tensor::TensorIRLoweringOptions tensor_opts;
+                tensor_opts.enable_cache = false;
+                tensor_opts.force_loop_nest =
+                    (options_.tensor.mode == TensorLoweringMode::On) || options_.tensor.force_loop_nest;
+                tensor_opts.log_decisions = options_.tensor.log_decisions;
+
+                tensor_opts.loop.enable_symmetry_lowering = options_.tensor.enable_symmetry_lowering;
+                tensor_opts.loop.enable_optimal_contraction_order = options_.tensor.enable_optimal_contraction_order;
+                tensor_opts.loop.enable_vectorization_hints = options_.vectorize;
+                tensor_opts.loop.preferred_vector_width = preferred_vector_width;
+                tensor_opts.loop.enable_delta_shortcuts = options_.tensor.enable_delta_shortcuts;
+                tensor_opts.loop.scalar_expansion_term_threshold = options_.tensor.scalar_expansion_term_threshold;
+
+                tensor_opts.alloc.stack_max_entries = options_.tensor.temp_stack_max_entries;
+                tensor_opts.alloc.alignment_bytes = options_.tensor.temp_alignment_bytes;
+                tensor_opts.alloc.enable_reuse = options_.tensor.temp_enable_reuse;
+
+                const auto tl = tensor::lowerToTensorIR(term.integrand, tensor_opts);
+                if (!tl.ok) {
+                    return LLVMGenResult{
+                        .ok = false,
+                        .message = tl.message.empty() ? "LLVMGen: tensor lowering failed for residual" : tl.message,
+                    };
+                }
+                if (tl.used_loop_nest) {
+                    tensor_ir = tl.ir;
+                } else if (tl.fallback_expr.isValid()) {
+                    effective_integrand = tl.fallback_expr;
+                }
+            } catch (const std::exception& e) {
+                return LLVMGenResult{
+                    .ok = false,
+                    .message = std::string("LLVMGen: tensor lowering threw for residual: ") + e.what(),
+                };
+            }
+        }
+
+        auto lowered = lowerToKernelIR(effective_integrand);
+        if (lowered.ir.empty()) {
+            return LLVMGenResult{.ok = false, .message = "LLVMGen: failed to lower residual term to KernelIR"};
+        }
+
+        auto shapes = inferShapes(lowered.ir, residual_ir.testSpace(), residual_ir.trialSpace());
+        if (!shapes.ok) {
+            return LLVMGenResult{.ok = false, .message = shapes.message};
+        }
+
+        // Dep mask for residual: TrialFunction is rewritten to StateField,
+        // so it doesn't set the trial dependency bit (0x2).
+        std::vector<std::uint8_t> dep;
+        dep.resize(lowered.ir.ops.size(), 0u);
+        for (std::size_t op_idx = 0; op_idx < lowered.ir.ops.size(); ++op_idx) {
+            const auto& op = lowered.ir.ops[op_idx];
+            std::uint8_t d = 0u;
+            for (std::size_t k = 0; k < op.child_count; ++k) {
+                const auto c = lowered.ir.children[static_cast<std::size_t>(op.first_child) + k];
+                d = static_cast<std::uint8_t>(d | dep[c]);
+            }
+            if (op.type == FormExprType::TestFunction) {
+                d = static_cast<std::uint8_t>(d | 0x1u);
+            }
+            // Note: no 0x2 bit for residual (TrialFunction → StateField rewrite)
+            dep[op_idx] = d;
+        }
+
+        bool has_indexed_access = false;
+        std::vector<std::pair<std::uint16_t, std::uint8_t>> bound_indices;
+        {
+            struct Use { std::uint8_t extent{0}; int count{0}; };
+            std::unordered_map<std::uint16_t, Use> uses;
+            for (const auto& op : lowered.ir.ops) {
+                if (op.type != FormExprType::IndexedAccess) continue;
+                has_indexed_access = true;
+                const int rank = static_cast<int>(unpackIndexedRank(op.imm1));
+                for (int k = 0; k < rank; ++k) {
+                    auto& u = uses[unpackIndexedId(op.imm0, k)];
+                    const auto ext = unpackIndexedExtent(op.imm1, k);
+                    if (u.count == 0) u.extent = ext;
+                    u.count += 1;
+                }
+            }
+            if (has_indexed_access) {
+                for (const auto& [id, u] : uses) {
+                    bound_indices.emplace_back(id, u.extent);
+                }
+                std::sort(bound_indices.begin(), bound_indices.end(),
+                          [](const auto& a, const auto& b) { return a.first < b.first; });
+            }
+        }
+
+        residual_terms.push_back(LoweredTerm{
+            .ir = std::move(lowered.ir),
+            .shapes = std::move(shapes.shapes),
+            .dep_mask = std::move(dep),
+            .time_derivative_order = term.time_derivative_order,
+            .tensor_ir = std::move(tensor_ir),
+            .has_indexed_access = has_indexed_access,
+            .bound_indices = std::move(bound_indices),
+            .target = LoweredTerm::Target::Vector,
+        });
+    }
+
+    if (residual_terms.empty()) {
+        return LLVMGenResult{.ok = false,
+                             .message = "LLVMGen: no cell-domain residual terms to fuse"};
+    }
+
+    // Delegate to the shared codegen, passing residual terms for fusion.
+    LLVMGenFusedInfo fused;
+    fused.extra_terms = std::move(residual_terms);
+    return compileAndAddKernelImpl(engine, tangent_ir, tangent_indices, domain,
+                                   boundary_marker, interface_marker,
+                                   symbol, out_address,
+                                   /*specialization=*/nullptr, &fused);
 #endif
 }
 

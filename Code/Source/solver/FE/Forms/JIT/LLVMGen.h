@@ -28,6 +28,10 @@ struct LLVMGenResult {
     std::string message{};
 };
 
+// Opaque type for passing pre-lowered fused terms from compileAndAddFusedKernel
+// to the shared codegen path. Defined in LLVMGen.cpp.
+struct LLVMGenFusedInfo;
+
 class LLVMGen final {
 public:
     explicit LLVMGen(JITOptions options);
@@ -45,7 +49,33 @@ public:
                                                     std::uintptr_t& out_address,
                                                     const JITCompileSpecialization* specialization = nullptr) const;
 
+    /** Compile a fused tangent+residual kernel that computes both element
+     *  matrix (from tangent_ir) and element vector (from residual_ir) in a
+     *  single QP loop pass. Falls back gracefully — if fused compilation
+     *  fails, JITKernelWrapper retains separate tangent/residual kernels. */
+    [[nodiscard]] LLVMGenResult compileAndAddFusedKernel(JITEngine& engine,
+                                                         const FormIR& tangent_ir,
+                                                         std::span<const std::size_t> tangent_indices,
+                                                         const FormIR& residual_ir,
+                                                         std::span<const std::size_t> residual_indices,
+                                                         IntegralDomain domain,
+                                                         int boundary_marker,
+                                                         int interface_marker,
+                                                         std::string_view symbol,
+                                                         std::uintptr_t& out_address) const;
+
 private:
+    [[nodiscard]] LLVMGenResult compileAndAddKernelImpl(JITEngine& engine,
+                                                        const FormIR& ir,
+                                                        std::span<const std::size_t> term_indices,
+                                                        IntegralDomain domain,
+                                                        int boundary_marker,
+                                                        int interface_marker,
+                                                        std::string_view symbol,
+                                                        std::uintptr_t& out_address,
+                                                        const JITCompileSpecialization* specialization,
+                                                        LLVMGenFusedInfo* fused) const;
+
     JITOptions options_{};
 };
 

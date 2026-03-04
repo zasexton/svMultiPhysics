@@ -445,7 +445,6 @@ set(FE_SPACES_SOURCES
     Spaces/EnrichedSpace.cpp
     Spaces/AdaptiveSpace.cpp
     Spaces/SpaceFactory.cpp
-    Spaces/SpaceInference.cpp
     Spaces/SpaceInterpolation.cpp
     Spaces/SpaceCompatibility.cpp
     Spaces/VectorComponentExtractor.cpp
