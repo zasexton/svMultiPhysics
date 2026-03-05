@@ -4023,8 +4023,49 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
         // Both coupled monolithic and standard paths use full batch size B.
         const std::size_t B_eff = B;
+
+        // --- Compute trial space groups (once per assembly call) ---
+        // trial_group_of[bi] = group index for block bi.
+        // Blocks share a group iff col_dof_map ptr AND col_dof_offset match.
+        // For NS-VMS 2D: VV+PV share velocity trial, VP+PP share pressure trial.
+        struct TrialGroupSlotCache {
+            std::vector<GlobalIndex> col_dofs;
+            std::vector<Real> sol_coeffs;
+            std::vector<std::vector<Real>> prev_sol_coeffs;
+            bool uses_vector_basis{false};
+            bool gathered{false};
+        };
+
+        std::vector<int> trial_group_of(n_blocks, -1);
+        int n_trial_groups = 0;
+        for (std::size_t bi = 0; bi < n_blocks; ++bi) {
+            if (trial_group_of[bi] >= 0) continue;
+            const auto& bs_i = coupled_kernel->blockSpec(bi);
+            trial_group_of[bi] = n_trial_groups;
+            for (std::size_t bj = bi + 1; bj < n_blocks; ++bj) {
+                if (trial_group_of[bj] >= 0) continue;
+                const auto& bs_j = coupled_kernel->blockSpec(bj);
+                if (bs_i.col_dof_map == bs_j.col_dof_map &&
+                    bs_i.col_dof_offset == bs_j.col_dof_offset) {
+                    trial_group_of[bj] = n_trial_groups;
+                }
+            }
+            ++n_trial_groups;
+        }
+
+        // Per-group, per-slot cache.  Indexed as [group * B_eff + slot].
+        // Allocated once and reused across batches; gathered flags are reset per batch.
+        const auto n_tg = static_cast<std::size_t>(n_trial_groups);
+        std::vector<TrialGroupSlotCache> tg_cache(n_tg * B_eff);
+
         for (std::size_t begin = 0; begin < gids.size(); begin += B_eff) {
             const std::size_t active = std::min(B_eff, gids.size() - begin);
+
+            // Reset trial group gathered flags for this batch
+            if (!use_monolithic) {
+                for (std::size_t gi = 0; gi < n_tg * B_eff; ++gi)
+                    tg_cache[gi].gathered = false;
+            }
 
             // === Prepare geometry + context for all cells in batch (ONCE) ===
             for (std::size_t slot = 0; slot < active; ++slot) {
@@ -4293,6 +4334,14 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             } else {
                 // =============================================================
                 // PER-BLOCK FALLBACK PATH: process blocks sequentially.
+                //
+                // Trial-space grouping: blocks sharing the same col_dof_map
+                // and col_dof_offset have identical column DOFs and solution
+                // coefficients.  We gather once per trial group per slot and
+                // reuse for subsequent blocks in the same group.
+                //
+                // trial_group_of[] and tg_cache[] are computed/allocated once
+                // above the batch loop; gathered flags are reset per batch.
                 // =============================================================
 
                 for (std::size_t bi = 0; bi < n_blocks; ++bi) {
@@ -4301,6 +4350,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     const bool block_want_matrix = parent_term.assemble_matrix && bs.want_matrix;
                     const bool block_want_vector = parent_term.assemble_vector && bs.want_vector;
                     if (!block_want_matrix && !block_want_vector) continue;
+
+                    const int tg = trial_group_of[bi];
 
                     for (std::size_t slot = 0; slot < active; ++slot) {
                         const auto cell_id = gids[begin + slot];
@@ -4322,63 +4373,95 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             tp_fb_field += TP() - tp0;
                         }
 
+                        // Row DOFs are always per-block (different test spaces)
                         tp0 = TP();
                         {
                             auto rl = bs.row_dof_map->getCellDofs(cell_id);
-                            auto cl = bs.col_dof_map->getCellDofs(cell_id);
                             auto& rd = batch_dofs[bi][slot].row_dofs;
-                            auto& cd = batch_dofs[bi][slot].col_dofs;
                             rd.resize(rl.size());
                             for (std::size_t i = 0; i < rl.size(); ++i) rd[i] = rl[i] + bs.row_dof_offset;
-                            cd.resize(cl.size());
-                            for (std::size_t j = 0; j < cl.size(); ++j) cd[j] = cl[j] + bs.col_dof_offset;
                         }
-                        tp_fb_dof += TP() - tp0;
 
-                        tp0 = TP();
-                        if (parent_td.need_solution) {
-                            const auto& cd = batch_dofs[bi][slot].col_dofs;
-                            auto& sol = batch_sol_coeffs[slot];
-                            sol.resize(cd.size());
-                            if (current_solution_view_ != nullptr) {
-                                current_solution_view_->getVectorEntries(
-                                    std::span<const GlobalIndex>(cd), std::span<Real>(sol));
-                            } else {
-                                for (std::size_t i = 0; i < cd.size(); ++i) {
-                                    const auto dof = cd[i];
-                                    sol[i] = current_solution_[static_cast<std::size_t>(dof)];
+                        // Column DOFs + solution gather: deduplicate by trial group
+                        auto& gc = tg_cache[static_cast<std::size_t>(tg) * B_eff + slot];
+                        if (!gc.gathered) {
+                            // First block in this trial group for this slot: do full gather
+                            auto cl = bs.col_dof_map->getCellDofs(cell_id);
+                            gc.col_dofs.resize(cl.size());
+                            for (std::size_t j = 0; j < cl.size(); ++j)
+                                gc.col_dofs[j] = cl[j] + bs.col_dof_offset;
+
+                            batch_dofs[bi][slot].col_dofs = gc.col_dofs;
+                            tp_fb_dof += TP() - tp0;
+
+                            tp0 = TP();
+                            if (parent_td.need_solution) {
+                                const auto& cd = gc.col_dofs;
+                                gc.sol_coeffs.resize(cd.size());
+                                if (current_solution_view_ != nullptr) {
+                                    current_solution_view_->getVectorEntries(
+                                        std::span<const GlobalIndex>(cd),
+                                        std::span<Real>(gc.sol_coeffs));
+                                } else {
+                                    for (std::size_t i = 0; i < cd.size(); ++i) {
+                                        gc.sol_coeffs[i] =
+                                            current_solution_[static_cast<std::size_t>(cd[i])];
+                                    }
+                                }
+                                gc.uses_vector_basis = ctx.trialUsesVectorBasis();
+                                if (gc.uses_vector_basis)
+                                    applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
+                                                                  std::span<Real>(gc.sol_coeffs));
+                                ctx.setSolutionCoefficients(
+                                    std::span<const Real>(gc.sol_coeffs));
+
+                                if (time_integration_ != nullptr) {
+                                    const int required =
+                                        requiredHistoryStates(time_integration_);
+                                    if (required > 0) {
+                                        gc.prev_sol_coeffs.resize(
+                                            static_cast<std::size_t>(required));
+                                        for (int k = 1; k <= required; ++k) {
+                                            const auto& pdata =
+                                                previous_solutions_[static_cast<std::size_t>(k - 1)];
+                                            const auto* pview =
+                                                (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+                                                    ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+                                                    : nullptr;
+                                            auto& lp = gc.prev_sol_coeffs[
+                                                static_cast<std::size_t>(k - 1)];
+                                            lp.resize(cd.size());
+                                            if (pview != nullptr) {
+                                                pview->getVectorEntries(
+                                                    std::span<const GlobalIndex>(cd),
+                                                    std::span<Real>(lp));
+                                            } else {
+                                                for (std::size_t i = 0; i < cd.size(); ++i) {
+                                                    lp[i] = pdata[static_cast<std::size_t>(cd[i])];
+                                                }
+                                            }
+                                            if (gc.uses_vector_basis)
+                                                applyVectorBasisGlobalToLocal(
+                                                    mesh, cell_id, *bs.trial_space,
+                                                    std::span<Real>(lp));
+                                            ctx.setPreviousSolutionCoefficientsK(k, lp);
+                                        }
+                                    }
                                 }
                             }
-                            if (ctx.trialUsesVectorBasis())
-                                applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
-                                                              std::span<Real>(sol));
-                            ctx.setSolutionCoefficients(std::span<const Real>(sol));
+                            gc.gathered = true;
+                        } else {
+                            // Reuse cached col_dofs and solution coefficients
+                            batch_dofs[bi][slot].col_dofs = gc.col_dofs;
+                            tp_fb_dof += TP() - tp0;
 
-                            if (time_integration_ != nullptr) {
-                                const int required = requiredHistoryStates(time_integration_);
-                                if (required > 0) {
-                                    auto& psc = batch_prev_sol_coeffs[slot];
-                                    if (psc.size() < static_cast<std::size_t>(required))
-                                        psc.resize(static_cast<std::size_t>(required));
-                                    for (int k = 1; k <= required; ++k) {
-                                        const auto& pdata = previous_solutions_[static_cast<std::size_t>(k - 1)];
-                                        const auto* pview = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
-                                                                ? previous_solution_views_[static_cast<std::size_t>(k - 1)] : nullptr;
-                                        auto& lp = psc[static_cast<std::size_t>(k - 1)];
-                                        lp.resize(cd.size());
-                                        if (pview != nullptr) {
-                                            pview->getVectorEntries(
-                                                std::span<const GlobalIndex>(cd), std::span<Real>(lp));
-                                        } else {
-                                            for (std::size_t i = 0; i < cd.size(); ++i) {
-                                                lp[i] = pdata[static_cast<std::size_t>(cd[i])];
-                                            }
-                                        }
-                                        if (ctx.trialUsesVectorBasis())
-                                            applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
-                                                                          std::span<Real>(lp));
-                                        ctx.setPreviousSolutionCoefficientsK(k, lp);
-                                    }
+                            tp0 = TP();
+                            if (parent_td.need_solution) {
+                                ctx.setSolutionCoefficients(
+                                    std::span<const Real>(gc.sol_coeffs));
+                                for (std::size_t k = 0; k < gc.prev_sol_coeffs.size(); ++k) {
+                                    ctx.setPreviousSolutionCoefficientsK(
+                                        static_cast<int>(k + 1), gc.prev_sol_coeffs[k]);
                                 }
                             }
                         }

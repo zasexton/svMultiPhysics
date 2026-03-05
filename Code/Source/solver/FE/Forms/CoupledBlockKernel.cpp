@@ -13,6 +13,7 @@
 #include "Forms/JIT/JITKernelWrapper.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace svmp {
 namespace FE {
@@ -121,6 +122,11 @@ void CoupledBlockKernel::maybeCompileMonolithic()
     if (attempted_monolithic_) return;
     attempted_monolithic_ = true;
     has_monolithic_jit_ = false;
+
+    if (!std::getenv("SVMP_USE_MONOLITHIC")) {
+        FE_LOG_DEBUG("CoupledBlockKernel: monolithic JIT disabled (set SVMP_USE_MONOLITHIC=1 to enable)");
+        return;
+    }
 
     if (!compiler_) {
         FE_LOG_DEBUG("CoupledBlockKernel: no JIT compiler, using per-block fallback");
