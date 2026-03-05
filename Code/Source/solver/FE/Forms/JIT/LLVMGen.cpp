@@ -194,6 +194,16 @@ struct LoweredTerm {
     Target target{Target::Auto};
 };
 
+/// Per-block term sets for monolithic coupled codegen.
+struct CoupledKernelInfo {
+    struct BlockTerms {
+        std::vector<LoweredTerm> terms;
+        bool want_matrix{false};
+        bool want_vector{false};
+    };
+    std::vector<BlockTerms> blocks;
+};
+
 constexpr std::uint32_t kMaxVectorDim = 3u;
 constexpr std::uint32_t kMaxMatrixDim = 3u;
 constexpr std::uint32_t kMaxTensor3Dim = 3u;
@@ -359,6 +369,78 @@ struct ABIV3 {
     static constexpr std::size_t batch_size_off = offsetof(assembly::jit::CellKernelBatchArgsV1, batch_size);
     static constexpr std::size_t batch_sides_off = offsetof(assembly::jit::CellKernelBatchArgsV1, sides);
     static constexpr std::size_t batch_outputs_off = offsetof(assembly::jit::CellKernelBatchArgsV1, outputs);
+
+    // Coupled Batch V1
+    static constexpr std::size_t coupled_batch_batch_size_off =
+        offsetof(assembly::jit::CoupledCellKernelBatchArgsV1, batch_size);
+    static constexpr std::size_t coupled_batch_elements_off =
+        offsetof(assembly::jit::CoupledCellKernelBatchArgsV1, elements);
+
+    // CoupledCellKernelArgsV1 (shared geometry per element)
+    static constexpr std::size_t coupled_dim_off = offsetof(assembly::jit::CoupledCellKernelArgsV1, dim);
+    static constexpr std::size_t coupled_n_qpts_off = offsetof(assembly::jit::CoupledCellKernelArgsV1, n_qpts);
+    static constexpr std::size_t coupled_integration_weights_off =
+        offsetof(assembly::jit::CoupledCellKernelArgsV1, integration_weights);
+    static constexpr std::size_t coupled_jacobians_off = offsetof(assembly::jit::CoupledCellKernelArgsV1, jacobians);
+    static constexpr std::size_t coupled_inverse_jacobians_off =
+        offsetof(assembly::jit::CoupledCellKernelArgsV1, inverse_jacobians);
+    static constexpr std::size_t coupled_jacobian_dets_off =
+        offsetof(assembly::jit::CoupledCellKernelArgsV1, jacobian_dets);
+    static constexpr std::size_t coupled_physical_points_xyz_off =
+        offsetof(assembly::jit::CoupledCellKernelArgsV1, physical_points_xyz);
+    static constexpr std::size_t coupled_cell_diameter_off =
+        offsetof(assembly::jit::CoupledCellKernelArgsV1, cell_diameter);
+    static constexpr std::size_t coupled_cell_volume_off =
+        offsetof(assembly::jit::CoupledCellKernelArgsV1, cell_volume);
+    static constexpr std::size_t coupled_time_off = offsetof(assembly::jit::CoupledCellKernelArgsV1, time);
+    static constexpr std::size_t coupled_dt_off = offsetof(assembly::jit::CoupledCellKernelArgsV1, dt);
+    static constexpr std::size_t coupled_field_solutions_off =
+        offsetof(assembly::jit::CoupledCellKernelArgsV1, field_solutions);
+    static constexpr std::size_t coupled_num_field_solutions_off =
+        offsetof(assembly::jit::CoupledCellKernelArgsV1, num_field_solutions);
+    static constexpr std::size_t coupled_time_derivative_term_weight_off =
+        offsetof(assembly::jit::CoupledCellKernelArgsV1, time_derivative_term_weight);
+    static constexpr std::size_t coupled_non_time_derivative_term_weight_off =
+        offsetof(assembly::jit::CoupledCellKernelArgsV1, non_time_derivative_term_weight);
+    static constexpr std::size_t coupled_dt_stencil_coeffs_off =
+        offsetof(assembly::jit::CoupledCellKernelArgsV1, dt_stencil_coeffs);
+    static constexpr std::size_t coupled_dt_term_weights_off =
+        offsetof(assembly::jit::CoupledCellKernelArgsV1, dt_term_weights);
+    static constexpr std::size_t coupled_max_time_derivative_order_off =
+        offsetof(assembly::jit::CoupledCellKernelArgsV1, max_time_derivative_order);
+    static constexpr std::size_t coupled_jit_constants_off =
+        offsetof(assembly::jit::CoupledCellKernelArgsV1, jit_constants);
+    static constexpr std::size_t coupled_blocks_off = offsetof(assembly::jit::CoupledCellKernelArgsV1, blocks);
+
+    // CoupledBlockView (per-block basis/solution/output)
+    static constexpr std::size_t cbv_test_basis_values_off =
+        offsetof(assembly::jit::CoupledBlockView, test_basis_values);
+    static constexpr std::size_t cbv_test_phys_grads_off =
+        offsetof(assembly::jit::CoupledBlockView, test_phys_gradients_xyz);
+    static constexpr std::size_t cbv_trial_basis_values_off =
+        offsetof(assembly::jit::CoupledBlockView, trial_basis_values);
+    static constexpr std::size_t cbv_trial_phys_grads_off =
+        offsetof(assembly::jit::CoupledBlockView, trial_phys_gradients_xyz);
+    static constexpr std::size_t cbv_test_phys_hessians_off =
+        offsetof(assembly::jit::CoupledBlockView, test_phys_hessians);
+    static constexpr std::size_t cbv_trial_phys_hessians_off =
+        offsetof(assembly::jit::CoupledBlockView, trial_phys_hessians);
+    static constexpr std::size_t cbv_n_test_dofs_off = offsetof(assembly::jit::CoupledBlockView, n_test_dofs);
+    static constexpr std::size_t cbv_n_trial_dofs_off = offsetof(assembly::jit::CoupledBlockView, n_trial_dofs);
+    static constexpr std::size_t cbv_test_value_dim_off = offsetof(assembly::jit::CoupledBlockView, test_value_dim);
+    static constexpr std::size_t cbv_trial_value_dim_off = offsetof(assembly::jit::CoupledBlockView, trial_value_dim);
+    static constexpr std::size_t cbv_test_uses_vector_basis_off =
+        offsetof(assembly::jit::CoupledBlockView, test_uses_vector_basis);
+    static constexpr std::size_t cbv_trial_uses_vector_basis_off =
+        offsetof(assembly::jit::CoupledBlockView, trial_uses_vector_basis);
+    static constexpr std::size_t cbv_solution_coefficients_off =
+        offsetof(assembly::jit::CoupledBlockView, solution_coefficients);
+    static constexpr std::size_t cbv_num_previous_solutions_off =
+        offsetof(assembly::jit::CoupledBlockView, num_previous_solutions);
+    static constexpr std::size_t cbv_previous_solution_coefficients_off =
+        offsetof(assembly::jit::CoupledBlockView, previous_solution_coefficients);
+    static constexpr std::size_t cbv_element_matrix_off = offsetof(assembly::jit::CoupledBlockView, element_matrix);
+    static constexpr std::size_t cbv_element_vector_off = offsetof(assembly::jit::CoupledBlockView, element_vector);
 };
 
 [[nodiscard]] Shape scalarShape() noexcept { return Shape{.kind = Shape::Kind::Scalar, .dims = {1u, 1u, 1u, 1u}}; }
@@ -1284,7 +1366,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                            std::string_view symbol,
                                            std::uintptr_t& out_address,
                                            const JITCompileSpecialization* specialization,
-                                           LLVMGenFusedInfo* fused) const
+                                           LLVMGenFusedInfo* fused,
+                                           void* coupled_info) const
 {
     (void)engine;
     (void)ir;
@@ -1295,6 +1378,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
     (void)symbol;
     (void)specialization;
     (void)fused;
+    (void)coupled_info;
     out_address = 0;
 
 #if !SVMP_FE_ENABLE_LLVM_JIT
@@ -1303,6 +1387,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
     (void)options_;
 
     try {
+        auto* coupled = static_cast<CoupledKernelInfo*>(coupled_info);
+
+        // terms is empty in coupled mode (block-sequential dispatch handles terms).
+        std::vector<LoweredTerm> terms;
+
+        if (!coupled) {
         if (!ir.isCompiled()) {
             return LLVMGenResult{.ok = false, .message = "LLVMGen: FormIR is not compiled"};
         }
@@ -1324,7 +1414,6 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         const int preferred_vector_width =
             preferredVectorWidthFromCpuFeatures(engine.cpuFeaturesString());
 
-        std::vector<LoweredTerm> terms;
         terms.reserve(term_indices.size());
 
         for (const auto tidx : term_indices) {
@@ -1507,6 +1596,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 terms.push_back(std::move(t));
             }
         }
+        } else {
+            // Coupled mode: term lowering was done externally.
+            // The coupled dispatch uses CoupledKernelInfo::blocks[i].terms.
+            // 'terms' stays empty so the standard term loop is a no-op.
+            if (coupled->blocks.empty()) {
+                return LLVMGenResult{.ok = false, .message = "LLVMGen: coupled kernel has no blocks"};
+            }
+            if (domain != IntegralDomain::Cell) {
+                return LLVMGenResult{.ok = false,
+                                     .message = "LLVMGen: coupled kernels only supported for Cell domain"};
+            }
+        }
 
         auto ctx = std::make_unique<llvm::LLVMContext>();
         auto module = std::make_unique<llvm::Module>(std::string(symbol), *ctx);
@@ -1590,8 +1691,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
         auto* args_ptr = fn->getArg(0);
         args_ptr->setName("args");
-        fn->addParamAttr(0, llvm::Attribute::NoAlias);
-        fn->addParamAttr(0, llvm::Attribute::NoCapture);
+        // For coupled kernels, do NOT add noalias/nocapture: the kernel stores
+        // results through pointers loaded from nested structs in args.  LLVM's
+        // alias analysis at O2 can incorrectly conclude those stores are dead.
+        if (!coupled) {
+            fn->addParamAttr(0, llvm::Attribute::NoAlias);
+            fn->addParamAttr(0, llvm::Attribute::NoCapture);
+        }
+        // Note: coupled kernels are now optimized (hessian fix resolved
+        // previous null-pointer issue that caused incorrect output).
 
         // External-call trampolines (relaxed-mode).
         auto coeff_eval_scalar_fn =
@@ -1949,8 +2057,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                // Functional kernels (no test space) are always invoked through
 	                // JITFunctionalKernelWrapper which packs CellKernelArgsV6, not
 	                // the batch CellKernelBatchArgsV1.  Disable batch mode for them.
-	                const bool is_functional = !ir.testSpace().has_value();
-	                const bool use_batch = options_.vectorize && (domain == IntegralDomain::Cell) && !is_functional;
+	                const bool is_functional = coupled ? false : !ir.testSpace().has_value();
+	                const bool use_batch = (coupled || options_.vectorize) && (domain == IntegralDomain::Cell) && !is_functional;
 	        
 	                auto* pre_batch = builder.GetInsertBlock();
 	                auto* batch_hdr = llvm::BasicBlock::Create(*ctx, "batch.hdr", fn);
@@ -1963,7 +2071,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                b_idx->addIncoming(builder.getInt32(0), pre_batch);
 	        
 	                llvm::Value* n_batch = builder.getInt32(1);
-	                if (use_batch) {
+	                if (coupled) {
+	                    n_batch = loadU32(args_ptr, ABIV3::coupled_batch_batch_size_off);
+	                } else if (use_batch) {
 	                    n_batch = loadU32(args_ptr, ABIV3::batch_size_off);
 	                }
 	        
@@ -1984,17 +2094,119 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	        
 	                llvm::Value* element_matrix_single = nullptr;
 	                llvm::Value* element_vector_single = nullptr;
-	        
+	                llvm::Value* coupled_blocks_ptr = nullptr; // Set in coupled mode
+
 	                if (!is_face_domain) {
+	                  if (coupled) {
+	                    // Coupled mode: load from CoupledCellKernelBatchArgsV1
+	                    auto* elements_base = loadPtr(args_ptr, ABIV3::coupled_batch_elements_off);
+	                    auto* b_idx64 = builder.CreateZExt(b_idx, i64);
+	                    auto* elem_ptr = builder.CreateGEP(builder.getInt8Ty(), elements_base,
+	                        builder.CreateMul(b_idx64,
+	                            builder.getInt64(sizeof(assembly::jit::CoupledCellKernelArgsV1))));
+
+	                    // Load shared geometry into side_single
+	                    side_single.side_ptr = elem_ptr;
+	                    side_single.dim = loadU32(elem_ptr, ABIV3::coupled_dim_off);
+	                    side_single.n_qpts = loadU32(elem_ptr, ABIV3::coupled_n_qpts_off);
+	                    side_single.integration_weights = loadPtr(elem_ptr, ABIV3::coupled_integration_weights_off);
+	                    side_single.jacobians = loadPtr(elem_ptr, ABIV3::coupled_jacobians_off);
+	                    side_single.inverse_jacobians = loadPtr(elem_ptr, ABIV3::coupled_inverse_jacobians_off);
+	                    side_single.jacobian_dets = loadPtr(elem_ptr, ABIV3::coupled_jacobian_dets_off);
+	                    side_single.physical_points_xyz = loadPtr(elem_ptr, ABIV3::coupled_physical_points_xyz_off);
+	                    side_single.cell_diameter = loadF64(elem_ptr, ABIV3::coupled_cell_diameter_off);
+	                    side_single.cell_volume = loadF64(elem_ptr, ABIV3::coupled_cell_volume_off);
+	                    side_single.time = loadF64(elem_ptr, ABIV3::coupled_time_off);
+	                    side_single.dt = loadF64(elem_ptr, ABIV3::coupled_dt_off);
+	                    side_single.field_solutions = loadPtr(elem_ptr, ABIV3::coupled_field_solutions_off);
+	                    side_single.num_field_solutions = loadU32(elem_ptr, ABIV3::coupled_num_field_solutions_off);
+	                    // Print offset constants at IR generation time (once)
+	                    {
+	                        static bool offset_diag_done = false;
+	                        if (!offset_diag_done) {
+	                            offset_diag_done = true;
+	                            std::fprintf(stderr, "[LLVMGEN-OFFSETS] td_off=%zu non_td_off=%zu "
+	                                "cell_diam_off=%zu cell_vol_off=%zu time_off=%zu dt_off=%zu "
+	                                "field_sol_off=%zu num_fs_off=%zu\n",
+	                                ABIV3::coupled_time_derivative_term_weight_off,
+	                                ABIV3::coupled_non_time_derivative_term_weight_off,
+	                                ABIV3::coupled_cell_diameter_off,
+	                                ABIV3::coupled_cell_volume_off,
+	                                ABIV3::coupled_time_off,
+	                                ABIV3::coupled_dt_off,
+	                                ABIV3::coupled_field_solutions_off,
+	                                ABIV3::coupled_num_field_solutions_off);
+	                        }
+	                    }
+	                    side_single.time_derivative_term_weight = loadF64(elem_ptr, ABIV3::coupled_time_derivative_term_weight_off);
+	                    side_single.non_time_derivative_term_weight = loadF64(elem_ptr, ABIV3::coupled_non_time_derivative_term_weight_off);
+	                    side_single.dt_stencil_coeffs_base = builder.CreatePointerCast(
+	                        gepBytes(elem_ptr, ABIV3::coupled_dt_stencil_coeffs_off), f64_ptr);
+	                    side_single.dt_term_weights_base = builder.CreatePointerCast(
+	                        gepBytes(elem_ptr, ABIV3::coupled_dt_term_weights_off), f64_ptr);
+	                    side_single.max_time_derivative_order = loadU32(elem_ptr, ABIV3::coupled_max_time_derivative_order_off);
+	                    side_single.jit_constants = loadPtr(elem_ptr, ABIV3::coupled_jit_constants_off);
+
+	                    // Fields not in coupled args - set to null/zero
+	                    auto* null_f64_ptr = llvm::ConstantPointerNull::get(f64_ptr);
+	                    side_single.quad_points_xyz = null_f64_ptr;
+	                    side_single.normals_xyz = null_f64_ptr;
+	                    side_single.interleaved_qpoint_geometry = null_f64_ptr;
+	                    side_single.interleaved_qpoint_geometry_stride_reals = builder.getInt32(0);
+	                    side_single.interleaved_qpoint_geometry_physical_offset = builder.getInt32(0);
+	                    side_single.interleaved_qpoint_geometry_jacobian_offset = builder.getInt32(0);
+	                    side_single.interleaved_qpoint_geometry_inverse_jacobian_offset = builder.getInt32(0);
+	                    side_single.interleaved_qpoint_geometry_det_offset = builder.getInt32(0);
+	                    side_single.interleaved_qpoint_geometry_normal_offset = builder.getInt32(0);
+	                    side_single.test_phys_hessians = null_f64_ptr;
+	                    side_single.trial_phys_hessians = null_f64_ptr;
+	                    side_single.test_basis_vector_values_xyz = null_f64_ptr;
+	                    side_single.test_basis_curls_xyz = null_f64_ptr;
+	                    side_single.test_basis_divs = null_f64_ptr;
+	                    side_single.trial_basis_vector_values_xyz = null_f64_ptr;
+	                    side_single.trial_basis_curls_xyz = null_f64_ptr;
+	                    side_single.trial_basis_divs = null_f64_ptr;
+	                    side_single.num_previous_solutions = builder.getInt32(0);
+	                    side_single.previous_solution_coefficients_base =
+	                        llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(i8_ptr));
+	                    side_single.num_history_steps = builder.getInt32(0);
+	                    side_single.history_weights = null_f64_ptr;
+	                    side_single.history_solution_coefficients_base =
+	                        llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(i8_ptr));
+	                    side_single.coupled_integrals = null_f64_ptr;
+	                    side_single.coupled_aux = null_f64_ptr;
+	                    side_single.cell_domain_id = builder.getInt32(0);
+	                    side_single.facet_area = f64c(0.0);
+	                    side_single.material_state_old_base = null_f64_ptr;
+	                    side_single.material_state_work_base = null_f64_ptr;
+	                    side_single.material_state_stride_bytes = builder.getInt64(0);
+	                    // Per-block fields (test/trial basis, solution, output) are loaded per-block in the coupled dispatch below.
+	                    // Set defaults so the standard (empty) term loop doesn't crash.
+	                    side_single.n_test_dofs = builder.getInt32(0);
+	                    side_single.n_trial_dofs = builder.getInt32(0);
+	                    side_single.test_field_type = builder.getInt32(0);
+	                    side_single.trial_field_type = builder.getInt32(0);
+	                    side_single.test_value_dim = builder.getInt32(1);
+	                    side_single.trial_value_dim = builder.getInt32(1);
+	                    side_single.test_uses_vector_basis = builder.getInt32(0);
+	                    side_single.trial_uses_vector_basis = builder.getInt32(0);
+	                    side_single.test_basis_values = null_f64_ptr;
+	                    side_single.trial_basis_values = null_f64_ptr;
+	                    side_single.test_phys_grads_xyz = null_f64_ptr;
+	                    side_single.trial_phys_grads_xyz = null_f64_ptr;
+	                    side_single.solution_coefficients = null_f64_ptr;
+
+	                    coupled_blocks_ptr = loadPtr(elem_ptr, ABIV3::coupled_blocks_off);
+	                  } else {
 	                    const std::size_t side_off = (domain == IntegralDomain::Cell) ? ABIV3::cell_side_off : ABIV3::bdry_side_off;
 	                    const std::size_t out_off = (domain == IntegralDomain::Cell) ? ABIV3::cell_out_off : ABIV3::bdry_out_off;
-	        
+
 	                    llvm::Value* side_ptr = nullptr;
 	                    if (use_batch) {
 	                        auto* sides_base = loadPtr(args_ptr, ABIV3::batch_sides_off);
 	                        auto* outputs_base = loadPtr(args_ptr, ABIV3::batch_outputs_off);
 	                        auto* b_idx64 = builder.CreateZExt(b_idx, i64);
-	        
+
 	                        side_ptr = builder.CreateGEP(builder.getInt8Ty(), sides_base,
 	                            builder.CreateMul(b_idx64, builder.getInt64(sizeof(assembly::jit::KernelSideArgsV6))));
 	                        out_single_ptr = builder.CreateGEP(builder.getInt8Ty(), outputs_base,
@@ -2003,11 +2215,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        side_ptr = gepBytes(args_ptr, side_off);
 	                        out_single_ptr = gepBytes(args_ptr, out_off);
 	                    }
-	        
+
 	                    side_single = loadSideView(side_ptr, fixed_n_qpts_minus, fixed_n_test_dofs_minus, fixed_n_trial_dofs_minus);
-	        
+
 	                    element_matrix_single = loadPtr(out_single_ptr, ABIV3::out_element_matrix_off);
 	                    element_vector_single = loadPtr(out_single_ptr, ABIV3::out_element_vector_off);
+	                  }
 	                } else {            auto* minus_ptr = gepBytes(args_ptr, ABIV3::face_minus_side_off);
             auto* plus_ptr = gepBytes(args_ptr, ABIV3::face_plus_side_off);
 
@@ -3657,8 +3870,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
         std::vector<int> used_field_ids;
         used_field_ids.reserve(8);
-        for (const auto& t : terms) {
-            for (const auto& op : t.ir.ops) {
+        // Collect field IDs from standard terms OR coupled block terms.
+        auto collectFieldIds = [&](const KernelIR& kir) {
+            for (const auto& op : kir.ops) {
                 if (op.type == FormExprType::DiscreteField || op.type == FormExprType::StateField) {
                     const int fid = unpackFieldIdImm1(op.imm1);
                     if (op.type == FormExprType::StateField && fid == 0xffff) {
@@ -3666,6 +3880,16 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         continue;
                     }
                     used_field_ids.push_back(fid);
+                }
+            }
+        };
+        for (const auto& t : terms) {
+            collectFieldIds(t.ir);
+        }
+        if (coupled) {
+            for (const auto& blk : coupled->blocks) {
+                for (const auto& t : blk.terms) {
+                    collectFieldIds(t.ir);
                 }
             }
         }
@@ -3727,22 +3951,23 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             return llvm::ConstantPointerNull::get(i8_ptr);
         };
 
-        const bool is_residual = (ir.kind() == FormKind::Residual);
-        const bool is_fused = (fused != nullptr && !fused->extra_terms.empty());
-        const bool want_matrix = (ir.kind() == FormKind::Bilinear) || is_fused;
-        const bool want_vector = (ir.kind() == FormKind::Linear) || is_residual || is_fused;
+        // In coupled mode, is_residual is set per-term in the coupled dispatch.
+        bool is_residual = coupled ? false : (ir.kind() == FormKind::Residual);
+        const bool is_fused = (!coupled) && (fused != nullptr && !fused->extra_terms.empty());
+        const bool want_matrix = coupled ? true : ((ir.kind() == FormKind::Bilinear) || is_fused);
+        const bool want_vector = coupled ? true : ((ir.kind() == FormKind::Linear) || is_residual || is_fused);
 
         if (is_face_domain) {
-            if (ir.kind() == FormKind::Linear) {
+            if (!coupled && ir.kind() == FormKind::Linear) {
                 return LLVMGenResult{.ok = false, .message = "LLVMGen: face kernels currently support bilinear/residual forms only"};
             }
         }
 
-        if (!want_matrix && !want_vector) {
+        if (!coupled && !want_matrix && !want_vector) {
             return LLVMGenResult{.ok = false, .message = "LLVMGen: unsupported FormKind"};
         }
 
-        if (ir.kind() == FormKind::Linear) {
+        if (!coupled && ir.kind() == FormKind::Linear) {
             for (const auto& t : terms) {
                 for (const auto& op : t.ir.ops) {
                     if (op.type == FormExprType::TrialFunction) {
@@ -9588,6 +9813,103 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 builder.CreateBr(term_end);
                 builder.SetInsertPoint(term_end);
             }
+
+            // ================================================================
+            // Coupled block-sequential dispatch: for each block, load per-block
+            // basis/solution/output from CoupledBlockView, then emit the block's
+            // pre-lowered terms using the standard QP loop structure.
+            // ================================================================
+            if (coupled) {
+                for (std::size_t blk = 0; blk < coupled->blocks.size(); ++blk) {
+                    const auto& blk_data = coupled->blocks[blk];
+                    const std::string bs = std::to_string(blk);
+
+                    // Load per-block data from CoupledBlockView[blk]
+                    auto* blk_ptr = builder.CreateGEP(builder.getInt8Ty(), coupled_blocks_ptr,
+                        builder.getInt64(static_cast<std::int64_t>(blk * sizeof(assembly::jit::CoupledBlockView))));
+
+                    // Overwrite SideView per-block fields
+                    side_single.n_test_dofs = loadU32(blk_ptr, ABIV3::cbv_n_test_dofs_off);
+                    side_single.n_trial_dofs = loadU32(blk_ptr, ABIV3::cbv_n_trial_dofs_off);
+                    side_single.test_value_dim = loadU32(blk_ptr, ABIV3::cbv_test_value_dim_off);
+                    side_single.trial_value_dim = loadU32(blk_ptr, ABIV3::cbv_trial_value_dim_off);
+                    side_single.test_uses_vector_basis = loadU32(blk_ptr, ABIV3::cbv_test_uses_vector_basis_off);
+                    side_single.trial_uses_vector_basis = loadU32(blk_ptr, ABIV3::cbv_trial_uses_vector_basis_off);
+                    side_single.test_basis_values = loadPtr(blk_ptr, ABIV3::cbv_test_basis_values_off);
+                    side_single.test_phys_grads_xyz = loadPtr(blk_ptr, ABIV3::cbv_test_phys_grads_off);
+                    side_single.trial_basis_values = loadPtr(blk_ptr, ABIV3::cbv_trial_basis_values_off);
+                    side_single.trial_phys_grads_xyz = loadPtr(blk_ptr, ABIV3::cbv_trial_phys_grads_off);
+                    side_single.test_phys_hessians = loadPtr(blk_ptr, ABIV3::cbv_test_phys_hessians_off);
+                    side_single.trial_phys_hessians = loadPtr(blk_ptr, ABIV3::cbv_trial_phys_hessians_off);
+                    side_single.solution_coefficients = loadPtr(blk_ptr, ABIV3::cbv_solution_coefficients_off);
+                    side_single.num_previous_solutions = loadU32(blk_ptr, ABIV3::cbv_num_previous_solutions_off);
+                    side_single.previous_solution_coefficients_base =
+                        gepBytes(blk_ptr, ABIV3::cbv_previous_solution_coefficients_off);
+
+                    // Per-block output pointers
+                    element_matrix_single = loadPtr(blk_ptr, ABIV3::cbv_element_matrix_off);
+                    element_vector_single = loadPtr(blk_ptr, ABIV3::cbv_element_vector_off);
+
+                    // (diagnostics removed)
+
+                    // Emit per-block terms
+                    for (std::size_t t = 0; t < blk_data.terms.size(); ++t) {
+                        const auto& term = blk_data.terms[t];
+                        const std::string ts = bs + "_" + std::to_string(t);
+
+                        // Set is_residual per-term: Vector-targeted terms come from
+                        // residual forms where TrialFunction represents u_h (current solution).
+                        is_residual = (term.target == LoweredTerm::Target::Vector);
+
+                        auto* te = llvm::BasicBlock::Create(*ctx, "cb" + ts + ".entry", fn);
+                        auto* tb = llvm::BasicBlock::Create(*ctx, "cb" + ts + ".body", fn);
+                        auto* tx = llvm::BasicBlock::Create(*ctx, "cb" + ts + ".end", fn);
+
+                        builder.CreateBr(te);
+                        builder.SetInsertPoint(te);
+                        auto* tw = termWeight(side_single, term.time_derivative_order);
+                        auto* is_zero = builder.CreateFCmpOEQ(tw, f64c(0.0));
+                        builder.CreateCondBr(is_zero, tx, tb);
+
+                        builder.SetInsertPoint(tb);
+                        emitForLoop(side_single.n_qpts, "cq" + ts, [&](llvm::Value* q) {
+                            auto* q64 = builder.CreateZExt(q, i64);
+                            auto* w = loadRealPtrAt(side_single.integration_weights, q64);
+                            auto* scaled_w = builder.CreateFMul(tw, w);
+
+                            std::vector<CodeValue> cached;
+                            const std::vector<CodeValue>* cached_ptr = nullptr;
+                            if (!term.has_indexed_access) {
+                                cached = computeCachedSingle(term, q, side_single);
+                                cached_ptr = &cached;
+                            }
+
+                            const bool emit_matrix =
+                                (term.target == LoweredTerm::Target::Matrix) ||
+                                (term.target == LoweredTerm::Target::Auto && blk_data.want_matrix);
+                            if (emit_matrix) {
+                                emitForLoop(side_single.n_test_dofs, "ci" + ts, [&](llvm::Value* i) {
+                                    emitForLoop(side_single.n_trial_dofs, "cj" + ts, [&](llvm::Value* j) {
+                                        auto* val = evalKernelIRSingle(term, q, i, j, side_single, cached_ptr);
+                                        auto* contrib = builder.CreateFMul(scaled_w, val);
+                                        emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
+                                    });
+                                });
+                            } else {
+                                emitForLoop(side_single.n_test_dofs, "ci" + ts, [&](llvm::Value* i) {
+                                    auto* val = evalKernelIRSingle(term, q, i, builder.getInt32(0), side_single, cached_ptr);
+                                    auto* contrib = builder.CreateFMul(scaled_w, val);
+                                    emitVectorAccum(element_vector_single, i, contrib);
+                                });
+                            }
+                        });
+                        builder.CreateBr(tx);
+                        builder.SetInsertPoint(tx);
+                    }
+
+                    // (post-term diagnostics removed)
+                }
+            }
         } else {
 	            auto evalKernelIRFaceValue = [&](const LoweredTerm& term,
 	                                             llvm::Value* q_index,
@@ -12311,6 +12633,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         llvm::orc::ThreadSafeModule tsm(std::move(module), std::move(ctx));
         engine.addModule(std::move(tsm));
         out_address = engine.lookup(symbol);
+
         return LLVMGenResult{.ok = true, .message = {}};
     } catch (const std::exception& e) {
         return LLVMGenResult{.ok = false, .message = std::string("LLVMGen: exception: ") + e.what()};
@@ -12488,18 +12811,189 @@ LLVMGenResult LLVMGen::compileAndAddCoupledKernel(JITEngine& engine,
                                                   std::uintptr_t& out_address) const
 {
     out_address = 0;
-    (void)engine;
-    (void)blocks;
-    (void)symbol;
+#if !SVMP_FE_ENABLE_LLVM_JIT
+    (void)engine; (void)blocks; (void)symbol;
+    return LLVMGenResult{.ok = false, .message = "LLVMGen: FE was built without LLVM JIT support"};
+#else
+    if (blocks.empty()) {
+        return LLVMGenResult{.ok = false, .message = "LLVMGen: no blocks for coupled kernel"};
+    }
 
-    // Monolithic coupled LLVM codegen is not yet implemented.
-    // The coupled assembly path dispatches per-block fallback kernels,
-    // which already share geometry across blocks.  Monolithic codegen
-    // (shared QP-level intermediates) is a future optimization.
-    return LLVMGenResult{
-        .ok = false,
-        .message = "LLVMGen: monolithic coupled codegen not yet implemented"
-    };
+    const int preferred_vector_width =
+        preferredVectorWidthFromCpuFeatures(engine.cpuFeaturesString());
+
+    // Pre-lower all blocks' terms into a CoupledKernelInfo structure.
+    CoupledKernelInfo coupled;
+    coupled.blocks.resize(blocks.size());
+
+    for (std::size_t bi = 0; bi < blocks.size(); ++bi) {
+        const auto& blk = blocks[bi];
+        auto& blk_terms = coupled.blocks[bi];
+        blk_terms.want_matrix = blk.want_matrix;
+        blk_terms.want_vector = blk.want_vector;
+
+        // Helper to lower terms from a FormIR for this block.
+        auto lowerBlockTerms = [&](const FormIR* form_ir, bool is_residual_form,
+                                   LoweredTerm::Target target) -> LLVMGenResult {
+            if (!form_ir) return LLVMGenResult{.ok = true};
+            if (!form_ir->isCompiled()) {
+                return LLVMGenResult{.ok = false,
+                    .message = "LLVMGen: coupled block " + std::to_string(bi) + " FormIR not compiled"};
+            }
+
+            for (std::size_t tidx = 0; tidx < form_ir->terms().size(); ++tidx) {
+                const auto& term = form_ir->terms()[tidx];
+                if (term.domain != IntegralDomain::Cell) continue;
+
+                FormExpr effective_integrand = term.integrand;
+                std::optional<tensor::TensorIR> tensor_ir;
+
+                // NOTE: Tensor lowering is disabled for coupled blocks because
+                // evalKernelIRSingle's tensor path uses ir.testSpace()/ir.trialSpace()
+                // from the dummy FormIR (block 0), which is wrong for cross-field blocks.
+                // TODO: Fix tensor path to use per-block spaces.
+                if (false && options_.tensor.mode != TensorLoweringMode::Off) {
+                    try {
+                        tensor::TensorIRLoweringOptions tensor_opts;
+                        tensor_opts.enable_cache = false;
+                        tensor_opts.force_loop_nest =
+                            (options_.tensor.mode == TensorLoweringMode::On) || options_.tensor.force_loop_nest;
+                        tensor_opts.log_decisions = options_.tensor.log_decisions;
+                        tensor_opts.loop.enable_symmetry_lowering = options_.tensor.enable_symmetry_lowering;
+                        tensor_opts.loop.enable_optimal_contraction_order = options_.tensor.enable_optimal_contraction_order;
+                        tensor_opts.loop.enable_vectorization_hints = options_.vectorize;
+                        tensor_opts.loop.preferred_vector_width = preferred_vector_width;
+                        tensor_opts.loop.enable_delta_shortcuts = options_.tensor.enable_delta_shortcuts;
+                        tensor_opts.loop.scalar_expansion_term_threshold = options_.tensor.scalar_expansion_term_threshold;
+                        tensor_opts.alloc.stack_max_entries = options_.tensor.temp_stack_max_entries;
+                        tensor_opts.alloc.alignment_bytes = options_.tensor.temp_alignment_bytes;
+                        tensor_opts.alloc.enable_reuse = options_.tensor.temp_enable_reuse;
+
+                        const auto tl = tensor::lowerToTensorIR(term.integrand, tensor_opts);
+                        if (!tl.ok) {
+                            return LLVMGenResult{.ok = false, .message = tl.message.empty()
+                                ? "LLVMGen: tensor lowering failed for coupled block" : tl.message};
+                        }
+                        if (tl.used_loop_nest) {
+                            tensor_ir = tl.ir;
+                        } else if (tl.fallback_expr.isValid()) {
+                            effective_integrand = tl.fallback_expr;
+                        }
+                    } catch (const std::exception& e) {
+                        return LLVMGenResult{.ok = false,
+                            .message = std::string("LLVMGen: tensor lowering threw for coupled: ") + e.what()};
+                    }
+                }
+
+                auto lowered = lowerToKernelIR(effective_integrand);
+                if (lowered.ir.empty()) {
+                    return LLVMGenResult{.ok = false,
+                        .message = "LLVMGen: failed to lower coupled block term to KernelIR"};
+                }
+
+                auto shapes = inferShapes(lowered.ir, form_ir->testSpace(), form_ir->trialSpace());
+                if (!shapes.ok) {
+                    return LLVMGenResult{.ok = false, .message = shapes.message};
+                }
+
+                // Compute dep_mask. For residual terms, don't set 0x2 for TrialFunction
+                // since it represents the current solution, not a trial basis function.
+                std::vector<std::uint8_t> dep;
+                dep.resize(lowered.ir.ops.size(), 0u);
+                for (std::size_t op_idx = 0; op_idx < lowered.ir.ops.size(); ++op_idx) {
+                    const auto& op = lowered.ir.ops[op_idx];
+                    std::uint8_t d = 0u;
+                    for (std::size_t k = 0; k < op.child_count; ++k) {
+                        const auto c = lowered.ir.children[static_cast<std::size_t>(op.first_child) + k];
+                        d = static_cast<std::uint8_t>(d | dep[c]);
+                    }
+                    if (op.type == FormExprType::TestFunction) {
+                        d = static_cast<std::uint8_t>(d | 0x1u);
+                    } else if (op.type == FormExprType::TrialFunction && !is_residual_form) {
+                        d = static_cast<std::uint8_t>(d | 0x2u);
+                    }
+                    dep[op_idx] = d;
+                }
+
+                bool has_indexed_access = false;
+                std::vector<std::pair<std::uint16_t, std::uint8_t>> bound_indices;
+                {
+                    struct Use { std::uint8_t extent{0}; int count{0}; };
+                    std::unordered_map<std::uint16_t, Use> uses;
+                    for (const auto& op : lowered.ir.ops) {
+                        if (op.type != FormExprType::IndexedAccess) continue;
+                        has_indexed_access = true;
+                        const int rank = static_cast<int>(unpackIndexedRank(op.imm1));
+                        for (int k = 0; k < rank; ++k) {
+                            auto& u = uses[unpackIndexedId(op.imm0, k)];
+                            const auto ext = unpackIndexedExtent(op.imm1, k);
+                            if (u.count == 0) u.extent = ext;
+                            u.count += 1;
+                        }
+                    }
+                    if (has_indexed_access) {
+                        for (const auto& [id, u] : uses) {
+                            bound_indices.emplace_back(id, u.extent);
+                        }
+                        std::sort(bound_indices.begin(), bound_indices.end(),
+                                  [](const auto& a, const auto& b) { return a.first < b.first; });
+                    }
+                }
+
+                blk_terms.terms.push_back(LoweredTerm{
+                    .ir = std::move(lowered.ir),
+                    .shapes = std::move(shapes.shapes),
+                    .dep_mask = std::move(dep),
+                    .time_derivative_order = term.time_derivative_order,
+                    .tensor_ir = std::move(tensor_ir),
+                    .has_indexed_access = has_indexed_access,
+                    .bound_indices = std::move(bound_indices),
+                    .target = target,
+                });
+            }
+            return LLVMGenResult{.ok = true};
+        };
+
+        // Lower tangent terms (bilinear form → Matrix target)
+        if (blk.want_matrix && blk.tangent_ir) {
+            auto r = lowerBlockTerms(blk.tangent_ir, /*is_residual_form=*/false,
+                                     LoweredTerm::Target::Matrix);
+            if (!r.ok) return r;
+        }
+
+        // Lower residual terms (residual form → Vector target)
+        if (blk.want_vector && blk.residual_ir) {
+            auto r = lowerBlockTerms(blk.residual_ir, /*is_residual_form=*/true,
+                                     LoweredTerm::Target::Vector);
+            if (!r.ok) return r;
+        }
+
+        if (blk_terms.terms.empty()) {
+            return LLVMGenResult{.ok = false,
+                .message = "LLVMGen: coupled block " + std::to_string(bi) + " has no cell terms"};
+        }
+
+        // Block lowered successfully: blk_terms.terms.size() terms.
+    }
+
+    // Use the first block's tangent FormIR as the dummy FormIR for compileAndAddKernelImpl.
+    // The coupled path ignores it.
+    const FormIR* dummy_ir = nullptr;
+    for (const auto& blk : blocks) {
+        if (blk.tangent_ir) { dummy_ir = blk.tangent_ir; break; }
+        if (blk.residual_ir) { dummy_ir = blk.residual_ir; break; }
+    }
+    if (!dummy_ir) {
+        return LLVMGenResult{.ok = false, .message = "LLVMGen: no FormIR found in any coupled block"};
+    }
+
+    std::span<const std::size_t> empty_indices;
+    return compileAndAddKernelImpl(engine, *dummy_ir, empty_indices,
+                                   IntegralDomain::Cell, /*boundary_marker=*/-1,
+                                   /*interface_marker=*/-1, symbol, out_address,
+                                   /*specialization=*/nullptr, /*fused=*/nullptr,
+                                   static_cast<void*>(&coupled));
+#endif
 }
 
 } // namespace jit

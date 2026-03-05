@@ -23,6 +23,7 @@
 #include "Basis/BasisFunction.h"
 #include "Basis/BasisCache.h"
 #include "Basis/VectorBasis.h"
+#include "Assembly/JIT/KernelArgs.h"
 #include "Forms/CoupledBlockKernel.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
@@ -2829,62 +2830,188 @@ void StandardAssembler::prepareBasis(
 
     // ---- Fast path: skip BasisCache reads when topology matches previous cell ----
     const bool same_space = (&test_space == &trial_space);
+    const bool spaces_match_cached =
+        (same_space && cached_basis_same_space_) ||
+        (!same_space && !cached_basis_same_space_ &&
+         &test_space == cached_basis_test_space_ptr_ &&
+         &trial_space == cached_basis_trial_space_ptr_ &&
+         n_trial_dofs == cached_basis_n_trial_dofs_ &&
+         !trial_is_vector_basis);
     if (basis_scratch_valid_ &&
-        same_space &&
+        spaces_match_cached &&
         !test_is_vector_basis &&
         cell_type == cached_basis_cell_type_ &&
         n_test_dofs == cached_basis_n_test_dofs_ &&
         n_qpts == cached_basis_n_qpts_ &&
-        cached_basis_same_space_ &&
-        !need_basis_hessians &&
+        (!need_basis_hessians || cached_basis_has_hessians_) &&
         !need_basis_curls &&
         !need_basis_divergences)
     {
-        // Recompute physical gradients from cached scratch_ref_gradients_ + new J_inv
+        // Recompute physical gradients + hessians from cached ref data + new J_inv.
+        // Helper: transform ref gradients → physical gradients for n_dofs DOFs.
         const auto ctx_inv_jacs_r = context.inverseJacobians();
 
-        if (cached_mapping_affine_) {
-            // Affine fast path: J_inv is constant across all QPs.
-            // Load once and iterate dof-major for sequential ref gradient access.
-            const auto& J_inv = ctx_inv_jacs_r[0];
-            for (LocalIndex i = 0; i < n_test_dofs; ++i) {
+        auto transformGradients = [&](LocalIndex n_dofs,
+                                      const std::vector<AssemblyContext::Vector3D>& ref_grads,
+                                      std::vector<AssemblyContext::Vector3D>& phys_grads,
+                                      const AssemblyContext::Matrix3x3& J_inv_const) {
+            for (LocalIndex i = 0; i < n_dofs; ++i) {
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
                     const std::size_t ref_idx = static_cast<std::size_t>(i * n_qpts + q);
-                    const std::size_t phys_idx = static_cast<std::size_t>(q * n_test_dofs + i);
-                    const auto& grad_ref = scratch_ref_gradients_[ref_idx];
-                    AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
+                    const std::size_t phys_idx = static_cast<std::size_t>(q * n_dofs + i);
+                    const auto& J_inv = cached_mapping_affine_ ? J_inv_const : ctx_inv_jacs_r[q];
+                    const auto& gr = ref_grads[ref_idx];
+                    AssemblyContext::Vector3D gp = {0.0, 0.0, 0.0};
                     if (dim == 3) {
-                        grad_phys[0] = J_inv[0][0] * grad_ref[0] + J_inv[1][0] * grad_ref[1] + J_inv[2][0] * grad_ref[2];
-                        grad_phys[1] = J_inv[0][1] * grad_ref[0] + J_inv[1][1] * grad_ref[1] + J_inv[2][1] * grad_ref[2];
-                        grad_phys[2] = J_inv[0][2] * grad_ref[0] + J_inv[1][2] * grad_ref[1] + J_inv[2][2] * grad_ref[2];
+                        gp[0] = J_inv[0][0]*gr[0] + J_inv[1][0]*gr[1] + J_inv[2][0]*gr[2];
+                        gp[1] = J_inv[0][1]*gr[0] + J_inv[1][1]*gr[1] + J_inv[2][1]*gr[2];
+                        gp[2] = J_inv[0][2]*gr[0] + J_inv[1][2]*gr[1] + J_inv[2][2]*gr[2];
                     } else if (dim == 2) {
-                        grad_phys[0] = J_inv[0][0] * grad_ref[0] + J_inv[1][0] * grad_ref[1];
-                        grad_phys[1] = J_inv[0][1] * grad_ref[0] + J_inv[1][1] * grad_ref[1];
-                    } else if (dim == 1) {
-                        grad_phys[0] = J_inv[0][0] * grad_ref[0];
+                        gp[0] = J_inv[0][0]*gr[0] + J_inv[1][0]*gr[1];
+                        gp[1] = J_inv[0][1]*gr[0] + J_inv[1][1]*gr[1];
+                    } else {
+                        gp[0] = J_inv[0][0]*gr[0];
                     }
-                    scratch_phys_gradients_[phys_idx] = grad_phys;
+                    phys_grads[phys_idx] = gp;
                 }
             }
-        } else {
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const auto& J_inv = ctx_inv_jacs_r[q];
-                for (LocalIndex i = 0; i < n_test_dofs; ++i) {
+        };
+
+        auto transformHessiansAffine = [&](LocalIndex n_dofs,
+                                           const std::vector<AssemblyContext::Matrix3x3>& ref_hess,
+                                           std::vector<AssemblyContext::Matrix3x3>& phys_hess,
+                                           const AssemblyContext::Matrix3x3& J_inv) {
+            for (LocalIndex i = 0; i < n_dofs; ++i) {
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
                     const std::size_t ref_idx = static_cast<std::size_t>(i * n_qpts + q);
-                    const std::size_t phys_idx = static_cast<std::size_t>(q * n_test_dofs + i);
-                    const auto& grad_ref = scratch_ref_gradients_[ref_idx];
-                    AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
-                    if (dim == 3) {
-                        grad_phys[0] = J_inv[0][0] * grad_ref[0] + J_inv[1][0] * grad_ref[1] + J_inv[2][0] * grad_ref[2];
-                        grad_phys[1] = J_inv[0][1] * grad_ref[0] + J_inv[1][1] * grad_ref[1] + J_inv[2][1] * grad_ref[2];
-                        grad_phys[2] = J_inv[0][2] * grad_ref[0] + J_inv[1][2] * grad_ref[1] + J_inv[2][2] * grad_ref[2];
-                    } else if (dim == 2) {
-                        grad_phys[0] = J_inv[0][0] * grad_ref[0] + J_inv[1][0] * grad_ref[1];
-                        grad_phys[1] = J_inv[0][1] * grad_ref[0] + J_inv[1][1] * grad_ref[1];
-                    } else if (dim == 1) {
-                        grad_phys[0] = J_inv[0][0] * grad_ref[0];
+                    const std::size_t phys_idx = ref_idx; // dof-major, matching full path (setPhysicalHessians transposes)
+                    const auto& Hr = ref_hess[ref_idx];
+                    AssemblyContext::Matrix3x3 Hp{};
+                    for (int r = 0; r < dim; ++r) {
+                        for (int c = 0; c < dim; ++c) {
+                            Real s = 0.0;
+                            for (int a = 0; a < dim; ++a)
+                                for (int b = 0; b < dim; ++b)
+                                    s += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                         Hr[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                         J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                            Hp[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = s;
+                        }
                     }
-                    scratch_phys_gradients_[phys_idx] = grad_phys;
+                    phys_hess[phys_idx] = Hp;
+                }
+            }
+        };
+
+        const auto& J_inv0 = ctx_inv_jacs_r[0];
+
+        // Test side: always transform
+        transformGradients(n_test_dofs, scratch_ref_gradients_, scratch_phys_gradients_, J_inv0);
+
+        if (need_basis_hessians) {
+            if (cached_mapping_affine_) {
+                transformHessiansAffine(n_test_dofs, scratch_ref_hessians_, scratch_phys_hessians_, J_inv0);
+            } else {
+                const auto& mapping = cached_mapping_;
+                const auto ctx_quad_pts_r = context.quadraturePoints();
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    const auto& J_inv = ctx_inv_jacs_r[q];
+                    const auto& qp = ctx_quad_pts_r[q];
+                    const math::Vector<Real, 3> xi{qp[0], qp[1], qp[2]};
+                    std::array<AssemblyContext::Matrix3x3, 3> d2xi_dx2{};
+                    const auto map_hess = mapping->mapping_hessian(xi);
+                    for (int a = 0; a < dim; ++a)
+                        for (int ii = 0; ii < dim; ++ii)
+                            for (int jj = 0; jj < dim; ++jj) {
+                                Real s = 0.0;
+                                for (int m = 0; m < dim; ++m)
+                                    for (int p = 0; p < dim; ++p)
+                                        for (int rr = 0; rr < dim; ++rr)
+                                            s += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(m)] *
+                                                 map_hess[static_cast<std::size_t>(m)](
+                                                     static_cast<std::size_t>(p), static_cast<std::size_t>(rr)) *
+                                                 J_inv[static_cast<std::size_t>(p)][static_cast<std::size_t>(ii)] *
+                                                 J_inv[static_cast<std::size_t>(rr)][static_cast<std::size_t>(jj)];
+                                d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(ii)][static_cast<std::size_t>(jj)] = -s;
+                            }
+                    for (LocalIndex i = 0; i < n_test_dofs; ++i) {
+                        const std::size_t ref_idx = static_cast<std::size_t>(i * n_qpts + q);
+                        const auto& Hr = scratch_ref_hessians_[ref_idx];
+                        const auto& gr = scratch_ref_gradients_[ref_idx];
+                        AssemblyContext::Matrix3x3 Hp{};
+                        for (int r = 0; r < dim; ++r)
+                            for (int c = 0; c < dim; ++c) {
+                                Real s = 0.0;
+                                for (int a = 0; a < dim; ++a)
+                                    for (int b = 0; b < dim; ++b)
+                                        s += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                             Hr[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                             J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                for (int a = 0; a < dim; ++a)
+                                    s += gr[static_cast<std::size_t>(a)] *
+                                         d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                                Hp[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = s;
+                            }
+                        scratch_phys_hessians_[ref_idx] = Hp; // dof-major, matching full path
+                    }
+                }
+            }
+        }
+
+        // Trial side: transform if different from test
+        if (!same_space) {
+            scratch_trial_phys_gradients_.resize(static_cast<std::size_t>(n_trial_dofs * n_qpts));
+            transformGradients(n_trial_dofs, scratch_trial_ref_gradients_, scratch_trial_phys_gradients_, J_inv0);
+
+            if (need_basis_hessians && !scratch_trial_ref_hessians_.empty()) {
+                scratch_trial_phys_hessians_.resize(static_cast<std::size_t>(n_trial_dofs * n_qpts));
+                if (cached_mapping_affine_) {
+                    transformHessiansAffine(n_trial_dofs, scratch_trial_ref_hessians_, scratch_trial_phys_hessians_, J_inv0);
+                } else {
+                    // Non-affine trial hessians: same d2xi_dx2 logic as test
+                    const auto& mapping = cached_mapping_;
+                    const auto ctx_quad_pts_r = context.quadraturePoints();
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        const auto& J_inv = ctx_inv_jacs_r[q];
+                        const auto& qp = ctx_quad_pts_r[q];
+                        const math::Vector<Real, 3> xi{qp[0], qp[1], qp[2]};
+                        std::array<AssemblyContext::Matrix3x3, 3> d2xi_dx2{};
+                        const auto map_hess = mapping->mapping_hessian(xi);
+                        for (int a = 0; a < dim; ++a)
+                            for (int ii = 0; ii < dim; ++ii)
+                                for (int jj = 0; jj < dim; ++jj) {
+                                    Real s = 0.0;
+                                    for (int m = 0; m < dim; ++m)
+                                        for (int p = 0; p < dim; ++p)
+                                            for (int rr = 0; rr < dim; ++rr)
+                                                s += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(m)] *
+                                                     map_hess[static_cast<std::size_t>(m)](
+                                                         static_cast<std::size_t>(p), static_cast<std::size_t>(rr)) *
+                                                     J_inv[static_cast<std::size_t>(p)][static_cast<std::size_t>(ii)] *
+                                                     J_inv[static_cast<std::size_t>(rr)][static_cast<std::size_t>(jj)];
+                                    d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(ii)][static_cast<std::size_t>(jj)] = -s;
+                                }
+                        for (LocalIndex i = 0; i < n_trial_dofs; ++i) {
+                            const std::size_t ref_idx = static_cast<std::size_t>(i * n_qpts + q);
+                            const auto& Hr = scratch_trial_ref_hessians_[ref_idx];
+                            const auto& gr = scratch_trial_ref_gradients_[ref_idx];
+                            AssemblyContext::Matrix3x3 Hp{};
+                            for (int r = 0; r < dim; ++r)
+                                for (int c = 0; c < dim; ++c) {
+                                    Real s = 0.0;
+                                    for (int a = 0; a < dim; ++a)
+                                        for (int b = 0; b < dim; ++b)
+                                            s += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                                 Hr[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                                 J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                    for (int a = 0; a < dim; ++a)
+                                        s += gr[static_cast<std::size_t>(a)] *
+                                             d2xi_dx2[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                                    Hp[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = s;
+                                }
+                            scratch_trial_phys_hessians_[ref_idx] = Hp; // dof-major, matching full path
+                        }
+                    }
                 }
             }
         }
@@ -2893,12 +3020,32 @@ void StandardAssembler::prepareBasis(
         context.configure(cell_id, test_space, trial_space, required_data);
         context.setCellDomainId(mesh.getCellDomainId(cell_id));
 
-        // Re-set basis data from cached scratch (same values, just re-transpose)
+        // Re-set basis data from cached scratch
         context.setTestBasisData(n_test_dofs, scratch_basis_values_, scratch_ref_gradients_);
+        if (need_basis_hessians) {
+            context.setTestBasisHessians(n_test_dofs, scratch_ref_hessians_);
+        }
+        if (!same_space) {
+            context.setTrialBasisData(n_trial_dofs, scratch_trial_basis_values_, scratch_trial_ref_gradients_);
+            if (need_basis_hessians) {
+                context.setTrialBasisHessians(n_trial_dofs, scratch_trial_ref_hessians_);
+            }
+        }
 
         // Update physical gradients
         const auto test_phys_span = std::span<const AssemblyContext::Vector3D>(scratch_phys_gradients_);
-        context.setPhysicalGradients(test_phys_span, same_space ? test_phys_span : test_phys_span);
+        const auto trial_phys_span = same_space
+            ? test_phys_span
+            : std::span<const AssemblyContext::Vector3D>(scratch_trial_phys_gradients_);
+        context.setPhysicalGradients(test_phys_span, trial_phys_span);
+
+        if (need_basis_hessians) {
+            const auto test_hess_span = std::span<const AssemblyContext::Matrix3x3>(scratch_phys_hessians_);
+            const auto trial_hess_span = same_space
+                ? test_hess_span
+                : std::span<const AssemblyContext::Matrix3x3>(scratch_trial_phys_hessians_);
+            context.setPhysicalHessians(test_hess_span, trial_hess_span);
+        }
 
         if (hasFlag(required_data, RequiredData::EntityMeasures)) {
             Real cell_volume = 0.0;
@@ -2984,15 +3131,15 @@ void StandardAssembler::prepareBasis(
         }
     }
 
-    // Storage for trial if different from test
-    std::vector<Real> trial_basis_values;
-    std::vector<AssemblyContext::Vector3D> trial_ref_gradients;
-    std::vector<AssemblyContext::Vector3D> trial_phys_gradients;
+    // Storage for trial if different from test — use member scratch for fast-path caching
     std::vector<AssemblyContext::Vector3D> trial_basis_vector_values;
     std::vector<AssemblyContext::Vector3D> trial_basis_curls;
     std::vector<Real> trial_basis_divergences;
-    std::vector<AssemblyContext::Matrix3x3> trial_ref_hessians;
-    std::vector<AssemblyContext::Matrix3x3> trial_phys_hessians;
+    auto& trial_basis_values = scratch_trial_basis_values_;
+    auto& trial_ref_gradients = scratch_trial_ref_gradients_;
+    auto& trial_phys_gradients = scratch_trial_phys_gradients_;
+    auto& trial_ref_hessians = scratch_trial_ref_hessians_;
+    auto& trial_phys_hessians = scratch_trial_phys_hessians_;
 
     if (&test_space != &trial_space) {
         const auto trial_basis_size = static_cast<std::size_t>(n_trial_dofs * n_qpts);
@@ -3444,6 +3591,9 @@ void StandardAssembler::prepareBasis(
         cached_basis_n_trial_dofs_ = n_trial_dofs;
         cached_basis_n_qpts_ = n_qpts;
         cached_basis_same_space_ = (&test_space == &trial_space);
+        cached_basis_has_hessians_ = need_basis_hessians;
+        cached_basis_test_space_ptr_ = &test_space;
+        cached_basis_trial_space_ptr_ = &trial_space;
     } else {
         basis_scratch_valid_ = false;
     }
@@ -3711,7 +3861,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     double tp_fb_geom = 0.0, tp_fb_save = 0.0, tp_fb_restore = 0.0;
     double tp_fb_basis = 0.0, tp_fb_field = 0.0, tp_fb_dof = 0.0;
     double tp_fb_sol = 0.0, tp_fb_setters = 0.0;
-    double tp_fb_kernel = 0.0, tp_fb_insert = 0.0;
+    double tp_fb_kernel = 0.0, tp_fb_insert = 0.0, tp_fb_snap = 0.0;
 #ifdef SVMP_FE_ASSEMBLY_TIMING
     auto TP = []() {
         return std::chrono::duration<double>(
@@ -3814,6 +3964,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     // use a block-sequential batch path that eliminates Phase 2 geometry restore.
     // ========================================================================
     const forms::CoupledBlockKernel* coupled_kernel = nullptr;
+    bool use_monolithic_flag = false;
     if (terms.size() == 1) {
         coupled_kernel = dynamic_cast<const forms::CoupledBlockKernel*>(terms[0].kernel);
     }
@@ -3821,6 +3972,12 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     // Coupled block batch range processor (replaces Phase 1 + Phase 2 with
     // a block-sequential loop: prepare geometry once, then for each block
     // prepare basis + gather + compute + insert without geometry save/restore).
+    //
+    // When monolithic JIT is available, all blocks are evaluated in a single
+    // JIT call with shared QP intermediates.  Basis data is copied into scratch
+    // buffers after each prepareBasis call (since prepareBasis overwrites the
+    // context's test/trial buffers), and the CoupledCellKernelBatchArgsV1 ABI
+    // struct is packed with pointers into these copies.
     auto assemble_coupled_batch_range = [&](std::span<const GlobalIndex> gids) {
         if (!coupled_kernel || !coupled_kernel->isResolved()) return;
         const auto& parent_term = terms[0];
@@ -3833,8 +3990,41 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             scratch_batch_dofs_.assign(n_blocks, std::vector<SlotDofs>(B));
         }
 
-        for (std::size_t begin = 0; begin < gids.size(); begin += B) {
-            const std::size_t active = std::min(B, gids.size() - begin);
+        // Monolithic JIT: currently slower than per-block dispatch due to
+        // code bloat (no shared QP intermediates yet). Opt-in via env var.
+        const bool use_monolithic = coupled_kernel->isMonolithicJITAvailable()
+            && std::getenv("SVMP_USE_MONOLITHIC");
+        use_monolithic_flag = use_monolithic;
+        const auto monolithic_addr = use_monolithic ? coupled_kernel->monolithicCellAddress() : 0;
+
+        // --- Scratch for monolithic JIT dispatch ---
+        // Per-block, per-slot basis data snapshots.  prepareBasis overwrites ctx
+        // buffers, so we copy out the basis arrays before the next block overwrites.
+        struct BasisSnapshot {
+            std::vector<Real> test_vals;
+            std::vector<Real> test_grads;
+            std::vector<Real> test_hessians;   // flattened [n_test_dofs * n_qpts * 9]
+            std::vector<Real> trial_vals;
+            std::vector<Real> trial_grads;
+            std::vector<Real> trial_hessians;  // flattened [n_trial_dofs * n_qpts * 9]
+            std::vector<Real> sol_coeffs;
+            // Previous solution coefficients (for time derivatives)
+            std::uint32_t num_prev_sols{0};
+            std::array<std::vector<Real>, assembly::jit::kMaxPreviousSolutionsV6> prev_sol_coeffs;
+        };
+        const std::size_t total_bv = n_blocks * B;
+        std::vector<BasisSnapshot> basis_snaps;
+        if (use_monolithic) {
+            scratch_coupled_block_views_.resize(total_bv);
+            scratch_coupled_cell_args_.resize(B);
+            scratch_coupled_block_outputs_.resize(total_bv);
+            basis_snaps.resize(total_bv);
+        }
+
+        // Both coupled monolithic and standard paths use full batch size B.
+        const std::size_t B_eff = B;
+        for (std::size_t begin = 0; begin < gids.size(); begin += B_eff) {
+            const std::size_t active = std::min(B_eff, gids.size() - begin);
 
             // === Prepare geometry + context for all cells in batch (ONCE) ===
             for (std::size_t slot = 0; slot < active; ++slot) {
@@ -3861,145 +4051,374 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 ctx.setCoupledValues(coupled_integrals_, coupled_aux_state_);
                 ctx.clearAllPreviousSolutionData();
                 tp_fb_setters += TP() - tp0;
-
-                // Field solutions are populated after first block's prepareBasis
-                // (populateFieldSolutionData only needs geometry arrays from
-                // prepareGeometry; it does NOT need prepareBasis. But we defer
-                // to the block loop so there's no extra prepareBasis call.)
             }
 
-            // === For each block: prepare basis + gather + compute + insert ===
-            for (std::size_t bi = 0; bi < n_blocks; ++bi) {
-                const auto& bs = coupled_kernel->blockSpec(bi);
-                if (!bs.fallback_kernel || !bs.fallback_kernel->hasCell()) continue;
-                const bool block_want_matrix = parent_term.assemble_matrix && bs.want_matrix;
-                const bool block_want_vector = parent_term.assemble_vector && bs.want_vector;
-                if (!block_want_matrix && !block_want_vector) continue;
+            if (use_monolithic) {
+                // =============================================================
+                // MONOLITHIC JIT PATH: prepare all blocks for all slots, then
+                // call the monolithic kernel once for the whole batch.
+                // =============================================================
 
+                // Phase A: For each slot, prepare all blocks' data.
                 for (std::size_t slot = 0; slot < active; ++slot) {
                     const auto cell_id = gids[begin + slot];
                     auto& ctx = batch_contexts[slot];
 
-                    double tp0 = TP();
-                    // Restore node coords for prepareBasis (geometry arrays survive)
-                    scratch_node_coords_ = saved_node_coords[slot].node_coords;
-                    cached_mapping_->resetNodes(scratch_node_coords_);
-                    tp_fb_restore += TP() - tp0;
+                    for (std::size_t bi = 0; bi < n_blocks; ++bi) {
+                        const auto& bs = coupled_kernel->blockSpec(bi);
+                        const std::size_t flat = slot * n_blocks + bi;
 
-                    tp0 = TP();
-                    prepareBasis(ctx, mesh, cell_id, *bs.test_space, *bs.trial_space,
-                                 bs.fallback_kernel->getRequiredData(), *fused_quad_rule);
-                    tp_fb_basis += TP() - tp0;
+                        double tp0 = TP();
+                        scratch_node_coords_ = saved_node_coords[slot].node_coords;
+                        cached_mapping_->resetNodes(scratch_node_coords_);
+                        tp_fb_restore += TP() - tp0;
 
-                    // Populate field solutions after first block's prepareBasis
-                    // (persists across blocks since FunctionSpace configure() doesn't clear them)
-                    if (bi == 0 && any_need_field_solutions) {
                         tp0 = TP();
-                        populateFieldSolutionData(ctx, mesh, cell_id, union_field_reqs);
-                        tp_fb_field += TP() - tp0;
-                    }
+                        prepareBasis(ctx, mesh, cell_id, *bs.test_space, *bs.trial_space,
+                                     bs.fallback_kernel->getRequiredData(), *fused_quad_rule);
+                        tp_fb_basis += TP() - tp0;
 
-                    // DOF lookup
-                    tp0 = TP();
-                    {
-                        auto rl = bs.row_dof_map->getCellDofs(cell_id);
-                        auto cl = bs.col_dof_map->getCellDofs(cell_id);
-                        auto& rd = batch_dofs[bi][slot].row_dofs;
-                        auto& cd = batch_dofs[bi][slot].col_dofs;
-                        rd.resize(rl.size());
-                        for (std::size_t i = 0; i < rl.size(); ++i) rd[i] = rl[i] + bs.row_dof_offset;
-                        cd.resize(cl.size());
-                        for (std::size_t j = 0; j < cl.size(); ++j) cd[j] = cl[j] + bs.col_dof_offset;
-                    }
-                    tp_fb_dof += TP() - tp0;
-
-                    // Solution gather using the block's col_dofs and trial_space
-                    tp0 = TP();
-                    if (parent_td.need_solution) {
-                        const auto& cd = batch_dofs[bi][slot].col_dofs;
-                        auto& sol = batch_sol_coeffs[slot];
-                        sol.resize(cd.size());
-                        if (current_solution_view_ != nullptr) {
-                            current_solution_view_->getVectorEntries(
-                                std::span<const GlobalIndex>(cd), std::span<Real>(sol));
-                        } else {
-                            for (std::size_t i = 0; i < cd.size(); ++i) {
-                                const auto dof = cd[i];
-                                sol[i] = current_solution_[static_cast<std::size_t>(dof)];
-                            }
+                        if (bi == 0 && any_need_field_solutions) {
+                            tp0 = TP();
+                            populateFieldSolutionData(ctx, mesh, cell_id, union_field_reqs);
+                            tp_fb_field += TP() - tp0;
                         }
-                        if (ctx.trialUsesVectorBasis())
-                            applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
-                                                          std::span<Real>(sol));
-                        ctx.setSolutionCoefficients(std::span<const Real>(sol));
 
-                        // Previous solution coefficients for time integration
-                        if (time_integration_ != nullptr) {
-                            const int required = requiredHistoryStates(time_integration_);
-                            if (required > 0) {
-                                auto& psc = batch_prev_sol_coeffs[slot];
-                                if (psc.size() < static_cast<std::size_t>(required))
-                                    psc.resize(static_cast<std::size_t>(required));
-                                for (int k = 1; k <= required; ++k) {
-                                    const auto& pdata = previous_solutions_[static_cast<std::size_t>(k - 1)];
-                                    const auto* pview = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
-                                                            ? previous_solution_views_[static_cast<std::size_t>(k - 1)] : nullptr;
-                                    auto& lp = psc[static_cast<std::size_t>(k - 1)];
-                                    lp.resize(cd.size());
-                                    if (pview != nullptr) {
-                                        pview->getVectorEntries(
-                                            std::span<const GlobalIndex>(cd), std::span<Real>(lp));
-                                    } else {
-                                        for (std::size_t i = 0; i < cd.size(); ++i) {
-                                            lp[i] = pdata[static_cast<std::size_t>(cd[i])];
+                        // DOF lookup
+                        tp0 = TP();
+                        {
+                            auto rl = bs.row_dof_map->getCellDofs(cell_id);
+                            auto cl = bs.col_dof_map->getCellDofs(cell_id);
+                            auto& rd = batch_dofs[bi][slot].row_dofs;
+                            auto& cd = batch_dofs[bi][slot].col_dofs;
+                            rd.resize(rl.size());
+                            for (std::size_t i = 0; i < rl.size(); ++i) rd[i] = rl[i] + bs.row_dof_offset;
+                            cd.resize(cl.size());
+                            for (std::size_t j = 0; j < cl.size(); ++j) cd[j] = cl[j] + bs.col_dof_offset;
+                        }
+                        tp_fb_dof += TP() - tp0;
+
+                        // Solution gather
+                        tp0 = TP();
+                        auto& snap = basis_snaps[flat];
+                        if (parent_td.need_solution) {
+                            const auto& cd = batch_dofs[bi][slot].col_dofs;
+                            auto& sol = snap.sol_coeffs;
+                            sol.resize(cd.size());
+                            if (current_solution_view_ != nullptr) {
+                                current_solution_view_->getVectorEntries(
+                                    std::span<const GlobalIndex>(cd), std::span<Real>(sol));
+                            } else {
+                                for (std::size_t i = 0; i < cd.size(); ++i) {
+                                    sol[i] = current_solution_[static_cast<std::size_t>(cd[i])];
+                                }
+                            }
+                            if (ctx.trialUsesVectorBasis())
+                                applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
+                                                              std::span<Real>(sol));
+                            ctx.setSolutionCoefficients(std::span<const Real>(sol));
+
+                            // Previous solution coefficients for time integration
+                            if (time_integration_ != nullptr) {
+                                const int required = requiredHistoryStates(time_integration_);
+                                if (required > 0) {
+                                    auto& psc = batch_prev_sol_coeffs[slot];
+                                    if (psc.size() < static_cast<std::size_t>(required))
+                                        psc.resize(static_cast<std::size_t>(required));
+                                    for (int k = 1; k <= required; ++k) {
+                                        const auto& pdata = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                                        const auto* pview = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+                                                                ? previous_solution_views_[static_cast<std::size_t>(k - 1)] : nullptr;
+                                        auto& lp = psc[static_cast<std::size_t>(k - 1)];
+                                        lp.resize(cd.size());
+                                        if (pview != nullptr) {
+                                            pview->getVectorEntries(
+                                                std::span<const GlobalIndex>(cd), std::span<Real>(lp));
+                                        } else {
+                                            for (std::size_t i = 0; i < cd.size(); ++i) {
+                                                lp[i] = pdata[static_cast<std::size_t>(cd[i])];
+                                            }
                                         }
+                                        if (ctx.trialUsesVectorBasis())
+                                            applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
+                                                                          std::span<Real>(lp));
+                                        ctx.setPreviousSolutionCoefficientsK(k, lp);
                                     }
-                                    if (ctx.trialUsesVectorBasis())
-                                        applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
-                                                                      std::span<Real>(lp));
-                                    ctx.setPreviousSolutionCoefficientsK(k, lp);
                                 }
                             }
                         }
-                    }
-                    tp_fb_sol += TP() - tp0;
+                        tp_fb_sol += TP() - tp0;
 
-                    batch_outputs[slot].clear();
-                    batch_context_ptrs[slot] = &ctx;
+                        // Copy basis data from ctx into persistent snapshot
+                        // (prepareBasis for the next block will overwrite ctx)
+                        tp0 = TP();
+                        {
+                            auto tv = ctx.testBasisValuesRaw();
+                            snap.test_vals.assign(tv.begin(), tv.end());
+
+                            auto tg = ctx.testPhysicalGradientsRaw();
+                            snap.test_grads.resize(tg.size() * 3);
+                            for (std::size_t i = 0; i < tg.size(); ++i) {
+                                snap.test_grads[i * 3 + 0] = tg[i][0];
+                                snap.test_grads[i * 3 + 1] = tg[i][1];
+                                snap.test_grads[i * 3 + 2] = tg[i][2];
+                            }
+
+                            auto rv = ctx.trialBasisValuesRaw();
+                            snap.trial_vals.assign(rv.begin(), rv.end());
+
+                            auto rg = ctx.trialPhysicalGradientsRaw();
+                            snap.trial_grads.resize(rg.size() * 3);
+                            for (std::size_t i = 0; i < rg.size(); ++i) {
+                                snap.trial_grads[i * 3 + 0] = rg[i][0];
+                                snap.trial_grads[i * 3 + 1] = rg[i][1];
+                                snap.trial_grads[i * 3 + 2] = rg[i][2];
+                            }
+
+                            // Copy hessians (needed for stabilization terms with divSymGrad)
+                            auto th = ctx.testPhysicalHessiansRaw();
+                            snap.test_hessians.resize(th.size() * 9);
+                            for (std::size_t i = 0; i < th.size(); ++i) {
+                                for (int r = 0; r < 3; ++r)
+                                    for (int c = 0; c < 3; ++c)
+                                        snap.test_hessians[i * 9 + r * 3 + c] = th[i][r][c];
+                            }
+
+                            auto rh = ctx.trialPhysicalHessiansRaw();
+                            snap.trial_hessians.resize(rh.size() * 9);
+                            for (std::size_t i = 0; i < rh.size(); ++i) {
+                                for (int r = 0; r < 3; ++r)
+                                    for (int c = 0; c < 3; ++c)
+                                        snap.trial_hessians[i * 9 + r * 3 + c] = rh[i][r][c];
+                            }
+                        }
+
+                        // Prepare output buffer
+                        auto& out = scratch_coupled_block_outputs_[flat];
+                        out.reserve(ctx.numTestDofs(), ctx.numTrialDofs(),
+                                    bs.want_matrix, bs.want_vector);
+                        out.clear();
+
+                        // Build CoupledBlockView from copied data
+                        auto& bv = scratch_coupled_block_views_[flat];
+                        bv.test_basis_values = snap.test_vals.empty() ? nullptr : snap.test_vals.data();
+                        bv.test_phys_gradients_xyz = snap.test_grads.empty() ? nullptr : snap.test_grads.data();
+                        bv.test_phys_hessians = snap.test_hessians.empty() ? nullptr : snap.test_hessians.data();
+                        bv.trial_basis_values = snap.trial_vals.empty() ? nullptr : snap.trial_vals.data();
+                        bv.trial_phys_gradients_xyz = snap.trial_grads.empty() ? nullptr : snap.trial_grads.data();
+                        bv.trial_phys_hessians = snap.trial_hessians.empty() ? nullptr : snap.trial_hessians.data();
+                        bv.n_test_dofs = static_cast<std::uint32_t>(ctx.numTestDofs());
+                        bv.n_trial_dofs = static_cast<std::uint32_t>(ctx.numTrialDofs());
+                        bv.test_value_dim = static_cast<std::uint32_t>(ctx.testValueDimension());
+                        bv.trial_value_dim = static_cast<std::uint32_t>(ctx.trialValueDimension());
+                        bv.test_uses_vector_basis = ctx.testUsesVectorBasis() ? 1u : 0u;
+                        bv.trial_uses_vector_basis = ctx.trialUsesVectorBasis() ? 1u : 0u;
+                        bv.solution_coefficients = snap.sol_coeffs.empty() ? nullptr : snap.sol_coeffs.data();
+
+                        // Copy previous solution coefficients for time-derivative terms
+                        {
+                            const auto nps = ctx.previousSolutionHistoryCount();
+                            snap.num_prev_sols = static_cast<std::uint32_t>(
+                                std::min(nps, assembly::jit::kMaxPreviousSolutionsV6));
+                            bv.num_previous_solutions = snap.num_prev_sols;
+                            bv.previous_solution_coefficients = {};
+                            for (std::size_t k = 0; k < snap.num_prev_sols; ++k) {
+                                auto psc = ctx.previousSolutionCoefficientsRaw(static_cast<int>(k + 1));
+                                snap.prev_sol_coeffs[k].assign(psc.begin(), psc.end());
+                                bv.previous_solution_coefficients[k] =
+                                    snap.prev_sol_coeffs[k].empty() ? nullptr : snap.prev_sol_coeffs[k].data();
+                            }
+                        }
+
+                        bv.element_matrix = out.local_matrix.empty() ? nullptr : out.local_matrix.data();
+                        bv.element_vector = out.local_vector.empty() ? nullptr : out.local_vector.data();
+
+                        tp_fb_snap += TP() - tp0;
+                    }
+
+                    // Pack CoupledCellKernelArgsV1 for this slot
+                    double tp0 = TP();
+                    auto blk_span = std::span<const assembly::jit::CoupledBlockView>(
+                        &scratch_coupled_block_views_[slot * n_blocks], n_blocks);
+                    scratch_coupled_cell_args_[slot] =
+                        assembly::jit::packCoupledCellKernelArgsV1(ctx, blk_span);
+                    tp_fb_snap += TP() - tp0;
                 }
 
-                // Batch-compute this block's kernel
+                // Phase B: Call monolithic kernel for entire batch.
                 double tp0 = TP();
-                bs.fallback_kernel->computeCellBatch(
-                    std::span<const AssemblyContext* const>(batch_context_ptrs.data(), active),
-                    std::span<KernelOutput>(batch_outputs.data(), active));
+                assembly::jit::CoupledCellKernelBatchArgsV1 batch_args;
+                batch_args.abi_version = assembly::jit::kCoupledCellKernelABIV1;
+                batch_args.batch_size = static_cast<std::uint32_t>(active);
+                batch_args.num_blocks = static_cast<std::uint32_t>(n_blocks);
+                batch_args.elements = scratch_coupled_cell_args_.data();
+
+                auto fn = reinterpret_cast<void(*)(void*)>(monolithic_addr);
+                fn(&batch_args);
                 tp_fb_kernel += TP() - tp0;
 
-                // Insert this block's outputs
+                // Phase C: Insert all block outputs.
                 tp0 = TP();
                 for (std::size_t slot = 0; slot < active; ++slot) {
                     const auto cid = gids[begin + slot];
-                    auto& ctx = batch_contexts[slot];
-                    auto& output = batch_outputs[slot];
-                    if (ctx.testUsesVectorBasis() || ctx.trialUsesVectorBasis())
-                        applyVectorBasisOutputOrientation(mesh, cid, *bs.test_space,
-                                                          cid, *bs.trial_space, output);
-                    const auto& rd = batch_dofs[bi][slot].row_dofs;
-                    const auto& cd = batch_dofs[bi][slot].col_dofs;
-                    GlobalSystemView* ins_mat = block_want_matrix ? parent_term.matrix_view : nullptr;
-                    GlobalSystemView* ins_vec = block_want_vector ? parent_term.vector_view : nullptr;
-                    if (options_.use_constraints && constraint_distributor_) {
-                        insertLocalConstrained(output, rd, cd, ins_mat, ins_vec);
-                    } else {
-                        insertLocal(output, rd, cd, ins_mat, ins_vec);
+                    for (std::size_t bi = 0; bi < n_blocks; ++bi) {
+                        const auto& bs = coupled_kernel->blockSpec(bi);
+                        const bool block_want_matrix = parent_term.assemble_matrix && bs.want_matrix;
+                        const bool block_want_vector = parent_term.assemble_vector && bs.want_vector;
+                        if (!block_want_matrix && !block_want_vector) continue;
+
+                        const std::size_t flat = slot * n_blocks + bi;
+                        auto& output = scratch_coupled_block_outputs_[flat];
+                        output.has_matrix = block_want_matrix && !output.local_matrix.empty();
+                        output.has_vector = block_want_vector && !output.local_vector.empty();
+
+                        const auto& rd = batch_dofs[bi][slot].row_dofs;
+                        const auto& cd = batch_dofs[bi][slot].col_dofs;
+                        GlobalSystemView* ins_mat = block_want_matrix ? parent_term.matrix_view : nullptr;
+                        GlobalSystemView* ins_vec = block_want_vector ? parent_term.vector_view : nullptr;
+                        if (options_.use_constraints && constraint_distributor_) {
+                            insertLocalConstrained(output, rd, cd, ins_mat, ins_vec);
+                        } else {
+                            insertLocal(output, rd, cd, ins_mat, ins_vec);
+                        }
+                        result.elements_assembled++;
+                        if (output.has_matrix)
+                            result.matrix_entries_inserted += static_cast<GlobalIndex>(rd.size() * cd.size());
+                        if (output.has_vector)
+                            result.vector_entries_inserted += static_cast<GlobalIndex>(rd.size());
                     }
-                    result.elements_assembled++;
-                    if (output.has_matrix)
-                        result.matrix_entries_inserted += static_cast<GlobalIndex>(rd.size() * cd.size());
-                    if (output.has_vector)
-                        result.vector_entries_inserted += static_cast<GlobalIndex>(rd.size());
                 }
                 tp_fb_insert += TP() - tp0;
+
+            } else {
+                // =============================================================
+                // PER-BLOCK FALLBACK PATH: process blocks sequentially.
+                // =============================================================
+
+                for (std::size_t bi = 0; bi < n_blocks; ++bi) {
+                    const auto& bs = coupled_kernel->blockSpec(bi);
+                    if (!bs.fallback_kernel || !bs.fallback_kernel->hasCell()) continue;
+                    const bool block_want_matrix = parent_term.assemble_matrix && bs.want_matrix;
+                    const bool block_want_vector = parent_term.assemble_vector && bs.want_vector;
+                    if (!block_want_matrix && !block_want_vector) continue;
+
+                    for (std::size_t slot = 0; slot < active; ++slot) {
+                        const auto cell_id = gids[begin + slot];
+                        auto& ctx = batch_contexts[slot];
+
+                        double tp0 = TP();
+                        scratch_node_coords_ = saved_node_coords[slot].node_coords;
+                        cached_mapping_->resetNodes(scratch_node_coords_);
+                        tp_fb_restore += TP() - tp0;
+
+                        tp0 = TP();
+                        prepareBasis(ctx, mesh, cell_id, *bs.test_space, *bs.trial_space,
+                                     bs.fallback_kernel->getRequiredData(), *fused_quad_rule);
+                        tp_fb_basis += TP() - tp0;
+
+                        if (bi == 0 && any_need_field_solutions) {
+                            tp0 = TP();
+                            populateFieldSolutionData(ctx, mesh, cell_id, union_field_reqs);
+                            tp_fb_field += TP() - tp0;
+                        }
+
+                        tp0 = TP();
+                        {
+                            auto rl = bs.row_dof_map->getCellDofs(cell_id);
+                            auto cl = bs.col_dof_map->getCellDofs(cell_id);
+                            auto& rd = batch_dofs[bi][slot].row_dofs;
+                            auto& cd = batch_dofs[bi][slot].col_dofs;
+                            rd.resize(rl.size());
+                            for (std::size_t i = 0; i < rl.size(); ++i) rd[i] = rl[i] + bs.row_dof_offset;
+                            cd.resize(cl.size());
+                            for (std::size_t j = 0; j < cl.size(); ++j) cd[j] = cl[j] + bs.col_dof_offset;
+                        }
+                        tp_fb_dof += TP() - tp0;
+
+                        tp0 = TP();
+                        if (parent_td.need_solution) {
+                            const auto& cd = batch_dofs[bi][slot].col_dofs;
+                            auto& sol = batch_sol_coeffs[slot];
+                            sol.resize(cd.size());
+                            if (current_solution_view_ != nullptr) {
+                                current_solution_view_->getVectorEntries(
+                                    std::span<const GlobalIndex>(cd), std::span<Real>(sol));
+                            } else {
+                                for (std::size_t i = 0; i < cd.size(); ++i) {
+                                    const auto dof = cd[i];
+                                    sol[i] = current_solution_[static_cast<std::size_t>(dof)];
+                                }
+                            }
+                            if (ctx.trialUsesVectorBasis())
+                                applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
+                                                              std::span<Real>(sol));
+                            ctx.setSolutionCoefficients(std::span<const Real>(sol));
+
+                            if (time_integration_ != nullptr) {
+                                const int required = requiredHistoryStates(time_integration_);
+                                if (required > 0) {
+                                    auto& psc = batch_prev_sol_coeffs[slot];
+                                    if (psc.size() < static_cast<std::size_t>(required))
+                                        psc.resize(static_cast<std::size_t>(required));
+                                    for (int k = 1; k <= required; ++k) {
+                                        const auto& pdata = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                                        const auto* pview = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+                                                                ? previous_solution_views_[static_cast<std::size_t>(k - 1)] : nullptr;
+                                        auto& lp = psc[static_cast<std::size_t>(k - 1)];
+                                        lp.resize(cd.size());
+                                        if (pview != nullptr) {
+                                            pview->getVectorEntries(
+                                                std::span<const GlobalIndex>(cd), std::span<Real>(lp));
+                                        } else {
+                                            for (std::size_t i = 0; i < cd.size(); ++i) {
+                                                lp[i] = pdata[static_cast<std::size_t>(cd[i])];
+                                            }
+                                        }
+                                        if (ctx.trialUsesVectorBasis())
+                                            applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
+                                                                          std::span<Real>(lp));
+                                        ctx.setPreviousSolutionCoefficientsK(k, lp);
+                                    }
+                                }
+                            }
+                        }
+                        tp_fb_sol += TP() - tp0;
+
+                        batch_outputs[slot].clear();
+                        batch_context_ptrs[slot] = &ctx;
+                    }
+
+                    double tp0 = TP();
+                    bs.fallback_kernel->computeCellBatch(
+                        std::span<const AssemblyContext* const>(batch_context_ptrs.data(), active),
+                        std::span<KernelOutput>(batch_outputs.data(), active));
+                    tp_fb_kernel += TP() - tp0;
+
+                    tp0 = TP();
+                    for (std::size_t slot = 0; slot < active; ++slot) {
+                        const auto cid = gids[begin + slot];
+                        auto& ctx = batch_contexts[slot];
+                        auto& output = batch_outputs[slot];
+                        if (ctx.testUsesVectorBasis() || ctx.trialUsesVectorBasis())
+                            applyVectorBasisOutputOrientation(mesh, cid, *bs.test_space,
+                                                              cid, *bs.trial_space, output);
+                        const auto& rd = batch_dofs[bi][slot].row_dofs;
+                        const auto& cd = batch_dofs[bi][slot].col_dofs;
+                        GlobalSystemView* ins_mat = block_want_matrix ? parent_term.matrix_view : nullptr;
+                        GlobalSystemView* ins_vec = block_want_vector ? parent_term.vector_view : nullptr;
+                        if (options_.use_constraints && constraint_distributor_) {
+                            insertLocalConstrained(output, rd, cd, ins_mat, ins_vec);
+                        } else {
+                            insertLocal(output, rd, cd, ins_mat, ins_vec);
+                        }
+                        result.elements_assembled++;
+                        if (output.has_matrix)
+                            result.matrix_entries_inserted += static_cast<GlobalIndex>(rd.size() * cd.size());
+                        if (output.has_vector)
+                            result.vector_entries_inserted += static_cast<GlobalIndex>(rd.size());
+                    }
+                    tp_fb_insert += TP() - tp0;
+                }
             }
         }
     };
@@ -4209,10 +4628,10 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         if (rank == 0) {
             const double total = tp_fb_geom + tp_fb_save + tp_fb_restore + tp_fb_basis +
                                  tp_fb_field + tp_fb_dof + tp_fb_sol + tp_fb_setters +
-                                 tp_fb_kernel + tp_fb_insert;
+                                 tp_fb_kernel + tp_fb_insert + tp_fb_snap;
             if (total > 1e-7) {
                 std::fprintf(stderr,
-                    "    --- cellLoop FUSED+BATCH TIMING (rank 0, %zu cells, %zu terms, batch=%zu) ---\n"
+                    "    --- cellLoop FUSED+BATCH TIMING (rank 0, %zu cells, %zu terms, batch=%zu%s) ---\n"
                     "      Total:           %9.6f s\n"
                     "      geometry:        %9.6f s  (%5.1f%%)\n"
                     "      save geom:       %9.6f s  (%5.1f%%)\n"
@@ -4222,10 +4641,12 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     "      dof lookup:      %9.6f s  (%5.1f%%)\n"
                     "      sol gather:      %9.6f s  (%5.1f%%)\n"
                     "      ctx setters:     %9.6f s  (%5.1f%%)\n"
+                    "      snap+pack:       %9.6f s  (%5.1f%%)\n"
                     "      kernel (batch):  %9.6f s  (%5.1f%%)\n"
                     "      insert:          %9.6f s  (%5.1f%%)\n"
                     "    ------------------------------------\n",
                     cell_ids.size(), terms.size(), requested_batch_size,
+                    coupled_kernel ? (use_monolithic_flag ? " MONOLITHIC" : " COUPLED-FB") : "",
                     total,
                     tp_fb_geom, 100.0 * tp_fb_geom / total,
                     tp_fb_save, 100.0 * tp_fb_save / total,
@@ -4235,6 +4656,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     tp_fb_dof, 100.0 * tp_fb_dof / total,
                     tp_fb_sol, 100.0 * tp_fb_sol / total,
                     tp_fb_setters, 100.0 * tp_fb_setters / total,
+                    tp_fb_snap, 100.0 * tp_fb_snap / total,
                     tp_fb_kernel, 100.0 * tp_fb_kernel / total,
                     tp_fb_insert, 100.0 * tp_fb_insert / total);
             }

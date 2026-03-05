@@ -104,6 +104,7 @@ public:
     [[nodiscard]] const BlockSpec& blockSpec(std::size_t i) const { return blocks_[i]; }
     [[nodiscard]] BlockSpec& mutableBlockSpec(std::size_t i) { return blocks_[i]; }
     [[nodiscard]] bool isMonolithicJITAvailable() const noexcept { return has_monolithic_jit_; }
+    [[nodiscard]] std::uintptr_t monolithicCellAddress() const noexcept { return monolithic_cell_addr_; }
     [[nodiscard]] bool isResolved() const noexcept { return resolved_; }
     void setResolved() { resolved_ = true; maybeCompileMonolithic(); }
 

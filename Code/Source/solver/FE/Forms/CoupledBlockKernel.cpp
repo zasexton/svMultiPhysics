@@ -156,6 +156,7 @@ void CoupledBlockKernel::maybeCompileMonolithic()
         spec.residual_ir = &sym_kernel->residualIR();
         spec.want_matrix = bs.want_matrix;
         spec.want_vector = bs.want_vector;
+
         block_specs.push_back(spec);
     }
 

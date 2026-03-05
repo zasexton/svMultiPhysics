@@ -76,7 +76,7 @@ double fsils_dot_v(const int dof, const fsils_int nNo, FSILS_commuType& commu, c
   const fsils_int n = static_cast<fsils_int>(dof) * nNo;
   double result = 0.0;
 
-  #pragma omp parallel for if(n >= 10000) reduction(+:result) schedule(static)
+  #pragma omp parallel for simd if(n >= 10000) reduction(+:result) schedule(static)
   for (fsils_int i = 0; i < n; i++) {
     result += u[i] * v[i];
   }
@@ -120,7 +120,7 @@ double fsils_nc_dot_v(const int dof, const fsils_int nNo, const Array<double>& U
   const fsils_int n = static_cast<fsils_int>(dof) * nNo;
   double result = 0.0;
 
-  #pragma omp parallel for if(n >= 10000) reduction(+:result) schedule(static)
+  #pragma omp parallel for simd if(n >= 10000) reduction(+:result) schedule(static)
   for (fsils_int i = 0; i < n; i++) {
     result += u[i] * v[i];
   }

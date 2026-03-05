@@ -67,6 +67,7 @@
 #include "GlobalSystemView.h"
 #include "AssemblyKernel.h"
 #include "AssemblyContext.h"
+#include "Assembly/JIT/KernelArgs.h"
 #include "Spaces/OrientationManager.h"
 #include "Geometry/GeometryMapping.h"
 #include "Basis/BasisCache.h"
@@ -638,6 +639,12 @@ private:
     std::vector<AssemblyContext::Vector3D> scratch_phys_gradients_;
     std::vector<AssemblyContext::Matrix3x3> scratch_ref_hessians_;
     std::vector<AssemblyContext::Matrix3x3> scratch_phys_hessians_;
+    // Trial-specific scratch for different-space fast path
+    std::vector<Real> scratch_trial_basis_values_;
+    std::vector<AssemblyContext::Vector3D> scratch_trial_ref_gradients_;
+    std::vector<AssemblyContext::Vector3D> scratch_trial_phys_gradients_;
+    std::vector<AssemblyContext::Matrix3x3> scratch_trial_ref_hessians_;
+    std::vector<AssemblyContext::Matrix3x3> scratch_trial_phys_hessians_;
     std::vector<AssemblyContext::Vector3D> scratch_normals_;
 
     // Point-wise evaluation scratch arrays
@@ -714,6 +721,9 @@ private:
     bool cached_basis_test_is_vector_{false};
     bool cached_basis_trial_is_vector_{false};
     bool cached_basis_same_space_{false};
+    bool cached_basis_has_hessians_{false};
+    const spaces::FunctionSpace* cached_basis_test_space_ptr_{nullptr};
+    const spaces::FunctionSpace* cached_basis_trial_space_ptr_{nullptr};
 
     // Field-solution BasisCache: small flat cache keyed by (BasisFunction*, gradients, hessians).
     // Typically 1-2 entries (velocity basis, pressure basis). Invalidated with mapping type.
@@ -736,6 +746,11 @@ private:
     std::size_t scratch_batch_reserved_dofs_{0};
     std::size_t scratch_batch_reserved_qpts_{0};
     int scratch_batch_reserved_dim_{0};
+
+    // Scratch for monolithic coupled JIT dispatch
+    std::vector<assembly::jit::CoupledBlockView> scratch_coupled_block_views_;
+    std::vector<assembly::jit::CoupledCellKernelArgsV1> scratch_coupled_cell_args_;
+    std::vector<KernelOutput> scratch_coupled_block_outputs_;
 };
 
 // ============================================================================

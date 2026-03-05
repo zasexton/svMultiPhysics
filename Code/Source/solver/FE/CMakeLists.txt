@@ -1271,6 +1271,28 @@ if(FE_ENABLE_ASSEMBLY)
 endif()
 
 #------------------------------------------------------------------------------
+# FSILS hot-path BLAS-1 files: ensure aggressive vectorization
+#
+# The default RelWithDebInfo flags use -O2 which does NOT enable GCC's
+# auto-vectoriser for reductions (dot products). Force -O3 plus
+# tree-vectorize on the handful of files that dominate GMRES runtime
+# (dot product, axpy, SpMV, orthogonalization kernels).
+# This does NOT touch the legacy solver copy in Code/Source/liner_solver.
+#------------------------------------------------------------------------------
+if(FE_ENABLE_ASSEMBLY AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(_FE_FSILS_BLAS1_O3_FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/dot.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/omp_la.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/spar_mul.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/gmres.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/norm.cpp
+    )
+    set_source_files_properties(${_FE_FSILS_BLAS1_O3_FILES}
+        PROPERTIES COMPILE_OPTIONS "-O3;-ftree-vectorize;-funroll-loops;-fopenmp-simd"
+    )
+endif()
+
+#------------------------------------------------------------------------------
 # Optional external solver backends: PETSc / Trilinos
 #------------------------------------------------------------------------------
 

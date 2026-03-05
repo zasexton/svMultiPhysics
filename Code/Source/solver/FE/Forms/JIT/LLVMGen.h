@@ -89,7 +89,8 @@ private:
                                                         std::string_view symbol,
                                                         std::uintptr_t& out_address,
                                                         const JITCompileSpecialization* specialization,
-                                                        LLVMGenFusedInfo* fused) const;
+                                                        LLVMGenFusedInfo* fused,
+                                                        void* coupled_info = nullptr) const;
 
     JITOptions options_{};
 };

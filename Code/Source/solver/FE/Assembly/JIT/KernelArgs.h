@@ -1024,6 +1024,10 @@ struct CoupledBlockView {
     const Real* trial_basis_values{nullptr};          // [n_trial_dofs * n_qpts]
     const Real* trial_phys_gradients_xyz{nullptr};    // [n_trial_dofs * n_qpts * 3]
 
+    // Physical Hessians (second derivatives, for stabilization terms)
+    const Real* test_phys_hessians{nullptr};          // [n_test_dofs * n_qpts * 9] or nullptr
+    const Real* trial_phys_hessians{nullptr};         // [n_trial_dofs * n_qpts * 9] or nullptr
+
     // DOF counts
     std::uint32_t n_test_dofs{0};
     std::uint32_t n_trial_dofs{0};
@@ -1034,6 +1038,10 @@ struct CoupledBlockView {
 
     // Solution coefficients for this block's trial field
     const Real* solution_coefficients{nullptr};       // [n_trial_dofs]
+
+    // Previous solution coefficients (for dt(·) time-derivative terms)
+    std::uint32_t num_previous_solutions{0};
+    std::array<const Real*, kMaxPreviousSolutionsV6> previous_solution_coefficients{};
 
     // Output buffers (caller zero-initializes; kernel accumulates +=)
     Real* element_matrix{nullptr};                    // [n_test_dofs * n_trial_dofs] row-major, or nullptr
@@ -2553,6 +2561,16 @@ namespace detail {
     bv.test_uses_vector_basis = ctx.testUsesVectorBasis() ? 1u : 0u;
     bv.trial_uses_vector_basis = ctx.trialUsesVectorBasis() ? 1u : 0u;
     bv.solution_coefficients = ctx.solutionCoefficients().empty() ? nullptr : ctx.solutionCoefficients().data();
+
+    // Previous solution coefficients for time-derivative terms
+    const auto history = ctx.previousSolutionHistoryCount();
+    bv.num_previous_solutions = static_cast<std::uint32_t>(std::min(history, kMaxPreviousSolutionsV6));
+    bv.previous_solution_coefficients = {};
+    for (std::size_t i = 0; i < static_cast<std::size_t>(bv.num_previous_solutions); ++i) {
+        const auto coeffs = ctx.previousSolutionCoefficientsRaw(static_cast<int>(i + 1));
+        bv.previous_solution_coefficients[i] = coeffs.empty() ? nullptr : coeffs.data();
+    }
+
     bv.element_matrix = output.local_matrix.empty() ? nullptr : output.local_matrix.data();
     bv.element_vector = output.local_vector.empty() ? nullptr : output.local_vector.data();
     return bv;

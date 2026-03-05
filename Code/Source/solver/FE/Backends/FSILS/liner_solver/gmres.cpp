@@ -2875,16 +2875,15 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
         tp_gs_update += TP() - tp0;
       }
 
-      // --- Sequential CGS Step 1 with Pythagorean trick ---
-      // Each dot product reads one u[j] vector (161 KB) linearly while u_slice_next
-      // stays hot in L2. Streaming access pattern is prefetch-friendly and avoids
-      // L2 thrashing that occurs with fused approach for large Krylov spaces.
+      // --- Cache-blocked CGS Step 1 with Pythagorean trick ---
+      // Fused dot: computes h_col[j] = dot(u[j], w) for j=0..i AND
+      // h_col[i+1] = dot(w,w) in a single L1-tiled pass over the Krylov
+      // basis.  Each tile loads w into a local buffer and streams u[0..i]
+      // through L1, avoiding the per-vector DRAM round-trip of sequential
+      // dot products.
       tp0 = TP();
-      for (int j = 0; j <= i; j++) {
-        h_col[j] = dot::fsils_nc_dot_v(dof, mynNo, u.rslice(j), u_slice_next);
-      }
-      const double zz_local = dot::fsils_nc_dot_v(dof, mynNo, u_slice_next, u_slice_next);
-      h_col[static_cast<size_t>(i+1)] = zz_local;
+      h_col[static_cast<size_t>(i+1)] = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
+                                                         dot_thread.data(), thread_stride, num_threads);
       tp_dot_gs += TP() - tp0;
 
       tp0 = TP();
@@ -2907,13 +2906,13 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 
       const double old_norm_sq = h_col[static_cast<size_t>(i+1)];
 
-      // Subtract projections sequentially (streaming access, no MPI needed)
+      // Cache-blocked axpy: w -= sum_j h_col[j] * u[j] in a single L1-tiled
+      // pass.  Each tile loads w into a local buffer, accumulates all
+      // subtractions from u[0..i], then writes back.
+      // Note: fused_update_v_inplace does vbuf[k] -= hj * u[j][k], so
+      // we pass h_col directly (positive values = subtract).
       tp0 = TP();
-      for (int j = 0; j <= i; j++) {
-        if (h_col[j] != 0.0) {
-          omp_la::omp_sum_v(dof, nNo, -h_col[j], u_slice_next, u.rslice(j));
-        }
-      }
+      fused_update_v_inplace(dof, nNo, u, i, u_slice_next, h_col);
       tp_gs_update += TP() - tp0;
 
       // CGS2: Selective reorthogonalization (Pythagorean check)
@@ -2932,11 +2931,8 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
         tp_reorth_count++;
 
         tp0 = TP();
-        for (int j = 0; j <= i; j++) {
-          h_col[j] = dot::fsils_nc_dot_v(dof, mynNo, u.rslice(j), u_slice_next);
-        }
-        const double zz2_local = dot::fsils_nc_dot_v(dof, mynNo, u_slice_next, u_slice_next);
-        h_col[static_cast<size_t>(i+1)] = zz2_local;
+        h_col[static_cast<size_t>(i+1)] = fused_dot_zz_v(dof, mynNo, u, i, u_slice_next, h_col,
+                                                           dot_thread.data(), thread_stride, num_threads);
         tp_dot_gs += TP() - tp0;
 
         tp0 = TP();
@@ -2950,11 +2946,7 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
         }
 
         tp0 = TP();
-        for (int j = 0; j <= i; j++) {
-          if (h_col[j] != 0.0) {
-            omp_la::omp_sum_v(dof, nNo, -h_col[j], u_slice_next, u.rslice(j));
-          }
-        }
+        fused_update_v_inplace(dof, nNo, u, i, u_slice_next, h_col);
         tp_gs_update += TP() - tp0;
 
         tt_sq = h_col[static_cast<size_t>(i+1)] - corr_sq;

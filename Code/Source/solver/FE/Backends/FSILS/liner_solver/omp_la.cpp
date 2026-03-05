@@ -55,7 +55,7 @@ void omp_mul_v(const int dof, const fsils_int nNo, const double r, Array<double>
   double* __restrict__ u = U.data();
   const fsils_int n = static_cast<fsils_int>(dof) * nNo;
 
-  #pragma omp parallel for if(n >= 10000) schedule(static)
+  #pragma omp parallel for simd if(n >= 10000) schedule(static)
   for (fsils_int i = 0; i < n; i++) {
     u[i] = r * u[i];
   }
@@ -81,7 +81,7 @@ void omp_sum_v(const int dof, const fsils_int nNo, const double r, Array<double>
   const double* __restrict__ v = V.data();
   const fsils_int n = static_cast<fsils_int>(dof) * nNo;
 
-  #pragma omp parallel for if(n >= 10000) schedule(static)
+  #pragma omp parallel for simd if(n >= 10000) schedule(static)
   for (fsils_int i = 0; i < n; i++) {
     u[i] = u[i] + r * v[i];
   }

@@ -828,6 +828,17 @@ std::unique_ptr<JITEngine> JITEngine::create(const JITOptions& options)
         engine->impl_ = std::make_unique<Impl>();
         engine->impl_->options = options;
 
+        // Allow runtime override of the max unroll trip count via env var.
+        if (const char* env = std::getenv("SVMP_JIT_MAX_UNROLL")) {
+            try {
+                const int val = std::stoi(env);
+                if (val >= 0) {
+                    engine->impl_->options.specialization.max_unroll_trip_count =
+                        static_cast<std::uint32_t>(val);
+                }
+            } catch (...) { /* ignore parse errors */ }
+        }
+
         std::string triple;
         std::string data_layout;
         auto jit = createLLJIT(options, triple, data_layout);

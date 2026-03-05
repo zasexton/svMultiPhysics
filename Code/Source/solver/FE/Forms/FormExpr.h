@@ -112,8 +112,12 @@ struct JITSpecializationOptions {
     std::size_t max_variants_per_kernel{8};
 
     // Optional loop metadata for the LLVM optimizer.
+    // Full unroll for trip counts <= max_unroll_trip_count; partial unroll up
+    // to 4x that limit.  Keeping this at 16 gives good QP-loop unrolling
+    // (typical trip counts 4-9) while avoiding code bloat for DOF loops in
+    // higher-order elements.  Override at runtime via SVMP_JIT_MAX_UNROLL.
     bool enable_loop_unroll_metadata{true};
-    std::uint32_t max_unroll_trip_count{32};
+    std::uint32_t max_unroll_trip_count{16};
 };
 
 struct JITOptions {
