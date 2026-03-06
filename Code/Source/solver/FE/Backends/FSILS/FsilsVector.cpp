@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <mpi.h>
 #include <string>
 
@@ -22,11 +23,108 @@ namespace backends {
 
 namespace {
 
-	class FsilsVectorView final : public assembly::GlobalSystemView {
-	public:
-	    explicit FsilsVectorView(FsilsVector& vec) : vec_(&vec) {}
+[[nodiscard]] std::size_t hashGlobalIndexSpan(std::span<const GlobalIndex> values) noexcept
+{
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const auto value : values) {
+        const auto mixed = static_cast<std::uint64_t>(std::hash<GlobalIndex>{}(value));
+        hash ^= mixed + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+    }
+    hash ^= static_cast<std::uint64_t>(values.size()) + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+    return static_cast<std::size_t>(hash);
+}
 
-    // Matrix operations (no-op)
+[[nodiscard]] bool spanMatches(std::span<const GlobalIndex> lhs,
+                               const std::vector<GlobalIndex>& rhs) noexcept
+{
+    return lhs.size() == rhs.size() && std::equal(lhs.begin(), lhs.end(), rhs.begin());
+}
+
+void resolveFsilsVectorEntriesUncached(const FsilsVector& vec,
+                                       std::span<const GlobalIndex> dofs,
+                                       std::span<GlobalIndex> resolved)
+{
+    FE_THROW_IF(dofs.size() != resolved.size(), InvalidArgumentException,
+                "resolveFsilsVectorEntriesUncached: size mismatch");
+
+    const auto* shared = vec.shared();
+    const GlobalIndex vec_size = vec.size();
+    if (!shared) {
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            const auto dof = dofs[i];
+            resolved[i] = (dof >= 0 && dof < vec_size) ? dof : INVALID_GLOBAL_INDEX;
+        }
+        return;
+    }
+
+    const auto* perm_ptr = shared->dof_permutation.get();
+    const bool has_perm = (perm_ptr != nullptr && !perm_ptr->forward.empty());
+    const auto* fwd_data = has_perm ? perm_ptr->forward.data() : nullptr;
+    const auto fwd_size = has_perm ? perm_ptr->forward.size() : std::size_t{0};
+    const int dof_per_node = shared->dof;
+
+    int cached_global_node = -1;
+    int cached_old_node = -1;
+
+    for (std::size_t i = 0; i < dofs.size(); ++i) {
+        auto dof = dofs[i];
+        if (dof < 0 || dof >= vec_size) {
+            resolved[i] = INVALID_GLOBAL_INDEX;
+            continue;
+        }
+
+        if (has_perm) {
+            if (static_cast<std::size_t>(dof) >= fwd_size) {
+                resolved[i] = INVALID_GLOBAL_INDEX;
+                continue;
+            }
+            dof = fwd_data[static_cast<std::size_t>(dof)];
+            if (dof < 0 || dof >= vec_size) {
+                resolved[i] = INVALID_GLOBAL_INDEX;
+                continue;
+            }
+        }
+
+        const int global_node = static_cast<int>(dof / dof_per_node);
+        const int comp = static_cast<int>(dof % dof_per_node);
+
+        int old_node = cached_old_node;
+        if (global_node != cached_global_node) {
+            old_node = shared->globalNodeToOld(global_node);
+            cached_global_node = global_node;
+            cached_old_node = old_node;
+        }
+
+        if (old_node < 0) {
+            resolved[i] = INVALID_GLOBAL_INDEX;
+            continue;
+        }
+
+        resolved[i] = static_cast<GlobalIndex>(
+            static_cast<std::size_t>(old_node) * static_cast<std::size_t>(dof_per_node) +
+            static_cast<std::size_t>(comp));
+    }
+}
+
+void gatherFsilsVectorEntries(const FsilsVector& vec,
+                              std::span<const GlobalIndex> resolved,
+                              std::span<Real> out)
+{
+    FE_THROW_IF(resolved.size() != out.size(), InvalidArgumentException,
+                "gatherFsilsVectorEntries: size mismatch");
+
+    const auto& data = vec.data();
+    const auto data_size = static_cast<GlobalIndex>(data.size());
+    for (std::size_t i = 0; i < resolved.size(); ++i) {
+        const auto idx = resolved[i];
+        out[i] = (idx >= 0 && idx < data_size) ? data[static_cast<std::size_t>(idx)] : 0.0;
+    }
+}
+
+class FsilsVectorView final : public assembly::GlobalSystemView {
+public:
+    explicit FsilsVectorView(FsilsVector& vec) : vec_(&vec) {}
+
     void addMatrixEntries(std::span<const GlobalIndex>, std::span<const Real>, assembly::AddMode) override {}
     void addMatrixEntries(std::span<const GlobalIndex>, std::span<const GlobalIndex>, std::span<const Real>, assembly::AddMode) override {}
     void addMatrixEntry(GlobalIndex, GlobalIndex, Real, assembly::AddMode) override {}
@@ -43,116 +141,59 @@ namespace {
         }
         FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
 
-        const auto* shared = vec_->shared();
-        if (!shared) {
-            // No shared metadata: fall back to per-entry insertion.
-            for (std::size_t i = 0; i < dofs.size(); ++i) {
-                addVectorEntry(dofs[i], local_vector[i], mode);
-            }
-            return;
-        }
+        thread_local std::vector<GlobalIndex> resolved;
+        resolved.resize(dofs.size());
+        vec_->resolveEntriesCached(dofs, resolved);
 
-        const int dof_per_node = shared->dof;
-        const auto perm = shared->dof_permutation;
-        const bool have_perm = perm && !perm->empty();
-        const GlobalIndex vec_size = vec_->size();
         auto& data = vec_->data();
-
-        int cached_global_node = -1;
-        int cached_old = -1;
-
-        for (std::size_t i = 0; i < dofs.size(); ++i) {
-            GlobalIndex dof_idx = dofs[i];
-            if (dof_idx < 0 || dof_idx >= vec_size) continue;
-
-            if (have_perm) {
-                if (static_cast<std::size_t>(dof_idx) >= perm->forward.size()) continue;
-                dof_idx = perm->forward[static_cast<std::size_t>(dof_idx)];
+        const auto data_size = static_cast<GlobalIndex>(data.size());
+        for (std::size_t i = 0; i < resolved.size(); ++i) {
+            const auto idx = resolved[i];
+            if (idx < 0 || idx >= data_size) {
+                continue;
             }
-            if (dof_idx < 0 || dof_idx >= vec_size) continue;
 
-            const int global_node = static_cast<int>(dof_idx / dof_per_node);
-            const int comp = static_cast<int>(dof_idx % dof_per_node);
-
-            // Reuse cached old index if same node as previous DOF.
-            int old;
-            if (global_node == cached_global_node) {
-                old = cached_old;
-            } else {
-                old = shared->globalNodeToOld(global_node);
-                cached_global_node = global_node;
-                cached_old = old;
-            }
-            if (old < 0) continue;
-
-            const std::size_t idx = static_cast<std::size_t>(old) * static_cast<std::size_t>(dof_per_node) +
-                                    static_cast<std::size_t>(comp);
-            if (idx >= data.size()) continue;
-
+            auto& dst = data[static_cast<std::size_t>(idx)];
             switch (mode) {
                 case assembly::AddMode::Add:
-                    data[idx] += local_vector[i];
+                    dst += local_vector[i];
                     break;
                 case assembly::AddMode::Insert:
-                    data[idx] = local_vector[i];
+                    dst = local_vector[i];
                     break;
                 case assembly::AddMode::Max:
-                    data[idx] = std::max(data[idx], local_vector[i]);
+                    dst = std::max(dst, local_vector[i]);
                     break;
                 case assembly::AddMode::Min:
-                    data[idx] = std::min(data[idx], local_vector[i]);
+                    dst = std::min(dst, local_vector[i]);
                     break;
             }
         }
     }
 
-	    void addVectorEntry(GlobalIndex dof, Real value, assembly::AddMode mode) override
-	    {
-	        FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
-	        if (dof < 0 || dof >= vec_->size()) {
-	            return;
-	        }
-
-		        if (const auto* shared = vec_->shared()) {
-		            if (const auto perm = shared->dof_permutation; perm && !perm->empty()) {
-		                const auto& fwd = perm->forward;
-		                if (static_cast<std::size_t>(dof) >= fwd.size()) {
-		                    return;
-		                }
-		                dof = fwd[static_cast<std::size_t>(dof)];
-		            }
-		        }
-		        if (dof < 0 || dof >= vec_->size()) {
-		            return;
-		        }
-
-		        std::size_t idx = 0;
-		        if (const auto* shared = vec_->shared()) {
-		            const int dof_per_node = shared->dof;
-		            const int global_node = static_cast<int>(dof / dof_per_node);
-	            const int comp = static_cast<int>(dof % dof_per_node);
-            const int old = shared->globalNodeToOld(global_node);
-            if (old < 0) return;
-            idx = static_cast<std::size_t>(old) * static_cast<std::size_t>(dof_per_node) +
-                  static_cast<std::size_t>(comp);
-        } else {
-            idx = static_cast<std::size_t>(dof);
+    void addVectorEntry(GlobalIndex dof, Real value, assembly::AddMode mode) override
+    {
+        FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
+        GlobalIndex resolved = INVALID_GLOBAL_INDEX;
+        vec_->resolveEntriesCached(std::span<const GlobalIndex>(&dof, 1),
+                                   std::span<GlobalIndex>(&resolved, 1));
+        if (resolved < 0 || static_cast<std::size_t>(resolved) >= vec_->data().size()) {
+            return;
         }
 
-        auto& data = vec_->data();
-        if (idx >= data.size()) return;
+        auto& dst = vec_->data()[static_cast<std::size_t>(resolved)];
         switch (mode) {
             case assembly::AddMode::Add:
-                data[idx] += value;
+                dst += value;
                 break;
             case assembly::AddMode::Insert:
-                data[idx] = value;
+                dst = value;
                 break;
             case assembly::AddMode::Max:
-                data[idx] = std::max(data[idx], value);
+                dst = std::max(dst, value);
                 break;
             case assembly::AddMode::Min:
-                data[idx] = std::min(data[idx], value);
+                dst = std::min(dst, value);
                 break;
         }
     }
@@ -160,129 +201,61 @@ namespace {
     void setVectorEntries(std::span<const GlobalIndex> dofs,
                           std::span<const Real> values) override
     {
-        if (dofs.size() != values.size()) {
-            FE_THROW(InvalidArgumentException, "FsilsVectorView::setVectorEntries: size mismatch");
-        }
-        for (std::size_t i = 0; i < dofs.size(); ++i) {
-            addVectorEntry(dofs[i], values[i], assembly::AddMode::Insert);
-        }
+        addVectorEntries(dofs, values, assembly::AddMode::Insert);
     }
 
     void zeroVectorEntries(std::span<const GlobalIndex> dofs) override
     {
-        for (const auto dof : dofs) {
-            addVectorEntry(dof, 0.0, assembly::AddMode::Insert);
-        }
+        thread_local std::vector<Real> zeros;
+        zeros.assign(dofs.size(), 0.0);
+        addVectorEntries(dofs, zeros, assembly::AddMode::Insert);
     }
 
-	    [[nodiscard]] Real getVectorEntry(GlobalIndex dof) const override
-	    {
-	        FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
-	        if (dof < 0 || dof >= vec_->size()) {
-	            return 0.0;
-	        }
-
-		        if (const auto* shared = vec_->shared()) {
-		            if (const auto perm = shared->dof_permutation; perm && !perm->empty()) {
-		                const auto& fwd = perm->forward;
-		                if (static_cast<std::size_t>(dof) >= fwd.size()) {
-		                    return 0.0;
-		                }
-		                dof = fwd[static_cast<std::size_t>(dof)];
-		            }
-		        }
-		        if (dof < 0 || dof >= vec_->size()) {
-		            return 0.0;
-		        }
-
-		        std::size_t idx = 0;
-		        if (const auto* shared = vec_->shared()) {
-		            const int dof_per_node = shared->dof;
-		            const int global_node = static_cast<int>(dof / dof_per_node);
-	            const int comp = static_cast<int>(dof % dof_per_node);
-            const int old = shared->globalNodeToOld(global_node);
-            if (old < 0) return 0.0;
-            idx = static_cast<std::size_t>(old) * static_cast<std::size_t>(dof_per_node) +
-                  static_cast<std::size_t>(comp);
-        } else {
-            idx = static_cast<std::size_t>(dof);
+    [[nodiscard]] Real getVectorEntry(GlobalIndex dof) const override
+    {
+        FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
+        GlobalIndex resolved = INVALID_GLOBAL_INDEX;
+        vec_->resolveEntriesCached(std::span<const GlobalIndex>(&dof, 1),
+                                   std::span<GlobalIndex>(&resolved, 1));
+        if (resolved < 0 || static_cast<std::size_t>(resolved) >= vec_->data().size()) {
+            return 0.0;
         }
-        if (idx >= vec_->data().size()) return 0.0;
-        return vec_->data()[idx];
+        return vec_->data()[static_cast<std::size_t>(resolved)];
+    }
+
+    [[nodiscard]] const void* vectorLayoutHandle() const noexcept override
+    {
+        if (vec_ == nullptr) {
+            return nullptr;
+        }
+        if (const auto* shared = vec_->shared()) {
+            return shared;
+        }
+        return vec_;
+    }
+
+    void resolveVectorEntries(std::span<const GlobalIndex> dofs,
+                              std::span<GlobalIndex> resolved) const override
+    {
+        FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
+        vec_->resolveEntriesCached(dofs, resolved);
+    }
+
+    void getVectorEntriesResolved(std::span<const GlobalIndex> resolved,
+                                  std::span<Real> out) const override
+    {
+        FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
+        gatherFsilsVectorEntries(*vec_, resolved, out);
     }
 
     void getVectorEntries(std::span<const GlobalIndex> dofs,
                           std::span<Real> out) const override
     {
         FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
-        const auto* shared = vec_->shared();
-        const auto& data = vec_->data();
-        const auto data_size = data.size();
-        const auto vec_size = vec_->size();
-
-        if (!shared) {
-            for (std::size_t i = 0; i < dofs.size(); ++i) {
-                const auto dof = dofs[i];
-                if (dof < 0 || dof >= vec_size) {
-                    out[i] = 0.0;
-                } else {
-                    const auto idx = static_cast<std::size_t>(dof);
-                    out[i] = (idx < data_size) ? data[idx] : 0.0;
-                }
-            }
-            return;
-        }
-
-        const auto* perm_ptr = shared->dof_permutation.get();
-        const bool has_perm = (perm_ptr != nullptr && !perm_ptr->forward.empty());
-        const auto* fwd_data = has_perm ? perm_ptr->forward.data() : nullptr;
-        const auto fwd_size = has_perm ? perm_ptr->forward.size() : std::size_t{0};
-        const int dof_per_node = shared->dof;
-
-        int cached_global_node = -1;
-        int cached_old_node = -1;
-
-        for (std::size_t i = 0; i < dofs.size(); ++i) {
-            auto dof = dofs[i];
-            if (dof < 0 || dof >= vec_size) {
-                out[i] = 0.0;
-                continue;
-            }
-
-            if (has_perm) {
-                if (static_cast<std::size_t>(dof) >= fwd_size) {
-                    out[i] = 0.0;
-                    continue;
-                }
-                dof = fwd_data[static_cast<std::size_t>(dof)];
-                if (dof < 0 || dof >= vec_size) {
-                    out[i] = 0.0;
-                    continue;
-                }
-            }
-
-            const int global_node = static_cast<int>(dof / dof_per_node);
-            const int comp = static_cast<int>(dof % dof_per_node);
-
-            int old_node;
-            if (global_node == cached_global_node) {
-                old_node = cached_old_node;
-            } else {
-                old_node = shared->globalNodeToOld(global_node);
-                cached_global_node = global_node;
-                cached_old_node = old_node;
-            }
-
-            if (old_node < 0) {
-                out[i] = 0.0;
-                continue;
-            }
-
-            const auto idx = static_cast<std::size_t>(old_node) *
-                             static_cast<std::size_t>(dof_per_node) +
-                             static_cast<std::size_t>(comp);
-            out[i] = (idx < data_size) ? data[idx] : 0.0;
-        }
+        thread_local std::vector<GlobalIndex> resolved;
+        resolved.resize(dofs.size());
+        vec_->resolveEntriesCached(dofs, resolved);
+        gatherFsilsVectorEntries(*vec_, resolved, out);
     }
 
     void beginAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Building; }
@@ -328,6 +301,31 @@ FsilsVector::FsilsVector(std::shared_ptr<const FsilsShared> shared)
     const std::size_t local_size =
         static_cast<std::size_t>(shared_->dof) * static_cast<std::size_t>(shared_->lhs.nNo);
     data_.assign(local_size, 0.0);
+}
+
+void FsilsVector::resolveEntriesCached(std::span<const GlobalIndex> dofs,
+                                       std::span<GlobalIndex> resolved) const
+{
+    FE_THROW_IF(dofs.size() != resolved.size(), InvalidArgumentException,
+                "FsilsVector::resolveEntriesCached: size mismatch");
+
+    const auto hash = hashGlobalIndexSpan(dofs);
+    auto bucket_it = resolution_cache_.find(hash);
+    if (bucket_it != resolution_cache_.end()) {
+        for (const auto& entry : bucket_it->second) {
+            if (spanMatches(dofs, entry.dofs)) {
+                std::copy(entry.resolved.begin(), entry.resolved.end(), resolved.begin());
+                return;
+            }
+        }
+    }
+
+    auto& bucket = resolution_cache_[hash];
+    auto& entry = bucket.emplace_back();
+    entry.dofs.assign(dofs.begin(), dofs.end());
+    entry.resolved.resize(dofs.size());
+    resolveFsilsVectorEntriesUncached(*this, dofs, entry.resolved);
+    std::copy(entry.resolved.begin(), entry.resolved.end(), resolved.begin());
 }
 
 void FsilsVector::zero()

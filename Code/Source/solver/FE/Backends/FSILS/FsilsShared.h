@@ -52,6 +52,9 @@ struct FsilsShared final {
     // Size = gnNo when populated. Enables O(1) globalNodeToOld() instead of O(log n) binary search.
     std::vector<int> global_to_old_{};
 
+    // Direct global-node -> internal-node lookup for hot matrix/vector paths.
+    std::vector<int> global_to_internal_{};
+
     // Inverse permutation for convenience: old_of_internal[internal] = old.
     std::vector<int> old_of_internal{};
 
@@ -60,19 +63,14 @@ struct FsilsShared final {
 
     fe_fsi_linear_solver::FSILS_lhsType lhs{};
     
-    // Flat O(1) lookup: row_col_to_nnz_[row_internal * max_row_nnz + local_col_offset] -> nnz_index
-    // This allows O(1) matrix insertion instead of binary searches within each row.
-    std::vector<int> row_col_to_nnz_{};
-    int max_row_nnz_{0};
-    
-    // Hash table for fallback if row is too dense. Unordered map is O(1) average.
-    // Use a flat map over internal node numbers.
-    // For each node, we map its non-zero column internal IDs to their NNZ index.
-    // In practice, since row lengths are small (e.g., 81 or 125 for hexes), we can use
-    // a flat CSR-like map: nnz_map[start + i] = {col, nnz}
-    std::vector<int> nnz_map_cols_{};
-    std::vector<int> nnz_map_idx_{};
-    std::vector<int> nnz_map_row_ptr_{};
+    // Setup-time per-row lookup tables mapping (row_internal, col_internal) to the
+    // base offset of the corresponding dof x dof block in the FSILS values array.
+    // Each row uses an open-addressed table with a power-of-two capacity, allowing
+    // fast mask-based lookup in the hot assembly path.
+    std::vector<int> block_lookup_row_ptr_{};
+    std::vector<int> block_lookup_row_mask_{};
+    std::vector<int> block_lookup_cols_{};
+    std::vector<GlobalIndex> block_lookup_base_{};
 
     [[nodiscard]] int localNodeCount() const noexcept { return lhs.nNo; }
 
@@ -104,6 +102,20 @@ struct FsilsShared final {
         }
     }
 
+    /// Build direct global-node -> internal-node lookup after lhs.map is available.
+    void buildGlobalToInternalTable()
+    {
+        if (gnNo <= 0) return;
+        global_to_internal_.assign(static_cast<std::size_t>(gnNo), -1);
+        for (int old = 0; old < lhs.nNo; ++old) {
+            const int global_node = oldToGlobalNode(old);
+            if (global_node < 0 || static_cast<std::size_t>(global_node) >= global_to_internal_.size()) {
+                continue;
+            }
+            global_to_internal_[static_cast<std::size_t>(global_node)] = lhs.map(old);
+        }
+    }
+
     [[nodiscard]] int globalNodeToOld(int global_node) const noexcept
     {
         // Fast path: O(1) flat lookup table.
@@ -131,6 +143,22 @@ struct FsilsShared final {
         return owned_node_count + static_cast<int>(it - ghost_nodes.begin());
     }
 
+    [[nodiscard]] int globalNodeToInternal(int global_node) const noexcept
+    {
+        if (!global_to_internal_.empty()) {
+            if (global_node < 0 || static_cast<std::size_t>(global_node) >= global_to_internal_.size()) {
+                return -1;
+            }
+            return global_to_internal_[static_cast<std::size_t>(global_node)];
+        }
+
+        const int old = globalNodeToOld(global_node);
+        if (old < 0 || old >= lhs.nNo) {
+            return -1;
+        }
+        return lhs.map(old);
+    }
+
     [[nodiscard]] int oldToGlobalNode(int old) const noexcept
     {
         if (old < 0) {
@@ -152,6 +180,41 @@ struct FsilsShared final {
             return -1;
         }
         return ghost_nodes[ghost_idx];
+    }
+
+    [[nodiscard]] GlobalIndex blockBase(int row_internal, int col_internal) const noexcept
+    {
+        if (row_internal < 0 || col_internal < 0 || row_internal >= lhs.nNo || col_internal >= lhs.nNo) {
+            return INVALID_GLOBAL_INDEX;
+        }
+        if (block_lookup_row_ptr_.empty() || block_lookup_row_mask_.empty()) {
+            return INVALID_GLOBAL_INDEX;
+        }
+
+        const int row_begin = block_lookup_row_ptr_[static_cast<std::size_t>(row_internal)];
+        const int row_end = block_lookup_row_ptr_[static_cast<std::size_t>(row_internal + 1)];
+        if (row_end <= row_begin) {
+            return INVALID_GLOBAL_INDEX;
+        }
+
+        const int mask = block_lookup_row_mask_[static_cast<std::size_t>(row_internal)];
+        if (mask < 0) {
+            return INVALID_GLOBAL_INDEX;
+        }
+
+        int slot = col_internal & mask;
+        for (int probe = 0; probe <= mask; ++probe) {
+            const int idx = row_begin + slot;
+            const int stored_col = block_lookup_cols_[static_cast<std::size_t>(idx)];
+            if (stored_col == col_internal) {
+                return block_lookup_base_[static_cast<std::size_t>(idx)];
+            }
+            if (stored_col == -1) {
+                return INVALID_GLOBAL_INDEX;
+            }
+            slot = (slot + 1) & mask;
+        }
+        return INVALID_GLOBAL_INDEX;
     }
 };
 

@@ -95,6 +95,11 @@ constexpr int DOT_THREAD_PAD = 8; // doubles (64 bytes) to reduce false sharing
 #endif
 }
 
+[[nodiscard]] bool use_serial_hot_path(const int num_threads) noexcept
+{
+  return num_threads <= 1;
+}
+
 [[nodiscard]] std::string to_lower(std::string s)
 {
   std::transform(s.begin(), s.end(), s.begin(),
@@ -468,6 +473,43 @@ double fused_dot_zz_v_impl(const fsils_int mynNo, Array3<double>& u, const int i
   const int num_vecs = i + 1;
   const double* v = u_next.data();
 
+  if (use_serial_hot_path(num_threads)) {
+    std::fill(h_col.begin(), h_col.begin() + num_vecs, 0.0);
+    double zz_sum = 0.0;
+    alignas(64) double vbuf[DOF * BLOCK_SIZE];
+
+    for (fsils_int k_start = 0; k_start < mynNo; k_start += BLOCK_SIZE) {
+      const fsils_int k_end = std::min(k_start + BLOCK_SIZE, mynNo);
+      const fsils_int blk_nodes = k_end - k_start;
+      const size_t blk_elems = static_cast<size_t>(blk_nodes) * static_cast<size_t>(DOF);
+
+      const double* v_block = v + static_cast<size_t>(k_start) * static_cast<size_t>(DOF);
+      #pragma omp simd
+      for (size_t idx = 0; idx < blk_elems; ++idx) {
+        vbuf[idx] = v_block[idx];
+      }
+
+      double zz = 0.0;
+      #pragma omp simd reduction(+:zz)
+      for (size_t idx = 0; idx < blk_elems; ++idx) {
+        zz += vbuf[idx] * vbuf[idx];
+      }
+      zz_sum += zz;
+
+      for (int j = 0; j < num_vecs; ++j) {
+        const double* uj_block = u.slice_data(j) + static_cast<size_t>(k_start) * static_cast<size_t>(DOF);
+        double sum = 0.0;
+        #pragma omp simd reduction(+:sum)
+        for (size_t idx = 0; idx < blk_elems; ++idx) {
+          sum += uj_block[idx] * vbuf[idx];
+        }
+        h_col[j] += sum;
+      }
+    }
+
+    return zz_sum;
+  }
+
   std::fill(thread_buf, thread_buf + static_cast<size_t>(num_threads) * thread_stride, 0.0);
 
   #pragma omp parallel
@@ -528,6 +570,41 @@ double fused_dot_zz_v_dyn(const int dof, const fsils_int mynNo, Array3<double>& 
 {
   const int num_vecs = i + 1;
   const double* v = u_next.data();
+
+  if (use_serial_hot_path(num_threads)) {
+    std::fill(h_col.begin(), h_col.begin() + num_vecs, 0.0);
+    double zz_sum = 0.0;
+
+    for (fsils_int k_start = 0; k_start < mynNo; k_start += BLOCK_SIZE) {
+      const fsils_int k_end = std::min(k_start + BLOCK_SIZE, mynNo);
+
+      for (int j = 0; j < num_vecs; ++j) {
+        const double* uj = u.slice_data(j);
+        double sum = 0.0;
+        for (fsils_int k = k_start; k < k_end; ++k) {
+          const size_t base = static_cast<size_t>(k) * static_cast<size_t>(dof);
+          double tmp = 0.0;
+          for (int d = 0; d < dof; ++d) {
+            tmp += uj[base + static_cast<size_t>(d)] * v[base + static_cast<size_t>(d)];
+          }
+          sum += tmp;
+        }
+        h_col[j] += sum;
+      }
+
+      double zz = 0.0;
+      for (fsils_int k = k_start; k < k_end; ++k) {
+        const size_t base = static_cast<size_t>(k) * static_cast<size_t>(dof);
+        for (int d = 0; d < dof; ++d) {
+          const double val = v[base + static_cast<size_t>(d)];
+          zz += val * val;
+        }
+      }
+      zz_sum += zz;
+    }
+
+    return zz_sum;
+  }
 
   std::fill(thread_buf, thread_buf + static_cast<size_t>(num_threads) * thread_stride, 0.0);
 
@@ -704,6 +781,41 @@ void fused_update_v_inplace_impl(const fsils_int nNo, Array3<double>& u, const i
   const int num_vecs = i + 1;
   double* v = u_next.data();
 
+  if (use_serial_hot_path(max_omp_threads())) {
+    for (fsils_int k_start = 0; k_start < nNo; k_start += BLOCK_SIZE) {
+      const fsils_int k_end = std::min(k_start + BLOCK_SIZE, nNo);
+      const fsils_int blk_nodes = k_end - k_start;
+      const size_t blk_elems = static_cast<size_t>(blk_nodes) * static_cast<size_t>(DOF);
+
+      alignas(64) double vbuf[DOF * BLOCK_SIZE];
+      double* v_block = v + static_cast<size_t>(k_start) * static_cast<size_t>(DOF);
+
+      #pragma omp simd
+      for (size_t idx = 0; idx < blk_elems; ++idx) {
+        vbuf[idx] = v_block[idx];
+      }
+
+      for (int j = 0; j < num_vecs; ++j) {
+        const double hj = h_factors[j];
+        if (hj == 0.0) {
+          continue;
+        }
+
+        const double* uj_block = u.slice_data(j) + static_cast<size_t>(k_start) * static_cast<size_t>(DOF);
+        #pragma omp simd
+        for (size_t idx = 0; idx < blk_elems; ++idx) {
+          vbuf[idx] -= hj * uj_block[idx];
+        }
+      }
+
+      #pragma omp simd
+      for (size_t idx = 0; idx < blk_elems; ++idx) {
+        v_block[idx] = vbuf[idx];
+      }
+    }
+    return;
+  }
+
   #pragma omp parallel for schedule(static)
   for (fsils_int k_start = 0; k_start < nNo; k_start += BLOCK_SIZE) {
     const fsils_int k_end = std::min(k_start + BLOCK_SIZE, nNo);
@@ -743,6 +855,28 @@ void fused_update_v_inplace_dyn(const int dof, const fsils_int nNo, Array3<doubl
 {
   const int num_vecs = i + 1;
   double* v = u_next.data();
+
+  if (use_serial_hot_path(max_omp_threads())) {
+    for (fsils_int k_start = 0; k_start < nNo; k_start += BLOCK_SIZE) {
+      const fsils_int k_end = std::min(k_start + BLOCK_SIZE, nNo);
+      const size_t block_offset = static_cast<size_t>(k_start) * static_cast<size_t>(dof);
+      const size_t blk_elems = static_cast<size_t>(k_end - k_start) * static_cast<size_t>(dof);
+
+      for (int j = 0; j < num_vecs; ++j) {
+        const double hj = h_factors[j];
+        if (hj == 0.0) {
+          continue;
+        }
+
+        const double* uj = u.slice_data(j) + block_offset;
+        double* vv = v + block_offset;
+        for (size_t idx = 0; idx < blk_elems; ++idx) {
+          vv[idx] -= hj * uj[idx];
+        }
+      }
+    }
+    return;
+  }
 
   #pragma omp parallel for schedule(static)
   for (fsils_int k_start = 0; k_start < nNo; k_start += BLOCK_SIZE) {

@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace svmp {
@@ -58,6 +59,21 @@ public:
     void addValue(GlobalIndex row, GlobalIndex col, Real value, assembly::AddMode mode);
 
     [[nodiscard]] std::shared_ptr<const FsilsShared> shared() const noexcept { return shared_; }
+
+    // Resolve local row/column FE DOFs to FSILS value-storage slots and reuse
+    // that mapping across repeated assemblies with identical connectivity.
+    void resolveMatrixEntrySlotsCached(std::span<const GlobalIndex> row_dofs,
+                                       std::span<const GlobalIndex> col_dofs,
+                                       std::span<GlobalIndex> resolved) const;
+    void addResolvedMatrixEntries(std::span<const GlobalIndex> row_dofs,
+                                  std::span<const GlobalIndex> col_dofs,
+                                  std::span<const GlobalIndex> resolved,
+                                  std::span<const Real> local_matrix,
+                                  assembly::AddMode mode);
+    void addMatrixEntriesCached(std::span<const GlobalIndex> row_dofs,
+                                std::span<const GlobalIndex> col_dofs,
+                                std::span<const Real> local_matrix,
+                                assembly::AddMode mode);
 
     // Internal access for solver integration
     [[nodiscard]] int fsilsDof() const noexcept;

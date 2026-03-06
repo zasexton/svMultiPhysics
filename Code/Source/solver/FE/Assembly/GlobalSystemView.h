@@ -63,6 +63,7 @@
 #include "Core/Types.h"
 #include "Core/FEException.h"
 
+#include <algorithm>
 #include <span>
 #include <vector>
 #include <memory>
@@ -245,6 +246,48 @@ public:
         std::span<const GlobalIndex> rows,
         bool set_diagonal = true) = 0;
 
+    /**
+     * @brief Stable identifier for the matrix-layout mapping used by this view.
+     *
+     * Returns nullptr when the backend does not expose reusable resolved-entry
+     * insertion hooks.
+     */
+    [[nodiscard]] virtual const void* matrixLayoutHandle() const noexcept {
+        return nullptr;
+    }
+
+    /**
+     * @brief Resolve local matrix entries into backend-local scalar slots.
+     *
+     * The default implementation marks all entries unresolved; callers should
+     * only use this when matrixLayoutHandle() is non-null.
+     */
+    virtual void resolveMatrixEntries(std::span<const GlobalIndex> row_dofs,
+                                      std::span<const GlobalIndex> col_dofs,
+                                      std::span<GlobalIndex> resolved) const {
+        FE_THROW_IF(resolved.size() != row_dofs.size() * col_dofs.size(),
+                    InvalidArgumentException,
+                    "GlobalSystemView::resolveMatrixEntries: size mismatch");
+        (void)row_dofs;
+        (void)col_dofs;
+        std::fill(resolved.begin(), resolved.end(), INVALID_GLOBAL_INDEX);
+    }
+
+    /**
+     * @brief Insert a local matrix using pre-resolved backend-local slots.
+     *
+     * The default implementation falls back to the regular rectangular insert.
+     */
+    virtual void addMatrixEntriesResolved(
+        std::span<const GlobalIndex> row_dofs,
+        std::span<const GlobalIndex> col_dofs,
+        std::span<const GlobalIndex> resolved,
+        std::span<const Real> local_matrix,
+        AddMode mode = AddMode::Add) {
+        (void)resolved;
+        addMatrixEntries(row_dofs, col_dofs, local_matrix, mode);
+    }
+
     // =========================================================================
     // Vector Operations
     // =========================================================================
@@ -299,6 +342,40 @@ public:
     [[nodiscard]] virtual Real getVectorEntry(GlobalIndex dof) const {
         (void)dof;
         return 0.0;
+    }
+
+    /**
+     * @brief Stable identifier for the vector-layout mapping used by this view.
+     *
+     * Views that share the same DOF-to-storage layout may return the same handle,
+     * allowing callers to reuse resolved gather indices across multiple vectors
+     * (for example, the current solution and its history states).
+     */
+    [[nodiscard]] virtual const void* vectorLayoutHandle() const noexcept {
+        return this;
+    }
+
+    /**
+     * @brief Resolve FE DOFs into backend-local vector entry indices.
+     *
+     * The default implementation is identity. Backends with indirection
+     * (permutations, block layouts, overlap numbering) should override this.
+     */
+    virtual void resolveVectorEntries(std::span<const GlobalIndex> dofs,
+                                      std::span<GlobalIndex> resolved) const {
+        FE_THROW_IF(resolved.size() != dofs.size(), InvalidArgumentException,
+                    "GlobalSystemView::resolveVectorEntries: size mismatch");
+        std::copy(dofs.begin(), dofs.end(), resolved.begin());
+    }
+
+    /**
+     * @brief Gather vector values from pre-resolved backend-local indices.
+     *
+     * The default implementation treats the resolved indices as FE DOF indices.
+     */
+    virtual void getVectorEntriesResolved(std::span<const GlobalIndex> resolved,
+                                          std::span<Real> out) const {
+        getVectorEntries(resolved, out);
     }
 
     /**

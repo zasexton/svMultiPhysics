@@ -582,8 +582,13 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
             llvm::ModuleAnalysisManager module_analysis_manager;
 
             llvm::PipelineTuningOptions tuning_options;
+            // These FE kernels are tiny and already carry explicit loop metadata.
+            // Default interleave/unroll passes spend compile time in SCEV and
+            // often fail to transform the generated loops anyway.
+            tuning_options.LoopInterleaving = false;
             tuning_options.LoopVectorization = vectorize;
             tuning_options.SLPVectorization = vectorize;
+            tuning_options.LoopUnrolling = false;
 
             if constexpr (requires(llvm::PipelineTuningOptions opts) { llvm::PassBuilder(nullptr, opts); }) {
                 llvm::PassBuilder pass_builder(nullptr, tuning_options);

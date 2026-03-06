@@ -219,6 +219,67 @@ int requiredHistoryStates(const TimeIntegrationContext* ctx) noexcept
     return required;
 }
 
+struct ResolvedVectorGatherCache {
+    const void* layout_handle{nullptr};
+    std::vector<GlobalIndex> dofs{};
+    std::vector<GlobalIndex> resolved{};
+};
+
+void gatherVectorCoefficients(
+    std::span<const GlobalIndex> dofs,
+    const GlobalSystemView* view,
+    std::span<const Real> raw_values,
+    std::vector<Real>& out,
+    ResolvedVectorGatherCache* cache,
+    const char* error_prefix,
+    bool validate_negative_dofs,
+    std::span<const GlobalIndex> pre_resolved = {})
+{
+    out.resize(dofs.size());
+
+    if (validate_negative_dofs) {
+        for (const auto dof : dofs) {
+            FE_THROW_IF(dof < 0, FEException, std::string(error_prefix) + ": negative DOF index");
+        }
+    }
+
+    if (view != nullptr) {
+        if (!pre_resolved.empty()) {
+            FE_THROW_IF(pre_resolved.size() != dofs.size(), FEException,
+                        std::string(error_prefix) + ": resolved vector-entry size mismatch");
+            view->getVectorEntriesResolved(pre_resolved, std::span<Real>(out));
+            return;
+        }
+        if (cache != nullptr) {
+            const void* layout_handle = view->vectorLayoutHandle();
+            const bool cache_hit =
+                cache->layout_handle == layout_handle &&
+                cache->dofs.size() == dofs.size() &&
+                std::equal(cache->dofs.begin(), cache->dofs.end(), dofs.begin());
+
+            if (!cache_hit) {
+                cache->layout_handle = layout_handle;
+                cache->dofs.assign(dofs.begin(), dofs.end());
+                cache->resolved.resize(dofs.size());
+                view->resolveVectorEntries(dofs, cache->resolved);
+            }
+
+            view->getVectorEntriesResolved(cache->resolved, std::span<Real>(out));
+        } else {
+            view->getVectorEntries(dofs, std::span<Real>(out));
+        }
+        return;
+    }
+
+    for (std::size_t i = 0; i < dofs.size(); ++i) {
+        const auto dof = dofs[i];
+        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= raw_values.size(), FEException,
+                    std::string(error_prefix) + ": solution vector too small for DOF " +
+                        std::to_string(dof));
+        out[i] = raw_values[static_cast<std::size_t>(dof)];
+    }
+}
+
 int defaultGeometryOrder(ElementType element_type) noexcept
 {
     switch (element_type) {
@@ -516,6 +577,118 @@ public:
         return base_->getMatrixEntry(row, col);
     }
 
+    [[nodiscard]] const void* matrixLayoutHandle() const noexcept override
+    {
+        return base_ ? base_->matrixLayoutHandle() : nullptr;
+    }
+
+    void resolveMatrixEntries(std::span<const GlobalIndex> row_dofs,
+                              std::span<const GlobalIndex> col_dofs,
+                              std::span<GlobalIndex> resolved) const override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        FE_THROW_IF(resolved.size() != row_dofs.size() * col_dofs.size(), FEException,
+                    "OwnedRowOnlyView::resolveMatrixEntries: size mismatch");
+
+        bool all_owned = true;
+        for (const auto row : row_dofs) {
+            if (!isOwnedRow(row)) {
+                all_owned = false;
+                break;
+            }
+        }
+        if (all_owned) {
+            base_->resolveMatrixEntries(row_dofs, col_dofs, resolved);
+            return;
+        }
+
+        std::fill(resolved.begin(), resolved.end(), INVALID_GLOBAL_INDEX);
+        std::vector<GlobalIndex> owned_rows;
+        owned_rows.reserve(row_dofs.size());
+        std::vector<std::size_t> owned_row_idx;
+        owned_row_idx.reserve(row_dofs.size());
+        for (std::size_t i = 0; i < row_dofs.size(); ++i) {
+            const auto row = row_dofs[i];
+            if (!isOwnedRow(row)) {
+                continue;
+            }
+            owned_rows.push_back(row);
+            owned_row_idx.push_back(i);
+        }
+        if (owned_rows.empty()) {
+            return;
+        }
+
+        std::vector<GlobalIndex> owned_resolved(owned_rows.size() * col_dofs.size(),
+                                                INVALID_GLOBAL_INDEX);
+        base_->resolveMatrixEntries(std::span<const GlobalIndex>(owned_rows),
+                                    col_dofs,
+                                    std::span<GlobalIndex>(owned_resolved));
+        for (std::size_t oi = 0; oi < owned_row_idx.size(); ++oi) {
+            const std::size_t row_i = owned_row_idx[oi];
+            const std::size_t src_base = oi * col_dofs.size();
+            const std::size_t dst_base = row_i * col_dofs.size();
+            std::copy_n(owned_resolved.data() + src_base,
+                        static_cast<std::ptrdiff_t>(col_dofs.size()),
+                        resolved.data() + dst_base);
+        }
+    }
+
+    void addMatrixEntriesResolved(std::span<const GlobalIndex> row_dofs,
+                                  std::span<const GlobalIndex> col_dofs,
+                                  std::span<const GlobalIndex> resolved,
+                                  std::span<const Real> local_matrix,
+                                  AddMode mode = AddMode::Add) override
+    {
+        FE_CHECK_NOT_NULL(base_, "OwnedRowOnlyView::base");
+        FE_THROW_IF(local_matrix.size() != row_dofs.size() * col_dofs.size() ||
+                        resolved.size() != local_matrix.size(),
+                    FEException,
+                    "OwnedRowOnlyView::addMatrixEntriesResolved: size mismatch");
+
+        bool all_owned = true;
+        for (const auto row : row_dofs) {
+            if (!isOwnedRow(row)) {
+                all_owned = false;
+                break;
+            }
+        }
+        if (all_owned) {
+            base_->addMatrixEntriesResolved(row_dofs, col_dofs, resolved, local_matrix, mode);
+            return;
+        }
+
+        owned_rows_.clear();
+        owned_values_.clear();
+        owned_rows_.reserve(row_dofs.size());
+        owned_values_.reserve(local_matrix.size());
+        std::vector<GlobalIndex> owned_resolved;
+        owned_resolved.reserve(local_matrix.size());
+
+        for (std::size_t i = 0; i < row_dofs.size(); ++i) {
+            const auto row = row_dofs[i];
+            if (!isOwnedRow(row)) {
+                continue;
+            }
+            owned_rows_.push_back(row);
+            const std::size_t base_idx = i * col_dofs.size();
+            owned_values_.insert(owned_values_.end(),
+                                 local_matrix.begin() + static_cast<std::ptrdiff_t>(base_idx),
+                                 local_matrix.begin() + static_cast<std::ptrdiff_t>(base_idx + col_dofs.size()));
+            owned_resolved.insert(owned_resolved.end(),
+                                  resolved.begin() + static_cast<std::ptrdiff_t>(base_idx),
+                                  resolved.begin() + static_cast<std::ptrdiff_t>(base_idx + col_dofs.size()));
+        }
+
+        if (!owned_rows_.empty()) {
+            base_->addMatrixEntriesResolved(std::span<const GlobalIndex>(owned_rows_),
+                                            col_dofs,
+                                            std::span<const GlobalIndex>(owned_resolved),
+                                            std::span<const Real>(owned_values_),
+                                            mode);
+        }
+    }
+
 private:
     [[nodiscard]] bool isOwnedRow(GlobalIndex global_row) const noexcept
     {
@@ -616,18 +789,30 @@ void StandardAssembler::setDofMap(const dofs::DofMap& dof_map)
     col_dof_map_ = &dof_map;
     row_dof_offset_ = 0;
     col_dof_offset_ = 0;
+    cell_dof_tables_.clear();
+    cell_resolved_vector_tables_.clear();
+    cell_resolved_matrix_tables_.clear();
+    field_access_plans_.clear();
 }
 
 void StandardAssembler::setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex row_offset)
 {
     row_dof_map_ = &dof_map;
     row_dof_offset_ = row_offset;
+    cell_dof_tables_.clear();
+    cell_resolved_vector_tables_.clear();
+    cell_resolved_matrix_tables_.clear();
+    field_access_plans_.clear();
 }
 
 void StandardAssembler::setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset)
 {
     col_dof_map_ = &dof_map;
     col_dof_offset_ = col_offset;
+    cell_dof_tables_.clear();
+    cell_resolved_vector_tables_.clear();
+    cell_resolved_matrix_tables_.clear();
+    field_access_plans_.clear();
 }
 
 void StandardAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
@@ -637,6 +822,10 @@ void StandardAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
     col_dof_map_ = row_dof_map_;
     row_dof_offset_ = 0;
     col_dof_offset_ = 0;
+    cell_dof_tables_.clear();
+    cell_resolved_vector_tables_.clear();
+    cell_resolved_matrix_tables_.clear();
+    field_access_plans_.clear();
 }
 
 void StandardAssembler::setConstraints(const constraints::AffineConstraints* constraints)
@@ -669,16 +858,22 @@ void StandardAssembler::setCurrentSolution(std::span<const Real> solution)
 {
     current_solution_ = solution;
     current_solution_view_ = nullptr;
+    cell_resolved_vector_tables_.clear();
 }
 
 void StandardAssembler::setCurrentSolutionView(const GlobalSystemView* solution_view)
 {
     current_solution_view_ = solution_view;
+    cell_resolved_vector_tables_.clear();
 }
 
 void StandardAssembler::setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields)
 {
     field_solution_access_.assign(fields.begin(), fields.end());
+    cell_dof_tables_.clear();
+    cell_resolved_vector_tables_.clear();
+    cell_resolved_matrix_tables_.clear();
+    field_access_plans_.clear();
 }
 
 void StandardAssembler::setPreviousSolution(std::span<const Real> solution)
@@ -713,6 +908,7 @@ void StandardAssembler::setPreviousSolutionK(int k, std::span<const Real> soluti
         previous_solution_views_.resize(static_cast<std::size_t>(k), nullptr);
     }
     previous_solution_views_[static_cast<std::size_t>(k - 1)] = nullptr;
+    cell_resolved_vector_tables_.clear();
 }
 
 void StandardAssembler::setPreviousSolutionViewK(int k, const GlobalSystemView* solution_view)
@@ -726,6 +922,7 @@ void StandardAssembler::setPreviousSolutionViewK(int k, const GlobalSystemView* 
     if (previous_solutions_.size() < static_cast<std::size_t>(k)) {
         previous_solutions_.resize(static_cast<std::size_t>(k));
     }
+    cell_resolved_vector_tables_.clear();
 }
 
 void StandardAssembler::setTimeIntegrationContext(const TimeIntegrationContext* ctx)
@@ -852,7 +1049,365 @@ void StandardAssembler::reset()
     cached_mapping_type_ = ElementType::Unknown;
     cached_mapping_order_ = -1;
     cached_mapping_affine_ = false;
+    cached_cell_dof_mesh_ = nullptr;
+    cached_cell_dof_count_ = 0;
+    cell_dof_tables_.clear();
+    cell_resolved_vector_tables_.clear();
+    cell_resolved_matrix_tables_.clear();
+    field_access_plans_.clear();
     initialized_ = false;
+}
+
+void StandardAssembler::ensureCellDofTables(const IMeshAccess& mesh)
+{
+    const auto n_cells = mesh.numCells();
+    if (cached_cell_dof_mesh_ != &mesh || cached_cell_dof_count_ != n_cells) {
+        cached_cell_dof_mesh_ = &mesh;
+        cached_cell_dof_count_ = n_cells;
+        cell_dof_tables_.clear();
+        cell_resolved_vector_tables_.clear();
+        cell_resolved_matrix_tables_.clear();
+        field_access_plans_.clear();
+    }
+}
+
+const StandardAssembler::CellDofTable& StandardAssembler::getCellDofTable(
+    const IMeshAccess& mesh,
+    const dofs::DofMap* dof_map,
+    GlobalIndex dof_offset
+)
+{
+    FE_CHECK_NOT_NULL(dof_map, "StandardAssembler::getCellDofTable: dof_map");
+    ensureCellDofTables(mesh);
+
+    for (const auto& table : cell_dof_tables_) {
+        if (table.dof_map == dof_map && table.dof_offset == dof_offset) {
+            return table;
+        }
+    }
+
+    cell_resolved_vector_tables_.clear();
+    cell_resolved_matrix_tables_.clear();
+    field_access_plans_.clear();
+    auto& table = cell_dof_tables_.emplace_back();
+    table.dof_map = dof_map;
+    table.dof_offset = dof_offset;
+    table.cell_offsets.resize(static_cast<std::size_t>(std::max<GlobalIndex>(0, mesh.numCells())) + 1u, 0);
+
+    std::size_t total_dofs = 0;
+    for (GlobalIndex cell_id = 0; cell_id < mesh.numCells(); ++cell_id) {
+        table.cell_offsets[static_cast<std::size_t>(cell_id)] = static_cast<GlobalIndex>(total_dofs);
+        total_dofs += dof_map->getCellDofs(cell_id).size();
+    }
+    table.cell_offsets.back() = static_cast<GlobalIndex>(total_dofs);
+    table.dofs.resize(total_dofs);
+
+    for (GlobalIndex cell_id = 0; cell_id < mesh.numCells(); ++cell_id) {
+        const auto src = dof_map->getCellDofs(cell_id);
+        const auto begin = static_cast<std::size_t>(
+            table.cell_offsets[static_cast<std::size_t>(cell_id)]);
+        for (std::size_t i = 0; i < src.size(); ++i) {
+            table.dofs[begin + i] = src[i] + dof_offset;
+        }
+    }
+
+    return table;
+}
+
+std::span<const GlobalIndex> StandardAssembler::getCellDofsCached(
+    const IMeshAccess& mesh,
+    GlobalIndex cell_id,
+    const dofs::DofMap* dof_map,
+    GlobalIndex dof_offset)
+{
+    const auto& table = getCellDofTable(mesh, dof_map, dof_offset);
+    FE_THROW_IF(cell_id < 0 || cell_id >= cached_cell_dof_count_, FEException,
+                "StandardAssembler::getCellDofsCached: cell_id out of range");
+    const auto begin = static_cast<std::size_t>(table.cell_offsets[static_cast<std::size_t>(cell_id)]);
+    const auto end = static_cast<std::size_t>(table.cell_offsets[static_cast<std::size_t>(cell_id) + 1u]);
+    return std::span<const GlobalIndex>(table.dofs.data() + begin, end - begin);
+}
+
+std::span<const GlobalIndex> StandardAssembler::getCellDofsFromTable(
+    const CellDofTable& table,
+    GlobalIndex cell_id) const
+{
+    FE_THROW_IF(cell_id < 0 || cell_id >= cached_cell_dof_count_, FEException,
+                "StandardAssembler::getCellDofsFromTable: cell_id out of range");
+    const auto begin = static_cast<std::size_t>(table.cell_offsets[static_cast<std::size_t>(cell_id)]);
+    const auto end = static_cast<std::size_t>(table.cell_offsets[static_cast<std::size_t>(cell_id) + 1u]);
+    return std::span<const GlobalIndex>(table.dofs.data() + begin, end - begin);
+}
+
+void StandardAssembler::ensureResolvedVectorTable(
+    const IMeshAccess& mesh,
+    const dofs::DofMap* dof_map,
+    GlobalIndex dof_offset,
+    const GlobalSystemView* view)
+{
+    if (view == nullptr || dof_map == nullptr) {
+        return;
+    }
+
+    const void* layout_handle = view->vectorLayoutHandle();
+    if (layout_handle == nullptr) {
+        return;
+    }
+
+    for (const auto& table : cell_resolved_vector_tables_) {
+        if (table.layout_handle == layout_handle &&
+            table.dof_map == dof_map &&
+            table.dof_offset == dof_offset) {
+            return;
+        }
+    }
+
+    const auto& dof_table = getCellDofTable(mesh, dof_map, dof_offset);
+    auto& table = cell_resolved_vector_tables_.emplace_back();
+    table.layout_handle = layout_handle;
+    table.dof_map = dof_map;
+    table.dof_offset = dof_offset;
+    table.resolved.resize(dof_table.dofs.size());
+
+    for (GlobalIndex cell_id = 0; cell_id < cached_cell_dof_count_; ++cell_id) {
+        const auto begin = static_cast<std::size_t>(
+            dof_table.cell_offsets[static_cast<std::size_t>(cell_id)]);
+        const auto end = static_cast<std::size_t>(
+            dof_table.cell_offsets[static_cast<std::size_t>(cell_id) + 1u]);
+        view->resolveVectorEntries(
+            std::span<const GlobalIndex>(dof_table.dofs.data() + begin, end - begin),
+            std::span<GlobalIndex>(table.resolved.data() + begin, end - begin));
+    }
+}
+
+void StandardAssembler::ensureResolvedVectorTables(const IMeshAccess& mesh)
+{
+    ensureCellDofTables(mesh);
+    if (current_solution_view_ != nullptr) {
+        for (const auto& table : cell_dof_tables_) {
+            ensureResolvedVectorTable(mesh, table.dof_map, table.dof_offset, current_solution_view_);
+        }
+    }
+}
+
+void StandardAssembler::ensureResolvedMatrixTable(
+    const IMeshAccess& mesh,
+    const dofs::DofMap* row_dof_map,
+    GlobalIndex row_dof_offset,
+    const dofs::DofMap* col_dof_map,
+    GlobalIndex col_dof_offset,
+    const GlobalSystemView* view)
+{
+    if (view == nullptr || row_dof_map == nullptr || col_dof_map == nullptr) {
+        return;
+    }
+
+    const void* layout_handle = view->matrixLayoutHandle();
+    if (layout_handle == nullptr) {
+        return;
+    }
+
+    for (const auto& table : cell_resolved_matrix_tables_) {
+        if (table.layout_handle == layout_handle &&
+            table.row_dof_map == row_dof_map &&
+            table.row_dof_offset == row_dof_offset &&
+            table.col_dof_map == col_dof_map &&
+            table.col_dof_offset == col_dof_offset) {
+            return;
+        }
+    }
+
+    const auto& row_table = getCellDofTable(mesh, row_dof_map, row_dof_offset);
+    const auto& col_table = getCellDofTable(mesh, col_dof_map, col_dof_offset);
+
+    auto& table = cell_resolved_matrix_tables_.emplace_back();
+    table.layout_handle = layout_handle;
+    table.row_dof_map = row_dof_map;
+    table.row_dof_offset = row_dof_offset;
+    table.col_dof_map = col_dof_map;
+    table.col_dof_offset = col_dof_offset;
+    table.cell_offsets.resize(static_cast<std::size_t>(cached_cell_dof_count_) + 1u, 0);
+
+    std::size_t total_entries = 0;
+    for (GlobalIndex cell_id = 0; cell_id < cached_cell_dof_count_; ++cell_id) {
+        const auto row_dofs = getCellDofsFromTable(row_table, cell_id);
+        const auto col_dofs = getCellDofsFromTable(col_table, cell_id);
+        table.cell_offsets[static_cast<std::size_t>(cell_id)] = static_cast<GlobalIndex>(total_entries);
+        total_entries += row_dofs.size() * col_dofs.size();
+    }
+    table.cell_offsets.back() = static_cast<GlobalIndex>(total_entries);
+    table.resolved.resize(total_entries);
+
+    for (GlobalIndex cell_id = 0; cell_id < cached_cell_dof_count_; ++cell_id) {
+        const auto row_dofs = getCellDofsFromTable(row_table, cell_id);
+        const auto col_dofs = getCellDofsFromTable(col_table, cell_id);
+        const auto begin = static_cast<std::size_t>(
+            table.cell_offsets[static_cast<std::size_t>(cell_id)]);
+        view->resolveMatrixEntries(
+            row_dofs,
+            col_dofs,
+            std::span<GlobalIndex>(table.resolved.data() + begin,
+                                   row_dofs.size() * col_dofs.size()));
+    }
+}
+
+std::span<const GlobalIndex> StandardAssembler::getResolvedCellVectorEntries(
+    GlobalIndex cell_id,
+    const dofs::DofMap* dof_map,
+    GlobalIndex dof_offset,
+    const GlobalSystemView* view) const
+{
+    if (view == nullptr || dof_map == nullptr || cell_id < 0 || cell_id >= cached_cell_dof_count_) {
+        return {};
+    }
+
+    const void* layout_handle = view->vectorLayoutHandle();
+    if (layout_handle == nullptr) {
+        return {};
+    }
+
+    const CellDofTable* dof_table = nullptr;
+    for (const auto& table : cell_dof_tables_) {
+        if (table.dof_map == dof_map && table.dof_offset == dof_offset) {
+            dof_table = &table;
+            break;
+        }
+    }
+    if (dof_table == nullptr) {
+        return {};
+    }
+
+    for (const auto& table : cell_resolved_vector_tables_) {
+        if (table.layout_handle == layout_handle &&
+            table.dof_map == dof_map &&
+            table.dof_offset == dof_offset) {
+            const auto begin = static_cast<std::size_t>(
+                dof_table->cell_offsets[static_cast<std::size_t>(cell_id)]);
+            const auto end = static_cast<std::size_t>(
+                dof_table->cell_offsets[static_cast<std::size_t>(cell_id) + 1u]);
+            return std::span<const GlobalIndex>(table.resolved.data() + begin, end - begin);
+        }
+    }
+
+    return {};
+}
+
+std::span<const GlobalIndex> StandardAssembler::getResolvedCellMatrixEntries(
+    GlobalIndex cell_id,
+    const dofs::DofMap* row_dof_map,
+    GlobalIndex row_dof_offset,
+    const dofs::DofMap* col_dof_map,
+    GlobalIndex col_dof_offset,
+    const GlobalSystemView* view) const
+{
+    if (view == nullptr || row_dof_map == nullptr || col_dof_map == nullptr ||
+        cell_id < 0 || cell_id >= cached_cell_dof_count_) {
+        return {};
+    }
+
+    const void* layout_handle = view->matrixLayoutHandle();
+    if (layout_handle == nullptr) {
+        return {};
+    }
+
+    for (const auto& table : cell_resolved_matrix_tables_) {
+        if (table.layout_handle == layout_handle &&
+            table.row_dof_map == row_dof_map &&
+            table.row_dof_offset == row_dof_offset &&
+            table.col_dof_map == col_dof_map &&
+            table.col_dof_offset == col_dof_offset) {
+            const auto begin = static_cast<std::size_t>(
+                table.cell_offsets[static_cast<std::size_t>(cell_id)]);
+            const auto end = static_cast<std::size_t>(
+                table.cell_offsets[static_cast<std::size_t>(cell_id) + 1u]);
+            return std::span<const GlobalIndex>(table.resolved.data() + begin, end - begin);
+        }
+    }
+
+    return {};
+}
+
+void StandardAssembler::ensureFieldAccessPlans(const IMeshAccess& mesh)
+{
+    ensureCellDofTables(mesh);
+    if (field_access_plans_.size() == field_solution_access_.size()) {
+        return;
+    }
+
+    field_access_plans_.clear();
+    field_access_plans_.reserve(field_solution_access_.size());
+    for (const auto& access : field_solution_access_) {
+        FE_CHECK_NOT_NULL(access.space, "StandardAssembler::ensureFieldAccessPlans: field space");
+        FE_CHECK_NOT_NULL(access.dof_map, "StandardAssembler::ensureFieldAccessPlans: field dof_map");
+        field_access_plans_.push_back(FieldAccessPlan{
+            access.field,
+            access.space,
+            access.dof_map,
+            access.dof_offset,
+            &getCellDofTable(mesh, access.dof_map, access.dof_offset),
+            access.space->field_type(),
+            access.space->space_type() == spaces::SpaceType::Product,
+            access.space->value_dimension(),
+        });
+    }
+}
+
+const StandardAssembler::FieldAccessPlan* StandardAssembler::findFieldAccessPlan(FieldId field) const noexcept
+{
+    for (const auto& plan : field_access_plans_) {
+        if (plan.field == field) {
+            return &plan;
+        }
+    }
+    return nullptr;
+}
+
+void StandardAssembler::gatherCellVectorCoefficients(
+    GlobalIndex cell_id,
+    const dofs::DofMap* dof_map,
+    GlobalIndex dof_offset,
+    std::span<const GlobalIndex> dofs,
+    const GlobalSystemView* view,
+    std::span<const Real> raw_values,
+    std::vector<Real>& out,
+    const char* error_prefix,
+    bool validate_negative_dofs)
+{
+    auto resolved = getResolvedCellVectorEntries(cell_id, dof_map, dof_offset, view);
+    if (resolved.empty() && view != nullptr && cached_cell_dof_mesh_ != nullptr &&
+        dof_map != nullptr) {
+        ensureResolvedVectorTable(*cached_cell_dof_mesh_, dof_map, dof_offset, view);
+        resolved = getResolvedCellVectorEntries(cell_id, dof_map, dof_offset, view);
+    }
+    gatherVectorCoefficients(dofs, view, raw_values, out, nullptr,
+                             error_prefix, validate_negative_dofs, resolved);
+}
+
+void StandardAssembler::insertLocalForCell(
+    GlobalIndex cell_id,
+    const dofs::DofMap* row_dof_map,
+    GlobalIndex row_dof_offset,
+    const dofs::DofMap* col_dof_map,
+    GlobalIndex col_dof_offset,
+    const KernelOutput& output,
+    std::span<const GlobalIndex> row_dofs,
+    std::span<const GlobalIndex> col_dofs,
+    GlobalSystemView* matrix_view,
+    GlobalSystemView* vector_view)
+{
+    if (options_.use_constraints && constraint_distributor_ &&
+        constraints_ != nullptr &&
+        (constraints_->hasConstrainedDofs(row_dofs) || constraints_->hasConstrainedDofs(col_dofs))) {
+        insertLocalConstrained(output, row_dofs, col_dofs, matrix_view, vector_view);
+        return;
+    }
+
+    (void)cell_id;
+    (void)row_dof_map;
+    (void)row_dof_offset;
+    (void)col_dof_map;
+    (void)col_dof_offset;
+    insertLocal(output, row_dofs, col_dofs, matrix_view, vector_view);
 }
 
 // ============================================================================
@@ -930,6 +1485,7 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
     if (!initialized_) {
         initialize();
     }
+    ensureCellDofTables(mesh);
 
     if (!kernel.hasBoundaryFace()) {
         return result;  // Nothing to do
@@ -966,6 +1522,15 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
         col_dof_map_ = row_dof_map_;
         col_dof_offset_ = row_dof_offset_;
     }
+    (void)getCellDofTable(mesh, row_dof_map_, row_dof_offset_);
+    (void)getCellDofTable(mesh, col_dof_map_, col_dof_offset_);
+    for (const auto& access : field_solution_access_) {
+        if (access.dof_map != nullptr) {
+            (void)getCellDofTable(mesh, access.dof_map, access.dof_offset);
+        }
+    }
+    ensureFieldAccessPlans(mesh);
+    ensureResolvedVectorTables(mesh);
 
     // Ensure AssemblyContext uses the mesh spatial dimension (2D/3D).
     const LocalIndex max_dofs =
@@ -1002,18 +1567,10 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
                     return;
                 }
                 // Get cell DOFs (rows/cols may come from different maps)
-                auto row_cell_dofs = row_dof_map_->getCellDofs(cell_id);
-                auto col_cell_dofs = col_dof_map_->getCellDofs(cell_id);
-
-                row_dofs_.resize(row_cell_dofs.size());
-                for (std::size_t i = 0; i < row_cell_dofs.size(); ++i) {
-                    row_dofs_[i] = row_cell_dofs[i] + row_dof_offset_;
-                }
-
-                col_dofs_.resize(col_cell_dofs.size());
-                for (std::size_t j = 0; j < col_cell_dofs.size(); ++j) {
-                    col_dofs_[j] = col_cell_dofs[j] + col_dof_offset_;
-                }
+                const auto row_dofs =
+                    getCellDofsCached(mesh, cell_id, row_dof_map_, row_dof_offset_);
+                const auto col_dofs =
+                    getCellDofsCached(mesh, cell_id, col_dof_map_, col_dof_offset_);
 
                 // Prepare context for face
                 LocalIndex local_face_id = mesh.getLocalFaceIndex(face_id, cell_id);
@@ -1031,30 +1588,17 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
                 context_.clearAllPreviousSolutionData();
                 context_.setBoundaryMarker(boundary_marker);
 
-	            if (need_solution) {
-	                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
-	                            "StandardAssembler::assembleBoundaryFaces: kernel requires solution but no solution was set");
-	                local_solution_coeffs_.resize(col_dofs_.size());
-	                if (current_solution_view_ != nullptr) {
-	                    for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
-	                        const auto dof = col_dofs_[i];
-	                        if (dof < 0) {
-	                            FE_THROW(FEException, "StandardAssembler::assembleBoundaryFaces: negative DOF index");
-	                        }
-	                        local_solution_coeffs_[i] = current_solution_view_->getVectorEntry(dof);
-	                    }
-	                } else {
-	                    for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
-	                        const auto dof = col_dofs_[i];
-	                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-	                                    "StandardAssembler::assembleBoundaryFaces: solution vector too small for DOF " +
-	                                        std::to_string(dof));
-	                        local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
-	                    }
-	                }
-	                if (context_.trialUsesVectorBasis()) {
-	                    applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
-	                                                  std::span<Real>(local_solution_coeffs_));
+		            if (need_solution) {
+		                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+		                            "StandardAssembler::assembleBoundaryFaces: kernel requires solution but no solution was set");
+                        ResolvedVectorGatherCache resolved_cache;
+		                local_solution_coeffs_.resize(col_dofs.size());
+                        gatherVectorCoefficients(col_dofs, current_solution_view_, current_solution_,
+                                                 local_solution_coeffs_, &resolved_cache,
+                                                 "StandardAssembler::assembleBoundaryFaces", true);
+		                if (context_.trialUsesVectorBasis()) {
+		                    applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
+		                                                  std::span<Real>(local_solution_coeffs_));
 	                }
 	                context_.setSolutionCoefficients(local_solution_coeffs_);
 
@@ -1073,28 +1617,16 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
 	                            const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
 	                                                        ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
 	                                                        : nullptr;
-	                            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
-	                                        "StandardAssembler::assembleBoundaryFaces: previous solution (k=" +
-	                                            std::to_string(k) + ") not set");
-	                            auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
-	                            local_prev.resize(col_dofs_.size());
-	                            for (std::size_t i = 0; i < col_dofs_.size(); ++i) {
-	                                const auto dof = col_dofs_[i];
-	                                if (dof < 0) {
-	                                    FE_THROW(FEException, "StandardAssembler::assembleBoundaryFaces: negative DOF index (prev)");
-	                                }
-	                                if (prev_view != nullptr) {
-	                                    local_prev[i] = prev_view->getVectorEntry(dof);
-	                                } else {
-	                                    FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
-	                                                "StandardAssembler::assembleBoundaryFaces: previous solution vector too small for DOF " +
-	                                                    std::to_string(dof));
-	                                    local_prev[i] = prev[static_cast<std::size_t>(dof)];
-	                                }
-	                            }
-	                            if (context_.trialUsesVectorBasis()) {
-	                                applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
-	                                                              std::span<Real>(local_prev));
+		                            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+		                                        "StandardAssembler::assembleBoundaryFaces: previous solution (k=" +
+		                                            std::to_string(k) + ") not set");
+		                            auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                                    gatherVectorCoefficients(col_dofs, prev_view, prev, local_prev,
+                                                             &resolved_cache,
+                                                             "StandardAssembler::assembleBoundaryFaces", true);
+		                            if (context_.trialUsesVectorBasis()) {
+		                                applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
+		                                                              std::span<Real>(local_prev));
 	                            }
                             context_.setPreviousSolutionCoefficientsK(k, local_prev);
                         }
@@ -1127,10 +1659,10 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
 
                 // Insert into global system
                 if (options_.use_constraints && constraint_distributor_) {
-                    insertLocalConstrained(kernel_output_, row_dofs_, col_dofs_,
+                    insertLocalConstrained(kernel_output_, row_dofs, col_dofs,
                                            insert_matrix_view, insert_vector_view);
                 } else {
-                    insertLocal(kernel_output_, row_dofs_, col_dofs_,
+                    insertLocal(kernel_output_, row_dofs, col_dofs,
                                 insert_matrix_view, insert_vector_view);
                 }
 
@@ -1162,6 +1694,7 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     if (!initialized_) {
         initialize();
     }
+    ensureCellDofTables(mesh);
 
     if (!kernel.hasInteriorFace()) {
         return result;
@@ -1197,6 +1730,15 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
         col_dof_map_ = row_dof_map_;
         col_dof_offset_ = row_dof_offset_;
     }
+    (void)getCellDofTable(mesh, row_dof_map_, row_dof_offset_);
+    (void)getCellDofTable(mesh, col_dof_map_, col_dof_offset_);
+    for (const auto& access : field_solution_access_) {
+        if (access.dof_map != nullptr) {
+            (void)getCellDofTable(mesh, access.dof_map, access.dof_offset);
+        }
+    }
+    ensureFieldAccessPlans(mesh);
+    ensureResolvedVectorTables(mesh);
 
     // Ensure AssemblyContext uses the mesh spatial dimension (2D/3D).
     context_.reserve(std::max(row_dof_map_->getMaxDofsPerCell(),
@@ -1238,8 +1780,10 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     KernelOutput output_minus, output_plus, coupling_mp, coupling_pm;
 
     // Scratch for DOFs
-    std::vector<GlobalIndex> minus_row_dofs, plus_row_dofs;
-    std::vector<GlobalIndex> minus_col_dofs, plus_col_dofs;
+    std::span<const GlobalIndex> minus_row_dofs;
+    std::span<const GlobalIndex> plus_row_dofs;
+    std::span<const GlobalIndex> minus_col_dofs;
+    std::span<const GlobalIndex> plus_col_dofs;
     std::vector<Real> plus_solution_coeffs;
     std::vector<std::vector<Real>> plus_prev_solution_coeffs;
     std::vector<GlobalIndex> cell_nodes_minus;
@@ -1252,28 +1796,10 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                 return;
             }
             // Get DOFs for both cells (rows/cols may differ)
-            auto minus_row_local = row_dof_map_->getCellDofs(cell_minus);
-            auto plus_row_local = row_dof_map_->getCellDofs(cell_plus);
-            auto minus_col_local = col_dof_map_->getCellDofs(cell_minus);
-            auto plus_col_local = col_dof_map_->getCellDofs(cell_plus);
-
-            minus_row_dofs.resize(minus_row_local.size());
-            for (std::size_t i = 0; i < minus_row_local.size(); ++i) {
-                minus_row_dofs[i] = minus_row_local[i] + row_dof_offset_;
-            }
-            plus_row_dofs.resize(plus_row_local.size());
-            for (std::size_t i = 0; i < plus_row_local.size(); ++i) {
-                plus_row_dofs[i] = plus_row_local[i] + row_dof_offset_;
-            }
-
-            minus_col_dofs.resize(minus_col_local.size());
-            for (std::size_t j = 0; j < minus_col_local.size(); ++j) {
-                minus_col_dofs[j] = minus_col_local[j] + col_dof_offset_;
-            }
-            plus_col_dofs.resize(plus_col_local.size());
-            for (std::size_t j = 0; j < plus_col_local.size(); ++j) {
-                plus_col_dofs[j] = plus_col_local[j] + col_dof_offset_;
-            }
+            minus_row_dofs = getCellDofsCached(mesh, cell_minus, row_dof_map_, row_dof_offset_);
+            plus_row_dofs = getCellDofsCached(mesh, cell_plus, row_dof_map_, row_dof_offset_);
+            minus_col_dofs = getCellDofsCached(mesh, cell_minus, col_dof_map_, col_dof_offset_);
+            plus_col_dofs = getCellDofsCached(mesh, cell_plus, col_dof_map_, col_dof_offset_);
 
             // Prepare contexts for both sides
             LocalIndex local_face_minus = mesh.getLocalFaceIndex(face_id, cell_minus);
@@ -1347,55 +1873,29 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_plus.setCoupledValues(coupled_integrals_, coupled_aux_state_);
             context_plus.clearAllPreviousSolutionData();
 
-	            if (need_solution) {
-	                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
-	                            "StandardAssembler::assembleInteriorFaces: kernel requires solution but no solution was set");
-	
-	                local_solution_coeffs_.resize(minus_col_dofs.size());
-	                if (current_solution_view_ != nullptr) {
-	                    for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
-	                        const auto dof = minus_col_dofs[i];
-	                        if (dof < 0) {
-	                            FE_THROW(FEException, "StandardAssembler::assembleInteriorFaces: negative DOF index");
-	                        }
-	                        local_solution_coeffs_[i] = current_solution_view_->getVectorEntry(dof);
-	                    }
-	                } else {
-	                    for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
-	                        const auto dof = minus_col_dofs[i];
-	                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-	                                    "StandardAssembler::assembleInteriorFaces: solution vector too small for DOF " +
-	                                        std::to_string(dof));
-	                        local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
-	                    }
-	                }
-	                if (context_.trialUsesVectorBasis()) {
-	                    applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
-	                                                  std::span<Real>(local_solution_coeffs_));
+		            if (need_solution) {
+		                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+		                            "StandardAssembler::assembleInteriorFaces: kernel requires solution but no solution was set");
+                        ResolvedVectorGatherCache minus_resolved_cache;
+                        ResolvedVectorGatherCache plus_resolved_cache;
+		
+		                local_solution_coeffs_.resize(minus_col_dofs.size());
+                        gatherVectorCoefficients(minus_col_dofs, current_solution_view_, current_solution_,
+                                                 local_solution_coeffs_, &minus_resolved_cache,
+                                                 "StandardAssembler::assembleInteriorFaces", true);
+		                if (context_.trialUsesVectorBasis()) {
+		                    applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
+		                                                  std::span<Real>(local_solution_coeffs_));
 	                }
 	                context_.setSolutionCoefficients(local_solution_coeffs_);
-	
-	                plus_solution_coeffs.resize(plus_col_dofs.size());
-	                if (current_solution_view_ != nullptr) {
-	                    for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
-	                        const auto dof = plus_col_dofs[i];
-	                        if (dof < 0) {
-	                            FE_THROW(FEException, "StandardAssembler::assembleInteriorFaces: negative DOF index");
-	                        }
-	                        plus_solution_coeffs[i] = current_solution_view_->getVectorEntry(dof);
-	                    }
-	                } else {
-	                    for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
-	                        const auto dof = plus_col_dofs[i];
-	                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-	                                    "StandardAssembler::assembleInteriorFaces: solution vector too small for DOF " +
-	                                        std::to_string(dof));
-	                        plus_solution_coeffs[i] = current_solution_[static_cast<std::size_t>(dof)];
-	                    }
-	                }
-	                if (context_plus.trialUsesVectorBasis()) {
-	                    applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
-	                                                  std::span<Real>(plus_solution_coeffs));
+		
+		                plus_solution_coeffs.resize(plus_col_dofs.size());
+                        gatherVectorCoefficients(plus_col_dofs, current_solution_view_, current_solution_,
+                                                 plus_solution_coeffs, &plus_resolved_cache,
+                                                 "StandardAssembler::assembleInteriorFaces", true);
+		                if (context_plus.trialUsesVectorBasis()) {
+		                    applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
+		                                                  std::span<Real>(plus_solution_coeffs));
 	                }
 	                context_plus.setSolutionCoefficients(plus_solution_coeffs);
 
@@ -1422,49 +1922,23 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
 	                                        "StandardAssembler::assembleInteriorFaces: previous solution (k=" +
 	                                            std::to_string(k) + ") not set");
 
-	                            auto& local_prev_minus = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
-	                            local_prev_minus.resize(minus_col_dofs.size());
-	                            for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
-	                                const auto dof = minus_col_dofs[i];
-	                                if (dof < 0) {
-	                                    FE_THROW(FEException,
-	                                             "StandardAssembler::assembleInteriorFaces: negative DOF index (prev)");
-	                                }
-	                                if (prev_view != nullptr) {
-	                                    local_prev_minus[i] = prev_view->getVectorEntry(dof);
-	                                } else {
-	                                    FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
-	                                                "StandardAssembler::assembleInteriorFaces: previous solution vector too small for DOF " +
-	                                                    std::to_string(dof));
-	                                    local_prev_minus[i] = prev[static_cast<std::size_t>(dof)];
-	                                }
-	                            }
-	                            if (context_.trialUsesVectorBasis()) {
-	                                applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
-	                                                              std::span<Real>(local_prev_minus));
+		                            auto& local_prev_minus = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                                    gatherVectorCoefficients(minus_col_dofs, prev_view, prev,
+                                                             local_prev_minus, &minus_resolved_cache,
+                                                             "StandardAssembler::assembleInteriorFaces", true);
+		                            if (context_.trialUsesVectorBasis()) {
+		                                applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
+		                                                              std::span<Real>(local_prev_minus));
 	                            }
                             context_.setPreviousSolutionCoefficientsK(k, local_prev_minus);
 
-	                            auto& local_prev_plus = plus_prev_solution_coeffs[static_cast<std::size_t>(k - 1)];
-	                            local_prev_plus.resize(plus_col_dofs.size());
-	                            for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
-	                                const auto dof = plus_col_dofs[i];
-	                                if (dof < 0) {
-	                                    FE_THROW(FEException,
-	                                             "StandardAssembler::assembleInteriorFaces: negative DOF index (prev)");
-	                                }
-	                                if (prev_view != nullptr) {
-	                                    local_prev_plus[i] = prev_view->getVectorEntry(dof);
-	                                } else {
-	                                    FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
-	                                                "StandardAssembler::assembleInteriorFaces: previous solution vector too small for DOF " +
-	                                                    std::to_string(dof));
-	                                    local_prev_plus[i] = prev[static_cast<std::size_t>(dof)];
-	                                }
-	                            }
-	                            if (context_plus.trialUsesVectorBasis()) {
-	                                applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
-	                                                              std::span<Real>(local_prev_plus));
+		                            auto& local_prev_plus = plus_prev_solution_coeffs[static_cast<std::size_t>(k - 1)];
+                                    gatherVectorCoefficients(plus_col_dofs, prev_view, prev,
+                                                             local_prev_plus, &plus_resolved_cache,
+                                                             "StandardAssembler::assembleInteriorFaces", true);
+		                            if (context_plus.trialUsesVectorBasis()) {
+		                                applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
+		                                                              std::span<Real>(local_prev_plus));
 	                            }
                             context_plus.setPreviousSolutionCoefficientsK(k, local_prev_plus);
                         }
@@ -1566,6 +2040,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
     if (!initialized_) {
         initialize();
     }
+    ensureCellDofTables(mesh);
 
     if (!kernel.hasInterfaceFace()) {
         return result;
@@ -1601,6 +2076,15 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         col_dof_map_ = row_dof_map_;
         col_dof_offset_ = row_dof_offset_;
     }
+    (void)getCellDofTable(mesh, row_dof_map_, row_dof_offset_);
+    (void)getCellDofTable(mesh, col_dof_map_, col_dof_offset_);
+    for (const auto& access : field_solution_access_) {
+        if (access.dof_map != nullptr) {
+            (void)getCellDofTable(mesh, access.dof_map, access.dof_offset);
+        }
+    }
+    ensureFieldAccessPlans(mesh);
+    ensureResolvedVectorTables(mesh);
 
     // Ensure AssemblyContext uses the mesh spatial dimension (2D/3D).
     context_.reserve(std::max(row_dof_map_->getMaxDofsPerCell(),
@@ -1617,8 +2101,10 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
     KernelOutput output_minus, output_plus, coupling_mp, coupling_pm;
 
     // Scratch for DOFs
-    std::vector<GlobalIndex> minus_row_dofs, plus_row_dofs;
-    std::vector<GlobalIndex> minus_col_dofs, plus_col_dofs;
+    std::span<const GlobalIndex> minus_row_dofs;
+    std::span<const GlobalIndex> plus_row_dofs;
+    std::span<const GlobalIndex> minus_col_dofs;
+    std::span<const GlobalIndex> plus_col_dofs;
     std::vector<Real> plus_solution_coeffs;
     std::vector<std::vector<Real>> plus_prev_solution_coeffs;
     std::vector<GlobalIndex> cell_nodes_minus;
@@ -1669,28 +2155,10 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                     "StandardAssembler::assembleInterfaceFaces: invalid local face index in InterfaceMesh");
 
         // Get DOFs for both cells (rows/cols may differ)
-        auto minus_row_local = row_dof_map_->getCellDofs(cell_minus);
-        auto plus_row_local = row_dof_map_->getCellDofs(cell_plus);
-        auto minus_col_local = col_dof_map_->getCellDofs(cell_minus);
-        auto plus_col_local = col_dof_map_->getCellDofs(cell_plus);
-
-        minus_row_dofs.resize(minus_row_local.size());
-        for (std::size_t i = 0; i < minus_row_local.size(); ++i) {
-            minus_row_dofs[i] = minus_row_local[i] + row_dof_offset_;
-        }
-        plus_row_dofs.resize(plus_row_local.size());
-        for (std::size_t i = 0; i < plus_row_local.size(); ++i) {
-            plus_row_dofs[i] = plus_row_local[i] + row_dof_offset_;
-        }
-
-        minus_col_dofs.resize(minus_col_local.size());
-        for (std::size_t j = 0; j < minus_col_local.size(); ++j) {
-            minus_col_dofs[j] = minus_col_local[j] + col_dof_offset_;
-        }
-        plus_col_dofs.resize(plus_col_local.size());
-        for (std::size_t j = 0; j < plus_col_local.size(); ++j) {
-            plus_col_dofs[j] = plus_col_local[j] + col_dof_offset_;
-        }
+        minus_row_dofs = getCellDofsCached(mesh, cell_minus, row_dof_map_, row_dof_offset_);
+        plus_row_dofs = getCellDofsCached(mesh, cell_plus, row_dof_map_, row_dof_offset_);
+        minus_col_dofs = getCellDofsCached(mesh, cell_minus, col_dof_map_, col_dof_offset_);
+        plus_col_dofs = getCellDofsCached(mesh, cell_plus, col_dof_map_, col_dof_offset_);
 
         // Prepare contexts for both sides
         prepareContextFace(context_, mesh, face_id, cell_minus, local_face_minus, test_space, trial_space,
@@ -1761,55 +2229,29 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         context_plus.setCoupledValues(coupled_integrals_, coupled_aux_state_);
         context_plus.clearAllPreviousSolutionData();
 
-        if (need_solution) {
-            FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
-                        "StandardAssembler::assembleInterfaceFaces: kernel requires solution but no solution was set");
+	        if (need_solution) {
+	            FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+	                        "StandardAssembler::assembleInterfaceFaces: kernel requires solution but no solution was set");
+            ResolvedVectorGatherCache minus_resolved_cache;
+            ResolvedVectorGatherCache plus_resolved_cache;
 
-            local_solution_coeffs_.resize(minus_col_dofs.size());
-            if (current_solution_view_ != nullptr) {
-                for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
-                    const auto dof = minus_col_dofs[i];
-                    if (dof < 0) {
-                        FE_THROW(FEException, "StandardAssembler::assembleInterfaceFaces: negative DOF index");
-                    }
-                    local_solution_coeffs_[i] = current_solution_view_->getVectorEntry(dof);
-                }
-            } else {
-                for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
-                    const auto dof = minus_col_dofs[i];
-                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-                                "StandardAssembler::assembleInterfaceFaces: solution vector too small for DOF " +
-                                    std::to_string(dof));
-                    local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
-                }
-            }
-            if (context_.trialUsesVectorBasis()) {
-                applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
-                                              std::span<Real>(local_solution_coeffs_));
+	            local_solution_coeffs_.resize(minus_col_dofs.size());
+                gatherVectorCoefficients(minus_col_dofs, current_solution_view_, current_solution_,
+                                         local_solution_coeffs_, &minus_resolved_cache,
+                                         "StandardAssembler::assembleInterfaceFaces", true);
+	            if (context_.trialUsesVectorBasis()) {
+	                applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
+	                                              std::span<Real>(local_solution_coeffs_));
             }
             context_.setSolutionCoefficients(local_solution_coeffs_);
 
-            plus_solution_coeffs.resize(plus_col_dofs.size());
-            if (current_solution_view_ != nullptr) {
-                for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
-                    const auto dof = plus_col_dofs[i];
-                    if (dof < 0) {
-                        FE_THROW(FEException, "StandardAssembler::assembleInterfaceFaces: negative DOF index");
-                    }
-                    plus_solution_coeffs[i] = current_solution_view_->getVectorEntry(dof);
-                }
-            } else {
-                for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
-                    const auto dof = plus_col_dofs[i];
-                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-                                "StandardAssembler::assembleInterfaceFaces: solution vector too small for DOF " +
-                                    std::to_string(dof));
-                    plus_solution_coeffs[i] = current_solution_[static_cast<std::size_t>(dof)];
-                }
-            }
-            if (context_plus.trialUsesVectorBasis()) {
-                applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
-                                              std::span<Real>(plus_solution_coeffs));
+	            plus_solution_coeffs.resize(plus_col_dofs.size());
+                gatherVectorCoefficients(plus_col_dofs, current_solution_view_, current_solution_,
+                                         plus_solution_coeffs, &plus_resolved_cache,
+                                         "StandardAssembler::assembleInterfaceFaces", true);
+	            if (context_plus.trialUsesVectorBasis()) {
+	                applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
+	                                              std::span<Real>(plus_solution_coeffs));
             }
             context_plus.setSolutionCoefficients(plus_solution_coeffs);
 
@@ -1836,49 +2278,23 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
 	                                    "StandardAssembler::assembleInterfaceFaces: previous solution (k=" +
 	                                        std::to_string(k) + ") not set");
 
-	                        auto& local_prev_minus = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
-	                        local_prev_minus.resize(minus_col_dofs.size());
-	                        for (std::size_t i = 0; i < minus_col_dofs.size(); ++i) {
-	                            const auto dof = minus_col_dofs[i];
-	                            if (dof < 0) {
-	                                FE_THROW(FEException,
-	                                         "StandardAssembler::assembleInterfaceFaces: negative DOF index (prev)");
-	                            }
-	                            if (prev_view != nullptr) {
-	                                local_prev_minus[i] = prev_view->getVectorEntry(dof);
-	                            } else {
-	                                FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
-	                                            "StandardAssembler::assembleInterfaceFaces: previous solution vector too small for DOF " +
-	                                                std::to_string(dof));
-	                                local_prev_minus[i] = prev[static_cast<std::size_t>(dof)];
-	                            }
-	                        }
-	                        if (context_.trialUsesVectorBasis()) {
-	                            applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
-	                                                          std::span<Real>(local_prev_minus));
+		                        auto& local_prev_minus = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                                gatherVectorCoefficients(minus_col_dofs, prev_view, prev,
+                                                         local_prev_minus, &minus_resolved_cache,
+                                                         "StandardAssembler::assembleInterfaceFaces", true);
+		                        if (context_.trialUsesVectorBasis()) {
+		                            applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
+		                                                          std::span<Real>(local_prev_minus));
 	                        }
                         context_.setPreviousSolutionCoefficientsK(k, local_prev_minus);
 
-	                        auto& local_prev_plus = plus_prev_solution_coeffs[static_cast<std::size_t>(k - 1)];
-	                        local_prev_plus.resize(plus_col_dofs.size());
-	                        for (std::size_t i = 0; i < plus_col_dofs.size(); ++i) {
-	                            const auto dof = plus_col_dofs[i];
-	                            if (dof < 0) {
-	                                FE_THROW(FEException,
-	                                         "StandardAssembler::assembleInterfaceFaces: negative DOF index (prev)");
-	                            }
-	                            if (prev_view != nullptr) {
-	                                local_prev_plus[i] = prev_view->getVectorEntry(dof);
-	                            } else {
-	                                FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
-	                                            "StandardAssembler::assembleInterfaceFaces: previous solution vector too small for DOF " +
-	                                                std::to_string(dof));
-	                                local_prev_plus[i] = prev[static_cast<std::size_t>(dof)];
-	                            }
-	                        }
-	                        if (context_plus.trialUsesVectorBasis()) {
-	                            applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
-	                                                          std::span<Real>(local_prev_plus));
+		                        auto& local_prev_plus = plus_prev_solution_coeffs[static_cast<std::size_t>(k - 1)];
+                                gatherVectorCoefficients(plus_col_dofs, prev_view, prev,
+                                                         local_prev_plus, &plus_resolved_cache,
+                                                         "StandardAssembler::assembleInterfaceFaces", true);
+		                        if (context_plus.trialUsesVectorBasis()) {
+		                            applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
+		                                                          std::span<Real>(local_prev_plus));
 	                        }
                         context_plus.setPreviousSolutionCoefficientsK(k, local_prev_plus);
                     }
@@ -1989,6 +2405,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
     if (!initialized_) {
         initialize();
     }
+    ensureCellDofTables(mesh);
 
     // Begin assembly phase
     if (matrix_view && assemble_matrix && matrix_view->getPhase() == AssemblyPhase::NotStarted) {
@@ -2030,6 +2447,15 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         col_dof_map_ = row_dof_map_;
         col_dof_offset_ = row_dof_offset_;
     }
+    (void)getCellDofTable(mesh, row_dof_map_, row_dof_offset_);
+    (void)getCellDofTable(mesh, col_dof_map_, col_dof_offset_);
+    for (const auto& access : field_solution_access_) {
+        if (access.dof_map != nullptr) {
+            (void)getCellDofTable(mesh, access.dof_map, access.dof_offset);
+        }
+    }
+    ensureFieldAccessPlans(mesh);
+    ensureResolvedVectorTables(mesh);
 
     const LocalIndex max_dofs =
         std::max(row_dof_map_->getMaxDofsPerCell(), col_dof_map_->getMaxDofsPerCell());
@@ -2093,21 +2519,11 @@ AssemblyResult StandardAssembler::assembleCellsCore(
 
     auto prepare_cell_data = [&](GlobalIndex cell_id,
                                  AssemblyContext& ctx,
-                                 std::vector<GlobalIndex>& row_dofs,
-                                 std::vector<GlobalIndex>& col_dofs) {
+                                 std::span<const GlobalIndex>& row_dofs,
+                                 std::span<const GlobalIndex>& col_dofs) {
         double tp_s0 = TP_SUB();
-        auto row_local = row_dof_map_->getCellDofs(cell_id);
-        auto col_local = col_dof_map_->getCellDofs(cell_id);
-
-        row_dofs.resize(row_local.size());
-        for (std::size_t i = 0; i < row_local.size(); ++i) {
-            row_dofs[i] = row_local[i] + row_dof_offset_;
-        }
-
-        col_dofs.resize(col_local.size());
-        for (std::size_t j = 0; j < col_local.size(); ++j) {
-            col_dofs[j] = col_local[j] + col_dof_offset_;
-        }
+        row_dofs = getCellDofsCached(mesh, cell_id, row_dof_map_, row_dof_offset_);
+        col_dofs = getCellDofsCached(mesh, cell_id, col_dof_map_, col_dof_offset_);
         tp_sub_dofmap += TP_SUB() - tp_s0;
 
         tp_s0 = TP_SUB();
@@ -2132,31 +2548,18 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         FE_THROW_IF(col_dofs.size() != static_cast<std::size_t>(ctx.numTrialDofs()), FEException,
                     "StandardAssembler::assembleCellsCore: column DOF count does not match trial space element DOFs");
 
-        tp_s0 = TP_SUB();
-        if (need_solution) {
-            FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
-                        "StandardAssembler::assembleCellsCore: kernel requires solution but no solution was set");
-            local_solution_coeffs_.resize(col_dofs.size());
-            if (current_solution_view_ != nullptr) {
-                for (std::size_t i = 0; i < col_dofs.size(); ++i) {
-                    const auto dof = col_dofs[i];
-                    if (dof < 0) {
-                        FE_THROW(FEException, "StandardAssembler::assembleCellsCore: negative DOF index");
-                    }
-                    local_solution_coeffs_[i] = current_solution_view_->getVectorEntry(dof);
-                }
-            } else {
-                for (std::size_t i = 0; i < col_dofs.size(); ++i) {
-                    const auto dof = col_dofs[i];
-                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-                                "StandardAssembler::assembleCellsCore: solution vector too small for DOF " +
-                                    std::to_string(dof));
-                    local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
-                }
-            }
-            if (ctx.trialUsesVectorBasis()) {
-                applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
-                                              std::span<Real>(local_solution_coeffs_));
+	        tp_s0 = TP_SUB();
+	        if (need_solution) {
+	            FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+	                        "StandardAssembler::assembleCellsCore: kernel requires solution but no solution was set");
+	            local_solution_coeffs_.resize(col_dofs.size());
+                gatherCellVectorCoefficients(cell_id, col_dof_map_, col_dof_offset_,
+                                             col_dofs, current_solution_view_,
+                                             current_solution_, local_solution_coeffs_,
+                                             "StandardAssembler::assembleCellsCore", true);
+	            if (ctx.trialUsesVectorBasis()) {
+	                applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
+	                                              std::span<Real>(local_solution_coeffs_));
             }
             ctx.setSolutionCoefficients(local_solution_coeffs_);
 
@@ -2175,29 +2578,16 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                         const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
                                                     ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
                                                     : nullptr;
-                        FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
-                                    "StandardAssembler::assembleCellsCore: previous solution (k=" +
-                                        std::to_string(k) + ") not set");
-                        auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
-                        local_prev.resize(col_dofs.size());
-                        for (std::size_t i = 0; i < col_dofs.size(); ++i) {
-                            const auto dof = col_dofs[i];
-                            if (dof < 0) {
-                                FE_THROW(FEException,
-                                         "StandardAssembler::assembleCellsCore: negative DOF index (prev)");
-                            }
-                            if (prev_view != nullptr) {
-                                local_prev[i] = prev_view->getVectorEntry(dof);
-                            } else {
-                                FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
-                                            "StandardAssembler::assembleCellsCore: previous solution vector too small for DOF " +
-                                                std::to_string(dof));
-                                local_prev[i] = prev[static_cast<std::size_t>(dof)];
-                            }
-                        }
-                        if (ctx.trialUsesVectorBasis()) {
-                            applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
-                                                          std::span<Real>(local_prev));
+	                        FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+	                                    "StandardAssembler::assembleCellsCore: previous solution (k=" +
+	                                        std::to_string(k) + ") not set");
+	                        auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                            gatherCellVectorCoefficients(cell_id, col_dof_map_, col_dof_offset_,
+                                                         col_dofs, prev_view, prev, local_prev,
+                                                         "StandardAssembler::assembleCellsCore", true);
+	                        if (ctx.trialUsesVectorBasis()) {
+	                            applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
+	                                                          std::span<Real>(local_prev));
                         }
                         ctx.setPreviousSolutionCoefficientsK(k, local_prev);
                     }
@@ -2229,22 +2619,18 @@ AssemblyResult StandardAssembler::assembleCellsCore(
 
     auto insert_cell_output = [&](GlobalIndex cell_id,
                                   AssemblyContext& ctx,
-                                  std::vector<GlobalIndex>& row_dofs,
-                                  std::vector<GlobalIndex>& col_dofs,
+                                  std::span<const GlobalIndex> row_dofs,
+                                  std::span<const GlobalIndex> col_dofs,
                                   KernelOutput& output) {
         if (ctx.testUsesVectorBasis() || ctx.trialUsesVectorBasis()) {
             applyVectorBasisOutputOrientation(mesh, cell_id, test_space, cell_id, trial_space, output);
         }
 
-        if (options_.use_constraints && constraint_distributor_) {
-            insertLocalConstrained(output, row_dofs, col_dofs,
-                                   assemble_matrix ? insert_matrix_view : nullptr,
-                                   assemble_vector ? insert_vector_view : nullptr);
-        } else {
-            insertLocal(output, row_dofs, col_dofs,
-                        assemble_matrix ? insert_matrix_view : nullptr,
-                        assemble_vector ? insert_vector_view : nullptr);
-        }
+        insertLocalForCell(cell_id, row_dof_map_, row_dof_offset_,
+                           col_dof_map_, col_dof_offset_,
+                           output, row_dofs, col_dofs,
+                           assemble_matrix ? insert_matrix_view : nullptr,
+                           assemble_vector ? insert_vector_view : nullptr);
 
         result.elements_assembled++;
         if (output.has_matrix) {
@@ -2271,10 +2657,12 @@ AssemblyResult StandardAssembler::assembleCellsCore(
             auto TP = []() -> double { return 0.0; };
 #endif
             double tp0;
+            std::span<const GlobalIndex> row_dofs;
+            std::span<const GlobalIndex> col_dofs;
 
             for (const auto cell_id : cell_ids) {
                 tp0 = TP();
-                prepare_cell_data(cell_id, context_, row_dofs_, col_dofs_);
+                prepare_cell_data(cell_id, context_, row_dofs, col_dofs);
                 tp_prepare += TP() - tp0;
 
                 tp0 = TP();
@@ -2283,7 +2671,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                 tp_kernel += TP() - tp0;
 
                 tp0 = TP();
-                insert_cell_output(cell_id, context_, row_dofs_, col_dofs_, kernel_output_);
+                insert_cell_output(cell_id, context_, row_dofs, col_dofs, kernel_output_);
                 tp_insert += TP() - tp0;
             }
 
@@ -2333,8 +2721,8 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         for (auto& ctx : batch_contexts) {
             ctx.reserve(max_dofs, max_qpts, mesh.dimension());
         }
-        std::vector<std::vector<GlobalIndex>> batch_row_dofs(requested_batch_size);
-        std::vector<std::vector<GlobalIndex>> batch_col_dofs(requested_batch_size);
+        std::vector<std::span<const GlobalIndex>> batch_row_dofs(requested_batch_size);
+        std::vector<std::span<const GlobalIndex>> batch_col_dofs(requested_batch_size);
         std::vector<KernelOutput> batch_outputs(requested_batch_size);
         std::vector<const AssemblyContext*> batch_context_ptrs(requested_batch_size, nullptr);
 
@@ -3636,6 +4024,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     if (!initialized_) {
         initialize();
     }
+    ensureCellDofTables(mesh);
 
     // Begin assembly phase on all views
     for (const auto& t : terms) {
@@ -3659,7 +4048,16 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         FE_CHECK_NOT_NULL(t.row_dof_map, "assembleCellsFused: row_dof_map");
         FE_CHECK_NOT_NULL(t.col_dof_map, "assembleCellsFused: col_dof_map");
         if (!t.kernel->hasCell()) continue;
+        (void)getCellDofTable(mesh, t.row_dof_map, t.row_dof_offset);
+        (void)getCellDofTable(mesh, t.col_dof_map, t.col_dof_offset);
     }
+    for (const auto& access : field_solution_access_) {
+        if (access.dof_map != nullptr) {
+            (void)getCellDofTable(mesh, access.dof_map, access.dof_offset);
+        }
+    }
+    ensureFieldAccessPlans(mesh);
+    ensureResolvedVectorTables(mesh);
 
     // Check if any term actually has work to do
     bool any_has_cell = false;
@@ -3771,8 +4169,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
     // Per-term scratch: DOF vectors and OwnedRowOnlyViews
     struct TermScratch {
-        std::vector<GlobalIndex> row_dofs;
-        std::vector<GlobalIndex> col_dofs;
+        std::span<const GlobalIndex> row_dofs{};
+        std::span<const GlobalIndex> col_dofs{};
         std::optional<OwnedRowOnlyView> owned_matrix_view;
         std::optional<OwnedRowOnlyView> owned_vector_view;
         GlobalSystemView* insert_matrix{nullptr};
@@ -3881,17 +4279,10 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
                     "assembleCellsFused: kernel requires solution but no solution was set");
         auto& sol = batch_sol_coeffs[slot];
-        sol.resize(col_dofs.size());
-        if (current_solution_view_ != nullptr) {
-            current_solution_view_->getVectorEntries(col_dofs, std::span<Real>(sol));
-        } else {
-            for (std::size_t i = 0; i < col_dofs.size(); ++i) {
-                const auto dof = col_dofs[i];
-                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-                            "assembleCellsFused: solution vector too small for DOF " + std::to_string(dof));
-                sol[i] = current_solution_[static_cast<std::size_t>(dof)];
-            }
-        }
+        gatherCellVectorCoefficients(cell_id, t.col_dof_map, t.col_dof_offset,
+                                     col_dofs, current_solution_view_,
+                                     current_solution_, sol,
+                                     "assembleCellsFused", false);
         if (ctx.trialUsesVectorBasis()) {
             applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space, std::span<Real>(sol));
         }
@@ -3911,16 +4302,9 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     FE_THROW_IF(pdata.empty() && pview == nullptr, FEException,
                                 "assembleCellsFused: previous solution (k=" + std::to_string(k) + ") not set");
                     auto& lp = psc[static_cast<std::size_t>(k - 1)];
-                    lp.resize(col_dofs.size());
-                    if (pview != nullptr) {
-                        pview->getVectorEntries(col_dofs, std::span<Real>(lp));
-                    } else {
-                        for (std::size_t i = 0; i < col_dofs.size(); ++i) {
-                            const auto dof = col_dofs[i];
-                            FE_THROW_IF(dof < 0, FEException, "assembleCellsFused: negative DOF index (prev)");
-                            lp[i] = pdata[static_cast<std::size_t>(dof)];
-                        }
-                    }
+                    gatherCellVectorCoefficients(cell_id, t.col_dof_map, t.col_dof_offset,
+                                                 col_dofs, pview, pdata, lp,
+                                                 "assembleCellsFused", false);
                     if (ctx.trialUsesVectorBasis())
                         applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space, std::span<Real>(lp));
                     ctx.setPreviousSolutionCoefficientsK(k, lp);
@@ -3942,15 +4326,11 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 applyVectorBasisOutputOrientation(mesh, cid, *t.test_space, cid, *t.trial_space, output);
             const auto& rd = batch_dofs[ti][slot].row_dofs;
             const auto& cd = batch_dofs[ti][slot].col_dofs;
-            if (options_.use_constraints && constraint_distributor_) {
-                insertLocalConstrained(output, rd, cd,
-                                       t.assemble_matrix ? ts.insert_matrix : nullptr,
-                                       t.assemble_vector ? ts.insert_vector : nullptr);
-            } else {
-                insertLocal(output, rd, cd,
-                            t.assemble_matrix ? ts.insert_matrix : nullptr,
-                            t.assemble_vector ? ts.insert_vector : nullptr);
-            }
+            insertLocalForCell(cid, t.row_dof_map, t.row_dof_offset,
+                               t.col_dof_map, t.col_dof_offset,
+                               output, rd, cd,
+                               t.assemble_matrix ? ts.insert_matrix : nullptr,
+                               t.assemble_vector ? ts.insert_vector : nullptr);
             result.elements_assembled++;
             if (output.has_matrix)
                 result.matrix_entries_inserted += static_cast<GlobalIndex>(rd.size() * cd.size());
@@ -4029,7 +4409,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         // Blocks share a group iff col_dof_map ptr AND col_dof_offset match.
         // For NS-VMS 2D: VV+PV share velocity trial, VP+PP share pressure trial.
         struct TrialGroupSlotCache {
-            std::vector<GlobalIndex> col_dofs;
+            std::span<const GlobalIndex> col_dofs{};
             std::vector<Real> sol_coeffs;
             std::vector<std::vector<Real>> prev_sol_coeffs;
             bool uses_vector_basis{false};
@@ -4128,35 +4508,28 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         // DOF lookup
                         tp0 = TP();
                         {
-                            auto rl = bs.row_dof_map->getCellDofs(cell_id);
-                            auto cl = bs.col_dof_map->getCellDofs(cell_id);
                             auto& rd = batch_dofs[bi][slot].row_dofs;
                             auto& cd = batch_dofs[bi][slot].col_dofs;
-                            rd.resize(rl.size());
-                            for (std::size_t i = 0; i < rl.size(); ++i) rd[i] = rl[i] + bs.row_dof_offset;
-                            cd.resize(cl.size());
-                            for (std::size_t j = 0; j < cl.size(); ++j) cd[j] = cl[j] + bs.col_dof_offset;
+                            rd = getCellDofsCached(mesh, cell_id, bs.row_dof_map, bs.row_dof_offset);
+                            cd = getCellDofsCached(mesh, cell_id, bs.col_dof_map, bs.col_dof_offset);
                         }
                         tp_fb_dof += TP() - tp0;
 
-                        // Solution gather
-                        tp0 = TP();
-                        auto& snap = basis_snaps[flat];
-                        if (parent_td.need_solution) {
-                            const auto& cd = batch_dofs[bi][slot].col_dofs;
-                            auto& sol = snap.sol_coeffs;
-                            sol.resize(cd.size());
-                            if (current_solution_view_ != nullptr) {
-                                current_solution_view_->getVectorEntries(
-                                    std::span<const GlobalIndex>(cd), std::span<Real>(sol));
-                            } else {
-                                for (std::size_t i = 0; i < cd.size(); ++i) {
-                                    sol[i] = current_solution_[static_cast<std::size_t>(cd[i])];
-                                }
-                            }
-                            if (ctx.trialUsesVectorBasis())
-                                applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
-                                                              std::span<Real>(sol));
+	                        // Solution gather
+	                        tp0 = TP();
+	                        auto& snap = basis_snaps[flat];
+	                        if (parent_td.need_solution) {
+	                            const auto& cd = batch_dofs[bi][slot].col_dofs;
+	                            auto& sol = snap.sol_coeffs;
+                                gatherCellVectorCoefficients(cell_id, bs.col_dof_map,
+                                                             bs.col_dof_offset,
+                                                             std::span<const GlobalIndex>(cd),
+                                                             current_solution_view_,
+                                                             current_solution_, sol,
+                                                             "assembleCellsFused", false);
+	                            if (ctx.trialUsesVectorBasis())
+	                                applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
+	                                                              std::span<Real>(sol));
                             ctx.setSolutionCoefficients(std::span<const Real>(sol));
 
                             // Previous solution coefficients for time integration
@@ -4168,21 +4541,17 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                         psc.resize(static_cast<std::size_t>(required));
                                     for (int k = 1; k <= required; ++k) {
                                         const auto& pdata = previous_solutions_[static_cast<std::size_t>(k - 1)];
-                                        const auto* pview = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
-                                                                ? previous_solution_views_[static_cast<std::size_t>(k - 1)] : nullptr;
-                                        auto& lp = psc[static_cast<std::size_t>(k - 1)];
-                                        lp.resize(cd.size());
-                                        if (pview != nullptr) {
-                                            pview->getVectorEntries(
-                                                std::span<const GlobalIndex>(cd), std::span<Real>(lp));
-                                        } else {
-                                            for (std::size_t i = 0; i < cd.size(); ++i) {
-                                                lp[i] = pdata[static_cast<std::size_t>(cd[i])];
-                                            }
-                                        }
-                                        if (ctx.trialUsesVectorBasis())
-                                            applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
-                                                                          std::span<Real>(lp));
+	                                        const auto* pview = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+	                                                                ? previous_solution_views_[static_cast<std::size_t>(k - 1)] : nullptr;
+	                                        auto& lp = psc[static_cast<std::size_t>(k - 1)];
+                                            gatherCellVectorCoefficients(cell_id, bs.col_dof_map,
+                                                                         bs.col_dof_offset,
+                                                                         std::span<const GlobalIndex>(cd),
+                                                                         pview, pdata, lp,
+                                                                         "assembleCellsFused", false);
+	                                        if (ctx.trialUsesVectorBasis())
+	                                            applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
+	                                                                          std::span<Real>(lp));
                                         ctx.setPreviousSolutionCoefficientsK(k, lp);
                                     }
                                 }
@@ -4376,38 +4745,28 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         // Row DOFs are always per-block (different test spaces)
                         tp0 = TP();
                         {
-                            auto rl = bs.row_dof_map->getCellDofs(cell_id);
                             auto& rd = batch_dofs[bi][slot].row_dofs;
-                            rd.resize(rl.size());
-                            for (std::size_t i = 0; i < rl.size(); ++i) rd[i] = rl[i] + bs.row_dof_offset;
+                            rd = getCellDofsCached(mesh, cell_id, bs.row_dof_map, bs.row_dof_offset);
                         }
 
                         // Column DOFs + solution gather: deduplicate by trial group
                         auto& gc = tg_cache[static_cast<std::size_t>(tg) * B_eff + slot];
                         if (!gc.gathered) {
                             // First block in this trial group for this slot: do full gather
-                            auto cl = bs.col_dof_map->getCellDofs(cell_id);
-                            gc.col_dofs.resize(cl.size());
-                            for (std::size_t j = 0; j < cl.size(); ++j)
-                                gc.col_dofs[j] = cl[j] + bs.col_dof_offset;
-
+                            gc.col_dofs = getCellDofsCached(mesh, cell_id, bs.col_dof_map, bs.col_dof_offset);
                             batch_dofs[bi][slot].col_dofs = gc.col_dofs;
                             tp_fb_dof += TP() - tp0;
 
                             tp0 = TP();
                             if (parent_td.need_solution) {
                                 const auto& cd = gc.col_dofs;
-                                gc.sol_coeffs.resize(cd.size());
-                                if (current_solution_view_ != nullptr) {
-                                    current_solution_view_->getVectorEntries(
-                                        std::span<const GlobalIndex>(cd),
-                                        std::span<Real>(gc.sol_coeffs));
-                                } else {
-                                    for (std::size_t i = 0; i < cd.size(); ++i) {
-                                        gc.sol_coeffs[i] =
-                                            current_solution_[static_cast<std::size_t>(cd[i])];
-                                    }
-                                }
+                                gatherCellVectorCoefficients(cell_id, bs.col_dof_map,
+                                                             bs.col_dof_offset,
+                                                             std::span<const GlobalIndex>(cd),
+                                                             current_solution_view_,
+                                                             current_solution_,
+                                                             gc.sol_coeffs,
+                                                             "assembleCellsFused", false);
                                 gc.uses_vector_basis = ctx.trialUsesVectorBasis();
                                 if (gc.uses_vector_basis)
                                     applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
@@ -4430,16 +4789,11 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                                     : nullptr;
                                             auto& lp = gc.prev_sol_coeffs[
                                                 static_cast<std::size_t>(k - 1)];
-                                            lp.resize(cd.size());
-                                            if (pview != nullptr) {
-                                                pview->getVectorEntries(
-                                                    std::span<const GlobalIndex>(cd),
-                                                    std::span<Real>(lp));
-                                            } else {
-                                                for (std::size_t i = 0; i < cd.size(); ++i) {
-                                                    lp[i] = pdata[static_cast<std::size_t>(cd[i])];
-                                                }
-                                            }
+                                            gatherCellVectorCoefficients(cell_id, bs.col_dof_map,
+                                                                         bs.col_dof_offset,
+                                                                         std::span<const GlobalIndex>(cd),
+                                                                         pview, pdata, lp,
+                                                                         "assembleCellsFused", false);
                                             if (gc.uses_vector_basis)
                                                 applyVectorBasisGlobalToLocal(
                                                     mesh, cell_id, *bs.trial_space,
@@ -4551,14 +4905,10 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 tp0 = TP();
                 {
                     const auto& t0 = terms[0];
-                    auto rl = t0.row_dof_map->getCellDofs(cell_id);
-                    auto cl = t0.col_dof_map->getCellDofs(cell_id);
                     auto& rd = batch_dofs[0][slot].row_dofs;
                     auto& cd = batch_dofs[0][slot].col_dofs;
-                    rd.resize(rl.size());
-                    for (std::size_t i = 0; i < rl.size(); ++i) rd[i] = rl[i] + t0.row_dof_offset;
-                    cd.resize(cl.size());
-                    for (std::size_t j = 0; j < cl.size(); ++j) cd[j] = cl[j] + t0.col_dof_offset;
+                    rd = getCellDofsCached(mesh, cell_id, t0.row_dof_map, t0.row_dof_offset);
+                    cd = getCellDofsCached(mesh, cell_id, t0.col_dof_map, t0.col_dof_offset);
                 }
                 tp_fb_dof += TP() - tp0;
 
@@ -4619,14 +4969,10 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
                     tp0 = TP();
                     {
-                        auto rl = t.row_dof_map->getCellDofs(cell_id);
-                        auto cl = t.col_dof_map->getCellDofs(cell_id);
                         auto& rd = batch_dofs[ti][slot].row_dofs;
                         auto& cd = batch_dofs[ti][slot].col_dofs;
-                        rd.resize(rl.size());
-                        for (std::size_t i = 0; i < rl.size(); ++i) rd[i] = rl[i] + t.row_dof_offset;
-                        cd.resize(cl.size());
-                        for (std::size_t j = 0; j < cl.size(); ++j) cd[j] = cl[j] + t.col_dof_offset;
+                        rd = getCellDofsCached(mesh, cell_id, t.row_dof_map, t.row_dof_offset);
+                        cd = getCellDofsCached(mesh, cell_id, t.col_dof_map, t.col_dof_offset);
                     }
                     tp_fb_dof += TP() - tp0;
 
@@ -4819,16 +5165,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
             // a. DOF map lookup
             double tp_a = TP();
-            auto row_local = t.row_dof_map->getCellDofs(cell_id);
-            auto col_local = t.col_dof_map->getCellDofs(cell_id);
-            ts.row_dofs.resize(row_local.size());
-            for (std::size_t i = 0; i < row_local.size(); ++i) {
-                ts.row_dofs[i] = row_local[i] + t.row_dof_offset;
-            }
-            ts.col_dofs.resize(col_local.size());
-            for (std::size_t j = 0; j < col_local.size(); ++j) {
-                ts.col_dofs[j] = col_local[j] + t.col_dof_offset;
-            }
+            ts.row_dofs = getCellDofsCached(mesh, cell_id, t.row_dof_map, t.row_dof_offset);
+            ts.col_dofs = getCellDofsCached(mesh, cell_id, t.col_dof_map, t.col_dof_offset);
             tp_fused_dof += TP() - tp_a;
 
             // b. Prepare basis for this term's test/trial spaces
@@ -4837,30 +5175,19 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                          td.required_data, *fused_quad_rule);
             tp_fused_basis += TP() - tp_a;
 
-            // c. Solution coefficient gather for this term's trial DOFs
-            tp_a = TP();
-            if (td.need_solution) {
-                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
-                            "assembleCellsFused: kernel requires solution but no solution was set");
-                local_solution_coeffs_.resize(ts.col_dofs.size());
-                if (current_solution_view_ != nullptr) {
-                    for (std::size_t i = 0; i < ts.col_dofs.size(); ++i) {
-                        const auto dof = ts.col_dofs[i];
-                        FE_THROW_IF(dof < 0, FEException, "assembleCellsFused: negative DOF index");
-                        local_solution_coeffs_[i] = current_solution_view_->getVectorEntry(dof);
-                    }
-                } else {
-                    for (std::size_t i = 0; i < ts.col_dofs.size(); ++i) {
-                        const auto dof = ts.col_dofs[i];
-                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-                                    "assembleCellsFused: solution vector too small for DOF " +
-                                        std::to_string(dof));
-                        local_solution_coeffs_[i] = current_solution_[static_cast<std::size_t>(dof)];
-                    }
-                }
-                if (context_.trialUsesVectorBasis()) {
-                    applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space,
-                                                  std::span<Real>(local_solution_coeffs_));
+	            // c. Solution coefficient gather for this term's trial DOFs
+	            tp_a = TP();
+	            if (td.need_solution) {
+	                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+	                            "assembleCellsFused: kernel requires solution but no solution was set");
+	                local_solution_coeffs_.resize(ts.col_dofs.size());
+                    gatherCellVectorCoefficients(cell_id, t.col_dof_map, t.col_dof_offset,
+                                                 ts.col_dofs, current_solution_view_,
+                                                 current_solution_, local_solution_coeffs_,
+                                                 "assembleCellsFused", true);
+	                if (context_.trialUsesVectorBasis()) {
+	                    applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space,
+	                                                  std::span<Real>(local_solution_coeffs_));
                 }
                 context_.setSolutionCoefficients(local_solution_coeffs_);
 
@@ -4879,25 +5206,18 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
                                                         ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
                                                         : nullptr;
-                            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
-                                        "assembleCellsFused: previous solution (k=" +
-                                            std::to_string(k) + ") not set");
-                            auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
-                            local_prev.resize(ts.col_dofs.size());
-                            for (std::size_t i = 0; i < ts.col_dofs.size(); ++i) {
-                                const auto dof = ts.col_dofs[i];
-                                FE_THROW_IF(dof < 0, FEException, "assembleCellsFused: negative DOF index (prev)");
-                                if (prev_view != nullptr) {
-                                    local_prev[i] = prev_view->getVectorEntry(dof);
-                                } else {
-                                    FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
-                                                "assembleCellsFused: previous solution vector too small");
-                                    local_prev[i] = prev[static_cast<std::size_t>(dof)];
-                                }
-                            }
-                            if (context_.trialUsesVectorBasis()) {
-                                applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space,
-                                                              std::span<Real>(local_prev));
+	                            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+	                                        "assembleCellsFused: previous solution (k=" +
+	                                            std::to_string(k) + ") not set");
+	                            auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                                gatherCellVectorCoefficients(cell_id, t.col_dof_map,
+                                                             t.col_dof_offset,
+                                                             ts.col_dofs, prev_view, prev,
+                                                             local_prev,
+                                                             "assembleCellsFused", true);
+	                            if (context_.trialUsesVectorBasis()) {
+	                                applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space,
+	                                                              std::span<Real>(local_prev));
                             }
                             context_.setPreviousSolutionCoefficientsK(k, local_prev);
                         }
@@ -4932,15 +5252,11 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
             // h. Insert into global system
             tp_a = TP();
-            if (options_.use_constraints && constraint_distributor_) {
-                insertLocalConstrained(kernel_output_, ts.row_dofs, ts.col_dofs,
-                                       t.assemble_matrix ? ts.insert_matrix : nullptr,
-                                       t.assemble_vector ? ts.insert_vector : nullptr);
-            } else {
-                insertLocal(kernel_output_, ts.row_dofs, ts.col_dofs,
-                            t.assemble_matrix ? ts.insert_matrix : nullptr,
-                            t.assemble_vector ? ts.insert_vector : nullptr);
-            }
+            insertLocalForCell(cell_id, t.row_dof_map, t.row_dof_offset,
+                               t.col_dof_map, t.col_dof_offset,
+                               kernel_output_, ts.row_dofs, ts.col_dofs,
+                               t.assemble_matrix ? ts.insert_matrix : nullptr,
+                               t.assemble_vector ? ts.insert_vector : nullptr);
 
             tp_fused_insert += TP() - tp_a;
 
@@ -6322,16 +6638,6 @@ void StandardAssembler::applyVectorBasisOutputOrientation(
     }
 }
 
-const FieldSolutionAccess* StandardAssembler::findFieldSolutionAccess(FieldId field) const noexcept
-{
-    for (const auto& rec : field_solution_access_) {
-        if (rec.field == field) {
-            return &rec;
-        }
-    }
-    return nullptr;
-}
-
 void StandardAssembler::populateFieldSolutionData(
     AssemblyContext& context,
     const IMeshAccess& mesh,
@@ -6342,6 +6648,7 @@ void StandardAssembler::populateFieldSolutionData(
     if (requirements.empty()) {
         return;
     }
+    ensureFieldAccessPlans(mesh);
 
     FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
 	                "StandardAssembler::populateFieldSolutionData: no current solution vector was set");
@@ -6399,18 +6706,19 @@ void StandardAssembler::populateFieldSolutionData(
         FE_THROW_IF(req.field == INVALID_FIELD_ID, FEException,
                     "StandardAssembler::populateFieldSolutionData: kernel requested an invalid FieldId");
 
-        const auto* access = findFieldSolutionAccess(req.field);
+        const auto* access = findFieldAccessPlan(req.field);
         FE_THROW_IF(access == nullptr, FEException,
                     "StandardAssembler::populateFieldSolutionData: no FieldSolutionAccess was provided for field " +
                         std::to_string(req.field));
         FE_CHECK_NOT_NULL(access->space, "StandardAssembler::populateFieldSolutionData: field space");
         FE_CHECK_NOT_NULL(access->dof_map, "StandardAssembler::populateFieldSolutionData: field dof_map");
+        FE_CHECK_NOT_NULL(access->dof_table, "StandardAssembler::populateFieldSolutionData: field dof table");
 
         const auto& space = *access->space;
         const auto& element = getElement(space, cell_id, cell_type);
         const auto& basis = element.basis();
 
-        const bool is_product = (space.space_type() == spaces::SpaceType::Product);
+        const bool is_product = access->is_product;
         const auto n_qpts = context.numQuadraturePoints();
         const auto n_dofs = static_cast<LocalIndex>(space.dofs_per_element());
         const auto n_scalar_dofs = static_cast<LocalIndex>(element.num_dofs());
@@ -6422,33 +6730,17 @@ void StandardAssembler::populateFieldSolutionData(
         const bool need_gradients = want_gradients;
         const bool need_hessians = want_hessians || want_laplacians;
 
-        auto cell_dofs = access->dof_map->getCellDofs(cell_id);
-        FE_THROW_IF(cell_dofs.size() != static_cast<std::size_t>(n_dofs), FEException,
-                    "StandardAssembler::populateFieldSolutionData: field DOF count does not match its space DOFs");
+	        const auto cell_dofs = getCellDofsFromTable(*access->dof_table, cell_id);
+	        FE_THROW_IF(cell_dofs.size() != static_cast<std::size_t>(n_dofs), FEException,
+	                    "StandardAssembler::populateFieldSolutionData: field DOF count does not match its space DOFs");
 
 	        local_coeffs.resize(cell_dofs.size());
-            field_dof_scratch_.resize(cell_dofs.size());
-            for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
-                const auto dof = cell_dofs[i] + access->dof_offset;
-                if (dof < 0) {
-                    FE_THROW(FEException, "StandardAssembler::populateFieldSolutionData: negative DOF index");
-                }
-                field_dof_scratch_[i] = dof;
-            }
+            gatherCellVectorCoefficients(cell_id, access->dof_map, access->dof_offset,
+                                         cell_dofs, current_solution_view_,
+                                         current_solution_, local_coeffs,
+                                         "StandardAssembler::populateFieldSolutionData", false);
 
-            if (current_solution_view_ != nullptr) {
-                current_solution_view_->getVectorEntries(field_dof_scratch_, std::span<Real>(local_coeffs));
-            } else {
-                for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
-                    const auto dof = field_dof_scratch_[i];
-                    FE_THROW_IF(static_cast<std::size_t>(dof) >= current_solution_.size(), FEException,
-                                "StandardAssembler::populateFieldSolutionData: solution vector too small for DOF " +
-                                    std::to_string(dof));
-                    local_coeffs[i] = current_solution_[static_cast<std::size_t>(dof)];
-                }
-            }
-
-        if (space.field_type() == FieldType::Scalar) {
+        if (access->field_type == FieldType::Scalar) {
             FE_THROW_IF(is_product, FEException,
                         "StandardAssembler::populateFieldSolutionData: ProductSpace cannot be scalar-valued");
             FE_THROW_IF(n_dofs != n_scalar_dofs, FEException,
@@ -6604,17 +6896,10 @@ void StandardAssembler::populateFieldSolutionData(
 	                    FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
 	                                "StandardAssembler::populateFieldSolutionData: previous solution data missing");
 
-                        if (prev_view != nullptr) {
-                            prev_view->getVectorEntries(field_dof_scratch_, std::span<Real>(local_coeffs));
-                        } else {
-	                        for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
-                                const auto dof = field_dof_scratch_[i];
-	                            FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
-	                                        "StandardAssembler::populateFieldSolutionData: previous solution vector too small for DOF " +
-	                                            std::to_string(dof));
-	                            local_coeffs[i] = prev[static_cast<std::size_t>(dof)];
-	                        }
-	                    }
+                        gatherCellVectorCoefficients(cell_id, access->dof_map, access->dof_offset,
+                                                     cell_dofs, prev_view, prev,
+                                                     local_coeffs,
+                                                     "StandardAssembler::populateFieldSolutionData", false);
 
                     // Values only (dt() needs just value history).
                     scalar_values.assign(static_cast<std::size_t>(n_qpts), 0.0);
@@ -6645,8 +6930,8 @@ void StandardAssembler::populateFieldSolutionData(
             continue;
         }
 
-        if (space.field_type() == FieldType::Vector) {
-            const int vd = space.value_dimension();
+        if (access->field_type == FieldType::Vector) {
+            const int vd = access->value_dimension;
             FE_THROW_IF(vd <= 0 || vd > 3, FEException,
                         "StandardAssembler::populateFieldSolutionData: vector space value_dimension must be 1..3");
 
@@ -6727,17 +7012,10 @@ void StandardAssembler::populateFieldSolutionData(
 	                        FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
 	                                    "StandardAssembler::populateFieldSolutionData: previous solution data missing");
 
-                            if (prev_view != nullptr) {
-                                prev_view->getVectorEntries(field_dof_scratch_, std::span<Real>(local_coeffs));
-                            } else {
-	                            for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
-                                    const auto dof = field_dof_scratch_[i];
-	                                FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
-	                                            "StandardAssembler::populateFieldSolutionData: previous solution vector too small for DOF " +
-	                                                std::to_string(dof));
-	                                local_coeffs[i] = prev[static_cast<std::size_t>(dof)];
-	                            }
-	                        }
+                            gatherCellVectorCoefficients(cell_id, access->dof_map, access->dof_offset,
+                                                         cell_dofs, prev_view, prev,
+                                                         local_coeffs,
+                                                         "StandardAssembler::populateFieldSolutionData", false);
 
                         applyVectorBasisGlobalToLocal(mesh, cell_id, space, std::span<Real>(local_coeffs));
 
@@ -6959,17 +7237,10 @@ void StandardAssembler::populateFieldSolutionData(
 	                    FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
 	                                "StandardAssembler::populateFieldSolutionData: previous solution data missing");
 
-                        if (prev_view != nullptr) {
-                            prev_view->getVectorEntries(field_dof_scratch_, std::span<Real>(local_coeffs));
-                        } else {
-	                        for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
-                                const auto dof = field_dof_scratch_[i];
-	                            FE_THROW_IF(static_cast<std::size_t>(dof) >= prev.size(), FEException,
-	                                        "StandardAssembler::populateFieldSolutionData: previous solution vector too small for DOF " +
-	                                            std::to_string(dof));
-	                            local_coeffs[i] = prev[static_cast<std::size_t>(dof)];
-	                        }
-	                    }
+                        gatherCellVectorCoefficients(cell_id, access->dof_map, access->dof_offset,
+                                                     cell_dofs, prev_view, prev,
+                                                     local_coeffs,
+                                                     "StandardAssembler::populateFieldSolutionData", false);
 
                     // Values only (dt() needs just value history).
                     vector_values.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Vector3D{0.0, 0.0, 0.0});
@@ -7009,17 +7280,18 @@ void StandardAssembler::populateFieldSolutionData(
             continue;
         }
 
-        throw FEException("StandardAssembler::populateFieldSolutionData: unsupported field type",
-                          __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
-    }
-}
+	        throw FEException("StandardAssembler::populateFieldSolutionData: unsupported field type",
+	                          __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	    }
+	}
 
 void StandardAssembler::insertLocal(
     const KernelOutput& output,
     std::span<const GlobalIndex> row_dofs,
     std::span<const GlobalIndex> col_dofs,
     GlobalSystemView* matrix_view,
-    GlobalSystemView* vector_view)
+    GlobalSystemView* vector_view,
+    std::span<const GlobalIndex> resolved_matrix_entries)
 {
     if (options_.check_finite_values) {
         auto check_finite = [](std::span<const Real> values, const char* what) {
@@ -7041,7 +7313,13 @@ void StandardAssembler::insertLocal(
 
     // Insert matrix entries
     if (matrix_view && output.has_matrix) {
-        matrix_view->addMatrixEntries(row_dofs, col_dofs, output.local_matrix);
+        if (!resolved_matrix_entries.empty()) {
+            matrix_view->addMatrixEntriesResolved(row_dofs, col_dofs,
+                                                  resolved_matrix_entries,
+                                                  output.local_matrix);
+        } else {
+            matrix_view->addMatrixEntries(row_dofs, col_dofs, output.local_matrix);
+        }
     }
 
     // Insert vector entries

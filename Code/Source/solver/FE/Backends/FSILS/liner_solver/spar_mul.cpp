@@ -42,9 +42,26 @@
 #include <algorithm>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace spar_mul {
 
 using fe_fsi_linear_solver::fsils_int;
+
+namespace {
+
+[[nodiscard]] bool use_serial_hot_path() noexcept
+{
+#ifdef _OPENMP
+  return omp_get_max_threads() <= 1;
+#else
+  return true;
+#endif
+}
+
+} // namespace
 
 //====================================================================
 // Templated SpMV implementations — DOF known at compile time enables
@@ -163,6 +180,31 @@ static void fsils_spar_mul_vv_impl(fsils_int iStart, fsils_int iEnd,
   const double* __restrict__ u_data = U.data();
   double* __restrict__ ku_data = KU.data();
 
+  if (use_serial_hot_path()) {
+    for (fsils_int i = iStart; i < iEnd; i++) {
+      double sums[DOF] = {};
+      const fsils_int j_start = rp[2*i];
+      const fsils_int j_end   = rp[2*i + 1];
+      for (fsils_int j = j_start; j <= j_end; j++) {
+        const fsils_int col = cp[j];
+        const double* __restrict__ kj = k_data + static_cast<size_t>(j) * DOF2;
+        const double* __restrict__ uc = u_data + static_cast<size_t>(col) * DOF;
+        for (int l = 0; l < DOF; l++) {
+          double s = 0.0;
+          for (int k = 0; k < DOF; k++) {
+            s += kj[l * DOF + k] * uc[k];
+          }
+          sums[l] += s;
+        }
+      }
+      double* __restrict__ kui = ku_data + static_cast<size_t>(i) * DOF;
+      for (int l = 0; l < DOF; l++) {
+        kui[l] = sums[l];
+      }
+    }
+    return;
+  }
+
   #pragma omp parallel for schedule(static)
   for (fsils_int i = iStart; i < iEnd; i++) {
     double sums[DOF] = {};
@@ -191,6 +233,30 @@ static void fsils_spar_mul_vv_dyn(fsils_int iStart, fsils_int iEnd, int dof,
     const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
     const Array<double>& K, const Array<double>& U, Array<double>& KU)
 {
+  if (use_serial_hot_path()) {
+    std::vector<double> sums(static_cast<size_t>(std::max(dof, 0)), 0.0);
+    for (fsils_int i = iStart; i < iEnd; i++) {
+      std::fill(sums.begin(), sums.end(), 0.0);
+
+      for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
+        const fsils_int col = colPtr(j);
+        for (int l = 0; l < dof; l++) {
+          const int s = l * dof;
+          double sum = 0.0;
+          for (int k = 0; k < dof; k++) {
+            sum += K(s+k,j) * U(k,col);
+          }
+          sums[static_cast<size_t>(l)] += sum;
+        }
+      }
+
+      for (int l = 0; l < dof; l++) {
+        KU(l,i) = sums[static_cast<size_t>(l)];
+      }
+    }
+    return;
+  }
+
   #pragma omp parallel
   {
     std::vector<double> sums(static_cast<size_t>(std::max(dof, 0)), 0.0);

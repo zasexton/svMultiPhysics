@@ -18,6 +18,8 @@
 #include "Forms/JIT/JITValidation.h"
 
 #include <cstddef>
+#include <cstdlib>
+#include <sstream>
 #include <utility>
 
 #ifndef SVMP_FE_ENABLE_LLVM_JIT
@@ -32,6 +34,48 @@ namespace jit {
 namespace {
 
 using JITFn = void (*)(const void*);
+
+[[nodiscard]] bool traceSpecializationEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* value = std::getenv("SVMP_JIT_TRACE_SPECIALIZATION");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
+[[nodiscard]] const char* integralDomainName(IntegralDomain domain) noexcept
+{
+    switch (domain) {
+        case IntegralDomain::Cell:
+            return "Cell";
+        case IntegralDomain::Boundary:
+            return "Boundary";
+        case IntegralDomain::InteriorFace:
+            return "InteriorFace";
+        case IntegralDomain::InterfaceFace:
+            return "InterfaceFace";
+    }
+    return "Unknown";
+}
+
+void traceSpecialization(const JITKernelWrapper* wrapper,
+                         const assembly::AssemblyKernel& fallback,
+                         std::uint64_t revision,
+                         std::string_view detail)
+{
+    if (!traceSpecializationEnabled()) {
+        return;
+    }
+
+    std::ostringstream oss;
+    oss << "JIT specialization trace: wrapper=" << static_cast<const void*>(wrapper)
+        << " kernel='" << fallback.name() << "' rev=" << revision;
+    if (!detail.empty()) {
+        oss << ' ' << detail;
+    }
+    FE_LOG_INFO(oss.str());
+}
 
 inline void callJIT(std::uintptr_t addr, const void* args) noexcept
 {
@@ -182,14 +226,14 @@ void JITKernelWrapper::resolveParameterSlots(
     const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
 {
     fallback_->resolveParameterSlots(slot_of_real_param);
-    markDirty();
+    markDirty("resolveParameterSlots");
     maybeCompile();
 }
 
 void JITKernelWrapper::resolveInlinableConstitutives()
 {
     fallback_->resolveInlinableConstitutives();
-    markDirty();
+    markDirty("resolveInlinableConstitutives");
 }
 
 bool JITKernelWrapper::hasCell() const noexcept { return fallback_->hasCell(); }
@@ -1522,10 +1566,405 @@ bool JITKernelWrapper::isVectorOnly() const noexcept
     return fallback_->isVectorOnly();
 }
 
-void JITKernelWrapper::markDirty() noexcept
+void JITKernelWrapper::primeCellSpecializations(std::span<const CellSpecializationHint> hints)
 {
+    maybeCompile();
+    if (traceSpecializationEnabled()) {
+        std::uint64_t revision = 0;
+        std::uint64_t compiled_revision = 0;
+        bool compiler_ready = false;
+        bool jit_ready = false;
+        std::uintptr_t residual_cell = 0;
+        std::uintptr_t tangent_cell = 0;
+        {
+            std::lock_guard<std::mutex> lock(jit_mutex_);
+            revision = revision_;
+            compiled_revision = compiled_revision_;
+            compiler_ready = static_cast<bool>(compiler_);
+            jit_ready = options_.enable && compiled_revision_ == revision_ && !runtime_failed_;
+            residual_cell = compiled_residual_.cell;
+            tangent_cell = compiled_tangent_.cell;
+        }
+
+        std::ostringstream detail;
+        detail << "event=prime_begin hints=" << hints.size()
+               << " compiled_revision=" << compiled_revision
+               << " compiler_ready=" << (compiler_ready ? 1 : 0)
+               << " jit_ready=" << (jit_ready ? 1 : 0)
+               << " residual_cell=" << residual_cell
+               << " tangent_cell=" << tangent_cell;
+        traceSpecialization(this, *fallback_, revision, detail.str());
+    }
+
+    if (!canUseJIT() || !options_.specialization.enable || !compiler_) {
+        if (traceSpecializationEnabled()) {
+            std::uint64_t revision = 0;
+            {
+                std::lock_guard<std::mutex> lock(jit_mutex_);
+                revision = revision_;
+            }
+
+            std::ostringstream detail;
+            detail << "event=prime_skip reason=jit_unavailable"
+                   << " can_use_jit=" << (canUseJIT() ? 1 : 0)
+                   << " specialization_enabled=" << (options_.specialization.enable ? 1 : 0)
+                   << " compiler_ready=" << (compiler_ ? 1 : 0);
+            traceSpecialization(this, *fallback_, revision, detail.str());
+        }
+        return;
+    }
+
+    const auto prime_role = [&](KernelRole role,
+                                const FormIR& ir,
+                                const CellSpecializationHint& hint) {
+        const auto role_name = [role]() noexcept {
+            switch (role) {
+                case KernelRole::Form:
+                    return "Form";
+                case KernelRole::Bilinear:
+                    return "Bilinear";
+                case KernelRole::Linear:
+                    return "Linear";
+                case KernelRole::Residual:
+                    return "Residual";
+                case KernelRole::Tangent:
+                    return "Tangent";
+            }
+            return "Unknown";
+        };
+
+        JITCompileSpecialization spec;
+        spec.domain = IntegralDomain::Cell;
+        bool any = false;
+
+        if (options_.specialization.specialize_n_qpts &&
+            hint.n_qpts > 0u &&
+            hint.n_qpts <= options_.specialization.max_specialized_n_qpts) {
+            spec.n_qpts_minus = hint.n_qpts;
+            any = true;
+        }
+
+        if (options_.specialization.specialize_dofs &&
+            hint.n_test_dofs > 0u &&
+            hint.n_trial_dofs > 0u &&
+            hint.n_test_dofs <= options_.specialization.max_specialized_dofs &&
+            hint.n_trial_dofs <= options_.specialization.max_specialized_dofs) {
+            spec.n_test_dofs_minus = hint.n_test_dofs;
+            spec.n_trial_dofs_minus = hint.n_trial_dofs;
+            any = true;
+        }
+
+        if (!any) {
+            if (traceSpecializationEnabled()) {
+                std::uint64_t revision = 0;
+                {
+                    std::lock_guard<std::mutex> lock(jit_mutex_);
+                    revision = revision_;
+                }
+
+                std::ostringstream detail;
+                detail << "event=prime_skip reason=no_specializable_shape"
+                       << " role=" << role_name()
+                       << " n_qpts=" << hint.n_qpts
+                       << " n_test_dofs=" << hint.n_test_dofs
+                       << " n_trial_dofs=" << hint.n_trial_dofs;
+                traceSpecialization(this, *fallback_, revision, detail.str());
+            }
+            return;
+        }
+
+        if (traceSpecializationEnabled()) {
+            std::uint64_t revision = 0;
+            {
+                std::lock_guard<std::mutex> lock(jit_mutex_);
+                revision = revision_;
+            }
+
+            std::ostringstream detail;
+            detail << "event=prime_request role=" << role_name()
+                   << " domain=" << integralDomainName(spec.domain)
+                   << " n_qpts=" << hint.n_qpts
+                   << " n_test_dofs=" << hint.n_test_dofs
+                   << " n_trial_dofs=" << hint.n_trial_dofs;
+            traceSpecialization(this, *fallback_, revision, detail.str());
+        }
+
+        (void)compileSpecializedDispatch(role, ir, spec, "prime");
+    };
+
+    if (kind_ == WrappedKind::FormKernel) {
+        if (const auto* k = dynamic_cast<const FormKernel*>(fallback_.get())) {
+            for (const auto& hint : hints) {
+                prime_role(KernelRole::Form, k->ir(), hint);
+            }
+        }
+        return;
+    }
+
+    if (kind_ == WrappedKind::LinearFormKernel) {
+        if (const auto* k = dynamic_cast<const LinearFormKernel*>(fallback_.get())) {
+            for (const auto& hint : hints) {
+                prime_role(KernelRole::Bilinear, k->bilinearIR(), hint);
+                if (has_compiled_linear_ && k->linearIR().has_value()) {
+                    prime_role(KernelRole::Linear, *k->linearIR(), hint);
+                }
+            }
+        }
+        return;
+    }
+
+    if (kind_ == WrappedKind::SymbolicNonlinearFormKernel) {
+        if (const auto* k = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get())) {
+            for (const auto& hint : hints) {
+                if (compiled_residual_.cell != 0) {
+                    prime_role(KernelRole::Residual, k->residualIR(), hint);
+                } else if (traceSpecializationEnabled()) {
+                    std::uint64_t revision = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(jit_mutex_);
+                        revision = revision_;
+                    }
+                    traceSpecialization(this, *fallback_, revision,
+                                        "event=prime_skip reason=missing_generic_dispatch role=Residual");
+                }
+                if (compiled_tangent_.cell != 0) {
+                    prime_role(KernelRole::Tangent, k->tangentIR(), hint);
+                } else if (traceSpecializationEnabled()) {
+                    std::uint64_t revision = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(jit_mutex_);
+                        revision = revision_;
+                    }
+                    traceSpecialization(this, *fallback_, revision,
+                                        "event=prime_skip reason=missing_generic_dispatch role=Tangent");
+                }
+            }
+        }
+        return;
+    }
+
+    if (kind_ == WrappedKind::NonlinearFormKernel) {
+        if (const auto* k = dynamic_cast<const NonlinearFormKernel*>(fallback_.get())) {
+            for (const auto& hint : hints) {
+                if (compiled_residual_.cell != 0) {
+                    prime_role(KernelRole::Residual, k->residualIR(), hint);
+                } else if (traceSpecializationEnabled()) {
+                    std::uint64_t revision = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(jit_mutex_);
+                        revision = revision_;
+                    }
+                    traceSpecialization(this, *fallback_, revision,
+                                        "event=prime_skip reason=missing_generic_dispatch role=Residual");
+                }
+                if (traceSpecializationEnabled()) {
+                    std::uint64_t revision = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(jit_mutex_);
+                        revision = revision_;
+                    }
+                    traceSpecialization(this, *fallback_, revision,
+                                        "event=prime_skip reason=tangent_ir_unavailable role=Tangent");
+                }
+            }
+        }
+    }
+}
+
+void JITKernelWrapper::primeBoundarySpecializations(std::span<const BoundarySpecializationHint> hints)
+{
+    maybeCompile();
+    if (traceSpecializationEnabled()) {
+        std::uint64_t revision = 0;
+        std::uint64_t compiled_revision = 0;
+        bool compiler_ready = false;
+        bool jit_ready = false;
+        std::uintptr_t residual_boundary = 0;
+        std::uintptr_t tangent_boundary = 0;
+        {
+            std::lock_guard<std::mutex> lock(jit_mutex_);
+            revision = revision_;
+            compiled_revision = compiled_revision_;
+            compiler_ready = static_cast<bool>(compiler_);
+            jit_ready = options_.enable && compiled_revision_ == revision_ && !runtime_failed_;
+            residual_boundary = compiled_residual_.boundary_all;
+            tangent_boundary = compiled_tangent_.boundary_all;
+        }
+
+        std::ostringstream detail;
+        detail << "event=prime_begin domain=Boundary hints=" << hints.size()
+               << " compiled_revision=" << compiled_revision
+               << " compiler_ready=" << (compiler_ready ? 1 : 0)
+               << " jit_ready=" << (jit_ready ? 1 : 0)
+               << " residual_boundary=" << residual_boundary
+               << " tangent_boundary=" << tangent_boundary;
+        traceSpecialization(this, *fallback_, revision, detail.str());
+    }
+
+    if (!canUseJIT() || !options_.specialization.enable || !compiler_) {
+        if (traceSpecializationEnabled()) {
+            std::uint64_t revision = 0;
+            {
+                std::lock_guard<std::mutex> lock(jit_mutex_);
+                revision = revision_;
+            }
+
+            std::ostringstream detail;
+            detail << "event=prime_skip domain=Boundary reason=jit_unavailable"
+                   << " can_use_jit=" << (canUseJIT() ? 1 : 0)
+                   << " specialization_enabled=" << (options_.specialization.enable ? 1 : 0)
+                   << " compiler_ready=" << (compiler_ ? 1 : 0);
+            traceSpecialization(this, *fallback_, revision, detail.str());
+        }
+        return;
+    }
+
+    const auto prime_role = [&](KernelRole role,
+                                const FormIR& ir,
+                                const BoundarySpecializationHint& hint) {
+        const auto role_name = [role]() noexcept {
+            switch (role) {
+                case KernelRole::Form:
+                    return "Form";
+                case KernelRole::Bilinear:
+                    return "Bilinear";
+                case KernelRole::Linear:
+                    return "Linear";
+                case KernelRole::Residual:
+                    return "Residual";
+                case KernelRole::Tangent:
+                    return "Tangent";
+            }
+            return "Unknown";
+        };
+
+        JITCompileSpecialization spec;
+        spec.domain = IntegralDomain::Boundary;
+        bool any = false;
+
+        if (options_.specialization.specialize_n_qpts &&
+            hint.n_qpts > 0u &&
+            hint.n_qpts <= options_.specialization.max_specialized_n_qpts) {
+            spec.n_qpts_minus = hint.n_qpts;
+            any = true;
+        }
+
+        if (options_.specialization.specialize_dofs &&
+            hint.n_test_dofs > 0u &&
+            hint.n_trial_dofs > 0u &&
+            hint.n_test_dofs <= options_.specialization.max_specialized_dofs &&
+            hint.n_trial_dofs <= options_.specialization.max_specialized_dofs) {
+            spec.n_test_dofs_minus = hint.n_test_dofs;
+            spec.n_trial_dofs_minus = hint.n_trial_dofs;
+            any = true;
+        }
+
+        if (!any) {
+            if (traceSpecializationEnabled()) {
+                std::uint64_t revision = 0;
+                {
+                    std::lock_guard<std::mutex> lock(jit_mutex_);
+                    revision = revision_;
+                }
+
+                std::ostringstream detail;
+                detail << "event=prime_skip domain=Boundary reason=no_specializable_shape"
+                       << " role=" << role_name()
+                       << " marker=" << hint.boundary_marker
+                       << " n_qpts=" << hint.n_qpts
+                       << " n_test_dofs=" << hint.n_test_dofs
+                       << " n_trial_dofs=" << hint.n_trial_dofs;
+                traceSpecialization(this, *fallback_, revision, detail.str());
+            }
+            return;
+        }
+
+        if (traceSpecializationEnabled()) {
+            std::uint64_t revision = 0;
+            {
+                std::lock_guard<std::mutex> lock(jit_mutex_);
+                revision = revision_;
+            }
+
+            std::ostringstream detail;
+            detail << "event=prime_request role=" << role_name()
+                   << " domain=" << integralDomainName(spec.domain)
+                   << " marker=" << hint.boundary_marker
+                   << " n_qpts=" << hint.n_qpts
+                   << " n_test_dofs=" << hint.n_test_dofs
+                   << " n_trial_dofs=" << hint.n_trial_dofs;
+            traceSpecialization(this, *fallback_, revision, detail.str());
+        }
+
+        (void)compileSpecializedDispatch(role, ir, spec, "prime");
+    };
+
+    const auto has_boundary_dispatch = [](const CompiledDispatch& dispatch) {
+        return dispatch.boundary_all != 0 || !dispatch.boundary_by_marker.empty();
+    };
+
+    if (kind_ == WrappedKind::FormKernel) {
+        if (const auto* k = dynamic_cast<const FormKernel*>(fallback_.get())) {
+            for (const auto& hint : hints) {
+                prime_role(KernelRole::Form, k->ir(), hint);
+            }
+        }
+        return;
+    }
+
+    if (kind_ == WrappedKind::LinearFormKernel) {
+        if (const auto* k = dynamic_cast<const LinearFormKernel*>(fallback_.get())) {
+            for (const auto& hint : hints) {
+                prime_role(KernelRole::Bilinear, k->bilinearIR(), hint);
+                if (has_compiled_linear_ && k->linearIR().has_value()) {
+                    prime_role(KernelRole::Linear, *k->linearIR(), hint);
+                }
+            }
+        }
+        return;
+    }
+
+    if (kind_ == WrappedKind::SymbolicNonlinearFormKernel) {
+        if (const auto* k = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get())) {
+            for (const auto& hint : hints) {
+                if (has_boundary_dispatch(compiled_residual_)) {
+                    prime_role(KernelRole::Residual, k->residualIR(), hint);
+                } else if (traceSpecializationEnabled()) {
+                    std::uint64_t revision = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(jit_mutex_);
+                        revision = revision_;
+                    }
+                    std::ostringstream detail;
+                    detail << "event=prime_skip domain=Boundary reason=missing_generic_dispatch"
+                           << " role=Residual marker=" << hint.boundary_marker;
+                    traceSpecialization(this, *fallback_, revision, detail.str());
+                }
+
+                if (has_boundary_dispatch(compiled_tangent_)) {
+                    prime_role(KernelRole::Tangent, k->tangentIR(), hint);
+                } else if (traceSpecializationEnabled()) {
+                    std::uint64_t revision = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(jit_mutex_);
+                        revision = revision_;
+                    }
+                    std::ostringstream detail;
+                    detail << "event=prime_skip domain=Boundary reason=missing_generic_dispatch"
+                           << " role=Tangent marker=" << hint.boundary_marker;
+                    traceSpecialization(this, *fallback_, revision, detail.str());
+                }
+            }
+        }
+    }
+}
+
+void JITKernelWrapper::markDirty(std::string_view reason) noexcept
+{
+    std::uint64_t revision = 0;
     std::lock_guard<std::mutex> lock(jit_mutex_);
     ++revision_;
+    revision = revision_;
     compiled_revision_ = static_cast<std::uint64_t>(-1);
     attempted_revision_ = static_cast<std::uint64_t>(-1);
 
@@ -1538,11 +1977,17 @@ void JITKernelWrapper::markDirty() noexcept
 
     specialized_dispatch_.clear();
     attempted_specializations_.clear();
+    traced_specialization_hits_.clear();
+    traced_specialization_compiles_.clear();
+    traced_specialization_skips_.clear();
     warned_specialization_failure_ = false;
 
     warned_compile_failure_ = false;
     runtime_failed_ = false;
     warned_runtime_failure_ = false;
+
+    const std::string detail = "event=dirty reason=" + std::string(reason);
+    traceSpecialization(this, *fallback_, revision, detail);
 }
 
 bool JITKernelWrapper::canUseJIT() const noexcept
@@ -1550,134 +1995,144 @@ bool JITKernelWrapper::canUseJIT() const noexcept
     return options_.enable && compiled_revision_ == revision_ && !runtime_failed_;
 }
 
-std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::getSpecializedDispatch(
+std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::compileSpecializedDispatch(
     KernelRole role,
     const FormIR& ir,
-    IntegralDomain domain,
-    const assembly::AssemblyContext& ctx_minus,
-    const assembly::AssemblyContext* ctx_plus)
+    const JITCompileSpecialization& specialization,
+    std::string_view trigger)
 {
-    if (!options_.enable || !options_.specialization.enable) {
-        return nullptr;
-    }
-    if (!compiler_) {
-        return nullptr;
-    }
-
-    const bool face_domain = (domain == IntegralDomain::InteriorFace || domain == IntegralDomain::InterfaceFace);
-    if (face_domain && ctx_plus == nullptr) {
-        return nullptr;
-    }
-
-    JITCompileSpecialization spec;
-    spec.domain = domain;
-    bool any = false;
-
-    if (options_.specialization.specialize_n_qpts) {
-        const auto n_qpts_minus = static_cast<std::uint32_t>(ctx_minus.numQuadraturePoints());
-        if (n_qpts_minus > 0u && n_qpts_minus <= options_.specialization.max_specialized_n_qpts) {
-            spec.n_qpts_minus = n_qpts_minus;
-            any = true;
-        }
-
-        if (face_domain) {
-            const auto n_qpts_plus = static_cast<std::uint32_t>(ctx_plus->numQuadraturePoints());
-            if (n_qpts_plus != n_qpts_minus) {
-                return nullptr;
-            }
-            if (n_qpts_plus > 0u && n_qpts_plus <= options_.specialization.max_specialized_n_qpts) {
-                spec.n_qpts_plus = n_qpts_plus;
-                any = true;
-            }
-        }
-    }
-
-    if (options_.specialization.specialize_dofs) {
-        const auto n_test_minus = static_cast<std::uint32_t>(ctx_minus.numTestDofs());
-        const auto n_trial_minus = static_cast<std::uint32_t>(ctx_minus.numTrialDofs());
-        const bool ok_minus = n_test_minus > 0u && n_trial_minus > 0u &&
-                              n_test_minus <= options_.specialization.max_specialized_dofs &&
-                              n_trial_minus <= options_.specialization.max_specialized_dofs;
-
-        bool ok_plus = true;
-        std::uint32_t n_test_plus = 0;
-        std::uint32_t n_trial_plus = 0;
-        if (face_domain) {
-            n_test_plus = static_cast<std::uint32_t>(ctx_plus->numTestDofs());
-            n_trial_plus = static_cast<std::uint32_t>(ctx_plus->numTrialDofs());
-            ok_plus = n_test_plus > 0u && n_trial_plus > 0u &&
-                      n_test_plus <= options_.specialization.max_specialized_dofs &&
-                      n_trial_plus <= options_.specialization.max_specialized_dofs;
-        }
-
-        if (ok_minus && ok_plus) {
-            spec.n_test_dofs_minus = n_test_minus;
-            spec.n_trial_dofs_minus = n_trial_minus;
-            any = true;
-            if (face_domain) {
-                spec.n_test_dofs_plus = n_test_plus;
-                spec.n_trial_dofs_plus = n_trial_plus;
-            }
-        }
-    }
-
-    if (!any) {
+    if (!options_.enable || !options_.specialization.enable || !compiler_) {
         return nullptr;
     }
 
     SpecializationKey key;
     key.role = role;
-    key.domain = domain;
+    key.domain = specialization.domain;
 
-    if (spec.n_qpts_minus) {
+    if (specialization.n_qpts_minus) {
         key.has_n_qpts_minus = true;
-        key.n_qpts_minus = *spec.n_qpts_minus;
+        key.n_qpts_minus = *specialization.n_qpts_minus;
     }
-    if (spec.n_test_dofs_minus) {
+    if (specialization.n_test_dofs_minus) {
         key.has_n_test_dofs_minus = true;
-        key.n_test_dofs_minus = *spec.n_test_dofs_minus;
+        key.n_test_dofs_minus = *specialization.n_test_dofs_minus;
     }
-    if (spec.n_trial_dofs_minus) {
+    if (specialization.n_trial_dofs_minus) {
         key.has_n_trial_dofs_minus = true;
-        key.n_trial_dofs_minus = *spec.n_trial_dofs_minus;
+        key.n_trial_dofs_minus = *specialization.n_trial_dofs_minus;
+    }
+    if (specialization.n_qpts_plus) {
+        key.has_n_qpts_plus = true;
+        key.n_qpts_plus = *specialization.n_qpts_plus;
+    }
+    if (specialization.n_test_dofs_plus) {
+        key.has_n_test_dofs_plus = true;
+        key.n_test_dofs_plus = *specialization.n_test_dofs_plus;
+    }
+    if (specialization.n_trial_dofs_plus) {
+        key.has_n_trial_dofs_plus = true;
+        key.n_trial_dofs_plus = *specialization.n_trial_dofs_plus;
     }
 
-    if (spec.n_qpts_plus) {
-        key.has_n_qpts_plus = true;
-        key.n_qpts_plus = *spec.n_qpts_plus;
-    }
-    if (spec.n_test_dofs_plus) {
-        key.has_n_test_dofs_plus = true;
-        key.n_test_dofs_plus = *spec.n_test_dofs_plus;
-    }
-    if (spec.n_trial_dofs_plus) {
-        key.has_n_trial_dofs_plus = true;
-        key.n_trial_dofs_plus = *spec.n_trial_dofs_plus;
-    }
+    const auto role_name = [role]() noexcept {
+        switch (role) {
+            case KernelRole::Form:
+                return "Form";
+            case KernelRole::Bilinear:
+                return "Bilinear";
+            case KernelRole::Linear:
+                return "Linear";
+            case KernelRole::Residual:
+                return "Residual";
+            case KernelRole::Tangent:
+                return "Tangent";
+        }
+        return "Unknown";
+    };
+
+    const auto describe_key = [&]() {
+        std::ostringstream oss;
+        oss << "role=" << role_name()
+            << " domain=" << integralDomainName(key.domain)
+            << " minus[qpts=" << (key.has_n_qpts_minus ? std::to_string(key.n_qpts_minus) : "*")
+            << ",test=" << (key.has_n_test_dofs_minus ? std::to_string(key.n_test_dofs_minus) : "*")
+            << ",trial=" << (key.has_n_trial_dofs_minus ? std::to_string(key.n_trial_dofs_minus) : "*") << "]";
+        if (key.domain == IntegralDomain::InteriorFace || key.domain == IntegralDomain::InterfaceFace) {
+            oss << " plus[qpts=" << (key.has_n_qpts_plus ? std::to_string(key.n_qpts_plus) : "*")
+                << ",test=" << (key.has_n_test_dofs_plus ? std::to_string(key.n_test_dofs_plus) : "*")
+                << ",trial=" << (key.has_n_trial_dofs_plus ? std::to_string(key.n_trial_dofs_plus) : "*") << "]";
+        }
+        return oss.str();
+    };
 
     std::uint64_t my_revision = 0;
+    std::string trace_detail;
     {
         std::lock_guard<std::mutex> lock(jit_mutex_);
         if (compiled_revision_ != revision_) {
+            if (traceSpecializationEnabled()) {
+                std::ostringstream oss;
+                oss << "event=skip trigger=" << trigger
+                    << " reason=generic_revision_mismatch"
+                    << " compiled_revision=" << compiled_revision_
+                    << " current_revision=" << revision_
+                    << " " << describe_key();
+                trace_detail = oss.str();
+            }
+            my_revision = revision_;
+            if (!trace_detail.empty()) {
+                traceSpecialization(this, *fallback_, my_revision, trace_detail);
+            }
             return nullptr;
         }
         my_revision = revision_;
 
         if (const auto it = specialized_dispatch_.find(key); it != specialized_dispatch_.end()) {
-            return it->second;
+            if (traceSpecializationEnabled() && traced_specialization_hits_.insert(key).second) {
+                std::ostringstream oss;
+                oss << "event=hit trigger=" << trigger << ' ' << describe_key();
+                trace_detail = oss.str();
+            }
+            const auto result = it->second;
+            if (!trace_detail.empty()) {
+                traceSpecialization(this, *fallback_, my_revision, trace_detail);
+            }
+            return result;
         }
 
         if (attempted_specializations_.find(key) != attempted_specializations_.end()) {
+            if (traceSpecializationEnabled() && traced_specialization_skips_.insert(key).second) {
+                std::ostringstream oss;
+                oss << "event=skip trigger=" << trigger
+                    << " reason=already_attempted "
+                    << describe_key();
+                trace_detail = oss.str();
+            }
+            if (!trace_detail.empty()) {
+                traceSpecialization(this, *fallback_, my_revision, trace_detail);
+            }
             return nullptr;
         }
 
         std::size_t count = 0;
         for (const auto& [k, _] : specialized_dispatch_) {
-            if (k.role == role && k.domain == domain) {
+            if (k.role == role && k.domain == specialization.domain) {
                 ++count;
             }
         }
         if (count >= options_.specialization.max_variants_per_kernel) {
+            if (traceSpecializationEnabled() && traced_specialization_skips_.insert(key).second) {
+                std::ostringstream oss;
+                oss << "event=skip trigger=" << trigger
+                    << " reason=max_variants_per_kernel"
+                    << " count=" << count
+                    << " limit=" << options_.specialization.max_variants_per_kernel
+                    << ' ' << describe_key();
+                trace_detail = oss.str();
+            }
+            if (!trace_detail.empty()) {
+                traceSpecialization(this, *fallback_, my_revision, trace_detail);
+            }
             return nullptr;
         }
 
@@ -1687,7 +2142,7 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::getS
     ValidationOptions vopt;
     vopt.strictness = Strictness::AllowExternalCalls;
 
-    const auto r = compiler_->compileSpecialized(ir, spec, vopt);
+    const auto r = compiler_->compileSpecialized(ir, specialization, vopt);
     if (!r.ok) {
         bool should_warn = false;
         {
@@ -1703,6 +2158,13 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::getS
                 msg += ": " + r.message;
             }
             FE_LOG_WARNING(msg);
+        }
+        if (traceSpecializationEnabled()) {
+            std::ostringstream detail;
+            detail << "event=compile_failed trigger=" << trigger
+                   << " message='" << r.message << "' "
+                   << describe_key();
+            traceSpecialization(this, *fallback_, my_revision, detail.str());
         }
         return nullptr;
     }
@@ -1742,12 +2204,160 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::getS
     {
         std::lock_guard<std::mutex> lock(jit_mutex_);
         if (revision_ != my_revision || compiled_revision_ != my_revision) {
+            if (traceSpecializationEnabled() && traced_specialization_skips_.insert(key).second) {
+                std::ostringstream oss;
+                oss << "event=skip trigger=" << trigger
+                    << " reason=revision_changed_after_compile"
+                    << " compiled_revision=" << compiled_revision_
+                    << " current_revision=" << revision_
+                    << ' ' << describe_key();
+                trace_detail = oss.str();
+            }
+            if (!trace_detail.empty()) {
+                traceSpecialization(this, *fallback_, my_revision, trace_detail);
+            }
             return nullptr;
         }
         specialized_dispatch_[key] = disp;
+        if (traceSpecializationEnabled() && traced_specialization_compiles_.insert(key).second) {
+            std::ostringstream oss;
+            oss << "event=compile trigger=" << trigger
+                << " cell=" << disp->cell
+                << " interior_face=" << disp->interior_face
+                << ' ' << describe_key();
+            trace_detail = oss.str();
+        }
+    }
+
+    if (!trace_detail.empty()) {
+        traceSpecialization(this, *fallback_, my_revision, trace_detail);
     }
 
     return disp;
+}
+
+std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::getSpecializedDispatch(
+    KernelRole role,
+    const FormIR& ir,
+    IntegralDomain domain,
+    const assembly::AssemblyContext& ctx_minus,
+    const assembly::AssemblyContext* ctx_plus)
+{
+    if (!options_.enable || !options_.specialization.enable) {
+        return nullptr;
+    }
+    if (!compiler_) {
+        return nullptr;
+    }
+
+    const bool face_domain = (domain == IntegralDomain::InteriorFace || domain == IntegralDomain::InterfaceFace);
+    if (face_domain && ctx_plus == nullptr) {
+        if (traceSpecializationEnabled()) {
+            std::uint64_t revision = 0;
+            {
+                std::lock_guard<std::mutex> lock(jit_mutex_);
+                revision = revision_;
+            }
+            std::ostringstream detail;
+            detail << "event=runtime_skip reason=missing_plus_context"
+                   << " role=" << static_cast<int>(role)
+                   << " domain=" << integralDomainName(domain);
+            traceSpecialization(this, *fallback_, revision, detail.str());
+        }
+        return nullptr;
+    }
+
+    JITCompileSpecialization spec;
+    spec.domain = domain;
+    bool any = false;
+
+    if (options_.specialization.specialize_n_qpts) {
+        const auto n_qpts_minus = static_cast<std::uint32_t>(ctx_minus.numQuadraturePoints());
+        if (n_qpts_minus > 0u && n_qpts_minus <= options_.specialization.max_specialized_n_qpts) {
+            spec.n_qpts_minus = n_qpts_minus;
+            any = true;
+        }
+
+        if (face_domain) {
+            const auto n_qpts_plus = static_cast<std::uint32_t>(ctx_plus->numQuadraturePoints());
+            if (n_qpts_plus != n_qpts_minus) {
+                if (traceSpecializationEnabled()) {
+                    std::uint64_t revision = 0;
+                    {
+                        std::lock_guard<std::mutex> lock(jit_mutex_);
+                        revision = revision_;
+                    }
+
+                    std::ostringstream detail;
+                    detail << "event=runtime_skip reason=face_qpts_mismatch"
+                           << " domain=" << integralDomainName(domain)
+                           << " n_qpts_minus=" << n_qpts_minus
+                           << " n_qpts_plus=" << n_qpts_plus;
+                    traceSpecialization(this, *fallback_, revision, detail.str());
+                }
+                return nullptr;
+            }
+            if (n_qpts_plus > 0u && n_qpts_plus <= options_.specialization.max_specialized_n_qpts) {
+                spec.n_qpts_plus = n_qpts_plus;
+                any = true;
+            }
+        }
+    }
+
+    if (options_.specialization.specialize_dofs) {
+        const auto n_test_minus = static_cast<std::uint32_t>(ctx_minus.numTestDofs());
+        const auto n_trial_minus = static_cast<std::uint32_t>(ctx_minus.numTrialDofs());
+        const bool ok_minus = n_test_minus > 0u && n_trial_minus > 0u &&
+                              n_test_minus <= options_.specialization.max_specialized_dofs &&
+                              n_trial_minus <= options_.specialization.max_specialized_dofs;
+
+        bool ok_plus = true;
+        std::uint32_t n_test_plus = 0;
+        std::uint32_t n_trial_plus = 0;
+        if (face_domain) {
+            n_test_plus = static_cast<std::uint32_t>(ctx_plus->numTestDofs());
+            n_trial_plus = static_cast<std::uint32_t>(ctx_plus->numTrialDofs());
+            ok_plus = n_test_plus > 0u && n_trial_plus > 0u &&
+                      n_test_plus <= options_.specialization.max_specialized_dofs &&
+                      n_trial_plus <= options_.specialization.max_specialized_dofs;
+        }
+
+        if (ok_minus && ok_plus) {
+            spec.n_test_dofs_minus = n_test_minus;
+            spec.n_trial_dofs_minus = n_trial_minus;
+            any = true;
+            if (face_domain) {
+                spec.n_test_dofs_plus = n_test_plus;
+                spec.n_trial_dofs_plus = n_trial_plus;
+            }
+        }
+    }
+
+    if (!any) {
+        if (traceSpecializationEnabled()) {
+            std::uint64_t revision = 0;
+            {
+                std::lock_guard<std::mutex> lock(jit_mutex_);
+                revision = revision_;
+            }
+
+            std::ostringstream detail;
+            detail << "event=runtime_skip reason=no_specializable_shape"
+                   << " domain=" << integralDomainName(domain)
+                   << " n_qpts_minus=" << ctx_minus.numQuadraturePoints()
+                   << " n_test_minus=" << ctx_minus.numTestDofs()
+                   << " n_trial_minus=" << ctx_minus.numTrialDofs();
+            if (face_domain) {
+                detail << " n_qpts_plus=" << ctx_plus->numQuadraturePoints()
+                       << " n_test_plus=" << ctx_plus->numTestDofs()
+                       << " n_trial_plus=" << ctx_plus->numTrialDofs();
+            }
+            traceSpecialization(this, *fallback_, revision, detail.str());
+        }
+        return nullptr;
+    }
+
+    return compileSpecializedDispatch(role, ir, spec, "runtime");
 }
 
 void JITKernelWrapper::markRuntimeFailureOnce(std::string_view where, std::string_view msg) noexcept
@@ -1867,6 +2477,8 @@ void JITKernelWrapper::maybeCompile()
         }
         fillDispatch(compiled_form_, r);
         compiled_revision_ = revision_;
+        traceSpecialization(this, *fallback_, compiled_revision_,
+                            "event=generic_compile kind=FormKernel cell=" + std::to_string(compiled_form_.cell));
         return;
     }
 
@@ -1899,6 +2511,14 @@ void JITKernelWrapper::maybeCompile()
         }
 
         compiled_revision_ = revision_;
+        {
+            std::ostringstream detail;
+            detail << "event=generic_compile kind=LinearFormKernel"
+                   << " bilinear_cell=" << compiled_bilinear_.cell
+                   << " linear_cell=" << compiled_linear_.cell
+                   << " has_linear=" << (has_compiled_linear_ ? 1 : 0);
+            traceSpecialization(this, *fallback_, compiled_revision_, detail.str());
+        }
         return;
     }
 
@@ -1941,6 +2561,14 @@ void JITKernelWrapper::maybeCompile()
         }
 
         compiled_revision_ = revision_;
+        {
+            std::ostringstream detail;
+            detail << "event=generic_compile kind=SymbolicNonlinearFormKernel"
+                   << " residual_cell=" << compiled_residual_.cell
+                   << " tangent_cell=" << compiled_tangent_.cell
+                   << " fused=" << (has_compiled_fused_ ? 1 : 0);
+            traceSpecialization(this, *fallback_, compiled_revision_, detail.str());
+        }
         return;
     }
 
@@ -2015,6 +2643,13 @@ void JITKernelWrapper::maybeCompile()
         }
 
         compiled_revision_ = revision_;
+        {
+            std::ostringstream detail;
+            detail << "event=generic_compile kind=NonlinearFormKernel"
+                   << " residual_cell=" << compiled_residual_.cell
+                   << " tangent_cell=" << compiled_tangent_.cell;
+            traceSpecialization(this, *fallback_, compiled_revision_, detail.str());
+        }
         return;
     }
 }

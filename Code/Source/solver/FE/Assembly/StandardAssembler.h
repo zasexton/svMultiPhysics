@@ -72,6 +72,7 @@
 #include "Geometry/GeometryMapping.h"
 #include "Basis/BasisCache.h"
 
+#include <deque>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -405,8 +406,8 @@ private:
 
     /** Per-slot DOF indices for fused-batched assembly. */
     struct SlotDofs {
-        std::vector<GlobalIndex> row_dofs;
-        std::vector<GlobalIndex> col_dofs;
+        std::span<const GlobalIndex> row_dofs{};
+        std::span<const GlobalIndex> col_dofs{};
     };
 
     // =========================================================================
@@ -502,7 +503,9 @@ private:
         ContextType type,
         std::span<const LocalIndex> align_facet_to_reference = {});
 
-    const FieldSolutionAccess* findFieldSolutionAccess(FieldId field) const noexcept;
+    struct FieldAccessPlan;
+    void ensureFieldAccessPlans(const IMeshAccess& mesh);
+    [[nodiscard]] const FieldAccessPlan* findFieldAccessPlan(FieldId field) const noexcept;
 
     void populateFieldSolutionData(
         AssemblyContext& context,
@@ -518,12 +521,74 @@ private:
         std::span<const GlobalIndex> row_dofs,
         std::span<const GlobalIndex> col_dofs,
         GlobalSystemView* matrix_view,
-        GlobalSystemView* vector_view);
+        GlobalSystemView* vector_view,
+        std::span<const GlobalIndex> resolved_matrix_entries = {});
 
     /**
      * @brief Insert with constraint distribution
      */
     void insertLocalConstrained(
+        const KernelOutput& output,
+        std::span<const GlobalIndex> row_dofs,
+        std::span<const GlobalIndex> col_dofs,
+        GlobalSystemView* matrix_view,
+        GlobalSystemView* vector_view);
+
+    struct CellDofTable;
+    void ensureCellDofTables(const IMeshAccess& mesh);
+    [[nodiscard]] const CellDofTable& getCellDofTable(
+        const IMeshAccess& mesh,
+        const dofs::DofMap* dof_map,
+        GlobalIndex dof_offset);
+    [[nodiscard]] std::span<const GlobalIndex> getCellDofsCached(
+        const IMeshAccess& mesh,
+        GlobalIndex cell_id,
+        const dofs::DofMap* dof_map,
+        GlobalIndex dof_offset);
+    [[nodiscard]] std::span<const GlobalIndex> getCellDofsFromTable(
+        const CellDofTable& table,
+        GlobalIndex cell_id) const;
+    void ensureResolvedVectorTables(const IMeshAccess& mesh);
+    void ensureResolvedVectorTable(
+        const IMeshAccess& mesh,
+        const dofs::DofMap* dof_map,
+        GlobalIndex dof_offset,
+        const GlobalSystemView* view);
+    void ensureResolvedMatrixTable(
+        const IMeshAccess& mesh,
+        const dofs::DofMap* row_dof_map,
+        GlobalIndex row_dof_offset,
+        const dofs::DofMap* col_dof_map,
+        GlobalIndex col_dof_offset,
+        const GlobalSystemView* view);
+    [[nodiscard]] std::span<const GlobalIndex> getResolvedCellVectorEntries(
+        GlobalIndex cell_id,
+        const dofs::DofMap* dof_map,
+        GlobalIndex dof_offset,
+        const GlobalSystemView* view) const;
+    [[nodiscard]] std::span<const GlobalIndex> getResolvedCellMatrixEntries(
+        GlobalIndex cell_id,
+        const dofs::DofMap* row_dof_map,
+        GlobalIndex row_dof_offset,
+        const dofs::DofMap* col_dof_map,
+        GlobalIndex col_dof_offset,
+        const GlobalSystemView* view) const;
+    void gatherCellVectorCoefficients(
+        GlobalIndex cell_id,
+        const dofs::DofMap* dof_map,
+        GlobalIndex dof_offset,
+        std::span<const GlobalIndex> dofs,
+        const GlobalSystemView* view,
+        std::span<const Real> raw_values,
+        std::vector<Real>& out,
+        const char* error_prefix,
+        bool validate_negative_dofs);
+    void insertLocalForCell(
+        GlobalIndex cell_id,
+        const dofs::DofMap* row_dof_map,
+        GlobalIndex row_dof_offset,
+        const dofs::DofMap* col_dof_map,
+        GlobalIndex col_dof_offset,
         const KernelOutput& output,
         std::span<const GlobalIndex> row_dofs,
         std::span<const GlobalIndex> col_dofs,
@@ -734,6 +799,44 @@ private:
         const basis::BasisCacheEntry* entry{nullptr};
     };
     std::vector<FieldBCacheEntry> cached_field_bcache_;
+
+    struct CellDofTable {
+        const dofs::DofMap* dof_map{nullptr};
+        GlobalIndex dof_offset{0};
+        std::vector<GlobalIndex> cell_offsets{};
+        std::vector<GlobalIndex> dofs{};
+    };
+    struct CellResolvedVectorTable {
+        const void* layout_handle{nullptr};
+        const dofs::DofMap* dof_map{nullptr};
+        GlobalIndex dof_offset{0};
+        std::vector<GlobalIndex> resolved{};
+    };
+    struct CellResolvedMatrixTable {
+        const void* layout_handle{nullptr};
+        const dofs::DofMap* row_dof_map{nullptr};
+        GlobalIndex row_dof_offset{0};
+        const dofs::DofMap* col_dof_map{nullptr};
+        GlobalIndex col_dof_offset{0};
+        std::vector<GlobalIndex> cell_offsets{};
+        std::vector<GlobalIndex> resolved{};
+    };
+    struct FieldAccessPlan {
+        FieldId field{INVALID_FIELD_ID};
+        const spaces::FunctionSpace* space{nullptr};
+        const dofs::DofMap* dof_map{nullptr};
+        GlobalIndex dof_offset{0};
+        const CellDofTable* dof_table{nullptr};
+        FieldType field_type{FieldType::Scalar};
+        bool is_product{false};
+        int value_dimension{1};
+    };
+    const IMeshAccess* cached_cell_dof_mesh_{nullptr};
+    GlobalIndex cached_cell_dof_count_{0};
+    std::deque<CellDofTable> cell_dof_tables_;
+    std::vector<CellResolvedVectorTable> cell_resolved_vector_tables_;
+    std::vector<CellResolvedMatrixTable> cell_resolved_matrix_tables_;
+    std::vector<FieldAccessPlan> field_access_plans_;
 
     // Scratch storage for assembleCellsFused batching (avoids per-batch heap allocation)
     std::vector<AssemblyContext> scratch_batch_contexts_;

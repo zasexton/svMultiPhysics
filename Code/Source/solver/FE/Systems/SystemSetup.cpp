@@ -40,6 +40,8 @@
 #include "Quadrature/QuadratureFactory.h"
 
 #include "Core/FEConfig.h"
+#include "Forms/CoupledBlockKernel.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 
 #include <algorithm>
 #include <iterator>
@@ -2412,6 +2414,280 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
             }
             assembler_selection_report_.append("Auto-registered matrix-free operators: ");
             assembler_selection_report_.append(std::to_string(registered));
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Setup-time JIT priming for cell kernels.
+    //
+    // Generic residual/tangent kernels are compiled on first use, and the
+    // size-specialized cell variants are normally compiled on the first batch
+    // that reaches a given (n_qpts, n_test_dofs, n_trial_dofs) signature.
+    // Prime those variants here so the transient loop does not pay that cold
+    // compile cost on its first nonlinear assemblies.
+    // ---------------------------------------------------------------------
+    {
+        std::vector<std::pair<ElementType, GlobalIndex>> cell_exemplars;
+        const auto collect_cell_exemplar = [&](GlobalIndex cell_id) {
+            const auto cell_type = meshAccess().getCellType(cell_id);
+            const auto it = std::find_if(
+                cell_exemplars.begin(), cell_exemplars.end(),
+                [&](const auto& entry) { return entry.first == cell_type; });
+            if (it == cell_exemplars.end()) {
+                cell_exemplars.emplace_back(cell_type, cell_id);
+            }
+        };
+
+        meshAccess().forEachOwnedCell(collect_cell_exemplar);
+        if (cell_exemplars.empty()) {
+            meshAccess().forEachCell(collect_cell_exemplar);
+        }
+
+        std::vector<std::tuple<int, ElementType, ElementType, GlobalIndex, GlobalIndex>> boundary_exemplars;
+        meshAccess().forEachBoundaryFace(/*marker=*/-1, [&](GlobalIndex face_id, GlobalIndex cell_id) {
+            const int marker = meshAccess().getBoundaryFaceMarker(face_id);
+            if (marker < 0) {
+                return;
+            }
+
+            const auto cell_type = meshAccess().getCellType(cell_id);
+            const auto face_type = faceTypeForFace(meshAccess(), face_id, cell_id);
+            const auto it = std::find_if(
+                boundary_exemplars.begin(), boundary_exemplars.end(),
+                [&](const auto& exemplar) {
+                    return std::get<0>(exemplar) == marker &&
+                           std::get<1>(exemplar) == cell_type &&
+                           std::get<2>(exemplar) == face_type;
+                });
+            if (it == boundary_exemplars.end()) {
+                boundary_exemplars.emplace_back(marker, cell_type, face_type, face_id, cell_id);
+            }
+        });
+
+        auto resolve_cell_quadrature =
+            [&](const spaces::FunctionSpace& qpt_space,
+                GlobalIndex cell_id,
+                ElementType cell_type) {
+                const auto& test_element = qpt_space.getElement(cell_type, cell_id);
+                auto quad_rule = test_element.quadrature();
+                if (!quad_rule) {
+                    const int quad_order = quadrature::QuadratureFactory::recommended_order(
+                        test_element.polynomial_order(), false);
+                    quad_rule = quadrature::QuadratureFactory::create(cell_type, quad_order);
+                }
+                return quad_rule;
+            };
+
+        auto resolve_boundary_quadrature =
+            [&](const spaces::FunctionSpace& test_space,
+                const spaces::FunctionSpace& trial_space,
+                GlobalIndex face_id,
+                GlobalIndex cell_id) {
+                const auto cell_type = meshAccess().getCellType(cell_id);
+                const auto& test_element = test_space.getElement(cell_type, cell_id);
+                const auto& trial_element = trial_space.getElement(cell_type, cell_id);
+
+                const int quad_order = quadrature::QuadratureFactory::recommended_order(
+                    std::max(test_element.polynomial_order(), trial_element.polynomial_order()), false);
+
+                const auto face_type = faceTypeForFace(meshAccess(), face_id, cell_id);
+                return quadrature::QuadratureFactory::create(face_type, quad_order);
+            };
+
+        auto build_cell_hints =
+            [&](const spaces::FunctionSpace& qpt_space,
+                const spaces::FunctionSpace& test_space,
+                const spaces::FunctionSpace& trial_space) {
+                std::vector<forms::jit::JITKernelWrapper::CellSpecializationHint> hints;
+                hints.reserve(cell_exemplars.size());
+                for (const auto& [cell_type, cell_id] : cell_exemplars) {
+                    const auto quad_rule = resolve_cell_quadrature(qpt_space, cell_id, cell_type);
+                    if (!quad_rule || quad_rule->num_points() == 0u) {
+                        continue;
+                    }
+
+                    forms::jit::JITKernelWrapper::CellSpecializationHint hint;
+                    hint.n_qpts = static_cast<std::uint32_t>(quad_rule->num_points());
+                    hint.n_test_dofs = static_cast<std::uint32_t>(test_space.dofs_per_element());
+                    hint.n_trial_dofs = static_cast<std::uint32_t>(trial_space.dofs_per_element());
+                    hints.push_back(hint);
+                }
+                return hints;
+            };
+
+        auto build_boundary_hints =
+            [&](const spaces::FunctionSpace& test_space,
+                const spaces::FunctionSpace& trial_space,
+                int boundary_marker) {
+                std::vector<forms::jit::JITKernelWrapper::BoundarySpecializationHint> hints;
+                hints.reserve(boundary_exemplars.size());
+                for (const auto& [marker, cell_type_unused, face_type_unused, face_id, cell_id] : boundary_exemplars) {
+                    (void)cell_type_unused;
+                    (void)face_type_unused;
+                    if (boundary_marker >= 0 && marker != boundary_marker) {
+                        continue;
+                    }
+
+                    const auto quad_rule = resolve_boundary_quadrature(test_space, trial_space, face_id, cell_id);
+                    if (!quad_rule || quad_rule->num_points() == 0u) {
+                        continue;
+                    }
+
+                    forms::jit::JITKernelWrapper::BoundarySpecializationHint hint;
+                    hint.boundary_marker = marker;
+                    hint.n_qpts = static_cast<std::uint32_t>(quad_rule->num_points());
+                    hint.n_test_dofs = static_cast<std::uint32_t>(test_space.dofs_per_element());
+                    hint.n_trial_dofs = static_cast<std::uint32_t>(trial_space.dofs_per_element());
+                    hints.push_back(hint);
+                }
+                return hints;
+            };
+
+        std::unordered_set<const assembly::AssemblyKernel*> primed_cell_jit_kernels;
+        auto prime_cell_jit_kernel =
+            [&](const std::shared_ptr<assembly::AssemblyKernel>& kernel,
+                const spaces::FunctionSpace& qpt_space,
+                const spaces::FunctionSpace& test_space,
+                const spaces::FunctionSpace& trial_space) {
+                if (!kernel) {
+                    return;
+                }
+
+                auto* jit_kernel = dynamic_cast<forms::jit::JITKernelWrapper*>(kernel.get());
+                if (!jit_kernel) {
+                    return;
+                }
+                if (!primed_cell_jit_kernels.insert(jit_kernel).second) {
+                    return;
+                }
+
+                const auto hints = build_cell_hints(qpt_space, test_space, trial_space);
+                if (!hints.empty()) {
+                    jit_kernel->primeCellSpecializations(hints);
+                }
+            };
+
+        std::vector<std::pair<const assembly::AssemblyKernel*, int>> primed_boundary_jit_kernels;
+        auto prime_boundary_jit_kernel =
+            [&](const std::shared_ptr<assembly::AssemblyKernel>& kernel,
+                const spaces::FunctionSpace& test_space,
+                const spaces::FunctionSpace& trial_space,
+                int boundary_marker) {
+                if (!kernel) {
+                    return;
+                }
+
+                auto* jit_kernel = dynamic_cast<forms::jit::JITKernelWrapper*>(kernel.get());
+                if (!jit_kernel) {
+                    return;
+                }
+                const auto it = std::find(primed_boundary_jit_kernels.begin(),
+                                          primed_boundary_jit_kernels.end(),
+                                          std::make_pair(static_cast<const assembly::AssemblyKernel*>(jit_kernel),
+                                                         boundary_marker));
+                if (it != primed_boundary_jit_kernels.end()) {
+                    return;
+                }
+                primed_boundary_jit_kernels.emplace_back(jit_kernel, boundary_marker);
+
+                const auto hints = build_boundary_hints(test_space, trial_space, boundary_marker);
+                if (!hints.empty()) {
+                    jit_kernel->primeBoundarySpecializations(hints);
+                }
+            };
+
+        if (!cell_exemplars.empty()) {
+            for (const auto& tag : operator_registry_.list()) {
+                const auto& def = operator_registry_.get(tag);
+                for (const auto& term : def.cells) {
+                    if (!term.kernel) {
+                        continue;
+                    }
+
+                    if (auto* coupled = dynamic_cast<forms::CoupledBlockKernel*>(term.kernel.get())) {
+                        if (coupled->numBlocks() == 0u) {
+                            continue;
+                        }
+
+                        const auto& ref_block = coupled->blockSpec(0);
+                        const auto& qpt_field = field_registry_.get(ref_block.test_field);
+                        FE_CHECK_NOT_NULL(qpt_field.space.get(),
+                                          "FESystem::setup: coupled priming quadrature space");
+
+                        for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
+                            const auto& bs = coupled->blockSpec(bi);
+                            if (!bs.fallback_kernel) {
+                                continue;
+                            }
+
+                            const auto& test_field = field_registry_.get(bs.test_field);
+                            const auto& trial_field = field_registry_.get(bs.trial_field);
+                            FE_CHECK_NOT_NULL(test_field.space.get(),
+                                              "FESystem::setup: coupled priming test space");
+                            FE_CHECK_NOT_NULL(trial_field.space.get(),
+                                              "FESystem::setup: coupled priming trial space");
+
+                            prime_cell_jit_kernel(bs.fallback_kernel,
+                                                  *qpt_field.space,
+                                                  *test_field.space,
+                                                  *trial_field.space);
+                        }
+                        continue;
+                    }
+
+                    const auto& test_field = field_registry_.get(term.test_field);
+                    const auto& trial_field = field_registry_.get(term.trial_field);
+                    FE_CHECK_NOT_NULL(test_field.space.get(), "FESystem::setup: priming test space");
+                    FE_CHECK_NOT_NULL(trial_field.space.get(), "FESystem::setup: priming trial space");
+
+                    prime_cell_jit_kernel(term.kernel,
+                                          *test_field.space,
+                                          *test_field.space,
+                                          *trial_field.space);
+                }
+
+                if (!boundary_exemplars.empty()) {
+                    for (const auto& term : def.boundary) {
+                        if (!term.kernel) {
+                            continue;
+                        }
+
+                        if (auto* coupled = dynamic_cast<forms::CoupledBlockKernel*>(term.kernel.get())) {
+                            for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
+                                const auto& bs = coupled->blockSpec(bi);
+                                if (!bs.fallback_kernel) {
+                                    continue;
+                                }
+
+                                const auto& test_field = field_registry_.get(bs.test_field);
+                                const auto& trial_field = field_registry_.get(bs.trial_field);
+                                FE_CHECK_NOT_NULL(test_field.space.get(),
+                                                  "FESystem::setup: boundary priming test space");
+                                FE_CHECK_NOT_NULL(trial_field.space.get(),
+                                                  "FESystem::setup: boundary priming trial space");
+
+                                prime_boundary_jit_kernel(bs.fallback_kernel,
+                                                          *test_field.space,
+                                                          *trial_field.space,
+                                                          term.marker);
+                            }
+                            continue;
+                        }
+
+                        const auto& test_field = field_registry_.get(term.test_field);
+                        const auto& trial_field = field_registry_.get(term.trial_field);
+                        FE_CHECK_NOT_NULL(test_field.space.get(),
+                                          "FESystem::setup: boundary priming test space");
+                        FE_CHECK_NOT_NULL(trial_field.space.get(),
+                                          "FESystem::setup: boundary priming trial space");
+
+                        prime_boundary_jit_kernel(term.kernel,
+                                                  *test_field.space,
+                                                  *trial_field.space,
+                                                  term.marker);
+                    }
+                }
+            }
         }
     }
 

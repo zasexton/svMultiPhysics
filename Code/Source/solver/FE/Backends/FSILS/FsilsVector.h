@@ -12,6 +12,8 @@
 #include "Backends/FSILS/FsilsShared.h"
 
 #include <memory>
+#include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace svmp {
@@ -60,10 +62,21 @@ public:
     [[nodiscard]] std::vector<Real>& data() noexcept { return data_; }
     [[nodiscard]] const std::vector<Real>& data() const noexcept { return data_; }
 
+    // Resolve FE DOFs into backend-local vector entries and reuse the mapping
+    // across repeated element/face gathers with the same connectivity.
+    void resolveEntriesCached(std::span<const GlobalIndex> dofs,
+                              std::span<GlobalIndex> resolved) const;
+
 private:
+    struct ResolutionCacheEntry {
+        std::vector<GlobalIndex> dofs{};
+        std::vector<GlobalIndex> resolved{};
+    };
+
     GlobalIndex global_size_{0};
     std::shared_ptr<const FsilsShared> shared_{};
     std::vector<Real> data_;
+    mutable std::unordered_map<std::size_t, std::vector<ResolutionCacheEntry>> resolution_cache_{};
 };
 
 } // namespace backends

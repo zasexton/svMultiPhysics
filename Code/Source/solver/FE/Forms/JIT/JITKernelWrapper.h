@@ -21,10 +21,11 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <span>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
-#include <string>
-#include <span>
 
 namespace svmp {
 namespace FE {
@@ -36,9 +37,23 @@ class FormIR;
 namespace jit {
 
 class JITCompiler;
+struct JITCompileSpecialization;
 
 class JITKernelWrapper final : public assembly::AssemblyKernel {
 public:
+    struct CellSpecializationHint {
+        std::uint32_t n_qpts{0};
+        std::uint32_t n_test_dofs{0};
+        std::uint32_t n_trial_dofs{0};
+    };
+
+    struct BoundarySpecializationHint {
+        int boundary_marker{-1};
+        std::uint32_t n_qpts{0};
+        std::uint32_t n_test_dofs{0};
+        std::uint32_t n_trial_dofs{0};
+    };
+
     JITKernelWrapper(std::shared_ptr<assembly::AssemblyKernel> fallback,
                      JITOptions options);
     ~JITKernelWrapper() override = default;
@@ -91,6 +106,9 @@ public:
     [[nodiscard]] bool isSymmetric() const noexcept override;
     [[nodiscard]] bool isMatrixOnly() const noexcept override;
     [[nodiscard]] bool isVectorOnly() const noexcept override;
+
+    void primeCellSpecializations(std::span<const CellSpecializationHint> hints);
+    void primeBoundarySpecializations(std::span<const BoundarySpecializationHint> hints);
 
     [[nodiscard]] const assembly::AssemblyKernel& fallbackKernel() const noexcept { return *fallback_; }
     [[nodiscard]] std::shared_ptr<const assembly::AssemblyKernel> fallbackKernelShared() const noexcept { return fallback_; }
@@ -195,7 +213,7 @@ private:
 	        }
 	    };
 
-	    void markDirty() noexcept;
+	    void markDirty(std::string_view reason) noexcept;
 	    void maybeCompile();
 	    [[nodiscard]] bool canUseJIT() const noexcept;
 	    void markRuntimeFailureOnce(std::string_view where, std::string_view msg) noexcept;
@@ -205,6 +223,11 @@ private:
 	        IntegralDomain domain,
 	        const assembly::AssemblyContext& ctx_minus,
 	        const assembly::AssemblyContext* ctx_plus);
+    [[nodiscard]] std::shared_ptr<const CompiledDispatch> compileSpecializedDispatch(
+        KernelRole role,
+        const FormIR& ir,
+        const JITCompileSpecialization& specialization,
+        std::string_view trigger);
 
     std::shared_ptr<assembly::AssemblyKernel> fallback_{};
     JITOptions options_{};
@@ -228,6 +251,9 @@ private:
 	    std::unordered_map<SpecializationKey, std::shared_ptr<CompiledDispatch>, SpecializationKeyHash>
 	        specialized_dispatch_{};
 	    std::unordered_set<SpecializationKey, SpecializationKeyHash> attempted_specializations_{};
+    std::unordered_set<SpecializationKey, SpecializationKeyHash> traced_specialization_hits_{};
+    std::unordered_set<SpecializationKey, SpecializationKeyHash> traced_specialization_compiles_{};
+    std::unordered_set<SpecializationKey, SpecializationKeyHash> traced_specialization_skips_{};
 	    bool warned_specialization_failure_{false};
 
 	    bool warned_unavailable_{false};
