@@ -306,6 +306,18 @@ void iterate_solution(Simulation* simulation)
   //Array<double>::write_enabled = true;
   //Array3<double>::write_enabled = true;
 
+  for (auto& eq : com_mod.eq) {
+    eq.legacy_assembly_last = 0.0;
+    eq.legacy_assembly_domain_last = 0.0;
+    eq.legacy_assembly_boundary_last = 0.0;
+    eq.legacy_assembly_post_last = 0.0;
+    eq.legacy_assembly_total = 0.0;
+    eq.legacy_assembly_domain_total = 0.0;
+    eq.legacy_assembly_boundary_total = 0.0;
+    eq.legacy_assembly_post_total = 0.0;
+    eq.legacy_assembly_count = 0;
+  }
+
   // Outer loop for marching in time. When entering this loop, all old
   // variables are completely set and satisfy BCs.
   // 
@@ -344,6 +356,10 @@ void iterate_solution(Simulation* simulation)
     for (auto& eq : com_mod.eq) {
       eq.itr = 0;
       eq.ok = false;
+      eq.legacy_assembly_last = 0.0;
+      eq.legacy_assembly_domain_last = 0.0;
+      eq.legacy_assembly_boundary_last = 0.0;
+      eq.legacy_assembly_post_last = 0.0;
     }
 
     // Compute mesh properties to check if remeshing is required
@@ -459,6 +475,7 @@ void iterate_solution(Simulation* simulation)
       dmsg << "Set body forces ..."  << std::endl;
       #endif
 
+      const double legacy_assembly_domain_start = com_mod.timer.get_time();
       bf::set_bf(com_mod, Dg);
       com_mod.Val.write("Val_bf"+ istr);
 
@@ -471,6 +488,7 @@ void iterate_solution(Simulation* simulation)
       for (int iM = 0; iM < com_mod.nMsh; iM++) {
         eq_assem::global_eq_assem(com_mod, cep_mod, com_mod.msh[iM], Ag, Yg, Dg);
       }
+      const double legacy_assembly_domain_time = com_mod.timer.get_time() - legacy_assembly_domain_start;
       com_mod.R.write("R_as"+ istr);
       com_mod.Val.write("Val_as"+ istr);
 
@@ -486,6 +504,7 @@ void iterate_solution(Simulation* simulation)
       Yg.write("Yg_vor_neu"+ istr);
       Dg.write("Dg_vor_neu"+ istr);
 
+      const double legacy_assembly_boundary_start = com_mod.timer.get_time();
       set_bc::set_bc_neu(com_mod, cm_mod, Yg, Dg);
 
       com_mod.Val.write("Val_neu"+ istr);
@@ -532,10 +551,13 @@ void iterate_solution(Simulation* simulation)
 #endif
       }
 
+      const double legacy_assembly_boundary_time = com_mod.timer.get_time() - legacy_assembly_boundary_start;
+
       // Synchronize R across processes. Note: that it is important
       // to synchronize residual, R before treating immersed bodies as
       // ib.R is already communicated across processes
       //
+      const double legacy_assembly_post_start = com_mod.timer.get_time();
       if (!eq.assmTLS) {
         #ifdef debug_iterate_solution
         dmsg << "Synchronize R across processes ..." << std::endl;
@@ -573,6 +595,20 @@ void iterate_solution(Simulation* simulation)
       #endif
 
       set_bc::set_bc_undef_neu(com_mod);
+
+      const double legacy_assembly_post_time = com_mod.timer.get_time() - legacy_assembly_post_start;
+      const double legacy_assembly_total_time =
+          legacy_assembly_domain_time + legacy_assembly_boundary_time + legacy_assembly_post_time;
+
+      eq.legacy_assembly_last = legacy_assembly_total_time;
+      eq.legacy_assembly_domain_last = legacy_assembly_domain_time;
+      eq.legacy_assembly_boundary_last = legacy_assembly_boundary_time;
+      eq.legacy_assembly_post_last = legacy_assembly_post_time;
+      eq.legacy_assembly_total += legacy_assembly_total_time;
+      eq.legacy_assembly_domain_total += legacy_assembly_domain_time;
+      eq.legacy_assembly_boundary_total += legacy_assembly_boundary_time;
+      eq.legacy_assembly_post_total += legacy_assembly_post_time;
+      eq.legacy_assembly_count += 1;
 
       // IB treatment: for explicit coupling, simply construct residual.
       //
@@ -849,6 +885,10 @@ void iterate_solution(Simulation* simulation)
     com_mod.cplBC.xo = com_mod.cplBC.xn;
 
   } // End of outer loop
+
+  for (int iEq = 0; iEq < com_mod.nEq; ++iEq) {
+    output::output_legacy_assembly_timing(simulation, iEq, true);
+  }
 
   #ifdef debug_iterate_solution
   dmsg << "End of outer loop" << std::endl;

@@ -35,6 +35,52 @@
 #include "utils.h"
 
 #include <math.h>
+#include <iomanip>
+#include <limits>
+#include <sstream>
+
+namespace {
+
+double percent_or_zero(const double part, const double total)
+{
+  if (std::abs(total) <= std::numeric_limits<double>::epsilon()) {
+    return 0.0;
+  }
+  return 100.0 * part / total;
+}
+
+void write_legacy_assembly_block(SimulationLogger& logger, const eqType& eq, const int rank, const bool cumulative)
+{
+  const double total = cumulative ? eq.legacy_assembly_total : eq.legacy_assembly_last;
+  const double domain = cumulative ? eq.legacy_assembly_domain_total : eq.legacy_assembly_domain_last;
+  const double boundary = cumulative ? eq.legacy_assembly_boundary_total : eq.legacy_assembly_boundary_last;
+  const double post = cumulative ? eq.legacy_assembly_post_total : eq.legacy_assembly_post_last;
+
+  if (total <= 0.0) {
+    return;
+  }
+
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(6);
+
+  oss << "  === legacy assembleOperator "
+      << (cumulative ? "SUMMARY" : "TIMING")
+      << " (rank " << rank << ", eq='" << eq.sym << "') ===\n";
+
+  if (cumulative) {
+    oss << "    Calls:               " << eq.legacy_assembly_count << "\n";
+  }
+
+  oss << "    Total:               " << total << " s\n";
+  oss << "    Domain terms:        " << domain << " s  (" << std::setw(5) << percent_or_zero(domain, total) << "%)\n";
+  oss << "    Boundary terms:      " << boundary << " s  (" << std::setw(5) << percent_or_zero(boundary, total) << "%)\n";
+  oss << "    Post-assembly:       " << post << " s  (" << std::setw(5) << percent_or_zero(post, total) << "%)\n";
+  oss << "  ================================================\n";
+
+  logger << oss.str();
+}
+
+} // namespace
 
 namespace output {
 
@@ -170,6 +216,8 @@ void output_result(Simulation* simulation,  std::array<double,3>& timeP, const i
     logger << sOut << std::endl;
   }
 
+  output_legacy_assembly_timing(simulation, iEq, false);
+
   // Print a warning message if the maximum number of nonlinear iterations has been exceeded.
   if (eq.itr > eq.maxItr) {
     auto msg = "[svMultiPhysics] WARNING: The number of nonlinear iterations (" + std::to_string(eq.itr) + 
@@ -180,6 +228,19 @@ void output_result(Simulation* simulation,  std::array<double,3>& timeP, const i
     msg += "\n";
     logger << msg << std::endl; 
   }
+}
+
+void output_legacy_assembly_timing(Simulation* simulation, const int iEq, const bool cumulative)
+{
+  auto& com_mod = simulation->com_mod;
+  auto& cm_mod = simulation->cm_mod;
+
+  if (!com_mod.cm.mas(cm_mod)) {
+    return;
+  }
+
+  const auto& eq = com_mod.eq[iEq];
+  write_legacy_assembly_block(simulation->logger, eq, com_mod.cm.idcm(), cumulative);
 }
 
 void read_restart_header(ComMod& com_mod, std::array<int,7>& tStamp, double& timeP, std::ifstream& restart_file)
@@ -442,4 +503,3 @@ void write_results(ComMod& com_mod, const std::array<double,3>& timeP, const std
 }
 
 };
-

@@ -538,6 +538,10 @@ assembly::AssemblyResult assembleOperator(
     assembler.setSuppressConstraintInhomogeneity(request.suppress_constraint_inhomogeneity);
 
     const auto& def = system.operator_registry_.get(request.op);
+    auto plan_it = system.assembly_plan_by_op_.find(request.op);
+    FE_THROW_IF(plan_it == system.assembly_plan_by_op_.end(), InvalidStateException,
+                "assembleOperator: missing assembly plan for operator '" + request.op + "'");
+    const auto& plan = plan_it->second;
 
     assembly::AssemblyResult total;
 
@@ -557,121 +561,18 @@ assembly::AssemblyResult assembleOperator(
     ao0 = AO_TP();
     {
         std::vector<assembly::FusedCellTerm> fused_terms;
-        fused_terms.reserve(def.cells.size());
+        fused_terms.reserve(plan.cell_terms.size());
 
-        // Track which per-block kernels have been covered by a CoupledBlockKernel
-        // so we don't add them twice (once standalone and once as part of the coupled expansion).
-        std::unordered_set<const assembly::AssemblyKernel*> coupled_covered_kernels;
-
-        // First pass: identify CoupledBlockKernel entries and collect their covered fallback kernels.
-        for (const auto& term : def.cells) {
-            if (auto* coupled = dynamic_cast<const forms::CoupledBlockKernel*>(term.kernel.get())) {
-                for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
-                    const auto& bs = coupled->blockSpec(bi);
-                    if (bs.fallback_kernel) {
-                        coupled_covered_kernels.insert(bs.fallback_kernel.get());
-                    }
-                }
-            }
-        }
-
-        for (const auto& term : def.cells) {
-            FE_CHECK_NOT_NULL(term.kernel.get(), "assembleOperator: cell term kernel");
-
-            // If this kernel is covered by a CoupledBlockKernel, skip it
-            // (it will be expanded below from the coupled kernel's blocks).
-            if (coupled_covered_kernels.count(term.kernel.get()) > 0) {
-                continue;
-            }
-
-            // Detect CoupledBlockKernel: resolve per-block data and register
-            // as a single FusedCellTerm.  The assembler's coupled path handles
-            // per-block dispatch with shared geometry/field solutions.
-            if (auto* coupled = dynamic_cast<forms::CoupledBlockKernel*>(term.kernel.get())) {
-                // Resolve per-block field info (deferred from installation time)
-                if (!coupled->isResolved()) {
-                    for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
-                        auto& bs = coupled->mutableBlockSpec(bi);
-                        const auto& b_test_field = system.field_registry_.get(bs.test_field);
-                        const auto& b_trial_field = system.field_registry_.get(bs.trial_field);
-                        FE_CHECK_NOT_NULL(b_test_field.space.get(), "assembleOperator: coupled block test space");
-                        FE_CHECK_NOT_NULL(b_trial_field.space.get(), "assembleOperator: coupled block trial space");
-                        const auto b_test_idx = static_cast<std::size_t>(b_test_field.id);
-                        const auto b_trial_idx = static_cast<std::size_t>(b_trial_field.id);
-
-                        bs.test_space = b_test_field.space.get();
-                        bs.trial_space = b_trial_field.space.get();
-                        bs.row_dof_map = &system.field_dof_handlers_[b_test_idx].getDofMap();
-                        bs.col_dof_map = &system.field_dof_handlers_[b_trial_idx].getDofMap();
-                        bs.row_dof_offset = system.field_dof_offsets_[b_test_idx];
-                        bs.col_dof_offset = system.field_dof_offsets_[b_trial_idx];
-
-                        if (oopTraceEnabled()) {
-                            std::ostringstream oss;
-                            oss << "assembleOperator: op='" << request.op
-                                << "' coupled block[" << bi << "] test='" << b_test_field.name
-                                << "' trial='" << b_trial_field.name
-                                << "' want_matrix=" << (request.want_matrix && bs.want_matrix ? 1 : 0)
-                                << " want_vector=" << (request.want_vector && bs.want_vector ? 1 : 0);
-                            traceLog(oss.str());
-                        }
-                    }
-                    coupled->setResolved();
-                }
-
-                // Check if any block has work to do
-                bool any_active = false;
-                for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
-                    const auto& bs = coupled->blockSpec(bi);
-                    if (!bs.fallback_kernel || !bs.fallback_kernel->hasCell()) continue;
-                    if ((request.want_matrix && bs.want_matrix) ||
-                        (request.want_vector && bs.want_vector)) {
-                        any_active = true;
-                        break;
-                    }
-                }
-                if (!any_active) continue;
-
-                // Register as single FusedCellTerm using first block's spaces.
-                // The assembler detects CoupledBlockKernel and dispatches per-block.
-                const auto& first_bs = coupled->blockSpec(0);
-                assembly::FusedCellTerm ft;
-                ft.test_space = first_bs.test_space;
-                ft.trial_space = first_bs.trial_space;
-                ft.kernel = coupled;
-                ft.row_dof_map = first_bs.row_dof_map;
-                ft.col_dof_map = first_bs.col_dof_map;
-                ft.row_dof_offset = first_bs.row_dof_offset;
-                ft.col_dof_offset = first_bs.col_dof_offset;
-                ft.matrix_view = request.want_matrix ? matrix_out : nullptr;
-                ft.vector_view = request.want_vector ? vector_out : nullptr;
-                ft.assemble_matrix = request.want_matrix;
-                ft.assemble_vector = request.want_vector;
-                fused_terms.push_back(ft);
-                continue;
-            }
-
-            // Standard single-kernel term (unchanged)
-            const auto& test_field = system.field_registry_.get(term.test_field);
-            const auto& trial_field = system.field_registry_.get(term.trial_field);
-
-            FE_CHECK_NOT_NULL(test_field.space.get(), "assembleOperator: test_field.space");
-            FE_CHECK_NOT_NULL(trial_field.space.get(), "assembleOperator: trial_field.space");
-
-            const auto test_idx = static_cast<std::size_t>(test_field.id);
-            const auto trial_idx = static_cast<std::size_t>(trial_field.id);
-            FE_THROW_IF(test_field.id < 0 || test_idx >= system.field_dof_handlers_.size(), InvalidStateException,
-                        "assembleOperator: invalid test field DOF handler");
-            FE_THROW_IF(trial_field.id < 0 || trial_idx >= system.field_dof_handlers_.size(), InvalidStateException,
-                        "assembleOperator: invalid trial field DOF handler");
-
-            const bool want_matrix = request.want_matrix && !term.kernel->isVectorOnly();
-            const bool want_vector = request.want_vector && !term.kernel->isMatrixOnly();
+        for (const auto& term : plan.cell_terms) {
+            const bool want_matrix = request.want_matrix && term.matrix_capable;
+            const bool want_vector = request.want_vector && term.vector_capable;
             if (!want_matrix && !want_vector) {
                 continue;
             }
 
             if (oopTraceEnabled()) {
+                const auto& test_field = system.field_registry_.get(term.test_field);
+                const auto& trial_field = system.field_registry_.get(term.trial_field);
                 std::ostringstream oss;
                 oss << "assembleOperator: op='" << request.op << "' cell term test='" << test_field.name
                     << "' trial='" << trial_field.name << "' want_matrix=" << (want_matrix ? 1 : 0)
@@ -680,13 +581,13 @@ assembly::AssemblyResult assembleOperator(
             }
 
             assembly::FusedCellTerm ft;
-            ft.test_space = test_field.space.get();
-            ft.trial_space = trial_field.space.get();
-            ft.kernel = term.kernel.get();
-            ft.row_dof_map = &system.field_dof_handlers_[test_idx].getDofMap();
-            ft.col_dof_map = &system.field_dof_handlers_[trial_idx].getDofMap();
-            ft.row_dof_offset = system.field_dof_offsets_[test_idx];
-            ft.col_dof_offset = system.field_dof_offsets_[trial_idx];
+            ft.test_space = term.test_space;
+            ft.trial_space = term.trial_space;
+            ft.kernel = term.kernel;
+            ft.row_dof_map = term.row_dof_map;
+            ft.col_dof_map = term.col_dof_map;
+            ft.row_dof_offset = term.row_dof_offset;
+            ft.col_dof_offset = term.col_dof_offset;
             ft.matrix_view = want_matrix ? matrix_out : nullptr;
             ft.vector_view = want_vector ? vector_out : nullptr;
             ft.assemble_matrix = want_matrix;
@@ -711,187 +612,156 @@ assembly::AssemblyResult assembleOperator(
     }
     ao_cell_time += AO_TP() - ao0;
 
-	    // Boundary terms
-	    ao0 = AO_TP();
-	    if (request.assemble_boundary_terms) {
-	        for (const auto& term : def.boundary) {
-	            FE_CHECK_NOT_NULL(term.kernel.get(), "assembleOperator: boundary term kernel");
-	            const auto& test_field = system.field_registry_.get(term.test_field);
-	            const auto& trial_field = system.field_registry_.get(term.trial_field);
+    // Boundary terms
+    ao0 = AO_TP();
+    if (request.assemble_boundary_terms) {
+        for (const auto& term : plan.boundary_terms) {
+            FE_CHECK_NOT_NULL(term.kernel, "assembleOperator: boundary term kernel");
+            const bool want_matrix = request.want_matrix && term.matrix_capable;
+            const bool want_vector = request.want_vector && term.vector_capable;
+            if (!want_matrix && !want_vector) {
+                continue;
+            }
 
-            FE_CHECK_NOT_NULL(test_field.space.get(), "assembleOperator: test_field.space");
-            FE_CHECK_NOT_NULL(trial_field.space.get(), "assembleOperator: trial_field.space");
+            assembler.setRowDofMap(*term.row_dof_map, term.row_dof_offset);
+            assembler.setColDofMap(*term.col_dof_map, term.col_dof_offset);
 
-            const auto test_idx = static_cast<std::size_t>(test_field.id);
-            const auto trial_idx = static_cast<std::size_t>(trial_field.id);
-            FE_THROW_IF(test_field.id < 0 || test_idx >= system.field_dof_handlers_.size(), InvalidStateException,
-                        "assembleOperator: invalid test field DOF handler");
-            FE_THROW_IF(trial_field.id < 0 || trial_idx >= system.field_dof_handlers_.size(), InvalidStateException,
-                        "assembleOperator: invalid trial field DOF handler");
+            if (oopTraceEnabled()) {
+                const auto& test_field = system.field_registry_.get(term.test_field);
+                const auto& trial_field = system.field_registry_.get(term.trial_field);
+                std::ostringstream oss;
+                oss << "assembleOperator: op='" << request.op << "' boundary term marker=" << term.marker
+                    << " test='" << test_field.name << "' trial='" << trial_field.name << "' want_matrix="
+                    << (want_matrix ? 1 : 0) << " want_vector=" << (want_vector ? 1 : 0);
+                traceLog(oss.str());
+            }
+            const auto term_t0 = std::chrono::steady_clock::now();
 
-	            assembler.setRowDofMap(system.field_dof_handlers_[test_idx].getDofMap(),
-	                                   system.field_dof_offsets_[test_idx]);
-	            assembler.setColDofMap(system.field_dof_handlers_[trial_idx].getDofMap(),
-	                                   system.field_dof_offsets_[trial_idx]);
+            auto r = assembler.assembleBoundaryFaces(
+                mesh, term.marker, *term.test_space, *term.trial_space, *term.kernel,
+                want_matrix ? matrix_out : nullptr,
+                want_vector ? vector_out : nullptr);
+            mergeAssemblyResult(total, r);
 
-	            const bool want_matrix = request.want_matrix && !term.kernel->isVectorOnly();
-	            const bool want_vector = request.want_vector && !term.kernel->isMatrixOnly();
-	            if (oopTraceEnabled() && (want_matrix || want_vector)) {
-	                std::ostringstream oss;
-	                oss << "assembleOperator: op='" << request.op << "' boundary term marker=" << term.marker
-	                    << " test='" << test_field.name << "' trial='" << trial_field.name << "' want_matrix="
-	                    << (want_matrix ? 1 : 0) << " want_vector=" << (want_vector ? 1 : 0);
-	                traceLog(oss.str());
-	            }
-	            const auto term_t0 = std::chrono::steady_clock::now();
+            if (oopTraceEnabled()) {
+                const auto& test_field = system.field_registry_.get(term.test_field);
+                const auto& trial_field = system.field_registry_.get(term.trial_field);
+                const auto term_t1 = std::chrono::steady_clock::now();
+                std::ostringstream oss;
+                oss << "assembleOperator: op='" << request.op << "' boundary term done marker=" << term.marker
+                    << " test='" << test_field.name << "' trial='" << trial_field.name << "' time="
+                    << std::chrono::duration<double>(term_t1 - term_t0).count();
+                traceLog(oss.str());
+            }
+        }
+    }
+    ao_boundary_time += AO_TP() - ao0;
 
-	            auto r = assembler.assembleBoundaryFaces(
-	                mesh, term.marker, *test_field.space, *trial_field.space, *term.kernel,
-	                request.want_matrix ? matrix_out : nullptr,
-	                request.want_vector ? vector_out : nullptr);
-	            mergeAssemblyResult(total, r);
+    ao0 = AO_TP();
+    // Interior face terms (DG)
+    if (request.assemble_interior_face_terms) {
+        for (const auto& term : plan.interior_terms) {
+            FE_CHECK_NOT_NULL(term.kernel, "assembleOperator: interior-face term kernel");
+            const bool want_matrix = request.want_matrix && term.matrix_capable;
+            const bool want_vector = request.want_vector && term.vector_capable;
+            if (!want_matrix && !want_vector) {
+                continue;
+            }
 
-	            if (oopTraceEnabled() && (want_matrix || want_vector)) {
-	                const auto term_t1 = std::chrono::steady_clock::now();
-	                std::ostringstream oss;
-	                oss << "assembleOperator: op='" << request.op << "' boundary term done marker=" << term.marker
-	                    << " test='" << test_field.name << "' trial='" << trial_field.name << "' time="
-	                    << std::chrono::duration<double>(term_t1 - term_t0).count();
-	                traceLog(oss.str());
-	            }
-	        }
-	    }
-	    ao_boundary_time += AO_TP() - ao0;
+            assembler.setRowDofMap(*term.row_dof_map, term.row_dof_offset);
+            assembler.setColDofMap(*term.col_dof_map, term.col_dof_offset);
 
-	    ao0 = AO_TP();
-		    // Interior face terms (DG)
-		    if (request.assemble_interior_face_terms) {
-		        for (const auto& term : def.interior) {
-		            FE_CHECK_NOT_NULL(term.kernel.get(), "assembleOperator: interior-face term kernel");
-		            const auto& test_field = system.field_registry_.get(term.test_field);
-	            const auto& trial_field = system.field_registry_.get(term.trial_field);
+            if (oopTraceEnabled()) {
+                const auto& test_field = system.field_registry_.get(term.test_field);
+                const auto& trial_field = system.field_registry_.get(term.trial_field);
+                std::ostringstream oss;
+                oss << "assembleOperator: op='" << request.op << "' interior-face term test='" << test_field.name
+                    << "' trial='" << trial_field.name << "' want_matrix=" << (want_matrix ? 1 : 0)
+                    << " want_vector=" << (want_vector ? 1 : 0);
+                traceLog(oss.str());
+            }
+            const auto term_t0 = std::chrono::steady_clock::now();
 
-            FE_CHECK_NOT_NULL(test_field.space.get(), "assembleOperator: test_field.space");
-            FE_CHECK_NOT_NULL(trial_field.space.get(), "assembleOperator: trial_field.space");
+            if (want_matrix) {
+                auto r = assembler.assembleInteriorFaces(
+                    mesh, *term.test_space, *term.trial_space, *term.kernel, *matrix_out,
+                    want_vector ? vector_out : nullptr);
+                mergeAssemblyResult(total, r);
+            } else {
+                assembly::DenseVectorView dummy_matrix(0);
+                auto r = assembler.assembleInteriorFaces(
+                    mesh, *term.test_space, *term.trial_space, *term.kernel, dummy_matrix,
+                    vector_out);
+                mergeAssemblyResult(total, r);
+            }
 
-            const auto test_idx = static_cast<std::size_t>(test_field.id);
-            const auto trial_idx = static_cast<std::size_t>(trial_field.id);
-            FE_THROW_IF(test_field.id < 0 || test_idx >= system.field_dof_handlers_.size(), InvalidStateException,
-                        "assembleOperator: invalid test field DOF handler");
-            FE_THROW_IF(trial_field.id < 0 || trial_idx >= system.field_dof_handlers_.size(), InvalidStateException,
-                        "assembleOperator: invalid trial field DOF handler");
-
-	            assembler.setRowDofMap(system.field_dof_handlers_[test_idx].getDofMap(),
-	                                   system.field_dof_offsets_[test_idx]);
-	            assembler.setColDofMap(system.field_dof_handlers_[trial_idx].getDofMap(),
-	                                   system.field_dof_offsets_[trial_idx]);
-
-		            const bool want_matrix = request.want_matrix && !term.kernel->isVectorOnly();
-		            const bool want_vector = request.want_vector && !term.kernel->isMatrixOnly();
-		            if (!want_matrix && !want_vector) {
-		                continue;
-		            }
-
-		            if (oopTraceEnabled()) {
-		                std::ostringstream oss;
-		                oss << "assembleOperator: op='" << request.op << "' interior-face term test='" << test_field.name
-		                    << "' trial='" << trial_field.name << "' want_matrix=" << (want_matrix ? 1 : 0)
-		                    << " want_vector=" << (want_vector ? 1 : 0);
-		                traceLog(oss.str());
-		            }
-		            const auto term_t0 = std::chrono::steady_clock::now();
-
-		            if (want_matrix) {
-		                auto r = assembler.assembleInteriorFaces(
-		                    mesh, *test_field.space, *trial_field.space, *term.kernel, *matrix_out,
-		                    want_vector ? vector_out : nullptr);
-		                mergeAssemblyResult(total, r);
-	            } else {
-	                assembly::DenseVectorView dummy_matrix(0);
-	                auto r = assembler.assembleInteriorFaces(
-	                    mesh, *test_field.space, *trial_field.space, *term.kernel, dummy_matrix,
-		                    vector_out);
-		                mergeAssemblyResult(total, r);
-		            }
-
-		            if (oopTraceEnabled()) {
-		                const auto term_t1 = std::chrono::steady_clock::now();
-		                std::ostringstream oss;
-		                oss << "assembleOperator: op='" << request.op << "' interior-face term done test='"
-		                    << test_field.name << "' trial='" << trial_field.name << "' time="
-		                    << std::chrono::duration<double>(term_t1 - term_t0).count();
-		                traceLog(oss.str());
-		            }
-			        }
-			    }
+            if (oopTraceEnabled()) {
+                const auto& test_field = system.field_registry_.get(term.test_field);
+                const auto& trial_field = system.field_registry_.get(term.trial_field);
+                const auto term_t1 = std::chrono::steady_clock::now();
+                std::ostringstream oss;
+                oss << "assembleOperator: op='" << request.op << "' interior-face term done test='"
+                    << test_field.name << "' trial='" << trial_field.name << "' time="
+                    << std::chrono::duration<double>(term_t1 - term_t0).count();
+                traceLog(oss.str());
+            }
+        }
+    }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-		    // Interface face terms (InterfaceMesh subset)
-		    if (request.assemble_interface_face_terms) {
-		        for (const auto& term : def.interface_faces) {
-		            FE_CHECK_NOT_NULL(term.kernel.get(), "assembleOperator: interface-face term kernel");
-		            const auto& test_field = system.field_registry_.get(term.test_field);
-		            const auto& trial_field = system.field_registry_.get(term.trial_field);
+    // Interface face terms (InterfaceMesh subset)
+    if (request.assemble_interface_face_terms) {
+        for (const auto& term : plan.interface_terms) {
+            FE_CHECK_NOT_NULL(term.kernel, "assembleOperator: interface-face term kernel");
+            const bool want_matrix = request.want_matrix && term.matrix_capable;
+            const bool want_vector = request.want_vector && term.vector_capable;
+            if (!want_matrix && !want_vector) {
+                continue;
+            }
 
-		            FE_CHECK_NOT_NULL(test_field.space.get(), "assembleOperator: test_field.space");
-		            FE_CHECK_NOT_NULL(trial_field.space.get(), "assembleOperator: trial_field.space");
+            assembler.setRowDofMap(*term.row_dof_map, term.row_dof_offset);
+            assembler.setColDofMap(*term.col_dof_map, term.col_dof_offset);
 
-		            const auto test_idx = static_cast<std::size_t>(test_field.id);
-		            const auto trial_idx = static_cast<std::size_t>(trial_field.id);
-		            FE_THROW_IF(test_field.id < 0 || test_idx >= system.field_dof_handlers_.size(), InvalidStateException,
-		                        "assembleOperator: invalid test field DOF handler");
-		            FE_THROW_IF(trial_field.id < 0 || trial_idx >= system.field_dof_handlers_.size(), InvalidStateException,
-		                        "assembleOperator: invalid trial field DOF handler");
+            auto assemble_on_marker = [&](int marker) {
+                auto it = system.interface_meshes_.find(marker);
+                FE_THROW_IF(it == system.interface_meshes_.end() || !it->second, InvalidArgumentException,
+                            "assembleOperator: missing InterfaceMesh for interface marker " + std::to_string(marker));
+                const auto& iface_mesh = *it->second;
 
-		            assembler.setRowDofMap(system.field_dof_handlers_[test_idx].getDofMap(),
-		                                   system.field_dof_offsets_[test_idx]);
-		            assembler.setColDofMap(system.field_dof_handlers_[trial_idx].getDofMap(),
-		                                   system.field_dof_offsets_[trial_idx]);
+                if (want_matrix) {
+                    auto r = assembler.assembleInterfaceFaces(
+                        mesh, iface_mesh, marker, *term.test_space, *term.trial_space, *term.kernel, *matrix_out,
+                        want_vector ? vector_out : nullptr);
+                    mergeAssemblyResult(total, r);
+                } else {
+                    assembly::DenseVectorView dummy_matrix(0);
+                    auto r = assembler.assembleInterfaceFaces(
+                        mesh, iface_mesh, marker, *term.test_space, *term.trial_space, *term.kernel, dummy_matrix,
+                        vector_out);
+                    mergeAssemblyResult(total, r);
+                }
+            };
 
-		            const bool want_matrix = request.want_matrix && !term.kernel->isVectorOnly();
-		            const bool want_vector = request.want_vector && !term.kernel->isMatrixOnly();
-		            if (!want_matrix && !want_vector) {
-		                continue;
-		            }
-
-		            auto assemble_on_marker = [&](int marker) {
-		                auto it = system.interface_meshes_.find(marker);
-		                FE_THROW_IF(it == system.interface_meshes_.end() || !it->second, InvalidArgumentException,
-		                            "assembleOperator: missing InterfaceMesh for interface marker " + std::to_string(marker));
-		                const auto& iface_mesh = *it->second;
-
-		                if (want_matrix) {
-		                    auto r = assembler.assembleInterfaceFaces(
-		                        mesh, iface_mesh, marker, *test_field.space, *trial_field.space, *term.kernel, *matrix_out,
-		                        want_vector ? vector_out : nullptr);
-		                    mergeAssemblyResult(total, r);
-		                } else {
-		                    assembly::DenseVectorView dummy_matrix(0);
-		                    auto r = assembler.assembleInterfaceFaces(
-		                        mesh, iface_mesh, marker, *test_field.space, *trial_field.space, *term.kernel, dummy_matrix,
-		                        vector_out);
-		                    mergeAssemblyResult(total, r);
-		                }
-		            };
-
-		            if (term.marker < 0) {
-		                FE_THROW_IF(system.interface_meshes_.empty(), InvalidArgumentException,
-		                            "assembleOperator: interface-face term requested for all interface markers, but no InterfaceMesh was registered");
-		                for (const auto& kv : system.interface_meshes_) {
-		                    if (!kv.second) continue;
-		                    assemble_on_marker(kv.first);
-		                }
-		            } else {
-		                assemble_on_marker(term.marker);
-		            }
-		        }
-		    }
+            if (term.marker < 0) {
+                FE_THROW_IF(system.interface_meshes_.empty(), InvalidArgumentException,
+                            "assembleOperator: interface-face term requested for all interface markers, but no InterfaceMesh was registered");
+                for (const auto& kv : system.interface_meshes_) {
+                    if (!kv.second) {
+                        continue;
+                    }
+                    assemble_on_marker(kv.first);
+                }
+            } else {
+                assemble_on_marker(term.marker);
+            }
+        }
+    }
 #endif
 
     // Global (non-element-local) terms (e.g., contact)
     if (request.assemble_global_terms) {
-        for (const auto& kernel : def.global) {
-            FE_CHECK_NOT_NULL(kernel.get(), "assembleOperator: global term kernel");
+        for (auto* kernel : plan.global_terms) {
+            FE_CHECK_NOT_NULL(kernel, "assembleOperator: global term kernel");
             auto r = kernel->assemble(system, request, state,
                                       request.want_matrix ? matrix_out : nullptr,
                                       request.want_vector ? vector_out : nullptr);

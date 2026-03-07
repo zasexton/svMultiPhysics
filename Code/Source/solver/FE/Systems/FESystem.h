@@ -288,6 +288,72 @@ public:
     void clearRankOneUpdates() noexcept;
 
 private:
+    struct PlannedCellTerm {
+        FieldId test_field{INVALID_FIELD_ID};
+        FieldId trial_field{INVALID_FIELD_ID};
+        const spaces::FunctionSpace* test_space{nullptr};
+        const spaces::FunctionSpace* trial_space{nullptr};
+        assembly::AssemblyKernel* kernel{nullptr};
+        const dofs::DofMap* row_dof_map{nullptr};
+        const dofs::DofMap* col_dof_map{nullptr};
+        GlobalIndex row_dof_offset{0};
+        GlobalIndex col_dof_offset{0};
+        bool matrix_capable{false};
+        bool vector_capable{false};
+    };
+
+    struct PlannedBoundaryTerm {
+        int marker{0};
+        FieldId test_field{INVALID_FIELD_ID};
+        FieldId trial_field{INVALID_FIELD_ID};
+        const spaces::FunctionSpace* test_space{nullptr};
+        const spaces::FunctionSpace* trial_space{nullptr};
+        assembly::AssemblyKernel* kernel{nullptr};
+        const dofs::DofMap* row_dof_map{nullptr};
+        const dofs::DofMap* col_dof_map{nullptr};
+        GlobalIndex row_dof_offset{0};
+        GlobalIndex col_dof_offset{0};
+        bool matrix_capable{false};
+        bool vector_capable{false};
+    };
+
+    struct PlannedInteriorFaceTerm {
+        FieldId test_field{INVALID_FIELD_ID};
+        FieldId trial_field{INVALID_FIELD_ID};
+        const spaces::FunctionSpace* test_space{nullptr};
+        const spaces::FunctionSpace* trial_space{nullptr};
+        assembly::AssemblyKernel* kernel{nullptr};
+        const dofs::DofMap* row_dof_map{nullptr};
+        const dofs::DofMap* col_dof_map{nullptr};
+        GlobalIndex row_dof_offset{0};
+        GlobalIndex col_dof_offset{0};
+        bool matrix_capable{false};
+        bool vector_capable{false};
+    };
+
+    struct PlannedInterfaceFaceTerm {
+        int marker{0};
+        FieldId test_field{INVALID_FIELD_ID};
+        FieldId trial_field{INVALID_FIELD_ID};
+        const spaces::FunctionSpace* test_space{nullptr};
+        const spaces::FunctionSpace* trial_space{nullptr};
+        assembly::AssemblyKernel* kernel{nullptr};
+        const dofs::DofMap* row_dof_map{nullptr};
+        const dofs::DofMap* col_dof_map{nullptr};
+        GlobalIndex row_dof_offset{0};
+        GlobalIndex col_dof_offset{0};
+        bool matrix_capable{false};
+        bool vector_capable{false};
+    };
+
+    struct OperatorAssemblyPlan {
+        std::vector<PlannedCellTerm> cell_terms{};
+        std::vector<PlannedBoundaryTerm> boundary_terms{};
+        std::vector<PlannedInteriorFaceTerm> interior_terms{};
+        std::vector<PlannedInterfaceFaceTerm> interface_terms{};
+        std::vector<GlobalKernel*> global_terms{};
+    };
+
     friend assembly::AssemblyResult assembleOperator(
         FESystem& system,
         const AssemblyRequest& request,
@@ -299,6 +365,7 @@ private:
     void invalidateSetup() noexcept;
     void requireSetup() const;
     void requireSingleFieldSetup() const;
+    void buildAssemblyPlans();
 
     [[nodiscard]] const FieldRecord& singleField() const;
 
@@ -335,6 +402,7 @@ private:
     std::unique_ptr<CoupledBoundaryManager> coupled_boundary_{};
 	    ParameterRegistry parameter_registry_{};
     std::vector<backends::RankOneUpdate> last_rank_one_updates_{};
+    std::unordered_map<OperatorTag, OperatorAssemblyPlan> assembly_plan_by_op_{};
 
 	    bool is_setup_{false};
 	};

@@ -40,6 +40,8 @@ namespace output {
 
 void output_result(Simulation* simulation,  std::array<double,3>& timeP, const int co, const int iEq);
 
+void output_legacy_assembly_timing(Simulation* simulation, const int iEq, const bool cumulative);
+
 void read_restart_header(ComMod& com_mod, std::array<int,7>& tStamp, double& timeP, std::ifstream& restart_file);
 
 void write_restart(Simulation* simulation, std::array<double,3>& timeP);
@@ -51,4 +53,3 @@ void write_results(ComMod& com_mod, const std::array<double,3>& timeP, const std
 };
 
 #endif
-

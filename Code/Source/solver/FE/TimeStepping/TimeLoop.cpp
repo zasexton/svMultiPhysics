@@ -1720,11 +1720,11 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                        // Ensure uDot storage exists and is initialized before the stage solve.
 	                        const bool had_u_dot = history.hasUDotState();
 	                        history.ensureSecondOrderState(factory);
-	                        if (!had_u_dot) {
-	                            // Compute a PDE-consistent initial uDot by solving a transient linear system for
-	                            // the time-derivative fields at the stage time. This avoids the degenerate uDot=0
-	                            // initialization that can remove inertia from the first residual evaluation.
-	                            history.uDot().zero();
+                        if (!had_u_dot) {
+                            // Compute a PDE-consistent initial uDot by solving a transient linear system for
+                            // the time-derivative fields at the stage time. This avoids the degenerate uDot=0
+                            // initialization that can remove inertia from the first residual evaluation.
+                            history.uDot().zero();
 
                             if (!dt_fields.empty()) {
                                 const double stage_time = t + ga1_params->alpha_f * dt;
@@ -1744,11 +1744,11 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                 init_state.u_history = history.uHistorySpans();
                                 init_state.dt_history = history.dtHistory();
 
-	                                auto ctx_base = generalized_alpha_fo->buildContext(temporal_order, init_state);
-	                                const auto* dt1 = ctx_base.dt1 ? &(*ctx_base.dt1) : nullptr;
-	                                const double c = dt1 ? static_cast<double>(dt1->coeff(/*history_index=*/0)) : 0.0;
+                                auto ctx_base = generalized_alpha_fo->buildContext(temporal_order, init_state);
+                                const auto* dt1 = ctx_base.dt1 ? &(*ctx_base.dt1) : nullptr;
+                                const double c = dt1 ? static_cast<double>(dt1->coeff(/*history_index=*/0)) : 0.0;
 
-	                                const bool can_solve = (dt1 != nullptr) && std::isfinite(c) && (std::abs(c) > 0.0);
+                                const bool can_solve = (dt1 != nullptr) && std::isfinite(c) && (std::abs(c) > 0.0);
 
                                 if (can_solve) {
                                     // Assemble non-dt residual r(u) with dt terms disabled.
@@ -1789,16 +1789,16 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                     FE_THROW_IF(!ar_A.success, FEException,
                                                 "TimeLoop: uDot initialization matrix assembly failed: " + ar_A.error_message);
 
-	                                    // Build RHS b = -c * r_non_dt so that:
-	                                    //   (c*M) * uDot = -c * r_non_dt  =>  M * uDot = -r_non_dt
-	                                    // which matches the PDE-consistent initial rate for first-order systems.
-	                                    auto& b = *scratch_vec1;
-	                                    copyVector(b, r_non_dt);
-	                                    b.scale(static_cast<Real>(-c));
-	                                    if (!nondt_dofs.empty()) {
-	                                        auto b_mod = b.createAssemblyView();
-	                                        FE_CHECK_NOT_NULL(b_mod.get(), "TimeLoop: uDot init rhs view");
-	                                        b_mod->beginAssemblyPhase();
+                                    // Build RHS b = -c * r_non_dt so that:
+                                    //   (c*M) * uDot = -c * r_non_dt  =>  M * uDot = -r_non_dt
+                                    // which matches the PDE-consistent initial rate for first-order systems.
+                                    auto& b = *scratch_vec1;
+                                    copyVector(b, r_non_dt);
+                                    b.scale(static_cast<Real>(-c));
+                                    if (!nondt_dofs.empty()) {
+                                        auto b_mod = b.createAssemblyView();
+                                        FE_CHECK_NOT_NULL(b_mod.get(), "TimeLoop: uDot init rhs view");
+                                        b_mod->beginAssemblyPhase();
                                         b_mod->zeroVectorEntries(nondt_dofs);
                                         b_mod->finalizeAssembly();
 
@@ -1807,59 +1807,59 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                         A_mod->beginAssemblyPhase();
                                         A_mod->zeroRows(nondt_dofs, /*set_diagonal=*/true);
                                         A_mod->finalizeAssembly();
-	                                    }
+                                    }
 
-	                                    // Solve A * uDot = b.
-	                                    // The dt-only Jacobian assembled above can be structurally incompatible with
-	                                    // certain specialized saddle-point solvers (e.g., block-Schur), since it
-	                                    // intentionally disables all non-dt terms and may eliminate required coupling
-	                                    // blocks. For this one-time initialization solve, fall back to a generic Krylov
-	                                    // method when the configured linear solver is block-Schur.
-	                                    const auto saved_opts = linear.getOptions();
-	                                    struct RestoreSolverOptionsGuard {
-	                                        backends::LinearSolver& linear;
-	                                        backends::SolverOptions opts;
-	                                        ~RestoreSolverOptionsGuard() noexcept
-	                                        {
-	                                            try {
-	                                                linear.setOptions(opts);
-	                                            } catch (...) {
-	                                            }
-	                                        }
-	                                    } restore_linear_opts{linear, saved_opts};
+                                    // Solve A * uDot = b.
+                                    // The dt-only Jacobian assembled above can be structurally incompatible with
+                                    // certain specialized saddle-point solvers (e.g., block-Schur), since it
+                                    // intentionally disables all non-dt terms and may eliminate required coupling
+                                    // blocks. For this one-time initialization solve, fall back to a generic Krylov
+                                    // method when the configured linear solver is block-Schur.
+                                    const auto saved_opts = linear.getOptions();
+                                    struct RestoreSolverOptionsGuard {
+                                        backends::LinearSolver& linear;
+                                        backends::SolverOptions opts;
+                                        ~RestoreSolverOptionsGuard() noexcept
+                                        {
+                                            try {
+                                                linear.setOptions(opts);
+                                            } catch (...) {
+                                            }
+                                        }
+                                    } restore_linear_opts{linear, saved_opts};
 
-	                                    backends::SolverOptions init_opts = saved_opts;
-	                                    if (init_opts.method == backends::SolverMethod::BlockSchur) {
-	                                        init_opts.method = backends::SolverMethod::GMRES;
-	                                        init_opts.max_iter = std::max(init_opts.max_iter, 50);
-	                                        linear.setOptions(init_opts);
-	                                    }
+                                    backends::SolverOptions init_opts = saved_opts;
+                                    if (init_opts.method == backends::SolverMethod::BlockSchur) {
+                                        init_opts.method = backends::SolverMethod::GMRES;
+                                        init_opts.max_iter = std::max(init_opts.max_iter, 50);
+                                        linear.setOptions(init_opts);
+                                    }
 
-	                                    backends::SolverReport rep{};
-	                                    try {
-	                                        rep = linear.solve(A, history.uDot(), b);
-	                                    } catch (const std::exception&) {
-	                                        rep.converged = false;
-	                                    }
-	                                    if (!rep.converged) {
-	                                        // Fall back to a finite-difference uDot (may be zero at the first step).
-	                                        (void)utils::initializeSecondOrderStateFromDisplacementHistory(
-	                                            history,
-	                                            history.uDot().localSpan(),
+                                    backends::SolverReport rep{};
+                                    try {
+                                        rep = linear.solve(A, history.uDot(), b);
+                                    } catch (const std::exception&) {
+                                        rep.converged = false;
+                                    }
+                                    if (!rep.converged) {
+                                        // Fall back to a finite-difference uDot (may be zero at the first step).
+                                        (void)utils::initializeSecondOrderStateFromDisplacementHistory(
+                                            history,
+                                            history.uDot().localSpan(),
                                             history.uDDot().localSpan(),
                                             /*overwrite_u_dot=*/true,
                                             /*overwrite_u_ddot=*/false);
                                     }
                                 } else {
-	                                    (void)utils::initializeSecondOrderStateFromDisplacementHistory(
-	                                        history,
-	                                        history.uDot().localSpan(),
-	                                        history.uDDot().localSpan(),
-	                                        /*overwrite_u_dot=*/true,
-	                                        /*overwrite_u_ddot=*/false);
-	                                }
-	                            }
-	                        }
+                                    (void)utils::initializeSecondOrderStateFromDisplacementHistory(
+                                        history,
+                                        history.uDot().localSpan(),
+                                        history.uDDot().localSpan(),
+                                        /*overwrite_u_dot=*/true,
+                                        /*overwrite_u_ddot=*/false);
+                                }
+                            }
+                        }
 	                        if (!nondt_dofs.empty()) {
 	                            zeroVectorEntries(nondt_dofs, history.uDot());
 	                        }
@@ -2717,31 +2717,6 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         }
                     }
 
-                    systems::TransientSystem transient_finalize(transient.system(), bdf1);
-                    systems::AssemblyRequest req_finalize;
-                    req_finalize.op = options_.newton.residual_op;
-                    req_finalize.want_vector = true;
-                    req_finalize.zero_outputs = true;
-
-                    scratch_vec0->zero();
-                    auto out_view = scratch_vec0->createAssemblyView();
-                    FE_CHECK_NOT_NULL(out_view.get(), "TimeLoop: final-state residual view");
-
-                    systems::SystemStateView state;
-                    state.time = solve_time;
-                    state.dt = dt;
-                    state.dt_prev = history.dtPrev();
-                    state.u = history.uSpan();
-                    state.u_prev = history.uPrevSpan();
-                    state.u_prev2 = history.uPrev2Span();
-                    state.u_vector = &history.u();
-                    state.u_prev_vector = &history.uPrev();
-                    state.u_prev2_vector = &history.uPrev2();
-                    state.u_history = history.uHistorySpans();
-                    state.dt_history = history.dtHistory();
-
-                    transient.system().beginTimeStep();
-                    (void)transient_finalize.assemble(req_finalize, state, nullptr, out_view.get());
                 }
 
 	                transient.system().commitTimeStep();

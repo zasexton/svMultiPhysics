@@ -115,6 +115,7 @@ void FESystem::invalidateSetup() noexcept
     if (operator_backends_) {
         operator_backends_->invalidateCache();
     }
+    assembly_plan_by_op_.clear();
 }
 
 void FESystem::requireSetup() const

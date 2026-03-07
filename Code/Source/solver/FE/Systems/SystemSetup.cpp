@@ -2691,7 +2691,229 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         }
     }
 
+    buildAssemblyPlans();
     is_setup_ = true;
+}
+
+void FESystem::buildAssemblyPlans()
+{
+    assembly_plan_by_op_.clear();
+
+    for (const auto& tag : operator_registry_.list()) {
+        const auto& def = operator_registry_.get(tag);
+        auto& plan = assembly_plan_by_op_[tag];
+
+        std::unordered_set<const assembly::AssemblyKernel*> coupled_covered_kernels;
+        for (const auto& term : def.cells) {
+            if (auto* coupled = dynamic_cast<forms::CoupledBlockKernel*>(term.kernel.get())) {
+                for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
+                    const auto& bs = coupled->blockSpec(bi);
+                    if (bs.fallback_kernel) {
+                        coupled_covered_kernels.insert(bs.fallback_kernel.get());
+                    }
+                }
+            }
+        }
+
+        plan.cell_terms.reserve(def.cells.size());
+        for (const auto& term : def.cells) {
+            FE_CHECK_NOT_NULL(term.kernel.get(), "FESystem::buildAssemblyPlans: cell kernel");
+
+            if (coupled_covered_kernels.count(term.kernel.get()) > 0) {
+                continue;
+            }
+
+            if (auto* coupled = dynamic_cast<forms::CoupledBlockKernel*>(term.kernel.get())) {
+                if (!coupled->isResolved()) {
+                    for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
+                        auto& bs = coupled->mutableBlockSpec(bi);
+                        const auto& b_test_field = field_registry_.get(bs.test_field);
+                        const auto& b_trial_field = field_registry_.get(bs.trial_field);
+                        FE_CHECK_NOT_NULL(b_test_field.space.get(),
+                                          "FESystem::buildAssemblyPlans: coupled block test space");
+                        FE_CHECK_NOT_NULL(b_trial_field.space.get(),
+                                          "FESystem::buildAssemblyPlans: coupled block trial space");
+
+                        const auto b_test_idx = static_cast<std::size_t>(b_test_field.id);
+                        const auto b_trial_idx = static_cast<std::size_t>(b_trial_field.id);
+                        FE_THROW_IF(b_test_field.id < 0 || b_test_idx >= field_dof_handlers_.size(),
+                                    InvalidStateException,
+                                    "FESystem::buildAssemblyPlans: invalid coupled block test field");
+                        FE_THROW_IF(b_trial_field.id < 0 || b_trial_idx >= field_dof_handlers_.size(),
+                                    InvalidStateException,
+                                    "FESystem::buildAssemblyPlans: invalid coupled block trial field");
+
+                        bs.test_space = b_test_field.space.get();
+                        bs.trial_space = b_trial_field.space.get();
+                        bs.row_dof_map = &field_dof_handlers_[b_test_idx].getDofMap();
+                        bs.col_dof_map = &field_dof_handlers_[b_trial_idx].getDofMap();
+                        bs.row_dof_offset = field_dof_offsets_[b_test_idx];
+                        bs.col_dof_offset = field_dof_offsets_[b_trial_idx];
+                    }
+                    coupled->setResolved();
+                }
+
+                bool any_active = false;
+                bool matrix_capable = false;
+                bool vector_capable = false;
+                for (std::size_t bi = 0; bi < coupled->numBlocks(); ++bi) {
+                    const auto& bs = coupled->blockSpec(bi);
+                    if (!bs.fallback_kernel || !bs.fallback_kernel->hasCell()) {
+                        continue;
+                    }
+                    any_active = true;
+                    matrix_capable = matrix_capable || bs.want_matrix;
+                    vector_capable = vector_capable || bs.want_vector;
+                }
+                if (!any_active) {
+                    continue;
+                }
+
+                const auto& first_bs = coupled->blockSpec(0);
+                plan.cell_terms.push_back(PlannedCellTerm{
+                    term.test_field,
+                    term.trial_field,
+                    first_bs.test_space,
+                    first_bs.trial_space,
+                    coupled,
+                    first_bs.row_dof_map,
+                    first_bs.col_dof_map,
+                    first_bs.row_dof_offset,
+                    first_bs.col_dof_offset,
+                    matrix_capable,
+                    vector_capable});
+                continue;
+            }
+
+            const auto& test_field = field_registry_.get(term.test_field);
+            const auto& trial_field = field_registry_.get(term.trial_field);
+            FE_CHECK_NOT_NULL(test_field.space.get(), "FESystem::buildAssemblyPlans: cell test space");
+            FE_CHECK_NOT_NULL(trial_field.space.get(), "FESystem::buildAssemblyPlans: cell trial space");
+
+            const auto test_idx = static_cast<std::size_t>(test_field.id);
+            const auto trial_idx = static_cast<std::size_t>(trial_field.id);
+            FE_THROW_IF(test_field.id < 0 || test_idx >= field_dof_handlers_.size(),
+                        InvalidStateException,
+                        "FESystem::buildAssemblyPlans: invalid cell test field");
+            FE_THROW_IF(trial_field.id < 0 || trial_idx >= field_dof_handlers_.size(),
+                        InvalidStateException,
+                        "FESystem::buildAssemblyPlans: invalid cell trial field");
+
+            plan.cell_terms.push_back(PlannedCellTerm{
+                term.test_field,
+                term.trial_field,
+                test_field.space.get(),
+                trial_field.space.get(),
+                term.kernel.get(),
+                &field_dof_handlers_[test_idx].getDofMap(),
+                &field_dof_handlers_[trial_idx].getDofMap(),
+                field_dof_offsets_[test_idx],
+                field_dof_offsets_[trial_idx],
+                !term.kernel->isVectorOnly(),
+                !term.kernel->isMatrixOnly()});
+        }
+
+        plan.boundary_terms.reserve(def.boundary.size());
+        for (const auto& term : def.boundary) {
+            FE_CHECK_NOT_NULL(term.kernel.get(), "FESystem::buildAssemblyPlans: boundary kernel");
+            const auto& test_field = field_registry_.get(term.test_field);
+            const auto& trial_field = field_registry_.get(term.trial_field);
+            FE_CHECK_NOT_NULL(test_field.space.get(), "FESystem::buildAssemblyPlans: boundary test space");
+            FE_CHECK_NOT_NULL(trial_field.space.get(), "FESystem::buildAssemblyPlans: boundary trial space");
+
+            const auto test_idx = static_cast<std::size_t>(test_field.id);
+            const auto trial_idx = static_cast<std::size_t>(trial_field.id);
+            FE_THROW_IF(test_field.id < 0 || test_idx >= field_dof_handlers_.size(),
+                        InvalidStateException,
+                        "FESystem::buildAssemblyPlans: invalid boundary test field");
+            FE_THROW_IF(trial_field.id < 0 || trial_idx >= field_dof_handlers_.size(),
+                        InvalidStateException,
+                        "FESystem::buildAssemblyPlans: invalid boundary trial field");
+
+            plan.boundary_terms.push_back(PlannedBoundaryTerm{
+                term.marker,
+                term.test_field,
+                term.trial_field,
+                test_field.space.get(),
+                trial_field.space.get(),
+                term.kernel.get(),
+                &field_dof_handlers_[test_idx].getDofMap(),
+                &field_dof_handlers_[trial_idx].getDofMap(),
+                field_dof_offsets_[test_idx],
+                field_dof_offsets_[trial_idx],
+                !term.kernel->isVectorOnly(),
+                !term.kernel->isMatrixOnly()});
+        }
+
+        plan.interior_terms.reserve(def.interior.size());
+        for (const auto& term : def.interior) {
+            FE_CHECK_NOT_NULL(term.kernel.get(), "FESystem::buildAssemblyPlans: interior kernel");
+            const auto& test_field = field_registry_.get(term.test_field);
+            const auto& trial_field = field_registry_.get(term.trial_field);
+            FE_CHECK_NOT_NULL(test_field.space.get(), "FESystem::buildAssemblyPlans: interior test space");
+            FE_CHECK_NOT_NULL(trial_field.space.get(), "FESystem::buildAssemblyPlans: interior trial space");
+
+            const auto test_idx = static_cast<std::size_t>(test_field.id);
+            const auto trial_idx = static_cast<std::size_t>(trial_field.id);
+            FE_THROW_IF(test_field.id < 0 || test_idx >= field_dof_handlers_.size(),
+                        InvalidStateException,
+                        "FESystem::buildAssemblyPlans: invalid interior test field");
+            FE_THROW_IF(trial_field.id < 0 || trial_idx >= field_dof_handlers_.size(),
+                        InvalidStateException,
+                        "FESystem::buildAssemblyPlans: invalid interior trial field");
+
+            plan.interior_terms.push_back(PlannedInteriorFaceTerm{
+                term.test_field,
+                term.trial_field,
+                test_field.space.get(),
+                trial_field.space.get(),
+                term.kernel.get(),
+                &field_dof_handlers_[test_idx].getDofMap(),
+                &field_dof_handlers_[trial_idx].getDofMap(),
+                field_dof_offsets_[test_idx],
+                field_dof_offsets_[trial_idx],
+                !term.kernel->isVectorOnly(),
+                !term.kernel->isMatrixOnly()});
+        }
+
+        plan.interface_terms.reserve(def.interface_faces.size());
+        for (const auto& term : def.interface_faces) {
+            FE_CHECK_NOT_NULL(term.kernel.get(), "FESystem::buildAssemblyPlans: interface kernel");
+            const auto& test_field = field_registry_.get(term.test_field);
+            const auto& trial_field = field_registry_.get(term.trial_field);
+            FE_CHECK_NOT_NULL(test_field.space.get(), "FESystem::buildAssemblyPlans: interface test space");
+            FE_CHECK_NOT_NULL(trial_field.space.get(), "FESystem::buildAssemblyPlans: interface trial space");
+
+            const auto test_idx = static_cast<std::size_t>(test_field.id);
+            const auto trial_idx = static_cast<std::size_t>(trial_field.id);
+            FE_THROW_IF(test_field.id < 0 || test_idx >= field_dof_handlers_.size(),
+                        InvalidStateException,
+                        "FESystem::buildAssemblyPlans: invalid interface test field");
+            FE_THROW_IF(trial_field.id < 0 || trial_idx >= field_dof_handlers_.size(),
+                        InvalidStateException,
+                        "FESystem::buildAssemblyPlans: invalid interface trial field");
+
+            plan.interface_terms.push_back(PlannedInterfaceFaceTerm{
+                term.marker,
+                term.test_field,
+                term.trial_field,
+                test_field.space.get(),
+                trial_field.space.get(),
+                term.kernel.get(),
+                &field_dof_handlers_[test_idx].getDofMap(),
+                &field_dof_handlers_[trial_idx].getDofMap(),
+                field_dof_offsets_[test_idx],
+                field_dof_offsets_[trial_idx],
+                !term.kernel->isVectorOnly(),
+                !term.kernel->isMatrixOnly()});
+        }
+
+        plan.global_terms.reserve(def.global.size());
+        for (const auto& kernel : def.global) {
+            FE_CHECK_NOT_NULL(kernel.get(), "FESystem::buildAssemblyPlans: global kernel");
+            plan.global_terms.push_back(kernel.get());
+        }
+    }
 }
 
 } // namespace systems

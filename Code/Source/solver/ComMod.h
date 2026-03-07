@@ -1180,6 +1180,30 @@ class eqType
     /// @brief First iteration norm
     double pNorm = 0.0;
 
+    /// @brief Last legacy operator assembly time for this equation.
+    double legacy_assembly_last = 0.0;
+
+    /// @brief Last legacy domain/cell assembly contribution.
+    double legacy_assembly_domain_last = 0.0;
+
+    /// @brief Last legacy boundary/load assembly contribution.
+    double legacy_assembly_boundary_last = 0.0;
+
+    /// @brief Last legacy post-assembly contribution (commu/constraint fixes).
+    double legacy_assembly_post_last = 0.0;
+
+    /// @brief Cumulative legacy operator assembly time for this run.
+    double legacy_assembly_total = 0.0;
+
+    /// @brief Cumulative legacy domain/cell assembly contribution.
+    double legacy_assembly_domain_total = 0.0;
+
+    /// @brief Cumulative legacy boundary/load assembly contribution.
+    double legacy_assembly_boundary_total = 0.0;
+
+    /// @brief Cumulative legacy post-assembly contribution.
+    double legacy_assembly_post_total = 0.0;
+
     /// @brief \f$\rho_{infinity}\f$
     double roInf = 0.0;
 
@@ -1231,6 +1255,9 @@ class eqType
 
     /// @brief Body force associated with this equation
     std::vector<bfType> bf;
+
+    /// @brief Number of legacy operator assemblies timed for this equation.
+    int legacy_assembly_count = 0;
 };
 
 /// @brief This type will be used to write data in the VTK files.
@@ -1872,4 +1899,3 @@ class ComMod {
 };
 
 #endif
-
