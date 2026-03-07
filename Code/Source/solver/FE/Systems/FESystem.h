@@ -236,6 +236,25 @@ public:
 	                                                                          const std::array<Real, 3>& point,
 	                                                                          GlobalIndex hint_cell = INVALID_GLOBAL_INDEX) const;
 
+	    /**
+	     * @brief Evaluate a field at all mesh vertices by direct DOF coefficient lookup.
+	     *
+	     * For Lagrange elements, basis functions equal 1 at their associated node and 0
+	     * at all others, so the field value at a vertex equals the DOF coefficient.
+	     * This avoids the expensive locatePoint + evaluate per vertex.
+	     *
+	     * @param field       Field to evaluate
+	     * @param state       Current system state
+	     * @param n_vertices  Number of mesh vertices
+	     * @param out         Output buffer, size >= n_vertices * max(1, components)
+	     * @return true if direct nodal evaluation was used, false if not supported
+	     *         (caller should fall back to evaluateFieldAtPoint)
+	     */
+	    [[nodiscard]] bool evaluateFieldAtVertices(FieldId field,
+	                                               const SystemStateView& state,
+	                                               GlobalIndex n_vertices,
+	                                               std::span<double> out) const;
+
 	    // ---- Global-kernel persistent state (optional) ----
 	    [[nodiscard]] assembly::MaterialStateView globalKernelCellState(const GlobalKernel& kernel,
 	                                                                    GlobalIndex cell_id,

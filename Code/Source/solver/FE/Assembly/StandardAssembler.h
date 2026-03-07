@@ -402,6 +402,8 @@ private:
      */
     struct SavedCellNodeCoords {
         std::vector<math::Vector<Real, 3>> node_coords;
+        Real entity_h{0.0};
+        Real entity_volume{0.0};
     };
 
     /** Per-slot DOF indices for fused-batched assembly. */
@@ -751,6 +753,12 @@ private:
     int cached_mapping_order_{-1};
     bool cached_mapping_affine_{false};
 
+    // Entity measures computed during prepareGeometry (reused by prepareBasis fast path
+    // to avoid accessing mapping->nodes() — enables skipping coordinate restore for affine
+    // elements in the coupled batch path).
+    Real cached_geom_h_{0.0};
+    Real cached_geom_volume_{0.0};
+
     // Cached quad rule from prepareContext (used for BasisCache lookups in populateFieldSolutionData)
     std::shared_ptr<const quadrature::QuadratureRule> cached_quad_rule_;
 
@@ -789,6 +797,32 @@ private:
     bool cached_basis_has_hessians_{false};
     const spaces::FunctionSpace* cached_basis_test_space_ptr_{nullptr};
     const spaces::FunctionSpace* cached_basis_trial_space_ptr_{nullptr};
+
+    // Reserved for future per-context basis caching
+    bool cached_qpt_test_valid_{false};
+    bool cached_qpt_trial_valid_{false};
+
+    // Cached qpt-major basis data for fast-path transpose elimination.
+    // Populated once per block in the slow path; reused for all subsequent
+    // fast-path cells. Eliminates dof-major→qpt-major transposes that were
+    // previously repeated for every cell.
+    std::vector<Real> cached_qpt_test_values_;
+    std::vector<AssemblyContext::Vector3D> cached_qpt_test_ref_grads_;
+    std::vector<AssemblyContext::Matrix3x3> cached_qpt_test_ref_hess_;
+    std::vector<Real> cached_qpt_trial_values_;
+    std::vector<AssemblyContext::Vector3D> cached_qpt_trial_ref_grads_;
+    std::vector<AssemblyContext::Matrix3x3> cached_qpt_trial_ref_hess_;
+    bool cached_qpt_major_valid_{false};
+    bool cached_qpt_major_same_space_{false};
+    bool cached_qpt_major_has_hessians_{false};
+
+    // Pre-computed coupled-block metadata to avoid virtual calls in fast path.
+    // Populated once per block before the cell loop; indexed by block index.
+    std::vector<AssemblyContext::CoupledBlockMetadata> cached_coupled_block_meta_;
+
+    // When non-null, prepareBasis fast path uses this instead of configure().
+    // Set by the coupled block loop before calling prepareBasis, cleared after.
+    const AssemblyContext::CoupledBlockMetadata* active_coupled_block_meta_{nullptr};
 
     // Field-solution BasisCache: small flat cache keyed by (BasisFunction*, gradients, hessians).
     // Typically 1-2 entries (velocity basis, pressure basis). Invalidated with mapping type.
@@ -854,6 +888,12 @@ private:
     std::vector<assembly::jit::CoupledBlockView> scratch_coupled_block_views_;
     std::vector<assembly::jit::CoupledCellKernelArgsV1> scratch_coupled_cell_args_;
     std::vector<KernelOutput> scratch_coupled_block_outputs_;
+
+    // Scratch for fused coupled block insertion (combines per-block outputs
+    // into a single combined matrix/vector per cell to hit the FSILS fast path).
+    std::vector<Real> scratch_fused_matrices_;
+    std::vector<Real> scratch_fused_vectors_;
+    std::vector<GlobalIndex> scratch_fused_dofs_;
 };
 
 // ============================================================================

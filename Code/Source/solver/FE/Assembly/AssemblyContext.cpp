@@ -924,6 +924,13 @@ AssemblyContext::Matrix3x3 AssemblyContext::trialPhysicalHessian(LocalIndex j, L
 // Solution Data Access
 // ============================================================================
 
+void AssemblyContext::setSolutionCoefficientsOnly(std::span<const Real> coefficients)
+{
+    const auto n = static_cast<std::size_t>(n_trial_dofs_);
+    solution_coefficients_.assign(coefficients.begin(),
+                                  coefficients.begin() + std::min(coefficients.size(), n));
+}
+
 void AssemblyContext::setSolutionCoefficients(std::span<const Real> coefficients)
 {
     if (coefficients.size() < static_cast<std::size_t>(n_trial_dofs_)) {
@@ -1183,6 +1190,17 @@ void AssemblyContext::setPreviousSolutionCoefficients(std::span<const Real> coef
 void AssemblyContext::setPreviousSolution2Coefficients(std::span<const Real> coefficients)
 {
     setPreviousSolutionCoefficientsK(2, coefficients);
+}
+
+void AssemblyContext::setPreviousSolutionCoefficientsOnlyK(int k, std::span<const Real> coefficients)
+{
+    if (history_solution_data_.size() < static_cast<std::size_t>(k)) {
+        history_solution_data_.resize(static_cast<std::size_t>(k));
+    }
+    auto& dst = history_solution_data_[static_cast<std::size_t>(k - 1)];
+    const auto n = static_cast<std::size_t>(n_trial_dofs_);
+    dst.coefficients.assign(coefficients.begin(),
+                            coefficients.begin() + std::min(coefficients.size(), n));
 }
 
 void AssemblyContext::setPreviousSolutionCoefficientsK(int k, std::span<const Real> coefficients)
@@ -1657,7 +1675,7 @@ void AssemblyContext::setFieldSolutionScalar(FieldId field,
     it->component_hessians.clear();
     it->component_laplacians.clear();
 
-    rebuildJITFieldSolutionTable();
+    if (jit_field_table_suspended_) { jit_field_table_dirty_ = true; } else { rebuildJITFieldSolutionTable(); }
 }
 
 void AssemblyContext::setFieldSolutionVector(FieldId field,
@@ -1721,7 +1739,7 @@ void AssemblyContext::setFieldSolutionVector(FieldId field,
     it->hessians.clear();
     it->laplacians.clear();
 
-    rebuildJITFieldSolutionTable();
+    if (jit_field_table_suspended_) { jit_field_table_dirty_ = true; } else { rebuildJITFieldSolutionTable(); }
 }
 
 void AssemblyContext::setFieldPreviousSolutionScalarK(FieldId field, int k, std::span<const Real> values)
@@ -1769,7 +1787,7 @@ void AssemblyContext::setFieldPreviousSolutionScalarK(FieldId field, int k, std:
         std::copy(values.begin(), values.end(), it->history_values.begin() + (static_cast<std::size_t>(k - 1) * nq));
     }
 
-    rebuildJITFieldSolutionTable();
+    if (jit_field_table_suspended_) { jit_field_table_dirty_ = true; } else { rebuildJITFieldSolutionTable(); }
 }
 
 void AssemblyContext::setFieldPreviousSolutionVectorK(FieldId field,
@@ -1823,7 +1841,7 @@ void AssemblyContext::setFieldPreviousSolutionVectorK(FieldId field,
                   it->history_vector_values.begin() + (static_cast<std::size_t>(k - 1) * nq));
     }
 
-    rebuildJITFieldSolutionTable();
+    if (jit_field_table_suspended_) { jit_field_table_dirty_ = true; } else { rebuildJITFieldSolutionTable(); }
 }
 
 bool AssemblyContext::hasFieldSolutionData(FieldId field) const noexcept
@@ -2287,6 +2305,23 @@ void AssemblyContext::setTestBasisData(
     test_basis_divergences_.clear();
 }
 
+void AssemblyContext::setTestBasisDataQptMajor(
+    LocalIndex n_dofs,
+    std::span<const Real> values,
+    std::span<const Vector3D> gradients)
+{
+    n_test_dofs_ = n_dofs;
+    if (trial_is_test_) {
+        n_trial_dofs_ = n_dofs;
+    }
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
+    test_basis_values_.assign(values.begin(), values.end());
+    test_ref_gradients_.assign(gradients.begin(), gradients.end());
+    test_basis_vector_values_.clear();
+    test_basis_curls_.clear();
+    test_basis_divergences_.clear();
+}
+
 void AssemblyContext::setTrialBasisData(
     LocalIndex n_dofs,
     std::span<const Real> values,
@@ -2310,6 +2345,21 @@ void AssemblyContext::setTrialBasisData(
         for (std::size_t q = 0; q < nq; ++q)
             trial_ref_gradients_[q * nd + i] = gradients[i * nq + q];
 
+    trial_basis_vector_values_.clear();
+    trial_basis_curls_.clear();
+    trial_basis_divergences_.clear();
+}
+
+void AssemblyContext::setTrialBasisDataQptMajor(
+    LocalIndex n_dofs,
+    std::span<const Real> values,
+    std::span<const Vector3D> gradients)
+{
+    n_trial_dofs_ = n_dofs;
+    trial_is_test_ = false;
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
+    trial_basis_values_.assign(values.begin(), values.end());
+    trial_ref_gradients_.assign(gradients.begin(), gradients.end());
     trial_basis_vector_values_.clear();
     trial_basis_curls_.clear();
     trial_basis_divergences_.clear();
@@ -2494,6 +2544,143 @@ void AssemblyContext::setPhysicalHessians(
             for (std::size_t q = 0; q < nq; ++q)
                 trial_phys_hessians_[q * nd + i] = trial_hessians[i * nq + q];
     }
+}
+
+void AssemblyContext::setPhysicalHessiansQptMajor(
+    std::span<const Matrix3x3> test_hessians,
+    std::span<const Matrix3x3> trial_hessians)
+{
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
+    test_phys_hessians_.assign(test_hessians.begin(), test_hessians.end());
+    if (!trial_is_test_) {
+        trial_phys_hessians_.assign(trial_hessians.begin(), trial_hessians.end());
+    }
+}
+
+void AssemblyContext::setTestBasisValuesOnlyQptMajor(LocalIndex n_dofs, std::span<const Real> values)
+{
+    n_test_dofs_ = n_dofs;
+    if (trial_is_test_) {
+        n_trial_dofs_ = n_dofs;
+    }
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
+    test_basis_values_.assign(values.begin(), values.end());
+    // Deliberately skip test_ref_gradients_ — caller manages physical gradients directly.
+    test_basis_vector_values_.clear();
+    test_basis_curls_.clear();
+    test_basis_divergences_.clear();
+}
+
+void AssemblyContext::setTrialBasisValuesOnlyQptMajor(LocalIndex n_dofs, std::span<const Real> values)
+{
+    n_trial_dofs_ = n_dofs;
+    trial_is_test_ = false;
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
+    trial_basis_values_.assign(values.begin(), values.end());
+    // Deliberately skip trial_ref_gradients_ — caller manages physical gradients directly.
+    trial_basis_vector_values_.clear();
+    trial_basis_curls_.clear();
+    trial_basis_divergences_.clear();
+}
+
+AssemblyContext::CoupledBlockMetadata AssemblyContext::makeCoupledBlockMetadata(
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
+    RequiredData required_data)
+{
+    CoupledBlockMetadata m;
+    m.n_test_dofs = static_cast<LocalIndex>(test_space.dofs_per_element());
+    m.n_trial_dofs = static_cast<LocalIndex>(trial_space.dofs_per_element());
+    m.trial_is_test = (&test_space == &trial_space);
+    m.test_field_type = test_space.field_type();
+    m.trial_field_type = trial_space.field_type();
+    m.test_continuity = test_space.continuity();
+    m.trial_continuity = trial_space.continuity();
+    m.test_is_vector_basis = test_space.element().basis().is_vector_valued();
+    m.trial_is_vector_basis = trial_space.element().basis().is_vector_valued();
+    m.test_value_dim = test_space.value_dimension();
+    m.trial_value_dim = trial_space.value_dimension();
+    m.required_data = required_data;
+    return m;
+}
+
+void AssemblyContext::configureForCoupledBlock(
+    GlobalIndex cell_id,
+    int domain_id,
+    const CoupledBlockMetadata& meta) noexcept
+{
+    type_ = ContextType::Cell;
+    cell_id_ = cell_id;
+    cell_domain_id_ = domain_id;
+    face_id_ = -1;
+    local_face_id_ = 0;
+    boundary_marker_ = -1;
+    required_data_ = meta.required_data;
+
+    test_field_type_ = meta.test_field_type;
+    trial_field_type_ = meta.trial_field_type;
+    test_continuity_ = meta.test_continuity;
+    trial_continuity_ = meta.trial_continuity;
+    test_is_vector_basis_ = meta.test_is_vector_basis;
+    trial_is_vector_basis_ = meta.trial_is_vector_basis;
+    test_value_dim_ = meta.test_value_dim;
+    trial_value_dim_ = meta.trial_value_dim;
+
+    n_test_dofs_ = meta.n_test_dofs;
+    n_trial_dofs_ = meta.n_trial_dofs;
+    trial_is_test_ = meta.trial_is_test;
+
+    cell_diameter_ = 0.0;
+    cell_volume_ = 0.0;
+    facet_area_ = 0.0;
+
+    material_state_old_base_ = nullptr;
+    material_state_work_base_ = nullptr;
+    material_state_bytes_per_qpt_ = 0;
+    material_state_stride_bytes_ = 0;
+
+    test_ref_hessians_.clear();
+    test_phys_hessians_.clear();
+    trial_ref_hessians_.clear();
+    trial_phys_hessians_.clear();
+
+    test_basis_vector_values_.clear();
+    test_basis_curls_.clear();
+    test_basis_divergences_.clear();
+    trial_basis_vector_values_.clear();
+    trial_basis_curls_.clear();
+    trial_basis_divergences_.clear();
+
+    solution_hessians_.clear();
+    solution_laplacians_.clear();
+}
+
+AssemblyContext::Vector3D* AssemblyContext::testPhysGradientsWritePtr(std::size_t count)
+{
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
+    test_phys_gradients_.resizeUninit(count);
+    return test_phys_gradients_.data();
+}
+
+AssemblyContext::Vector3D* AssemblyContext::trialPhysGradientsWritePtr(std::size_t count)
+{
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
+    trial_phys_gradients_.resizeUninit(count);
+    return trial_phys_gradients_.data();
+}
+
+AssemblyContext::Matrix3x3* AssemblyContext::testPhysHessiansWritePtr(std::size_t count)
+{
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
+    test_phys_hessians_.resizeUninit(count);
+    return test_phys_hessians_.data();
+}
+
+AssemblyContext::Matrix3x3* AssemblyContext::trialPhysHessiansWritePtr(std::size_t count)
+{
+    ensureArenaCapacity(std::max(n_test_dofs_, n_trial_dofs_), n_qpts_);
+    trial_phys_hessians_.resizeUninit(count);
+    return trial_phys_hessians_.data();
 }
 
 void AssemblyContext::setNormals(std::span<const Vector3D> normals)

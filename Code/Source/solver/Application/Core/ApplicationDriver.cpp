@@ -642,21 +642,28 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
       throw std::runtime_error("[svMultiPhysics::Application] Failed to allocate VTK field '" + rec.name + "'.");
     }
 
-    for (std::size_t v = 0; v < mesh.n_vertices(); ++v) {
-      std::array<svmp::FE::Real, 3> p{0.0, 0.0, 0.0};
-      for (int d = 0; d < mesh_dim; ++d) {
-        p[static_cast<std::size_t>(d)] = static_cast<svmp::FE::Real>(coords[v * static_cast<std::size_t>(mesh_dim) +
-                                                                           static_cast<std::size_t>(d)]);
-      }
+    const auto nv = static_cast<svmp::FE::GlobalIndex>(mesh.n_vertices());
+    const bool fast = sim.fe_system->evaluateFieldAtVertices(
+        field_id, state, nv, std::span<double>(data, static_cast<std::size_t>(nv) * ncomp));
 
-      const auto val = sim.fe_system->evaluateFieldAtPoint(field_id, state, p);
-      if (!val) {
-        throw std::runtime_error("[svMultiPhysics::Application] Failed to evaluate field '" + rec.name +
-                                 "' at a mesh vertex for VTK output.");
-      }
+    if (!fast) {
+      // Fallback: per-vertex spatial search + basis evaluation
+      for (std::size_t v = 0; v < mesh.n_vertices(); ++v) {
+        std::array<svmp::FE::Real, 3> p{0.0, 0.0, 0.0};
+        for (int d = 0; d < mesh_dim; ++d) {
+          p[static_cast<std::size_t>(d)] = static_cast<svmp::FE::Real>(coords[v * static_cast<std::size_t>(mesh_dim) +
+                                                                             static_cast<std::size_t>(d)]);
+        }
 
-      for (std::size_t c = 0; c < ncomp; ++c) {
-        data[v * ncomp + c] = static_cast<double>((*val)[c]);
+        const auto val = sim.fe_system->evaluateFieldAtPoint(field_id, state, p);
+        if (!val) {
+          throw std::runtime_error("[svMultiPhysics::Application] Failed to evaluate field '" + rec.name +
+                                   "' at a mesh vertex for VTK output.");
+        }
+
+        for (std::size_t c = 0; c < ncomp; ++c) {
+          data[v * ncomp + c] = static_cast<double>((*val)[c]);
+        }
       }
     }
 

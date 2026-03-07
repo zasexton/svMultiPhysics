@@ -1290,6 +1290,15 @@ if(FE_ENABLE_ASSEMBLY AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(${_FE_FSILS_BLAS1_O3_FILES}
         PROPERTIES COMPILE_OPTIONS "-O3;-ftree-vectorize;-funroll-loops;-fopenmp-simd"
     )
+
+    # Assembly hot-path files: upgrade from -O2 (RelWithDebInfo default) to -O3
+    set(_FE_ASSEMBLY_O3_FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/Assembly/StandardAssembler.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Assembly/AssemblyContext.cpp
+    )
+    set_source_files_properties(${_FE_ASSEMBLY_O3_FILES}
+        PROPERTIES COMPILE_OPTIONS "-O3;-ftree-vectorize;-funroll-loops"
+    )
 endif()
 
 #------------------------------------------------------------------------------

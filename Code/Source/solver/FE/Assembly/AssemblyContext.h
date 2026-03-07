@@ -626,6 +626,14 @@ public:
         return test_phys_hessians_;
     }
 
+    /** @brief Raw ref hessians in qpt-major layout. */
+    [[nodiscard]] std::vector<Matrix3x3> testRefHessiansRaw() const { return {test_ref_hessians_.begin(), test_ref_hessians_.end()}; }
+    [[nodiscard]] std::vector<Matrix3x3> trialRefHessiansRaw() const { return {trial_ref_hessians_.begin(), trial_ref_hessians_.end()}; }
+
+    /** @brief Restore ref hessians from cached qpt-major data (no transpose). */
+    void restoreTestRefHessians(const std::vector<Matrix3x3>& data) { test_ref_hessians_.assign(data.begin(), data.end()); }
+    void restoreTrialRefHessians(const std::vector<Matrix3x3>& data) { trial_ref_hessians_.assign(data.begin(), data.end()); }
+
     // =========================================================================
     // Trial Basis Function Data (for rectangular assembly)
     // =========================================================================
@@ -747,6 +755,14 @@ public:
     void setSolutionCoefficients(std::span<const Real> coefficients);
 
     /**
+     * @brief Set solution coefficients without computing QP values/gradients.
+     *
+     * Use this when the caller (e.g. JIT kernel) will compute solution
+     * values/gradients itself from raw coefficients + basis data.
+     */
+    void setSolutionCoefficientsOnly(std::span<const Real> coefficients);
+
+    /**
      * @brief Access element-local solution coefficients (DOF values)
      *
      * Size is `numTrialDofs()` for the active context.
@@ -774,6 +790,13 @@ public:
      * @param k History index (k=1 is u^{n-1})
      */
     void setPreviousSolutionCoefficientsK(int k, std::span<const Real> coefficients);
+
+    /**
+     * @brief Set k-th previous solution coefficients without computing QP values.
+     *
+     * Use when the caller (e.g. JIT kernel) computes values/gradients itself.
+     */
+    void setPreviousSolutionCoefficientsOnlyK(int k, std::span<const Real> coefficients);
 
     /**
      * @brief Get solution value at quadrature point
@@ -1191,9 +1214,17 @@ public:
     void setIntegrationWeights(std::span<const Real> weights);
 
     /**
-     * @brief Set test basis function data
+     * @brief Set test basis function data (dof-major input, transposed to qpt-major)
      */
     void setTestBasisData(
+        LocalIndex n_dofs,
+        std::span<const Real> values,
+        std::span<const Vector3D> gradients);
+
+    /**
+     * @brief Set test basis data already in qpt-major layout. No transpose.
+     */
+    void setTestBasisDataQptMajor(
         LocalIndex n_dofs,
         std::span<const Real> values,
         std::span<const Vector3D> gradients);
@@ -1202,6 +1233,14 @@ public:
      * @brief Set trial basis function data (for rectangular)
      */
     void setTrialBasisData(
+        LocalIndex n_dofs,
+        std::span<const Real> values,
+        std::span<const Vector3D> gradients);
+
+    /**
+     * @brief Set trial basis data already in qpt-major layout. No transpose.
+     */
+    void setTrialBasisDataQptMajor(
         LocalIndex n_dofs,
         std::span<const Real> values,
         std::span<const Vector3D> gradients);
@@ -1259,10 +1298,116 @@ public:
 
     /**
      * @brief Set physical Hessians (after Jacobian transformation)
+     *
+     * Input is dof-major [i*n_qpts+q]; transposed internally to qpt-major.
      */
     void setPhysicalHessians(
         std::span<const Matrix3x3> test_hessians,
         std::span<const Matrix3x3> trial_hessians);
+
+    /**
+     * @brief Set physical Hessians already in qpt-major layout [q*n_dofs+i].
+     *
+     * Skips the dof-major to qpt-major transpose. Use when the caller
+     * already stores hessians in qpt-major order.
+     */
+    void setPhysicalHessiansQptMajor(
+        std::span<const Matrix3x3> test_hessians,
+        std::span<const Matrix3x3> trial_hessians);
+
+    /**
+     * @brief Set only test basis values in qpt-major layout (skip ref gradients).
+     *
+     * Use when the caller will write physical gradients directly via
+     * testPhysGradientsWritePtr(). Avoids copying ref gradients that are
+     * not read by JIT kernels.
+     */
+    void setTestBasisValuesOnlyQptMajor(LocalIndex n_dofs, std::span<const Real> values);
+
+    /// Same as above for trial side.
+    void setTrialBasisValuesOnlyQptMajor(LocalIndex n_dofs, std::span<const Real> values);
+
+    /**
+     * @brief Get writable pointer to test physical gradients arena buffer.
+     *
+     * Resizes the arena array to @p count without zero-filling.
+     * Caller must write all @p count elements before any reader accesses them.
+     */
+    Vector3D* testPhysGradientsWritePtr(std::size_t count);
+
+    /// Same for trial side.
+    Vector3D* trialPhysGradientsWritePtr(std::size_t count);
+
+    /// Same for test physical hessians.
+    Matrix3x3* testPhysHessiansWritePtr(std::size_t count);
+
+    /// Same for trial physical hessians.
+    Matrix3x3* trialPhysHessiansWritePtr(std::size_t count);
+
+    /**
+     * @brief Pre-computed metadata for a coupled block, avoiding virtual calls.
+     *
+     * Populate once per block from the FunctionSpace objects, then pass to
+     * configureForCoupledBlock() for each cell in the batch loop.
+     */
+    struct CoupledBlockMetadata {
+        LocalIndex n_test_dofs;
+        LocalIndex n_trial_dofs;
+        bool trial_is_test;
+        FieldType test_field_type;
+        FieldType trial_field_type;
+        Continuity test_continuity;
+        Continuity trial_continuity;
+        bool test_is_vector_basis;
+        bool trial_is_vector_basis;
+        int test_value_dim;
+        int trial_value_dim;
+        RequiredData required_data;
+    };
+
+    /**
+     * @brief Populate CoupledBlockMetadata from function spaces (calls virtuals).
+     *
+     * Call once per block outside the cell loop. Uses FunctionSpace accessors
+     * which may involve virtual dispatch.
+     */
+    static CoupledBlockMetadata makeCoupledBlockMetadata(
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        RequiredData required_data);
+
+    /**
+     * @brief Lightweight configure for coupled-block fast path.
+     *
+     * Sets cell ID, domain ID, and block metadata from a pre-computed struct.
+     * Clears arena arrays (size=0, no dealloc) but avoids all virtual calls
+     * to FunctionSpace/Element accessors. ~2x faster than configure() with
+     * FunctionSpace overload.
+     */
+    void configureForCoupledBlock(
+        GlobalIndex cell_id,
+        int domain_id,
+        const CoupledBlockMetadata& meta) noexcept;
+
+    /**
+     * @brief Suspend automatic JIT field solution table rebuilds.
+     *
+     * While suspended, setFieldSolution* calls mark the table dirty instead
+     * of rebuilding. Call resumeJITFieldTableRebuild() to rebuild once.
+     */
+    void suspendJITFieldTableRebuild() noexcept { jit_field_table_suspended_ = true; }
+
+    /**
+     * @brief Resume automatic rebuilds and rebuild if dirty.
+     */
+    void resumeJITFieldTableRebuild()
+    {
+        jit_field_table_suspended_ = false;
+        if (jit_field_table_dirty_) {
+            rebuildJITFieldSolutionTable();
+            jit_field_table_dirty_ = false;
+        }
+    }
 
     /**
      * @brief Set normal vectors (for face contexts)
@@ -1375,6 +1520,13 @@ private:
             if (n > size_) {
                 std::fill(data_ + size_, data_ + n, value);
             }
+            size_ = n;
+        }
+
+        /// Set size without zero-filling new elements. Caller must overwrite all n elements.
+        void resizeUninit(std::size_t n)
+        {
+            checkCapacity(n);
             size_ = n;
         }
 
@@ -1514,6 +1666,8 @@ private:
 
     std::vector<FieldSolutionData> field_solution_data_{};
     JITAlignedVector<jit::FieldSolutionEntryV1> jit_field_solution_table_{};
+    bool jit_field_table_suspended_{false};
+    bool jit_field_table_dirty_{false};
 
     // Transient history solution data (optional)
     struct HistorySolutionData {

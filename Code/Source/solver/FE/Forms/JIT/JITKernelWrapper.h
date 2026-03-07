@@ -113,6 +113,12 @@ public:
     [[nodiscard]] const assembly::AssemblyKernel& fallbackKernel() const noexcept { return *fallback_; }
     [[nodiscard]] std::shared_ptr<const assembly::AssemblyKernel> fallbackKernelShared() const noexcept { return fallback_; }
 
+    /** @brief Trigger JIT compilation if not already done. */
+    void ensureCompiled();
+
+    /** @brief Check if JIT-compiled kernel is available. */
+    [[nodiscard]] bool isJITReady() const noexcept;
+
 private:
     enum class WrappedKind : std::uint8_t {
         Unknown = 0u,

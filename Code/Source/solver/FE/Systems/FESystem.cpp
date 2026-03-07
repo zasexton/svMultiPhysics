@@ -16,6 +16,7 @@
 #include "Assembly/GlobalSystemView.h"
 
 #include "Backends/Interfaces/GenericVector.h"
+#include "Dofs/EntityDofMap.h"
 
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
@@ -405,6 +406,75 @@ std::optional<std::array<Real, 3>> FESystem::evaluateFieldAtPoint(FieldId field,
 
     const auto v = rec.space->evaluate(xi, coeffs);
     return std::array<Real, 3>{v[0], v[1], v[2]};
+}
+
+bool FESystem::evaluateFieldAtVertices(FieldId field,
+                                        const SystemStateView& state,
+                                        GlobalIndex n_vertices,
+                                        std::span<double> out) const
+{
+    requireSetup();
+
+    if (n_vertices <= 0) {
+        return false;
+    }
+
+    const auto field_idx = static_cast<std::size_t>(field);
+    FE_THROW_IF(field < 0 || field_idx >= field_dof_handlers_.size(), InvalidArgumentException,
+                "FESystem::evaluateFieldAtVertices: invalid FieldId");
+
+    const auto* entity_map = field_dof_handlers_[field_idx].getEntityDofMap();
+    if (!entity_map) {
+        return false;
+    }
+
+    if (entity_map->numVertices() < n_vertices) {
+        return false; // Entity map doesn't cover all mesh vertices
+    }
+
+    const auto& rec = field_registry_.get(field);
+    const auto ncomp = static_cast<std::size_t>(std::max(1, rec.components));
+
+    FE_THROW_IF(out.size() < static_cast<std::size_t>(n_vertices) * ncomp, InvalidArgumentException,
+                "FESystem::evaluateFieldAtVertices: output buffer too small");
+
+    // Check that vertex DOFs exist and have the expected component count
+    {
+        const auto test_dofs = entity_map->getVertexDofs(0);
+        if (test_dofs.empty()) {
+            return false; // No vertex DOFs (e.g. DG elements)
+        }
+        if (test_dofs.size() != ncomp) {
+            return false; // Component count mismatch
+        }
+    }
+
+    const GlobalIndex offset = field_dof_offsets_[field_idx];
+
+    // Create assembly view if backend vector is provided (MPI case)
+    std::unique_ptr<assembly::GlobalSystemView> solution_view;
+    if (state.u_vector != nullptr) {
+        auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
+        solution_view = vec->createAssemblyView();
+    }
+
+    for (GlobalIndex v = 0; v < n_vertices; ++v) {
+        const auto vdofs = entity_map->getVertexDofs(v);
+        const auto out_base = static_cast<std::size_t>(v) * ncomp;
+        for (std::size_t c = 0; c < ncomp; ++c) {
+            const GlobalIndex d = vdofs[c] + offset;
+            if (solution_view) {
+                out[out_base + c] = solution_view->getVectorEntry(d);
+            } else {
+                const auto idx = static_cast<std::size_t>(d);
+                FE_THROW_IF(idx >= state.u.size(), InvalidArgumentException,
+                            "FESystem::evaluateFieldAtVertices: state.u too small");
+                out[out_base + c] = state.u[idx];
+            }
+        }
+    }
+
+    return true;
 }
 
 const FieldRecord& FESystem::fieldRecord(FieldId field) const

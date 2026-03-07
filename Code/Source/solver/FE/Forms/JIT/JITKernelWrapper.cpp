@@ -1995,6 +1995,16 @@ bool JITKernelWrapper::canUseJIT() const noexcept
     return options_.enable && compiled_revision_ == revision_ && !runtime_failed_;
 }
 
+void JITKernelWrapper::ensureCompiled()
+{
+    maybeCompile();
+}
+
+bool JITKernelWrapper::isJITReady() const noexcept
+{
+    return canUseJIT();
+}
+
 std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::compileSpecializedDispatch(
     KernelRole role,
     const FormIR& ir,
