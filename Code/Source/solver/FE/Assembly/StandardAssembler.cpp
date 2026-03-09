@@ -52,6 +52,22 @@ namespace assembly {
 
 namespace {
 
+/// Runtime assembly timing control: set SVMP_ASSEMBLY_TIMING=1 to enable.
+/// When disabled (default), TP() returns 0.0 with a well-predicted branch.
+[[nodiscard]] inline bool assemblyTimingEnabled() noexcept {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SVMP_ASSEMBLY_TIMING");
+        return env && std::string_view(env) != "0";
+    }();
+    return enabled;
+}
+
+[[nodiscard]] inline double assemblyTimeNow() noexcept {
+    if (!assemblyTimingEnabled()) return 0.0;
+    return std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 [[nodiscard]] bool invertDenseMatrix(std::span<const Real> A,
                                      LocalIndex n,
                                      std::vector<Real>& inv,
@@ -2510,14 +2526,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
     // Sub-phase timing accumulators for prepareContext breakdown
     double tp_sub_dofmap = 0.0, tp_sub_prepare_ctx = 0.0, tp_sub_solution = 0.0;
     double tp_sub_field_sol = 0.0, tp_sub_material = 0.0, tp_sub_setters = 0.0;
-#ifdef SVMP_FE_ASSEMBLY_TIMING
-    auto TP_SUB = []() {
-        return std::chrono::duration<double>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    };
-#else
-    auto TP_SUB = []() -> double { return 0.0; };
-#endif
+    auto TP_SUB = assemblyTimeNow;
 
     auto prepare_cell_data = [&](GlobalIndex cell_id,
                                  AssemblyContext& ctx,
@@ -2650,14 +2659,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
 
         if (!use_batch_path) {
             double tp_prepare = 0.0, tp_kernel = 0.0, tp_insert = 0.0;
-#ifdef SVMP_FE_ASSEMBLY_TIMING
-            auto TP = []() {
-                return std::chrono::duration<double>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count();
-            };
-#else
-            auto TP = []() -> double { return 0.0; };
-#endif
+            auto TP = assemblyTimeNow;
             double tp0;
             std::span<const GlobalIndex> row_dofs;
             std::span<const GlobalIndex> col_dofs;
@@ -2678,6 +2680,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
             }
 
 #ifdef SVMP_FE_ASSEMBLY_TIMING
+            if (assemblyTimingEnabled())
             {
                 int rank = 0;
 #if FE_HAS_MPI
@@ -2729,14 +2732,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         std::vector<const AssemblyContext*> batch_context_ptrs(requested_batch_size, nullptr);
 
         double tp_prepare = 0.0, tp_kernel = 0.0, tp_insert = 0.0;
-#ifdef SVMP_FE_ASSEMBLY_TIMING
-        auto TP = []() {
-            return std::chrono::duration<double>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-        };
-#else
-        auto TP = []() -> double { return 0.0; };
-#endif
+        auto TP = assemblyTimeNow;
 
         auto assemble_batch_range = [&](std::span<const GlobalIndex> grouped_cell_ids) {
             for (std::size_t begin = 0; begin < grouped_cell_ids.size(); begin += requested_batch_size) {
@@ -2811,6 +2807,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         }
 
 #ifdef SVMP_FE_ASSEMBLY_TIMING
+        if (assemblyTimingEnabled())
         // Print batch path timing
         {
             int rank = 0;
@@ -2902,13 +2899,8 @@ void StandardAssembler::prepareGeometry(
     GlobalIndex cell_id,
     const quadrature::QuadratureRule& quad_rule)
 {
-#ifdef SVMP_FE_ASSEMBLY_TIMING
-    auto PC_TP = []() {
-        return std::chrono::duration<double>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    };
+    auto PC_TP = assemblyTimeNow;
     double pc_t0 = PC_TP();
-#endif
 
     const ElementType cell_type = mesh.getCellType(cell_id);
     const int dim = mesh.dimension();
@@ -3485,13 +3477,8 @@ void StandardAssembler::prepareBasis(
     // ---- End fast path ----
 
     // Resize basis scratch storage
-#ifdef SVMP_FE_ASSEMBLY_TIMING
-    auto PC_TP = []() {
-        return std::chrono::duration<double>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    };
+    auto PC_TP = assemblyTimeNow;
     double pc_t0 = PC_TP();
-#endif
     const auto test_basis_size = static_cast<std::size_t>(n_test_dofs * n_qpts);
 
     const bool need_test_vector_values =
@@ -4319,14 +4306,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     double tp_fb_basis = 0.0, tp_fb_field = 0.0, tp_fb_dof = 0.0;
     double tp_fb_sol = 0.0, tp_fb_setters = 0.0;
     double tp_fb_kernel = 0.0, tp_fb_insert = 0.0, tp_fb_snap = 0.0;
-#ifdef SVMP_FE_ASSEMBLY_TIMING
-    auto TP = []() {
-        return std::chrono::duration<double>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    };
-#else
-    auto TP = []() -> double { return 0.0; };
-#endif
+    auto TP = assemblyTimeNow;
 
     // Helper: gather solution coefficients for a term/slot
     auto gather_solution = [&](std::size_t ti, std::size_t slot,
@@ -5473,6 +5453,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     }
 
 #ifdef SVMP_FE_ASSEMBLY_TIMING
+    if (assemblyTimingEnabled())
     // Fused+batch timing output
     {
         int rank = 0;
@@ -5529,14 +5510,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     double tp_geometry = 0.0, tp_term_loop = 0.0;
     double tp_fused_dof = 0.0, tp_fused_basis = 0.0, tp_fused_sol = 0.0;
     double tp_fused_kernel = 0.0, tp_fused_insert = 0.0, tp_fused_field = 0.0;
-#ifdef SVMP_FE_ASSEMBLY_TIMING
-    auto TP = []() {
-        return std::chrono::duration<double>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    };
-#else
-    auto TP = []() -> double { return 0.0; };
-#endif
+    auto TP = assemblyTimeNow;
 
     // ========================================================================
     // Main fused cell loop
@@ -5700,6 +5674,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     }
 
 #ifdef SVMP_FE_ASSEMBLY_TIMING
+    if (assemblyTimingEnabled())
     // Print fused timing
     {
         int rank = 0;

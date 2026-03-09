@@ -184,6 +184,7 @@ struct LoweredTerm {
     KernelIR ir{};
     std::vector<Shape> shapes{};
     std::vector<std::uint8_t> dep_mask{};
+    std::vector<std::uint64_t> op_hashes{};  ///< Per-op structural hash for cross-block CSE
     int time_derivative_order{0};
 
     std::optional<tensor::TensorIR> tensor_ir{};
@@ -1575,6 +1576,33 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     }
                     std::sort(bound_indices.begin(), bound_indices.end(),
                               [](const auto& a, const auto& b) { return a.first < b.first; });
+                }
+            }
+
+            // Diagnostic: dump per-term dep_mask breakdown
+            if (const char* env = std::getenv("SVMP_DUMP_DEP_MASK"); env && std::string_view(env) != "0") {
+                std::size_t n0 = 0, n1 = 0, n2 = 0, n3 = 0;
+                for (auto d : dep) {
+                    if (d == 0) ++n0;
+                    else if (d == 1) ++n1;
+                    else if (d == 2) ++n2;
+                    else ++n3;
+                }
+                fprintf(stderr, "[LLVMGen] symbol=%.*s term=%zu ops=%zu "
+                        "dep0=%zu dep1=%zu dep2=%zu dep3=%zu integrand=\"%s\"\n",
+                        static_cast<int>(symbol.size()), symbol.data(),
+                        tidx, dep.size(), n0, n1, n2, n3,
+                        term.debug_string.c_str());
+                // Dump per-op types with dep_mask for detailed analysis
+                if (std::string_view(env) == "2") {
+                    const auto& ops = lowered.ir.ops;
+                    for (std::size_t oi = 0; oi < ops.size(); ++oi) {
+                        fprintf(stderr, "  op[%zu] type=%d dep=%u imm0=%lu imm1=%lu children=%u\n",
+                                oi, static_cast<int>(ops[oi].type), dep[oi],
+                                static_cast<unsigned long>(ops[oi].imm0),
+                                static_cast<unsigned long>(ops[oi].imm1),
+                                ops[oi].child_count);
+                    }
                 }
             }
 
@@ -4562,6 +4590,38 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             throw std::runtime_error("LLVMGen: DiscreteField/StateField history unsupported shape");
         };
 
+        // Helper: compute per-component active flags for scalar-basis
+        // vector fields WITHOUT integer division.  `vd` (value dimension)
+        // is known at C++ codegen time; for vd <= 3 we use comparisons
+        // against dofs_per_comp boundaries instead of `i / dofs_per_comp`.
+        // This eliminates ~26-cycle integer divides from the inner DOF loops.
+        auto emitComponentFlags = [&](llvm::Value* dof_index,
+                                      llvm::Value* dofs_per_comp,
+                                      std::size_t vd) -> llvm::SmallVector<llvm::Value*, 3> {
+            llvm::SmallVector<llvm::Value*, 3> flags;
+            if (vd == 1) {
+                flags.push_back(builder.getTrue());
+            } else if (vd == 2) {
+                auto* ge1 = builder.CreateICmpUGE(dof_index, dofs_per_comp);
+                flags.push_back(builder.CreateNot(ge1));
+                flags.push_back(ge1);
+            } else if (vd == 3) {
+                auto* two_dpc = builder.CreateMul(dofs_per_comp, builder.getInt32(2));
+                auto* ge1 = builder.CreateICmpUGE(dof_index, dofs_per_comp);
+                auto* ge2 = builder.CreateICmpUGE(dof_index, two_dpc);
+                flags.push_back(builder.CreateNot(ge1));
+                flags.push_back(builder.CreateAnd(ge1, builder.CreateNot(ge2)));
+                flags.push_back(ge2);
+            } else {
+                // Fallback: use integer divide for vd > 3
+                auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
+                for (std::size_t c = 0; c < vd; ++c) {
+                    flags.push_back(builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(c))));
+                }
+            }
+            return flags;
+        };
+
 	        auto evalKernelIRSingleValue = [&](const LoweredTerm& term,
 	                                           llvm::Value* q_index,
 	                                           llvm::Value* i_index,
@@ -4798,11 +4858,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         builder.SetInsertPoint(sb);
                         {
                             const auto dofs_per_comp = builder.CreateUDiv(side.n_test_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                            const auto comp = builder.CreateUDiv(i_index, dofs_per_comp);
                             const auto phi = loadBasisScalar(side.test_basis_values, side.n_test_dofs, i_index, q_index);
+                            const auto comp_flags = emitComponentFlags(i_index, dofs_per_comp, vd);
                             for (std::size_t c = 0; c < vd; ++c) {
-                                auto* is_c = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(c)));
-                                sb_vals[c] = builder.CreateSelect(is_c, phi, f64c(0.0));
+                                sb_vals[c] = builder.CreateSelect(comp_flags[c], phi, f64c(0.0));
                             }
                             builder.CreateBr(merge);
                         }
@@ -4858,11 +4917,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         builder.SetInsertPoint(sb);
                         {
                             const auto dofs_per_comp = builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                            const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
                             const auto phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j_index, q_index);
+                            const auto comp_flags = emitComponentFlags(j_index, dofs_per_comp, vd);
                             for (std::size_t c = 0; c < vd; ++c) {
-                                auto* is_c = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(c)));
-                                sb_vals[c] = builder.CreateSelect(is_c, phi, f64c(0.0));
+                                sb_vals[c] = builder.CreateSelect(comp_flags[c], phi, f64c(0.0));
                             }
                             builder.CreateBr(merge);
                         }
@@ -4900,12 +4958,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 const auto dim = static_cast<std::size_t>(shape.dims[1]);
                                 CodeValue out = makeZero(shape);
                                 const auto dofs_per_comp = builder.CreateUDiv(side.n_test_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                const auto comp = builder.CreateUDiv(i_index, dofs_per_comp);
                                 const auto g = loadVec3FromTableQMajor(side.test_phys_grads_xyz, side.n_test_dofs, i_index, q_index);
+                                const auto comp_flags = emitComponentFlags(i_index, dofs_per_comp, vd);
                                 for (std::size_t r = 0; r < vd; ++r) {
-                                    auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
                                     for (std::size_t d = 0; d < dim; ++d) {
-                                        out.elems[r * dim + d] = builder.CreateSelect(is_r, g[d], f64c(0.0));
+                                        out.elems[r * dim + d] = builder.CreateSelect(comp_flags[r], g[d], f64c(0.0));
                                     }
                                 }
                                 values[op_idx] = out;
@@ -4974,12 +5031,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 const auto dim = static_cast<std::size_t>(shape.dims[1]);
                                 CodeValue out = makeZero(shape);
                                 const auto dofs_per_comp = builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
                                 const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
+                                const auto comp_flags = emitComponentFlags(j_index, dofs_per_comp, vd);
                                 for (std::size_t r = 0; r < vd; ++r) {
-                                    auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
                                     for (std::size_t d = 0; d < dim; ++d) {
-                                        out.elems[r * dim + d] = builder.CreateSelect(is_r, g[d], f64c(0.0));
+                                        out.elems[r * dim + d] = builder.CreateSelect(comp_flags[r], g[d], f64c(0.0));
                                     }
                                 }
                                 values[op_idx] = out;
@@ -7286,6 +7342,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         std::unordered_map<std::uint64_t, QPCacheEntry> qp_shared_cache;
         std::unordered_map<std::uint64_t, QPCacheEntry>* qp_shared_cache_ptr = nullptr;
 
+        // Cross-block CSE cache for dep_mask==0 ops shared across coupled blocks.
+        // Keyed by per-op structural hash.  Active only during coupled dispatch.
+        std::unordered_map<std::uint64_t, QPCacheEntry> dep0_xblock_cache;
+        bool dep0_xblock_active = false;
+
         auto getOrCreateCacheEntry = [&](std::uint64_t key, std::uint32_t n_elems_per_qp) -> QPCacheEntry& {
             auto it = qp_shared_cache.find(key);
             if (it != qp_shared_cache.end()) return it->second;
@@ -7355,6 +7416,19 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     cached[op_idx] = makeZero(term.shapes[op_idx]);
                     continue;
                 }
+                // Cross-block CSE: check if this dep_mask==0 op was already
+                // computed by a previous coupled block with the same structural hash.
+                if (dep0_xblock_active && !term.op_hashes.empty()) {
+                    const auto op_hash = term.op_hashes[op_idx];
+                    auto it = dep0_xblock_cache.find(op_hash);
+                    if (it != dep0_xblock_cache.end()) {
+                        auto cv = loadFromCacheEntry(it->second, q_index, term.shapes[op_idx]);
+                        values[op_idx] = cv;
+                        cached[op_idx] = cv;
+                        continue;
+                    }
+                }
+
                 const auto& op = term.ir.ops[op_idx];
                 const auto& shape = term.shapes[op_idx];
                 switch (op.type) {
@@ -8856,6 +8930,25 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         throw std::runtime_error("LLVMGen: unsupported op in cached eval");
                 }
                 cached[op_idx] = values[op_idx];
+
+                // Cross-block CSE: store non-trivial dep_mask==0 results for reuse
+                // by subsequent coupled blocks.  Skip Constants and ParameterRef
+                // (cheap to recompute; not worth the alloca + memory traffic).
+                if (dep0_xblock_active && !term.op_hashes.empty()) {
+                    const auto& op_store = term.ir.ops[op_idx];
+                    if (op_store.type != FormExprType::Constant &&
+                        op_store.type != FormExprType::ParameterRef) {
+                        const auto op_hash = term.op_hashes[op_idx];
+                        if (dep0_xblock_cache.find(op_hash) == dep0_xblock_cache.end()) {
+                            const auto n_elems = static_cast<std::uint32_t>(values[op_idx].elems.size());
+                            const std::uint32_t total = kMaxCacheQPts * n_elems;
+                            auto* alloca_inst = allocaInEntry(f64, builder.getInt32(total), "xb_cache");
+                            QPCacheEntry entry{alloca_inst, n_elems, true};
+                            storeToCacheEntry(entry, q_index, values[op_idx]);
+                            dep0_xblock_cache[op_hash] = entry;
+                        }
+                    }
+                }
             }
 
             return cached;
@@ -10130,6 +10223,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 qp_shared_cache.clear();
                 qp_shared_cache_ptr = &qp_shared_cache;
 
+                // Enable cross-block CSE for dep_mask==0 ops.
+                dep0_xblock_cache.clear();
+                dep0_xblock_active = true;
+
                 for (std::size_t blk = 0; blk < coupled->blocks.size(); ++blk) {
                     const auto& blk_data = coupled->blocks[blk];
                     const std::string bs = std::to_string(blk);
@@ -10244,11 +10341,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     }
                 }
 
-                // Disable the shared QP cache after coupled dispatch.
+                // Disable the shared QP cache and cross-block CSE after coupled dispatch.
                 // (Cache entries and their allocas remain valid in the generated
                 // function -- they were created in the entry block.)
                 qp_shared_cache_ptr = nullptr;
                 qp_cache_trial_group = -1;
+                dep0_xblock_active = false;
             }
         } else {
 	            auto evalKernelIRFaceValue = [&](const LoweredTerm& term,
@@ -13280,10 +13378,14 @@ LLVMGenResult LLVMGen::compileAndAddCoupledKernel(JITEngine& engine,
                     }
                 }
 
+                // Compute per-op structural hashes for cross-block CSE
+                auto per_op_hashes = lowered.ir.perOpStructuralHashes();
+
                 blk_terms.terms.push_back(LoweredTerm{
                     .ir = std::move(lowered.ir),
                     .shapes = std::move(shapes.shapes),
                     .dep_mask = std::move(dep),
+                    .op_hashes = std::move(per_op_hashes),
                     .time_derivative_order = term.time_derivative_order,
                     .tensor_ir = std::move(tensor_ir),
                     .has_indexed_access = has_indexed_access,
@@ -13313,7 +13415,23 @@ LLVMGenResult LLVMGen::compileAndAddCoupledKernel(JITEngine& engine,
                 .message = "LLVMGen: coupled block " + std::to_string(bi) + " has no cell terms"};
         }
 
-        // Block lowered successfully: blk_terms.terms.size() terms.
+        // Block lowered successfully — log dep_mask breakdown for diagnostics.
+        for (std::size_t ti = 0; ti < blk_terms.terms.size(); ++ti) {
+            const auto& t = blk_terms.terms[ti];
+            std::size_t n0 = 0, n1 = 0, n2 = 0, n3 = 0;
+            for (auto d : t.dep_mask) {
+                if (d == 0) ++n0;
+                else if (d == 1) ++n1;
+                else if (d == 2) ++n2;
+                else ++n3;
+            }
+            fprintf(stderr, "[LLVMGen] coupled blk=%zu term=%zu target=%s ops=%zu "
+                    "dep0=%zu dep1=%zu dep2=%zu dep3=%zu\n",
+                    bi, ti,
+                    t.target == LoweredTerm::Target::Matrix ? "mat" :
+                    t.target == LoweredTerm::Target::Vector ? "vec" : "auto",
+                    t.ir.opCount(), n0, n1, n2, n3);
+        }
     }
 
     // Assign trial-space group IDs: blocks with the same trial space share a group.

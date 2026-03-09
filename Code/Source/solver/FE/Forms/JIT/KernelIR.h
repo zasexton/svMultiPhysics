@@ -57,6 +57,7 @@ struct KernelIR {
      * should be treated as non-cacheable even if a hash is available.
      */
     [[nodiscard]] std::uint64_t stableHash64() const;
+    [[nodiscard]] std::vector<std::uint64_t> perOpStructuralHashes() const;
     [[nodiscard]] std::string dump() const;
 };
 

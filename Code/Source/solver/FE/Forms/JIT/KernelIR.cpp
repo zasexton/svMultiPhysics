@@ -560,6 +560,36 @@ std::uint64_t KernelIR::stableHash64() const
     return op_hash[root];
 }
 
+std::vector<std::uint64_t> KernelIR::perOpStructuralHashes() const
+{
+    std::vector<std::uint64_t> op_hash(ops.size(), 0);
+    for (std::size_t i = 0; i < ops.size(); ++i) {
+        const auto& op = ops[i];
+        std::uint64_t h = kFNVOffset;
+        hashMix(h, 0x4b49525f5631ULL);
+        hashMix(h, static_cast<std::uint64_t>(op.type));
+        hashMix(h, op.imm0);
+        hashMix(h, op.imm1);
+        hashMix(h, static_cast<std::uint64_t>(op.child_count));
+
+        if (op.child_count == 2u && isCommutative(op.type)) {
+            const auto a_idx = children[static_cast<std::size_t>(op.first_child) + 0];
+            const auto b_idx = children[static_cast<std::size_t>(op.first_child) + 1];
+            const auto ha = op_hash[a_idx];
+            const auto hb = op_hash[b_idx];
+            hashMix(h, std::min(ha, hb));
+            hashMix(h, std::max(ha, hb));
+        } else {
+            for (std::size_t c = 0; c < op.child_count; ++c) {
+                const auto child_idx = children[static_cast<std::size_t>(op.first_child) + c];
+                hashMix(h, op_hash[child_idx]);
+            }
+        }
+        op_hash[i] = h;
+    }
+    return op_hash;
+}
+
 std::string KernelIR::dump() const
 {
     std::ostringstream oss;
