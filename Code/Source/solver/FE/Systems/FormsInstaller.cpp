@@ -160,8 +160,9 @@ std::unordered_set<FieldId> gatherStateFields(const forms::FormExprNode& node)
     const auto visit = [&](const auto& self, const forms::FormExprNode& n) -> void {
         if (n.type() == forms::FormExprType::StateField) {
             const auto fid = n.fieldId();
-            FE_THROW_IF(!fid || *fid == INVALID_FIELD_ID, InvalidArgumentException,
-                        "installCoupledResidual: encountered StateField with invalid FieldId");
+            FE_THROW_IF(!fid || *fid == CURRENT_SOLUTION_FIELD_ID, InvalidArgumentException,
+                        "installCoupledResidual: encountered StateField with CURRENT_SOLUTION_FIELD_ID sentinel "
+                        "(coupled residuals must use explicit named field IDs)");
             out.insert(*fid);
         }
         for (const auto& child : n.childrenShared()) {
@@ -204,8 +205,9 @@ forms::FormExpr lowerStateFields(
         }
 
         const auto fid = n.fieldId();
-        FE_THROW_IF(!fid || *fid == INVALID_FIELD_ID, InvalidArgumentException,
-                    "installCoupledResidual: StateField node missing FieldId");
+        FE_THROW_IF(!fid || *fid == CURRENT_SOLUTION_FIELD_ID, InvalidArgumentException,
+                    "installCoupledResidual: StateField node has CURRENT_SOLUTION_FIELD_ID sentinel "
+                    "(coupled residuals must use explicit named field IDs)");
 
         const auto& rec = system.fieldRecord(*fid);
         FE_CHECK_NOT_NULL(rec.space.get(), "installCoupledResidual: field space");

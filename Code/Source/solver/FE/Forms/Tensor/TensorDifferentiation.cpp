@@ -318,7 +318,7 @@ FormExpr differentiateTensorResidualHessianVector(const FormExpr& residual_form,
 {
     const auto tangent = differentiateTensorResidual(residual_form, ctx);
 
-    FieldId target = INVALID_FIELD_ID;
+    FieldId target = CURRENT_SOLUTION_FIELD_ID;
     if (ctx.wrt_field.has_value()) {
         target = *ctx.wrt_field;
     } else if (ctx.wrt_terminal.has_value()) {

@@ -231,10 +231,10 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
             case FormExprType::StateField: {
                 // StateField usually refers to an auxiliary/state variable provided as
                 // field solution data (handled via FieldRequirements). We also support
-                // a special sentinel FieldId (INVALID_FIELD_ID) to represent the current
-                // solution state u in symbolic tangent forms.
+                // a special sentinel FieldId (CURRENT_SOLUTION_FIELD_ID) to represent the
+                // current solution state u in symbolic tangent forms.
                 const auto fid = n.fieldId();
-                if (fid && *fid == INVALID_FIELD_ID) {
+                if (fid && *fid == CURRENT_SOLUTION_FIELD_ID) {
                     required |= RequiredData::SolutionValues;
                     required |= RequiredData::BasisValues;
                     if (order >= 1) {
@@ -359,9 +359,9 @@ std::vector<assembly::FieldRequirement> analyzeFieldRequirements(const FormExprN
                 if (!fid) {
                     throw std::logic_error("FormCompiler: DiscreteField/StateField node missing fieldId()");
                 }
-                if (n.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
-                    // Special-case: INVALID StateField represents the current solution state (u),
-                    // not an external field entry.
+                if (n.type() == FormExprType::StateField && *fid == CURRENT_SOLUTION_FIELD_ID) {
+                    // Special-case: StateField(CURRENT_SOLUTION_FIELD_ID) represents the current
+                    // solution state (u), not an external field entry.
                     break;
                 }
                 RequiredData bits = RequiredData::SolutionValues;

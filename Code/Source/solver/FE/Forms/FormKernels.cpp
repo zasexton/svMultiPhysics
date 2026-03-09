@@ -2263,9 +2263,9 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
 
-            // Special-case: StateField(INVALID_FIELD_ID) represents the current solution state u
+            // Special-case: StateField(CURRENT_SOLUTION_FIELD_ID) represents the current solution state u
             // (used in symbolic tangent forms). This behaves like a coefficient (no derivatives).
-            if (node.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+            if (node.type() == FormExprType::StateField && *fid == CURRENT_SOLUTION_FIELD_ID) {
                 if (sig->field_type == FieldType::Scalar) {
                     out.value.kind = EvalValue<Scalar>::Kind::Scalar;
                     out.value.s = makeScalarConstant<Scalar>(ctx.solutionValue(q), env);
@@ -2349,7 +2349,7 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
                                   __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
             }
 
-            if (*fid == INVALID_FIELD_ID) {
+            if (*fid == CURRENT_SOLUTION_FIELD_ID) {
                 throw FEException("Forms: DiscreteField node missing a valid FieldId (jet)",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
@@ -5047,9 +5047,9 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
 
-            // Special-case: StateField(INVALID_FIELD_ID) represents the current solution state u
+            // Special-case: StateField(CURRENT_SOLUTION_FIELD_ID) represents the current solution state u
             // (used in symbolic tangent forms).
-            if (node.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+            if (node.type() == FormExprType::StateField && *fid == CURRENT_SOLUTION_FIELD_ID) {
                 if (sig->field_type == FieldType::Scalar) {
                     return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.solutionValue(q)};
                 }
@@ -5069,7 +5069,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                                   __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
             }
 
-            if (*fid == INVALID_FIELD_ID) {
+            if (*fid == CURRENT_SOLUTION_FIELD_ID) {
                 throw FEException("Forms: DiscreteField node missing a valid FieldId",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
@@ -5216,8 +5216,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                 const auto fid = child.fieldId();
                 const bool state_current =
                     ((child.type() == FormExprType::StateField || child.type() == FormExprType::DiscreteField) &&
-                     (!fid || *fid == INVALID_FIELD_ID));
-                if (!state_current && (!fid || *fid == INVALID_FIELD_ID)) {
+                     (!fid || *fid == CURRENT_SOLUTION_FIELD_ID));
+                if (!state_current && (!fid || *fid == CURRENT_SOLUTION_FIELD_ID)) {
                     throw FEException("Forms: grad(DiscreteField) missing a valid FieldId",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
@@ -5417,8 +5417,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
 	                    const auto fid = base.fieldId();
 	                    const bool state_current =
 	                        ((base.type() == FormExprType::StateField || base.type() == FormExprType::DiscreteField) &&
-	                         (!fid || *fid == INVALID_FIELD_ID));
-	                    if (!state_current && (!fid || *fid == INVALID_FIELD_ID)) {
+	                         (!fid || *fid == CURRENT_SOLUTION_FIELD_ID));
+	                    if (!state_current && (!fid || *fid == CURRENT_SOLUTION_FIELD_ID)) {
 	                        throw FEException("Forms: H(component(DiscreteField,i)) missing a valid FieldId",
 	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                    }
@@ -5514,8 +5514,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
 	                const auto fid = child.fieldId();
 	                const bool state_current =
 	                    ((child.type() == FormExprType::StateField || child.type() == FormExprType::DiscreteField) &&
-	                     (!fid || *fid == INVALID_FIELD_ID));
-	                if (!state_current && (!fid || *fid == INVALID_FIELD_ID)) {
+	                     (!fid || *fid == CURRENT_SOLUTION_FIELD_ID));
+	                if (!state_current && (!fid || *fid == CURRENT_SOLUTION_FIELD_ID)) {
 	                    throw FEException("Forms: H(DiscreteField) missing a valid FieldId",
 	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                }
@@ -5602,12 +5602,12 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                     const auto fid = child.fieldId();
                     FE_THROW_IF(!fid, InvalidArgumentException,
                                 "Forms: dt(field) operand missing FieldId");
-                    if (child.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+                    if (child.type() == FormExprType::StateField && *fid == CURRENT_SOLUTION_FIELD_ID) {
                         for (int k = 1; k <= required; ++k) {
                             out += stencil->coeff(k) * ctx.previousSolutionValue(q, k);
                         }
                     } else {
-                        FE_THROW_IF(*fid == INVALID_FIELD_ID, InvalidArgumentException,
+                        FE_THROW_IF(*fid == CURRENT_SOLUTION_FIELD_ID, InvalidArgumentException,
                                     "Forms: dt(DiscreteField/StateField) missing a valid FieldId");
                         for (int k = 1; k <= required; ++k) {
                             out += stencil->coeff(k) * ctx.fieldPreviousValue(*fid, q, k);
@@ -5627,7 +5627,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                     const auto fid = child.fieldId();
                     FE_THROW_IF(!fid, InvalidArgumentException,
                                 "Forms: dt(field) operand missing FieldId");
-                    if (child.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+                    if (child.type() == FormExprType::StateField && *fid == CURRENT_SOLUTION_FIELD_ID) {
                         for (int k = 1; k <= required; ++k) {
                             const auto prev = ctx.previousSolutionVectorValue(q, k);
                             for (std::size_t d = 0; d < out.vectorSize(); ++d) {
@@ -5635,7 +5635,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                             }
                         }
                     } else {
-                        FE_THROW_IF(*fid == INVALID_FIELD_ID, InvalidArgumentException,
+                        FE_THROW_IF(*fid == CURRENT_SOLUTION_FIELD_ID, InvalidArgumentException,
                                     "Forms: dt(DiscreteField/StateField) missing a valid FieldId");
                         for (int k = 1; k <= required; ++k) {
                             const auto prev = ctx.fieldPreviousVectorValue(*fid, q, k);
@@ -5756,7 +5756,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
 
-                if (child.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+                if (child.type() == FormExprType::StateField && *fid == CURRENT_SOLUTION_FIELD_ID) {
                     // div(u): current solution state
                     if (ctx.trialUsesVectorBasis()) {
                         if (sig->continuity != Continuity::H_div) {
@@ -5787,7 +5787,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                     return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, div};
                 }
 
-                if (*fid == INVALID_FIELD_ID) {
+                if (*fid == CURRENT_SOLUTION_FIELD_ID) {
                     throw FEException("Forms: div(DiscreteField) missing a valid FieldId",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
@@ -5966,7 +5966,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
 
-                if (child.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+                if (child.type() == FormExprType::StateField && *fid == CURRENT_SOLUTION_FIELD_ID) {
                     EvalValue<Real> out;
                     out.kind = EvalValue<Real>::Kind::Vector;
                     if (ctx.trialUsesVectorBasis()) {
@@ -6004,7 +6004,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                     return out;
                 }
 
-                if (*fid == INVALID_FIELD_ID) {
+                if (*fid == CURRENT_SOLUTION_FIELD_ID) {
                     throw FEException("Forms: curl(DiscreteField) missing a valid FieldId",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
@@ -8615,9 +8615,9 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
 	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	            }
 
-	            // Special-case: StateField(INVALID_FIELD_ID) represents the current solution state u
+	            // Special-case: StateField(CURRENT_SOLUTION_FIELD_ID) represents the current solution state u
 	            // (used in symbolic residual/tangent forms). This behaves like a coefficient (no derivative seeding).
-	            if (node.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+	            if (node.type() == FormExprType::StateField && *fid == CURRENT_SOLUTION_FIELD_ID) {
 	                if (sig->field_type == FieldType::Scalar) {
 	                    EvalValue<Dual> out;
 	                    out.kind = EvalValue<Dual>::Kind::Scalar;
@@ -8649,7 +8649,7 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
 	                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
 	            }
 
-	            if (*fid == INVALID_FIELD_ID) {
+	            if (*fid == CURRENT_SOLUTION_FIELD_ID) {
 	                throw FEException("Forms: DiscreteField node missing a valid FieldId (dual)",
 	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	            }
@@ -9045,8 +9045,8 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
 	                const auto fid = child.fieldId();
 	                const bool state_current =
 	                    ((child.type() == FormExprType::StateField || child.type() == FormExprType::DiscreteField) &&
-	                     (!fid || *fid == INVALID_FIELD_ID));
-	                if (!state_current && (!fid || *fid == INVALID_FIELD_ID)) {
+	                     (!fid || *fid == CURRENT_SOLUTION_FIELD_ID));
+	                if (!state_current && (!fid || *fid == CURRENT_SOLUTION_FIELD_ID)) {
 	                    throw FEException("Forms: grad(DiscreteField) missing a valid FieldId (dual)",
 	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                }
@@ -9305,8 +9305,8 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
 	                    const auto fid = base.fieldId();
 	                    const bool state_current =
 	                        ((base.type() == FormExprType::StateField || base.type() == FormExprType::DiscreteField) &&
-	                         (!fid || *fid == INVALID_FIELD_ID));
-	                    if (!state_current && (!fid || *fid == INVALID_FIELD_ID)) {
+	                         (!fid || *fid == CURRENT_SOLUTION_FIELD_ID));
+	                    if (!state_current && (!fid || *fid == CURRENT_SOLUTION_FIELD_ID)) {
 	                        throw FEException("Forms: H(component(DiscreteField,i)) missing a valid FieldId (dual)",
 	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                    }
@@ -9453,8 +9453,8 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
 	                const auto fid = child.fieldId();
 	                const bool state_current =
 	                    ((child.type() == FormExprType::StateField || child.type() == FormExprType::DiscreteField) &&
-	                     (!fid || *fid == INVALID_FIELD_ID));
-	                if (!state_current && (!fid || *fid == INVALID_FIELD_ID)) {
+	                     (!fid || *fid == CURRENT_SOLUTION_FIELD_ID));
+	                if (!state_current && (!fid || *fid == CURRENT_SOLUTION_FIELD_ID)) {
 	                    throw FEException("Forms: H(DiscreteField) missing a valid FieldId (dual)",
 	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                }
@@ -9569,11 +9569,11 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
 	                    throw FEException("Forms: dt(field) operand missing FieldId (dual)",
 	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                }
-	                if (child.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
-	                    // dt(StateField(INVALID_FIELD_ID)) represents dt(u) for the current solution state.
+	                if (child.type() == FormExprType::StateField && *fid == CURRENT_SOLUTION_FIELD_ID) {
+	                    // dt(StateField(CURRENT_SOLUTION_FIELD_ID)) represents dt(u) for the current solution state.
 	                    trial_dt = true;
 	                } else {
-	                    if (*fid == INVALID_FIELD_ID) {
+	                    if (*fid == CURRENT_SOLUTION_FIELD_ID) {
 	                        throw FEException("Forms: dt(DiscreteField/StateField) missing a valid FieldId (dual)",
 	                                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                    }
@@ -9767,7 +9767,7 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
 	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                }
 
-	                if (child.type() == FormExprType::StateField && *fid == INVALID_FIELD_ID) {
+	                if (child.type() == FormExprType::StateField && *fid == CURRENT_SOLUTION_FIELD_ID) {
 	                    // div(u): current solution state
 	                    if (ctx.trialUsesVectorBasis()) {
 	                        if (sig->continuity != Continuity::H_div) {
@@ -9804,7 +9804,7 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
 	                    return out;
 	                }
 
-	                if (*fid == INVALID_FIELD_ID) {
+	                if (*fid == CURRENT_SOLUTION_FIELD_ID) {
 	                    throw FEException("Forms: div(DiscreteField) missing a valid FieldId (dual)",
 	                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	                }
@@ -10028,7 +10028,7 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
                 const auto fid = child.fieldId();
-                if (!fid || *fid == INVALID_FIELD_ID) {
+                if (!fid || *fid == CURRENT_SOLUTION_FIELD_ID) {
                     throw FEException("Forms: curl(DiscreteField) missing a valid FieldId (dual)",
                                       __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
                 }
@@ -14019,7 +14019,7 @@ void SymbolicNonlinearFormKernel::rewriteResidualTrialToState()
         const auto* sig = n.spaceSignature();
         FE_THROW_IF(!sig, InvalidArgumentException,
                     "SymbolicNonlinearFormKernel: TrialFunction missing SpaceSignature during residual rewrite");
-        return FormExpr::stateField(INVALID_FIELD_ID, *sig, n.toString());
+        return FormExpr::stateField(CURRENT_SOLUTION_FIELD_ID, *sig, n.toString());
     };
 
     residual_ir_.transformIntegrands(transform);
@@ -14059,7 +14059,7 @@ void SymbolicNonlinearFormKernel::resolveInlinableConstitutives()
     }
 
     // Residual evaluation uses scalar (Real) mode, which must not contain TrialFunction nodes.
-    // Rewrite TrialFunction -> StateField(INVALID_FIELD_ID) to represent the current solution u.
+    // Rewrite TrialFunction -> StateField(CURRENT_SOLUTION_FIELD_ID) to represent the current solution u.
     rewriteResidualTrialToState();
 
     inlinable_constitutives_resolved_ = true;

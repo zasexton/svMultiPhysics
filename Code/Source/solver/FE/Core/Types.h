@@ -144,6 +144,21 @@ constexpr GlobalIndex INVALID_GLOBAL_INDEX = -1;
 constexpr FieldId INVALID_FIELD_ID = std::numeric_limits<FieldId>::max();
 constexpr BlockId INVALID_BLOCK_ID = std::numeric_limits<BlockId>::max();
 
+/**
+ * @brief Sentinel FieldId representing "the current solution state" in tangent forms.
+ *
+ * When differentiating a residual form to obtain the tangent (Jacobian), undifferentiated
+ * TrialFunction occurrences are rewritten to StateField nodes. Those that represent the
+ * block's own primary unknown (rather than a named external field) use this sentinel
+ * FieldId. The assembler maps it to the current solution coefficients at each quadrature
+ * point, regardless of which physics or field variables are involved.
+ *
+ * This is distinct from INVALID_FIELD_ID, which means "uninitialized / no field."
+ * CURRENT_SOLUTION_FIELD_ID uses the same numeric value for backward compatibility
+ * with existing KernelIR encodings, but carries explicit semantic intent.
+ */
+constexpr FieldId CURRENT_SOLUTION_FIELD_ID = std::numeric_limits<FieldId>::max();
+
 // ============================================================================
 // Element Type Enumerations
 // ============================================================================

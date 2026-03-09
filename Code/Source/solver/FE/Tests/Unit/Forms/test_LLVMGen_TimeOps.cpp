@@ -105,7 +105,7 @@ TEST(LLVMGenTimeOps, TimeDerivativeOrder2_UsesCorrectStencil)
     dt2.a = {Real(10.0), Real(20.0), Real(30.0)};
     env.ti.dt2 = dt2;
 
-    const auto integrand = FormExpr::stateField(INVALID_FIELD_ID, env.space, "u").dt(2);
+    const auto integrand = FormExpr::stateField(CURRENT_SOLUTION_FIELD_ID, env.space, "u").dt(2);
 
     const Real ref = assembleInterp(integrand, env);
     const Real jit = assembleJIT(integrand, env);

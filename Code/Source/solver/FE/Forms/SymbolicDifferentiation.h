@@ -48,7 +48,7 @@ struct SymbolicDiffResult {
  *   a(δu, v) = dR/du[δu, v]
  *
  * Important semantic detail:
- * - Undifferentiated TrialFunction occurrences are rewritten to StateField(INVALID_FIELD_ID),
+ * - Undifferentiated TrialFunction occurrences are rewritten to StateField(CURRENT_SOLUTION_FIELD_ID),
  *   representing the current solution state u.
  * - Differentiated TrialFunction occurrences become TrialFunction nodes representing δu.
  */
@@ -63,13 +63,13 @@ struct SymbolicDiffResult {
  *
  * The `trial_state_field` parameter controls how *all* TrialFunction occurrences in the residual are
  * rewritten in the primal expression:
- * - `trial_state_field == INVALID_FIELD_ID` (default): use StateField(INVALID_FIELD_ID) sentinel, i.e. current solution
+ * - `trial_state_field == CURRENT_SOLUTION_FIELD_ID` (default): use StateField(CURRENT_SOLUTION_FIELD_ID) sentinel, i.e. current solution
  * - otherwise: rewrite TrialFunction to `StateField(trial_state_field, ...)` so tangents can be assembled in block/multi-field
  *   contexts where the active trial space differs from the residual's primary unknown.
  */
 [[nodiscard]] FormExpr differentiateResidual(const FormExpr& residual_form,
                                             const FormExpr& wrt_terminal,
-                                            FieldId trial_state_field = INVALID_FIELD_ID);
+                                            FieldId trial_state_field = CURRENT_SOLUTION_FIELD_ID);
 
 /**
  * @brief Differentiate a residual form w.r.t. a specific FieldId (multi-field support)
@@ -82,7 +82,7 @@ struct SymbolicDiffResult {
  */
 [[nodiscard]] FormExpr differentiateResidual(const FormExpr& residual_form,
                                             FieldId field,
-                                            FieldId trial_state_field = INVALID_FIELD_ID);
+                                            FieldId trial_state_field = CURRENT_SOLUTION_FIELD_ID);
 
 /**
  * @brief Directional derivative of an expression w.r.t. a FieldId

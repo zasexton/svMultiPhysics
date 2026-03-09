@@ -62,6 +62,10 @@ namespace jit {
 
 namespace {
 
+/// Packed integer value of CURRENT_SOLUTION_FIELD_ID for comparison against
+/// the int returned by unpackFieldIdImm1().
+constexpr int kCurrentSolutionFid = static_cast<int>(CURRENT_SOLUTION_FIELD_ID);
+
 #if SVMP_FE_ENABLE_LLVM_JIT
 [[nodiscard]] std::string sanitizeFilename(std::string_view s)
 {
@@ -3949,8 +3953,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             for (const auto& op : kir.ops) {
                 if (op.type == FormExprType::DiscreteField || op.type == FormExprType::StateField) {
                     const int fid = unpackFieldIdImm1(op.imm1);
-                    if (op.type == FormExprType::StateField && fid == 0xffff) {
-                        // StateField(INVALID_FIELD_ID) represents the current solution state u, not a field table entry.
+                    if (op.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
+                        // StateField(CURRENT_SOLUTION_FIELD_ID) represents the current solution state u, not a field table entry.
                         continue;
                     }
                     used_field_ids.push_back(fid);
@@ -4687,7 +4691,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::DiscreteField:
                     case FormExprType::StateField: {
                         const int fid = unpackFieldIdImm1(op.imm1);
-                        if (op.type == FormExprType::StateField && fid == 0xffff) {
+                        if (op.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                             values[op_idx] = evalCurrentSolution(side, shape, q_index);
                         } else {
                             values[op_idx] = evalDiscreteOrStateField(/*plus_side=*/false, shape, fid, q_index);
@@ -5101,7 +5105,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         }
 	                        if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
 	                            const int fid = unpackFieldIdImm1(kid.imm1);
-	                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
+	                            if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
 	                                auto* coeffs = side.solution_coefficients;
 	                                if (shape.kind == Shape::Kind::Vector) {
 	                                    const auto dim = static_cast<std::size_t>(shape.dims[0]);
@@ -5412,7 +5416,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             if (dt_child.type == FormExprType::DiscreteField || dt_child.type == FormExprType::StateField) {
                                 const int fid = unpackFieldIdImm1(dt_child.imm1);
-                                const auto g = (dt_child.type == FormExprType::StateField && fid == 0xffff)
+                                const auto g = (dt_child.type == FormExprType::StateField && fid == kCurrentSolutionFid)
                                                    ? gradCurrentSolution()
                                                    : gradDiscreteOrStateField(fid);
                                 values[op_idx] = mul(makeScalar(coeff0), g);
@@ -5461,7 +5465,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        //   div( scalar * sym(grad(u)) )
 	                        // where the scalar factor is spatially constant and u is one of:
 	                        //   - TrialFunction  (residual: current solution; tangent: trial basis)
-	                        //   - StateField(INVALID_FIELD_ID) (current solution)
+	                        //   - StateField(CURRENT_SOLUTION_FIELD_ID) (current solution)
 	                        //   - PreviousSolutionRef
 	                        if (shape.kind == Shape::Kind::Vector) {
 	                            auto isSpatiallyConstantScalar = [&](auto&& self, std::size_t idx) -> bool {
@@ -5686,7 +5690,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    }
 	                                    if (uop.type == FormExprType::StateField) {
 	                                        const int fid = unpackFieldIdImm1(uop.imm1);
-	                                        if (fid == 0xffff) {
+	                                        if (fid == kCurrentSolutionFid) {
 	                                            return divSymGradFromCoeffs(side.solution_coefficients, rows2, dim2);
 	                                        }
 	                                        return divSymGradFromField(fid, rows2, dim2);
@@ -5735,7 +5739,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                        }
 	                                    }
 	                                    throw std::runtime_error(
-	                                        "LLVMGen: div(sym(grad(u))) expects u = TrialFunction, DiscreteField, StateField(INVALID_FIELD_ID), PreviousSolutionRef, or linear scalar*vector ops");
+	                                        "LLVMGen: div(sym(grad(u))) expects u = TrialFunction, DiscreteField, StateField(CURRENT_SOLUTION_FIELD_ID), PreviousSolutionRef, or linear scalar*vector ops");
 	                                };
 	                                return divSymGradForURec(divSymGradForURec, u_idx, rows, dim);
 	                            };
@@ -5958,7 +5962,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         }
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
-                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                            if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                 values[op_idx] = makeScalar(divCurrentSolution());
                                 break;
                             }
@@ -6012,7 +6016,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             if (dt_child.type == FormExprType::DiscreteField || dt_child.type == FormExprType::StateField) {
                                 const int fid = unpackFieldIdImm1(dt_child.imm1);
-                                if (dt_child.type == FormExprType::StateField && fid == 0xffff) {
+                                if (dt_child.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                     values[op_idx] = makeScalar(builder.CreateFMul(coeff0, divCurrentSolution()));
                                     break;
                                 }
@@ -6254,7 +6258,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         }
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
-                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                            if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                 values[op_idx] = curlCurrentSolution();
                                 break;
                             }
@@ -6357,7 +6361,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             if (dt_child.type == FormExprType::DiscreteField || dt_child.type == FormExprType::StateField) {
                                 const int fid = unpackFieldIdImm1(dt_child.imm1);
                                 const auto v =
-                                    (dt_child.type == FormExprType::StateField && fid == 0xffff)
+                                    (dt_child.type == FormExprType::StateField && fid == kCurrentSolutionFid)
                                         ? curlCurrentSolution()
                                         : [&]() -> CodeValue {
                                               auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
@@ -6474,7 +6478,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        }
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
-                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                            if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                 values[op_idx] = hessCurrentSolution();
                                 break;
                             }
@@ -6532,7 +6536,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             if (dt_child.type == FormExprType::DiscreteField || dt_child.type == FormExprType::StateField) {
                                 const int fid = unpackFieldIdImm1(dt_child.imm1);
-                                if (dt_child.type == FormExprType::StateField && fid == 0xffff) {
+                                if (dt_child.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                     values[op_idx] = mul(makeScalar(coeff0), hessCurrentSolution());
                                     break;
                                 }
@@ -6598,7 +6602,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto& kid = term.ir.ops[child_op_idx];
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
-                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                            if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                 for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                     acc = add(acc,
                                               mul(makeScalar(loadDtCoeff(side, order, k)),
@@ -7364,6 +7368,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             auto* q64 = builder.CreateZExt(q_index, i64);
             auto* base = builder.CreateMul(q64, builder.getInt64(entry.n_elems));
             for (std::uint32_t e = 0; e < entry.n_elems; ++e) {
+                if (!val.elems[e]) {
+                    throw std::runtime_error(
+                        "LLVMGen: storeToCacheEntry: null element at index " +
+                        std::to_string(e) + " of " + std::to_string(entry.n_elems));
+                }
                 auto* idx = builder.CreateAdd(base, builder.getInt64(e));
                 auto* gep = builder.CreateGEP(f64, entry.data, idx);
                 builder.CreateStore(val.elems[e], gep);
@@ -7384,8 +7393,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         };
 
         // Cache pattern IDs for the 5 cacheable operation types:
-        //   0 = CurrentSolution (StateField with fid==0xffff)
-        //   1 = CurrentSolutionGrad (grad(TrialFunction) in residual mode, or grad(StateField(0xffff)))
+        //   0 = CurrentSolution (StateField with fid==kCurrentSolutionFid)
+        //   1 = CurrentSolutionGrad (grad(TrialFunction) in residual mode, or grad(StateField(CURRENT_SOLUTION_FIELD_ID)))
         //   2 = PreviousSolution(k)
         //   3 = PreviousSolutionGrad(k)
         //   4 = Gradient(TimeDerivative(TrialFunction/StateField))
@@ -7455,7 +7464,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::DiscreteField:
                     case FormExprType::StateField: {
                         const int fid = unpackFieldIdImm1(op.imm1);
-                        if (op.type == FormExprType::StateField && fid == 0xffff) {
+                        if (op.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                             // Cache pattern 0: CurrentSolution evaluation (expensive reduce-sum)
                             if (qp_shared_cache_ptr && qp_cache_trial_group >= 0) {
                                 const auto n_e = elemCount(shape);
@@ -7724,7 +7733,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            }
 	                            if (dt_child.type == FormExprType::StateField) {
 	                                const int fid = unpackFieldIdImm1(dt_child.imm1);
-	                                if (fid == 0xffff) {
+	                                if (fid == kCurrentSolutionFid) {
 	                                    values[op_idx] = mul(makeScalar(coeff0), gradCurrentSolution());
 	                                    break;
 	                                }
@@ -7836,7 +7845,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
-                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                            if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                 // Cache pattern 1: grad(StateField(current solution))
                                 if (qp_shared_cache_ptr && qp_cache_trial_group >= 0) {
                                     const auto n_e = elemCount(shape);
@@ -7980,7 +7989,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         // Currently implemented for the Navier–Stokes/Stokes VMS strong residual pattern
                         //   div( scalar * sym(grad(u)) )
                         // where the scalar factor is spatially constant and u is the current solution
-                        // (StateField(INVALID_FIELD_ID)) or a PreviousSolutionRef.
+                        // (StateField(CURRENT_SOLUTION_FIELD_ID)) or a PreviousSolutionRef.
                         if (shape.kind == Shape::Kind::Vector) {
                             auto isSpatiallyConstantScalar = [&](auto&& self, std::size_t idx) -> bool {
                                 const auto& op2 = term.ir.ops[idx];
@@ -8162,7 +8171,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 }
                                 if (uop.type == FormExprType::StateField) {
                                     const int fid = unpackFieldIdImm1(uop.imm1);
-                                    if (fid == 0xffff) {
+                                    if (fid == kCurrentSolutionFid) {
                                         return divSymGradCurrentSolution(side.solution_coefficients, rows, dim);
                                     }
                                     return divSymGradFromField(fid, rows, dim);
@@ -8311,8 +8320,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                        if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
 	                            const int fid = unpackFieldIdImm1(kid.imm1);
-	                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
-	                                // StateField(INVALID_FIELD_ID) represents the current solution state u.
+	                            if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
+	                                // StateField(CURRENT_SOLUTION_FIELD_ID) represents the current solution state u.
 	                                // Compute div(u_h) directly from current solution coefficients.
 	                                auto* coeffs = side.solution_coefficients;
 	                                auto* uses_vec_basis =
@@ -8619,7 +8628,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto& kid = term.ir.ops[child_op_idx];
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
-                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                            if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                 for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                     acc = add(acc,
                                               mul(makeScalar(loadDtCoeff(side, order, k)),
@@ -8940,7 +8949,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         op_store.type != FormExprType::ParameterRef) {
                         const auto op_hash = term.op_hashes[op_idx];
                         if (dep0_xblock_cache.find(op_hash) == dep0_xblock_cache.end()) {
-                            const auto n_elems = static_cast<std::uint32_t>(values[op_idx].elems.size());
+                            const auto n_elems = static_cast<std::uint32_t>(elemCount(values[op_idx].shape));
                             const std::uint32_t total = kMaxCacheQPts * n_elems;
                             auto* alloca_inst = allocaInEntry(f64, builder.getInt32(total), "xb_cache");
                             QPCacheEntry entry{alloca_inst, n_elems, true};
@@ -9025,7 +9034,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::DiscreteField:
                     case FormExprType::StateField: {
                         const int fid = unpackFieldIdImm1(op.imm1);
-                        if (op.type == FormExprType::StateField && fid == 0xffff) {
+                        if (op.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                             values_minus[op_idx] = evalCurrentSolution(side_minus, shape, q_index);
                             values_plus[op_idx] = evalCurrentSolution(side_plus, shape, q_index);
                         } else {
@@ -9650,7 +9659,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto& kid = term.ir.ops[child_op_idx];
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
-                            if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                            if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                 for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                     acc_minus = add(acc_minus,
                                                     mul(makeScalar(loadDtCoeff(side_minus, order, k)),
@@ -10663,7 +10672,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                    if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
 	                        const int fid = unpackFieldIdImm1(kid.imm1);
-	                        if (kid.type == FormExprType::StateField && fid == 0xffff) {
+	                        if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
 	                            // Current solution state u.
 		                            auto* coeffs = side.solution_coefficients;
 		                            if (shape.kind == Shape::Kind::Vector) {
@@ -10979,7 +10988,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         if (dt_child.type == FormExprType::DiscreteField || dt_child.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(dt_child.imm1);
-                            const auto g = (dt_child.type == FormExprType::StateField && fid == 0xffff)
+                            const auto g = (dt_child.type == FormExprType::StateField && fid == kCurrentSolutionFid)
                                                ? gradCurrentSolution()
                                                : gradDiscreteOrStateField(fid);
                             return mul(makeScalar(coeff0), g);
@@ -11151,7 +11160,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                    }
                     if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                         const int fid = unpackFieldIdImm1(kid.imm1);
-                        if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                        if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                             return makeScalar(divCurrentSolution());
                         }
                         auto* entry = fieldEntryPtrFor(is_plus, fid);
@@ -11202,7 +11211,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         if (dt_child.type == FormExprType::DiscreteField || dt_child.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(dt_child.imm1);
-                            if (dt_child.type == FormExprType::StateField && fid == 0xffff) {
+                            if (dt_child.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                 return makeScalar(builder.CreateFMul(coeff0, divCurrentSolution()));
                             }
 
@@ -11420,7 +11429,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     }
                     if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                         const int fid = unpackFieldIdImm1(kid.imm1);
-                        if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                        if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                             return curlCurrentSolution();
                         }
                         auto* entry = fieldEntryPtrFor(is_plus, fid);
@@ -11516,7 +11525,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         if (dt_child.type == FormExprType::DiscreteField || dt_child.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(dt_child.imm1);
-                            if (dt_child.type == FormExprType::StateField && fid == 0xffff) {
+                            if (dt_child.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                 return mul(makeScalar(coeff0), curlCurrentSolution());
                             }
 
@@ -11631,7 +11640,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                    }
 	                    if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
 	                        const int fid = unpackFieldIdImm1(kid.imm1);
-	                        if (kid.type == FormExprType::StateField && fid == 0xffff) {
+	                        if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
 	                            return hessCurrentSolution();
 	                        }
 	                        auto* entry = fieldEntryPtrFor(is_plus, fid);
@@ -11687,7 +11696,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         if (dt_child.type == FormExprType::DiscreteField || dt_child.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(dt_child.imm1);
-                            if (dt_child.type == FormExprType::StateField && fid == 0xffff) {
+                            if (dt_child.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                 return mul(makeScalar(coeff0), hessCurrentSolution());
                             }
 
@@ -11782,7 +11791,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         case FormExprType::DiscreteField:
                         case FormExprType::StateField: {
                             const int fid = unpackFieldIdImm1(op.imm1);
-                            if (op.type == FormExprType::StateField && fid == 0xffff) {
+                            if (op.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                 values_minus[op_idx] = evalCurrentSolution(side_minus, shape, q_index);
                                 values_plus[op_idx] = evalCurrentSolution(side_plus, shape, q_index);
                             } else {
@@ -12012,7 +12021,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             const auto& kid = term.ir.ops[child_op_idx];
                             if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                                 const int fid = unpackFieldIdImm1(kid.imm1);
-                                if (kid.type == FormExprType::StateField && fid == 0xffff) {
+                                if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
                                     for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
                                         acc_minus = add(acc_minus,
                                                         mul(makeScalar(loadDtCoeff(side_minus, order, k)),

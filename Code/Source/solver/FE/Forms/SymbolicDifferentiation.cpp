@@ -188,7 +188,7 @@ struct DiffTargetConfig {
     DiffWrtKind kind{DiffWrtKind::ActiveTrialFunction};
 
     // How to rewrite residual TrialFunction occurrences in the primal expression.
-    FieldId trial_state_field{INVALID_FIELD_ID};
+    FieldId trial_state_field{CURRENT_SOLUTION_FIELD_ID};
 
     // SpecificTrialFunction target.
     std::optional<FormExprNode::SpaceSignature> trial_sig{};
@@ -1301,7 +1301,7 @@ FormExpr differentiateResidual(const FormExpr& residual_form)
 {
     DiffTargetConfig cfg;
     cfg.kind = DiffWrtKind::ActiveTrialFunction;
-    cfg.trial_state_field = INVALID_FIELD_ID;
+    cfg.trial_state_field = CURRENT_SOLUTION_FIELD_ID;
     return differentiateResidualImpl(residual_form, cfg);
 }
 
@@ -2082,7 +2082,7 @@ FormExpr differentiateResidualHessianVector(const FormExpr& residual_form,
                                            const FormExpr& direction)
 {
     const auto tangent = differentiateResidual(residual_form);
-    return directionalDerivativeWrtField(tangent, INVALID_FIELD_ID, direction);
+    return directionalDerivativeWrtField(tangent, CURRENT_SOLUTION_FIELD_ID, direction);
 }
 
 FormExpr differentiateResidualHessianVector(const FormExpr& residual_form,

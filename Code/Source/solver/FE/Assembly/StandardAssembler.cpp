@@ -39,7 +39,7 @@
 #include <utility>
 #include <stdexcept>
 #include <cmath>
-#include <cmath>
+#include <cstring>
 #include <cstdio>
 
 #if FE_HAS_MPI
@@ -1420,12 +1420,10 @@ void StandardAssembler::insertLocalForCell(
         return;
     }
 
-    (void)cell_id;
-    (void)row_dof_map;
-    (void)row_dof_offset;
-    (void)col_dof_map;
-    (void)col_dof_offset;
-    insertLocal(output, row_dofs, col_dofs, matrix_view, vector_view);
+    // Use pre-resolved CSR slots when available (avoids hash probes per insertion).
+    const auto resolved = getResolvedCellMatrixEntries(
+        cell_id, row_dof_map, row_dof_offset, col_dof_map, col_dof_offset, matrix_view);
+    insertLocal(output, row_dofs, col_dofs, matrix_view, vector_view, resolved);
 }
 
 // ============================================================================
@@ -2474,6 +2472,11 @@ AssemblyResult StandardAssembler::assembleCellsCore(
     }
     ensureFieldAccessPlans(mesh);
     ensureResolvedVectorTables(mesh);
+    if (assemble_matrix && matrix_view &&
+        matrix_view->matrixLayoutHandle() != nullptr) {
+        ensureResolvedMatrixTable(mesh, row_dof_map_, row_dof_offset_,
+                                  col_dof_map_, col_dof_offset_, matrix_view);
+    }
 
     const LocalIndex max_dofs =
         std::max(row_dof_map_->getMaxDofsPerCell(), col_dof_map_->getMaxDofsPerCell());
@@ -3255,7 +3258,7 @@ void StandardAssembler::prepareBasis(
         (!need_basis_hessians || cached_basis_has_hessians_) &&
         !need_basis_curls &&
         !need_basis_divergences &&
-        !std::getenv("SVMP_DISABLE_BASIS_CACHE")) // DIAG: allow disabling fast path
+        !disable_basis_cache_) // DIAG: allow disabling fast path via SVMP_DISABLE_BASIS_CACHE
     {
         // Configure context metadata first (sets trial_is_test_, n_test_dofs_,
         // n_trial_dofs_, etc. — required for batch contexts that were not
@@ -4069,6 +4072,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
     if (!initialized_) {
         initialize();
+        // Cache env var to avoid per-cell std::getenv overhead in prepareBasis
+        disable_basis_cache_ = (std::getenv("SVMP_DISABLE_BASIS_CACHE") != nullptr);
     }
     ensureCellDofTables(mesh);
 
@@ -4104,6 +4109,18 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     }
     ensureFieldAccessPlans(mesh);
     ensureResolvedVectorTables(mesh);
+
+    // Pre-resolve matrix CSR slots for all terms that assemble matrices.
+    // Tables persist across Newton iterations; subsequent insertions become
+    // flat scatter (no hash probes).
+    for (const auto& t : terms) {
+        if (t.assemble_matrix && t.matrix_view &&
+            t.matrix_view->matrixLayoutHandle() != nullptr) {
+            ensureResolvedMatrixTable(mesh, t.row_dof_map, t.row_dof_offset,
+                                      t.col_dof_map, t.col_dof_offset,
+                                      t.matrix_view);
+        }
+    }
 
     // Check if any term actually has work to do
     bool any_has_cell = false;
@@ -4624,6 +4641,77 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     bs.fallback_kernel->getRequiredData());
         }
 
+        // Pre-resolve CSR matrix insertion slots for all coupled blocks.
+        // The resolved slot tables persist across Newton iterations (same mesh
+        // topology → same DOF numbering → same CSR layout). On subsequent
+        // assembly calls, insertions become flat scatter (no hash probes).
+        bool use_resolved_insert = false;
+        if (parent_term.assemble_matrix && parent_term.matrix_view &&
+            parent_term.matrix_view->matrixLayoutHandle() != nullptr) {
+            for (std::size_t bi = 0; bi < n_blocks; ++bi) {
+                const auto& bs = coupled_kernel->blockSpec(bi);
+                if (bs.want_matrix) {
+                    ensureResolvedMatrixTable(mesh, bs.row_dof_map, bs.row_dof_offset,
+                                              bs.col_dof_map, bs.col_dof_offset,
+                                              parent_term.matrix_view);
+                }
+            }
+            use_resolved_insert = true;
+        }
+
+        // Build fused-insert resolved slot table.
+        // The fused-insert path combines all per-block DOFs into an interleaved
+        // combined DOF list per cell, then inserts one combined matrix.
+        // Pre-resolving the CSR slots for the combined DOF list eliminates
+        // hash probes in the hot insertion loop.
+        if (use_fused_insert && parent_term.assemble_matrix && parent_term.matrix_view &&
+            parent_term.matrix_view->matrixLayoutHandle() != nullptr) {
+            const auto cn = static_cast<std::size_t>(fused_combined_n);
+            const auto n_cells = mesh.numCells();
+            if (scratch_fused_resolved_.empty() && cn > 0 && n_cells > 0) {
+                // Build combined DOF list for each cell, then resolve.
+                scratch_fused_resolved_offsets_.resize(static_cast<std::size_t>(n_cells) + 1u);
+                const std::size_t entries_per_cell = cn * cn;
+                const std::size_t total_entries = static_cast<std::size_t>(n_cells) * entries_per_cell;
+                scratch_fused_resolved_.resize(total_entries);
+                scratch_fused_resolved_offsets_[0] = 0;
+
+                std::vector<GlobalIndex> combined_dofs(cn);
+                for (GlobalIndex cell_id = 0; cell_id < n_cells; ++cell_id) {
+                    // Build combined DOF list for this cell
+                    for (std::size_t bi = 0; bi < n_blocks; ++bi) {
+                        const auto& bs = coupled_kernel->blockSpec(bi);
+                        const auto& fi = fused_info[bi];
+                        const auto rd = getCellDofsCached(mesh, cell_id, bs.row_dof_map, bs.row_dof_offset);
+                        const int n_br = static_cast<int>(rd.size());
+                        const int tc = fused_total_comps;
+                        for (int i = 0; i < n_br; ++i) {
+                            const int ci = (i / fi.row_comps) * tc +
+                                           fi.row_comp_start + (i % fi.row_comps);
+                            combined_dofs[static_cast<std::size_t>(ci)] = rd[static_cast<std::size_t>(i)];
+                        }
+                        const auto cd = getCellDofsCached(mesh, cell_id, bs.col_dof_map, bs.col_dof_offset);
+                        const int n_bc = static_cast<int>(cd.size());
+                        for (int j = 0; j < n_bc; ++j) {
+                            const int cj = (j / fi.col_comps) * tc +
+                                           fi.col_comp_start + (j % fi.col_comps);
+                            combined_dofs[static_cast<std::size_t>(cj)] = cd[static_cast<std::size_t>(j)];
+                        }
+                    }
+
+                    const std::size_t offset = static_cast<std::size_t>(cell_id) * entries_per_cell;
+                    scratch_fused_resolved_offsets_[static_cast<std::size_t>(cell_id)] =
+                        static_cast<GlobalIndex>(offset);
+                    parent_term.matrix_view->resolveMatrixEntries(
+                        std::span<const GlobalIndex>(combined_dofs),
+                        std::span<const GlobalIndex>(combined_dofs),
+                        std::span<GlobalIndex>(scratch_fused_resolved_.data() + offset, entries_per_cell));
+                }
+                scratch_fused_resolved_offsets_[static_cast<std::size_t>(n_cells)] =
+                    static_cast<GlobalIndex>(total_entries);
+            }
+        }
+
         for (std::size_t begin = 0; begin < gids.size(); begin += B_eff) {
             const std::size_t active = std::min(B_eff, gids.size() - begin);
 
@@ -4776,6 +4864,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
                         // Copy basis data from ctx into persistent snapshot
                         // (prepareBasis for the next block will overwrite ctx)
+                        // Vector3D = std::array<Real,3> and Matrix3x3 = std::array<std::array<Real,3>,3>
+                        // are contiguous in memory, so use memcpy for bulk copies.
                         tp0 = TP();
                         {
                             auto tv = ctx.testBasisValuesRaw();
@@ -4783,39 +4873,27 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
                             auto tg = ctx.testPhysicalGradientsRaw();
                             snap.test_grads.resize(tg.size() * 3);
-                            for (std::size_t i = 0; i < tg.size(); ++i) {
-                                snap.test_grads[i * 3 + 0] = tg[i][0];
-                                snap.test_grads[i * 3 + 1] = tg[i][1];
-                                snap.test_grads[i * 3 + 2] = tg[i][2];
-                            }
+                            if (!tg.empty())
+                                std::memcpy(snap.test_grads.data(), tg.data(), tg.size() * sizeof(AssemblyContext::Vector3D));
 
                             auto rv = ctx.trialBasisValuesRaw();
                             snap.trial_vals.assign(rv.begin(), rv.end());
 
                             auto rg = ctx.trialPhysicalGradientsRaw();
                             snap.trial_grads.resize(rg.size() * 3);
-                            for (std::size_t i = 0; i < rg.size(); ++i) {
-                                snap.trial_grads[i * 3 + 0] = rg[i][0];
-                                snap.trial_grads[i * 3 + 1] = rg[i][1];
-                                snap.trial_grads[i * 3 + 2] = rg[i][2];
-                            }
+                            if (!rg.empty())
+                                std::memcpy(snap.trial_grads.data(), rg.data(), rg.size() * sizeof(AssemblyContext::Vector3D));
 
                             // Copy hessians (needed for stabilization terms with divSymGrad)
                             auto th = ctx.testPhysicalHessiansRaw();
                             snap.test_hessians.resize(th.size() * 9);
-                            for (std::size_t i = 0; i < th.size(); ++i) {
-                                for (int r = 0; r < 3; ++r)
-                                    for (int c = 0; c < 3; ++c)
-                                        snap.test_hessians[i * 9 + r * 3 + c] = th[i][r][c];
-                            }
+                            if (!th.empty())
+                                std::memcpy(snap.test_hessians.data(), th.data(), th.size() * sizeof(AssemblyContext::Matrix3x3));
 
                             auto rh = ctx.trialPhysicalHessiansRaw();
                             snap.trial_hessians.resize(rh.size() * 9);
-                            for (std::size_t i = 0; i < rh.size(); ++i) {
-                                for (int r = 0; r < 3; ++r)
-                                    for (int c = 0; c < 3; ++c)
-                                        snap.trial_hessians[i * 9 + r * 3 + c] = rh[i][r][c];
-                            }
+                            if (!rh.empty())
+                                std::memcpy(snap.trial_hessians.data(), rh.data(), rh.size() * sizeof(AssemblyContext::Matrix3x3));
                         }
 
                         // Prepare output buffer
@@ -4945,6 +5023,12 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         GlobalSystemView* ins_vec = block_want_vector ? parent_term.vector_view : nullptr;
                         if (options_.use_constraints && constraint_distributor_) {
                             insertLocalConstrained(output, rd, cd, ins_mat, ins_vec);
+                        } else if (use_resolved_insert && block_want_matrix) {
+                            const auto resolved = getResolvedCellMatrixEntries(
+                                cid, bs.row_dof_map, bs.row_dof_offset,
+                                bs.col_dof_map, bs.col_dof_offset,
+                                parent_term.matrix_view);
+                            insertLocal(output, rd, cd, ins_mat, ins_vec, resolved);
                         } else {
                             insertLocal(output, rd, cd, ins_mat, ins_vec);
                         }
@@ -5181,13 +5265,19 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                 cd_ptr[cj] = block_cd[static_cast<std::size_t>(j)];
                             }
                         } else {
-                            // Original per-block insertion
+                            // Per-block insertion (with optional pre-resolved CSR slots)
                             const auto& rd = batch_dofs[bi][slot].row_dofs;
                             const auto& cd = batch_dofs[bi][slot].col_dofs;
                             GlobalSystemView* ins_mat = block_want_matrix ? parent_term.matrix_view : nullptr;
                             GlobalSystemView* ins_vec = block_want_vector ? parent_term.vector_view : nullptr;
                             if (options_.use_constraints && constraint_distributor_) {
                                 insertLocalConstrained(output, rd, cd, ins_mat, ins_vec);
+                            } else if (use_resolved_insert && block_want_matrix) {
+                                const auto resolved = getResolvedCellMatrixEntries(
+                                    cid, bs.row_dof_map, bs.row_dof_offset,
+                                    bs.col_dof_map, bs.col_dof_offset,
+                                    parent_term.matrix_view);
+                                insertLocal(output, rd, cd, ins_mat, ins_vec, resolved);
                             } else {
                                 insertLocal(output, rd, cd, ins_mat, ins_vec);
                             }
@@ -5240,11 +5330,26 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             insertLocalConstrained(fused_out, dofs_span, dofs_span,
                                                    parent_term.matrix_view, parent_term.vector_view);
                         } else {
-                            // Interior cell: direct insertion (FSILS fast path)
+                            // Interior cell: direct insertion
                             if (parent_term.matrix_view) {
-                                parent_term.matrix_view->addMatrixEntries(
-                                    dofs_span, dofs_span, mat_span,
-                                    assembly::AddMode::Add);
+                                const auto cid = gids[begin + slot];
+                                if (!scratch_fused_resolved_.empty() &&
+                                    cid >= 0 &&
+                                    static_cast<std::size_t>(cid) < scratch_fused_resolved_offsets_.size() - 1u) {
+                                    const auto off = static_cast<std::size_t>(
+                                        scratch_fused_resolved_offsets_[static_cast<std::size_t>(cid)]);
+                                    const auto end_off = static_cast<std::size_t>(
+                                        scratch_fused_resolved_offsets_[static_cast<std::size_t>(cid) + 1u]);
+                                    auto resolved_span = std::span<const GlobalIndex>(
+                                        scratch_fused_resolved_.data() + off, end_off - off);
+                                    parent_term.matrix_view->addMatrixEntriesResolved(
+                                        dofs_span, dofs_span, resolved_span, mat_span,
+                                        assembly::AddMode::Add);
+                                } else {
+                                    parent_term.matrix_view->addMatrixEntries(
+                                        dofs_span, dofs_span, mat_span,
+                                        assembly::AddMode::Add);
+                                }
                             }
                             if (parent_term.vector_view) {
                                 parent_term.vector_view->addVectorEntries(
@@ -7207,12 +7312,16 @@ void StandardAssembler::populateFieldSolutionData(
                 // For affine elements, J_inv is the same at all QPs.
                 const auto& J_inv = ctx_inv_jacs_span[cached_mapping_affine_ ? 0 : static_cast<std::size_t>(q)];
                 Real val = 0.0;
-                AssemblyContext::Vector3D grad = {0.0, 0.0, 0.0};
-                AssemblyContext::Matrix3x3 H{};
+
+                // Accumulate in reference space first, then apply J_inv
+                // transform once.  This saves (n_dofs-1) matrix-vector
+                // products per QP for gradients and (n_dofs-1) matrix
+                // triple products for hessians.
+                AssemblyContext::Vector3D gref_sum = {0.0, 0.0, 0.0};
+                AssemblyContext::Matrix3x3 H_ref_sum{};
 
                 for (LocalIndex j = 0; j < n_dofs; ++j) {
                     const Real coef = local_coeffs[static_cast<std::size_t>(j)];
-                    // Read directly from BasisCache when available (skip copy to values_at_pt).
                     const Real basis_val = field_bcache
                         ? field_bcache->scalarValue(static_cast<std::size_t>(j), static_cast<std::size_t>(q))
                         : values_at_pt[static_cast<std::size_t>(j)];
@@ -7222,59 +7331,55 @@ void StandardAssembler::populateFieldSolutionData(
                         const auto& gref = field_bcache
                             ? field_bcache->gradients[static_cast<std::size_t>(q)][static_cast<std::size_t>(j)]
                             : gradients_at_pt[static_cast<std::size_t>(j)];
-                        AssemblyContext::Vector3D gphys = {0.0, 0.0, 0.0};
-                        for (int d1 = 0; d1 < dim; ++d1) {
-                            for (int d2 = 0; d2 < dim; ++d2) {
-                                gphys[d1] += J_inv[static_cast<std::size_t>(d2)][static_cast<std::size_t>(d1)] * gref[static_cast<std::size_t>(d2)];
-                            }
+                        for (int d = 0; d < dim; ++d) {
+                            gref_sum[d] += coef * gref[static_cast<std::size_t>(d)];
                         }
-                        grad[0] += coef * gphys[0];
-                        grad[1] += coef * gphys[1];
-                        grad[2] += coef * gphys[2];
                     }
 
                     if (need_hessians) {
                         const auto& hess_j = field_bcache
                             ? field_bcache->hessians[static_cast<std::size_t>(q)][static_cast<std::size_t>(j)]
                             : hessians_at_pt[static_cast<std::size_t>(j)];
-                        AssemblyContext::Matrix3x3 H_ref{};
-                        for (int r = 0; r < 3; ++r) {
-                            for (int c = 0; c < 3; ++c) {
-                                H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                                    hess_j(static_cast<std::size_t>(r),
-                                            static_cast<std::size_t>(c));
-                            }
-                        }
-
-                        AssemblyContext::Matrix3x3 H_phys{};
                         for (int r = 0; r < dim; ++r) {
                             for (int c = 0; c < dim; ++c) {
-                                Real sum = 0.0;
-                                for (int a = 0; a < dim; ++a) {
-                                    for (int b = 0; b < dim; ++b) {
-                                        sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-                                               H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-                                               J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
-                                    }
-                                }
-                                H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
-                            }
-                        }
-
-                        for (int r = 0; r < 3; ++r) {
-                            for (int c = 0; c < 3; ++c) {
-                                H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
-                                    coef * H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                                H_ref_sum[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
+                                    coef * hess_j(static_cast<std::size_t>(r),
+                                                   static_cast<std::size_t>(c));
                             }
                         }
                     }
                 }
 
                 scalar_values[static_cast<std::size_t>(q)] = val;
+
                 if (need_gradients) {
+                    // Single J_inv^T * gref_sum transform
+                    AssemblyContext::Vector3D grad = {0.0, 0.0, 0.0};
+                    for (int d1 = 0; d1 < dim; ++d1) {
+                        for (int d2 = 0; d2 < dim; ++d2) {
+                            grad[d1] += J_inv[static_cast<std::size_t>(d2)][static_cast<std::size_t>(d1)] *
+                                        gref_sum[d2];
+                        }
+                    }
                     scalar_gradients[static_cast<std::size_t>(q)] = grad;
                 }
+
                 if (need_hessians) {
+                    // Single J_inv^T * H_ref_sum * J_inv transform
+                    AssemblyContext::Matrix3x3 H{};
+                    for (int r = 0; r < dim; ++r) {
+                        for (int c = 0; c < dim; ++c) {
+                            Real sum = 0.0;
+                            for (int a = 0; a < dim; ++a) {
+                                for (int b = 0; b < dim; ++b) {
+                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                           H_ref_sum[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                }
+                            }
+                            H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                        }
+                    }
                     scalar_hessians[static_cast<std::size_t>(q)] = H;
                     if (want_laplacians) {
                         Real lap = 0.0;
@@ -7543,14 +7648,15 @@ void StandardAssembler::populateFieldSolutionData(
                 const auto q_base = static_cast<std::size_t>(q) * static_cast<std::size_t>(vd);
                 for (int comp = 0; comp < vd; ++comp) {
                     Real val_c = 0.0;
-                    AssemblyContext::Matrix3x3 H{};
+                    // Accumulate in reference space, then transform once.
+                    AssemblyContext::Vector3D gref_sum_c = {0.0, 0.0, 0.0};
+                    AssemblyContext::Matrix3x3 H_ref_sum_c{};
 
                     const LocalIndex base = static_cast<LocalIndex>(comp) * dofs_per_component;
                     for (LocalIndex j = 0; j < dofs_per_component; ++j) {
                         const LocalIndex jj = base + j;
                         const LocalIndex sj = static_cast<LocalIndex>(jj % n_scalar_dofs);
                         const Real coef = local_coeffs[static_cast<std::size_t>(jj)];
-                        // Read directly from BasisCache when available (skip copy to values_at_pt).
                         const Real basis_val = field_bcache_ps
                             ? field_bcache_ps->scalarValue(static_cast<std::size_t>(sj), static_cast<std::size_t>(q))
                             : values_at_pt[static_cast<std::size_t>(sj)];
@@ -7560,56 +7666,54 @@ void StandardAssembler::populateFieldSolutionData(
                             const auto& gref = field_bcache_ps
                                 ? field_bcache_ps->gradients[static_cast<std::size_t>(q)][static_cast<std::size_t>(sj)]
                                 : gradients_at_pt[static_cast<std::size_t>(sj)];
-                            AssemblyContext::Vector3D gphys = {0.0, 0.0, 0.0};
-                            for (int d1 = 0; d1 < dim; ++d1) {
-                                for (int d2 = 0; d2 < dim; ++d2) {
-                                    gphys[d1] += J_inv[static_cast<std::size_t>(d2)][static_cast<std::size_t>(d1)] * gref[static_cast<std::size_t>(d2)];
-                                }
+                            for (int d = 0; d < dim; ++d) {
+                                gref_sum_c[d] += coef * gref[static_cast<std::size_t>(d)];
                             }
-                            J[static_cast<std::size_t>(comp)][0] += coef * gphys[0];
-                            J[static_cast<std::size_t>(comp)][1] += coef * gphys[1];
-                            J[static_cast<std::size_t>(comp)][2] += coef * gphys[2];
                         }
 
                         if (need_hessians) {
                             const auto& hess_sj = field_bcache_ps
                                 ? field_bcache_ps->hessians[static_cast<std::size_t>(q)][static_cast<std::size_t>(sj)]
                                 : hessians_at_pt[static_cast<std::size_t>(sj)];
-                            AssemblyContext::Matrix3x3 H_ref{};
-                            for (int r = 0; r < 3; ++r) {
-                                for (int c = 0; c < 3; ++c) {
-                                    H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                                        hess_sj(static_cast<std::size_t>(r),
-                                                 static_cast<std::size_t>(c));
-                                }
-                            }
-
-                            AssemblyContext::Matrix3x3 H_phys{};
                             for (int r = 0; r < dim; ++r) {
                                 for (int c = 0; c < dim; ++c) {
-                                    Real sum = 0.0;
-                                    for (int a = 0; a < dim; ++a) {
-                                        for (int b = 0; b < dim; ++b) {
-                                            sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-                                                   H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-                                                   J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
-                                        }
-                                    }
-                                    H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
-                                }
-                            }
-
-                            for (int r = 0; r < 3; ++r) {
-                                for (int c = 0; c < 3; ++c) {
-                                    H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
-                                        coef * H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                                    H_ref_sum_c[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
+                                        coef * hess_sj(static_cast<std::size_t>(r),
+                                                        static_cast<std::size_t>(c));
                                 }
                             }
                         }
                     }
 
                     vector_values[static_cast<std::size_t>(q)][static_cast<std::size_t>(comp)] = val_c;
+
+                    if (need_gradients) {
+                        // Single J_inv^T * gref_sum transform per component
+                        for (int d1 = 0; d1 < dim; ++d1) {
+                            Real sum = 0.0;
+                            for (int d2 = 0; d2 < dim; ++d2) {
+                                sum += J_inv[static_cast<std::size_t>(d2)][static_cast<std::size_t>(d1)] *
+                                       gref_sum_c[d2];
+                            }
+                            J[static_cast<std::size_t>(comp)][static_cast<std::size_t>(d1)] += sum;
+                        }
+                    }
+
                     if (need_hessians) {
+                        AssemblyContext::Matrix3x3 H{};
+                        for (int r = 0; r < dim; ++r) {
+                            for (int c = 0; c < dim; ++c) {
+                                Real sum = 0.0;
+                                for (int a = 0; a < dim; ++a) {
+                                    for (int b = 0; b < dim; ++b) {
+                                        sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                               H_ref_sum_c[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                               J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                    }
+                                }
+                                H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                            }
+                        }
                         const auto idx = q_base + static_cast<std::size_t>(comp);
                         vector_component_hessians[idx] = H;
                         if (want_laplacians) {

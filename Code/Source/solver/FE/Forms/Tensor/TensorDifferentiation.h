@@ -45,7 +45,7 @@ struct TensorDiffContext {
 
     // Controls how TrialFunction occurrences in the primal expression are rewritten
     // (see `forms::differentiateResidual` docs).
-    FieldId trial_state_field{INVALID_FIELD_ID};
+    FieldId trial_state_field{CURRENT_SOLUTION_FIELD_ID};
 };
 
 struct TensorDiffOptions {

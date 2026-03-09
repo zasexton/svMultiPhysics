@@ -795,6 +795,7 @@ private:
     bool cached_basis_trial_is_vector_{false};
     bool cached_basis_same_space_{false};
     bool cached_basis_has_hessians_{false};
+    bool disable_basis_cache_{false}; // Cached from SVMP_DISABLE_BASIS_CACHE env var
     const spaces::FunctionSpace* cached_basis_test_space_ptr_{nullptr};
     const spaces::FunctionSpace* cached_basis_trial_space_ptr_{nullptr};
 
@@ -894,6 +895,13 @@ private:
     std::vector<Real> scratch_fused_matrices_;
     std::vector<Real> scratch_fused_vectors_;
     std::vector<GlobalIndex> scratch_fused_dofs_;
+
+    // Pre-resolved CSR slots for fused combined DOF insertion.
+    // Built once on first assembly call; persists across Newton iterations.
+    // scratch_fused_resolved_[cell_offset..cell_offset+cn*cn] = resolved slots
+    // for the interleaved combined DOF list of that cell.
+    std::vector<GlobalIndex> scratch_fused_resolved_;
+    std::vector<GlobalIndex> scratch_fused_resolved_offsets_;
 };
 
 // ============================================================================
