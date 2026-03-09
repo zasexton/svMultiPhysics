@@ -1183,6 +1183,7 @@ target_include_directories(svfe
 
 target_compile_definitions(svfe PUBLIC SVMP_FE_WITH_MESH=$<BOOL:${FE_WITH_MESH}>)
 target_compile_definitions(svfe PUBLIC SVMP_FE_ENABLE_LLVM_JIT=$<BOOL:${FE_ENABLE_LLVM_JIT}>)
+target_compile_definitions(svfe PRIVATE SVMP_FE_ASSEMBLY_TIMING)
 
 if(FE_WITH_MESH)
     if(TARGET svmesh)

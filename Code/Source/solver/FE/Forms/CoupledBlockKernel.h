@@ -106,13 +106,24 @@ public:
     [[nodiscard]] bool isMonolithicJITAvailable() const noexcept { return has_monolithic_jit_; }
     [[nodiscard]] std::uintptr_t monolithicCellAddress() const noexcept { return monolithic_cell_addr_; }
     [[nodiscard]] bool isResolved() const noexcept { return resolved_; }
-    void setResolved() { resolved_ = true; maybeCompileMonolithic(); }
+    void setResolved() { resolved_ = true; maybeCompileMonolithic(); maybeCompilePairwise(); }
 
     /// Tag so assembler can identify this kernel type.
     [[nodiscard]] bool isCoupledBlockKernel() const noexcept { return true; }
 
+    // ---- Pairwise trial-space fusion ----
+    struct TrialGroup {
+        std::vector<std::size_t> block_indices;  ///< Indices into blocks_
+        std::uintptr_t kernel_addr{0};           ///< JIT kernel for this group
+    };
+
+    [[nodiscard]] bool isPairwiseJITAvailable() const noexcept { return has_pairwise_jit_; }
+    [[nodiscard]] std::size_t numTrialGroups() const noexcept { return trial_groups_.size(); }
+    [[nodiscard]] const TrialGroup& trialGroup(std::size_t i) const { return trial_groups_[i]; }
+
 private:
     void maybeCompileMonolithic();
+    void maybeCompilePairwise();
 
     std::vector<BlockSpec> blocks_;
     std::shared_ptr<jit::JITCompiler> compiler_;
@@ -123,6 +134,10 @@ private:
     bool has_monolithic_jit_{false};
     std::uintptr_t monolithic_cell_addr_{0};
     std::uintptr_t monolithic_batch_addr_{0};
+
+    bool attempted_pairwise_{false};
+    bool has_pairwise_jit_{false};
+    std::vector<TrialGroup> trial_groups_;
 
     // Scratch for monolithic cell dispatch
     mutable std::vector<assembly::jit::CoupledBlockView> scratch_block_views_;

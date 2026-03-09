@@ -21,6 +21,7 @@
 #include <array>
 #include <bit>
 #include <cstddef>
+#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -1615,6 +1616,22 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         auto module = std::make_unique<llvm::Module>(std::string(symbol), *ctx);
         module->setModuleIdentifier(std::string(symbol));
 
+        // Per-module optimization level override for coupled kernels.
+        // Testing showed: per-block O2 (small ~7.5K IR functions) >> monolithic at any
+        // opt level.  LLVM's optimizer degrades on ~30K IR: O2 creates register pressure
+        // from GVN/LICM, O1 is 70% slower than per-block, lite pipeline is 2.2x slower.
+        // SimplifyCFG also produces incorrect results for the coupled kernel (LLVM 14 bug).
+        // Left as infrastructure for future outlined-function experiments.
+        // Env var: SVMP_COUPLED_OPT_LEVEL=<0|1|2|-1(lite)> overrides the default O2.
+        if (coupled) {
+            const char* env = std::getenv("SVMP_COUPLED_OPT_LEVEL");
+            if (env) {
+                const int coupled_opt = std::atoi(env);
+                module->addModuleFlag(llvm::Module::Override, "svmp.opt_level",
+                                      llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), coupled_opt));
+            }
+        }
+
         std::unique_ptr<llvm::DIBuilder> di_builder;
         llvm::DICompileUnit* di_cu = nullptr;
         llvm::DIFile* di_file = nullptr;
@@ -1700,8 +1717,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             fn->addParamAttr(0, llvm::Attribute::NoAlias);
             fn->addParamAttr(0, llvm::Attribute::NoCapture);
         }
-        // Note: coupled kernels are now optimized (hessian fix resolved
-        // previous null-pointer issue that caused incorrect output).
+
+        // Pure compute kernel: does not throw or synchronize.
+        fn->addFnAttr(llvm::Attribute::NoUnwind);
+        fn->addFnAttr(llvm::Attribute::WillReturn);
 
         // External-call trampolines (relaxed-mode).
         auto coeff_eval_scalar_fn =
@@ -1858,10 +1877,27 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             return builder.CreateLoad(i8_ptr, addr);
         };
 
+        // --------------- alias scope metadata --------------------------------
+        // Tells LLVM that input arrays (basis, solution, geometry) never overlap
+        // the output buffers (element_matrix, element_vector).  Without this the
+        // optimizer conservatively reloads input values after every store to the
+        // output accumulator, blocking LICM and register promotion of hot reads.
+        auto* alias_domain = llvm::MDNode::getDistinct(
+            *ctx, {llvm::MDString::get(*ctx, "svmp.jit.kernel")});
+        auto* input_alias_scope = llvm::MDNode::getDistinct(
+            *ctx, {llvm::MDString::get(*ctx, "svmp.input"), alias_domain});
+        auto* output_alias_scope = llvm::MDNode::getDistinct(
+            *ctx, {llvm::MDString::get(*ctx, "svmp.output"), alias_domain});
+        auto* input_scope_list  = llvm::MDNode::get(*ctx, {input_alias_scope});
+        auto* output_scope_list = llvm::MDNode::get(*ctx, {output_alias_scope});
+
         auto loadRealPtrAt = [&](llvm::Value* base_ptr,
                                  llvm::Value* index64) -> llvm::Value* {
             auto* gep = builder.CreateGEP(f64, base_ptr, index64);
-            return builder.CreateLoad(f64, gep);
+            auto* ld = builder.CreateLoad(f64, gep);
+            ld->setMetadata(llvm::LLVMContext::MD_alias_scope, input_scope_list);
+            ld->setMetadata(llvm::LLVMContext::MD_noalias,     output_scope_list);
+            return ld;
         };
 
         auto storeRealPtrAt = [&](llvm::Value* base_ptr,
@@ -2390,7 +2426,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             auto* off64 = builder.CreateZExt(off, i64);
             auto* ptr = builder.CreateGEP(f64, element_matrix_ptr, off64);
             auto* old = builder.CreateLoad(f64, ptr);
-            builder.CreateStore(builder.CreateFAdd(old, contrib), ptr);
+            old->setMetadata(llvm::LLVMContext::MD_alias_scope, output_scope_list);
+            old->setMetadata(llvm::LLVMContext::MD_noalias,     input_scope_list);
+            auto* st = builder.CreateStore(builder.CreateFAdd(old, contrib), ptr);
+            st->setMetadata(llvm::LLVMContext::MD_alias_scope, output_scope_list);
+            st->setMetadata(llvm::LLVMContext::MD_noalias,     input_scope_list);
         };
 
         auto emitVectorAccum = [&](llvm::Value* element_vector_ptr,
@@ -2399,7 +2439,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             auto* off64 = builder.CreateZExt(i_idx, i64);
             auto* ptr = builder.CreateGEP(f64, element_vector_ptr, off64);
             auto* old = builder.CreateLoad(f64, ptr);
-            builder.CreateStore(builder.CreateFAdd(old, contrib), ptr);
+            old->setMetadata(llvm::LLVMContext::MD_alias_scope, output_scope_list);
+            old->setMetadata(llvm::LLVMContext::MD_noalias,     input_scope_list);
+            auto* st = builder.CreateStore(builder.CreateFAdd(old, contrib), ptr);
+            st->setMetadata(llvm::LLVMContext::MD_alias_scope, output_scope_list);
+            st->setMetadata(llvm::LLVMContext::MD_noalias,     input_scope_list);
         };
 
         auto termWeight = [&](const SideView& side, int time_derivative_order) -> llvm::Value* {

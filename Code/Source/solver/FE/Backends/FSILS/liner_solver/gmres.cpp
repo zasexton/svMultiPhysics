@@ -2911,6 +2911,21 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
   constexpr int max_stagnation_restarts = 5;
   constexpr double stagnation_ratio = 0.95;
 
+  // Adaptive early restart: within each restart cycle, the cost of
+  // iteration i is O(i) for the GS orthogonalization (fused dot products
+  // + vector updates against the entire Krylov basis).  If convergence
+  // stalls at iteration k, continuing to sD wastes O((sD²-k²)/2) work.
+  // Detect intra-restart stagnation: if the residual hasn't improved by
+  // at least (1 - inner_stag_ratio) for inner_stag_window consecutive
+  // iterations, break and restart.  Use env var to control.
+  constexpr int inner_stag_window = 15;    // consecutive slow-progress iters
+  constexpr double inner_stag_ratio = 0.9999; // require 0.01% improvement per iter
+  // Only activate adaptive restart for restart dimensions larger than this
+  // (small sD doesn't benefit and can lose convergence).
+  constexpr int adaptive_min_sD = 50;
+  const bool use_adaptive_restart = (ls.sD >= adaptive_min_sD) &&
+      !std::getenv("SVMP_FSILS_GMRES_NO_ADAPTIVE");
+
   for (int l = 0; l < ls.mItr; l++) {
     ls.dB = ls.fNorm;
     ls.itr++;
@@ -2970,6 +2985,10 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
     tp0 = TP();
     omp_la::omp_mul_v(dof, nNo, 1.0 / err[0], u_slice);
     tp_vecops += TP() - tp0;
+
+    // Adaptive early restart: track intra-restart convergence
+    int inner_stag_count = 0;
+    double prev_inner_err = std::abs(err[0]);
 
     for (int i = 0; i < ls.sD; i++) {
       ls.itr++;
@@ -3131,6 +3150,24 @@ void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
       if (std::abs(err(i+1)) < eps || breakdown) {
         ls.suc = true;
         break;
+      }
+
+      // Adaptive early restart: if convergence per iteration is very slow,
+      // restart early.  The cost of iteration i is O(i) for GS operations,
+      // so late iterations in a restart cycle are expensive.  Restarting
+      // resets the O(i) cost back to O(0) while retaining the current
+      // solution approximation.
+      if (use_adaptive_restart && i >= inner_stag_window) {
+        const double cur_err = std::abs(err(i+1));
+        if (cur_err >= inner_stag_ratio * prev_inner_err) {
+          inner_stag_count++;
+        } else {
+          inner_stag_count = 0;
+        }
+        prev_inner_err = cur_err;
+        if (inner_stag_count >= inner_stag_window) {
+          break;  // early restart
+        }
       }
     }
 

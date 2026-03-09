@@ -43,6 +43,13 @@
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <llvm/Transforms/Scalar/ADCE.h>
+#include <llvm/Transforms/Scalar/EarlyCSE.h>
+#include <llvm/Transforms/Scalar/GVN.h>
+#include <llvm/Transforms/Scalar/Reassociate.h>
+#include <llvm/Transforms/Scalar/SimplifyCFG.h>
+#include <llvm/Transforms/InstCombine/InstCombine.h>
+#include <llvm/Transforms/Utils/Mem2Reg.h>
 #include <llvm/Support/CodeGen.h>
 #include <llvm/Support/Error.h>
 #if __has_include(<llvm/TargetParser/Host.h>)
@@ -53,6 +60,7 @@
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Target/TargetMachine.h>
 
 #if __has_include(<llvm/ExecutionEngine/Orc/Debugging/PerfJITEventListener.h>)
 #include <llvm/ExecutionEngine/Orc/Debugging/PerfJITEventListener.h>
@@ -576,19 +584,61 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
                                                   llvm::orc::MaterializationResponsibility& /*responsibility*/)
             -> llvm::Expected<llvm::orc::ThreadSafeModule> {
         tsm.withModuleDo([&](llvm::Module& module) {
+            // Per-module optimization level override via module metadata.
+            // Modules can set "svmp.opt_level" to request a different level.
+            // Special value -1 = "lite" pipeline (mem2reg + instcombine + EarlyCSE + ADCE)
+            // for large coupled kernels where O2 scaling is quadratic.
+            int effective_opt_int = -999; // sentinel: use default
+            if (auto* md = module.getModuleFlag("svmp.opt_level")) {
+                if (auto* ci = llvm::mdconst::dyn_extract<llvm::ConstantInt>(md)) {
+                    effective_opt_int = static_cast<int>(ci->getSExtValue());
+                }
+            }
+
             llvm::LoopAnalysisManager loop_analysis_manager;
             llvm::FunctionAnalysisManager function_analysis_manager;
             llvm::CGSCCAnalysisManager cgscc_analysis_manager;
             llvm::ModuleAnalysisManager module_analysis_manager;
 
             llvm::PipelineTuningOptions tuning_options;
-            // These FE kernels are tiny and already carry explicit loop metadata.
-            // Default interleave/unroll passes spend compile time in SCEV and
-            // often fail to transform the generated loops anyway.
             tuning_options.LoopInterleaving = false;
             tuning_options.LoopVectorization = vectorize;
             tuning_options.SLPVectorization = vectorize;
+            // Keep LLVM's LoopUnrollPass disabled — the code generator already
+            // emits explicit loop unroll metadata, and full unrolling of the
+            // nested QP×test×trial loops creates massive code that thrashes icache.
             tuning_options.LoopUnrolling = false;
+
+            // "Lite" pipeline for large fused kernels: fast O(n) passes only.
+            // Promotes allocas to registers, simplifies instructions, eliminates
+            // dead code.  Avoids quadratic passes (GVN, LICM) that choke on ~30K IR.
+            if (effective_opt_int == -1) {
+                llvm::PassBuilder pass_builder(nullptr, tuning_options);
+                pass_builder.registerModuleAnalyses(module_analysis_manager);
+                pass_builder.registerCGSCCAnalyses(cgscc_analysis_manager);
+                pass_builder.registerFunctionAnalyses(function_analysis_manager);
+                pass_builder.registerLoopAnalyses(loop_analysis_manager);
+                pass_builder.crossRegisterProxies(loop_analysis_manager,
+                                                 function_analysis_manager,
+                                                 cgscc_analysis_manager,
+                                                 module_analysis_manager);
+
+                llvm::FunctionPassManager fpm;
+                fpm.addPass(llvm::PromotePass());         // mem2reg: alloca → SSA registers
+                fpm.addPass(llvm::InstCombinePass());     // algebraic simplification
+                fpm.addPass(llvm::EarlyCSEPass(false));   // common subexpression elimination
+                fpm.addPass(llvm::ADCEPass());            // aggressive dead code elimination
+
+                llvm::ModulePassManager mpm;
+                mpm.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(fpm)));
+                mpm.run(module, module_analysis_manager);
+                if (dump_optimized) {
+                    dumpLLVMIRBestEffort(dump_directory, module, "_after.ll");
+                }
+            } else {
+            llvm::OptimizationLevel effective_opt_level =
+                (effective_opt_int >= 0 && effective_opt_int <= 3)
+                    ? toLLVMOptLevel(effective_opt_int) : llvm_opt_level;
 
             if constexpr (requires(llvm::PipelineTuningOptions opts) { llvm::PassBuilder(nullptr, opts); }) {
                 llvm::PassBuilder pass_builder(nullptr, tuning_options);
@@ -603,10 +653,10 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
                                                  module_analysis_manager);
 
                 llvm::ModulePassManager module_pass_manager;
-                if (llvm_opt_level == llvm::OptimizationLevel::O0) {
-                    module_pass_manager = pass_builder.buildO0DefaultPipeline(llvm_opt_level);
+                if (effective_opt_level == llvm::OptimizationLevel::O0) {
+                    module_pass_manager = pass_builder.buildO0DefaultPipeline(effective_opt_level);
                 } else {
-                    module_pass_manager = pass_builder.buildPerModuleDefaultPipeline(llvm_opt_level);
+                    module_pass_manager = pass_builder.buildPerModuleDefaultPipeline(effective_opt_level);
                 }
                 module_pass_manager.run(module, module_analysis_manager);
                 if (dump_optimized) {
@@ -615,7 +665,7 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
                 return;
             }
 
-            llvm::PassBuilder pass_builder;
+            llvm::PassBuilder pass_builder(nullptr, tuning_options);
             pass_builder.registerModuleAnalyses(module_analysis_manager);
             pass_builder.registerCGSCCAnalyses(cgscc_analysis_manager);
             pass_builder.registerFunctionAnalyses(function_analysis_manager);
@@ -626,15 +676,16 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
                                              module_analysis_manager);
 
             llvm::ModulePassManager module_pass_manager;
-            if (llvm_opt_level == llvm::OptimizationLevel::O0) {
-                module_pass_manager = pass_builder.buildO0DefaultPipeline(llvm_opt_level);
+            if (effective_opt_level == llvm::OptimizationLevel::O0) {
+                module_pass_manager = pass_builder.buildO0DefaultPipeline(effective_opt_level);
             } else {
-                module_pass_manager = pass_builder.buildPerModuleDefaultPipeline(llvm_opt_level);
+                module_pass_manager = pass_builder.buildPerModuleDefaultPipeline(effective_opt_level);
             }
             module_pass_manager.run(module, module_analysis_manager);
             if (dump_optimized) {
                 dumpLLVMIRBestEffort(dump_directory, module, "_after.ll");
             }
+            } // end else (non-lite pipeline)
         });
 
         return std::move(tsm);

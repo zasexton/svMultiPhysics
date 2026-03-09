@@ -183,6 +183,127 @@ void CoupledBlockKernel::maybeCompileMonolithic()
     FE_LOG_INFO("CoupledBlockKernel: monolithic JIT compiled successfully");
 }
 
+void CoupledBlockKernel::maybeCompilePairwise()
+{
+    if (attempted_pairwise_) return;
+    attempted_pairwise_ = true;
+    has_pairwise_jit_ = false;
+
+    if (!std::getenv("SVMP_USE_PAIRWISE")) {
+        FE_LOG_DEBUG("CoupledBlockKernel: pairwise JIT disabled (set SVMP_USE_PAIRWISE=1 to enable)");
+        return;
+    }
+
+    if (has_monolithic_jit_) {
+        FE_LOG_DEBUG("CoupledBlockKernel: monolithic already available, skipping pairwise");
+        return;
+    }
+
+    if (!compiler_) {
+        FE_LOG_DEBUG("CoupledBlockKernel: no JIT compiler, skipping pairwise");
+        return;
+    }
+
+    if (blocks_.size() < 2) {
+        FE_LOG_DEBUG("CoupledBlockKernel: fewer than 2 blocks, skipping pairwise");
+        return;
+    }
+
+    // Extract FormIRs for all blocks (same logic as maybeCompileMonolithic).
+    std::vector<jit::JITCompiler::MonolithicBlockSpec> all_specs;
+    all_specs.reserve(blocks_.size());
+
+    for (std::size_t i = 0; i < blocks_.size(); ++i) {
+        const auto& bs = blocks_[i];
+        if (!bs.fallback_kernel) {
+            FE_LOG_DEBUG("CoupledBlockKernel: block has no fallback kernel, skipping pairwise");
+            return;
+        }
+
+        const assembly::AssemblyKernel* inner = bs.fallback_kernel.get();
+        if (const auto* wrapper = dynamic_cast<const jit::JITKernelWrapper*>(inner)) {
+            inner = &wrapper->fallbackKernel();
+        }
+
+        const auto* sym_kernel = dynamic_cast<const SymbolicNonlinearFormKernel*>(inner);
+        if (!sym_kernel) {
+            FE_LOG_DEBUG("CoupledBlockKernel: block is not SymbolicNonlinearFormKernel, skipping pairwise");
+            return;
+        }
+
+        jit::JITCompiler::MonolithicBlockSpec spec;
+        spec.tangent_ir = &sym_kernel->tangentIR();
+        spec.residual_ir = &sym_kernel->residualIR();
+        spec.want_matrix = bs.want_matrix;
+        spec.want_vector = bs.want_vector;
+        all_specs.push_back(spec);
+    }
+
+    // Group blocks by trial space (col_dof_map + col_dof_offset).
+    // Blocks in the same trial group share the same solution evaluation
+    // and benefit from QP intermediate caching in the coupled codegen.
+    trial_groups_.clear();
+    std::vector<int> group_of(blocks_.size(), -1);
+    for (std::size_t i = 0; i < blocks_.size(); ++i) {
+        if (group_of[i] >= 0) continue;
+        const auto gidx = static_cast<int>(trial_groups_.size());
+        trial_groups_.emplace_back();
+        auto& grp = trial_groups_.back();
+        grp.block_indices.push_back(i);
+        group_of[i] = gidx;
+
+        for (std::size_t j = i + 1; j < blocks_.size(); ++j) {
+            if (group_of[j] >= 0) continue;
+            if (blocks_[i].col_dof_map == blocks_[j].col_dof_map &&
+                blocks_[i].col_dof_offset == blocks_[j].col_dof_offset) {
+                grp.block_indices.push_back(j);
+                group_of[j] = gidx;
+            }
+        }
+    }
+
+    // If every group has only 1 block, pairwise doesn't help — fall through to per-block.
+    if (std::all_of(trial_groups_.begin(), trial_groups_.end(),
+                    [](const TrialGroup& g) { return g.block_indices.size() <= 1; })) {
+        FE_LOG_DEBUG("CoupledBlockKernel: all trial groups have 1 block, pairwise not beneficial");
+        trial_groups_.clear();
+        return;
+    }
+
+    FE_LOG_INFO("CoupledBlockKernel: pairwise compilation: " +
+                std::to_string(trial_groups_.size()) + " trial groups from " +
+                std::to_string(blocks_.size()) + " blocks");
+
+    // Compile each trial group as a separate monolithic kernel.
+    for (std::size_t gi = 0; gi < trial_groups_.size(); ++gi) {
+        auto& grp = trial_groups_[gi];
+
+        std::vector<jit::JITCompiler::MonolithicBlockSpec> group_specs;
+        group_specs.reserve(grp.block_indices.size());
+        for (const auto bi : grp.block_indices) {
+            group_specs.push_back(all_specs[bi]);
+        }
+
+        const std::string sym = "pairwise_group" + std::to_string(gi);
+        FE_LOG_INFO("CoupledBlockKernel: compiling pairwise group " + std::to_string(gi) +
+                    " with " + std::to_string(group_specs.size()) + " blocks");
+
+        const auto result = compiler_->compileMonolithic(group_specs);
+        if (!result.ok || result.kernels.empty() || result.kernels[0].address == 0) {
+            FE_LOG_DEBUG("CoupledBlockKernel: pairwise group " + std::to_string(gi) +
+                         " compilation failed, falling back to per-block");
+            trial_groups_.clear();
+            return;
+        }
+
+        grp.kernel_addr = result.kernels[0].address;
+    }
+
+    has_pairwise_jit_ = true;
+    FE_LOG_INFO("CoupledBlockKernel: pairwise JIT compiled successfully (" +
+                std::to_string(trial_groups_.size()) + " groups)");
+}
+
 } // namespace forms
 } // namespace FE
 } // namespace svmp

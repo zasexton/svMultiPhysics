@@ -3262,7 +3262,8 @@ void StandardAssembler::prepareBasis(
         n_qpts == cached_basis_n_qpts_ &&
         (!need_basis_hessians || cached_basis_has_hessians_) &&
         !need_basis_curls &&
-        !need_basis_divergences)
+        !need_basis_divergences &&
+        !std::getenv("SVMP_DISABLE_BASIS_CACHE")) // DIAG: allow disabling fast path
     {
         // Configure context metadata first (sets trial_is_test_, n_test_dofs_,
         // n_trial_dofs_, etc. — required for batch contexts that were not
@@ -4435,6 +4436,13 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         use_monolithic_flag = use_monolithic;
         const auto monolithic_addr = use_monolithic ? coupled_kernel->monolithicCellAddress() : 0;
 
+        // Pairwise JIT: trial-space-grouped kernels (each handles 2 blocks
+        // with shared QP intermediates). Half the IR of full monolithic.
+        const bool use_pairwise = !use_monolithic
+            && coupled_kernel->isPairwiseJITAvailable()
+            && std::getenv("SVMP_USE_PAIRWISE")
+            && !std::getenv("SVMP_FORCE_FALLBACK");
+
         // --- Scratch for monolithic JIT dispatch ---
         // Per-block, per-slot basis data snapshots.  prepareBasis overwrites ctx
         // buffers, so we copy out the basis arrays before the next block overwrites.
@@ -4452,7 +4460,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         };
         const std::size_t total_bv = n_blocks * B;
         std::vector<BasisSnapshot> basis_snaps;
-        if (use_monolithic) {
+        if (use_monolithic || use_pairwise) {
             scratch_coupled_block_views_.resize(total_bv);
             scratch_coupled_cell_args_.resize(B);
             scratch_coupled_block_outputs_.resize(total_bv);
@@ -4686,11 +4694,16 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 ctx.clearAllPreviousSolutionData();
                 tp_fb_setters += TP() - tp0;
             }
+            // For residual-only assemblies (mat=0, vec=1), the monolithic/pairwise
+            // JIT kernels may produce NaN because the codegen always computes both
+            // matrix and vector.  Fall through to per-block for vec-only assemblies.
+            const bool use_coupled_jit =
+                (use_monolithic || use_pairwise) && parent_term.assemble_matrix;
 
-            if (use_monolithic) {
+            if (use_coupled_jit) {
                 // =============================================================
-                // MONOLITHIC JIT PATH: prepare all blocks for all slots, then
-                // call the monolithic kernel once for the whole batch.
+                // MONOLITHIC / PAIRWISE JIT PATH: prepare all blocks for all
+                // slots, then call kernels for the whole batch.
                 // =============================================================
 
                 // Phase A: For each slot, prepare all blocks' data.
@@ -4878,16 +4891,55 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     tp_fb_snap += TP() - tp0;
                 }
 
-                // Phase B: Call monolithic kernel for entire batch.
+                // Phase B: Call JIT kernel(s) for entire batch.
                 double tp0 = TP();
-                assembly::jit::CoupledCellKernelBatchArgsV1 batch_args;
-                batch_args.abi_version = assembly::jit::kCoupledCellKernelABIV1;
-                batch_args.batch_size = static_cast<std::uint32_t>(active);
-                batch_args.num_blocks = static_cast<std::uint32_t>(n_blocks);
-                batch_args.elements = scratch_coupled_cell_args_.data();
+                if (use_monolithic) {
+                    // Single monolithic kernel for all blocks.
+                    assembly::jit::CoupledCellKernelBatchArgsV1 batch_args;
+                    batch_args.abi_version = assembly::jit::kCoupledCellKernelABIV1;
+                    batch_args.batch_size = static_cast<std::uint32_t>(active);
+                    batch_args.num_blocks = static_cast<std::uint32_t>(n_blocks);
+                    batch_args.elements = scratch_coupled_cell_args_.data();
 
-                auto fn = reinterpret_cast<void(*)(void*)>(monolithic_addr);
-                fn(&batch_args);
+                    auto fn = reinterpret_cast<void(*)(void*)>(monolithic_addr);
+                    fn(&batch_args);
+                } else {
+                    // Pairwise: call one kernel per trial group.
+                    // Each group kernel expects CoupledBlockView indices [0..group_size-1].
+                    // We repack per-slot block views for each group.
+                    const auto n_groups = coupled_kernel->numTrialGroups();
+                    std::vector<assembly::jit::CoupledBlockView> pair_views;
+                    std::vector<assembly::jit::CoupledCellKernelArgsV1> pair_cell_args(active);
+
+                    for (std::size_t gi = 0; gi < n_groups; ++gi) {
+                        const auto& grp = coupled_kernel->trialGroup(gi);
+                        const auto grp_sz = grp.block_indices.size();
+
+                        // Repack block views: for each slot, extract only this group's blocks.
+                        pair_views.resize(active * grp_sz);
+                        for (std::size_t slot = 0; slot < active; ++slot) {
+                            for (std::size_t li = 0; li < grp_sz; ++li) {
+                                const auto bi = grp.block_indices[li];
+                                const std::size_t src_flat = slot * n_blocks + bi;
+                                const std::size_t dst_flat = slot * grp_sz + li;
+                                pair_views[dst_flat] = scratch_coupled_block_views_[src_flat];
+                            }
+                            // Repack CoupledCellKernelArgsV1 with group's block views.
+                            pair_cell_args[slot] = scratch_coupled_cell_args_[slot];
+                            pair_cell_args[slot].num_blocks = static_cast<std::uint32_t>(grp_sz);
+                            pair_cell_args[slot].blocks = &pair_views[slot * grp_sz];
+                        }
+
+                        assembly::jit::CoupledCellKernelBatchArgsV1 batch_args;
+                        batch_args.abi_version = assembly::jit::kCoupledCellKernelABIV1;
+                        batch_args.batch_size = static_cast<std::uint32_t>(active);
+                        batch_args.num_blocks = static_cast<std::uint32_t>(grp_sz);
+                        batch_args.elements = pair_cell_args.data();
+
+                        auto fn = reinterpret_cast<void(*)(void*)>(grp.kernel_addr);
+                        fn(&batch_args);
+                    }
+                }
                 tp_fb_kernel += TP() - tp0;
 
                 // Phase C: Insert all block outputs.
@@ -4904,6 +4956,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         auto& output = scratch_coupled_block_outputs_[flat];
                         output.has_matrix = block_want_matrix && !output.local_matrix.empty();
                         output.has_vector = block_want_vector && !output.local_vector.empty();
+
+                        // (diagnostics removed)
 
                         const auto& rd = batch_dofs[bi][slot].row_dofs;
                         const auto& cd = batch_dofs[bi][slot].col_dofs;
@@ -5377,6 +5431,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 tp_fb_insert += TP() - tp0;
             }
         }
+
     };
 
     // Topology grouping (homogeneous batches)
