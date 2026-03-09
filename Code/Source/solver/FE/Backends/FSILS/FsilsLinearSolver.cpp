@@ -310,19 +310,17 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
     applyStageScalingToMatrix();
 
-    // The BlockSchur solver assumes a saddle-point structure where the
-    // constraint-to-momentum off-diagonal block is the negative transpose of the
-    // momentum-to-constraint block (up to sparsity transposition). Some FE
-    // formulations / linearizations may introduce small inconsistencies that can
-    // destabilize the Schur complement solve (CG requires an SPD operator).
+    // The FE ns_solver uses BiCGStab for the Schur complement, which handles
+    // asymmetric operators (D != -G^T). VMS-stabilized formulations produce
+    // PSPG/LSIC contributions in the D block that are NOT the negative transpose
+    // of G. Overwriting D = -G^T would corrupt the assembled Jacobian and cause
+    // Newton convergence failure.
     //
-    // To match legacy solver expectations and improve robustness, enforce:
-    //   D(i<-j) = -G(j<-i)^T
-    // by overwriting the constraint-row block entries at the transposed sparsity
-    // location with the negative of the momentum-row block entries.
-    //
-    // This is a no-op when the assembled Jacobian already satisfies the relation.
-    if (options_.method == SolverMethod::BlockSchur && has_saddle_point) {
+    // Saddle-point enforcement is therefore DISABLED by default. Set
+    // SVMP_SADDLE_ENFORCE=1 to enable it (e.g., for formulations where D ≈ -G^T
+    // and CG is used for the Schur complement).
+    const bool force_saddle_enforce = (std::getenv("SVMP_SADDLE_ENFORCE") != nullptr);
+    if (options_.method == SolverMethod::BlockSchur && has_saddle_point && force_saddle_enforce) {
         const int nNo = lhs.nNo;
         const int nnz_int = lhs.nnz;
         if (nNo > 0 && nnz_int > 0) {
