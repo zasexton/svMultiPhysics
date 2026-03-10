@@ -46,4 +46,12 @@ void fsils_spar_mul_vs(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr, const
 void fsils_spar_mul_vv(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
     const int dof, const Array<double>& K, const Array<double>& U, Array<double>& KU);
 
+/// Fused SV+SS: computes GP = G * in_vec AND SP = L * in_vec in a single row loop.
+/// G(nsd, nnz), L(nnz), in_vec(nNo) share the same sparsity pattern.
+/// Saves one full traversal of colPtr + in_vec compared to separate SV + SS calls.
+void fsils_spar_mul_sv_ss_fused(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, const int nsd, const Array<double>& G,
+    const Vector<double>& L, const Vector<double>& in_vec,
+    Array<double>& GP, Vector<double>& SP);
+
 };

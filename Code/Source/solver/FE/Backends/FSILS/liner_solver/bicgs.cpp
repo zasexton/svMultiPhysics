@@ -322,8 +322,8 @@ void schur(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
 
   // 3. Define the preconditioned Schur Operator Q = M_inv * (L - D*H*G) * in_vec
   auto apply_schur_operator = [&](const Vector<double>& in_vec, Vector<double>& out_vec) {
-    // GP = G * in_vec
-    spar_mul::fsils_spar_mul_sv(lhs, lhs.rowPtr, lhs.colPtr, nsd, G, in_vec, GP);
+    // Fused: GP = G * in_vec AND SP = L * in_vec (single row traversal)
+    spar_mul::fsils_spar_mul_sv_ss_fused(lhs, lhs.rowPtr, lhs.colPtr, nsd, G, L, in_vec, GP, SP);
 
     // Apply Boundary Sherman-Morrison Preconditioner H
     for (auto& face : lhs.face) {
@@ -336,9 +336,6 @@ void schur(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
 
     // DGP = D * GP (using exact analytical D, NOT G^T)
     spar_mul::fsils_spar_mul_vs(lhs, lhs.rowPtr, lhs.colPtr, nsd, D, GP, DGP);
-
-    // SP = L * in_vec (PSPG Laplacian)
-    spar_mul::fsils_spar_mul_ss(lhs, lhs.rowPtr, lhs.colPtr, L, in_vec, SP);
 
     // out_vec = M_inv * (SP - DGP)
     #pragma omp parallel for schedule(static)

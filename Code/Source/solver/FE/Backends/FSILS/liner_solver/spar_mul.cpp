@@ -442,4 +442,116 @@ void fsils_spar_mul_vv(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
   }
 }
 
+//====================================================================
+// Fused SV+SS: G(nsd,nnz)*in_vec -> GP(nsd,nNo) AND L(nnz)*in_vec -> SP(nNo)
+// in a single row loop. Saves one full traversal of colPtr + in_vec.
+//====================================================================
+
+template <int DOF>
+static void fsils_spar_mul_sv_ss_fused_impl(fsils_int iStart, fsils_int iEnd,
+    const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
+    const Array<double>& G, const Vector<double>& L,
+    const Vector<double>& in_vec, Array<double>& GP, Vector<double>& SP)
+{
+  const fsils_int* __restrict__ rp = rowPtr.data();
+  const fsils_int* __restrict__ cp = colPtr.data();
+  const double* __restrict__ g_data = G.data();
+  const double* __restrict__ l_data = L.data();
+  const double* __restrict__ u_data = in_vec.data();
+  double* __restrict__ gp_data = GP.data();
+  double* __restrict__ sp_data = SP.data();
+
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = iStart; i < iEnd; i++) {
+    double gp_sums[DOF] = {};
+    double sp_sum = 0.0;
+    const fsils_int j_start = rp[2*i];
+    const fsils_int j_end   = rp[2*i + 1];
+    for (fsils_int j = j_start; j <= j_end; j++) {
+      const double u_col = u_data[cp[j]];
+      const double* __restrict__ gj = g_data + static_cast<size_t>(j) * DOF;
+      for (int m = 0; m < DOF; m++) {
+        gp_sums[m] += gj[m] * u_col;
+      }
+      sp_sum += l_data[j] * u_col;
+    }
+    double* __restrict__ gpi = gp_data + static_cast<size_t>(i) * DOF;
+    for (int m = 0; m < DOF; m++) {
+      gpi[m] = gp_sums[m];
+    }
+    sp_data[i] = sp_sum;
+  }
+}
+
+static void fsils_spar_mul_sv_ss_fused_dyn(fsils_int iStart, fsils_int iEnd, int nsd,
+    const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
+    const Array<double>& G, const Vector<double>& L,
+    const Vector<double>& in_vec, Array<double>& GP, Vector<double>& SP)
+{
+  const fsils_int* __restrict__ rp = rowPtr.data();
+  const fsils_int* __restrict__ cp = colPtr.data();
+  const double* __restrict__ g_data = G.data();
+  const double* __restrict__ l_data = L.data();
+  const double* __restrict__ u_data = in_vec.data();
+  double* __restrict__ gp_data = GP.data();
+  double* __restrict__ sp_data = SP.data();
+
+  #pragma omp parallel
+  {
+    std::vector<double> gp_sums(static_cast<size_t>(std::max(nsd, 0)), 0.0);
+
+    #pragma omp for schedule(static)
+    for (fsils_int i = iStart; i < iEnd; i++) {
+      std::fill(gp_sums.begin(), gp_sums.end(), 0.0);
+      double sp_sum = 0.0;
+      const fsils_int j_start = rp[2*i];
+      const fsils_int j_end   = rp[2*i + 1];
+      for (fsils_int j = j_start; j <= j_end; j++) {
+        const double u_col = u_data[cp[j]];
+        const double* __restrict__ gj = g_data + static_cast<size_t>(j) * nsd;
+        for (int m = 0; m < nsd; m++) {
+          gp_sums[static_cast<size_t>(m)] += gj[m] * u_col;
+        }
+        sp_sum += l_data[j] * u_col;
+      }
+      double* __restrict__ gpi = gp_data + static_cast<size_t>(i) * nsd;
+      for (int m = 0; m < nsd; m++) {
+        gpi[m] = gp_sums[static_cast<size_t>(m)];
+      }
+      sp_data[i] = sp_sum;
+    }
+  }
+}
+
+void fsils_spar_mul_sv_ss_fused(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, const int nsd, const Array<double>& G,
+    const Vector<double>& L, const Vector<double>& in_vec,
+    Array<double>& GP, Vector<double>& SP)
+{
+  fsils_int nNo = lhs.nNo;
+
+  auto compute_range = [&](fsils_int iStart, fsils_int iEnd) {
+    switch (nsd) {
+      case 2: fsils_spar_mul_sv_ss_fused_impl<2>(iStart, iEnd, rowPtr, colPtr, G, L, in_vec, GP, SP); break;
+      case 3: fsils_spar_mul_sv_ss_fused_impl<3>(iStart, iEnd, rowPtr, colPtr, G, L, in_vec, GP, SP); break;
+      default: fsils_spar_mul_sv_ss_fused_dyn(iStart, iEnd, nsd, rowPtr, colPtr, G, L, in_vec, GP, SP); break;
+    }
+  };
+
+  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+    // Compute boundary rows first
+    compute_range(0, lhs.shnNo);
+    compute_range(lhs.mynNo, nNo);
+    // Overlap GP (vector) comm with interior computation
+    fsils_commuv_begin(lhs, nsd, GP);
+    compute_range(lhs.shnNo, lhs.mynNo);
+    fsils_commuv_end(lhs, nsd, GP);
+    // SP (scalar) comm — boundary rows already computed
+    fsils_commus_begin(lhs, SP);
+    fsils_commus_end(lhs, SP);
+  } else {
+    compute_range(0, nNo);
+  }
+}
+
 };
