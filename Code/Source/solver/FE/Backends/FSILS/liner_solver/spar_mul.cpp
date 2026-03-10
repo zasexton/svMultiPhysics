@@ -74,13 +74,21 @@ static void fsils_spar_mul_ss_range(fsils_int iStart, fsils_int iEnd,
     const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
     const Vector<double>& K, const Vector<double>& U, Vector<double>& KU)
 {
+  const fsils_int* __restrict__ rp = rowPtr.data();   // column-major: rowPtr(r,c) = rp[r + c*2]
+  const fsils_int* __restrict__ cp = colPtr.data();
+  const double* __restrict__ k_data = K.data();
+  const double* __restrict__ u_data = U.data();
+  double* __restrict__ ku_data = KU.data();
+
   #pragma omp parallel for schedule(static)
   for (fsils_int i = iStart; i < iEnd; i++) {
+    const fsils_int j_start = rp[2*i];
+    const fsils_int j_end   = rp[2*i + 1];
     double sum = 0.0;
-    for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-      sum += K(j) * U(colPtr(j));
+    for (fsils_int j = j_start; j <= j_end; j++) {
+      sum += k_data[j] * u_data[cp[j]];
     }
-    KU(i) = sum;
+    ku_data[i] = sum;
   }
 }
 
@@ -90,17 +98,27 @@ static void fsils_spar_mul_sv_impl(fsils_int iStart, fsils_int iEnd,
     const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
     const Array<double>& K, const Vector<double>& U, Array<double>& KU)
 {
+  const fsils_int* __restrict__ rp = rowPtr.data();
+  const fsils_int* __restrict__ cp = colPtr.data();
+  const double* __restrict__ k_data = K.data();
+  const double* __restrict__ u_data = U.data();
+  double* __restrict__ ku_data = KU.data();
+
   #pragma omp parallel for schedule(static)
   for (fsils_int i = iStart; i < iEnd; i++) {
     double sums[DOF] = {};
-    for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-      double u_col = U(colPtr(j));
+    const fsils_int j_start = rp[2*i];
+    const fsils_int j_end   = rp[2*i + 1];
+    for (fsils_int j = j_start; j <= j_end; j++) {
+      const double u_col = u_data[cp[j]];
+      const double* __restrict__ kj = k_data + static_cast<size_t>(j) * DOF;
       for (int m = 0; m < DOF; m++) {
-        sums[m] += K(m,j) * u_col;
+        sums[m] += kj[m] * u_col;
       }
     }
+    double* __restrict__ kui = ku_data + static_cast<size_t>(i) * DOF;
     for (int m = 0; m < DOF; m++) {
-      KU(m,i) = sums[m];
+      kui[m] = sums[m];
     }
   }
 }
@@ -109,6 +127,12 @@ static void fsils_spar_mul_sv_dyn(fsils_int iStart, fsils_int iEnd, int dof,
     const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
     const Array<double>& K, const Vector<double>& U, Array<double>& KU)
 {
+  const fsils_int* __restrict__ rp = rowPtr.data();
+  const fsils_int* __restrict__ cp = colPtr.data();
+  const double* __restrict__ k_data = K.data();
+  const double* __restrict__ u_data = U.data();
+  double* __restrict__ ku_data = KU.data();
+
   #pragma omp parallel
   {
     std::vector<double> sums(static_cast<size_t>(std::max(dof, 0)), 0.0);
@@ -117,15 +141,19 @@ static void fsils_spar_mul_sv_dyn(fsils_int iStart, fsils_int iEnd, int dof,
     for (fsils_int i = iStart; i < iEnd; i++) {
       std::fill(sums.begin(), sums.end(), 0.0);
 
-      for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-        const double u_col = U(colPtr(j));
+      const fsils_int j_start = rp[2*i];
+      const fsils_int j_end   = rp[2*i + 1];
+      for (fsils_int j = j_start; j <= j_end; j++) {
+        const double u_col = u_data[cp[j]];
+        const double* __restrict__ kj = k_data + static_cast<size_t>(j) * dof;
         for (int m = 0; m < dof; m++) {
-          sums[static_cast<size_t>(m)] += K(m,j) * u_col;
+          sums[static_cast<size_t>(m)] += kj[m] * u_col;
         }
       }
 
+      double* __restrict__ kui = ku_data + static_cast<size_t>(i) * dof;
       for (int m = 0; m < dof; m++) {
-        KU(m,i) = sums[static_cast<size_t>(m)];
+        kui[m] = sums[static_cast<size_t>(m)];
       }
     }
   }
@@ -137,16 +165,26 @@ static void fsils_spar_mul_vs_impl(fsils_int iStart, fsils_int iEnd,
     const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
     const Array<double>& K, const Array<double>& U, Vector<double>& KU)
 {
+  const fsils_int* __restrict__ rp = rowPtr.data();
+  const fsils_int* __restrict__ cp = colPtr.data();
+  const double* __restrict__ k_data = K.data();
+  const double* __restrict__ u_data = U.data();
+  double* __restrict__ ku_data = KU.data();
+
   #pragma omp parallel for schedule(static)
   for (fsils_int i = iStart; i < iEnd; i++) {
+    const fsils_int j_start = rp[2*i];
+    const fsils_int j_end   = rp[2*i + 1];
     double sum = 0.0;
-    for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-      fsils_int col = colPtr(j);
+    for (fsils_int j = j_start; j <= j_end; j++) {
+      const fsils_int col = cp[j];
+      const double* __restrict__ kj = k_data + static_cast<size_t>(j) * DOF;
+      const double* __restrict__ uc = u_data + static_cast<size_t>(col) * DOF;
       for (int m = 0; m < DOF; m++) {
-        sum += K(m,j) * U(m,col);
+        sum += kj[m] * uc[m];
       }
     }
-    KU(i) = sum;
+    ku_data[i] = sum;
   }
 }
 
@@ -154,16 +192,26 @@ static void fsils_spar_mul_vs_dyn(fsils_int iStart, fsils_int iEnd, int dof,
     const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
     const Array<double>& K, const Array<double>& U, Vector<double>& KU)
 {
+  const fsils_int* __restrict__ rp = rowPtr.data();
+  const fsils_int* __restrict__ cp = colPtr.data();
+  const double* __restrict__ k_data = K.data();
+  const double* __restrict__ u_data = U.data();
+  double* __restrict__ ku_data = KU.data();
+
   #pragma omp parallel for schedule(static)
   for (fsils_int i = iStart; i < iEnd; i++) {
+    const fsils_int j_start = rp[2*i];
+    const fsils_int j_end   = rp[2*i + 1];
     double sum = 0.0;
-    for (fsils_int j = rowPtr(0,i); j <= rowPtr(1,i); j++) {
-      fsils_int col = colPtr(j);
+    for (fsils_int j = j_start; j <= j_end; j++) {
+      const fsils_int col = cp[j];
+      const double* __restrict__ kj = k_data + static_cast<size_t>(j) * dof;
+      const double* __restrict__ uc = u_data + static_cast<size_t>(col) * dof;
       for (int m = 0; m < dof; m++) {
-        sum += K(m,j) * U(m,col);
+        sum += kj[m] * uc[m];
       }
     }
-    KU(i) = sum;
+    ku_data[i] = sum;
   }
 }
 
