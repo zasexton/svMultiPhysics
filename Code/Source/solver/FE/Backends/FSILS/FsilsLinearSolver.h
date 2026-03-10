@@ -46,6 +46,14 @@ private:
     // Cached RHS permutation buffer to avoid re-allocating each solve.
     mutable std::vector<double> r_internal_work_{};
 
+    // Saddle-point enforcement auto-detection state.
+    // On the first BlockSchur solve, we numerically check if D ≈ -G^T
+    // by computing max|D + G^T| / max(|D|, |G^T|). If the relative error
+    // is below a threshold, the system has a symmetric saddle-point structure
+    // and enforcement is applied for this and all subsequent solves.
+    // -1 = not yet determined, 0 = skip enforcement, 1 = enforce D = -G^T
+    mutable int saddle_enforce_state_{-1};
+
     // Cached face data to avoid re-building faces every Newton iteration.
     // Face construction involves std::map allocation, sorting, and MPI_Allreduce
     // for shared face sync. The data only changes when setDirichletDofs() or

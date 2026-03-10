@@ -28,9 +28,11 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-// Fractional-step solver for incompressible NS / FSI equations.
+// Fractional-step block Schur complement solver for saddle-point systems.
 // Form: AU=R, where A = [K G; D L] with exact analytical D (not -G^T).
 // Uses asymmetric BiCGStab Schur complement instead of symmetric CG.
+// Supports arbitrary momentum (field-A) and constraint (field-B) block positions
+// via block layout metadata in the FSILS_lsType structure.
 
 #include "ns_solver.h"
 
@@ -81,9 +83,8 @@ namespace {
 } // namespace
 
 /// @brief Modifies: lhs.face[].nS
-/// VMS FIX: Avoided uninitialized memory by locally accumulating the norm
-/// before MPI_Allreduce, instead of scattering into a full-size array.
-void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int nsd, const int dof, const fsils_int nNo, const fsils_int mynNo)
+/// Accumulates boundary coupling norms for the field-A (momentum) components.
+void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int mom_ncomp, const int dof, const fsils_int nNo, const fsils_int mynNo)
 {
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
     auto& face = lhs.face[faIn];
@@ -94,7 +95,7 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int nsd, const int d
         for (int a = 0; a < face.nNo; a++) {
           int Ac = face.glob(a);
           if (Ac < mynNo) {
-            for (int i = 0; i < nsd; i++) {
+            for (int i = 0; i < mom_ncomp; i++) {
               local_nS += face.valM(i,a) * face.valM(i,a);
             }
           }
@@ -111,7 +112,7 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int nsd, const int d
       } else {
         face.nS = 0.0;
         for (int a = 0; a < face.nNo; a++) {
-          for (int i = 0; i < nsd; i++) {
+          for (int i = 0; i < mom_ncomp; i++) {
             face.nS += face.valM(i,a) * face.valM(i,a);
           }
         }
@@ -121,28 +122,33 @@ void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int nsd, const int d
 }
 
 /// @brief Store sections of the 'Val' into separate arrays: 'mK', 'mG', 'mD', 'mL'
-/// VMS FIX: Removed the O(N * dof^2) transposition to Gt. Exact analytical D is preserved.
+/// Uses block layout indices to extract blocks from arbitrary positions in the
+/// per-node DOF ordering. Exact analytical D is preserved (no transposition to -G^T).
 ///
 /// Modifies: mK, mG, mD, and mL.
-void depart(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int nsd, const int dof, const fsils_int nNo, const fsils_int nnz,
-    const Array<double>& Val, Array<double>& mK, Array<double>& mG, Array<double>& mD, Vector<double>& mL)
+void depart(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+            const int mom_start, const int mom_ncomp,
+            const int con_start, const int con_ncomp,
+            const int dof,
+            const fsils_int nNo, const fsils_int nnz,
+            const Array<double>& Val, Array<double>& mK, Array<double>& mG, Array<double>& mD, Vector<double>& mL)
 {
-  const int stride = nsd + 1;
-
   #pragma omp parallel for schedule(static)
   for (fsils_int nz = 0; nz < nnz; nz++) {
-    for (int i = 0; i < nsd; i++) {
-      for (int j = 0; j < nsd; j++) {
-        mK(i*nsd + j, nz) = Val(i*stride + j, nz);
+    for (int i = 0; i < mom_ncomp; i++) {
+      for (int j = 0; j < mom_ncomp; j++) {
+        mK(i*mom_ncomp + j, nz) = Val((mom_start + i)*dof + (mom_start + j), nz);
       }
-      mG(i, nz) = Val(i*stride + nsd, nz);
-      mD(i, nz) = Val(nsd*stride + i, nz);
+      mG(i, nz) = Val((mom_start + i)*dof + con_start, nz);
+      mD(i, nz) = Val(con_start*dof + (mom_start + i), nz);
     }
-    mL(nz) = Val(nsd*stride + nsd, nz);
+    mL(nz) = Val(con_start*dof + con_start, nz);
   }
 }
 
 /// @brief Fractional-step solver utilizing an exact asymmetric Schur complement.
+/// Block layout is read from ls.mom_start/mom_ncomp/con_start/con_ncomp.
+/// If ls.mom_ncomp == 0, falls back to legacy behavior (nsd = dof - 1).
 ///
 /// Ri (dof, lhs.nNo)
 void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_lsType& ls, const int dof, const Array<double>& Val, Array<double>& Ri)
@@ -160,7 +166,13 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   const fsils_int nNo = lhs.nNo;
   const fsils_int nnz = lhs.nnz;
   const fsils_int mynNo = lhs.mynNo;
-  const int nsd = dof - 1;
+
+  // Block layout: use explicit indices if provided, else legacy fallback.
+  const int mom_start = (ls.mom_ncomp > 0) ? ls.mom_start : 0;
+  const int mom_ncomp = (ls.mom_ncomp > 0) ? ls.mom_ncomp : (dof - 1);
+  const int con_start = (ls.mom_ncomp > 0) ? ls.con_start : (dof - 1);
+  const int con_ncomp = (ls.mom_ncomp > 0) ? ls.con_ncomp : 1;
+  const int nsd = mom_ncomp;  // alias for SpMV dimension parameter
   const int iB = ls.RI.mItr;
   const int nB = 2*iB;
   constexpr fsils_int BLOCK_SIZE = 256;
@@ -184,9 +196,9 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   #pragma omp parallel for schedule(static)
   for (fsils_int j = 0; j < nNo; j++) {
     for (int i = 0; i < nsd; i++) {
-      Rmi(i,j) = Ri(i,j);
+      Rmi(i,j) = Ri(mom_start + i, j);
     }
-    Rci(j) = Ri(dof-1,j);
+    Rci(j) = Ri(con_start, j);
   }
 
   Rm = Rmi;
@@ -224,14 +236,14 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   dmsg << "ls.RI.fNorm: " << ls.RI.fNorm;
   #endif
 
-  // VMS FIX: Gt block mapping completely removed; exact analytical D is preserved.
+  // Extract sub-blocks using block layout indices. Exact analytical D is preserved.
   Array<double> mK(nsd*nsd,nnz), mG(nsd,nnz), mD(nsd,nnz);
   Vector<double> mL(nnz);
 
-  depart(lhs, nsd, dof, nNo, nnz, Val, mK, mG, mD, mL);
+  depart(lhs, mom_start, mom_ncomp, con_start, con_ncomp, dof, nNo, nnz, Val, mK, mG, mD, mL);
 
   // Computes lhs.face[].nS for each face.
-  bc_pre(lhs, nsd, dof, nNo, mynNo);
+  bc_pre(lhs, mom_ncomp, dof, nNo, mynNo);
 
   for (int faIn = 0; faIn < lhs.nFaces; faIn++) {
     auto& face = lhs.face[faIn];
@@ -533,9 +545,9 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   #pragma omp parallel for schedule(static)
   for (fsils_int j = 0; j < nNo; j++) {
     for (int i = 0; i < nsd; i++) {
-      Ri(i,j) = Rmi(i,j);
+      Ri(mom_start + i, j) = Rmi(i,j);
     }
-    Ri(dof-1,j) = Rci(j);
+    Ri(con_start, j) = Rci(j);
   }
 
   if (lhs.commu.masF) {

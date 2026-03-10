@@ -33,15 +33,24 @@
 
 namespace ns_solver {
 
-void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int nsd, const int dof,
+/// Compute boundary condition normal norms for coupled faces.
+/// @param mom_ncomp  Number of field-A (momentum) components.
+void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int mom_ncomp, const int dof,
             const fe_fsi_linear_solver::fsils_int nNo, const fe_fsi_linear_solver::fsils_int mynNo);
 
-// NOTE: Gt argument removed. Exact mD is now preserved.
-void depart(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int nsd, const int dof,
+/// Extract sub-blocks K, G, D, L from the monolithic matrix Val.
+/// Block positions are specified by (mom_start, mom_ncomp, con_start, con_ncomp).
+void depart(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+            const int mom_start, const int mom_ncomp,
+            const int con_start, const int con_ncomp,
+            const int dof,
             const fe_fsi_linear_solver::fsils_int nNo, const fe_fsi_linear_solver::fsils_int nnz,
             const Array<double>& Val, Array<double>& mK, Array<double>& mG,
             Array<double>& mD, Vector<double>& mL);
 
+/// Fractional-step block Schur complement solver.
+/// Block layout is read from ls.mom_start/mom_ncomp/con_start/con_ncomp.
+/// If ls.mom_ncomp == 0, falls back to legacy behavior (nsd = dof - 1).
 void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_lsType& ls,
                const int dof, const Array<double>& Val, Array<double>& Ri);
 

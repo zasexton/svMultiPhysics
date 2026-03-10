@@ -397,7 +397,6 @@ void BlockAssembler::addField(
     field.dof_map = &dof_map;
     field.constraints = nullptr;
     field.components = 1;
-    field.is_pressure_like = false;
 
     config_.fields.push_back(field);
 

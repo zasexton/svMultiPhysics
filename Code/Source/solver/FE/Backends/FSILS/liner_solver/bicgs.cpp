@@ -270,9 +270,9 @@ void bicgss(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSIL
 //--------
 // schur
 //--------
-/// @brief VMS-compatible BiCGStab Schur complement solver for (L - D*H*G) P = R.
-/// Replaces the symmetric CG Schur solver. Handles exact non-symmetric D != -G^T
-/// and utilizes an algebraic diagonal SIMPLEC scaling based on the PSPG L block.
+/// @brief BiCGStab Schur complement solver for (L - D*H*G) P = R.
+/// Handles asymmetric saddle-point systems where D != -G^T (e.g., stabilized
+/// formulations). Uses algebraic diagonal scaling: M_inv = 1/diag(L).
 void schur(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int nsd,
            const Array<double>& D, const Array<double>& G, const Vector<double>& L, Vector<double>& R)
 {
@@ -291,11 +291,11 @@ void schur(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
   Array<double> GP(nsd, nNo);
   Vector<double> SP(nNo), DGP(nNo);
 
-  // 1. SIMPLEC Preconditioner: M_inv = 1 / diag(L)
+  // 1. Diagonal preconditioner: M_inv = 1 / diag(L)
   Vector<double> M_inv(nNo);
   for (fsils_int i = 0; i < nNo; ++i) {
     double diag_val = L(lhs.diagPtr(i));
-    // Protect against division by zero for standard Galerkin nodes where L_ii = 0
+    // Protect against division by zero for nodes where L_ii = 0
     M_inv(i) = (std::abs(diag_val) > 1e-12) ? 1.0 / diag_val : 1.0;
   }
 

@@ -310,20 +310,20 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
     applyStageScalingToMatrix();
 
-    // The FE ns_solver uses BiCGStab for the Schur complement, which handles
-    // asymmetric operators (D != -G^T). VMS-stabilized formulations produce
-    // PSPG/LSIC contributions in the D block that are NOT the negative transpose
-    // of G. Overwriting D = -G^T would corrupt the assembled Jacobian and cause
-    // Newton convergence failure.
+    // Saddle-point enforcement: automatically detect whether D ≈ -G^T.
     //
-    // Saddle-point enforcement is therefore DISABLED by default. Set
-    // SVMP_SADDLE_ENFORCE=1 to enable it (e.g., for formulations where D ≈ -G^T
-    // and CG is used for the Schur complement).
-    const bool force_saddle_enforce = (std::getenv("SVMP_SADDLE_ENFORCE") != nullptr);
-    if (options_.method == SolverMethod::BlockSchur && has_saddle_point && force_saddle_enforce) {
+    // On the first BlockSchur solve, numerically measure max|D + G^T| / max(|D|, |G^T|).
+    // If the relative error is below a threshold, the formulation produces a symmetric
+    // saddle-point system (e.g., unstabilized Stokes / Taylor-Hood) and we enforce
+    // D = -G^T on this and all subsequent solves. Otherwise (e.g., NS-VMS with PSPG/LSIC
+    // stabilization where D contains extra terms), enforcement is permanently skipped.
+    if (options_.method == SolverMethod::BlockSchur && has_saddle_point) {
         const int nNo = lhs.nNo;
         const int nnz_int = lhs.nnz;
-        if (nNo > 0 && nnz_int > 0) {
+        const bool need_detection = (saddle_enforce_state_ == -1) && (nNo > 0) && (nnz_int > 0);
+        const bool need_enforcement = (saddle_enforce_state_ == 1) && (nNo > 0) && (nnz_int > 0);
+
+        if (need_detection || need_enforcement) {
             auto* cols = lhs.colPtr.data();
             const auto find_entry = [&](int row, int col) -> fe_fsi_linear_solver::fsils_int {
                 const auto start = lhs.rowPtr(0, row);
@@ -352,12 +352,12 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                     continue;
                 }
                 for (auto idx = start; idx <= end; ++idx) {
-                    const auto col = cols[idx];
-                    if (col < 0 || col >= nNo) {
+                    const auto col_idx = cols[idx];
+                    if (col_idx < 0 || col_idx >= nNo) {
                         continue;
                     }
 
-                    const auto idx_t = find_entry(col, row);
+                    const auto idx_t = find_entry(col_idx, row);
                     if (idx_t < 0 || idx_t >= nnz_int) {
                         continue;
                     }
@@ -365,26 +365,73 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                     Real* blk = values_work_.data() + static_cast<std::size_t>(idx) * blk_size;
                     Real* blk_t = values_work_.data() + static_cast<std::size_t>(idx_t) * blk_size;
 
-                    // top-right: rows [mom_start..mom_start+mom_ncomp), cols [con_start..con_start+con_ncomp)
-                    // bottom-left at transpose: rows [con_start..con_start+con_ncomp), cols [mom_start..mom_start+mom_ncomp)
+                    // G block: rows [mom_start..mom_start+mom_ncomp), cols [con_start..con_start+con_ncomp)
+                    // D block at transpose position: rows [con_start..con_start+con_ncomp), cols [mom_start..mom_start+mom_ncomp)
                     for (int vc = 0; vc < mom_ncomp; ++vc) {
                         for (int cc = 0; cc < con_ncomp; ++cc) {
-                            const Real top = blk[static_cast<std::size_t>((mom_start + vc) * dof + (con_start + cc))];
-                            const std::size_t bl_idx = static_cast<std::size_t>((con_start + cc) * dof + (mom_start + vc));
-                            const Real bottom = blk_t[bl_idx];
-                            max_abs_ref = std::max(max_abs_ref, static_cast<double>(std::abs(top)));
-                            max_abs_ref = std::max(max_abs_ref, static_cast<double>(std::abs(bottom)));
-                            const double diff = static_cast<double>(bottom + top);
+                            const Real g_val = blk[static_cast<std::size_t>((mom_start + vc) * dof + (con_start + cc))];
+                            const std::size_t d_idx = static_cast<std::size_t>((con_start + cc) * dof + (mom_start + vc));
+                            const Real d_val = blk_t[d_idx];
+                            max_abs_ref = std::max(max_abs_ref, static_cast<double>(std::abs(g_val)));
+                            max_abs_ref = std::max(max_abs_ref, static_cast<double>(std::abs(d_val)));
+                            const double diff = static_cast<double>(d_val + g_val);
                             max_abs_diff = std::max(max_abs_diff, std::abs(diff));
 
-                            // Enforce bottom-left at transpose == -top-right at original.
-                            blk_t[bl_idx] = -top;
+                            // Apply enforcement if active (detection pass doesn't modify).
+                            if (need_enforcement) {
+                                blk_t[d_idx] = -g_val;
+                            }
                         }
                     }
                 }
             }
 
-            if (oopTraceEnabled() && max_abs_ref > 0.0) {
+            // Auto-detection: decide enforcement based on numerical symmetry.
+            if (need_detection && max_abs_ref > 0.0) {
+                const double rel_error = max_abs_diff / max_abs_ref;
+                // Threshold: relative error < 1e-8 means D = -G^T to near machine precision
+                // (accounting for finite-element integration/assembly round-off).
+                constexpr double symmetry_threshold = 1e-8;
+                if (rel_error < symmetry_threshold) {
+                    saddle_enforce_state_ = 1;
+                    // Re-run with enforcement now that we've decided.
+                    // (The detection pass did not modify the matrix.)
+                    for (fe_fsi_linear_solver::fsils_int row2 = 0; row2 < nNo; ++row2) {
+                        const auto start2 = lhs.rowPtr(0, row2);
+                        const auto end2 = lhs.rowPtr(1, row2);
+                        if (start2 < 0 || end2 < start2) continue;
+                        for (auto idx2 = start2; idx2 <= end2; ++idx2) {
+                            const auto col2 = cols[idx2];
+                            if (col2 < 0 || col2 >= nNo) continue;
+                            const auto idx_t2 = find_entry(col2, row2);
+                            if (idx_t2 < 0 || idx_t2 >= nnz_int) continue;
+                            Real* blk2 = values_work_.data() + static_cast<std::size_t>(idx2) * blk_size;
+                            Real* blk_t2 = values_work_.data() + static_cast<std::size_t>(idx_t2) * blk_size;
+                            for (int vc = 0; vc < mom_ncomp; ++vc) {
+                                for (int cc = 0; cc < con_ncomp; ++cc) {
+                                    const Real g = blk2[static_cast<std::size_t>((mom_start + vc) * dof + (con_start + cc))];
+                                    blk_t2[static_cast<std::size_t>((con_start + cc) * dof + (mom_start + vc))] = -g;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    saddle_enforce_state_ = 0;
+                }
+                {
+                    // Always log auto-detection result — this is a one-time configuration decision.
+                    std::ostringstream oss;
+                    oss << "[FsilsLinearSolver] Saddle-point symmetry auto-detected: "
+                        << "max|D+G^T|/max(|D|,|G|)=" << (max_abs_diff / max_abs_ref)
+                        << (saddle_enforce_state_ == 1 ? " -> enforcing D=-G^T" : " -> skipping enforcement (stabilized formulation)");
+                    FE_LOG_INFO(oss.str());
+                }
+            } else if (need_detection) {
+                // Both blocks are zero — no enforcement needed.
+                saddle_enforce_state_ = 0;
+            }
+
+            if (need_enforcement && oopTraceEnabled() && max_abs_ref > 0.0) {
                 std::ostringstream oss;
                 oss << "FsilsLinearSolver: enforced D=-G^T (max|D+G^T|=" << max_abs_diff
                     << ", rel=" << (max_abs_diff / max_abs_ref) << ")";
@@ -430,6 +477,14 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 	        if (options_.fsils_blockschur_cg_rel_tol) {
 	            ls.CG.relTol = *options_.fsils_blockschur_cg_rel_tol;
 	        }
+
+	        // Propagate block layout to FSILS_lsType for the fractional-step solver.
+	        if (has_saddle_point) {
+	            ls.mom_start = mom_start;
+	            ls.mom_ncomp = mom_ncomp;
+	            ls.con_start = con_start;
+	            ls.con_ncomp = con_ncomp;
+	        }
 		    } else {
 		        const auto method = to_fsils_solver(options_.method);
 		        if (method == fe_fsi_linear_solver::LS_TYPE_GMRES) {
@@ -474,21 +529,6 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 	                                           options_.max_iter);
 	        }
 	    }
-
-    // New OOP solver selection: `<LS type="KSPPGMRES">` requests a pipelined/communication-hiding
-    // GMRES implementation in the FSILS backend. Keep the solver type as GMRES and toggle the
-    // variant via the RI sub-solver settings.
-    ls.RI.pipelined_gmres = (options_.method == SolverMethod::PGMRES);
-    // Allow env var override for pipelined GMRES
-    {
-        const char* pipe_env = std::getenv("SVMP_FSILS_GMRES_PIPELINED");
-        if (pipe_env) {
-            std::string v(pipe_env);
-            if (v == "1" || v == "true" || v == "on" || v == "yes") {
-                ls.RI.pipelined_gmres = true;
-            }
-        }
-    }
 
     // Set up FSILS faces from:
     //  - Dirichlet constraints (legacy-equivalent FSILS preconditioner handling)

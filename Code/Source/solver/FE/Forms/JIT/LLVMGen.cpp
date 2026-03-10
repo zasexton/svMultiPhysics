@@ -1648,22 +1648,6 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         auto module = std::make_unique<llvm::Module>(std::string(symbol), *ctx);
         module->setModuleIdentifier(std::string(symbol));
 
-        // Per-module optimization level override for coupled kernels.
-        // Testing showed: per-block O2 (small ~7.5K IR functions) >> monolithic at any
-        // opt level.  LLVM's optimizer degrades on ~30K IR: O2 creates register pressure
-        // from GVN/LICM, O1 is 70% slower than per-block, lite pipeline is 2.2x slower.
-        // SimplifyCFG also produces incorrect results for the coupled kernel (LLVM 14 bug).
-        // Left as infrastructure for future outlined-function experiments.
-        // Env var: SVMP_COUPLED_OPT_LEVEL=<0|1|2|-1(lite)> overrides the default O2.
-        if (coupled) {
-            const char* env = std::getenv("SVMP_COUPLED_OPT_LEVEL");
-            if (env) {
-                const int coupled_opt = std::atoi(env);
-                module->addModuleFlag(llvm::Module::Override, "svmp.opt_level",
-                                      llvm::ConstantInt::get(llvm::Type::getInt32Ty(*ctx), coupled_opt));
-            }
-        }
-
         std::unique_ptr<llvm::DIBuilder> di_builder;
         llvm::DICompileUnit* di_cu = nullptr;
         llvm::DIFile* di_file = nullptr;
@@ -5461,12 +5445,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                        // Matrix divergence (returns a vector with length = number of matrix rows).
 	                        //
-	                        // Currently implemented for the Navier–Stokes/Stokes VMS strong residual pattern
-	                        //   div( scalar * sym(grad(u)) )
+	                        // JIT-supported pattern: div( scalar * sym(grad(u)) )
 	                        // where the scalar factor is spatially constant and u is one of:
 	                        //   - TrialFunction  (residual: current solution; tangent: trial basis)
 	                        //   - StateField(CURRENT_SOLUTION_FIELD_ID) (current solution)
 	                        //   - PreviousSolutionRef
+	                        // Other matrix divergence patterns (e.g., div(C : grad(u)) for
+	                        // anisotropic constitutive tensors) are not yet JIT-compiled and
+	                        // will fall back to the interpreted evaluation path.
 	                        if (shape.kind == Shape::Kind::Vector) {
 	                            auto isSpatiallyConstantScalar = [&](auto&& self, std::size_t idx) -> bool {
 	                                const auto& op2 = term.ir.ops[idx];
@@ -7986,10 +7972,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         // Matrix divergence (returns a vector with length = number of matrix rows).
                         //
-                        // Currently implemented for the Navier–Stokes/Stokes VMS strong residual pattern
-                        //   div( scalar * sym(grad(u)) )
+                        // JIT-supported pattern: div( scalar * sym(grad(u)) )
                         // where the scalar factor is spatially constant and u is the current solution
                         // (StateField(CURRENT_SOLUTION_FIELD_ID)) or a PreviousSolutionRef.
+                        // Other matrix divergence patterns (e.g., div(C : grad(u)) for
+                        // anisotropic constitutive tensors) are not yet JIT-compiled and
+                        // will fall back to the interpreted evaluation path.
                         if (shape.kind == Shape::Kind::Vector) {
                             auto isSpatiallyConstantScalar = [&](auto&& self, std::size_t idx) -> bool {
                                 const auto& op2 = term.ir.ops[idx];
@@ -8286,7 +8274,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                         break;
                                 }
 
-                                throw std::runtime_error("LLVMGen: cached div(matrix) operand not supported");
+                                throw std::runtime_error("LLVMGen: cached div(matrix) operand not supported — "
+                                    "only div(scalar * sym(grad(u))) is JIT-compiled; "
+                                    "other patterns require the interpreted path");
                             };
 
                             values[op_idx] = evalDivMatrix(evalDivMatrix, child_idx);

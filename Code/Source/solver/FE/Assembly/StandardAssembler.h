@@ -67,7 +67,6 @@
 #include "GlobalSystemView.h"
 #include "AssemblyKernel.h"
 #include "AssemblyContext.h"
-#include "Assembly/JIT/KernelArgs.h"
 #include "Spaces/OrientationManager.h"
 #include "Geometry/GeometryMapping.h"
 #include "Basis/BasisCache.h"
@@ -860,7 +859,6 @@ private:
     bool cached_basis_trial_is_vector_{false};
     bool cached_basis_same_space_{false};
     bool cached_basis_has_hessians_{false};
-    bool disable_basis_cache_{false}; // Cached from SVMP_DISABLE_BASIS_CACHE env var
     const spaces::FunctionSpace* cached_basis_test_space_ptr_{nullptr};
     const spaces::FunctionSpace* cached_basis_trial_space_ptr_{nullptr};
 
@@ -891,7 +889,7 @@ private:
     const AssemblyContext::CoupledBlockMetadata* active_coupled_block_meta_{nullptr};
 
     // Field-solution BasisCache: small flat cache keyed by (BasisFunction*, gradients, hessians).
-    // Typically 1-2 entries (velocity basis, pressure basis). Invalidated with mapping type.
+    // Typically 1-2 entries (one per unique basis in coupled blocks). Invalidated with mapping type.
     struct FieldBCacheEntry {
         const basis::BasisFunction* basis{nullptr};
         bool gradients{false};
@@ -950,11 +948,6 @@ private:
     std::size_t scratch_batch_reserved_qpts_{0};
     int scratch_batch_reserved_dim_{0};
 
-    // Scratch for monolithic coupled JIT dispatch
-    std::vector<assembly::jit::CoupledBlockView> scratch_coupled_block_views_;
-    std::vector<assembly::jit::CoupledCellKernelArgsV1> scratch_coupled_cell_args_;
-    std::vector<KernelOutput> scratch_coupled_block_outputs_;
-
     // Scratch for fused coupled block insertion (combines per-block outputs
     // into a single combined matrix/vector per cell to hit the FSILS fast path).
     std::vector<Real> scratch_fused_matrices_;
@@ -987,12 +980,23 @@ private:
     std::vector<AssemblyContext::Vector3D> coupled_scalar_ref_grads_;   // [i * n_qpts + q]
     std::vector<AssemblyContext::Matrix3x3> coupled_scalar_ref_hess_;   // [i * n_qpts + q]
     std::vector<Real> coupled_scalar_basis_values_;                     // [q * n_scalar + i]
-    // qpt-major basis values for each space wrapper (velocity[12], pressure[4])
-    // so setTestBasisValuesOnlyQptMajor can be called without re-transposing.
-    std::vector<Real> coupled_vel_qpt_values_;  // [q * n_vel_dofs + i]
-    std::vector<Real> coupled_pres_qpt_values_; // [q * n_pres_dofs + i]
-    LocalIndex coupled_vel_n_dofs_{0};
-    LocalIndex coupled_pres_n_dofs_{0};
+
+    // Qpt-major basis value caches for each unique DOF count in coupled blocks.
+    // Built once during coupled scalar cache initialization. Looked up by DOF count
+    // at basis-setting time. Supports arbitrary multi-field coupled systems.
+    struct CoupledSpaceQptCache {
+        LocalIndex n_dofs{0};                 // DOFs per element for this space
+        std::vector<Real> qpt_values;         // [q * n_dofs + i]
+    };
+    std::vector<CoupledSpaceQptCache> coupled_space_qpt_caches_;
+
+    /// Look up the qpt-major basis cache for a given DOF count. Returns nullptr if not found.
+    const std::vector<Real>* findCoupledQptCache(LocalIndex n_dofs) const noexcept {
+        for (const auto& c : coupled_space_qpt_caches_) {
+            if (c.n_dofs == n_dofs) return &c.qpt_values;
+        }
+        return nullptr;
+    }
 
     // Per-slot scalar physical gradient/hessian cache.
     // Populated by block 0 of each cell in the coupled loop; reused by blocks 1-3.

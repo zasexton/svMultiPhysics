@@ -13,23 +13,21 @@
  * @brief Physics-agnostic coupled block kernel for multi-field systems
  *
  * CoupledBlockKernel wraps NxM block FormIRs from a coupled multi-field
- * system (e.g., NS-VMS velocity+pressure producing VV, VP, PV, PP blocks)
+ * system (e.g., velocity+pressure producing VV, VP, PV, PP blocks in
+ * incompressible flow, or displacement+pressure in mixed elasticity)
  * into a single AssemblyKernel.
  *
- * When monolithic JIT compilation succeeds, all blocks are evaluated in
- * a single kernel call with shared geometry and intermediates.  When JIT
- * is unavailable or fails, per-block fallback kernels are dispatched.
+ * Per-block fallback kernels (existing JITKernelWrappers) are dispatched
+ * by the assembler's coupled path.
  *
  * This header contains no LLVM dependencies.
  */
 
 #include "Assembly/AssemblyKernel.h"
-#include "Assembly/JIT/KernelArgs.h"
 #include "Core/Types.h"
 #include "Forms/FormExpr.h"
 
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <span>
 #include <string>
@@ -51,9 +49,8 @@ class JITCompiler;
 
 /// Physics-agnostic coupled block kernel for multi-field systems.
 ///
-/// Wraps NxM block FormIRs and dispatches to either:
-/// (a) a JIT-compiled monolithic kernel (shared intermediates, single pass), or
-/// (b) per-block fallback kernels (existing JITKernelWrappers).
+/// Wraps NxM block FormIRs and dispatches per-block fallback kernels
+/// (existing JITKernelWrappers).
 class CoupledBlockKernel final : public assembly::AssemblyKernel {
 public:
     struct BlockSpec {
@@ -103,45 +100,18 @@ public:
     [[nodiscard]] std::size_t numBlocks() const noexcept { return blocks_.size(); }
     [[nodiscard]] const BlockSpec& blockSpec(std::size_t i) const { return blocks_[i]; }
     [[nodiscard]] BlockSpec& mutableBlockSpec(std::size_t i) { return blocks_[i]; }
-    [[nodiscard]] bool isMonolithicJITAvailable() const noexcept { return has_monolithic_jit_; }
-    [[nodiscard]] std::uintptr_t monolithicCellAddress() const noexcept { return monolithic_cell_addr_; }
     [[nodiscard]] bool isResolved() const noexcept { return resolved_; }
-    void setResolved() { resolved_ = true; maybeCompileMonolithic(); maybeCompilePairwise(); }
+    void setResolved() { resolved_ = true; }
 
     /// Tag so assembler can identify this kernel type.
     [[nodiscard]] bool isCoupledBlockKernel() const noexcept { return true; }
 
-    // ---- Pairwise trial-space fusion ----
-    struct TrialGroup {
-        std::vector<std::size_t> block_indices;  ///< Indices into blocks_
-        std::uintptr_t kernel_addr{0};           ///< JIT kernel for this group
-    };
-
-    [[nodiscard]] bool isPairwiseJITAvailable() const noexcept { return has_pairwise_jit_; }
-    [[nodiscard]] std::size_t numTrialGroups() const noexcept { return trial_groups_.size(); }
-    [[nodiscard]] const TrialGroup& trialGroup(std::size_t i) const { return trial_groups_[i]; }
-
 private:
-    void maybeCompileMonolithic();
-    void maybeCompilePairwise();
-
     std::vector<BlockSpec> blocks_;
     std::shared_ptr<jit::JITCompiler> compiler_;
     JITOptions options_;
 
     bool resolved_{false};
-    bool attempted_monolithic_{false};
-    bool has_monolithic_jit_{false};
-    std::uintptr_t monolithic_cell_addr_{0};
-    std::uintptr_t monolithic_batch_addr_{0};
-
-    bool attempted_pairwise_{false};
-    bool has_pairwise_jit_{false};
-    std::vector<TrialGroup> trial_groups_;
-
-    // Scratch for monolithic cell dispatch
-    mutable std::vector<assembly::jit::CoupledBlockView> scratch_block_views_;
-    mutable assembly::jit::CoupledCellKernelArgsV1 scratch_coupled_args_;
 };
 
 } // namespace forms

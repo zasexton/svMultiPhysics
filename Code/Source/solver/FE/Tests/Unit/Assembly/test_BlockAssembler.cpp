@@ -461,7 +461,6 @@ TEST_F(BlockAssemblerTest, FieldConfigDefaults)
     EXPECT_EQ(config.dof_map, nullptr);
     EXPECT_EQ(config.constraints, nullptr);
     EXPECT_EQ(config.components, 1);
-    EXPECT_FALSE(config.is_pressure_like);
 }
 
 TEST_F(BlockAssemblerTest, FieldConfigPopulation)
@@ -470,7 +469,6 @@ TEST_F(BlockAssemblerTest, FieldConfigPopulation)
     config.id = 0;
     config.name = "velocity";
     config.components = 3;
-    config.is_pressure_like = false;
 
     EXPECT_EQ(config.id, 0);
     EXPECT_EQ(config.name, "velocity");

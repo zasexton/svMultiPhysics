@@ -189,8 +189,7 @@ struct FieldConfig {
     const constraints::AffineConstraints* constraints{nullptr}; ///< Field constraints
 
     // Field properties
-    int components{1};                          ///< Number of components (e.g., 3 for velocity)
-    bool is_pressure_like{false};               ///< For special handling (e.g., no BCs at outflow)
+    int components{1};                          ///< Number of components
 };
 
 /**
@@ -205,7 +204,7 @@ struct BlockSystemConfig {
     void addField(FieldId id, const std::string& name,
                   const spaces::FunctionSpace& space,
                   const dofs::DofMap& dof_map) {
-        fields.push_back({id, name, &space, &dof_map, nullptr, 1, false});
+        fields.push_back({id, name, &space, &dof_map, nullptr, 1});
     }
 
     /**

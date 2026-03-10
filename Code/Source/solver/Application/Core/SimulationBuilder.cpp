@@ -201,6 +201,19 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
     }
   }
 
+  // Explicit saddle-point block names: env vars or programmatic SolverOptions.
+  // SVMP_MOMENTUM_BLOCK=<name> and SVMP_CONSTRAINT_BLOCK=<name> override the heuristic.
+  if (opts.method == svmp::FE::backends::SolverMethod::BlockSchur) {
+    if (opts.momentum_block_name.empty()) {
+      const char* env = std::getenv("SVMP_MOMENTUM_BLOCK");
+      if (env && env[0]) opts.momentum_block_name = env;
+    }
+    if (opts.constraint_block_name.empty()) {
+      const char* env = std::getenv("SVMP_CONSTRAINT_BLOCK");
+      if (env && env[0]) opts.constraint_block_name = env;
+    }
+  }
+
   // FSILS BlockSchur sub-solver knobs: pass GM/CG sub-solver controls through.
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS &&
       opts.method == svmp::FE::backends::SolverMethod::BlockSchur) {
@@ -576,14 +589,29 @@ void SimulationBuilder::createSolvers()
         offset += ncomp;
       }
 
-      // Auto-detect saddle-point structure for block solvers.
-      // Convention: first multi-component field = momentum, first single-component field = constraint.
+      // Identify saddle-point block pair for BlockSchur solver.
       if (solver_options.method == svmp::FE::backends::SolverMethod::BlockSchur) {
-        for (int bi = 0; bi < static_cast<int>(layout.blocks.size()); ++bi) {
-          if (!layout.momentum_block && layout.blocks[static_cast<std::size_t>(bi)].n_components > 1) {
-            layout.momentum_block = bi;
-          } else if (!layout.constraint_block && layout.blocks[static_cast<std::size_t>(bi)].n_components == 1) {
-            layout.constraint_block = bi;
+        // Prefer explicit block names from solver configuration.
+        if (!solver_options.momentum_block_name.empty() || !solver_options.constraint_block_name.empty()) {
+          for (int bi = 0; bi < static_cast<int>(layout.blocks.size()); ++bi) {
+            if (!layout.momentum_block && layout.blocks[static_cast<std::size_t>(bi)].name == solver_options.momentum_block_name) {
+              layout.momentum_block = bi;
+            }
+            if (!layout.constraint_block && layout.blocks[static_cast<std::size_t>(bi)].name == solver_options.constraint_block_name) {
+              layout.constraint_block = bi;
+            }
+          }
+        }
+
+        // Fall back to heuristic: first multi-component field = field-A (momentum),
+        // first single-component field = field-B (constraint).
+        if (!layout.momentum_block || !layout.constraint_block) {
+          for (int bi = 0; bi < static_cast<int>(layout.blocks.size()); ++bi) {
+            if (!layout.momentum_block && layout.blocks[static_cast<std::size_t>(bi)].n_components > 1) {
+              layout.momentum_block = bi;
+            } else if (!layout.constraint_block && layout.blocks[static_cast<std::size_t>(bi)].n_components == 1) {
+              layout.constraint_block = bi;
+            }
           }
         }
       }

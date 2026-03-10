@@ -398,7 +398,7 @@ public:
  * @brief Describes a single cell term for fused multi-term assembly
  *
  * When a multi-field system produces multiple cell terms (e.g., the 4 blocks
- * of a 2-field Navier-Stokes Jacobian), the assembler can fuse them into a
+ * of a 2-field saddle-point Jacobian), the assembler can fuse them into a
  * single cell loop, preparing shared geometry/field data once per cell.
  */
 struct FusedCellTerm {

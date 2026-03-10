@@ -2923,7 +2923,7 @@ std::shared_ptr<const quadrature::QuadratureRule> StandardAssembler::resolveQuad
     // that match the legacy solver behavior (4 QPs for Tet4, 3 for Tri3)
     // instead of the tensor-product Duffy transform (27 QPs for Tet4).
     // The position-based Gaussian rule gives degree-2 polynomial exactness,
-    // which is sufficient for all NS-VMS terms on affine P1 elements.
+    // which is sufficient for bilinear forms on affine P1 elements.
     const int basis_order = test_element.polynomial_order();
     if (basis_order <= 1 &&
         quadrature::QuadratureFactory::supports_position_based(cell_type)) {
@@ -3523,8 +3523,7 @@ void StandardAssembler::prepareBasis(
         n_qpts == cached_basis_n_qpts_ &&
         (!need_basis_hessians || cached_basis_has_hessians_) &&
         !need_basis_curls &&
-        !need_basis_divergences &&
-        !disable_basis_cache_) // DIAG: allow disabling fast path via SVMP_DISABLE_BASIS_CACHE
+        !need_basis_divergences)
     {
         // Configure context metadata first (sets trial_is_test_, n_test_dofs_,
         // n_trial_dofs_, etc. — required for batch contexts that were not
@@ -4338,8 +4337,6 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
     if (!initialized_) {
         initialize();
-        // Cache env var to avoid per-cell std::getenv overhead in prepareBasis
-        disable_basis_cache_ = (std::getenv("SVMP_DISABLE_BASIS_CACHE") != nullptr);
     }
     ensureCellDofTables(mesh);
 
@@ -4675,7 +4672,6 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     // use a block-sequential batch path that eliminates Phase 2 geometry restore.
     // ========================================================================
     const forms::CoupledBlockKernel* coupled_kernel = nullptr;
-    bool use_monolithic_flag = false;
     if (terms.size() == 1) {
         coupled_kernel = dynamic_cast<const forms::CoupledBlockKernel*>(terms[0].kernel);
     }
@@ -4698,12 +4694,6 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     // Coupled block batch range processor (replaces Phase 1 + Phase 2 with
     // a block-sequential loop: prepare geometry once, then for each block
     // prepare basis + gather + compute + insert without geometry save/restore).
-    //
-    // When monolithic JIT is available, all blocks are evaluated in a single
-    // JIT call with shared QP intermediates.  Basis data is copied into scratch
-    // buffers after each prepareBasis call (since prepareBasis overwrites the
-    // context's test/trial buffers), and the CoupledCellKernelBatchArgsV1 ABI
-    // struct is packed with pointers into these copies.
     auto assemble_coupled_batch_range = [&](std::span<const GlobalIndex> gids) {
         if (!coupled_kernel || !coupled_kernel->isResolved()) return;
         const auto& parent_term = terms[0];
@@ -4716,51 +4706,13 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             scratch_batch_dofs_.assign(n_blocks, std::vector<SlotDofs>(B));
         }
 
-        // Monolithic JIT: currently slower than per-block dispatch due to
-        // code bloat (no shared QP intermediates yet). Opt-in via env var.
-        const bool use_monolithic = coupled_kernel->isMonolithicJITAvailable()
-            && std::getenv("SVMP_USE_MONOLITHIC");
-        use_monolithic_flag = use_monolithic;
-        const auto monolithic_addr = use_monolithic ? coupled_kernel->monolithicCellAddress() : 0;
-
-        // Pairwise JIT: trial-space-grouped kernels (each handles 2 blocks
-        // with shared QP intermediates). Half the IR of full monolithic.
-        const bool use_pairwise = !use_monolithic
-            && coupled_kernel->isPairwiseJITAvailable()
-            && std::getenv("SVMP_USE_PAIRWISE")
-            && !std::getenv("SVMP_FORCE_FALLBACK");
-
-        // --- Scratch for monolithic JIT dispatch ---
-        // Per-block, per-slot basis data snapshots.  prepareBasis overwrites ctx
-        // buffers, so we copy out the basis arrays before the next block overwrites.
-        struct BasisSnapshot {
-            std::vector<Real> test_vals;
-            std::vector<Real> test_grads;
-            std::vector<Real> test_hessians;   // flattened [n_test_dofs * n_qpts * 9]
-            std::vector<Real> trial_vals;
-            std::vector<Real> trial_grads;
-            std::vector<Real> trial_hessians;  // flattened [n_trial_dofs * n_qpts * 9]
-            std::vector<Real> sol_coeffs;
-            // Previous solution coefficients (for time derivatives)
-            std::uint32_t num_prev_sols{0};
-            std::array<std::vector<Real>, assembly::jit::kMaxPreviousSolutionsV6> prev_sol_coeffs;
-        };
-        const std::size_t total_bv = n_blocks * B;
-        std::vector<BasisSnapshot> basis_snaps;
-        if (use_monolithic || use_pairwise) {
-            scratch_coupled_block_views_.resize(total_bv);
-            scratch_coupled_cell_args_.resize(B);
-            scratch_coupled_block_outputs_.resize(total_bv);
-            basis_snaps.resize(total_bv);
-        }
-
-        // Both coupled monolithic and standard paths use full batch size B.
+        // Full batch size B for all paths.
         const std::size_t B_eff = B;
 
         // --- Compute trial space groups (once per assembly call) ---
         // trial_group_of[bi] = group index for block bi.
         // Blocks share a group iff col_dof_map ptr AND col_dof_offset match.
-        // For NS-VMS 2D: VV+PV share velocity trial, VP+PP share pressure trial.
+        // E.g., in a 2-field system: blocks with the same trial field share a group.
         struct TrialGroupSlotCache {
             std::span<const GlobalIndex> col_dofs{};
             std::vector<Real> sol_coeffs;
@@ -4809,7 +4761,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         int fused_n_nodes = 0;
         std::vector<FusedInsertInfo> fused_info(n_blocks);
 
-        if (parent_term.assemble_matrix && n_blocks >= 2 && !use_monolithic) {
+        if (parent_term.assemble_matrix && n_blocks >= 2) {
             // Check all blocks are active
             bool all_active = true;
             for (std::size_t bi = 0; bi < n_blocks; ++bi) {
@@ -4904,7 +4856,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         // When true, skip the expensive QP solution value/gradient computation in
         // setSolutionCoefficients — the JIT kernel reads raw coefficients directly.
         bool use_coeffs_only = false;
-        if (coupled_kernel && !use_monolithic_flag) {
+        if (coupled_kernel) {
             use_coeffs_only = true;
             for (std::size_t bi = 0; bi < n_blocks; ++bi) {
                 auto* jit = dynamic_cast<forms::jit::JITKernelWrapper*>(
@@ -5103,26 +5055,38 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         }
                     }
 
-                    // Build qpt-major basis values for each unique DOF count.
-                    // Velocity (ProductSpace dim=3): n_dofs = 3*n_scalar, values replicated.
-                    // Pressure (scalar): n_dofs = n_scalar, values direct.
-                    coupled_pres_n_dofs_ = coupled_n_scalar;
-                    coupled_pres_qpt_values_.resize(nq * ns);
-                    for (std::size_t q = 0; q < nq; ++q)
-                        for (std::size_t si = 0; si < ns; ++si)
-                            coupled_pres_qpt_values_[q * ns + si] =
-                                coupled_scalar_basis_values_[q * ns + si];
+                    // Build qpt-major basis value caches for each unique DOF count
+                    // across all coupled blocks. Scalar basis values are replicated
+                    // for ProductSpace fields (e.g., 3-component velocity = 3*scalar DOFs).
+                    coupled_space_qpt_caches_.clear();
+                    {
+                        // Collect unique DOF counts from all coupled blocks.
+                        std::vector<LocalIndex> unique_dof_counts;
+                        for (std::size_t bi = 0; bi < n_blocks; ++bi) {
+                            const auto& bs = coupled_kernel->blockSpec(bi);
+                            const auto td = static_cast<LocalIndex>(bs.test_space->dofs_per_element());
+                            bool found = false;
+                            for (auto d : unique_dof_counts) { if (d == td) { found = true; break; } }
+                            if (!found) unique_dof_counts.push_back(td);
+                            if (bs.trial_space && bs.trial_space != bs.test_space) {
+                                const auto trd = static_cast<LocalIndex>(bs.trial_space->dofs_per_element());
+                                found = false;
+                                for (auto d : unique_dof_counts) { if (d == trd) { found = true; break; } }
+                                if (!found) unique_dof_counts.push_back(trd);
+                            }
+                        }
 
-                    // Detect the ProductSpace DOF count (assumes first block has max DOFs)
-                    const auto vel_dofs = static_cast<std::size_t>(
-                        first_bs.test_space->dofs_per_element());
-                    if (vel_dofs > ns) {
-                        coupled_vel_n_dofs_ = static_cast<LocalIndex>(vel_dofs);
-                        coupled_vel_qpt_values_.resize(nq * vel_dofs);
-                        for (std::size_t q = 0; q < nq; ++q)
-                            for (std::size_t i = 0; i < vel_dofs; ++i)
-                                coupled_vel_qpt_values_[q * vel_dofs + i] =
-                                    coupled_scalar_basis_values_[q * ns + (i % ns)];
+                        for (const auto n_dofs : unique_dof_counts) {
+                            const auto nd = static_cast<std::size_t>(n_dofs);
+                            CoupledSpaceQptCache cache;
+                            cache.n_dofs = n_dofs;
+                            cache.qpt_values.resize(nq * nd);
+                            for (std::size_t q = 0; q < nq; ++q)
+                                for (std::size_t i = 0; i < nd; ++i)
+                                    cache.qpt_values[q * nd + i] =
+                                        coupled_scalar_basis_values_[q * ns + (i % ns)];
+                            coupled_space_qpt_caches_.push_back(std::move(cache));
+                        }
                     }
 
                     coupled_scalar_n_dofs_ = coupled_n_scalar;
@@ -5162,8 +5126,6 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             use_batch_basis_early &&
             max_omp_threads > 1 &&
             gids.size() >= 256 &&
-            !use_monolithic &&
-            !use_pairwise &&
             !std::getenv("SVMP_NO_COLORED_PARALLEL");
 
         if (use_colored_parallel) {
@@ -5399,23 +5361,13 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                 }
                             }
 
-                            // Basis values from pre-built qpt-major cache
-                            if (n_test == coupled_vel_n_dofs_ &&
-                                !coupled_vel_qpt_values_.empty()) {
-                                thread_ctx.setTestBasisValuesOnlyQptMajor(
-                                    n_test, coupled_vel_qpt_values_);
-                            } else {
-                                thread_ctx.setTestBasisValuesOnlyQptMajor(
-                                    n_test, coupled_pres_qpt_values_);
+                            // Basis values from pre-built qpt-major cache (generic N-space lookup)
+                            if (const auto* tc = findCoupledQptCache(n_test)) {
+                                thread_ctx.setTestBasisValuesOnlyQptMajor(n_test, *tc);
                             }
                             if (!same_sp) {
-                                if (n_trial == coupled_vel_n_dofs_ &&
-                                    !coupled_vel_qpt_values_.empty()) {
-                                    thread_ctx.setTrialBasisValuesOnlyQptMajor(
-                                        n_trial, coupled_vel_qpt_values_);
-                                } else {
-                                    thread_ctx.setTrialBasisValuesOnlyQptMajor(
-                                        n_trial, coupled_pres_qpt_values_);
+                                if (const auto* trc = findCoupledQptCache(n_trial)) {
+                                    thread_ctx.setTrialBasisValuesOnlyQptMajor(n_trial, *trc);
                                 }
                             }
 
@@ -5636,10 +5588,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             const std::size_t active = std::min(B_eff, gids.size() - begin);
 
             // Reset trial group gathered flags for this batch
-            if (!use_monolithic) {
-                for (std::size_t gi = 0; gi < n_tg * B_eff; ++gi)
-                    tg_cache[gi].gathered = false;
-            }
+            for (std::size_t gi = 0; gi < n_tg * B_eff; ++gi)
+                tg_cache[gi].gathered = false;
 
             // Zero-initialize fused combined matrices/vectors for this batch
             if (use_fused_insert) {
@@ -5767,297 +5717,6 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 }
             }
 
-            // For residual-only assemblies (mat=0, vec=1), the monolithic/pairwise
-            // JIT kernels may produce NaN because the codegen always computes both
-            // matrix and vector.  Fall through to per-block for vec-only assemblies.
-            const bool use_coupled_jit =
-                (use_monolithic || use_pairwise) && parent_term.assemble_matrix;
-
-            if (use_coupled_jit) {
-                // =============================================================
-                // MONOLITHIC / PAIRWISE JIT PATH: prepare all blocks for all
-                // slots, then call kernels for the whole batch.
-                // =============================================================
-
-                // Phase A: For each slot, prepare all blocks' data.
-                for (std::size_t slot = 0; slot < active; ++slot) {
-                    const auto cell_id = gids[begin + slot];
-                    auto& ctx = batch_contexts[slot];
-
-                    for (std::size_t bi = 0; bi < n_blocks; ++bi) {
-                        const auto& bs = coupled_kernel->blockSpec(bi);
-                        const std::size_t flat = slot * n_blocks + bi;
-
-                        double tp0 = TP();
-                        // Restore cached entity measures for this slot.
-                        // For affine elements, the prepareBasis fast path uses
-                        // these cached values and never accesses mapping nodes,
-                        // so we can skip the expensive coordinate restore + resetNodes.
-                        cached_geom_h_ = saved_node_coords[slot].entity_h;
-                        cached_geom_volume_ = saved_node_coords[slot].entity_volume;
-                        if (!cached_mapping_affine_) {
-                            scratch_node_coords_ = saved_node_coords[slot].node_coords;
-                            cached_mapping_->resetNodes(scratch_node_coords_);
-                        }
-                        tp_fb_restore += TP() - tp0;
-
-                        tp0 = TP();
-                        active_coupled_block_meta_ = &cached_coupled_block_meta_[bi];
-                        prepareBasis(ctx, mesh, cell_id, *bs.test_space, *bs.trial_space,
-                                     bs.fallback_kernel->getRequiredData(), *fused_quad_rule);
-                        tp_fb_basis += TP() - tp0;
-
-                        if (bi == 0 && any_need_field_solutions) {
-                            tp0 = TP();
-                            populateFieldSolutionData(ctx, mesh, cell_id, union_field_reqs);
-                            tp_fb_field += TP() - tp0;
-                        }
-
-                        // DOF lookup
-                        tp0 = TP();
-                        {
-                            auto& rd = batch_dofs[bi][slot].row_dofs;
-                            auto& cd = batch_dofs[bi][slot].col_dofs;
-                            rd = getCellDofsCached(mesh, cell_id, bs.row_dof_map, bs.row_dof_offset);
-                            cd = getCellDofsCached(mesh, cell_id, bs.col_dof_map, bs.col_dof_offset);
-                        }
-                        tp_fb_dof += TP() - tp0;
-
-	                        // Solution gather
-	                        tp0 = TP();
-	                        auto& snap = basis_snaps[flat];
-	                        if (parent_td.need_solution) {
-	                            const auto& cd = batch_dofs[bi][slot].col_dofs;
-	                            auto& sol = snap.sol_coeffs;
-                                gatherCellVectorCoefficients(cell_id, bs.col_dof_map,
-                                                             bs.col_dof_offset,
-                                                             std::span<const GlobalIndex>(cd),
-                                                             current_solution_view_,
-                                                             current_solution_, sol,
-                                                             "assembleCellsFused", false);
-	                            if (ctx.trialUsesVectorBasis())
-	                                applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
-	                                                              std::span<Real>(sol));
-                            ctx.setSolutionCoefficients(std::span<const Real>(sol));
-
-                            // Previous solution coefficients for time integration
-                            if (time_integration_ != nullptr) {
-                                const int required = requiredHistoryStates(time_integration_);
-                                if (required > 0) {
-                                    auto& psc = batch_prev_sol_coeffs[slot];
-                                    if (psc.size() < static_cast<std::size_t>(required))
-                                        psc.resize(static_cast<std::size_t>(required));
-                                    for (int k = 1; k <= required; ++k) {
-                                        const auto& pdata = previous_solutions_[static_cast<std::size_t>(k - 1)];
-	                                        const auto* pview = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
-	                                                                ? previous_solution_views_[static_cast<std::size_t>(k - 1)] : nullptr;
-	                                        auto& lp = psc[static_cast<std::size_t>(k - 1)];
-                                            gatherCellVectorCoefficients(cell_id, bs.col_dof_map,
-                                                                         bs.col_dof_offset,
-                                                                         std::span<const GlobalIndex>(cd),
-                                                                         pview, pdata, lp,
-                                                                         "assembleCellsFused", false);
-	                                        if (ctx.trialUsesVectorBasis())
-	                                            applyVectorBasisGlobalToLocal(mesh, cell_id, *bs.trial_space,
-	                                                                          std::span<Real>(lp));
-                                        ctx.setPreviousSolutionCoefficientsK(k, lp);
-                                    }
-                                }
-                            }
-                        }
-                        tp_fb_sol += TP() - tp0;
-
-                        // Copy basis data from ctx into persistent snapshot
-                        // (prepareBasis for the next block will overwrite ctx)
-                        // Vector3D = std::array<Real,3> and Matrix3x3 = std::array<std::array<Real,3>,3>
-                        // are contiguous in memory, so use memcpy for bulk copies.
-                        tp0 = TP();
-                        {
-                            auto tv = ctx.testBasisValuesRaw();
-                            snap.test_vals.assign(tv.begin(), tv.end());
-
-                            auto tg = ctx.testPhysicalGradientsRaw();
-                            snap.test_grads.resize(tg.size() * 3);
-                            if (!tg.empty())
-                                std::memcpy(snap.test_grads.data(), tg.data(), tg.size() * sizeof(AssemblyContext::Vector3D));
-
-                            auto rv = ctx.trialBasisValuesRaw();
-                            snap.trial_vals.assign(rv.begin(), rv.end());
-
-                            auto rg = ctx.trialPhysicalGradientsRaw();
-                            snap.trial_grads.resize(rg.size() * 3);
-                            if (!rg.empty())
-                                std::memcpy(snap.trial_grads.data(), rg.data(), rg.size() * sizeof(AssemblyContext::Vector3D));
-
-                            // Copy hessians (needed for stabilization terms with divSymGrad)
-                            auto th = ctx.testPhysicalHessiansRaw();
-                            snap.test_hessians.resize(th.size() * 9);
-                            if (!th.empty())
-                                std::memcpy(snap.test_hessians.data(), th.data(), th.size() * sizeof(AssemblyContext::Matrix3x3));
-
-                            auto rh = ctx.trialPhysicalHessiansRaw();
-                            snap.trial_hessians.resize(rh.size() * 9);
-                            if (!rh.empty())
-                                std::memcpy(snap.trial_hessians.data(), rh.data(), rh.size() * sizeof(AssemblyContext::Matrix3x3));
-                        }
-
-                        // Prepare output buffer
-                        auto& out = scratch_coupled_block_outputs_[flat];
-                        out.reserve(ctx.numTestDofs(), ctx.numTrialDofs(),
-                                    bs.want_matrix, bs.want_vector);
-                        out.clear();
-
-                        // Build CoupledBlockView from copied data
-                        auto& bv = scratch_coupled_block_views_[flat];
-                        bv.test_basis_values = snap.test_vals.empty() ? nullptr : snap.test_vals.data();
-                        bv.test_phys_gradients_xyz = snap.test_grads.empty() ? nullptr : snap.test_grads.data();
-                        bv.test_phys_hessians = snap.test_hessians.empty() ? nullptr : snap.test_hessians.data();
-                        bv.trial_basis_values = snap.trial_vals.empty() ? nullptr : snap.trial_vals.data();
-                        bv.trial_phys_gradients_xyz = snap.trial_grads.empty() ? nullptr : snap.trial_grads.data();
-                        bv.trial_phys_hessians = snap.trial_hessians.empty() ? nullptr : snap.trial_hessians.data();
-                        bv.n_test_dofs = static_cast<std::uint32_t>(ctx.numTestDofs());
-                        bv.n_trial_dofs = static_cast<std::uint32_t>(ctx.numTrialDofs());
-                        bv.test_value_dim = static_cast<std::uint32_t>(ctx.testValueDimension());
-                        bv.trial_value_dim = static_cast<std::uint32_t>(ctx.trialValueDimension());
-                        bv.test_uses_vector_basis = ctx.testUsesVectorBasis() ? 1u : 0u;
-                        bv.trial_uses_vector_basis = ctx.trialUsesVectorBasis() ? 1u : 0u;
-                        bv.solution_coefficients = snap.sol_coeffs.empty() ? nullptr : snap.sol_coeffs.data();
-
-                        // Copy previous solution coefficients for time-derivative terms
-                        {
-                            const auto nps = ctx.previousSolutionHistoryCount();
-                            snap.num_prev_sols = static_cast<std::uint32_t>(
-                                std::min(nps, assembly::jit::kMaxPreviousSolutionsV6));
-                            bv.num_previous_solutions = snap.num_prev_sols;
-                            bv.previous_solution_coefficients = {};
-                            for (std::size_t k = 0; k < snap.num_prev_sols; ++k) {
-                                auto psc = ctx.previousSolutionCoefficientsRaw(static_cast<int>(k + 1));
-                                snap.prev_sol_coeffs[k].assign(psc.begin(), psc.end());
-                                bv.previous_solution_coefficients[k] =
-                                    snap.prev_sol_coeffs[k].empty() ? nullptr : snap.prev_sol_coeffs[k].data();
-                            }
-                        }
-
-                        bv.element_matrix = out.local_matrix.empty() ? nullptr : out.local_matrix.data();
-                        bv.element_vector = out.local_vector.empty() ? nullptr : out.local_vector.data();
-
-                        tp_fb_snap += TP() - tp0;
-                    }
-                    active_coupled_block_meta_ = nullptr;
-
-                    // Pack CoupledCellKernelArgsV1 for this slot
-                    double tp0 = TP();
-                    auto blk_span = std::span<const assembly::jit::CoupledBlockView>(
-                        &scratch_coupled_block_views_[slot * n_blocks], n_blocks);
-                    scratch_coupled_cell_args_[slot] =
-                        assembly::jit::packCoupledCellKernelArgsV1(ctx, blk_span);
-                    tp_fb_snap += TP() - tp0;
-                }
-
-                // Phase B: Call JIT kernel(s) for entire batch.
-                double tp0 = TP();
-                if (use_monolithic) {
-                    // Single monolithic kernel for all blocks.
-                    assembly::jit::CoupledCellKernelBatchArgsV1 batch_args;
-                    batch_args.abi_version = assembly::jit::kCoupledCellKernelABIV1;
-                    batch_args.batch_size = static_cast<std::uint32_t>(active);
-                    batch_args.num_blocks = static_cast<std::uint32_t>(n_blocks);
-                    batch_args.elements = scratch_coupled_cell_args_.data();
-
-                    auto fn = reinterpret_cast<void(*)(void*)>(monolithic_addr);
-                    fn(&batch_args);
-                } else {
-                    // Pairwise: call one kernel per trial group.
-                    // Each group kernel expects CoupledBlockView indices [0..group_size-1].
-                    // We repack per-slot block views for each group.
-                    const auto n_groups = coupled_kernel->numTrialGroups();
-                    std::vector<assembly::jit::CoupledBlockView> pair_views;
-                    std::vector<assembly::jit::CoupledCellKernelArgsV1> pair_cell_args(active);
-
-                    for (std::size_t gi = 0; gi < n_groups; ++gi) {
-                        const auto& grp = coupled_kernel->trialGroup(gi);
-                        const auto grp_sz = grp.block_indices.size();
-
-                        // Repack block views: for each slot, extract only this group's blocks.
-                        pair_views.resize(active * grp_sz);
-                        for (std::size_t slot = 0; slot < active; ++slot) {
-                            for (std::size_t li = 0; li < grp_sz; ++li) {
-                                const auto bi = grp.block_indices[li];
-                                const std::size_t src_flat = slot * n_blocks + bi;
-                                const std::size_t dst_flat = slot * grp_sz + li;
-                                pair_views[dst_flat] = scratch_coupled_block_views_[src_flat];
-                            }
-                            // Repack CoupledCellKernelArgsV1 with group's block views.
-                            pair_cell_args[slot] = scratch_coupled_cell_args_[slot];
-                            pair_cell_args[slot].num_blocks = static_cast<std::uint32_t>(grp_sz);
-                            pair_cell_args[slot].blocks = &pair_views[slot * grp_sz];
-                        }
-
-                        assembly::jit::CoupledCellKernelBatchArgsV1 batch_args;
-                        batch_args.abi_version = assembly::jit::kCoupledCellKernelABIV1;
-                        batch_args.batch_size = static_cast<std::uint32_t>(active);
-                        batch_args.num_blocks = static_cast<std::uint32_t>(grp_sz);
-                        batch_args.elements = pair_cell_args.data();
-
-                        auto fn = reinterpret_cast<void(*)(void*)>(grp.kernel_addr);
-                        fn(&batch_args);
-                    }
-                }
-                tp_fb_kernel += TP() - tp0;
-
-                // Phase C: Insert all block outputs.
-                tp0 = TP();
-                for (std::size_t slot = 0; slot < active; ++slot) {
-                    const auto cid = gids[begin + slot];
-                    for (std::size_t bi = 0; bi < n_blocks; ++bi) {
-                        const auto& bs = coupled_kernel->blockSpec(bi);
-                        const bool block_want_matrix = parent_term.assemble_matrix && bs.want_matrix;
-                        const bool block_want_vector = parent_term.assemble_vector && bs.want_vector;
-                        if (!block_want_matrix && !block_want_vector) continue;
-
-                        const std::size_t flat = slot * n_blocks + bi;
-                        auto& output = scratch_coupled_block_outputs_[flat];
-                        output.has_matrix = block_want_matrix && !output.local_matrix.empty();
-                        output.has_vector = block_want_vector && !output.local_vector.empty();
-
-                        // (diagnostics removed)
-
-                        const auto& rd = batch_dofs[bi][slot].row_dofs;
-                        const auto& cd = batch_dofs[bi][slot].col_dofs;
-                        GlobalSystemView* ins_mat = block_want_matrix ? parent_term.matrix_view : nullptr;
-                        GlobalSystemView* ins_vec = block_want_vector ? parent_term.vector_view : nullptr;
-                        if (options_.use_constraints && constraint_distributor_) {
-                            insertLocalConstrained(output, rd, cd, ins_mat, ins_vec);
-                        } else if (use_resolved_insert && block_want_matrix) {
-                            const auto resolved = getResolvedCellMatrixEntries(
-                                cid, bs.row_dof_map, bs.row_dof_offset,
-                                bs.col_dof_map, bs.col_dof_offset,
-                                parent_term.matrix_view);
-                            insertLocal(output, rd, cd, ins_mat, ins_vec, resolved);
-                        } else {
-                            insertLocal(output, rd, cd, ins_mat, ins_vec);
-                        }
-                        result.elements_assembled++;
-                        if (output.has_matrix)
-                            result.matrix_entries_inserted += static_cast<GlobalIndex>(rd.size() * cd.size());
-                        if (output.has_vector)
-                            result.vector_entries_inserted += static_cast<GlobalIndex>(rd.size());
-                    }
-                }
-                tp_fb_insert += TP() - tp0;
-
-            } else {
-                // =============================================================
-                // PER-BLOCK FALLBACK PATH: process blocks sequentially.
-                //
-                // Trial-space grouping: blocks sharing the same col_dof_map
-                // and col_dof_offset have identical column DOFs and solution
-                // coefficients.  We gather once per trial group per slot and
-                // reuse for subsequent blocks in the same group.
-                //
-                // trial_group_of[] and tg_cache[] are computed/allocated once
-                // above the batch loop; gathered flags are reset per batch.
-                // =============================================================
 
                 for (std::size_t bi = 0; bi < n_blocks; ++bi) {
                     const auto& bs = coupled_kernel->blockSpec(bi);
@@ -6183,23 +5842,13 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                 }
                             }
 
-                            // Basis values from pre-built qpt-major cache
-                            if (n_test == coupled_vel_n_dofs_ &&
-                                !coupled_vel_qpt_values_.empty()) {
-                                ctx.setTestBasisValuesOnlyQptMajor(
-                                    n_test, coupled_vel_qpt_values_);
-                            } else {
-                                ctx.setTestBasisValuesOnlyQptMajor(
-                                    n_test, coupled_pres_qpt_values_);
+                            // Basis values from pre-built qpt-major cache (generic N-space lookup)
+                            if (const auto* tc = findCoupledQptCache(n_test)) {
+                                ctx.setTestBasisValuesOnlyQptMajor(n_test, *tc);
                             }
                             if (!same_sp) {
-                                if (n_trial == coupled_vel_n_dofs_ &&
-                                    !coupled_vel_qpt_values_.empty()) {
-                                    ctx.setTrialBasisValuesOnlyQptMajor(
-                                        n_trial, coupled_vel_qpt_values_);
-                                } else {
-                                    ctx.setTrialBasisValuesOnlyQptMajor(
-                                        n_trial, coupled_pres_qpt_values_);
+                                if (const auto* trc = findCoupledQptCache(n_trial)) {
+                                    ctx.setTrialBasisValuesOnlyQptMajor(n_trial, *trc);
                                 }
                             }
 
@@ -6511,7 +6160,6 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     }
                     tp_fb_insert += TP() - tp0;
                 }
-            }
         }
         } // end serial batch else-branch
     };
@@ -6742,7 +6390,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     "      insert:          %9.6f s  (%5.1f%%)\n"
                     "    ------------------------------------\n",
                     cell_ids.size(), terms.size(), requested_batch_size,
-                    coupled_kernel ? (use_monolithic_flag ? " MONOLITHIC" : " COUPLED-FB") : "",
+                    coupled_kernel ? " COUPLED" : "",
                     total,
                     tp_fb_geom, 100.0 * tp_fb_geom / total,
                     tp_fb_save, 100.0 * tp_fb_save / total,

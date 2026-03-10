@@ -543,8 +543,7 @@ CoupledResidualKernels installCoupledResidual(
     // so that assembleCellsFused can share geometry across blocks.
     // ========================================================================
     if (options.coupled_residual_install_jacobian_blocks &&
-        options.compiler_options.jit.enable &&
-        !std::getenv("SVMP_NO_COUPLED_KERNEL"))
+        options.compiler_options.jit.enable)
     {
         std::vector<forms::CoupledBlockKernel::BlockSpec> block_specs;
         for (std::size_t i = 0; i < out.jacobian_blocks.size(); ++i) {

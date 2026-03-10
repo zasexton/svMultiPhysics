@@ -114,6 +114,12 @@ struct SolverOptions {
     /// Populated from FieldDofMap metadata; used by block-aware solvers (BlockSchur, FieldSplit).
     std::optional<BlockLayout> block_layout{};
 
+    /// Explicit saddle-point block names (optional). If set, used to identify momentum/constraint
+    /// blocks by name instead of the auto-detection heuristic (first multi-component = momentum,
+    /// first single-component = constraint). Set from solver XML configuration.
+    std::string momentum_block_name{};    ///< e.g., "velocity" or "displacement"
+    std::string constraint_block_name{};  ///< e.g., "pressure"
+
     // Backend-specific pass-through (optional).
     // PETSc: used with KSPSetOptionsPrefix()/KSPSetFromOptions().
     // Example (CLI): -my_solver_ksp_type gmres

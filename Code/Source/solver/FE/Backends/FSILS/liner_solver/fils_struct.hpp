@@ -270,10 +270,6 @@ class FSILS_subLsType
     /// Calling duration            (OUT)
     double callD;
 
-    /// Enable communication-hiding pipelined GMRES when using the GMRES solver.
-    /// This is set by the new OOP solver when `<LS type="KSPPGMRES">` is selected.
-    bool pipelined_gmres = false;
-
     /// Pre-allocated workspace arrays for iterative solvers.
     /// These are lazily resized on first use and reused on subsequent calls
     /// when the dimensions (nNo, dof, sD) remain unchanged.
@@ -282,8 +278,6 @@ class FSILS_subLsType
       Array<double> h;
       Array3<double> u3;        ///< Krylov basis for vector GMRES
       Array<double> u2;         ///< Krylov basis for scalar GMRES
-      Array3<double> z3;        ///< Pipelined GMRES auxiliary basis (A*U) for vector problems
-      Array<double> z2;         ///< Pipelined GMRES auxiliary basis (A*U) for scalar problems
       Array<double> X2, unCondU; ///< vector GMRES solution & precond workspace
       Vector<double> Xs;        ///< scalar GMRES solution
       Vector<double> y, c, s, err;
@@ -291,8 +285,6 @@ class FSILS_subLsType
       // GMRES scratch (avoid per-call allocations).
       std::vector<double> h_col;
       std::vector<double> dot_thread;
-      int pipe_v_nNo = 0, pipe_v_dof = 0, pipe_v_sD = 0;
-      int pipe_s_nNo = 0, pipe_s_sD = 0;
 
       // Recycled/deflation subspace for GMRES (vector version).
       // Stores U (correction space) and C = A*U (orthonormal columns) for
@@ -340,27 +332,6 @@ class FSILS_subLsType
         y.resize(sD_); c.resize(sD_); s.resize(sD_); err.resize(sD_+1);
         h_col.resize(sD_+2);
         dof = -1; nNo = nNo_; sD_alloc = sD_;
-      }
-
-      void ensure_gmres_pipe_v(int dof_, int nNo_, int sD_) {
-        ensure_gmres_v(dof_, nNo_, sD_);
-        if (pipe_v_dof == dof_ && pipe_v_nNo == nNo_ && pipe_v_sD == sD_) {
-          return;
-        }
-        z3.resize(dof_, nNo_, sD_+1);
-        pipe_v_dof = dof_;
-        pipe_v_nNo = nNo_;
-        pipe_v_sD = sD_;
-      }
-
-      void ensure_gmres_pipe_s(int nNo_, int sD_) {
-        ensure_gmres_s(nNo_, sD_);
-        if (pipe_s_nNo == nNo_ && pipe_s_sD == sD_) {
-          return;
-        }
-        z2.resize(nNo_, sD_+1);
-        pipe_s_nNo = nNo_;
-        pipe_s_sD = sD_;
       }
 
       void ensure_recycle_v(int dof_, int nNo_, int k_) {
@@ -454,6 +425,15 @@ class FSILS_lsType
     FSILS_subLsType GM;
     FSILS_subLsType CG;
     FSILS_subLsType RI;
+
+    /// Block layout for fractional-step (BlockSchur) solver.
+    /// Populated by the FE backend before calling fsils_solve.
+    /// When mom_ncomp > 0, the block solver uses these indices instead of the
+    /// legacy assumption nsd = dof - 1 (momentum = first dof-1, constraint = last).
+    int mom_start{0};    ///< First per-node component of field-A (momentum) block
+    int mom_ncomp{0};    ///< Number of field-A components (0 = use legacy nsd = dof-1)
+    int con_start{0};    ///< First per-node component of field-B (constraint) block
+    int con_ncomp{0};    ///< Number of field-B components (typically 1)
 };
 
 
