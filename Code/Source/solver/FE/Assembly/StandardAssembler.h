@@ -412,6 +412,46 @@ private:
         std::span<const GlobalIndex> col_dofs{};
     };
 
+    /**
+     * @brief Per-thread mutable state for prepareGeometry in colored parallel assembly.
+     *
+     * When passed to prepareGeometry, the function uses these fields instead of
+     * member variables, making it safe for concurrent calls from multiple threads.
+     */
+    struct GeometryWorkspace {
+        std::vector<std::array<Real, 3>> cell_coords;
+        std::vector<math::Vector<Real, 3>> node_coords;
+        std::shared_ptr<geometry::GeometryMapping> mapping;
+        ElementType mapping_type{ElementType::Unknown};
+        int mapping_order{-1};
+        bool mapping_affine{false};
+        Real geom_h{0.0};
+        Real geom_volume{0.0};
+        const basis::BasisCacheEntry* geom_bcache{nullptr};
+    };
+
+    /**
+     * @brief Per-thread mutable scratch for populateFieldSolutionData in colored
+     *        parallel assembly.
+     */
+    struct FieldSolutionWorkspace {
+        std::vector<Real> scalar_values_at_pt;
+        std::vector<basis::Gradient> scalar_gradients_at_pt;
+        std::vector<basis::Hessian> scalar_hessians_at_pt;
+        std::vector<Real> field_local_coeffs;
+        std::vector<Real> fsd_scalar_values;
+        std::vector<AssemblyContext::Vector3D> fsd_scalar_gradients;
+        std::vector<AssemblyContext::Matrix3x3> fsd_scalar_hessians;
+        std::vector<Real> fsd_scalar_laplacians;
+        std::vector<AssemblyContext::Vector3D> fsd_vector_values;
+        std::vector<AssemblyContext::Matrix3x3> fsd_vector_jacobians;
+        std::vector<AssemblyContext::Matrix3x3> fsd_vector_comp_hessians;
+        std::vector<Real> fsd_vector_comp_laplacians;
+        std::vector<math::Vector<Real, 3>> vec_values_at_pt;
+        std::vector<math::Vector<Real, 3>> vec_curls_at_pt;
+        std::vector<Real> vec_divs_at_pt;
+    };
+
     // =========================================================================
     // Internal Implementation
     // =========================================================================
@@ -471,6 +511,20 @@ private:
         const quadrature::QuadratureRule& quad_rule);
 
     /**
+     * @brief Thread-safe variant of prepareGeometry using explicit workspace.
+     *
+     * When ws is non-null, all mutable state (cell_coords, node_coords,
+     * mapping, geom_h, geom_volume) is read/written through the workspace
+     * instead of member variables.
+     */
+    void prepareGeometry(
+        AssemblyContext& context,
+        const IMeshAccess& mesh,
+        GlobalIndex cell_id,
+        const quadrature::QuadratureRule& quad_rule,
+        GeometryWorkspace& ws);
+
+    /**
      * @brief Prepare basis data and configure context for test/trial spaces
      *
      * Evaluates test/trial basis functions at QPs, transforms gradients using
@@ -516,6 +570,16 @@ private:
         const std::vector<FieldRequirement>& requirements);
 
     /**
+     * @brief Thread-safe variant using explicit field solution workspace.
+     */
+    void populateFieldSolutionData(
+        AssemblyContext& context,
+        const IMeshAccess& mesh,
+        GlobalIndex cell_id,
+        const std::vector<FieldRequirement>& requirements,
+        FieldSolutionWorkspace& ws);
+
+    /**
      * @brief Insert local contributions into global system
      */
     void insertLocal(
@@ -524,7 +588,8 @@ private:
         std::span<const GlobalIndex> col_dofs,
         GlobalSystemView* matrix_view,
         GlobalSystemView* vector_view,
-        std::span<const GlobalIndex> resolved_matrix_entries = {});
+        std::span<const GlobalIndex> resolved_matrix_entries = {},
+        std::span<const GlobalIndex> resolved_vector_entries = {});
 
     /**
      * @brief Insert with constraint distribution
@@ -902,6 +967,44 @@ private:
     // for the interleaved combined DOF list of that cell.
     std::vector<GlobalIndex> scratch_fused_resolved_;
     std::vector<GlobalIndex> scratch_fused_resolved_offsets_;
+
+    // Graph coloring for parallel assembly (computed once, persists across Newton iterations)
+    void ensureColoring(const IMeshAccess& mesh);
+    std::vector<int> coloring_colors_;                        // color per element
+    std::vector<std::vector<GlobalIndex>> coloring_cells_by_color_; // cells grouped by color
+    int coloring_num_colors_{0};
+    bool coloring_valid_{false};
+    const IMeshAccess* coloring_mesh_{nullptr};
+
+    // Coupled scalar basis cache: caches the n_scalar_dofs reference
+    // gradients/hessians (e.g. 4 for P1 Tet4) so that block transitions
+    // in the coupled loop don't trigger full slow-path BasisCache re-evaluation.
+    // The scalar ref data is the same for all blocks sharing the same element basis.
+    bool coupled_scalar_ref_valid_{false};
+    LocalIndex coupled_scalar_n_dofs_{0};
+    LocalIndex coupled_scalar_n_qpts_{0};
+    bool coupled_scalar_has_hessians_{false};
+    std::vector<AssemblyContext::Vector3D> coupled_scalar_ref_grads_;   // [i * n_qpts + q]
+    std::vector<AssemblyContext::Matrix3x3> coupled_scalar_ref_hess_;   // [i * n_qpts + q]
+    std::vector<Real> coupled_scalar_basis_values_;                     // [q * n_scalar + i]
+    // qpt-major basis values for each space wrapper (velocity[12], pressure[4])
+    // so setTestBasisValuesOnlyQptMajor can be called without re-transposing.
+    std::vector<Real> coupled_vel_qpt_values_;  // [q * n_vel_dofs + i]
+    std::vector<Real> coupled_pres_qpt_values_; // [q * n_pres_dofs + i]
+    LocalIndex coupled_vel_n_dofs_{0};
+    LocalIndex coupled_pres_n_dofs_{0};
+
+    // Per-slot scalar physical gradient/hessian cache.
+    // Populated by block 0 of each cell in the coupled loop; reused by blocks 1-3.
+    // Layout: [q * n_scalar + si]  (qpt-major, scalar-DOF minor)
+    static constexpr std::size_t kMaxScalarDofsPerSlot = 8;
+    static constexpr std::size_t kMaxQPtsPerSlot = 16;
+    static constexpr std::size_t kMaxScalarEntriesPerSlot = kMaxScalarDofsPerSlot * kMaxQPtsPerSlot;
+    struct CoupledSlotPhysCache {
+        AssemblyContext::Vector3D phys_grads[kMaxScalarEntriesPerSlot];
+        AssemblyContext::Matrix3x3 phys_hess[kMaxScalarEntriesPerSlot];
+    };
+    std::vector<CoupledSlotPhysCache> coupled_slot_phys_cache_;
 };
 
 // ============================================================================

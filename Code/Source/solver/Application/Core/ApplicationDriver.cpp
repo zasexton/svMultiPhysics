@@ -332,6 +332,12 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   newton_opts.jacobian_op = "equations";
   newton_opts.use_line_search = false;
 
+  // Modified Newton: reuse Jacobian across multiple iterations.
+  // Period 1 = full Newton (default), 2 = rebuild every 2nd iteration, etc.
+  if (const char* jrp = std::getenv("SVMP_JACOBIAN_REBUILD_PERIOD")) {
+    newton_opts.jacobian_rebuild_period = std::atoi(jrp);
+  }
+
   const auto integrator = std::make_shared<const ZeroTimeDerivativeIntegrator>();
   svmp::FE::systems::TransientSystem transient(*sim.fe_system, integrator);
 
@@ -444,6 +450,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // solver applies a full Newton update without line search.  Disabling it avoids
   // 2 extra residual assembly passes per Newton iteration.
   opts.newton.use_line_search = false;
+
+  // Modified Newton: reuse Jacobian across multiple iterations.
+  if (const char* jrp = std::getenv("SVMP_JACOBIAN_REBUILD_PERIOD")) {
+    opts.newton.jacobian_rebuild_period = std::atoi(jrp);
+  }
 
   // Pseudo-transient continuation (PTC): if the linear solve stalls on distorted meshes,
   // add a lumped dt-only diagonal to regularize early Newton iterations and relax it

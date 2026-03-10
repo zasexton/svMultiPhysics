@@ -268,7 +268,9 @@ private:
 	    bool runtime_failed_{false};
     bool warned_runtime_failure_{false};
 
-    // Scratch storage for computeCellBatch (avoids per-batch heap allocation)
+    // NOTE: scratch_batch_sides_/outputs_ are no longer used by computeCellBatch
+    // (replaced with stack-local vectors for thread safety), but kept to avoid
+    // changing object layout until the next ABI-breaking change.
     std::vector<assembly::jit::KernelSideArgsV6> scratch_batch_sides_;
     std::vector<assembly::jit::KernelOutputViewV6> scratch_batch_outputs_;
 };

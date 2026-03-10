@@ -2469,10 +2469,21 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                 GlobalIndex cell_id,
                 ElementType cell_type) {
                 const auto& test_element = qpt_space.getElement(cell_type, cell_id);
+
+                // For P1 simplex elements, use position-based Gaussian rules
+                // (4 QPs for Tet4, 3 for Tri3) matching StandardAssembler::resolveQuadratureRule.
+                const int basis_order = test_element.polynomial_order();
+                if (basis_order <= 1 &&
+                    quadrature::QuadratureFactory::supports_position_based(cell_type)) {
+                    const auto default_mod = quadrature::QuadratureFactory::default_legacy_modifier(cell_type);
+                    return quadrature::QuadratureFactory::create_legacy_compatible(
+                        cell_type, default_mod);
+                }
+
                 auto quad_rule = test_element.quadrature();
                 if (!quad_rule) {
                     const int quad_order = quadrature::QuadratureFactory::recommended_order(
-                        test_element.polynomial_order(), false);
+                        basis_order, false);
                     quad_rule = quadrature::QuadratureFactory::create(cell_type, quad_order);
                 }
                 return quad_rule;

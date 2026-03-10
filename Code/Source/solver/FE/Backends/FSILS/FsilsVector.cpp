@@ -171,6 +171,40 @@ public:
         }
     }
 
+    void addVectorEntriesResolved(std::span<const GlobalIndex> dofs,
+                                   std::span<const GlobalIndex> resolved,
+                                   std::span<const Real> local_vector,
+                                   assembly::AddMode mode) override
+    {
+        (void)dofs;
+        FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");
+
+        auto& data = vec_->data();
+        const auto data_size = static_cast<GlobalIndex>(data.size());
+        for (std::size_t i = 0; i < resolved.size(); ++i) {
+            const auto idx = resolved[i];
+            if (idx < 0 || idx >= data_size) {
+                continue;
+            }
+
+            auto& dst = data[static_cast<std::size_t>(idx)];
+            switch (mode) {
+                case assembly::AddMode::Add:
+                    dst += local_vector[i];
+                    break;
+                case assembly::AddMode::Insert:
+                    dst = local_vector[i];
+                    break;
+                case assembly::AddMode::Max:
+                    dst = std::max(dst, local_vector[i]);
+                    break;
+                case assembly::AddMode::Min:
+                    dst = std::min(dst, local_vector[i]);
+                    break;
+            }
+        }
+    }
+
     void addVectorEntry(GlobalIndex dof, Real value, assembly::AddMode mode) override
     {
         FE_CHECK_NOT_NULL(vec_, "FsilsVectorView::vec");

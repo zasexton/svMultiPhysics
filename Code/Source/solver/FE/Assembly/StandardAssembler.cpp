@@ -24,6 +24,7 @@
 #include "Basis/BasisCache.h"
 #include "Basis/VectorBasis.h"
 #include "Assembly/JIT/KernelArgs.h"
+#include "Coloring.h"
 #include "Forms/CoupledBlockKernel.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
@@ -34,6 +35,7 @@
 #include "Mesh/Core/InterfaceMesh.h"
 #endif
 
+#include <atomic>
 #include <chrono>
 #include <algorithm>
 #include <utility>
@@ -44,6 +46,10 @@
 
 #if FE_HAS_MPI
 #  include <mpi.h>
+#endif
+
+#ifdef _OPENMP
+#  include <omp.h>
 #endif
 
 namespace svmp {
@@ -815,20 +821,18 @@ void StandardAssembler::setRowDofMap(const dofs::DofMap& dof_map, GlobalIndex ro
 {
     row_dof_map_ = &dof_map;
     row_dof_offset_ = row_offset;
-    cell_dof_tables_.clear();
-    cell_resolved_vector_tables_.clear();
-    cell_resolved_matrix_tables_.clear();
-    field_access_plans_.clear();
+    // NOTE: Do NOT clear cell_dof_tables_, cell_resolved_*_tables_, or
+    // field_access_plans_ here.  These caches are keyed by (dof_map_ptr, offset)
+    // and remain valid when the assembler's "default" DOF maps change.
+    // Clearing them forces expensive rebuilds (0.2s per call for resolved
+    // matrix tables on 75K-cell meshes).
 }
 
 void StandardAssembler::setColDofMap(const dofs::DofMap& dof_map, GlobalIndex col_offset)
 {
     col_dof_map_ = &dof_map;
     col_dof_offset_ = col_offset;
-    cell_dof_tables_.clear();
-    cell_resolved_vector_tables_.clear();
-    cell_resolved_matrix_tables_.clear();
-    field_access_plans_.clear();
+    // See setRowDofMap note above.
 }
 
 void StandardAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
@@ -879,17 +883,38 @@ void StandardAssembler::setCurrentSolution(std::span<const Real> solution)
 
 void StandardAssembler::setCurrentSolutionView(const GlobalSystemView* solution_view)
 {
+    if (current_solution_view_ != solution_view) {
+        cell_resolved_vector_tables_.clear();
+    }
     current_solution_view_ = solution_view;
-    cell_resolved_vector_tables_.clear();
 }
 
 void StandardAssembler::setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields)
 {
+    // Check if the access list actually changed before clearing expensive caches.
+    // This function is called on every assembleOperator call; clearing forces
+    // 0.2s+ table rebuilds for 75K-cell meshes.
+    bool changed = (fields.size() != field_solution_access_.size());
+    if (!changed) {
+        for (std::size_t i = 0; i < fields.size(); ++i) {
+            if (fields[i].field != field_solution_access_[i].field ||
+                fields[i].space != field_solution_access_[i].space ||
+                fields[i].dof_map != field_solution_access_[i].dof_map ||
+                fields[i].dof_offset != field_solution_access_[i].dof_offset) {
+                changed = true;
+                break;
+            }
+        }
+    }
+
     field_solution_access_.assign(fields.begin(), fields.end());
-    cell_dof_tables_.clear();
-    cell_resolved_vector_tables_.clear();
-    cell_resolved_matrix_tables_.clear();
-    field_access_plans_.clear();
+
+    if (changed) {
+        // Only clear plans (which store CellDofTable* pointers that could be
+        // invalidated).  DOF tables and resolved tables are keyed by DofMap
+        // pointers and remain valid.
+        field_access_plans_.clear();
+    }
 }
 
 void StandardAssembler::setPreviousSolution(std::span<const Real> solution)
@@ -933,12 +958,16 @@ void StandardAssembler::setPreviousSolutionViewK(int k, const GlobalSystemView* 
     if (previous_solution_views_.size() < static_cast<std::size_t>(k)) {
         previous_solution_views_.resize(static_cast<std::size_t>(k), nullptr);
     }
+    const bool view_changed =
+        (previous_solution_views_[static_cast<std::size_t>(k - 1)] != solution_view);
     previous_solution_views_[static_cast<std::size_t>(k - 1)] = solution_view;
 
     if (previous_solutions_.size() < static_cast<std::size_t>(k)) {
         previous_solutions_.resize(static_cast<std::size_t>(k));
     }
-    cell_resolved_vector_tables_.clear();
+    if (view_changed) {
+        cell_resolved_vector_tables_.clear();
+    }
 }
 
 void StandardAssembler::setTimeIntegrationContext(const TimeIntegrationContext* ctx)
@@ -1104,8 +1133,10 @@ const StandardAssembler::CellDofTable& StandardAssembler::getCellDofTable(
         }
     }
 
-    cell_resolved_vector_tables_.clear();
-    cell_resolved_matrix_tables_.clear();
+    // NOTE: Do NOT clear cell_resolved_*_tables_ here.  Resolved tables are
+    // keyed by (layout_handle, dof_map_ptr, offset) and remain valid when new
+    // DOF tables are added.  Clearing forces expensive rebuilds.
+    // field_access_plans_ may reference CellDofTable pointers; clear if needed.
     field_access_plans_.clear();
     auto& table = cell_dof_tables_.emplace_back();
     table.dof_map = dof_map;
@@ -2887,13 +2918,58 @@ std::shared_ptr<const quadrature::QuadratureRule> StandardAssembler::resolveQuad
     ElementType cell_type) const
 {
     const auto& test_element = getElement(test_space, cell_id, cell_type);
+
+    // For P1 simplex elements (Tet4, Tri3), use position-based rules
+    // that match the legacy solver behavior (4 QPs for Tet4, 3 for Tri3)
+    // instead of the tensor-product Duffy transform (27 QPs for Tet4).
+    // The position-based Gaussian rule gives degree-2 polynomial exactness,
+    // which is sufficient for all NS-VMS terms on affine P1 elements.
+    const int basis_order = test_element.polynomial_order();
+    if (basis_order <= 1 &&
+        quadrature::QuadratureFactory::supports_position_based(cell_type)) {
+        const auto default_mod = quadrature::QuadratureFactory::default_legacy_modifier(cell_type);
+        return quadrature::QuadratureFactory::create_legacy_compatible(
+            cell_type, default_mod);
+    }
+
     auto quad_rule = test_element.quadrature();
     if (!quad_rule) {
         const int quad_order = quadrature::QuadratureFactory::recommended_order(
-            test_element.polynomial_order(), false);
+            basis_order, false);
         quad_rule = quadrature::QuadratureFactory::create(cell_type, quad_order);
     }
     return quad_rule;
+}
+
+void StandardAssembler::ensureColoring(const IMeshAccess& mesh)
+{
+    // Check if coloring is already valid for this mesh
+    if (coloring_valid_ && coloring_mesh_ == &mesh) {
+        return;
+    }
+
+    // Build element connectivity graph
+    ElementGraph graph;
+    graph.build(mesh, *row_dof_map_);
+
+    // Color the graph using greedy algorithm
+    coloring_num_colors_ = colorGraph(graph, ColoringAlgorithm::Greedy, coloring_colors_);
+
+    // Verify coloring in debug builds
+    FE_THROW_IF(!verifyColoring(graph, coloring_colors_), FEException,
+                "ensureColoring: graph coloring verification failed");
+
+    // Build per-color cell lists
+    coloring_cells_by_color_.clear();
+    coloring_cells_by_color_.resize(coloring_num_colors_);
+    mesh.forEachOwnedCell([&](GlobalIndex cell_id) {
+        const int color = coloring_colors_[cell_id];
+        coloring_cells_by_color_[color].push_back(cell_id);
+    });
+
+    // Mark cache as valid
+    coloring_valid_ = true;
+    coloring_mesh_ = &mesh;
 }
 
 void StandardAssembler::prepareGeometry(
@@ -3143,6 +3219,196 @@ void StandardAssembler::prepareGeometry(
     // Cache quad_rule for use in populateFieldSolutionData BasisCache lookups
     cached_quad_rule_ = std::shared_ptr<const quadrature::QuadratureRule>(
         std::shared_ptr<const quadrature::QuadratureRule>{}, &quad_rule);
+}
+
+void StandardAssembler::prepareGeometry(
+    AssemblyContext& context,
+    const IMeshAccess& mesh,
+    GlobalIndex cell_id,
+    const quadrature::QuadratureRule& quad_rule,
+    GeometryWorkspace& ws)
+{
+    const ElementType cell_type = mesh.getCellType(cell_id);
+    const int dim = mesh.dimension();
+
+    mesh.getCellCoordinates(cell_id, ws.cell_coords);
+    const auto n_nodes = ws.cell_coords.size();
+
+    ws.node_coords.resize(n_nodes);
+    for (std::size_t i = 0; i < n_nodes; ++i) {
+        ws.node_coords[i] = math::Vector<Real, 3>{
+            ws.cell_coords[i][0], ws.cell_coords[i][1], ws.cell_coords[i][2]};
+    }
+
+    const int geom_order = defaultGeometryOrder(cell_type);
+    const bool use_affine = (geom_order <= 1);
+
+    if (cell_type != ws.mapping_type ||
+        geom_order != ws.mapping_order ||
+        use_affine != ws.mapping_affine ||
+        !ws.mapping) {
+        geometry::MappingRequest map_request;
+        map_request.element_type = cell_type;
+        map_request.geometry_order = geom_order;
+        map_request.use_affine = use_affine;
+        ws.mapping = geometry::MappingFactory::create(map_request, ws.node_coords);
+        ws.mapping_type = cell_type;
+        ws.mapping_order = geom_order;
+        ws.mapping_affine = use_affine;
+        ws.geom_bcache = nullptr;
+    } else {
+        ws.mapping->resetNodes(ws.node_coords);
+    }
+    const auto& mapping = ws.mapping;
+
+    const auto n_qpts = static_cast<LocalIndex>(quad_rule.num_points());
+    context.prepareGeometryStorage(n_qpts);
+    auto ctx_quad_pts = context.quadPointsWritable();
+    auto ctx_quad_wts = context.quadWeightsWritable();
+    auto ctx_phys_pts = context.physicalPointsWritable();
+    auto ctx_jacs = context.jacobiansWritable();
+    auto ctx_inv_jacs = context.inverseJacobiansWritable();
+    auto ctx_jac_dets = context.jacobianDetsWritable();
+    auto ctx_int_wts = context.integrationWeightsWritable();
+
+    const auto& quad_points = quad_rule.points();
+    const auto& quad_weights = quad_rule.weights();
+
+    if (!ws.geom_bcache) {
+        ws.geom_bcache = &basis::BasisCache::instance().get_or_compute(
+            mapping->geometryBasis(), quad_rule, /*gradients=*/true, /*hessians=*/false);
+    }
+    const auto& geom_bcache = *ws.geom_bcache;
+    const auto& geom_nodes = mapping->nodes();
+    const auto n_geom_dofs = geom_bcache.num_dofs;
+
+    if (mapping->isAffine()) {
+        math::Matrix<Real, 3, 3> J{};
+        for (std::size_t a = 0; a < n_geom_dofs; ++a) {
+            const auto& grad_a = geom_bcache.gradients[0][a];
+            for (int j = 0; j < dim; ++j)
+                for (int i = 0; i < 3; ++i)
+                    J(i, j) += geom_nodes[a][i] * grad_a[j];
+        }
+
+        if (dim == 1) {
+            const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
+            math::Vector<Real, 3> n1{}, n2{};
+            geometry::detail::complete_curve_frame(t, n1, n2);
+            J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
+            J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
+        } else if (dim == 2) {
+            const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
+            const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
+            const auto nv = tu.cross(tv);
+            const Real nv_norm = nv.norm();
+            if (nv_norm < geometry::detail::kDegenerateTol) {
+                J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
+            } else {
+                const auto nv_unit = nv / nv_norm;
+                J(0, 2) = nv_unit[0]; J(1, 2) = nv_unit[1]; J(2, 2) = nv_unit[2];
+            }
+        }
+
+        const auto J_inv = J.inverse();
+        const Real det_J = J.determinant();
+        const Real abs_det_J = std::abs(det_J);
+
+        AssemblyContext::Matrix3x3 J_arr{}, J_inv_arr{};
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) {
+                J_arr[i][j] = J(i, j);
+                J_inv_arr[i][j] = J_inv(i, j);
+            }
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const auto& qpt = quad_points[q];
+            ctx_quad_pts[q] = {qpt[0], qpt[1], qpt[2]};
+            ctx_quad_wts[q] = quad_weights[q];
+            const auto qidx = static_cast<std::size_t>(q);
+            Real x0 = 0, x1 = 0, x2 = 0;
+            for (std::size_t a = 0; a < n_geom_dofs; ++a) {
+                const Real N_a = geom_bcache.scalarValue(a, qidx);
+                x0 += geom_nodes[a][0] * N_a;
+                x1 += geom_nodes[a][1] * N_a;
+                x2 += geom_nodes[a][2] * N_a;
+            }
+            ctx_phys_pts[q] = {x0, x1, x2};
+            ctx_jacs[q] = J_arr;
+            ctx_inv_jacs[q] = J_inv_arr;
+            ctx_jac_dets[q] = det_J;
+            ctx_int_wts[q] = quad_weights[q] * abs_det_J;
+        }
+    } else {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const auto& qpt = quad_points[q];
+            ctx_quad_pts[q] = {qpt[0], qpt[1], qpt[2]};
+            ctx_quad_wts[q] = quad_weights[q];
+            const auto qidx = static_cast<std::size_t>(q);
+            Real x0 = 0, x1 = 0, x2 = 0;
+            for (std::size_t a = 0; a < n_geom_dofs; ++a) {
+                const Real N_a = geom_bcache.scalarValue(a, qidx);
+                x0 += geom_nodes[a][0] * N_a;
+                x1 += geom_nodes[a][1] * N_a;
+                x2 += geom_nodes[a][2] * N_a;
+            }
+            ctx_phys_pts[q] = {x0, x1, x2};
+            math::Matrix<Real, 3, 3> J{};
+            for (std::size_t a = 0; a < n_geom_dofs; ++a) {
+                const auto& grad_a = geom_bcache.gradients[qidx][a];
+                for (int j = 0; j < dim; ++j)
+                    for (int i = 0; i < 3; ++i)
+                        J(i, j) += geom_nodes[a][i] * grad_a[j];
+            }
+            if (dim == 1) {
+                const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
+                math::Vector<Real, 3> n1{}, n2{};
+                geometry::detail::complete_curve_frame(t, n1, n2);
+                J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
+                J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
+            } else if (dim == 2) {
+                const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
+                const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
+                const auto nv = tu.cross(tv);
+                const Real nv_norm = nv.norm();
+                if (nv_norm < geometry::detail::kDegenerateTol) {
+                    J(0, 2) = Real(0); J(1, 2) = Real(0); J(2, 2) = Real(0);
+                } else {
+                    const auto nv_unit = nv / nv_norm;
+                    J(0, 2) = nv_unit[0]; J(1, 2) = nv_unit[1]; J(2, 2) = nv_unit[2];
+                }
+            }
+            const auto J_inv = J.inverse();
+            const Real det_J = J.determinant();
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j) {
+                    ctx_jacs[q][i][j] = J(i, j);
+                    ctx_inv_jacs[q][i][j] = J_inv(i, j);
+                }
+            ctx_jac_dets[q] = det_J;
+            ctx_int_wts[q] = quad_weights[q] * std::abs(det_J);
+        }
+    }
+
+    // Entity measures
+    {
+        Real cell_volume = 0.0;
+        for (LocalIndex q = 0; q < n_qpts; ++q)
+            cell_volume += ctx_int_wts[q];
+        Real h = 0.0;
+        for (std::size_t a = 0; a < n_nodes; ++a)
+            for (std::size_t b = a + 1; b < n_nodes; ++b) {
+                const Real dx = ws.node_coords[a][0] - ws.node_coords[b][0];
+                const Real dy = ws.node_coords[a][1] - ws.node_coords[b][1];
+                const Real dz = ws.node_coords[a][2] - ws.node_coords[b][2];
+                const Real dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (dist > h) h = dist;
+            }
+        ws.geom_h = h;
+        ws.geom_volume = cell_volume;
+    }
+
+    context.markGeometryDirty();
 }
 
 void StandardAssembler::prepareBasis(
@@ -4264,9 +4530,18 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     // ========================================================================
     // Check if fused+batched path is viable
     // ========================================================================
-    const std::size_t requested_batch_size =
+    std::size_t requested_batch_size =
         (options_.use_batching && options_.batch_size > 1)
             ? static_cast<std::size_t>(options_.batch_size) : 1u;
+    // Allow runtime override via SVMP_BATCH_SIZE (useful for OpenMP tuning).
+    {
+        static const int env_batch = [] {
+            const char* s = std::getenv("SVMP_BATCH_SIZE");
+            return (s && s[0]) ? std::atoi(s) : 0;
+        }();
+        if (env_batch > 0)
+            requested_batch_size = static_cast<std::size_t>(env_batch);
+    }
     bool all_support_batch = (requested_batch_size > 1);
     if (all_support_batch) {
         for (const auto& t : terms) {
@@ -4322,7 +4597,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     double tp_fb_geom = 0.0, tp_fb_save = 0.0, tp_fb_restore = 0.0;
     double tp_fb_basis = 0.0, tp_fb_field = 0.0, tp_fb_dof = 0.0;
     double tp_fb_sol = 0.0, tp_fb_setters = 0.0;
-    double tp_fb_kernel = 0.0, tp_fb_insert = 0.0, tp_fb_snap = 0.0;
+    double tp_fb_kernel = 0.0, tp_fb_insert = 0.0, tp_fb_snap = 0.0, tp_fb_scatter = 0.0;
     auto TP = assemblyTimeNow;
 
     // Helper: gather solution coefficients for a term/slot
@@ -4403,6 +4678,21 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     bool use_monolithic_flag = false;
     if (terms.size() == 1) {
         coupled_kernel = dynamic_cast<const forms::CoupledBlockKernel*>(terms[0].kernel);
+    }
+
+    // Pre-build DOF tables for ALL coupled block specs so that the batch loop
+    // can use getCellDofsCached as a read-only lookup (thread-safe).
+    // Also re-resolve vector tables for the newly added DOF maps.
+    if (coupled_kernel && coupled_kernel->isResolved()) {
+        const auto n_blk = coupled_kernel->numBlocks();
+        for (std::size_t bi = 0; bi < n_blk; ++bi) {
+            const auto& bs = coupled_kernel->blockSpec(bi);
+            if (bs.row_dof_map)
+                (void)getCellDofTable(mesh, bs.row_dof_map, bs.row_dof_offset);
+            if (bs.col_dof_map)
+                (void)getCellDofTable(mesh, bs.col_dof_map, bs.col_dof_offset);
+        }
+        ensureResolvedVectorTables(mesh);
     }
 
     // Coupled block batch range processor (replaces Phase 1 + Phase 2 with
@@ -4659,6 +4949,23 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             use_resolved_insert = true;
         }
 
+        // Pre-resolve vector insertion slots for the output vector view.
+        // This is critical for thread-safe parallel assembly — bypasses the
+        // resolution cache in FsilsVector::resolveEntriesCached which is not
+        // thread-safe for concurrent access.
+        bool use_resolved_vector_insert = false;
+        if (parent_term.assemble_vector && parent_term.vector_view &&
+            parent_term.vector_view->vectorLayoutHandle() != nullptr) {
+            for (std::size_t bi = 0; bi < n_blocks; ++bi) {
+                const auto& bs = coupled_kernel->blockSpec(bi);
+                if (bs.want_vector) {
+                    ensureResolvedVectorTable(mesh, bs.row_dof_map, bs.row_dof_offset,
+                                              parent_term.vector_view);
+                }
+            }
+            use_resolved_vector_insert = true;
+        }
+
         // Build fused-insert resolved slot table.
         // The fused-insert path combines all per-block DOFs into an interleaved
         // combined DOF list per cell, then inserts one combined matrix.
@@ -4712,6 +5019,619 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             }
         }
 
+        // ---------------------------------------------------------------
+        // Coupled scalar basis cache: detect if all blocks share the same
+        // scalar element basis (e.g. P1 Lagrange on Tet4).  When true,
+        // blocks 1-3 can skip the full prepareBasis slow-path fallback
+        // on block transitions by expanding cached scalar physical data.
+        // ---------------------------------------------------------------
+        bool use_coupled_scalar_cache = false;
+        LocalIndex coupled_n_scalar = 0;
+        int coupled_dim = mesh.dimension();
+        if (n_blocks >= 2 && !gids.empty()) {
+            use_coupled_scalar_cache = true;
+            const auto first_ct = mesh.getCellType(gids[0]);
+            const auto& first_bs = coupled_kernel->blockSpec(0);
+            const auto& first_el = getElement(*first_bs.test_space, gids[0], first_ct);
+            coupled_n_scalar = static_cast<LocalIndex>(first_el.num_dofs());
+            const auto* first_basis_ptr = &first_el.basis();
+
+            for (std::size_t bi = 0; bi < n_blocks && use_coupled_scalar_cache; ++bi) {
+                const auto& bs = coupled_kernel->blockSpec(bi);
+                const auto& te = getElement(*bs.test_space, gids[0], first_ct);
+                const auto& tre = getElement(*bs.trial_space, gids[0], first_ct);
+                if (te.basis().is_vector_valued() || tre.basis().is_vector_valued()) {
+                    use_coupled_scalar_cache = false;
+                } else if (&te.basis() != first_basis_ptr || &tre.basis() != first_basis_ptr) {
+                    // Different scalar basis functions — can't share cache.
+                    // But for equal-order elements (P1/P1), they will match.
+                    if (static_cast<LocalIndex>(te.num_dofs()) != coupled_n_scalar ||
+                        static_cast<LocalIndex>(tre.num_dofs()) != coupled_n_scalar) {
+                        use_coupled_scalar_cache = false;
+                    }
+                }
+            }
+
+            if (use_coupled_scalar_cache) {
+                // Allocate per-slot phys cache
+                if (coupled_slot_phys_cache_.size() < B)
+                    coupled_slot_phys_cache_.resize(B);
+
+                // Populate scalar ref data if not already cached
+                const auto n_qpts = static_cast<LocalIndex>(fused_quad_rule->num_points());
+                const auto ns = static_cast<std::size_t>(coupled_n_scalar);
+                const auto nq = static_cast<std::size_t>(n_qpts);
+                const bool need_hess = std::any_of(
+                    cached_coupled_block_meta_.begin(), cached_coupled_block_meta_.end(),
+                    [](const auto& m) {
+                        return hasFlag(m.required_data, RequiredData::BasisHessians);
+                    });
+
+                if (!coupled_scalar_ref_valid_ ||
+                    coupled_scalar_n_dofs_ != coupled_n_scalar ||
+                    coupled_scalar_n_qpts_ != n_qpts ||
+                    (need_hess && !coupled_scalar_has_hessians_))
+                {
+                    // Populate from BasisCache
+                    const auto& basis_fn = first_el.basis();
+                    const auto& bcache = basis::BasisCache::instance().get_or_compute(
+                        basis_fn, *fused_quad_rule, true, need_hess);
+
+                    coupled_scalar_ref_grads_.resize(ns * nq);
+                    coupled_scalar_ref_hess_.resize(need_hess ? ns * nq : 0);
+                    coupled_scalar_basis_values_.resize(nq * ns);
+
+                    for (std::size_t q = 0; q < nq; ++q) {
+                        for (std::size_t si = 0; si < ns; ++si) {
+                            const auto ref_idx = si * nq + q;
+                            coupled_scalar_ref_grads_[ref_idx] = {
+                                bcache.gradients[q][si][0],
+                                bcache.gradients[q][si][1],
+                                bcache.gradients[q][si][2]
+                            };
+                            if (need_hess) {
+                                AssemblyContext::Matrix3x3 Hr{};
+                                for (int r = 0; r < 3; ++r)
+                                    for (int c = 0; c < 3; ++c)
+                                        Hr[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                            bcache.hessians[q][si](static_cast<std::size_t>(r),
+                                                                    static_cast<std::size_t>(c));
+                                coupled_scalar_ref_hess_[ref_idx] = Hr;
+                            }
+                            coupled_scalar_basis_values_[q * ns + si] =
+                                bcache.scalarValue(si, q);
+                        }
+                    }
+
+                    // Build qpt-major basis values for each unique DOF count.
+                    // Velocity (ProductSpace dim=3): n_dofs = 3*n_scalar, values replicated.
+                    // Pressure (scalar): n_dofs = n_scalar, values direct.
+                    coupled_pres_n_dofs_ = coupled_n_scalar;
+                    coupled_pres_qpt_values_.resize(nq * ns);
+                    for (std::size_t q = 0; q < nq; ++q)
+                        for (std::size_t si = 0; si < ns; ++si)
+                            coupled_pres_qpt_values_[q * ns + si] =
+                                coupled_scalar_basis_values_[q * ns + si];
+
+                    // Detect the ProductSpace DOF count (assumes first block has max DOFs)
+                    const auto vel_dofs = static_cast<std::size_t>(
+                        first_bs.test_space->dofs_per_element());
+                    if (vel_dofs > ns) {
+                        coupled_vel_n_dofs_ = static_cast<LocalIndex>(vel_dofs);
+                        coupled_vel_qpt_values_.resize(nq * vel_dofs);
+                        for (std::size_t q = 0; q < nq; ++q)
+                            for (std::size_t i = 0; i < vel_dofs; ++i)
+                                coupled_vel_qpt_values_[q * vel_dofs + i] =
+                                    coupled_scalar_basis_values_[q * ns + (i % ns)];
+                    }
+
+                    coupled_scalar_n_dofs_ = coupled_n_scalar;
+                    coupled_scalar_n_qpts_ = n_qpts;
+                    coupled_scalar_has_hessians_ = need_hess;
+                    coupled_scalar_ref_valid_ = true;
+                }
+            }
+        }
+
+        // =================================================================
+        // COLORED PARALLEL ASSEMBLY PATH
+        // =================================================================
+        // When conditions are met, use graph coloring to partition elements
+        // so that same-colored elements share no DOFs.  This makes CSR
+        // insertion race-free within each color, enabling OMP parallelism
+        // across cells within a color.
+        //
+        // Conditions:
+        //  - coupled_kernel + use_coupled_scalar_cache (all blocks share basis)
+        //  - affine elements (determined from first cell's geometry order)
+        //  - OMP available with > 1 thread
+        //  - enough cells to amortize coloring/OMP overhead
+        //  - not using monolithic/pairwise JIT (those have own parallelism)
+        //  - not using constraints (insertLocalConstrained is not thread-safe)
+        // =================================================================
+        const bool all_affine = !gids.empty() &&
+            (defaultGeometryOrder(mesh.getCellType(gids[0])) <= 1);
+        const bool use_batch_basis_early =
+            use_coupled_scalar_cache && all_affine;
+
+        int max_omp_threads = 1;
+#ifdef _OPENMP
+        max_omp_threads = omp_get_max_threads();
+#endif
+        const bool use_colored_parallel =
+            use_batch_basis_early &&
+            max_omp_threads > 1 &&
+            gids.size() >= 256 &&
+            !use_monolithic &&
+            !use_pairwise &&
+            !std::getenv("SVMP_NO_COLORED_PARALLEL");
+
+        if (use_colored_parallel) {
+            // --- Build per-color cell lists from gids ---
+            ensureColoring(mesh);
+
+            // Diagnostic: can be enabled via SVMP_ASSEMBLY_TIMING=1
+            if (assemblyTimingEnabled()) {
+                static bool diag_printed = false;
+                if (!diag_printed) {
+                    std::fprintf(stderr, "[COLORED_PARALLEL] active: %d colors, %zu cells, %d threads\n",
+                        coloring_num_colors_, gids.size(), max_omp_threads);
+                    diag_printed = true;
+                }
+            }
+            std::vector<std::vector<GlobalIndex>> color_cells(
+                static_cast<std::size_t>(coloring_num_colors_));
+            for (const auto cid : gids) {
+                const int c = coloring_colors_[static_cast<std::size_t>(cid)];
+                color_cells[static_cast<std::size_t>(c)].push_back(cid);
+            }
+
+            // Pre-populate field access plans + basis cache (serial, before parallel)
+            if (any_need_field_solutions)
+                ensureFieldAccessPlans(mesh);
+
+            // Shared read-only state aliases
+            const auto& ref_grads = coupled_scalar_ref_grads_;
+            const auto& ref_hess = coupled_scalar_ref_hess_;
+            const auto nq = coupled_scalar_n_qpts_;
+            const auto ns = coupled_scalar_n_dofs_;
+            const bool need_hess = coupled_scalar_has_hessians_;
+            const int dim = mesh.dimension();
+
+            const auto& parent_term = terms[0];
+            const auto& parent_td = term_data[0];
+
+            // Thread-safe result accumulators
+            std::atomic<GlobalIndex> atomic_elements_assembled{0};
+            std::atomic<GlobalIndex> atomic_matrix_entries{0};
+            std::atomic<GlobalIndex> atomic_vector_entries{0};
+
+            // Single persistent thread team for all colors.
+            // The implicit barrier at end of each 'omp for' ensures
+            // color-to-color synchronization without fork/join overhead.
+#ifdef _OPENMP
+#pragma omp parallel
+#endif
+            {
+                // Per-thread state — allocated once, reused across colors
+                AssemblyContext thread_ctx;
+                thread_ctx.reserve(max_dofs, max_qpts, dim);
+                GeometryWorkspace geom_ws;
+                FieldSolutionWorkspace field_ws;
+                CoupledSlotPhysCache slot_phys;
+                KernelOutput thread_output;
+
+                // Per-trial-group solution cache for this thread
+                struct ThreadTrialCache {
+                    std::span<const GlobalIndex> col_dofs{};
+                    std::vector<Real> sol_coeffs;
+                    std::vector<std::vector<Real>> prev_sol_coeffs;
+                    bool uses_vector_basis{false};
+                    bool gathered{false};
+                };
+                std::vector<ThreadTrialCache> thread_tg(
+                    static_cast<std::size_t>(n_trial_groups));
+
+                // Per-thread counters
+                GlobalIndex local_elems = 0;
+                GlobalIndex local_mat_entries = 0;
+                GlobalIndex local_vec_entries = 0;
+
+            for (std::size_t ci = 0; ci < color_cells.size(); ++ci) {
+                const auto& cells_this_color = color_cells[ci];
+                // NOTE: no 'continue' on empty — all threads must reach omp for
+
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic, 4)
+#endif
+                    for (std::size_t ci_cell = 0;
+                         ci_cell < cells_this_color.size(); ++ci_cell) {
+                        const auto cell_id = cells_this_color[ci_cell];
+
+                        // --- 1. Prepare geometry (thread-safe workspace version) ---
+                        prepareGeometry(thread_ctx, mesh, cell_id,
+                                        *fused_quad_rule, geom_ws);
+
+                        // --- 2. Set context properties ---
+                        thread_ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
+                        thread_ctx.setTimeIntegrationContext(time_integration_);
+                        thread_ctx.setTime(time_);
+                        thread_ctx.setTimeStep(dt_);
+                        thread_ctx.setRealParameterGetter(get_real_param_);
+                        thread_ctx.setParameterGetter(get_param_);
+                        thread_ctx.setUserData(user_data_);
+                        thread_ctx.setJITConstants(jit_constants_);
+                        thread_ctx.setCoupledValues(coupled_integrals_,
+                                                    coupled_aux_state_);
+                        thread_ctx.clearAllPreviousSolutionData();
+
+                        // --- 3. Field solutions (thread-safe workspace version) ---
+                        if (any_need_field_solutions)
+                            populateFieldSolutionData(thread_ctx, mesh, cell_id,
+                                                      union_field_reqs, field_ws);
+
+                        // --- 4. Gradient transform (ref → physical) ---
+                        {
+                            const auto ctx_inv_jacs = thread_ctx.inverseJacobians();
+                            const auto& J_inv = ctx_inv_jacs[0]; // affine
+
+                            for (LocalIndex si = 0; si < ns; ++si) {
+                                for (LocalIndex q = 0; q < nq; ++q) {
+                                    const auto ri = static_cast<std::size_t>(
+                                        si * nq + q);
+                                    const auto& gr = ref_grads[ri];
+                                    auto& gp = slot_phys.phys_grads[q * ns + si];
+                                    if (dim == 3) {
+                                        gp[0] = J_inv[0][0]*gr[0] + J_inv[1][0]*gr[1] + J_inv[2][0]*gr[2];
+                                        gp[1] = J_inv[0][1]*gr[0] + J_inv[1][1]*gr[1] + J_inv[2][1]*gr[2];
+                                        gp[2] = J_inv[0][2]*gr[0] + J_inv[1][2]*gr[1] + J_inv[2][2]*gr[2];
+                                    } else if (dim == 2) {
+                                        gp[0] = J_inv[0][0]*gr[0] + J_inv[1][0]*gr[1];
+                                        gp[1] = J_inv[0][1]*gr[0] + J_inv[1][1]*gr[1];
+                                        gp[2] = 0.0;
+                                    } else {
+                                        gp[0] = J_inv[0][0]*gr[0];
+                                        gp[1] = 0.0;
+                                        gp[2] = 0.0;
+                                    }
+                                }
+                            }
+
+                            if (need_hess) {
+                                for (LocalIndex si = 0; si < ns; ++si) {
+                                    for (LocalIndex q = 0; q < nq; ++q) {
+                                        const auto ri = static_cast<std::size_t>(
+                                            si * nq + q);
+                                        const auto& Hr = ref_hess[ri];
+                                        auto& Hp = slot_phys.phys_hess[q * ns + si];
+                                        for (int r = 0; r < dim; ++r)
+                                            for (int c_d = 0; c_d < dim; ++c_d) {
+                                                Real s = 0.0;
+                                                for (int a = 0; a < dim; ++a)
+                                                    for (int b = 0; b < dim; ++b)
+                                                        s += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                                             Hr[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                                             J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c_d)];
+                                                Hp[static_cast<std::size_t>(r)][static_cast<std::size_t>(c_d)] = s;
+                                            }
+                                    }
+                                }
+                            }
+                        }
+
+                        // --- 5. Per-block: expand, DOF, sol, kernel, insert ---
+                        // Reset trial group gathered flags
+                        for (auto& tg : thread_tg) tg.gathered = false;
+
+                        for (std::size_t bi = 0; bi < n_blocks; ++bi) {
+                            const auto& bs = coupled_kernel->blockSpec(bi);
+                            if (!bs.fallback_kernel || !bs.fallback_kernel->hasCell())
+                                continue;
+                            const bool block_want_matrix =
+                                parent_term.assemble_matrix && bs.want_matrix;
+                            const bool block_want_vector =
+                                parent_term.assemble_vector && bs.want_vector;
+                            if (!block_want_matrix && !block_want_vector) continue;
+
+                            const int tg_idx = trial_group_of[bi];
+
+                            // Expand coupled scalar cache → context
+                            const auto& meta = cached_coupled_block_meta_[bi];
+                            thread_ctx.configureForCoupledBlock(
+                                cell_id, mesh.getCellDomainId(cell_id), meta);
+
+                            const auto n_test = meta.n_test_dofs;
+                            const auto n_trial = meta.n_trial_dofs;
+                            const bool same_sp = meta.trial_is_test;
+                            const bool blk_need_hess = hasFlag(
+                                meta.required_data, RequiredData::BasisHessians);
+
+                            // Test gradients
+                            const auto test_count =
+                                static_cast<std::size_t>(n_test * nq);
+                            auto* tg_ptr = thread_ctx.testPhysGradientsWritePtr(
+                                test_count);
+                            for (LocalIndex q = 0; q < nq; ++q)
+                                for (LocalIndex i = 0; i < n_test; ++i) {
+                                    const auto si = static_cast<LocalIndex>(
+                                        i % static_cast<LocalIndex>(ns));
+                                    tg_ptr[static_cast<std::size_t>(q * n_test + i)] =
+                                        slot_phys.phys_grads[q * ns + si];
+                                }
+
+                            if (blk_need_hess) {
+                                auto* th = thread_ctx.testPhysHessiansWritePtr(
+                                    test_count);
+                                for (LocalIndex q = 0; q < nq; ++q)
+                                    for (LocalIndex i = 0; i < n_test; ++i) {
+                                        const auto si = static_cast<LocalIndex>(
+                                            i % static_cast<LocalIndex>(ns));
+                                        th[static_cast<std::size_t>(q * n_test + i)] =
+                                            slot_phys.phys_hess[q * ns + si];
+                                    }
+                            }
+
+                            // Trial side
+                            if (!same_sp) {
+                                const auto trial_count =
+                                    static_cast<std::size_t>(n_trial * nq);
+                                auto* trg = thread_ctx.trialPhysGradientsWritePtr(
+                                    trial_count);
+                                for (LocalIndex q = 0; q < nq; ++q)
+                                    for (LocalIndex j = 0; j < n_trial; ++j) {
+                                        const auto sj = static_cast<LocalIndex>(
+                                            j % static_cast<LocalIndex>(ns));
+                                        trg[static_cast<std::size_t>(q * n_trial + j)] =
+                                            slot_phys.phys_grads[q * ns + sj];
+                                    }
+                                if (blk_need_hess) {
+                                    auto* trh =
+                                        thread_ctx.trialPhysHessiansWritePtr(
+                                            trial_count);
+                                    for (LocalIndex q = 0; q < nq; ++q)
+                                        for (LocalIndex j = 0; j < n_trial; ++j) {
+                                            const auto sj = static_cast<LocalIndex>(
+                                                j % static_cast<LocalIndex>(ns));
+                                            trh[static_cast<std::size_t>(
+                                                    q * n_trial + j)] =
+                                                slot_phys.phys_hess[q * ns + sj];
+                                        }
+                                }
+                            }
+
+                            // Basis values from pre-built qpt-major cache
+                            if (n_test == coupled_vel_n_dofs_ &&
+                                !coupled_vel_qpt_values_.empty()) {
+                                thread_ctx.setTestBasisValuesOnlyQptMajor(
+                                    n_test, coupled_vel_qpt_values_);
+                            } else {
+                                thread_ctx.setTestBasisValuesOnlyQptMajor(
+                                    n_test, coupled_pres_qpt_values_);
+                            }
+                            if (!same_sp) {
+                                if (n_trial == coupled_vel_n_dofs_ &&
+                                    !coupled_vel_qpt_values_.empty()) {
+                                    thread_ctx.setTrialBasisValuesOnlyQptMajor(
+                                        n_trial, coupled_vel_qpt_values_);
+                                } else {
+                                    thread_ctx.setTrialBasisValuesOnlyQptMajor(
+                                        n_trial, coupled_pres_qpt_values_);
+                                }
+                            }
+
+                            if (hasFlag(meta.required_data,
+                                        RequiredData::EntityMeasures))
+                                thread_ctx.setEntityMeasures(
+                                    geom_ws.geom_h, geom_ws.geom_volume, 0.0);
+
+                            // Row DOFs
+                            auto row_dofs = getCellDofsCached(
+                                mesh, cell_id, bs.row_dof_map, bs.row_dof_offset);
+
+                            // Column DOFs + solution gather (trial group dedup)
+                            auto& gc = thread_tg[static_cast<std::size_t>(tg_idx)];
+                            if (!gc.gathered) {
+                                gc.col_dofs = getCellDofsCached(
+                                    mesh, cell_id, bs.col_dof_map,
+                                    bs.col_dof_offset);
+                                if (parent_td.need_solution) {
+                                    gatherCellVectorCoefficients(
+                                        cell_id, bs.col_dof_map,
+                                        bs.col_dof_offset,
+                                        gc.col_dofs,
+                                        current_solution_view_,
+                                        current_solution_,
+                                        gc.sol_coeffs,
+                                        "assembleCellsFused", false);
+                                    gc.uses_vector_basis =
+                                        thread_ctx.trialUsesVectorBasis();
+                                    if (gc.uses_vector_basis)
+                                        applyVectorBasisGlobalToLocal(
+                                            mesh, cell_id, *bs.trial_space,
+                                            std::span<Real>(gc.sol_coeffs));
+                                    if (use_coeffs_only)
+                                        thread_ctx.setSolutionCoefficientsOnly(
+                                            std::span<const Real>(gc.sol_coeffs));
+                                    else
+                                        thread_ctx.setSolutionCoefficients(
+                                            std::span<const Real>(gc.sol_coeffs));
+
+                                    if (time_integration_ != nullptr) {
+                                        const int req_hist =
+                                            requiredHistoryStates(
+                                                time_integration_);
+                                        if (req_hist > 0) {
+                                            gc.prev_sol_coeffs.resize(
+                                                static_cast<std::size_t>(
+                                                    req_hist));
+                                            for (int k = 1; k <= req_hist; ++k) {
+                                                const auto& pdata =
+                                                    previous_solutions_[
+                                                        static_cast<std::size_t>(
+                                                            k - 1)];
+                                                const auto* pview =
+                                                    (static_cast<std::size_t>(
+                                                         k - 1) <
+                                                     previous_solution_views_
+                                                         .size())
+                                                        ? previous_solution_views_
+                                                              [static_cast<
+                                                                  std::size_t>(
+                                                                  k - 1)]
+                                                        : nullptr;
+                                                auto& lp =
+                                                    gc.prev_sol_coeffs
+                                                        [static_cast<std::size_t>(
+                                                            k - 1)];
+                                                gatherCellVectorCoefficients(
+                                                    cell_id, bs.col_dof_map,
+                                                    bs.col_dof_offset,
+                                                    gc.col_dofs,
+                                                    pview, pdata, lp,
+                                                    "assembleCellsFused", false);
+                                                if (gc.uses_vector_basis)
+                                                    applyVectorBasisGlobalToLocal(
+                                                        mesh, cell_id,
+                                                        *bs.trial_space,
+                                                        std::span<Real>(lp));
+                                                if (use_coeffs_only)
+                                                    thread_ctx
+                                                        .setPreviousSolutionCoefficientsOnlyK(
+                                                            k, lp);
+                                                else
+                                                    thread_ctx
+                                                        .setPreviousSolutionCoefficientsK(
+                                                            k, lp);
+                                            }
+                                        }
+                                    }
+                                }
+                                gc.gathered = true;
+                            } else {
+                                // Reuse cached trial-group data
+                                if (parent_td.need_solution) {
+                                    if (use_coeffs_only) {
+                                        thread_ctx.setSolutionCoefficientsOnly(
+                                            std::span<const Real>(
+                                                gc.sol_coeffs));
+                                        for (std::size_t k = 0;
+                                             k < gc.prev_sol_coeffs.size();
+                                             ++k)
+                                            thread_ctx
+                                                .setPreviousSolutionCoefficientsOnlyK(
+                                                    static_cast<int>(k + 1),
+                                                    gc.prev_sol_coeffs[k]);
+                                    } else {
+                                        thread_ctx.setSolutionCoefficients(
+                                            std::span<const Real>(
+                                                gc.sol_coeffs));
+                                        for (std::size_t k = 0;
+                                             k < gc.prev_sol_coeffs.size();
+                                             ++k)
+                                            thread_ctx
+                                                .setPreviousSolutionCoefficientsK(
+                                                    static_cast<int>(k + 1),
+                                                    gc.prev_sol_coeffs[k]);
+                                    }
+                                }
+                            }
+                            auto col_dofs = gc.col_dofs;
+
+                            // Kernel compute (batch of 1)
+                            thread_output.clear();
+                            const AssemblyContext* ctx_ptr = &thread_ctx;
+                            bs.fallback_kernel->computeCellBatch(
+                                std::span<const AssemblyContext* const>(
+                                    &ctx_ptr, 1),
+                                std::span<KernelOutput>(&thread_output, 1));
+
+                            if (thread_ctx.testUsesVectorBasis() ||
+                                thread_ctx.trialUsesVectorBasis())
+                                applyVectorBasisOutputOrientation(
+                                    mesh, cell_id, *bs.test_space,
+                                    cell_id, *bs.trial_space, thread_output);
+
+                            thread_output.has_matrix =
+                                block_want_matrix &&
+                                !thread_output.local_matrix.empty();
+                            thread_output.has_vector =
+                                block_want_vector &&
+                                !thread_output.local_vector.empty();
+
+                            // Insert (race-free for unconstrained: same-color
+                            // cells share no DOFs; constrained cells use mutex)
+                            GlobalSystemView* ins_mat =
+                                block_want_matrix ? parent_term.matrix_view
+                                                  : nullptr;
+                            GlobalSystemView* ins_vec =
+                                block_want_vector ? parent_term.vector_view
+                                                  : nullptr;
+                            const bool cell_constrained =
+                                options_.use_constraints &&
+                                constraint_distributor_ &&
+                                constraints_ &&
+                                (constraints_->hasConstrainedDofs(row_dofs) ||
+                                 constraints_->hasConstrainedDofs(col_dofs));
+                            // Look up pre-resolved vector entries for thread-safe insertion
+                            const auto resolved_vec =
+                                use_resolved_vector_insert
+                                    ? getResolvedCellVectorEntries(
+                                          cell_id, bs.row_dof_map,
+                                          bs.row_dof_offset,
+                                          parent_term.vector_view)
+                                    : std::span<const GlobalIndex>{};
+
+                            if (cell_constrained) {
+                                // Constrained cells write to master DOFs that
+                                // may overlap with other elements. Serialize.
+                                #pragma omp critical(constrained_insert)
+                                insertLocalConstrained(thread_output, row_dofs,
+                                    col_dofs, ins_mat, ins_vec);
+                            } else if (use_resolved_insert && block_want_matrix) {
+                                const auto resolved =
+                                    getResolvedCellMatrixEntries(
+                                        cell_id, bs.row_dof_map,
+                                        bs.row_dof_offset,
+                                        bs.col_dof_map, bs.col_dof_offset,
+                                        parent_term.matrix_view);
+                                insertLocal(thread_output, row_dofs, col_dofs,
+                                            ins_mat, ins_vec, resolved,
+                                            resolved_vec);
+                            } else {
+                                insertLocal(thread_output, row_dofs, col_dofs,
+                                            ins_mat, ins_vec, {},
+                                            resolved_vec);
+                            }
+
+                            local_elems++;
+                            if (thread_output.has_matrix)
+                                local_mat_entries += static_cast<GlobalIndex>(
+                                    row_dofs.size() * col_dofs.size());
+                            if (thread_output.has_vector)
+                                local_vec_entries += static_cast<GlobalIndex>(
+                                    row_dofs.size());
+                        } // end per-block loop
+                    } // end per-cell loop
+            } // end per-color loop
+
+                // Accumulate per-thread counters
+                atomic_elements_assembled.fetch_add(
+                    local_elems, std::memory_order_relaxed);
+                atomic_matrix_entries.fetch_add(
+                    local_mat_entries, std::memory_order_relaxed);
+                atomic_vector_entries.fetch_add(
+                    local_vec_entries, std::memory_order_relaxed);
+            } // end omp parallel
+
+            result.elements_assembled += atomic_elements_assembled.load();
+            result.matrix_entries_inserted += atomic_matrix_entries.load();
+            result.vector_entries_inserted += atomic_vector_entries.load();
+
+        } else {
+        // =================================================================
+        // SERIAL BATCH PATH (original)
+        // =================================================================
+
         for (std::size_t begin = 0; begin < gids.size(); begin += B_eff) {
             const std::size_t active = std::min(B_eff, gids.size() - begin);
 
@@ -4762,6 +5682,91 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 ctx.clearAllPreviousSolutionData();
                 tp_fb_setters += TP() - tp0;
             }
+
+            // === Batch field solutions + gradient transform ===
+            // When coupled scalar cache is active on affine elements, we can
+            // compute field solutions and scalar physical gradients/hessians
+            // for all slots BEFORE the block loop, eliminating per-cell
+            // prepareBasis calls entirely.
+            const bool use_batch_basis =
+                use_coupled_scalar_cache && cached_mapping_affine_;
+
+            if (use_batch_basis) {
+                // Phase A: field solutions (serial — uses member scratch)
+                if (any_need_field_solutions) {
+                    for (std::size_t slot = 0; slot < active; ++slot) {
+                        const auto cell_id = gids[begin + slot];
+                        auto& ctx = batch_contexts[slot];
+                        double tp0 = TP();
+                        populateFieldSolutionData(ctx, mesh, cell_id, union_field_reqs);
+                        tp_fb_field += TP() - tp0;
+                    }
+                }
+
+                // Phase B: batch gradient transform — compute scalar physical
+                // gradients/hessians from cached ref data + per-slot J_inv.
+                // Replaces 75K per-cell prepareBasis calls with a tight loop.
+                {
+                    const auto nq = coupled_scalar_n_qpts_;
+                    const auto ns = coupled_scalar_n_dofs_;
+                    const bool need_hess = coupled_scalar_has_hessians_;
+                    const int dim = mesh.dimension();
+
+                    for (std::size_t slot = 0; slot < active; ++slot) {
+                        auto& ctx = batch_contexts[slot];
+                        const auto ctx_inv_jacs = ctx.inverseJacobians();
+                        const auto& J_inv = ctx_inv_jacs[0]; // constant for affine
+
+                        auto& slotc = coupled_slot_phys_cache_[slot];
+
+                        // Transform ref gradients → physical gradients
+                        // grad_phys = J_inv^T * grad_ref
+                        for (LocalIndex si = 0; si < ns; ++si) {
+                            for (LocalIndex q = 0; q < nq; ++q) {
+                                const auto ref_idx = static_cast<std::size_t>(si * nq + q);
+                                const auto& gr = coupled_scalar_ref_grads_[ref_idx];
+                                auto& gp = slotc.phys_grads[q * ns + si];
+                                if (dim == 3) {
+                                    gp[0] = J_inv[0][0]*gr[0] + J_inv[1][0]*gr[1] + J_inv[2][0]*gr[2];
+                                    gp[1] = J_inv[0][1]*gr[0] + J_inv[1][1]*gr[1] + J_inv[2][1]*gr[2];
+                                    gp[2] = J_inv[0][2]*gr[0] + J_inv[1][2]*gr[1] + J_inv[2][2]*gr[2];
+                                } else if (dim == 2) {
+                                    gp[0] = J_inv[0][0]*gr[0] + J_inv[1][0]*gr[1];
+                                    gp[1] = J_inv[0][1]*gr[0] + J_inv[1][1]*gr[1];
+                                    gp[2] = 0.0;
+                                } else {
+                                    gp[0] = J_inv[0][0]*gr[0];
+                                    gp[1] = 0.0;
+                                    gp[2] = 0.0;
+                                }
+                            }
+                        }
+
+                        // Transform ref hessians → physical hessians (affine only)
+                        // H_phys = J_inv^T * H_ref * J_inv
+                        if (need_hess) {
+                            for (LocalIndex si = 0; si < ns; ++si) {
+                                for (LocalIndex q = 0; q < nq; ++q) {
+                                    const auto ref_idx = static_cast<std::size_t>(si * nq + q);
+                                    const auto& Hr = coupled_scalar_ref_hess_[ref_idx];
+                                    auto& Hp = slotc.phys_hess[q * ns + si];
+                                    for (int r = 0; r < dim; ++r)
+                                        for (int c = 0; c < dim; ++c) {
+                                            Real s = 0.0;
+                                            for (int a = 0; a < dim; ++a)
+                                                for (int b = 0; b < dim; ++b)
+                                                    s += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                                         Hr[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                                         J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                            Hp[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = s;
+                                        }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // For residual-only assemblies (mat=0, vec=1), the monolithic/pairwise
             // JIT kernels may produce NaN because the codegen always computes both
             // matrix and vector.  Fall through to per-block for vec-only assemblies.
@@ -5066,36 +6071,183 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     // Use pre-computed metadata for this block to skip virtual calls.
                     active_coupled_block_meta_ = &cached_coupled_block_meta_[bi];
 
+                    // When use_batch_basis is active, ALL blocks use the expansion
+                    // path (physical gradients were pre-computed in the batch
+                    // gradient transform above).  Otherwise, only blocks 1+ use it.
+                    const bool use_expansion_this_block =
+                        use_batch_basis || (use_coupled_scalar_cache && bi > 0);
+
+                    // When all conditions are met, the expansion slot loop can be
+                    // parallelized: each slot writes only to independent per-slot
+                    // data (ctx, batch_dofs, tg_cache, output).  Requires:
+                    //  - Expansion path active (no prepareBasis needed)
+                    //  - Affine elements (no mapping resetNodes needed)
+                    //  - bi > 0 (block 0 needs serial populateFieldSolutionData
+                    //    when !use_batch_basis; when use_batch_basis, field sols
+                    //    are already done)
+                    const bool omp_slot_parallel =
+                        use_expansion_this_block && cached_mapping_affine_ &&
+                        (use_batch_basis || bi > 0);
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(omp_slot_parallel && active >= 4)
+#endif
                     for (std::size_t slot = 0; slot < active; ++slot) {
                         const auto cell_id = gids[begin + slot];
                         auto& ctx = batch_contexts[slot];
 
-                        double tp0 = TP();
-                        // Restore cached entity measures for this slot.
-                        // For affine elements, skip coordinate restore + resetNodes
-                        // since the prepareBasis fast path uses cached entity measures
-                        // and never accesses mapping nodes.
-                        cached_geom_h_ = saved_node_coords[slot].entity_h;
-                        cached_geom_volume_ = saved_node_coords[slot].entity_volume;
-                        if (!cached_mapping_affine_) {
-                            scratch_node_coords_ = saved_node_coords[slot].node_coords;
-                            cached_mapping_->resetNodes(scratch_node_coords_);
+                        // Per-slot entity measures from saved geometry.
+                        const double slot_h = saved_node_coords[slot].entity_h;
+                        const double slot_vol = saved_node_coords[slot].entity_volume;
+
+                        // tp0 used for all sub-phase timing; guarded for parallel safety.
+                        double tp0 = 0;
+
+                        if (!omp_slot_parallel) {
+                            tp0 = TP();
+                            // Restore cached entity measures (serial only — member vars not thread-safe)
+                            cached_geom_h_ = slot_h;
+                            cached_geom_volume_ = slot_vol;
+                            if (!cached_mapping_affine_) {
+                                scratch_node_coords_ = saved_node_coords[slot].node_coords;
+                                cached_mapping_->resetNodes(scratch_node_coords_);
+                            }
+                            tp_fb_restore += TP() - tp0;
                         }
-                        tp_fb_restore += TP() - tp0;
 
                         tp0 = TP();
-                        prepareBasis(ctx, mesh, cell_id, *bs.test_space, *bs.trial_space,
-                                     bs.fallback_kernel->getRequiredData(), *fused_quad_rule);
-                        tp_fb_basis += TP() - tp0;
+                        if (use_expansion_this_block) {
+                            // ===================================================
+                            // COUPLED SCALAR FAST PATH: expand from per-slot
+                            // cached scalar physical gradients/hessians.
+                            // Avoids full prepareBasis (no slow-path fallback,
+                            // no redundant gradient/hessian transforms).
+                            // ===================================================
+                            const auto& meta = cached_coupled_block_meta_[bi];
+                            ctx.configureForCoupledBlock(
+                                cell_id, mesh.getCellDomainId(cell_id), meta);
 
-                        if (bi == 0 && any_need_field_solutions) {
+                            const auto n_test = meta.n_test_dofs;
+                            const auto n_trial = meta.n_trial_dofs;
+                            const auto nq = coupled_scalar_n_qpts_;
+                            const auto ns = coupled_scalar_n_dofs_;
+                            const bool same_sp = meta.trial_is_test;
+                            const bool need_hess = hasFlag(
+                                meta.required_data, RequiredData::BasisHessians);
+
+                            const auto& slotc = coupled_slot_phys_cache_[slot];
+
+                            // Test gradients: expand scalar phys → DOF layout
+                            const auto test_count = static_cast<std::size_t>(n_test * nq);
+                            auto* tg = ctx.testPhysGradientsWritePtr(test_count);
+                            for (LocalIndex q = 0; q < nq; ++q)
+                                for (LocalIndex i = 0; i < n_test; ++i) {
+                                    const auto si = static_cast<LocalIndex>(
+                                        i % static_cast<LocalIndex>(ns));
+                                    tg[static_cast<std::size_t>(q * n_test + i)] =
+                                        slotc.phys_grads[q * ns + si];
+                                }
+
+                            // Test hessians
+                            if (need_hess) {
+                                auto* th = ctx.testPhysHessiansWritePtr(test_count);
+                                for (LocalIndex q = 0; q < nq; ++q)
+                                    for (LocalIndex i = 0; i < n_test; ++i) {
+                                        const auto si = static_cast<LocalIndex>(
+                                            i % static_cast<LocalIndex>(ns));
+                                        th[static_cast<std::size_t>(q * n_test + i)] =
+                                            slotc.phys_hess[q * ns + si];
+                                    }
+                            }
+
+                            // Trial side
+                            if (!same_sp) {
+                                const auto trial_count = static_cast<std::size_t>(n_trial * nq);
+                                auto* trg = ctx.trialPhysGradientsWritePtr(trial_count);
+                                for (LocalIndex q = 0; q < nq; ++q)
+                                    for (LocalIndex j = 0; j < n_trial; ++j) {
+                                        const auto sj = static_cast<LocalIndex>(
+                                            j % static_cast<LocalIndex>(ns));
+                                        trg[static_cast<std::size_t>(q * n_trial + j)] =
+                                            slotc.phys_grads[q * ns + sj];
+                                    }
+                                if (need_hess) {
+                                    auto* trh = ctx.trialPhysHessiansWritePtr(trial_count);
+                                    for (LocalIndex q = 0; q < nq; ++q)
+                                        for (LocalIndex j = 0; j < n_trial; ++j) {
+                                            const auto sj = static_cast<LocalIndex>(
+                                                j % static_cast<LocalIndex>(ns));
+                                            trh[static_cast<std::size_t>(q * n_trial + j)] =
+                                                slotc.phys_hess[q * ns + sj];
+                                        }
+                                }
+                            }
+
+                            // Basis values from pre-built qpt-major cache
+                            if (n_test == coupled_vel_n_dofs_ &&
+                                !coupled_vel_qpt_values_.empty()) {
+                                ctx.setTestBasisValuesOnlyQptMajor(
+                                    n_test, coupled_vel_qpt_values_);
+                            } else {
+                                ctx.setTestBasisValuesOnlyQptMajor(
+                                    n_test, coupled_pres_qpt_values_);
+                            }
+                            if (!same_sp) {
+                                if (n_trial == coupled_vel_n_dofs_ &&
+                                    !coupled_vel_qpt_values_.empty()) {
+                                    ctx.setTrialBasisValuesOnlyQptMajor(
+                                        n_trial, coupled_vel_qpt_values_);
+                                } else {
+                                    ctx.setTrialBasisValuesOnlyQptMajor(
+                                        n_trial, coupled_pres_qpt_values_);
+                                }
+                            }
+
+                            if (hasFlag(meta.required_data, RequiredData::EntityMeasures))
+                                ctx.setEntityMeasures(slot_h, slot_vol, 0.0);
+
+                        } else {
+                            prepareBasis(ctx, mesh, cell_id, *bs.test_space, *bs.trial_space,
+                                         bs.fallback_kernel->getRequiredData(), *fused_quad_rule);
+
+                            // After block 0's prepareBasis, cache scalar physical data
+                            // so subsequent blocks can use the expansion path.
+                            if (use_coupled_scalar_cache && bi == 0) {
+                                const auto nq = coupled_scalar_n_qpts_;
+                                const auto ns = coupled_scalar_n_dofs_;
+                                const auto n_test = static_cast<LocalIndex>(
+                                    bs.test_space->dofs_per_element());
+                                const bool need_hess = hasFlag(
+                                    bs.fallback_kernel->getRequiredData(),
+                                    RequiredData::BasisHessians);
+
+                                auto& slotc = coupled_slot_phys_cache_[slot];
+                                const auto tg_raw = ctx.testPhysicalGradientsRaw();
+                                for (LocalIndex q = 0; q < nq; ++q)
+                                    for (LocalIndex si = 0; si < ns; ++si)
+                                        slotc.phys_grads[q * ns + si] =
+                                            tg_raw[static_cast<std::size_t>(q * n_test + si)];
+
+                                if (need_hess) {
+                                    const auto th_raw = ctx.testPhysicalHessiansRaw();
+                                    for (LocalIndex q = 0; q < nq; ++q)
+                                        for (LocalIndex si = 0; si < ns; ++si)
+                                            slotc.phys_hess[q * ns + si] =
+                                                th_raw[static_cast<std::size_t>(q * n_test + si)];
+                                }
+
+                            }
+                        }
+                        if (!omp_slot_parallel) tp_fb_basis += TP() - tp0;
+
+                        if (bi == 0 && any_need_field_solutions && !use_batch_basis) {
                             tp0 = TP();
                             populateFieldSolutionData(ctx, mesh, cell_id, union_field_reqs);
                             tp_fb_field += TP() - tp0;
                         }
 
                         // Row DOFs are always per-block (different test spaces)
-                        tp0 = TP();
+                        if (!omp_slot_parallel) tp0 = TP();
                         {
                             auto& rd = batch_dofs[bi][slot].row_dofs;
                             rd = getCellDofsCached(mesh, cell_id, bs.row_dof_map, bs.row_dof_offset);
@@ -5107,9 +6259,9 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             // First block in this trial group for this slot: do full gather
                             gc.col_dofs = getCellDofsCached(mesh, cell_id, bs.col_dof_map, bs.col_dof_offset);
                             batch_dofs[bi][slot].col_dofs = gc.col_dofs;
-                            tp_fb_dof += TP() - tp0;
+                            if (!omp_slot_parallel) tp_fb_dof += TP() - tp0;
 
-                            tp0 = TP();
+                            if (!omp_slot_parallel) tp0 = TP();
                             if (parent_td.need_solution) {
                                 const auto& cd = gc.col_dofs;
                                 gatherCellVectorCoefficients(cell_id, bs.col_dof_map,
@@ -5166,9 +6318,9 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         } else {
                             // Reuse cached col_dofs and solution coefficients
                             batch_dofs[bi][slot].col_dofs = gc.col_dofs;
-                            tp_fb_dof += TP() - tp0;
+                            if (!omp_slot_parallel) tp_fb_dof += TP() - tp0;
 
-                            tp0 = TP();
+                            if (!omp_slot_parallel) tp0 = TP();
                             if (parent_td.need_solution) {
                                 if (use_coeffs_only) {
                                     ctx.setSolutionCoefficientsOnly(
@@ -5187,7 +6339,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                 }
                             }
                         }
-                        tp_fb_sol += TP() - tp0;
+                        if (!omp_slot_parallel) tp_fb_sol += TP() - tp0;
 
                         batch_outputs[slot].clear();
                         batch_context_ptrs[slot] = &ctx;
@@ -5201,7 +6353,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         std::span<KernelOutput>(batch_outputs.data(), active));
                     tp_fb_kernel += TP() - tp0;
 
-                    tp0 = TP();
+                    double tp0_scatter = TP();
                     for (std::size_t slot = 0; slot < active; ++slot) {
                         const auto cid = gids[begin + slot];
                         auto& ctx = batch_contexts[slot];
@@ -5291,7 +6443,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             result.vector_entries_inserted += static_cast<GlobalIndex>(
                                 batch_dofs[bi][slot].row_dofs.size());
                     }
-                    tp_fb_insert += TP() - tp0;
+                    tp_fb_scatter += TP() - tp0_scatter;
                 }
 
                 // === Fused combined insertion (after all blocks) ===
@@ -5361,6 +6513,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 }
             }
         }
+        } // end serial batch else-branch
     };
 
     // Main fused-batch range processor
@@ -5585,6 +6738,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     "      ctx setters:     %9.6f s  (%5.1f%%)\n"
                     "      snap+pack:       %9.6f s  (%5.1f%%)\n"
                     "      kernel (batch):  %9.6f s  (%5.1f%%)\n"
+                    "      scatter:         %9.6f s  (%5.1f%%)\n"
                     "      insert:          %9.6f s  (%5.1f%%)\n"
                     "    ------------------------------------\n",
                     cell_ids.size(), terms.size(), requested_batch_size,
@@ -5600,6 +6754,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     tp_fb_setters, 100.0 * tp_fb_setters / total,
                     tp_fb_snap, 100.0 * tp_fb_snap / total,
                     tp_fb_kernel, 100.0 * tp_fb_kernel / total,
+                    tp_fb_scatter, 100.0 * tp_fb_scatter / total,
                     tp_fb_insert, 100.0 * tp_fb_insert / total);
             }
         }
@@ -5838,6 +6993,11 @@ void StandardAssembler::prepareContextFace(
     ContextType type,
     std::span<const LocalIndex> align_facet_to_reference)
 {
+    // Face assembly reuses cell-assembly scratch arrays (scratch_ref_gradients_, etc.).
+    // Invalidate the cell-basis fast-path cache so the next prepareBasis call
+    // falls through to the slow path and repopulates the scratch arrays.
+    basis_scratch_valid_ = false;
+
     // 1. Get element type from mesh
     const ElementType cell_type = mesh.getCellType(cell_id);
     const int dim = mesh.dimension();
@@ -7797,13 +8957,671 @@ void StandardAssembler::populateFieldSolutionData(
 	    context.resumeJITFieldTableRebuild();
 	}
 
+void StandardAssembler::populateFieldSolutionData(
+    AssemblyContext& context,
+    const IMeshAccess& mesh,
+    GlobalIndex cell_id,
+    const std::vector<FieldRequirement>& requirements,
+    FieldSolutionWorkspace& ws)
+{
+    context.clearFieldSolutionData();
+    if (requirements.empty()) {
+        return;
+    }
+    // NOTE: ensureFieldAccessPlans() must be called before the parallel region.
+    // Do NOT call it here — it mutates shared state.
+
+    // Suspend JIT field table rebuilds — each setter would rebuild redundantly.
+    // One rebuild at the end of this function suffices.
+    context.suspendJITFieldTableRebuild();
+
+    FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+	                "StandardAssembler::populateFieldSolutionData: no current solution vector was set");
+
+    int required_history = 0;
+    if (time_integration_ != nullptr) {
+        if (time_integration_->dt1) {
+            required_history = std::max(required_history, time_integration_->dt1->requiredHistoryStates());
+        }
+        if (time_integration_->dt2) {
+            required_history = std::max(required_history, time_integration_->dt2->requiredHistoryStates());
+        }
+        for (const auto& s : time_integration_->dt_extra) {
+            if (s) {
+                required_history = std::max(required_history, s->requiredHistoryStates());
+            }
+        }
+    }
+
+	    if (required_history > 0) {
+	        FE_THROW_IF(static_cast<int>(previous_solutions_.size()) < required_history, FEException,
+	                    "StandardAssembler::populateFieldSolutionData: insufficient solution history (need " +
+	                        std::to_string(required_history) + ")");
+	        for (int k = 1; k <= required_history; ++k) {
+	            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+	            const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+	                                        ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+	                                        : nullptr;
+	            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+	                        "StandardAssembler::populateFieldSolutionData: previous solution state " + std::to_string(k) +
+	                            " not set");
+	        }
+	    }
+
+    const ElementType cell_type = mesh.getCellType(cell_id);
+    const int dim = mesh.dimension();
+    const auto qpts = context.quadraturePoints();
+
+    auto& values_at_pt = ws.scalar_values_at_pt;
+    auto& gradients_at_pt = ws.scalar_gradients_at_pt;
+    auto& hessians_at_pt = ws.scalar_hessians_at_pt;
+    auto& local_coeffs = ws.field_local_coeffs;
+
+    auto& scalar_values = ws.fsd_scalar_values;
+    auto& scalar_gradients = ws.fsd_scalar_gradients;
+    auto& scalar_hessians = ws.fsd_scalar_hessians;
+    auto& scalar_laplacians = ws.fsd_scalar_laplacians;
+
+    auto& vector_values = ws.fsd_vector_values;
+    auto& vector_jacobians = ws.fsd_vector_jacobians;
+    auto& vector_component_hessians = ws.fsd_vector_comp_hessians;
+    auto& vector_component_laplacians = ws.fsd_vector_comp_laplacians;
+
+    for (const auto& req : requirements) {
+        FE_THROW_IF(req.field == INVALID_FIELD_ID, FEException,
+                    "StandardAssembler::populateFieldSolutionData: kernel requested an invalid FieldId");
+
+        const auto* access = findFieldAccessPlan(req.field);
+        FE_THROW_IF(access == nullptr, FEException,
+                    "StandardAssembler::populateFieldSolutionData: no FieldSolutionAccess was provided for field " +
+                        std::to_string(req.field));
+        FE_CHECK_NOT_NULL(access->space, "StandardAssembler::populateFieldSolutionData: field space");
+        FE_CHECK_NOT_NULL(access->dof_map, "StandardAssembler::populateFieldSolutionData: field dof_map");
+        FE_CHECK_NOT_NULL(access->dof_table, "StandardAssembler::populateFieldSolutionData: field dof table");
+
+        const auto& space = *access->space;
+        const auto& element = getElement(space, cell_id, cell_type);
+        const auto& basis = element.basis();
+
+        const bool is_product = access->is_product;
+        const auto n_qpts = context.numQuadraturePoints();
+        const auto n_dofs = static_cast<LocalIndex>(space.dofs_per_element());
+        const auto n_scalar_dofs = static_cast<LocalIndex>(element.num_dofs());
+
+        const bool want_values = hasFlag(req.required, RequiredData::SolutionValues) || (req.required == RequiredData::None);
+        const bool want_gradients = hasFlag(req.required, RequiredData::SolutionGradients);
+        const bool want_hessians = hasFlag(req.required, RequiredData::SolutionHessians);
+        const bool want_laplacians = hasFlag(req.required, RequiredData::SolutionLaplacians);
+        const bool need_gradients = want_gradients;
+        const bool need_hessians = want_hessians || want_laplacians;
+
+	        const auto cell_dofs = getCellDofsFromTable(*access->dof_table, cell_id);
+	        FE_THROW_IF(cell_dofs.size() != static_cast<std::size_t>(n_dofs), FEException,
+	                    "StandardAssembler::populateFieldSolutionData: field DOF count does not match its space DOFs");
+
+	        local_coeffs.resize(cell_dofs.size());
+            gatherCellVectorCoefficients(cell_id, access->dof_map, access->dof_offset,
+                                         cell_dofs, current_solution_view_,
+                                         current_solution_, local_coeffs,
+                                         "StandardAssembler::populateFieldSolutionData", false);
+
+        if (access->field_type == FieldType::Scalar) {
+            FE_THROW_IF(is_product, FEException,
+                        "StandardAssembler::populateFieldSolutionData: ProductSpace cannot be scalar-valued");
+            FE_THROW_IF(n_dofs != n_scalar_dofs, FEException,
+                        "StandardAssembler::populateFieldSolutionData: non-Product scalar space DOF count mismatch");
+
+            scalar_values.assign(static_cast<std::size_t>(n_qpts), 0.0);
+            if (need_gradients) {
+                scalar_gradients.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+            } else {
+                scalar_gradients.clear();
+            }
+            if (need_hessians) {
+                scalar_hessians.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Matrix3x3{});
+            } else {
+                scalar_hessians.clear();
+            }
+            if (want_laplacians) {
+                scalar_laplacians.assign(static_cast<std::size_t>(n_qpts), 0.0);
+            } else {
+                scalar_laplacians.clear();
+            }
+
+            // Use BasisCache for field basis evaluations when quad rule is available.
+            // Read-only lookup in pre-populated cache; do NOT insert on miss
+            // (this overload may run from multiple threads).
+            const basis::BasisCacheEntry* field_bcache = nullptr;
+            if (cached_quad_rule_ &&
+                static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
+                for (const auto& fc : cached_field_bcache_) {
+                    if (fc.basis == &basis && fc.gradients == need_gradients && fc.hessians == need_hessians) {
+                        field_bcache = fc.entry;
+                        break;
+                    }
+                }
+                // Cache miss: query the global thread-safe BasisCache singleton
+                // but do NOT insert into cached_field_bcache_ (shared state).
+                if (!field_bcache) {
+                    field_bcache = &basis::BasisCache::instance().get_or_compute(
+                        basis, *cached_quad_rule_, need_gradients, need_hessians);
+                }
+            }
+
+            // Get inverse Jacobians span once (avoid per-QP accessor overhead).
+            const auto ctx_inv_jacs_span = context.inverseJacobians();
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                if (!field_bcache) {
+                    const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                   qpts[static_cast<std::size_t>(q)][1],
+                                                   qpts[static_cast<std::size_t>(q)][2]};
+                    basis.evaluate_values(xi, values_at_pt);
+                    if (need_gradients) {
+                        basis.evaluate_gradients(xi, gradients_at_pt);
+                    }
+                    if (need_hessians) {
+                        basis.evaluate_hessians(xi, hessians_at_pt);
+                    }
+                }
+
+                // For affine elements, J_inv is the same at all QPs.
+                const auto& J_inv = ctx_inv_jacs_span[cached_mapping_affine_ ? 0 : static_cast<std::size_t>(q)];
+                Real val = 0.0;
+
+                // Accumulate in reference space first, then apply J_inv
+                // transform once.  This saves (n_dofs-1) matrix-vector
+                // products per QP for gradients and (n_dofs-1) matrix
+                // triple products for hessians.
+                AssemblyContext::Vector3D gref_sum = {0.0, 0.0, 0.0};
+                AssemblyContext::Matrix3x3 H_ref_sum{};
+
+                for (LocalIndex j = 0; j < n_dofs; ++j) {
+                    const Real coef = local_coeffs[static_cast<std::size_t>(j)];
+                    const Real basis_val = field_bcache
+                        ? field_bcache->scalarValue(static_cast<std::size_t>(j), static_cast<std::size_t>(q))
+                        : values_at_pt[static_cast<std::size_t>(j)];
+                    val += coef * basis_val;
+
+                    if (need_gradients) {
+                        const auto& gref = field_bcache
+                            ? field_bcache->gradients[static_cast<std::size_t>(q)][static_cast<std::size_t>(j)]
+                            : gradients_at_pt[static_cast<std::size_t>(j)];
+                        for (int d = 0; d < dim; ++d) {
+                            gref_sum[d] += coef * gref[static_cast<std::size_t>(d)];
+                        }
+                    }
+
+                    if (need_hessians) {
+                        const auto& hess_j = field_bcache
+                            ? field_bcache->hessians[static_cast<std::size_t>(q)][static_cast<std::size_t>(j)]
+                            : hessians_at_pt[static_cast<std::size_t>(j)];
+                        for (int r = 0; r < dim; ++r) {
+                            for (int c = 0; c < dim; ++c) {
+                                H_ref_sum[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
+                                    coef * hess_j(static_cast<std::size_t>(r),
+                                                   static_cast<std::size_t>(c));
+                            }
+                        }
+                    }
+                }
+
+                scalar_values[static_cast<std::size_t>(q)] = val;
+
+                if (need_gradients) {
+                    // Single J_inv^T * gref_sum transform
+                    AssemblyContext::Vector3D grad = {0.0, 0.0, 0.0};
+                    for (int d1 = 0; d1 < dim; ++d1) {
+                        for (int d2 = 0; d2 < dim; ++d2) {
+                            grad[d1] += J_inv[static_cast<std::size_t>(d2)][static_cast<std::size_t>(d1)] *
+                                        gref_sum[d2];
+                        }
+                    }
+                    scalar_gradients[static_cast<std::size_t>(q)] = grad;
+                }
+
+                if (need_hessians) {
+                    // Single J_inv^T * H_ref_sum * J_inv transform
+                    AssemblyContext::Matrix3x3 H{};
+                    for (int r = 0; r < dim; ++r) {
+                        for (int c = 0; c < dim; ++c) {
+                            Real sum = 0.0;
+                            for (int a = 0; a < dim; ++a) {
+                                for (int b = 0; b < dim; ++b) {
+                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                           H_ref_sum[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                }
+                            }
+                            H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                        }
+                    }
+                    scalar_hessians[static_cast<std::size_t>(q)] = H;
+                    if (want_laplacians) {
+                        Real lap = 0.0;
+                        for (int d = 0; d < dim; ++d) {
+                            lap += H[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
+                        }
+                        scalar_laplacians[static_cast<std::size_t>(q)] = lap;
+                    }
+                }
+            }
+
+            context.setFieldSolutionScalar(req.field,
+                                           want_values ? std::span<const Real>(scalar_values) : std::span<const Real>{},
+                                           want_gradients ? std::span<const AssemblyContext::Vector3D>(scalar_gradients) : std::span<const AssemblyContext::Vector3D>{},
+                                           want_hessians ? std::span<const AssemblyContext::Matrix3x3>(scalar_hessians) : std::span<const AssemblyContext::Matrix3x3>{},
+                                           want_laplacians ? std::span<const Real>(scalar_laplacians) : std::span<const Real>{});
+
+            // Populate previous field values if a transient context requires history.
+	            if (required_history > 0) {
+	                for (int k = 1; k <= required_history; ++k) {
+	                    const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+	                    const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+	                                                ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+	                                                : nullptr;
+	                    FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+	                                "StandardAssembler::populateFieldSolutionData: previous solution data missing");
+
+                        gatherCellVectorCoefficients(cell_id, access->dof_map, access->dof_offset,
+                                                     cell_dofs, prev_view, prev,
+                                                     local_coeffs,
+                                                     "StandardAssembler::populateFieldSolutionData", false);
+
+                    // Values only (dt() needs just value history).
+                    scalar_values.assign(static_cast<std::size_t>(n_qpts), 0.0);
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        if (field_bcache) {
+                            values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
+                            for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
+                                values_at_pt[static_cast<std::size_t>(j)] =
+                                    field_bcache->scalarValue(static_cast<std::size_t>(j),
+                                                             static_cast<std::size_t>(q));
+                            }
+                        } else {
+                            const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                           qpts[static_cast<std::size_t>(q)][1],
+                                                           qpts[static_cast<std::size_t>(q)][2]};
+                            basis.evaluate_values(xi, values_at_pt);
+                        }
+                        Real val = 0.0;
+                        for (LocalIndex j = 0; j < n_dofs; ++j) {
+                            const Real coef = local_coeffs[static_cast<std::size_t>(j)];
+                            val += coef * values_at_pt[static_cast<std::size_t>(j)];
+                        }
+                        scalar_values[static_cast<std::size_t>(q)] = val;
+                    }
+                    context.setFieldPreviousSolutionScalarK(req.field, k, std::span<const Real>(scalar_values));
+                }
+            }
+            continue;
+        }
+
+        if (access->field_type == FieldType::Vector) {
+            const int vd = access->value_dimension;
+            FE_THROW_IF(vd <= 0 || vd > 3, FEException,
+                        "StandardAssembler::populateFieldSolutionData: vector space value_dimension must be 1..3");
+
+            // Vector-basis spaces (H(curl)/H(div)) are non-Product vector-valued spaces. We currently support
+            // values only for these coefficient fields (no gradients/Hessians/Laplacians).
+            if (!is_product) {
+                FE_THROW_IF(!basis.is_vector_valued(), FEException,
+                            "StandardAssembler::populateFieldSolutionData: non-Product vector field is not a vector-basis space");
+                const auto cont = space.continuity();
+                FE_THROW_IF(cont != Continuity::H_curl && cont != Continuity::H_div, FEException,
+                            "StandardAssembler::populateFieldSolutionData: non-Product vector field is not H(curl)/H(div)");
+                FE_THROW_IF(need_gradients || need_hessians, FEException,
+                            "StandardAssembler::populateFieldSolutionData: SolutionGradients/Hessians/Laplacians are not supported for vector-basis fields");
+                FE_THROW_IF(n_dofs != n_scalar_dofs, FEException,
+                            "StandardAssembler::populateFieldSolutionData: vector-basis DOF count mismatch");
+
+                applyVectorBasisGlobalToLocal(mesh, cell_id, space, std::span<Real>(local_coeffs));
+
+                vector_values.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+                vector_jacobians.clear();
+                vector_component_hessians.clear();
+                vector_component_laplacians.clear();
+
+                auto& vec_values_at_pt = ws.vec_values_at_pt;
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                   qpts[static_cast<std::size_t>(q)][1],
+                                                   qpts[static_cast<std::size_t>(q)][2]};
+                    basis.evaluate_vector_values(xi, vec_values_at_pt);
+
+                    const auto J = context.jacobian(q);
+                    const auto J_inv = context.inverseJacobian(q);
+                    const Real det_J = context.jacobianDet(q);
+
+                    AssemblyContext::Vector3D u{0.0, 0.0, 0.0};
+                    for (LocalIndex j = 0; j < n_dofs; ++j) {
+                        const Real coef = local_coeffs[static_cast<std::size_t>(j)];
+                        const auto& vref = vec_values_at_pt[static_cast<std::size_t>(j)];
+                        AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
+                        if (cont == Continuity::H_curl) {
+                            for (int r = 0; r < dim; ++r) {
+                                for (int c = 0; c < dim; ++c) {
+                                    vphys[static_cast<std::size_t>(r)] +=
+                                        J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
+                                        vref[static_cast<std::size_t>(c)];
+                                }
+                            }
+                        } else { // H_div
+                            const Real inv_det = Real(1) / det_J;
+                            for (int r = 0; r < dim; ++r) {
+                                Real sum = 0.0;
+                                for (int c = 0; c < dim; ++c) {
+                                    sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                                           vref[static_cast<std::size_t>(c)];
+                                }
+                                vphys[static_cast<std::size_t>(r)] = inv_det * sum;
+                            }
+                        }
+
+                        u[0] += coef * vphys[0];
+                        u[1] += coef * vphys[1];
+                        u[2] += coef * vphys[2];
+                    }
+
+                    vector_values[static_cast<std::size_t>(q)] = u;
+                }
+
+                context.setFieldSolutionVector(req.field, vd,
+                                               want_values ? std::span<const AssemblyContext::Vector3D>(vector_values)
+                                                           : std::span<const AssemblyContext::Vector3D>{});
+
+	                if (required_history > 0) {
+	                    for (int k = 1; k <= required_history; ++k) {
+	                        const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+	                        const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+	                                                    ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+	                                                    : nullptr;
+	                        FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+	                                    "StandardAssembler::populateFieldSolutionData: previous solution data missing");
+
+                            gatherCellVectorCoefficients(cell_id, access->dof_map, access->dof_offset,
+                                                         cell_dofs, prev_view, prev,
+                                                         local_coeffs,
+                                                         "StandardAssembler::populateFieldSolutionData", false);
+
+                        applyVectorBasisGlobalToLocal(mesh, cell_id, space, std::span<Real>(local_coeffs));
+
+                        vector_values.assign(static_cast<std::size_t>(n_qpts),
+                                             AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+
+                        for (LocalIndex q = 0; q < n_qpts; ++q) {
+                            const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                           qpts[static_cast<std::size_t>(q)][1],
+                                                           qpts[static_cast<std::size_t>(q)][2]};
+                            basis.evaluate_vector_values(xi, vec_values_at_pt);
+
+                            const auto J = context.jacobian(q);
+                            const auto J_inv = context.inverseJacobian(q);
+                            const Real det_J = context.jacobianDet(q);
+
+                            AssemblyContext::Vector3D u{0.0, 0.0, 0.0};
+                            for (LocalIndex j = 0; j < n_dofs; ++j) {
+                                const Real coef = local_coeffs[static_cast<std::size_t>(j)];
+                                const auto& vref = vec_values_at_pt[static_cast<std::size_t>(j)];
+                                AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
+                                if (cont == Continuity::H_curl) {
+                                    for (int r = 0; r < dim; ++r) {
+                                        for (int c = 0; c < dim; ++c) {
+                                            vphys[static_cast<std::size_t>(r)] +=
+                                                J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
+                                                vref[static_cast<std::size_t>(c)];
+                                        }
+                                    }
+                                } else { // H_div
+                                    const Real inv_det = Real(1) / det_J;
+                                    for (int r = 0; r < dim; ++r) {
+                                        Real sum = 0.0;
+                                        for (int c = 0; c < dim; ++c) {
+                                            sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                                                   vref[static_cast<std::size_t>(c)];
+                                        }
+                                        vphys[static_cast<std::size_t>(r)] = inv_det * sum;
+                                    }
+                                }
+
+                                u[0] += coef * vphys[0];
+                                u[1] += coef * vphys[1];
+                                u[2] += coef * vphys[2];
+                            }
+
+                            vector_values[static_cast<std::size_t>(q)] = u;
+                        }
+
+                        context.setFieldPreviousSolutionVectorK(req.field, k, vd,
+                                                               std::span<const AssemblyContext::Vector3D>(vector_values));
+                    }
+                }
+
+                continue;
+            }
+
+            FE_THROW_IF(n_dofs != static_cast<LocalIndex>(n_scalar_dofs * static_cast<LocalIndex>(vd)), FEException,
+                        "StandardAssembler::populateFieldSolutionData: ProductSpace DOF count mismatch");
+
+            const LocalIndex dofs_per_component = static_cast<LocalIndex>(n_dofs / static_cast<LocalIndex>(vd));
+
+            vector_values.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+            if (need_gradients) {
+                vector_jacobians.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Matrix3x3{});
+            } else {
+                vector_jacobians.clear();
+            }
+            if (need_hessians) {
+                vector_component_hessians.assign(static_cast<std::size_t>(n_qpts) * static_cast<std::size_t>(vd),
+                                                 AssemblyContext::Matrix3x3{});
+            } else {
+                vector_component_hessians.clear();
+            }
+            if (want_laplacians) {
+                vector_component_laplacians.assign(static_cast<std::size_t>(n_qpts) * static_cast<std::size_t>(vd), 0.0);
+            } else {
+                vector_component_laplacians.clear();
+            }
+
+            // Use BasisCache for ProductSpace field basis evaluations.
+            // Read-only lookup in pre-populated cache; do NOT insert on miss.
+            const basis::BasisCacheEntry* field_bcache_ps = nullptr;
+            if (cached_quad_rule_ &&
+                static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
+                for (const auto& fc : cached_field_bcache_) {
+                    if (fc.basis == &basis && fc.gradients == need_gradients && fc.hessians == need_hessians) {
+                        field_bcache_ps = fc.entry;
+                        break;
+                    }
+                }
+                // Cache miss: query the global thread-safe BasisCache singleton
+                // but do NOT insert into cached_field_bcache_ (shared state).
+                if (!field_bcache_ps) {
+                    field_bcache_ps = &basis::BasisCache::instance().get_or_compute(
+                        basis, *cached_quad_rule_, need_gradients, need_hessians);
+                }
+            }
+
+            // Get inverse Jacobians span once (avoid per-QP accessor overhead).
+            const auto ctx_inv_jacs_ps = context.inverseJacobians();
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                if (!field_bcache_ps) {
+                    const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                   qpts[static_cast<std::size_t>(q)][1],
+                                                   qpts[static_cast<std::size_t>(q)][2]};
+                    basis.evaluate_values(xi, values_at_pt);
+                    if (need_gradients) {
+                        basis.evaluate_gradients(xi, gradients_at_pt);
+                    }
+                    if (need_hessians) {
+                        basis.evaluate_hessians(xi, hessians_at_pt);
+                    }
+                }
+
+                const auto& J_inv = ctx_inv_jacs_ps[cached_mapping_affine_ ? 0 : static_cast<std::size_t>(q)];
+                AssemblyContext::Matrix3x3 J{};
+
+                const auto q_base = static_cast<std::size_t>(q) * static_cast<std::size_t>(vd);
+                for (int comp = 0; comp < vd; ++comp) {
+                    Real val_c = 0.0;
+                    // Accumulate in reference space, then transform once.
+                    AssemblyContext::Vector3D gref_sum_c = {0.0, 0.0, 0.0};
+                    AssemblyContext::Matrix3x3 H_ref_sum_c{};
+
+                    const LocalIndex base = static_cast<LocalIndex>(comp) * dofs_per_component;
+                    for (LocalIndex j = 0; j < dofs_per_component; ++j) {
+                        const LocalIndex jj = base + j;
+                        const LocalIndex sj = static_cast<LocalIndex>(jj % n_scalar_dofs);
+                        const Real coef = local_coeffs[static_cast<std::size_t>(jj)];
+                        const Real basis_val = field_bcache_ps
+                            ? field_bcache_ps->scalarValue(static_cast<std::size_t>(sj), static_cast<std::size_t>(q))
+                            : values_at_pt[static_cast<std::size_t>(sj)];
+                        val_c += coef * basis_val;
+
+                        if (need_gradients) {
+                            const auto& gref = field_bcache_ps
+                                ? field_bcache_ps->gradients[static_cast<std::size_t>(q)][static_cast<std::size_t>(sj)]
+                                : gradients_at_pt[static_cast<std::size_t>(sj)];
+                            for (int d = 0; d < dim; ++d) {
+                                gref_sum_c[d] += coef * gref[static_cast<std::size_t>(d)];
+                            }
+                        }
+
+                        if (need_hessians) {
+                            const auto& hess_sj = field_bcache_ps
+                                ? field_bcache_ps->hessians[static_cast<std::size_t>(q)][static_cast<std::size_t>(sj)]
+                                : hessians_at_pt[static_cast<std::size_t>(sj)];
+                            for (int r = 0; r < dim; ++r) {
+                                for (int c = 0; c < dim; ++c) {
+                                    H_ref_sum_c[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
+                                        coef * hess_sj(static_cast<std::size_t>(r),
+                                                        static_cast<std::size_t>(c));
+                                }
+                            }
+                        }
+                    }
+
+                    vector_values[static_cast<std::size_t>(q)][static_cast<std::size_t>(comp)] = val_c;
+
+                    if (need_gradients) {
+                        // Single J_inv^T * gref_sum transform per component
+                        for (int d1 = 0; d1 < dim; ++d1) {
+                            Real sum = 0.0;
+                            for (int d2 = 0; d2 < dim; ++d2) {
+                                sum += J_inv[static_cast<std::size_t>(d2)][static_cast<std::size_t>(d1)] *
+                                       gref_sum_c[d2];
+                            }
+                            J[static_cast<std::size_t>(comp)][static_cast<std::size_t>(d1)] += sum;
+                        }
+                    }
+
+                    if (need_hessians) {
+                        AssemblyContext::Matrix3x3 H{};
+                        for (int r = 0; r < dim; ++r) {
+                            for (int c = 0; c < dim; ++c) {
+                                Real sum = 0.0;
+                                for (int a = 0; a < dim; ++a) {
+                                    for (int b = 0; b < dim; ++b) {
+                                        sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                               H_ref_sum_c[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                               J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                    }
+                                }
+                                H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                            }
+                        }
+                        const auto idx = q_base + static_cast<std::size_t>(comp);
+                        vector_component_hessians[idx] = H;
+                        if (want_laplacians) {
+                            Real lap = 0.0;
+                            for (int d = 0; d < dim; ++d) {
+                                lap += H[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
+                            }
+                            vector_component_laplacians[idx] = lap;
+                        }
+                    }
+                }
+
+                if (need_gradients) {
+                    vector_jacobians[static_cast<std::size_t>(q)] = J;
+                }
+            }
+
+            context.setFieldSolutionVector(req.field, vd,
+                                           want_values ? std::span<const AssemblyContext::Vector3D>(vector_values) : std::span<const AssemblyContext::Vector3D>{},
+                                           want_gradients ? std::span<const AssemblyContext::Matrix3x3>(vector_jacobians) : std::span<const AssemblyContext::Matrix3x3>{},
+                                           want_hessians ? std::span<const AssemblyContext::Matrix3x3>(vector_component_hessians) : std::span<const AssemblyContext::Matrix3x3>{},
+                                           want_laplacians ? std::span<const Real>(vector_component_laplacians) : std::span<const Real>{});
+
+            // Populate previous field values if a transient context requires history.
+	            if (required_history > 0) {
+	                for (int k = 1; k <= required_history; ++k) {
+	                    const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+	                    const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+	                                                ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+	                                                : nullptr;
+	                    FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+	                                "StandardAssembler::populateFieldSolutionData: previous solution data missing");
+
+                        gatherCellVectorCoefficients(cell_id, access->dof_map, access->dof_offset,
+                                                     cell_dofs, prev_view, prev,
+                                                     local_coeffs,
+                                                     "StandardAssembler::populateFieldSolutionData", false);
+
+                    // Values only (dt() needs just value history).
+                    vector_values.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        if (field_bcache_ps) {
+                            values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
+                            for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
+                                values_at_pt[static_cast<std::size_t>(j)] =
+                                    field_bcache_ps->scalarValue(static_cast<std::size_t>(j),
+                                                                static_cast<std::size_t>(q));
+                            }
+                        } else {
+                            const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                           qpts[static_cast<std::size_t>(q)][1],
+                                                           qpts[static_cast<std::size_t>(q)][2]};
+                            basis.evaluate_values(xi, values_at_pt);
+                        }
+
+                        AssemblyContext::Vector3D u_prev = {0.0, 0.0, 0.0};
+                        for (int c = 0; c < vd; ++c) {
+                            Real val_c = 0.0;
+                            const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
+                            for (LocalIndex j = 0; j < dofs_per_component; ++j) {
+                                const LocalIndex jj = base + j;
+                                val_c += local_coeffs[static_cast<std::size_t>(jj)] *
+                                         values_at_pt[static_cast<std::size_t>(j)];
+                            }
+                            u_prev[static_cast<std::size_t>(c)] = val_c;
+                        }
+                        vector_values[static_cast<std::size_t>(q)] = u_prev;
+                    }
+
+                    context.setFieldPreviousSolutionVectorK(req.field, k, vd,
+                                                            std::span<const AssemblyContext::Vector3D>(vector_values));
+                }
+            }
+            continue;
+        }
+
+	        throw FEException("StandardAssembler::populateFieldSolutionData: unsupported field type",
+	                          __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+	    }
+	    // Resume JIT field table rebuild (one rebuild instead of per-setter).
+	    context.resumeJITFieldTableRebuild();
+	}
+
 void StandardAssembler::insertLocal(
     const KernelOutput& output,
     std::span<const GlobalIndex> row_dofs,
     std::span<const GlobalIndex> col_dofs,
     GlobalSystemView* matrix_view,
     GlobalSystemView* vector_view,
-    std::span<const GlobalIndex> resolved_matrix_entries)
+    std::span<const GlobalIndex> resolved_matrix_entries,
+    std::span<const GlobalIndex> resolved_vector_entries)
 {
     if (options_.check_finite_values) {
         auto check_finite = [](std::span<const Real> values, const char* what) {
@@ -7836,7 +9654,12 @@ void StandardAssembler::insertLocal(
 
     // Insert vector entries
     if (vector_view && output.has_vector) {
-        vector_view->addVectorEntries(row_dofs, output.local_vector);
+        if (!resolved_vector_entries.empty()) {
+            vector_view->addVectorEntriesResolved(row_dofs, resolved_vector_entries,
+                                                  output.local_vector);
+        } else {
+            vector_view->addVectorEntries(row_dofs, output.local_vector);
+        }
     }
 }
 

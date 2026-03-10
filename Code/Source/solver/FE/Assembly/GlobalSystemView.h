@@ -305,6 +305,25 @@ public:
         AddMode mode = AddMode::Add) = 0;
 
     /**
+     * @brief Add entries to a vector using pre-resolved backend-local indices.
+     *
+     * The default implementation falls back to the regular addVectorEntries.
+     *
+     * @param dofs Original global DOF indices (unused by resolved path, kept for fallback)
+     * @param resolved Pre-resolved backend-local indices (from resolveVectorEntries)
+     * @param local_vector Local vector values
+     * @param mode Add or insert mode
+     */
+    virtual void addVectorEntriesResolved(
+        std::span<const GlobalIndex> dofs,
+        std::span<const GlobalIndex> resolved,
+        std::span<const Real> local_vector,
+        AddMode mode = AddMode::Add) {
+        (void)resolved;
+        addVectorEntries(dofs, local_vector, mode);
+    }
+
+    /**
      * @brief Add a single vector entry
      *
      * @param dof Global DOF index

@@ -22,6 +22,10 @@
 #include <sstream>
 #include <utility>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #ifndef SVMP_FE_ENABLE_LLVM_JIT
 #define SVMP_FE_ENABLE_LLVM_JIT 0
 #endif
@@ -253,6 +257,23 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
     try {
         const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
 
+        // When vectorize=true, JIT kernels expect CellKernelBatchArgsV1 (batch ABI).
+        // Wrap callJIT to pack a batch-of-1 with stack-local scratch so computeCell
+        // is thread-safe (no shared member vectors).
+        auto callJITCell = [&](std::uintptr_t addr, const assembly::jit::CellKernelArgsV6& v6_args) {
+            if (options_.vectorize) {
+                assembly::jit::KernelSideArgsV6 local_side = v6_args.side;
+                assembly::jit::KernelOutputViewV6 local_out = v6_args.output;
+                assembly::jit::CellKernelBatchArgsV1 batch_args;
+                batch_args.batch_size = 1;
+                batch_args.sides = &local_side;
+                batch_args.outputs = &local_out;
+                callJIT(addr, &batch_args);
+            } else {
+                callJIT(addr, &v6_args);
+            }
+        };
+
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
         if (!k) {
@@ -279,7 +300,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
 	        const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
 	        const auto disp = getSpecializedDispatch(KernelRole::Form, k->ir(), IntegralDomain::Cell, ctx, nullptr);
 	        const auto& compiled = disp ? *disp : compiled_form_;
-	        callJIT(compiled.cell, &args);
+	        callJITCell(compiled.cell, args);
 
         output.has_matrix = want_matrix;
         output.has_vector = want_vector;
@@ -315,7 +336,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
 	        const auto& compiled_bi = disp_bi ? *disp_bi : compiled_bilinear_;
 	        if (want_matrix) {
 	            const auto args_bi = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
-	            callJIT(compiled_bi.cell, &args_bi);
+	            callJITCell(compiled_bi.cell, args_bi);
 	        }
 
 	        // 2) Residual vector = (linear part) + (K*u).
@@ -329,7 +350,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
 	                    getSpecializedDispatch(KernelRole::Linear, *k->linearIR(), IntegralDomain::Cell, ctx, nullptr);
 	                const auto& compiled_lin = disp_lin ? *disp_lin : compiled_linear_;
 	                const auto args_lin = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
-	                callJIT(compiled_lin.cell, &args_lin);
+	                callJITCell(compiled_lin.cell, args_lin);
 	            }
 
             // K*u contribution.
@@ -347,7 +368,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
 	                tmp.clear();
 
 	                const auto args_bi = assembly::jit::packCellKernelArgsV6(ctx, tmp, checks);
-	                callJIT(compiled_bi.cell, &args_bi);
+	                callJITCell(compiled_bi.cell, args_bi);
 
                 for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
                     Real sum = 0.0;
@@ -394,7 +415,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
         // Fused path: single JIT call computes both matrix and vector.
         if (has_compiled_fused_ && want_matrix && want_vector) {
             const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
-            callJIT(compiled_fused_.cell, &args);
+            callJITCell(compiled_fused_.cell, args);
             output.has_matrix = true;
             output.has_vector = true;
             return;
@@ -410,7 +431,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
             const auto disp = k_sym ? getSpecializedDispatch(KernelRole::Tangent, k_sym->tangentIR(), IntegralDomain::Cell, ctx, nullptr)
                                     : nullptr;
             const auto& compiled = disp ? *disp : compiled_tangent_;
-            callJIT(compiled.cell, &args);
+            callJITCell(compiled.cell, args);
         }
 
         if (want_vector) {
@@ -421,7 +442,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
             const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
             const auto disp = getSpecializedDispatch(KernelRole::Residual, residual_ir, IntegralDomain::Cell, ctx, nullptr);
             const auto& compiled = disp ? *disp : compiled_residual_;
-            callJIT(compiled.cell, &args);
+            callJITCell(compiled.cell, args);
         }
 
         output.has_matrix = want_matrix;
@@ -513,7 +534,7 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                 const auto n_test = first_ctx->numTestDofs();
                 const auto n_trial = first_ctx->numTrialDofs();
                 for (std::size_t idx = 0; idx < n; ++idx) {
-                    outputs[idx].reserve(n_test, n_trial, want_matrix, want_vector);
+                    outputs[idx].reserveNoZero(n_test, n_trial, want_matrix, want_vector);
                 }
 
                 // Pack template from first element (time integration stencils
@@ -523,8 +544,10 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                 // Tight per-element loop.
                 if (options_.vectorize) {
-                    scratch_batch_sides_.resize(n);
-                    scratch_batch_outputs_.resize(n);
+                    // Stack-local scratch: thread-safe for concurrent calls
+                    // from outer OMP parallel regions.
+                    std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
+                    std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
 
                     for (std::size_t idx = 0; idx < n; ++idx) {
                         if (contexts[idx] == nullptr) {
@@ -546,8 +569,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         // Start with template and patch per-cell fields.
                         auto args = args_template;
                         patchCellArgsV6(args, ctx, output);
-                        scratch_batch_sides_[idx] = args.side;
-                        scratch_batch_outputs_[idx] = args.output;
+                        batch_sides[idx] = args.side;
+                        batch_outputs[idx] = args.output;
 
                         output.has_matrix = want_matrix;
                         output.has_vector = want_vector;
@@ -555,8 +578,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                     assembly::jit::CellKernelBatchArgsV1 batch_args;
                     batch_args.batch_size = static_cast<std::uint32_t>(n);
-                    batch_args.sides = scratch_batch_sides_.data();
-                    batch_args.outputs = scratch_batch_outputs_.data();
+                    batch_args.sides = batch_sides.data();
+                    batch_args.outputs = batch_outputs.data();
 
                     callJIT(compiled.cell, &batch_args);
                 } else {
@@ -616,7 +639,7 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                 const auto n_test = first_ctx->numTestDofs();
                 const auto n_trial = first_ctx->numTrialDofs();
                 for (std::size_t idx = 0; idx < n; ++idx) {
-                    outputs[idx].reserve(n_test, n_trial, want_matrix, want_vector);
+                    outputs[idx].reserveNoZero(n_test, n_trial, want_matrix, want_vector);
                 }
 
                 // Scratch output for K*u when matrix-only mode needs a temporary.
@@ -631,8 +654,9 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                 // Tight per-element loop.
                 if (options_.vectorize) {
-                    scratch_batch_sides_.resize(n);
-                    scratch_batch_outputs_.resize(n);
+                    // Stack-local scratch: thread-safe for concurrent calls.
+                    std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
+                    std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
 
                     for (std::size_t idx = 0; idx < n; ++idx) {
                         if (contexts[idx] == nullptr) continue;
@@ -650,14 +674,14 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                         auto args = args_template;
                         patchCellArgsV6(args, ctx, output);
-                        scratch_batch_sides_[idx] = args.side;
-                        scratch_batch_outputs_[idx] = args.output;
+                        batch_sides[idx] = args.side;
+                        batch_outputs[idx] = args.output;
                     }
 
                     assembly::jit::CellKernelBatchArgsV1 batch_args;
                     batch_args.batch_size = static_cast<std::uint32_t>(n);
-                    batch_args.sides = scratch_batch_sides_.data();
-                    batch_args.outputs = scratch_batch_outputs_.data();
+                    batch_args.sides = batch_sides.data();
+                    batch_args.outputs = batch_outputs.data();
 
                     if (want_matrix) {
                         callJIT(compiled_bi.cell, &batch_args);
@@ -826,7 +850,7 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                     const auto n_test = first_ctx->numTestDofs();
                     const auto n_trial = first_ctx->numTrialDofs();
                     for (std::size_t idx = 0; idx < n; ++idx) {
-                        outputs[idx].reserve(n_test, n_trial, want_matrix, want_vector);
+                        outputs[idx].reserveNoZero(n_test, n_trial, want_matrix, want_vector);
                     }
 
                     // Pack template from first element (avoids stencil recomputation).
@@ -834,56 +858,125 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         *first_ctx, outputs[first_idx], checks);
 
                     // Tight per-element loop.
+                    // When OpenMP is available and the batch is large enough,
+                    // elements are processed in parallel using thread-local
+                    // sub-batches.  The JIT function is a pure function of its
+                    // input/output pointers and is safe for concurrent calls.
+
+                    const auto fused_addr = (has_compiled_fused_ && want_matrix && want_vector)
+                                                ? compiled_fused_.cell : std::uintptr_t{0};
+                    const auto tan_addr   = want_matrix ? compiled_tan_ptr->cell : std::uintptr_t{0};
+                    const auto res_addr   = want_vector ? compiled_res_ptr->cell : std::uintptr_t{0};
+
                     if (options_.vectorize) {
-                        scratch_batch_sides_.resize(n);
-                        scratch_batch_outputs_.resize(n);
+#ifdef _OPENMP
+                        // Parallel sub-batch dispatch: each thread packs and
+                        // processes its own contiguous sub-batch using the batch
+                        // ABI (CellKernelBatchArgsV1) that the vectorized JIT
+                        // kernel expects.
+                        const int omp_threads = omp_get_max_threads();
+                        if (omp_threads > 1 && n >= 4) {
+                            #pragma omp parallel num_threads(omp_threads)
+                            {
+                                const int tid = omp_get_thread_num();
+                                const int nt  = omp_get_num_threads();
+                                const std::size_t chunk = (n + static_cast<std::size_t>(nt) - 1)
+                                                          / static_cast<std::size_t>(nt);
+                                const std::size_t lo = std::min(static_cast<std::size_t>(tid) * chunk, n);
+                                const std::size_t hi = std::min(lo + chunk, n);
+                                const std::size_t sub_n = hi - lo;
 
-                        for (std::size_t idx = 0; idx < n; ++idx) {
-                            if (contexts[idx] == nullptr) {
-                                continue;
-                            }
-                            const auto& ctx = *contexts[idx];
-                            auto& output = outputs[idx];
-                            output.clear();
+                                if (sub_n > 0) {
+                                    // Thread-local scratch for batch packing.
+                                    std::vector<assembly::jit::KernelSideArgsV6> local_sides(sub_n);
+                                    std::vector<assembly::jit::KernelOutputViewV6> local_outputs(sub_n);
 
-                            if (has_updates) {
-                                for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
-                                    applyInlinedMaterialStateUpdatesReal(
-                                        ctx, nullptr, FormKind::Residual,
-                                        state_layout, updates, Side::Minus, q);
+                                    for (std::size_t idx = lo; idx < hi; ++idx) {
+                                        if (contexts[idx] == nullptr) continue;
+                                        const auto& ctx = *contexts[idx];
+                                        auto& output = outputs[idx];
+                                        output.clear();
+
+                                        if (has_updates) {
+                                            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                                                applyInlinedMaterialStateUpdatesReal(
+                                                    ctx, nullptr, FormKind::Residual,
+                                                    state_layout, updates, Side::Minus, q);
+                                            }
+                                        }
+
+                                        auto args = args_template;
+                                        patchCellArgsV6(args, ctx, output);
+                                        local_sides[idx - lo]   = args.side;
+                                        local_outputs[idx - lo] = args.output;
+
+                                        output.has_matrix = want_matrix;
+                                        output.has_vector = want_vector;
+                                    }
+
+                                    assembly::jit::CellKernelBatchArgsV1 batch_args;
+                                    batch_args.batch_size = static_cast<std::uint32_t>(sub_n);
+                                    batch_args.sides   = local_sides.data();
+                                    batch_args.outputs = local_outputs.data();
+
+                                    if (fused_addr != 0) {
+                                        callJIT(fused_addr, &batch_args);
+                                    } else {
+                                        if (tan_addr != 0) callJIT(tan_addr, &batch_args);
+                                        if (res_addr != 0) callJIT(res_addr, &batch_args);
+                                    }
                                 }
                             }
+                        } else
+#endif
+                        {
+                            // Serial vectorize path: stack-local scratch
+                            // (thread-safe for concurrent calls).
+                            std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
+                            std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
 
-                            auto args = args_template;
-                            patchCellArgsV6(args, ctx, output);
-                            scratch_batch_sides_[idx] = args.side;
-                            scratch_batch_outputs_[idx] = args.output;
+                            for (std::size_t idx = 0; idx < n; ++idx) {
+                                if (contexts[idx] == nullptr) continue;
+                                const auto& ctx = *contexts[idx];
+                                auto& output = outputs[idx];
+                                output.clear();
 
-                            output.has_matrix = want_matrix;
-                            output.has_vector = want_vector;
-                        }
+                                if (has_updates) {
+                                    for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                                        applyInlinedMaterialStateUpdatesReal(
+                                            ctx, nullptr, FormKind::Residual,
+                                            state_layout, updates, Side::Minus, q);
+                                    }
+                                }
 
-                        assembly::jit::CellKernelBatchArgsV1 batch_args;
-                        batch_args.batch_size = static_cast<std::uint32_t>(n);
-                        batch_args.sides = scratch_batch_sides_.data();
-                        batch_args.outputs = scratch_batch_outputs_.data();
+                                auto args = args_template;
+                                patchCellArgsV6(args, ctx, output);
+                                batch_sides[idx]   = args.side;
+                                batch_outputs[idx] = args.output;
 
-                        // Fused path: single call computes both matrix and vector.
-                        if (has_compiled_fused_ && want_matrix && want_vector) {
-                            callJIT(compiled_fused_.cell, &batch_args);
-                        } else {
-                            if (want_matrix) {
-                                callJIT(compiled_tan_ptr->cell, &batch_args);
+                                output.has_matrix = want_matrix;
+                                output.has_vector = want_vector;
                             }
-                            if (want_vector) {
-                                callJIT(compiled_res_ptr->cell, &batch_args);
+
+                            assembly::jit::CellKernelBatchArgsV1 batch_args;
+                            batch_args.batch_size = static_cast<std::uint32_t>(n);
+                            batch_args.sides   = batch_sides.data();
+                            batch_args.outputs = batch_outputs.data();
+
+                            if (fused_addr != 0) {
+                                callJIT(fused_addr, &batch_args);
+                            } else {
+                                if (tan_addr != 0) callJIT(tan_addr, &batch_args);
+                                if (res_addr != 0) callJIT(res_addr, &batch_args);
                             }
                         }
                     } else {
+                        // Non-vectorize per-element path.
+#ifdef _OPENMP
+                        #pragma omp parallel for schedule(static) if(n >= 4)
+#endif
                         for (std::size_t idx = 0; idx < n; ++idx) {
-                            if (contexts[idx] == nullptr) {
-                                continue;
-                            }
+                            if (contexts[idx] == nullptr) continue;
                             const auto& ctx = *contexts[idx];
                             auto& output = outputs[idx];
                             output.clear();
@@ -898,11 +991,11 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                             auto args = args_template;
                             patchCellArgsV6(args, ctx, output);
-                            if (want_matrix) {
-                                callJIT(compiled_tan_ptr->cell, &args);
-                            }
-                            if (want_vector) {
-                                callJIT(compiled_res_ptr->cell, &args);
+                            if (fused_addr != 0) {
+                                callJIT(fused_addr, &args);
+                            } else {
+                                if (tan_addr != 0) callJIT(tan_addr, &args);
+                                if (res_addr != 0) callJIT(res_addr, &args);
                             }
 
                             output.has_matrix = want_matrix;

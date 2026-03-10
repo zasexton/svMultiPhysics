@@ -1239,6 +1239,64 @@ if(FE_ENABLE_LLVM_JIT AND FE_ENABLE_ASSEMBLY)
 endif()
 
 #------------------------------------------------------------------------------
+# OpenMP (optional, enables threaded assembly kernels and BLAS-1 in FSILS)
+#------------------------------------------------------------------------------
+
+find_package(OpenMP QUIET COMPONENTS CXX)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(svfe PUBLIC OpenMP::OpenMP_CXX)
+    set(_FE_OMP_ENABLED ON)
+    set(_FE_OMP_COMPILE_FLAG "")  # OpenMP::OpenMP_CXX handles flags
+    message(STATUS "FE: OpenMP enabled (version ${OpenMP_CXX_VERSION})")
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    # Clang without libomp-dev: use extracted libomp from /tmp/libomp14.
+    # -fopenmp (NOT -fopenmp=libgomp) is required to define _OPENMP and
+    # generate __kmpc_* calls.  Links against LLVM's libomp runtime.
+    set(_FE_OMP_ENABLED OFF)
+
+    # Search paths for libomp (extracted package or system install)
+    set(_LIBOMP_SEARCH_DIRS
+        "/tmp/libomp14/usr/lib/x86_64-linux-gnu"
+        "/tmp/libomp14/usr/lib/llvm-14/lib"
+        "/usr/lib/x86_64-linux-gnu"
+        "/usr/lib/llvm-14/lib"
+    )
+    set(_LIBOMP_INC_SEARCH_DIRS
+        "/tmp/libomp14/usr/lib/llvm-14/lib/clang/14.0.0/include"
+        "/usr/lib/llvm-14/lib/clang/14.0.0/include"
+    )
+
+    set(_LIBOMP_LIB "")
+    set(_LIBOMP_INC "")
+    foreach(_dir ${_LIBOMP_SEARCH_DIRS})
+        if(EXISTS "${_dir}/libomp.so" OR EXISTS "${_dir}/libomp5.so")
+            set(_LIBOMP_LIB "${_dir}")
+            break()
+        endif()
+    endforeach()
+    foreach(_dir ${_LIBOMP_INC_SEARCH_DIRS})
+        if(EXISTS "${_dir}/omp.h")
+            set(_LIBOMP_INC "${_dir}")
+            break()
+        endif()
+    endforeach()
+
+    if(_LIBOMP_LIB AND _LIBOMP_INC)
+        # -fopenmp defines _OPENMP and generates __kmpc_* runtime calls
+        set(_FE_OMP_COMPILE_FLAG "-fopenmp")
+        set(_FE_OMP_INCLUDE_FLAG "-isystem${_LIBOMP_INC}")
+        target_link_libraries(svfe PUBLIC "-L${_LIBOMP_LIB}" "-lomp" "-Wl,-rpath,${_LIBOMP_LIB}")
+        set(_FE_OMP_ENABLED ON)
+        message(STATUS "FE: OpenMP enabled via libomp (lib=${_LIBOMP_LIB}, inc=${_LIBOMP_INC})")
+    else()
+        message(STATUS "FE: OpenMP not found (no libomp), threading disabled")
+    endif()
+else()
+    set(_FE_OMP_ENABLED OFF)
+    message(STATUS "FE: OpenMP not found, threading disabled")
+endif()
+
+#------------------------------------------------------------------------------
 # FSILS backend (vendored)
 #------------------------------------------------------------------------------
 
@@ -1288,16 +1346,78 @@ if(FE_ENABLE_ASSEMBLY AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/gmres.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/norm.cpp
     )
-    set_source_files_properties(${_FE_FSILS_BLAS1_O3_FILES}
-        PROPERTIES COMPILE_OPTIONS "-O3;-ftree-vectorize;-funroll-loops;-fopenmp-simd"
+    # When full OpenMP is available, add -fopenmp to activate thread-parallel
+    # BLAS-1 operations (dot, axpy, SpMV, norms).
+    if(_FE_OMP_ENABLED AND DEFINED _FE_OMP_COMPILE_FLAG AND NOT _FE_OMP_COMPILE_FLAG STREQUAL "")
+        set(_FE_FSILS_OMP_FLAG "${_FE_OMP_COMPILE_FLAG}")
+    else()
+        set(_FE_FSILS_OMP_FLAG "-fopenmp-simd")
+    endif()
+
+    # FSILS BLAS-1 files that include <omp.h> need the include path too.
+    # gmres.cpp and spar_mul.cpp include <omp.h> for omp_get_max_threads().
+    set(_FE_FSILS_BLAS1_OMP_FLAGS "${_FE_FSILS_OMP_FLAG}")
+    if(_FE_OMP_ENABLED AND DEFINED _FE_OMP_INCLUDE_FLAG AND NOT _FE_OMP_INCLUDE_FLAG STREQUAL "")
+        set(_FE_FSILS_BLAS1_OMP_FLAGS "${_FE_FSILS_OMP_FLAG};${_FE_OMP_INCLUDE_FLAG}")
+    endif()
+
+    # Files that DON'T include <omp.h> (only use #pragma omp):
+    set(_FE_FSILS_PRAGMA_ONLY_FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/dot.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/omp_la.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/norm.cpp
+    )
+    set_source_files_properties(${_FE_FSILS_PRAGMA_ONLY_FILES}
+        PROPERTIES COMPILE_OPTIONS "-O3;-ftree-vectorize;-funroll-loops;${_FE_FSILS_OMP_FLAG}"
     )
 
-    # Assembly hot-path files: upgrade from -O2 (RelWithDebInfo default) to -O3
-    set(_FE_ASSEMBLY_O3_FILES
-        ${CMAKE_CURRENT_SOURCE_DIR}/Assembly/StandardAssembler.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Assembly/AssemblyContext.cpp
+    # Files that DO include <omp.h>:
+    set(_FE_FSILS_OMP_H_FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/gmres.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/spar_mul.cpp
     )
-    set_source_files_properties(${_FE_ASSEMBLY_O3_FILES}
+    set_source_files_properties(${_FE_FSILS_OMP_H_FILES}
+        PROPERTIES COMPILE_OPTIONS "-O3;-ftree-vectorize;-funroll-loops;${_FE_FSILS_BLAS1_OMP_FLAGS}"
+    )
+
+    # ns_solver and bicgs also have OpenMP pragmas for parallel operations.
+    if(_FE_OMP_ENABLED AND DEFINED _FE_OMP_COMPILE_FLAG AND NOT _FE_OMP_COMPILE_FLAG STREQUAL "")
+        set(_FE_FSILS_OMP_EXTRA_FILES
+            ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/ns_solver.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/bicgs.cpp
+        )
+        set_source_files_properties(${_FE_FSILS_OMP_EXTRA_FILES}
+            PROPERTIES COMPILE_OPTIONS "${_FE_OMP_COMPILE_FLAG}"
+        )
+    endif()
+
+    # JITKernelWrapper needs -fopenmp + omp.h include for thread management.
+    if(_FE_OMP_ENABLED AND DEFINED _FE_OMP_COMPILE_FLAG AND NOT _FE_OMP_COMPILE_FLAG STREQUAL "")
+        set(_FE_JIT_OMP_FLAGS "${_FE_OMP_COMPILE_FLAG}")
+        if(DEFINED _FE_OMP_INCLUDE_FLAG AND NOT _FE_OMP_INCLUDE_FLAG STREQUAL "")
+            set(_FE_JIT_OMP_FLAGS "${_FE_OMP_COMPILE_FLAG};${_FE_OMP_INCLUDE_FLAG}")
+        endif()
+        set_source_files_properties(
+            ${CMAKE_CURRENT_SOURCE_DIR}/Forms/JIT/JITKernelWrapper.cpp
+            PROPERTIES COMPILE_OPTIONS "${_FE_JIT_OMP_FLAGS}"
+        )
+    endif()
+
+    # Assembly hot-path files: upgrade from -O2 (RelWithDebInfo default) to -O3
+    # StandardAssembler also needs -fopenmp for thread-parallel coupled assembly.
+    set(_FE_ASSEMBLY_STD_FLAGS "-O3;-ftree-vectorize;-funroll-loops")
+    if(_FE_OMP_ENABLED AND DEFINED _FE_OMP_COMPILE_FLAG AND NOT _FE_OMP_COMPILE_FLAG STREQUAL "")
+        list(APPEND _FE_ASSEMBLY_STD_FLAGS "${_FE_OMP_COMPILE_FLAG}")
+        if(DEFINED _FE_OMP_INCLUDE_FLAG AND NOT _FE_OMP_INCLUDE_FLAG STREQUAL "")
+            list(APPEND _FE_ASSEMBLY_STD_FLAGS "${_FE_OMP_INCLUDE_FLAG}")
+        endif()
+    endif()
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/Assembly/StandardAssembler.cpp
+        PROPERTIES COMPILE_OPTIONS "${_FE_ASSEMBLY_STD_FLAGS}"
+    )
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/Assembly/AssemblyContext.cpp
         PROPERTIES COMPILE_OPTIONS "-O3;-ftree-vectorize;-funroll-loops"
     )
 endif()

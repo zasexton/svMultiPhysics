@@ -260,6 +260,27 @@ struct KernelOutput {
     }
 
     /**
+     * @brief Reserve storage without zeroing (use when clear() will be called before use)
+     */
+    void reserveNoZero(LocalIndex n_test, LocalIndex n_trial, bool need_matrix, bool need_vector) {
+        n_test_dofs = n_test;
+        n_trial_dofs = n_trial;
+        has_matrix = need_matrix;
+        has_vector = need_vector;
+        if (need_matrix) {
+            local_matrix.resize(
+                static_cast<std::size_t>(n_test) * static_cast<std::size_t>(n_trial));
+        } else {
+            local_matrix.clear();
+        }
+        if (need_vector) {
+            local_vector.resize(static_cast<std::size_t>(n_test));
+        } else {
+            local_vector.clear();
+        }
+    }
+
+    /**
      * @brief Clear all data
      */
     void clear() {
