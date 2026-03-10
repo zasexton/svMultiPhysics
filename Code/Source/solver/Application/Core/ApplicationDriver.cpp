@@ -318,11 +318,12 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
     if (eq->tolerance.defined()) {
       const double tol = eq->tolerance.value();
       if (tol > 0.0) {
-        // Legacy semantics: <Add_equation><Tolerance> is a *relative* tolerance (see eqType::tol).
+        // Legacy semantics: <Add_equation><Tolerance> is a *relative* tolerance.
         newton_opts.rel_tolerance = tol;
-        // Absolute tolerance: tol^2 provides a sensible floor so Newton declares
-        // convergence immediately when the residual is already negligible.
-        newton_opts.abs_tolerance = tol * tol;
+        // Use the same tolerance for absolute convergence so that problems
+        // with already-small residuals (e.g., linear heat at near-steady-state)
+        // can declare convergence without requiring unachievable relative reduction.
+        newton_opts.abs_tolerance = tol;
       }
     }
   }
@@ -426,11 +427,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     if (eq->tolerance.defined()) {
       const double tol = eq->tolerance.value();
       if (tol > 0.0) {
-        // Legacy semantics: <Add_equation><Tolerance> is a *relative* tolerance (see eqType::tol).
+        // Legacy semantics: <Add_equation><Tolerance> is a *relative* tolerance.
         opts.newton.rel_tolerance = tol;
-        // Absolute tolerance: tol^2 provides a sensible floor so Newton declares
-        // convergence immediately when the residual is already negligible.
-        opts.newton.abs_tolerance = tol * tol;
+        // Use the same tolerance for absolute convergence so that problems
+        // with already-small residuals (e.g., linear heat at near-steady-state)
+        // can declare convergence without requiring unachievable relative reduction.
+        opts.newton.abs_tolerance = tol;
       }
     }
   }

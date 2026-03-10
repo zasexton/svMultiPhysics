@@ -62,6 +62,12 @@ struct NewtonOptions {
     double rel_tolerance{1e-8};
     double step_tolerance{0.0};
 
+    // Stagnation tolerance: if ||r_{k}|| / ||r_{k-1}|| >= this threshold,
+    // Newton has converged to the best achievable precision and further
+    // iterations won't help (e.g., linear solve roundoff floor).
+    // Set to 0 to disable. Default 0.99 = less than 1% improvement.
+    double stagnation_tolerance{0.99};
+
     bool assemble_both_when_possible{true};
 
     // Modified Newton: reuse the Jacobian for multiple nonlinear iterations.

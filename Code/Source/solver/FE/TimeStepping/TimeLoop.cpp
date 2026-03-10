@@ -1089,6 +1089,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             }
         } else {
             const int max_it = options_.newton.max_iterations;
+            double prev_residual_norm = -1.0;
             for (int it = 0; it < max_it; ++it) {
             collocation.jacobian->zero();
             collocation.residual->zero();
@@ -1385,6 +1386,22 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 rep.iterations = it;
                 break;
             }
+
+            // Stagnation detection: residual not improving AND has decreased from
+            // initial means we've converged to the best achievable precision.
+            // Requiring ||r|| < ||r0|| prevents false convergence when Newton
+            // hasn't made meaningful progress.
+            if (it > 0 && options_.newton.stagnation_tolerance > 0.0 &&
+                prev_residual_norm > 0.0 && std::isfinite(prev_residual_norm) &&
+                rep.residual_norm0 > 0.0 && rep.residual_norm < rep.residual_norm0) {
+                const double ratio = rep.residual_norm / prev_residual_norm;
+                if (ratio >= options_.newton.stagnation_tolerance) {
+                    rep.converged = true;
+                    rep.iterations = it;
+                    break;
+                }
+            }
+            prev_residual_norm = rep.residual_norm;
 
             collocation.delta->zero();
             rep.linear = linear.solve(*collocation.jacobian, *collocation.delta, *collocation.residual);

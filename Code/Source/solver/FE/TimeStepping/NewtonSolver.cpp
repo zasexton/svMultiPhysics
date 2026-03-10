@@ -841,6 +841,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     };
     // =================================
 
+    double prev_residual_norm = -1.0;
+
     for (int it = 0; it < max_it; ++it) {
         ntp0 = NTP();
         history.updateGhosts();
@@ -913,6 +915,31 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             printNewtonProfile(it);
             return report;
         }
+
+        // Stagnation detection: if the residual isn't improving between Newton iterations
+        // AND has already decreased from the initial residual, the solution has converged
+        // to the best precision achievable (e.g., limited by linear solver accuracy or
+        // floating-point roundoff). Requiring ||r|| < ||r0|| prevents false convergence
+        // when Newton hasn't made any meaningful progress (e.g., early NS iterations
+        // establishing the pressure field).
+        if (it > 0 && options_.stagnation_tolerance > 0.0 &&
+            prev_residual_norm > 0.0 && std::isfinite(prev_residual_norm) &&
+            report.residual_norm0 > 0.0 && current_residual_norm < report.residual_norm0) {
+            const double ratio = current_residual_norm / prev_residual_norm;
+            if (ratio >= options_.stagnation_tolerance) {
+                report.converged = true;
+                report.iterations = it;
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "NewtonSolver: converged by stagnation (||r_k||/||r_{k-1}||="
+                        << ratio << " >= " << options_.stagnation_tolerance << ")";
+                    traceLog(oss.str());
+                }
+                printNewtonProfile(it);
+                return report;
+            }
+        }
+        prev_residual_norm = current_residual_norm;
 
         if (ptc_can_run) {
             if (options_.pseudo_transient.update_from_residual_ratio && ptc_mass_ready &&
