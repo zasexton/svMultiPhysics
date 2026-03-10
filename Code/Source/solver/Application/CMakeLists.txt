@@ -33,6 +33,18 @@ target_include_directories(svapplication
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
 )
 
+# ApplicationDriver.cpp needs OpenMP for automatic thread configuration.
+# Use the compile flags exported by the FE CMakeLists.
+if(FE_OMP_ENABLED)
+    set(_APP_OMP_FLAGS "${FE_OMP_COMPILE_FLAG}")
+    if(FE_OMP_INCLUDE_FLAG)
+        list(APPEND _APP_OMP_FLAGS "${FE_OMP_INCLUDE_FLAG}")
+    endif()
+    set_source_files_properties(Core/ApplicationDriver.cpp
+        PROPERTIES COMPILE_OPTIONS "${_APP_OMP_FLAGS}"
+    )
+endif()
+
 option(APPLICATION_BUILD_TESTS "Build Application tests" OFF)
 if(APPLICATION_BUILD_TESTS)
   add_subdirectory(Tests)

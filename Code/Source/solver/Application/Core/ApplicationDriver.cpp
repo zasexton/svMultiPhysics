@@ -22,11 +22,99 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <set>
+#include <thread>
 #include <vector>
 #include <sstream>
 #include <stdexcept>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+#ifdef MESH_HAS_MPI
+#include <mpi.h>
+#endif
+
 namespace {
+
+/// @brief Detect the number of physical CPU cores (excluding hyperthreads).
+/// Falls back to std::thread::hardware_concurrency() if detection fails.
+int detectPhysicalCores()
+{
+  int physical = 0;
+#if defined(__linux__)
+  // Count unique physical cores from sysfs topology.
+  // Each /sys/devices/system/cpu/cpuN/topology/thread_siblings_list contains
+  // the list of sibling logical CPUs sharing one physical core. We count
+  // unique "first sibling" entries to get the physical core count.
+  std::set<int> seen_first_siblings;
+  for (int cpu = 0; cpu < 4096; ++cpu) {
+    char path[128];
+    std::snprintf(path, sizeof(path),
+                  "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list", cpu);
+    std::ifstream f(path);
+    if (!f.is_open()) break;
+    int first_sibling = -1;
+    // thread_siblings_list format: "0-1" or "0,1" or "0" — first integer is
+    // the lowest-numbered sibling.
+    f >> first_sibling;
+    if (first_sibling >= 0) {
+      seen_first_siblings.insert(first_sibling);
+    }
+  }
+  physical = static_cast<int>(seen_first_siblings.size());
+#endif
+  if (physical <= 0) {
+    physical = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+  }
+  return physical;
+}
+
+/// @brief Automatically configure OpenMP thread count based on physical cores
+/// and number of MPI ranks sharing this node. If OMP_NUM_THREADS is already set
+/// by the user, that value is respected.
+///
+/// Uses physical cores (not logical/hyperthreaded) because FEM workloads are
+/// memory-bandwidth-bound and hyperthreading typically hurts performance.
+///
+/// Logic: threads_per_rank = floor(physical_cores / ranks_on_this_node)
+///        clamped to [1, physical_cores].
+void configureOpenMPThreads(const svmp::MeshComm& comm)
+{
+#ifdef _OPENMP
+  // If user explicitly set OMP_NUM_THREADS, respect it.
+  if (std::getenv("OMP_NUM_THREADS")) {
+    return;
+  }
+
+  const int physical_cores = detectPhysicalCores();
+
+  // Determine how many MPI ranks share this physical node.
+  int ranks_on_node = 1;
+#ifdef MESH_HAS_MPI
+  int mpi_initialized = 0;
+  MPI_Initialized(&mpi_initialized);
+  if (mpi_initialized) {
+    MPI_Comm node_comm = MPI_COMM_NULL;
+    MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, comm.rank(),
+                        MPI_INFO_NULL, &node_comm);
+    if (node_comm != MPI_COMM_NULL) {
+      MPI_Comm_size(node_comm, &ranks_on_node);
+      MPI_Comm_free(&node_comm);
+    }
+  }
+#else
+  (void)comm;
+#endif
+
+  if (ranks_on_node < 1) ranks_on_node = 1;
+  int threads = std::max(1, physical_cores / ranks_on_node);
+  omp_set_num_threads(threads);
+#else
+  (void)comm;
+#endif
+}
 
 std::string trim_copy(std::string s)
 {
@@ -195,6 +283,22 @@ void ApplicationDriver::run(const std::string& xml_file)
 void ApplicationDriver::runWithParameters(const Parameters& params)
 {
   const auto comm = svmp::MeshComm::world();
+
+  // Auto-configure OpenMP threads: hardware_cores / MPI_ranks_per_node.
+  // Respects OMP_NUM_THREADS if the user has set it explicitly.
+  configureOpenMPThreads(comm);
+
+  {
+    int omp_threads = 1;
+#ifdef _OPENMP
+    omp_threads = omp_get_max_threads();
+#endif
+    oopCout() << "[svMultiPhysics::Application] Threading: MPI ranks=" << comm.size()
+              << " OMP threads/rank=" << omp_threads
+              << " (physical cores=" << detectPhysicalCores()
+              << " logical cores=" << std::thread::hardware_concurrency() << ")" << std::endl;
+  }
+
   if (comm.is_parallel() && comm.rank() == 0 && !oopTraceEnabled()) {
     oopCout() << "[svMultiPhysics::Application] MPI ranks=" << comm.size()
               << "; suppressing non-root log output (set SVMP_OOP_SOLVER_TRACE=1 for per-rank logs)." << std::endl;

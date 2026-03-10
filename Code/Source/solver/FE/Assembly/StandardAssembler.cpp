@@ -5125,8 +5125,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         const bool use_colored_parallel =
             use_batch_basis_early &&
             max_omp_threads > 1 &&
-            gids.size() >= 256 &&
-            !std::getenv("SVMP_NO_COLORED_PARALLEL");
+            gids.size() >= 256;
 
         if (use_colored_parallel) {
             // --- Build per-color cell lists from gids ---

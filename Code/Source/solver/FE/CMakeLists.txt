@@ -1296,6 +1296,20 @@ else()
     message(STATUS "FE: OpenMP not found, threading disabled")
 endif()
 
+# Export OpenMP compile flags for dependent targets (e.g. svapplication).
+set(FE_OMP_ENABLED ${_FE_OMP_ENABLED} CACHE INTERNAL "")
+if(_FE_OMP_ENABLED AND DEFINED _FE_OMP_COMPILE_FLAG)
+    set(FE_OMP_COMPILE_FLAG "${_FE_OMP_COMPILE_FLAG}" CACHE INTERNAL "")
+    if(DEFINED _FE_OMP_INCLUDE_FLAG AND NOT _FE_OMP_INCLUDE_FLAG STREQUAL "")
+        set(FE_OMP_INCLUDE_FLAG "${_FE_OMP_INCLUDE_FLAG}" CACHE INTERNAL "")
+    else()
+        set(FE_OMP_INCLUDE_FLAG "" CACHE INTERNAL "")
+    endif()
+else()
+    set(FE_OMP_COMPILE_FLAG "" CACHE INTERNAL "")
+    set(FE_OMP_INCLUDE_FLAG "" CACHE INTERNAL "")
+endif()
+
 #------------------------------------------------------------------------------
 # FSILS backend (vendored)
 #------------------------------------------------------------------------------
