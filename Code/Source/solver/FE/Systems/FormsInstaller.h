@@ -10,12 +10,17 @@
 
 /**
  * @file FormsInstaller.h
- * @brief Helpers to lower FE/Forms weak forms into FE/Systems kernels.
+ * @brief Public API for installing weak-form formulations into an FESystem.
+ *
+ * Physics modules should use installFormulation() as the single entry point.
+ * It auto-selects single-field or multi-field (mixed) assembly paths based on
+ * the number of TestFunction spaces in the residual expression.
+ *
+ * For internal/low-level installer functions, see FormsInstallerDetail.h.
  */
 
 #include "Core/Types.h"
 
-#include "Forms/BlockForm.h"
 #include "Forms/BoundaryConditions.h"
 #include "Systems/OperatorRegistry.h"
 
@@ -33,7 +38,6 @@ class AssemblyKernel;
 
 namespace forms {
 class FormExpr;
-struct WeakForm;
 }
 
 namespace systems {
@@ -44,73 +48,21 @@ struct FormInstallOptions {
     forms::ADMode ad_mode{forms::ADMode::Forward};
     forms::SymbolicOptions compiler_options{};
 
-    // Coupled residual installation controls (used by installCoupledResidual()).
+    // Coupled residual installation controls (used internally by installFormulation).
     bool coupled_residual_install_residual_kernels{true};
     bool coupled_residual_install_jacobian_blocks{true};
 
     // When true, the residual vector for each test field is produced by a single
     // Jacobian block kernel (output=Both) instead of a separate vector-only kernel.
     // This reduces assembly passes during Newton when assembling matrix+vector together.
-    // Requires:
-    // - coupled_residual_install_residual_kernels == false
-    // - coupled_residual_install_jacobian_blocks == true
     bool coupled_residual_from_jacobian_block{false};
 };
 
 using KernelPtr = std::shared_ptr<assembly::AssemblyKernel>;
 
-KernelPtr installResidualForm(
-    FESystem& system,
-    const OperatorTag& op,
-    FieldId test_field,
-    FieldId trial_field,
-    const forms::FormExpr& residual_form,
-    const FormInstallOptions& options = {});
-
 void installStrongDirichlet(
     FESystem& system,
     std::span<const forms::bc::StrongDirichlet> bcs);
-
-KernelPtr installResidualForm(
-    FESystem& system,
-    const OperatorTag& op,
-    FieldId test_field,
-    FieldId trial_field,
-    const forms::FormExpr& residual_form,
-    std::span<const forms::bc::StrongDirichlet> bcs,
-    const FormInstallOptions& options = {});
-
-KernelPtr installWeakForm(
-    FESystem& system,
-    const OperatorTag& op,
-    FieldId test_field,
-    FieldId trial_field,
-    const forms::WeakForm& form,
-    const FormInstallOptions& options = {});
-
-std::vector<KernelPtr> installWeakForm(
-    FESystem& system,
-    std::initializer_list<OperatorTag> ops,
-    FieldId test_field,
-    FieldId trial_field,
-    const forms::WeakForm& form,
-    const FormInstallOptions& options = {});
-
-std::vector<std::vector<KernelPtr>> installResidualBlocks(
-    FESystem& system,
-    const OperatorTag& op,
-    std::span<const FieldId> test_fields,
-    std::span<const FieldId> trial_fields,
-    const forms::BlockBilinearForm& blocks,
-    const FormInstallOptions& options = {});
-
-std::vector<std::vector<KernelPtr>> installResidualBlocks(
-    FESystem& system,
-    const OperatorTag& op,
-    std::initializer_list<FieldId> test_fields,
-    std::initializer_list<FieldId> trial_fields,
-    const forms::BlockBilinearForm& blocks,
-    const FormInstallOptions& options = {});
 
 struct CoupledResidualKernels {
     std::vector<KernelPtr> residual;                      // one per test field
@@ -118,21 +70,43 @@ struct CoupledResidualKernels {
 };
 
 /**
- * @brief Install a coupled multi-field residual without double-counting the RHS
+ * @brief Unified formulation installer — auto-selects single or multi-field path
  *
- * The input is a block vector of residual forms (one per test field) that may
- * reference multiple state fields via `forms::FormExpr::stateField(FieldId, ...)`.
+ * This is the preferred entry point for physics modules. The caller provides a
+ * single residual FormExpr and the field IDs for the unknowns. The function
+ * inspects the expression to determine the number of test-function spaces and
+ * automatically routes to the appropriate internal path:
  *
- * This helper registers:
- * - vector-only residual kernels (one per test field, trial field paired by index),
- * - matrix-only Jacobian kernels for every (test,trial) block.
+ *   - 1 TestFunction space → single-field path
+ *   - 2+ TestFunction spaces → mixed multi-field path
+ *
+ * Unknown fields should be created with FormExpr::stateField(). The function
+ * handles lowering StateField nodes to TrialFunction/DiscreteField internally.
+ * Expressions with TrialFunction (no StateField nodes) are also supported for
+ * single-field formulations.
+ *
+ * For multi-field formulations, the coupled assembly strategy is set automatically:
+ * diagonal Jacobian blocks produce both matrix and residual vector (Both mode),
+ * off-diagonal blocks produce matrix only.
+ *
+ * @param system   FESystem to install kernels into
+ * @param op       Operator tag (e.g., "equations")
+ * @param fields   FieldId for each unknown (test = trial, standard Galerkin)
+ * @param residual Full residual expression (may reference multiple TestFunctions)
+ * @param options  Compiler and JIT options (coupled_residual_* flags are overridden)
  */
-CoupledResidualKernels installCoupledResidual(
+CoupledResidualKernels installFormulation(
     FESystem& system,
     const OperatorTag& op,
-    std::span<const FieldId> test_fields,
-    std::span<const FieldId> trial_fields,
-    const forms::BlockLinearForm& residual_blocks,
+    std::span<const FieldId> fields,
+    const forms::FormExpr& residual,
+    const FormInstallOptions& options = {});
+
+CoupledResidualKernels installFormulation(
+    FESystem& system,
+    const OperatorTag& op,
+    std::initializer_list<FieldId> fields,
+    const forms::FormExpr& residual,
     const FormInstallOptions& options = {});
 
 } // namespace systems

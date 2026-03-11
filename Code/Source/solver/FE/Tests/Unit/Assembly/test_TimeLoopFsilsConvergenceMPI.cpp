@@ -533,22 +533,17 @@ TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
         const auto eps = forms::FormExpr::constant(Real(0.05));
         const auto kappa = forms::FormExpr::constant(Real(1.0));
 
-        forms::BlockLinearForm residual(/*tests=*/2);
-        residual.setBlock(
-            0,
+        const auto residual =
             (forms::inner(u.dt(1), v) +
              lambda * forms::inner(u, v) +
              eps * (one + forms::inner(u, u)) * forms::inner(u, v))
-                .dx());
-        residual.setBlock(1, (kappa * p * q).dx());
+                .dx() +
+            (kappa * p * q).dx();
 
-        const std::array<FieldId, 2> fields = {u_field, p_field};
-        (void)systems::installCoupledResidual(
+        (void)systems::installFormulation(
             sys, "op",
-            fields,
-            fields,
-            residual,
-            systems::FormInstallOptions{.ad_mode = forms::ADMode::Forward});
+            {u_field, p_field},
+            residual);
 
         systems::SetupOptions setup_opts;
         setup_opts.assembler_name = "StandardAssembler";

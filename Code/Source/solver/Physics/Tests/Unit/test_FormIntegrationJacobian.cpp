@@ -42,7 +42,7 @@ TEST(FormIntegrationJacobian, NonlinearViscosityForm_MatchesFiniteDifference)
 
     using namespace svmp::FE::forms;
 
-    auto u = FormExpr::trialFunction(*space, "u");
+    auto u = FormExpr::stateField(u_id, *space, "u");
     auto v = FormExpr::testFunction(*space, "v");
 
     auto mu_model = std::make_shared<materials::fluid::CarreauYasudaViscosity>(
@@ -52,8 +52,8 @@ TEST(FormIntegrationJacobian, NonlinearViscosityForm_MatchesFiniteDifference)
 
     const auto residual = (mu * inner(grad(u), grad(v))).dx();
 
-    FE::systems::installResidualForm(system, "residual", u_id, u_id, residual);
-    FE::systems::installResidualForm(system, "jacobian", u_id, u_id, residual);
+    FE::systems::installFormulation(system, "residual", {u_id}, residual);
+    FE::systems::installFormulation(system, "jacobian", {u_id}, residual);
 
     system.setup({}, makeSingleTetraSetupInputs());
 
@@ -91,7 +91,7 @@ TEST(FormIntegrationJacobian, LinearElasticityForm_MatchesFiniteDifference)
 
     using namespace svmp::FE::forms;
 
-    auto u = FormExpr::trialFunction(*space, "u");
+    auto u = FormExpr::stateField(u_id, *space, "u");
     auto v = FormExpr::testFunction(*space, "v");
 
     auto model = std::make_shared<materials::solid::LinearElasticStress>(/*lambda=*/1.0, /*mu=*/2.0);
@@ -101,8 +101,8 @@ TEST(FormIntegrationJacobian, LinearElasticityForm_MatchesFiniteDifference)
 
     const auto residual = inner(sigma, eps_v).dx();
 
-    FE::systems::installResidualForm(system, "residual", u_id, u_id, residual);
-    FE::systems::installResidualForm(system, "jacobian", u_id, u_id, residual);
+    FE::systems::installFormulation(system, "residual", {u_id}, residual);
+    FE::systems::installFormulation(system, "jacobian", {u_id}, residual);
 
     system.setup({}, makeSingleTetraSetupInputs());
 
@@ -139,7 +139,7 @@ TEST(FormIntegrationJacobian, NeoHookeanForm_MatchesFiniteDifference)
 
     using namespace svmp::FE::forms;
 
-    auto u = FormExpr::trialFunction(*space, "u");
+    auto u = FormExpr::stateField(u_id, *space, "u");
     auto v = FormExpr::testFunction(*space, "v");
 
     auto model = std::make_shared<materials::solid::NeoHookeanPK1>(/*lambda=*/10.0, /*mu=*/2.0);
@@ -148,8 +148,8 @@ TEST(FormIntegrationJacobian, NeoHookeanForm_MatchesFiniteDifference)
 
     const auto residual = inner(P, grad(v)).dx();
 
-    FE::systems::installResidualForm(system, "residual", u_id, u_id, residual);
-    FE::systems::installResidualForm(system, "jacobian", u_id, u_id, residual);
+    FE::systems::installFormulation(system, "residual", {u_id}, residual);
+    FE::systems::installFormulation(system, "jacobian", {u_id}, residual);
 
     system.setup({}, makeSingleTetraSetupInputs());
 

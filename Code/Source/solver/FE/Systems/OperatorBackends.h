@@ -36,8 +36,8 @@ class FESystem;
  * infrastructure (matrix-free operators and scalar functionals) while keeping
  * the primary "assembled matrix/vector" path unchanged.
  *
- * Phase 1 scope:
- * - Single-field systems only
+ * Supports both single-field and multi-field systems. Multi-field functional
+ * evaluation requires field bindings from the field registry.
  * - Mesh iteration provided by `assembly::IMeshAccess` (typically MeshAccess)
  */
 class OperatorBackends {

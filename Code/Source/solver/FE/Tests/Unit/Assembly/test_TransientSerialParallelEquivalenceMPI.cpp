@@ -341,17 +341,14 @@ std::unique_ptr<systems::FESystem> buildTwoFieldTransientSystem(std::shared_ptr<
     const auto lambda = forms::FormExpr::constant(Real(0.25));
     const auto kappa = forms::FormExpr::constant(Real(1.0));
 
-    forms::BlockLinearForm residual(/*tests=*/2);
-    residual.setBlock(0, (weight * forms::inner(u.dt(1), v) + lambda * forms::inner(u, v)).dx());
-    residual.setBlock(1, (kappa * p * q).dx());
+    const auto residual =
+        (weight * forms::inner(u.dt(1), v) + lambda * forms::inner(u, v)).dx() +
+        (kappa * p * q).dx();
 
-    const std::array<FieldId, 2> fields = {u_field, p_field};
-    (void)systems::installCoupledResidual(
+    (void)systems::installFormulation(
         *sys, "op",
-        fields,
-        fields,
-        residual,
-        systems::FormInstallOptions{.ad_mode = forms::ADMode::Forward});
+        {u_field, p_field},
+        residual);
 
     systems::SetupOptions setup_opts;
     setup_opts.assembler_name = std::move(assembler_name);

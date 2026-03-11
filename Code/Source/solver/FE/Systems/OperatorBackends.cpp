@@ -13,6 +13,7 @@
 #include "Assembly/MatrixFreeAssembler.h"
 #include "Assembly/FunctionalAssembler.h"
 #include "Forms/JIT/ExternalCalls.h"
+#include "Spaces/FunctionSpace.h"
 #include "Core/Alignment.h"
 #include "Core/AlignedAllocator.h"
 
@@ -103,7 +104,8 @@ OperatorBackends::matrixFreeOperator(const FESystem& system, const OperatorTag& 
     FE_THROW_IF(!system.is_setup_, InvalidStateException,
                 "OperatorBackends::matrixFreeOperator: system is not set up");
     FE_THROW_IF(system.field_registry_.size() != 1u, NotImplementedException,
-                "OperatorBackends::matrixFreeOperator: multi-field not implemented");
+                "OperatorBackends::matrixFreeOperator: multi-field matrix-free operators require "
+                "Stage 3 (native matrix-free mixed apply). Use assembled operators for multi-field systems.");
 
     auto it = impl_->matrix_free.find(tag);
     FE_THROW_IF(it == impl_->matrix_free.end(), InvalidArgumentException,
@@ -154,23 +156,50 @@ Real OperatorBackends::evaluateFunctional(const FESystem& system,
 {
     FE_THROW_IF(!system.is_setup_, InvalidStateException,
                 "OperatorBackends::evaluateFunctional: system is not set up");
-    FE_THROW_IF(system.field_registry_.size() != 1u, NotImplementedException,
-                "OperatorBackends::evaluateFunctional: multi-field not implemented");
 
     auto it = impl_->functionals.find(tag);
     FE_THROW_IF(it == impl_->functionals.end(), InvalidArgumentException,
                 "OperatorBackends::evaluateFunctional: unknown functional '" + tag + "'");
 
     auto& kernel = *it->second;
-    const auto& field = system.field_registry_.records().front();
-    const auto& space = *field.space;
+    const auto& records = system.field_registry_.records();
+    FE_THROW_IF(records.empty(), InvalidStateException,
+                "OperatorBackends::evaluateFunctional: no fields registered");
+
+    // Use first field as primary
+    const auto& primary = records.front();
+    const auto& space = *primary.space;
 
     assembly::FunctionalAssembler assembler;
     assembler.setMesh(system.meshAccess());
     assembler.setDofMap(system.dof_handler_.getDofMap());
     assembler.setSpace(space);
-    assembler.setPrimaryField(field.id);
+    assembler.setPrimaryField(primary.id);
     assembler.setSolution(state.u);
+
+    // Multi-field: register secondary fields and set dof_per_node
+    if (records.size() > 1u) {
+        int dof_per_node = 0;
+        for (const auto& rec : records) {
+            dof_per_node += rec.components;
+        }
+        assembler.setDofPerNode(dof_per_node);
+
+        int offset = primary.components;  // Primary field occupies first components
+        for (std::size_t fi = 1; fi < records.size(); ++fi) {
+            const auto& rec = records[fi];
+            assembly::FieldSolutionBinding binding;
+            binding.field = rec.id;
+            binding.space = rec.space.get();
+            binding.field_type = rec.space->field_type();
+            binding.value_dimension = rec.components;
+            binding.component_offset = offset;
+            binding.n_components = rec.components;
+            assembler.registerFieldBinding(binding);
+            offset += rec.components;
+        }
+    }
+
     assembler.setTimeIntegrationContext(state.time_integration);
     assembler.setTime(static_cast<Real>(state.time));
     assembler.setTimeStep(static_cast<Real>(state.dt));
@@ -219,23 +248,49 @@ Real OperatorBackends::evaluateBoundaryFunctional(const FESystem& system,
 {
     FE_THROW_IF(!system.is_setup_, InvalidStateException,
                 "OperatorBackends::evaluateBoundaryFunctional: system is not set up");
-    FE_THROW_IF(system.field_registry_.size() != 1u, NotImplementedException,
-                "OperatorBackends::evaluateBoundaryFunctional: multi-field not implemented");
 
     auto it = impl_->functionals.find(tag);
     FE_THROW_IF(it == impl_->functionals.end(), InvalidArgumentException,
                 "OperatorBackends::evaluateBoundaryFunctional: unknown functional '" + tag + "'");
 
     auto& kernel = *it->second;
-    const auto& field = system.field_registry_.records().front();
-    const auto& space = *field.space;
+    const auto& records = system.field_registry_.records();
+    FE_THROW_IF(records.empty(), InvalidStateException,
+                "OperatorBackends::evaluateBoundaryFunctional: no fields registered");
+
+    const auto& primary = records.front();
+    const auto& space = *primary.space;
 
     assembly::FunctionalAssembler assembler;
     assembler.setMesh(system.meshAccess());
     assembler.setDofMap(system.dof_handler_.getDofMap());
     assembler.setSpace(space);
-    assembler.setPrimaryField(field.id);
+    assembler.setPrimaryField(primary.id);
     assembler.setSolution(state.u);
+
+    // Multi-field: register secondary fields
+    if (records.size() > 1u) {
+        int dof_per_node = 0;
+        for (const auto& rec : records) {
+            dof_per_node += rec.components;
+        }
+        assembler.setDofPerNode(dof_per_node);
+
+        int offset = primary.components;
+        for (std::size_t fi = 1; fi < records.size(); ++fi) {
+            const auto& rec = records[fi];
+            assembly::FieldSolutionBinding binding;
+            binding.field = rec.id;
+            binding.space = rec.space.get();
+            binding.field_type = rec.space->field_type();
+            binding.value_dimension = rec.components;
+            binding.component_offset = offset;
+            binding.n_components = rec.components;
+            assembler.registerFieldBinding(binding);
+            offset += rec.components;
+        }
+    }
+
     assembler.setTimeIntegrationContext(state.time_integration);
     assembler.setTime(static_cast<Real>(state.time));
     assembler.setTimeStep(static_cast<Real>(state.dt));

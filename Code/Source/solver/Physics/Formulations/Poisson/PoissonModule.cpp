@@ -10,7 +10,6 @@
 #include "Physics/Formulations/Poisson/PoissonBCFactories.h"
 
 #include "FE/Forms/Vocabulary.h"
-#include "FE/Forms/WeakForm.h"
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
@@ -50,7 +49,7 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
 
     using namespace svmp::FE::forms;
 
-    auto u = FormExpr::trialFunction(*space_, options_.field_name);
+    auto u = FormExpr::stateField(u_id, *space_, options_.field_name);
     auto v = FormExpr::testFunction(*space_, "v");
 
     const auto k = FormExpr::constant(options_.diffusion);
@@ -79,24 +78,17 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
     auto strong_constraints = bc_manager.getStrongConstraints(u_id);
     bc_manager.apply(system, residual, u, v, u_id);
 
-    FE::forms::WeakForm weak_form;
-    weak_form.residual = residual;
-    weak_form.strong_constraints = std::move(strong_constraints);
+    if (!strong_constraints.empty()) {
+        FE::systems::installStrongDirichlet(system, strong_constraints);
+    }
 
     FE::systems::FormInstallOptions install_opts{};
 #if SVMP_FE_ENABLE_LLVM_JIT
-    // Enable LLVM JIT fast path when available. For nonlinear/coupled cases, we
-    // also prefer symbolic tangents because the JIT backend does not accelerate
-    // the dual-number (NonlinearFormKernel) path yet.
     install_opts.compiler_options.jit.enable = true;
     install_opts.compiler_options.use_symbolic_tangent = true;
 #endif
 
-    // Register the weak form under the unified "equations" operator tag.
-    // The underlying kernel can produce either vector or matrix outputs
-    // depending on the AssemblyRequest (and may auto-select an optimized
-    // LinearFormKernel when the residual is affine in the TrialFunction).
-    FE::systems::installWeakForm(system, {"equations"}, u_id, u_id, weak_form, install_opts);
+    (void)FE::systems::installFormulation(system, "equations", {u_id}, residual, install_opts);
 }
 
 } // namespace poisson

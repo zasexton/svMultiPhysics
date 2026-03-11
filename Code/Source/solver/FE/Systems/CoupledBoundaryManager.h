@@ -12,13 +12,16 @@
  * - provides a stable CoupledBCContext object for coefficient evaluators.
  *
  * Current scope:
- * - Single-field Systems only (primary field specified at construction).
+ * - Primary field specified at construction; secondary fields optionally registered.
+ * - Boundary functionals may depend on any registered field subset.
  * - BoundaryFunctional reductions: Sum and Average (Max/Min throw for now).
  */
 
 #include "Core/Types.h"
 #include "Core/FEException.h"
 #include "Core/ParameterValue.h"
+
+#include "Assembly/FunctionalAssembler.h"  // for FieldSolutionBinding
 
 #include "Constraints/CoupledBCContext.h"
 #include "Constraints/CoupledNeumannBC.h"
@@ -180,6 +183,19 @@ public:
     [[nodiscard]] std::vector<Real> computeAuxiliarySensitivityForIntegrals(std::span<const Real> integrals_override,
                                                                             const SystemStateView& state) const;
 
+    /**
+     * @brief Register a secondary field for multi-field boundary functional evaluation
+     *
+     * When boundary functionals depend on fields other than the primary field,
+     * register those fields here so the evaluator can bind their solution data.
+     */
+    void registerSecondaryField(const assembly::FieldSolutionBinding& binding);
+
+    /**
+     * @brief Set total DOFs per node for interleaved multi-field DOF layout
+     */
+    void setDofPerNode(int dof_per_node) noexcept;
+
 private:
     struct CompiledFunctional {
         forms::BoundaryFunctional def{};
@@ -206,6 +222,9 @@ private:
     constraints::CoupledBCContext ctx_{integrals_, aux_state_, 0.0, 0.0};
 
     forms::SymbolicOptions compiler_options_{};
+
+    std::vector<assembly::FieldSolutionBinding> secondary_fields_{};
+    int dof_per_node_{0};
 };
 
 } // namespace systems

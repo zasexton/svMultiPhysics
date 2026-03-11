@@ -895,6 +895,16 @@ std::unique_ptr<JITEngine> JITEngine::create(const JITOptions& options)
             } catch (...) { /* ignore parse errors */ }
         }
 
+        // Allow runtime override of the LLVM optimization level (0-3).
+        if (const char* env = std::getenv("SVMP_JIT_OPT_LEVEL")) {
+            try {
+                const int val = std::stoi(env);
+                if (val >= 0 && val <= 3) {
+                    engine->impl_->options.optimization_level = val;
+                }
+            } catch (...) { /* ignore parse errors */ }
+        }
+
         std::string triple;
         std::string data_layout;
         auto jit = createLLJIT(options, triple, data_layout);

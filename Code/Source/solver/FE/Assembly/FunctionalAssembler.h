@@ -94,6 +94,23 @@ namespace assembly {
 
 struct TimeIntegrationContext;
 
+/**
+ * @brief Binding descriptor for a secondary field in multi-field functional evaluation
+ *
+ * When evaluating functionals on multi-field systems, the primary field is set
+ * via setSpace/setPrimaryField/setSolution.  Additional fields are described by
+ * FieldSolutionBinding records that tell the assembler how to extract each
+ * field's DOF coefficients from the monolithic solution vector.
+ */
+struct FieldSolutionBinding {
+    FieldId field{INVALID_FIELD_ID};                    ///< Field identifier
+    const spaces::FunctionSpace* space{nullptr};        ///< Function space for this field
+    FieldType field_type{FieldType::Scalar};             ///< Scalar or vector
+    int value_dimension{1};                              ///< Number of physical components
+    int component_offset{0};                             ///< Starting component in interleaved DOF layout
+    int n_components{1};                                 ///< Number of components this field occupies
+};
+
 // ============================================================================
 // Functional Kernel Interface
 // ============================================================================
@@ -587,10 +604,35 @@ public:
      * StateField nodes) to access the current solution through the
      * AssemblyContext field-solution API.
      *
-     * Current limitation: only the primary field is supported (multi-field
-     * functional evaluation is not yet implemented here).
+     * Secondary fields can be registered via registerFieldBinding() for
+     * multi-field functional evaluation.
      */
     void setPrimaryField(FieldId field) noexcept;
+
+    /**
+     * @brief Register a secondary field for multi-field functional evaluation
+     *
+     * The primary field is configured via setSpace()/setSolution()/setPrimaryField().
+     * This method registers additional fields that functional kernels may reference
+     * via AssemblyContext::fieldValue(field_id, q) etc.
+     *
+     * @param binding Field metadata including space, component offset, and type
+     */
+    void registerFieldBinding(const FieldSolutionBinding& binding);
+
+    /**
+     * @brief Set the total DOFs per node for interleaved multi-field systems
+     *
+     * This is needed to extract per-field DOF coefficients from the monolithic
+     * solution vector. For single-field systems, this equals the primary field's
+     * components.
+     */
+    void setDofPerNode(int dof_per_node) noexcept;
+
+    /**
+     * @brief Clear all registered secondary field bindings
+     */
+    void clearFieldBindings() noexcept;
 
     /**
      * @brief Set current solution for evaluation
@@ -870,6 +912,10 @@ private:
 
     // Results
     FunctionalResult last_result_;
+
+    // Multi-field support
+    std::vector<FieldSolutionBinding> field_bindings_;
+    int dof_per_node_{0};
 };
 
 // ============================================================================

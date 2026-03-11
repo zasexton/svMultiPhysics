@@ -8,6 +8,7 @@
 
 #include "Forms/FormExpr.h"
 #include "Forms/FormIR.h"
+#include "Forms/MixedFormIR.h"
 
 #include <optional>
 #include <vector>
@@ -75,6 +76,28 @@ public:
      * one TestFunction (corresponding to a Jacobian block in Systems).
      */
     [[nodiscard]] std::vector<std::vector<std::optional<FormIR>>> compileResidual(const BlockBilinearForm& blocks);
+
+    // =========================================================================
+    // Native mixed-form compilation (Stage 2)
+    // =========================================================================
+
+    /**
+     * @brief Compile a mixed weak-form expression containing multiple test/trial spaces
+     *
+     * Accepts a single FormExpr that references multiple TestFunction and/or
+     * TrialFunction spaces. The compiler automatically decomposes the expression
+     * into per-block sub-expressions based on test/trial space signatures, compiles
+     * each block independently, and returns a block-sparse MixedFormIR.
+     *
+     * Zero blocks (no terms matching a particular test/trial pair) are represented
+     * as std::nullopt and can be skipped during assembly.
+     *
+     * @param form   The mixed weak-form expression
+     * @param kind   FormKind (Bilinear or Residual)
+     * @return Block-sparse MixedFormIR
+     * @throws std::invalid_argument if form has no test functions
+     */
+    [[nodiscard]] MixedFormIR compileMixed(const FormExpr& form, FormKind kind = FormKind::Bilinear);
 
     /**
      * @brief Set compile-time options (simplification, caching, etc.)

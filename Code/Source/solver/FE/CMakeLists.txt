@@ -1888,6 +1888,7 @@ if(FE_BUILD_TESTS)
 	        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Backends/test_main.cpp)
 	            set(FE_BACKENDS_TEST_SOURCES
 	                Tests/Unit/Backends/test_BackendOptions.cpp
+	                Tests/Unit/Backends/test_BackendCapability.cpp
 	                Tests/Unit/Backends/test_BackendKind.cpp
 	                Tests/Unit/Backends/test_BackendFactory.cpp
 	                Tests/Unit/Backends/test_BlockSystems.cpp
@@ -1961,6 +1962,7 @@ if(FE_BUILD_TESTS)
 				                    Tests/Unit/Forms/test_PointEvaluator.cpp
 				                Tests/Unit/Forms/test_BoundaryConditionHelpers.cpp
 				                Tests/Unit/Forms/test_FormCompiler.cpp
+				                Tests/Unit/Forms/test_MixedFormIR.cpp
 			                Tests/Unit/Forms/test_Dual.cpp
 		                Tests/Unit/Forms/test_DynamicValueShapes.cpp
 		                Tests/Unit/Forms/test_FormKernel_Cell.cpp

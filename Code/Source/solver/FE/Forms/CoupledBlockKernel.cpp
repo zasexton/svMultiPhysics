@@ -115,6 +115,125 @@ bool CoupledBlockKernel::isVectorOnly() const noexcept
                        [](const BlockSpec& b) { return !b.want_matrix && b.want_vector; });
 }
 
+void CoupledBlockKernel::primeAllBlocksColocated()
+{
+    if (blocks_.empty() || !compiler_) {
+        return;
+    }
+
+    // Collect FormIR and JITKernelWrapper from each block's fallback kernel.
+    struct BlockInfo {
+        std::size_t block_index{0};
+        jit::JITKernelWrapper* wrapper{nullptr};
+        const FormIR* ir{nullptr};
+    };
+    std::vector<BlockInfo> infos;
+    infos.reserve(blocks_.size());
+
+    for (std::size_t i = 0; i < blocks_.size(); ++i) {
+        const auto& bs = blocks_[i];
+        if (!bs.fallback_kernel) {
+            continue;
+        }
+
+        auto* jit_wrapper = dynamic_cast<jit::JITKernelWrapper*>(bs.fallback_kernel.get());
+        if (!jit_wrapper) {
+            continue;
+        }
+
+        // Ensure the wrapper has been compiled so we can access its FormIR.
+        jit_wrapper->ensureCompiled();
+
+        // Extract FormIR from the underlying interpreter kernel.
+        const auto& fallback = jit_wrapper->fallbackKernel();
+        const FormIR* ir = nullptr;
+
+        if (const auto* fk = dynamic_cast<const FormKernel*>(&fallback)) {
+            ir = &fk->ir();
+        } else if (const auto* snk = dynamic_cast<const SymbolicNonlinearFormKernel*>(&fallback)) {
+            ir = &snk->tangentIR();
+        } else if (const auto* lfk = dynamic_cast<const LinearFormKernel*>(&fallback)) {
+            ir = &lfk->bilinearIR();
+        }
+
+        if (!ir || !ir->isCompiled()) {
+            continue;
+        }
+
+        infos.push_back(BlockInfo{i, jit_wrapper, ir});
+    }
+
+    if (infos.size() < 2u) {
+        // Colocation only benefits when there are multiple kernels.
+        return;
+    }
+
+    // Build colocated specs from the FormIRs.
+    std::vector<jit::JITCompiler::ColocatedKernelSpec> specs;
+    specs.reserve(infos.size());
+
+    for (const auto& info : infos) {
+        jit::JITCompiler::ColocatedKernelSpec spec;
+        spec.ir = info.ir;
+
+        // Collect cell-domain term indices from the FormIR.
+        for (std::size_t t = 0; t < info.ir->terms().size(); ++t) {
+            if (info.ir->terms()[t].domain == IntegralDomain::Cell) {
+                spec.term_indices.push_back(t);
+            }
+        }
+
+        if (spec.term_indices.empty()) {
+            continue;
+        }
+
+        spec.domain = IntegralDomain::Cell;
+        specs.push_back(std::move(spec));
+    }
+
+    if (specs.size() < 2u) {
+        return;
+    }
+
+    // Compile all block kernels into a single module.
+    std::vector<jit::JITCompiler::ColocatedKernelResult> results;
+    auto compile_result = compiler_->compileColocated(specs, results);
+
+    if (!compile_result.ok || results.size() != specs.size()) {
+        FE_LOG_WARNING("CoupledBlockKernel: colocated compilation failed: " + compile_result.message);
+        return;
+    }
+
+    // Inject resolved addresses into each block's JITKernelWrapper.
+    std::size_t result_idx = 0;
+    for (const auto& info : infos) {
+        if (result_idx >= results.size()) {
+            break;
+        }
+
+        // Check that this info contributed a spec (had cell terms).
+        bool had_cell_terms = false;
+        for (std::size_t t = 0; t < info.ir->terms().size(); ++t) {
+            if (info.ir->terms()[t].domain == IntegralDomain::Cell) {
+                had_cell_terms = true;
+                break;
+            }
+        }
+
+        if (!had_cell_terms) {
+            continue;
+        }
+
+        if (results[result_idx].address != 0) {
+            info.wrapper->setExternalCellAddress(results[result_idx].address);
+        }
+        ++result_idx;
+    }
+
+    FE_LOG_INFO("CoupledBlockKernel: colocated " + std::to_string(infos.size()) +
+                " block kernels into single module");
+}
+
 } // namespace forms
 } // namespace FE
 } // namespace svmp

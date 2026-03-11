@@ -79,6 +79,29 @@ public:
                                                            std::string_view symbol,
                                                            std::uintptr_t& out_address) const;
 
+    struct ColocatedKernelSpec {
+        const FormIR* ir{nullptr};
+        std::vector<std::size_t> term_indices{};
+        IntegralDomain domain{IntegralDomain::Cell};
+        int boundary_marker{-1};
+        int interface_marker{-1};
+        std::string symbol{};
+        const JITCompileSpecialization* specialization{nullptr};
+    };
+
+    struct ColocatedResult {
+        std::string symbol{};
+        std::uintptr_t address{0};
+    };
+
+    /** Compile multiple kernel functions into a single LLVM module for
+     *  contiguous .text layout. Reduces L1i cache thrashing when cycling
+     *  through multiple kernels per element in coupled assembly. */
+    [[nodiscard]] LLVMGenResult compileAndAddColocatedKernels(
+        JITEngine& engine,
+        std::span<const ColocatedKernelSpec> specs,
+        std::vector<ColocatedResult>& out_results) const;
+
 private:
     [[nodiscard]] LLVMGenResult compileAndAddKernelImpl(JITEngine& engine,
                                                         const FormIR& ir,
@@ -90,7 +113,9 @@ private:
                                                         std::uintptr_t& out_address,
                                                         const JITCompileSpecialization* specialization,
                                                         LLVMGenFusedInfo* fused,
-                                                        void* coupled_info = nullptr) const;
+                                                        void* coupled_info = nullptr,
+                                                        void* external_ctx = nullptr,
+                                                        void* external_module = nullptr) const;
 
     JITOptions options_{};
 };

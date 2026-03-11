@@ -119,6 +119,10 @@ public:
     /** @brief Check if JIT-compiled kernel is available. */
     [[nodiscard]] bool isJITReady() const noexcept;
 
+    /** @brief Inject a pre-compiled cell kernel address from colocated compilation.
+     *  Bypasses the normal maybeCompile() path. */
+    void setExternalCellAddress(std::uintptr_t addr);
+
 private:
     enum class WrappedKind : std::uint8_t {
         Unknown = 0u,

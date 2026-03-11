@@ -175,4 +175,193 @@ TEST(BlockLayout, SolverOptionsBlockLayout)
     EXPECT_TRUE(opts.block_layout->hasSaddlePoint());
 }
 
+// --- BlockRole tests ---
+
+TEST(BlockRole, ToStringCoversAllValues)
+{
+    EXPECT_EQ(blockRoleToString(BlockRole::Generic), "Generic");
+    EXPECT_EQ(blockRoleToString(BlockRole::PrimaryField), "PrimaryField");
+    EXPECT_EQ(blockRoleToString(BlockRole::ConstraintField), "ConstraintField");
+    EXPECT_EQ(blockRoleToString(BlockRole::AuxiliaryField), "AuxiliaryField");
+}
+
+TEST(BlockRole, DefaultRoleIsGeneric)
+{
+    BlockDescriptor desc;
+    desc.name = "test";
+    EXPECT_EQ(desc.role, BlockRole::Generic);
+}
+
+TEST(BlockLayout, FindBlockByRole)
+{
+    BlockLayout layout{};
+    layout.blocks.push_back({"velocity", 0, 3, BlockRole::PrimaryField});
+    layout.blocks.push_back({"pressure", 3, 1, BlockRole::ConstraintField});
+    layout.blocks.push_back({"temperature", 4, 1, BlockRole::AuxiliaryField});
+
+    const auto* primary = layout.findBlockByRole(BlockRole::PrimaryField);
+    ASSERT_NE(primary, nullptr);
+    EXPECT_EQ(primary->name, "velocity");
+
+    const auto* constraint = layout.findBlockByRole(BlockRole::ConstraintField);
+    ASSERT_NE(constraint, nullptr);
+    EXPECT_EQ(constraint->name, "pressure");
+
+    const auto* aux = layout.findBlockByRole(BlockRole::AuxiliaryField);
+    ASSERT_NE(aux, nullptr);
+    EXPECT_EQ(aux->name, "temperature");
+
+    // No second PrimaryField
+    EXPECT_EQ(layout.findBlockByRole(BlockRole::Generic), nullptr);
+}
+
+TEST(BlockLayout, PrimaryFieldBlockWithRoleAnnotation)
+{
+    BlockLayout layout{};
+    layout.blocks.push_back({"velocity", 0, 3, BlockRole::PrimaryField});
+    layout.blocks.push_back({"pressure", 3, 1, BlockRole::ConstraintField});
+
+    const auto* primary = layout.primaryFieldBlock();
+    ASSERT_NE(primary, nullptr);
+    EXPECT_EQ(primary->name, "velocity");
+
+    const auto* constraint = layout.constraintFieldBlock();
+    ASSERT_NE(constraint, nullptr);
+    EXPECT_EQ(constraint->name, "pressure");
+}
+
+TEST(BlockLayout, PrimaryFieldBlockFallsBackToMomentumBlock)
+{
+    // No BlockRole annotation, uses legacy momentum_block/constraint_block indices
+    BlockLayout layout{};
+    layout.blocks.push_back({"velocity", 0, 3});
+    layout.blocks.push_back({"pressure", 3, 1});
+    layout.momentum_block = 0;
+    layout.constraint_block = 1;
+
+    const auto* primary = layout.primaryFieldBlock();
+    ASSERT_NE(primary, nullptr);
+    EXPECT_EQ(primary->name, "velocity");
+
+    const auto* constraint = layout.constraintFieldBlock();
+    ASSERT_NE(constraint, nullptr);
+    EXPECT_EQ(constraint->name, "pressure");
+}
+
+TEST(BlockLayout, PrimaryFieldBlockReturnsNullWhenNoAnnotation)
+{
+    BlockLayout layout{};
+    layout.blocks.push_back({"temperature", 0, 1});
+    // No roles, no momentum/constraint indices
+    EXPECT_EQ(layout.primaryFieldBlock(), nullptr);
+    EXPECT_EQ(layout.constraintFieldBlock(), nullptr);
+}
+
+TEST(BlockLayout, RoleAnnotationBackwardCompatible)
+{
+    // Existing aggregate initialization without role (defaults to Generic)
+    BlockLayout layout{};
+    layout.blocks.push_back({"velocity", 0, 3});
+    EXPECT_EQ(layout.blocks[0].role, BlockRole::Generic);
+}
+
+// --- TimeIntegrationDescriptor tests ---
+
+TEST(TimeIntegrationDescriptor, DefaultConstruction)
+{
+    TimeIntegrationDescriptor desc{};
+    EXPECT_TRUE(desc.fields.empty());
+    EXPECT_TRUE(desc.global_scheme.empty());
+    EXPECT_EQ(desc.maxDerivativeOrder(), 0);
+    EXPECT_EQ(desc.maxHistoryDepth(), 0);
+}
+
+TEST(TimeIntegrationDescriptor, FirstOrderSystem)
+{
+    // Heat equation: 1 field, first-order time derivative
+    TimeIntegrationDescriptor desc{};
+    desc.global_scheme = "BDF2";
+    desc.fields.push_back({FieldId(1), "temperature", 1, 2, ""});
+
+    EXPECT_EQ(desc.maxDerivativeOrder(), 1);
+    EXPECT_EQ(desc.maxHistoryDepth(), 2);
+    EXPECT_EQ(desc.fields[0].name, "temperature");
+}
+
+TEST(TimeIntegrationDescriptor, SecondOrderSystem)
+{
+    // Elastodynamics: displacement with 2nd-order time derivative
+    TimeIntegrationDescriptor desc{};
+    desc.global_scheme = "Newmark";
+    desc.fields.push_back({FieldId(1), "displacement", 2, 1, ""});
+
+    EXPECT_EQ(desc.maxDerivativeOrder(), 2);
+    EXPECT_EQ(desc.maxHistoryDepth(), 1);
+}
+
+TEST(TimeIntegrationDescriptor, MixedOrderSystem)
+{
+    // FSI-like: displacement (2nd-order) + pressure (1st-order) + temperature (1st-order)
+    TimeIntegrationDescriptor desc{};
+    desc.global_scheme = "GenAlpha";
+    desc.fields.push_back({FieldId(1), "displacement", 2, 2, ""});
+    desc.fields.push_back({FieldId(2), "pressure", 1, 1, ""});
+    desc.fields.push_back({FieldId(3), "temperature", 1, 3, "BDF2"});
+
+    EXPECT_EQ(desc.maxDerivativeOrder(), 2);
+    EXPECT_EQ(desc.maxHistoryDepth(), 3);
+
+    // Verify scheme override
+    EXPECT_TRUE(desc.fields[0].scheme_override.empty());
+    EXPECT_EQ(desc.fields[2].scheme_override, "BDF2");
+}
+
+TEST(TimeIntegrationDescriptor, SteadyState)
+{
+    // Steady-state: 0th-order derivative
+    TimeIntegrationDescriptor desc{};
+    desc.fields.push_back({FieldId(1), "velocity", 0, 1, ""});
+    desc.fields.push_back({FieldId(2), "pressure", 0, 1, ""});
+
+    EXPECT_EQ(desc.maxDerivativeOrder(), 0);
+    EXPECT_EQ(desc.maxHistoryDepth(), 1);
+}
+
+// --- SolverOptions new fields tests ---
+
+TEST(SolverOptions, BlockRoleNamesDefaultEmpty)
+{
+    SolverOptions opts{};
+    EXPECT_TRUE(opts.block_role_names.empty());
+    EXPECT_FALSE(opts.time_integration.has_value());
+}
+
+TEST(SolverOptions, BlockRoleNamesPopulated)
+{
+    SolverOptions opts{};
+    opts.block_role_names.emplace_back(BlockRole::PrimaryField, "velocity");
+    opts.block_role_names.emplace_back(BlockRole::ConstraintField, "pressure");
+
+    ASSERT_EQ(opts.block_role_names.size(), 2u);
+    EXPECT_EQ(opts.block_role_names[0].first, BlockRole::PrimaryField);
+    EXPECT_EQ(opts.block_role_names[0].second, "velocity");
+    EXPECT_EQ(opts.block_role_names[1].first, BlockRole::ConstraintField);
+    EXPECT_EQ(opts.block_role_names[1].second, "pressure");
+}
+
+TEST(SolverOptions, TimeIntegrationOptional)
+{
+    SolverOptions opts{};
+    EXPECT_FALSE(opts.time_integration.has_value());
+
+    TimeIntegrationDescriptor desc{};
+    desc.global_scheme = "GenAlpha";
+    desc.fields.push_back({FieldId(1), "velocity", 1, 1, ""});
+    opts.time_integration = desc;
+
+    ASSERT_TRUE(opts.time_integration.has_value());
+    EXPECT_EQ(opts.time_integration->global_scheme, "GenAlpha");
+    EXPECT_EQ(opts.time_integration->maxDerivativeOrder(), 1);
+}
+
 } // namespace svmp::FE::backends

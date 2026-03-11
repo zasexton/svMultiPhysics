@@ -734,6 +734,33 @@ void FunctionalAssembler::setPrimaryField(FieldId field) noexcept
     primary_field_ = field;
 }
 
+void FunctionalAssembler::registerFieldBinding(const FieldSolutionBinding& binding)
+{
+    FE_THROW_IF(binding.field == INVALID_FIELD_ID, InvalidArgumentException,
+                "FunctionalAssembler::registerFieldBinding: invalid field ID");
+    FE_CHECK_NOT_NULL(binding.space, "FunctionalAssembler::registerFieldBinding: space");
+
+    // Replace existing binding for the same field, or add new
+    for (auto& existing : field_bindings_) {
+        if (existing.field == binding.field) {
+            existing = binding;
+            return;
+        }
+    }
+    field_bindings_.push_back(binding);
+}
+
+void FunctionalAssembler::setDofPerNode(int dof_per_node) noexcept
+{
+    dof_per_node_ = dof_per_node;
+}
+
+void FunctionalAssembler::clearFieldBindings() noexcept
+{
+    field_bindings_.clear();
+    dof_per_node_ = 0;
+}
+
 void FunctionalAssembler::setSolution(std::span<const Real> solution)
 {
     solution_.assign(solution.begin(), solution.end());
@@ -851,13 +878,9 @@ void FunctionalAssembler::bindFieldSolutionData(AssemblyContext& context,
         return;
     }
 
-    FE_THROW_IF(primary_field_ == INVALID_FIELD_ID, InvalidArgumentException,
-                "FunctionalAssembler: primary_field is not set (required for DiscreteField/StateField evaluation)");
-    FE_CHECK_NOT_NULL(space_, "FunctionalAssembler::bindFieldSolutionData: space");
-
     const auto n_qpts = context.numQuadraturePoints();
-    const auto field_type = space_->field_type();
 
+    // Scratch vectors (reused across fields)
     std::vector<Real> scalar_values;
     std::vector<AssemblyContext::Vector3D> scalar_gradients;
     std::vector<AssemblyContext::Matrix3x3> scalar_hessians;
@@ -869,105 +892,291 @@ void FunctionalAssembler::bindFieldSolutionData(AssemblyContext& context,
     std::vector<Real> vector_component_laplacians;
 
     for (const auto& fr : reqs) {
-        FE_THROW_IF(fr.field != primary_field_, NotImplementedException,
-                    "FunctionalAssembler: multi-field functionals are not implemented (requested FieldId " +
-                        std::to_string(fr.field) + ", primary FieldId is " + std::to_string(primary_field_) + ")");
+        // --- Primary field: copy from already-prepared context ---
+        if (fr.field == primary_field_) {
+            FE_CHECK_NOT_NULL(space_, "FunctionalAssembler::bindFieldSolutionData: space");
+            const auto field_type = space_->field_type();
 
-        if (field_type == FieldType::Scalar) {
+            if (field_type == FieldType::Scalar) {
+                scalar_values.resize(static_cast<std::size_t>(n_qpts));
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    scalar_values[static_cast<std::size_t>(q)] = context.solutionValue(q);
+                }
+
+                std::span<const AssemblyContext::Vector3D> grads{};
+                if (hasFlag(fr.required, RequiredData::SolutionGradients)) {
+                    scalar_gradients.resize(static_cast<std::size_t>(n_qpts));
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        scalar_gradients[static_cast<std::size_t>(q)] = context.solutionGradient(q);
+                    }
+                    grads = scalar_gradients;
+                } else {
+                    scalar_gradients.clear();
+                }
+
+                std::span<const AssemblyContext::Matrix3x3> hessians{};
+                if (hasFlag(fr.required, RequiredData::SolutionHessians)) {
+                    scalar_hessians.resize(static_cast<std::size_t>(n_qpts));
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        scalar_hessians[static_cast<std::size_t>(q)] = context.solutionHessian(q);
+                    }
+                    hessians = scalar_hessians;
+                } else {
+                    scalar_hessians.clear();
+                }
+
+                std::span<const Real> laps{};
+                if (hasFlag(fr.required, RequiredData::SolutionLaplacians)) {
+                    scalar_laplacians.resize(static_cast<std::size_t>(n_qpts));
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        scalar_laplacians[static_cast<std::size_t>(q)] = context.solutionLaplacian(q);
+                    }
+                    laps = scalar_laplacians;
+                } else {
+                    scalar_laplacians.clear();
+                }
+
+                context.setFieldSolutionScalar(primary_field_, scalar_values, grads, hessians, laps);
+            } else if (field_type == FieldType::Vector) {
+                const int vd = space_->value_dimension();
+                FE_THROW_IF(vd <= 0 || vd > 3, InvalidArgumentException,
+                            "FunctionalAssembler: invalid primary vector value_dimension");
+
+                vector_values.resize(static_cast<std::size_t>(n_qpts));
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    vector_values[static_cast<std::size_t>(q)] = context.solutionVectorValue(q);
+                }
+
+                std::span<const AssemblyContext::Matrix3x3> jacobians{};
+                if (hasFlag(fr.required, RequiredData::SolutionGradients)) {
+                    vector_jacobians.resize(static_cast<std::size_t>(n_qpts));
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        vector_jacobians[static_cast<std::size_t>(q)] = context.solutionJacobian(q);
+                    }
+                    jacobians = vector_jacobians;
+                } else {
+                    vector_jacobians.clear();
+                }
+
+                std::span<const AssemblyContext::Matrix3x3> component_hessians{};
+                if (hasFlag(fr.required, RequiredData::SolutionHessians)) {
+                    vector_component_hessians.resize(static_cast<std::size_t>(n_qpts) * static_cast<std::size_t>(vd));
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        for (int comp = 0; comp < vd; ++comp) {
+                            vector_component_hessians[
+                                static_cast<std::size_t>(q) * static_cast<std::size_t>(vd) + static_cast<std::size_t>(comp)] =
+                                context.solutionComponentHessian(q, comp);
+                        }
+                    }
+                    component_hessians = vector_component_hessians;
+                } else {
+                    vector_component_hessians.clear();
+                }
+
+                std::span<const Real> component_laps{};
+                if (hasFlag(fr.required, RequiredData::SolutionLaplacians)) {
+                    vector_component_laplacians.resize(static_cast<std::size_t>(n_qpts) * static_cast<std::size_t>(vd));
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        for (int comp = 0; comp < vd; ++comp) {
+                            vector_component_laplacians[
+                                static_cast<std::size_t>(q) * static_cast<std::size_t>(vd) + static_cast<std::size_t>(comp)] =
+                                context.solutionComponentLaplacian(q, comp);
+                        }
+                    }
+                    component_laps = vector_component_laplacians;
+                } else {
+                    vector_component_laplacians.clear();
+                }
+
+                context.setFieldSolutionVector(primary_field_, vd, vector_values, jacobians,
+                                               component_hessians, component_laps);
+            } else {
+                FE_THROW(NotImplementedException,
+                         "FunctionalAssembler: primary field type not supported");
+            }
+            continue;
+        }
+
+        // --- Secondary field: evaluate from monolithic solution + field binding ---
+        const FieldSolutionBinding* binding = nullptr;
+        for (const auto& fb : field_bindings_) {
+            if (fb.field == fr.field) {
+                binding = &fb;
+                break;
+            }
+        }
+
+        FE_THROW_IF(binding == nullptr, NotImplementedException,
+                    "FunctionalAssembler: field " + std::to_string(fr.field) +
+                    " not registered (primary=" + std::to_string(primary_field_) +
+                    "). Register via registerFieldBinding() for multi-field functionals.");
+
+        FE_THROW_IF(dof_per_node_ <= 0, InvalidArgumentException,
+                    "FunctionalAssembler: dof_per_node must be set for multi-field evaluation");
+
+        // Gather this field's coefficients from the monolithic solution
+        const auto& sol = solution_;
+        const auto* sol_view = solution_view_;
+        FE_THROW_IF(sol_view == nullptr && sol.empty(), FEException,
+                    "FunctionalAssembler: solution not set for secondary field evaluation");
+
+        // Get cell DOFs (monolithic, interleaved)
+        FE_CHECK_NOT_NULL(dof_map_, "FunctionalAssembler::bindFieldSolutionData: dof_map");
+        const auto cell_id = context.cellId();
+        const auto all_dofs = dof_map_->getCellDofs(cell_id);
+        const int dpn = dof_per_node_;
+        const int comp_off = binding->component_offset;
+        const int n_comp = binding->n_components;
+        const auto n_nodes = static_cast<int>(all_dofs.size()) / dpn;
+
+        // Extract per-field coefficients
+        std::vector<Real> field_coeffs;
+        field_coeffs.resize(static_cast<std::size_t>(n_nodes * n_comp));
+        for (int node = 0; node < n_nodes; ++node) {
+            for (int c = 0; c < n_comp; ++c) {
+                const auto mono_idx = static_cast<std::size_t>(node * dpn + comp_off + c);
+                FE_THROW_IF(mono_idx >= all_dofs.size(), FEException,
+                            "FunctionalAssembler: DOF index out of bounds for secondary field");
+                const auto global_dof = all_dofs[mono_idx];
+                Real val = 0.0;
+                if (sol_view != nullptr) {
+                    val = sol_view->getVectorEntry(global_dof);
+                } else {
+                    FE_THROW_IF(global_dof < 0 || static_cast<std::size_t>(global_dof) >= sol.size(), FEException,
+                                "FunctionalAssembler: solution too small for secondary field DOF");
+                    val = sol[static_cast<std::size_t>(global_dof)];
+                }
+                field_coeffs[static_cast<std::size_t>(node * n_comp + c)] = val;
+            }
+        }
+
+        // Evaluate basis functions for this field's space at the current QPs
+        const auto& field_space = *binding->space;
+        const auto field_elem_type = field_space.element_type();
+        const auto& field_element = field_space.getElement(field_elem_type, cell_id);
+        const auto& field_basis = field_element.basis();
+        const int dim = context.dimension();
+
+        // Scratch for basis evaluation
+        std::vector<Real> basis_vals;
+        std::vector<basis::Gradient> basis_grads;
+
+        const bool need_grads = hasFlag(fr.required, RequiredData::SolutionGradients) ||
+                                hasFlag(fr.required, RequiredData::SolutionHessians) ||
+                                hasFlag(fr.required, RequiredData::SolutionLaplacians);
+
+        if (binding->field_type == FieldType::Scalar) {
+            // Evaluate scalar field at QPs
             scalar_values.resize(static_cast<std::size_t>(n_qpts));
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                scalar_values[static_cast<std::size_t>(q)] = context.solutionValue(q);
-            }
-
-            std::span<const AssemblyContext::Vector3D> grads{};
-            if (hasFlag(fr.required, RequiredData::SolutionGradients)) {
+            scalar_gradients.clear();
+            if (need_grads) {
                 scalar_gradients.resize(static_cast<std::size_t>(n_qpts));
-                for (LocalIndex q = 0; q < n_qpts; ++q) {
-                    scalar_gradients[static_cast<std::size_t>(q)] = context.solutionGradient(q);
-                }
-                grads = scalar_gradients;
-            } else {
-                scalar_gradients.clear();
             }
 
-            std::span<const AssemblyContext::Matrix3x3> hessians{};
-            if (hasFlag(fr.required, RequiredData::SolutionHessians)) {
-                scalar_hessians.resize(static_cast<std::size_t>(n_qpts));
-                for (LocalIndex q = 0; q < n_qpts; ++q) {
-                    scalar_hessians[static_cast<std::size_t>(q)] = context.solutionHessian(q);
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const auto qpt = context.quadraturePoint(q);
+                const math::Vector<Real, 3> xi{qpt[0], qpt[1], qpt[2]};
+
+                field_basis.evaluate_values(xi, basis_vals);
+
+                Real val = 0.0;
+                for (int i = 0; i < n_nodes; ++i) {
+                    val += field_coeffs[static_cast<std::size_t>(i)] *
+                           basis_vals[static_cast<std::size_t>(i)];
                 }
-                hessians = scalar_hessians;
-            } else {
-                scalar_hessians.clear();
+                scalar_values[static_cast<std::size_t>(q)] = val;
+
+                if (need_grads) {
+                    field_basis.evaluate_gradients(xi, basis_grads);
+                    const auto J_inv = context.inverseJacobian(q);
+
+                    // Accumulate in reference space first, then transform
+                    AssemblyContext::Vector3D gref = {0.0, 0.0, 0.0};
+                    for (int i = 0; i < n_nodes; ++i) {
+                        const Real ci = field_coeffs[static_cast<std::size_t>(i)];
+                        const auto& gi = basis_grads[static_cast<std::size_t>(i)];
+                        for (int d = 0; d < dim; ++d) {
+                            gref[static_cast<std::size_t>(d)] += ci * gi[static_cast<std::size_t>(d)];
+                        }
+                    }
+
+                    // Transform: grad_phys = J_inv^T * grad_ref
+                    AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
+                    for (int d1 = 0; d1 < dim; ++d1) {
+                        for (int d2 = 0; d2 < dim; ++d2) {
+                            grad_phys[static_cast<std::size_t>(d1)] +=
+                                J_inv[static_cast<std::size_t>(d2)][static_cast<std::size_t>(d1)] *
+                                gref[static_cast<std::size_t>(d2)];
+                        }
+                    }
+                    scalar_gradients[static_cast<std::size_t>(q)] = grad_phys;
+                }
             }
 
-            std::span<const Real> laps{};
-            if (hasFlag(fr.required, RequiredData::SolutionLaplacians)) {
-                scalar_laplacians.resize(static_cast<std::size_t>(n_qpts));
-                for (LocalIndex q = 0; q < n_qpts; ++q) {
-                    scalar_laplacians[static_cast<std::size_t>(q)] = context.solutionLaplacian(q);
-                }
-                laps = scalar_laplacians;
-            } else {
-                scalar_laplacians.clear();
-            }
-
-            context.setFieldSolutionScalar(primary_field_, scalar_values, grads, hessians, laps);
-        } else if (field_type == FieldType::Vector) {
-            const int vd = space_->value_dimension();
-            FE_THROW_IF(vd <= 0 || vd > 3, InvalidArgumentException,
-                        "FunctionalAssembler: invalid primary vector value_dimension");
+            context.setFieldSolutionScalar(fr.field, scalar_values,
+                                           need_grads ? std::span<const AssemblyContext::Vector3D>(scalar_gradients)
+                                                      : std::span<const AssemblyContext::Vector3D>{});
+        } else if (binding->field_type == FieldType::Vector) {
+            const int vd = binding->value_dimension;
 
             vector_values.resize(static_cast<std::size_t>(n_qpts));
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                vector_values[static_cast<std::size_t>(q)] = context.solutionVectorValue(q);
-            }
-
-            std::span<const AssemblyContext::Matrix3x3> jacobians{};
-            if (hasFlag(fr.required, RequiredData::SolutionGradients)) {
+            vector_jacobians.clear();
+            if (need_grads) {
                 vector_jacobians.resize(static_cast<std::size_t>(n_qpts));
-                for (LocalIndex q = 0; q < n_qpts; ++q) {
-                    vector_jacobians[static_cast<std::size_t>(q)] = context.solutionJacobian(q);
-                }
-                jacobians = vector_jacobians;
-            } else {
-                vector_jacobians.clear();
             }
 
-            std::span<const AssemblyContext::Matrix3x3> component_hessians{};
-            if (hasFlag(fr.required, RequiredData::SolutionHessians)) {
-                vector_component_hessians.resize(static_cast<std::size_t>(n_qpts) * static_cast<std::size_t>(vd));
-                for (LocalIndex q = 0; q < n_qpts; ++q) {
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const auto qpt = context.quadraturePoint(q);
+                const math::Vector<Real, 3> xi{qpt[0], qpt[1], qpt[2]};
+
+                field_basis.evaluate_values(xi, basis_vals);
+
+                AssemblyContext::Vector3D val = {0.0, 0.0, 0.0};
+                for (int i = 0; i < n_nodes; ++i) {
                     for (int comp = 0; comp < vd; ++comp) {
-                        vector_component_hessians[
-                            static_cast<std::size_t>(q) * static_cast<std::size_t>(vd) + static_cast<std::size_t>(comp)] =
-                            context.solutionComponentHessian(q, comp);
+                        val[static_cast<std::size_t>(comp)] +=
+                            field_coeffs[static_cast<std::size_t>(i * n_comp + comp)] *
+                            basis_vals[static_cast<std::size_t>(i)];
                     }
                 }
-                component_hessians = vector_component_hessians;
-            } else {
-                vector_component_hessians.clear();
-            }
+                vector_values[static_cast<std::size_t>(q)] = val;
 
-            std::span<const Real> component_laps{};
-            if (hasFlag(fr.required, RequiredData::SolutionLaplacians)) {
-                vector_component_laplacians.resize(static_cast<std::size_t>(n_qpts) * static_cast<std::size_t>(vd));
-                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                if (need_grads) {
+                    field_basis.evaluate_gradients(xi, basis_grads);
+                    const auto J_inv = context.inverseJacobian(q);
+
+                    AssemblyContext::Matrix3x3 jac = {};
                     for (int comp = 0; comp < vd; ++comp) {
-                        vector_component_laplacians[
-                            static_cast<std::size_t>(q) * static_cast<std::size_t>(vd) + static_cast<std::size_t>(comp)] =
-                            context.solutionComponentLaplacian(q, comp);
+                        // Accumulate reference gradient for this component
+                        AssemblyContext::Vector3D gref = {0.0, 0.0, 0.0};
+                        for (int i = 0; i < n_nodes; ++i) {
+                            const Real ci = field_coeffs[static_cast<std::size_t>(i * n_comp + comp)];
+                            const auto& gi = basis_grads[static_cast<std::size_t>(i)];
+                            for (int d = 0; d < dim; ++d) {
+                                gref[static_cast<std::size_t>(d)] += ci * gi[static_cast<std::size_t>(d)];
+                            }
+                        }
+
+                        // Transform to physical
+                        for (int d1 = 0; d1 < dim; ++d1) {
+                            Real g = 0.0;
+                            for (int d2 = 0; d2 < dim; ++d2) {
+                                g += J_inv[static_cast<std::size_t>(d2)][static_cast<std::size_t>(d1)] *
+                                     gref[static_cast<std::size_t>(d2)];
+                            }
+                            jac[static_cast<std::size_t>(comp)][static_cast<std::size_t>(d1)] = g;
+                        }
                     }
+                    vector_jacobians[static_cast<std::size_t>(q)] = jac;
                 }
-                component_laps = vector_component_laplacians;
-            } else {
-                vector_component_laplacians.clear();
             }
 
-            context.setFieldSolutionVector(primary_field_, vd, vector_values, jacobians, component_hessians, component_laps);
+            context.setFieldSolutionVector(fr.field, vd, vector_values,
+                                           need_grads ? std::span<const AssemblyContext::Matrix3x3>(vector_jacobians)
+                                                      : std::span<const AssemblyContext::Matrix3x3>{});
         } else {
             FE_THROW(NotImplementedException,
-                     "FunctionalAssembler: primary field type not supported");
+                     "FunctionalAssembler: unsupported secondary field type");
         }
     }
 }

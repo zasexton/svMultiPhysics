@@ -77,24 +77,19 @@ TEST(StokesCouplingJacobianTest, CouplingBlocksMatchCentralDifferencesAndHaveCor
     const auto p_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "p", .space = p_space, .components = 1});
     sys.addOperator("stokes_coupling");
 
-    const auto u = svmp::FE::forms::TrialFunction(*u_space, "u");
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *u_space, "u");
     const auto v = svmp::FE::forms::TestFunction(*u_space, "v");
-    const auto p = svmp::FE::forms::TrialFunction(*p_space, "p");
+    const auto p = svmp::FE::forms::FormExpr::stateField(p_field, *p_space, "p");
     const auto q = svmp::FE::forms::TestFunction(*p_space, "q");
 
-    const auto up_residual = (-p * svmp::FE::forms::div(v)).dx();
-    const auto pu_residual = (q * svmp::FE::forms::div(u)).dx();
+    const auto residual =
+        (-p * svmp::FE::forms::div(v)).dx() +
+        (q * svmp::FE::forms::div(u)).dx();
 
-    svmp::FE::forms::BlockBilinearForm blocks(/*tests=*/2, /*trials=*/2);
-    blocks.setBlock(0, 1, up_residual);
-    blocks.setBlock(1, 0, pu_residual);
-
-    (void)svmp::FE::systems::installResidualBlocks(
+    (void)svmp::FE::systems::installFormulation(
         sys, "stokes_coupling",
         {u_field, p_field},
-        {u_field, p_field},
-        blocks,
-        svmp::FE::systems::FormInstallOptions{.ad_mode = svmp::FE::forms::ADMode::Forward});
+        residual);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -202,32 +197,25 @@ TEST(NonlinearJacobianVerificationTest, ReverseADJacobianMatchesCentralDifferenc
     const auto p_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "p", .space = p_space, .components = 1});
     sys.addOperator("ns_reverse");
 
-    const auto u = svmp::FE::forms::TrialFunction(*u_space, "u");
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *u_space, "u");
     const auto v = svmp::FE::forms::TestFunction(*u_space, "v");
-    const auto p = svmp::FE::forms::TrialFunction(*p_space, "p");
+    const auto p = svmp::FE::forms::FormExpr::stateField(p_field, *p_space, "p");
     const auto q = svmp::FE::forms::TestFunction(*p_space, "q");
 
     const Real nu = 0.01;
     const auto nu_c = svmp::FE::forms::FormExpr::constant(nu);
 
-    const auto uu_residual =
+    const auto residual =
         (svmp::FE::forms::inner(svmp::FE::forms::grad(u) * u, v) +
-         nu_c * svmp::FE::forms::inner(svmp::FE::forms::grad(u), svmp::FE::forms::grad(v)))
-            .dx();
-    const auto up_residual = (-p * svmp::FE::forms::div(v)).dx();
-    const auto pu_residual = (q * svmp::FE::forms::div(u)).dx();
+         nu_c * svmp::FE::forms::inner(svmp::FE::forms::grad(u), svmp::FE::forms::grad(v)) -
+         p * svmp::FE::forms::div(v))
+            .dx() +
+        (q * svmp::FE::forms::div(u)).dx();
 
-    svmp::FE::forms::BlockBilinearForm blocks(/*tests=*/2, /*trials=*/2);
-    blocks.setBlock(0, 0, uu_residual);
-    blocks.setBlock(0, 1, up_residual);
-    blocks.setBlock(1, 0, pu_residual);
-
-    (void)svmp::FE::systems::installResidualBlocks(
+    (void)svmp::FE::systems::installFormulation(
         sys, "ns_reverse",
         {u_field, p_field},
-        {u_field, p_field},
-        blocks,
-        svmp::FE::systems::FormInstallOptions{.ad_mode = svmp::FE::forms::ADMode::Reverse});
+        residual);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -347,22 +335,19 @@ TEST(StabilizedConvectionTest, SUPGJacobianMatchesCentralDifferencesAndTaylorRem
     const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = u_space, .components = 1});
     sys.addOperator("supg");
 
-    const auto u = svmp::FE::forms::TrialFunction(*u_space, "u");
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *u_space, "u");
     const auto v = svmp::FE::forms::TestFunction(*u_space, "v");
 
     // Nonlinear, physics-agnostic convection + SUPG-style stabilization.
-    // beta(u) = [u,u,u], tau(u) = 0.5*h / ||beta||, with safeNorm regularization.
     const auto beta = svmp::FE::forms::as_vector({u, u, u});
     const auto adv = svmp::FE::forms::inner(beta, svmp::FE::forms::grad(u));
     const auto tau = 0.5 * svmp::FE::forms::h() / svmp::FE::forms::safeNorm(beta);
     const auto residual = (adv * (v + tau * svmp::FE::forms::inner(beta, svmp::FE::forms::grad(v)))).dx();
 
-    (void)svmp::FE::systems::installResidualForm(
+    (void)svmp::FE::systems::installFormulation(
         sys, "supg",
-        u_field,
-        u_field,
-        residual,
-        svmp::FE::systems::FormInstallOptions{.ad_mode = svmp::FE::forms::ADMode::Forward});
+        {u_field},
+        residual);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();

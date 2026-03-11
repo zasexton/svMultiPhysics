@@ -10,6 +10,7 @@
 
 #include "Core/Types.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -51,11 +52,44 @@ struct FieldSplitOptions {
     std::vector<std::string> split_names{}; // Optional, defaults to field0/field1/...
 };
 
+/**
+ * @brief Generic solver role that a block can play
+ *
+ * Replaces physics-specific names like "momentum" and "constraint" with
+ * generic roles that apply to any saddle-point or multi-field formulation.
+ * The mapping from physics-specific names to roles is done by backend-specific
+ * adapters, not by the FE public API.
+ */
+enum class BlockRole : std::uint8_t {
+    /// No special role; treated as a generic field block
+    Generic = 0,
+
+    /// Primary field in a saddle-point system (e.g., velocity, displacement)
+    PrimaryField,
+
+    /// Constraint/multiplier field in a saddle-point system (e.g., pressure, Lagrange multiplier)
+    ConstraintField,
+
+    /// Auxiliary field (e.g., temperature in thermo-mechanics, damage variable)
+    AuxiliaryField,
+};
+
+[[nodiscard]] inline std::string_view blockRoleToString(BlockRole role) noexcept {
+    switch (role) {
+        case BlockRole::Generic: return "Generic";
+        case BlockRole::PrimaryField: return "PrimaryField";
+        case BlockRole::ConstraintField: return "ConstraintField";
+        case BlockRole::AuxiliaryField: return "AuxiliaryField";
+    }
+    return "Unknown";
+}
+
 /// Describes a single DOF block within a multi-field system.
 struct BlockDescriptor {
     std::string name;             ///< Field name (e.g., "velocity", "pressure", "temperature")
     int start_component{0};       ///< First per-node component index for this block
     int n_components{0};          ///< Number of per-node components in this block
+    BlockRole role{BlockRole::Generic};  ///< Solver role for this block
 };
 
 /// Describes the per-node DOF block structure of a multi-field system.
@@ -90,11 +124,86 @@ struct BlockLayout {
         return nullptr;
     }
 
+    /// Look up the first block with a given role (returns nullptr if not found).
+    [[nodiscard]] const BlockDescriptor* findBlockByRole(BlockRole role) const noexcept {
+        for (const auto& b : blocks) {
+            if (b.role == role) return &b;
+        }
+        return nullptr;
+    }
+
+    /// Find the primary field block (saddle-point field-A). Falls back to momentum_block.
+    [[nodiscard]] const BlockDescriptor* primaryFieldBlock() const noexcept {
+        if (auto* p = findBlockByRole(BlockRole::PrimaryField)) return p;
+        if (momentum_block && *momentum_block >= 0 && *momentum_block < static_cast<int>(blocks.size()))
+            return &blocks[static_cast<std::size_t>(*momentum_block)];
+        return nullptr;
+    }
+
+    /// Find the constraint field block (saddle-point field-B). Falls back to constraint_block.
+    [[nodiscard]] const BlockDescriptor* constraintFieldBlock() const noexcept {
+        if (auto* p = findBlockByRole(BlockRole::ConstraintField)) return p;
+        if (constraint_block && *constraint_block >= 0 && *constraint_block < static_cast<int>(blocks.size()))
+            return &blocks[static_cast<std::size_t>(*constraint_block)];
+        return nullptr;
+    }
+
     /// Check if saddle-point annotation is present and valid.
     [[nodiscard]] bool hasSaddlePoint() const noexcept {
         return momentum_block.has_value() && constraint_block.has_value()
             && *momentum_block >= 0 && *momentum_block < static_cast<int>(blocks.size())
             && *constraint_block >= 0 && *constraint_block < static_cast<int>(blocks.size());
+    }
+};
+
+/**
+ * @brief Time integration metadata for a field
+ *
+ * Describes how a field participates in time integration by derivative order
+ * rather than physics-specific naming (displacement/velocity/acceleration).
+ *
+ * - First-order systems: fields have max_derivative_order = 1 (e.g., heat, Stokes)
+ * - Second-order systems: fields have max_derivative_order = 2 (e.g., elastodynamics)
+ * - Mixed-order systems: different fields may have different orders
+ */
+struct FieldTimeMetadata {
+    FieldId field{INVALID_FIELD_ID};
+    std::string name;
+
+    /// Maximum time derivative order this field undergoes (0 = steady, 1 = first-order, 2 = second-order)
+    int max_derivative_order{0};
+
+    /// Whether this field needs time-history storage beyond the current and previous step
+    int history_depth{1};
+
+    /// Optional: time integration scheme override for this field (empty = use global scheme)
+    std::string scheme_override{};
+};
+
+/**
+ * @brief Time integration descriptor for a multi-field system
+ *
+ * Groups per-field time metadata so the time integrator layer can allocate
+ * scheme-specific state storage without physics-specific naming.
+ */
+struct TimeIntegrationDescriptor {
+    std::vector<FieldTimeMetadata> fields{};
+
+    /// Global time integration scheme (e.g., "BDF2", "Newmark", "GenAlpha")
+    std::string global_scheme{};
+
+    /// Maximum derivative order across all fields
+    [[nodiscard]] int maxDerivativeOrder() const noexcept {
+        int mx = 0;
+        for (const auto& f : fields) mx = std::max(mx, f.max_derivative_order);
+        return mx;
+    }
+
+    /// Maximum history depth across all fields
+    [[nodiscard]] int maxHistoryDepth() const noexcept {
+        int mx = 0;
+        for (const auto& f : fields) mx = std::max(mx, f.history_depth);
+        return mx;
     }
 };
 
@@ -119,6 +228,13 @@ struct SolverOptions {
     /// first single-component = constraint). Set from solver XML configuration.
     std::string momentum_block_name{};    ///< e.g., "velocity" or "displacement"
     std::string constraint_block_name{};  ///< e.g., "pressure"
+
+    /// Generic role-to-name mapping (takes precedence over momentum/constraint names when set).
+    /// Maps BlockRole -> block name. Used by backend adapters to resolve role-based queries.
+    std::vector<std::pair<BlockRole, std::string>> block_role_names{};
+
+    /// Optional time integration descriptor for multi-field systems.
+    std::optional<TimeIntegrationDescriptor> time_integration{};
 
     // Backend-specific pass-through (optional).
     // PETSc: used with KSPSetOptionsPrefix()/KSPSetFromOptions().

@@ -110,6 +110,22 @@ void CoupledBoundaryManager::requireSetup() const
                 "CoupledBoundaryManager: system.setup() has not been called");
 }
 
+void CoupledBoundaryManager::registerSecondaryField(const assembly::FieldSolutionBinding& binding)
+{
+    for (auto& existing : secondary_fields_) {
+        if (existing.field == binding.field) {
+            existing = binding;
+            return;
+        }
+    }
+    secondary_fields_.push_back(binding);
+}
+
+void CoupledBoundaryManager::setDofPerNode(int dof_per_node) noexcept
+{
+    dof_per_node_ = dof_per_node;
+}
+
 void CoupledBoundaryManager::setCompilerOptions(forms::SymbolicOptions options)
 {
     compiler_options_ = std::move(options);
@@ -431,6 +447,14 @@ Real CoupledBoundaryManager::evaluateFunctional(const CompiledFunctional& entry,
         assembler.setJITConstants({});
     }
     assembler.setCoupledValues({}, {});
+
+    // Register secondary fields for multi-field boundary functionals
+    if (!secondary_fields_.empty()) {
+        assembler.setDofPerNode(dof_per_node_);
+        for (const auto& fb : secondary_fields_) {
+            assembler.registerFieldBinding(fb);
+        }
+    }
 
     std::unique_ptr<assembly::GlobalSystemView> prev_solution_view;
     std::unique_ptr<assembly::GlobalSystemView> prev2_solution_view;

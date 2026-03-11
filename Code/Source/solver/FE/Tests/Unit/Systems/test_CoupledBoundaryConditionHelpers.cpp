@@ -78,7 +78,7 @@ TEST(CoupledBoundaryConditionHelpers, ApplyCoupledNeumann_UsesBoundaryFunctional
         /*aux=*/{},
         /*flux_name_prefix=*/"flux");
 
-    svmp::FE::systems::installResidualForm(sys, "residual", u_field, u_field, residual);
+    svmp::FE::systems::installFormulation(sys, "residual", {u_field}, residual);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -153,7 +153,7 @@ TEST(CoupledBoundaryConditionHelpers, ApplyCoupledNeumann_RegistersAuxStateAndRe
         std::span<const svmp::FE::systems::AuxiliaryStateRegistration>(aux.data(), aux.size()),
         /*flux_name_prefix=*/"flux");
 
-    svmp::FE::systems::installResidualForm(sys, "residual", u_field, u_field, residual);
+    svmp::FE::systems::installFormulation(sys, "residual", {u_field}, residual);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -231,7 +231,7 @@ TEST(CoupledBoundaryConditionHelpers, ApplyCoupledRobin_UsesBoundaryFunctionalIn
         /*alpha_name_prefix=*/"alpha",
         /*rhs_name_prefix=*/"rhs");
 
-    svmp::FE::systems::installResidualForm(sys, "residual", u_field, u_field, residual);
+    svmp::FE::systems::installFormulation(sys, "residual", {u_field}, residual);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -285,7 +285,7 @@ TEST(CoupledBoundaryConditionHelpers, CoupledBoundaryIntegral_JacobianIncludesCh
         /*boundary_marker=*/2,
         /*flux=*/Q);
 
-    svmp::FE::systems::installResidualForm(sys, "residual", u_field, u_field, residual);
+    svmp::FE::systems::installFormulation(sys, "residual", {u_field}, residual);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -365,7 +365,7 @@ TEST(CoupledBoundaryConditionHelpers, CoupledAuxiliaryState_JacobianIncludesChai
         /*flux=*/flux,
         std::span<const svmp::FE::systems::AuxiliaryStateRegistration>(&reg, 1));
 
-    svmp::FE::systems::installResidualForm(sys, "residual", u_field, u_field, residual);
+    svmp::FE::systems::installFormulation(sys, "residual", {u_field}, residual);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -441,7 +441,7 @@ TEST(CoupledBoundaryConditionHelpers, CoupledAuxiliaryState_JacobianMatchesFinit
         /*flux=*/flux,
         std::span<const svmp::FE::systems::AuxiliaryStateRegistration>(&reg, 1));
 
-    svmp::FE::systems::installResidualForm(sys, "residual", u_field, u_field, residual);
+    svmp::FE::systems::installFormulation(sys, "residual", {u_field}, residual);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -520,7 +520,7 @@ TEST(CoupledBoundaryConditionHelpers, ApplyCoupledNeumann_ExpressionAware_Bounda
         /*boundary_marker=*/2,
         /*flux=*/Q);
 
-    svmp::FE::systems::installResidualForm(sys, "residual", u_field, u_field, residual);
+    svmp::FE::systems::installFormulation(sys, "residual", {u_field}, residual);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -576,7 +576,7 @@ TEST(CoupledBoundaryConditionHelpers, ApplyCoupledNeumann_ExpressionAware_Auxili
         /*flux=*/flux,
         std::span<const svmp::FE::systems::AuxiliaryStateRegistration>(&reg, 1));
 
-    svmp::FE::systems::installResidualForm(sys, "residual", u_field, u_field, residual);
+    svmp::FE::systems::installFormulation(sys, "residual", {u_field}, residual);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();

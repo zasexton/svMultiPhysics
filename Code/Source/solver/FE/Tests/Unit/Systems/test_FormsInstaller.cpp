@@ -6,7 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "Systems/FESystem.h"
-#include "Systems/FormsInstaller.h"
+#include "Systems/FormsInstallerDetail.h"
 
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
@@ -87,7 +87,7 @@ svmp::FE::assembly::DenseVectorView assembleLinear(
 
 } // namespace
 
-TEST(FormsInstaller, FormsInstaller_InstallResidualForm_RegistersKernel)
+TEST(FormsInstaller, FormsInstaller_InstallFormulation_RegistersKernel)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
     auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
@@ -96,14 +96,13 @@ TEST(FormsInstaller, FormsInstaller_InstallResidualForm_RegistersKernel)
     const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
     sys.addOperator("op");
 
-    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
     const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
     const auto residual_form = (u * v).dx();
 
-    auto installed = svmp::FE::systems::installResidualForm(sys, "op", u_field, u_field, residual_form);
-    ASSERT_NE(installed, nullptr);
-    // The returned kernel may be a LinearFormKernel or a JITKernelWrapper
-    // (when LLVM JIT is compiled in).  Correctness is verified via assembly below.
+    auto installed = svmp::FE::systems::installFormulation(sys, "op", {u_field}, residual_form);
+    ASSERT_FALSE(installed.residual.empty());
+    ASSERT_NE(installed.residual[0], nullptr);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -122,7 +121,9 @@ TEST(FormsInstaller, FormsInstaller_InstallResidualForm_RegistersKernel)
     out.zero();
     (void)sys.assemble(req, state, &out, &out);
 
-    const auto mass = assembleBilinear((u * v).dx(), *space, *space, *mesh);
+    // Use trialFunction for the verification helper (assembleBilinear requires it).
+    const auto u_trial = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto mass = assembleBilinear((u_trial * v).dx(), *space, *space, *mesh);
 
     // Matrix matches mass.
     for (GlobalIndex i = 0; i < 4; ++i) {
@@ -141,7 +142,7 @@ TEST(FormsInstaller, FormsInstaller_InstallResidualForm_RegistersKernel)
     }
 }
 
-TEST(FormsInstaller, FormsInstaller_InstallResidualForm_AffineWithRHS_UsesLinearKernel)
+TEST(FormsInstaller, FormsInstaller_InstallFormulation_AffineWithRHS)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
     auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
@@ -150,17 +151,16 @@ TEST(FormsInstaller, FormsInstaller_InstallResidualForm_AffineWithRHS_UsesLinear
     const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
     sys.addOperator("op");
 
-    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
     const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
     const auto one = svmp::FE::forms::FormExpr::constant(1.0);
 
     // Residual: ∫ u v dx - ∫ 1 * v dx
     const auto residual_form = (u * v - one * v).dx();
 
-    auto installed = svmp::FE::systems::installResidualForm(sys, "op", u_field, u_field, residual_form);
-    ASSERT_NE(installed, nullptr);
-    // The returned kernel may be a LinearFormKernel or a JITKernelWrapper
-    // (when LLVM JIT is compiled in).  Correctness is verified via assembly below.
+    auto installed = svmp::FE::systems::installFormulation(sys, "op", {u_field}, residual_form);
+    ASSERT_FALSE(installed.residual.empty());
+    ASSERT_NE(installed.residual[0], nullptr);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -179,7 +179,9 @@ TEST(FormsInstaller, FormsInstaller_InstallResidualForm_AffineWithRHS_UsesLinear
     out.zero();
     (void)sys.assemble(req, state, &out, &out);
 
-    const auto mass = assembleBilinear((u * v).dx(), *space, *space, *mesh);
+    // Use trialFunction for the verification helper (assembleBilinear requires it).
+    const auto u_trial = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto mass = assembleBilinear((u_trial * v).dx(), *space, *space, *mesh);
     const auto rhs = assembleLinear((-one * v).dx(), *space, *mesh);
 
     for (GlobalIndex i = 0; i < 4; ++i) {
@@ -197,7 +199,7 @@ TEST(FormsInstaller, FormsInstaller_InstallResidualForm_AffineWithRHS_UsesLinear
     }
 }
 
-TEST(FormsInstaller, FormsInstaller_InstallWeakForm_MultiOpInstallsConstraintsOnce)
+TEST(FormsInstaller, FormsInstaller_InstallFormulation_MultiOpInstallsConstraintsOnce)
 {
     const int marker = 5;
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
@@ -206,16 +208,15 @@ TEST(FormsInstaller, FormsInstaller_InstallWeakForm_MultiOpInstallsConstraintsOn
     svmp::FE::systems::FESystem sys(mesh);
     const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
 
-    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
     const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
     const auto residual_form = (u * v).dx();
 
-    svmp::FE::forms::WeakForm form;
-    form.residual = residual_form;
-    form.strong_constraints.push_back(
-        svmp::FE::forms::bc::strongDirichlet(u_field, marker, svmp::FE::forms::FormExpr::constant(2.5), "u"));
+    const auto bc = svmp::FE::forms::bc::strongDirichlet(u_field, marker, svmp::FE::forms::FormExpr::constant(2.5), "u");
+    svmp::FE::systems::installStrongDirichlet(sys, std::span<const svmp::FE::forms::bc::StrongDirichlet>(&bc, 1));
 
-    (void)svmp::FE::systems::installWeakForm(sys, {"op", "op2"}, u_field, u_field, form);
+    (void)svmp::FE::systems::installFormulation(sys, "op", {u_field}, residual_form);
+    (void)svmp::FE::systems::installFormulation(sys, "op2", {u_field}, residual_form);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -491,7 +492,7 @@ TEST(FormsInstaller, FormsInstaller_InstallResidualBlocks_InitializerListOverloa
     }
 }
 
-TEST(FormsInstaller, FormsInstaller_InstallCoupledResidual_SeparatesVectorAndMatrix)
+TEST(FormsInstaller, FormsInstaller_InstallFormulation_CoupledSeparatesVectorAndMatrix)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
     auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
@@ -506,12 +507,11 @@ TEST(FormsInstaller, FormsInstaller_InstallCoupledResidual_SeparatesVectorAndMat
     const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
     const auto q = svmp::FE::forms::FormExpr::testFunction(*space, "q");
 
-    svmp::FE::forms::BlockLinearForm residual(/*tests=*/2);
-    residual.setBlock(0, (u_state * v + p_state * v).dx()); // depends on u and p
-    residual.setBlock(1, (q * u_state).dx());               // depends on u only
+    const auto residual =
+        (u_state * v + p_state * v).dx() +  // depends on u and p
+        (q * u_state).dx();                  // depends on u only
 
-    const std::array<FieldId, 2> fields = {u_field, p_field};
-    (void)svmp::FE::systems::installCoupledResidual(sys, "op", fields, fields, residual);
+    (void)svmp::FE::systems::installFormulation(sys, "op", {u_field, p_field}, residual);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -592,7 +592,7 @@ TEST(FormsInstaller, FormsInstaller_InstallCoupledResidual_StateFieldsTracked)
     EXPECT_EQ(installed.jacobian_blocks[1][1], nullptr); // dR_p / dp == 0
 }
 
-TEST(FormsInstaller, FormsInstaller_FormWithoutDx_Behavior)
+TEST(FormsInstaller, FormsInstaller_InstallFormulation_FormWithoutDx_Throws)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
     auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
@@ -601,12 +601,12 @@ TEST(FormsInstaller, FormsInstaller_FormWithoutDx_Behavior)
     const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
     sys.addOperator("op");
 
-    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
     const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
 
     try {
-        (void)svmp::FE::systems::installResidualForm(sys, "op", u_field, u_field, (u * v));
-        FAIL() << "Expected installResidualForm to throw for residual missing dx()/ds()/dS()";
+        (void)svmp::FE::systems::installFormulation(sys, "op", {u_field}, (u * v));
+        FAIL() << "Expected installFormulation to throw for residual missing dx()/ds()/dS()";
     } catch (const svmp::FE::InvalidArgumentException&) {
         SUCCEED();
     } catch (const std::invalid_argument&) {

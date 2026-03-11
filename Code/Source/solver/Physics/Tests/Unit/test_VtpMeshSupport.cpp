@@ -70,12 +70,12 @@ TEST(VtpMeshSupport, LoadsSquareMeshAndAssemblesPoisson)
     system.addOperator("jacobian");
 
     using namespace svmp::FE::forms;
-    auto u = FormExpr::trialFunction(*space, "u");
+    auto u = FormExpr::stateField(u_id, *space, "u");
     auto v = FormExpr::testFunction(*space, "v");
     const auto residual = inner(grad(u), grad(v)).dx();
 
-    FE::systems::installResidualForm(system, "residual", u_id, u_id, residual);
-    FE::systems::installResidualForm(system, "jacobian", u_id, u_id, residual);
+    FE::systems::installFormulation(system, "residual", {u_id}, residual);
+    FE::systems::installFormulation(system, "jacobian", {u_id}, residual);
 
     EXPECT_NO_THROW(system.setup());
 

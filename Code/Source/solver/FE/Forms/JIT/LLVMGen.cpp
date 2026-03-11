@@ -1375,7 +1375,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                            std::uintptr_t& out_address,
                                            const JITCompileSpecialization* specialization,
                                            LLVMGenFusedInfo* fused,
-                                           void* coupled_info) const
+                                           void* coupled_info,
+                                           void* external_ctx,
+                                           void* external_module) const
 {
     (void)engine;
     (void)ir;
@@ -1387,6 +1389,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
     (void)specialization;
     (void)fused;
     (void)coupled_info;
+    (void)external_ctx;
+    (void)external_module;
     out_address = 0;
 
 #if !SVMP_FE_ENABLE_LLVM_JIT
@@ -1644,15 +1648,28 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             }
         }
 
-        auto ctx = std::make_unique<llvm::LLVMContext>();
-        auto module = std::make_unique<llvm::Module>(std::string(symbol), *ctx);
-        module->setModuleIdentifier(std::string(symbol));
+        // Module/context ownership: when external_ctx/external_module are
+        // provided (colocation mode), we use them directly and skip
+        // finalization (addModule/lookup). Otherwise, we create and own them.
+        std::unique_ptr<llvm::LLVMContext> ctx_owner;
+        std::unique_ptr<llvm::Module> mod_owner;
+        llvm::LLVMContext* ctx = static_cast<llvm::LLVMContext*>(external_ctx);
+        llvm::Module* module = static_cast<llvm::Module*>(external_module);
+        const bool owns_module = (ctx == nullptr);
+
+        if (owns_module) {
+            ctx_owner = std::make_unique<llvm::LLVMContext>();
+            mod_owner = std::make_unique<llvm::Module>(std::string(symbol), *ctx_owner);
+            mod_owner->setModuleIdentifier(std::string(symbol));
+            ctx = ctx_owner.get();
+            module = mod_owner.get();
+        }
 
         std::unique_ptr<llvm::DIBuilder> di_builder;
         llvm::DICompileUnit* di_cu = nullptr;
         llvm::DIFile* di_file = nullptr;
 
-        if (options_.debug_info) {
+        if (options_.debug_info && owns_module) {
             module->setSourceFileName("svmp_fe_jit");
             di_builder = std::make_unique<llvm::DIBuilder>(*module);
             di_file = di_builder->createFile("svmp_fe_jit", ".");
@@ -1664,17 +1681,19 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                                   /*RV=*/0);
         }
 
-        const std::string target_triple = engine.targetTriple();
-        const std::string data_layout = engine.dataLayoutString();
-        if (!target_triple.empty()) {
+        if (owns_module) {
+            const std::string target_triple = engine.targetTriple();
+            const std::string data_layout = engine.dataLayoutString();
+            if (!target_triple.empty()) {
 #if LLVM_VERSION_MAJOR >= 18
-            module->setTargetTriple(llvm::Triple(target_triple));
+                module->setTargetTriple(llvm::Triple(target_triple));
 #else
-            module->setTargetTriple(target_triple);
+                module->setTargetTriple(target_triple);
 #endif
-        }
-        if (!data_layout.empty()) {
-            module->setDataLayout(data_layout);
+            }
+            if (!data_layout.empty()) {
+                module->setDataLayout(data_layout);
+            }
         }
 
         llvm::IRBuilder<> builder(*ctx);
@@ -1703,7 +1722,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         auto* fn = llvm::Function::Create(fn_ty,
                                           llvm::GlobalValue::ExternalLinkage,
                                           std::string(symbol),
-                                          module.get());
+                                          module);
 
         if (di_builder && di_cu && di_file) {
             auto* sub_type =
@@ -13048,28 +13067,35 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             di_builder->finalize();
         }
 
-        if (llvm::verifyModule(*module, &llvm::errs())) {
-            return LLVMGenResult{.ok = false, .message = "LLVMGen: generated module failed verification"};
-        }
+        // In colocation mode, skip per-function verification and module
+        // finalization — the caller handles these after all functions are
+        // generated into the shared module.
+        if (owns_module) {
+            if (llvm::verifyModule(*module, &llvm::errs())) {
+                return LLVMGenResult{.ok = false, .message = "LLVMGen: generated module failed verification"};
+            }
 
-        if (options_.dump_llvm_ir) {
-            std::string ir_text;
-            llvm::raw_string_ostream os(ir_text);
-            module->print(os, nullptr);
-            os.flush();
-            writeTextFile(dumpPath(options_, symbol, "_before.ll"), ir_text);
-        }
-        if (options_.dump_llvm_ir_optimized && options_.optimization_level <= 0) {
-            std::string ir_text;
-            llvm::raw_string_ostream os(ir_text);
-            module->print(os, nullptr);
-            os.flush();
-            writeTextFile(dumpPath(options_, symbol, "_after.ll"), ir_text);
-        }
+            if (options_.dump_llvm_ir) {
+                std::string ir_text;
+                llvm::raw_string_ostream os(ir_text);
+                module->print(os, nullptr);
+                os.flush();
+                writeTextFile(dumpPath(options_, symbol, "_before.ll"), ir_text);
+            }
+            if (options_.dump_llvm_ir_optimized && options_.optimization_level <= 0) {
+                std::string ir_text;
+                llvm::raw_string_ostream os(ir_text);
+                module->print(os, nullptr);
+                os.flush();
+                writeTextFile(dumpPath(options_, symbol, "_after.ll"), ir_text);
+            }
 
-        llvm::orc::ThreadSafeModule tsm(std::move(module), std::move(ctx));
-        engine.addModule(std::move(tsm));
-        out_address = engine.lookup(symbol);
+            llvm::orc::ThreadSafeModule tsm(std::move(mod_owner), std::move(ctx_owner));
+            engine.addModule(std::move(tsm));
+            out_address = engine.lookup(symbol);
+        }
+        // else: colocation mode — address is 0, resolved by caller after
+        // the shared module is added to the engine.
 
         return LLVMGenResult{.ok = true, .message = {}};
     } catch (const std::exception& e) {
@@ -13479,6 +13505,112 @@ LLVMGenResult LLVMGen::compileAndAddCoupledKernel(JITEngine& engine,
                                    /*interface_marker=*/-1, symbol, out_address,
                                    /*specialization=*/nullptr, /*fused=*/nullptr,
                                    static_cast<void*>(&coupled));
+#endif
+}
+
+LLVMGenResult LLVMGen::compileAndAddColocatedKernels(
+    JITEngine& engine,
+    std::span<const ColocatedKernelSpec> specs,
+    std::vector<ColocatedResult>& out_results) const
+{
+    out_results.clear();
+
+#if !SVMP_FE_ENABLE_LLVM_JIT
+    (void)engine;
+    (void)specs;
+    return LLVMGenResult{.ok = false, .message = "LLVMGen: FE was built without LLVM JIT support"};
+#else
+    if (specs.empty()) {
+        return LLVMGenResult{.ok = true, .message = {}};
+    }
+
+    try {
+        // Create a single shared module for all kernel functions.
+        // Contiguous .text layout eliminates L1i thrashing when cycling kernels.
+        auto ctx_owner = std::make_unique<llvm::LLVMContext>();
+        auto mod_owner = std::make_unique<llvm::Module>("svmp_fe_colocated", *ctx_owner);
+
+        // Build a combined module identifier from all kernel symbols.
+        {
+            std::string combined_id = "svmp_fe_colocated";
+            for (const auto& spec : specs) {
+                combined_id += "_";
+                combined_id += spec.symbol;
+            }
+            mod_owner->setModuleIdentifier(combined_id);
+        }
+
+        const std::string target_triple = engine.targetTriple();
+        const std::string data_layout = engine.dataLayoutString();
+        if (!target_triple.empty()) {
+#if LLVM_VERSION_MAJOR >= 18
+            mod_owner->setTargetTriple(llvm::Triple(target_triple));
+#else
+            mod_owner->setTargetTriple(target_triple);
+#endif
+        }
+        if (!data_layout.empty()) {
+            mod_owner->setDataLayout(data_layout);
+        }
+
+        // Generate each kernel function into the shared module.
+        for (const auto& spec : specs) {
+            if (!spec.ir) {
+                return LLVMGenResult{.ok = false,
+                                     .message = "LLVMGen(colocated): null FormIR for kernel '" + spec.symbol + "'"};
+            }
+
+            std::uintptr_t dummy_addr = 0;
+            auto r = compileAndAddKernelImpl(
+                engine, *spec.ir, spec.term_indices,
+                spec.domain, spec.boundary_marker, spec.interface_marker,
+                spec.symbol, dummy_addr, spec.specialization,
+                /*fused=*/nullptr, /*coupled_info=*/nullptr,
+                /*external_ctx=*/static_cast<void*>(ctx_owner.get()),
+                /*external_module=*/static_cast<void*>(mod_owner.get()));
+
+            if (!r.ok) {
+                return LLVMGenResult{
+                    .ok = false,
+                    .message = "LLVMGen(colocated): failed to generate kernel '" + spec.symbol + "': " + r.message};
+            }
+        }
+
+        // Verify the combined module.
+        if (llvm::verifyModule(*mod_owner, &llvm::errs())) {
+            return LLVMGenResult{.ok = false,
+                                 .message = "LLVMGen(colocated): combined module failed verification"};
+        }
+
+        if (options_.dump_llvm_ir) {
+            std::string ir_text;
+            llvm::raw_string_ostream os(ir_text);
+            mod_owner->print(os, nullptr);
+            os.flush();
+            writeTextFile(dumpPath(options_, "colocated", "_before.ll"), ir_text);
+        }
+
+        // Add the single module to the engine.
+        llvm::orc::ThreadSafeModule tsm(std::move(mod_owner), std::move(ctx_owner));
+        engine.addModule(std::move(tsm));
+
+        // Resolve all symbol addresses from the single dylib.
+        out_results.reserve(specs.size());
+        for (const auto& spec : specs) {
+            ColocatedResult cr;
+            cr.symbol = spec.symbol;
+            cr.address = engine.lookup(spec.symbol);
+            out_results.push_back(std::move(cr));
+        }
+
+        FE_LOG_INFO("LLVMGen(colocated): compiled " + std::to_string(specs.size()) +
+                    " kernels into single module");
+
+        return LLVMGenResult{.ok = true, .message = {}};
+    } catch (const std::exception& e) {
+        return LLVMGenResult{.ok = false,
+                             .message = std::string("LLVMGen(colocated): exception: ") + e.what()};
+    }
 #endif
 }
 

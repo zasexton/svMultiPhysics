@@ -2643,6 +2643,12 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                                                   *test_field.space,
                                                   *trial_field.space);
                         }
+
+                        // After individual block priming, compile all block
+                        // kernels into a single LLVM module for contiguous
+                        // .text layout (reduces L1i cache thrashing).
+                        coupled->primeAllBlocksColocated();
+
                         continue;
                     }
 

@@ -1361,6 +1361,230 @@ JITCompileResult JITCompiler::compileMonolithic(
 #endif
 }
 
+JITCompileResult JITCompiler::compileColocated(
+    std::span<const ColocatedKernelSpec> specs,
+    std::vector<ColocatedKernelResult>& out_results)
+{
+    JITCompileResult out;
+    out.ok = false;
+    out.cacheable = true;
+    out_results.clear();
+
+    if (!impl_) {
+        out.message = "JITCompiler: internal error (missing impl)";
+        return out;
+    }
+
+    if (specs.empty()) {
+        out.ok = true;
+        return out;
+    }
+
+#if !SVMP_FE_ENABLE_LLVM_JIT
+    (void)specs;
+    out.message = "JITCompiler: FE was built without LLVM JIT support";
+    out.cacheable = false;
+    return out;
+#else
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+
+    if (!impl_->engine || !impl_->engine->available()) {
+        out.message = "JITCompiler(colocated): LLVM JIT engine is not available at runtime";
+        out.cacheable = false;
+        return out;
+    }
+
+    const std::string target_triple = impl_->engine->targetTriple();
+    const std::string data_layout = impl_->engine->dataLayoutString();
+    const std::string cpu_name = impl_->engine->cpuName();
+    const std::string cpu_features = impl_->engine->cpuFeaturesString();
+    const std::string llvm_version = llvmVersionString();
+
+    // Build per-kernel plans to get cache keys and term indices.
+    struct KernelPlan {
+        CompilationPlan plan{};
+        std::uint64_t combined_cache_key{0};
+    };
+    std::vector<KernelPlan> kernel_plans;
+    kernel_plans.reserve(specs.size());
+
+    // Compute combined cache key from all kernel cache keys.
+    std::uint64_t combined_cache_key = kFNVOffset;
+    hashMix(combined_cache_key, static_cast<std::uint64_t>(specs.size()));
+
+    for (const auto& spec : specs) {
+        if (!spec.ir) {
+            out.message = "JITCompiler(colocated): null FormIR in spec";
+            out.cacheable = false;
+            return out;
+        }
+
+        KernelPlan kp;
+        try {
+            kp.plan = buildPlan(*spec.ir, {}, impl_->options,
+                                target_triple, data_layout, cpu_name,
+                                cpu_features, llvm_version,
+                                spec.specialization);
+        } catch (const std::exception& e) {
+            out.message = std::string("JITCompiler(colocated): plan failed: ") + e.what();
+            out.cacheable = false;
+            return out;
+        }
+
+        if (!kp.plan.ok) {
+            out.message = "JITCompiler(colocated): plan failed: " + kp.plan.message;
+            out.cacheable = false;
+            return out;
+        }
+
+        // Hash all group cache keys from this kernel into the combined key.
+        for (const auto& group : kp.plan.groups) {
+            hashMix(combined_cache_key, group.cache_key);
+        }
+
+        kernel_plans.push_back(std::move(kp));
+    }
+
+    // Check if the combined colocated module is already in the symbol table.
+    const std::string combined_symbol = stableSymbolForKernel(combined_cache_key);
+
+    // Build per-kernel stable symbols.
+    std::vector<std::string> kernel_symbols;
+    kernel_symbols.reserve(specs.size());
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        // Use the first cell-domain group's cache key as the kernel's stable symbol.
+        // Each spec typically has exactly one cell-domain group.
+        std::uint64_t kernel_key = kFNVOffset;
+        hashMix(kernel_key, combined_cache_key);
+        hashMix(kernel_key, static_cast<std::uint64_t>(i));
+        for (const auto& group : kernel_plans[i].plan.groups) {
+            if (group.key.domain == IntegralDomain::Cell) {
+                hashMix(kernel_key, group.cache_key);
+            }
+        }
+        kernel_symbols.push_back("svmp_fe_jit_coloc_" + toHex(kernel_key));
+    }
+
+    // Try to look up all symbols — if they all resolve, the colocated module
+    // was already compiled (from disk cache or a previous run).
+    bool all_resolved = true;
+    out_results.resize(specs.size());
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        JITEngine::SymbolAddress addr = 0;
+        if (impl_->engine->tryLookup(kernel_symbols[i], addr)) {
+            out_results[i].symbol = kernel_symbols[i];
+            out_results[i].address = addr;
+        } else {
+            all_resolved = false;
+            break;
+        }
+    }
+
+    if (all_resolved) {
+        out.ok = true;
+        FE_LOG_INFO("JITCompiler(colocated): all " + std::to_string(specs.size()) +
+                    " kernels resolved from existing symbols");
+        return out;
+    }
+
+    // Try loading from object cache by the combined module identifier.
+    {
+        std::string combined_module_id = "svmp_fe_colocated";
+        for (const auto& sym : kernel_symbols) {
+            combined_module_id += "_";
+            combined_module_id += sym;
+        }
+        if (impl_->engine->tryLoadFromObjectCache(combined_module_id)) {
+            bool cache_resolved = true;
+            for (std::size_t i = 0; i < specs.size(); ++i) {
+                JITEngine::SymbolAddress addr = 0;
+                if (impl_->engine->tryLookup(kernel_symbols[i], addr)) {
+                    out_results[i].symbol = kernel_symbols[i];
+                    out_results[i].address = addr;
+                } else {
+                    cache_resolved = false;
+                    break;
+                }
+            }
+            if (cache_resolved) {
+                out.ok = true;
+                FE_LOG_INFO("JITCompiler(colocated): loaded " + std::to_string(specs.size()) +
+                            " kernels from object cache");
+                return out;
+            }
+        }
+    }
+
+    // Cache miss — compile all kernels into a single module.
+    // Build LLVMGen::ColocatedKernelSpec for each kernel.
+    std::vector<LLVMGen::ColocatedKernelSpec> gen_specs;
+    gen_specs.reserve(specs.size());
+
+    for (std::size_t i = 0; i < specs.size(); ++i) {
+        const auto& spec = specs[i];
+        const auto& plan = kernel_plans[i].plan;
+
+        // Use the first cell-domain group's term indices.
+        std::vector<std::size_t> term_indices;
+        IntegralDomain domain = IntegralDomain::Cell;
+        int boundary_marker = -1;
+        int interface_marker = -1;
+
+        for (const auto& group : plan.groups) {
+            if (group.key.domain == IntegralDomain::Cell) {
+                term_indices = group.term_indices;
+                domain = group.key.domain;
+                boundary_marker = group.key.boundary_marker;
+                interface_marker = group.key.interface_marker;
+                break;
+            }
+        }
+
+        if (term_indices.empty() && !plan.groups.empty()) {
+            // Fallback: use the first group's term indices.
+            const auto& group = plan.groups[0];
+            term_indices = group.term_indices;
+            domain = group.key.domain;
+            boundary_marker = group.key.boundary_marker;
+            interface_marker = group.key.interface_marker;
+        }
+
+        LLVMGen::ColocatedKernelSpec gs;
+        gs.ir = spec.ir;
+        gs.term_indices = std::move(term_indices);
+        gs.domain = domain;
+        gs.boundary_marker = boundary_marker;
+        gs.interface_marker = interface_marker;
+        gs.symbol = kernel_symbols[i];
+        gs.specialization = spec.specialization;
+        gen_specs.push_back(std::move(gs));
+    }
+
+    try {
+        LLVMGen gen(impl_->options);
+        std::vector<LLVMGen::ColocatedResult> gen_results;
+        auto r = gen.compileAndAddColocatedKernels(*impl_->engine, gen_specs, gen_results);
+        if (!r.ok) {
+            out.message = "JITCompiler(colocated): " + r.message;
+            out.cacheable = false;
+            return out;
+        }
+
+        for (std::size_t i = 0; i < gen_results.size(); ++i) {
+            out_results[i].symbol = gen_results[i].symbol;
+            out_results[i].address = gen_results[i].address;
+        }
+    } catch (const std::exception& e) {
+        out.message = std::string("JITCompiler(colocated): compilation failed: ") + e.what();
+        out.cacheable = false;
+        return out;
+    }
+
+    out.ok = true;
+    return out;
+#endif
+}
+
 JITCompileResult JITCompiler::compileFunctional(const FormExpr& integrand,
                                                 IntegralDomain domain,
                                                 std::uint32_t dim_hint,

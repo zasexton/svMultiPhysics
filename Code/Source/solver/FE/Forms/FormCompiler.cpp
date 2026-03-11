@@ -9,6 +9,7 @@
 
 #include "Core/FEException.h"
 #include "Forms/BlockForm.h"
+#include "Forms/MixedFormIR.h"
 
 #include <algorithm>
 #include <cmath>
@@ -160,6 +161,75 @@ BoundArgumentInfo analyzeBoundArguments(const FormExprNode& node)
 
     visit(visit, node);
     return info;
+}
+
+struct MixedBoundArgumentInfo {
+    // Unique test spaces and their names, in order of first occurrence
+    std::vector<std::pair<FormExprNode::SpaceSignature, std::string>> test_spaces{};
+    // Unique trial spaces and their names, in order of first occurrence
+    std::vector<std::pair<FormExprNode::SpaceSignature, std::string>> trial_spaces{};
+};
+
+MixedBoundArgumentInfo analyzeMixedBoundArguments(const FormExprNode& node)
+{
+    MixedBoundArgumentInfo info;
+
+    const auto find_or_add = [](
+        std::vector<std::pair<FormExprNode::SpaceSignature, std::string>>& spaces,
+        const FormExprNode::SpaceSignature& sig,
+        const std::string& name) -> std::size_t
+    {
+        for (std::size_t i = 0; i < spaces.size(); ++i) {
+            if (spaceSignatureEqual(spaces[i].first, sig) && spaces[i].second == name) {
+                return i;
+            }
+        }
+        spaces.push_back({sig, name});
+        return spaces.size() - 1;
+    };
+
+    const auto visit = [&](const auto& self, const FormExprNode& n) -> void {
+        if (n.type() == FormExprType::TestFunction) {
+            const auto* sig = n.spaceSignature();
+            if (sig) {
+                find_or_add(info.test_spaces, *sig, n.toString());
+            }
+        }
+        if (n.type() == FormExprType::TrialFunction) {
+            const auto* sig = n.spaceSignature();
+            if (sig) {
+                find_or_add(info.trial_spaces, *sig, n.toString());
+            }
+        }
+        for (const auto& child : n.childrenShared()) {
+            if (child) self(self, *child);
+        }
+    };
+
+    visit(visit, node);
+    return info;
+}
+
+bool integrandContainsTestNamed(const FormExprNode& node, const std::string& test_name)
+{
+    if (node.type() == FormExprType::TestFunction && node.toString() == test_name) {
+        return true;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && integrandContainsTestNamed(*child, test_name)) return true;
+    }
+    return false;
+}
+
+bool integrandContainsTrialNamed(const FormExprNode& node, const std::string& trial_name)
+{
+    if (node.type() == FormExprType::TrialFunction && node.toString() == trial_name) {
+        return true;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && integrandContainsTrialNamed(*child, trial_name)) return true;
+    }
+    return false;
 }
 
 assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind kind)
@@ -953,6 +1023,148 @@ std::vector<std::vector<std::optional<FormIR>>> FormCompiler::compileResidual(co
         }
     }
     return out;
+}
+
+MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
+{
+    if (!form.isValid()) {
+        throw std::invalid_argument("FormCompiler::compileMixed: cannot compile invalid form");
+    }
+    if (!form.hasTest()) {
+        throw std::invalid_argument("FormCompiler::compileMixed: form has no test function");
+    }
+
+    detail::requireNoCoupledPlaceholders(*form.node());
+    if (!impl_->options.jit.enable) {
+        detail::requireNoIndexedAccess(*form.node());
+    }
+
+    // Collect all test/trial space signatures
+    const auto mixed_args = detail::analyzeMixedBoundArguments(*form.node());
+
+    // If single test and single trial, delegate to single-field compilation
+    if (mixed_args.test_spaces.size() <= 1 && mixed_args.trial_spaces.size() <= 1) {
+        MixedFormIR mir(1, mixed_args.trial_spaces.empty() ? 0 : 1);
+        if (!mixed_args.trial_spaces.empty()) {
+            mir.setBlock(0, 0, compileImpl(form, kind));
+        } else {
+            // Linear form (no trial)
+            // For linear forms, use a 1x1 layout with trial index 0
+            MixedFormIR mir_l(1, 1);
+            mir_l.setBlock(0, 0, compileImpl(form, kind));
+            mir_l.setKind(kind);
+            if (!mixed_args.test_spaces.empty()) {
+                std::vector<MixedFieldDescriptor> test_desc;
+                test_desc.push_back({INVALID_FIELD_ID, mixed_args.test_spaces[0].second,
+                                     mixed_args.test_spaces[0].first,
+                                     mixed_args.test_spaces[0].first.value_dimension});
+                mir_l.setTestFields(std::move(test_desc));
+            }
+            return mir_l;
+        }
+        mir.setKind(kind);
+        if (!mixed_args.test_spaces.empty()) {
+            std::vector<MixedFieldDescriptor> test_desc;
+            test_desc.push_back({INVALID_FIELD_ID, mixed_args.test_spaces[0].second,
+                                 mixed_args.test_spaces[0].first,
+                                 mixed_args.test_spaces[0].first.value_dimension});
+            mir.setTestFields(std::move(test_desc));
+        }
+        if (!mixed_args.trial_spaces.empty()) {
+            std::vector<MixedFieldDescriptor> trial_desc;
+            trial_desc.push_back({INVALID_FIELD_ID, mixed_args.trial_spaces[0].second,
+                                  mixed_args.trial_spaces[0].first,
+                                  mixed_args.trial_spaces[0].first.value_dimension});
+            mir.setTrialFields(std::move(trial_desc));
+        }
+        return mir;
+    }
+
+    // Multi-field: decompose into blocks
+    const std::size_t n_test = mixed_args.test_spaces.size();
+    const std::size_t n_trial = std::max(mixed_args.trial_spaces.size(), std::size_t{1});
+
+    MixedFormIR mir(n_test, n_trial);
+    mir.setKind(kind);
+
+    // Set field descriptors
+    std::vector<MixedFieldDescriptor> test_desc;
+    test_desc.reserve(n_test);
+    for (const auto& ts : mixed_args.test_spaces) {
+        test_desc.push_back({INVALID_FIELD_ID, ts.second, ts.first, ts.first.value_dimension});
+    }
+    mir.setTestFields(std::move(test_desc));
+
+    std::vector<MixedFieldDescriptor> trial_desc;
+    trial_desc.reserve(n_trial);
+    for (const auto& ts : mixed_args.trial_spaces) {
+        trial_desc.push_back({INVALID_FIELD_ID, ts.second, ts.first, ts.first.value_dimension});
+    }
+    mir.setTrialFields(std::move(trial_desc));
+
+    // Collect all integral terms from the mixed expression
+    std::vector<IntegralTerm> all_terms;
+    detail::collectIntegralTerms(form, /*sign=*/+1, all_terms);
+
+    // Classify each term by its (test, trial) block
+    for (std::size_t ti = 0; ti < n_test; ++ti) {
+        const auto& test_name = mixed_args.test_spaces[ti].second;
+        for (std::size_t tj = 0; tj < n_trial; ++tj) {
+            const auto& trial_name = mixed_args.trial_spaces[tj].second;
+
+            // Collect terms that contain this specific test AND trial
+            std::vector<IntegralTerm> block_terms;
+            for (const auto& term : all_terms) {
+                if (detail::integrandContainsTestNamed(*term.integrand.node(), test_name) &&
+                    detail::integrandContainsTrialNamed(*term.integrand.node(), trial_name)) {
+                    block_terms.push_back(term);
+                }
+            }
+
+            if (block_terms.empty()) continue;
+
+            // Reconstruct a FormExpr for this block by summing its integral terms
+            // Each term already includes its measure (dx/ds/dS/dI)
+            FormExpr block_expr;
+            for (std::size_t k = 0; k < block_terms.size(); ++k) {
+                // The term's integrand is the integrand-only part; we need to re-wrap it
+                FormExpr term_with_measure;
+                switch (block_terms[k].domain) {
+                    case IntegralDomain::Cell:
+                        term_with_measure = block_terms[k].integrand.dx();
+                        break;
+                    case IntegralDomain::Boundary:
+                        term_with_measure = block_terms[k].integrand.ds(block_terms[k].boundary_marker);
+                        break;
+                    case IntegralDomain::InteriorFace:
+                        term_with_measure = block_terms[k].integrand.dS();
+                        break;
+                    case IntegralDomain::InterfaceFace:
+                        term_with_measure = block_terms[k].integrand.dI(block_terms[k].interface_marker);
+                        break;
+                }
+
+                if (!block_expr.isValid()) {
+                    block_expr = term_with_measure;
+                } else {
+                    block_expr = block_expr + term_with_measure;
+                }
+            }
+
+            // Compile this block using the single-field path
+            // (analyzeBoundArguments will see exactly one test + one trial)
+            try {
+                mir.setBlock(ti, tj, compileImpl(block_expr, kind));
+            } catch (const std::invalid_argument& e) {
+                // Re-throw with block context
+                throw std::invalid_argument(
+                    "FormCompiler::compileMixed: error compiling block (" +
+                    std::to_string(ti) + ", " + std::to_string(tj) + "): " + e.what());
+            }
+        }
+    }
+
+    return mir;
 }
 
 } // namespace forms

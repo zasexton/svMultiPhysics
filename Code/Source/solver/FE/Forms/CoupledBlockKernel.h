@@ -106,6 +106,10 @@ public:
     /// Tag so assembler can identify this kernel type.
     [[nodiscard]] bool isCoupledBlockKernel() const noexcept { return true; }
 
+    /** Compile all block kernels into a single LLVM module for contiguous
+     *  .text layout. Call during system setup, before the first assembly. */
+    void primeAllBlocksColocated();
+
 private:
     std::vector<BlockSpec> blocks_;
     std::shared_ptr<jit::JITCompiler> compiler_;

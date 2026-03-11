@@ -2098,6 +2098,42 @@ bool JITKernelWrapper::isJITReady() const noexcept
     return canUseJIT();
 }
 
+void JITKernelWrapper::setExternalCellAddress(std::uintptr_t addr)
+{
+    if (addr == 0) {
+        return;
+    }
+
+    // Ensure the fallback kernel has been analyzed so we know the wrapped kind.
+    // Must be called BEFORE acquiring jit_mutex_ since maybeCompile() also locks it.
+    maybeCompile();
+
+    std::lock_guard<std::mutex> lock(jit_mutex_);
+
+    // Inject the address into whichever compiled dispatch is appropriate.
+    // For coupled blocks, the tangent (bilinear) cell kernel is the primary target.
+    if (compiled_tangent_.ok && compiled_tangent_.cell != 0) {
+        compiled_tangent_.cell = addr;
+    } else if (compiled_bilinear_.ok && compiled_bilinear_.cell != 0) {
+        compiled_bilinear_.cell = addr;
+    } else if (compiled_form_.ok && compiled_form_.cell != 0) {
+        compiled_form_.cell = addr;
+    } else {
+        // No compiled dispatch available yet — set up a minimal one.
+        // This handles the case where the wrapper hasn't been compiled at all.
+        compiled_form_.ok = true;
+        compiled_form_.cell = addr;
+
+        // Also set tangent/bilinear if appropriate for the kernel kind.
+        if (kind_ == WrappedKind::FormKernel || kind_ == WrappedKind::SymbolicNonlinearFormKernel) {
+            compiled_tangent_.ok = true;
+            compiled_tangent_.cell = addr;
+            compiled_bilinear_.ok = true;
+            compiled_bilinear_.cell = addr;
+        }
+    }
+}
+
 std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::compileSpecializedDispatch(
     KernelRole role,
     const FormIR& ir,

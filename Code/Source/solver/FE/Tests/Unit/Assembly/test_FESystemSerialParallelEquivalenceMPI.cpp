@@ -358,24 +358,18 @@ systems::FESystem buildCoupledNavierStokesLikeSystem(std::shared_ptr<const IMesh
     const Real nu = 0.01;
     const auto nu_c = forms::FormExpr::constant(nu);
 
-    // Momentum residual: convection + diffusion - pressure coupling.
-    forms::BlockLinearForm residual(/*tests=*/2);
-    residual.setBlock(
-        0,
+    // Combined momentum + continuity residual.
+    const auto residual =
         (forms::inner(forms::grad(u_state) * u_state, v) +
          nu_c * forms::inner(forms::grad(u_state), forms::grad(v)) -
          p_state * forms::div(v))
-            .dx());
-    // Continuity residual.
-    residual.setBlock(1, (q * forms::div(u_state)).dx());
+            .dx() +
+        (q * forms::div(u_state)).dx();
 
-    const std::array<FieldId, 2> fields = {u_field, p_field};
-    (void)systems::installCoupledResidual(
+    (void)systems::installFormulation(
         sys, "ns",
-        fields,
-        fields,
-        residual,
-        systems::FormInstallOptions{.ad_mode = forms::ADMode::Forward});
+        {u_field, p_field},
+        residual);
 
     systems::SetupOptions opts;
     opts.assembler_name = std::move(assembler_name);

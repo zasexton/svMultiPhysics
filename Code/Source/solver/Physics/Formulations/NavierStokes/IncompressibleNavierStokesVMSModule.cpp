@@ -350,33 +350,21 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         }
     }
 
-    // Install Jacobian blocks under a single unified operator tag.  Diagonal blocks
-    // (VV, PP) use Both mode to produce matrix+vector simultaneously, while off-diagonal
-    // blocks (VP, PV) use MatrixOnly.  This allows Newton to use the combined
-    // assembleJacobianAndResidual() path (same_op=true), cutting mesh traversals from
-    // 6 to 4 compared to separate residual/jacobian operators.
-    FE::forms::BlockLinearForm residual(/*tests=*/2);
-    residual.setBlock(0, momentum_form);
-    residual.setBlock(1, continuity_form);
+    // Install the complete residual (momentum + continuity) via the unified
+    // installFormulation() entry point.  It auto-detects the two-field mixed
+    // structure and sets up per-block Jacobian kernels with optimal assembly.
+    const auto residual = momentum_form + continuity_form;
 
-    const std::array<FE::FieldId, 2> fields = {u_id, p_id};
-    {
-        FE::systems::FormInstallOptions install{};
-        install.coupled_residual_install_residual_kernels = false;
-        install.coupled_residual_install_jacobian_blocks = true;
-        install.coupled_residual_from_jacobian_block = true;
-        // Prefer symbolic tangents for performance. The dual-number (NonlinearFormKernel)
-        // path is not JIT-accelerated and builds a large AD AST for complex fluid terms.
-        install.compiler_options.use_symbolic_tangent = true;
+    FE::systems::FormInstallOptions install{};
+    install.compiler_options.use_symbolic_tangent = true;
 #if SVMP_FE_ENABLE_LLVM_JIT
-        install.compiler_options.jit.enable = true;
-        install.compiler_options.jit.optimization_level = 3;
-        install.compiler_options.jit.specialization.enable = true;
-        install.compiler_options.jit.specialization.specialize_n_qpts = true;
-        install.compiler_options.jit.specialization.specialize_dofs = true;
+    install.compiler_options.jit.enable = true;
+    install.compiler_options.jit.optimization_level = 3;
+    install.compiler_options.jit.specialization.enable = true;
+    install.compiler_options.jit.specialization.specialize_n_qpts = true;
+    install.compiler_options.jit.specialization.specialize_dofs = true;
 #endif
-        (void)FE::systems::installCoupledResidual(system, "equations", fields, fields, residual, install);
-    }
+    (void)FE::systems::installFormulation(system, "equations", {u_id, p_id}, residual, install);
 }
 
 } // namespace navier_stokes

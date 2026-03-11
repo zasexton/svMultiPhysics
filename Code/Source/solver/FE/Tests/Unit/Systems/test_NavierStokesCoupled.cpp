@@ -94,38 +94,30 @@ TEST(NavierStokesCoupledFormsTest, ResidualAndJacobianMatchFiniteDifferences)
     const auto p_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "p", .space = p_space, .components = 1});
     sys.addOperator("ns");
 
-    // Block kernels (each residual has exactly one TrialFunction and one TestFunction).
-    const auto u = svmp::FE::forms::TrialFunction(*u_space, "u");
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *u_space, "u");
+    const auto p = svmp::FE::forms::FormExpr::stateField(p_field, *p_space, "p");
     const auto v = svmp::FE::forms::TestFunction(*u_space, "v");
-    const auto p = svmp::FE::forms::TrialFunction(*p_space, "p");
     const auto q = svmp::FE::forms::TestFunction(*p_space, "q");
 
     const Real nu = 0.01;
     const auto nu_c = svmp::FE::forms::FormExpr::constant(nu);
 
-    // Momentum: ( (u·∇)u, v ) + nu (∇u, ∇v)
-    const auto uu_residual =
+    // Momentum: ( (u·∇)u, v ) + nu (∇u, ∇v) - (p, div(v))
+    const auto momentum =
         (svmp::FE::forms::inner(svmp::FE::forms::grad(u) * u, v) +
-         nu_c * svmp::FE::forms::inner(svmp::FE::forms::grad(u), svmp::FE::forms::grad(v)))
+         nu_c * svmp::FE::forms::inner(svmp::FE::forms::grad(u), svmp::FE::forms::grad(v)) -
+         p * svmp::FE::forms::div(v))
             .dx();
 
-    // Pressure coupling: -(p, div(v))
-    const auto up_residual = (-p * svmp::FE::forms::div(v)).dx();
-
     // Continuity: (q, div(u))
-    const auto pu_residual = (q * svmp::FE::forms::div(u)).dx();
+    const auto continuity = (q * svmp::FE::forms::div(u)).dx();
 
-    svmp::FE::forms::BlockBilinearForm blocks(/*tests=*/2, /*trials=*/2);
-    blocks.setBlock(0, 0, uu_residual);
-    blocks.setBlock(0, 1, up_residual);
-    blocks.setBlock(1, 0, pu_residual);
+    const auto residual = momentum + continuity;
 
-    (void)svmp::FE::systems::installResidualBlocks(
+    (void)svmp::FE::systems::installFormulation(
         sys, "ns",
         {u_field, p_field},
-        {u_field, p_field},
-        blocks,
-        svmp::FE::systems::FormInstallOptions{.ad_mode = svmp::FE::forms::ADMode::Forward});
+        residual);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -199,9 +191,6 @@ TEST(NavierStokesCoupledFormsTest, CoupledResidualInstallerMatchesFiniteDifferen
     const auto p_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "p", .space = p_space, .components = 1});
     sys.addOperator("ns_coupled");
 
-    // Coupled residual blocks:
-    // - momentum residual references both u and p state fields
-    // - continuity residual references only u state field
     const auto u_state = svmp::FE::forms::FormExpr::stateField(u_field, *u_space, "u");
     const auto p_state = svmp::FE::forms::FormExpr::stateField(p_field, *p_space, "p");
 
@@ -211,22 +200,19 @@ TEST(NavierStokesCoupledFormsTest, CoupledResidualInstallerMatchesFiniteDifferen
     const Real nu = 0.01;
     const auto nu_c = svmp::FE::forms::FormExpr::constant(nu);
 
-    svmp::FE::forms::BlockLinearForm residual(/*tests=*/2);
-    residual.setBlock(
-        0,
+    const auto momentum =
         (svmp::FE::forms::inner(svmp::FE::forms::grad(u_state) * u_state, v) +
          nu_c * svmp::FE::forms::inner(svmp::FE::forms::grad(u_state), svmp::FE::forms::grad(v)) -
          p_state * svmp::FE::forms::div(v))
-            .dx());
-    residual.setBlock(1, (q * svmp::FE::forms::div(u_state)).dx());
+            .dx();
+    const auto continuity = (q * svmp::FE::forms::div(u_state)).dx();
 
-    const std::array<svmp::FE::FieldId, 2> fields = {u_field, p_field};
-    (void)svmp::FE::systems::installCoupledResidual(
+    const auto residual = momentum + continuity;
+
+    (void)svmp::FE::systems::installFormulation(
         sys, "ns_coupled",
-        fields,
-        fields,
-        residual,
-        svmp::FE::systems::FormInstallOptions{.ad_mode = svmp::FE::forms::ADMode::Forward});
+        {u_field, p_field},
+        residual);
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();

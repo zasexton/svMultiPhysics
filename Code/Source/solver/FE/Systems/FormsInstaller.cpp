@@ -11,9 +11,11 @@
 
 #include "Core/FEException.h"
 
+#include "Forms/BlockForm.h"
 #include "Forms/CoupledBlockKernel.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/MixedFormIR.h"
 #include "Forms/JIT/JITCompiler.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/WeakForm.h"
@@ -219,6 +221,7 @@ forms::FormExpr lowerStateFields(
         return forms::FormExpr::discreteField(*fid, *rec.space, sym);
     });
 }
+
 
 } // namespace
 
@@ -574,6 +577,370 @@ CoupledResidualKernels installCoupledResidual(
     }
 
     return out;
+}
+
+CoupledResidualKernels installCoupledResidualMixed(
+    FESystem& system,
+    const OperatorTag& op,
+    std::span<const FieldId> test_fields,
+    std::span<const FieldId> trial_fields,
+    const forms::FormExpr& mixed_residual,
+    const FormInstallOptions& options)
+{
+    FE_THROW_IF(test_fields.empty(), InvalidArgumentException,
+                "installCoupledResidualMixed: empty test field list");
+    FE_THROW_IF(trial_fields.empty(), InvalidArgumentException,
+                "installCoupledResidualMixed: empty trial field list");
+    FE_THROW_IF(!mixed_residual.isValid(), InvalidArgumentException,
+                "installCoupledResidualMixed: invalid form expression");
+    FE_THROW_IF(!mixed_residual.hasTest(), InvalidArgumentException,
+                "installCoupledResidualMixed: form has no test function");
+    FE_THROW_IF(options.coupled_residual_from_jacobian_block && options.coupled_residual_install_residual_kernels,
+                InvalidArgumentException,
+                "installCoupledResidualMixed: coupled_residual_from_jacobian_block requires coupled_residual_install_residual_kernels=false");
+    FE_THROW_IF(options.coupled_residual_from_jacobian_block && !options.coupled_residual_install_jacobian_blocks,
+                InvalidArgumentException,
+                "installCoupledResidualMixed: coupled_residual_from_jacobian_block requires coupled_residual_install_jacobian_blocks=true");
+
+    // =========================================================================
+    // Phase 1: Decompose the mixed expression into per-test-function sub-expressions.
+    //
+    // The mixed FormExpr is a sum of integrals, each containing exactly one
+    // TestFunction space. We recursively traverse the top-level Add/Subtract/Negate
+    // structure, find individual integral terms (CellIntegral, BoundaryIntegral, etc.),
+    // split their integrands into additive terms, and classify each term by which
+    // TestFunction it contains.
+    //
+    // This is critical: we decompose by TEST function only. We do NOT filter by
+    // TrialFunction here. For Residual-kind forms, terms that depend on only the
+    // test function (not the trial) still contribute to the residual vector — they
+    // are "constant" w.r.t. the trial and must be included.
+    // =========================================================================
+
+    // Find unique test function names/signatures in the expression.
+    struct TestInfo {
+        forms::FormExprNode::SpaceSignature signature{};
+        std::string name{};
+    };
+    std::vector<TestInfo> test_infos;
+    {
+        const auto find_tests = [&](const auto& self, const forms::FormExprNode& n) -> void {
+            if (n.type() == forms::FormExprType::TestFunction) {
+                const auto* sig = n.spaceSignature();
+                if (sig) {
+                    std::string nm = n.toString();
+                    bool found = false;
+                    for (const auto& info : test_infos) {
+                        if (signaturesMatch(info.signature, *sig) && info.name == nm) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        test_infos.push_back({*sig, nm});
+                    }
+                }
+            }
+            for (const auto& child : n.childrenShared()) {
+                if (child) self(self, *child);
+            }
+        };
+        find_tests(find_tests, *mixed_residual.node());
+    }
+
+    FE_THROW_IF(test_infos.size() != test_fields.size(), InvalidArgumentException,
+                "installCoupledResidualMixed: expression has " + std::to_string(test_infos.size()) +
+                " TestFunction spaces but " + std::to_string(test_fields.size()) + " test fields provided");
+
+    // Map test_infos ordering to caller's test_fields by space signature.
+    std::vector<std::size_t> test_map(test_infos.size(), ~std::size_t{0});
+    for (std::size_t mi = 0; mi < test_infos.size(); ++mi) {
+        for (std::size_t ci = 0; ci < test_fields.size(); ++ci) {
+            const auto& rec = system.fieldRecord(test_fields[ci]);
+            if (rec.space && signaturesMatch(test_infos[mi].signature, signatureFromSpace(*rec.space))) {
+                test_map[mi] = ci;
+                break;
+            }
+        }
+        FE_THROW_IF(test_map[mi] == ~std::size_t{0}, InvalidArgumentException,
+                    "installCoupledResidualMixed: could not match test function '" +
+                    test_infos[mi].name + "' to any provided test FieldId");
+    }
+
+    // Helper: check if an expression subtree contains a TestFunction with a given name.
+    const auto containsTestNamed = [](const auto& self, const forms::FormExprNode& n,
+                                      const std::string& name) -> bool {
+        if (n.type() == forms::FormExprType::TestFunction && n.toString() == name) {
+            return true;
+        }
+        for (const auto& child : n.childrenShared()) {
+            if (child && self(self, *child, name)) return true;
+        }
+        return false;
+    };
+
+    // Decompose the mixed expression into per-test sub-expressions by traversing
+    // the top-level Add/Subtract/Negate tree and assigning each sub-tree to the
+    // test function it contains. This preserves the original expression structure
+    // exactly — no re-assembly of integral terms — so the compiled kernels are
+    // structurally identical to what would result from manual decomposition.
+    //
+    // At each Add/Subtract node, we check if both children contain the SAME set of
+    // test functions. If so, we keep the node intact (it belongs to one test block).
+    // If they contain DIFFERENT test functions, we split the children into separate
+    // test blocks. This handles `momentum_form + continuity_form` naturally: the top
+    // Add splits, and each sub-form goes to its respective test block.
+    std::vector<forms::FormExpr> test_block_exprs(test_infos.size());
+
+    // Find which test function(s) appear in a sub-expression.
+    const auto findTestIndices = [&](const forms::FormExprNode& node) -> std::vector<std::size_t> {
+        std::vector<std::size_t> indices;
+        for (std::size_t ti = 0; ti < test_infos.size(); ++ti) {
+            if (containsTestNamed(containsTestNamed, node, test_infos[ti].name)) {
+                indices.push_back(ti);
+            }
+        }
+        return indices;
+    };
+
+    const auto assignToBlock = [&](std::size_t ti, forms::FormExpr expr, int sign) {
+        if (sign < 0) {
+            expr = forms::FormExpr::constant(-1.0) * expr;
+        }
+        if (!test_block_exprs[ti].isValid()) {
+            test_block_exprs[ti] = std::move(expr);
+        } else {
+            test_block_exprs[ti] = test_block_exprs[ti] + std::move(expr);
+        }
+    };
+
+    const auto decompose = [&](const auto& self, const forms::FormExpr& expr, int sign) -> void {
+        if (!expr.isValid()) return;
+        const auto& n = *expr.node();
+        const auto kids = n.childrenShared();
+
+        // For Add/Subtract/Negate: check if children go to different test blocks.
+        if ((n.type() == forms::FormExprType::Add || n.type() == forms::FormExprType::Subtract)
+            && kids.size() == 2 && kids[0] && kids[1])
+        {
+            const auto left_tests = findTestIndices(*kids[0]);
+            const auto right_tests = findTestIndices(*kids[1]);
+
+            // If both sides reference the same single test function, keep the node intact.
+            if (left_tests.size() == 1 && right_tests.size() == 1 && left_tests[0] == right_tests[0]) {
+                assignToBlock(left_tests[0], expr, sign);
+                return;
+            }
+
+            // Different test functions or multiple: recurse to split.
+            const int right_sign = (n.type() == forms::FormExprType::Subtract) ? -sign : sign;
+            self(self, forms::FormExpr(kids[0]), sign);
+            self(self, forms::FormExpr(kids[1]), right_sign);
+            return;
+        }
+        if (n.type() == forms::FormExprType::Negate && kids.size() == 1 && kids[0]) {
+            self(self, forms::FormExpr(kids[0]), -sign);
+            return;
+        }
+
+        // Leaf integral or non-Add node: assign to the matching test block.
+        const auto tests = findTestIndices(n);
+        FE_THROW_IF(tests.empty(), InvalidArgumentException,
+                    "installCoupledResidualMixed: sub-expression does not contain any recognized TestFunction");
+        FE_THROW_IF(tests.size() > 1, InvalidArgumentException,
+                    "installCoupledResidualMixed: sub-expression contains multiple TestFunctions (" +
+                    test_infos[tests[0]].name + ", " + test_infos[tests[1]].name + ")");
+        assignToBlock(tests[0], expr, sign);
+    };
+
+    decompose(decompose, mixed_residual, +1);
+
+    // =========================================================================
+    // Phase 2: Build a BlockLinearForm and delegate to installCoupledResidual.
+    //
+    // The per-test sub-expressions are complete residual contributions for each
+    // test function. We reorder them to match the caller's test_fields ordering,
+    // then use the proven installCoupledResidual path which correctly handles
+    // per-trial lowering + compileResidual (including terms without TrialFunction
+    // in the residual vector).
+    // =========================================================================
+
+    forms::BlockLinearForm residual_blocks(test_fields.size());
+    for (std::size_t mi = 0; mi < test_infos.size(); ++mi) {
+        const auto caller_ti = test_map[mi];
+        FE_THROW_IF(!test_block_exprs[mi].isValid(), InvalidArgumentException,
+                    "installCoupledResidualMixed: test block '" + test_infos[mi].name + "' is empty");
+        residual_blocks.setBlock(caller_ti, std::move(test_block_exprs[mi]));
+    }
+
+    return installCoupledResidual(system, op, test_fields, trial_fields, residual_blocks, options);
+}
+
+std::vector<std::vector<KernelPtr>>
+installMixedFormIR(
+    FESystem& system,
+    const OperatorTag& op,
+    std::span<const FieldId> test_fields,
+    std::span<const FieldId> trial_fields,
+    const forms::MixedFormIR& mir,
+    const FormInstallOptions& options)
+{
+    FE_THROW_IF(test_fields.size() != mir.numTestFields(), InvalidArgumentException,
+                "installMixedFormIR: test_fields size does not match mir.numTestFields()");
+    FE_THROW_IF(trial_fields.size() != mir.numTrialFields(), InvalidArgumentException,
+                "installMixedFormIR: trial_fields size does not match mir.numTrialFields()");
+
+    const auto n_test = mir.numTestFields();
+    const auto n_trial = mir.numTrialFields();
+
+    std::vector<std::vector<KernelPtr>> result(n_test);
+    for (auto& row : result) row.resize(n_trial);
+
+    for (std::size_t i = 0; i < n_test; ++i) {
+        for (std::size_t j = 0; j < n_trial; ++j) {
+            if (!mir.hasBlock(i, j)) continue;
+
+            // FormIR is move-only; clone from the const MixedFormIR block.
+            auto block_ir = mir.block(i, j).clone();
+
+            const auto dispatch = analyzeDispatch(block_ir);
+            FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&
+                            dispatch.boundary_markers.empty() && dispatch.interface_markers.empty(),
+                        InvalidArgumentException,
+                        "installMixedFormIR: compiled block has no integral terms");
+
+            KernelPtr kernel{};
+            switch (block_ir.kind()) {
+                case forms::FormKind::Bilinear:
+                case forms::FormKind::Linear:
+                    // Bilinear/linear forms: direct evaluation, no AD
+                    kernel = std::make_shared<forms::FormKernel>(std::move(block_ir));
+                    break;
+                case forms::FormKind::Residual:
+                    // Residual forms: require AD or symbolic tangent for Jacobian
+                    if (options.compiler_options.use_symbolic_tangent) {
+                        kernel = std::make_shared<forms::SymbolicNonlinearFormKernel>(
+                            std::move(block_ir), forms::NonlinearKernelOutput::Both);
+                    } else {
+                        kernel = std::make_shared<forms::NonlinearFormKernel>(
+                            std::move(block_ir), options.ad_mode);
+                    }
+                    break;
+            }
+
+            kernel = maybeWrapForJIT(std::move(kernel), options);
+            registerKernel(system, op, test_fields[i], trial_fields[j], dispatch, kernel);
+            result[i][j] = std::move(kernel);
+        }
+    }
+
+    return result;
+}
+
+// ============================================================================
+// installFormulation — unified entry point
+// ============================================================================
+
+namespace {
+
+std::size_t countUniqueTestSpaces(const forms::FormExprNode& root)
+{
+    struct SpaceInfo {
+        forms::FormExprNode::SpaceSignature sig;
+        std::string name;
+    };
+    std::vector<SpaceInfo> found;
+
+    const auto visit = [&](const auto& self, const forms::FormExprNode& n) -> void {
+        if (n.type() == forms::FormExprType::TestFunction) {
+            const auto* sig = n.spaceSignature();
+            if (sig) {
+                const std::string nm = n.toString();
+                bool exists = false;
+                for (const auto& info : found) {
+                    if (info.name == nm && signaturesMatch(info.sig, *sig)) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    found.push_back({*sig, nm});
+                }
+            }
+        }
+        for (const auto& child : n.childrenShared()) {
+            if (child) self(self, *child);
+        }
+    };
+    visit(visit, root);
+    return found.size();
+}
+
+bool hasStateFieldNodes(const forms::FormExprNode& root)
+{
+    if (root.type() == forms::FormExprType::StateField) return true;
+    for (const auto& child : root.childrenShared()) {
+        if (child && hasStateFieldNodes(*child)) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+CoupledResidualKernels installFormulation(
+    FESystem& system,
+    const OperatorTag& op,
+    std::span<const FieldId> fields,
+    const forms::FormExpr& residual,
+    const FormInstallOptions& options)
+{
+    FE_THROW_IF(fields.empty(), InvalidArgumentException,
+                "installFormulation: empty field list");
+    FE_THROW_IF(!residual.isValid(), InvalidArgumentException,
+                "installFormulation: invalid residual expression");
+
+    const auto num_test = countUniqueTestSpaces(*residual.node());
+    FE_THROW_IF(num_test == 0, InvalidArgumentException,
+                "installFormulation: residual contains no TestFunction");
+
+    if (num_test == 1) {
+        // Single-field path.
+        FE_THROW_IF(fields.size() != 1, InvalidArgumentException,
+                    "installFormulation: expression has 1 TestFunction space but " +
+                    std::to_string(fields.size()) + " fields provided");
+
+        // If the expression uses StateField nodes, lower them to TrialFunction.
+        forms::FormExpr lowered = residual;
+        if (residual.node() && hasStateFieldNodes(*residual.node())) {
+            lowered = lowerStateFields(residual, fields[0], system);
+        }
+
+        auto kernel = installResidualForm(system, op, fields[0], fields[0], lowered, options);
+
+        CoupledResidualKernels out;
+        out.residual = {kernel};
+        out.jacobian_blocks = {{kernel}};
+        return out;
+    }
+
+    // Multi-field path: auto-set optimal coupled assembly options.
+    FormInstallOptions coupled_opts = options;
+    coupled_opts.coupled_residual_install_residual_kernels = false;
+    coupled_opts.coupled_residual_install_jacobian_blocks = true;
+    coupled_opts.coupled_residual_from_jacobian_block = true;
+
+    return installCoupledResidualMixed(system, op, fields, fields, residual, coupled_opts);
+}
+
+CoupledResidualKernels installFormulation(
+    FESystem& system,
+    const OperatorTag& op,
+    std::initializer_list<FieldId> fields,
+    const forms::FormExpr& residual,
+    const FormInstallOptions& options)
+{
+    const std::span<const FieldId> span(fields.begin(), fields.size());
+    return installFormulation(system, op, span, residual, options);
 }
 
 } // namespace systems
