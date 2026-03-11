@@ -401,4 +401,149 @@ void schur(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
   }
 }
 
+//--------
+// schur_mc
+//--------
+/// @brief Multi-component BiCGStab Schur complement solver for (L - D*H*G) P = R.
+/// D(con_ncomp*mom_ncomp, nnz), G(mom_ncomp*con_ncomp, nnz), L(con_ncomp*con_ncomp, nnz).
+/// R(con_ncomp, nNo) is both RHS input and solution output.
+/// Uses component-wise diagonal scaling: M_inv(k,i) = 1/L(k*con_ncomp+k, diagPtr(i)).
+void schur_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls,
+              int mom_ncomp, int con_ncomp,
+              const Array<double>& D, const Array<double>& G, const Array<double>& L, Array<double>& R)
+{
+  using namespace fe_fsi_linear_solver;
+  fsils_int nNo = lhs.nNo;
+  fsils_int mynNo = lhs.mynNo;
+
+  // Workspace: reuse vector BiCGStab workspace with con_ncomp as "dof"
+  ls.ws.ensure_bicgs_v(con_ncomp, nNo);
+  auto& P  = ls.ws.bicgs_P;
+  auto& Rh = ls.ws.bicgs_Rh;
+  auto& X  = ls.ws.bicgs_X;
+  auto& V  = ls.ws.bicgs_V;
+  auto& S  = ls.ws.bicgs_S;
+  auto& T  = ls.ws.bicgs_T;
+
+  Array<double> GP(mom_ncomp, nNo);
+  Array<double> SP(con_ncomp, nNo), DGP(con_ncomp, nNo);
+
+  // 1. Component-wise diagonal preconditioner: M_inv(k,i) = 1/L(k*con_ncomp+k, diagPtr(i))
+  Array<double> M_inv(con_ncomp, nNo);
+  for (fsils_int i = 0; i < nNo; ++i) {
+    fsils_int diag_nz = lhs.diagPtr(i);
+    for (int k = 0; k < con_ncomp; k++) {
+      double diag_val = L(k * con_ncomp + k, diag_nz);
+      M_inv(k, i) = (std::abs(diag_val) > 1e-12) ? 1.0 / diag_val : 1.0;
+    }
+  }
+
+  // 2. Precondition initial RHS: R(k,i) *= M_inv(k,i)
+  #pragma omp parallel for schedule(static)
+  for (fsils_int i = 0; i < nNo; i++) {
+    for (int k = 0; k < con_ncomp; k++) {
+      R(k, i) *= M_inv(k, i);
+    }
+  }
+
+  ls.callD = fe_fsi_linear_solver::fsils_cpu_t();
+  ls.suc = false;
+
+  double err = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, R);
+  double errO = err;
+  ls.iNorm = err;
+  double eps = std::max(ls.absTol, ls.relTol * err);
+  double rho = err * err;
+  double beta = rho;
+
+  X = 0.0;
+  P = R;
+  Rh = R;
+  int i_itr = 1;
+
+  // 3. Preconditioned Schur operator: Q = M_inv * (L - D*H*G) * in_vec
+  auto apply_schur_operator = [&](const Array<double>& in_vec, Array<double>& out_vec) {
+    // Fused: GP = G * in_vec AND SP = L * in_vec
+    spar_mul::fsils_spar_mul_rect_vv_fused(lhs, lhs.rowPtr, lhs.colPtr,
+        mom_ncomp, con_ncomp, G, L, in_vec, GP, SP);
+
+    // Apply boundary Sherman-Morrison preconditioner H on momentum space
+    for (auto& face : lhs.face) {
+      if (face.coupledFlag) {
+        Array<double> unCondU = GP;
+        add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, mom_ncomp, unCondU, GP);
+        break;
+      }
+    }
+
+    // DGP = D * GP (rect: con_ncomp × mom_ncomp)
+    spar_mul::fsils_spar_mul_rect(lhs, lhs.rowPtr, lhs.colPtr,
+        con_ncomp, mom_ncomp, D, GP, DGP);
+
+    // out_vec = M_inv * (SP - DGP)
+    #pragma omp parallel for schedule(static)
+    for (fsils_int i = 0; i < nNo; i++) {
+      for (int k = 0; k < con_ncomp; k++) {
+        out_vec(k, i) = M_inv(k, i) * (SP(k, i) - DGP(k, i));
+      }
+    }
+  };
+
+  // 4. Left-Preconditioned BiCGStab Loop
+  for (int i = 0; i < ls.mItr; i++) {
+    if (err < eps) {
+      ls.suc = true;
+      break;
+    }
+
+    apply_schur_operator(P, V);
+
+    double denom_alpha = dot::fsils_dot_v(con_ncomp, mynNo, lhs.commu, Rh, V);
+    if (std::abs(denom_alpha) < std::numeric_limits<double>::epsilon() * (std::abs(rho) + std::numeric_limits<double>::epsilon())) break;
+    double alpha = rho / denom_alpha;
+
+    // S = R - alpha * V
+    omp_la::omp_axpby_v(con_ncomp, nNo, S, R, -alpha, V);
+
+    apply_schur_operator(S, T);
+
+    double t_sq = dot::fsils_dot_v(con_ncomp, mynNo, lhs.commu, T, T);
+    if (std::sqrt(t_sq) < std::numeric_limits<double>::epsilon() * ls.iNorm) break;
+    double omega = dot::fsils_dot_v(con_ncomp, mynNo, lhs.commu, T, S) / t_sq;
+
+    // X = X + alpha * P + omega * S
+    omp_la::omp_axpbypgz_v(con_ncomp, nNo, X, X, alpha, P, omega, S);
+
+    // R = S - omega * T
+    omp_la::omp_axpby_v(con_ncomp, nNo, R, S, -omega, T);
+
+    errO = err;
+    err = norm::fsi_ls_normv(con_ncomp, mynNo, lhs.commu, R);
+
+    double rhoO = rho;
+    rho = dot::fsils_dot_v(con_ncomp, mynNo, lhs.commu, R, Rh);
+
+    double denom_beta = rhoO * omega;
+    if (std::abs(denom_beta) < std::numeric_limits<double>::epsilon() * (std::abs(rho) + std::numeric_limits<double>::epsilon())) break;
+    beta = (rho * alpha) / denom_beta;
+
+    // P = R + beta * (P - omega * V)
+    omp_la::omp_sum_v(con_ncomp, nNo, -omega, P, V);
+    omp_la::omp_axpby_v(con_ncomp, nNo, P, R, beta, P);
+
+    i_itr += 1;
+  }
+
+  R = X;
+  ls.itr = i_itr - 1;
+  ls.fNorm = err;
+  ls.callD = fe_fsi_linear_solver::fsils_cpu_t() - ls.callD;
+
+  if (errO < std::numeric_limits<double>::epsilon()) {
+    ls.dB = 0.0;
+  } else {
+    ls.dB = 10.0 * std::log(err / errO);
+  }
+}
+
 } // namespace bicgs

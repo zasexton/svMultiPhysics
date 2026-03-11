@@ -554,4 +554,188 @@ void fsils_spar_mul_sv_ss_fused(FSILS_lhsType& lhs, const Array<fsils_int>& rowP
   }
 }
 
+//====================================================================
+// Rectangular block SpMV: K(out_dof * in_dof, nnz) × U(in_dof, nNo) → KU(out_dof, nNo)
+// Generalizes SV (in_dof=1), VS (out_dof=1), VV (out_dof=in_dof).
+//====================================================================
+
+static void fsils_spar_mul_rect_range(fsils_int iStart, fsils_int iEnd,
+    int out_dof, int in_dof,
+    const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
+    const Array<double>& K, const Array<double>& U, Array<double>& KU)
+{
+  const int block_size = out_dof * in_dof;
+  const fsils_int* __restrict__ rp = rowPtr.data();
+  const fsils_int* __restrict__ cp = colPtr.data();
+  const double* __restrict__ k_data = K.data();
+  const double* __restrict__ u_data = U.data();
+  double* __restrict__ ku_data = KU.data();
+
+  #pragma omp parallel
+  {
+    std::vector<double> sums(static_cast<size_t>(std::max(out_dof, 0)), 0.0);
+
+    #pragma omp for schedule(static)
+    for (fsils_int i = iStart; i < iEnd; i++) {
+      std::fill(sums.begin(), sums.end(), 0.0);
+      const fsils_int j_start = rp[2*i];
+      const fsils_int j_end   = rp[2*i + 1];
+      for (fsils_int j = j_start; j <= j_end; j++) {
+        const fsils_int col = cp[j];
+        const double* __restrict__ kj = k_data + static_cast<size_t>(j) * block_size;
+        const double* __restrict__ uc = u_data + static_cast<size_t>(col) * in_dof;
+        for (int l = 0; l < out_dof; l++) {
+          double s = 0.0;
+          for (int k = 0; k < in_dof; k++) {
+            s += kj[l * in_dof + k] * uc[k];
+          }
+          sums[static_cast<size_t>(l)] += s;
+        }
+      }
+      double* __restrict__ kui = ku_data + static_cast<size_t>(i) * out_dof;
+      for (int l = 0; l < out_dof; l++) {
+        kui[l] = sums[static_cast<size_t>(l)];
+      }
+    }
+  }
+}
+
+void fsils_spar_mul_rect(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, int out_dof, int in_dof,
+    const Array<double>& K, const Array<double>& U, Array<double>& KU)
+{
+  // Dispatch to specialized routines for common degenerate cases.
+  if (in_dof == 1 && out_dof == 1) {
+    // SS: treat K and U as vectors.  Layout is compatible since K(1*1, nnz)
+    // is column-major contiguous like Vector<double>(nnz).
+    // Wrap as Vectors via const_cast-free copies.
+    Vector<double> Kv(K.ncols());
+    for (fsils_int n = 0; n < K.ncols(); n++) Kv(n) = K(0, n);
+    Vector<double> Uv(U.ncols());
+    for (fsils_int n = 0; n < U.ncols(); n++) Uv(n) = U(0, n);
+    Vector<double> KUv(KU.ncols());
+    fsils_spar_mul_ss(lhs, rowPtr, colPtr, Kv, Uv, KUv);
+    for (fsils_int n = 0; n < KU.ncols(); n++) KU(0, n) = KUv(n);
+    return;
+  }
+  if (out_dof == in_dof) {
+    fsils_spar_mul_vv(lhs, rowPtr, colPtr, out_dof, K, U, KU);
+    return;
+  }
+
+  fsils_int nNo = lhs.nNo;
+
+  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+    fsils_spar_mul_rect_range(0, lhs.shnNo, out_dof, in_dof, rowPtr, colPtr, K, U, KU);
+    fsils_spar_mul_rect_range(lhs.mynNo, nNo, out_dof, in_dof, rowPtr, colPtr, K, U, KU);
+    fsils_commuv_begin(lhs, out_dof, KU);
+    fsils_spar_mul_rect_range(lhs.shnNo, lhs.mynNo, out_dof, in_dof, rowPtr, colPtr, K, U, KU);
+    fsils_commuv_end(lhs, out_dof, KU);
+  } else {
+    fsils_spar_mul_rect_range(0, nNo, out_dof, in_dof, rowPtr, colPtr, K, U, KU);
+  }
+}
+
+//====================================================================
+// Fused rectangular G×P + square L×P SpMV for multi-component Schur.
+// G(mom_ncomp * con_ncomp, nnz) × P(con_ncomp, nNo) → GP(mom_ncomp, nNo)
+// L(con_ncomp * con_ncomp, nnz) × P(con_ncomp, nNo) → SP(con_ncomp, nNo)
+//====================================================================
+
+static void fsils_spar_mul_rect_vv_fused_range(fsils_int iStart, fsils_int iEnd,
+    int mom_ncomp, int con_ncomp,
+    const Array<fsils_int>& rowPtr, const Vector<fsils_int>& colPtr,
+    const Array<double>& G, const Array<double>& L,
+    const Array<double>& P, Array<double>& GP, Array<double>& SP)
+{
+  const int g_block = mom_ncomp * con_ncomp;
+  const int l_block = con_ncomp * con_ncomp;
+  const fsils_int* __restrict__ rp = rowPtr.data();
+  const fsils_int* __restrict__ cp = colPtr.data();
+  const double* __restrict__ g_data = G.data();
+  const double* __restrict__ l_data = L.data();
+  const double* __restrict__ p_data = P.data();
+  double* __restrict__ gp_data = GP.data();
+  double* __restrict__ sp_data = SP.data();
+
+  #pragma omp parallel
+  {
+    std::vector<double> g_sums(static_cast<size_t>(mom_ncomp), 0.0);
+    std::vector<double> l_sums(static_cast<size_t>(con_ncomp), 0.0);
+
+    #pragma omp for schedule(static)
+    for (fsils_int i = iStart; i < iEnd; i++) {
+      std::fill(g_sums.begin(), g_sums.end(), 0.0);
+      std::fill(l_sums.begin(), l_sums.end(), 0.0);
+      const fsils_int j_start = rp[2*i];
+      const fsils_int j_end   = rp[2*i + 1];
+      for (fsils_int j = j_start; j <= j_end; j++) {
+        const fsils_int col = cp[j];
+        const double* __restrict__ pc = p_data + static_cast<size_t>(col) * con_ncomp;
+        const double* __restrict__ gj = g_data + static_cast<size_t>(j) * g_block;
+        const double* __restrict__ lj = l_data + static_cast<size_t>(j) * l_block;
+        // G accumulation: GP(l,i) += Σ_k G(l*con_ncomp+k, j) * P(k, col)
+        for (int l = 0; l < mom_ncomp; l++) {
+          double s = 0.0;
+          for (int k = 0; k < con_ncomp; k++) {
+            s += gj[l * con_ncomp + k] * pc[k];
+          }
+          g_sums[static_cast<size_t>(l)] += s;
+        }
+        // L accumulation: SP(l,i) += Σ_k L(l*con_ncomp+k, j) * P(k, col)
+        for (int l = 0; l < con_ncomp; l++) {
+          double s = 0.0;
+          for (int k = 0; k < con_ncomp; k++) {
+            s += lj[l * con_ncomp + k] * pc[k];
+          }
+          l_sums[static_cast<size_t>(l)] += s;
+        }
+      }
+      double* __restrict__ gpi = gp_data + static_cast<size_t>(i) * mom_ncomp;
+      for (int l = 0; l < mom_ncomp; l++) gpi[l] = g_sums[static_cast<size_t>(l)];
+      double* __restrict__ spi = sp_data + static_cast<size_t>(i) * con_ncomp;
+      for (int l = 0; l < con_ncomp; l++) spi[l] = l_sums[static_cast<size_t>(l)];
+    }
+  }
+}
+
+void fsils_spar_mul_rect_vv_fused(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, int mom_ncomp, int con_ncomp,
+    const Array<double>& G, const Array<double>& L,
+    const Array<double>& P, Array<double>& GP, Array<double>& SP)
+{
+  // For con_ncomp == 1, delegate to the optimized fused SV+SS path.
+  if (con_ncomp == 1) {
+    Vector<double> Lv(L.ncols());
+    for (fsils_int n = 0; n < L.ncols(); n++) Lv(n) = L(0, n);
+    Vector<double> Pv(P.ncols());
+    for (fsils_int n = 0; n < P.ncols(); n++) Pv(n) = P(0, n);
+    Vector<double> SPv(SP.ncols());
+    fsils_spar_mul_sv_ss_fused(lhs, rowPtr, colPtr, mom_ncomp, G, Lv, Pv, GP, SPv);
+    for (fsils_int n = 0; n < SP.ncols(); n++) SP(0, n) = SPv(n);
+    return;
+  }
+
+  fsils_int nNo = lhs.nNo;
+
+  auto compute_range = [&](fsils_int iStart, fsils_int iEnd) {
+    fsils_spar_mul_rect_vv_fused_range(iStart, iEnd, mom_ncomp, con_ncomp,
+        rowPtr, colPtr, G, L, P, GP, SP);
+  };
+
+  if (lhs.commu.nTasks > 1 && lhs.nReq > 0) {
+    compute_range(0, lhs.shnNo);
+    compute_range(lhs.mynNo, nNo);
+    // Overlap GP comm with interior
+    fsils_commuv_begin(lhs, mom_ncomp, GP);
+    compute_range(lhs.shnNo, lhs.mynNo);
+    fsils_commuv_end(lhs, mom_ncomp, GP);
+    // SP comm
+    fsils_commuv_begin(lhs, con_ncomp, SP);
+    fsils_commuv_end(lhs, con_ncomp, SP);
+  } else {
+    compute_range(0, nNo);
+  }
+}
+
 };

@@ -517,6 +517,12 @@ public:
 
     [[nodiscard]] std::string name() const override { return "Forms::CoupledResidualSensitivityKernel"; }
 
+    /// Returns true if the coupled Jacobian sensitivity depends only on mesh
+    /// geometry and fixed parameters (not on the current solution state or
+    /// explicit time). When true, the cached sensitivity is valid across Newton
+    /// iterations and time steps with constant dt.
+    [[nodiscard]] bool isTimeInvariant() const noexcept;
+
 private:
     void buildDependencyCache();
 
@@ -654,6 +660,10 @@ public:
     }
 
     [[nodiscard]] std::string name() const override { return "Forms::BoundaryFunctionalGradientKernel"; }
+
+    /// Returns true if the functional gradient dQ/du depends only on mesh
+    /// geometry (e.g., linear flow-rate integrals Q = ∫ u·n dS).
+    [[nodiscard]] bool isTimeInvariant() const noexcept;
 
 private:
     FormExpr integrand_{};

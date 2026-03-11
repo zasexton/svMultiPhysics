@@ -137,8 +137,13 @@ struct DualValue {
     if (kids.size() != 2u || !kids[0] || !kids[1]) {
         throw std::invalid_argument("PointEvaluator: binary node must have exactly 2 children");
     }
-    const auto& a = requireScalar(evalDual(*kids[0], ctx, ws, seeds), "PointEvaluatorDual");
-    const auto& b = requireScalar(evalDual(*kids[1], ctx, ws, seeds), "PointEvaluatorDual");
+    // Store DualValue temporaries to avoid dangling references.
+    // requireScalar returns const Dual& to a member of its argument;
+    // without naming the DualValue, the temporary is destroyed before use.
+    const auto av = evalDual(*kids[0], ctx, ws, seeds);
+    const auto bv = evalDual(*kids[1], ctx, ws, seeds);
+    const auto& a = requireScalar(av, "PointEvaluatorDual");
+    const auto& b = requireScalar(bv, "PointEvaluatorDual");
     Dual out = makeDualConstant(0.0, ws.alloc());
     return scalar(f(a, b, out));
 }
@@ -451,8 +456,10 @@ struct DualValue {
             if (kids.size() != 2u || !kids[0] || !kids[1]) {
                 throw std::invalid_argument("PointEvaluatorDual: power node must have exactly 2 children");
             }
-            const auto& a = requireScalar(evalDual(*kids[0], ctx, ws, seeds), "PointEvaluatorDual");
-            const auto& b = requireScalar(evalDual(*kids[1], ctx, ws, seeds), "PointEvaluatorDual");
+            const auto av = evalDual(*kids[0], ctx, ws, seeds);
+            const auto bv = evalDual(*kids[1], ctx, ws, seeds);
+            const auto& a = requireScalar(av, "PointEvaluatorDual");
+            const auto& b = requireScalar(bv, "PointEvaluatorDual");
             Dual out = makeDualConstant(0.0, ws.alloc());
             const bool b_is_constant = std::all_of(b.deriv.begin(), b.deriv.end(),
                                                   [](Real v) { return v == 0.0; });
@@ -466,8 +473,10 @@ struct DualValue {
             if (kids.size() != 2u || !kids[0] || !kids[1]) {
                 throw std::invalid_argument("PointEvaluatorDual: minimum node must have exactly 2 children");
             }
-            const auto& a = requireScalar(evalDual(*kids[0], ctx, ws, seeds), "PointEvaluatorDual");
-            const auto& b = requireScalar(evalDual(*kids[1], ctx, ws, seeds), "PointEvaluatorDual");
+            const auto av = evalDual(*kids[0], ctx, ws, seeds);
+            const auto bv = evalDual(*kids[1], ctx, ws, seeds);
+            const auto& a = requireScalar(av, "PointEvaluatorDual");
+            const auto& b = requireScalar(bv, "PointEvaluatorDual");
             Dual out = makeDualConstant(0.0, ws.alloc());
             return scalar((a.value <= b.value) ? copy(a, out) : copy(b, out));
         }
@@ -476,8 +485,10 @@ struct DualValue {
             if (kids.size() != 2u || !kids[0] || !kids[1]) {
                 throw std::invalid_argument("PointEvaluatorDual: maximum node must have exactly 2 children");
             }
-            const auto& a = requireScalar(evalDual(*kids[0], ctx, ws, seeds), "PointEvaluatorDual");
-            const auto& b = requireScalar(evalDual(*kids[1], ctx, ws, seeds), "PointEvaluatorDual");
+            const auto av = evalDual(*kids[0], ctx, ws, seeds);
+            const auto bv = evalDual(*kids[1], ctx, ws, seeds);
+            const auto& a = requireScalar(av, "PointEvaluatorDual");
+            const auto& b = requireScalar(bv, "PointEvaluatorDual");
             Dual out = makeDualConstant(0.0, ws.alloc());
             return scalar((a.value >= b.value) ? copy(a, out) : copy(b, out));
         }
@@ -503,8 +514,10 @@ struct DualValue {
             if (kids.size() != 2u || !kids[0] || !kids[1]) {
                 throw std::invalid_argument("PointEvaluatorDual: comparison expects 2 operands");
             }
-            const auto& a = requireScalar(evalDual(*kids[0], ctx, ws, seeds), "PointEvaluatorDual");
-            const auto& b = requireScalar(evalDual(*kids[1], ctx, ws, seeds), "PointEvaluatorDual");
+            const auto av = evalDual(*kids[0], ctx, ws, seeds);
+            const auto bv = evalDual(*kids[1], ctx, ws, seeds);
+            const auto& a = requireScalar(av, "PointEvaluatorDual");
+            const auto& b = requireScalar(bv, "PointEvaluatorDual");
             bool pred = false;
             switch (node.type()) {
                 case FormExprType::Less:
@@ -536,7 +549,8 @@ struct DualValue {
             if (kids.size() != 3u || !kids[0] || !kids[1] || !kids[2]) {
                 throw std::invalid_argument("PointEvaluatorDual: conditional expects 3 operands");
             }
-            const auto& c = requireScalar(evalDual(*kids[0], ctx, ws, seeds), "PointEvaluatorDual");
+            const auto cv = evalDual(*kids[0], ctx, ws, seeds);
+            const auto& c = requireScalar(cv, "PointEvaluatorDual");
             return (c.value != 0.0) ? evalDual(*kids[1], ctx, ws, seeds)
                                     : evalDual(*kids[2], ctx, ws, seeds);
         }

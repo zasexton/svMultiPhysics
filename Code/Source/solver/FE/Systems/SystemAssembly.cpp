@@ -790,6 +790,45 @@ assembly::AssemblyResult assembleOperator(
             if (!integrals.empty()) {
                 const auto regs = system.coupled_boundary_->registeredBoundaryFunctionals();
                 if (!regs.empty()) {
+
+                    // --- Coupled Jacobian cache: replay if valid ---
+                    // Time-invariant sensitivities (e.g., RCR/resistance BCs) are keyed
+                    // by dt only; time-variant ones also check the current time.
+                    auto& cjc = system.coupled_jac_cache_;
+                    const bool cache_hit = cjc.valid && cjc.dt == state.dt &&
+                        (cjc.is_time_invariant || cjc.time == state.time);
+                    if (cache_hit) {
+                        // Replay cached rank-1 updates.
+                        for (const auto& u : cjc.rank_one_updates) {
+                            system.last_rank_one_updates_.push_back(u);
+                        }
+                        // Replay cached outer-product matrix entries.
+                        for (const auto& e : cjc.outer_product_entries) {
+                            std::array<GlobalIndex, 1> row_dof{e.row};
+                            matrix_out->addMatrixEntries(
+                                std::span<const GlobalIndex>(row_dof.data(), 1),
+                                std::span<const GlobalIndex>(e.col_dofs.data(), e.col_dofs.size()),
+                                std::span<const Real>(e.col_vals.data(), e.col_vals.size()),
+                                assembly::AddMode::Add);
+                        }
+                        static const bool show_timing = (std::getenv("SVMP_ASSEMBLY_TIMING") != nullptr);
+                        if (show_timing) {
+                            std::fprintf(stderr,
+                                "    --- Coupled Jacobian: CACHED (rank1=%zu, outer=%zu, time_inv=%d) ---\n",
+                                cjc.rank_one_updates.size(), cjc.outer_product_entries.size(),
+                                cjc.is_time_invariant ? 1 : 0);
+                        }
+                        traceLog("coupled Jacobian: replayed from cache (" +
+                                 std::to_string(cjc.rank_one_updates.size()) + " rank-1, " +
+                                 std::to_string(cjc.outer_product_entries.size()) + " outer-product entries, time_invariant=" +
+                                 std::to_string(cjc.is_time_invariant ? 1 : 0) + ")");
+                    } else {
+                    // --- Coupled Jacobian cache miss: compute and cache ---
+                    cjc.clear();
+                    cjc.time = state.time;
+                    cjc.dt = state.dt;
+                    cjc.is_time_invariant = true;  // assume time-invariant; set false if any kernel isn't
+
                     const auto coupling_t0 = std::chrono::steady_clock::now();
                     const auto dropped_before = backends::FsilsMatrix::droppedEntryCount();
                     traceLog("coupled Jacobian: " + std::to_string(regs.size()) +
@@ -826,7 +865,11 @@ assembly::AssemblyResult assembleOperator(
                     });
                 };
 
+                auto coupled_tp = [](){ return std::chrono::steady_clock::now(); };
+                double cpl_dQdu_time = 0, cpl_aux_time = 0, cpl_dRdQ_time = 0, cpl_rank1_time = 0;
+
                 std::vector<std::vector<std::pair<GlobalIndex, Real>>> dQ_du_by_slot(integrals.size());
+                auto cpl_t1 = coupled_tp();
                 for (const auto& entry : regs) {
                     if (entry.slot >= integrals.size()) {
                         continue;
@@ -837,6 +880,10 @@ assembly::AssemblyResult assembleOperator(
 
                     const auto integrand_trial = build_integrand_with_trial(entry.def.integrand);
                     forms::BoundaryFunctionalGradientKernel g_kernel(integrand_trial, entry.def.boundary_marker);
+
+                    if (!g_kernel.isTimeInvariant()) {
+                        cjc.is_time_invariant = false;
+                    }
 
                     SparseVectorAccumulatorView g_view(n_dofs);
                     assembler.setRowDofMap(primary_map, primary_offset);
@@ -879,6 +926,8 @@ assembly::AssemblyResult assembleOperator(
                     dQ_du_by_slot[entry.slot] = std::move(g_pairs);
                 }
 
+                cpl_dQdu_time = std::chrono::duration<double>(coupled_tp() - cpl_t1).count();
+                cpl_t1 = coupled_tp();
                 const auto aux_state_base = system.coupled_boundary_->auxiliaryState().values();
                 std::vector<Real> integrals_base(integrals.begin(), integrals.end());
                 assembler.setCoupledValues(integrals_base, aux_state_base);
@@ -893,12 +942,16 @@ assembly::AssemblyResult assembleOperator(
                     aux_sens_span = std::span<const Real>(aux_sens.data(), aux_sens.size());
                 }
 
+                cpl_aux_time = std::chrono::duration<double>(coupled_tp() - cpl_t1).count();
+                cpl_t1 = coupled_tp();
+
                 constexpr Real kAbsTol = 1e-14;
 
                 std::vector<Real> col_vals;
                 std::vector<GlobalIndex> col_dofs;
                 std::array<GlobalIndex, 1> row_dof{};
 
+                double cpl_dRdQ_cell_time = 0, cpl_dRdQ_bdy_time = 0;
                 for (std::size_t k = 0; k < integrals_base.size(); ++k) {
                     if (k >= dQ_du_by_slot.size() || dQ_du_by_slot[k].empty()) {
                         continue;
@@ -908,6 +961,7 @@ assembly::AssemblyResult assembleOperator(
                     assembler.setCoupledValues(integrals_base, aux_state_base);
 
 	                    // Cell terms.
+                    auto cpl_sub_t = coupled_tp();
                     {
                         int cell_term_idx = 0;
 	                    for (const auto& term : def.cells) {
@@ -932,6 +986,9 @@ assembly::AssemblyResult assembleOperator(
 	                                                                             static_cast<std::uint32_t>(k),
 	                                                                             aux_sens_span,
 	                                                                             integrals_base.size());
+	                            if (!s_kernel.isTimeInvariant()) {
+	                                cjc.is_time_invariant = false;
+	                            }
 	                            if (term.test_field == term.trial_field) {
 	                                auto rr = assembler.assembleVector(system.meshAccess(), *test_field.space, s_kernel, dR_view);
 	                                FE_THROW_IF(!rr.success, InvalidStateException,
@@ -962,6 +1019,8 @@ assembly::AssemblyResult assembleOperator(
                         ++cell_term_idx;
 	                    }
                     }
+                    cpl_dRdQ_cell_time += std::chrono::duration<double>(coupled_tp() - cpl_sub_t).count();
+                    cpl_sub_t = coupled_tp();
 
                     // Boundary terms.
 	                    if (request.assemble_boundary_terms) {
@@ -983,6 +1042,9 @@ assembly::AssemblyResult assembleOperator(
 	                                                                                 static_cast<std::uint32_t>(k),
 	                                                                                 aux_sens_span,
 	                                                                                 integrals_base.size());
+	                                if (!s_kernel.isTimeInvariant()) {
+	                                    cjc.is_time_invariant = false;
+	                                }
 	                                auto rr = assembler.assembleBoundaryFaces(system.meshAccess(),
 	                                                                          term.marker,
 	                                                                          *test_field.space,
@@ -1008,6 +1070,7 @@ assembly::AssemblyResult assembleOperator(
 	                            }
 	                        }
 	                    }
+                    cpl_dRdQ_bdy_time += std::chrono::duration<double>(coupled_tp() - cpl_sub_t).count();
 
                     // Interior-face terms.
 	                    if (request.assemble_interior_face_terms) {
@@ -1029,6 +1092,9 @@ assembly::AssemblyResult assembleOperator(
 	                                                                                 static_cast<std::uint32_t>(k),
 	                                                                                 aux_sens_span,
 	                                                                                 integrals_base.size());
+	                                if (!s_kernel.isTimeInvariant()) {
+	                                    cjc.is_time_invariant = false;
+	                                }
 	                                assembly::DenseVectorView dummy_matrix(0);
 	                                auto rr = assembler.assembleInteriorFaces(system.meshAccess(),
 	                                                                          *test_field.space,
@@ -1076,6 +1142,9 @@ assembly::AssemblyResult assembleOperator(
 	                                                                                 static_cast<std::uint32_t>(k),
 	                                                                                 aux_sens_span,
 	                                                                                 integrals_base.size());
+	                                if (!s_kernel.isTimeInvariant()) {
+	                                    cjc.is_time_invariant = false;
+	                                }
 
 	                                auto assemble_on_marker = [&](int marker) {
 	                                    auto it = system.interface_meshes_.find(marker);
@@ -1120,6 +1189,9 @@ assembly::AssemblyResult assembleOperator(
 	                        }
 	                    }
 #endif
+
+                    cpl_dRdQ_time += std::chrono::duration<double>(coupled_tp() - cpl_t1).count();
+                    cpl_t1 = coupled_tp();
 
                     auto dR_dQ = dR_view.entriesSorted(kAbsTol);
 
@@ -1213,7 +1285,8 @@ assembly::AssemblyResult assembleOperator(
                                 backends::RankOneUpdate update;
                                 update.sigma = sigma;
                                 update.v = g; // dQ_du
-                                system.last_rank_one_updates_.push_back(std::move(update));
+                                system.last_rank_one_updates_.push_back(update);
+                                cjc.rank_one_updates.push_back(std::move(update));
                                 extracted_rank_one = true;
 
                                 traceLog("  slot " + std::to_string(k) +
@@ -1261,14 +1334,37 @@ assembly::AssemblyResult assembleOperator(
                                                          std::span<const GlobalIndex>(col_dofs.data(), col_dofs.size()),
                                                          std::span<const Real>(row_vals.data(), row_vals.size()),
                                                          assembly::AddMode::Add);
+                            // Cache the outer-product entries for replay.
+                            cjc.outer_product_entries.push_back({ri.first, col_dofs, row_vals});
                         }
                     }
                 }
+
+                cpl_rank1_time += std::chrono::duration<double>(coupled_tp() - cpl_t1).count();
 
                 const auto dropped_after = backends::FsilsMatrix::droppedEntryCount();
                 const auto dropped_coupling = dropped_after - dropped_before;
                 const auto coupling_elapsed = std::chrono::duration<double>(
                     std::chrono::steady_clock::now() - coupling_t0).count();
+
+                {
+                    static const bool show_timing = (std::getenv("SVMP_ASSEMBLY_TIMING") != nullptr);
+                    if (show_timing) {
+                        std::fprintf(stderr,
+                            "    --- Coupled Jacobian sub-timing ---\n"
+                            "      dQ/du (boundary func grad): %9.6f s\n"
+                            "      aux sensitivity:            %9.6f s\n"
+                            "      dR/dQ (cell+bdy assembly):  %9.6f s\n"
+                            "        cell terms:               %9.6f s\n"
+                            "        boundary terms:           %9.6f s\n"
+                            "      rank-1 detect + insert:     %9.6f s\n"
+                            "      TOTAL:                      %9.6f s\n"
+                            "    -----------------------------------\n",
+                            cpl_dQdu_time, cpl_aux_time, cpl_dRdQ_time,
+                            cpl_dRdQ_cell_time, cpl_dRdQ_bdy_time,
+                            cpl_rank1_time, coupling_elapsed);
+                    }
+                }
 
                 traceLog("coupled Jacobian: completed in " +
                          std::to_string(coupling_elapsed) + " s, " +
@@ -1279,6 +1375,10 @@ assembly::AssemblyResult assembleOperator(
                 }
 
                 assembler.setCoupledValues(integrals_base, aux_state_base);
+
+                // Mark cache as valid for subsequent Newton iterations in this time step.
+                cjc.valid = true;
+                    } // end else (cache miss)
                 }
             }
         }

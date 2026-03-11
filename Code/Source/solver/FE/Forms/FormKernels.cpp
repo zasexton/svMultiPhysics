@@ -14845,6 +14845,142 @@ const ConstitutiveStateLayout* CoupledResidualSensitivityKernel::constitutiveSta
     return base_symbolic_->constitutiveStateLayout();
 }
 
+namespace {
+
+/// Three-bit flags for subtree dependency analysis:
+///   bit 0: subtree contains a coupled-integral/auxiliary-state dependency
+///   bit 1: subtree contains a time-varying node (DiscreteField, StateField, etc.)
+///   bit 2: subtree has Q-dependent and time-varying nodes multiplicatively combined
+enum SubtreeFlags : std::uint8_t {
+    kNone         = 0u,
+    kCoupledDep   = 1u,
+    kTimeVarying  = 2u,
+    kMixed        = 4u,  ///< Q and time-varying are multiplicatively entangled
+};
+
+/// Recursively analyze a FormExpr subtree. Returns combined flags indicating
+/// whether Q-dependent and time-varying parts are multiplicatively mixed (kMixed),
+/// which would mean the derivative w.r.t. Q depends on the solution state.
+///
+/// Key insight: if Q-dep and time-varying parts only combine through Add/Subtract
+/// (e.g., h(Q)*n + stabilization(u)), then dR/dQ = h'(Q)*n (time-invariant).
+/// If they combine through Multiply/InnerProduct (e.g., u * Q), then
+/// dR/dQ = u (time-variant).
+std::uint8_t analyzeSubtreeDependency(
+    const FormExprNode& node,
+    std::uint32_t coupled_integral_slot,
+    const std::unordered_set<std::uint32_t>& aux_slots_with_seed)
+{
+    // Terminal check: coupled dependency
+    if (node.type() == FormExprType::BoundaryIntegralRef) {
+        if (node.slotIndex().value_or(0u) == coupled_integral_slot) {
+            return kCoupledDep;
+        }
+        return kNone;
+    }
+    if (node.type() == FormExprType::AuxiliaryStateRef) {
+        if (aux_slots_with_seed.count(node.slotIndex().value_or(0u)) > 0u) {
+            return kCoupledDep;
+        }
+        return kNone;
+    }
+
+    // Terminal check: time-varying
+    switch (node.type()) {
+        case FormExprType::DiscreteField:
+        case FormExprType::StateField:
+        case FormExprType::PreviousSolutionRef:
+        case FormExprType::Time:
+            return kTimeVarying;
+        default:
+            break;
+    }
+
+    // Recurse into children
+    const auto kids = node.children();
+    if (kids.empty()) {
+        return kNone;
+    }
+
+    // Collect per-child flags and check for cross-child mixing.
+    std::uint8_t combined = kNone;
+
+    // For non-additive nodes: track whether distinct children contribute
+    // Q-dep and time-varying respectively (cross-child multiplicative mixing).
+    // If child A has "pure Q-dep" (kCoupledDep without kTimeVarying) and
+    // child B has "pure time-varying" (kTimeVarying without kCoupledDep),
+    // then the node multiplies Q with the solution → derivative depends on u.
+    //
+    // If BOTH flags come from the SAME child (e.g., Add(Q-part, u-part)),
+    // they were additively separated at a lower level and the derivative
+    // w.r.t. Q doesn't introduce u (since d/dQ(f(Q)+g(u)) = f'(Q)).
+    bool has_child_with_pure_coupled = false;
+    bool has_child_with_pure_varying = false;
+
+    for (const auto* kid : kids) {
+        if (!kid) continue;
+        const auto cf = analyzeSubtreeDependency(*kid, coupled_integral_slot, aux_slots_with_seed);
+        combined |= cf;
+
+        // A child with pure coupled dep (not mixed with time-varying)
+        if ((cf & kCoupledDep) && !(cf & kTimeVarying)) {
+            has_child_with_pure_coupled = true;
+        }
+        // A child with pure time-varying (not mixed with coupled)
+        if ((cf & kTimeVarying) && !(cf & kCoupledDep)) {
+            has_child_with_pure_varying = true;
+        }
+    }
+
+    // If any child already has kMixed, propagate unconditionally.
+    if (combined & kMixed) {
+        return combined;
+    }
+
+    // For non-additive nodes: flag kMixed if DISTINCT children bring Q-dep
+    // and time-varying separately (they're being multiplied together).
+    const bool is_additive = (node.type() == FormExprType::Add ||
+                               node.type() == FormExprType::Subtract ||
+                               node.type() == FormExprType::Negate);
+
+    if (!is_additive && has_child_with_pure_coupled && has_child_with_pure_varying) {
+        combined |= kMixed;
+    }
+
+    return combined;
+}
+
+} // anonymous namespace
+
+bool CoupledResidualSensitivityKernel::isTimeInvariant() const noexcept
+{
+    // Build aux_slots_with_seed (same logic as buildDependencyCache)
+    std::unordered_set<std::uint32_t> aux_slots_with_seed;
+    if (!daux_dintegrals_.empty() && num_integrals_ > 0u) {
+        const std::size_t num_aux = daux_dintegrals_.size() / num_integrals_;
+        for (std::size_t aux = 0u; aux < num_aux; ++aux) {
+            const auto idx = aux * num_integrals_ + static_cast<std::size_t>(coupled_integral_slot_);
+            if (idx < daux_dintegrals_.size() && daux_dintegrals_[idx] != 0.0) {
+                aux_slots_with_seed.insert(static_cast<std::uint32_t>(aux));
+            }
+        }
+    }
+
+    const auto& terms = residualIR().terms();
+    for (std::size_t t = 0u; t < terms.size(); ++t) {
+        if (t < term_has_coupled_dependency_.size() && term_has_coupled_dependency_[t] != 0u) {
+            const auto* root = terms[t].integrand.node();
+            if (!root) continue;
+
+            const auto flags = analyzeSubtreeDependency(*root, coupled_integral_slot_, aux_slots_with_seed);
+            if (flags & kMixed) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 assembly::RequiredData CoupledResidualSensitivityKernel::getRequiredData() const noexcept
 {
     // Mirror the base residual kernel requirements.
@@ -15509,6 +15645,35 @@ void BoundaryFunctionalGradientKernel::computeBoundaryFace(const assembly::Assem
             output.local_vector[static_cast<std::size_t>(j)] += w * val.s.deriv[static_cast<std::size_t>(j)];
         }
     }
+}
+
+namespace {
+/// Simple check: does the expression tree contain any time-varying terminal?
+bool exprContainsTimeVaryingNodes(const FormExprNode& root)
+{
+    switch (root.type()) {
+        case FormExprType::DiscreteField:
+        case FormExprType::StateField:
+        case FormExprType::PreviousSolutionRef:
+        case FormExprType::Time:
+            return true;
+        default:
+            break;
+    }
+    for (const auto* child : root.children()) {
+        if (child && exprContainsTimeVaryingNodes(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+} // anonymous namespace
+
+bool BoundaryFunctionalGradientKernel::isTimeInvariant() const noexcept
+{
+    const auto* root = integrand_.node();
+    if (!root) return true;
+    return !exprContainsTimeVaryingNodes(*root);
 }
 
 } // namespace forms

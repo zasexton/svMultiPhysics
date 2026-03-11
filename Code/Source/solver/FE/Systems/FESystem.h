@@ -423,6 +423,36 @@ private:
     std::vector<backends::RankOneUpdate> last_rank_one_updates_{};
     std::unordered_map<OperatorTag, OperatorAssemblyPlan> assembly_plan_by_op_{};
 
+    // Cached coupled Jacobian results.
+    // For time-invariant sensitivities (e.g., RCR/resistance BCs), keyed by dt only.
+    // For time-variant sensitivities, keyed by (time, dt) pair.
+    // Time-invariance is auto-detected on the first computation by walking the
+    // FormExpr trees for solution/time references.
+    struct CoupledJacobianCache {
+        double time{-1e30};
+        double dt{-1e30};
+        bool valid{false};
+        bool is_time_invariant{false};  ///< True if sensitivity depends only on geometry + dt
+        std::vector<backends::RankOneUpdate> rank_one_updates{};
+        // For non-symmetric cases: cached outer-product matrix entries.
+        struct SparseEntry {
+            GlobalIndex row;
+            std::vector<GlobalIndex> col_dofs;
+            std::vector<Real> col_vals;
+        };
+        std::vector<SparseEntry> outer_product_entries{};
+
+        void clear() noexcept {
+            time = -1e30;
+            dt = -1e30;
+            valid = false;
+            is_time_invariant = false;
+            rank_one_updates.clear();
+            outer_product_entries.clear();
+        }
+    };
+    CoupledJacobianCache coupled_jac_cache_{};
+
 	    bool is_setup_{false};
 	};
 

@@ -38,7 +38,7 @@ namespace ns_solver {
 void bc_pre(fe_fsi_linear_solver::FSILS_lhsType& lhs, const int mom_ncomp, const int dof,
             const fe_fsi_linear_solver::fsils_int nNo, const fe_fsi_linear_solver::fsils_int mynNo);
 
-/// Extract sub-blocks K, G, D, L from the monolithic matrix Val.
+/// Extract sub-blocks K, G, D, L from the monolithic matrix Val (scalar constraint).
 /// Block positions are specified by (mom_start, mom_ncomp, con_start, con_ncomp).
 void depart(fe_fsi_linear_solver::FSILS_lhsType& lhs,
             const int mom_start, const int mom_ncomp,
@@ -47,6 +47,16 @@ void depart(fe_fsi_linear_solver::FSILS_lhsType& lhs,
             const fe_fsi_linear_solver::fsils_int nNo, const fe_fsi_linear_solver::fsils_int nnz,
             const Array<double>& Val, Array<double>& mK, Array<double>& mG,
             Array<double>& mD, Vector<double>& mL);
+
+/// Extract sub-blocks K, G, D, L for multi-component constraint (con_ncomp > 1).
+/// mG(mom_ncomp*con_ncomp, nnz), mD(con_ncomp*mom_ncomp, nnz), mL(con_ncomp*con_ncomp, nnz).
+void depart_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
+               const int mom_start, const int mom_ncomp,
+               const int con_start, const int con_ncomp,
+               const int dof,
+               const fe_fsi_linear_solver::fsils_int nNo, const fe_fsi_linear_solver::fsils_int nnz,
+               const Array<double>& Val, Array<double>& mK, Array<double>& mG,
+               Array<double>& mD, Array<double>& mL);
 
 /// Fractional-step block Schur complement solver.
 /// Block layout is read from ls.mom_start/mom_ncomp/con_start/con_ncomp.

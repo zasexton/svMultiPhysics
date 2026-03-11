@@ -54,4 +54,18 @@ void fsils_spar_mul_sv_ss_fused(FSILS_lhsType& lhs, const Array<fsils_int>& rowP
     const Vector<double>& L, const Vector<double>& in_vec,
     Array<double>& GP, Vector<double>& SP);
 
+/// Rectangular block SpMV: K(out_dof * in_dof, nnz) × U(in_dof, nNo) → KU(out_dof, nNo)
+/// Generalizes SV (in_dof=1) and VS (out_dof=1) for arbitrary rectangular blocks.
+void fsils_spar_mul_rect(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, int out_dof, int in_dof,
+    const Array<double>& K, const Array<double>& U, Array<double>& KU);
+
+/// Fused rectangular + VV for Schur complement with multi-component constraint:
+/// G(mom_ncomp * con_ncomp, nnz) × P(con_ncomp, nNo) → GP(mom_ncomp, nNo)
+/// L(con_ncomp * con_ncomp, nnz) × P(con_ncomp, nNo) → SP(con_ncomp, nNo)
+void fsils_spar_mul_rect_vv_fused(FSILS_lhsType& lhs, const Array<fsils_int>& rowPtr,
+    const Vector<fsils_int>& colPtr, int mom_ncomp, int con_ncomp,
+    const Array<double>& G, const Array<double>& L,
+    const Array<double>& P, Array<double>& GP, Array<double>& SP);
+
 };

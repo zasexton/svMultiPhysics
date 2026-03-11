@@ -117,6 +117,7 @@ void FESystem::invalidateSetup() noexcept
         operator_backends_->invalidateCache();
     }
     assembly_plan_by_op_.clear();
+    coupled_jac_cache_.clear();
 }
 
 void FESystem::requireSetup() const
