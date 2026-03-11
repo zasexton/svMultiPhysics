@@ -7834,6 +7834,12 @@ struct ConstitutiveCallCacheDual {
                        std::vector<EvalValue<Dual>>,
                        ConstitutiveCallKeyHash> values{};
     std::unordered_map<const FormExprNode*, std::uint8_t> dependency_masks{};
+
+    // Test-independent node result cache for sensitivity hoisting.
+    // When test_dep_nodes is non-null, evalDual caches results for nodes
+    // NOT in the set, avoiding re-evaluation across test DOFs within a QP.
+    std::unordered_map<const FormExprNode*, EvalValue<Dual>> test_indep_cache{};
+    const std::unordered_set<const FormExprNode*>* test_dep_nodes{nullptr};
 };
 
 [[nodiscard]] std::uint8_t constitutiveDependencyMask(const FormExprNode& call_node,
@@ -11369,11 +11375,51 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                       __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
 }
 
+/// Recursively mark nodes that depend on the test function.
+/// A node is test-dependent if it IS a TestFunction node or if any of its children are.
+/// Composite expressions like Gradient(TestFunction) are marked because their child is.
+void markTestDependentNodes(const FormExprNode& node, std::unordered_set<const FormExprNode*>& deps)
+{
+    if (node.type() == FormExprType::TestFunction) {
+        deps.insert(&node);
+        return;
+    }
+    bool child_dep = false;
+    for (const auto& kid : node.childrenShared()) {
+        if (kid) {
+            markTestDependentNodes(*kid, deps);
+            if (deps.count(kid.get())) child_dep = true;
+        }
+    }
+    if (child_dep) deps.insert(&node);
+}
+
 EvalValue<Dual> evalDual(const FormExprNode& node,
                          const EvalEnvDual& env,
                          Side side,
                          LocalIndex q)
 {
+    // Test-independent caching: if caching is active and this node is NOT
+    // test-dependent, check cache first. This avoids re-evaluating expensive
+    // Q-derivative subtrees for each test DOF in sensitivity assembly.
+    auto* cc = env.constitutive_cache;
+    if (cc && cc->test_dep_nodes) {
+        if (cc->test_dep_nodes->find(&node) == cc->test_dep_nodes->end()) {
+            auto it = cc->test_indep_cache.find(&node);
+            if (it != cc->test_indep_cache.end()) {
+                return it->second;
+            }
+            const auto type_index = static_cast<std::size_t>(node.type());
+            const auto& dispatch = evalDualDispatchTable();
+            FE_THROW_IF(type_index >= dispatch.size(),
+                        FEException,
+                        "Forms: evalDual dispatch index out of range");
+            auto result = dispatch[type_index](node, env, side, q);
+            cc->test_indep_cache.emplace(&node, result);
+            return result;
+        }
+    }
+
     const auto type_index = static_cast<std::size_t>(node.type());
     const auto& dispatch = evalDualDispatchTable();
     FE_THROW_IF(type_index >= dispatch.size(),
@@ -15072,10 +15118,26 @@ void CoupledResidualSensitivityKernel::computeCell(const assembly::AssemblyConte
     ConstitutiveCallCacheDual constitutive_cache;
     const auto& terms = residualIR().terms();
     const bool have_mask = (term_has_coupled_dependency_.size() == terms.size());
+
+    // Test-independent caching (same optimization as computeBoundaryFace)
+    std::unordered_set<const FormExprNode*> test_dep_nodes;
+    if (n_test > 1) {
+        for (std::size_t t = 0u; t < terms.size(); ++t) {
+            if (have_mask && term_has_coupled_dependency_[t] == 0u) continue;
+            const auto& term = terms[t];
+            if (term.domain != IntegralDomain::Cell) continue;
+            if (term.integrand.node()) {
+                markTestDependentNodes(*term.integrand.node(), test_dep_nodes);
+            }
+        }
+        constitutive_cache.test_dep_nodes = &test_dep_nodes;
+    }
+
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const Real w = ctx.integrationWeight(q);
         ws.reset(/*num_dofs=*/1u);
         constitutive_cache.values.clear();
+        constitutive_cache.test_indep_cache.clear();
         for (LocalIndex i = 0; i < n_test; ++i) {
             EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, /*n_trial_dofs=*/0u, &ws,
                             constitutive_state, &constitutive_cache};
@@ -15104,6 +15166,7 @@ void CoupledResidualSensitivityKernel::computeCell(const assembly::AssemblyConte
             output.local_vector[static_cast<std::size_t>(i)] += w * sum_dq;
         }
     }
+    constitutive_cache.test_dep_nodes = nullptr;
 }
 
 void CoupledResidualSensitivityKernel::computeCellBatch(
@@ -15250,10 +15313,30 @@ void CoupledResidualSensitivityKernel::computeBoundaryFace(const assembly::Assem
     ConstitutiveCallCacheDual constitutive_cache;
     const auto& terms = residualIR().terms();
     const bool have_mask = (term_has_coupled_dependency_.size() == terms.size());
+
+    // Precompute test-dependent nodes for caching optimization.
+    // Nodes NOT in this set are test-independent and their dual results
+    // can be cached across test DOFs within a single QP, avoiding
+    // redundant expression tree traversals (n_test → 1 evaluations).
+    std::unordered_set<const FormExprNode*> test_dep_nodes;
+    if (n_test > 1) {
+        for (std::size_t t = 0u; t < terms.size(); ++t) {
+            if (have_mask && term_has_coupled_dependency_[t] == 0u) continue;
+            const auto& term = terms[t];
+            if (term.domain != IntegralDomain::Boundary) continue;
+            if (term.boundary_marker >= 0 && term.boundary_marker != boundary_marker) continue;
+            if (term.integrand.node()) {
+                markTestDependentNodes(*term.integrand.node(), test_dep_nodes);
+            }
+        }
+        constitutive_cache.test_dep_nodes = &test_dep_nodes;
+    }
+
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const Real w = ctx.integrationWeight(q);
         ws.reset(/*num_dofs=*/1u);
         constitutive_cache.values.clear();
+        constitutive_cache.test_indep_cache.clear();
         for (LocalIndex i = 0; i < n_test; ++i) {
             EvalEnvDual env{ctx, nullptr, Side::Minus, Side::Minus, i, /*n_trial_dofs=*/0u, &ws,
                             constitutive_state, &constitutive_cache};
@@ -15283,6 +15366,7 @@ void CoupledResidualSensitivityKernel::computeBoundaryFace(const assembly::Assem
             output.local_vector[static_cast<std::size_t>(i)] += w * sum_dq;
         }
     }
+    constitutive_cache.test_dep_nodes = nullptr;
 }
 
 void CoupledResidualSensitivityKernel::computeInteriorFace(const assembly::AssemblyContext& ctx_minus,

@@ -989,6 +989,8 @@ assembly::AssemblyResult assembleOperator(
 	                            if (!s_kernel.isTimeInvariant()) {
 	                                cjc.is_time_invariant = false;
 	                            }
+	                            // Skip cell assembly entirely if no cell FormIR terms depend on Q.
+	                            if (!s_kernel.hasCell()) return;
 	                            if (term.test_field == term.trial_field) {
 	                                auto rr = assembler.assembleVector(system.meshAccess(), *test_field.space, s_kernel, dR_view);
 	                                FE_THROW_IF(!rr.success, InvalidStateException,
@@ -1045,15 +1047,30 @@ assembly::AssemblyResult assembleOperator(
 	                                if (!s_kernel.isTimeInvariant()) {
 	                                    cjc.is_time_invariant = false;
 	                                }
-	                                auto rr = assembler.assembleBoundaryFaces(system.meshAccess(),
-	                                                                          term.marker,
-	                                                                          *test_field.space,
-	                                                                          *trial_field.space,
-	                                                                          s_kernel,
-	                                                                          /*matrix_out=*/nullptr,
-	                                                                          /*vector_out=*/&dR_view);
-	                                FE_THROW_IF(!rr.success, InvalidStateException,
-	                                            "assembleOperator: coupled dR/dQ sensitivity assembly failed");
+	                                // Skip boundary assembly entirely if no boundary FormIR terms depend on Q.
+	                                if (!s_kernel.hasBoundaryFace()) return;
+
+	                                auto do_assemble = [&](int marker) {
+	                                    auto rr = assembler.assembleBoundaryFaces(system.meshAccess(),
+	                                                                              marker,
+	                                                                              *test_field.space,
+	                                                                              *trial_field.space,
+	                                                                              s_kernel,
+	                                                                              /*matrix_out=*/nullptr,
+	                                                                              /*vector_out=*/&dR_view);
+	                                    FE_THROW_IF(!rr.success, InvalidStateException,
+	                                                "assembleOperator: coupled dR/dQ sensitivity assembly failed");
+	                                };
+
+	                                if (term.marker < 0 && !s_kernel.hasBoundaryAllDependency()) {
+	                                    // Wildcard term but only specific markers have Q-dependency.
+	                                    // Assemble only on those markers instead of all boundary faces.
+	                                    for (int dep_marker : s_kernel.boundaryDependencyMarkers()) {
+	                                        do_assemble(dep_marker);
+	                                    }
+	                                } else {
+	                                    do_assemble(term.marker);
+	                                }
 	                            };
 
 	                            const auto* kernel = term.kernel.get();

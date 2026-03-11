@@ -523,6 +523,15 @@ public:
     /// iterations and time steps with constant dt.
     [[nodiscard]] bool isTimeInvariant() const noexcept;
 
+    /// True if ALL boundary markers potentially have dependency (wildcard FormIR term with Q-dep).
+    [[nodiscard]] bool hasBoundaryAllDependency() const noexcept { return boundary_all_dependency_; }
+
+    /// Returns the set of specific boundary markers with Q-dependency.
+    /// Empty when hasBoundaryAllDependency() is true (all markers may be needed).
+    [[nodiscard]] const std::unordered_set<int>& boundaryDependencyMarkers() const noexcept {
+        return boundary_marker_dependency_;
+    }
+
 private:
     void buildDependencyCache();
 
