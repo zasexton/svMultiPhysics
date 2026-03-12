@@ -61,11 +61,21 @@ struct KernelIR {
     [[nodiscard]] std::string dump() const;
 
     /**
-     * @brief Optimize the IR in-place: zero propagation, constant folding, DCE
+     * @brief Optimize the IR in-place: zero propagation, constant folding, CSE, DCE
      *
      * Returns the number of ops eliminated.
      */
     std::size_t optimize();
+
+    /**
+     * @brief Compute per-op subtree cost (bottom-up additive cost model)
+     *
+     * Leaf ops (Constant, ParameterRef, etc.) have cost 1.
+     * Internal ops accumulate children's costs + 1.
+     * Reduce-sum ops (StateField, DiscreteField) get a multiplier
+     * reflecting the implied DOF loop.
+     */
+    [[nodiscard]] std::vector<std::uint32_t> subtreeCosts() const;
 };
 
 struct KernelIRBuildOptions {
@@ -89,6 +99,36 @@ KernelIRBuildResult lowerToKernelIR(const FormExpr& integrand,
 
 KernelIRBuildResult lowerToKernelIR(const FormExprNode& root,
                                     const KernelIRBuildOptions& options = {});
+
+// ============================================================================
+// Term-group planning for micro-kernel splitting
+// ============================================================================
+
+/// Description of one contiguous group of terms within a block.
+struct TermGroupPlan {
+    std::size_t first_term{0};     ///< Index into the block's term list
+    std::size_t num_terms{0};      ///< Number of terms in this group
+    std::uint64_t estimated_text_bytes{0};
+};
+
+/// Split plan for a single coupled block.
+struct BlockSplitPlan {
+    std::size_t block_index{0};
+    std::vector<TermGroupPlan> groups;
+    bool needs_split{false};
+    std::uint64_t total_estimated_bytes{0};
+};
+
+/// Plan contiguous term groups fitting within @p budget_bytes of .text.
+///
+/// @param term_op_counts  Number of KernelIR ops per term.
+/// @param budget_bytes    Target .text budget per helper function.
+/// @param bytes_per_op    Estimated bytes of machine code per KernelIR op.
+/// @return A BlockSplitPlan with needs_split=true if the block exceeds budget.
+[[nodiscard]] BlockSplitPlan planTermGroups(
+    const std::vector<std::size_t>& term_op_counts,
+    std::uint64_t budget_bytes,
+    std::uint64_t bytes_per_op);
 
 } // namespace jit
 } // namespace forms

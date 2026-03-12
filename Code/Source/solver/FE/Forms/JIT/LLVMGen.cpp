@@ -13,6 +13,7 @@
 #include "Assembly/JIT/KernelArgs.h"
 #include "Forms/ConstitutiveModel.h"
 #include "Forms/JIT/ExternalCalls.h"
+#include "Forms/JIT/HardwareProfile.h"
 #include "Forms/JIT/LLVMTensorGen.h"
 #include "Forms/JIT/KernelIR.h"
 #include "Forms/Tensor/TensorIR.h"
@@ -190,6 +191,7 @@ struct LoweredTerm {
     std::vector<Shape> shapes{};
     std::vector<std::uint8_t> dep_mask{};
     std::vector<std::uint64_t> op_hashes{};  ///< Per-op structural hash for cross-block CSE
+    std::vector<std::uint32_t> subtree_costs{};  ///< Per-op subtree cost for hoist decisions
     int time_derivative_order{0};
 
     std::optional<tensor::TensorIR> tensor_ir{};
@@ -783,12 +785,27 @@ struct ShapeInferenceResult {
                     out.shapes[idx] = vectorShape(a.dims[0]);
                     break;
                 }
+                // TypedZero (scalar) through Divergence → scalar zero
+                // (div(0) = 0 regardless of the "intended" operand rank)
+                {
+                    const auto& kid_op = ir.ops[ir.children[op.first_child]];
+                    if (kid_op.type == FormExprType::TypedZero) {
+                        out.shapes[idx] = scalarShape();
+                        break;
+                    }
+                }
                 return fail("LLVMGen: Divergence expects vector or matrix operand");
             }
 
             case FormExprType::Curl: {
                 const auto& a = childAt(0);
                 if (a.kind != Shape::Kind::Vector) {
+                    // TypedZero (scalar) through Curl → zero 3-vector
+                    const auto& kid_op = ir.ops[ir.children[op.first_child]];
+                    if (kid_op.type == FormExprType::TypedZero) {
+                        out.shapes[idx] = vectorShape(3u);
+                        break;
+                    }
                     return fail("LLVMGen: Curl expects vector operand");
                 }
                 out.shapes[idx] = vectorShape(3u);
@@ -921,12 +938,16 @@ struct ShapeInferenceResult {
             case FormExprType::OuterProduct: {
                 const auto& a = childAt(0);
                 const auto& b = childAt(1);
-                // TypedZero (scalar) is compatible — outer(0,X)=0-matrix
+                // TypedZero (scalar) is compatible — outer(0,X)=0-matrix.
+                // Use spatial dimension for the unknown (TypedZero) operand
+                // instead of squaring the known operand's dimension.
                 const auto& op_a2 = ir.ops[ir.children[op.first_child]];
                 const auto& op_b2 = ir.ops[ir.children[op.first_child + 1]];
                 if (op_a2.type == FormExprType::TypedZero) {
                     if (b.kind == Shape::Kind::Vector) {
-                        out.shapes[idx] = matrixShape(b.dims[0], b.dims[0]);
+                        // Unknown first dim → use spatial dim (common for
+                        // gradients in FE); second dim from known operand.
+                        out.shapes[idx] = matrixShape(dim, b.dims[0]);
                     } else {
                         out.shapes[idx] = scalarShape(); // degenerate
                     }
@@ -934,7 +955,7 @@ struct ShapeInferenceResult {
                 }
                 if (op_b2.type == FormExprType::TypedZero) {
                     if (a.kind == Shape::Kind::Vector) {
-                        out.shapes[idx] = matrixShape(a.dims[0], a.dims[0]);
+                        out.shapes[idx] = matrixShape(a.dims[0], dim);
                     } else {
                         out.shapes[idx] = scalarShape();
                     }
@@ -1044,6 +1065,12 @@ struct ShapeInferenceResult {
             case FormExprType::Determinant: {
                 const auto& a = childAt(0);
                 if (a.kind != Shape::Kind::Matrix || a.dims[0] != a.dims[1] || a.dims[0] == 0u) {
+                    // TypedZero (scalar) → scalar zero (trace/det of zero = 0)
+                    const auto& kid_op = ir.ops[ir.children[op.first_child]];
+                    if (kid_op.type == FormExprType::TypedZero) {
+                        out.shapes[idx] = scalarShape();
+                        break;
+                    }
                     return fail("LLVMGen: Trace/Determinant expects square matrix");
                 }
                 out.shapes[idx] = scalarShape();
@@ -1057,6 +1084,12 @@ struct ShapeInferenceResult {
             case FormExprType::SkewPart: {
                 const auto& a = childAt(0);
                 if (a.kind != Shape::Kind::Matrix || a.dims[0] != a.dims[1]) {
+                    // TypedZero (scalar) → scalar zero
+                    const auto& kid_op = ir.ops[ir.children[op.first_child]];
+                    if (kid_op.type == FormExprType::TypedZero) {
+                        out.shapes[idx] = scalarShape();
+                        break;
+                    }
                     return fail("LLVMGen: matrix op expects square matrix");
                 }
                 out.shapes[idx] = a;
@@ -1070,6 +1103,12 @@ struct ShapeInferenceResult {
             case FormExprType::Normalize: {
                 const auto& a = childAt(0);
                 if (a.kind != Shape::Kind::Vector) {
+                    // TypedZero (scalar) → scalar zero
+                    const auto& kid_op = ir.ops[ir.children[op.first_child]];
+                    if (kid_op.type == FormExprType::TypedZero) {
+                        out.shapes[idx] = scalarShape();
+                        break;
+                    }
                     return fail("LLVMGen: Normalize expects vector");
                 }
                 out.shapes[idx] = a;
@@ -1535,18 +1574,17 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             }
             {
                 const auto ops_before = lowered.ir.opCount();
-                // KernelIR::optimize() is disabled by default — its aliasing
-                // transforms (op = kidX for 0+X, 1*X, etc.) can produce IR
-                // that fails LLVMGen shape inference for Subtract/Add nodes.
-                // LLVM's own optimizer handles zero propagation and DCE.
-                static const bool enable_ir_opt = (std::getenv("SVMP_ENABLE_IR_OPT") != nullptr);
-                const auto eliminated = enable_ir_opt ? lowered.ir.optimize() : 0u;
+                // KernelIR::optimize() runs shape-aware zero propagation,
+                // constant folding, post-rewrite CSE, and DCE.  Enabled by
+                // default; disable via SVMP_DISABLE_IR_OPT for debugging.
+                static const bool disable_ir_opt = (std::getenv("SVMP_DISABLE_IR_OPT") != nullptr);
+                const auto eliminated = disable_ir_opt ? 0u : lowered.ir.optimize();
                 static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
                 if (jit_telemetry) {
                     std::cerr << "[JIT telemetry] " << symbol << " term " << tidx
                               << ": KernelIR " << ops_before << " -> " << lowered.ir.opCount()
                               << " ops (-" << eliminated << ", ~"
-                              << (lowered.ir.opCount() * 58) << " bytes .text est)\n";
+                              << (lowered.ir.opCount() * bytesPerOpCalibration().calibratedBytesPerOp()) << " bytes .text est)\n";
                     std::cerr.flush();
                 }
             }
@@ -2199,11 +2237,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         // (test/trial) keep standard loops while QP loops still get unroll hints.
         bool suppress_dof_unroll = false;
 
+        // Hardware profile for budget derivation (cached singleton, essentially free).
+        const auto& hw = hardwareProfile();
+
         // --- Budget-aware DOF loop unrolling decision ---
-        // When the estimated fully-unrolled .text exceeds the budget (default
-        // 32 KB = L1i), suppress unroll metadata on test/trial DOF loops.
+        // When the estimated fully-unrolled .text exceeds the budget,
+        // suppress unroll metadata on test/trial DOF loops.
         // QP loops remain fully unrolled (small trip count, high benefit).
-        if (options_.specialization.text_budget_bytes > 0u &&
+        // Budget: user-provided or auto from hardware profile (~3× L1i).
+        const std::uint32_t effective_text_budget = (options_.specialization.text_budget_bytes > 0u)
+            ? options_.specialization.text_budget_bytes
+            : hw.textBudgetBytes();
+        if (effective_text_budget > 0u &&
             fixed_n_test_dofs_minus.has_value() &&
             fixed_n_trial_dofs_minus.has_value() &&
             fixed_n_qpts_minus.has_value())
@@ -2211,7 +2256,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             const auto n_q = static_cast<std::uint64_t>(*fixed_n_qpts_minus);
             const auto n_t = static_cast<std::uint64_t>(*fixed_n_test_dofs_minus);
             const auto n_j = static_cast<std::uint64_t>(*fixed_n_trial_dofs_minus);
-            const auto bpo = static_cast<std::uint64_t>(options_.specialization.bytes_per_op_estimate);
+            // Use telemetry-calibrated bytes/op if available, else the per-options fallback.
+            const auto bpo = bytesPerOpCalibration().calibratedBytesPerOp(
+                options_.specialization.bytes_per_op_estimate);
 
             // Estimate total ops if all loops (QP, test, trial) are fully unrolled.
             std::uint64_t total_unrolled_ops = 0;
@@ -2230,7 +2277,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             }
 
             const auto estimated_text = total_unrolled_ops * bpo;
-            const auto budget = static_cast<std::uint64_t>(options_.specialization.text_budget_bytes);
+            const auto budget = static_cast<std::uint64_t>(effective_text_budget);
             suppress_dof_unroll = (estimated_text > budget);
 
             static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
@@ -2447,7 +2494,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 return;
             }
 
-            const auto max_full = static_cast<std::uint64_t>(options_.specialization.max_unroll_trip_count);
+            const auto max_full = static_cast<std::uint64_t>(
+                (options_.specialization.max_unroll_trip_count > 0u)
+                    ? options_.specialization.max_unroll_trip_count
+                    : hw.maxUnrollTripCount());
             const auto max_partial = (max_full <= (std::numeric_limits<std::uint64_t>::max)() / 4u)
                                          ? (max_full * 4u)
                                          : max_full;
@@ -7209,7 +7259,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                              .vectorize = options_.vectorize,
                                              .enable_polly = options_.tensor.enable_polly,
                                              .enable_tiling = options_.tensor.enable_loop_tiling,
-                                             .tile_size = static_cast<int>(options_.tensor.tile_size),
+                                             .tile_size = static_cast<int>(options_.tensor.tile_size > 0u ? options_.tensor.tile_size : hw.defaultTileSize()),
                                              .min_tiling_extent = static_cast<int>(options_.tensor.min_tiling_extent),
                                          });
 
@@ -7219,7 +7269,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     }
 
                     auto lowered_scalar = lowerToKernelIR(scalar_expr);
-                    // KernelIR::optimize() disabled — see earlier comment.
+                    lowered_scalar.ir.optimize();
                     auto scalar_shapes = inferShapes(lowered_scalar.ir, ir.testSpace(), ir.trialSpace(), /*require_scalar_root=*/false);
                     if (!scalar_shapes.ok) {
                         throw std::runtime_error(scalar_shapes.message.empty() ? "LLVMGen: failed to infer scalar shapes" : scalar_shapes.message);
@@ -7255,7 +7305,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     }
 
                     auto lowered_base = lowerToKernelIR(spec.base);
-                    // KernelIR::optimize() disabled — see earlier comment.
+                    lowered_base.ir.optimize();
                     auto base_shapes = inferShapes(lowered_base.ir, ir.testSpace(), ir.trialSpace(), /*require_scalar_root=*/false);
                     if (!base_shapes.ok) {
                         throw std::runtime_error(base_shapes.message.empty() ? "LLVMGen: failed to infer base-tensor shapes" : base_shapes.message);
@@ -7456,11 +7506,37 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         // always generate load code -- no runtime branches.
         // ================================================================
         struct QPCacheEntry {
-            llvm::AllocaInst* data{nullptr};  // n_elems_per_qp * kMaxCacheQPts doubles
+            llvm::Value* data{nullptr};       // n_elems_per_qp * actual_n_qpts doubles
             std::uint32_t n_elems{0};         // doubles per QP point
             bool populated{false};            // C++ flag: has store code been generated?
+            std::uint32_t buffer_offset{0};   // offset in doubles into shared buffer (helper mode)
         };
-        static constexpr std::uint32_t kMaxCacheQPts = 64;
+        // QP cache buffer size: use the specialized n_qpts when available
+        // (known at codegen time), otherwise derive from L1d budget.
+        // This prevents buffer overflows when n_qpts > 64 (e.g. high-order
+        // elements with tensor-product quadrature).
+        // Fallback: budget from L1d / (max_elems_per_qp * sizeof(double))
+        // Use dim*dim as the worst-case doubles-per-entry (matrix-valued
+        // cache entries). For 3D: 9 doubles/entry; for 2D: 4 doubles/entry.
+        const std::uint32_t cache_dim = [&]() -> std::uint32_t {
+            if (const auto& ts = ir.testSpace()) {
+                const auto d = static_cast<std::uint32_t>(ts->topological_dimension);
+                if (d >= 1u && d <= 3u) return d;
+            }
+            if (const auto& ts = ir.trialSpace()) {
+                const auto d = static_cast<std::uint32_t>(ts->topological_dimension);
+                if (d >= 1u && d <= 3u) return d;
+            }
+            return 3u;  // conservative default
+        }();
+        const std::uint32_t max_elems_per_qp = cache_dim * cache_dim;
+        const std::uint32_t hw_max_qpts = hw.qpCacheBudgetDoubles() / std::max(1u, max_elems_per_qp);
+        // When n_qpts is specialized (known at codegen time), cap it against
+        // the L1d-derived budget.  If the specialized count exceeds the budget,
+        // the cache working set would spill L1d; use the hardware cap instead.
+        const std::uint32_t max_cache_qpts = fixed_n_qpts_minus.has_value()
+            ? std::min(*fixed_n_qpts_minus, hw_max_qpts)
+            : hw_max_qpts;
 
         // Cache key: FNV-1a hash of (trial_group, pattern, sub_id, shape_kind, dim0)
         auto makeCacheKey = [](int trial_group, int pattern, int sub_id,
@@ -7487,16 +7563,58 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         std::unordered_map<std::uint64_t, QPCacheEntry> dep0_xblock_cache;
         bool dep0_xblock_active = false;
 
-        auto getOrCreateCacheEntry = [&](std::uint64_t key, std::uint32_t n_elems_per_qp) -> QPCacheEntry& {
-            auto it = qp_shared_cache.find(key);
-            if (it != qp_shared_cache.end()) return it->second;
+        // Separate per-pool byte budgets for cache allocas.
+        // QP cache: 1/4 L1d — the 5 critical shared patterns (solution,
+        // grad, prev-solution, etc.) needed per coupled group.
+        // Xblock cache: separate 1/4 L1d — optional cross-block dep_mask==0
+        // sharing that can gracefully degrade without crowding QP entries.
+        const std::uint32_t qp_cache_budget_bytes = hw.qpCacheBudgetBytes();
+        const std::uint32_t xblock_cache_budget_bytes = hw.qpCacheBudgetBytes();
+        std::uint32_t qp_cache_bytes_allocated = 0;
+        std::uint32_t xblock_cache_bytes_allocated = 0;
 
-            // Create alloca at function entry for fixed-size cache buffer.
-            const std::uint32_t total = kMaxCacheQPts * n_elems_per_qp;
-            auto* alloca_inst = allocaInEntry(f64, builder.getInt32(total), "qp_cache");
-            QPCacheEntry entry{alloca_inst, n_elems_per_qp, false};
+        // Helper-mode cache redirection: when non-null, cache entries use GEP
+        // offsets into a pre-allocated flat buffer instead of allocaInEntry.
+        // Set during helper function emission and for inline blocks in split mode.
+        llvm::Value* active_qp_cache_base = nullptr;
+        llvm::Value* active_xblock_cache_base = nullptr;
+        std::uint32_t next_qp_cache_offset = 0;
+        std::uint32_t next_xblock_cache_offset = 0;
+
+        auto getOrCreateCacheEntry = [&](std::uint64_t key, std::uint32_t n_elems_per_qp) -> QPCacheEntry* {
+            auto it = qp_shared_cache.find(key);
+            if (it != qp_shared_cache.end()) {
+                // In buffer mode, recompute data GEP for current function context.
+                if (active_qp_cache_base) {
+                    it->second.data = builder.CreateGEP(f64, active_qp_cache_base,
+                        builder.getInt32(it->second.buffer_offset));
+                }
+                return &it->second;
+            }
+
+            // Check cumulative QP cache budget before allocating.
+            const std::uint32_t alloc_bytes = max_cache_qpts * n_elems_per_qp * 8u; // sizeof(double)
+            if (qp_cache_bytes_allocated + alloc_bytes > qp_cache_budget_bytes) {
+                return nullptr; // budget exhausted
+            }
+
+            const std::uint32_t total = max_cache_qpts * n_elems_per_qp;
+            llvm::Value* data_ptr;
+            std::uint32_t buf_off = 0;
+            if (active_qp_cache_base) {
+                // Buffer mode: GEP into pre-allocated flat buffer.
+                buf_off = next_qp_cache_offset;
+                data_ptr = builder.CreateGEP(f64, active_qp_cache_base,
+                    builder.getInt32(buf_off));
+                next_qp_cache_offset += total;
+            } else {
+                // Normal mode: alloca in function entry block.
+                data_ptr = allocaInEntry(f64, builder.getInt32(total), "qp_cache");
+            }
+            QPCacheEntry entry{data_ptr, n_elems_per_qp, false, buf_off};
+            qp_cache_bytes_allocated += alloc_bytes;
             qp_shared_cache[key] = entry;
-            return qp_shared_cache[key];
+            return &qp_shared_cache[key];
         };
 
         // Store a CodeValue into a cache entry at the given QP index.
@@ -7567,6 +7685,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     const auto op_hash = term.op_hashes[op_idx];
                     auto it = dep0_xblock_cache.find(op_hash);
                     if (it != dep0_xblock_cache.end()) {
+                        // In buffer mode, re-derive data pointer for current function.
+                        if (active_xblock_cache_base) {
+                            it->second.data = builder.CreateGEP(f64, active_xblock_cache_base,
+                                builder.getInt32(it->second.buffer_offset));
+                        }
                         auto cv = loadFromCacheEntry(it->second, q_index, term.shapes[op_idx]);
                         values[op_idx] = cv;
                         cached[op_idx] = cv;
@@ -7610,13 +7733,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 const auto n_e = elemCount(shape);
                                 const auto key = makeCacheKey(qp_cache_trial_group,
                                     kCacheCurrentSolution, 0, shape.kind, shape.dims[0]);
-                                auto& entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
-                                if (entry.populated) {
-                                    values[op_idx] = loadFromCacheEntry(entry, q_index, shape);
+                                auto* entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
+                                if (entry && entry->populated) {
+                                    values[op_idx] = loadFromCacheEntry(*entry, q_index, shape);
+                                } else if (entry) {
+                                    values[op_idx] = evalCurrentSolution(side, shape, q_index);
+                                    storeToCacheEntry(*entry, q_index, values[op_idx]);
+                                    entry->populated = true;
                                 } else {
                                     values[op_idx] = evalCurrentSolution(side, shape, q_index);
-                                    storeToCacheEntry(entry, q_index, values[op_idx]);
-                                    entry.populated = true;
                                 }
                             } else {
                                 values[op_idx] = evalCurrentSolution(side, shape, q_index);
@@ -7744,13 +7869,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             const auto n_e = elemCount(shape);
                             const auto key = makeCacheKey(qp_cache_trial_group,
                                 kCachePreviousSolution, k, shape.kind, shape.dims[0]);
-                            auto& entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
-                            if (entry.populated) {
-                                values[op_idx] = loadFromCacheEntry(entry, q_index, shape);
+                            auto* entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
+                            if (entry && entry->populated) {
+                                values[op_idx] = loadFromCacheEntry(*entry, q_index, shape);
+                            } else if (entry) {
+                                values[op_idx] = evalPreviousSolution(side, shape, k, q_index);
+                                storeToCacheEntry(*entry, q_index, values[op_idx]);
+                                entry->populated = true;
                             } else {
                                 values[op_idx] = evalPreviousSolution(side, shape, k, q_index);
-                                storeToCacheEntry(entry, q_index, values[op_idx]);
-                                entry.populated = true;
                             }
                         } else {
                             values[op_idx] = evalPreviousSolution(side, shape, k, q_index);
@@ -7822,13 +7949,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                const auto n_e = elemCount(shape);
 	                                const auto key = makeCacheKey(qp_cache_trial_group,
 	                                    kCacheCurrentSolutionGrad, 0, shape.kind, shape.dims[0]);
-	                                auto& entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
-	                                if (entry.populated) {
-	                                    values[op_idx] = loadFromCacheEntry(entry, q_index, shape);
+	                                auto* entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
+	                                if (entry && entry->populated) {
+	                                    values[op_idx] = loadFromCacheEntry(*entry, q_index, shape);
+	                                } else if (entry) {
+	                                    values[op_idx] = gradFromCoeffs(side.solution_coefficients, "grad_u");
+	                                    storeToCacheEntry(*entry, q_index, values[op_idx]);
+	                                    entry->populated = true;
 	                                } else {
 	                                    values[op_idx] = gradFromCoeffs(side.solution_coefficients, "grad_u");
-	                                    storeToCacheEntry(entry, q_index, values[op_idx]);
-	                                    entry.populated = true;
 	                                }
 	                            } else {
 	                                values[op_idx] = gradFromCoeffs(side.solution_coefficients, "grad_u");
@@ -7850,13 +7979,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    const auto n_e = elemCount(shape);
 	                                    const auto key = makeCacheKey(qp_cache_trial_group,
 	                                        kCacheGradTimeDerivative, 0, shape.kind, shape.dims[0]);
-	                                    auto& entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
-	                                    if (entry.populated) {
-	                                        return loadFromCacheEntry(entry, q_index, shape);
-	                                    } else {
+	                                    auto* entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
+	                                    if (entry && entry->populated) {
+	                                        return loadFromCacheEntry(*entry, q_index, shape);
+	                                    } else if (entry) {
 	                                        auto val = gradFromCoeffs(side.solution_coefficients, "grad_dt_u");
-	                                        storeToCacheEntry(entry, q_index, val);
-	                                        entry.populated = true;
+	                                        storeToCacheEntry(*entry, q_index, val);
+	                                        entry->populated = true;
 	                                        return val;
 	                                    }
 	                                }
@@ -7886,14 +8015,16 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    const auto n_e = elemCount(shape);
 	                                    const auto key = makeCacheKey(qp_cache_trial_group,
 	                                        kCachePreviousSolutionGrad, k, shape.kind, shape.dims[0]);
-	                                    auto& entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
+	                                    auto* entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
 	                                    CodeValue grad_val;
-	                                    if (entry.populated) {
-	                                        grad_val = loadFromCacheEntry(entry, q_index, shape);
+	                                    if (entry && entry->populated) {
+	                                        grad_val = loadFromCacheEntry(*entry, q_index, shape);
+	                                    } else if (entry) {
+	                                        grad_val = gradFromCoeffs(coeffs_ptr, "grad_dt_prev" + std::to_string(k));
+	                                        storeToCacheEntry(*entry, q_index, grad_val);
+	                                        entry->populated = true;
 	                                    } else {
 	                                        grad_val = gradFromCoeffs(coeffs_ptr, "grad_dt_prev" + std::to_string(k));
-	                                        storeToCacheEntry(entry, q_index, grad_val);
-	                                        entry.populated = true;
 	                                    }
 	                                    values[op_idx] = mul(makeScalar(coeff0), grad_val);
 	                                } else {
@@ -7916,17 +8047,19 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                const auto n_e = elemCount(shape);
 	                                const auto key = makeCacheKey(qp_cache_trial_group,
 	                                    kCachePreviousSolutionGrad, k, shape.kind, shape.dims[0]);
-	                                auto& entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
-	                                if (entry.populated) {
-	                                    values[op_idx] = loadFromCacheEntry(entry, q_index, shape);
+	                                auto* entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
+	                                if (entry && entry->populated) {
+	                                    values[op_idx] = loadFromCacheEntry(*entry, q_index, shape);
 	                                    break;
 	                                }
-	                                // First-in-group: compute normally and store
-	                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
-	                                values[op_idx] = gradFromCoeffs(coeffs, "prev_grad" + std::to_string(k));
-	                                storeToCacheEntry(entry, q_index, values[op_idx]);
-	                                entry.populated = true;
-	                                break;
+	                                if (entry) {
+	                                    // First-in-group: compute normally and store
+	                                    auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+	                                    values[op_idx] = gradFromCoeffs(coeffs, "prev_grad" + std::to_string(k));
+	                                    storeToCacheEntry(*entry, q_index, values[op_idx]);
+	                                    entry->populated = true;
+	                                    break;
+	                                }
 	                            }
 	                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
 	                            if (shape.kind == Shape::Kind::Vector) {
@@ -7991,13 +8124,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                     const auto n_e = elemCount(shape);
                                     const auto key = makeCacheKey(qp_cache_trial_group,
                                         kCacheCurrentSolutionGrad, 0, shape.kind, shape.dims[0]);
-                                    auto& entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
-                                    if (entry.populated) {
-                                        values[op_idx] = loadFromCacheEntry(entry, q_index, shape);
+                                    auto* entry = getOrCreateCacheEntry(key, static_cast<std::uint32_t>(n_e));
+                                    if (entry && entry->populated) {
+                                        values[op_idx] = loadFromCacheEntry(*entry, q_index, shape);
+                                    } else if (entry) {
+                                        values[op_idx] = gradFromCoeffs(side.solution_coefficients, "grad_state_u");
+                                        storeToCacheEntry(*entry, q_index, values[op_idx]);
+                                        entry->populated = true;
                                     } else {
                                         values[op_idx] = gradFromCoeffs(side.solution_coefficients, "grad_state_u");
-                                        storeToCacheEntry(entry, q_index, values[op_idx]);
-                                        entry.populated = true;
                                     }
                                 } else {
                                     values[op_idx] = gradFromCoeffs(side.solution_coefficients, "grad_state_u");
@@ -9085,21 +9220,39 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 }
                 cached[op_idx] = values[op_idx];
 
-                // Cross-block CSE: store non-trivial dep_mask==0 results for reuse
-                // by subsequent coupled blocks.  Skip Constants and ParameterRef
-                // (cheap to recompute; not worth the alloca + memory traffic).
+                // Cross-block CSE: store expensive dep_mask==0 results for reuse
+                // by subsequent coupled blocks.  Use subtree cost to avoid
+                // caching cheap ops (Constants, ParameterRef, simple arithmetic)
+                // where alloca + memory traffic exceeds recomputation cost.
                 if (dep0_xblock_active && !term.op_hashes.empty()) {
-                    const auto& op_store = term.ir.ops[op_idx];
-                    if (op_store.type != FormExprType::Constant &&
-                        op_store.type != FormExprType::ParameterRef) {
+                    // Cost threshold from hardware profile: only cache ops
+                    // whose subtree cost justifies alloca + memory traffic.
+                    const std::uint32_t xblock_cost_threshold = hw.crossBlockCostThreshold();
+                    const auto& costs = term.subtree_costs;
+                    if (!costs.empty() && op_idx < costs.size() &&
+                        costs[op_idx] >= xblock_cost_threshold) {
                         const auto op_hash = term.op_hashes[op_idx];
                         if (dep0_xblock_cache.find(op_hash) == dep0_xblock_cache.end()) {
                             const auto n_elems = static_cast<std::uint32_t>(elemCount(values[op_idx].shape));
-                            const std::uint32_t total = kMaxCacheQPts * n_elems;
-                            auto* alloca_inst = allocaInEntry(f64, builder.getInt32(total), "xb_cache");
-                            QPCacheEntry entry{alloca_inst, n_elems, true};
-                            storeToCacheEntry(entry, q_index, values[op_idx]);
-                            dep0_xblock_cache[op_hash] = entry;
+                            const std::uint32_t alloc_bytes = max_cache_qpts * n_elems * 8u;
+                            // Check cumulative xblock budget before allocating
+                            if (xblock_cache_bytes_allocated + alloc_bytes <= xblock_cache_budget_bytes) {
+                                const std::uint32_t total = max_cache_qpts * n_elems;
+                                llvm::Value* data_ptr;
+                                std::uint32_t buf_off = 0;
+                                if (active_xblock_cache_base) {
+                                    buf_off = next_xblock_cache_offset;
+                                    data_ptr = builder.CreateGEP(f64, active_xblock_cache_base,
+                                        builder.getInt32(buf_off));
+                                    next_xblock_cache_offset += total;
+                                } else {
+                                    data_ptr = allocaInEntry(f64, builder.getInt32(total), "xb_cache");
+                                }
+                                QPCacheEntry entry{data_ptr, n_elems, true, buf_off};
+                                storeToCacheEntry(entry, q_index, values[op_idx]);
+                                dep0_xblock_cache[op_hash] = entry;
+                                xblock_cache_bytes_allocated += alloc_bytes;
+                            }
                         }
                     }
                 }
@@ -10316,16 +10469,41 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         (terms[t].target == LoweredTerm::Target::Matrix) ||
                         (terms[t].target == LoweredTerm::Target::Auto && want_matrix);
                     if (emit_matrix) {
-                        // Count trial-only ops (dep_mask==0x2) to decide whether
-                        // to swap loop nesting for trial-outer/test-inner ordering
-                        // and cache trial-only intermediate values.
-                        const std::size_t n_trial_only = cached_ptr != nullptr
-                            ? static_cast<std::size_t>(std::count_if(
-                                  terms[t].dep_mask.begin(), terms[t].dep_mask.end(),
-                                  [](std::uint8_t m) { return m == 0x2u; }))
-                            : 0u;
+                        // Cost-weighted profitability test for trial-only caching.
+                        // Instead of a simple op count threshold, compute the total
+                        // subtree cost of trial-only ops and compare against the
+                        // estimated n_test reuse factor.  Caching is profitable when:
+                        //   trial_only_cost × (n_test - 1) > min_savings_threshold
+                        // This avoids caching when there are many cheap ops (e.g.,
+                        // just basis lookups) or too few test DOFs for amortization.
+                        std::uint32_t trial_only_cost = 0;
+                        std::size_t n_trial_only = 0;
+                        if (cached_ptr != nullptr) {
+                            const auto& dep = terms[t].dep_mask;
+                            const auto& costs = terms[t].subtree_costs;
+                            for (std::size_t oi = 0; oi < dep.size(); ++oi) {
+                                if (dep[oi] == 0x2u) {
+                                    ++n_trial_only;
+                                    if (oi < costs.size()) {
+                                        trial_only_cost += costs[oi];
+                                    } else {
+                                        trial_only_cost += 1u; // fallback
+                                    }
+                                }
+                            }
+                        }
+                        // Estimate reuse: n_test DOFs (specialized or hardware-default).
+                        const std::uint32_t n_test_est = fixed_n_test_dofs_minus.value_or(
+                            hw.defaultTestDofEstimate());
+                        const std::uint32_t reuse = (n_test_est > 1u) ? (n_test_est - 1u) : 0u;
+                        // Profitability: total savings > hardware-derived threshold.
+                        // Each cached trial-only evaluation is reused (n_test-1) times.
+                        // Thresholds derived from L1d size to account for cache pressure.
+                        const bool trial_cache_profitable =
+                            (n_trial_only >= hw.trialOnlyMinOps()) &&
+                            (trial_only_cost * reuse >= hw.trialOnlyMinSavings());
 
-                        if (n_trial_only >= 4u) {
+                        if (trial_cache_profitable) {
                             // Trial-outer, test-inner: compute trial-only ops once
                             // per trial DOF, then reuse across all test DOFs.
                             emitForLoop(side_single.n_trial_dofs, "j" + std::to_string(t), [&](llvm::Value* j) {
@@ -10370,13 +10548,17 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
             // ================================================================
             // Coupled block-sequential dispatch with shared QP intermediate
-            // caching: blocks that share the same trial space (same
-            // trial_group) reuse expensive reduce-sum results (solution
-            // evaluation, gradients) computed by the first block in the
-            // group.  Cache entries are stack allocas indexed by QP; the
-            // "populated" flag is a C++ compile-time variable, so first-in-
-            // group blocks always get store code and followers always get
-            // load code -- no runtime overhead.
+            // caching and term-level micro-kernel splitting.
+            //
+            // Blocks that share the same trial space (same trial_group)
+            // reuse expensive reduce-sum results (solution evaluation,
+            // gradients) computed by the first block in the group.
+            //
+            // Oversized blocks (estimated .text > L1i budget) are split
+            // into multiple helper functions, each fitting within the L1i
+            // budget.  Helpers are module-private, called sequentially.
+            // Cache buffers are pre-allocated in the dispatcher and passed
+            // to helpers as arguments.
             // ================================================================
             if (coupled) {
                 // Enable the shared QP cache for this coupled dispatch.
@@ -10387,46 +10569,111 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 dep0_xblock_cache.clear();
                 dep0_xblock_active = true;
 
-                for (std::size_t blk = 0; blk < coupled->blocks.size(); ++blk) {
-                    const auto& blk_data = coupled->blocks[blk];
-                    const std::string bs = std::to_string(blk);
-
-                    // Set the trial group so computeCachedSingle can key caches.
-                    qp_cache_trial_group = blk_data.trial_group;
-
-                    // Load per-block data from CoupledBlockView[blk]
-                    auto* blk_ptr = builder.CreateGEP(builder.getInt8Ty(), coupled_blocks_ptr,
+                // --- Reusable lambda: load per-block CoupledBlockView fields ---
+                auto loadBlockView = [&](llvm::Value* blocks_ptr_local, std::size_t blk) {
+                    auto* bp = builder.CreateGEP(builder.getInt8Ty(), blocks_ptr_local,
                         builder.getInt64(static_cast<std::int64_t>(blk * sizeof(assembly::jit::CoupledBlockView))));
-
-                    // Overwrite SideView per-block fields
-                    side_single.n_test_dofs = loadU32(blk_ptr, ABIV3::cbv_n_test_dofs_off);
-                    side_single.n_trial_dofs = loadU32(blk_ptr, ABIV3::cbv_n_trial_dofs_off);
-                    side_single.test_value_dim = loadU32(blk_ptr, ABIV3::cbv_test_value_dim_off);
-                    side_single.trial_value_dim = loadU32(blk_ptr, ABIV3::cbv_trial_value_dim_off);
-                    side_single.test_uses_vector_basis = loadU32(blk_ptr, ABIV3::cbv_test_uses_vector_basis_off);
-                    side_single.trial_uses_vector_basis = loadU32(blk_ptr, ABIV3::cbv_trial_uses_vector_basis_off);
-                    side_single.test_basis_values = loadPtr(blk_ptr, ABIV3::cbv_test_basis_values_off);
-                    side_single.test_phys_grads_xyz = loadPtr(blk_ptr, ABIV3::cbv_test_phys_grads_off);
-                    side_single.trial_basis_values = loadPtr(blk_ptr, ABIV3::cbv_trial_basis_values_off);
-                    side_single.trial_phys_grads_xyz = loadPtr(blk_ptr, ABIV3::cbv_trial_phys_grads_off);
-                    side_single.test_phys_hessians = loadPtr(blk_ptr, ABIV3::cbv_test_phys_hessians_off);
-                    side_single.trial_phys_hessians = loadPtr(blk_ptr, ABIV3::cbv_trial_phys_hessians_off);
-                    side_single.solution_coefficients = loadPtr(blk_ptr, ABIV3::cbv_solution_coefficients_off);
-                    side_single.num_previous_solutions = loadU32(blk_ptr, ABIV3::cbv_num_previous_solutions_off);
+                    side_single.n_test_dofs = loadU32(bp, ABIV3::cbv_n_test_dofs_off);
+                    side_single.n_trial_dofs = loadU32(bp, ABIV3::cbv_n_trial_dofs_off);
+                    side_single.test_value_dim = loadU32(bp, ABIV3::cbv_test_value_dim_off);
+                    side_single.trial_value_dim = loadU32(bp, ABIV3::cbv_trial_value_dim_off);
+                    side_single.test_uses_vector_basis = loadU32(bp, ABIV3::cbv_test_uses_vector_basis_off);
+                    side_single.trial_uses_vector_basis = loadU32(bp, ABIV3::cbv_trial_uses_vector_basis_off);
+                    side_single.test_basis_values = loadPtr(bp, ABIV3::cbv_test_basis_values_off);
+                    side_single.test_phys_grads_xyz = loadPtr(bp, ABIV3::cbv_test_phys_grads_off);
+                    side_single.trial_basis_values = loadPtr(bp, ABIV3::cbv_trial_basis_values_off);
+                    side_single.trial_phys_grads_xyz = loadPtr(bp, ABIV3::cbv_trial_phys_grads_off);
+                    side_single.test_phys_hessians = loadPtr(bp, ABIV3::cbv_test_phys_hessians_off);
+                    side_single.trial_phys_hessians = loadPtr(bp, ABIV3::cbv_trial_phys_hessians_off);
+                    side_single.solution_coefficients = loadPtr(bp, ABIV3::cbv_solution_coefficients_off);
+                    side_single.num_previous_solutions = loadU32(bp, ABIV3::cbv_num_previous_solutions_off);
                     side_single.previous_solution_coefficients_base =
-                        gepBytes(blk_ptr, ABIV3::cbv_previous_solution_coefficients_off);
+                        gepBytes(bp, ABIV3::cbv_previous_solution_coefficients_off);
+                    element_matrix_single = loadPtr(bp, ABIV3::cbv_element_matrix_off);
+                    element_vector_single = loadPtr(bp, ABIV3::cbv_element_vector_off);
+                };
 
-                    // Per-block output pointers
-                    element_matrix_single = loadPtr(blk_ptr, ABIV3::cbv_element_matrix_off);
-                    element_vector_single = loadPtr(blk_ptr, ABIV3::cbv_element_vector_off);
+                // --- Reusable lambda: load coupled geometry from element pointer ---
+                auto loadCoupledGeometry = [&](llvm::Value* ep) {
+                    auto* null_f64_p = llvm::ConstantPointerNull::get(f64_ptr);
+                    side_single.side_ptr = ep;
+                    side_single.dim = loadU32(ep, ABIV3::coupled_dim_off);
+                    side_single.n_qpts = loadU32(ep, ABIV3::coupled_n_qpts_off);
+                    side_single.integration_weights = loadPtr(ep, ABIV3::coupled_integration_weights_off);
+                    side_single.jacobians = loadPtr(ep, ABIV3::coupled_jacobians_off);
+                    side_single.inverse_jacobians = loadPtr(ep, ABIV3::coupled_inverse_jacobians_off);
+                    side_single.jacobian_dets = loadPtr(ep, ABIV3::coupled_jacobian_dets_off);
+                    side_single.physical_points_xyz = loadPtr(ep, ABIV3::coupled_physical_points_xyz_off);
+                    side_single.cell_diameter = loadF64(ep, ABIV3::coupled_cell_diameter_off);
+                    side_single.cell_volume = loadF64(ep, ABIV3::coupled_cell_volume_off);
+                    side_single.time = loadF64(ep, ABIV3::coupled_time_off);
+                    side_single.dt = loadF64(ep, ABIV3::coupled_dt_off);
+                    side_single.field_solutions = loadPtr(ep, ABIV3::coupled_field_solutions_off);
+                    side_single.num_field_solutions = loadU32(ep, ABIV3::coupled_num_field_solutions_off);
+                    side_single.time_derivative_term_weight = loadF64(ep, ABIV3::coupled_time_derivative_term_weight_off);
+                    side_single.non_time_derivative_term_weight = loadF64(ep, ABIV3::coupled_non_time_derivative_term_weight_off);
+                    side_single.dt_stencil_coeffs_base = builder.CreatePointerCast(
+                        gepBytes(ep, ABIV3::coupled_dt_stencil_coeffs_off), f64_ptr);
+                    side_single.dt_term_weights_base = builder.CreatePointerCast(
+                        gepBytes(ep, ABIV3::coupled_dt_term_weights_off), f64_ptr);
+                    side_single.max_time_derivative_order = loadU32(ep, ABIV3::coupled_max_time_derivative_order_off);
+                    side_single.jit_constants = loadPtr(ep, ABIV3::coupled_jit_constants_off);
+                    side_single.quad_points_xyz = null_f64_p;
+                    side_single.normals_xyz = null_f64_p;
+                    side_single.interleaved_qpoint_geometry = null_f64_p;
+                    side_single.interleaved_qpoint_geometry_stride_reals = builder.getInt32(0);
+                    side_single.interleaved_qpoint_geometry_physical_offset = builder.getInt32(0);
+                    side_single.interleaved_qpoint_geometry_jacobian_offset = builder.getInt32(0);
+                    side_single.interleaved_qpoint_geometry_inverse_jacobian_offset = builder.getInt32(0);
+                    side_single.interleaved_qpoint_geometry_det_offset = builder.getInt32(0);
+                    side_single.interleaved_qpoint_geometry_normal_offset = builder.getInt32(0);
+                    side_single.test_phys_hessians = null_f64_p;
+                    side_single.trial_phys_hessians = null_f64_p;
+                    side_single.test_basis_vector_values_xyz = null_f64_p;
+                    side_single.test_basis_curls_xyz = null_f64_p;
+                    side_single.test_basis_divs = null_f64_p;
+                    side_single.trial_basis_vector_values_xyz = null_f64_p;
+                    side_single.trial_basis_curls_xyz = null_f64_p;
+                    side_single.trial_basis_divs = null_f64_p;
+                    side_single.num_previous_solutions = builder.getInt32(0);
+                    side_single.previous_solution_coefficients_base =
+                        llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(i8_ptr));
+                    side_single.num_history_steps = builder.getInt32(0);
+                    side_single.history_weights = null_f64_p;
+                    side_single.history_solution_coefficients_base =
+                        llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(i8_ptr));
+                    side_single.coupled_integrals = null_f64_p;
+                    side_single.coupled_aux = null_f64_p;
+                    side_single.cell_domain_id = builder.getInt32(0);
+                    side_single.facet_area = f64c(0.0);
+                    side_single.material_state_old_base = null_f64_p;
+                    side_single.material_state_work_base = null_f64_p;
+                    side_single.material_state_stride_bytes = builder.getInt64(0);
+                    // Per-block fields set by loadBlockView().
+                    side_single.n_test_dofs = builder.getInt32(0);
+                    side_single.n_trial_dofs = builder.getInt32(0);
+                    side_single.test_field_type = builder.getInt32(0);
+                    side_single.trial_field_type = builder.getInt32(0);
+                    side_single.test_value_dim = builder.getInt32(1);
+                    side_single.trial_value_dim = builder.getInt32(1);
+                    side_single.test_uses_vector_basis = builder.getInt32(0);
+                    side_single.trial_uses_vector_basis = builder.getInt32(0);
+                    side_single.test_basis_values = null_f64_p;
+                    side_single.trial_basis_values = null_f64_p;
+                    side_single.test_phys_grads_xyz = null_f64_p;
+                    side_single.trial_phys_grads_xyz = null_f64_p;
+                    side_single.solution_coefficients = null_f64_p;
+                };
 
-                    // Emit per-block terms
-                    for (std::size_t t = 0; t < blk_data.terms.size(); ++t) {
+                // --- Reusable lambda: emit a range of terms for a block ---
+                auto emitCoupledTermRange = [&](const CoupledKernelInfo::BlockTerms& blk_data,
+                                                std::size_t blk_idx,
+                                                std::size_t first_t, std::size_t end_t) {
+                    const std::string bs = std::to_string(blk_idx);
+                    for (std::size_t t = first_t; t < end_t; ++t) {
                         const auto& term = blk_data.terms[t];
                         const std::string ts = bs + "_" + std::to_string(t);
 
-                        // Set is_residual per-term: Vector-targeted terms come from
-                        // residual forms where TrialFunction represents u_h (current solution).
                         is_residual = (term.target == LoweredTerm::Target::Vector);
 
                         auto* te = llvm::BasicBlock::Create(*ctx, "cb" + ts + ".entry", fn);
@@ -10436,8 +10683,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         builder.CreateBr(te);
                         builder.SetInsertPoint(te);
                         auto* tw = termWeight(side_single, term.time_derivative_order);
-                        auto* is_zero = builder.CreateFCmpOEQ(tw, f64c(0.0));
-                        builder.CreateCondBr(is_zero, tx, tb);
+                        auto* is_zero_w = builder.CreateFCmpOEQ(tw, f64c(0.0));
+                        builder.CreateCondBr(is_zero_w, tx, tb);
 
                         builder.SetInsertPoint(tb);
                         emitForLoop(side_single.n_qpts, "cq" + ts, [&](llvm::Value* q) {
@@ -10456,13 +10703,26 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 (term.target == LoweredTerm::Target::Matrix) ||
                                 (term.target == LoweredTerm::Target::Auto && blk_data.want_matrix);
                             if (emit_matrix) {
-                                const std::size_t n_trial_only_c = cached_ptr != nullptr
-                                    ? static_cast<std::size_t>(std::count_if(
-                                          term.dep_mask.begin(), term.dep_mask.end(),
-                                          [](std::uint8_t m) { return m == 0x2u; }))
-                                    : 0u;
+                                std::uint32_t trial_only_cost_c = 0;
+                                std::size_t n_trial_only_c = 0;
+                                if (cached_ptr != nullptr) {
+                                    const auto& dep = term.dep_mask;
+                                    const auto& costs = term.subtree_costs;
+                                    for (std::size_t oi = 0; oi < dep.size(); ++oi) {
+                                        if (dep[oi] == 0x2u) {
+                                            ++n_trial_only_c;
+                                            trial_only_cost_c += (oi < costs.size()) ? costs[oi] : 1u;
+                                        }
+                                    }
+                                }
+                                const std::uint32_t n_test_est_c = fixed_n_test_dofs_minus.value_or(
+                                    hw.defaultTestDofEstimate());
+                                const std::uint32_t reuse_c = (n_test_est_c > 1u) ? (n_test_est_c - 1u) : 0u;
+                                const bool trial_cache_profitable_c =
+                                    (n_trial_only_c >= hw.trialOnlyMinOps()) &&
+                                    (trial_only_cost_c * reuse_c >= hw.trialOnlyMinSavings());
 
-                                if (n_trial_only_c >= 4u) {
+                                if (trial_cache_profitable_c) {
                                     emitForLoop(side_single.n_trial_dofs, "cj" + ts, [&](llvm::Value* j) {
                                         std::vector<CodeValue> trial_vals;
                                         evalKernelIRSingleValue(term, q, builder.getInt32(0), j, side_single,
@@ -10499,11 +10759,212 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         builder.CreateBr(tx);
                         builder.SetInsertPoint(tx);
                     }
+                };
+
+                // ============================================================
+                // Plan term-group splits for oversized blocks
+                // ============================================================
+                const auto helper_budget = hw.helperTextBudgetBytes();
+                const auto bpo = bytesPerOpCalibration().calibratedBytesPerOp();
+
+                std::vector<BlockSplitPlan> split_plans;
+                split_plans.reserve(coupled->blocks.size());
+                bool any_block_needs_split = false;
+
+                for (std::size_t blk = 0; blk < coupled->blocks.size(); ++blk) {
+                    std::vector<std::size_t> op_counts;
+                    op_counts.reserve(coupled->blocks[blk].terms.size());
+                    for (const auto& t : coupled->blocks[blk].terms) {
+                        op_counts.push_back(t.ir.opCount());
+                    }
+                    auto plan = planTermGroups(op_counts, helper_budget, bpo);
+                    plan.block_index = blk;
+                    any_block_needs_split = any_block_needs_split || plan.needs_split;
+                    split_plans.push_back(std::move(plan));
                 }
 
-                // Disable the shared QP cache and cross-block CSE after coupled dispatch.
-                // (Cache entries and their allocas remain valid in the generated
-                // function -- they were created in the entry block.)
+                // Telemetry: log split decisions
+                {
+                    static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                    if (jit_telemetry && any_block_needs_split) {
+                        for (std::size_t blk = 0; blk < split_plans.size(); ++blk) {
+                            const auto& plan = split_plans[blk];
+                            if (plan.needs_split) {
+                                std::cerr << "[JIT micro-kernel] block " << blk
+                                          << ": " << plan.groups.size() << " groups"
+                                          << " (total_est=" << plan.total_estimated_bytes
+                                          << ", budget=" << helper_budget << ")\n";
+                                for (std::size_t gi = 0; gi < plan.groups.size(); ++gi) {
+                                    const auto& g = plan.groups[gi];
+                                    std::cerr << "  group " << gi << ": terms ["
+                                              << g.first_term << "," << (g.first_term + g.num_terms) << ")"
+                                              << " est=" << g.estimated_text_bytes << " bytes\n";
+                                }
+                            } else {
+                                std::cerr << "[JIT micro-kernel] block " << blk
+                                          << ": 1 group (no split, est=" << plan.total_estimated_bytes << ")\n";
+                            }
+                        }
+                        std::cerr.flush();
+                    }
+                }
+
+                // ============================================================
+                // Pre-allocate shared cache buffers and emit helper functions
+                // ============================================================
+                llvm::Value* split_qp_cache_buf = nullptr;
+                llvm::Value* split_xblock_cache_buf = nullptr;
+
+                // helper_fns[blk][gi] = llvm::Function* for each split group
+                std::vector<std::vector<llvm::Function*>> helper_fns(coupled->blocks.size());
+
+                if (any_block_needs_split) {
+                    // Pre-allocate flat cache buffers in the dispatcher function.
+                    const std::uint32_t qp_buf_doubles = qp_cache_budget_bytes / 8u;
+                    const std::uint32_t xblock_buf_doubles = xblock_cache_budget_bytes / 8u;
+                    split_qp_cache_buf = allocaInEntry(f64, builder.getInt32(qp_buf_doubles), "split_qp_buf");
+                    split_xblock_cache_buf = allocaInEntry(f64, builder.getInt32(xblock_buf_doubles), "split_xb_buf");
+
+                    // Helper function signature: void(i8* args, i32 batch_idx, i8* blocks_ptr, f64* qp_cache, f64* xblock_cache)
+                    auto* helper_fn_type = llvm::FunctionType::get(
+                        builder.getVoidTy(),
+                        {i8_ptr, i32, i8_ptr, f64_ptr, f64_ptr},
+                        false);
+
+                    // Emit helper functions for each split block/group.
+                    for (std::size_t blk = 0; blk < coupled->blocks.size(); ++blk) {
+                        const auto& plan = split_plans[blk];
+                        if (!plan.needs_split) continue;
+                        const auto& blk_data = coupled->blocks[blk];
+
+                        helper_fns[blk].resize(plan.groups.size(), nullptr);
+
+                        for (std::size_t gi = 0; gi < plan.groups.size(); ++gi) {
+                            const auto& group = plan.groups[gi];
+
+                            // Create helper function (module-private).
+                            std::string hname = std::string(symbol) + "_b" + std::to_string(blk) + "_g" + std::to_string(gi);
+                            auto* hfn = llvm::Function::Create(
+                                helper_fn_type, llvm::Function::InternalLinkage, hname, module);
+                            hfn->addFnAttr(llvm::Attribute::NoUnwind);
+                            hfn->addFnAttr(llvm::Attribute::WillReturn);
+                            if (group.estimated_text_bytes > 8192u) {
+                                hfn->addFnAttr(llvm::Attribute::NoInline);
+                            }
+                            hfn->addParamAttr(3, llvm::Attribute::NoAlias);
+                            hfn->addParamAttr(4, llvm::Attribute::NoAlias);
+                            helper_fns[blk][gi] = hfn;
+
+                            auto* helper_entry = llvm::BasicBlock::Create(*ctx, "entry", hfn);
+
+                            // Save codegen state.
+                            auto* saved_fn = fn;
+                            auto saved_ip = builder.saveIP();
+                            auto saved_side = side_single;
+                            auto* saved_elem_mat = element_matrix_single;
+                            auto* saved_elem_vec = element_vector_single;
+                            bool saved_is_res = is_residual;
+                            int saved_tg = qp_cache_trial_group;
+                            auto* saved_qp_base = active_qp_cache_base;
+                            auto* saved_xb_base = active_xblock_cache_base;
+
+                            // Switch to helper function context.
+                            fn = hfn;
+                            builder.SetInsertPoint(helper_entry);
+
+                            // Set cache redirection to helper args.
+                            active_qp_cache_base = hfn->getArg(3);
+                            active_xblock_cache_base = hfn->getArg(4);
+
+                            // Derive element pointer from args + batch_idx.
+                            auto* h_args = hfn->getArg(0);
+                            auto* h_bidx = hfn->getArg(1);
+                            auto* h_blocks = hfn->getArg(2);
+
+                            auto* h_elems_base = loadPtr(h_args, ABIV3::coupled_batch_elements_off);
+                            auto* h_bidx64 = builder.CreateZExt(h_bidx, i64);
+                            auto* h_elem_ptr = builder.CreateGEP(builder.getInt8Ty(), h_elems_base,
+                                builder.CreateMul(h_bidx64,
+                                    builder.getInt64(sizeof(assembly::jit::CoupledCellKernelArgsV1))));
+
+                            // Load geometry and block view.
+                            loadCoupledGeometry(h_elem_ptr);
+                            loadBlockView(h_blocks, blk);
+
+                            // Set trial group for QP cache keying.
+                            qp_cache_trial_group = blk_data.trial_group;
+
+                            // Re-derive existing cache entry data pointers for this helper.
+                            for (auto& [k, e] : qp_shared_cache) {
+                                e.data = builder.CreateGEP(f64, active_qp_cache_base,
+                                    builder.getInt32(e.buffer_offset));
+                            }
+                            for (auto& [k, e] : dep0_xblock_cache) {
+                                e.data = builder.CreateGEP(f64, active_xblock_cache_base,
+                                    builder.getInt32(e.buffer_offset));
+                            }
+
+                            // Emit terms for this group.
+                            emitCoupledTermRange(blk_data, blk, group.first_term,
+                                                 group.first_term + group.num_terms);
+
+                            builder.CreateRetVoid();
+
+                            // Restore codegen state.
+                            fn = saved_fn;
+                            builder.restoreIP(saved_ip);
+                            side_single = saved_side;
+                            element_matrix_single = saved_elem_mat;
+                            element_vector_single = saved_elem_vec;
+                            is_residual = saved_is_res;
+                            qp_cache_trial_group = saved_tg;
+                            active_qp_cache_base = saved_qp_base;
+                            active_xblock_cache_base = saved_xb_base;
+                        }
+                    }
+
+                    // For inline blocks in split mode, redirect cache to the
+                    // dispatcher's alloca buffers.
+                    active_qp_cache_base = split_qp_cache_buf;
+                    active_xblock_cache_base = split_xblock_cache_buf;
+                }
+
+                // ============================================================
+                // Dispatcher: block loop (call helpers or emit inline)
+                // ============================================================
+                for (std::size_t blk = 0; blk < coupled->blocks.size(); ++blk) {
+                    const auto& blk_data = coupled->blocks[blk];
+                    qp_cache_trial_group = blk_data.trial_group;
+
+                    if (any_block_needs_split && split_plans[blk].needs_split) {
+                        // Call helper functions for each term group.
+                        for (std::size_t gi = 0; gi < helper_fns[blk].size(); ++gi) {
+                            builder.CreateCall(helper_fns[blk][gi],
+                                {args_ptr, b_idx, coupled_blocks_ptr,
+                                 split_qp_cache_buf, split_xblock_cache_buf});
+                        }
+                    } else {
+                        // Re-derive cache entry data pointers for main function.
+                        if (any_block_needs_split) {
+                            for (auto& [k, e] : qp_shared_cache) {
+                                e.data = builder.CreateGEP(f64, active_qp_cache_base,
+                                    builder.getInt32(e.buffer_offset));
+                            }
+                            for (auto& [k, e] : dep0_xblock_cache) {
+                                e.data = builder.CreateGEP(f64, active_xblock_cache_base,
+                                    builder.getInt32(e.buffer_offset));
+                            }
+                        }
+
+                        // Inline emission for this block.
+                        loadBlockView(coupled_blocks_ptr, blk);
+                        emitCoupledTermRange(blk_data, blk, 0, blk_data.terms.size());
+                    }
+                }
+
+                // Disable caches after coupled dispatch.
+                active_qp_cache_base = nullptr;
+                active_xblock_cache_base = nullptr;
                 qp_shared_cache_ptr = nullptr;
                 qp_cache_trial_group = -1;
                 dep0_xblock_active = false;
@@ -12792,7 +13253,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                                  .vectorize = options_.vectorize,
                                                  .enable_polly = options_.tensor.enable_polly,
                                                  .enable_tiling = options_.tensor.enable_loop_tiling,
-                                                 .tile_size = static_cast<int>(options_.tensor.tile_size),
+                                                 .tile_size = static_cast<int>(options_.tensor.tile_size > 0u ? options_.tensor.tile_size : hw.defaultTileSize()),
                                                  .min_tiling_extent = static_cast<int>(options_.tensor.min_tiling_extent),
                                              });
 
@@ -12802,7 +13263,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         }
 
                         auto lowered_scalar = lowerToKernelIR(scalar_expr);
-                        // KernelIR::optimize() disabled — see earlier comment.
+                        lowered_scalar.ir.optimize();
                         auto scalar_shapes = inferShapes(lowered_scalar.ir, ir.testSpace(), ir.trialSpace(), /*require_scalar_root=*/false);
                         if (!scalar_shapes.ok) {
                             throw std::runtime_error(scalar_shapes.message.empty() ? "LLVMGen: failed to infer scalar shapes" : scalar_shapes.message);
@@ -12840,7 +13301,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         }
 
                         auto lowered_base = lowerToKernelIR(spec.base);
-                        // KernelIR::optimize() disabled — see earlier comment.
+                        lowered_base.ir.optimize();
                         auto base_shapes = inferShapes(lowered_base.ir, ir.testSpace(), ir.trialSpace(), /*require_scalar_root=*/false);
                         if (!base_shapes.ok) {
                             throw std::runtime_error(base_shapes.message.empty() ? "LLVMGen: failed to infer base-tensor shapes" : base_shapes.message);
@@ -13248,10 +13709,39 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                               << " suppress_dof_unroll=" << suppress_dof_unroll << "\n";
                     std::cerr.flush();
                 }
+
+                // Snapshot object cache bytes before compilation for telemetry.
+                // The delta (bytes_after - bytes_before) is correct only if no
+                // concurrent compilation runs on this engine instance.  Currently
+                // compilePlan is called sequentially during form installation.
+                const auto bytes_before = engine.objectCacheStats().bytes_written;
+
                 engine.addModule(std::move(tsm));
                 out_address = engine.lookup(symbol);
+
+                // Record bytes-per-op telemetry for future budget calibration.
+                {
+                    const auto bytes_after = engine.objectCacheStats().bytes_written;
+                    const auto object_bytes = bytes_after - bytes_before;
+                    std::uint64_t total_ir_ops = 0;
+                    for (const auto& t : terms) {
+                        total_ir_ops += t.ir.opCount();
+                    }
+                    if (coupled) {
+                        for (const auto& blk : coupled->blocks) {
+                            for (const auto& t : blk.terms) {
+                                total_ir_ops += t.ir.opCount();
+                            }
+                        }
+                    }
+                    if (object_bytes > 0 && total_ir_ops > 0) {
+                        bytesPerOpCalibration().recordSample(object_bytes, total_ir_ops);
+                    }
+                }
+
                 if (jit_telemetry) {
-                    std::cerr << "[JIT compile-done] " << symbol << "\n";
+                    std::cerr << "[JIT compile-done] " << symbol
+                              << " calibrated_bpo=" << bytesPerOpCalibration().calibratedBytesPerOp() << "\n";
                     std::cerr.flush();
                 }
             }
@@ -13356,9 +13846,8 @@ LLVMGenResult LLVMGen::compileAndAddFusedKernel(JITEngine& engine,
         }
         {
             const auto ops_before = lowered.ir.opCount();
-            // KernelIR::optimize() disabled — see earlier comment.
-            static const bool enable_ir_opt_r = (std::getenv("SVMP_ENABLE_IR_OPT") != nullptr);
-            const auto eliminated = enable_ir_opt_r ? lowered.ir.optimize() : 0u;
+            static const bool disable_ir_opt_r = (std::getenv("SVMP_DISABLE_IR_OPT") != nullptr);
+            const auto eliminated = disable_ir_opt_r ? 0u : lowered.ir.optimize();
             static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
             if (jit_telemetry) {
                 std::cerr << "[JIT telemetry] residual term " << tidx
@@ -13530,15 +14019,15 @@ LLVMGenResult LLVMGen::compileAndAddCoupledKernel(JITEngine& engine,
                 }
                 {
                     const auto ops_before = lowered.ir.opCount();
-                    // KernelIR::optimize() disabled — see earlier comment.
-                    static const bool enable_ir_opt_coupled = (std::getenv("SVMP_ENABLE_IR_OPT") != nullptr);
-                    const auto eliminated = enable_ir_opt_coupled ? lowered.ir.optimize() : 0u;
+                    // Shape-aware KernelIR::optimize(): zero propagation, CSE, DCE.
+                    static const bool disable_ir_opt_coupled = (std::getenv("SVMP_DISABLE_IR_OPT") != nullptr);
+                    const auto eliminated = disable_ir_opt_coupled ? 0u : lowered.ir.optimize();
                     static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
                     if (jit_telemetry && eliminated > 0) {
                         std::cerr << "[JIT telemetry] coupled block " << bi << " term " << tidx
                                   << ": KernelIR " << ops_before << " -> " << lowered.ir.opCount()
                                   << " ops (-" << eliminated << ", ~"
-                                  << (lowered.ir.opCount() * 58) << " bytes .text est)\n";
+                                  << (lowered.ir.opCount() * bytesPerOpCalibration().calibratedBytesPerOp()) << " bytes .text est)\n";
                     }
                 }
 
@@ -13591,14 +14080,16 @@ LLVMGenResult LLVMGen::compileAndAddCoupledKernel(JITEngine& engine,
                     }
                 }
 
-                // Compute per-op structural hashes for cross-block CSE
+                // Compute per-op structural hashes and subtree costs
                 auto per_op_hashes = lowered.ir.perOpStructuralHashes();
+                auto costs = lowered.ir.subtreeCosts();
 
                 blk_terms.terms.push_back(LoweredTerm{
                     .ir = std::move(lowered.ir),
                     .shapes = std::move(shapes.shapes),
                     .dep_mask = std::move(dep),
                     .op_hashes = std::move(per_op_hashes),
+                    .subtree_costs = std::move(costs),
                     .time_derivative_order = term.time_derivative_order,
                     .tensor_ir = std::move(tensor_ir),
                     .has_indexed_access = has_indexed_access,

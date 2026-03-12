@@ -778,6 +778,7 @@ set(FE_FORMS_SOURCES
 	    Forms/SymbolicDifferentiation.cpp
 	    Forms/PointEvaluator.cpp
 	    Forms/JIT/ExternalCalls.cpp
+	    Forms/JIT/HardwareProfile.cpp
 	    Forms/JIT/JITCompiler.cpp
 	    Forms/JIT/JITEngine.cpp
 	    Forms/JIT/KernelIR.cpp

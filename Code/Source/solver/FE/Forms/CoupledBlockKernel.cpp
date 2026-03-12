@@ -9,8 +9,10 @@
 
 #include "Core/Logger.h"
 #include "Forms/FormKernels.h"
+#include "Forms/JIT/HardwareProfile.h"
 #include "Forms/JIT/JITCompiler.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Forms/JIT/KernelIR.h"
 
 #include <algorithm>
 
@@ -195,12 +197,91 @@ void CoupledBlockKernel::primeAllBlocksColocated()
         return;
     }
 
-    // Compile all block kernels into a single module.
-    std::vector<jit::JITCompiler::ColocatedKernelResult> results;
-    auto compile_result = compiler_->compileColocated(specs, results);
+    // Partition specs into groups whose estimated .text fits within L1i.
+    // This prevents instruction cache thrashing for large coupled systems.
+    const auto& hw = jit::hardwareProfile();
+    const std::uint64_t text_budget = hw.colocationTextBudgetBytes();
+    // Estimate per-spec .text size from actual KernelIR op counts when
+    // available (FormIR terms → lowerToKernelIR → optimize → opCount).
+    // Falls back to a conservative heuristic if lowering fails or no
+    // FormIR is available.
+    // Use telemetry-calibrated bytes/op when available, else default.
+    const auto kBytesPerOp = jit::bytesPerOpCalibration().calibratedBytesPerOp();
+    constexpr auto kFallbackOpsPerTerm = jit::HardwareProfile::kFallbackOpsPerTerm;
+    auto estimateSpecSize = [&](const jit::JITCompiler::ColocatedKernelSpec& spec) -> std::uint64_t {
+        if (!spec.ir) {
+            return static_cast<std::uint64_t>(spec.term_indices.size()) * kFallbackOpsPerTerm * kBytesPerOp;
+        }
+        std::uint64_t total_ops = 0;
+        const auto& terms = spec.ir->terms();
+        for (const auto idx : spec.term_indices) {
+            if (idx >= terms.size()) {
+                total_ops += kFallbackOpsPerTerm;
+                continue;
+            }
+            try {
+                auto lowered = jit::lowerToKernelIR(terms[idx].integrand);
+                lowered.ir.optimize();
+                total_ops += lowered.ir.opCount();
+            } catch (...) {
+                total_ops += kFallbackOpsPerTerm;
+            }
+        }
+        return total_ops * kBytesPerOp;
+    };
 
-    if (!compile_result.ok || results.size() != specs.size()) {
-        FE_LOG_WARNING("CoupledBlockKernel: colocated compilation failed: " + compile_result.message);
+    // Greedy first-fit partitioning.
+    struct Partition {
+        std::vector<std::size_t> spec_indices;  // indices into specs[]
+        std::uint64_t estimated_bytes{0};
+    };
+    std::vector<Partition> partitions;
+    for (std::size_t si = 0; si < specs.size(); ++si) {
+        const auto est = estimateSpecSize(specs[si]);
+        bool placed = false;
+        for (auto& part : partitions) {
+            if (part.estimated_bytes + est <= text_budget) {
+                part.spec_indices.push_back(si);
+                part.estimated_bytes += est;
+                placed = true;
+                break;
+            }
+        }
+        if (!placed) {
+            partitions.push_back({{si}, est});
+        }
+    }
+
+    // Compile each partition as a separate colocated module.
+    std::vector<jit::JITCompiler::ColocatedKernelResult> results(specs.size());
+    std::size_t modules_compiled = 0;
+    for (const auto& part : partitions) {
+        if (part.spec_indices.size() < 2u) {
+            // Single-kernel partition — no colocation benefit.
+            continue;
+        }
+
+        std::vector<jit::JITCompiler::ColocatedKernelSpec> group_specs;
+        group_specs.reserve(part.spec_indices.size());
+        for (const auto si : part.spec_indices) {
+            group_specs.push_back(specs[si]);
+        }
+
+        std::vector<jit::JITCompiler::ColocatedKernelResult> group_results;
+        auto compile_result = compiler_->compileColocated(group_specs, group_results);
+
+        if (!compile_result.ok || group_results.size() != group_specs.size()) {
+            FE_LOG_WARNING("CoupledBlockKernel: colocated partition failed: " + compile_result.message);
+            continue;
+        }
+
+        for (std::size_t gi = 0; gi < group_results.size(); ++gi) {
+            results[part.spec_indices[gi]] = group_results[gi];
+        }
+        ++modules_compiled;
+    }
+
+    if (modules_compiled == 0) {
         return;
     }
 
@@ -231,7 +312,8 @@ void CoupledBlockKernel::primeAllBlocksColocated()
     }
 
     FE_LOG_INFO("CoupledBlockKernel: colocated " + std::to_string(infos.size()) +
-                " block kernels into single module");
+                " block kernels into " + std::to_string(modules_compiled) +
+                " module(s) (L1i budget " + std::to_string(text_budget) + " bytes)");
 }
 
 } // namespace forms

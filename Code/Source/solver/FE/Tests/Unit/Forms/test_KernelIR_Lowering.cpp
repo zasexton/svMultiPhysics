@@ -9,6 +9,7 @@
 
 #include "Forms/FormExpr.h"
 #include "Forms/JIT/KernelIR.h"
+#include "Forms/JIT/HardwareProfile.h"
 
 #include <bit>
 #include <cstdint>
@@ -17,6 +18,10 @@ namespace svmp {
 namespace FE {
 namespace forms {
 namespace test {
+
+// ============================================================================
+// Lowering tests
+// ============================================================================
 
 TEST(KernelIRLowering, LowerConstantPreservesValue)
 {
@@ -83,8 +88,547 @@ TEST(KernelIRHashing, DifferentExprsDifferentHash)
     EXPECT_NE(h1, h2);
 }
 
+// ============================================================================
+// Optimize: zero propagation (shape-aware)
+// ============================================================================
+
+TEST(KernelIROptimize, ConstantFoldingMultiply)
+{
+    // const * const → const
+    const auto expr = FormExpr::constant(Real(3.0)) * FormExpr::constant(Real(4.0));
+    auto r = jit::lowerToKernelIR(expr);
+    const auto before = r.ir.opCount();
+    const auto eliminated = r.ir.optimize();
+    EXPECT_GT(eliminated, 0u);
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 12.0);
+}
+
+TEST(KernelIROptimize, ConstantFoldingAdd)
+{
+    const auto expr = FormExpr::constant(Real(1.5)) + FormExpr::constant(Real(2.5));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 4.0);
+}
+
+TEST(KernelIROptimize, IdentityMultiplyOneTimesX)
+{
+    // 1 * X → X
+    const auto x = FormExpr::parameterRef(0);
+    const auto expr = FormExpr::constant(Real(1.0)) * x;
+    auto r = jit::lowerToKernelIR(expr);
+    const auto before = r.ir.opCount();
+    r.ir.optimize();
+
+    // Root should now be ParameterRef directly (no Multiply)
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::ParameterRef);
+    // DCE should remove the Constant(1.0) and Multiply ops
+    EXPECT_LT(r.ir.opCount(), before);
+}
+
+TEST(KernelIROptimize, ZeroPlusXEliminated)
+{
+    // 0 + X → X
+    const auto x = FormExpr::parameterRef(0);
+    const auto expr = FormExpr::typedZero() + x;
+    auto r = jit::lowerToKernelIR(expr);
+    const auto before = r.ir.opCount();
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::ParameterRef);
+    EXPECT_LT(r.ir.opCount(), before);
+}
+
+TEST(KernelIROptimize, XMinusZeroEliminated)
+{
+    // X - 0 → X
+    const auto x = FormExpr::parameterRef(0);
+    const auto expr = x - FormExpr::typedZero();
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::ParameterRef);
+}
+
+TEST(KernelIROptimize, InnerProductWithZeroIsScalarZero)
+{
+    // inner(0, X) → Constant(0.0)
+    const auto x = FormExpr::parameterRef(0);
+    const auto expr = inner(FormExpr::typedZero(), x);
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 0.0);
+}
+
+TEST(KernelIROptimize, GradientOfZeroPreservesGradientOp)
+{
+    // grad(0) should keep the Gradient op (shape-changing: scalar→vector)
+    // NOT collapse to TypedZero
+    const auto expr = grad(FormExpr::typedZero());
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Gradient)
+        << "Gradient(0) must keep Gradient op for shape inference";
+}
+
+TEST(KernelIROptimize, NegateOfZeroCollapses)
+{
+    // -0 → TypedZero (shape-preserving, safe to collapse)
+    const auto expr = -FormExpr::typedZero();
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::TypedZero);
+}
+
+TEST(KernelIROptimize, TimeDerivativeOfZeroCollapses)
+{
+    // dt(0) → TypedZero (TimeDerivative is truly shape-preserving:
+    // scalar→scalar for shapeless TypedZero input)
+    const auto expr = dt(FormExpr::typedZero());
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::TypedZero);
+}
+
+TEST(KernelIROptimize, RestrictMinusOfZeroKeepsOp)
+{
+    // minus(0) must keep the RestrictMinus node for shape context.
+    const auto expr = minus(FormExpr::typedZero());
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::RestrictMinus)
+        << "RestrictMinus(0) must keep op for shape inference context";
+}
+
+TEST(KernelIROptimize, RestrictPlusOfZeroKeepsOp)
+{
+    // plus(0) must keep the RestrictPlus node for shape context.
+    const auto expr = plus(FormExpr::typedZero());
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::RestrictPlus)
+        << "RestrictPlus(0) must keep op for shape inference context";
+}
+
+TEST(KernelIROptimize, JumpOfZeroKeepsOp)
+{
+    // jump(0) must keep the Jump node — collapsing to bare TypedZero
+    // loses the rank context needed when the result is used in
+    // vector/matrix operations downstream.
+    const auto expr = jump(FormExpr::typedZero());
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Jump)
+        << "Jump(0) must keep Jump op for shape inference context";
+}
+
+TEST(KernelIROptimize, AverageOfZeroKeepsOp)
+{
+    // avg(0) must keep the Average node for shape inference.
+    const auto expr = avg(FormExpr::typedZero());
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Average)
+        << "Average(0) must keep Average op for shape inference context";
+}
+
+TEST(KernelIROptimize, AsVectorOfZerosKeepsOp)
+{
+    // AsVector(0, 0, 0) should stay as AsVector, not collapse to TypedZero.
+    // The op carries vector-rank information (3 components → 3-vector).
+    const auto expr = FormExpr::asVector({
+        FormExpr::typedZero(), FormExpr::typedZero(), FormExpr::typedZero()
+    });
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::AsVector)
+        << "AsVector(0,0,0) must keep AsVector for shape (3-vector, not scalar)";
+}
+
+TEST(KernelIROptimize, OuterProductWithZeroKeepsOp)
+{
+    // outer(0, X) should keep OuterProduct op (shape-changing: loses dim info)
+    const auto x = FormExpr::parameterRef(0);
+    const auto expr = outer(FormExpr::typedZero(), x);
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::OuterProduct)
+        << "OuterProduct(0, X) must keep OuterProduct for shape inference";
+}
+
+TEST(KernelIROptimize, ComponentOfZeroIsScalarZero)
+{
+    // component(0, 0) → Constant(0.0) (always scalar result)
+    const auto expr = component(FormExpr::typedZero(), 0);
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 0.0);
+}
+
+TEST(KernelIROptimize, PowerZeroExponentIsOne)
+{
+    // X^0 → 1
+    const auto x = FormExpr::parameterRef(0);
+    const auto expr = pow(x, FormExpr::constant(Real(0.0)));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 1.0);
+}
+
+TEST(KernelIROptimize, DoubleNegationEliminated)
+{
+    // --X → X
+    const auto x = FormExpr::parameterRef(0);
+    const auto expr = -(-x);
+    auto r = jit::lowerToKernelIR(expr);
+    const auto before = r.ir.opCount();
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::ParameterRef);
+    EXPECT_LT(r.ir.opCount(), before);
+}
+
+// ============================================================================
+// Optimize: post-rewrite CSE
+// ============================================================================
+
+TEST(KernelIROptimize, PostRewriteCSEMergesDuplicateConstants)
+{
+    // After folding, two subtrees that both produce Constant(0.0) should
+    // be merged by CSE, reducing the reachable op count.
+    const auto a = FormExpr::parameterRef(0);
+    const auto b = FormExpr::parameterRef(1);
+    // inner(0, a) → Constant(0.0) and inner(0, b) → Constant(0.0)
+    // Adding them: 0 + 0 → Constant(0.0) after folding
+    const auto expr = inner(FormExpr::typedZero(), a) + inner(FormExpr::typedZero(), b);
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    // Result should be a single Constant(0.0)
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 0.0);
+}
+
+// ============================================================================
+// Optimize: DCE
+// ============================================================================
+
+TEST(KernelIROptimize, DCERemovesUnreachableOps)
+{
+    // Build an expression where some subtrees become dead after folding.
+    // 0 * (a + b + c) → 0, making the entire (a+b+c) subtree dead.
+    // But with our shape-aware fix, 0*X is NOT collapsed — it stays as
+    // Multiply(0, X).  DCE won't remove X since it's still referenced.
+    // Instead test: 0 + X → X, making the 0 constant unreachable.
+    const auto a = FormExpr::parameterRef(0);
+    const auto expr = FormExpr::typedZero() + a;
+    auto r = jit::lowerToKernelIR(expr);
+    const auto before = r.ir.opCount();
+    r.ir.optimize();
+
+    // After 0+X → X aliasing + DCE, only the ParameterRef should remain.
+    EXPECT_LT(r.ir.opCount(), before);
+    EXPECT_EQ(r.ir.ops[r.ir.root].type, FormExprType::ParameterRef);
+}
+
+// ============================================================================
+// SubtreeCosts
+// ============================================================================
+
+TEST(KernelIRCost, LeafCostIsOne)
+{
+    const auto expr = FormExpr::parameterRef(0);
+    const auto r = jit::lowerToKernelIR(expr);
+    const auto costs = r.ir.subtreeCosts();
+
+    ASSERT_EQ(costs.size(), r.ir.opCount());
+    EXPECT_EQ(costs[r.ir.root], 1u);
+}
+
+TEST(KernelIRCost, BinaryOpCostAddsChildren)
+{
+    const auto a = FormExpr::parameterRef(0);
+    const auto b = FormExpr::parameterRef(1);
+    const auto expr = a + b;
+    const auto r = jit::lowerToKernelIR(expr);
+    const auto costs = r.ir.subtreeCosts();
+
+    // Root is Add: cost = cost(a) + cost(b) + 1 = 1 + 1 + 1 = 3
+    EXPECT_EQ(costs[r.ir.root], 3u);
+}
+
+TEST(KernelIRCost, TranscendentalOpsInflated)
+{
+    // sqrt(x) should cost more than plain x+y due to libm call overhead.
+    const auto x = FormExpr::parameterRef(0);
+    const auto y = FormExpr::parameterRef(1);
+
+    const auto sqrt_expr = sqrt(x);
+    const auto add_expr = x + y;
+
+    const auto r_sqrt = jit::lowerToKernelIR(sqrt_expr);
+    const auto r_add = jit::lowerToKernelIR(add_expr);
+    const auto costs_sqrt = r_sqrt.ir.subtreeCosts();
+    const auto costs_add = r_add.ir.subtreeCosts();
+
+    // sqrt(x): cost(x)=1 + 1(op) + 4(transcendental) = 6
+    // x + y:   cost(x)=1 + cost(y)=1 + 1(op) = 3
+    EXPECT_GT(costs_sqrt[r_sqrt.ir.root], costs_add[r_add.ir.root]);
+}
+
+// ============================================================================
+// HardwareProfile
+// ============================================================================
+
+TEST(HardwareProfile, DiscoverReturnsReasonableDefaults)
+{
+    const auto& hp = jit::hardwareProfile();
+    EXPECT_GT(hp.l1d.size_bytes, 0u);
+    EXPECT_GT(hp.l1i.size_bytes, 0u);
+    EXPECT_GT(hp.l2.size_bytes, 0u);
+    EXPECT_GE(hp.simd_width_bytes, 16u);  // At least SSE2
+}
+
+TEST(HardwareProfile, DerivedBudgetsArePositive)
+{
+    const auto& hp = jit::hardwareProfile();
+    EXPECT_GT(hp.qpCacheBudgetDoubles(), 0u);
+    EXPECT_GT(hp.colocationTextBudgetBytes(), 0u);
+    EXPECT_GT(hp.maxUnrollTripCount(), 0u);
+    EXPECT_GT(hp.defaultTileSize(), 0u);
+}
+
+TEST(HardwareProfile, ProfitabilityThresholdsAreReasonable)
+{
+    const auto& hp = jit::hardwareProfile();
+    // Trial-only caching thresholds
+    EXPECT_GE(hp.trialOnlyMinSavings(), 4u);
+    EXPECT_LE(hp.trialOnlyMinSavings(), 16u);
+    EXPECT_GE(hp.trialOnlyMinOps(), 2u);
+    EXPECT_LE(hp.trialOnlyMinOps(), 4u);
+    // Cross-block CSE threshold
+    EXPECT_GE(hp.crossBlockCostThreshold(), 2u);
+    EXPECT_LE(hp.crossBlockCostThreshold(), 8u);
+    // Default test DOF estimate
+    EXPECT_GE(hp.defaultTestDofEstimate(), 2u);
+    EXPECT_LE(hp.defaultTestDofEstimate(), 8u);
+}
+
+TEST(KernelIROptimize, ConstantFoldingThenCSEMergesEquivalentSums)
+{
+    // Build a+b and b+a where a and b are distinct constants.
+    // Constant folding makes both 2+3→5 and 3+2→5, then CSE merges
+    // the duplicate Constant(5) nodes.  The outer Add(5,5) folds to 10.
+    const auto a = FormExpr::constant(2.0);
+    const auto b = FormExpr::constant(3.0);
+    const auto ab = a + b;
+    const auto ba = b + a;
+    const auto expr = ab + ba;  // Add( Add(2,3), Add(3,2) )
+
+    auto r = jit::lowerToKernelIR(expr);
+    const auto before = r.ir.opCount();
+    r.ir.optimize();
+    const auto after = r.ir.opCount();
+
+    // After constant folding + CSE + DCE, everything collapses to
+    // Constant(10.0).
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_LT(after, before) << "Constant folding + CSE should reduce op count";
+}
+
+TEST(HardwareProfile, CumulativeCacheBudgetIsPositive)
+{
+    const auto& hp = jit::hardwareProfile();
+    EXPECT_GT(hp.qpCacheBudgetBytes(), 0u);
+    // Budget should be <= L1d size
+    EXPECT_LE(hp.qpCacheBudgetBytes(), hp.l1d.size_bytes);
+}
+
+TEST(HardwareProfile, BytesPerOpCalibrationDefaultsToStatic)
+{
+    // Before any samples, should return the static default.
+    jit::BytesPerOpCalibration cal;
+    EXPECT_EQ(cal.calibratedBytesPerOp(), jit::HardwareProfile::kBytesPerOp);
+    // Custom fallback is honored when uncalibrated.
+    EXPECT_EQ(cal.calibratedBytesPerOp(42u), 42u);
+    // After one sample, still not enough (need kMinSamples=2)
+    cal.recordSample(5800, 100);  // 58 bytes/op
+    EXPECT_EQ(cal.calibratedBytesPerOp(), jit::HardwareProfile::kBytesPerOp);
+    // After two samples, should return the measured average
+    cal.recordSample(4200, 100);  // 42 bytes/op → average (5800+4200)/(100+100) = 50
+    EXPECT_EQ(cal.calibratedBytesPerOp(), 50u);
+    // Custom fallback is ignored once calibrated.
+    EXPECT_EQ(cal.calibratedBytesPerOp(999u), 50u);
+}
+
+TEST(HardwareProfile, ContinuousProfitabilityFormulas)
+{
+    using HP = jit::HardwareProfile;
+
+    // 16KB L1d — tight cache
+    HP hp16;
+    hp16.l1d.size_bytes = 16u * 1024u;
+    EXPECT_EQ(hp16.trialOnlyMinSavings(), 12u);
+    EXPECT_EQ(hp16.trialOnlyMinOps(), 3u);
+    EXPECT_EQ(hp16.crossBlockCostThreshold(), 6u);
+    EXPECT_EQ(hp16.defaultTestDofEstimate(), 3u);
+
+    // 32KB L1d — typical desktop
+    HP hp32;
+    hp32.l1d.size_bytes = 32u * 1024u;
+    EXPECT_EQ(hp32.trialOnlyMinSavings(), 8u);
+    EXPECT_EQ(hp32.trialOnlyMinOps(), 2u);
+    EXPECT_EQ(hp32.crossBlockCostThreshold(), 4u);
+    EXPECT_EQ(hp32.defaultTestDofEstimate(), 4u);
+
+    // 48KB L1d — large cache
+    HP hp48;
+    hp48.l1d.size_bytes = 48u * 1024u;
+    EXPECT_EQ(hp48.trialOnlyMinSavings(), 6u);   // raw=4, clamped to 6
+    EXPECT_EQ(hp48.trialOnlyMinOps(), 2u);
+    EXPECT_EQ(hp48.crossBlockCostThreshold(), 3u); // raw=2, clamped to 3
+
+    // 64KB L1d — very large cache
+    HP hp64;
+    hp64.l1d.size_bytes = 64u * 1024u;
+    EXPECT_EQ(hp64.trialOnlyMinSavings(), 6u);   // floor clamp
+    EXPECT_EQ(hp64.crossBlockCostThreshold(), 3u);  // floor clamp
+}
+
+// ============================================================================
+// Term-group planning
+// ============================================================================
+
+TEST(TermGroupPlanning, SingleTermFitsInBudget)
+{
+    // A single small term fits within budget — no split.
+    std::vector<std::size_t> ops = {100};
+    auto plan = jit::planTermGroups(ops, /*budget_bytes=*/24576, /*bytes_per_op=*/58);
+    EXPECT_FALSE(plan.needs_split);
+    ASSERT_EQ(plan.groups.size(), 1u);
+    EXPECT_EQ(plan.groups[0].first_term, 0u);
+    EXPECT_EQ(plan.groups[0].num_terms, 1u);
+    EXPECT_EQ(plan.groups[0].estimated_text_bytes, 100u * 58u);
+}
+
+TEST(TermGroupPlanning, AllTermsFitInBudget_NoSplit)
+{
+    // 3 terms whose combined .text fits within budget.
+    std::vector<std::size_t> ops = {50, 60, 70};
+    const auto total = (50u + 60u + 70u) * 58u; // 10440 < 24576
+    auto plan = jit::planTermGroups(ops, 24576, 58);
+    EXPECT_FALSE(plan.needs_split);
+    ASSERT_EQ(plan.groups.size(), 1u);
+    EXPECT_EQ(plan.groups[0].num_terms, 3u);
+    EXPECT_EQ(plan.total_estimated_bytes, total);
+}
+
+TEST(TermGroupPlanning, LargeBlockSplitsIntoGroups)
+{
+    // 4 terms, each ~200 ops × 58 bpo = 11600 bytes.
+    // Budget = 24576. Terms 0+1 = 23200 fits, term 2 would exceed → split.
+    std::vector<std::size_t> ops = {200, 200, 200, 200};
+    auto plan = jit::planTermGroups(ops, 24576, 58);
+    EXPECT_TRUE(plan.needs_split);
+    ASSERT_GE(plan.groups.size(), 2u);
+
+    // Verify all terms are covered contiguously.
+    std::size_t total_terms = 0;
+    for (std::size_t g = 0; g < plan.groups.size(); ++g) {
+        EXPECT_EQ(plan.groups[g].first_term, total_terms);
+        total_terms += plan.groups[g].num_terms;
+        // Each group should fit within budget (except single oversized terms).
+        EXPECT_GT(plan.groups[g].num_terms, 0u);
+    }
+    EXPECT_EQ(total_terms, 4u);
+}
+
+TEST(TermGroupPlanning, SingleOversizedTermGetsOwnGroup)
+{
+    // One term that exceeds the budget by itself.
+    std::vector<std::size_t> ops = {50, 500, 50};
+    auto plan = jit::planTermGroups(ops, 24576, 58);
+    // 500 × 58 = 29000 > 24576, so it must get its own group.
+    EXPECT_TRUE(plan.needs_split);
+
+    // Find the group containing term 1 (the 500-op term).
+    bool found_big_term = false;
+    for (const auto& g : plan.groups) {
+        if (g.first_term <= 1 && g.first_term + g.num_terms > 1) {
+            found_big_term = true;
+            // If the oversized term got its own group, num_terms == 1.
+            if (g.estimated_text_bytes > 24576) {
+                EXPECT_EQ(g.num_terms, 1u);
+            }
+        }
+    }
+    EXPECT_TRUE(found_big_term);
+}
+
+TEST(TermGroupPlanning, PreservesContiguousOrder)
+{
+    // Verify groups are contiguous and non-overlapping.
+    std::vector<std::size_t> ops = {100, 100, 100, 100, 100, 100, 100, 100};
+    auto plan = jit::planTermGroups(ops, 12000, 58); // 100×58=5800 per term
+    EXPECT_TRUE(plan.needs_split);
+
+    std::size_t expected_first = 0;
+    for (const auto& g : plan.groups) {
+        EXPECT_EQ(g.first_term, expected_first);
+        EXPECT_GT(g.num_terms, 0u);
+        expected_first += g.num_terms;
+    }
+    EXPECT_EQ(expected_first, 8u);
+}
+
+TEST(TermGroupPlanning, EmptyTermsReturnsNoSplit)
+{
+    std::vector<std::size_t> ops;
+    auto plan = jit::planTermGroups(ops, 24576, 58);
+    EXPECT_FALSE(plan.needs_split);
+    EXPECT_TRUE(plan.groups.empty());
+}
+
 } // namespace test
 } // namespace forms
 } // namespace FE
 } // namespace svmp
-

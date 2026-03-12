@@ -92,7 +92,7 @@ struct TensorJITOptions {
 
     // Optional: emit tiled loop nests in LLVM tensor codegen.
     bool enable_loop_tiling{true};
-    std::uint32_t tile_size{32};        // 0 => auto
+    std::uint32_t tile_size{0};         // 0 => auto from hardware profile
     std::uint32_t min_tiling_extent{64};
 };
 
@@ -113,22 +113,25 @@ struct JITSpecializationOptions {
 
     // Optional loop metadata for the LLVM optimizer.
     // Full unroll for trip counts <= max_unroll_trip_count; partial unroll up
-    // to 4x that limit.  Keeping this at 16 gives good QP-loop unrolling
-    // (typical trip counts 4-9) while avoiding code bloat for DOF loops in
-    // higher-order elements.  Override at runtime via SVMP_JIT_MAX_UNROLL.
+    // to 4x that limit.  0 => auto from hardware profile (typically 16 for
+    // 32KB L1i).  Override at runtime via SVMP_JIT_MAX_UNROLL.
     bool enable_loop_unroll_metadata{true};
-    std::uint32_t max_unroll_trip_count{16};
+    std::uint32_t max_unroll_trip_count{0};
 
     // Code-size budget: estimated .text bytes before DOF-loop unrolling is
     // suppressed.  When the estimated fully-unrolled code exceeds this limit,
     // test/trial DOF loops remain as actual loops (QP loops still unroll).
-    // Set to 0 to disable budget-aware unrolling.
+    // 0 => auto from hardware profile (typically 3x L1i size).
     // Override at runtime via SVMP_JIT_TEXT_BUDGET.
-    std::uint32_t text_budget_bytes{98304};
+    std::uint32_t text_budget_bytes{0};
 
-    // Estimated bytes per KernelIR op when fully unrolled by LLVM.
-    // Used only for the budget calculation, not for actual code generation.
-    std::uint32_t bytes_per_op_estimate{4};
+    // Estimated bytes of machine code per KernelIR op after LLVM codegen.
+    // Used as the uncalibrated fallback for .text budget calculations when
+    // process-level telemetry (BytesPerOpCalibration) has insufficient
+    // samples.  Once enough compilations complete, the telemetry value
+    // supersedes this estimate.
+    // Canonical value: HardwareProfile::kBytesPerOp (58).
+    std::uint32_t bytes_per_op_estimate{58};
 };
 
 struct JITOptions {

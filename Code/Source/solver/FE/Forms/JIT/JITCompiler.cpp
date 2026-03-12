@@ -460,13 +460,13 @@ struct CompilationPlan {
                     const auto effective =
                         tl.fallback_expr.isValid() ? tl.fallback_expr : term.integrand;
                     auto lowered = lowerToKernelIR(effective);
-                    // KernelIR::optimize() disabled — see LLVMGen.cpp comment.
+                    lowered.ir.optimize();
                     term_hash = lowered.ir.stableHash64();
                     term_cacheable = lowered.cacheable;
                 }
             } else {
                 auto lowered = lowerToKernelIR(term.integrand);
-                // KernelIR::optimize() disabled — see LLVMGen.cpp comment.
+                lowered.ir.optimize();
                 term_hash = lowered.ir.stableHash64();
                 term_cacheable = lowered.cacheable;
             }

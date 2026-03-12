@@ -705,29 +705,62 @@ std::size_t KernelIR::optimize()
         auto& kid0 = ops[kidIdx(0)];
 
         if (op.child_count == 1u) {
-            // Unary ops with zero child → TypedZero (shapeless zero)
+            // Unary ops with zero child: only collapse to TypedZero for
+            // shape-PRESERVING ops (output shape == input shape).
+            // Shape-CHANGING ops (Gradient, Curl, Hessian, Transpose, etc.)
+            // must keep their operation node so that LLVMGen::inferShapes()
+            // can derive the correct output shape from the op type + spatial
+            // dimension.  Collapsing them to shapeless TypedZero loses shape
+            // information and causes downstream shape errors (e.g. outer(0,v)
+            // reconstructed as square instead of rectangular).
             if (isZeroOp(kid0)) {
                 switch (op.type) {
+                    // Shape-preserving AND rank-preserving: safe to collapse
+                    // to TypedZero only for ops where TypedZero (inferred as
+                    // scalar in inferShapes) matches the actual output rank.
+                    // Negate and TimeDerivative are truly shape-preserving
+                    // scalar→scalar ops.
                     case FormExprType::Negate:
-                    case FormExprType::Gradient:
-                    case FormExprType::Divergence:
-                    case FormExprType::Curl:
-                    case FormExprType::Hessian:
                     case FormExprType::TimeDerivative:
-                    case FormExprType::Transpose:
-                    case FormExprType::SymmetricPart:
-                    case FormExprType::SkewPart:
-                    case FormExprType::Deviator:
+                        makeTypedZero(op);
+                        break;
+
+                    // Always-scalar results from zero input
+                    case FormExprType::Component:
+                    case FormExprType::Norm:
+                        makeConstant(op, 0.0);
+                        break;
+
+                    // DG restriction/averaging ops: these ARE shape-preserving,
+                    // but TypedZero in inferShapes maps to scalar.  If the
+                    // input was a vector/matrix that collapsed to TypedZero
+                    // upstream, collapsing these further loses the rank
+                    // context needed by downstream ops (e.g. inner, outer).
+                    // Keep the node so inferShapes can propagate shape from
+                    // the child's op type.
                     case FormExprType::RestrictMinus:
                     case FormExprType::RestrictPlus:
                     case FormExprType::Jump:
                     case FormExprType::Average:
-                    case FormExprType::Component:
+
+                    // Shape-changing ops: keep the node with zero child so
+                    // inferShapes() can compute the correct output shape.
+                    // Gradient(0)→zero-vector, Hessian(0)→zero-matrix, etc.
+                    case FormExprType::Gradient:
+                    case FormExprType::Divergence:
+                    case FormExprType::Curl:
+                    case FormExprType::Hessian:
+                    case FormExprType::Transpose:
+                    case FormExprType::SymmetricPart:
+                    case FormExprType::SkewPart:
+                    case FormExprType::Deviator:
                     case FormExprType::Trace:
                     case FormExprType::Determinant:
-                    case FormExprType::Norm:
-                        makeTypedZero(op);
+                    case FormExprType::Normalize:
+                        // Leave op unchanged — child is zero but shape is
+                        // determined by the op type in inferShapes().
                         break;
+
                     default:
                         break;
                 }
@@ -758,8 +791,11 @@ std::size_t KernelIR::optimize()
 
             switch (op.type) {
                 case FormExprType::Multiply:
-                    // 0*X or X*0 → TypedZero (shapeless zero)
-                    if (k0_zero || k1_zero) { makeTypedZero(op); break; }
+                    // 0*X or X*0: keep the Multiply node — collapsing to
+                    // TypedZero loses the output shape (scalar*vector=vector,
+                    // scalar*matrix=matrix).  inferShapes handles TypedZero
+                    // (scalar) children correctly for Multiply.  LLVM's own
+                    // optimizer will fold fmul(0.0, x) → 0.0 at IR level.
                     // 1*X → X or X*1 → X (shape-preserving alias)
                     if (k0_one) { op = kid1; break; }
                     if (k1_one) { op = kid0; break; }
@@ -784,8 +820,9 @@ std::size_t KernelIR::optimize()
                     break;
 
                 case FormExprType::Divide:
-                    // 0/X → TypedZero
-                    if (k0_zero) { makeTypedZero(op); break; }
+                    // 0/X: keep — numerator shape determines output shape.
+                    // inferShapes requires scalar denominator, so output =
+                    // numerator shape.  LLVM folds fdiv(0.0, x) → 0.0.
                     // X/1 → X (shape-preserving alias)
                     if (k1_one) { op = kid0; break; }
                     // const / const → const
@@ -812,8 +849,10 @@ std::size_t KernelIR::optimize()
 
                 case FormExprType::OuterProduct:
                 case FormExprType::CrossProduct:
-                    // outer(0,X) or outer(X,0) → TypedZero
-                    if (k0_zero || k1_zero) { makeTypedZero(op); break; }
+                    // Keep the node — collapsing outer(0,v) to TypedZero
+                    // loses the rectangular shape (m×n → shapeless).
+                    // inferShapes handles TypedZero children and uses the
+                    // spatial dimension for the unknown operand.
                     break;
 
                 default:
@@ -821,18 +860,83 @@ std::size_t KernelIR::optimize()
             }
         }
 
-        // Multi-child: AsVector/AsTensor with all-zero children → TypedZero
-        if (op.child_count > 2u &&
-            (op.type == FormExprType::AsVector || op.type == FormExprType::AsTensor)) {
-            bool all_zero = true;
-            for (std::uint32_t c = 0; c < op.child_count; ++c) {
-                if (!isZeroOp(ops[kidIdx(c)])) { all_zero = false; break; }
-            }
-            if (all_zero) { makeTypedZero(op); }
-        }
+        // Multi-child: AsVector/AsTensor with all-zero children.
+        // Do NOT collapse to TypedZero — AsVector(0,0,0) is a 3-vector zero,
+        // not a scalar zero.  TypedZero in inferShapes maps to scalarShape(),
+        // so collapsing loses the vector/matrix rank and causes shape errors
+        // in downstream ops (e.g. inner(AsVector(0,0,0), v) expects vector).
+        // Keep the AsVector/AsTensor node; LLVM will fold fmul(0,x)→0 at IR level.
     }
 
-    // Pass 2: Dead code elimination.
+    // Pass 2: Post-rewrite structural CSE.
+    // After zero propagation/constant folding, some previously-distinct
+    // subexpressions may now be structurally identical (e.g., two subtrees
+    // that both simplified to Constant(0.0)).  Merge them by remapping
+    // child indices to the first occurrence of each structural pattern.
+    //
+    // NOTE: Commutative canonicalization (merging a+b with b+a) is
+    // intentionally NOT done here.  While mathematically equivalent,
+    // reusing one for the other perturbs the Jacobian by ULPs (different
+    // floating-point summation order), which can destabilize iterative
+    // linear solvers on ill-conditioned systems.  Commutative
+    // canonicalization is already applied at lowering time (line 424)
+    // before any rewrites occur, which handles the common case.
+    {
+        // Compute structural hash per op (children-aware, bottom-up).
+        std::vector<std::uint64_t> op_hash(n, 0);
+        // Map from structural hash → list of candidate op indices
+        std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> hash_to_idx;
+        // CSE remap: old index → canonical index (identity initially)
+        std::vector<std::uint32_t> cse_remap(n);
+        for (std::uint32_t i = 0; i < n; ++i) cse_remap[i] = i;
+
+        for (std::size_t i = 0; i < n; ++i) {
+            const auto& op = ops[i];
+            std::uint64_t h = kFNVOffset;
+            hashMix(h, static_cast<std::uint64_t>(op.type));
+            hashMix(h, op.imm0);
+            hashMix(h, op.imm1);
+            hashMix(h, static_cast<std::uint64_t>(op.child_count));
+            for (std::uint32_t c = 0; c < op.child_count; ++c) {
+                // Use the canonical (CSE-remapped) child index for hashing
+                auto raw_child = children[static_cast<std::size_t>(op.first_child) + c];
+                hashMix(h, static_cast<std::uint64_t>(cse_remap[raw_child]));
+            }
+            op_hash[i] = h;
+
+            // Check for structural match with existing ops of same hash
+            bool merged = false;
+            auto& candidates = hash_to_idx[h];
+            for (const auto cand : candidates) {
+                const auto& cop = ops[cand];
+                if (cop.type != op.type || cop.imm0 != op.imm0 ||
+                    cop.imm1 != op.imm1 || cop.child_count != op.child_count)
+                    continue;
+                bool match = true;
+                for (std::uint32_t c = 0; c < op.child_count; ++c) {
+                    const auto c1 = cse_remap[children[static_cast<std::size_t>(cop.first_child) + c]];
+                    const auto c2 = cse_remap[children[static_cast<std::size_t>(op.first_child) + c]];
+                    if (c1 != c2) { match = false; break; }
+                }
+                if (match) {
+                    cse_remap[i] = cse_remap[cand];
+                    merged = true;
+                    break;
+                }
+            }
+            if (!merged) {
+                candidates.push_back(static_cast<std::uint32_t>(i));
+            }
+        }
+
+        // Apply CSE remapping to all child references
+        for (auto& c : children) {
+            c = cse_remap[c];
+        }
+        root = cse_remap[root];
+    }
+
+    // Pass 3: Dead code elimination.
     // Mark reachable ops from root, then compact.
     std::vector<bool> reachable(n, false);
     {
@@ -894,6 +998,107 @@ std::size_t KernelIR::optimize()
     return original_count - live_count;
 }
 
+std::vector<std::uint32_t> KernelIR::subtreeCosts() const
+{
+    const auto n = ops.size();
+    std::vector<std::uint32_t> cost(n, 1u);
+
+    // Bottom-up (post-order guarantees children processed first).
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& op = ops[i];
+        if (op.child_count == 0u) {
+            // Leaf cost: 1 for cheap ops, higher for reduce-sum ops
+            // that expand to DOF loops in codegen.
+            switch (op.type) {
+                case FormExprType::StateField:
+                case FormExprType::DiscreteField:
+                case FormExprType::PreviousSolutionRef:
+                    // These expand to N_dof-length reduce-sums in codegen.
+                    // Use a multiplier to reflect that.
+                    cost[i] = 16;
+                    break;
+                default:
+                    cost[i] = 1;
+                    break;
+            }
+            continue;
+        }
+
+        std::uint32_t c = 1; // op's own cost
+        for (std::uint32_t k = 0; k < op.child_count; ++k) {
+            const auto child = children[static_cast<std::size_t>(op.first_child) + k];
+            c += cost[child];
+        }
+
+        // Gradient/Hessian of a field involves J_inv transforms
+        if (op.child_count == 1u) {
+            const auto child = children[static_cast<std::size_t>(op.first_child)];
+            const auto ct = ops[child].type;
+            if ((op.type == FormExprType::Gradient || op.type == FormExprType::Hessian) &&
+                (ct == FormExprType::StateField || ct == FormExprType::DiscreteField ||
+                 ct == FormExprType::PreviousSolutionRef || ct == FormExprType::TrialFunction ||
+                 ct == FormExprType::TestFunction)) {
+                c += 8; // J_inv transform overhead
+            }
+        }
+
+        // Matrix spectral ops: O(d^3) work for d×d matrices
+        switch (op.type) {
+            case FormExprType::Inverse:
+            case FormExprType::Cofactor:
+            case FormExprType::Determinant:
+                c += 16;  // LU decomposition / cofactor expansion
+                break;
+            case FormExprType::MatrixExponential:
+            case FormExprType::MatrixSqrt:
+            case FormExprType::MatrixLogarithm:
+            case FormExprType::MatrixPower:
+                c += 32;  // series expansion / eigendecomposition
+                break;
+            case FormExprType::Eigenvalue:
+            case FormExprType::SymmetricEigenvalue:
+                c += 24;  // eigenvalue computation
+                break;
+            // Directional derivatives of matrix spectral ops
+            // (involve the base spectral op plus Fréchet derivative)
+            case FormExprType::MatrixExponentialDirectionalDerivative:
+            case FormExprType::MatrixLogarithmDirectionalDerivative:
+            case FormExprType::MatrixSqrtDirectionalDerivative:
+            case FormExprType::MatrixPowerDirectionalDerivative:
+            case FormExprType::SymmetricEigenvalueDirectionalDerivative:
+            case FormExprType::SymmetricEigenvalueDirectionalDerivativeWrtA:
+            case FormExprType::SymmetricEigenvectorDirectionalDerivative:
+            case FormExprType::SpectralDecompositionDirectionalDerivative:
+                c += 40;  // spectral op + Fréchet derivative
+                break;
+            // Transcendental scalar ops (libm calls)
+            case FormExprType::Exp:
+            case FormExprType::Log:
+            case FormExprType::Sqrt:
+            case FormExprType::AbsoluteValue:
+            case FormExprType::Power:
+                c += 4;   // libm call overhead
+                break;
+            // History operators (weighted sum over time steps)
+            case FormExprType::HistoryWeightedSum:
+            case FormExprType::HistoryConvolution:
+                c += 8;   // loop over history steps
+                break;
+            // Constitutive model evaluation
+            case FormExprType::Constitutive:
+            case FormExprType::ConstitutiveOutput:
+                c += 16;  // typically involves multiple matrix ops
+                break;
+            default:
+                break;
+        }
+
+        cost[i] = c;
+    }
+
+    return cost;
+}
+
 KernelIRBuildResult lowerToKernelIR(const FormExprNode& root,
                                     const KernelIRBuildOptions& options)
 {
@@ -918,6 +1123,74 @@ KernelIRBuildResult lowerToKernelIR(const FormExpr& integrand,
     const auto* root = integrand.node();
     FE_CHECK_NOT_NULL(root, "lowerToKernelIR: integrand node");
     return lowerToKernelIR(*root, options);
+}
+
+// ============================================================================
+// Term-group planning for micro-kernel splitting
+// ============================================================================
+
+BlockSplitPlan planTermGroups(
+    const std::vector<std::size_t>& term_op_counts,
+    std::uint64_t budget_bytes,
+    std::uint64_t bytes_per_op)
+{
+    BlockSplitPlan plan;
+
+    if (term_op_counts.empty()) {
+        plan.needs_split = false;
+        return plan;
+    }
+
+    // Calculate total estimated bytes for this block.
+    std::uint64_t total_bytes = 0;
+    for (const auto ops : term_op_counts) {
+        total_bytes += static_cast<std::uint64_t>(ops) * bytes_per_op;
+    }
+    plan.total_estimated_bytes = total_bytes;
+
+    // If total fits in budget, no splitting needed.
+    if (budget_bytes == 0 || total_bytes <= budget_bytes) {
+        plan.needs_split = false;
+        TermGroupPlan g;
+        g.first_term = 0;
+        g.num_terms = term_op_counts.size();
+        g.estimated_text_bytes = total_bytes;
+        plan.groups.push_back(g);
+        return plan;
+    }
+
+    // Greedy contiguous packing.
+    plan.needs_split = true;
+    std::size_t current_first = 0;
+    std::uint64_t current_bytes = 0;
+
+    for (std::size_t i = 0; i < term_op_counts.size(); ++i) {
+        const std::uint64_t term_bytes =
+            static_cast<std::uint64_t>(term_op_counts[i]) * bytes_per_op;
+
+        if (current_bytes + term_bytes > budget_bytes && i > current_first) {
+            // Close current group.
+            TermGroupPlan g;
+            g.first_term = current_first;
+            g.num_terms = i - current_first;
+            g.estimated_text_bytes = current_bytes;
+            plan.groups.push_back(g);
+            current_first = i;
+            current_bytes = 0;
+        }
+        current_bytes += term_bytes;
+    }
+
+    // Close last group.
+    if (current_first < term_op_counts.size()) {
+        TermGroupPlan g;
+        g.first_term = current_first;
+        g.num_terms = term_op_counts.size() - current_first;
+        g.estimated_text_bytes = current_bytes;
+        plan.groups.push_back(g);
+    }
+
+    return plan;
 }
 
 } // namespace jit
