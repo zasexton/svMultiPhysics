@@ -2919,14 +2919,13 @@ std::shared_ptr<const quadrature::QuadratureRule> StandardAssembler::resolveQuad
 {
     const auto& test_element = getElement(test_space, cell_id, cell_type);
 
-    // For P1 simplex elements (Tet4, Tri3), use position-based rules
-    // that match the legacy solver behavior (4 QPs for Tet4, 3 for Tri3)
-    // instead of the tensor-product Duffy transform (27 QPs for Tet4).
-    // The position-based Gaussian rule gives degree-2 polynomial exactness,
-    // which is sufficient for bilinear forms on affine P1 elements.
+    // For P1 Tet4 elements, use position-based rules that match the legacy
+    // solver (4 QPs instead of 27 from tensor-product Duffy transform).
+    // Do NOT override Tri3: its Duffy rule already gives 4 QPs, and the
+    // NS-VMS stabilization terms (nonlinear τ) need the extra point for
+    // accurate integration compared to the 3-point position-based rule.
     const int basis_order = test_element.polynomial_order();
-    if (basis_order <= 1 &&
-        quadrature::QuadratureFactory::supports_position_based(cell_type)) {
+    if (basis_order <= 1 && cell_type == ElementType::Tetra4) {
         const auto default_mod = quadrature::QuadratureFactory::default_legacy_modifier(cell_type);
         return quadrature::QuadratureFactory::create_legacy_compatible(
             cell_type, default_mod);
@@ -4318,6 +4317,9 @@ void StandardAssembler::prepareContext(
     auto quad_rule = resolveQuadratureRule(test_space, cell_id, cell_type);
     prepareGeometry(context, mesh, cell_id, *quad_rule);
     prepareBasis(context, mesh, cell_id, test_space, trial_space, required_data, *quad_rule);
+    // Override the non-owning alias from prepareBasis with the actual shared_ptr
+    // so that cached_quad_rule_ survives after this function returns.
+    cached_quad_rule_ = std::move(quad_rule);
 }
 
 // ============================================================================

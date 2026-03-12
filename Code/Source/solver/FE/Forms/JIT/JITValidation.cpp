@@ -209,6 +209,7 @@ struct ConstantMatrix {
 
     switch (node.type()) {
         // Scalars / scalar-like terminals
+        case FormExprType::TypedZero:
         case FormExprType::Constant:
         case FormExprType::ParameterSymbol:
         case FormExprType::ParameterRef:

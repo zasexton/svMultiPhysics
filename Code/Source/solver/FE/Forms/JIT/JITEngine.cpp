@@ -895,6 +895,17 @@ std::unique_ptr<JITEngine> JITEngine::create(const JITOptions& options)
             } catch (...) { /* ignore parse errors */ }
         }
 
+        // Allow runtime override of the code-size budget for DOF loop unrolling.
+        if (const char* env = std::getenv("SVMP_JIT_TEXT_BUDGET")) {
+            try {
+                const int val = std::stoi(env);
+                if (val >= 0) {
+                    engine->impl_->options.specialization.text_budget_bytes =
+                        static_cast<std::uint32_t>(val);
+                }
+            } catch (...) { /* ignore parse errors */ }
+        }
+
         // Allow runtime override of the LLVM optimization level (0-3).
         if (const char* env = std::getenv("SVMP_JIT_OPT_LEVEL")) {
             try {

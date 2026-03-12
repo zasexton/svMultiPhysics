@@ -1124,11 +1124,21 @@ TEST(ConstitutiveModelTest, SupportsMultiOutputConstitutiveNodes)
 
     // This constitutive call depends on TrialFunction, so caching reuses values across
     // test-basis loops but not across trial-basis loops.
-    auto quad_rule = space.getElement(ElementType::Tetra4, 0).quadrature();
-    if (!quad_rule) {
-        const int order = quadrature::QuadratureFactory::recommended_order(
-            space.getElement(ElementType::Tetra4, 0).polynomial_order(), false);
-        quad_rule = quadrature::QuadratureFactory::create(ElementType::Tetra4, order);
+    // For P1 Tet4, resolveQuadratureRule uses a position-based 4-point rule
+    // (not the element's default Duffy-transform rule).
+    const int basis_order = space.getElement(ElementType::Tetra4, 0).polynomial_order();
+    std::shared_ptr<const quadrature::QuadratureRule> quad_rule;
+    if (basis_order <= 1 &&
+        quadrature::QuadratureFactory::supports_position_based(ElementType::Tetra4)) {
+        quad_rule = quadrature::QuadratureFactory::create_legacy_compatible(
+            ElementType::Tetra4,
+            quadrature::QuadratureFactory::default_legacy_modifier(ElementType::Tetra4));
+    } else {
+        quad_rule = space.getElement(ElementType::Tetra4, 0).quadrature();
+        if (!quad_rule) {
+            const int order = quadrature::QuadratureFactory::recommended_order(basis_order, false);
+            quad_rule = quadrature::QuadratureFactory::create(ElementType::Tetra4, order);
+        }
     }
     ASSERT_TRUE(static_cast<bool>(quad_rule));
     const auto n_qpts = static_cast<std::size_t>(quad_rule->num_points());

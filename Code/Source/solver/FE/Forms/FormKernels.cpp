@@ -1357,6 +1357,7 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
     out.has_hess = (order >= 2);
 
     switch (node.type()) {
+        case FormExprType::TypedZero:
         case FormExprType::Constant: {
             out.value.kind = EvalValue<Scalar>::Kind::Scalar;
             out.value.s = makeScalarConstant<Scalar>(node.constantValue().value_or(0.0), env);
@@ -3459,6 +3460,9 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 	            }
 	            const auto A = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
 	            if (!isMatrixKind<Scalar>(A.value.kind)) {
+	                if (isScalarKind<Scalar>(A.value.kind)) {
+	                    return out; // zero scalar through transpose = zero
+	                }
 	                throw FEException("Forms: transpose() expects a matrix (jet)",
 	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	            }
@@ -3496,6 +3500,9 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 	            }
 	            const auto A = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
 	            if (!isMatrixKind<Scalar>(A.value.kind)) {
+	                if (isScalarKind<Scalar>(A.value.kind)) {
+	                    return out; // zero scalar through trace = zero
+	                }
 	                throw FEException("Forms: trace() expects a matrix (jet)",
 	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	            }
@@ -3536,6 +3543,9 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 	            }
 	            const auto A = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
 	            if (!isMatrixKind<Scalar>(A.value.kind)) {
+	                if (isScalarKind<Scalar>(A.value.kind)) {
+	                    return out; // zero scalar through sym/skew = zero
+	                }
 	                throw FEException("Forms: sym/skew expects a matrix (jet)",
 	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	            }
@@ -3588,6 +3598,9 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 	            }
 	            const auto A = evalSpatialJet<Scalar>(*kids[0], env, side, q, order);
 	            if (!isMatrixKind<Scalar>(A.value.kind)) {
+	                if (isScalarKind<Scalar>(A.value.kind)) {
+	                    return out; // zero scalar through dev = zero
+	                }
 	                throw FEException("Forms: dev() expects a matrix (jet)",
 	                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
 	            }
@@ -4702,6 +4715,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
     const int dim = ctx.dimension();
 
     switch (node.type()) {
+        case FormExprType::TypedZero:
         case FormExprType::Constant: {
             const Real v = node.constantValue().value_or(0.0);
             return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, v};
@@ -6163,6 +6177,10 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
         case FormExprType::Transpose: {
             const auto a = evalRealUnary(node, env, side, q);
             if (!isMatrixKind<Real>(a.kind)) {
+                // TypedZero or zero-like expression evaluates to scalar 0 — transpose of zero is zero
+                if (a.kind == EvalValue<Real>::Kind::Scalar && a.s == 0.0) {
+                    return EvalValue<Real>{};
+                }
                 throw FEException("Forms: transpose() expects a matrix",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
@@ -6181,6 +6199,9 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
         case FormExprType::Trace: {
             const auto a = evalRealUnary(node, env, side, q);
             if (!isMatrixKind<Real>(a.kind)) {
+                if (a.kind == EvalValue<Real>::Kind::Scalar && a.s == 0.0) {
+                    return EvalValue<Real>{};
+                }
                 throw FEException("Forms: trace() expects a matrix",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
@@ -6197,6 +6218,9 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
         case FormExprType::Determinant: {
             const auto a = evalRealUnary(node, env, side, q);
             if (!isMatrixKind<Real>(a.kind)) {
+                if (a.kind == EvalValue<Real>::Kind::Scalar && a.s == 0.0) {
+                    return EvalValue<Real>{};
+                }
                 throw FEException("Forms: det() expects a matrix",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
@@ -6297,6 +6321,9 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
         case FormExprType::SkewPart: {
             const auto a = evalRealUnary(node, env, side, q);
             if (!isMatrixKind<Real>(a.kind)) {
+                if (a.kind == EvalValue<Real>::Kind::Scalar && a.s == 0.0) {
+                    return EvalValue<Real>{};
+                }
                 throw FEException("Forms: sym()/skew() expects a matrix",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
@@ -6324,6 +6351,9 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
         case FormExprType::Deviator: {
             const auto a = evalRealUnary(node, env, side, q);
             if (!isMatrixKind<Real>(a.kind)) {
+                if (a.kind == EvalValue<Real>::Kind::Scalar && a.s == 0.0) {
+                    return EvalValue<Real>{};
+                }
                 throw FEException("Forms: dev() expects a matrix",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
@@ -7667,6 +7697,30 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
             const auto a = evalReal(*kids[1], env, side, q);
             const auto b = evalReal(*kids[2], env, side, q);
             if (!sameCategory<Real>(a.kind, b.kind)) {
+                // TypedZero evaluates to scalar 0.0 but semantically is "zero of any shape".
+                // When one branch is scalar zero and the other is vector/matrix,
+                // select the non-zero branch or create a zero of the correct kind.
+                const bool a_is_typed_zero = kids[1]->type() == FormExprType::TypedZero;
+                const bool b_is_typed_zero = kids[2]->type() == FormExprType::TypedZero;
+                if (a_is_typed_zero || b_is_typed_zero) {
+                    // Use the non-TypedZero branch as a shape template
+                    const auto& shape_ref = a_is_typed_zero ? b : a;
+                    if (cond.s > 0.0) {
+                        if (a_is_typed_zero) {
+                            EvalValue<Real> out{};
+                            out.kind = shape_ref.kind;
+                            return out; // default-initialized = all zeros
+                        }
+                        return a;
+                    } else {
+                        if (b_is_typed_zero) {
+                            EvalValue<Real> out{};
+                            out.kind = shape_ref.kind;
+                            return out;
+                        }
+                        return b;
+                    }
+                }
                 throw FEException("Forms: conditional branch kind mismatch",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
@@ -8346,6 +8400,7 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
     const int dim = ctx.dimension();
 
     switch (node.type()) {
+        case FormExprType::TypedZero:
         case FormExprType::Constant: {
             const Real v = node.constantValue().value_or(0.0);
             EvalValue<Dual> out;

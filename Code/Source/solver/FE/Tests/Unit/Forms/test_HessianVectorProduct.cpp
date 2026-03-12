@@ -87,11 +87,13 @@ TEST(HessianVectorProduct, MatchesFiniteDifferenceOfJacobian)
         state[static_cast<std::size_t>(n + i)] = W[static_cast<std::size_t>(i)];
     }
 
+    // Assemble tangent at u
     assembly::DenseMatrixView J0(n);
     J0.zero();
     assembler.setCurrentSolution(state);
     (void)assembler.assembleMatrix(mesh, space, space, J_kernel, J0);
 
+    // Assemble tangent at u + eps*w (finite-difference perturbation)
     const Real eps = 1e-7;
     std::vector<Real> state_eps = state;
     for (GlobalIndex i = 0; i < n; ++i) {
@@ -103,6 +105,7 @@ TEST(HessianVectorProduct, MatchesFiniteDifferenceOfJacobian)
     assembler.setCurrentSolution(state_eps);
     (void)assembler.assembleMatrix(mesh, space, space, J_kernel, J1);
 
+    // Finite-difference approximation: dJ/du[w] ≈ (J(u+εw) - J(u)) / ε
     assembly::DenseMatrixView Jfd(n);
     Jfd.zero();
     for (GlobalIndex i = 0; i < n; ++i) {
@@ -112,6 +115,7 @@ TEST(HessianVectorProduct, MatchesFiniteDifferenceOfJacobian)
         }
     }
 
+    // Assemble analytic Hessian-vector product
     assembly::DenseMatrixView H(n);
     H.zero();
     assembler.setCurrentSolution(state);

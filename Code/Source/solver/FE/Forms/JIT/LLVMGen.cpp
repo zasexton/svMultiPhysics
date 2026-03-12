@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <sstream>
@@ -597,6 +598,7 @@ struct ShapeInferenceResult {
 
         switch (op.type) {
             case FormExprType::Constant:
+            case FormExprType::TypedZero:
             case FormExprType::ParameterRef:
             case FormExprType::BoundaryIntegralRef:
             case FormExprType::AuxiliaryStateRef:
@@ -822,6 +824,17 @@ struct ShapeInferenceResult {
                 const auto& a = childAt(0);
                 const auto& b = childAt(1);
                 if (a.kind != b.kind || a.dims != b.dims) {
+                    // TypedZero (scalar shape) is compatible with any shape
+                    const auto& op_a = ir.ops[ir.children[op.first_child]];
+                    const auto& op_b = ir.ops[ir.children[op.first_child + 1]];
+                    if (op_a.type == FormExprType::TypedZero) {
+                        out.shapes[idx] = b;
+                        break;
+                    }
+                    if (op_b.type == FormExprType::TypedZero) {
+                        out.shapes[idx] = a;
+                        break;
+                    }
                     return fail("LLVMGen: Add/Subtract requires matching shapes");
                 }
                 out.shapes[idx] = a;
@@ -872,7 +885,12 @@ struct ShapeInferenceResult {
                 const auto& a = childAt(0);
                 const auto& b = childAt(1);
                 if (a.kind != b.kind || a.dims != b.dims) {
-                    return fail("LLVMGen: InnerProduct requires matching operand shapes");
+                    // TypedZero (scalar) is compatible — inner(0,X)=0, inner(X,0)=0
+                    const auto& op_a = ir.ops[ir.children[op.first_child]];
+                    const auto& op_b = ir.ops[ir.children[op.first_child + 1]];
+                    if (op_a.type != FormExprType::TypedZero && op_b.type != FormExprType::TypedZero) {
+                        return fail("LLVMGen: InnerProduct requires matching operand shapes");
+                    }
                 }
                 out.shapes[idx] = scalarShape();
                 break;
@@ -890,7 +908,11 @@ struct ShapeInferenceResult {
                     break;
                 }
                 if (a.kind != b.kind || a.dims != b.dims) {
-                    return fail("LLVMGen: DoubleContraction requires matching operand shapes");
+                    const auto& op_a = ir.ops[ir.children[op.first_child]];
+                    const auto& op_b = ir.ops[ir.children[op.first_child + 1]];
+                    if (op_a.type != FormExprType::TypedZero && op_b.type != FormExprType::TypedZero) {
+                        return fail("LLVMGen: DoubleContraction requires matching operand shapes");
+                    }
                 }
                 out.shapes[idx] = scalarShape();
                 break;
@@ -899,6 +921,25 @@ struct ShapeInferenceResult {
             case FormExprType::OuterProduct: {
                 const auto& a = childAt(0);
                 const auto& b = childAt(1);
+                // TypedZero (scalar) is compatible — outer(0,X)=0-matrix
+                const auto& op_a2 = ir.ops[ir.children[op.first_child]];
+                const auto& op_b2 = ir.ops[ir.children[op.first_child + 1]];
+                if (op_a2.type == FormExprType::TypedZero) {
+                    if (b.kind == Shape::Kind::Vector) {
+                        out.shapes[idx] = matrixShape(b.dims[0], b.dims[0]);
+                    } else {
+                        out.shapes[idx] = scalarShape(); // degenerate
+                    }
+                    break;
+                }
+                if (op_b2.type == FormExprType::TypedZero) {
+                    if (a.kind == Shape::Kind::Vector) {
+                        out.shapes[idx] = matrixShape(a.dims[0], a.dims[0]);
+                    } else {
+                        out.shapes[idx] = scalarShape();
+                    }
+                    break;
+                }
                 if (a.kind != Shape::Kind::Vector || b.kind != Shape::Kind::Vector) {
                     return fail("LLVMGen: OuterProduct expects vector-vector");
                 }
@@ -910,7 +951,11 @@ struct ShapeInferenceResult {
                 const auto& a = childAt(0);
                 const auto& b = childAt(1);
                 if (a.kind != Shape::Kind::Vector || b.kind != Shape::Kind::Vector) {
-                    return fail("LLVMGen: CrossProduct expects vector-vector");
+                    const auto& op_a3 = ir.ops[ir.children[op.first_child]];
+                    const auto& op_b3 = ir.ops[ir.children[op.first_child + 1]];
+                    if (op_a3.type != FormExprType::TypedZero && op_b3.type != FormExprType::TypedZero) {
+                        return fail("LLVMGen: CrossProduct expects vector-vector");
+                    }
                 }
                 out.shapes[idx] = vectorShape(3u);
                 break;
@@ -983,6 +1028,12 @@ struct ShapeInferenceResult {
             case FormExprType::Transpose: {
                 const auto& a = childAt(0);
                 if (a.kind != Shape::Kind::Matrix) {
+                    // TypedZero (scalar) through Transpose → still TypedZero (scalar)
+                    const auto& kid_op = ir.ops[ir.children[op.first_child]];
+                    if (kid_op.type == FormExprType::TypedZero) {
+                        out.shapes[idx] = scalarShape();
+                        break;
+                    }
                     return fail("LLVMGen: Transpose expects matrix");
                 }
                 out.shapes[idx] = matrixShape(a.dims[1], a.dims[0]);
@@ -1481,6 +1532,23 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             auto lowered = lowerToKernelIR(effective_integrand);
             if (lowered.ir.empty()) {
                 return LLVMGenResult{.ok = false, .message = "LLVMGen: failed to lower term to KernelIR"};
+            }
+            {
+                const auto ops_before = lowered.ir.opCount();
+                // KernelIR::optimize() is disabled by default — its aliasing
+                // transforms (op = kidX for 0+X, 1*X, etc.) can produce IR
+                // that fails LLVMGen shape inference for Subtract/Add nodes.
+                // LLVM's own optimizer handles zero propagation and DCE.
+                static const bool enable_ir_opt = (std::getenv("SVMP_ENABLE_IR_OPT") != nullptr);
+                const auto eliminated = enable_ir_opt ? lowered.ir.optimize() : 0u;
+                static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                if (jit_telemetry) {
+                    std::cerr << "[JIT telemetry] " << symbol << " term " << tidx
+                              << ": KernelIR " << ops_before << " -> " << lowered.ir.opCount()
+                              << " ops (-" << eliminated << ", ~"
+                              << (lowered.ir.opCount() * 58) << " bytes .text est)\n";
+                    std::cerr.flush();
+                }
             }
 
             if (options_.dump_kernel_ir) {
@@ -2126,6 +2194,58 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	        const std::optional<std::uint32_t> fixed_n_trial_dofs_plus =
 	            (specialization != nullptr) ? specialization->n_trial_dofs_plus : std::optional<std::uint32_t>{};
 
+        // Budget-aware DOF loop unrolling: set to true below if the estimated
+        // fully-unrolled .text would exceed the budget.  When set, DOF loops
+        // (test/trial) keep standard loops while QP loops still get unroll hints.
+        bool suppress_dof_unroll = false;
+
+        // --- Budget-aware DOF loop unrolling decision ---
+        // When the estimated fully-unrolled .text exceeds the budget (default
+        // 32 KB = L1i), suppress unroll metadata on test/trial DOF loops.
+        // QP loops remain fully unrolled (small trip count, high benefit).
+        if (options_.specialization.text_budget_bytes > 0u &&
+            fixed_n_test_dofs_minus.has_value() &&
+            fixed_n_trial_dofs_minus.has_value() &&
+            fixed_n_qpts_minus.has_value())
+        {
+            const auto n_q = static_cast<std::uint64_t>(*fixed_n_qpts_minus);
+            const auto n_t = static_cast<std::uint64_t>(*fixed_n_test_dofs_minus);
+            const auto n_j = static_cast<std::uint64_t>(*fixed_n_trial_dofs_minus);
+            const auto bpo = static_cast<std::uint64_t>(options_.specialization.bytes_per_op_estimate);
+
+            // Estimate total ops if all loops (QP, test, trial) are fully unrolled.
+            std::uint64_t total_unrolled_ops = 0;
+            const auto& all_terms = coupled ? std::vector<LoweredTerm>{} : terms;
+            for (const auto& t : all_terms) {
+                const auto ops = static_cast<std::uint64_t>(t.ir.opCount());
+                total_unrolled_ops += n_q * n_t * n_j * ops;
+            }
+            if (coupled) {
+                for (const auto& blk : coupled->blocks) {
+                    for (const auto& t : blk.terms) {
+                        total_unrolled_ops += n_q * n_t * n_j *
+                                             static_cast<std::uint64_t>(t.ir.opCount());
+                    }
+                }
+            }
+
+            const auto estimated_text = total_unrolled_ops * bpo;
+            const auto budget = static_cast<std::uint64_t>(options_.specialization.text_budget_bytes);
+            suppress_dof_unroll = (estimated_text > budget);
+
+            static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+            if (jit_telemetry) {
+                std::cerr << "[JIT budget] " << symbol
+                          << ": estimated unrolled .text " << estimated_text
+                          << " bytes (nq=" << n_q << " nt=" << n_t << " nj=" << n_j
+                          << " total_ops=" << total_unrolled_ops
+                          << ") budget=" << budget
+                          << " -> DOF unroll " << (suppress_dof_unroll ? "SUPPRESSED" : "allowed")
+                          << "\n";
+                std::cerr.flush();
+            }
+        }
+
 	                // Prepare batch loop.
 	                // Functional kernels (no test space) are always invoked through
 	                // JITFunctionalKernelWrapper which packs CellKernelArgsV6, not
@@ -2309,8 +2429,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         }
 
         auto attachLoopUnrollMetadata = [&](llvm::BranchInst* backedge,
-                                            llvm::Value* end) -> void {
+                                            llvm::Value* end,
+                                            bool is_dof_loop = false) -> void {
             if (!options_.specialization.enable_loop_unroll_metadata) {
+                return;
+            }
+            if (is_dof_loop && suppress_dof_unroll) {
                 return;
             }
             auto* c = llvm::dyn_cast<llvm::ConstantInt>(end);
@@ -2356,7 +2480,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	        auto emitForLoop = [&](llvm::Value* end,
 	                               std::string_view name,
-	                               const auto& body_fn) -> void {
+	                               const auto& body_fn,
+	                               bool is_dof_loop = false) -> void {
 	            auto* pre = builder.GetInsertBlock();
 	            auto* header = llvm::BasicBlock::Create(*ctx, std::string(name) + ".hdr", fn);
 	            auto* body = llvm::BasicBlock::Create(*ctx, std::string(name) + ".body", fn);
@@ -2377,7 +2502,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	            auto* body_end = builder.GetInsertBlock();
 	            auto* next = builder.CreateAdd(idx_phi, builder.getInt32(1));
 	            auto* backedge = builder.CreateBr(header);
-	            attachLoopUnrollMetadata(backedge, end);
+	            attachLoopUnrollMetadata(backedge, end, is_dof_loop);
 	            idx_phi->addIncoming(next, body_end);
 
 	            builder.SetInsertPoint(exit);
@@ -4667,6 +4792,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 const auto& shape = term.shapes[op_idx];
 
                 switch (op.type) {
+                    case FormExprType::TypedZero: {
+                        values[op_idx] = makeZero(shape);
+                        break;
+                    }
                     case FormExprType::Constant: {
                         const double v = std::bit_cast<double>(op.imm0);
                         values[op_idx] = makeScalar(f64c(v));
@@ -5426,7 +5555,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 break;
                             }
 
-                            if (dt_child.type == FormExprType::Constant) {
+                            if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
                                 values[op_idx] = makeZero(shape);
                                 break;
                             }
@@ -6064,7 +6193,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 break;
                             }
 
-                            if (dt_child.type == FormExprType::Constant) {
+                            if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
                                 values[op_idx] = makeScalar(f64c(0.0));
                                 break;
                             }
@@ -6072,7 +6201,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             throw std::runtime_error("LLVMGen: div(dt(...)) operand not supported");
                             break;
                         }
-	                        if (kid.type == FormExprType::Constant) {
+	                        if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
 	                            values[op_idx] = makeScalar(f64c(0.0));
 	                            break;
 	                        }
@@ -6416,7 +6545,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 break;
                             }
 
-                            if (dt_child.type == FormExprType::Constant) {
+                            if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
                                 values[op_idx] = makeZero(vectorShape(3u));
                                 break;
                             }
@@ -6424,7 +6553,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             throw std::runtime_error("LLVMGen: curl(dt(...)) operand not supported");
                             break;
                         }
-                        if (kid.type == FormExprType::Constant) {
+                        if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
                             values[op_idx] = makeZero(vectorShape(3u));
                             break;
                         }
@@ -6584,7 +6713,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 break;
                             }
 
-                            if (dt_child.type == FormExprType::Constant) {
+                            if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
                                 values[op_idx] = matZero();
                                 break;
                             }
@@ -6592,7 +6721,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             throw std::runtime_error("LLVMGen: H(dt(...)) operand not supported");
                             break;
                         }
-                        if (kid.type == FormExprType::Constant) {
+                        if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
                             values[op_idx] = matZero();
                             break;
                         }
@@ -7090,6 +7219,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     }
 
                     auto lowered_scalar = lowerToKernelIR(scalar_expr);
+                    // KernelIR::optimize() disabled — see earlier comment.
                     auto scalar_shapes = inferShapes(lowered_scalar.ir, ir.testSpace(), ir.trialSpace(), /*require_scalar_root=*/false);
                     if (!scalar_shapes.ok) {
                         throw std::runtime_error(scalar_shapes.message.empty() ? "LLVMGen: failed to infer scalar shapes" : scalar_shapes.message);
@@ -7125,6 +7255,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     }
 
                     auto lowered_base = lowerToKernelIR(spec.base);
+                    // KernelIR::optimize() disabled — see earlier comment.
                     auto base_shapes = inferShapes(lowered_base.ir, ir.testSpace(), ir.trialSpace(), /*require_scalar_root=*/false);
                     if (!base_shapes.ok) {
                         throw std::runtime_error(base_shapes.message.empty() ? "LLVMGen: failed to infer base-tensor shapes" : base_shapes.message);
@@ -7446,6 +7577,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 const auto& op = term.ir.ops[op_idx];
                 const auto& shape = term.shapes[op_idx];
                 switch (op.type) {
+                    case FormExprType::TypedZero: {
+                        values[op_idx] = makeZero(shape);
+                        break;
+                    }
                     case FormExprType::Constant: {
                         const double v = std::bit_cast<double>(op.imm0);
                         values[op_idx] = makeScalar(f64c(v));
@@ -7767,7 +7902,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                }
 	                                break;
 	                            }
-	                            if (dt_child.type == FormExprType::Constant) {
+	                            if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
 	                                values[op_idx] = makeZero(shape);
 	                                break;
 	                            }
@@ -7955,7 +8090,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             throw std::runtime_error("LLVMGen: cached grad(DiscreteField) unsupported shape");
                         }
 
-	                        if (kid.type == FormExprType::Constant) {
+	                        if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
 	                            values[op_idx] = makeZero(shape);
 	                            break;
 	                        }
@@ -8001,6 +8136,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             auto isSpatiallyConstantScalar = [&](auto&& self, std::size_t idx) -> bool {
                                 const auto& op2 = term.ir.ops[idx];
                                 switch (op2.type) {
+                                    case FormExprType::TypedZero:
                                     case FormExprType::Constant:
                                     case FormExprType::ParameterRef:
                                     case FormExprType::Time:
@@ -8443,7 +8579,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             }
                         }
 
-	                        if (kid.type == FormExprType::Constant) {
+	                        if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
 	                            values[op_idx] = makeScalar(f64c(0.0));
 	                            break;
 	                        }
@@ -8543,7 +8679,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             break;
                         }
 
-                        if (kid.type == FormExprType::Constant) {
+                        if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
                             values[op_idx] = makeZero(vectorShape(3u));
                             break;
                         }
@@ -8621,7 +8757,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            break;
 	                        }
 
-	                        if (kid.type == FormExprType::Constant) {
+	                        if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
 	                            values[op_idx] = makeZero(shape);
 	                            break;
 	                        }
@@ -9011,6 +9147,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 const auto& shape = term.shapes[op_idx];
 
                 switch (op.type) {
+                    case FormExprType::TypedZero: {
+                        const auto cv = makeZero(shape);
+                        values_minus[op_idx] = cv;
+                        values_plus[op_idx] = cv;
+                        break;
+                    }
                     case FormExprType::Constant: {
                         const double v = std::bit_cast<double>(op.imm0);
                         const auto cv = makeScalar(f64c(v));
@@ -9382,7 +9524,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 throw std::runtime_error("LLVMGen: cached grad(DiscreteField) unsupported shape");
                             }
 
-                            if (kid.type == FormExprType::Constant) {
+                            if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
                                 return makeZero(shape);
                             }
 
@@ -9463,7 +9605,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 return makeScalar(phi);
                             }
 
-                            if (kid.type == FormExprType::Constant) {
+                            if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
                                 return makeScalar(f64c(0.0));
                             }
 
@@ -9566,7 +9708,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 return makeVector(3u, cx, cy, cz);
                             }
 
-                            if (kid.type == FormExprType::Constant) {
+                            if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
                                 return makeZero(vectorShape(3u));
                             }
 
@@ -9647,7 +9789,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                return out;
 	                            }
 
-	                            if (kid.type == FormExprType::Constant) {
+	                            if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
 	                                return makeZero(shape);
 	                            }
 
@@ -10203,23 +10345,23 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                                                     tc_ptr, /*partial_cached_mask=*/0x2u);
                                     auto* contrib = builder.CreateFMul(scaled_w, val);
                                     emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
-                                });
-                            });
+                                }, /*is_dof_loop=*/true);
+                            }, /*is_dof_loop=*/true);
                         } else {
                             emitForLoop(side_single.n_test_dofs, "i" + std::to_string(t), [&](llvm::Value* i) {
                                 emitForLoop(side_single.n_trial_dofs, "j" + std::to_string(t), [&](llvm::Value* j) {
                                     auto* val = evalKernelIRSingle(terms[t], q, i, j, side_single, cached_ptr);
                                     auto* contrib = builder.CreateFMul(scaled_w, val);
                                     emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
-                                });
-                            });
+                                }, /*is_dof_loop=*/true);
+                            }, /*is_dof_loop=*/true);
                         }
                     } else {
                         emitForLoop(side_single.n_test_dofs, "i" + std::to_string(t), [&](llvm::Value* i) {
                             auto* val = evalKernelIRSingle(terms[t], q, i, builder.getInt32(0), side_single, cached_ptr);
                             auto* contrib = builder.CreateFMul(scaled_w, val);
                             emitVectorAccum(element_vector_single, i, contrib);
-                        });
+                        }, /*is_dof_loop=*/true);
                     }
                 });
                 builder.CreateBr(term_end);
@@ -10335,23 +10477,23 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                                                             tc_ptr, /*partial_cached_mask=*/0x2u);
                                             auto* contrib = builder.CreateFMul(scaled_w, val);
                                             emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
-                                        });
-                                    });
+                                        }, /*is_dof_loop=*/true);
+                                    }, /*is_dof_loop=*/true);
                                 } else {
                                     emitForLoop(side_single.n_test_dofs, "ci" + ts, [&](llvm::Value* i) {
                                         emitForLoop(side_single.n_trial_dofs, "cj" + ts, [&](llvm::Value* j) {
                                             auto* val = evalKernelIRSingle(term, q, i, j, side_single, cached_ptr);
                                             auto* contrib = builder.CreateFMul(scaled_w, val);
                                             emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
-                                        });
-                                    });
+                                        }, /*is_dof_loop=*/true);
+                                    }, /*is_dof_loop=*/true);
                                 }
                             } else {
                                 emitForLoop(side_single.n_test_dofs, "ci" + ts, [&](llvm::Value* i) {
                                     auto* val = evalKernelIRSingle(term, q, i, builder.getInt32(0), side_single, cached_ptr);
                                     auto* contrib = builder.CreateFMul(scaled_w, val);
                                     emitVectorAccum(element_vector_single, i, contrib);
-                                });
+                                }, /*is_dof_loop=*/true);
                             }
                         });
                         builder.CreateBr(tx);
@@ -11003,7 +11145,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             return mul(makeScalar(coeff0), g);
                         }
 
-                        if (dt_child.type == FormExprType::Constant) {
+                        if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
                             return makeZero(shape);
                         }
 
@@ -11261,13 +11403,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             return makeScalar(phi);
                         }
 
-                        if (dt_child.type == FormExprType::Constant) {
+                        if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
                             return makeScalar(f64c(0.0));
                         }
 
                         throw std::runtime_error("LLVMGen: div(dt(...)) operand not supported");
                     }
-                    if (kid.type == FormExprType::Constant) {
+                    if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
                         return makeScalar(f64c(0.0));
                     }
                     throw std::runtime_error("LLVMGen: Divergence operand not supported");
@@ -11586,13 +11728,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             return makeVector(3u, out[0], out[1], out[2]);
                         }
 
-                        if (dt_child.type == FormExprType::Constant) {
+                        if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
                             return makeZero(vectorShape(3u));
                         }
 
                         throw std::runtime_error("LLVMGen: curl(dt(...)) operand not supported");
                     }
-                    if (kid.type == FormExprType::Constant) {
+                    if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
                         return makeZero(vectorShape(3u));
                     }
                     throw std::runtime_error("LLVMGen: Curl operand not supported");
@@ -11746,13 +11888,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            return mul(makeScalar(coeff0), out);
 	                        }
 
-	                        if (dt_child.type == FormExprType::Constant) {
+	                        if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
 	                            return matZero();
 	                        }
 
                         throw std::runtime_error("LLVMGen: H(dt(...)) operand not supported");
 	                    }
-	                    if (kid.type == FormExprType::Constant) {
+	                    if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
 	                        return matZero();
 	                    }
 	                    throw std::runtime_error("LLVMGen: Hessian operand not supported");
@@ -11768,6 +11910,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     const auto& shape = term.shapes[op_idx];
 
                     switch (op.type) {
+                        case FormExprType::TypedZero: {
+                            const auto cv = makeZero(shape);
+                            values_minus[op_idx] = cv;
+                            values_plus[op_idx] = cv;
+                            break;
+                        }
                         case FormExprType::Constant: {
                             const double v = std::bit_cast<double>(op.imm0);
                             const auto cv = makeScalar(f64c(v));
@@ -12654,6 +12802,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         }
 
                         auto lowered_scalar = lowerToKernelIR(scalar_expr);
+                        // KernelIR::optimize() disabled — see earlier comment.
                         auto scalar_shapes = inferShapes(lowered_scalar.ir, ir.testSpace(), ir.trialSpace(), /*require_scalar_root=*/false);
                         if (!scalar_shapes.ok) {
                             throw std::runtime_error(scalar_shapes.message.empty() ? "LLVMGen: failed to infer scalar shapes" : scalar_shapes.message);
@@ -12691,6 +12840,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         }
 
                         auto lowered_base = lowerToKernelIR(spec.base);
+                        // KernelIR::optimize() disabled — see earlier comment.
                         auto base_shapes = inferShapes(lowered_base.ir, ir.testSpace(), ir.trialSpace(), /*require_scalar_root=*/false);
                         if (!base_shapes.ok) {
                             throw std::runtime_error(base_shapes.message.empty() ? "LLVMGen: failed to infer base-tensor shapes" : base_shapes.message);
@@ -13091,8 +13241,20 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             }
 
             llvm::orc::ThreadSafeModule tsm(std::move(mod_owner), std::move(ctx_owner));
-            engine.addModule(std::move(tsm));
-            out_address = engine.lookup(symbol);
+            {
+                static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                if (jit_telemetry) {
+                    std::cerr << "[JIT compile-start] " << symbol
+                              << " suppress_dof_unroll=" << suppress_dof_unroll << "\n";
+                    std::cerr.flush();
+                }
+                engine.addModule(std::move(tsm));
+                out_address = engine.lookup(symbol);
+                if (jit_telemetry) {
+                    std::cerr << "[JIT compile-done] " << symbol << "\n";
+                    std::cerr.flush();
+                }
+            }
         }
         // else: colocation mode — address is 0, resolved by caller after
         // the shared module is added to the engine.
@@ -13191,6 +13353,19 @@ LLVMGenResult LLVMGen::compileAndAddFusedKernel(JITEngine& engine,
         auto lowered = lowerToKernelIR(effective_integrand);
         if (lowered.ir.empty()) {
             return LLVMGenResult{.ok = false, .message = "LLVMGen: failed to lower residual term to KernelIR"};
+        }
+        {
+            const auto ops_before = lowered.ir.opCount();
+            // KernelIR::optimize() disabled — see earlier comment.
+            static const bool enable_ir_opt_r = (std::getenv("SVMP_ENABLE_IR_OPT") != nullptr);
+            const auto eliminated = enable_ir_opt_r ? lowered.ir.optimize() : 0u;
+            static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+            if (jit_telemetry) {
+                std::cerr << "[JIT telemetry] residual term " << tidx
+                          << ": KernelIR " << ops_before << " -> " << lowered.ir.opCount()
+                          << " ops (-" << eliminated << ", ~"
+                          << (lowered.ir.opCount() * 58) << " bytes .text est)\n";
+            }
         }
 
         auto shapes = inferShapes(lowered.ir, residual_ir.testSpace(), residual_ir.trialSpace());
@@ -13352,6 +13527,19 @@ LLVMGenResult LLVMGen::compileAndAddCoupledKernel(JITEngine& engine,
                 if (lowered.ir.empty()) {
                     return LLVMGenResult{.ok = false,
                         .message = "LLVMGen: failed to lower coupled block term to KernelIR"};
+                }
+                {
+                    const auto ops_before = lowered.ir.opCount();
+                    // KernelIR::optimize() disabled — see earlier comment.
+                    static const bool enable_ir_opt_coupled = (std::getenv("SVMP_ENABLE_IR_OPT") != nullptr);
+                    const auto eliminated = enable_ir_opt_coupled ? lowered.ir.optimize() : 0u;
+                    static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                    if (jit_telemetry && eliminated > 0) {
+                        std::cerr << "[JIT telemetry] coupled block " << bi << " term " << tidx
+                                  << ": KernelIR " << ops_before << " -> " << lowered.ir.opCount()
+                                  << " ops (-" << eliminated << ", ~"
+                                  << (lowered.ir.opCount() * 58) << " bytes .text est)\n";
+                    }
                 }
 
                 auto shapes = inferShapes(lowered.ir, form_ir->testSpace(), form_ir->trialSpace());
@@ -13592,7 +13780,18 @@ LLVMGenResult LLVMGen::compileAndAddColocatedKernels(
 
         // Add the single module to the engine.
         llvm::orc::ThreadSafeModule tsm(std::move(mod_owner), std::move(ctx_owner));
-        engine.addModule(std::move(tsm));
+        {
+            static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+            if (jit_telemetry) {
+                std::cerr << "[JIT coloc-compile-start] n_kernels=" << specs.size() << "\n";
+                std::cerr.flush();
+            }
+            engine.addModule(std::move(tsm));
+            if (jit_telemetry) {
+                std::cerr << "[JIT coloc-compile-done]\n";
+                std::cerr.flush();
+            }
+        }
 
         // Resolve all symbol addresses from the single dylib.
         out_results.reserve(specs.size());

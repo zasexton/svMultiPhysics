@@ -76,6 +76,7 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
         case FormExprType::TestFunction:
         case FormExprType::DiscreteField:
         case FormExprType::Coefficient:
+        case FormExprType::TypedZero:
         case FormExprType::Constant:
         case FormExprType::Coordinate:
         case FormExprType::ReferenceCoordinate:

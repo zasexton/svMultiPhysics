@@ -39,6 +39,7 @@ struct DeltaInfo {
 {
     // Conservative scalar inference sufficient to guard commutativity-based rewrites.
     switch (node.type()) {
+        case FormExprType::TypedZero:
         case FormExprType::Constant:
         case FormExprType::ParameterRef:
         case FormExprType::BoundaryIntegralRef:

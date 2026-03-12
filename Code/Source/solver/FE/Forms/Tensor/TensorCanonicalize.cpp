@@ -128,6 +128,7 @@ namespace {
 {
     // Conservative scalar inference (sufficient for safe commutative reordering).
     switch (node.type()) {
+        case FormExprType::TypedZero:
         case FormExprType::Constant:
         case FormExprType::ParameterSymbol:
         case FormExprType::ParameterRef:

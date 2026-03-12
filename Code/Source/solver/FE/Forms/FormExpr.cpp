@@ -118,6 +118,18 @@ private:
     Real value_{0.0};
 };
 
+class TypedZeroNode final : public FormExprNode {
+public:
+    TypedZeroNode() = default;
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::TypedZero; }
+    [[nodiscard]] std::string toString() const override { return "TypedZero"; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+
+    [[nodiscard]] std::optional<Real> constantValue() const override { return Real(0.0); }
+};
+
 class BoundaryFunctionalSymbolNode final : public FormExprNode {
 public:
     BoundaryFunctionalSymbolNode(std::shared_ptr<FormExprNode> integrand,
@@ -2030,6 +2042,11 @@ FormExpr FormExpr::parameterRef(std::uint32_t slot)
 FormExpr FormExpr::constant(Real value)
 {
     return FormExpr(std::make_shared<ConstantNode>(value));
+}
+
+FormExpr FormExpr::typedZero()
+{
+    return FormExpr(std::make_shared<TypedZeroNode>());
 }
 
 FormExpr FormExpr::boundaryIntegral(FormExpr integrand, int boundary_marker, std::string name)

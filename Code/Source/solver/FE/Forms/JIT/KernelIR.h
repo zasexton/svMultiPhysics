@@ -59,6 +59,13 @@ struct KernelIR {
     [[nodiscard]] std::uint64_t stableHash64() const;
     [[nodiscard]] std::vector<std::uint64_t> perOpStructuralHashes() const;
     [[nodiscard]] std::string dump() const;
+
+    /**
+     * @brief Optimize the IR in-place: zero propagation, constant folding, DCE
+     *
+     * Returns the number of ops eliminated.
+     */
+    std::size_t optimize();
 };
 
 struct KernelIRBuildOptions {

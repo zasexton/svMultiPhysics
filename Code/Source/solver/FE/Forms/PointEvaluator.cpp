@@ -151,6 +151,7 @@ struct DualValue {
 [[nodiscard]] Value eval(const FormExprNode& node, const PointEvalContext& ctx)
 {
     switch (node.type()) {
+        case FormExprType::TypedZero:
         case FormExprType::Constant:
             return scalar(node.constantValue().value_or(0.0));
         case FormExprType::Time:
@@ -347,6 +348,7 @@ struct DualValue {
                                  const PointDualSeedContext& seeds)
 {
     switch (node.type()) {
+        case FormExprType::TypedZero:
         case FormExprType::Constant: {
             const Real v = node.constantValue().value_or(0.0);
             return scalar(makeDualConstant(v, ws.alloc()));

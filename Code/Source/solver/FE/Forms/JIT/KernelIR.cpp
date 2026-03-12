@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <sstream>
 #include <span>
@@ -49,6 +50,7 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
         case FormExprType::ParameterSymbol: return "ParameterSymbol";
         case FormExprType::ParameterRef: return "ParameterRef";
         case FormExprType::Constant: return "Constant";
+        case FormExprType::TypedZero: return "TypedZero";
         case FormExprType::BoundaryFunctionalSymbol: return "BoundaryFunctionalSymbol";
         case FormExprType::BoundaryIntegralSymbol: return "BoundaryIntegralSymbol";
         case FormExprType::BoundaryIntegralRef: return "BoundaryIntegralRef";
@@ -212,6 +214,13 @@ struct ImmPayload {
 {
     ImmPayload out{};
     switch (node.type()) {
+        case FormExprType::TypedZero: {
+            // TypedZero lowers to Constant(0.0) in KernelIR
+            const double zero = 0.0;
+            out.imm0 = std::bit_cast<std::uint64_t>(zero);
+            return out;
+        }
+
         case FormExprType::Constant: {
             const auto v = node.constantValue().value_or(0.0);
             out.imm0 = std::bit_cast<std::uint64_t>(v);
@@ -478,12 +487,14 @@ struct Builder {
         }
         result.cacheable = result.cacheable && imm.cacheable;
 
-        const std::uint64_t h = opHash(node.type(), imm.imm0, imm.imm1, kid_indices);
+        const auto ir_type = node.type();
+
+        const std::uint64_t h = opHash(ir_type, imm.imm0, imm.imm1, kid_indices);
         if (options.cse) {
             auto it = hash_to_ops.find(h);
             if (it != hash_to_ops.end()) {
                 for (const auto cand : it->second) {
-                    if (opEquals(cand, node.type(), imm.imm0, imm.imm1, kid_indices)) {
+                    if (opEquals(cand, ir_type, imm.imm0, imm.imm1, kid_indices)) {
                         return cand;
                     }
                 }
@@ -495,7 +506,7 @@ struct Builder {
 
         const auto idx = static_cast<std::uint32_t>(ops.size());
         ops.push_back(KernelIROp{
-            .type = node.type(),
+            .type = ir_type,
             .first_child = first,
             .child_count = static_cast<std::uint32_t>(kid_indices.size()),
             .imm0 = imm.imm0,
@@ -620,6 +631,267 @@ std::string KernelIR::dump() const
         oss << "\n";
     }
     return oss.str();
+}
+
+namespace {
+
+[[nodiscard]] bool isZeroOp(const KernelIROp& op) noexcept
+{
+    if (op.type == FormExprType::TypedZero) return true;
+    if (op.type != FormExprType::Constant) return false;
+    const double v = std::bit_cast<double>(op.imm0);
+    return v == 0.0;
+}
+
+void makeTypedZero(KernelIROp& op) noexcept
+{
+    op.type = FormExprType::TypedZero;
+    op.first_child = 0;
+    op.child_count = 0;
+    op.imm0 = 0;
+    op.imm1 = 0;
+}
+
+[[nodiscard]] bool isConstantOne(const KernelIROp& op) noexcept
+{
+    if (op.type != FormExprType::Constant) return false;
+    const double v = std::bit_cast<double>(op.imm0);
+    return v == 1.0;
+}
+
+[[nodiscard]] bool isConstant(const KernelIROp& op) noexcept
+{
+    return op.type == FormExprType::Constant;
+}
+
+[[nodiscard]] double constantVal(const KernelIROp& op) noexcept
+{
+    return std::bit_cast<double>(op.imm0);
+}
+
+void makeConstant(KernelIROp& op, double value) noexcept
+{
+    op.type = FormExprType::Constant;
+    op.first_child = 0;
+    op.child_count = 0;
+    op.imm0 = std::bit_cast<std::uint64_t>(value);
+    op.imm1 = 0;
+}
+
+} // namespace
+
+std::size_t KernelIR::optimize()
+{
+    if (ops.empty()) return 0;
+
+    const std::size_t n = ops.size();
+    const std::size_t original_count = n;
+
+    // Pass 1: Zero propagation and constant folding (bottom-up, single pass).
+    // Since ops are in post-order (children before parents), a single forward
+    // scan propagates zeros/constants through the entire DAG.
+    for (std::size_t i = 0; i < n; ++i) {
+        auto& op = ops[i];
+        if (op.child_count == 0u) continue;
+
+        // Get children indices
+        auto kidIdx = [&](std::size_t k) -> std::uint32_t {
+            return children[static_cast<std::size_t>(op.first_child) + k];
+        };
+
+        // Resolve through forwarding (an op that was folded to a constant
+        // may have children pointing to the original op index; after folding,
+        // the op AT that index is now a constant).
+        auto& kid0 = ops[kidIdx(0)];
+
+        if (op.child_count == 1u) {
+            // Unary ops with zero child → TypedZero (shapeless zero)
+            if (isZeroOp(kid0)) {
+                switch (op.type) {
+                    case FormExprType::Negate:
+                    case FormExprType::Gradient:
+                    case FormExprType::Divergence:
+                    case FormExprType::Curl:
+                    case FormExprType::Hessian:
+                    case FormExprType::TimeDerivative:
+                    case FormExprType::Transpose:
+                    case FormExprType::SymmetricPart:
+                    case FormExprType::SkewPart:
+                    case FormExprType::Deviator:
+                    case FormExprType::RestrictMinus:
+                    case FormExprType::RestrictPlus:
+                    case FormExprType::Jump:
+                    case FormExprType::Average:
+                    case FormExprType::Component:
+                    case FormExprType::Trace:
+                    case FormExprType::Determinant:
+                    case FormExprType::Norm:
+                        makeTypedZero(op);
+                        break;
+                    default:
+                        break;
+                }
+            }
+
+            // Negate constant folding: negate(const) → -const (scalar→scalar)
+            if (op.type == FormExprType::Negate && isConstant(kid0)) {
+                makeConstant(op, -constantVal(kid0));
+            }
+
+            // Double negate: --X → X (redirect to grandchild, shape-preserving)
+            if (op.type == FormExprType::Negate && kid0.type == FormExprType::Negate && kid0.child_count == 1u) {
+                const auto grandchild = children[static_cast<std::size_t>(kid0.first_child)];
+                op = ops[grandchild]; // copy the grandchild op
+            }
+
+            continue;
+        }
+
+        if (op.child_count == 2u) {
+            auto& kid1 = ops[kidIdx(1)];
+            const bool k0_zero = isZeroOp(kid0);
+            const bool k1_zero = isZeroOp(kid1);
+            const bool k0_one = isConstantOne(kid0);
+            const bool k1_one = isConstantOne(kid1);
+            const bool k0_const = isConstant(kid0);
+            const bool k1_const = isConstant(kid1);
+
+            switch (op.type) {
+                case FormExprType::Multiply:
+                    // 0*X or X*0 → TypedZero (shapeless zero)
+                    if (k0_zero || k1_zero) { makeTypedZero(op); break; }
+                    // 1*X → X or X*1 → X (shape-preserving alias)
+                    if (k0_one) { op = kid1; break; }
+                    if (k1_one) { op = kid0; break; }
+                    // const * const → const
+                    if (k0_const && k1_const) { makeConstant(op, constantVal(kid0) * constantVal(kid1)); break; }
+                    break;
+
+                case FormExprType::Add:
+                    // 0+X → X or X+0 → X (shape-preserving alias)
+                    if (k0_zero) { op = kid1; break; }
+                    if (k1_zero) { op = kid0; break; }
+                    // const + const → const
+                    if (k0_const && k1_const) { makeConstant(op, constantVal(kid0) + constantVal(kid1)); break; }
+                    break;
+
+                case FormExprType::Subtract:
+                    // X-0 → X (shape-preserving alias)
+                    if (k1_zero) { op = kid0; break; }
+                    // 0-X → keep as subtract (LLVM handles it)
+                    // const - const → const
+                    if (k0_const && k1_const) { makeConstant(op, constantVal(kid0) - constantVal(kid1)); break; }
+                    break;
+
+                case FormExprType::Divide:
+                    // 0/X → TypedZero
+                    if (k0_zero) { makeTypedZero(op); break; }
+                    // X/1 → X (shape-preserving alias)
+                    if (k1_one) { op = kid0; break; }
+                    // const / const → const
+                    if (k0_const && k1_const && constantVal(kid1) != 0.0) {
+                        makeConstant(op, constantVal(kid0) / constantVal(kid1));
+                        break;
+                    }
+                    break;
+
+                case FormExprType::Power:
+                    // X^0 → 1 (Power is always scalar^scalar)
+                    if (k1_zero) { makeConstant(op, 1.0); break; }
+                    // X^1 → X (shape-preserving alias)
+                    if (k1_one) { op = kid0; break; }
+                    // const ^ const → const
+                    if (k0_const && k1_const) { makeConstant(op, std::pow(constantVal(kid0), constantVal(kid1))); break; }
+                    break;
+
+                case FormExprType::InnerProduct:
+                case FormExprType::DoubleContraction:
+                    // inner(0,X) or inner(X,0) → 0 (always scalar)
+                    if (k0_zero || k1_zero) { makeConstant(op, 0.0); break; }
+                    break;
+
+                case FormExprType::OuterProduct:
+                case FormExprType::CrossProduct:
+                    // outer(0,X) or outer(X,0) → TypedZero
+                    if (k0_zero || k1_zero) { makeTypedZero(op); break; }
+                    break;
+
+                default:
+                    break;
+            }
+        }
+
+        // Multi-child: AsVector/AsTensor with all-zero children → TypedZero
+        if (op.child_count > 2u &&
+            (op.type == FormExprType::AsVector || op.type == FormExprType::AsTensor)) {
+            bool all_zero = true;
+            for (std::uint32_t c = 0; c < op.child_count; ++c) {
+                if (!isZeroOp(ops[kidIdx(c)])) { all_zero = false; break; }
+            }
+            if (all_zero) { makeTypedZero(op); }
+        }
+    }
+
+    // Pass 2: Dead code elimination.
+    // Mark reachable ops from root, then compact.
+    std::vector<bool> reachable(n, false);
+    {
+        // BFS/DFS from root
+        std::vector<std::uint32_t> stack;
+        stack.push_back(root);
+        while (!stack.empty()) {
+            const auto idx = stack.back();
+            stack.pop_back();
+            if (idx >= n || reachable[idx]) continue;
+            reachable[idx] = true;
+            const auto& op = ops[idx];
+            for (std::uint32_t c = 0; c < op.child_count; ++c) {
+                const auto child = children[static_cast<std::size_t>(op.first_child) + c];
+                if (!reachable[child]) {
+                    stack.push_back(child);
+                }
+            }
+        }
+    }
+
+    // Count reachable ops
+    std::size_t live_count = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (reachable[i]) ++live_count;
+    }
+
+    if (live_count == n) {
+        return 0; // nothing eliminated
+    }
+
+    // Build remapping: old index → new index
+    std::vector<std::uint32_t> remap(n, UINT32_MAX);
+    std::vector<KernelIROp> new_ops;
+    new_ops.reserve(live_count);
+    std::vector<std::uint32_t> new_children;
+    new_children.reserve(children.size());
+
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!reachable[i]) continue;
+        const auto& old_op = ops[i];
+        const auto new_idx = static_cast<std::uint32_t>(new_ops.size());
+        remap[i] = new_idx;
+
+        KernelIROp new_op = old_op;
+        new_op.first_child = static_cast<std::uint32_t>(new_children.size());
+        for (std::uint32_t c = 0; c < old_op.child_count; ++c) {
+            const auto old_child = children[static_cast<std::size_t>(old_op.first_child) + c];
+            const auto remapped = remap[old_child];
+            new_children.push_back(remapped);
+        }
+        new_ops.push_back(new_op);
+    }
+
+    root = remap[root];
+    ops = std::move(new_ops);
+    children = std::move(new_children);
+
+    return original_count - live_count;
 }
 
 KernelIRBuildResult lowerToKernelIR(const FormExprNode& root,

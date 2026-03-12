@@ -228,6 +228,12 @@ inferFunctionalTrialSpaceSignature(const FormExprNode& node, bool& out_conflict)
     std::uint64_t h = kFNVOffset;
     hashMix(h, static_cast<std::uint64_t>(opt.enable_loop_unroll_metadata ? 1u : 0u));
     hashMix(h, static_cast<std::uint64_t>(opt.max_unroll_trip_count));
+    // NOTE: text_budget_bytes is NOT included here because it only affects code
+    // generation for specialized kernels (fixed DOF counts enable loop unroll
+    // metadata, which the budget may suppress). Including it here would
+    // invalidate ALL kernel caches when the budget changes.  Instead,
+    // text_budget_bytes is mixed into the cache key in computeKernelCacheKey()
+    // only when specialization is active (use_spec == true).
     return h;
 }
 
@@ -343,6 +349,10 @@ struct KernelGroupPlan {
         mixOptU32(specialization->n_qpts_plus);
         mixOptU32(specialization->n_test_dofs_plus);
         mixOptU32(specialization->n_trial_dofs_plus);
+
+        // text_budget_bytes affects whether DOF loop unroll metadata is
+        // emitted for specialized kernels, so it must be part of this key.
+        hashMix(h, static_cast<std::uint64_t>(jit_options.specialization.text_budget_bytes));
     }
     return h;
 }
@@ -449,12 +459,14 @@ struct CompilationPlan {
                 } else {
                     const auto effective =
                         tl.fallback_expr.isValid() ? tl.fallback_expr : term.integrand;
-                    const auto lowered = lowerToKernelIR(effective);
+                    auto lowered = lowerToKernelIR(effective);
+                    // KernelIR::optimize() disabled — see LLVMGen.cpp comment.
                     term_hash = lowered.ir.stableHash64();
                     term_cacheable = lowered.cacheable;
                 }
             } else {
-                const auto lowered = lowerToKernelIR(term.integrand);
+                auto lowered = lowerToKernelIR(term.integrand);
+                // KernelIR::optimize() disabled — see LLVMGen.cpp comment.
                 term_hash = lowered.ir.stableHash64();
                 term_cacheable = lowered.cacheable;
             }
@@ -945,14 +957,17 @@ JITCompileResult JITCompiler::Impl::compileFusedFormIR(const FormIR& tangent_ir,
                 if (tl.ok && tl.used_loop_nest) {
                     term_hash = tl.ir.stableHash64();
                 } else if (tl.ok && tl.fallback_expr.isValid()) {
-                    const auto lowered = lowerToKernelIR(tl.fallback_expr);
+                    auto lowered = lowerToKernelIR(tl.fallback_expr);
+                    lowered.ir.optimize();
                     term_hash = lowered.ir.stableHash64();
                 } else {
-                    const auto lowered = lowerToKernelIR(term.integrand);
+                    auto lowered = lowerToKernelIR(term.integrand);
+                    lowered.ir.optimize();
                     term_hash = lowered.ir.stableHash64();
                 }
             } else {
-                const auto lowered = lowerToKernelIR(term.integrand);
+                auto lowered = lowerToKernelIR(term.integrand);
+                lowered.ir.optimize();
                 term_hash = lowered.ir.stableHash64();
             }
 
@@ -1145,14 +1160,17 @@ JITCompileResult JITCompiler::Impl::compileMonolithicFormIR(
                     if (tl.ok && tl.used_loop_nest) {
                         term_hash = tl.ir.stableHash64();
                     } else if (tl.ok && tl.fallback_expr.isValid()) {
-                        const auto lowered = lowerToKernelIR(tl.fallback_expr);
+                        auto lowered = lowerToKernelIR(tl.fallback_expr);
+                        lowered.ir.optimize();
                         term_hash = lowered.ir.stableHash64();
                     } else {
-                        const auto lowered = lowerToKernelIR(term.integrand);
+                        auto lowered = lowerToKernelIR(term.integrand);
+                        lowered.ir.optimize();
                         term_hash = lowered.ir.stableHash64();
                     }
                 } else {
-                    const auto lowered = lowerToKernelIR(term.integrand);
+                    auto lowered = lowerToKernelIR(term.integrand);
+                    lowered.ir.optimize();
                     term_hash = lowered.ir.stableHash64();
                 }
                 hashMix(combined_hash, term_hash);

@@ -136,6 +136,7 @@ FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
         case FormExprType::Coefficient:
         case FormExprType::ParameterSymbol:
         case FormExprType::ParameterRef:
+        case FormExprType::TypedZero:
         case FormExprType::Constant:
         case FormExprType::BoundaryIntegralSymbol:
         case FormExprType::BoundaryIntegralRef:

@@ -118,6 +118,17 @@ struct JITSpecializationOptions {
     // higher-order elements.  Override at runtime via SVMP_JIT_MAX_UNROLL.
     bool enable_loop_unroll_metadata{true};
     std::uint32_t max_unroll_trip_count{16};
+
+    // Code-size budget: estimated .text bytes before DOF-loop unrolling is
+    // suppressed.  When the estimated fully-unrolled code exceeds this limit,
+    // test/trial DOF loops remain as actual loops (QP loops still unroll).
+    // Set to 0 to disable budget-aware unrolling.
+    // Override at runtime via SVMP_JIT_TEXT_BUDGET.
+    std::uint32_t text_budget_bytes{98304};
+
+    // Estimated bytes per KernelIR op when fully unrolled by LLVM.
+    // Used only for the budget calculation, not for actual code generation.
+    std::uint32_t bytes_per_op_estimate{4};
 };
 
 struct JITOptions {
@@ -169,6 +180,7 @@ struct SymbolicOptions {
 	    ParameterSymbol,          ///< Runtime scalar parameter by name (setup-time identifier)
 	    ParameterRef,             ///< Runtime scalar parameter by slot (JIT-friendly)
 	    Constant,
+	    TypedZero,             ///< Shape-preserving zero (no children, no dead subtrees)
 	    BoundaryFunctionalSymbol,
 	    BoundaryIntegralSymbol,   ///< Coupled boundary-integral value by name (requires Systems registration)
 	    BoundaryIntegralRef,      ///< Coupled boundary-integral value by slot (JIT-friendly)
@@ -425,6 +437,7 @@ public:
     static FormExpr parameterRef(std::uint32_t slot);
 
     static FormExpr constant(Real value);
+    static FormExpr typedZero();
     static FormExpr boundaryIntegral(FormExpr integrand, int boundary_marker, std::string name);
     static FormExpr boundaryIntegralValue(std::string name);
     static FormExpr boundaryIntegralRef(std::uint32_t slot);
