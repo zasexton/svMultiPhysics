@@ -71,6 +71,15 @@ struct HardwareProfile {
         return (l1i.size_bytes * 3u) / 4u;
     }
 
+    /// Minimum estimated .text size for marking helper functions NoInline.
+    /// Helpers smaller than this threshold are left inlineable so LLVM can
+    /// merge them into the caller when profitable.  Tied to L1i: ~1/4 of
+    /// the helper text budget (i.e. ~3/16 of L1i).
+    [[nodiscard]] std::uint32_t noInlineThresholdBytes() const noexcept
+    {
+        return helperTextBudgetBytes() / 4u;
+    }
+
     /// Maximum trip count for full loop unrolling.
     /// Derived from L1i budget and estimated bytes per unrolled iteration.
     [[nodiscard]] std::uint32_t maxUnrollTripCount() const noexcept
@@ -166,6 +175,15 @@ struct HardwareProfile {
     /// This is the static fallback; use BytesPerOpCalibration for
     /// telemetry-driven per-process estimates from actual compilations.
     static constexpr std::uint64_t kBytesPerOp = 58;
+
+    /// Raw bytes per KernelIR op for the un-unrolled instruction stream.
+    /// Unlike kBytesPerOp (calibrated from fully-unrolled kernels where the
+    /// bpo already embeds the DOF/QP repetition factor), this estimates only
+    /// the per-iteration instruction encoding.  Used by the text budget
+    /// estimator where the formula already multiplies by nq*nt*nj explicitly,
+    /// avoiding the double-counting that previously disabled the budget path.
+    /// Empirical: ~8-12 x86-64 bytes per FMA-heavy IR op (mov+fma+store).
+    static constexpr std::uint64_t kRawBytesPerOp = 10;
 
     /// Conservative fallback KernelIR op count per FormIR term, used when
     /// actual lowering is unavailable (e.g. FormIR not compiled, lowering

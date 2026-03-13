@@ -229,12 +229,10 @@ inferFunctionalTrialSpaceSignature(const FormExprNode& node, bool& out_conflict)
     std::uint64_t h = kFNVOffset;
     hashMix(h, static_cast<std::uint64_t>(opt.enable_loop_unroll_metadata ? 1u : 0u));
     hashMix(h, static_cast<std::uint64_t>(opt.max_unroll_trip_count));
-    // NOTE: text_budget_bytes is NOT included here because it only affects code
-    // generation for specialized kernels (fixed DOF counts enable loop unroll
-    // metadata, which the budget may suppress). Including it here would
-    // invalidate ALL kernel caches when the budget changes.  Instead,
-    // text_budget_bytes is mixed into the cache key in computeKernelCacheKey()
-    // only when specialization is active (use_spec == true).
+    // bytes_per_op_estimate is a live codegen input (used in text budget
+    // estimation at LLVMGen.cpp).  Include it so that changing the estimate
+    // invalidates cached kernels that were compiled with the old value.
+    hashMix(h, static_cast<std::uint64_t>(opt.bytes_per_op_estimate));
     return h;
 }
 

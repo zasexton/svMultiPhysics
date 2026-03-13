@@ -599,8 +599,33 @@ struct ShapeInferenceResult {
         };
 
         switch (op.type) {
+            case FormExprType::TypedZero: {
+                // Shaped TypedZero: if imm1 carries encoded shape data
+                // (from KernelIR::optimize()), decode the shape directly.
+                // Otherwise fall through to scalar (legacy behavior).
+                if (typed_zero::hasShape(op.imm1)) {
+                    const auto k = typed_zero::kind(op.imm1);
+                    switch (k) {
+                        case typed_zero::kScalar:
+                            out.shapes[idx] = scalarShape();
+                            break;
+                        case typed_zero::kVector:
+                            out.shapes[idx] = vectorShape(typed_zero::dim(op.imm1, 0));
+                            break;
+                        case typed_zero::kMatrix:
+                            out.shapes[idx] = matrixShape(typed_zero::dim(op.imm1, 0),
+                                                          typed_zero::dim(op.imm1, 1));
+                            break;
+                        default:
+                            out.shapes[idx] = scalarShape();
+                            break;
+                    }
+                } else {
+                    out.shapes[idx] = scalarShape();
+                }
+                break;
+            }
             case FormExprType::Constant:
-            case FormExprType::TypedZero:
             case FormExprType::ParameterRef:
             case FormExprType::BoundaryIntegralRef:
             case FormExprType::AuxiliaryStateRef:
@@ -2245,13 +2270,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         const auto& hw = hardwareProfile();
 
         // --- Budget-aware loop unrolling decision ---
-        // Budget: user-provided only.  Auto-budget from hardware profile is
-        // NOT used because the text estimate (nq*nt*nj*ops*bpo) double-counts
-        // the unrolling factor embedded in calibrated bpo — leading to massive
-        // overestimates (25MB vs 170KB actual) that suppress DOF unrolling
-        // even for small 2D kernels.  Set text_budget_bytes explicitly to
-        // enable budget-based suppression.
-        const std::uint32_t effective_text_budget = options_.specialization.text_budget_bytes;
+        // The budget path is opt-in: DOF rolling is only enabled when the user
+        // explicitly sets text_budget_bytes > 0.  Auto-enabling via
+        // hw.textBudgetBytes() was tried and reverted because (a) rolled DOF
+        // loops are catastrophically slow for NS-VMS kernels (>100× regression),
+        // and (b) the raw bpo estimate still double-counts in practice.
+        const std::uint32_t effective_text_budget =
+            options_.specialization.text_budget_bytes;
         if (effective_text_budget > 0u &&
             fixed_n_test_dofs_minus.has_value() &&
             fixed_n_trial_dofs_minus.has_value() &&
@@ -2260,7 +2285,6 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             const auto n_q = static_cast<std::uint64_t>(*fixed_n_qpts_minus);
             const auto n_t = static_cast<std::uint64_t>(*fixed_n_test_dofs_minus);
             const auto n_j = static_cast<std::uint64_t>(*fixed_n_trial_dofs_minus);
-            // Use telemetry-calibrated bytes/op if available, else the per-options fallback.
             const auto bpo = bytesPerOpCalibration().calibratedBytesPerOp(
                 options_.specialization.bytes_per_op_estimate);
 
@@ -2315,6 +2339,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                           << " text_roll_dof=" << text_roll_dof
                           << " text_roll_all=" << (total_ops_roll_all * bpo)
                           << " bytes (nq=" << n_q << " nt=" << n_t << " nj=" << n_j
+                          << " bpo=" << bpo
                           << ") budget=" << budget
                           << " -> " << policy
                           << "\n";
@@ -10549,12 +10574,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         (terms[t].target == LoweredTerm::Target::Auto && want_matrix);
                     if (emit_matrix) {
                         // Cost-weighted profitability test for trial-only caching.
-                        // Instead of a simple op count threshold, compute the total
-                        // subtree cost of trial-only ops and compare against the
-                        // estimated n_test reuse factor.  Caching is profitable when:
-                        //   trial_only_cost × (n_test - 1) > min_savings_threshold
-                        // This avoids caching when there are many cheap ops (e.g.,
-                        // just basis lookups) or too few test DOFs for amortization.
+                        // Compute the total subtree cost of trial-only ops and
+                        // compare against the estimated n_test reuse factor.
                         std::uint32_t trial_only_cost = 0;
                         std::size_t n_trial_only = 0;
                         if (cached_ptr != nullptr) {
@@ -10566,18 +10587,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                     if (oi < costs.size()) {
                                         trial_only_cost += costs[oi];
                                     } else {
-                                        trial_only_cost += 1u; // fallback
+                                        trial_only_cost += 1u;
                                     }
                                 }
                             }
                         }
-                        // Estimate reuse: n_test DOFs (specialized or hardware-default).
                         const std::uint32_t n_test_est = fixed_n_test_dofs_minus.value_or(
                             hw.defaultTestDofEstimate());
                         const std::uint32_t reuse = (n_test_est > 1u) ? (n_test_est - 1u) : 0u;
-                        // Profitability: total savings > hardware-derived threshold.
-                        // Each cached trial-only evaluation is reused (n_test-1) times.
-                        // Thresholds derived from L1d size to account for cache pressure.
                         const bool trial_cache_profitable =
                             (n_trial_only >= hw.trialOnlyMinOps()) &&
                             (trial_only_cost * reuse >= hw.trialOnlyMinSavings());
@@ -10586,7 +10603,6 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             // Trial-outer, test-inner: compute trial-only ops once
                             // per trial DOF, then reuse across all test DOFs.
                             emitForLoop(side_single.n_trial_dofs, "j" + std::to_string(t), [&](llvm::Value* j) {
-                                // Compute dep_mask==0 and dep_mask==0x2 ops, skip test-dependent ops
                                 std::vector<CodeValue> trial_vals;
                                 evalKernelIRSingleValue(terms[t], q, builder.getInt32(0), j, side_single,
                                                         /*indexed_env=*/nullptr, cached_ptr,
@@ -10594,8 +10610,6 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                                         /*partial_cached_mask=*/0u,
                                                         /*skip_dep_mask=*/0x1u,
                                                         /*out_values=*/&trial_vals);
-                                // trial_vals: dep_mask==0 (from cached) + dep_mask==0x2 (evaluated)
-                                // dep_mask==0x1 and 0x3 are zero-filled (will be computed in inner loop)
                                 const std::vector<CodeValue>* tc_ptr = &trial_vals;
                                 emitForLoop(side_single.n_test_dofs, "i" + std::to_string(t), [&](llvm::Value* i) {
                                     auto* val = evalKernelIRSingle(terms[t], q, i, j, side_single, cached_ptr,
@@ -10605,13 +10619,58 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 }, /*is_dof_loop=*/true);
                             }, /*is_dof_loop=*/true);
                         } else {
-                            emitForLoop(side_single.n_test_dofs, "i" + std::to_string(t), [&](llvm::Value* i) {
-                                emitForLoop(side_single.n_trial_dofs, "j" + std::to_string(t), [&](llvm::Value* j) {
-                                    auto* val = evalKernelIRSingle(terms[t], q, i, j, side_single, cached_ptr);
-                                    auto* contrib = builder.CreateFMul(scaled_w, val);
-                                    emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
+                            // Test-only hoisting: compute dep_mask==0x1 ops once
+                            // per test DOF, cache, reuse across trial DOFs.
+                            std::uint32_t test_only_cost = 0;
+                            std::size_t n_test_only = 0;
+                            if (cached_ptr != nullptr) {
+                                const auto& dep = terms[t].dep_mask;
+                                const auto& costs = terms[t].subtree_costs;
+                                for (std::size_t oi = 0; oi < dep.size(); ++oi) {
+                                    if (dep[oi] == 0x1u) {
+                                        ++n_test_only;
+                                        if (oi < costs.size()) {
+                                            test_only_cost += costs[oi];
+                                        } else {
+                                            test_only_cost += 1u;
+                                        }
+                                    }
+                                }
+                            }
+                            const std::uint32_t n_trial_est = fixed_n_trial_dofs_minus.value_or(
+                                hw.defaultTestDofEstimate());
+                            const std::uint32_t test_reuse = (n_trial_est > 1u) ? (n_trial_est - 1u) : 0u;
+                            const bool test_cache_profitable =
+                                (n_test_only >= hw.trialOnlyMinOps()) &&
+                                (test_only_cost * test_reuse >= hw.trialOnlyMinSavings());
+
+                            if (test_cache_profitable) {
+                                // Test-outer, trial-inner with test-only caching.
+                                emitForLoop(side_single.n_test_dofs, "i" + std::to_string(t), [&](llvm::Value* i) {
+                                    std::vector<CodeValue> test_vals;
+                                    evalKernelIRSingleValue(terms[t], q, i, builder.getInt32(0), side_single,
+                                                            /*indexed_env=*/nullptr, cached_ptr,
+                                                            /*partial_cached=*/nullptr,
+                                                            /*partial_cached_mask=*/0u,
+                                                            /*skip_dep_mask=*/0x2u,
+                                                            /*out_values=*/&test_vals);
+                                    const std::vector<CodeValue>* tc_ptr = &test_vals;
+                                    emitForLoop(side_single.n_trial_dofs, "j" + std::to_string(t), [&](llvm::Value* j) {
+                                        auto* val = evalKernelIRSingle(terms[t], q, i, j, side_single, cached_ptr,
+                                                                        tc_ptr, /*partial_cached_mask=*/0x1u);
+                                        auto* contrib = builder.CreateFMul(scaled_w, val);
+                                        emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
+                                    }, /*is_dof_loop=*/true);
                                 }, /*is_dof_loop=*/true);
-                            }, /*is_dof_loop=*/true);
+                            } else {
+                                emitForLoop(side_single.n_test_dofs, "i" + std::to_string(t), [&](llvm::Value* i) {
+                                    emitForLoop(side_single.n_trial_dofs, "j" + std::to_string(t), [&](llvm::Value* j) {
+                                        auto* val = evalKernelIRSingle(terms[t], q, i, j, side_single, cached_ptr);
+                                        auto* contrib = builder.CreateFMul(scaled_w, val);
+                                        emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
+                                    }, /*is_dof_loop=*/true);
+                                }, /*is_dof_loop=*/true);
+                            }
                         }
                     } else {
                         emitForLoop(side_single.n_test_dofs, "i" + std::to_string(t), [&](llvm::Value* i) {
@@ -10668,7 +10727,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         nc_helper_type, llvm::Function::InternalLinkage, hname, module);
                     hfn->addFnAttr(llvm::Attribute::NoUnwind);
                     hfn->addFnAttr(llvm::Attribute::WillReturn);
-                    if (group.estimated_text_bytes > 8192u) {
+                    if (group.estimated_text_bytes > hw.noInlineThresholdBytes()) {
                         hfn->addFnAttr(llvm::Attribute::NoInline);
                     }
                     hfn->addParamAttr(2, llvm::Attribute::NoAlias);
@@ -10752,7 +10811,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 }
             } else {
                 // No split needed: emit inline.
+                // Cross-term CSE for non-coupled blocks with multiple terms:
+                // activate dep0_xblock_cache so that expensive dep_mask==0 ops
+                // evaluated by the first term are reused by subsequent terms.
+                if (terms.size() > 1u) {
+                    dep0_xblock_cache.clear();
+                    dep0_xblock_active = true;
+                    xblock_cache_bytes_allocated = 0;
+                }
                 emitNonCoupledTermRange(0, terms.size());
+                if (terms.size() > 1u) {
+                    dep0_xblock_active = false;
+                }
             }
 
             // ================================================================
@@ -10949,13 +11019,52 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                         }, /*is_dof_loop=*/true);
                                     }, /*is_dof_loop=*/true);
                                 } else {
-                                    emitForLoop(side_single.n_test_dofs, "ci" + ts, [&](llvm::Value* i) {
-                                        emitForLoop(side_single.n_trial_dofs, "cj" + ts, [&](llvm::Value* j) {
-                                            auto* val = evalKernelIRSingle(term, q, i, j, side_single, cached_ptr);
-                                            auto* contrib = builder.CreateFMul(scaled_w, val);
-                                            emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
+                                    // Test-only hoisting for coupled blocks.
+                                    std::uint32_t test_only_cost_c = 0;
+                                    std::size_t n_test_only_c = 0;
+                                    if (cached_ptr != nullptr) {
+                                        const auto& dep = term.dep_mask;
+                                        const auto& costs = term.subtree_costs;
+                                        for (std::size_t oi = 0; oi < dep.size(); ++oi) {
+                                            if (dep[oi] == 0x1u) {
+                                                ++n_test_only_c;
+                                                test_only_cost_c += (oi < costs.size()) ? costs[oi] : 1u;
+                                            }
+                                        }
+                                    }
+                                    const std::uint32_t n_trial_est_c = fixed_n_trial_dofs_minus.value_or(
+                                        hw.defaultTestDofEstimate());
+                                    const std::uint32_t test_reuse_c = (n_trial_est_c > 1u) ? (n_trial_est_c - 1u) : 0u;
+                                    const bool test_cache_profitable_c =
+                                        (n_test_only_c >= hw.trialOnlyMinOps()) &&
+                                        (test_only_cost_c * test_reuse_c >= hw.trialOnlyMinSavings());
+
+                                    if (test_cache_profitable_c) {
+                                        emitForLoop(side_single.n_test_dofs, "ci" + ts, [&](llvm::Value* i) {
+                                            std::vector<CodeValue> test_vals;
+                                            evalKernelIRSingleValue(term, q, i, builder.getInt32(0), side_single,
+                                                                    /*indexed_env=*/nullptr, cached_ptr,
+                                                                    /*partial_cached=*/nullptr,
+                                                                    /*partial_cached_mask=*/0u,
+                                                                    /*skip_dep_mask=*/0x2u,
+                                                                    /*out_values=*/&test_vals);
+                                            const std::vector<CodeValue>* tc_ptr = &test_vals;
+                                            emitForLoop(side_single.n_trial_dofs, "cj" + ts, [&](llvm::Value* j) {
+                                                auto* val = evalKernelIRSingle(term, q, i, j, side_single, cached_ptr,
+                                                                                tc_ptr, /*partial_cached_mask=*/0x1u);
+                                                auto* contrib = builder.CreateFMul(scaled_w, val);
+                                                emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
+                                            }, /*is_dof_loop=*/true);
                                         }, /*is_dof_loop=*/true);
-                                    }, /*is_dof_loop=*/true);
+                                    } else {
+                                        emitForLoop(side_single.n_test_dofs, "ci" + ts, [&](llvm::Value* i) {
+                                            emitForLoop(side_single.n_trial_dofs, "cj" + ts, [&](llvm::Value* j) {
+                                                auto* val = evalKernelIRSingle(term, q, i, j, side_single, cached_ptr);
+                                                auto* contrib = builder.CreateFMul(scaled_w, val);
+                                                emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
+                                            }, /*is_dof_loop=*/true);
+                                        }, /*is_dof_loop=*/true);
+                                    }
                                 }
                             } else {
                                 emitForLoop(side_single.n_test_dofs, "ci" + ts, [&](llvm::Value* i) {
@@ -11065,7 +11174,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 helper_fn_type, llvm::Function::InternalLinkage, hname, module);
                             hfn->addFnAttr(llvm::Attribute::NoUnwind);
                             hfn->addFnAttr(llvm::Attribute::WillReturn);
-                            if (group.estimated_text_bytes > 8192u) {
+                            if (group.estimated_text_bytes > hw.noInlineThresholdBytes()) {
                                 hfn->addFnAttr(llvm::Attribute::NoInline);
                             }
                             hfn->addParamAttr(3, llvm::Attribute::NoAlias);

@@ -78,6 +78,60 @@ struct KernelIR {
     [[nodiscard]] std::vector<std::uint32_t> subtreeCosts() const;
 };
 
+// ============================================================================
+// Shaped-zero encoding for TypedZero imm1
+// ============================================================================
+// When imm1==0, inferShapes treats TypedZero as scalar (legacy behavior).
+// When bit 63 is set, imm1 encodes the output shape so that the optimizer
+// can collapse shape-changing ops (Gradient, OuterProduct, etc.) applied to
+// zero without losing shape information.
+
+namespace typed_zero {
+    /// Sentinel bit indicating imm1 carries encoded shape data.
+    constexpr std::uint64_t kShapeSentinel = 1ULL << 63;
+
+    /// Shape kind values (mirroring LLVMGen's Shape::Kind).
+    constexpr std::uint8_t kScalar  = 0;
+    constexpr std::uint8_t kVector  = 1;
+    constexpr std::uint8_t kMatrix  = 2;
+    constexpr std::uint8_t kTensor3 = 3;
+    constexpr std::uint8_t kTensor4 = 4;
+
+    /// Encode a shape into imm1.
+    /// @param kind  Shape kind (kScalar, kVector, kMatrix, ...).
+    /// @param d0-d3 Dimension extents (unused dims should be 1).
+    inline constexpr std::uint64_t encode(std::uint8_t kind,
+                                          std::uint32_t d0 = 1, std::uint32_t d1 = 1,
+                                          std::uint32_t d2 = 1, std::uint32_t d3 = 1) noexcept
+    {
+        return kShapeSentinel
+             | (static_cast<std::uint64_t>(kind) & 0x7ULL)
+             | ((static_cast<std::uint64_t>(d0) & 0x3FFULL) << 3)
+             | ((static_cast<std::uint64_t>(d1) & 0x3FFULL) << 13)
+             | ((static_cast<std::uint64_t>(d2) & 0x3FFULL) << 23)
+             | ((static_cast<std::uint64_t>(d3) & 0x3FFULL) << 33);
+    }
+
+    /// Check whether imm1 carries encoded shape data.
+    inline constexpr bool hasShape(std::uint64_t imm1) noexcept
+    {
+        return (imm1 & kShapeSentinel) != 0;
+    }
+
+    /// Decode shape kind from imm1.
+    inline constexpr std::uint8_t kind(std::uint64_t imm1) noexcept
+    {
+        return static_cast<std::uint8_t>(imm1 & 0x7ULL);
+    }
+
+    /// Decode dimension @p i (0-based) from imm1.
+    inline constexpr std::uint32_t dim(std::uint64_t imm1, int i) noexcept
+    {
+        const int shift = 3 + 10 * i;
+        return static_cast<std::uint32_t>((imm1 >> shift) & 0x3FFULL);
+    }
+} // namespace typed_zero
+
 struct KernelIRBuildOptions {
     bool cse{true};
     bool canonicalize_commutative{true};
