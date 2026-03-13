@@ -2232,22 +2232,26 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	        const std::optional<std::uint32_t> fixed_n_trial_dofs_plus =
 	            (specialization != nullptr) ? specialization->n_trial_dofs_plus : std::optional<std::uint32_t>{};
 
-        // Budget-aware DOF loop unrolling: set to true below if the estimated
-        // fully-unrolled .text would exceed the budget.  When set, DOF loops
-        // (test/trial) keep standard loops while QP loops still get unroll hints.
+        // Budget-aware loop unrolling: suppress_dof_unroll gates test/trial
+        // DOF loops; suppress_qp_unroll additionally gates QP loops.
+        // Three-level policy:
+        //   Full          — all loops unrolled (text fits in budget)
+        //   RollDof       — DOF loops rolled, QP still unrolled
+        //   RollQpAndDof  — both QP and DOF loops rolled
         bool suppress_dof_unroll = false;
+        bool suppress_qp_unroll = false;
 
         // Hardware profile for budget derivation (cached singleton, essentially free).
         const auto& hw = hardwareProfile();
 
-        // --- Budget-aware DOF loop unrolling decision ---
-        // When the estimated fully-unrolled .text exceeds the budget,
-        // suppress unroll metadata on test/trial DOF loops.
-        // QP loops remain fully unrolled (small trip count, high benefit).
-        // Budget: user-provided or auto from hardware profile (~3× L1i).
-        const std::uint32_t effective_text_budget = (options_.specialization.text_budget_bytes > 0u)
-            ? options_.specialization.text_budget_bytes
-            : hw.textBudgetBytes();
+        // --- Budget-aware loop unrolling decision ---
+        // Budget: user-provided only.  Auto-budget from hardware profile is
+        // NOT used because the text estimate (nq*nt*nj*ops*bpo) double-counts
+        // the unrolling factor embedded in calibrated bpo — leading to massive
+        // overestimates (25MB vs 170KB actual) that suppress DOF unrolling
+        // even for small 2D kernels.  Set text_budget_bytes explicitly to
+        // enable budget-based suppression.
+        const std::uint32_t effective_text_budget = options_.specialization.text_budget_bytes;
         if (effective_text_budget > 0u &&
             fixed_n_test_dofs_minus.has_value() &&
             fixed_n_trial_dofs_minus.has_value() &&
@@ -2260,34 +2264,59 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             const auto bpo = bytesPerOpCalibration().calibratedBytesPerOp(
                 options_.specialization.bytes_per_op_estimate);
 
-            // Estimate total ops if all loops (QP, test, trial) are fully unrolled.
-            std::uint64_t total_unrolled_ops = 0;
+            // Estimate text for three layout policies:
+            //   text_full     = all loops fully unrolled
+            //   text_roll_dof = DOF loops rolled, QP still unrolled
+            //   text_roll_all = all loops rolled (single body copy)
+            std::uint64_t total_ops_full = 0;
+            std::uint64_t total_ops_roll_dof = 0;
+            std::uint64_t total_ops_roll_all = 0;
+
+            auto accumulate_term_ops = [&](std::uint64_t ops) {
+                total_ops_full += n_q * n_t * n_j * ops;
+                total_ops_roll_dof += n_q * ops;
+                total_ops_roll_all += ops;
+            };
+
             const auto& all_terms = coupled ? std::vector<LoweredTerm>{} : terms;
             for (const auto& t : all_terms) {
-                const auto ops = static_cast<std::uint64_t>(t.ir.opCount());
-                total_unrolled_ops += n_q * n_t * n_j * ops;
+                accumulate_term_ops(static_cast<std::uint64_t>(t.ir.opCount()));
             }
             if (coupled) {
                 for (const auto& blk : coupled->blocks) {
                     for (const auto& t : blk.terms) {
-                        total_unrolled_ops += n_q * n_t * n_j *
-                                             static_cast<std::uint64_t>(t.ir.opCount());
+                        accumulate_term_ops(static_cast<std::uint64_t>(t.ir.opCount()));
                     }
                 }
             }
 
-            const auto estimated_text = total_unrolled_ops * bpo;
+            const auto text_full = total_ops_full * bpo;
+            const auto text_roll_dof = total_ops_roll_dof * bpo;
             const auto budget = static_cast<std::uint64_t>(effective_text_budget);
-            suppress_dof_unroll = (estimated_text > budget);
+
+            if (text_full > budget) {
+                suppress_dof_unroll = true;
+                // Only suppress QP unrolling for large QP counts (>= 12).
+                // For small QP counts (4-9 typical in FEM), QP unrolling is
+                // always beneficial: minimal code bloat, eliminates branch
+                // mispredictions, enables register allocation across QPs.
+                if (text_roll_dof > budget && n_q >= 12) {
+                    suppress_qp_unroll = true;
+                }
+            }
 
             static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
             if (jit_telemetry) {
+                const char* policy = suppress_qp_unroll ? "ROLL_QP_AND_DOF"
+                                   : suppress_dof_unroll ? "ROLL_DOF_ONLY"
+                                   : "FULL";
                 std::cerr << "[JIT budget] " << symbol
-                          << ": estimated unrolled .text " << estimated_text
+                          << ": text_full=" << text_full
+                          << " text_roll_dof=" << text_roll_dof
+                          << " text_roll_all=" << (total_ops_roll_all * bpo)
                           << " bytes (nq=" << n_q << " nt=" << n_t << " nj=" << n_j
-                          << " total_ops=" << total_unrolled_ops
                           << ") budget=" << budget
-                          << " -> DOF unroll " << (suppress_dof_unroll ? "SUPPRESSED" : "allowed")
+                          << " -> " << policy
                           << "\n";
                 std::cerr.flush();
             }
@@ -2477,11 +2506,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
         auto attachLoopUnrollMetadata = [&](llvm::BranchInst* backedge,
                                             llvm::Value* end,
-                                            bool is_dof_loop = false) -> void {
+                                            bool is_dof_loop = false,
+                                            bool is_qp_loop = false) -> void {
             if (!options_.specialization.enable_loop_unroll_metadata) {
                 return;
             }
             if (is_dof_loop && suppress_dof_unroll) {
+                return;
+            }
+            if (is_qp_loop && suppress_qp_unroll) {
                 return;
             }
             auto* c = llvm::dyn_cast<llvm::ConstantInt>(end);
@@ -2531,7 +2564,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	        auto emitForLoop = [&](llvm::Value* end,
 	                               std::string_view name,
 	                               const auto& body_fn,
-	                               bool is_dof_loop = false) -> void {
+	                               bool is_dof_loop = false,
+	                               bool is_qp_loop = false) -> void {
 	            auto* pre = builder.GetInsertBlock();
 	            auto* header = llvm::BasicBlock::Create(*ctx, std::string(name) + ".hdr", fn);
 	            auto* body = llvm::BasicBlock::Create(*ctx, std::string(name) + ".body", fn);
@@ -2552,7 +2586,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	            auto* body_end = builder.GetInsertBlock();
 	            auto* next = builder.CreateAdd(idx_phi, builder.getInt32(1));
 	            auto* backedge = builder.CreateBr(header);
-	            attachLoopUnrollMetadata(backedge, end, is_dof_loop);
+	            attachLoopUnrollMetadata(backedge, end, is_dof_loop, is_qp_loop);
 	            idx_phi->addIncoming(next, body_end);
 
 	            builder.SetInsertPoint(exit);
@@ -10437,7 +10471,52 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         };
 
         if (!is_face_domain) {
-            for (std::size_t t = 0; t < terms.size(); ++t) {
+            // ============================================================
+            // Plan term-group splits for oversized per-block kernels.
+            // If total .text exceeds helperTextBudget, split terms into
+            // contiguous groups emitted as separate LLVM helper functions.
+            // Each helper is module-private and NoInline, keeping .text
+            // within L1i budget.  The main kernel calls helpers sequentially.
+            // ============================================================
+            const auto nc_helper_budget = hw.helperTextBudgetBytes();
+            const auto nc_bpo = bytesPerOpCalibration().calibratedBytesPerOp(
+                options_.specialization.bytes_per_op_estimate);
+            const std::size_t nc_qp_factor = (!suppress_qp_unroll && fixed_n_qpts_minus.has_value())
+                ? static_cast<std::size_t>(*fixed_n_qpts_minus) : 1u;
+
+            std::vector<std::size_t> nc_op_counts;
+            nc_op_counts.reserve(terms.size());
+            for (const auto& t_ir : terms) {
+                nc_op_counts.push_back(t_ir.ir.opCount() * nc_qp_factor);
+            }
+            auto nc_plan = planTermGroups(nc_op_counts, nc_helper_budget, nc_bpo);
+
+            {
+                static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                if (jit_telemetry) {
+                    if (nc_plan.needs_split) {
+                        std::cerr << "[JIT perblock-split] " << symbol
+                                  << ": " << nc_plan.groups.size() << " groups"
+                                  << " (total_est=" << nc_plan.total_estimated_bytes
+                                  << ", budget=" << nc_helper_budget << ")\n";
+                        for (std::size_t gi = 0; gi < nc_plan.groups.size(); ++gi) {
+                            const auto& g = nc_plan.groups[gi];
+                            std::cerr << "  group " << gi << ": terms ["
+                                      << g.first_term << "," << (g.first_term + g.num_terms) << ")"
+                                      << " est=" << g.estimated_text_bytes << " bytes\n";
+                        }
+                    } else {
+                        std::cerr << "[JIT perblock-split] " << symbol
+                                  << ": 1 group (no split, est=" << nc_plan.total_estimated_bytes << ")\n";
+                    }
+                    std::cerr.flush();
+                }
+            }
+
+            // Reusable lambda: emit terms [first_t, end_t) using the current
+            // codegen context (side_single, element_matrix/vector by reference).
+            auto emitNonCoupledTermRange = [&](std::size_t first_t, std::size_t end_t) {
+            for (std::size_t t = first_t; t < end_t; ++t) {
                 auto* term_entry = llvm::BasicBlock::Create(*ctx, "term" + std::to_string(t) + ".entry", fn);
                 auto* term_body = llvm::BasicBlock::Create(*ctx, "term" + std::to_string(t) + ".body", fn);
                 auto* term_end = llvm::BasicBlock::Create(*ctx, "term" + std::to_string(t) + ".end", fn);
@@ -10541,9 +10620,139 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             emitVectorAccum(element_vector_single, i, contrib);
                         }, /*is_dof_loop=*/true);
                     }
-                });
+                }, /*is_dof_loop=*/false, /*is_qp_loop=*/true);
                 builder.CreateBr(term_end);
                 builder.SetInsertPoint(term_end);
+            }
+            }; // end emitNonCoupledTermRange
+
+            // Term-group helper emission is gated behind SVMP_JIT_TERM_SPLIT
+            // because LLVM 14's backend has issues with the helper function IR
+            // pattern (physreg copy, bitcast selection failures).  The split
+            // plan is still computed and logged for diagnostics.  Enable once
+            // upgrading to LLVM 15+ where these backend bugs are fixed.
+            static const bool enable_term_split = (std::getenv("SVMP_JIT_TERM_SPLIT") != nullptr);
+            if (nc_plan.needs_split && enable_term_split) {
+                // Emit helper functions for each term group.
+                // Helper signature: void(i8* args, i32 batch_idx, i8** field_ptrs)
+                // The third argument carries pre-resolved field entry pointers
+                // from the main function, avoiding search-loop IR in helpers
+                // (which triggers LLVM 14 physreg bugs from non-entry allocas).
+                auto* i8_ptr_ptr = llvm::PointerType::get(i8_ptr, 0);
+                auto* nc_helper_type = llvm::FunctionType::get(
+                    builder.getVoidTy(), {i8_ptr, i32, i8_ptr_ptr}, false);
+
+                // In the main function, pack resolved field entry pointers
+                // into a stack buffer that is passed to each helper.
+                const auto n_fields = field_entries.size();
+                llvm::Value* field_ptr_buf = nullptr;
+                if (n_fields > 0u) {
+                    field_ptr_buf = allocaInEntry(i8_ptr,
+                        builder.getInt32(static_cast<std::uint32_t>(n_fields)), "nc_field_ptrs");
+                    for (std::size_t fi = 0; fi < n_fields; ++fi) {
+                        auto* slot = builder.CreateGEP(i8_ptr, field_ptr_buf,
+                            builder.getInt64(static_cast<std::int64_t>(fi)));
+                        builder.CreateStore(field_entries[fi].single, slot);
+                    }
+                } else {
+                    field_ptr_buf = llvm::ConstantPointerNull::get(i8_ptr_ptr);
+                }
+
+                std::vector<llvm::Function*> nc_helpers;
+                nc_helpers.reserve(nc_plan.groups.size());
+
+                for (std::size_t gi = 0; gi < nc_plan.groups.size(); ++gi) {
+                    const auto& group = nc_plan.groups[gi];
+                    std::string hname = std::string(symbol) + "_g" + std::to_string(gi);
+                    auto* hfn = llvm::Function::Create(
+                        nc_helper_type, llvm::Function::InternalLinkage, hname, module);
+                    hfn->addFnAttr(llvm::Attribute::NoUnwind);
+                    hfn->addFnAttr(llvm::Attribute::WillReturn);
+                    if (group.estimated_text_bytes > 8192u) {
+                        hfn->addFnAttr(llvm::Attribute::NoInline);
+                    }
+                    hfn->addParamAttr(2, llvm::Attribute::NoAlias);
+                    nc_helpers.push_back(hfn);
+
+                    auto* h_entry = llvm::BasicBlock::Create(*ctx, "entry", hfn);
+
+                    // Save codegen state.
+                    auto* saved_fn = fn;
+                    auto saved_ip = builder.saveIP();
+                    auto saved_side = side_single;
+                    auto* saved_mat = element_matrix_single;
+                    auto* saved_vec = element_vector_single;
+                    auto saved_field_entries = field_entries;
+
+                    // Switch to helper function context.
+                    fn = hfn;
+                    builder.SetInsertPoint(h_entry);
+
+                    auto* h_args = hfn->getArg(0);
+                    auto* h_bidx = hfn->getArg(1);
+                    auto* h_field_ptrs = hfn->getArg(2);
+
+                    // Re-derive side and output pointers from args.
+                    llvm::Value* h_side_ptr = nullptr;
+                    llvm::Value* h_out_ptr = nullptr;
+                    if (use_batch) {
+                        auto* h_sides_base = loadPtr(h_args, ABIV3::batch_sides_off);
+                        auto* h_outs_base = loadPtr(h_args, ABIV3::batch_outputs_off);
+                        auto* h_bidx64 = builder.CreateZExt(h_bidx, i64);
+                        h_side_ptr = builder.CreateGEP(builder.getInt8Ty(), h_sides_base,
+                            builder.CreateMul(h_bidx64,
+                                builder.getInt64(sizeof(assembly::jit::KernelSideArgsV6))));
+                        h_out_ptr = builder.CreateGEP(builder.getInt8Ty(), h_outs_base,
+                            builder.CreateMul(h_bidx64,
+                                builder.getInt64(sizeof(assembly::jit::KernelOutputViewV6))));
+                    } else {
+                        const std::size_t h_side_off = (domain == IntegralDomain::Cell)
+                            ? ABIV3::cell_side_off : ABIV3::bdry_side_off;
+                        const std::size_t h_out_off = (domain == IntegralDomain::Cell)
+                            ? ABIV3::cell_out_off : ABIV3::bdry_out_off;
+                        h_side_ptr = gepBytes(h_args, h_side_off);
+                        h_out_ptr = gepBytes(h_args, h_out_off);
+                    }
+
+                    side_single = loadSideView(h_side_ptr, fixed_n_qpts_minus,
+                                               fixed_n_test_dofs_minus, fixed_n_trial_dofs_minus);
+                    element_matrix_single = loadPtr(h_out_ptr, ABIV3::out_element_matrix_off);
+                    element_vector_single = loadPtr(h_out_ptr, ABIV3::out_element_vector_off);
+
+                    // Load pre-resolved field entry pointers from the main
+                    // function's stack buffer (passed as arg 2).  This avoids
+                    // emitting field-search loops in each helper.
+                    field_entries.clear();
+                    field_entries.reserve(n_fields);
+                    for (std::size_t fi = 0; fi < n_fields; ++fi) {
+                        FieldEntryPtrs e;
+                        e.field_id = used_field_ids[fi];
+                        auto* slot = builder.CreateGEP(i8_ptr, h_field_ptrs,
+                            builder.getInt64(static_cast<std::int64_t>(fi)));
+                        e.single = builder.CreateLoad(i8_ptr, slot, "h_field_" + std::to_string(fi));
+                        field_entries.push_back(e);
+                    }
+
+                    emitNonCoupledTermRange(group.first_term, group.first_term + group.num_terms);
+
+                    builder.CreateRetVoid();
+
+                    // Restore codegen state.
+                    fn = saved_fn;
+                    builder.restoreIP(saved_ip);
+                    side_single = saved_side;
+                    element_matrix_single = saved_mat;
+                    element_vector_single = saved_vec;
+                    field_entries = saved_field_entries;
+                }
+
+                // Dispatcher: call helpers sequentially.
+                for (auto* hfn : nc_helpers) {
+                    builder.CreateCall(hfn, {args_ptr, b_idx, field_ptr_buf});
+                }
+            } else {
+                // No split needed: emit inline.
+                emitNonCoupledTermRange(0, terms.size());
             }
 
             // ================================================================
@@ -10755,7 +10964,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                     emitVectorAccum(element_vector_single, i, contrib);
                                 }, /*is_dof_loop=*/true);
                             }
-                        });
+                        }, /*is_dof_loop=*/false, /*is_qp_loop=*/true);
                         builder.CreateBr(tx);
                         builder.SetInsertPoint(tx);
                     }
@@ -10767,6 +10976,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 const auto helper_budget = hw.helperTextBudgetBytes();
                 const auto bpo = bytesPerOpCalibration().calibratedBytesPerOp();
 
+                // QP unrolling multiplier: when QP loops are unrolled, LLVM
+                // duplicates the loop body n_q times, so effective text per
+                // term is n_q × ops × bpo.  With QP suppressed, it's 1× ops × bpo.
+                const std::size_t qp_unroll_factor = (!suppress_qp_unroll && fixed_n_qpts_minus.has_value())
+                    ? static_cast<std::size_t>(*fixed_n_qpts_minus)
+                    : 1u;
+
                 std::vector<BlockSplitPlan> split_plans;
                 split_plans.reserve(coupled->blocks.size());
                 bool any_block_needs_split = false;
@@ -10775,7 +10991,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     std::vector<std::size_t> op_counts;
                     op_counts.reserve(coupled->blocks[blk].terms.size());
                     for (const auto& t : coupled->blocks[blk].terms) {
-                        op_counts.push_back(t.ir.opCount());
+                        // Scale by QP unroll factor for accurate text estimation
+                        op_counts.push_back(t.ir.opCount() * qp_unroll_factor);
                     }
                     auto plan = planTermGroups(op_counts, helper_budget, bpo);
                     plan.block_index = blk;
@@ -13706,7 +13923,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
                 if (jit_telemetry) {
                     std::cerr << "[JIT compile-start] " << symbol
-                              << " suppress_dof_unroll=" << suppress_dof_unroll << "\n";
+                              << " suppress_dof_unroll=" << suppress_dof_unroll
+                              << " suppress_qp_unroll=" << suppress_qp_unroll << "\n";
                     std::cerr.flush();
                 }
 

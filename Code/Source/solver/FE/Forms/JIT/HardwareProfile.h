@@ -137,6 +137,22 @@ struct HardwareProfile {
         return l1i.size_bytes * 3u;  // 96KB for 32KB L1i
     }
 
+    /// Stable hash of the hardware profile fields that affect codegen decisions.
+    /// Used to key JIT disk caches so that kernels compiled for one hardware
+    /// profile are not reused on a different machine with different cache sizes.
+    [[nodiscard]] std::uint64_t stableHash64() const noexcept
+    {
+        // FNV-1a
+        std::uint64_t h = 14695981039346656037ULL;
+        auto mix = [&](std::uint64_t v) { h ^= v; h *= 1099511628211ULL; };
+        mix(l1d.size_bytes);
+        mix(l1i.size_bytes);
+        mix(l2.size_bytes);
+        mix(l3.size_bytes);
+        mix(simd_width_bytes);
+        return h;
+    }
+
     // ----- Codegen calibration constants -----
     // These are empirical values from LLVM codegen output, NOT derived from
     // the CPU cache hierarchy.  They depend on the compiler (LLVM 14-18),

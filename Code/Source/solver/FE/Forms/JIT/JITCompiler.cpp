@@ -10,6 +10,7 @@
 #include "Core/Logger.h"
 
 #include "Assembly/JIT/KernelArgs.h"
+#include "Forms/JIT/HardwareProfile.h"
 #include "Forms/JIT/JITEngine.h"
 #include "Forms/JIT/KernelIR.h"
 #include "Forms/JIT/LLVMGen.h"
@@ -332,6 +333,12 @@ struct KernelGroupPlan {
     hashMix(h, hashString(cpu_name));
     hashMix(h, hashString(cpu_features));
     hashMix(h, hashString(llvm_version));
+
+    // Hardware profile: cache hierarchy sizes affect codegen decisions
+    // (term-group splitting, colocation budgets, unroll suppression).
+    // Include in key so that disk-cached kernels are not reused across
+    // machines with different cache sizes.
+    hashMix(h, hardwareProfile().stableHash64());
 
     const bool use_spec = (specialization != nullptr) && (specialization->domain == group.key.domain);
     hashMix(h, static_cast<std::uint64_t>(use_spec ? 1u : 0u));

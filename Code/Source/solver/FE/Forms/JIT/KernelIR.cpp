@@ -742,20 +742,28 @@ std::size_t KernelIR::optimize()
                     case FormExprType::RestrictPlus:
                     case FormExprType::Jump:
                     case FormExprType::Average:
+                        break;
+
+                    // Always-scalar results from zero input (contraction ops):
+                    // Divergence(0) = 0 (sum of derivatives of zero),
+                    // Trace(0) = 0 (sum of diagonal of zero matrix),
+                    // Determinant(0) = 0 (det of zero matrix).
+                    case FormExprType::Divergence:
+                    case FormExprType::Trace:
+                    case FormExprType::Determinant:
+                        makeConstant(op, 0.0);
+                        break;
 
                     // Shape-changing ops: keep the node with zero child so
                     // inferShapes() can compute the correct output shape.
                     // Gradient(0)→zero-vector, Hessian(0)→zero-matrix, etc.
                     case FormExprType::Gradient:
-                    case FormExprType::Divergence:
                     case FormExprType::Curl:
                     case FormExprType::Hessian:
                     case FormExprType::Transpose:
                     case FormExprType::SymmetricPart:
                     case FormExprType::SkewPart:
                     case FormExprType::Deviator:
-                    case FormExprType::Trace:
-                    case FormExprType::Determinant:
                     case FormExprType::Normalize:
                         // Leave op unchanged — child is zero but shape is
                         // determined by the op type in inferShapes().
@@ -766,9 +774,28 @@ std::size_t KernelIR::optimize()
                 }
             }
 
-            // Negate constant folding: negate(const) → -const (scalar→scalar)
-            if (op.type == FormExprType::Negate && isConstant(kid0)) {
-                makeConstant(op, -constantVal(kid0));
+            // Unary constant folding (scalar→scalar ops)
+            if (isConstant(kid0)) {
+                const double v = constantVal(kid0);
+                switch (op.type) {
+                    case FormExprType::Negate:
+                        makeConstant(op, -v);
+                        break;
+                    case FormExprType::Exp:
+                        makeConstant(op, std::exp(v));
+                        break;
+                    case FormExprType::Log:
+                        if (v > 0.0) makeConstant(op, std::log(v));
+                        break;
+                    case FormExprType::Sqrt:
+                        if (v >= 0.0) makeConstant(op, std::sqrt(v));
+                        break;
+                    case FormExprType::AbsoluteValue:
+                        makeConstant(op, std::fabs(v));
+                        break;
+                    default:
+                        break;
+                }
             }
 
             // Double negate: --X → X (redirect to grandchild, shape-preserving)
@@ -841,6 +868,34 @@ std::size_t KernelIR::optimize()
                     if (k0_const && k1_const) { makeConstant(op, std::pow(constantVal(kid0), constantVal(kid1))); break; }
                     break;
 
+                case FormExprType::Minimum:
+                    if (k0_const && k1_const) { makeConstant(op, std::fmin(constantVal(kid0), constantVal(kid1))); break; }
+                    break;
+
+                case FormExprType::Maximum:
+                    if (k0_const && k1_const) { makeConstant(op, std::fmax(constantVal(kid0), constantVal(kid1))); break; }
+                    break;
+
+                // Comparisons: const op const → 1.0 or 0.0
+                case FormExprType::Less:
+                    if (k0_const && k1_const) { makeConstant(op, constantVal(kid0) < constantVal(kid1) ? 1.0 : 0.0); break; }
+                    break;
+                case FormExprType::LessEqual:
+                    if (k0_const && k1_const) { makeConstant(op, constantVal(kid0) <= constantVal(kid1) ? 1.0 : 0.0); break; }
+                    break;
+                case FormExprType::Greater:
+                    if (k0_const && k1_const) { makeConstant(op, constantVal(kid0) > constantVal(kid1) ? 1.0 : 0.0); break; }
+                    break;
+                case FormExprType::GreaterEqual:
+                    if (k0_const && k1_const) { makeConstant(op, constantVal(kid0) >= constantVal(kid1) ? 1.0 : 0.0); break; }
+                    break;
+                case FormExprType::Equal:
+                    if (k0_const && k1_const) { makeConstant(op, constantVal(kid0) == constantVal(kid1) ? 1.0 : 0.0); break; }
+                    break;
+                case FormExprType::NotEqual:
+                    if (k0_const && k1_const) { makeConstant(op, constantVal(kid0) != constantVal(kid1) ? 1.0 : 0.0); break; }
+                    break;
+
                 case FormExprType::InnerProduct:
                 case FormExprType::DoubleContraction:
                     // inner(0,X) or inner(X,0) → 0 (always scalar)
@@ -857,6 +912,17 @@ std::size_t KernelIR::optimize()
 
                 default:
                     break;
+            }
+        }
+
+        // Conditional(const_cond, a, b): if condition is a constant,
+        // select the appropriate branch.  Semantics: cond > 0.0 → a, else → b.
+        if (op.child_count == 3u && op.type == FormExprType::Conditional) {
+            if (isConstant(kid0)) {
+                const double cond_val = constantVal(kid0);
+                // cond > 0.0 → take "then" branch (child 1), else → "else" branch (child 2)
+                const auto selected = kidIdx(cond_val > 0.0 ? 1u : 2u);
+                op = ops[selected];
             }
         }
 

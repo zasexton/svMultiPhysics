@@ -12,6 +12,7 @@
 #include "Forms/JIT/HardwareProfile.h"
 
 #include <bit>
+#include <cmath>
 #include <cstdint>
 
 namespace svmp {
@@ -626,6 +627,268 @@ TEST(TermGroupPlanning, EmptyTermsReturnsNoSplit)
     auto plan = jit::planTermGroups(ops, 24576, 58);
     EXPECT_FALSE(plan.needs_split);
     EXPECT_TRUE(plan.groups.empty());
+}
+
+// ============================================================================
+// Optimize: scalar-zero folds for contraction ops
+// ============================================================================
+
+TEST(KernelIROptimize, DivergenceOfZeroIsScalarZero)
+{
+    // div(0) → Constant(0.0)  (contraction: always scalar output)
+    const auto expr = div(FormExpr::typedZero());
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 0.0);
+}
+
+TEST(KernelIROptimize, TraceOfZeroIsScalarZero)
+{
+    // trace(0) → Constant(0.0)  (sum of diagonal of zero matrix)
+    const auto expr = trace(FormExpr::typedZero());
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 0.0);
+}
+
+TEST(KernelIROptimize, DeterminantOfZeroIsScalarZero)
+{
+    // det(0) → Constant(0.0)  (determinant of zero matrix)
+    const auto expr = det(FormExpr::typedZero());
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 0.0);
+}
+
+// ============================================================================
+// Optimize: expanded unary constant folding
+// ============================================================================
+
+TEST(KernelIROptimize, ConstantFoldingExp)
+{
+    const auto expr = exp(FormExpr::constant(Real(1.0)));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    const double expected_exp = std::exp(1.0);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), expected_exp);
+}
+
+TEST(KernelIROptimize, ConstantFoldingLog)
+{
+    const auto expr = log(FormExpr::constant(Real(2.0)));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    const double expected_log = std::log(2.0);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), expected_log);
+}
+
+TEST(KernelIROptimize, ConstantFoldingLogNegativeNotFolded)
+{
+    // log(-1) should NOT be folded (domain error)
+    const auto expr = log(FormExpr::constant(Real(-1.0)));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Log)
+        << "log(negative) must not be constant-folded";
+}
+
+TEST(KernelIROptimize, ConstantFoldingSqrt)
+{
+    const auto expr = sqrt(FormExpr::constant(Real(4.0)));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 2.0);
+}
+
+TEST(KernelIROptimize, ConstantFoldingSqrtZero)
+{
+    const auto expr = sqrt(FormExpr::constant(Real(0.0)));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 0.0);
+}
+
+TEST(KernelIROptimize, ConstantFoldingAbs)
+{
+    const auto expr = abs(FormExpr::constant(Real(-3.5)));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 3.5);
+}
+
+// ============================================================================
+// Optimize: expanded binary constant folding
+// ============================================================================
+
+TEST(KernelIROptimize, ConstantFoldingMinimum)
+{
+    const auto expr = min(FormExpr::constant(Real(3.0)), FormExpr::constant(Real(5.0)));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 3.0);
+}
+
+TEST(KernelIROptimize, ConstantFoldingMaximum)
+{
+    const auto expr = max(FormExpr::constant(Real(3.0)), FormExpr::constant(Real(5.0)));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 5.0);
+}
+
+TEST(KernelIROptimize, ConstantFoldingLess)
+{
+    const auto a = FormExpr::constant(Real(2.0));
+    const auto b = FormExpr::constant(Real(5.0));
+    const auto expr = a.lt(b);
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 1.0);  // 2 < 5 → true
+}
+
+TEST(KernelIROptimize, ConstantFoldingGreaterFalse)
+{
+    const auto a = FormExpr::constant(Real(2.0));
+    const auto b = FormExpr::constant(Real(5.0));
+    const auto expr = a.gt(b);
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 0.0);  // 2 > 5 → false
+}
+
+// ============================================================================
+// Optimize: Conditional with constant condition
+// ============================================================================
+
+TEST(KernelIROptimize, ConditionalTrueSelectsThenBranch)
+{
+    // conditional(1.0, a, b) → a  (condition > 0.0 → then branch)
+    const auto cond = FormExpr::constant(Real(1.0));
+    const auto a = FormExpr::parameterRef(0);
+    const auto b = FormExpr::parameterRef(1);
+    const auto expr = conditional(cond, a, b);
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::ParameterRef);
+    EXPECT_EQ(root_op.imm0, 0u);  // slot 0 = a
+}
+
+TEST(KernelIROptimize, ConditionalFalseSelectsElseBranch)
+{
+    // conditional(0.0, a, b) → b  (condition not > 0.0 → else branch)
+    const auto cond = FormExpr::constant(Real(0.0));
+    const auto a = FormExpr::parameterRef(0);
+    const auto b = FormExpr::parameterRef(1);
+    const auto expr = conditional(cond, a, b);
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::ParameterRef);
+    EXPECT_EQ(root_op.imm0, 1u);  // slot 1 = b
+}
+
+TEST(KernelIROptimize, ConditionalNegativeSelectsElseBranch)
+{
+    // conditional(-5.0, a, b) → b  (negative is not > 0.0 → else branch)
+    const auto cond = FormExpr::constant(Real(-5.0));
+    const auto a = FormExpr::parameterRef(0);
+    const auto b = FormExpr::parameterRef(1);
+    const auto expr = conditional(cond, a, b);
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::ParameterRef);
+    EXPECT_EQ(root_op.imm0, 1u);  // slot 1 = b
+}
+
+// ============================================================================
+// Optimize: compound folds (constant folding + propagation in single pass)
+// ============================================================================
+
+TEST(KernelIROptimize, CompoundExpLogFolding)
+{
+    // exp(log(2.0)) → 2.0 via log(2.0)→const, exp(const)→const
+    const auto expr = exp(log(FormExpr::constant(Real(2.0))));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_NEAR(std::bit_cast<double>(root_op.imm0), 2.0, 1e-14);
+}
+
+// ============================================================================
+// HardwareProfile hash stability
+// ============================================================================
+
+TEST(HardwareProfile, StableHashDiffersForDifferentCaches)
+{
+    jit::HardwareProfile a;
+    a.l1d.size_bytes = 32 * 1024;
+    a.l1i.size_bytes = 32 * 1024;
+    a.l2.size_bytes = 256 * 1024;
+    a.l3.size_bytes = 8 * 1024 * 1024;
+    a.simd_width_bytes = 16;
+
+    jit::HardwareProfile b = a;
+    b.l1i.size_bytes = 64 * 1024;  // different L1i
+
+    EXPECT_NE(a.stableHash64(), b.stableHash64());
+}
+
+TEST(HardwareProfile, StableHashSameForIdenticalProfiles)
+{
+    jit::HardwareProfile a;
+    a.l1d.size_bytes = 32 * 1024;
+    a.l1i.size_bytes = 32 * 1024;
+    a.l2.size_bytes = 256 * 1024;
+    a.l3.size_bytes = 8 * 1024 * 1024;
+    a.simd_width_bytes = 16;
+
+    jit::HardwareProfile b = a;
+    EXPECT_EQ(a.stableHash64(), b.stableHash64());
 }
 
 } // namespace test
