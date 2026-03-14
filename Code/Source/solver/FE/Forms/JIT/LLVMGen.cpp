@@ -2275,13 +2275,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
         // --- Budget-aware loop unrolling decision ---
         // Automatically constrains kernel .text to fit within L1i-derived
-        // budget.  The calibrated bpo (bytes per raw IR op) already
-        // embeds QP expansion — bpo = object_bytes / sum(raw_ir_ops) from
-        // QP-unrolled rolled-DOF compilations.  Therefore:
-        //   text_full     ≈ n_t × n_j × raw_ops × bpo  (DOF-expanded, QP in bpo)
-        //   text_roll_dof ≈ raw_ops × bpo               (DOFs rolled, QP in bpo)
-        //   text_roll_all ≈ raw_ops × bpo / n_q          (all rolled)
+        // budget.  bpo is calibrated as bytes per QP-body IR op (i.e. the
+        // cost of one op inside one QP iteration, NOT pre-multiplied by
+        // the QP count).  This matches the convention in planTermGroups()
+        // which multiplies opCount * qp_factor * bpo.  Therefore:
+        //   text_full     ≈ n_t × n_j × n_q × raw_ops × bpo  (all unrolled)
+        //   text_roll_dof ≈ n_q × raw_ops × bpo               (DOFs rolled, QP unrolled)
+        //   text_roll_all ≈ raw_ops × bpo                      (all rolled)
         const std::uint32_t effective_text_budget =
+
             (options_.specialization.text_budget_bytes > 0u)
                 ? options_.specialization.text_budget_bytes
                 : hw.textBudgetBytes();
@@ -2297,8 +2299,6 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 options_.specialization.bytes_per_op_estimate);
 
             // Accumulate raw IR op counts across all terms.
-            // bpo already embeds QP expansion (calibrated from QP-unrolled
-            // kernels), so we do NOT multiply by n_q here.
             std::uint64_t total_raw_ops = 0;
 
             const auto& all_terms = coupled ? std::vector<LoweredTerm>{} : terms;
@@ -2313,15 +2313,26 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 }
             }
 
-            // Three text estimates (bpo includes QP expansion):
-            const auto text_full = n_t * n_j * total_raw_ops * bpo;
-            const auto text_roll_dof = total_raw_ops * bpo;
-            const auto text_roll_all = (n_q > 1u) ? (total_raw_ops * bpo / n_q) : (total_raw_ops * bpo);
+            // Linear forms have no trial DOF loop (trial index hard-coded
+            // to 0), so text_full should use effective_n_j = 1.
+            const bool has_matrix_terms =
+                coupled || (ir.kind() != FormKind::Linear);
+            const auto effective_n_j = has_matrix_terms ? n_j : 1ULL;
+
+            // ROLL_DOF keeps QP loops unrolled → text scales with n_q.
+            // ROLL_QP_AND_DOF rolls both → text is ops × bpo (no QP factor).
+            const auto text_full = n_t * effective_n_j * n_q * total_raw_ops * bpo;
+            const auto text_roll_dof = n_q * total_raw_ops * bpo;
+            const auto text_roll_all = total_raw_ops * bpo;
             const auto budget = static_cast<std::uint64_t>(effective_text_budget);
 
             if (text_full > budget) {
                 suppress_dof_unroll = true;
-                if (text_roll_dof > budget) {
+                // Only roll QP loops when n_q is large enough to amortize
+                // loop overhead.  For small QP counts (Tet4=4, Quad4=4),
+                // LLVM benefits from full QP unrolling even if the kernel
+                // exceeds L1i — L2 code fetch handles the overshoot.
+                if (text_roll_dof > budget && n_q >= 8u) {
                     suppress_qp_unroll = true;
                 }
             }
