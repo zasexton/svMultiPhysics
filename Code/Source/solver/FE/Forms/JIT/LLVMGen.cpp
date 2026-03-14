@@ -1600,10 +1600,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             {
                 const auto ops_before = lowered.ir.opCount();
                 // KernelIR::optimize() runs shape-aware zero propagation,
-                // constant folding, post-rewrite CSE, and DCE.  Enabled by
-                // default; disable via SVMP_DISABLE_IR_OPT for debugging.
-                static const bool disable_ir_opt = (std::getenv("SVMP_DISABLE_IR_OPT") != nullptr);
-                const auto eliminated = disable_ir_opt ? 0u : lowered.ir.optimize();
+                // constant folding, post-rewrite CSE, and DCE.
+                const auto eliminated = lowered.ir.optimize();
                 static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
                 if (jit_telemetry) {
                     std::cerr << "[JIT telemetry] " << symbol << " term " << tidx
@@ -1718,6 +1716,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 }
             }
 
+            // Compute per-op structural hashes and subtree costs for cross-term CSE.
+            auto per_op_hashes = lowered.ir.perOpStructuralHashes();
+            auto costs = lowered.ir.subtreeCosts();
+
             // Diagnostic: dump per-term dep_mask breakdown
             if (const char* env = std::getenv("SVMP_DUMP_DEP_MASK"); env && std::string_view(env) != "0") {
                 std::size_t n0 = 0, n1 = 0, n2 = 0, n3 = 0;
@@ -1749,6 +1751,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 .ir = std::move(lowered.ir),
                 .shapes = std::move(shapes.shapes),
                 .dep_mask = std::move(dep),
+                .op_hashes = std::move(per_op_hashes),
+                .subtree_costs = std::move(costs),
                 .time_derivative_order = term.time_derivative_order,
                 .tensor_ir = std::move(tensor_ir),
                 .has_indexed_access = has_indexed_access,
@@ -2270,13 +2274,17 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         const auto& hw = hardwareProfile();
 
         // --- Budget-aware loop unrolling decision ---
-        // The budget path is opt-in: DOF rolling is only enabled when the user
-        // explicitly sets text_budget_bytes > 0.  Auto-enabling via
-        // hw.textBudgetBytes() was tried and reverted because (a) rolled DOF
-        // loops are catastrophically slow for NS-VMS kernels (>100× regression),
-        // and (b) the raw bpo estimate still double-counts in practice.
+        // Automatically constrains kernel .text to fit within L1i-derived
+        // budget.  The calibrated bpo (bytes per raw IR op) already
+        // embeds QP expansion — bpo = object_bytes / sum(raw_ir_ops) from
+        // QP-unrolled rolled-DOF compilations.  Therefore:
+        //   text_full     ≈ n_t × n_j × raw_ops × bpo  (DOF-expanded, QP in bpo)
+        //   text_roll_dof ≈ raw_ops × bpo               (DOFs rolled, QP in bpo)
+        //   text_roll_all ≈ raw_ops × bpo / n_q          (all rolled)
         const std::uint32_t effective_text_budget =
-            options_.specialization.text_budget_bytes;
+            (options_.specialization.text_budget_bytes > 0u)
+                ? options_.specialization.text_budget_bytes
+                : hw.textBudgetBytes();
         if (effective_text_budget > 0u &&
             fixed_n_test_dofs_minus.has_value() &&
             fixed_n_trial_dofs_minus.has_value() &&
@@ -2288,43 +2296,32 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             const auto bpo = bytesPerOpCalibration().calibratedBytesPerOp(
                 options_.specialization.bytes_per_op_estimate);
 
-            // Estimate text for three layout policies:
-            //   text_full     = all loops fully unrolled
-            //   text_roll_dof = DOF loops rolled, QP still unrolled
-            //   text_roll_all = all loops rolled (single body copy)
-            std::uint64_t total_ops_full = 0;
-            std::uint64_t total_ops_roll_dof = 0;
-            std::uint64_t total_ops_roll_all = 0;
-
-            auto accumulate_term_ops = [&](std::uint64_t ops) {
-                total_ops_full += n_q * n_t * n_j * ops;
-                total_ops_roll_dof += n_q * ops;
-                total_ops_roll_all += ops;
-            };
+            // Accumulate raw IR op counts across all terms.
+            // bpo already embeds QP expansion (calibrated from QP-unrolled
+            // kernels), so we do NOT multiply by n_q here.
+            std::uint64_t total_raw_ops = 0;
 
             const auto& all_terms = coupled ? std::vector<LoweredTerm>{} : terms;
             for (const auto& t : all_terms) {
-                accumulate_term_ops(static_cast<std::uint64_t>(t.ir.opCount()));
+                total_raw_ops += static_cast<std::uint64_t>(t.ir.opCount());
             }
             if (coupled) {
                 for (const auto& blk : coupled->blocks) {
                     for (const auto& t : blk.terms) {
-                        accumulate_term_ops(static_cast<std::uint64_t>(t.ir.opCount()));
+                        total_raw_ops += static_cast<std::uint64_t>(t.ir.opCount());
                     }
                 }
             }
 
-            const auto text_full = total_ops_full * bpo;
-            const auto text_roll_dof = total_ops_roll_dof * bpo;
+            // Three text estimates (bpo includes QP expansion):
+            const auto text_full = n_t * n_j * total_raw_ops * bpo;
+            const auto text_roll_dof = total_raw_ops * bpo;
+            const auto text_roll_all = (n_q > 1u) ? (total_raw_ops * bpo / n_q) : (total_raw_ops * bpo);
             const auto budget = static_cast<std::uint64_t>(effective_text_budget);
 
             if (text_full > budget) {
                 suppress_dof_unroll = true;
-                // Only suppress QP unrolling for large QP counts (>= 12).
-                // For small QP counts (4-9 typical in FEM), QP unrolling is
-                // always beneficial: minimal code bloat, eliminates branch
-                // mispredictions, enables register allocation across QPs.
-                if (text_roll_dof > budget && n_q >= 12) {
+                if (text_roll_dof > budget) {
                     suppress_qp_unroll = true;
                 }
             }
@@ -2337,7 +2334,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 std::cerr << "[JIT budget] " << symbol
                           << ": text_full=" << text_full
                           << " text_roll_dof=" << text_roll_dof
-                          << " text_roll_all=" << (total_ops_roll_all * bpo)
+                          << " text_roll_all=" << text_roll_all
                           << " bytes (nq=" << n_q << " nt=" << n_t << " nj=" << n_j
                           << " bpo=" << bpo
                           << ") budget=" << budget
@@ -10685,13 +10682,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             }
             }; // end emitNonCoupledTermRange
 
-            // Term-group helper emission is gated behind SVMP_JIT_TERM_SPLIT
-            // because LLVM 14's backend has issues with the helper function IR
-            // pattern (physreg copy, bitcast selection failures).  The split
-            // plan is still computed and logged for diagnostics.  Enable once
-            // upgrading to LLVM 15+ where these backend bugs are fixed.
-            static const bool enable_term_split = (std::getenv("SVMP_JIT_TERM_SPLIT") != nullptr);
-            if (nc_plan.needs_split && enable_term_split) {
+            // Term-group helper emission: split oversized kernels into
+            // L1i-sized helper functions, each NoInline.  The main kernel
+            // calls helpers sequentially.  Requires LLVM 15+ (LLVM 14 had
+            // physreg copy and bitcast ISel bugs with this IR pattern).
+            if (nc_plan.needs_split) {
                 // Emit helper functions for each term group.
                 // Helper signature: void(i8* args, i32 batch_idx, i8** field_ptrs)
                 // The third argument carries pre-resolved field entry pointers
@@ -10813,16 +10808,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 // No split needed: emit inline.
                 // Cross-term CSE for non-coupled blocks with multiple terms:
                 // activate dep0_xblock_cache so that expensive dep_mask==0 ops
-                // evaluated by the first term are reused by subsequent terms.
-                if (terms.size() > 1u) {
-                    dep0_xblock_cache.clear();
-                    dep0_xblock_active = true;
-                    xblock_cache_bytes_allocated = 0;
-                }
+                // Cross-term CSE (dep0_xblock_cache) is NOT activated for
+                // non-coupled blocks.  Benchmarking shows the alloca-based
+                // cache adds store/load memory traffic per QP iteration that
+                // exceeds the savings from reusing dep0 ops across terms.
+                // Each term's QP loop independently evaluates dep0 ops, and
+                // LLVM optimizes them efficiently as straight-line code.
+                // Cross-term CSE remains active for coupled blocks where
+                // separate LLVM helper functions cannot share registers.
                 emitNonCoupledTermRange(0, terms.size());
-                if (terms.size() > 1u) {
-                    dep0_xblock_active = false;
-                }
             }
 
             // ================================================================
@@ -14173,8 +14167,7 @@ LLVMGenResult LLVMGen::compileAndAddFusedKernel(JITEngine& engine,
         }
         {
             const auto ops_before = lowered.ir.opCount();
-            static const bool disable_ir_opt_r = (std::getenv("SVMP_DISABLE_IR_OPT") != nullptr);
-            const auto eliminated = disable_ir_opt_r ? 0u : lowered.ir.optimize();
+            const auto eliminated = lowered.ir.optimize();
             static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
             if (jit_telemetry) {
                 std::cerr << "[JIT telemetry] residual term " << tidx
@@ -14347,8 +14340,7 @@ LLVMGenResult LLVMGen::compileAndAddCoupledKernel(JITEngine& engine,
                 {
                     const auto ops_before = lowered.ir.opCount();
                     // Shape-aware KernelIR::optimize(): zero propagation, CSE, DCE.
-                    static const bool disable_ir_opt_coupled = (std::getenv("SVMP_DISABLE_IR_OPT") != nullptr);
-                    const auto eliminated = disable_ir_opt_coupled ? 0u : lowered.ir.optimize();
+                    const auto eliminated = lowered.ir.optimize();
                     static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
                     if (jit_telemetry && eliminated > 0) {
                         std::cerr << "[JIT telemetry] coupled block " << bi << " term " << tidx

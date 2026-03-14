@@ -229,10 +229,11 @@ inferFunctionalTrialSpaceSignature(const FormExprNode& node, bool& out_conflict)
     std::uint64_t h = kFNVOffset;
     hashMix(h, static_cast<std::uint64_t>(opt.enable_loop_unroll_metadata ? 1u : 0u));
     hashMix(h, static_cast<std::uint64_t>(opt.max_unroll_trip_count));
-    // bytes_per_op_estimate is a live codegen input (used in text budget
-    // estimation at LLVMGen.cpp).  Include it so that changing the estimate
-    // invalidates cached kernels that were compiled with the old value.
+    // Both bytes/op estimates are live codegen inputs. Include them so that
+    // changing the estimate invalidates cached kernels compiled with the old
+    // policy.
     hashMix(h, static_cast<std::uint64_t>(opt.bytes_per_op_estimate));
+    hashMix(h, static_cast<std::uint64_t>(opt.raw_bytes_per_op_estimate));
     return h;
 }
 
@@ -561,8 +562,17 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
         bool dump_llvm_ir_optimized{false};
         bool debug_info{false};
         std::string dump_directory{};
+        bool specialization_enable{false};
+        bool specialization_specialize_n_qpts{true};
+        bool specialization_specialize_dofs{false};
+        std::uint32_t specialization_max_specialized_n_qpts{32};
+        std::uint32_t specialization_max_specialized_dofs{64};
+        std::size_t specialization_max_variants_per_kernel{8};
         bool specialization_enable_loop_unroll_metadata{true};
         std::uint32_t specialization_max_unroll_trip_count{32};
+        std::uint32_t specialization_text_budget_bytes{0};
+        std::uint32_t specialization_bytes_per_op_estimate{58};
+        std::uint32_t specialization_raw_bytes_per_op_estimate{10};
         TensorJITOptions tensor{};
 
         bool operator==(const CompilerKey& other) const noexcept
@@ -578,8 +588,17 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
                    dump_llvm_ir_optimized == other.dump_llvm_ir_optimized &&
                    debug_info == other.debug_info &&
                    dump_directory == other.dump_directory &&
+                   specialization_enable == other.specialization_enable &&
+                   specialization_specialize_n_qpts == other.specialization_specialize_n_qpts &&
+                   specialization_specialize_dofs == other.specialization_specialize_dofs &&
+                   specialization_max_specialized_n_qpts == other.specialization_max_specialized_n_qpts &&
+                   specialization_max_specialized_dofs == other.specialization_max_specialized_dofs &&
+                   specialization_max_variants_per_kernel == other.specialization_max_variants_per_kernel &&
                    specialization_enable_loop_unroll_metadata == other.specialization_enable_loop_unroll_metadata &&
                    specialization_max_unroll_trip_count == other.specialization_max_unroll_trip_count &&
+                   specialization_text_budget_bytes == other.specialization_text_budget_bytes &&
+                   specialization_bytes_per_op_estimate == other.specialization_bytes_per_op_estimate &&
+                   specialization_raw_bytes_per_op_estimate == other.specialization_raw_bytes_per_op_estimate &&
                    tensor.mode == other.tensor.mode &&
                    tensor.force_loop_nest == other.tensor.force_loop_nest &&
                    tensor.enable_symmetry_lowering == other.tensor.enable_symmetry_lowering &&
@@ -612,8 +631,17 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
             hashMix(h, static_cast<std::uint64_t>(k.dump_llvm_ir_optimized ? 1u : 0u));
             hashMix(h, static_cast<std::uint64_t>(k.debug_info ? 1u : 0u));
             hashMix(h, hashString(k.dump_directory));
+            hashMix(h, static_cast<std::uint64_t>(k.specialization_enable ? 1u : 0u));
+            hashMix(h, static_cast<std::uint64_t>(k.specialization_specialize_n_qpts ? 1u : 0u));
+            hashMix(h, static_cast<std::uint64_t>(k.specialization_specialize_dofs ? 1u : 0u));
+            hashMix(h, static_cast<std::uint64_t>(k.specialization_max_specialized_n_qpts));
+            hashMix(h, static_cast<std::uint64_t>(k.specialization_max_specialized_dofs));
+            hashMix(h, static_cast<std::uint64_t>(k.specialization_max_variants_per_kernel));
             hashMix(h, static_cast<std::uint64_t>(k.specialization_enable_loop_unroll_metadata ? 1u : 0u));
             hashMix(h, static_cast<std::uint64_t>(k.specialization_max_unroll_trip_count));
+            hashMix(h, static_cast<std::uint64_t>(k.specialization_text_budget_bytes));
+            hashMix(h, static_cast<std::uint64_t>(k.specialization_bytes_per_op_estimate));
+            hashMix(h, static_cast<std::uint64_t>(k.specialization_raw_bytes_per_op_estimate));
             hashMix(h, static_cast<std::uint64_t>(k.tensor.mode));
             hashMix(h, static_cast<std::uint64_t>(k.tensor.force_loop_nest ? 1u : 0u));
             hashMix(h, static_cast<std::uint64_t>(k.tensor.enable_symmetry_lowering ? 1u : 0u));
@@ -654,8 +682,17 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
     key.dump_llvm_ir_optimized = options.dump_llvm_ir_optimized;
     key.debug_info = options.debug_info;
     key.dump_directory = options.dump_directory;
+    key.specialization_enable = options.specialization.enable;
+    key.specialization_specialize_n_qpts = options.specialization.specialize_n_qpts;
+    key.specialization_specialize_dofs = options.specialization.specialize_dofs;
+    key.specialization_max_specialized_n_qpts = options.specialization.max_specialized_n_qpts;
+    key.specialization_max_specialized_dofs = options.specialization.max_specialized_dofs;
+    key.specialization_max_variants_per_kernel = options.specialization.max_variants_per_kernel;
     key.specialization_enable_loop_unroll_metadata = options.specialization.enable_loop_unroll_metadata;
     key.specialization_max_unroll_trip_count = options.specialization.max_unroll_trip_count;
+    key.specialization_text_budget_bytes = options.specialization.text_budget_bytes;
+    key.specialization_bytes_per_op_estimate = options.specialization.bytes_per_op_estimate;
+    key.specialization_raw_bytes_per_op_estimate = options.specialization.raw_bytes_per_op_estimate;
     key.tensor = options.tensor;
 
     std::lock_guard<std::mutex> lock(*registry_mutex);

@@ -119,19 +119,24 @@ struct JITSpecializationOptions {
     std::uint32_t max_unroll_trip_count{0};
 
     // Code-size budget: estimated .text bytes before DOF-loop unrolling is
-    // suppressed.  When the estimated fully-unrolled code exceeds this limit,
-    // test/trial DOF loops remain as actual loops (QP loops still unroll).
-    // 0 => auto from hardware profile (typically 3x L1i size).
+    // suppressed. When the estimated specialized kernel exceeds this limit,
+    // test/trial DOF loops remain as actual loops (QP loops may still unroll
+    // if they fit). 0 => auto from the current hardware profile
+    // (typically 3x L1i size).
     // Override at runtime via SVMP_JIT_TEXT_BUDGET.
     std::uint32_t text_budget_bytes{0};
 
-    // Estimated bytes of machine code per KernelIR op after LLVM codegen.
-    // Used as the uncalibrated fallback for .text budget calculations when
-    // process-level telemetry (BytesPerOpCalibration) has insufficient
-    // samples.  Once enough compilations complete, the telemetry value
-    // supersedes this estimate.
+    // Estimated bytes of machine code per KernelIR op in the final emitted
+    // object. Used as the uncalibrated fallback for emitted-size telemetry
+    // when process-level calibration has insufficient samples.
     // Canonical value: HardwareProfile::kBytesPerOp (58).
     std::uint32_t bytes_per_op_estimate{58};
+
+    // Estimated bytes of machine code per KernelIR op in the unrolled loop
+    // body before explicit nq/nt/nj replication factors are applied. Used by
+    // the budget estimator so that DOF/QP expansion is not double-counted.
+    // Canonical value: HardwareProfile::kRawBytesPerOp (10).
+    std::uint32_t raw_bytes_per_op_estimate{10};
 };
 
 struct JITOptions {

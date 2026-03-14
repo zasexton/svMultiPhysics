@@ -501,6 +501,20 @@ TEST(HardwareProfile, BytesPerOpCalibrationDefaultsToStatic)
     EXPECT_EQ(cal.calibratedBytesPerOp(999u), 50u);
 }
 
+TEST(HardwareProfile, RawBytesPerOpCalibrationUsesCallerFallback)
+{
+    jit::BytesPerOpCalibration cal;
+    EXPECT_EQ(cal.calibratedBytesPerOp(jit::HardwareProfile::kRawBytesPerOp),
+              jit::HardwareProfile::kRawBytesPerOp);
+
+    cal.recordSample(900, 100);   // 9 bytes/op, still uncalibrated
+    EXPECT_EQ(cal.calibratedBytesPerOp(jit::HardwareProfile::kRawBytesPerOp),
+              jit::HardwareProfile::kRawBytesPerOp);
+
+    cal.recordSample(1100, 100);  // average 10 bytes/op
+    EXPECT_EQ(cal.calibratedBytesPerOp(jit::HardwareProfile::kRawBytesPerOp), 10u);
+}
+
 TEST(HardwareProfile, ContinuousProfitabilityFormulas)
 {
     using HP = jit::HardwareProfile;

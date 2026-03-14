@@ -4532,15 +4532,6 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     std::size_t requested_batch_size =
         (options_.use_batching && options_.batch_size > 1)
             ? static_cast<std::size_t>(options_.batch_size) : 1u;
-    // Allow runtime override via SVMP_BATCH_SIZE (useful for OpenMP tuning).
-    {
-        static const int env_batch = [] {
-            const char* s = std::getenv("SVMP_BATCH_SIZE");
-            return (s && s[0]) ? std::atoi(s) : 0;
-        }();
-        if (env_batch > 0)
-            requested_batch_size = static_cast<std::size_t>(env_batch);
-    }
     bool all_support_batch = (requested_batch_size > 1);
     if (all_support_batch) {
         for (const auto& t : terms) {

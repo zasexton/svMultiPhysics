@@ -884,37 +884,9 @@ std::unique_ptr<JITEngine> JITEngine::create(const JITOptions& options)
         engine->impl_ = std::make_unique<Impl>();
         engine->impl_->options = options;
 
-        // Allow runtime override of the max unroll trip count via env var.
-        if (const char* env = std::getenv("SVMP_JIT_MAX_UNROLL")) {
-            try {
-                const int val = std::stoi(env);
-                if (val >= 0) {
-                    engine->impl_->options.specialization.max_unroll_trip_count =
-                        static_cast<std::uint32_t>(val);
-                }
-            } catch (...) { /* ignore parse errors */ }
-        }
-
-        // Allow runtime override of the code-size budget for DOF loop unrolling.
-        if (const char* env = std::getenv("SVMP_JIT_TEXT_BUDGET")) {
-            try {
-                const int val = std::stoi(env);
-                if (val >= 0) {
-                    engine->impl_->options.specialization.text_budget_bytes =
-                        static_cast<std::uint32_t>(val);
-                }
-            } catch (...) { /* ignore parse errors */ }
-        }
-
-        // Allow runtime override of the LLVM optimization level (0-3).
-        if (const char* env = std::getenv("SVMP_JIT_OPT_LEVEL")) {
-            try {
-                const int val = std::stoi(env);
-                if (val >= 0 && val <= 3) {
-                    engine->impl_->options.optimization_level = val;
-                }
-            } catch (...) { /* ignore parse errors */ }
-        }
+        // JIT specialization parameters (max unroll, text budget, bpo,
+        // optimization level) are derived automatically from the hardware
+        // profile and calibration.  No runtime overrides needed.
 
         std::string triple;
         std::string data_layout;
@@ -1022,7 +994,7 @@ JITEngine::SymbolAddress JITEngine::lookup(std::string_view name)
         FE_THROW(FEException, "LLVM JIT: symbol lookup failed for '" + std::string(name) + "': " +
                                   llvmErrorToString(sym_expected.takeError()));
     }
-#if LLVM_VERSION_MAJOR >= 16
+#if LLVM_VERSION_MAJOR >= 15
     return static_cast<SymbolAddress>(sym_expected->getValue());
 #else
     return static_cast<SymbolAddress>(sym_expected->getAddress());
@@ -1079,7 +1051,7 @@ bool JITEngine::tryLookup(std::string_view name, SymbolAddress& out) noexcept
             return false;
         }
 
-#if LLVM_VERSION_MAJOR >= 16
+#if LLVM_VERSION_MAJOR >= 15
         out = static_cast<SymbolAddress>(sym_expected->getValue());
 #else
         out = static_cast<SymbolAddress>(sym_expected->getAddress());

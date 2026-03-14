@@ -164,16 +164,14 @@ struct HardwareProfile {
 
     // ----- Codegen calibration constants -----
     // These are empirical values from LLVM codegen output, NOT derived from
-    // the CPU cache hierarchy.  They depend on the compiler (LLVM 14-18),
-    // the KernelIR op mix, and the unrolling strategy.  Centralized here
-    // so that all consumers (JITSpecializationOptions, CoupledBlockKernel,
-    // etc.) share the same values.
+    // the CPU cache hierarchy. They depend on the compiler (LLVM 14-18),
+    // the KernelIR op mix, and the unrolling strategy. Centralized here so
+    // that all FE/JIT consumers share the same defaults.
 
     /// Estimated bytes of x86-64 machine code per KernelIR op after LLVM
-    /// codegen with full QP/DOF unrolling.  Calibrated from FMA-heavy FEM
-    /// kernels (diffusion, elasticity, stabilized flow) on LLVM 14.
-    /// This is the static fallback; use BytesPerOpCalibration for
-    /// telemetry-driven per-process estimates from actual compilations.
+    /// codegen in the final emitted object. This is the static fallback;
+    /// use BytesPerOpCalibration for telemetry-driven per-process estimates
+    /// from actual compilations.
     static constexpr std::uint64_t kBytesPerOp = 58;
 
     /// Raw bytes per KernelIR op for the un-unrolled instruction stream.
@@ -187,8 +185,7 @@ struct HardwareProfile {
 
     /// Conservative fallback KernelIR op count per FormIR term, used when
     /// actual lowering is unavailable (e.g. FormIR not compiled, lowering
-    /// throws).  Based on stabilized FEM tangent terms (~125-186 ops
-    /// post-optimize).
+    /// throws). Chosen from representative medium-complexity FE terms.
     static constexpr std::uint64_t kFallbackOpsPerTerm = 180;
 };
 
@@ -227,6 +224,10 @@ private:
 
 /// Return a process-global BytesPerOpCalibration instance (thread-safe).
 [[nodiscard]] BytesPerOpCalibration& bytesPerOpCalibration();
+
+/// Return a process-global calibration for raw loop-body bytes/op used by
+/// text-budget estimates before nq/nt/nj replication is applied.
+[[nodiscard]] BytesPerOpCalibration& rawBytesPerOpCalibration();
 
 } // namespace jit
 } // namespace forms

@@ -202,6 +202,12 @@ BytesPerOpCalibration& bytesPerOpCalibration()
     return instance;
 }
 
+BytesPerOpCalibration& rawBytesPerOpCalibration()
+{
+    static BytesPerOpCalibration instance;
+    return instance;
+}
+
 } // namespace jit
 } // namespace forms
 } // namespace FE

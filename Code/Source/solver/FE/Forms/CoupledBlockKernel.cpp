@@ -206,7 +206,9 @@ void CoupledBlockKernel::primeAllBlocksColocated()
     // Falls back to a conservative heuristic if lowering fails or no
     // FormIR is available.
     // Use telemetry-calibrated bytes/op when available, else default.
-    const auto kBytesPerOp = jit::bytesPerOpCalibration().calibratedBytesPerOp();
+    const auto kBytesPerOp = jit::bytesPerOpCalibration().calibratedBytesPerOp(
+        options_.specialization.bytes_per_op_estimate);
+    const auto kRawBytesPerOp = static_cast<std::uint64_t>(options_.specialization.raw_bytes_per_op_estimate);
     constexpr auto kFallbackOpsPerTerm = jit::HardwareProfile::kFallbackOpsPerTerm;
     auto estimateSpecSize = [&](const jit::JITCompiler::ColocatedKernelSpec& spec) -> std::uint64_t {
         if (!spec.ir) {
@@ -227,6 +229,20 @@ void CoupledBlockKernel::primeAllBlocksColocated()
                 total_ops += kFallbackOpsPerTerm;
             }
         }
+
+        if (const auto* sz = spec.specialization) {
+            if (sz->domain == spec.domain &&
+                sz->n_qpts_minus.has_value() &&
+                sz->n_test_dofs_minus.has_value()) {
+                std::uint64_t expand = static_cast<std::uint64_t>(*sz->n_qpts_minus) *
+                                       static_cast<std::uint64_t>(*sz->n_test_dofs_minus);
+                if (spec.ir->kind() == FormKind::Bilinear) {
+                    expand *= static_cast<std::uint64_t>(sz->n_trial_dofs_minus.value_or(1u));
+                }
+                return total_ops * std::max<std::uint64_t>(1u, expand) * kRawBytesPerOp;
+            }
+        }
+
         return total_ops * kBytesPerOp;
     };
 
