@@ -2328,11 +2328,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
             if (text_full > budget) {
                 suppress_dof_unroll = true;
-                // Only roll QP loops when n_q is large enough to amortize
-                // loop overhead.  For small QP counts (Tet4=4, Quad4=4),
-                // LLVM benefits from full QP unrolling even if the kernel
-                // exceeds L1i — L2 code fetch handles the overshoot.
-                if (text_roll_dof > budget && n_q >= 8u) {
+                // Roll QP loops when the DOF-rolled estimate still exceeds
+                // the L1i budget.  Previous n_q>=8 threshold kept QP unrolled
+                // for Tet4/Tri3 (4 QPs), but perf profiling shows the 4x code
+                // replication (227KB VV tangent) causes massive L1i thrashing
+                // (5.25B misses vs 1.29B legacy on iliac_artery).  The ~2-4
+                // extra loop instructions per QP iteration are negligible
+                // compared to the L1i miss cost at these kernel sizes.
+                if (text_roll_dof > budget) {
                     suppress_qp_unroll = true;
                 }
             }
@@ -10818,16 +10821,26 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             } else {
                 // No split needed: emit inline.
                 // Cross-term CSE for non-coupled blocks with multiple terms:
-                // activate dep0_xblock_cache so that expensive dep_mask==0 ops
-                // Cross-term CSE (dep0_xblock_cache) is NOT activated for
-                // non-coupled blocks.  Benchmarking shows the alloca-based
-                // cache adds store/load memory traffic per QP iteration that
-                // exceeds the savings from reusing dep0 ops across terms.
-                // Each term's QP loop independently evaluates dep0 ops, and
-                // LLVM optimizes them efficiently as straight-line code.
-                // Cross-term CSE remains active for coupled blocks where
-                // separate LLVM helper functions cannot share registers.
+                // When QP loops are rolled (suppress_qp_unroll), each term
+                // has its own QP loop and LLVM cannot CSE dep_mask==0 ops
+                // across separate loop bodies.  The alloca-based cache
+                // stores dep0 values (indexed by QP) from the first term
+                // and subsequent terms load from cache — avoiding redundant
+                // computation of expensive ops like grad(u), τ_m, τ_c.
+                //
+                // When QP is unrolled, LLVM's GVN handles cross-term CSE
+                // within straight-line basic blocks, so the alloca cache
+                // just adds store/load overhead — keep it disabled.
+                const bool enable_xterm_cse =
+                    suppress_qp_unroll && terms.size() > 1u;
+                if (enable_xterm_cse) {
+                    dep0_xblock_cache.clear();
+                    dep0_xblock_active = true;
+                }
                 emitNonCoupledTermRange(0, terms.size());
+                if (enable_xterm_cse) {
+                    dep0_xblock_active = false;
+                }
             }
 
             // ================================================================
