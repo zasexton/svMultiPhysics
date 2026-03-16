@@ -453,6 +453,10 @@ bool AffineConstraints::isConstrained(GlobalIndex dof) const noexcept {
 }
 
 bool AffineConstraints::hasConstrainedDofs(std::span<const GlobalIndex> dofs) const noexcept {
+    // Fast path: if no constraints exist at all, skip per-DOF iteration.
+    // This is called per-cell in the hot assembly loop; for unconstrained
+    // problems (majority of test cases), this avoids ~8 bitset lookups per cell.
+    if (slave_to_index_.empty()) return false;
     for (GlobalIndex dof : dofs) {
         if (isConstrained(dof)) {
             return true;

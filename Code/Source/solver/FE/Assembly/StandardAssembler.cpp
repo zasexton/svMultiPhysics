@@ -8095,22 +8095,48 @@ void StandardAssembler::populateFieldSolutionData(
             // Get inverse Jacobians span once (avoid per-QP accessor overhead).
             const auto ctx_inv_jacs_span = context.inverseJacobians();
 
+            // P1 affine fast path: for linear basis functions on affine
+            // elements, ref-space gradients are constant across all QPs
+            // (same basis gradients at every point).  Detect this by comparing
+            // basis gradients at QP 0 vs QP 1.  When true:
+            //  - gradient: compute gref_sum + J_inv transform at QP 0, copy to rest
+            //  - hessians: zero for P1 (constant gradient → zero curvature)
+            const bool p1_affine_grad = cached_mapping_affine_ && need_gradients &&
+                                        field_bcache && n_qpts >= 2 && n_dofs > 0 &&
+                                        field_bcache->gradients.size() >= 2 &&
+                                        [&]() -> bool {
+                                            for (LocalIndex j = 0; j < n_dofs; ++j) {
+                                                const auto& g0 = field_bcache->gradients[0][static_cast<std::size_t>(j)];
+                                                const auto& g1 = field_bcache->gradients[1][static_cast<std::size_t>(j)];
+                                                for (int d = 0; d < dim; ++d) {
+                                                    if (g0[static_cast<std::size_t>(d)] != g1[static_cast<std::size_t>(d)])
+                                                        return false;
+                                                }
+                                            }
+                                            return true;
+                                        }();
+
+            AssemblyContext::Vector3D p1_const_grad{};
+            bool p1_grad_ready = false;
+
             for (LocalIndex q = 0; q < n_qpts; ++q) {
                 if (!field_bcache) {
                     const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
                                                    qpts[static_cast<std::size_t>(q)][1],
                                                    qpts[static_cast<std::size_t>(q)][2]};
                     basis.evaluate_values(xi, values_at_pt);
-                    if (need_gradients) {
+                    if (need_gradients && !(p1_affine_grad && p1_grad_ready)) {
                         basis.evaluate_gradients(xi, gradients_at_pt);
                     }
-                    if (need_hessians) {
+                    if (need_hessians && !p1_affine_grad) {
                         basis.evaluate_hessians(xi, hessians_at_pt);
                     }
                 }
 
                 // For affine elements, J_inv is the same at all QPs.
                 const auto& J_inv = ctx_inv_jacs_span[cached_mapping_affine_ ? 0 : static_cast<std::size_t>(q)];
+
+                // Values always vary per QP (different N_j at each point)
                 Real val = 0.0;
 
                 // Accumulate in reference space first, then apply J_inv
@@ -8120,6 +8146,9 @@ void StandardAssembler::populateFieldSolutionData(
                 AssemblyContext::Vector3D gref_sum = {0.0, 0.0, 0.0};
                 AssemblyContext::Matrix3x3 H_ref_sum{};
 
+                const bool do_grad_accum = need_gradients && !(p1_affine_grad && p1_grad_ready);
+                const bool do_hess_accum = need_hessians && !p1_affine_grad;
+
                 for (LocalIndex j = 0; j < n_dofs; ++j) {
                     const Real coef = local_coeffs[static_cast<std::size_t>(j)];
                     const Real basis_val = field_bcache
@@ -8127,7 +8156,7 @@ void StandardAssembler::populateFieldSolutionData(
                         : values_at_pt[static_cast<std::size_t>(j)];
                     val += coef * basis_val;
 
-                    if (need_gradients) {
+                    if (do_grad_accum) {
                         const auto& gref = field_bcache
                             ? field_bcache->gradients[static_cast<std::size_t>(q)][static_cast<std::size_t>(j)]
                             : gradients_at_pt[static_cast<std::size_t>(j)];
@@ -8136,7 +8165,7 @@ void StandardAssembler::populateFieldSolutionData(
                         }
                     }
 
-                    if (need_hessians) {
+                    if (do_hess_accum) {
                         const auto& hess_j = field_bcache
                             ? field_bcache->hessians[static_cast<std::size_t>(q)][static_cast<std::size_t>(j)]
                             : hessians_at_pt[static_cast<std::size_t>(j)];
@@ -8153,40 +8182,57 @@ void StandardAssembler::populateFieldSolutionData(
                 scalar_values[static_cast<std::size_t>(q)] = val;
 
                 if (need_gradients) {
-                    // Single J_inv^T * gref_sum transform
-                    AssemblyContext::Vector3D grad = {0.0, 0.0, 0.0};
-                    for (int d1 = 0; d1 < dim; ++d1) {
-                        for (int d2 = 0; d2 < dim; ++d2) {
-                            grad[d1] += J_inv[static_cast<std::size_t>(d2)][static_cast<std::size_t>(d1)] *
-                                        gref_sum[d2];
+                    if (p1_affine_grad && p1_grad_ready) {
+                        // Reuse constant gradient from QP 0
+                        scalar_gradients[static_cast<std::size_t>(q)] = p1_const_grad;
+                    } else {
+                        // Single J_inv^T * gref_sum transform
+                        AssemblyContext::Vector3D grad = {0.0, 0.0, 0.0};
+                        for (int d1 = 0; d1 < dim; ++d1) {
+                            for (int d2 = 0; d2 < dim; ++d2) {
+                                grad[d1] += J_inv[static_cast<std::size_t>(d2)][static_cast<std::size_t>(d1)] *
+                                            gref_sum[d2];
+                            }
+                        }
+                        scalar_gradients[static_cast<std::size_t>(q)] = grad;
+                        if (p1_affine_grad) {
+                            p1_const_grad = grad;
+                            p1_grad_ready = true;
                         }
                     }
-                    scalar_gradients[static_cast<std::size_t>(q)] = grad;
                 }
 
                 if (need_hessians) {
-                    // Single J_inv^T * H_ref_sum * J_inv transform
-                    AssemblyContext::Matrix3x3 H{};
-                    for (int r = 0; r < dim; ++r) {
-                        for (int c = 0; c < dim; ++c) {
-                            Real sum = 0.0;
-                            for (int a = 0; a < dim; ++a) {
-                                for (int b = 0; b < dim; ++b) {
-                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-                                           H_ref_sum[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                    if (p1_affine_grad) {
+                        // P1 affine: hessians are zero (constant gradient)
+                        scalar_hessians[static_cast<std::size_t>(q)] = AssemblyContext::Matrix3x3{};
+                        if (want_laplacians) {
+                            scalar_laplacians[static_cast<std::size_t>(q)] = 0.0;
+                        }
+                    } else {
+                        // Single J_inv^T * H_ref_sum * J_inv transform
+                        AssemblyContext::Matrix3x3 H{};
+                        for (int r = 0; r < dim; ++r) {
+                            for (int c = 0; c < dim; ++c) {
+                                Real sum = 0.0;
+                                for (int a = 0; a < dim; ++a) {
+                                    for (int b = 0; b < dim; ++b) {
+                                        sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                               H_ref_sum[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                               J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                    }
                                 }
+                                H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
                             }
-                            H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
                         }
-                    }
-                    scalar_hessians[static_cast<std::size_t>(q)] = H;
-                    if (want_laplacians) {
-                        Real lap = 0.0;
-                        for (int d = 0; d < dim; ++d) {
-                            lap += H[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
+                        scalar_hessians[static_cast<std::size_t>(q)] = H;
+                        if (want_laplacians) {
+                            Real lap = 0.0;
+                            for (int d = 0; d < dim; ++d) {
+                                lap += H[static_cast<std::size_t>(d)][static_cast<std::size_t>(d)];
+                            }
+                            scalar_laplacians[static_cast<std::size_t>(q)] = lap;
                         }
-                        scalar_laplacians[static_cast<std::size_t>(q)] = lap;
                     }
                 }
             }
