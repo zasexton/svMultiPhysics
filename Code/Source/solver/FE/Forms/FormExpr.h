@@ -146,6 +146,7 @@ struct JITOptions {
     int optimization_level{2};
     bool cache_kernels{true};
     bool vectorize{true};
+    bool simd_batch{true};           // SoA SIMD vectorization across batch elements (SSE2: 2-wide)
     std::string cache_directory;
     bool cache_diagnostics{false};
     std::size_t max_in_memory_kernels{1024};  // Default to 1024 to prevent unbounded memory growth

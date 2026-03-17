@@ -14,6 +14,7 @@
 #include "Forms/FormKernels.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/SymbolicDifferentiation.h"
+#include "Forms/JIT/HardwareProfile.h"
 #include "Forms/JIT/JITCompiler.h"
 #include "Forms/JIT/JITValidation.h"
 
@@ -262,12 +263,37 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
         // is thread-safe (no shared member vectors).
         auto callJITCell = [&](std::uintptr_t addr, const assembly::jit::CellKernelArgsV6& v6_args) {
             if (options_.vectorize) {
-                assembly::jit::KernelSideArgsV6 local_side = v6_args.side;
-                assembly::jit::KernelOutputViewV6 local_out = v6_args.output;
+                // SIMD batch: pad to simd_w elements (the JIT kernel reads simd_w at a time).
+                const auto sw = options_.simd_batch
+                    ? static_cast<std::uint32_t>(jit::hardwareProfile().simdDoubles())
+                    : 1u;
+                const auto pn = (sw >= 2 && options_.simd_batch) ? sw : 1u;
+
+                thread_local std::vector<assembly::jit::KernelSideArgsV6> local_sides;
+                thread_local std::vector<assembly::jit::KernelOutputViewV6> local_outs;
+                thread_local std::vector<Real> pad_m_cell, pad_v_cell;
+                local_sides.resize(pn);
+                local_outs.resize(pn);
+
+                local_sides[0] = v6_args.side;
+                local_outs[0] = v6_args.output;
+                if (pn > 1) {
+                    pad_m_cell.assign(
+                        static_cast<std::size_t>(v6_args.output.n_test_dofs) *
+                        static_cast<std::size_t>(v6_args.output.n_trial_dofs), 0.0);
+                    pad_v_cell.assign(v6_args.output.n_test_dofs, 0.0);
+                    for (std::uint32_t pi = 1; pi < pn; ++pi) {
+                        local_sides[pi] = v6_args.side;
+                        local_outs[pi] = v6_args.output;
+                        local_outs[pi].element_matrix = pad_m_cell.data();
+                        local_outs[pi].element_vector = pad_v_cell.data();
+                    }
+                }
+
                 assembly::jit::CellKernelBatchArgsV1 batch_args;
-                batch_args.batch_size = 1;
-                batch_args.sides = &local_side;
-                batch_args.outputs = &local_out;
+                batch_args.batch_size = pn;
+                batch_args.sides = local_sides.data();
+                batch_args.outputs = local_outs.data();
                 callJIT(addr, &batch_args);
             } else {
                 callJIT(addr, &v6_args);
@@ -544,10 +570,22 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                 // Tight per-element loop.
                 if (options_.vectorize) {
+                    // SIMD batch padding: round up to next multiple of simd_w
+                    // so the JIT kernel's SIMD loop doesn't read past the end.
+                    const auto simd_w = options_.simd_batch
+                        ? static_cast<std::size_t>(jit::hardwareProfile().simdDoubles())
+                        : std::size_t{1};
+                    const auto padded_n = (simd_w >= 2 && options_.simd_batch)
+                        ? ((n + simd_w - 1) / simd_w) * simd_w
+                        : n;
+
                     // Stack-local scratch: thread-safe for concurrent calls
                     // from outer OMP parallel regions.
-                    std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
-                    std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
+                    std::vector<assembly::jit::KernelSideArgsV6> batch_sides(padded_n);
+                    std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(padded_n);
+
+                    // Scratch output for padding elements (writes are harmless).
+                    thread_local std::vector<Real> pad_matrix_scratch, pad_vector_scratch;
 
                     for (std::size_t idx = 0; idx < n; ++idx) {
                         if (contexts[idx] == nullptr) {
@@ -576,12 +614,35 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         output.has_vector = want_vector;
                     }
 
+                    // Fill holes and pad for SIMD batch.
+                    {
+                        pad_matrix_scratch.assign(
+                            static_cast<std::size_t>(n_test) * static_cast<std::size_t>(n_trial), 0.0);
+                        pad_vector_scratch.assign(static_cast<std::size_t>(n_test), 0.0);
+                        std::size_t fill_src = 0;
+                        for (std::size_t idx = 0; idx < n; ++idx) {
+                            if (batch_sides[idx].integration_weights != nullptr) {
+                                fill_src = idx; break;
+                            }
+                        }
+                        for (std::size_t idx = 0; idx < padded_n; ++idx) {
+                            if (batch_sides[idx].integration_weights == nullptr) {
+                                batch_sides[idx] = batch_sides[fill_src];
+                                batch_outputs[idx].element_matrix = pad_matrix_scratch.data();
+                                batch_outputs[idx].element_vector = pad_vector_scratch.data();
+                                batch_outputs[idx].n_test_dofs = batch_outputs[fill_src].n_test_dofs;
+                                batch_outputs[idx].n_trial_dofs = batch_outputs[fill_src].n_trial_dofs;
+                            }
+                        }
+                    }
+
                     assembly::jit::CellKernelBatchArgsV1 batch_args;
-                    batch_args.batch_size = static_cast<std::uint32_t>(n);
+                    batch_args.batch_size = static_cast<std::uint32_t>(padded_n);
                     batch_args.sides = batch_sides.data();
                     batch_args.outputs = batch_outputs.data();
 
                     callJIT(compiled.cell, &batch_args);
+
                 } else {
                     for (std::size_t idx = 0; idx < n; ++idx) {
                         if (contexts[idx] == nullptr) {
@@ -654,9 +715,19 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                 // Tight per-element loop.
                 if (options_.vectorize) {
+                    // SIMD batch padding (same as FormKernel path above).
+                    const auto simd_w = options_.simd_batch
+                        ? static_cast<std::size_t>(jit::hardwareProfile().simdDoubles())
+                        : std::size_t{1};
+                    const auto padded_n = (simd_w >= 2 && options_.simd_batch)
+                        ? ((n + simd_w - 1) / simd_w) * simd_w
+                        : n;
+
                     // Stack-local scratch: thread-safe for concurrent calls.
-                    std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
-                    std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
+                    std::vector<assembly::jit::KernelSideArgsV6> batch_sides(padded_n);
+                    std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(padded_n);
+
+                    thread_local std::vector<Real> pad_matrix_scratch2, pad_vector_scratch2;
 
                     for (std::size_t idx = 0; idx < n; ++idx) {
                         if (contexts[idx] == nullptr) continue;
@@ -678,8 +749,21 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         batch_outputs[idx] = args.output;
                     }
 
+                    // Pad remaining slots
+                    if (padded_n > n && n > 0) {
+                        pad_matrix_scratch2.assign(
+                            static_cast<std::size_t>(n_test) * static_cast<std::size_t>(n_trial), 0.0);
+                        pad_vector_scratch2.assign(static_cast<std::size_t>(n_test), 0.0);
+                        for (std::size_t idx = n; idx < padded_n; ++idx) {
+                            batch_sides[idx] = batch_sides[n - 1];
+                            batch_outputs[idx] = batch_outputs[n - 1];
+                            batch_outputs[idx].element_matrix = pad_matrix_scratch2.data();
+                            batch_outputs[idx].element_vector = pad_vector_scratch2.data();
+                        }
+                    }
+
                     assembly::jit::CellKernelBatchArgsV1 batch_args;
-                    batch_args.batch_size = static_cast<std::uint32_t>(n);
+                    batch_args.batch_size = static_cast<std::uint32_t>(padded_n);
                     batch_args.sides = batch_sides.data();
                     batch_args.outputs = batch_outputs.data();
 
@@ -888,8 +972,15 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                                 if (sub_n > 0) {
                                     // Thread-local scratch for batch packing.
-                                    std::vector<assembly::jit::KernelSideArgsV6> local_sides(sub_n);
-                                    std::vector<assembly::jit::KernelOutputViewV6> local_outputs(sub_n);
+                                    // SIMD batch padding.
+                                    const auto simd_w_omp = options_.simd_batch
+                                        ? static_cast<std::size_t>(jit::hardwareProfile().simdDoubles())
+                                        : std::size_t{1};
+                                    const auto padded_sub_n = (simd_w_omp >= 2 && options_.simd_batch)
+                                        ? ((sub_n + simd_w_omp - 1) / simd_w_omp) * simd_w_omp
+                                        : sub_n;
+                                    std::vector<assembly::jit::KernelSideArgsV6> local_sides(padded_sub_n);
+                                    std::vector<assembly::jit::KernelOutputViewV6> local_outputs(padded_sub_n);
 
                                     for (std::size_t idx = lo; idx < hi; ++idx) {
                                         if (contexts[idx] == nullptr) continue;
@@ -914,8 +1005,26 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                                         output.has_vector = want_vector;
                                     }
 
+                                    // Pad remaining slots for SIMD batch
+                                    if (padded_sub_n > sub_n) {
+                                        std::size_t last_v = sub_n - 1;
+                                        while (last_v > 0 && local_sides[last_v].integration_weights == nullptr) {
+                                            --last_v;
+                                        }
+                                        thread_local std::vector<Real> pad_m_omp, pad_v_omp;
+                                        pad_m_omp.assign(
+                                            static_cast<std::size_t>(n_test) * static_cast<std::size_t>(n_trial), 0.0);
+                                        pad_v_omp.assign(static_cast<std::size_t>(n_test), 0.0);
+                                        for (std::size_t pi = sub_n; pi < padded_sub_n; ++pi) {
+                                            local_sides[pi] = local_sides[last_v];
+                                            local_outputs[pi] = local_outputs[last_v];
+                                            local_outputs[pi].element_matrix = pad_m_omp.data();
+                                            local_outputs[pi].element_vector = pad_v_omp.data();
+                                        }
+                                    }
+
                                     assembly::jit::CellKernelBatchArgsV1 batch_args;
-                                    batch_args.batch_size = static_cast<std::uint32_t>(sub_n);
+                                    batch_args.batch_size = static_cast<std::uint32_t>(padded_sub_n);
                                     batch_args.sides   = local_sides.data();
                                     batch_args.outputs = local_outputs.data();
 
@@ -932,8 +1041,17 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         {
                             // Serial vectorize path: stack-local scratch
                             // (thread-safe for concurrent calls).
-                            std::vector<assembly::jit::KernelSideArgsV6> batch_sides(n);
-                            std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(n);
+                            // SIMD batch padding: round up to next SIMD width.
+                            const auto simd_w_nl = options_.simd_batch
+                                ? static_cast<std::size_t>(jit::hardwareProfile().simdDoubles())
+                                : std::size_t{1};
+                            const auto padded_n_nl = (simd_w_nl >= 2 && options_.simd_batch)
+                                ? ((n + simd_w_nl - 1) / simd_w_nl) * simd_w_nl
+                                : n;
+
+                            std::vector<assembly::jit::KernelSideArgsV6> batch_sides(padded_n_nl);
+                            std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(padded_n_nl);
+                            thread_local std::vector<Real> pad_mat_nl, pad_vec_nl;
 
                             for (std::size_t idx = 0; idx < n; ++idx) {
                                 if (contexts[idx] == nullptr) continue;
@@ -958,8 +1076,37 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                                 output.has_vector = want_vector;
                             }
 
+                            // Fill holes and pad for SIMD batch.
+                            // The SIMD kernel reads ALL batch_size entries — null-context
+                            // holes must be filled with valid data (reads are safe, writes
+                            // go to scratch buffers).
+                            {
+                                pad_mat_nl.assign(
+                                    static_cast<std::size_t>(n_test) * static_cast<std::size_t>(n_trial), 0.0);
+                                pad_vec_nl.assign(static_cast<std::size_t>(n_test), 0.0);
+
+                                // Find first valid entry to use as fill source.
+                                std::size_t fill_src = 0;
+                                for (std::size_t idx = 0; idx < n; ++idx) {
+                                    if (batch_sides[idx].integration_weights != nullptr) {
+                                        fill_src = idx;
+                                        break;
+                                    }
+                                }
+                                // Fill holes within [0, n) and padding slots [n, padded_n_nl).
+                                for (std::size_t idx = 0; idx < padded_n_nl; ++idx) {
+                                    if (batch_sides[idx].integration_weights == nullptr) {
+                                        batch_sides[idx] = batch_sides[fill_src];
+                                        batch_outputs[idx].element_matrix = pad_mat_nl.data();
+                                        batch_outputs[idx].element_vector = pad_vec_nl.data();
+                                        batch_outputs[idx].n_test_dofs = batch_outputs[fill_src].n_test_dofs;
+                                        batch_outputs[idx].n_trial_dofs = batch_outputs[fill_src].n_trial_dofs;
+                                    }
+                                }
+                            }
+
                             assembly::jit::CellKernelBatchArgsV1 batch_args;
-                            batch_args.batch_size = static_cast<std::uint32_t>(n);
+                            batch_args.batch_size = static_cast<std::uint32_t>(padded_n_nl);
                             batch_args.sides   = batch_sides.data();
                             batch_args.outputs = batch_outputs.data();
 

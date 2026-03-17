@@ -40,6 +40,13 @@ struct HardwareProfile {
                                          // target-specific vectorization/cost decisions.
                                          // Safe on server CPUs; disabled on mobile (throttling).
 
+    /// Number of doubles that fit in one SIMD register.
+    /// 2 for SSE2 (16 bytes), 4 for AVX2 (32 bytes), 8 for AVX-512 (64 bytes).
+    [[nodiscard]] std::uint32_t simdDoubles() const noexcept
+    {
+        return simd_width_bytes / 8u;
+    }
+
     // ----- Derived budgets -----
 
     /// Maximum QP cache entries (doubles) that fit in ~1/4 of L1d.

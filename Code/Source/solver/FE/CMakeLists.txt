@@ -1983,6 +1983,7 @@ if(FE_BUILD_TESTS)
 					                Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_MatrixAndEigenOps.cpp
 					                Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_SmoothOps.cpp
 					                Tests/Unit/Forms/test_JIT_ExtendedParity.cpp
+					                Tests/Unit/Forms/test_JIT_SIMDBatch.cpp
 					                Tests/Unit/Forms/test_JIT_TangentFiniteDifferences.cpp
 					                Tests/Unit/Forms/test_SymbolicDifferentiation.cpp
 			                    Tests/Unit/Forms/test_HessianVectorProduct.cpp

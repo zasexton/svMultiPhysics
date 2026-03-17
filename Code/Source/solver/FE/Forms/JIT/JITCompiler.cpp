@@ -324,6 +324,7 @@ struct KernelGroupPlan {
     hashMix(h, trial_sig_hash.h);
     hashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(jit_options.optimization_level)));
     hashMix(h, static_cast<std::uint64_t>(jit_options.vectorize ? 1u : 0u));
+    hashMix(h, static_cast<std::uint64_t>(jit_options.simd_batch ? 1u : 0u));
     hashMix(h, hashTensorOptions(jit_options.tensor));
     hashMix(h, hashSpecializationCodegenOptions(jit_options.specialization));
     hashMix(h, static_cast<std::uint64_t>(jit_options.debug_info ? 1u : 0u));
@@ -1033,6 +1034,7 @@ JITCompileResult JITCompiler::Impl::compileFusedFormIR(const FormIR& tangent_ir,
     hashMix(cache_key, trial_sig_hash.h);
     hashMix(cache_key, static_cast<std::uint64_t>(static_cast<std::int64_t>(options.optimization_level)));
     hashMix(cache_key, static_cast<std::uint64_t>(options.vectorize ? 1u : 0u));
+    hashMix(cache_key, static_cast<std::uint64_t>(options.simd_batch ? 1u : 0u));
     hashMix(cache_key, hashTensorOptions(options.tensor));
     hashMix(cache_key, hashSpecializationCodegenOptions(options.specialization));
     hashMix(cache_key, static_cast<std::uint64_t>(options.debug_info ? 1u : 0u));
@@ -1235,6 +1237,7 @@ JITCompileResult JITCompiler::Impl::compileMonolithicFormIR(
     hashMix(cache_key, combined_hash);
     hashMix(cache_key, static_cast<std::uint64_t>(static_cast<std::int64_t>(options.optimization_level)));
     hashMix(cache_key, static_cast<std::uint64_t>(options.vectorize ? 1u : 0u));
+    hashMix(cache_key, static_cast<std::uint64_t>(options.simd_batch ? 1u : 0u));
     hashMix(cache_key, hashTensorOptions(options.tensor));
     hashMix(cache_key, hashSpecializationCodegenOptions(options.specialization));
     hashMix(cache_key, static_cast<std::uint64_t>(options.debug_info ? 1u : 0u));

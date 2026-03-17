@@ -2012,10 +2012,6 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         auto spectral_decomp_dd_3x3_fn =
             module->getOrInsertFunction("svmp_fe_jit_spectral_decomp_dd_3x3_v1", builder.getVoidTy(), f64_ptr, f64_ptr, f64_ptr);
 
-        auto f64c = [&](double v) -> llvm::Constant* {
-            return llvm::ConstantFP::get(f64, v);
-        };
-
         auto gepBytes = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
             return builder.CreateGEP(builder.getInt8Ty(),
                                      base,
@@ -2037,14 +2033,71 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             return builder.CreateLoad(builder.getInt64Ty(), addr);
         };
 
+        // --- SIMD batch vectorization across elements ---
+        // Forward-declared here so that loadF64/loadPtr/simdLoadPtr can
+        // reference them via capture-by-reference.
+        static const bool simd_batch_env_off = [] {
+            const char* e = std::getenv("SVMP_SIMD_BATCH");
+            return e && std::string_view(e) == "0";
+        }();
+        const std::uint32_t simd_w = hardwareProfile().simdDoubles();  // 2 for SSE2
+        llvm::Type* vf64 = (simd_w >= 2) ? llvm::FixedVectorType::get(f64, simd_w) : nullptr;
+
+        // Map from lane-0 SideView pointer -> per-lane pointer array for gathering.
+        // When loadRealPtrAt sees a base_ptr registered here, it emits a
+        // per-lane GEP+load+insertelement sequence instead of a scalar load.
+        std::unordered_map<llvm::Value*, std::vector<llvm::Value*>> simd_ptr_map;
+
+        bool simd_active = false;  // Set to true inside the batch body when SIMD mode is active
+
         auto loadF64 = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
             auto* addr = gepBytes(base, off);
+            if (simd_active) {
+                auto it = simd_ptr_map.find(base);
+                if (it != simd_ptr_map.end() && it->second.size() > 1) {
+                    auto* addr1 = gepBytes(it->second[1], off);
+                    auto* val0 = builder.CreateLoad(f64, addr);
+                    auto* val1 = builder.CreateLoad(f64, addr1);
+                    llvm::Value* vec = llvm::UndefValue::get(vf64);
+                    vec = builder.CreateInsertElement(vec, val0, static_cast<uint64_t>(0));
+                    vec = builder.CreateInsertElement(vec, val1, static_cast<uint64_t>(1));
+                    return vec;
+                }
+            }
             return builder.CreateLoad(builder.getDoubleTy(), addr);
         };
 
         auto loadPtr = [&](llvm::Value* base, std::size_t off) -> llvm::Value* {
             auto* addr = gepBytes(base, off);
-            return builder.CreateLoad(i8_ptr, addr);
+            auto* ptr = builder.CreateLoad(i8_ptr, addr);
+            // SIMD propagation: if base is tracked, load from all lanes and register result.
+            if (simd_active) {
+                auto it = simd_ptr_map.find(base);
+                if (it != simd_ptr_map.end() && it->second.size() > 1) {
+                    auto* addr1 = gepBytes(it->second[1], off);
+                    auto* ptr1 = builder.CreateLoad(i8_ptr, addr1);
+                    simd_ptr_map[ptr] = {ptr, ptr1};
+                }
+            }
+            return ptr;
+        };
+
+        // SIMD-propagating pointer load with a runtime LLVM Value byte offset.
+        // Used for indirect pointer-array accesses (previous/history solution
+        // coefficient arrays) where the offset is computed at JIT time but not
+        // a C++ compile-time constant.
+        auto simdLoadPtr = [&](llvm::Value* base, llvm::Value* byte_offset) -> llvm::Value* {
+            auto* addr = builder.CreateGEP(builder.getInt8Ty(), base, byte_offset);
+            auto* ptr = builder.CreateLoad(i8_ptr, addr);
+            if (simd_active) {
+                auto it = simd_ptr_map.find(base);
+                if (it != simd_ptr_map.end() && it->second.size() > 1) {
+                    auto* addr1 = builder.CreateGEP(builder.getInt8Ty(), it->second[1], byte_offset);
+                    auto* ptr1 = builder.CreateLoad(i8_ptr, addr1);
+                    simd_ptr_map[ptr] = {ptr, ptr1};
+                }
+            }
+            return ptr;
         };
 
         // --------------- alias scope metadata --------------------------------
@@ -2061,8 +2114,56 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         auto* input_scope_list  = llvm::MDNode::get(*ctx, {input_alias_scope});
         auto* output_scope_list = llvm::MDNode::get(*ctx, {output_alias_scope});
 
+        // Per-lane output pointers (element_matrix/vector for each SIMD lane)
+        std::array<llvm::Value*, 8> simd_element_matrix_ptrs{};
+        std::array<llvm::Value*, 8> simd_element_vector_ptrs{};
+
+        // Always-scalar f64 constant (never splatted, even when simd_active).
+        // Use for struct defaults, SideView initialization, and any context
+        // that requires a plain scalar double.
+        auto f64c = [&](double v) -> llvm::Constant* {
+            return llvm::ConstantFP::get(f64, v);
+        };
+
+        // Real constant: returns splatted <simd_w x double> when simd_active,
+        // otherwise scalar f64 constant.  Use inside the evaluation pipeline
+        // (makeZero, makeVector, emitReduceSum, cmpToScalar01, conditional,
+        // evalCurrentSolution, evalPreviousSolution, evalDiscreteOrStateField,
+        // evalDiscreteOrStateFieldHistoryK, loadHistoryWeightOrZero, and all
+        // FormExprType case handlers in evalKernelIRSingleValue).
+        auto rc = [&](double v) -> llvm::Value* {
+            if (simd_active) {
+                return llvm::ConstantVector::getSplat(
+                    llvm::ElementCount::getFixed(simd_w),
+                    llvm::ConstantFP::get(f64, v));
+            }
+            return llvm::ConstantFP::get(f64, v);
+        };
+
         auto loadRealPtrAt = [&](llvm::Value* base_ptr,
                                  llvm::Value* index64) -> llvm::Value* {
+            if (simd_active) {
+                auto it = simd_ptr_map.find(base_ptr);
+                if (it != simd_ptr_map.end()) {
+                    // Gather from per-lane pointers
+                    llvm::Value* vec = llvm::UndefValue::get(vf64);
+                    for (std::uint32_t lane = 0; lane < simd_w; ++lane) {
+                        auto* gep = builder.CreateGEP(f64, it->second[lane], index64);
+                        auto* val = builder.CreateLoad(f64, gep);
+                        val->setMetadata(llvm::LLVMContext::MD_alias_scope, input_scope_list);
+                        val->setMetadata(llvm::LLVMContext::MD_noalias,     output_scope_list);
+                        vec = builder.CreateInsertElement(vec, val, static_cast<uint64_t>(lane));
+                    }
+                    return vec;
+                }
+                // Pointer not in map -> broadcast (batch-invariant data)
+                auto* gep = builder.CreateGEP(f64, base_ptr, index64);
+                auto* val = builder.CreateLoad(f64, gep);
+                val->setMetadata(llvm::LLVMContext::MD_alias_scope, input_scope_list);
+                val->setMetadata(llvm::LLVMContext::MD_noalias,     output_scope_list);
+                return builder.CreateVectorSplat(simd_w, val);
+            }
+            // Scalar path (unchanged)
             auto* gep = builder.CreateGEP(f64, base_ptr, index64);
             auto* ld = builder.CreateLoad(f64, gep);
             ld->setMetadata(llvm::LLVMContext::MD_alias_scope, input_scope_list);
@@ -2364,25 +2465,88 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                // the batch CellKernelBatchArgsV1.  Disable batch mode for them.
 	                const bool is_functional = coupled ? false : !ir.testSpace().has_value();
 	                const bool use_batch = (coupled || options_.vectorize) && (domain == IntegralDomain::Cell) && !is_functional;
-	        
+
+	                // Determine SIMD batch eligibility: process simd_w elements per
+	                // batch iteration using <simd_w x double> vector types.
+	                // Disabled for: coupled mode, face domains, functional kernels,
+	                // external calls (scalar ABI), env override, insufficient SIMD width.
+	                const bool has_external_calls = [&]() -> bool {
+	                    for (const auto& t : terms) {
+	                        for (const auto& op : t.ir.ops) {
+	                            if (op.type == FormExprType::Coefficient ||
+	                                op.type == FormExprType::Constitutive ||
+	                                op.type == FormExprType::ConstitutiveOutput ||
+	                                op.type == FormExprType::MaterialStateOldRef ||
+	                                op.type == FormExprType::MaterialStateWorkRef) {
+	                                return true;
+	                            }
+	                        }
+	                    }
+	                    return false;
+	                }();
+	                // Check for non-current-solution discrete/state fields.
+	                // These use field_solutions entries whose value pointers are
+	                // per-element and would need separate SIMD gather handling.
+	                // Disable SIMD batch for kernels that use them.
+	                const bool has_field_solutions = [&]() -> bool {
+	                    for (const auto& t : terms) {
+	                        for (const auto& op : t.ir.ops) {
+	                            if (op.type == FormExprType::DiscreteField) {
+	                                return true;
+	                            }
+	                            if (op.type == FormExprType::StateField) {
+	                                const int fid = static_cast<int>((op.imm1 >> 16) & 0xffffULL);
+	                                if (fid != kCurrentSolutionFid) {
+	                                    return true;
+	                                }
+	                            }
+	                        }
+	                    }
+	                    return false;
+	                }();
+	                const bool use_simd_batch = options_.simd_batch && !simd_batch_env_off &&
+	                                            use_batch && !coupled && simd_w >= 2 &&
+	                                            !has_external_calls;
+	                {
+	                    static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+	                    if (jit_telemetry) {
+	                        std::cerr << "[JIT simd_batch] " << symbol
+	                                  << ": simd_w=" << simd_w << " use_simd_batch=" << use_simd_batch
+	                                  << " use_batch=" << use_batch << " coupled=" << (coupled != nullptr)
+	                                  << " external_calls=" << has_external_calls
+	                                  << " field_solutions=" << has_field_solutions
+	                                  << "\n";
+	                        std::cerr.flush();
+	                    }
+	                }
+
 	                auto* pre_batch = builder.GetInsertBlock();
 	                auto* batch_hdr = llvm::BasicBlock::Create(*ctx, "batch.hdr", fn);
 	                auto* batch_body = llvm::BasicBlock::Create(*ctx, "batch.body", fn);
 	                auto* batch_exit = llvm::BasicBlock::Create(*ctx, "batch.exit", fn);
-	        
+
 	                builder.CreateBr(batch_hdr);
 	                builder.SetInsertPoint(batch_hdr);
 	                auto* b_idx = builder.CreatePHI(i32, 2, "batch.idx");
 	                b_idx->addIncoming(builder.getInt32(0), pre_batch);
-	        
+
 	                llvm::Value* n_batch = builder.getInt32(1);
 	                if (coupled) {
 	                    n_batch = loadU32(args_ptr, ABIV3::coupled_batch_batch_size_off);
 	                } else if (use_batch) {
 	                    n_batch = loadU32(args_ptr, ABIV3::batch_size_off);
 	                }
-	        
-	                auto* has_next = builder.CreateICmpULT(b_idx, n_batch);
+
+	                // When SIMD batching, ensure enough elements for a full SIMD width.
+	                // Condition: b_idx + simd_w <= n_batch (i.e., b_idx < n_batch - simd_w + 1
+	                // but using unsigned subtraction-safe form).
+	                llvm::Value* has_next;
+	                if (use_simd_batch) {
+	                    auto* b_end = builder.CreateAdd(b_idx, builder.getInt32(simd_w));
+	                    has_next = builder.CreateICmpULE(b_end, n_batch);
+	                } else {
+	                    has_next = builder.CreateICmpULT(b_idx, n_batch);
+	                }
 	                builder.CreateCondBr(has_next, batch_body, batch_exit);
 	        
 	                builder.SetInsertPoint(batch_body);
@@ -2390,7 +2554,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                SideView side_single{};
 	                SideView side_minus{};
 	                SideView side_plus{};
-	        
+	                llvm::Value* simd_side_ptr_1 = nullptr;  // lane-1 side pointer for SIMD batch
+
 	                llvm::Value* out_single_ptr = nullptr;
 	                llvm::Value* out_minus_ptr = nullptr;
 	                llvm::Value* out_plus_ptr = nullptr;
@@ -2525,6 +2690,115 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                    element_matrix_single = loadPtr(out_single_ptr, ABIV3::out_element_matrix_off);
 	                    element_vector_single = loadPtr(out_single_ptr, ABIV3::out_element_vector_off);
+
+	                    // --- SIMD batch: populate pointer map and override scalar fields ---
+	                    if (use_simd_batch) {
+	                        simd_active = true;
+
+	                        auto* sides_base = loadPtr(args_ptr, ABIV3::batch_sides_off);
+	                        auto* outputs_base = loadPtr(args_ptr, ABIV3::batch_outputs_off);
+	                        auto* b_idx64 = builder.CreateZExt(b_idx, i64);
+
+	                        // Load lane-1 side pointer
+	                        auto* b_idx_1 = builder.CreateAdd(b_idx, builder.getInt32(1));
+	                        auto* b_idx64_1 = builder.CreateZExt(b_idx_1, i64);
+	                        simd_side_ptr_1 = builder.CreateGEP(builder.getInt8Ty(), sides_base,
+	                            builder.CreateMul(b_idx64_1, builder.getInt64(sizeof(assembly::jit::KernelSideArgsV6))));
+
+	                        // Register per-lane pointers for all per-element pointer fields.
+	                        // When loadRealPtrAt encounters a registered base_ptr, it gathers
+	                        // from both lanes instead of scalar loading.
+	                        auto registerSimdPtr = [&](llvm::Value* lane0_ptr, std::size_t field_offset) {
+	                            auto* lane1_ptr = loadPtr(simd_side_ptr_1, field_offset);
+	                            simd_ptr_map[lane0_ptr] = {lane0_ptr, lane1_ptr};
+	                        };
+
+	                        // Per-element geometry arrays
+	                        registerSimdPtr(side_single.integration_weights, ABIV3::side_integration_weights_off);
+	                        registerSimdPtr(side_single.quad_points_xyz, ABIV3::side_quad_points_xyz_off);
+	                        registerSimdPtr(side_single.physical_points_xyz, ABIV3::side_physical_points_xyz_off);
+	                        registerSimdPtr(side_single.jacobians, ABIV3::side_jacobians_off);
+	                        registerSimdPtr(side_single.inverse_jacobians, ABIV3::side_inverse_jacobians_off);
+	                        registerSimdPtr(side_single.jacobian_dets, ABIV3::side_jacobian_dets_off);
+	                        registerSimdPtr(side_single.normals_xyz, ABIV3::side_normals_xyz_off);
+	                        registerSimdPtr(side_single.interleaved_qpoint_geometry, ABIV3::side_interleaved_geom_off);
+
+	                        // Per-element basis arrays
+	                        registerSimdPtr(side_single.test_basis_values, ABIV3::side_test_basis_values_off);
+	                        registerSimdPtr(side_single.trial_basis_values, ABIV3::side_trial_basis_values_off);
+	                        registerSimdPtr(side_single.test_phys_grads_xyz, ABIV3::side_test_phys_grads_off);
+	                        registerSimdPtr(side_single.trial_phys_grads_xyz, ABIV3::side_trial_phys_grads_off);
+	                        registerSimdPtr(side_single.test_phys_hessians, ABIV3::side_test_phys_hess_off);
+	                        registerSimdPtr(side_single.trial_phys_hessians, ABIV3::side_trial_phys_hess_off);
+
+	                        // Per-element vector basis arrays
+	                        registerSimdPtr(side_single.test_basis_vector_values_xyz, ABIV3::side_test_vector_basis_values_xyz_off);
+	                        registerSimdPtr(side_single.test_basis_curls_xyz, ABIV3::side_test_vector_basis_curls_xyz_off);
+	                        registerSimdPtr(side_single.test_basis_divs, ABIV3::side_test_vector_basis_divs_off);
+	                        registerSimdPtr(side_single.trial_basis_vector_values_xyz, ABIV3::side_trial_vector_basis_values_xyz_off);
+	                        registerSimdPtr(side_single.trial_basis_curls_xyz, ABIV3::side_trial_vector_basis_curls_xyz_off);
+	                        registerSimdPtr(side_single.trial_basis_divs, ABIV3::side_trial_vector_basis_divs_off);
+
+	                        // Per-element solution arrays
+	                        registerSimdPtr(side_single.solution_coefficients, ABIV3::side_solution_coefficients_off);
+	                        // previous_solution_coefficients_base and history_solution_coefficients_base
+	                        // are inline pointer arrays (gepBytes into the struct), not loaded pointers.
+	                        // The lane-1 counterpart must also be gepBytes, not loadPtr.
+	                        simd_ptr_map[side_single.previous_solution_coefficients_base] = {
+	                            side_single.previous_solution_coefficients_base,
+	                            gepBytes(simd_side_ptr_1, ABIV3::side_previous_solution_coefficients_off)};
+	                        registerSimdPtr(side_single.history_weights, ABIV3::side_history_weights_off);
+	                        simd_ptr_map[side_single.history_solution_coefficients_base] = {
+	                            side_single.history_solution_coefficients_base,
+	                            gepBytes(simd_side_ptr_1, ABIV3::side_history_solution_coefficients_off)};
+
+	                        // Per-element field solutions
+	                        registerSimdPtr(side_single.field_solutions, ABIV3::side_field_solutions_off);
+
+	                        // Per-element coupled integrals/aux
+	                        registerSimdPtr(side_single.coupled_integrals, ABIV3::side_coupled_integrals_off);
+	                        registerSimdPtr(side_single.coupled_aux, ABIV3::side_coupled_aux_off);
+
+	                        // Per-element material state
+	                        registerSimdPtr(side_single.material_state_old_base, ABIV3::side_material_state_old_base_off);
+	                        registerSimdPtr(side_single.material_state_work_base, ABIV3::side_material_state_work_base_off);
+
+	                        // NOTE: jit_constants, dt_stencil_coeffs_base, dt_term_weights_base
+	                        // are batch-invariant (same across elements) -- do NOT register.
+	                        // loadRealPtrAt will automatically broadcast them.
+
+	                        // Override per-element f64 scalar fields with gathered <simd_w x double>
+	                        auto gatherF64Field = [&](llvm::Value* lane0_val, std::size_t field_offset) -> llvm::Value* {
+	                            auto* lane1_val = loadF64(simd_side_ptr_1, field_offset);
+	                            llvm::Value* vec = llvm::UndefValue::get(vf64);
+	                            vec = builder.CreateInsertElement(vec, lane0_val, static_cast<uint64_t>(0));
+	                            vec = builder.CreateInsertElement(vec, lane1_val, static_cast<uint64_t>(1));
+	                            return vec;
+	                        };
+
+	                        auto splatF64 = [&](llvm::Value* scalar) -> llvm::Value* {
+	                            return builder.CreateVectorSplat(simd_w, scalar);
+	                        };
+
+	                        // Per-element scalars: gather from both lanes
+	                        side_single.cell_diameter = gatherF64Field(side_single.cell_diameter, ABIV3::side_cell_diameter_off);
+	                        side_single.cell_volume = gatherF64Field(side_single.cell_volume, ABIV3::side_cell_volume_off);
+	                        side_single.facet_area = gatherF64Field(side_single.facet_area, ABIV3::side_facet_area_off);
+
+	                        // Batch-invariant scalars: splat to <simd_w x double>
+	                        side_single.time = splatF64(side_single.time);
+	                        side_single.dt = splatF64(side_single.dt);
+	                        side_single.time_derivative_term_weight = splatF64(side_single.time_derivative_term_weight);
+	                        side_single.non_time_derivative_term_weight = splatF64(side_single.non_time_derivative_term_weight);
+
+	                        // Load per-lane output pointers
+	                        auto* out_ptr_1 = builder.CreateGEP(builder.getInt8Ty(), outputs_base,
+	                            builder.CreateMul(b_idx64_1, builder.getInt64(sizeof(assembly::jit::KernelOutputViewV6))));
+	                        simd_element_matrix_ptrs[0] = element_matrix_single;
+	                        simd_element_matrix_ptrs[1] = loadPtr(out_ptr_1, ABIV3::out_element_matrix_off);
+	                        simd_element_vector_ptrs[0] = element_vector_single;
+	                        simd_element_vector_ptrs[1] = loadPtr(out_ptr_1, ABIV3::out_element_vector_off);
+	                    }
 	                  }
 	                } else {            auto* minus_ptr = gepBytes(args_ptr, ABIV3::face_minus_side_off);
             auto* plus_ptr = gepBytes(args_ptr, ABIV3::face_plus_side_off);
@@ -2648,11 +2922,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             auto* idx_phi = builder.CreatePHI(i32, 2, std::string(name) + ".i");
             idx_phi->addIncoming(builder.getInt32(0), preheader);
 
+            auto* real_ty = simd_active ? vf64 : f64;
             std::vector<llvm::PHINode*> acc_phi;
             acc_phi.reserve(n_acc);
             for (std::size_t k = 0; k < n_acc; ++k) {
-                auto* a = builder.CreatePHI(f64, 2, std::string(name) + ".acc" + std::to_string(k));
-                a->addIncoming(f64c(0.0), preheader);
+                auto* a = builder.CreatePHI(real_ty, 2, std::string(name) + ".acc" + std::to_string(k));
+                a->addIncoming(rc(0.0), preheader);
                 acc_phi.push_back(a);
             }
 
@@ -2704,6 +2979,23 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             auto* off_i = builder.CreateMul(i_idx, n_trial_dofs);
             auto* off = builder.CreateAdd(off_i, j_idx);
             auto* off64 = builder.CreateZExt(off, i64);
+
+            if (simd_active) {
+                // Extract each lane and accumulate into per-element output buffers
+                for (std::uint32_t lane = 0; lane < simd_w; ++lane) {
+                    auto* lane_contrib = builder.CreateExtractElement(contrib, static_cast<uint64_t>(lane));
+                    auto* lane_ptr = simd_element_matrix_ptrs[lane];
+                    auto* ptr = builder.CreateGEP(f64, lane_ptr, off64);
+                    auto* old = builder.CreateLoad(f64, ptr);
+                    old->setMetadata(llvm::LLVMContext::MD_alias_scope, output_scope_list);
+                    old->setMetadata(llvm::LLVMContext::MD_noalias,     input_scope_list);
+                    auto* st = builder.CreateStore(builder.CreateFAdd(old, lane_contrib), ptr);
+                    st->setMetadata(llvm::LLVMContext::MD_alias_scope, output_scope_list);
+                    st->setMetadata(llvm::LLVMContext::MD_noalias,     input_scope_list);
+                }
+                return;
+            }
+            // Scalar path
             auto* ptr = builder.CreateGEP(f64, element_matrix_ptr, off64);
             auto* old = builder.CreateLoad(f64, ptr);
             old->setMetadata(llvm::LLVMContext::MD_alias_scope, output_scope_list);
@@ -2717,6 +3009,23 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                    llvm::Value* i_idx,
                                    llvm::Value* contrib) -> void {
             auto* off64 = builder.CreateZExt(i_idx, i64);
+
+            if (simd_active) {
+                // Extract each lane and accumulate into per-element output buffers
+                for (std::uint32_t lane = 0; lane < simd_w; ++lane) {
+                    auto* lane_contrib = builder.CreateExtractElement(contrib, static_cast<uint64_t>(lane));
+                    auto* lane_ptr = simd_element_vector_ptrs[lane];
+                    auto* ptr = builder.CreateGEP(f64, lane_ptr, off64);
+                    auto* old = builder.CreateLoad(f64, ptr);
+                    old->setMetadata(llvm::LLVMContext::MD_alias_scope, output_scope_list);
+                    old->setMetadata(llvm::LLVMContext::MD_noalias,     input_scope_list);
+                    auto* st = builder.CreateStore(builder.CreateFAdd(old, lane_contrib), ptr);
+                    st->setMetadata(llvm::LLVMContext::MD_alias_scope, output_scope_list);
+                    st->setMetadata(llvm::LLVMContext::MD_noalias,     input_scope_list);
+                }
+                return;
+            }
+            // Scalar path
             auto* ptr = builder.CreateGEP(f64, element_vector_ptr, off64);
             auto* old = builder.CreateLoad(f64, ptr);
             old->setMetadata(llvm::LLVMContext::MD_alias_scope, output_scope_list);
@@ -2908,7 +3217,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             out.elems.fill(nullptr);
             const auto n = elemCount(s);
             for (std::size_t i = 0; i < n; ++i) {
-                out.elems[i] = f64c(0.0);
+                out.elems[i] = rc(0.0);
             }
             return out;
         };
@@ -2926,8 +3235,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             out.shape = vectorShape(n);
             out.elems.fill(nullptr);
             out.elems[0] = x;
-            out.elems[1] = (n > 1u) ? y : f64c(0.0);
-            out.elems[2] = (n > 2u) ? z : f64c(0.0);
+            out.elems[1] = (n > 1u) ? y : rc(0.0);
+            out.elems[2] = (n > 2u) ? z : rc(0.0);
             return out;
         };
 
@@ -3068,7 +3377,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 throw std::runtime_error("LLVMGen: expected vector");
             }
             if (i >= static_cast<std::size_t>(v.shape.dims[0])) {
-                return f64c(0.0);
+                return rc(0.0);
             }
             return v.elems[i];
         };
@@ -3154,7 +3463,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 out.shape = vectorShape(static_cast<std::uint32_t>(rows));
                 out.elems.fill(nullptr);
                 for (std::size_t r = 0; r < rows; ++r) {
-                    llvm::Value* sumv = f64c(0.0);
+                    llvm::Value* sumv = rc(0.0);
                     for (std::size_t c = 0; c < cols; ++c) {
                         const auto aidx = matIndex(a, r, c);
                         sumv = builder.CreateFAdd(sumv, builder.CreateFMul(a.elems[aidx], getVecComp(b, c)));
@@ -3174,7 +3483,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 out.shape = vectorShape(static_cast<std::uint32_t>(cols));
                 out.elems.fill(nullptr);
                 for (std::size_t c = 0; c < cols; ++c) {
-                    llvm::Value* sumv = f64c(0.0);
+                    llvm::Value* sumv = rc(0.0);
                     for (std::size_t r = 0; r < rows; ++r) {
                         const auto bidx = matIndex(b, r, c);
                         sumv = builder.CreateFAdd(sumv, builder.CreateFMul(getVecComp(a, r), b.elems[bidx]));
@@ -3197,7 +3506,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 out.elems.fill(nullptr);
                 for (std::size_t r = 0; r < a_rows; ++r) {
                     for (std::size_t c = 0; c < b_cols; ++c) {
-                        llvm::Value* sumv = f64c(0.0);
+                        llvm::Value* sumv = rc(0.0);
                         for (std::size_t k = 0; k < a_cols; ++k) {
                             const auto aidx = matIndex(a, r, k);
                             const auto bidx = matIndex(b, k, c);
@@ -3233,7 +3542,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             if (a.shape.kind != b.shape.kind || a.shape.dims != b.shape.dims) {
                 throw std::runtime_error("LLVMGen: InnerProduct requires matching shapes");
             }
-            llvm::Value* sumv = f64c(0.0);
+            llvm::Value* sumv = rc(0.0);
             const auto n = elemCount(a.shape);
             for (std::size_t i = 0; i < n; ++i) {
                 sumv = builder.CreateFAdd(sumv, builder.CreateFMul(a.elems[i], b.elems[i]));
@@ -3249,7 +3558,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 out.elems.fill(nullptr);
                 for (std::size_t i = 0; i < dim; ++i) {
                     for (std::size_t j = 0; j < dim; ++j) {
-                        llvm::Value* sumv = f64c(0.0);
+                        llvm::Value* sumv = rc(0.0);
                         for (std::size_t k = 0; k < dim; ++k) {
                             for (std::size_t l = 0; l < dim; ++l) {
                                 const std::size_t idx4 = ((i * 3 + j) * 3 + k) * 3 + l;
@@ -3269,7 +3578,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 out.elems.fill(nullptr);
                 for (std::size_t k = 0; k < dim; ++k) {
                     for (std::size_t l = 0; l < dim; ++l) {
-                        llvm::Value* sumv = f64c(0.0);
+                        llvm::Value* sumv = rc(0.0);
                         for (std::size_t i = 0; i < dim; ++i) {
                             for (std::size_t j = 0; j < dim; ++j) {
                                 const auto midx = matIndex(a, i, j);
@@ -3326,7 +3635,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         };
 
         auto cmpToScalar01 = [&](llvm::Value* cmp) -> CodeValue {
-            return makeScalar(builder.CreateSelect(cmp, f64c(1.0), f64c(0.0)));
+            return makeScalar(builder.CreateSelect(cmp, rc(1.0), rc(0.0)));
         };
 
         auto cmp = [&](FormExprType t, const CodeValue& a, const CodeValue& b) -> CodeValue {
@@ -3353,7 +3662,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             if (a.shape.kind != b.shape.kind || a.shape.dims != b.shape.dims) {
                 throw std::runtime_error("LLVMGen: Conditional branch shape mismatch");
             }
-            auto* pick_a = builder.CreateFCmpOGT(cond.elems[0], f64c(0.0));
+            auto* pick_a = builder.CreateFCmpOGT(cond.elems[0], rc(0.0));
             CodeValue out;
             out.shape = a.shape;
             out.elems.fill(nullptr);
@@ -3387,7 +3696,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 throw std::runtime_error("LLVMGen: Trace expects square matrix");
             }
             const auto n = static_cast<std::size_t>(a.shape.dims[0]);
-            llvm::Value* tr = f64c(0.0);
+            llvm::Value* tr = rc(0.0);
             for (std::size_t d = 0; d < n; ++d) {
                 tr = builder.CreateFAdd(tr, a.elems[matIndex(a, d, d)]);
             }
@@ -3439,7 +3748,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             const auto n = static_cast<std::size_t>(a.shape.dims[0]);
             if (n == 1u) {
                 CodeValue out = makeMatrix(1u, 1u);
-                out.elems[0] = f64c(1.0);
+                out.elems[0] = rc(1.0);
                 return out;
             }
             if (n == 2u) {
@@ -3749,21 +4058,21 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
         auto smoothHeaviside = [&](const CodeValue& x, const CodeValue& eps) -> CodeValue {
             const auto s = smoothSign(x, eps);
-            return makeScalar(builder.CreateFMul(f64c(0.5), builder.CreateFAdd(f64c(1.0), s.elems[0])));
+            return makeScalar(builder.CreateFMul(rc(0.5), builder.CreateFAdd(rc(1.0), s.elems[0])));
         };
 
         auto smoothMin = [&](const CodeValue& a, const CodeValue& b, const CodeValue& eps) -> CodeValue {
             auto* diff = builder.CreateFSub(a.elems[0], b.elems[0]);
             const auto ad = smoothAbs(makeScalar(diff), eps);
             auto* sum = builder.CreateFAdd(a.elems[0], b.elems[0]);
-            return makeScalar(builder.CreateFMul(f64c(0.5), builder.CreateFSub(sum, ad.elems[0])));
+            return makeScalar(builder.CreateFMul(rc(0.5), builder.CreateFSub(sum, ad.elems[0])));
         };
 
         auto smoothMax = [&](const CodeValue& a, const CodeValue& b, const CodeValue& eps) -> CodeValue {
             auto* diff = builder.CreateFSub(a.elems[0], b.elems[0]);
             const auto ad = smoothAbs(makeScalar(diff), eps);
             auto* sum = builder.CreateFAdd(a.elems[0], b.elems[0]);
-            return makeScalar(builder.CreateFMul(f64c(0.5), builder.CreateFAdd(sum, ad.elems[0])));
+            return makeScalar(builder.CreateFMul(rc(0.5), builder.CreateFAdd(sum, ad.elems[0])));
         };
 
         auto eigSym = [&](const CodeValue& a, std::uint32_t which) -> CodeValue {
@@ -3831,7 +4140,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     auto* art = a.elems[matIndex(a, r, c)];
                     auto* atr = a.elems[matIndex(a, c, r)];
                     auto* sum = symmetric ? builder.CreateFAdd(art, atr) : builder.CreateFSub(art, atr);
-                    out.elems[matIndex(out, r, c)] = builder.CreateFMul(f64c(0.5), sum);
+                    out.elems[matIndex(out, r, c)] = builder.CreateFMul(rc(0.5), sum);
                 }
             }
             return out;
@@ -3843,7 +4152,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             }
             const auto n = static_cast<std::size_t>(a.shape.dims[0]);
             auto tr = trace(a).elems[0];
-            auto mean = builder.CreateFDiv(tr, f64c(static_cast<double>(n)));
+            auto mean = builder.CreateFDiv(tr, rc(static_cast<double>(n)));
             CodeValue out = a;
             for (std::size_t d = 0; d < n; ++d) {
                 const auto idx = matIndex(out, d, d);
@@ -3856,7 +4165,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             if (a.shape.kind == Shape::Kind::Scalar) {
                 return makeScalar(f_fabs(a.elems[0]));
             }
-            llvm::Value* sumv = f64c(0.0);
+            llvm::Value* sumv = rc(0.0);
             const auto n = elemCount(a.shape);
             for (std::size_t i = 0; i < n; ++i) {
                 auto* p = builder.CreateFMul(a.elems[i], a.elems[i]);
@@ -3870,19 +4179,19 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 throw std::runtime_error("LLVMGen: normalize expects vector");
             }
             const auto n = static_cast<std::size_t>(a.shape.dims[0]);
-            llvm::Value* sumv = f64c(0.0);
+            llvm::Value* sumv = rc(0.0);
             for (std::size_t i = 0; i < n; ++i) {
                 auto* p = builder.CreateFMul(a.elems[i], a.elems[i]);
                 sumv = builder.CreateFAdd(sumv, p);
             }
             auto* nrm = f_sqrt(sumv);
-            auto* is_zero = builder.CreateFCmpOEQ(nrm, f64c(0.0));
+            auto* is_zero = builder.CreateFCmpOEQ(nrm, rc(0.0));
             CodeValue out;
             out.shape = a.shape;
             out.elems.fill(nullptr);
             for (std::size_t i = 0; i < n; ++i) {
                 auto* divv = builder.CreateFDiv(a.elems[i], nrm);
-                out.elems[i] = builder.CreateSelect(is_zero, f64c(0.0), divv);
+                out.elems[i] = builder.CreateSelect(is_zero, rc(0.0), divv);
             }
             return out;
         };
@@ -3898,12 +4207,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             if (a.shape.kind != Shape::Kind::Scalar) {
                 throw std::runtime_error("LLVMGen: sign expects scalar");
             }
-            auto* gt0 = builder.CreateFCmpOGT(a.elems[0], f64c(0.0));
-            auto* lt0 = builder.CreateFCmpOLT(a.elems[0], f64c(0.0));
-            auto* one = f64c(1.0);
-            auto* neg_one = f64c(-1.0);
-            auto* pos_or_zero = builder.CreateSelect(gt0, one, f64c(0.0));
-            auto* neg_or_zero = builder.CreateSelect(lt0, neg_one, f64c(0.0));
+            auto* gt0 = builder.CreateFCmpOGT(a.elems[0], rc(0.0));
+            auto* lt0 = builder.CreateFCmpOLT(a.elems[0], rc(0.0));
+            auto* one = rc(1.0);
+            auto* neg_one = rc(-1.0);
+            auto* pos_or_zero = builder.CreateSelect(gt0, one, rc(0.0));
+            auto* neg_or_zero = builder.CreateSelect(lt0, neg_one, rc(0.0));
             return makeScalar(builder.CreateFAdd(pos_or_zero, neg_or_zero));
         };
 
@@ -4076,11 +4385,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                       std::uint32_t dim,
                                       llvm::Value* interleaved_offset) -> CodeValue {
             const auto legacy = loadXYZDim(legacy_xyz_base, q_index, dim);
-            auto inter = makeVector(dim, f64c(0.0), f64c(0.0), f64c(0.0));
+            auto inter = makeVector(dim, rc(0.0), rc(0.0), rc(0.0));
             inter.elems[0] = loadInterleavedReal(side, q_index, interleaved_offset, builder.getInt32(0));
             inter.elems[1] = loadInterleavedReal(side, q_index, interleaved_offset, builder.getInt32(1));
             inter.elems[2] = loadInterleavedReal(side, q_index, interleaved_offset, builder.getInt32(2));
-            auto out = makeVector(dim, f64c(0.0), f64c(0.0), f64c(0.0));
+            auto out = makeVector(dim, rc(0.0), rc(0.0), rc(0.0));
             auto* use_interleaved = useInterleavedGeometry(side);
             for (std::uint32_t d = 0; d < dim; ++d) {
                 out.elems[d] = builder.CreateSelect(use_interleaved, inter.elems[d], legacy.elems[d]);
@@ -4152,10 +4461,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
         auto loadDtCoeff = [&](const SideView& side, int order, int history_index) -> llvm::Value* {
             if (order < 1 || order > static_cast<int>(assembly::jit::kMaxTimeDerivativeOrderV6)) {
-                return f64c(0.0);
+                return rc(0.0);
             }
             if (history_index < 0 || history_index > static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6)) {
-                return f64c(0.0);
+                return rc(0.0);
             }
             const std::uint64_t idx =
                 static_cast<std::uint64_t>(static_cast<std::int64_t>(order - 1)) * kDtCoeffStride +
@@ -4165,8 +4474,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
         auto loadEffectiveDt = [&](const SideView& side) -> llvm::Value* {
             auto* a0 = loadDtCoeff(side, /*order=*/1, /*history_index=*/0);
-            auto* is_zero = builder.CreateFCmpOEQ(a0, f64c(0.0));
-            auto* inv_abs = builder.CreateFDiv(f64c(1.0), f_fabs(a0));
+            auto* is_zero = builder.CreateFCmpOEQ(a0, rc(0.0));
+            auto* inv_abs = builder.CreateFDiv(rc(1.0), f_fabs(a0));
             return builder.CreateSelect(is_zero, side.dt, inv_abs);
         };
 
@@ -4176,18 +4485,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
         auto loadPrevSolutionCoeffsPtr = [&](const SideView& side, int k) -> llvm::Value* {
             const auto idx = static_cast<std::uint64_t>(static_cast<std::int64_t>(k - 1));
-            auto* addr = builder.CreateGEP(builder.getInt8Ty(),
-                                           side.previous_solution_coefficients_base,
-                                           builder.getInt64(idx * sizeof(void*)));
-            return builder.CreateLoad(i8_ptr, addr);
+            return simdLoadPtr(side.previous_solution_coefficients_base,
+                               builder.getInt64(idx * sizeof(void*)));
         };
 
         auto loadHistorySolutionCoeffsPtr = [&](const SideView& side, int k) -> llvm::Value* {
             const auto idx = static_cast<std::uint64_t>(static_cast<std::int64_t>(k - 1));
-            auto* addr = builder.CreateGEP(builder.getInt8Ty(),
-                                           side.history_solution_coefficients_base,
-                                           builder.getInt64(idx * sizeof(void*)));
-            return builder.CreateLoad(i8_ptr, addr);
+            return simdLoadPtr(side.history_solution_coefficients_base,
+                               builder.getInt64(idx * sizeof(void*)));
         };
 
         auto unpackFieldIdImm1 = [&](std::uint64_t imm1) -> int {
@@ -4227,6 +4532,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             llvm::Value* single{nullptr};
             llvm::Value* minus{nullptr};
             llvm::Value* plus{nullptr};
+            // Per-lane entries for SIMD batch (lane 0 == single)
+            std::array<llvm::Value*, 8> simd_entries{};
         };
 
         auto emitFindFieldEntry = [&](const SideView& side,
@@ -4260,9 +4567,21 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             e.field_id = fid;
             if (!is_face_domain) {
                 e.single = emitFindFieldEntry(side_single, fid, "s" + std::to_string(fid));
+                e.simd_entries[0] = e.single;
+                // For SIMD batch: also find field entry for lane 1
+                if (use_simd_batch && simd_side_ptr_1 != nullptr) {
+                    SideView side_1_stub{};
+                    side_1_stub.field_solutions = loadPtr(simd_side_ptr_1, ABIV3::side_field_solutions_off);
+                    side_1_stub.num_field_solutions = loadU32(simd_side_ptr_1, ABIV3::side_num_field_solutions_off);
+                    e.simd_entries[1] = emitFindFieldEntry(side_1_stub, fid, "s1_" + std::to_string(fid));
+                }
             } else {
                 e.minus = emitFindFieldEntry(side_minus, fid, "m" + std::to_string(fid));
                 e.plus = emitFindFieldEntry(side_plus, fid, "p" + std::to_string(fid));
+            }
+            // Register field entry SIMD pair so loadPtr(entry, ...) propagates automatically.
+            if (use_simd_batch && e.simd_entries[1] != nullptr) {
+                simd_ptr_map[e.simd_entries[0]] = {e.simd_entries[0], e.simd_entries[1]};
             }
             field_entries.push_back(e);
         }
@@ -4334,8 +4653,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                auto* zero_block = builder.GetInsertBlock();
 
 	                builder.SetInsertPoint(merge);
-	                auto* phi = builder.CreatePHI(f64, 2, tag + ".val");
-	                phi->addIncoming(f64c(0.0), zero_block);
+	                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".val");
+	                phi->addIncoming(rc(0.0), zero_block);
 	                phi->addIncoming(sum, ok_block);
 	                return makeScalar(phi);
 	            }
@@ -4391,7 +4710,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                std::vector<llvm::Value*> ok_vals;
 	                ok_vals.reserve(vd);
 	                for (std::size_t c = 0; c < vd; ++c) {
-	                    auto* phi = builder.CreatePHI(f64, 2, tag + ".ok.phi" + std::to_string(c));
+	                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".ok.phi" + std::to_string(c));
 	                    phi->addIncoming(vb_sums[c], vb_block);
 	                    phi->addIncoming(sb_sums[c], sb_block);
 	                    ok_vals.push_back(phi);
@@ -4405,8 +4724,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                builder.SetInsertPoint(merge);
 	                for (std::size_t c = 0; c < vd; ++c) {
-	                    auto* phi = builder.CreatePHI(f64, 2, tag + ".phi" + std::to_string(c));
-	                    phi->addIncoming(f64c(0.0), zero_block);
+	                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".phi" + std::to_string(c));
+	                    phi->addIncoming(rc(0.0), zero_block);
 	                    phi->addIncoming(ok_vals[c], ok_block);
 	                    out.elems[c] = phi;
 	                }
@@ -4447,8 +4766,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                auto* zero_block = builder.GetInsertBlock();
 
 		                builder.SetInsertPoint(merge);
-		                auto* phi = builder.CreatePHI(f64, 2, tag + ".val");
-		                phi->addIncoming(f64c(0.0), zero_block);
+		                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".val");
+		                phi->addIncoming(rc(0.0), zero_block);
 		                phi->addIncoming(sum, ok_block);
 		                return makeScalar(phi);
 		            }
@@ -4508,7 +4827,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                std::vector<llvm::Value*> ok_vals;
 		                ok_vals.reserve(vd);
 		                for (std::size_t c = 0; c < vd; ++c) {
-		                    auto* phi = builder.CreatePHI(f64, 2, tag + ".ok.phi" + std::to_string(c));
+		                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".ok.phi" + std::to_string(c));
 		                    phi->addIncoming(vb_sums[c], vb_block);
 		                    phi->addIncoming(sb_sums[c], sb_block);
 		                    ok_vals.push_back(phi);
@@ -4522,8 +4841,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 		                builder.SetInsertPoint(merge);
 		                for (std::size_t c = 0; c < vd; ++c) {
-		                    auto* phi = builder.CreatePHI(f64, 2, tag + ".phi" + std::to_string(c));
-		                    phi->addIncoming(f64c(0.0), zero_block);
+		                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".phi" + std::to_string(c));
+		                    phi->addIncoming(rc(0.0), zero_block);
 		                    phi->addIncoming(ok_vals[c], ok_block);
 		                    out.elems[c] = phi;
 		                }
@@ -4557,8 +4876,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		            auto* zero_block = builder.GetInsertBlock();
 
 		            builder.SetInsertPoint(merge);
-		            auto* phi = builder.CreatePHI(f64, 2, tag + ".val");
-		            phi->addIncoming(f64c(0.0), zero_block);
+		            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".val");
+		            phi->addIncoming(rc(0.0), zero_block);
 		            phi->addIncoming(w, ok_block);
 		            return phi;
 		        };
@@ -4592,8 +4911,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                auto* zero_block = builder.GetInsertBlock();
 
 	                builder.SetInsertPoint(merge);
-	                auto* phi = builder.CreatePHI(f64, 2, std::string(tag) + ".val");
-	                phi->addIncoming(f64c(0.0), zero_block);
+	                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, std::string(tag) + ".val");
+	                phi->addIncoming(rc(0.0), zero_block);
 	                phi->addIncoming(sum, ok_block);
 	                return makeScalar(phi);
 	            }
@@ -4649,7 +4968,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                std::vector<llvm::Value*> ok_vals;
 	                ok_vals.reserve(vd);
 	                for (std::size_t c = 0; c < vd; ++c) {
-	                    auto* phi = builder.CreatePHI(f64, 2, std::string(tag) + ".ok.phi" + std::to_string(c));
+	                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, std::string(tag) + ".ok.phi" + std::to_string(c));
 	                    phi->addIncoming(vb_sums[c], vb_block);
 	                    phi->addIncoming(sb_sums[c], sb_block);
 	                    ok_vals.push_back(phi);
@@ -4663,8 +4982,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                builder.SetInsertPoint(merge);
 	                for (std::size_t c = 0; c < vd; ++c) {
-	                    auto* phi = builder.CreatePHI(f64, 2, std::string(tag) + ".phi" + std::to_string(c));
-	                    phi->addIncoming(f64c(0.0), zero_block);
+	                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, std::string(tag) + ".phi" + std::to_string(c));
+	                    phi->addIncoming(rc(0.0), zero_block);
 	                    phi->addIncoming(ok_vals[c], ok_block);
 	                    out.elems[c] = phi;
 	                }
@@ -4688,7 +5007,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             builder.CreateCondBr(is_null, zero, ok);
 
             if (out_shape.kind == Shape::Kind::Scalar) {
-                llvm::Value* loaded = f64c(0.0);
+                llvm::Value* loaded = rc(0.0);
 
                 builder.SetInsertPoint(ok);
                 auto* base = loadPtr(entry, ABIV3::field_entry_values_off);
@@ -4707,15 +5026,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 auto* zero_block = builder.GetInsertBlock();
 
                 builder.SetInsertPoint(merge);
-                auto* phi = builder.CreatePHI(f64, 2, "field.s");
-                phi->addIncoming(f64c(0.0), zero_block);
+                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field.s");
+                phi->addIncoming(rc(0.0), zero_block);
                 phi->addIncoming(loaded, ok2_block);
                 return makeScalar(phi);
             }
 
             if (out_shape.kind == Shape::Kind::Vector) {
                 const auto vd = static_cast<std::size_t>(out_shape.dims[0]);
-                std::array<llvm::Value*, 3> loaded{f64c(0.0), f64c(0.0), f64c(0.0)};
+                std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
 
                 builder.SetInsertPoint(ok);
                 auto* base = loadPtr(entry, ABIV3::field_entry_vector_values_xyz_off);
@@ -4724,9 +5043,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 builder.CreateCondBr(base_is_null, zero, ok2);
 
                 builder.SetInsertPoint(ok2);
-                const auto v = loadXYZ(base, q_index);
-                for (std::size_t c = 0; c < vd; ++c) {
-                    loaded[c] = v.elems[c];
+                {
+                    const auto v = loadXYZ(base, q_index);
+                    for (std::size_t c = 0; c < vd; ++c) {
+                        loaded[c] = v.elems[c];
+                    }
                 }
                 builder.CreateBr(merge);
                 auto* ok2_block = builder.GetInsertBlock();
@@ -4738,8 +5059,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 builder.SetInsertPoint(merge);
                 CodeValue out = makeZero(out_shape);
                 for (std::size_t c = 0; c < vd; ++c) {
-                    auto* phi = builder.CreatePHI(f64, 2, "field.v" + std::to_string(c));
-                    phi->addIncoming(f64c(0.0), zero_block);
+                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field.v" + std::to_string(c));
+                    phi->addIncoming(rc(0.0), zero_block);
                     phi->addIncoming(loaded[c], ok2_block);
                     out.elems[c] = phi;
                 }
@@ -4774,7 +5095,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             builder.CreateCondBr(has_k, ok_k, zero);
 
             if (out_shape.kind == Shape::Kind::Scalar) {
-                llvm::Value* loaded = f64c(0.0);
+                llvm::Value* loaded = rc(0.0);
 
                 builder.SetInsertPoint(ok_k);
                 auto* base = loadPtr(entry, ABIV3::field_entry_history_values_off);
@@ -4796,15 +5117,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 auto* zero_block = builder.GetInsertBlock();
 
                 builder.SetInsertPoint(merge);
-                auto* phi = builder.CreatePHI(f64, 2, tag + ".phi");
-                phi->addIncoming(f64c(0.0), zero_block);
+                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".phi");
+                phi->addIncoming(rc(0.0), zero_block);
                 phi->addIncoming(loaded, ok_block);
                 return makeScalar(phi);
             }
 
             if (out_shape.kind == Shape::Kind::Vector) {
                 const auto vd = static_cast<std::size_t>(out_shape.dims[0]);
-                std::array<llvm::Value*, 3> loaded{f64c(0.0), f64c(0.0), f64c(0.0)};
+                std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
 
                 builder.SetInsertPoint(ok_k);
                 auto* base = loadPtr(entry, ABIV3::field_entry_history_vector_values_xyz_off);
@@ -4813,13 +5134,20 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 builder.CreateCondBr(base_is_null, zero, ok_base);
 
                 builder.SetInsertPoint(ok_base);
-                auto* n_qpts64 = builder.CreateZExt(side.n_qpts, i64);
-                auto* scale = builder.getInt64(static_cast<std::uint64_t>(3u * static_cast<std::uint32_t>(k - 1)));
-                auto* off64 = builder.CreateMul(n_qpts64, scale);
-                auto* base_k = builder.CreateGEP(f64, base, off64);
-                const auto v = loadVec3FromQ(base_k, q_index);
-                for (std::size_t c = 0; c < vd; ++c) {
-                    loaded[c] = v[c];
+                {
+                    // Compute flat index: off64 + 3*q + c, where off64 = n_qpts * 3 * (k-1).
+                    // Using loadRealPtrAt(base, idx) directly so SIMD gathering
+                    // propagates automatically through the tracked base pointer.
+                    auto* n_qpts64 = builder.CreateZExt(side.n_qpts, i64);
+                    auto* scale = builder.getInt64(static_cast<std::uint64_t>(3u * static_cast<std::uint32_t>(k - 1)));
+                    auto* off64 = builder.CreateMul(n_qpts64, scale);
+                    auto* base3 = builder.CreateMul(q_index, builder.getInt32(3));
+                    auto* base3_64 = builder.CreateZExt(base3, i64);
+                    auto* base_off = builder.CreateAdd(off64, base3_64);
+                    for (std::size_t c = 0; c < vd; ++c) {
+                        auto* c_off = builder.CreateAdd(base_off, builder.getInt64(c));
+                        loaded[c] = loadRealPtrAt(base, c_off);
+                    }
                 }
                 builder.CreateBr(merge);
                 auto* ok_block = builder.GetInsertBlock();
@@ -4831,8 +5159,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 builder.SetInsertPoint(merge);
                 CodeValue out = makeZero(out_shape);
                 for (std::size_t c = 0; c < vd; ++c) {
-                    auto* phi = builder.CreatePHI(f64, 2, tag + ".phi" + std::to_string(c));
-                    phi->addIncoming(f64c(0.0), zero_block);
+                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".phi" + std::to_string(c));
+                    phi->addIncoming(rc(0.0), zero_block);
                     phi->addIncoming(loaded[c], ok_block);
                     out.elems[c] = phi;
                 }
@@ -4918,7 +5246,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     }
                     case FormExprType::Constant: {
                         const double v = std::bit_cast<double>(op.imm0);
-                        values[op_idx] = makeScalar(f64c(v));
+                        values[op_idx] = makeScalar(rc(v));
                         break;
                     }
 
@@ -5031,9 +5359,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         values[op_idx] = makeScalar(side.facet_area);
                         break;
 
-                    case FormExprType::CellDomainId:
-                        values[op_idx] = makeScalar(builder.CreateSIToFP(side.cell_domain_id, f64));
+                    case FormExprType::CellDomainId: {
+                        auto* id_f64 = builder.CreateSIToFP(side.cell_domain_id, f64);
+                        values[op_idx] = makeScalar(simd_active ? builder.CreateVectorSplat(simd_w, id_f64) : id_f64);
                         break;
+                    }
 
                     case FormExprType::Coordinate:
                         values[op_idx] =
@@ -5067,7 +5397,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         CodeValue out = makeZero(shape);
                         const auto n = static_cast<std::size_t>(shape.dims[0]);
                         for (std::size_t d = 0; d < n; ++d) {
-                            out.elems[d * n + d] = f64c(1.0);
+                            out.elems[d * n + d] = rc(1.0);
                         }
                         values[op_idx] = out;
                         break;
@@ -5098,8 +5428,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-                        std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
-                        std::array<llvm::Value*, 3> sb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+                        std::array<llvm::Value*, 3> vb_vals{rc(0.0), rc(0.0), rc(0.0)};
+                        std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
 
                         builder.SetInsertPoint(vb);
                         {
@@ -5117,7 +5447,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             const auto phi = loadBasisScalar(side.test_basis_values, side.n_test_dofs, i_index, q_index);
                             const auto comp_flags = emitComponentFlags(i_index, dofs_per_comp, vd);
                             for (std::size_t c = 0; c < vd; ++c) {
-                                sb_vals[c] = builder.CreateSelect(comp_flags[c], phi, f64c(0.0));
+                                sb_vals[c] = builder.CreateSelect(comp_flags[c], phi, rc(0.0));
                             }
                             builder.CreateBr(merge);
                         }
@@ -5126,7 +5456,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         builder.SetInsertPoint(merge);
                         CodeValue out = makeZero(shape);
                         for (std::size_t c = 0; c < vd; ++c) {
-                            auto* phi = builder.CreatePHI(f64, 2, "test.phi" + std::to_string(c));
+                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "test.phi" + std::to_string(c));
                             phi->addIncoming(vb_vals[c], vb_block);
                             phi->addIncoming(sb_vals[c], sb_block);
                             out.elems[c] = phi;
@@ -5157,8 +5487,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-                        std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
-                        std::array<llvm::Value*, 3> sb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+                        std::array<llvm::Value*, 3> vb_vals{rc(0.0), rc(0.0), rc(0.0)};
+                        std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
 
                         builder.SetInsertPoint(vb);
                         {
@@ -5176,7 +5506,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             const auto phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j_index, q_index);
                             const auto comp_flags = emitComponentFlags(j_index, dofs_per_comp, vd);
                             for (std::size_t c = 0; c < vd; ++c) {
-                                sb_vals[c] = builder.CreateSelect(comp_flags[c], phi, f64c(0.0));
+                                sb_vals[c] = builder.CreateSelect(comp_flags[c], phi, rc(0.0));
                             }
                             builder.CreateBr(merge);
                         }
@@ -5185,7 +5515,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         builder.SetInsertPoint(merge);
                         CodeValue out = makeZero(shape);
                         for (std::size_t c = 0; c < vd; ++c) {
-                            auto* phi = builder.CreatePHI(f64, 2, "trial.phi" + std::to_string(c));
+                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "trial.phi" + std::to_string(c));
                             phi->addIncoming(vb_vals[c], vb_block);
                             phi->addIncoming(sb_vals[c], sb_block);
                             out.elems[c] = phi;
@@ -5218,7 +5548,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 const auto comp_flags = emitComponentFlags(i_index, dofs_per_comp, vd);
                                 for (std::size_t r = 0; r < vd; ++r) {
                                     for (std::size_t d = 0; d < dim; ++d) {
-                                        out.elems[r * dim + d] = builder.CreateSelect(comp_flags[r], g[d], f64c(0.0));
+                                        out.elems[r * dim + d] = builder.CreateSelect(comp_flags[r], g[d], rc(0.0));
                                     }
                                 }
                                 values[op_idx] = out;
@@ -5243,8 +5573,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                        return terms;
 	                                    });
 	                                    auto* x = sums[0];
-	                                    auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
-	                                    auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+	                                    auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+	                                    auto* z = (dim > 2u) ? sums[2] : rc(0.0);
 	                                    values[op_idx] = makeVector(static_cast<std::uint32_t>(dim), x, y, z);
 	                                    break;
 	                                }
@@ -5291,7 +5621,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 const auto comp_flags = emitComponentFlags(j_index, dofs_per_comp, vd);
                                 for (std::size_t r = 0; r < vd; ++r) {
                                     for (std::size_t d = 0; d < dim; ++d) {
-                                        out.elems[r * dim + d] = builder.CreateSelect(comp_flags[r], g[d], f64c(0.0));
+                                        out.elems[r * dim + d] = builder.CreateSelect(comp_flags[r], g[d], rc(0.0));
                                     }
                                 }
                                 values[op_idx] = out;
@@ -5317,8 +5647,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                        return terms;
 	                                    });
 	                                auto* x = sums[0];
-	                                auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
-	                                auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+	                                auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+	                                auto* z = (dim > 2u) ? sums[2] : rc(0.0);
 	                                values[op_idx] = makeVector(static_cast<std::uint32_t>(dim), x, y, z);
 	                                break;
 	                            }
@@ -5374,8 +5704,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                            return terms;
 	                                        });
 	                                    auto* x = sums[0];
-	                                    auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
-	                                    auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+	                                    auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+	                                    auto* z = (dim > 2u) ? sums[2] : rc(0.0);
 	                                    values[op_idx] = makeVector(static_cast<std::uint32_t>(dim), x, y, z);
 	                                    break;
 	                                }
@@ -5420,7 +5750,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                                 builder.CreateCondBr(entry_is_null, zero, ok);
 
-                                std::array<llvm::Value*, 3> loaded{f64c(0.0), f64c(0.0), f64c(0.0)};
+                                std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
                                 builder.SetInsertPoint(ok);
                                 auto* base = loadPtr(entry, ABIV3::field_entry_gradients_xyz_off);
                                 auto* base_is_null =
@@ -5439,10 +5769,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 auto* zero_block = builder.GetInsertBlock();
 
                                 builder.SetInsertPoint(merge);
-                                std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
+                                std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
                                 for (std::size_t d = 0; d < dim; ++d) {
-                                    auto* phi = builder.CreatePHI(f64, 2, "field_grad.v" + std::to_string(d));
-                                    phi->addIncoming(f64c(0.0), zero_block);
+                                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_grad.v" + std::to_string(d));
+                                    phi->addIncoming(rc(0.0), zero_block);
                                     phi->addIncoming(loaded[d], ok2_block);
                                     outv[d] = phi;
                                 }
@@ -5482,8 +5812,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 CodeValue out = makeZero(shape);
                                 for (std::size_t r = 0; r < vd; ++r) {
                                     for (std::size_t c = 0; c < dim; ++c) {
-                                        auto* phi = builder.CreatePHI(f64, 2, "field_jac.a");
-                                        phi->addIncoming(f64c(0.0), zero_block);
+                                        auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_jac.a");
+                                        phi->addIncoming(rc(0.0), zero_block);
                                         phi->addIncoming(loaded.elems[r * 3 + c], ok2_block);
                                         out.elems[r * dim + c] = phi;
                                     }
@@ -5517,7 +5847,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    for (std::size_t r = 0; r < vd; ++r) {
 	                                        auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
 	                                        for (std::size_t d = 0; d < dim; ++d) {
-	                                            g.elems[r * dim + d] = builder.CreateSelect(is_r, gg[d], f64c(0.0));
+	                                            g.elems[r * dim + d] = builder.CreateSelect(is_r, gg[d], rc(0.0));
 	                                        }
 	                                    }
 	                                    return g;
@@ -5543,8 +5873,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                            return terms;
 		                                        });
 		                                    auto* x = sums[0];
-		                                    auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
-		                                    auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+		                                    auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+		                                    auto* z = (dim > 2u) ? sums[2] : rc(0.0);
 		                                    return makeVector(static_cast<std::uint32_t>(dim), x, y, z);
 		                                }
 		                                if (shape.kind == Shape::Kind::Matrix) {
@@ -5589,7 +5919,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                                     builder.CreateCondBr(entry_is_null, zero, ok);
 
-                                    std::array<llvm::Value*, 3> loaded{f64c(0.0), f64c(0.0), f64c(0.0)};
+                                    std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
                                     builder.SetInsertPoint(ok);
 	                                    auto* base = loadPtr(entry, ABIV3::field_entry_gradients_xyz_off);
                                     auto* base_is_null =
@@ -5607,10 +5937,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                     auto* zero_block = builder.GetInsertBlock();
 
 	                                    builder.SetInsertPoint(merge);
-	                                    std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                                    std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
 	                                    for (std::size_t d = 0; d < dim; ++d) {
-	                                        auto* phi = builder.CreatePHI(f64, 2, "field_grad.g");
-	                                        phi->addIncoming(f64c(0.0), zero_block);
+	                                        auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_grad.g");
+	                                        phi->addIncoming(rc(0.0), zero_block);
 	                                        phi->addIncoming(loaded[d], ok2_block);
 	                                        outv[d] = phi;
 	                                    }
@@ -5649,8 +5979,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    CodeValue out = makeZero(shape);
 	                                    for (std::size_t r = 0; r < vd; ++r) {
 	                                        for (std::size_t c = 0; c < dim; ++c) {
-	                                            auto* phi = builder.CreatePHI(f64, 2, "field_jac.a");
-	                                            phi->addIncoming(f64c(0.0), zero_block);
+	                                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_jac.a");
+	                                            phi->addIncoming(rc(0.0), zero_block);
 	                                            phi->addIncoming(loaded.elems[r * 3 + c], ok2_block);
 	                                            out.elems[r * dim + c] = phi;
 	                                        }
@@ -5777,7 +6107,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                const std::size_t n = std::min(rows, dim);
 		                                for (std::size_t r = 0; r < rows; ++r) {
 		                                    if (r >= dim) {
-		                                        out.elems[r] = f64c(0.0);
+		                                        out.elems[r] = rc(0.0);
 		                                        continue;
 		                                    }
 
@@ -5794,7 +6124,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                        return builder.CreateFMul(cj, tr);
 		                                    });
 
-		                                    llvm::Value* gd = f64c(0.0);
+		                                    llvm::Value* gd = rc(0.0);
 		                                    for (std::size_t d = 0; d < n; ++d) {
 		                                        const auto loop_name =
 		                                            "gd_u_r" + std::to_string(r) + "_d" + std::to_string(d);
@@ -5812,7 +6142,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                        gd = builder.CreateFAdd(gd, acc);
 		                                    }
 
-	                                    out.elems[r] = builder.CreateFMul(f64c(0.5), builder.CreateFAdd(lap, gd));
+	                                    out.elems[r] = builder.CreateFMul(rc(0.5), builder.CreateFAdd(lap, gd));
 	                                }
 
 	                                return out;
@@ -5828,14 +6158,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                                for (std::size_t r = 0; r < rows; ++r) {
 	                                    if (r >= dim) {
-	                                        out.elems[r] = f64c(0.0);
+	                                        out.elems[r] = rc(0.0);
 	                                        continue;
 	                                    }
 
 	                                    auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
-	                                    auto* lap = builder.CreateSelect(is_r, tr, f64c(0.0));
+	                                    auto* lap = builder.CreateSelect(is_r, tr, rc(0.0));
 
-	                                    llvm::Value* h_rc = f64c(0.0);
+	                                    llvm::Value* h_rc = rc(0.0);
 	                                    if (dim >= 1) {
 	                                        auto* is0 = builder.CreateICmpEQ(comp, builder.getInt32(0));
 	                                        h_rc = builder.CreateSelect(is0, H.elems[r * 3u + 0u], h_rc);
@@ -5849,7 +6179,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                        h_rc = builder.CreateSelect(is2, H.elems[r * 3u + 2u], h_rc);
 	                                    }
 
-	                                    out.elems[r] = builder.CreateFMul(f64c(0.5), builder.CreateFAdd(lap, h_rc));
+	                                    out.elems[r] = builder.CreateFMul(rc(0.5), builder.CreateFAdd(lap, h_rc));
 	                                }
 	                                return out;
 	                            };
@@ -5867,7 +6197,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    auto* merge = llvm::BasicBlock::Create(*ctx, "field_divsym.merge", fn);
 	                                    builder.CreateCondBr(entry_is_null, zero, ok);
 
-	                                    std::array<llvm::Value*, 3> computed{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                                    std::array<llvm::Value*, 3> computed{rc(0.0), rc(0.0), rc(0.0)};
 	                                    builder.SetInsertPoint(ok);
 	                                    auto* base = loadPtr(entry, ABIV3::field_entry_component_hessians_off);
 	                                    auto* base_is_null = builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
@@ -5896,7 +6226,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                                    for (std::size_t r = 0; r < rows2; ++r) {
 	                                        if (r >= dim2) {
-	                                            computed[r] = f64c(0.0);
+	                                            computed[r] = rc(0.0);
 	                                            continue;
 	                                        }
 
@@ -5904,12 +6234,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                        if (dim2 >= 2u) lap = builder.CreateFAdd(lap, loadHessElem(r, 1u, 1u));
 	                                        if (dim2 >= 3u) lap = builder.CreateFAdd(lap, loadHessElem(r, 2u, 2u));
 
-	                                        llvm::Value* gd = f64c(0.0);
+	                                        llvm::Value* gd = rc(0.0);
 	                                        for (std::size_t d = 0; d < n2; ++d) {
 	                                            gd = builder.CreateFAdd(gd, loadHessElem(d, r, d));
 	                                        }
 
-	                                        computed[r] = builder.CreateFMul(f64c(0.5), builder.CreateFAdd(lap, gd));
+	                                        computed[r] = builder.CreateFMul(rc(0.5), builder.CreateFAdd(lap, gd));
 	                                    }
 
 	                                    builder.CreateBr(merge);
@@ -5921,8 +6251,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                                    builder.SetInsertPoint(merge);
 	                                    for (std::size_t r = 0; r < rows2; ++r) {
-	                                        auto* phi = builder.CreatePHI(f64, 2, "field_divsym." + std::to_string(r));
-	                                        phi->addIncoming(f64c(0.0), zero_block);
+	                                        auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_divsym." + std::to_string(r));
+	                                        phi->addIncoming(rc(0.0), zero_block);
 	                                        phi->addIncoming(computed[r], ok3_block);
 	                                        out.elems[r] = phi;
 	                                    }
@@ -6072,7 +6402,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                            auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
 	                            const auto g = loadVec3FromTableQMajor(grads_xyz, n_dofs, dof_index, q_index);
-	                            llvm::Value* out = f64c(0.0);
+	                            llvm::Value* out = rc(0.0);
 	                            if (vd >= 1) {
 	                                out = builder.CreateSelect(builder.CreateICmpEQ(comp, builder.getInt32(0)), g[0], out);
 	                            }
@@ -6093,20 +6423,20 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-                            llvm::Value* v_vb = f64c(0.0);
+                            llvm::Value* v_vb = rc(0.0);
                             builder.SetInsertPoint(vb);
                             v_vb = loadBasisScalar(side.test_basis_divs, side.n_test_dofs, i_index, q_index);
                             builder.CreateBr(merge);
                             auto* vb_block = builder.GetInsertBlock();
 
-                            llvm::Value* v_sb = f64c(0.0);
+                            llvm::Value* v_sb = rc(0.0);
                             builder.SetInsertPoint(sb);
                             v_sb = divScalarBasis(side.n_test_dofs, i_index, side.test_phys_grads_xyz);
                             builder.CreateBr(merge);
                             auto* sb_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
-                            auto* phi = builder.CreatePHI(f64, 2, "div.test");
+                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "div.test");
                             phi->addIncoming(v_vb, vb_block);
                             phi->addIncoming(v_sb, sb_block);
                             return phi;
@@ -6120,20 +6450,20 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-                            llvm::Value* v_vb = f64c(0.0);
+                            llvm::Value* v_vb = rc(0.0);
                             builder.SetInsertPoint(vb);
                             v_vb = loadBasisScalar(side.trial_basis_divs, side.n_trial_dofs, j_index, q_index);
                             builder.CreateBr(merge);
                             auto* vb_block = builder.GetInsertBlock();
 
-                            llvm::Value* v_sb = f64c(0.0);
+                            llvm::Value* v_sb = rc(0.0);
                             builder.SetInsertPoint(sb);
                             v_sb = divScalarBasis(side.n_trial_dofs, j_index, side.trial_phys_grads_xyz);
                             builder.CreateBr(merge);
                             auto* sb_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
-                            auto* phi = builder.CreatePHI(f64, 2, "div.trial");
+                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "div.trial");
                             phi->addIncoming(v_vb, vb_block);
                             phi->addIncoming(v_sb, sb_block);
                             return phi;
@@ -6148,7 +6478,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                            builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-		                            llvm::Value* div_vb = f64c(0.0);
+		                            llvm::Value* div_vb = rc(0.0);
 		                            builder.SetInsertPoint(vb);
 		                            {
 		                                div_vb = emitReduceSumScalar(side.n_trial_dofs, "div_u_vb", [&](llvm::Value* j) -> llvm::Value* {
@@ -6161,7 +6491,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                            }
 		                            auto* vb_block = builder.GetInsertBlock();
 
-		                            llvm::Value* div_sb = f64c(0.0);
+		                            llvm::Value* div_sb = rc(0.0);
 		                            builder.SetInsertPoint(sb);
 		                            {
 		                                div_sb = emitReduceSumScalar(
@@ -6176,7 +6506,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                            auto* sb_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
-                            auto* phi = builder.CreatePHI(f64, 2, "div.u");
+                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "div.u");
                             phi->addIncoming(div_vb, vb_block);
                             phi->addIncoming(div_sb, sb_block);
                             return phi;
@@ -6195,7 +6525,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
 	                            auto* dofs_per_comp = builder.CreateUDiv(
 	                                side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-		                            llvm::Value* div = f64c(0.0);
+		                            llvm::Value* div = rc(0.0);
 		                            for (std::size_t comp = 0; comp < vd; ++comp) {
 		                                auto* acc = emitReduceSumScalar(
 		                                    dofs_per_comp,
@@ -6229,7 +6559,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             builder.CreateCondBr(entry_is_null, zero, ok);
 
-                            llvm::Value* div = f64c(0.0);
+                            llvm::Value* div = rc(0.0);
                             builder.SetInsertPoint(ok);
                             auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
                             auto* base_is_null =
@@ -6250,8 +6580,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             auto* zero_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
-                            auto* phi = builder.CreatePHI(f64, 2, "field_div");
-                            phi->addIncoming(f64c(0.0), zero_block);
+                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_div");
+                            phi->addIncoming(rc(0.0), zero_block);
                             phi->addIncoming(div, ok2_block);
                             values[op_idx] = makeScalar(phi);
                             break;
@@ -6284,7 +6614,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                                 builder.CreateCondBr(entry_is_null, zero, ok);
 
-                                llvm::Value* div = f64c(0.0);
+                                llvm::Value* div = rc(0.0);
                                 builder.SetInsertPoint(ok);
                                 auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
                                 auto* base_is_null =
@@ -6306,15 +6636,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 auto* zero_block = builder.GetInsertBlock();
 
                                 builder.SetInsertPoint(merge);
-                                auto* phi = builder.CreatePHI(f64, 2, "field_dt_div");
-                                phi->addIncoming(f64c(0.0), zero_block);
+                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_dt_div");
+                                phi->addIncoming(rc(0.0), zero_block);
                                 phi->addIncoming(div, ok2_block);
                                 values[op_idx] = makeScalar(phi);
                                 break;
                             }
 
                             if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
-                                values[op_idx] = makeScalar(f64c(0.0));
+                                values[op_idx] = makeScalar(rc(0.0));
                                 break;
                             }
 
@@ -6322,7 +6652,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             break;
                         }
 	                        if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
-	                            values[op_idx] = makeScalar(f64c(0.0));
+	                            values[op_idx] = makeScalar(rc(0.0));
 	                            break;
 	                        }
 
@@ -6342,7 +6672,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             };
 
                             if (isZeroConstant(aop) || isZeroConstant(bop)) {
-                                values[op_idx] = makeScalar(f64c(0.0));
+                                values[op_idx] = makeScalar(rc(0.0));
                                 break;
                             }
                         }
@@ -6360,9 +6690,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                        auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
 	                        const auto g = loadVec3FromTableQMajor(grads_xyz, n_dofs, dof_index, q_index);
-	                        llvm::Value* x = f64c(0.0);
-	                        llvm::Value* y = f64c(0.0);
-	                        llvm::Value* z = f64c(0.0);
+	                        llvm::Value* x = rc(0.0);
+	                        llvm::Value* y = rc(0.0);
+	                        llvm::Value* z = rc(0.0);
 	                        if (vd >= 1) {
 	                            auto* is0 = builder.CreateICmpEQ(comp, builder.getInt32(0));
 	                            y = builder.CreateSelect(is0, g[2], y);
@@ -6389,22 +6719,22 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-                            std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+                            std::array<llvm::Value*, 3> vb_vals{rc(0.0), rc(0.0), rc(0.0)};
                             builder.SetInsertPoint(vb);
                             vb_vals = loadVec3FromTable(side.test_basis_curls_xyz, side.n_test_dofs, i_index, q_index);
                             builder.CreateBr(merge);
                             auto* vb_block = builder.GetInsertBlock();
 
-                            std::array<llvm::Value*, 3> sb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+                            std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
                             builder.SetInsertPoint(sb);
                             sb_vals = curlScalarBasis(side.n_test_dofs, i_index, side.test_phys_grads_xyz);
                             builder.CreateBr(merge);
                             auto* sb_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
-                            std::array<llvm::Value*, 3> out{f64c(0.0), f64c(0.0), f64c(0.0)};
+                            std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
                             for (std::size_t d = 0; d < 3; ++d) {
-                                auto* phi = builder.CreatePHI(f64, 2, "curl.test." + std::to_string(d));
+                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "curl.test." + std::to_string(d));
                                 phi->addIncoming(vb_vals[d], vb_block);
                                 phi->addIncoming(sb_vals[d], sb_block);
                                 out[d] = phi;
@@ -6420,22 +6750,22 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-                            std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+                            std::array<llvm::Value*, 3> vb_vals{rc(0.0), rc(0.0), rc(0.0)};
                             builder.SetInsertPoint(vb);
                             vb_vals = loadVec3FromTable(side.trial_basis_curls_xyz, side.n_trial_dofs, j_index, q_index);
                             builder.CreateBr(merge);
                             auto* vb_block = builder.GetInsertBlock();
 
-                            std::array<llvm::Value*, 3> sb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+                            std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
                             builder.SetInsertPoint(sb);
                             sb_vals = curlScalarBasis(side.n_trial_dofs, j_index, side.trial_phys_grads_xyz);
                             builder.CreateBr(merge);
                             auto* sb_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
-                            std::array<llvm::Value*, 3> out{f64c(0.0), f64c(0.0), f64c(0.0)};
+                            std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
                             for (std::size_t d = 0; d < 3; ++d) {
-                                auto* phi = builder.CreatePHI(f64, 2, "curl.trial." + std::to_string(d));
+                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "curl.trial." + std::to_string(d));
                                 phi->addIncoming(vb_vals[d], vb_block);
                                 phi->addIncoming(sb_vals[d], sb_block);
                                 out[d] = phi;
@@ -6452,7 +6782,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                            builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-	                            std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                            std::array<llvm::Value*, 3> vb_vals{rc(0.0), rc(0.0), rc(0.0)};
 	                            builder.SetInsertPoint(vb);
 	                            {
 	                                const auto sums = emitReduceSum(side.n_trial_dofs, "curl_u_vb", 3u, [&](llvm::Value* j) {
@@ -6472,7 +6802,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            }
 	                            auto* vb_block = builder.GetInsertBlock();
 
-	                            std::array<llvm::Value*, 3> sb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                            std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
 	                            builder.SetInsertPoint(sb);
 	                            {
 	                                const auto sums = emitReduceSum(side.n_trial_dofs, "curl_u_sb", 3u, [&](llvm::Value* j) {
@@ -6492,9 +6822,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            auto* sb_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
-                            std::array<llvm::Value*, 3> out{f64c(0.0), f64c(0.0), f64c(0.0)};
+                            std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
                             for (std::size_t d = 0; d < 3; ++d) {
-                                auto* phi = builder.CreatePHI(f64, 2, "curl.u." + std::to_string(d));
+                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "curl.u." + std::to_string(d));
                                 phi->addIncoming(vb_vals[d], vb_block);
                                 phi->addIncoming(sb_vals[d], sb_block);
                                 out[d] = phi;
@@ -6525,7 +6855,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             builder.CreateCondBr(entry_is_null, zero, ok);
 
-                            std::array<llvm::Value*, 3> c{f64c(0.0), f64c(0.0), f64c(0.0)};
+                            std::array<llvm::Value*, 3> c{rc(0.0), rc(0.0), rc(0.0)};
                             builder.SetInsertPoint(ok);
                             auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
                             auto* base_is_null =
@@ -6536,7 +6866,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             builder.SetInsertPoint(ok2);
                             const auto J = loadMat3FromQ(base, q_index);
                             auto d = [&](std::size_t comp, std::size_t wrt) -> llvm::Value* {
-                                if (comp >= vd || comp >= 3u || wrt >= 3u) return f64c(0.0);
+                                if (comp >= vd || comp >= 3u || wrt >= 3u) return rc(0.0);
                                 return J.elems[comp * 3 + wrt];
                             };
                             c[0] = builder.CreateFSub(d(2, 1), d(1, 2));
@@ -6550,10 +6880,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             auto* zero_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
-                            std::array<llvm::Value*, 3> out{f64c(0.0), f64c(0.0), f64c(0.0)};
+                            std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
                             for (std::size_t d0 = 0; d0 < 3; ++d0) {
-                                auto* phi = builder.CreatePHI(f64, 2, "field_curl." + std::to_string(d0));
-                                phi->addIncoming(f64c(0.0), zero_block);
+                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_curl." + std::to_string(d0));
+                                phi->addIncoming(rc(0.0), zero_block);
                                 phi->addIncoming(c[d0], ok2_block);
                                 out[d0] = phi;
                             }
@@ -6568,7 +6898,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             std::array<std::array<llvm::Value*, 3>, 3> J{};
                             for (auto& row : J) {
-                                row = {f64c(0.0), f64c(0.0), f64c(0.0)};
+                                row = {rc(0.0), rc(0.0), rc(0.0)};
                             }
 
 	                            for (std::size_t comp = 0; comp < std::min<std::size_t>(vd, 3u); ++comp) {
@@ -6627,7 +6957,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                                               builder.CreateCondBr(entry_is_null, zero, ok);
 
-                                              std::array<llvm::Value*, 3> c{f64c(0.0), f64c(0.0), f64c(0.0)};
+                                              std::array<llvm::Value*, 3> c{rc(0.0), rc(0.0), rc(0.0)};
                                               builder.SetInsertPoint(ok);
                                               auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
                                               auto* base_is_null =
@@ -6638,7 +6968,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                               builder.SetInsertPoint(ok2);
                                               const auto J = loadMat3FromQ(base, q_index);
                                               auto d = [&](std::size_t comp, std::size_t wrt) -> llvm::Value* {
-                                                  if (comp >= vd || comp >= 3u || wrt >= 3u) return f64c(0.0);
+                                                  if (comp >= vd || comp >= 3u || wrt >= 3u) return rc(0.0);
                                                   return J.elems[comp * 3 + wrt];
                                               };
                                               c[0] = builder.CreateFSub(d(2, 1), d(1, 2));
@@ -6652,10 +6982,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                               auto* zero_block = builder.GetInsertBlock();
 
                                               builder.SetInsertPoint(merge);
-                                              std::array<llvm::Value*, 3> out{f64c(0.0), f64c(0.0), f64c(0.0)};
+                                              std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
                                               for (std::size_t d0 = 0; d0 < 3; ++d0) {
-                                                  auto* phi = builder.CreatePHI(f64, 2, "field_dt_curl." + std::to_string(d0));
-                                                  phi->addIncoming(f64c(0.0), zero_block);
+                                                  auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_dt_curl." + std::to_string(d0));
+                                                  phi->addIncoming(rc(0.0), zero_block);
                                                   phi->addIncoming(c[d0], ok2_block);
                                                   out[d0] = phi;
                                               }
@@ -6684,7 +7014,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                         const auto& kid = term.ir.ops[child_idx];
 
-                        auto* zero = f64c(0.0);
+                        auto* zero = rc(0.0);
                         const auto dim_u32 = shape.dims[0];
                         const auto mat_len = elemCount(shape);
 	                        auto matZero = [&]() -> CodeValue { return makeZero(shape); };
@@ -6765,7 +7095,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             builder.SetInsertPoint(merge);
                             CodeValue out = makeZero(shape);
                             for (std::size_t i = 0; i < mat_len; ++i) {
-                                auto* phi = builder.CreatePHI(f64, 2, "field_hess." + std::to_string(i));
+                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_hess." + std::to_string(i));
                                 phi->addIncoming(zero, zero_block);
                                 phi->addIncoming(loaded.elems[i], ok2_block);
                                 out.elems[i] = phi;
@@ -6824,7 +7154,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 builder.SetInsertPoint(merge);
                                 CodeValue out = matZero();
                                 for (std::size_t i = 0; i < mat_len; ++i) {
-                                    auto* phi = builder.CreatePHI(f64, 2, "field_dt_hess." + std::to_string(i));
+                                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_dt_hess." + std::to_string(i));
                                     phi->addIncoming(zero, zero_block);
                                     phi->addIncoming(loaded.elems[i], ok2_block);
                                     out.elems[i] = phi;
@@ -7529,8 +7859,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 builder.SetInsertPoint(header);
                 auto* idx_phi = builder.CreatePHI(i32, 2, "idx" + std::to_string(level));
                 idx_phi->addIncoming(builder.getInt32(0), preheader);
-                auto* acc_phi = builder.CreatePHI(f64, 2, "idx.acc" + std::to_string(level));
-                acc_phi->addIncoming(f64c(0.0), preheader);
+                auto* acc_phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "idx.acc" + std::to_string(level));
+                acc_phi->addIncoming(rc(0.0), preheader);
                 auto* cond = builder.CreateICmpULT(idx_phi, builder.getInt32(extent));
                 builder.CreateCondBr(cond, body, exit);
 
@@ -7652,18 +7982,22 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         std::uint32_t next_xblock_cache_offset = 0;
 
         auto getOrCreateCacheEntry = [&](std::uint64_t key, std::uint32_t n_elems_per_qp) -> QPCacheEntry* {
+            // Cache element type: <simd_w x double> when SIMD active, else scalar double.
+            auto* elem_ty = simd_active ? vf64 : f64;
+            const std::uint32_t elem_bytes = simd_active ? (simd_w * 8u) : 8u;
+
             auto it = qp_shared_cache.find(key);
             if (it != qp_shared_cache.end()) {
                 // In buffer mode, recompute data GEP for current function context.
                 if (active_qp_cache_base) {
-                    it->second.data = builder.CreateGEP(f64, active_qp_cache_base,
+                    it->second.data = builder.CreateGEP(elem_ty, active_qp_cache_base,
                         builder.getInt32(it->second.buffer_offset));
                 }
                 return &it->second;
             }
 
             // Check cumulative QP cache budget before allocating.
-            const std::uint32_t alloc_bytes = max_cache_qpts * n_elems_per_qp * 8u; // sizeof(double)
+            const std::uint32_t alloc_bytes = max_cache_qpts * n_elems_per_qp * elem_bytes;
             if (qp_cache_bytes_allocated + alloc_bytes > qp_cache_budget_bytes) {
                 return nullptr; // budget exhausted
             }
@@ -7674,12 +8008,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             if (active_qp_cache_base) {
                 // Buffer mode: GEP into pre-allocated flat buffer.
                 buf_off = next_qp_cache_offset;
-                data_ptr = builder.CreateGEP(f64, active_qp_cache_base,
+                data_ptr = builder.CreateGEP(elem_ty, active_qp_cache_base,
                     builder.getInt32(buf_off));
                 next_qp_cache_offset += total;
             } else {
                 // Normal mode: alloca in function entry block.
-                data_ptr = allocaInEntry(f64, builder.getInt32(total), "qp_cache");
+                data_ptr = allocaInEntry(elem_ty, builder.getInt32(total), "qp_cache");
             }
             QPCacheEntry entry{data_ptr, n_elems_per_qp, false, buf_off};
             qp_cache_bytes_allocated += alloc_bytes;
@@ -7688,7 +8022,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         };
 
         // Store a CodeValue into a cache entry at the given QP index.
+        // When simd_active, values are <simd_w x double> and the cache uses
+        // vf64-strided elements.  Otherwise scalar f64.
         auto storeToCacheEntry = [&](QPCacheEntry& entry, llvm::Value* q_index, const CodeValue& val) {
+            auto* elem_ty = simd_active ? vf64 : f64;
             auto* q64 = builder.CreateZExt(q_index, i64);
             auto* base = builder.CreateMul(q64, builder.getInt64(entry.n_elems));
             for (std::uint32_t e = 0; e < entry.n_elems; ++e) {
@@ -7698,20 +8035,21 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         std::to_string(e) + " of " + std::to_string(entry.n_elems));
                 }
                 auto* idx = builder.CreateAdd(base, builder.getInt64(e));
-                auto* gep = builder.CreateGEP(f64, entry.data, idx);
+                auto* gep = builder.CreateGEP(elem_ty, entry.data, idx);
                 builder.CreateStore(val.elems[e], gep);
             }
         };
 
         // Load a CodeValue from a cache entry at the given QP index.
         auto loadFromCacheEntry = [&](const QPCacheEntry& entry, llvm::Value* q_index, const Shape& shape) -> CodeValue {
+            auto* elem_ty = simd_active ? vf64 : f64;
             auto* q64 = builder.CreateZExt(q_index, i64);
             auto* base = builder.CreateMul(q64, builder.getInt64(entry.n_elems));
             CodeValue cv = makeZero(shape);
             for (std::uint32_t e = 0; e < entry.n_elems; ++e) {
                 auto* idx = builder.CreateAdd(base, builder.getInt64(e));
-                auto* gep = builder.CreateGEP(f64, entry.data, idx);
-                cv.elems[e] = builder.CreateLoad(f64, gep);
+                auto* gep = builder.CreateGEP(elem_ty, entry.data, idx);
+                cv.elems[e] = builder.CreateLoad(elem_ty, gep);
             }
             return cv;
         };
@@ -7757,7 +8095,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     if (it != dep0_xblock_cache.end()) {
                         // In buffer mode, re-derive data pointer for current function.
                         if (active_xblock_cache_base) {
-                            it->second.data = builder.CreateGEP(f64, active_xblock_cache_base,
+                            auto* xb_elem_ty = simd_active ? vf64 : f64;
+                            it->second.data = builder.CreateGEP(xb_elem_ty, active_xblock_cache_base,
                                 builder.getInt32(it->second.buffer_offset));
                         }
                         auto cv = loadFromCacheEntry(it->second, q_index, term.shapes[op_idx]);
@@ -7776,7 +8115,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     }
                     case FormExprType::Constant: {
                         const double v = std::bit_cast<double>(op.imm0);
-                        values[op_idx] = makeScalar(f64c(v));
+                        values[op_idx] = makeScalar(rc(v));
                         break;
                     }
                     case FormExprType::ParameterRef: {
@@ -7921,7 +8260,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         CodeValue out = makeZero(shape);
                         const auto n = static_cast<std::size_t>(shape.dims[0]);
                         for (std::size_t d = 0; d < n; ++d) {
-                            out.elems[d * n + d] = f64c(1.0);
+                            out.elems[d * n + d] = rc(1.0);
                         }
                         values[op_idx] = out;
                         break;
@@ -7974,8 +8313,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    return terms;
 	                                });
 	                                auto* x = sums[0];
-	                                auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
-	                                auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+	                                auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+	                                auto* z = (dim > 2u) ? sums[2] : rc(0.0);
 	                                return makeVector(static_cast<std::uint32_t>(dim), x, y, z);
 	                            }
 	                            if (shape.kind == Shape::Kind::Matrix) {
@@ -8147,8 +8486,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                        return terms;
 	                                    });
 	                                auto* x = sums[0];
-	                                auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
-	                                auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+	                                auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+	                                auto* z = (dim > 2u) ? sums[2] : rc(0.0);
 	                                values[op_idx] = makeVector(static_cast<std::uint32_t>(dim), x, y, z);
 	                                break;
 	                            }
@@ -8219,7 +8558,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                                 builder.CreateCondBr(entry_is_null, zero, ok);
 
-                                std::array<llvm::Value*, 3> loaded{f64c(0.0), f64c(0.0), f64c(0.0)};
+                                std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
                                 builder.SetInsertPoint(ok);
                                 auto* base = loadPtr(entry, ABIV3::field_entry_gradients_xyz_off);
                                 auto* base_is_null =
@@ -8238,11 +8577,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 auto* zero_block = builder.GetInsertBlock();
 
 	                                builder.SetInsertPoint(merge);
-	                                std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                                std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
 	                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
 	                                for (std::size_t d = 0; d < dim; ++d) {
-	                                    auto* phi = builder.CreatePHI(f64, 2, "field_grad.v" + std::to_string(d));
-	                                    phi->addIncoming(f64c(0.0), zero_block);
+	                                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_grad.v" + std::to_string(d));
+	                                    phi->addIncoming(rc(0.0), zero_block);
 	                                    phi->addIncoming(loaded[d], ok2_block);
 	                                    outv[d] = phi;
 	                                }
@@ -8282,9 +8621,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                CodeValue out = makeZero(shape);
 	                                for (std::size_t r = 0; r < vd; ++r) {
 	                                    for (std::size_t c = 0; c < dim; ++c) {
-	                                        auto* phi = builder.CreatePHI(f64, 2, "field_jac.a");
-	                                        phi->addIncoming(f64c(0.0), zero_block);
-	                                        auto* l = (r < 3u && c < 3u) ? loaded.elems[r * 3u + c] : f64c(0.0);
+	                                        auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_jac.a");
+	                                        phi->addIncoming(rc(0.0), zero_block);
+	                                        auto* l = (r < 3u && c < 3u) ? loaded.elems[r * 3u + c] : rc(0.0);
 	                                        phi->addIncoming(l, ok2_block);
 	                                        out.elems[r * dim + c] = phi;
 	                                    }
@@ -8393,7 +8732,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 const std::size_t n = std::min(rows, dim);
 	                                for (std::size_t r = 0; r < rows; ++r) {
 	                                    if (r >= dim) {
-	                                        out.elems[r] = f64c(0.0);
+	                                        out.elems[r] = rc(0.0);
 	                                        continue;
 	                                    }
 
@@ -8408,7 +8747,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                        return builder.CreateFMul(cj, tr);
 	                                    });
 
-	                                    llvm::Value* gd = f64c(0.0);
+	                                    llvm::Value* gd = rc(0.0);
 	                                    for (std::size_t d = 0; d < n; ++d) {
 	                                        const auto loop_name = "gd_u_r" + std::to_string(r) + "_d" + std::to_string(d);
 	                                        auto* acc = emitReduceSumScalar(dofs_per_comp, loop_name, [&](llvm::Value* jj) -> llvm::Value* {
@@ -8423,7 +8762,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                        gd = builder.CreateFAdd(gd, acc);
 	                                    }
 
-                                    out.elems[r] = builder.CreateFMul(f64c(0.5), builder.CreateFAdd(lap, gd));
+                                    out.elems[r] = builder.CreateFMul(rc(0.5), builder.CreateFAdd(lap, gd));
                                 }
 
                                 return out;
@@ -8439,7 +8778,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 auto* merge = llvm::BasicBlock::Create(*ctx, "field_divsym.merge", fn);
                                 builder.CreateCondBr(entry_is_null, zero, ok);
 
-                                std::array<llvm::Value*, 3> computed{f64c(0.0), f64c(0.0), f64c(0.0)};
+                                std::array<llvm::Value*, 3> computed{rc(0.0), rc(0.0), rc(0.0)};
                                 builder.SetInsertPoint(ok);
                                 auto* base = loadPtr(entry, ABIV3::field_entry_component_hessians_off);
                                 auto* base_is_null = builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
@@ -8468,7 +8807,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                                 for (std::size_t r = 0; r < rows2; ++r) {
                                     if (r >= dim2) {
-                                        computed[r] = f64c(0.0);
+                                        computed[r] = rc(0.0);
                                         continue;
                                     }
 
@@ -8476,12 +8815,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                     if (dim2 >= 2u) lap = builder.CreateFAdd(lap, loadHessElem(r, 1u, 1u));
                                     if (dim2 >= 3u) lap = builder.CreateFAdd(lap, loadHessElem(r, 2u, 2u));
 
-                                    llvm::Value* gd = f64c(0.0);
+                                    llvm::Value* gd = rc(0.0);
                                     for (std::size_t d = 0; d < n2; ++d) {
                                         gd = builder.CreateFAdd(gd, loadHessElem(d, r, d));
                                     }
 
-                                    computed[r] = builder.CreateFMul(f64c(0.5), builder.CreateFAdd(lap, gd));
+                                    computed[r] = builder.CreateFMul(rc(0.5), builder.CreateFAdd(lap, gd));
                                 }
 
                                 builder.CreateBr(merge);
@@ -8493,8 +8832,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                                 builder.SetInsertPoint(merge);
                                 for (std::size_t r = 0; r < rows2; ++r) {
-                                    auto* phi = builder.CreatePHI(f64, 2, "field_divsym." + std::to_string(r));
-                                    phi->addIncoming(f64c(0.0), zero_block);
+                                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_divsym." + std::to_string(r));
+                                    phi->addIncoming(rc(0.0), zero_block);
                                     phi->addIncoming(computed[r], ok3_block);
                                     out.elems[r] = phi;
                                 }
@@ -8648,7 +8987,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
 	                            auto* dofs_per_comp =
 	                                builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-		                            llvm::Value* div = f64c(0.0);
+		                            llvm::Value* div = rc(0.0);
 		                            for (std::size_t comp = 0; comp < vd; ++comp) {
 		                                auto* acc = emitReduceSumScalar(
 		                                    dofs_per_comp,
@@ -8682,7 +9021,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                                builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-	                                llvm::Value* div_vb = f64c(0.0);
+	                                llvm::Value* div_vb = rc(0.0);
 	                                builder.SetInsertPoint(vb);
 	                                div_vb = emitReduceSumScalar(
 	                                    side.n_trial_dofs, "div_state_u_vb", [&](llvm::Value* j) -> llvm::Value* {
@@ -8694,11 +9033,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                builder.CreateBr(merge);
 	                                auto* vb_block = builder.GetInsertBlock();
 
-	                                llvm::Value* div_sb = f64c(0.0);
+	                                llvm::Value* div_sb = rc(0.0);
 	                                builder.SetInsertPoint(sb);
 	                                auto* dofs_per_comp =
 	                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                                llvm::Value* div_sum = f64c(0.0);
+	                                llvm::Value* div_sum = rc(0.0);
 	                                for (std::size_t comp = 0; comp < vd; ++comp) {
 	                                    auto* acc = emitReduceSumScalar(
 	                                        dofs_per_comp,
@@ -8720,7 +9059,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                auto* sb_block = builder.GetInsertBlock();
 
 	                                builder.SetInsertPoint(merge);
-	                                auto* phi = builder.CreatePHI(f64, 2, "div.state_u");
+	                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "div.state_u");
 	                                phi->addIncoming(div_vb, vb_block);
 	                                phi->addIncoming(div_sb, sb_block);
 	                                values[op_idx] = makeScalar(phi);
@@ -8735,7 +9074,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             builder.CreateCondBr(entry_is_null, zero, ok);
 
-                            llvm::Value* div = f64c(0.0);
+                            llvm::Value* div = rc(0.0);
                             builder.SetInsertPoint(ok);
                             auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
                             auto* base_is_null =
@@ -8756,8 +9095,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             auto* zero_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
-                            auto* phi = builder.CreatePHI(f64, 2, "field_div");
-                            phi->addIncoming(f64c(0.0), zero_block);
+                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_div");
+                            phi->addIncoming(rc(0.0), zero_block);
                             phi->addIncoming(div, ok2_block);
 	                            values[op_idx] = makeScalar(phi);
 	                            break;
@@ -8779,13 +9118,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             };
 
                             if (isZeroConstant(aop) || isZeroConstant(bop)) {
-                                values[op_idx] = makeScalar(f64c(0.0));
+                                values[op_idx] = makeScalar(rc(0.0));
                                 break;
                             }
                         }
 
 	                        if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
-	                            values[op_idx] = makeScalar(f64c(0.0));
+	                            values[op_idx] = makeScalar(rc(0.0));
 	                            break;
 	                        }
 
@@ -8808,7 +9147,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             builder.CreateCondBr(entry_is_null, zero, ok);
 
-                            std::array<llvm::Value*, 3> c{f64c(0.0), f64c(0.0), f64c(0.0)};
+                            std::array<llvm::Value*, 3> c{rc(0.0), rc(0.0), rc(0.0)};
                             builder.SetInsertPoint(ok);
                             auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
                             auto* base_is_null =
@@ -8819,7 +9158,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             builder.SetInsertPoint(ok2);
                             const auto J = loadMat3FromQ(base, q_index);
                             auto d = [&](std::size_t comp, std::size_t wrt) -> llvm::Value* {
-                                if (comp >= vd || comp >= 3u || wrt >= 3u) return f64c(0.0);
+                                if (comp >= vd || comp >= 3u || wrt >= 3u) return rc(0.0);
                                 return J.elems[comp * 3 + wrt];
                             };
                             c[0] = builder.CreateFSub(d(2, 1), d(1, 2));
@@ -8833,10 +9172,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             auto* zero_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
-                            std::array<llvm::Value*, 3> out{f64c(0.0), f64c(0.0), f64c(0.0)};
+                            std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
                             for (std::size_t d0 = 0; d0 < 3; ++d0) {
-                                auto* phi = builder.CreatePHI(f64, 2, "field_curl." + std::to_string(d0));
-                                phi->addIncoming(f64c(0.0), zero_block);
+                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_curl." + std::to_string(d0));
+                                phi->addIncoming(rc(0.0), zero_block);
                                 phi->addIncoming(c[d0], ok2_block);
                                 out[d0] = phi;
                             }
@@ -8852,7 +9191,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             std::array<std::array<llvm::Value*, 3>, 3> J{};
                             for (auto& row : J) {
-                                row = {f64c(0.0), f64c(0.0), f64c(0.0)};
+                                row = {rc(0.0), rc(0.0), rc(0.0)};
                             }
 
 	                            for (std::size_t comp = 0; comp < std::min<std::size_t>(vd, 3u); ++comp) {
@@ -8953,8 +9292,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            builder.SetInsertPoint(merge);
 	                            CodeValue out = makeZero(shape);
 	                            for (std::size_t i = 0; i < mat_len; ++i) {
-	                                auto* phi = builder.CreatePHI(f64, 2, "field_hess." + std::to_string(i));
-	                                phi->addIncoming(f64c(0.0), zero_block);
+	                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_hess." + std::to_string(i));
+	                                phi->addIncoming(rc(0.0), zero_block);
 	                                phi->addIncoming(loaded.elems[i], ok2_block);
 	                                out.elems[i] = phi;
 	                            }
@@ -9304,7 +9643,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto op_hash = term.op_hashes[op_idx];
                         if (dep0_xblock_cache.find(op_hash) == dep0_xblock_cache.end()) {
                             const auto n_elems = static_cast<std::uint32_t>(elemCount(values[op_idx].shape));
-                            const std::uint32_t alloc_bytes = max_cache_qpts * n_elems * 8u;
+                            auto* xb_elem_ty = simd_active ? vf64 : f64;
+                            const std::uint32_t xb_elem_bytes = simd_active ? (simd_w * 8u) : 8u;
+                            const std::uint32_t alloc_bytes = max_cache_qpts * n_elems * xb_elem_bytes;
                             // Check cumulative xblock budget before allocating
                             if (xblock_cache_bytes_allocated + alloc_bytes <= xblock_cache_budget_bytes) {
                                 const std::uint32_t total = max_cache_qpts * n_elems;
@@ -9312,11 +9653,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 std::uint32_t buf_off = 0;
                                 if (active_xblock_cache_base) {
                                     buf_off = next_xblock_cache_offset;
-                                    data_ptr = builder.CreateGEP(f64, active_xblock_cache_base,
+                                    data_ptr = builder.CreateGEP(xb_elem_ty, active_xblock_cache_base,
                                         builder.getInt32(buf_off));
                                     next_xblock_cache_offset += total;
                                 } else {
-                                    data_ptr = allocaInEntry(f64, builder.getInt32(total), "xb_cache");
+                                    data_ptr = allocaInEntry(xb_elem_ty, builder.getInt32(total), "xb_cache");
                                 }
                                 QPCacheEntry entry{data_ptr, n_elems, true, buf_off};
                                 storeToCacheEntry(entry, q_index, values[op_idx]);
@@ -9378,7 +9719,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     }
                     case FormExprType::Constant: {
                         const double v = std::bit_cast<double>(op.imm0);
-                        const auto cv = makeScalar(f64c(v));
+                        const auto cv = makeScalar(rc(v));
                         values_minus[op_idx] = cv;
                         values_plus[op_idx] = cv;
                         break;
@@ -9575,7 +9916,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         CodeValue out = makeZero(shape);
                         const auto n = static_cast<std::size_t>(shape.dims[0]);
                         for (std::size_t d = 0; d < n; ++d) {
-                            out.elems[d * n + d] = f64c(1.0);
+                            out.elems[d * n + d] = rc(1.0);
                         }
                         values_minus[op_idx] = out;
                         values_plus[op_idx] = out;
@@ -9623,8 +9964,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                            return terms;
 		                                        });
 		                                    auto* x = sums[0];
-		                                    auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
-		                                    auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+		                                    auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+		                                    auto* z = (dim > 2u) ? sums[2] : rc(0.0);
 		                                    return makeVector(shape.dims[0], x, y, z);
 		                                }
 		                                if (shape.kind == Shape::Kind::Matrix) {
@@ -9673,7 +10014,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                                     builder.CreateCondBr(entry_is_null, zero, ok);
 
-                                    std::array<llvm::Value*, 3> loaded{f64c(0.0), f64c(0.0), f64c(0.0)};
+                                    std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
                                     builder.SetInsertPoint(ok);
                                     auto* base = loadPtr(entry, ABIV3::field_entry_gradients_xyz_off);
                                     auto* base_is_null =
@@ -9692,10 +10033,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                     auto* zero_block = builder.GetInsertBlock();
 
 	                                    builder.SetInsertPoint(merge);
-	                                    std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                                    std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
 	                                    for (std::size_t d = 0; d < dim; ++d) {
-	                                        auto* phi = builder.CreatePHI(f64, 2, "field_grad.v" + std::to_string(d));
-	                                        phi->addIncoming(f64c(0.0), zero_block);
+	                                        auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_grad.v" + std::to_string(d));
+	                                        phi->addIncoming(rc(0.0), zero_block);
 	                                        phi->addIncoming(loaded[d], ok2_block);
 	                                        outv[d] = phi;
 	                                    }
@@ -9734,10 +10075,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    CodeValue out = makeZero(shape);
 	                                    for (std::size_t r = 0; r < vd; ++r) {
 	                                        for (std::size_t c = 0; c < dim; ++c) {
-	                                            auto* phi = builder.CreatePHI(f64, 2, "field_jac.a");
-	                                            phi->addIncoming(f64c(0.0), zero_block);
+	                                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_jac.a");
+	                                            phi->addIncoming(rc(0.0), zero_block);
 	                                            auto* l =
-	                                                (r < 3u && c < 3u) ? loaded.elems[r * 3u + c] : f64c(0.0);
+	                                                (r < 3u && c < 3u) ? loaded.elems[r * 3u + c] : rc(0.0);
 	                                            phi->addIncoming(l, ok2_block);
 	                                            out.elems[r * dim + c] = phi;
 	                                        }
@@ -9770,7 +10111,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
 		                                auto* dofs_per_comp =
 		                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-		                                llvm::Value* div = f64c(0.0);
+		                                llvm::Value* div = rc(0.0);
 		                                for (std::size_t comp = 0; comp < vd; ++comp) {
 		                                    auto* acc = emitReduceSumScalar(
 		                                        dofs_per_comp,
@@ -9801,7 +10142,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                                 builder.CreateCondBr(entry_is_null, zero, ok);
 
-                                llvm::Value* div = f64c(0.0);
+                                llvm::Value* div = rc(0.0);
                                 builder.SetInsertPoint(ok);
                                 auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
                                 auto* base_is_null =
@@ -9822,14 +10163,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 auto* zero_block = builder.GetInsertBlock();
 
                                 builder.SetInsertPoint(merge);
-                                auto* phi = builder.CreatePHI(f64, 2, "field_div");
-                                phi->addIncoming(f64c(0.0), zero_block);
+                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_div");
+                                phi->addIncoming(rc(0.0), zero_block);
                                 phi->addIncoming(div, ok2_block);
                                 return makeScalar(phi);
                             }
 
                             if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
-                                return makeScalar(f64c(0.0));
+                                return makeScalar(rc(0.0));
                             }
 
                             throw std::runtime_error("LLVMGen: cached Divergence operand not supported");
@@ -9857,7 +10198,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                                 builder.CreateCondBr(entry_is_null, zero, ok);
 
-                                std::array<llvm::Value*, 3> c{f64c(0.0), f64c(0.0), f64c(0.0)};
+                                std::array<llvm::Value*, 3> c{rc(0.0), rc(0.0), rc(0.0)};
                                 builder.SetInsertPoint(ok);
                                 auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
                                 auto* base_is_null =
@@ -9868,7 +10209,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 builder.SetInsertPoint(ok2);
                                 const auto J = loadMat3FromQ(base, q_index);
                                 auto d = [&](std::size_t comp, std::size_t wrt) -> llvm::Value* {
-                                    if (comp >= vd || comp >= 3u || wrt >= 3u) return f64c(0.0);
+                                    if (comp >= vd || comp >= 3u || wrt >= 3u) return rc(0.0);
                                     return J.elems[comp * 3 + wrt];
                                 };
                                 c[0] = builder.CreateFSub(d(2, 1), d(1, 2));
@@ -9882,10 +10223,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 auto* zero_block = builder.GetInsertBlock();
 
                                 builder.SetInsertPoint(merge);
-                                std::array<llvm::Value*, 3> out{f64c(0.0), f64c(0.0), f64c(0.0)};
+                                std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
                                 for (std::size_t d0 = 0; d0 < 3; ++d0) {
-                                    auto* phi = builder.CreatePHI(f64, 2, "field_curl." + std::to_string(d0));
-                                    phi->addIncoming(f64c(0.0), zero_block);
+                                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_curl." + std::to_string(d0));
+                                    phi->addIncoming(rc(0.0), zero_block);
                                     phi->addIncoming(c[d0], ok2_block);
                                     out[d0] = phi;
                                 }
@@ -9900,7 +10241,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                                 std::array<std::array<llvm::Value*, 3>, 3> J{};
                                 for (auto& row : J) {
-                                    row = {f64c(0.0), f64c(0.0), f64c(0.0)};
+                                    row = {rc(0.0), rc(0.0), rc(0.0)};
                                 }
 
 	                                for (std::size_t comp = 0; comp < std::min<std::size_t>(vd, 3u); ++comp) {
@@ -10004,8 +10345,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                builder.SetInsertPoint(merge);
 	                                CodeValue out = makeZero(shape);
 	                                for (std::size_t i = 0; i < mat_len; ++i) {
-	                                    auto* phi = builder.CreatePHI(f64, 2, "field_hess." + std::to_string(i));
-	                                    phi->addIncoming(f64c(0.0), zero_block);
+	                                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_hess." + std::to_string(i));
+	                                    phi->addIncoming(rc(0.0), zero_block);
 	                                    phi->addIncoming(loaded.elems[i], ok2_block);
 	                                    out.elems[i] = phi;
 	                                }
@@ -10083,7 +10424,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                     case FormExprType::Average: {
                         const auto child = childIndex(op, 0);
-                        const auto out = mul(makeScalar(f64c(0.5)), add(values_minus[child], values_plus[child]));
+                        const auto out = mul(makeScalar(rc(0.5)), add(values_minus[child], values_plus[child]));
                         values_minus[op_idx] = out;
                         values_plus[op_idx] = out;
                         break;
@@ -10560,7 +10901,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 builder.CreateBr(term_entry);
                 builder.SetInsertPoint(term_entry);
                 auto* tw = termWeight(side_single, terms[t].time_derivative_order);
-                auto* is_zero = builder.CreateFCmpOEQ(tw, f64c(0.0));
+                // Term weights are batch-invariant (same for all SIMD lanes).
+                // Extract lane 0 for scalar branch condition when SIMD is active.
+                auto* tw_scalar = simd_active
+                    ? builder.CreateExtractElement(tw, static_cast<uint64_t>(0))
+                    : tw;
+                auto* is_zero = builder.CreateFCmpOEQ(tw_scalar, llvm::ConstantFP::get(f64, 0.0));
                 builder.CreateCondBr(is_zero, term_end, term_body);
 
                 builder.SetInsertPoint(term_body);
@@ -10700,8 +11046,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             // L1i-sized helper functions, each NoInline.  The main kernel
             // calls helpers sequentially.  Requires LLVM 15+ (LLVM 14 had
             // physreg copy and bitcast ISel bugs with this IR pattern).
-            if (nc_plan.needs_split) {
+            if (nc_plan.needs_split && !use_simd_batch) {
                 // Emit helper functions for each term group.
+                // NOTE: Disabled when SIMD batch is active because helpers load
+                // a fresh scalar SideView, incompatible with the main function's
+                // <simd_w x double> SIMD state.
                 // Helper signature: void(i8* args, i32 batch_idx, i8** field_ptrs)
                 // The third argument carries pre-resolved field entry pointers
                 // from the main function, avoiding search-loop IR in helpers
@@ -10751,6 +11100,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     auto* saved_mat = element_matrix_single;
                     auto* saved_vec = element_vector_single;
                     auto saved_field_entries = field_entries;
+                    const bool saved_simd_active = simd_active;
+                    auto saved_simd_ptr_map = simd_ptr_map;
+                    // Helper functions load a fresh scalar SideView — disable SIMD
+                    // until proper SIMD setup is done for the helper.
+                    simd_active = false;
+                    simd_ptr_map.clear();
 
                     // Switch to helper function context.
                     fn = hfn;
@@ -10812,6 +11167,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     element_matrix_single = saved_mat;
                     element_vector_single = saved_vec;
                     field_entries = saved_field_entries;
+                    simd_active = saved_simd_active;
+                    simd_ptr_map = saved_simd_ptr_map;
                 }
 
                 // Dispatcher: call helpers sequentially.
@@ -10980,7 +11337,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         builder.CreateBr(te);
                         builder.SetInsertPoint(te);
                         auto* tw = termWeight(side_single, term.time_derivative_order);
-                        auto* is_zero_w = builder.CreateFCmpOEQ(tw, f64c(0.0));
+                        // Term weights are batch-invariant. Extract lane 0 for
+                        // scalar branch condition when SIMD is active.
+                        auto* tw_scalar = simd_active
+                            ? builder.CreateExtractElement(tw, static_cast<uint64_t>(0))
+                            : tw;
+                        auto* is_zero_w = builder.CreateFCmpOEQ(tw_scalar, llvm::ConstantFP::get(f64, 0.0));
                         builder.CreateCondBr(is_zero_w, tx, tb);
 
                         builder.SetInsertPoint(tb);
@@ -11361,8 +11723,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                     builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-                    std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
-                    std::array<llvm::Value*, 3> sb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+                    std::array<llvm::Value*, 3> vb_vals{rc(0.0), rc(0.0), rc(0.0)};
+                    std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
 
                     builder.SetInsertPoint(vb);
                     {
@@ -11382,7 +11744,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto phi = loadBasisScalar(side.test_basis_values, side.n_test_dofs, i_index, q_index);
                         for (std::size_t c = 0; c < vd; ++c) {
                             auto* is_c = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(c)));
-                            sb_vals[c] = builder.CreateSelect(is_c, phi, f64c(0.0));
+                            sb_vals[c] = builder.CreateSelect(is_c, phi, rc(0.0));
                         }
                         builder.CreateBr(merge);
                     }
@@ -11391,7 +11753,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     builder.SetInsertPoint(merge);
                     CodeValue out = makeZero(shape);
                     for (std::size_t c = 0; c < vd; ++c) {
-                        auto* phi = builder.CreatePHI(f64, 2, "test.phi" + std::to_string(c));
+                        auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "test.phi" + std::to_string(c));
                         phi->addIncoming(vb_vals[c], vb_block);
                         phi->addIncoming(sb_vals[c], sb_block);
                         out.elems[c] = phi;
@@ -11425,8 +11787,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                     builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-                    std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
-                    std::array<llvm::Value*, 3> sb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+                    std::array<llvm::Value*, 3> vb_vals{rc(0.0), rc(0.0), rc(0.0)};
+                    std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
 
                     builder.SetInsertPoint(vb);
                     {
@@ -11446,7 +11808,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j_index, q_index);
                         for (std::size_t c = 0; c < vd; ++c) {
                             auto* is_c = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(c)));
-                            sb_vals[c] = builder.CreateSelect(is_c, phi, f64c(0.0));
+                            sb_vals[c] = builder.CreateSelect(is_c, phi, rc(0.0));
                         }
                         builder.CreateBr(merge);
                     }
@@ -11455,7 +11817,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     builder.SetInsertPoint(merge);
                     CodeValue out = makeZero(shape);
                     for (std::size_t c = 0; c < vd; ++c) {
-                        auto* phi = builder.CreatePHI(f64, 2, "trial.phi" + std::to_string(c));
+                        auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "trial.phi" + std::to_string(c));
                         phi->addIncoming(vb_vals[c], vb_block);
                         phi->addIncoming(sb_vals[c], sb_block);
                         out.elems[c] = phi;
@@ -11485,7 +11847,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            for (std::size_t r = 0; r < vd; ++r) {
 	                                auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
 	                                for (std::size_t d = 0; d < dim; ++d) {
-	                                    out.elems[r * dim + d] = builder.CreateSelect(is_r, g[d], f64c(0.0));
+	                                    out.elems[r * dim + d] = builder.CreateSelect(is_r, g[d], rc(0.0));
 	                                }
 	                            }
 	                            return out;
@@ -11513,8 +11875,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                        return terms;
 		                                    });
 		                                auto* x = sums[0];
-		                                auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
-		                                auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+		                                auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+		                                auto* z = (dim > 2u) ? sums[2] : rc(0.0);
 		                                return makeVector(shape.dims[0], x, y, z);
 		                            }
 		                            if (shape.kind == Shape::Kind::Matrix) {
@@ -11563,7 +11925,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            for (std::size_t r = 0; r < vd; ++r) {
 	                                auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
 	                                for (std::size_t d = 0; d < dim; ++d) {
-	                                    out.elems[r * dim + d] = builder.CreateSelect(is_r, g[d], f64c(0.0));
+	                                    out.elems[r * dim + d] = builder.CreateSelect(is_r, g[d], rc(0.0));
 	                                }
 	                            }
 	                            return out;
@@ -11590,8 +11952,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                    return terms;
 		                                });
 		                            auto* x = sums[0];
-		                            auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
-		                            auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+		                            auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+		                            auto* z = (dim > 2u) ? sums[2] : rc(0.0);
 		                            return makeVector(shape.dims[0], x, y, z);
 		                        }
 		                        if (shape.kind == Shape::Kind::Matrix) {
@@ -11647,8 +12009,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                        return terms;
 		                                    });
 		                                auto* x = sums[0];
-		                                auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
-		                                auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+		                                auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+		                                auto* z = (dim > 2u) ? sums[2] : rc(0.0);
 		                                return makeVector(shape.dims[0], x, y, z);
 		                            }
 		                            if (shape.kind == Shape::Kind::Matrix) {
@@ -11690,7 +12052,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             builder.CreateCondBr(entry_is_null, zero, ok);
 
-                            std::array<llvm::Value*, 3> loaded{f64c(0.0), f64c(0.0), f64c(0.0)};
+                            std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
                             builder.SetInsertPoint(ok);
                             auto* base = loadPtr(entry, ABIV3::field_entry_gradients_xyz_off);
                             auto* base_is_null =
@@ -11709,11 +12071,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             auto* zero_block = builder.GetInsertBlock();
 
 	                            builder.SetInsertPoint(merge);
-	                            std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                            std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
 	                            const auto dim = static_cast<std::size_t>(shape.dims[0]);
 	                            for (std::size_t d = 0; d < dim; ++d) {
-	                                auto* phi = builder.CreatePHI(f64, 2, "field_grad.v" + std::to_string(d));
-	                                phi->addIncoming(f64c(0.0), zero_block);
+	                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_grad.v" + std::to_string(d));
+	                                phi->addIncoming(rc(0.0), zero_block);
 	                                phi->addIncoming(loaded[d], ok2_block);
 	                                outv[d] = phi;
 	                            }
@@ -11752,10 +12114,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            CodeValue out = makeZero(shape);
 	                            for (std::size_t r = 0; r < vd; ++r) {
 	                                for (std::size_t c = 0; c < dim; ++c) {
-	                                    auto* phi = builder.CreatePHI(f64, 2, "field_jac.a");
-	                                    phi->addIncoming(f64c(0.0), zero_block);
+	                                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_jac.a");
+	                                    phi->addIncoming(rc(0.0), zero_block);
 	                                    auto* l =
-	                                        (r < 3u && c < 3u) ? loaded.elems[r * 3u + c] : f64c(0.0);
+	                                        (r < 3u && c < 3u) ? loaded.elems[r * 3u + c] : rc(0.0);
 	                                    phi->addIncoming(l, ok2_block);
 	                                    out.elems[r * dim + c] = phi;
 	                                }
@@ -11791,7 +12153,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                for (std::size_t r = 0; r < vd; ++r) {
 	                                    auto* is_r = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(r)));
 	                                    for (std::size_t d = 0; d < dim; ++d) {
-	                                        g.elems[r * dim + d] = builder.CreateSelect(is_r, gg[d], f64c(0.0));
+	                                        g.elems[r * dim + d] = builder.CreateSelect(is_r, gg[d], rc(0.0));
 	                                    }
 	                                }
 	                                return g;
@@ -11817,8 +12179,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                        return terms;
 		                                    });
 		                                auto* x = sums[0];
-		                                auto* y = (dim > 1u) ? sums[1] : f64c(0.0);
-		                                auto* z = (dim > 2u) ? sums[2] : f64c(0.0);
+		                                auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+		                                auto* z = (dim > 2u) ? sums[2] : rc(0.0);
 		                                return makeVector(shape.dims[0], x, y, z);
 		                            }
 		                            if (shape.kind == Shape::Kind::Matrix) {
@@ -11862,7 +12224,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                                 builder.CreateCondBr(entry_is_null, zero, ok);
 
-                                std::array<llvm::Value*, 3> loaded{f64c(0.0), f64c(0.0), f64c(0.0)};
+                                std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
                                 builder.SetInsertPoint(ok);
                                 auto* base = loadPtr(entry, ABIV3::field_entry_gradients_xyz_off);
                                 auto* base_is_null =
@@ -11881,11 +12243,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 auto* zero_block = builder.GetInsertBlock();
 
 	                                builder.SetInsertPoint(merge);
-	                                std::array<llvm::Value*, 3> outv{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                                std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
 	                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
 	                                for (std::size_t d = 0; d < dim; ++d) {
-	                                    auto* phi = builder.CreatePHI(f64, 2, "field_dt_grad.v" + std::to_string(d));
-	                                    phi->addIncoming(f64c(0.0), zero_block);
+	                                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_dt_grad.v" + std::to_string(d));
+	                                    phi->addIncoming(rc(0.0), zero_block);
 	                                    phi->addIncoming(loaded[d], ok2_block);
 	                                    outv[d] = phi;
 	                                }
@@ -11924,10 +12286,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                CodeValue out = makeZero(shape);
 	                                for (std::size_t r = 0; r < vd; ++r) {
 	                                    for (std::size_t c = 0; c < dim; ++c) {
-	                                        auto* phi = builder.CreatePHI(f64, 2, "field_dt_jac.a");
-	                                        phi->addIncoming(f64c(0.0), zero_block);
+	                                        auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_dt_jac.a");
+	                                        phi->addIncoming(rc(0.0), zero_block);
 	                                        auto* l =
-	                                            (r < 3u && c < 3u) ? loaded.elems[r * 3u + c] : f64c(0.0);
+	                                            (r < 3u && c < 3u) ? loaded.elems[r * 3u + c] : rc(0.0);
 	                                        phi->addIncoming(l, ok2_block);
 	                                        out.elems[r * dim + c] = phi;
 	                                    }
@@ -11971,7 +12333,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                        auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
 	                        const auto g = loadVec3FromTableQMajor(grads_xyz, n_dofs, dof_index, q_index);
-	                        llvm::Value* out = f64c(0.0);
+	                        llvm::Value* out = rc(0.0);
 	                        if (vd >= 1) {
 	                            out = builder.CreateSelect(builder.CreateICmpEQ(comp, builder.getInt32(0)), g[0], out);
 	                        }
@@ -11985,7 +12347,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     };
 
                     auto divTest = [&]() -> llvm::Value* {
-                        if (is_plus != test_active_plus) return f64c(0.0);
+                        if (is_plus != test_active_plus) return rc(0.0);
 
                         auto* uses_vec_basis = builder.CreateICmpNE(side.test_uses_vector_basis, builder.getInt32(0));
                         auto* vb = llvm::BasicBlock::Create(*ctx, "div.test.vec_basis", fn);
@@ -11994,27 +12356,27 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-                        llvm::Value* v_vb = f64c(0.0);
+                        llvm::Value* v_vb = rc(0.0);
                         builder.SetInsertPoint(vb);
                         v_vb = loadBasisScalar(side.test_basis_divs, side.n_test_dofs, i_index, q_index);
                         builder.CreateBr(merge);
                         auto* vb_block = builder.GetInsertBlock();
 
-                        llvm::Value* v_sb = f64c(0.0);
+                        llvm::Value* v_sb = rc(0.0);
                         builder.SetInsertPoint(sb);
                         v_sb = divScalarBasis(side.n_test_dofs, i_index, side.test_phys_grads_xyz);
                         builder.CreateBr(merge);
                         auto* sb_block = builder.GetInsertBlock();
 
                         builder.SetInsertPoint(merge);
-                        auto* phi = builder.CreatePHI(f64, 2, "div.test");
+                        auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "div.test");
                         phi->addIncoming(v_vb, vb_block);
                         phi->addIncoming(v_sb, sb_block);
                         return phi;
                     };
 
                     auto divTrial = [&]() -> llvm::Value* {
-                        if (is_plus != trial_active_plus) return f64c(0.0);
+                        if (is_plus != trial_active_plus) return rc(0.0);
 
                         auto* uses_vec_basis = builder.CreateICmpNE(side.trial_uses_vector_basis, builder.getInt32(0));
                         auto* vb = llvm::BasicBlock::Create(*ctx, "div.trial.vec_basis", fn);
@@ -12023,20 +12385,20 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-                        llvm::Value* v_vb = f64c(0.0);
+                        llvm::Value* v_vb = rc(0.0);
                         builder.SetInsertPoint(vb);
                         v_vb = loadBasisScalar(side.trial_basis_divs, side.n_trial_dofs, j_index, q_index);
                         builder.CreateBr(merge);
                         auto* vb_block = builder.GetInsertBlock();
 
-                        llvm::Value* v_sb = f64c(0.0);
+                        llvm::Value* v_sb = rc(0.0);
                         builder.SetInsertPoint(sb);
                         v_sb = divScalarBasis(side.n_trial_dofs, j_index, side.trial_phys_grads_xyz);
                         builder.CreateBr(merge);
                         auto* sb_block = builder.GetInsertBlock();
 
                         builder.SetInsertPoint(merge);
-                        auto* phi = builder.CreatePHI(f64, 2, "div.trial");
+                        auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "div.trial");
                         phi->addIncoming(v_vb, vb_block);
                         phi->addIncoming(v_sb, sb_block);
                         return phi;
@@ -12051,7 +12413,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-		                        llvm::Value* div_vb = f64c(0.0);
+		                        llvm::Value* div_vb = rc(0.0);
 		                        builder.SetInsertPoint(vb);
 		                        {
 		                            div_vb = emitReduceSumScalar(side.n_trial_dofs, "div_u_vb", [&](llvm::Value* j) -> llvm::Value* {
@@ -12064,7 +12426,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        }
 	                        auto* vb_block = builder.GetInsertBlock();
 
-		                        llvm::Value* div_sb = f64c(0.0);
+		                        llvm::Value* div_sb = rc(0.0);
 		                        builder.SetInsertPoint(sb);
 		                        {
 		                            div_sb = emitReduceSumScalar(
@@ -12079,7 +12441,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        auto* sb_block = builder.GetInsertBlock();
 
                         builder.SetInsertPoint(merge);
-                        auto* phi = builder.CreatePHI(f64, 2, "div.u");
+                        auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "div.u");
                         phi->addIncoming(div_vb, vb_block);
                         phi->addIncoming(div_sb, sb_block);
                         return phi;
@@ -12096,7 +12458,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
 		                        auto* dofs_per_comp =
 		                            builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-		                        llvm::Value* div = f64c(0.0);
+		                        llvm::Value* div = rc(0.0);
 		                        for (std::size_t comp = 0; comp < vd; ++comp) {
 		                            auto* acc = emitReduceSumScalar(
 		                                dofs_per_comp,
@@ -12128,7 +12490,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         builder.CreateCondBr(entry_is_null, zero, ok);
 
-                        llvm::Value* div = f64c(0.0);
+                        llvm::Value* div = rc(0.0);
                         builder.SetInsertPoint(ok);
                         auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
                         auto* base_is_null =
@@ -12149,8 +12511,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         auto* zero_block = builder.GetInsertBlock();
 
                         builder.SetInsertPoint(merge);
-                        auto* phi = builder.CreatePHI(f64, 2, "field_div");
-                        phi->addIncoming(f64c(0.0), zero_block);
+                        auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_div");
+                        phi->addIncoming(rc(0.0), zero_block);
                         phi->addIncoming(div, ok2_block);
                         return makeScalar(phi);
                     }
@@ -12180,7 +12542,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             builder.CreateCondBr(entry_is_null, zero, ok);
 
-                            llvm::Value* div = f64c(0.0);
+                            llvm::Value* div = rc(0.0);
                             builder.SetInsertPoint(ok);
                             auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
                             auto* base_is_null =
@@ -12202,20 +12564,20 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             auto* zero_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
-                            auto* phi = builder.CreatePHI(f64, 2, "field_dt_div");
-                            phi->addIncoming(f64c(0.0), zero_block);
+                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_dt_div");
+                            phi->addIncoming(rc(0.0), zero_block);
                             phi->addIncoming(div, ok2_block);
                             return makeScalar(phi);
                         }
 
                         if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
-                            return makeScalar(f64c(0.0));
+                            return makeScalar(rc(0.0));
                         }
 
                         throw std::runtime_error("LLVMGen: div(dt(...)) operand not supported");
                     }
                     if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
-                        return makeScalar(f64c(0.0));
+                        return makeScalar(rc(0.0));
                     }
                     throw std::runtime_error("LLVMGen: Divergence operand not supported");
                 };
@@ -12231,9 +12593,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                        auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
 	                        const auto g = loadVec3FromTableQMajor(grads_xyz, n_dofs, dof_index, q_index);
-	                        llvm::Value* x = f64c(0.0);
-	                        llvm::Value* y = f64c(0.0);
-	                        llvm::Value* z = f64c(0.0);
+	                        llvm::Value* x = rc(0.0);
+	                        llvm::Value* y = rc(0.0);
+	                        llvm::Value* z = rc(0.0);
 	                        if (vd >= 1) {
 	                            auto* is0 = builder.CreateICmpEQ(comp, builder.getInt32(0));
 	                            y = builder.CreateSelect(is0, g[2], y);
@@ -12262,22 +12624,22 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-                        std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+                        std::array<llvm::Value*, 3> vb_vals{rc(0.0), rc(0.0), rc(0.0)};
                         builder.SetInsertPoint(vb);
                         vb_vals = loadVec3FromTable(side.test_basis_curls_xyz, side.n_test_dofs, i_index, q_index);
                         builder.CreateBr(merge);
                         auto* vb_block = builder.GetInsertBlock();
 
-                        std::array<llvm::Value*, 3> sb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+                        std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
                         builder.SetInsertPoint(sb);
                         sb_vals = curlScalarBasis(side.n_test_dofs, i_index, side.test_phys_grads_xyz);
                         builder.CreateBr(merge);
                         auto* sb_block = builder.GetInsertBlock();
 
                         builder.SetInsertPoint(merge);
-                        std::array<llvm::Value*, 3> out{f64c(0.0), f64c(0.0), f64c(0.0)};
+                        std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
                         for (std::size_t d = 0; d < 3; ++d) {
-                            auto* phi = builder.CreatePHI(f64, 2, "curl.test." + std::to_string(d));
+                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "curl.test." + std::to_string(d));
                             phi->addIncoming(vb_vals[d], vb_block);
                             phi->addIncoming(sb_vals[d], sb_block);
                             out[d] = phi;
@@ -12295,22 +12657,22 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-                        std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+                        std::array<llvm::Value*, 3> vb_vals{rc(0.0), rc(0.0), rc(0.0)};
                         builder.SetInsertPoint(vb);
                         vb_vals = loadVec3FromTable(side.trial_basis_curls_xyz, side.n_trial_dofs, j_index, q_index);
                         builder.CreateBr(merge);
                         auto* vb_block = builder.GetInsertBlock();
 
-                        std::array<llvm::Value*, 3> sb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+                        std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
                         builder.SetInsertPoint(sb);
                         sb_vals = curlScalarBasis(side.n_trial_dofs, j_index, side.trial_phys_grads_xyz);
                         builder.CreateBr(merge);
                         auto* sb_block = builder.GetInsertBlock();
 
                         builder.SetInsertPoint(merge);
-                        std::array<llvm::Value*, 3> out{f64c(0.0), f64c(0.0), f64c(0.0)};
+                        std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
                         for (std::size_t d = 0; d < 3; ++d) {
-                            auto* phi = builder.CreatePHI(f64, 2, "curl.trial." + std::to_string(d));
+                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "curl.trial." + std::to_string(d));
                             phi->addIncoming(vb_vals[d], vb_block);
                             phi->addIncoming(sb_vals[d], sb_block);
                             out[d] = phi;
@@ -12327,7 +12689,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         builder.CreateCondBr(uses_vec_basis, vb, sb);
 
-	                        std::array<llvm::Value*, 3> vb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                        std::array<llvm::Value*, 3> vb_vals{rc(0.0), rc(0.0), rc(0.0)};
 	                        builder.SetInsertPoint(vb);
 	                        {
 	                            const auto sums = emitReduceSum(side.n_trial_dofs, "curl_u_vb", 3u, [&](llvm::Value* j) {
@@ -12347,7 +12709,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        }
 	                        auto* vb_block = builder.GetInsertBlock();
 
-	                        std::array<llvm::Value*, 3> sb_vals{f64c(0.0), f64c(0.0), f64c(0.0)};
+	                        std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
 	                        builder.SetInsertPoint(sb);
 	                        {
 	                            const auto sums = emitReduceSum(side.n_trial_dofs, "curl_u_sb", 3u, [&](llvm::Value* j) {
@@ -12367,9 +12729,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        auto* sb_block = builder.GetInsertBlock();
 
                         builder.SetInsertPoint(merge);
-                        std::array<llvm::Value*, 3> out{f64c(0.0), f64c(0.0), f64c(0.0)};
+                        std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
                         for (std::size_t d = 0; d < 3; ++d) {
-                            auto* phi = builder.CreatePHI(f64, 2, "curl.u." + std::to_string(d));
+                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "curl.u." + std::to_string(d));
                             phi->addIncoming(vb_vals[d], vb_block);
                             phi->addIncoming(sb_vals[d], sb_block);
                             out[d] = phi;
@@ -12397,7 +12759,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         builder.CreateCondBr(entry_is_null, zero, ok);
 
-                        std::array<llvm::Value*, 3> c{f64c(0.0), f64c(0.0), f64c(0.0)};
+                        std::array<llvm::Value*, 3> c{rc(0.0), rc(0.0), rc(0.0)};
                         builder.SetInsertPoint(ok);
                         auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
                         auto* base_is_null =
@@ -12408,7 +12770,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         builder.SetInsertPoint(ok2);
                         const auto J = loadMat3FromQ(base, q_index);
                         auto d = [&](std::size_t comp, std::size_t wrt) -> llvm::Value* {
-                            if (comp >= vd || comp >= 3u || wrt >= 3u) return f64c(0.0);
+                            if (comp >= vd || comp >= 3u || wrt >= 3u) return rc(0.0);
                             return J.elems[comp * 3 + wrt];
                         };
                         c[0] = builder.CreateFSub(d(2, 1), d(1, 2));
@@ -12422,10 +12784,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         auto* zero_block = builder.GetInsertBlock();
 
                         builder.SetInsertPoint(merge);
-                        std::array<llvm::Value*, 3> out{f64c(0.0), f64c(0.0), f64c(0.0)};
+                        std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
                         for (std::size_t d0 = 0; d0 < 3; ++d0) {
-                            auto* phi = builder.CreatePHI(f64, 2, "field_curl." + std::to_string(d0));
-                            phi->addIncoming(f64c(0.0), zero_block);
+                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_curl." + std::to_string(d0));
+                            phi->addIncoming(rc(0.0), zero_block);
                             phi->addIncoming(c[d0], ok2_block);
                             out[d0] = phi;
                         }
@@ -12439,7 +12801,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         std::array<std::array<llvm::Value*, 3>, 3> J{};
                         for (auto& row : J) {
-                            row = {f64c(0.0), f64c(0.0), f64c(0.0)};
+                            row = {rc(0.0), rc(0.0), rc(0.0)};
                         }
 
 	                        for (std::size_t comp = 0; comp < std::min<std::size_t>(vd, 3u); ++comp) {
@@ -12495,7 +12857,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             builder.CreateCondBr(entry_is_null, zero, ok);
 
-                            std::array<llvm::Value*, 3> c{f64c(0.0), f64c(0.0), f64c(0.0)};
+                            std::array<llvm::Value*, 3> c{rc(0.0), rc(0.0), rc(0.0)};
                             builder.SetInsertPoint(ok);
                             auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
                             auto* base_is_null =
@@ -12506,7 +12868,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             builder.SetInsertPoint(ok2);
                             const auto J = loadMat3FromQ(base, q_index);
                             auto d = [&](std::size_t comp, std::size_t wrt) -> llvm::Value* {
-                                if (comp >= vd || comp >= 3u || wrt >= 3u) return f64c(0.0);
+                                if (comp >= vd || comp >= 3u || wrt >= 3u) return rc(0.0);
                                 return J.elems[comp * 3 + wrt];
                             };
                             c[0] = builder.CreateFSub(d(2, 1), d(1, 2));
@@ -12523,10 +12885,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             auto* zero_block = builder.GetInsertBlock();
 
                             builder.SetInsertPoint(merge);
-                            std::array<llvm::Value*, 3> out{f64c(0.0), f64c(0.0), f64c(0.0)};
+                            std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
                             for (std::size_t d0 = 0; d0 < 3; ++d0) {
-                                auto* phi = builder.CreatePHI(f64, 2, "field_dt_curl." + std::to_string(d0));
-                                phi->addIncoming(f64c(0.0), zero_block);
+                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_dt_curl." + std::to_string(d0));
+                                phi->addIncoming(rc(0.0), zero_block);
                                 phi->addIncoming(c[d0], ok2_block);
                                 out[d0] = phi;
                             }
@@ -12628,8 +12990,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        builder.SetInsertPoint(merge);
 	                        CodeValue out = matZero();
 	                        for (std::size_t i = 0; i < mat_len; ++i) {
-	                            auto* phi = builder.CreatePHI(f64, 2, "field_hess." + std::to_string(i));
-	                            phi->addIncoming(f64c(0.0), zero_block);
+	                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_hess." + std::to_string(i));
+	                            phi->addIncoming(rc(0.0), zero_block);
 	                            phi->addIncoming(loaded.elems[i], ok2_block);
 	                            out.elems[i] = phi;
 	                        }
@@ -12685,8 +13047,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            builder.SetInsertPoint(merge);
 	                            CodeValue out = matZero();
 	                            for (std::size_t i = 0; i < mat_len; ++i) {
-	                                auto* phi = builder.CreatePHI(f64, 2, "field_dt_hess." + std::to_string(i));
-	                                phi->addIncoming(f64c(0.0), zero_block);
+	                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_dt_hess." + std::to_string(i));
+	                                phi->addIncoming(rc(0.0), zero_block);
 	                                phi->addIncoming(loaded.elems[i], ok2_block);
 	                                out.elems[i] = phi;
 	                            }
@@ -12723,7 +13085,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         }
                         case FormExprType::Constant: {
                             const double v = std::bit_cast<double>(op.imm0);
-                            const auto cv = makeScalar(f64c(v));
+                            const auto cv = makeScalar(rc(v));
                             values_minus[op_idx] = cv;
                             values_plus[op_idx] = cv;
                             break;
@@ -12920,7 +13282,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             CodeValue out = makeZero(shape);
                             const auto n = static_cast<std::size_t>(shape.dims[0]);
                             for (std::size_t d = 0; d < n; ++d) {
-                                out.elems[d * n + d] = f64c(1.0);
+                                out.elems[d * n + d] = rc(1.0);
                             }
                             values_minus[op_idx] = out;
                             values_plus[op_idx] = out;
@@ -13033,7 +13395,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         case FormExprType::Average: {
                             const auto child = childIndex(op, 0);
-                            const auto out = mul(makeScalar(f64c(0.5)), add(values_minus[child], values_plus[child]));
+                            const auto out = mul(makeScalar(rc(0.5)), add(values_minus[child], values_plus[child]));
                             values_minus[op_idx] = out;
                             values_plus[op_idx] = out;
                             break;
@@ -13804,8 +14166,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     builder.SetInsertPoint(header);
                     auto* idx_phi = builder.CreatePHI(i32, 2, "fidx" + std::to_string(level));
                     idx_phi->addIncoming(builder.getInt32(0), preheader);
-                    auto* acc_phi = builder.CreatePHI(f64, 2, "fidx.acc" + std::to_string(level));
-                    acc_phi->addIncoming(f64c(0.0), preheader);
+                    auto* acc_phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "fidx.acc" + std::to_string(level));
+                    acc_phi->addIncoming(rc(0.0), preheader);
                     auto* cond = builder.CreateICmpULT(idx_phi, builder.getInt32(extent));
                     builder.CreateCondBr(cond, body, exit);
 
@@ -13868,7 +14230,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         builder.CreateBr(term_entry);
                         builder.SetInsertPoint(term_entry);
                         auto* tw = termWeight(side_eval, terms[t].time_derivative_order);
-                        auto* is_zero = builder.CreateFCmpOEQ(tw, f64c(0.0));
+                        // Term weights are batch-invariant. Extract lane 0 for
+                        // scalar branch condition when SIMD is active.
+                        auto* tw_scalar = simd_active
+                            ? builder.CreateExtractElement(tw, static_cast<uint64_t>(0))
+                            : tw;
+                        auto* is_zero = builder.CreateFCmpOEQ(tw_scalar, llvm::ConstantFP::get(f64, 0.0));
                         builder.CreateCondBr(is_zero, term_end, term_body);
 
                         builder.SetInsertPoint(term_body);
@@ -13946,7 +14313,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         builder.CreateBr(term_entry);
                         builder.SetInsertPoint(term_entry);
                         auto* tw = termWeight(side_eval, terms[t].time_derivative_order);
-                        auto* is_zero = builder.CreateFCmpOEQ(tw, f64c(0.0));
+                        // Term weights are batch-invariant. Extract lane 0 for
+                        // scalar branch condition when SIMD is active.
+                        auto* tw_scalar = simd_active
+                            ? builder.CreateExtractElement(tw, static_cast<uint64_t>(0))
+                            : tw;
+                        auto* is_zero = builder.CreateFCmpOEQ(tw_scalar, llvm::ConstantFP::get(f64, 0.0));
                         builder.CreateCondBr(is_zero, term_end, term_body);
 
                         builder.SetInsertPoint(term_body);
@@ -13990,7 +14362,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         }
 
         auto* body_end = builder.GetInsertBlock();
-        auto* b_next = builder.CreateAdd(b_idx, builder.getInt32(1));
+        auto* b_next = builder.CreateAdd(b_idx, builder.getInt32(use_simd_batch ? simd_w : 1u));
         b_idx->addIncoming(b_next, body_end);
         auto* batch_backedge = builder.CreateBr(batch_hdr);
 
