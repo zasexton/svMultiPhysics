@@ -10,6 +10,7 @@
 #include "Core/FEException.h"
 #include "Core/Logger.h"
 #include "Forms/JIT/ExternalCalls.h"
+#include "Forms/JIT/HardwareProfile.h"
 #include "Forms/JIT/LLVMJITBuildInfo.h"
 #include "Forms/Tensor/SpectralEigen.h"
 
@@ -576,11 +577,19 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
 
     const llvm::OptimizationLevel llvm_opt_level = toLLVMOptLevel(sanitized_opt_level);
 
+    // Detect whether to use target-aware optimization pipeline.
+    // On AVX-512 / AArch64 (32+ FP registers), target-aware PassBuilder
+    // enables register-count-aware vectorization decisions and proper
+    // cost modeling.  On mobile x86-64 (16 XMM regs), PassBuilder(nullptr)
+    // avoids AVX2 frequency throttling.
+    const bool use_target_aware = hardwareProfile().target_aware_pipeline;
+
     llvm::orc::IRTransformLayer::TransformFunction transform =
         [llvm_opt_level,
          vectorize = options.vectorize,
          dump_optimized = options.dump_llvm_ir_optimized,
-         dump_directory = options.dump_directory](llvm::orc::ThreadSafeModule tsm,
+         dump_directory = options.dump_directory,
+         use_target_aware](llvm::orc::ThreadSafeModule tsm,
                                                   llvm::orc::MaterializationResponsibility& /*responsibility*/)
             -> llvm::Expected<llvm::orc::ThreadSafeModule> {
         tsm.withModuleDo([&](llvm::Module& module) {
@@ -609,11 +618,24 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
             // nested QP×test×trial loops creates massive code that thrashes icache.
             tuning_options.LoopUnrolling = false;
 
+            // Create target machine for target-aware optimization when enabled.
+            // On AVX-512 / AArch64, this enables proper register count awareness,
+            // vectorization width selection, and cost-model-based SLP decisions.
+            std::unique_ptr<llvm::TargetMachine> opt_tm;
+            if (use_target_aware) {
+                auto jtmb = llvm::orc::JITTargetMachineBuilder::detectHost();
+                if (jtmb) {
+                    auto tm = jtmb->createTargetMachine();
+                    if (tm) opt_tm = std::move(*tm);
+                }
+            }
+            llvm::TargetMachine* tm_ptr = opt_tm.get(); // nullptr if not target-aware
+
             // "Lite" pipeline for large fused kernels: fast O(n) passes only.
             // Promotes allocas to registers, simplifies instructions, eliminates
             // dead code.  Avoids quadratic passes (GVN, LICM) that choke on ~30K IR.
             if (effective_opt_int == -1) {
-                llvm::PassBuilder pass_builder(nullptr, tuning_options);
+                llvm::PassBuilder pass_builder(tm_ptr, tuning_options);
                 pass_builder.registerModuleAnalyses(module_analysis_manager);
                 pass_builder.registerCGSCCAnalyses(cgscc_analysis_manager);
                 pass_builder.registerFunctionAnalyses(function_analysis_manager);
@@ -641,7 +663,7 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
                     ? toLLVMOptLevel(effective_opt_int) : llvm_opt_level;
 
             if constexpr (requires(llvm::PipelineTuningOptions opts) { llvm::PassBuilder(nullptr, opts); }) {
-                llvm::PassBuilder pass_builder(nullptr, tuning_options);
+                llvm::PassBuilder pass_builder(tm_ptr, tuning_options);
 
                 pass_builder.registerModuleAnalyses(module_analysis_manager);
                 pass_builder.registerCGSCCAnalyses(cgscc_analysis_manager);
@@ -665,7 +687,7 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
                 return;
             }
 
-            llvm::PassBuilder pass_builder(nullptr, tuning_options);
+            llvm::PassBuilder pass_builder(tm_ptr, tuning_options);
             pass_builder.registerModuleAnalyses(module_analysis_manager);
             pass_builder.registerCGSCCAnalyses(cgscc_analysis_manager);
             pass_builder.registerFunctionAnalyses(function_analysis_manager);
@@ -922,10 +944,17 @@ std::unique_ptr<JITEngine> JITEngine::create(const JITOptions& options)
             configureObjectCache(engine->impl_->jit->getIRCompileLayer(), engine->impl_->object_cache.get());
         }
 
-        FE_LOG_INFO("LLVM JIT: OrcJIT initialized (LLVM " + llvmVersionString() +
-                    ", triple=" + engine->impl_->target_triple +
-                    ", opt=" + std::to_string(sanitizeOptLevel(options.optimization_level)) +
-                    ", vectorize=" + std::string(options.vectorize ? "true" : "false") + ")");
+        {
+            const auto& hw = hardwareProfile();
+            FE_LOG_INFO("LLVM JIT: OrcJIT initialized (LLVM " + llvmVersionString() +
+                        ", triple=" + engine->impl_->target_triple +
+                        ", opt=" + std::to_string(sanitizeOptLevel(options.optimization_level)) +
+                        ", vectorize=" + std::string(options.vectorize ? "true" : "false") +
+                        ", fp_regs=" + std::to_string(hw.fp_register_count) +
+                        ", simd=" + std::to_string(hw.simd_width_bytes * 8) + "b" +
+                        ", target_aware=" + std::string(hw.target_aware_pipeline ? "true" : "false") +
+                        ", max_fused_terms=" + std::to_string(hw.maxFusedTerms()) + ")");
+        }
 
         return engine;
     } catch (const std::exception& e) {

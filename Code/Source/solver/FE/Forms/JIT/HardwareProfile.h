@@ -35,6 +35,10 @@ struct HardwareProfile {
     CacheLevel l2{};                // L2 cache (per-core or shared)
     CacheLevel l3{};                // L3 / LLC (package-wide)
     std::uint32_t simd_width_bytes{16};  // SIMD register width (SSE2=16, AVX2=32, AVX-512=64)
+    std::uint32_t fp_register_count{16}; // Number of FP/SIMD registers (x86-64=16, AVX-512=32)
+    bool target_aware_pipeline{false};   // Pass TargetMachine to LLVM PassBuilder for
+                                         // target-specific vectorization/cost decisions.
+                                         // Safe on server CPUs; disabled on mobile (throttling).
 
     // ----- Derived budgets -----
 
@@ -146,6 +150,22 @@ struct HardwareProfile {
         return l1i.size_bytes * 3u;  // 96KB for 32KB L1i
     }
 
+    /// Maximum number of terms that can be fused into a single DOF loop.
+    /// Fusion puts all terms' trial-only values (~10 per term) live across
+    /// the test DOF loop.  With N terms × 10 values, the register allocator
+    /// spills values exceeding the FP register count.  Spill overhead >
+    /// CSE savings when spills exceed ~30% of live values.
+    /// Returns 0 to disable fusion (when register pressure is too high).
+    [[nodiscard]] std::uint32_t maxFusedTerms() const noexcept
+    {
+        // ~10 trial-only values per term + ~6 registers for loop vars/scratch
+        // Available for trial values: fp_register_count - 6
+        // Max terms before spills: (fp_register_count - 6) / 10
+        if (fp_register_count <= 16u) return 0u; // 16 XMM: fusion never profitable
+        const auto available = fp_register_count - 6u;
+        return available / 10u; // 32 ZMM → 2; 64 regs → 5
+    }
+
     /// Stable hash of the hardware profile fields that affect codegen decisions.
     /// Used to key JIT disk caches so that kernels compiled for one hardware
     /// profile are not reused on a different machine with different cache sizes.
@@ -159,6 +179,8 @@ struct HardwareProfile {
         mix(l2.size_bytes);
         mix(l3.size_bytes);
         mix(simd_width_bytes);
+        mix(fp_register_count);
+        mix(target_aware_pipeline ? 1u : 0u);
         return h;
     }
 

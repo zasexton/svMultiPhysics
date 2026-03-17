@@ -77,6 +77,43 @@ namespace {
 #endif
 }
 
+/// Detect number of FP/SIMD registers available.
+/// x86-64 baseline: 16 XMM/YMM registers.
+/// AVX-512: 32 ZMM registers (doubled register file).
+/// AArch64: 32 128-bit V registers.
+[[nodiscard]] std::uint32_t detectFPRegisterCount() noexcept
+{
+#if defined(__AVX512F__)
+    return 32;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return 32;
+#else
+    return 16; // x86-64 SSE2/AVX2 baseline
+#endif
+}
+
+/// Detect whether target-aware LLVM PassBuilder is safe on this CPU.
+/// Mobile Intel CPUs (i7-8xxxU, i7-10xxxU, etc.) throttle frequency
+/// when executing AVX2/AVX-512 instructions, causing net regressions.
+/// Server/desktop CPUs with fixed clock or proper thermal design
+/// benefit from target-aware vectorization and cost modeling.
+/// Default: enabled for AVX-512 CPUs (always server-class), disabled
+/// for AVX2-only (could be mobile). Override via SVMP_JIT_TARGET_AWARE.
+[[nodiscard]] bool detectTargetAwarePipeline() noexcept
+{
+    // Explicit override
+    if (const char* env = std::getenv("SVMP_JIT_TARGET_AWARE")) {
+        return env[0] == '1' || env[0] == 'y' || env[0] == 'Y';
+    }
+#if defined(__AVX512F__)
+    // AVX-512 CPUs are server/workstation class — safe for target-aware opts
+    return true;
+#else
+    // AVX2/SSE2: might be mobile with frequency throttling — conservative
+    return false;
+#endif
+}
+
 /// Read a single cache level from Linux sysfs.
 [[nodiscard]] CacheLevel readCacheIndex(int cpu, int index)
 {
@@ -121,6 +158,8 @@ namespace {
     hp.l2  = {256 * 1024, 64, 4};
     hp.l3  = {8 * 1024 * 1024, 64, 16};
     hp.simd_width_bytes = detectSimdWidth();
+    hp.fp_register_count = detectFPRegisterCount();
+    hp.target_aware_pipeline = detectTargetAwarePipeline();
     return hp;
 }
 
@@ -169,6 +208,8 @@ HardwareProfile discoverHardwareProfile()
     }
 
     hp.simd_width_bytes = detectSimdWidth();
+    hp.fp_register_count = detectFPRegisterCount();
+    hp.target_aware_pipeline = detectTargetAwarePipeline();
     return hp;
 }
 
