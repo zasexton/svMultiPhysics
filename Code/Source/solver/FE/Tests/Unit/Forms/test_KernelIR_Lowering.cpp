@@ -905,6 +905,409 @@ TEST(HardwareProfile, StableHashSameForIdenticalProfiles)
     EXPECT_EQ(a.stableHash64(), b.stableHash64());
 }
 
+// ============================================================================
+// Pass 1.3: Algebraic strength reduction tests
+// ============================================================================
+
+// --- Power specialization (Tier 1) ---
+
+TEST(KernelIRStrengthReduction, PowerTwo_BecomesMultiply)
+{
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(pow(x, FormExpr::constant(Real(2.0))));
+    r.ir.optimize();
+    const auto& root = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root.type, FormExprType::Multiply);
+    // Both children should be the same op (X * X)
+    const auto c0 = r.ir.children[root.first_child];
+    const auto c1 = r.ir.children[root.first_child + 1];
+    EXPECT_EQ(c0, c1);
+}
+
+TEST(KernelIRStrengthReduction, PowerHalf_BecomesSqrt)
+{
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(pow(x, FormExpr::constant(Real(0.5))));
+    r.ir.optimize();
+    EXPECT_EQ(r.ir.ops[r.ir.root].type, FormExprType::Sqrt);
+}
+
+TEST(KernelIRStrengthReduction, PowerMinusOne_BecomesDivide)
+{
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(pow(x, FormExpr::constant(Real(-1.0))));
+    r.ir.optimize();
+    const auto& root = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root.type, FormExprType::Divide);
+    // Numerator should be Constant(1.0)
+    const auto num = r.ir.children[root.first_child];
+    EXPECT_EQ(r.ir.ops[num].type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(r.ir.ops[num].imm0), 1.0);
+}
+
+TEST(KernelIRStrengthReduction, PowerMinusHalf_BecomesDivSqrt)
+{
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(pow(x, FormExpr::constant(Real(-0.5))));
+    ASSERT_FALSE(r.ir.ops.empty());
+    r.ir.optimize();
+    ASSERT_LT(r.ir.root, r.ir.ops.size());
+    const auto& root = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root.type, FormExprType::Divide);
+    if (root.type == FormExprType::Divide) {
+        const auto den = r.ir.children[root.first_child + 1];
+        EXPECT_EQ(r.ir.ops[den].type, FormExprType::Sqrt);
+    }
+}
+
+TEST(KernelIRStrengthReduction, PowerThree_BecomesMulMul)
+{
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(pow(x, FormExpr::constant(Real(3.0))));
+    r.ir.optimize();
+    const auto& root = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root.type, FormExprType::Multiply);
+    // One child should be Mul(X,X), the other should be X
+}
+
+TEST(KernelIRStrengthReduction, PowerFour_BecomesSqSq)
+{
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(pow(x, FormExpr::constant(Real(4.0))));
+    r.ir.optimize();
+    const auto& root = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root.type, FormExprType::Multiply);
+    // Both children should be the same Mul(X,X) op
+    const auto c0 = r.ir.children[root.first_child];
+    const auto c1 = r.ir.children[root.first_child + 1];
+    EXPECT_EQ(c0, c1);
+    EXPECT_EQ(r.ir.ops[c0].type, FormExprType::Multiply);
+}
+
+TEST(KernelIRStrengthReduction, PowerMinusTwo_BecomesDivMulMul)
+{
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(pow(x, FormExpr::constant(Real(-2.0))));
+    r.ir.optimize();
+    const auto& root = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root.type, FormExprType::Divide);
+}
+
+TEST(KernelIRStrengthReduction, PowerMinusThree)
+{
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(pow(x, FormExpr::constant(Real(-3.0))));
+    r.ir.optimize();
+    EXPECT_EQ(r.ir.ops[r.ir.root].type, FormExprType::Divide);
+}
+
+TEST(KernelIRStrengthReduction, PowerMinusFour)
+{
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(pow(x, FormExpr::constant(Real(-4.0))));
+    r.ir.optimize();
+    EXPECT_EQ(r.ir.ops[r.ir.root].type, FormExprType::Divide);
+}
+
+// --- Multiply/Divide by -1 (Tier 2) ---
+
+TEST(KernelIRStrengthReduction, MultiplyByMinusOne_Left_BecomesNegate)
+{
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(FormExpr::constant(Real(-1.0)) * x);
+    r.ir.optimize();
+    EXPECT_EQ(r.ir.ops[r.ir.root].type, FormExprType::Negate);
+}
+
+TEST(KernelIRStrengthReduction, MultiplyByMinusOne_Right_BecomesNegate)
+{
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(x * FormExpr::constant(Real(-1.0)));
+    r.ir.optimize();
+    EXPECT_EQ(r.ir.ops[r.ir.root].type, FormExprType::Negate);
+}
+
+TEST(KernelIRStrengthReduction, DivideByMinusOne_BecomesNegate)
+{
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(x / FormExpr::constant(Real(-1.0)));
+    r.ir.optimize();
+    EXPECT_EQ(r.ir.ops[r.ir.root].type, FormExprType::Negate);
+}
+
+// --- Divide by exact-reciprocal constant (Tier 2) ---
+
+TEST(KernelIRStrengthReduction, DivideByTwo_BecomesMultiplyByHalf)
+{
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(x / FormExpr::constant(Real(2.0)));
+    r.ir.optimize();
+    const auto& root = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root.type, FormExprType::Multiply);
+    // Second child should be Constant(0.5)
+    const auto c1 = r.ir.children[root.first_child + 1];
+    EXPECT_EQ(r.ir.ops[c1].type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(r.ir.ops[c1].imm0), 0.5);
+}
+
+TEST(KernelIRStrengthReduction, DivideByThree_BecomesMultiply)
+{
+    // 3.0 * (1.0/3.0) == 1.0 in double precision (IEEE754 rounding),
+    // so x/3 is rewritten to x*(1/3).
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(x / FormExpr::constant(Real(3.0)));
+    r.ir.optimize();
+    EXPECT_EQ(r.ir.ops[r.ir.root].type, FormExprType::Multiply);
+}
+
+TEST(KernelIRStrengthReduction, DivideBy49_StaysDivide)
+{
+    // 49.0 * (1.0/49.0) != 1.0 in double precision, so should NOT be rewritten
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(x / FormExpr::constant(Real(49.0)));
+    r.ir.optimize();
+    EXPECT_EQ(r.ir.ops[r.ir.root].type, FormExprType::Divide);
+}
+
+// --- Same-operand: NOT collapsed for NaN safety (Note 2) ---
+
+TEST(KernelIRStrengthReduction, SubtractSelf_NotCollapsed)
+{
+    // Sub(X,X) is NOT collapsed to 0 because X could be NaN or inf
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(x - x);
+    r.ir.optimize();
+    // Should remain as Subtract (or collapse via CSE to single ref, but NOT Constant(0))
+    // With CSE, both children reference the same ParameterRef, but the Subtract stays.
+    const auto& root = r.ir.ops[r.ir.root];
+    EXPECT_NE(root.type, FormExprType::Constant);
+}
+
+TEST(KernelIRStrengthReduction, DivideSelf_NotCollapsed)
+{
+    // Div(X,X) is NOT collapsed to 1 because X could be 0 or NaN
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(x / x);
+    r.ir.optimize();
+    const auto& root = r.ir.ops[r.ir.root];
+    EXPECT_NE(root.type, FormExprType::Constant);
+}
+
+// --- Add(X, Negate(X)) is NOT collapsed ---
+// KernelIR has no shape information; collapsing to TypedZero (unshaped)
+// would lose tensor rank for vector/matrix operands.
+
+TEST(KernelIRStrengthReduction, AddNegateX_NotCollapsed)
+{
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(x + (-x));
+    r.ir.optimize();
+    const auto& root = r.ir.ops[r.ir.root];
+    // Should remain as Add (LLVM folds element-wise)
+    EXPECT_EQ(root.type, FormExprType::Add);
+}
+
+// --- Tensor identities (Tier 4) ---
+// These tests build KernelIR manually with a matrix-typed leaf
+// (AsTensor) so the reductions are exercised on actual tensor ops,
+// not just scalar placeholders.
+
+namespace {
+/// Build a 2x2 AsTensor IR leaf from 4 ParameterRefs, then wrap it
+/// with the given unary op(s).  Returns the IR with root pointing to
+/// the outermost op.
+jit::KernelIR buildUnaryOnMatrix(std::initializer_list<FormExprType> chain)
+{
+    jit::KernelIR ir;
+    // 4 scalar leaves: p0..p3
+    for (int i = 0; i < 4; ++i) {
+        jit::KernelIROp p{};
+        p.type = FormExprType::ParameterRef;
+        p.imm0 = static_cast<std::uint64_t>(i);
+        ir.ops.push_back(p);
+    }
+    // AsTensor([p0,p1],[p2,p3]) — 4 children, imm0 encodes 2 rows
+    jit::KernelIROp at{};
+    at.type = FormExprType::AsTensor;
+    at.first_child = static_cast<std::uint32_t>(ir.children.size());
+    at.child_count = 4;
+    at.imm0 = 2; // n_rows
+    ir.ops.push_back(at);
+    ir.children.insert(ir.children.end(), {0, 1, 2, 3});
+
+    std::uint32_t prev = 4; // AsTensor index
+    for (auto ty : chain) {
+        jit::KernelIROp u{};
+        u.type = ty;
+        u.first_child = static_cast<std::uint32_t>(ir.children.size());
+        u.child_count = 1;
+        ir.ops.push_back(u);
+        ir.children.push_back(prev);
+        prev = static_cast<std::uint32_t>(ir.ops.size() - 1);
+    }
+    ir.root = prev;
+    return ir;
+}
+} // namespace
+
+TEST(KernelIRStrengthReduction, TransposeTranspose_Eliminated)
+{
+    auto ir = buildUnaryOnMatrix({FormExprType::Transpose, FormExprType::Transpose});
+    ir.optimize();
+    // Root should be the AsTensor (both Transposes eliminated)
+    EXPECT_EQ(ir.ops[ir.root].type, FormExprType::AsTensor);
+}
+
+TEST(KernelIRStrengthReduction, SymPartIdempotent)
+{
+    auto ir = buildUnaryOnMatrix({FormExprType::SymmetricPart, FormExprType::SymmetricPart});
+    ir.optimize();
+    const auto& root = ir.ops[ir.root];
+    EXPECT_EQ(root.type, FormExprType::SymmetricPart);
+    const auto child = ir.children[root.first_child];
+    EXPECT_EQ(ir.ops[child].type, FormExprType::AsTensor);
+}
+
+TEST(KernelIRStrengthReduction, SymOfTranspose_DropTranspose)
+{
+    auto ir = buildUnaryOnMatrix({FormExprType::Transpose, FormExprType::SymmetricPart});
+    ir.optimize();
+    const auto& root = ir.ops[ir.root];
+    EXPECT_EQ(root.type, FormExprType::SymmetricPart);
+    const auto child = ir.children[root.first_child];
+    EXPECT_EQ(ir.ops[child].type, FormExprType::AsTensor);
+}
+
+TEST(KernelIRStrengthReduction, TraceOfTranspose_DropTranspose)
+{
+    auto ir = buildUnaryOnMatrix({FormExprType::Transpose, FormExprType::Trace});
+    ir.optimize();
+    const auto& root = ir.ops[ir.root];
+    EXPECT_EQ(root.type, FormExprType::Trace);
+    const auto child = ir.children[root.first_child];
+    EXPECT_EQ(ir.ops[child].type, FormExprType::AsTensor);
+}
+
+TEST(KernelIRStrengthReduction, TraceOfSymPart_DropSymPart)
+{
+    auto ir = buildUnaryOnMatrix({FormExprType::SymmetricPart, FormExprType::Trace});
+    ir.optimize();
+    const auto& root = ir.ops[ir.root];
+    EXPECT_EQ(root.type, FormExprType::Trace);
+    const auto child = ir.children[root.first_child];
+    EXPECT_EQ(ir.ops[child].type, FormExprType::AsTensor);
+}
+
+TEST(KernelIRStrengthReduction, DetOfTranspose_DropTranspose)
+{
+    auto ir = buildUnaryOnMatrix({FormExprType::Transpose, FormExprType::Determinant});
+    ir.optimize();
+    const auto& root = ir.ops[ir.root];
+    EXPECT_EQ(root.type, FormExprType::Determinant);
+    const auto child = ir.children[root.first_child];
+    EXPECT_EQ(ir.ops[child].type, FormExprType::AsTensor);
+}
+
+TEST(KernelIRStrengthReduction, NegateSubtract_SwapsOperands)
+{
+    const auto a = FormExpr::parameterRef(0);
+    const auto b = FormExpr::parameterRef(1);
+    auto r = jit::lowerToKernelIR(-(a - b));
+    r.ir.optimize();
+    const auto& root = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root.type, FormExprType::Subtract);
+    // Children should be (b, a), not (a, b)
+    const auto c0 = r.ir.children[root.first_child];
+    const auto c1 = r.ir.children[root.first_child + 1];
+    EXPECT_EQ(r.ir.ops[c0].imm0, 1u); // ParameterRef(1) = b
+    EXPECT_EQ(r.ir.ops[c1].imm0, 0u); // ParameterRef(0) = a
+}
+
+// --- Compound rewrite via second sweep (Note 3) ---
+
+TEST(KernelIRStrengthReduction, DivideByMinusOne_CompoundToNegate)
+{
+    // x / (-1) should become Negate(x) directly (not Mul(x, -1))
+    const auto x = FormExpr::parameterRef(0);
+    auto r = jit::lowerToKernelIR(x / FormExpr::constant(Real(-1.0)));
+    r.ir.optimize();
+    EXPECT_EQ(r.ir.ops[r.ir.root].type, FormExprType::Negate);
+}
+
+// --- Inverse(Inverse) NOT collapsed (Note 2, FP safety) ---
+
+TEST(KernelIRStrengthReduction, InverseInverse_NotCollapsed)
+{
+    // Inverse(Inverse(X)) is NOT collapsed because Inverse of a singular
+    // matrix returns inf/NaN, and Inverse(inf) ≠ X.
+    // Build the IR manually: Inverse(Inverse(ParameterRef(0)))
+    jit::KernelIR ir;
+    jit::KernelIROp param{};
+    param.type = FormExprType::ParameterRef;
+    param.imm0 = 0;
+    ir.ops.push_back(param);
+
+    jit::KernelIROp inv1{};
+    inv1.type = FormExprType::Inverse;
+    inv1.first_child = static_cast<std::uint32_t>(ir.children.size());
+    inv1.child_count = 1;
+    ir.ops.push_back(inv1);
+    ir.children.push_back(0); // child = param
+
+    jit::KernelIROp inv2{};
+    inv2.type = FormExprType::Inverse;
+    inv2.first_child = static_cast<std::uint32_t>(ir.children.size());
+    inv2.child_count = 1;
+    ir.ops.push_back(inv2);
+    ir.children.push_back(1); // child = inv1
+
+    ir.root = 2;
+    ir.optimize();
+
+    // Should remain as Inverse (NOT collapsed to ParameterRef)
+    EXPECT_EQ(ir.ops[ir.root].type, FormExprType::Inverse);
+}
+
+// --- Factor extraction (Pass 1.5) ---
+
+TEST(KernelIRStrengthReduction, ConstantFactorExtraction_BasicAdd)
+{
+    // C*a + C*b → C*(a+b) when C is a constant
+    const auto a = FormExpr::parameterRef(0);
+    const auto b = FormExpr::parameterRef(1);
+    const auto c = FormExpr::constant(Real(3.14));
+    auto r = jit::lowerToKernelIR(c * a + c * b);
+    const auto before = r.ir.opCount();
+    r.ir.optimize();
+    // Should have fewer ops (one Multiply eliminated)
+    EXPECT_LT(r.ir.opCount(), before);
+    // Root should be Multiply(C, Add(a, b))
+    const auto& root = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root.type, FormExprType::Multiply);
+}
+
+TEST(KernelIRStrengthReduction, FactorExtraction_SingleUseOnly)
+{
+    // C*a + C*b where C*a is also used elsewhere — should NOT factor
+    const auto a = FormExpr::parameterRef(0);
+    const auto b = FormExpr::parameterRef(1);
+    const auto c = FormExpr::constant(Real(2.0));
+    const auto ca = c * a;
+    // ca used twice: in the Add and in an outer Multiply
+    auto r = jit::lowerToKernelIR((ca + c * b) * ca);
+    r.ir.optimize();
+    // Root should still be Multiply (factoring should NOT have happened
+    // because ca is multi-use)
+    EXPECT_EQ(r.ir.ops[r.ir.root].type, FormExprType::Multiply);
+}
+
+// --- kBytesPerOp updated default ---
+
+TEST(HardwareProfile, DefaultBytesPerOpIs300)
+{
+    EXPECT_EQ(jit::HardwareProfile::kBytesPerOp, 300u);
+}
+
 } // namespace test
 } // namespace forms
 } // namespace FE

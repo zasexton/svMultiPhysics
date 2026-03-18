@@ -684,12 +684,13 @@ std::size_t KernelIR::optimize()
 {
     if (ops.empty()) return 0;
 
-    const std::size_t n = ops.size();
-    const std::size_t original_count = n;
+    const std::size_t original_count = ops.size();
 
     // Pass 1: Zero propagation and constant folding (bottom-up, single pass).
     // Since ops are in post-order (children before parents), a single forward
     // scan propagates zeros/constants through the entire DAG.
+    {
+    const std::size_t n = ops.size();
     for (std::size_t i = 0; i < n; ++i) {
         auto& op = ops[i];
         if (op.child_count == 0u) continue;
@@ -933,13 +934,26 @@ std::size_t KernelIR::optimize()
         // in downstream ops (e.g. inner(AsVector(0,0,0), v) expects vector).
         // Keep the AsVector/AsTensor node; LLVM will fold fmul(0,x)→0 at IR level.
     }
+    } // end Pass 1 scope
 
     // Pass 1.3: Algebraic strength reduction.
     // Specializes expensive operations to cheaper equivalents.
-    // All rewrites are either FP-exact or produce at most ULP-level
-    // differences from compile-time constant reciprocals.
+    //
+    // Safety policy:
+    //   - Rewrites that are algebraic identities for all finite values
+    //     (Transpose², sym idempotence, Negate(Sub)) are always safe.
+    //   - Power specializations (pow→mul/sqrt/div) are safe because
+    //     llvm.pow already handles NaN/inf/zero the same way as the
+    //     replacement ops for these specific exponents.
+    //   - Rewrites that change behavior for NaN, inf, or zero inputs
+    //     (Sub(X,X)→0, Div(X,X)→1, Inv(Inv(X))→X, Log(Exp)→X,
+    //     Exp(Log)→X, Sqrt(X*X)→|X|) are NOT applied because the JIT
+    //     FP contract does not include no-nans or no-infs.
+    //
+    // The pass runs in a fixed-point loop (max 2 sweeps) so that
+    // compound rewrites are fully collapsed: e.g. x/-1 → x*(-1) →
+    // Negate(x).
     {
-        const std::size_t n_before_sr = ops.size();
         bool needs_sort = false;
 
         auto kidIdx_sr = [&](const KernelIROp& op, std::size_t k) -> std::uint32_t {
@@ -986,248 +1000,227 @@ std::size_t KernelIR::optimize()
             return idx;
         };
 
-        for (std::size_t i = 0; i < n_before_sr; ++i) {
-            auto& op = ops[i];
+        constexpr int kMaxSweeps = 2;
+        for (int sweep = 0; sweep < kMaxSweeps; ++sweep) {
+            bool changed = false;
+            const std::size_t n_before_sr = ops.size();
 
-            // ================================================================
-            // Unary reductions (child_count == 1)
-            // ================================================================
-            if (op.child_count == 1u) {
-                const auto child_idx = kidIdx_sr(op, 0);
-                const auto& kid = ops[child_idx];
+            // Pre-reserve capacity so push_back in append helpers never
+            // reallocates, keeping op/kid references valid.
+            // Worst case: each binary op spawns ~4 new ops + ~4 children.
+            ops.reserve(n_before_sr + n_before_sr * 4);
+            children.reserve(children.size() + n_before_sr * 8);
 
-                // Transpose(Transpose(X)) → X
-                if (op.type == FormExprType::Transpose &&
-                    kid.type == FormExprType::Transpose && kid.child_count == 1u)
-                {
-                    op = ops[children[static_cast<std::size_t>(kid.first_child)]];
-                    continue;
-                }
+            for (std::size_t i = 0; i < n_before_sr; ++i) {
+                auto& op = ops[i];
 
-                // Inverse(Inverse(X)) → X
-                if (op.type == FormExprType::Inverse &&
-                    kid.type == FormExprType::Inverse && kid.child_count == 1u)
-                {
-                    op = ops[children[static_cast<std::size_t>(kid.first_child)]];
-                    continue;
-                }
+                // ============================================================
+                // Unary reductions (child_count == 1)
+                // ============================================================
+                if (op.child_count == 1u) {
+                    const auto child_idx = kidIdx_sr(op, 0);
+                    const auto& kid = ops[child_idx];
 
-                // SymmetricPart(SymmetricPart(X)) → SymmetricPart(X)
-                if (op.type == FormExprType::SymmetricPart &&
-                    kid.type == FormExprType::SymmetricPart)
-                {
-                    op = kid;
-                    continue;
-                }
-
-                // SymmetricPart(Transpose(X)) → SymmetricPart(X)
-                if (op.type == FormExprType::SymmetricPart &&
-                    kid.type == FormExprType::Transpose && kid.child_count == 1u)
-                {
-                    setKid_sr(op, 0, children[static_cast<std::size_t>(kid.first_child)]);
-                    continue;
-                }
-
-                // Trace(Transpose(X)) → Trace(X)
-                if (op.type == FormExprType::Trace &&
-                    kid.type == FormExprType::Transpose && kid.child_count == 1u)
-                {
-                    setKid_sr(op, 0, children[static_cast<std::size_t>(kid.first_child)]);
-                    continue;
-                }
-
-                // Determinant(Transpose(X)) → Determinant(X)
-                if (op.type == FormExprType::Determinant &&
-                    kid.type == FormExprType::Transpose && kid.child_count == 1u)
-                {
-                    setKid_sr(op, 0, children[static_cast<std::size_t>(kid.first_child)]);
-                    continue;
-                }
-
-                // Log(Exp(X)) → X
-                if (op.type == FormExprType::Log &&
-                    kid.type == FormExprType::Exp && kid.child_count == 1u)
-                {
-                    op = ops[children[static_cast<std::size_t>(kid.first_child)]];
-                    continue;
-                }
-
-                // Exp(Log(X)) → X
-                if (op.type == FormExprType::Exp &&
-                    kid.type == FormExprType::Log && kid.child_count == 1u)
-                {
-                    op = ops[children[static_cast<std::size_t>(kid.first_child)]];
-                    continue;
-                }
-
-                // Negate(Subtract(A, B)) → Subtract(B, A) — eliminates one op
-                if (op.type == FormExprType::Negate &&
-                    kid.type == FormExprType::Subtract && kid.child_count == 2u)
-                {
-                    const auto a = children[static_cast<std::size_t>(kid.first_child)];
-                    const auto b = children[static_cast<std::size_t>(kid.first_child) + 1];
-                    op.type = FormExprType::Subtract;
-                    op.child_count = 2;
-                    op.first_child = static_cast<std::uint32_t>(children.size());
-                    children.push_back(b);
-                    children.push_back(a);
-                    continue;
-                }
-
-                // Sqrt(Multiply(X, X)) → AbsoluteValue(X) when same operand
-                if (op.type == FormExprType::Sqrt &&
-                    kid.type == FormExprType::Multiply && kid.child_count == 2u)
-                {
-                    const auto ma = children[static_cast<std::size_t>(kid.first_child)];
-                    const auto mb = children[static_cast<std::size_t>(kid.first_child) + 1];
-                    if (ma == mb) {
-                        op.type = FormExprType::AbsoluteValue;
-                        setKid_sr(op, 0, ma);
-                        continue;
+                    // Transpose(Transpose(X)) → X  [algebraic identity]
+                    if (op.type == FormExprType::Transpose &&
+                        kid.type == FormExprType::Transpose && kid.child_count == 1u)
+                    {
+                        op = ops[children[static_cast<std::size_t>(kid.first_child)]];
+                        changed = true; continue;
                     }
-                }
 
-                continue;
-            }
+                    // SymmetricPart(SymmetricPart(X)) → SymmetricPart(X) [idempotent]
+                    if (op.type == FormExprType::SymmetricPart &&
+                        kid.type == FormExprType::SymmetricPart)
+                    {
+                        op = kid;
+                        changed = true; continue;
+                    }
 
-            // ================================================================
-            // Binary reductions (child_count == 2)
-            // ================================================================
-            if (op.child_count != 2u) continue;
+                    // SymmetricPart(Transpose(X)) → SymmetricPart(X) [sym(A^T)=sym(A)]
+                    if (op.type == FormExprType::SymmetricPart &&
+                        kid.type == FormExprType::Transpose && kid.child_count == 1u)
+                    {
+                        setKid_sr(op, 0, children[static_cast<std::size_t>(kid.first_child)]);
+                        changed = true; continue;
+                    }
 
-            const auto kid0_idx = kidIdx_sr(op, 0);
-            const auto kid1_idx = kidIdx_sr(op, 1);
+                    // Trace(Transpose(X)) → Trace(X)  [tr(A^T)=tr(A)]
+                    if (op.type == FormExprType::Trace &&
+                        kid.type == FormExprType::Transpose && kid.child_count == 1u)
+                    {
+                        setKid_sr(op, 0, children[static_cast<std::size_t>(kid.first_child)]);
+                        changed = true; continue;
+                    }
 
-            // Refresh kid references (prior iterations may have rewritten them).
-            const auto& kid0 = ops[kid0_idx];
-            const auto& kid1 = ops[kid1_idx];
+                    // Trace(SymmetricPart(X)) → Trace(X)  [tr(sym(A))=tr(A)]
+                    if (op.type == FormExprType::Trace &&
+                        kid.type == FormExprType::SymmetricPart && kid.child_count == 1u)
+                    {
+                        setKid_sr(op, 0, children[static_cast<std::size_t>(kid.first_child)]);
+                        changed = true; continue;
+                    }
 
-            // ---- Tier 1: Power specialization ----
-            if (op.type == FormExprType::Power && isConstant(kid1)) {
-                const double exp = constantVal(kid1);
+                    // Determinant(Transpose(X)) → Determinant(X)  [det(A^T)=det(A)]
+                    if (op.type == FormExprType::Determinant &&
+                        kid.type == FormExprType::Transpose && kid.child_count == 1u)
+                    {
+                        setKid_sr(op, 0, children[static_cast<std::size_t>(kid.first_child)]);
+                        changed = true; continue;
+                    }
 
-                if (exp == 2.0) {
-                    // Power(X, 2) → Mul(X, X)
-                    op.type = FormExprType::Multiply;
-                    setKid_sr(op, 0, kid0_idx);
-                    setKid_sr(op, 1, kid0_idx);
+                    // Negate(Subtract(A, B)) → Subtract(B, A)  [-(a-b)=b-a]
+                    if (op.type == FormExprType::Negate &&
+                        kid.type == FormExprType::Subtract && kid.child_count == 2u)
+                    {
+                        const auto a = children[static_cast<std::size_t>(kid.first_child)];
+                        const auto b = children[static_cast<std::size_t>(kid.first_child) + 1];
+                        op.type = FormExprType::Subtract;
+                        op.child_count = 2;
+                        op.first_child = static_cast<std::uint32_t>(children.size());
+                        children.push_back(b);
+                        children.push_back(a);
+                        changed = true; continue;
+                    }
+
                     continue;
                 }
-                if (exp == 0.5) {
-                    // Power(X, 0.5) → Sqrt(X)
-                    op.type = FormExprType::Sqrt;
-                    op.child_count = 1;
-                    continue;
-                }
-                if (exp == -1.0) {
-                    // Power(X, -1) → Div(1, X)
-                    const auto one = appendConstOp(1.0);
-                    op.type = FormExprType::Divide;
-                    setKid_sr(op, 0, one);
-                    setKid_sr(op, 1, kid0_idx);
-                    continue;
-                }
-                if (exp == -0.5) {
-                    // Power(X, -0.5) → Div(1, Sqrt(X))
-                    const auto one = appendConstOp(1.0);
-                    const auto sq = appendUnaryOp(FormExprType::Sqrt, kid0_idx);
-                    op.type = FormExprType::Divide;
-                    setKid_sr(op, 0, one);
-                    setKid_sr(op, 1, sq);
-                    continue;
-                }
-                if (exp == 3.0) {
-                    // Power(X, 3) → Mul(Mul(X,X), X)
-                    const auto sq = appendBinaryOp(FormExprType::Multiply, kid0_idx, kid0_idx);
-                    op.type = FormExprType::Multiply;
-                    setKid_sr(op, 0, sq);
-                    setKid_sr(op, 1, kid0_idx);
-                    continue;
-                }
-                if (exp == -2.0) {
-                    // Power(X, -2) → Div(1, Mul(X,X))
-                    const auto one = appendConstOp(1.0);
-                    const auto sq = appendBinaryOp(FormExprType::Multiply, kid0_idx, kid0_idx);
-                    op.type = FormExprType::Divide;
-                    setKid_sr(op, 0, one);
-                    setKid_sr(op, 1, sq);
-                    continue;
-                }
-            }
 
-            // ---- Tier 2: Multiply by -1 → Negate ----
-            if (op.type == FormExprType::Multiply) {
-                if (isConstant(kid0) && constantVal(kid0) == -1.0) {
-                    op.type = FormExprType::Negate;
-                    op.child_count = 1;
-                    setKid_sr(op, 0, kid1_idx);
-                    continue;
-                }
-                if (isConstant(kid1) && constantVal(kid1) == -1.0) {
-                    op.type = FormExprType::Negate;
-                    op.child_count = 1;
-                    // first_child already points to kid0_idx
-                    continue;
-                }
-            }
+                // ============================================================
+                // Binary reductions (child_count == 2)
+                // ============================================================
+                if (op.child_count != 2u) continue;
 
-            // ---- Tier 2: Divide by constant → Multiply by reciprocal ----
-            // Only when the reciprocal is exactly representable (c * (1/c) == 1.0)
-            // to avoid any FP perturbation.
-            if (op.type == FormExprType::Divide && isConstant(kid1)) {
-                const double c = constantVal(kid1);
-                if (c != 0.0) {
-                    const double recip = 1.0 / c;
-                    if (c * recip == 1.0) {
-                        const auto recip_idx = appendConstOp(recip);
+                const auto kid0_idx = kidIdx_sr(op, 0);
+                const auto kid1_idx = kidIdx_sr(op, 1);
+                const auto& kid0 = ops[kid0_idx];
+                const auto& kid1 = ops[kid1_idx];
+
+                // ---- Power specialization ----
+                // These are safe because llvm.pow(x, n) for integer/half-integer
+                // n handles NaN/inf/zero consistently with the replacement ops.
+                if (op.type == FormExprType::Power && isConstant(kid1)) {
+                    const double exp = constantVal(kid1);
+
+                    if (exp == 2.0) {
                         op.type = FormExprType::Multiply;
-                        setKid_sr(op, 1, recip_idx);
-                        continue;
+                        setKid_sr(op, 0, kid0_idx);
+                        setKid_sr(op, 1, kid0_idx);
+                        changed = true; continue;
+                    }
+                    if (exp == 0.5) {
+                        op.type = FormExprType::Sqrt;
+                        op.child_count = 1;
+                        changed = true; continue;
+                    }
+                    if (exp == -1.0) {
+                        const auto one = appendConstOp(1.0);
+                        op.type = FormExprType::Divide;
+                        setKid_sr(op, 0, one);
+                        setKid_sr(op, 1, kid0_idx);
+                        changed = true; continue;
+                    }
+                    if (exp == -0.5) {
+                        const auto one = appendConstOp(1.0);
+                        const auto sq = appendUnaryOp(FormExprType::Sqrt, kid0_idx);
+                        op.type = FormExprType::Divide;
+                        setKid_sr(op, 0, one);
+                        setKid_sr(op, 1, sq);
+                        changed = true; continue;
+                    }
+                    if (exp == 3.0) {
+                        const auto sq = appendBinaryOp(FormExprType::Multiply, kid0_idx, kid0_idx);
+                        op.type = FormExprType::Multiply;
+                        setKid_sr(op, 0, sq);
+                        setKid_sr(op, 1, kid0_idx);
+                        changed = true; continue;
+                    }
+                    if (exp == 4.0) {
+                        const auto sq = appendBinaryOp(FormExprType::Multiply, kid0_idx, kid0_idx);
+                        op.type = FormExprType::Multiply;
+                        setKid_sr(op, 0, sq);
+                        setKid_sr(op, 1, sq);
+                        changed = true; continue;
+                    }
+                    if (exp == -2.0) {
+                        const auto one = appendConstOp(1.0);
+                        const auto sq = appendBinaryOp(FormExprType::Multiply, kid0_idx, kid0_idx);
+                        op.type = FormExprType::Divide;
+                        setKid_sr(op, 0, one);
+                        setKid_sr(op, 1, sq);
+                        changed = true; continue;
+                    }
+                    if (exp == -3.0) {
+                        const auto one = appendConstOp(1.0);
+                        const auto sq = appendBinaryOp(FormExprType::Multiply, kid0_idx, kid0_idx);
+                        const auto cu = appendBinaryOp(FormExprType::Multiply, sq, kid0_idx);
+                        op.type = FormExprType::Divide;
+                        setKid_sr(op, 0, one);
+                        setKid_sr(op, 1, cu);
+                        changed = true; continue;
+                    }
+                    if (exp == -4.0) {
+                        const auto one = appendConstOp(1.0);
+                        const auto sq = appendBinaryOp(FormExprType::Multiply, kid0_idx, kid0_idx);
+                        const auto q4 = appendBinaryOp(FormExprType::Multiply, sq, sq);
+                        op.type = FormExprType::Divide;
+                        setKid_sr(op, 0, one);
+                        setKid_sr(op, 1, q4);
+                        changed = true; continue;
                     }
                 }
-            }
 
-            // ---- Tier 3: Same-operand identities ----
-            if (kid0_idx == kid1_idx) {
-                if (op.type == FormExprType::Subtract) {
-                    makeConstant(op, 0.0);
-                    continue;
+                // ---- Multiply by -1 → Negate ----
+                if (op.type == FormExprType::Multiply) {
+                    if (isConstant(kid0) && constantVal(kid0) == -1.0) {
+                        op.type = FormExprType::Negate;
+                        op.child_count = 1;
+                        setKid_sr(op, 0, kid1_idx);
+                        changed = true; continue;
+                    }
+                    if (isConstant(kid1) && constantVal(kid1) == -1.0) {
+                        op.type = FormExprType::Negate;
+                        op.child_count = 1;
+                        changed = true; continue;
+                    }
                 }
-                if (op.type == FormExprType::Divide) {
-                    makeConstant(op, 1.0);
-                    continue;
-                }
-            }
 
-            // Add(X, Negate(X)) → 0
-            if (op.type == FormExprType::Add) {
-                if (kid1.type == FormExprType::Negate && kid1.child_count == 1u &&
-                    children[static_cast<std::size_t>(kid1.first_child)] == kid0_idx)
+                // ---- Divide by -1 → Negate ----
+                if (op.type == FormExprType::Divide &&
+                    isConstant(kid1) && constantVal(kid1) == -1.0)
                 {
-                    makeConstant(op, 0.0);
-                    continue;
+                    op.type = FormExprType::Negate;
+                    op.child_count = 1;
+                    // first_child already points to kid0_idx (numerator)
+                    changed = true; continue;
                 }
-                if (kid0.type == FormExprType::Negate && kid0.child_count == 1u &&
-                    children[static_cast<std::size_t>(kid0.first_child)] == kid1_idx)
-                {
-                    makeConstant(op, 0.0);
-                    continue;
+
+                // ---- Divide by exact-reciprocal constant → Multiply ----
+                // Only when c * (1/c) == 1.0 in double precision, ensuring
+                // the rewrite is FP-identical (no rounding change).
+                if (op.type == FormExprType::Divide && isConstant(kid1)) {
+                    const double c = constantVal(kid1);
+                    if (c != 0.0 && c != -1.0) { // -1 already handled above
+                        const double recip = 1.0 / c;
+                        if (c * recip == 1.0) {
+                            const auto recip_idx = appendConstOp(recip);
+                            op.type = FormExprType::Multiply;
+                            setKid_sr(op, 1, recip_idx);
+                            changed = true; continue;
+                        }
+                    }
                 }
+
+                // ---- Add(X, Negate(X)) ----
+                // NOT collapsed. The KernelIR has no shape information, so we
+                // cannot produce a correctly-shaped zero (TypedZero defaults to
+                // scalar in inferShapes, losing tensor rank). For tensors,
+                // Add(A, Negate(A)) where A is a vector/matrix would produce a
+                // scalar zero, breaking downstream shape inference. LLVM will
+                // fold fadd(x, fneg(x)) → 0 per element at IR level.
             }
 
-            // ---- Tier 5: Double-reciprocal elimination ----
-            // Div(1, Div(1, X)) → X
-            if (op.type == FormExprType::Divide &&
-                isConstant(kid0) && constantVal(kid0) == 1.0 &&
-                kid1.type == FormExprType::Divide && kid1.child_count == 2u)
-            {
-                const auto inner_num = children[static_cast<std::size_t>(kid1.first_child)];
-                if (isConstant(ops[inner_num]) && constantVal(ops[inner_num]) == 1.0) {
-                    const auto inner_den = children[static_cast<std::size_t>(kid1.first_child) + 1];
-                    op = ops[inner_den];
-                    continue;
-                }
-            }
+            if (!changed) break;
         }
 
         // If compound rewrites appended new ops, restore post-order via
@@ -1238,7 +1231,6 @@ std::size_t KernelIR::optimize()
             order.reserve(total_n);
             std::vector<std::uint8_t> state(total_n, 0);
 
-            // Iterative DFS post-order
             std::vector<std::pair<std::uint32_t, std::uint32_t>> dfs_stack;
             dfs_stack.push_back({root, 0});
             state[root] = 1;
@@ -1259,7 +1251,6 @@ std::size_t KernelIR::optimize()
                 }
             }
 
-            // Rebuild in topological order
             std::vector<std::uint32_t> remap(total_n, UINT32_MAX);
             std::vector<KernelIROp> sorted_ops;
             sorted_ops.reserve(order.size());
@@ -1388,6 +1379,7 @@ std::size_t KernelIR::optimize()
     // canonicalization is already applied at lowering time (line 424)
     // before any rewrites occur, which handles the common case.
     {
+        const std::size_t n = ops.size();
         // Compute structural hash per op (children-aware, bottom-up).
         std::vector<std::uint64_t> op_hash(n, 0);
         // Map from structural hash → list of candidate op indices
@@ -1444,6 +1436,7 @@ std::size_t KernelIR::optimize()
 
     // Pass 3: Dead code elimination.
     // Mark reachable ops from root, then compact.
+    const std::size_t n = ops.size();
     std::vector<bool> reachable(n, false);
     {
         // BFS/DFS from root
