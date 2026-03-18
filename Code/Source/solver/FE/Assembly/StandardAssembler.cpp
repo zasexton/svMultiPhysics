@@ -851,6 +851,7 @@ void StandardAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
 void StandardAssembler::setConstraints(const constraints::AffineConstraints* constraints)
 {
     constraints_ = constraints;
+    cell_constrained_flags_valid_ = false;
 
     if (constraints_ && constraints_->isClosed()) {
         constraint_distributor_ = std::make_unique<constraints::ConstraintDistributor>(*constraints_);
@@ -1102,6 +1103,7 @@ void StandardAssembler::reset()
     cell_resolved_vector_tables_.clear();
     cell_resolved_matrix_tables_.clear();
     field_access_plans_.clear();
+    cell_constrained_flags_valid_ = false;
     initialized_ = false;
 }
 
@@ -1115,6 +1117,7 @@ void StandardAssembler::ensureCellDofTables(const IMeshAccess& mesh)
         cell_resolved_vector_tables_.clear();
         cell_resolved_matrix_tables_.clear();
         field_access_plans_.clear();
+        cell_constrained_flags_valid_ = false;
     }
 }
 
@@ -1300,6 +1303,33 @@ void StandardAssembler::ensureResolvedMatrixTable(
     }
 }
 
+void StandardAssembler::ensureCellConstrainedFlags(const IMeshAccess& mesh)
+{
+    if (cell_constrained_flags_valid_) return;
+    if (!constraints_ || !options_.use_constraints || !constraint_distributor_) {
+        cell_constrained_flags_valid_ = true;
+        return;
+    }
+
+    ensureCellDofTables(mesh);
+    const auto n_cells = cached_cell_dof_count_;
+    cell_constrained_flags_.resize(static_cast<std::size_t>(n_cells), 0);
+
+    for (GlobalIndex cell_id = 0; cell_id < n_cells; ++cell_id) {
+        bool any_constrained = false;
+        for (const auto& table : cell_dof_tables_) {
+            const auto dofs = getCellDofsFromTable(table, cell_id);
+            if (constraints_->hasConstrainedDofs(dofs)) {
+                any_constrained = true;
+                break;
+            }
+        }
+        cell_constrained_flags_[static_cast<std::size_t>(cell_id)] =
+            any_constrained ? static_cast<std::uint8_t>(1u) : static_cast<std::uint8_t>(0u);
+    }
+    cell_constrained_flags_valid_ = true;
+}
+
 std::span<const GlobalIndex> StandardAssembler::getResolvedCellVectorEntries(
     GlobalIndex cell_id,
     const dofs::DofMap* dof_map,
@@ -1444,11 +1474,21 @@ void StandardAssembler::insertLocalForCell(
     GlobalSystemView* matrix_view,
     GlobalSystemView* vector_view)
 {
-    if (options_.use_constraints && constraint_distributor_ &&
-        constraints_ != nullptr &&
-        (constraints_->hasConstrainedDofs(row_dofs) || constraints_->hasConstrainedDofs(col_dofs))) {
-        insertLocalConstrained(output, row_dofs, col_dofs, matrix_view, vector_view);
-        return;
+    if (options_.use_constraints && constraint_distributor_ && constraints_ != nullptr) {
+        // Use pre-computed per-cell constrained flags when available (avoids
+        // per-call hasConstrainedDofs hash-map/bitset lookups). Falls back to
+        // the original per-DOF check if flags haven't been built yet.
+        const bool is_constrained =
+            (cell_constrained_flags_valid_ &&
+             cell_id >= 0 &&
+             static_cast<std::size_t>(cell_id) < cell_constrained_flags_.size())
+            ? (cell_constrained_flags_[static_cast<std::size_t>(cell_id)] != 0)
+            : (constraints_->hasConstrainedDofs(row_dofs) ||
+               constraints_->hasConstrainedDofs(col_dofs));
+        if (is_constrained) {
+            insertLocalConstrained(output, row_dofs, col_dofs, matrix_view, vector_view);
+            return;
+        }
     }
 
     // Use pre-resolved CSR slots when available (avoids hash probes per insertion).
@@ -2508,6 +2548,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         ensureResolvedMatrixTable(mesh, row_dof_map_, row_dof_offset_,
                                   col_dof_map_, col_dof_offset_, matrix_view);
     }
+    ensureCellConstrainedFlags(mesh);
 
     const LocalIndex max_dofs =
         std::max(row_dof_map_->getMaxDofsPerCell(), col_dof_map_->getMaxDofsPerCell());
@@ -4408,6 +4449,11 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         }
     }
 
+    // Pre-compute per-cell constrained flags (built once, persists across
+    // Newton iterations). Avoids per-cell hasConstrainedDofs lookups in
+    // insertLocalForCell and the colored parallel insertion path.
+    ensureCellConstrainedFlags(mesh);
+
     // Check if any term actually has work to do
     bool any_has_cell = false;
     for (const auto& t : terms) {
@@ -5556,8 +5602,11 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                 options_.use_constraints &&
                                 constraint_distributor_ &&
                                 constraints_ &&
-                                (constraints_->hasConstrainedDofs(row_dofs) ||
-                                 constraints_->hasConstrainedDofs(col_dofs));
+                                (cell_constrained_flags_valid_ &&
+                                 static_cast<std::size_t>(cell_id) < cell_constrained_flags_.size()
+                                    ? (cell_constrained_flags_[static_cast<std::size_t>(cell_id)] != 0)
+                                    : (constraints_->hasConstrainedDofs(row_dofs) ||
+                                       constraints_->hasConstrainedDofs(col_dofs)));
                             // Look up pre-resolved vector entries for thread-safe insertion
                             const auto resolved_vec =
                                 use_resolved_vector_insert
@@ -9416,46 +9465,135 @@ void StandardAssembler::insertLocalConstrained(
         }
     }
 
-    // Check if any DOFs are constrained
-    if (!constraints_->hasConstrainedDofs(row_dofs) &&
-        !constraints_->hasConstrainedDofs(col_dofs)) {
-        // No constraints - direct insertion
-        insertLocal(output, row_dofs, col_dofs, matrix_view, vector_view);
-        return;
-    }
+    // NOTE: The redundant hasConstrainedDofs check that was here has been
+    // removed. All callers (insertLocalForCell, colored parallel path) already
+    // verify constraint status before calling this method, either via the
+    // pre-computed cell_constrained_flags_ or via direct hasConstrainedDofs.
 
-    // Use ConstraintDistributor for constrained assembly
-    // This expands constrained DOFs to their masters and distributes contributions
+    // Use ConstraintDistributor for constrained assembly.
+    // Buffered adapters collect expanded entries; flush eliminates per-entry
+    // virtual dispatch overhead. Vector batching via addVectorEntries reduces
+    // resolveEntriesCached calls from per-DOF to per-cell.
 
     // For matrix
     if (matrix_view && output.has_matrix && constraint_distributor_) {
-        // Create matrix ops adapter
-        class MatrixOpsAdapter : public constraints::IMatrixOperations {
+        // Buffered matrix adapter: collects (row, col, value) triples,
+        // passes setDiagonal through immediately.
+        class BufferedMatrixOps : public constraints::IMatrixOperations {
         public:
-            explicit MatrixOpsAdapter(GlobalSystemView& view) : view_(view) {}
+            BufferedMatrixOps(GlobalSystemView& view,
+                              std::vector<GlobalIndex>& rows,
+                              std::vector<GlobalIndex>& cols,
+                              std::vector<Real>& vals)
+                : view_(view), rows_(rows), cols_(cols), vals_(vals)
+            {
+                rows_.clear();
+                cols_.clear();
+                vals_.clear();
+            }
 
             void addValues(std::span<const GlobalIndex> rows,
                            std::span<const GlobalIndex> cols,
                            std::span<const double> values) override {
-                view_.addMatrixEntries(rows, cols, values);
+                // Dense block: expand to per-entry triples
+                const auto nr = rows.size();
+                const auto nc = cols.size();
+                for (std::size_t i = 0; i < nr; ++i) {
+                    for (std::size_t j = 0; j < nc; ++j) {
+                        const auto v = values[i * nc + j];
+                        if (v != 0.0) {
+                            rows_.push_back(rows[i]);
+                            cols_.push_back(cols[j]);
+                            vals_.push_back(v);
+                        }
+                    }
+                }
             }
 
             void addValue(GlobalIndex row, GlobalIndex col, double value) override {
-                view_.addMatrixEntry(row, col, value);
+                rows_.push_back(row);
+                cols_.push_back(col);
+                vals_.push_back(value);
             }
 
             void setDiagonal(GlobalIndex row, double value) override {
+                // Dirichlet diagonal: pass through immediately (rare, ~3% of DOFs)
                 view_.setDiagonal(row, value);
             }
 
             [[nodiscard]] GlobalIndex numRows() const override { return view_.numRows(); }
             [[nodiscard]] GlobalIndex numCols() const override { return view_.numCols(); }
 
+            void flush() {
+                // Flush individual scattered entries (constraint expansion
+                // produces scattered master DOF entries, not dense blocks).
+                for (std::size_t k = 0; k < rows_.size(); ++k) {
+                    view_.addMatrixEntry(rows_[k], cols_[k], vals_[k]);
+                }
+            }
+
         private:
             GlobalSystemView& view_;
+            std::vector<GlobalIndex>& rows_;
+            std::vector<GlobalIndex>& cols_;
+            std::vector<Real>& vals_;
         };
 
-        MatrixOpsAdapter matrix_ops(*matrix_view);
+        // Buffered vector adapter: collects (index, value) pairs for addValue,
+        // passes setValue/getValue through immediately.
+        class BufferedVectorOps : public constraints::IVectorOperations {
+        public:
+            BufferedVectorOps(GlobalSystemView& view,
+                              std::vector<GlobalIndex>& dofs,
+                              std::vector<Real>& vals)
+                : view_(view), dofs_(dofs), vals_(vals)
+            {
+                dofs_.clear();
+                vals_.clear();
+            }
+
+            void addValues(std::span<const GlobalIndex> indices,
+                           std::span<const double> values) override {
+                for (std::size_t i = 0; i < indices.size(); ++i) {
+                    dofs_.push_back(indices[i]);
+                    vals_.push_back(values[i]);
+                }
+            }
+
+            void addValue(GlobalIndex index, double value) override {
+                dofs_.push_back(index);
+                vals_.push_back(value);
+            }
+
+            void setValue(GlobalIndex index, double value) override {
+                // Dirichlet enforcement: pass through immediately
+                view_.addVectorEntry(index, value, AddMode::Insert);
+            }
+
+            [[nodiscard]] double getValue(GlobalIndex index) const override {
+                return view_.getVectorEntry(index);
+            }
+
+            [[nodiscard]] GlobalIndex size() const override {
+                return view_.numRows();
+            }
+
+            void flush() {
+                if (!dofs_.empty()) {
+                    view_.addVectorEntries(dofs_, vals_);
+                }
+            }
+
+        private:
+            GlobalSystemView& view_;
+            std::vector<GlobalIndex>& dofs_;
+            std::vector<Real>& vals_;
+        };
+
+        BufferedMatrixOps matrix_ops(*matrix_view,
+                                     scratch_expanded_rows_,
+                                     scratch_expanded_cols_,
+                                     scratch_expanded_matrix_vals_);
 
         // When both matrix and vector are present, the distribution strategy depends
         // on whether we suppress the Dirichlet inhomogeneity correction:
@@ -9465,42 +9603,18 @@ void StandardAssembler::insertLocalConstrained(
         //    residual R(u) is already evaluated at the constrained state and the
         //    -K*g correction would double-count the inhomogeneity.
         if (vector_view && output.has_vector && !suppress_constraint_inhomogeneity_) {
-            class VectorOpsAdapter : public constraints::IVectorOperations {
-            public:
-                explicit VectorOpsAdapter(GlobalSystemView& view) : view_(view) {}
-
-                void addValues(std::span<const GlobalIndex> indices,
-                               std::span<const double> values) override {
-                    view_.addVectorEntries(indices, values);
-                }
-
-                void addValue(GlobalIndex index, double value) override {
-                    view_.addVectorEntry(index, value);
-                }
-
-                void setValue(GlobalIndex index, double value) override {
-                    view_.addVectorEntry(index, value, AddMode::Insert);
-                }
-
-                [[nodiscard]] double getValue(GlobalIndex index) const override {
-                    return view_.getVectorEntry(index);
-                }
-
-                [[nodiscard]] GlobalIndex size() const override {
-                    return view_.numRows();
-                }
-
-            private:
-                GlobalSystemView& view_;
-            };
-
-            VectorOpsAdapter vector_ops(*vector_view);
+            BufferedVectorOps vector_ops(*vector_view,
+                                         scratch_expanded_vec_dofs_,
+                                         scratch_expanded_vec_vals_);
             constraint_distributor_->distributeLocalToGlobal(
                 output.local_matrix, output.local_vector,
                 row_dofs, col_dofs, matrix_ops, vector_ops);
+            matrix_ops.flush();
+            vector_ops.flush();
         } else {
             constraint_distributor_->distributeMatrixToGlobal(
                 output.local_matrix, row_dofs, col_dofs, matrix_ops);
+            matrix_ops.flush();
         }
     }
 
@@ -9508,17 +9622,28 @@ void StandardAssembler::insertLocalConstrained(
     // (in which case matrix was already distributed above independently).
     if (vector_view && output.has_vector && constraint_distributor_ &&
         !(matrix_view && output.has_matrix && !suppress_constraint_inhomogeneity_)) {
-        class VectorOpsAdapter : public constraints::IVectorOperations {
+        class BufferedVectorOps : public constraints::IVectorOperations {
         public:
-            explicit VectorOpsAdapter(GlobalSystemView& view) : view_(view) {}
+            BufferedVectorOps(GlobalSystemView& view,
+                              std::vector<GlobalIndex>& dofs,
+                              std::vector<Real>& vals)
+                : view_(view), dofs_(dofs), vals_(vals)
+            {
+                dofs_.clear();
+                vals_.clear();
+            }
 
             void addValues(std::span<const GlobalIndex> indices,
                            std::span<const double> values) override {
-                view_.addVectorEntries(indices, values);
+                for (std::size_t i = 0; i < indices.size(); ++i) {
+                    dofs_.push_back(indices[i]);
+                    vals_.push_back(values[i]);
+                }
             }
 
             void addValue(GlobalIndex index, double value) override {
-                view_.addVectorEntry(index, value);
+                dofs_.push_back(index);
+                vals_.push_back(value);
             }
 
             void setValue(GlobalIndex index, double value) override {
@@ -9533,13 +9658,24 @@ void StandardAssembler::insertLocalConstrained(
                 return view_.numRows();
             }
 
+            void flush() {
+                if (!dofs_.empty()) {
+                    view_.addVectorEntries(dofs_, vals_);
+                }
+            }
+
         private:
             GlobalSystemView& view_;
+            std::vector<GlobalIndex>& dofs_;
+            std::vector<Real>& vals_;
         };
 
-        VectorOpsAdapter vector_ops(*vector_view);
+        BufferedVectorOps vector_ops(*vector_view,
+                                     scratch_expanded_vec_dofs_,
+                                     scratch_expanded_vec_vals_);
         constraint_distributor_->distributeRhsToGlobal(
             output.local_vector, row_dofs, vector_ops);
+        vector_ops.flush();
     }
 }
 

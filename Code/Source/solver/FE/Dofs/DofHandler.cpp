@@ -7419,6 +7419,110 @@ void DofHandler::renumberDofs(DofNumberingStrategy strategy) {
             break;
         }
 
+        case DofNumberingStrategy::CuthillMcKee: {
+            // For multi-component interleaved DOFs (e.g., vel_x,vel_y,vel_z,pres per node),
+            // operate at the NODE level so that all components of each node stay together.
+            // This preserves the interleaved layout that the FSILS backend requires for
+            // efficient SpMV access patterns.
+            const auto nc = static_cast<GlobalIndex>(num_components_ > 1 ? num_components_ : 1);
+            if (nc > 1 && (n_dofs % nc) == 0) {
+                // Node-level RCM: build adjacency on nodes, then expand to DOFs
+                const auto n_nodes = n_dofs / nc;
+                const auto nn = static_cast<std::size_t>(n_nodes);
+                std::vector<std::vector<GlobalIndex>> node_adj_lists(nn);
+
+                const GlobalIndex n_cells = dof_map_.getNumCells();
+                for (GlobalIndex c = 0; c < n_cells; ++c) {
+                    const auto cell_dofs = dof_map_.getCellDofs(c);
+                    // Extract unique node indices from cell DOFs
+                    std::vector<GlobalIndex> cell_nodes;
+                    cell_nodes.reserve(cell_dofs.size() / static_cast<std::size_t>(nc));
+                    for (const auto d : cell_dofs) {
+                        if (d < 0 || d >= n_dofs) continue;
+                        const auto node = d / nc;
+                        if (cell_nodes.empty() || cell_nodes.back() != node) {
+                            // Check if already in list (handles non-sequential DOF ordering)
+                            bool found = false;
+                            for (const auto n : cell_nodes) {
+                                if (n == node) { found = true; break; }
+                            }
+                            if (!found) cell_nodes.push_back(node);
+                        }
+                    }
+                    // Record node adjacency
+                    for (std::size_t i = 0; i < cell_nodes.size(); ++i) {
+                        for (std::size_t j = i + 1; j < cell_nodes.size(); ++j) {
+                            const auto ni = cell_nodes[i];
+                            const auto nj = cell_nodes[j];
+                            node_adj_lists[static_cast<std::size_t>(ni)].push_back(nj);
+                            node_adj_lists[static_cast<std::size_t>(nj)].push_back(ni);
+                        }
+                    }
+                }
+
+                // Deduplicate and convert to CSR
+                std::vector<GlobalIndex> adjacency_csr(nn + 1, 0);
+                std::vector<GlobalIndex> adj_indices;
+                for (std::size_t i = 0; i < nn; ++i) {
+                    auto& neighbors = node_adj_lists[i];
+                    std::sort(neighbors.begin(), neighbors.end());
+                    neighbors.erase(std::unique(neighbors.begin(), neighbors.end()),
+                                    neighbors.end());
+                    adjacency_csr[i + 1] = adjacency_csr[i]
+                                           + static_cast<GlobalIndex>(neighbors.size());
+                    adj_indices.insert(adj_indices.end(), neighbors.begin(), neighbors.end());
+                }
+
+                CuthillMcKeeNumbering rcm(/*reverse=*/true);
+                auto node_perm = rcm.computeNumbering(n_nodes, adjacency_csr, adj_indices);
+
+                // Expand node permutation to DOF permutation preserving interleaving:
+                // node old_node -> new_node: DOFs old_node*nc+k -> new_node*nc+k
+                perm.resize(static_cast<std::size_t>(n_dofs));
+                for (GlobalIndex old_node = 0; old_node < n_nodes; ++old_node) {
+                    const auto new_node = node_perm[static_cast<std::size_t>(old_node)];
+                    for (GlobalIndex k = 0; k < nc; ++k) {
+                        perm[static_cast<std::size_t>(old_node * nc + k)] = new_node * nc + k;
+                    }
+                }
+            } else {
+                // Single-component: operate directly on DOFs
+                const auto n = static_cast<std::size_t>(n_dofs);
+                std::vector<std::vector<GlobalIndex>> adj_lists(n);
+
+                const GlobalIndex n_cells = dof_map_.getNumCells();
+                for (GlobalIndex c = 0; c < n_cells; ++c) {
+                    const auto cell_dofs = dof_map_.getCellDofs(c);
+                    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+                        const auto di = cell_dofs[i];
+                        if (di < 0 || di >= n_dofs) continue;
+                        for (std::size_t j = i + 1; j < cell_dofs.size(); ++j) {
+                            const auto dj = cell_dofs[j];
+                            if (dj < 0 || dj >= n_dofs) continue;
+                            adj_lists[static_cast<std::size_t>(di)].push_back(dj);
+                            adj_lists[static_cast<std::size_t>(dj)].push_back(di);
+                        }
+                    }
+                }
+
+                std::vector<GlobalIndex> adjacency_csr(n + 1, 0);
+                std::vector<GlobalIndex> adj_indices;
+                for (std::size_t i = 0; i < n; ++i) {
+                    auto& neighbors = adj_lists[i];
+                    std::sort(neighbors.begin(), neighbors.end());
+                    neighbors.erase(std::unique(neighbors.begin(), neighbors.end()),
+                                    neighbors.end());
+                    adjacency_csr[i + 1] = adjacency_csr[i]
+                                           + static_cast<GlobalIndex>(neighbors.size());
+                    adj_indices.insert(adj_indices.end(), neighbors.begin(), neighbors.end());
+                }
+
+                CuthillMcKeeNumbering rcm(/*reverse=*/true);
+                perm = rcm.computeNumbering(n_dofs, adjacency_csr, adj_indices);
+            }
+            break;
+        }
+
         default:
             throw FEException("DofHandler::renumberDofs: unsupported strategy");
     }

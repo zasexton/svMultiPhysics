@@ -71,6 +71,7 @@
 #include "Geometry/GeometryMapping.h"
 #include "Basis/BasisCache.h"
 
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <span>
@@ -628,6 +629,7 @@ private:
         const dofs::DofMap* col_dof_map,
         GlobalIndex col_dof_offset,
         const GlobalSystemView* view);
+    void ensureCellConstrainedFlags(const IMeshAccess& mesh);
     [[nodiscard]] std::span<const GlobalIndex> getResolvedCellVectorEntries(
         GlobalIndex cell_id,
         const dofs::DofMap* dof_map,
@@ -753,6 +755,14 @@ private:
     std::vector<Real> scratch_vector_;
     std::vector<Real> scratch_orient_in_;
     std::vector<Real> scratch_orient_out_;
+
+    // Scratch for batch constraint expansion (Phase 2 optimization).
+    // Buffered adapters collect expanded entries here; flushed in one batch call.
+    std::vector<GlobalIndex> scratch_expanded_rows_;
+    std::vector<GlobalIndex> scratch_expanded_cols_;
+    std::vector<Real> scratch_expanded_matrix_vals_;
+    std::vector<GlobalIndex> scratch_expanded_vec_dofs_;
+    std::vector<Real> scratch_expanded_vec_vals_;
 
     // Scratch for geometry/basis computations
     std::vector<std::array<Real, 3>> cell_coords_;
@@ -961,6 +971,11 @@ private:
     // for the interleaved combined DOF list of that cell.
     std::vector<GlobalIndex> scratch_fused_resolved_;
     std::vector<GlobalIndex> scratch_fused_resolved_offsets_;
+
+    // Per-cell flag: whether any DOF in the cell is constrained.
+    // Built once during first assembly call; avoids per-call hasConstrainedDofs().
+    std::vector<std::uint8_t> cell_constrained_flags_;
+    bool cell_constrained_flags_valid_{false};
 
     // Graph coloring for parallel assembly (computed once, persists across Newton iterations)
     void ensureColoring(const IMeshAccess& mesh,

@@ -8126,6 +8126,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         auto cv = loadFromCacheEntry(it->second, q_index, term.shapes[op_idx]);
                         values[op_idx] = cv;
                         cached[op_idx] = cv;
+                        {
+                            static const bool jit_tel = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                            if (jit_tel) {
+                                std::cerr << "[JIT dep0-xblock] HIT hash=0x" << std::hex << op_hash << std::dec
+                                          << " op=" << op_idx << "\n";
+                            }
+                        }
                         continue;
                     }
                 }
@@ -9687,6 +9694,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 storeToCacheEntry(entry, q_index, values[op_idx]);
                                 dep0_xblock_cache[op_hash] = entry;
                                 xblock_cache_bytes_allocated += alloc_bytes;
+                                {
+                                    static const bool jit_tel = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                                    if (jit_tel) {
+                                        std::cerr << "[JIT dep0-xblock] STORE hash=0x" << std::hex << op_hash << std::dec
+                                                  << " op=" << op_idx << " bytes=" << alloc_bytes << "\n";
+                                    }
+                                }
                             }
                         }
                     }
@@ -11454,6 +11468,17 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 // and LLVM cannot CSE across separate loop bodies.
                 const bool enable_xterm_cse =
                     suppress_qp_unroll && terms.size() > 1u;
+                {
+                    static const bool jit_tel = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                    if (jit_tel) {
+                        std::cerr << "[JIT xterm-cse] " << symbol
+                                  << ": enable=" << enable_xterm_cse
+                                  << " suppress_qp_unroll=" << suppress_qp_unroll
+                                  << " n_terms=" << terms.size()
+                                  << " (LLVM GVN " << (suppress_qp_unroll ? "inactive" : "active") << ")\n";
+                        std::cerr.flush();
+                    }
+                }
                 if (enable_xterm_cse) {
                     dep0_xblock_cache.clear();
                     dep0_xblock_active = true;
@@ -14772,7 +14797,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                 if (jit_telemetry) {
                     std::cerr << "[JIT compile-done] " << symbol
-                              << " calibrated_bpo=" << bytesPerOpCalibration().calibratedBytesPerOp() << "\n";
+                              << " calibrated_bpo=" << bytesPerOpCalibration().calibratedBytesPerOp()
+                              << " dep0_xblock_entries=" << dep0_xblock_cache.size()
+                              << " dep0_xblock_active=" << dep0_xblock_active
+                              << " suppress_qp_unroll=" << suppress_qp_unroll << "\n";
                     std::cerr.flush();
                 }
             }

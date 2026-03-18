@@ -77,7 +77,8 @@ enum class DofNumberingStrategy : std::uint8_t {
     Block,          ///< Block all DOFs of same component together
     Hierarchical,   ///< Hierarchy: vertex DOFs, edge DOFs, face DOFs, cell DOFs
     Morton,         ///< Spatially reorder DOFs via Morton (Z-order) curve
-    Hilbert         ///< Spatially reorder DOFs via Hilbert curve
+    Hilbert,        ///< Spatially reorder DOFs via Hilbert curve
+    CuthillMcKee    ///< Reverse Cuthill-McKee bandwidth minimization
 };
 
 enum class SpatialCurveType : std::uint8_t {

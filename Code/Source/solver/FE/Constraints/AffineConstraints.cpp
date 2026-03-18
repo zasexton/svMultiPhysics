@@ -481,6 +481,14 @@ AffineConstraints::getConstraint(GlobalIndex dof) const {
         };
     }
 
+    // Bitset pre-check: ~97% of DOFs are unconstrained, so this avoids
+    // a hash-map lookup in the common case (O(1) dense bitset vs amortized
+    // O(1) unordered_map with hashing overhead).
+    if (dof < 0 || dof > constrained_bitset_max_dof_ ||
+        !constrained_bitset_[static_cast<std::size_t>(dof)]) {
+        return std::nullopt;
+    }
+
     auto it = slave_to_index_.find(dof);
     if (it == slave_to_index_.end()) {
         return std::nullopt;

@@ -8,6 +8,7 @@
 #include "FE/Backends/Interfaces/BackendKind.h"
 #include "FE/Backends/Interfaces/LinearSolver.h"
 #include "FE/Backends/Utils/BackendOptions.h"
+#include "FE/Dofs/DofHandler.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/TimeStepping/TimeHistory.h"
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -489,6 +491,28 @@ void SimulationBuilder::setupSystem()
     setup_opts.dof_options.mpi_comm = comm.native();
 #endif
   }
+
+  // Allow env var override for DOF numbering strategy
+  if (const char* env = std::getenv("SVMP_DOF_NUMBERING"); env != nullptr) {
+    const std::string val = lower_copy(std::string(env));
+    using S = svmp::FE::dofs::DofNumberingStrategy;
+    if (val == "rcm" || val == "cuthill-mckee") {
+      setup_opts.dof_options.numbering = S::CuthillMcKee;
+    } else if (val == "morton") {
+      setup_opts.dof_options.numbering = S::Morton;
+    } else if (val == "hilbert") {
+      setup_opts.dof_options.numbering = S::Hilbert;
+    } else if (val == "sequential") {
+      setup_opts.dof_options.numbering = S::Sequential;
+    } else if (val == "interleaved") {
+      setup_opts.dof_options.numbering = S::Interleaved;
+    } else if (val == "block") {
+      setup_opts.dof_options.numbering = S::Block;
+    }
+    oopCout() << "[svMultiPhysics::Application] SVMP_DOF_NUMBERING=" << env
+              << " -> numbering override applied" << std::endl;
+  }
+
   components_.fe_system->setup(setup_opts);
 
   const auto n_dofs = components_.fe_system->dofHandler().getNumDofs();
