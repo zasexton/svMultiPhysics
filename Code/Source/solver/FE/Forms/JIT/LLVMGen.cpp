@@ -11195,17 +11195,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
             // Term-group helper emission: split oversized kernels into
             // L1i-sized helper functions, each NoInline.  The main kernel
-            // calls helpers sequentially.  Requires LLVM 15+ (LLVM 14 had
-            // physreg copy and bitcast ISel bugs with this IR pattern).
-            if (nc_plan.needs_split && !use_simd_batch) {
-                // Emit helper functions for each term group.
-                // NOTE: Disabled when SIMD batch is active because helpers load
-                // a fresh scalar SideView, incompatible with the main function's
-                // <simd_w x double> SIMD state.
-                // Helper signature: void(i8* args, i32 batch_idx, i8** field_ptrs)
-                // The third argument carries pre-resolved field entry pointers
-                // from the main function, avoiding search-loop IR in helpers
-                // (which triggers LLVM 14 physreg bugs from non-entry allocas).
+            // calls helpers sequentially.
+            // Helper signature: void(i8* args, i32 batch_idx, i8** field_ptrs)
+            // The third argument carries pre-resolved field entry pointers
+            // from the main function, avoiding search-loop IR in helpers.
+            // When SIMD batch is active, the field_ptrs buffer carries
+            // interleaved {lane0, lane1} pairs (2 * n_fields entries).
+            if (nc_plan.needs_split) {
                 auto* i8_ptr_ptr = llvm::PointerType::get(i8_ptr, 0);
                 auto* nc_helper_type = llvm::FunctionType::get(
                     builder.getVoidTy(), {i8_ptr, i32, i8_ptr_ptr}, false);
@@ -11213,14 +11209,28 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 // In the main function, pack resolved field entry pointers
                 // into a stack buffer that is passed to each helper.
                 const auto n_fields = field_entries.size();
+                // When SIMD batch is active, pack both lane-0 and lane-1
+                // field entry pointers (interleaved: [f0_l0, f0_l1, f1_l0, f1_l1, ...]).
+                const std::uint32_t ptrs_per_field = use_simd_batch ? 2u : 1u;
+                const std::uint32_t total_field_slots = static_cast<std::uint32_t>(n_fields) * ptrs_per_field;
                 llvm::Value* field_ptr_buf = nullptr;
-                if (n_fields > 0u) {
+                if (total_field_slots > 0u) {
                     field_ptr_buf = allocaInEntry(i8_ptr,
-                        builder.getInt32(static_cast<std::uint32_t>(n_fields)), "nc_field_ptrs");
+                        builder.getInt32(total_field_slots), "nc_field_ptrs");
                     for (std::size_t fi = 0; fi < n_fields; ++fi) {
-                        auto* slot = builder.CreateGEP(i8_ptr, field_ptr_buf,
-                            builder.getInt64(static_cast<std::int64_t>(fi)));
-                        builder.CreateStore(field_entries[fi].single, slot);
+                        auto* slot0 = builder.CreateGEP(i8_ptr, field_ptr_buf,
+                            builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field)));
+                        builder.CreateStore(field_entries[fi].single, slot0);
+                        if (use_simd_batch && field_entries[fi].simd_entries[1] != nullptr) {
+                            auto* slot1 = builder.CreateGEP(i8_ptr, field_ptr_buf,
+                                builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field + 1)));
+                            builder.CreateStore(field_entries[fi].simd_entries[1], slot1);
+                        } else if (use_simd_batch) {
+                            // Fallback: duplicate lane-0 for lane-1
+                            auto* slot1 = builder.CreateGEP(i8_ptr, field_ptr_buf,
+                                builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field + 1)));
+                            builder.CreateStore(field_entries[fi].single, slot1);
+                        }
                     }
                 } else {
                     field_ptr_buf = llvm::ConstantPointerNull::get(i8_ptr_ptr);
@@ -11253,8 +11263,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     auto saved_field_entries = field_entries;
                     const bool saved_simd_active = simd_active;
                     auto saved_simd_ptr_map = simd_ptr_map;
-                    // Helper functions load a fresh scalar SideView — disable SIMD
-                    // until proper SIMD setup is done for the helper.
+                    auto saved_simd_mat_ptrs = simd_element_matrix_ptrs;
+                    auto saved_simd_vec_ptrs = simd_element_vector_ptrs;
                     simd_active = false;
                     simd_ptr_map.clear();
 
@@ -11293,17 +11303,116 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     element_matrix_single = loadPtr(h_out_ptr, ABIV3::out_element_matrix_off);
                     element_vector_single = loadPtr(h_out_ptr, ABIV3::out_element_vector_off);
 
+                    // Set up SIMD batch state in the helper if active.
+                    if (use_simd_batch) {
+                        simd_active = true;
+
+                        auto* h_sides_base2 = loadPtr(h_args, ABIV3::batch_sides_off);
+                        auto* h_outs_base2 = loadPtr(h_args, ABIV3::batch_outputs_off);
+                        auto* h_bidx64_2 = builder.CreateZExt(h_bidx, i64);
+
+                        // Derive lane-1 side pointer
+                        auto* h_bidx_1 = builder.CreateAdd(h_bidx, builder.getInt32(1));
+                        auto* h_bidx64_1 = builder.CreateZExt(h_bidx_1, i64);
+                        auto* h_side_ptr_1 = builder.CreateGEP(builder.getInt8Ty(), h_sides_base2,
+                            builder.CreateMul(h_bidx64_1, builder.getInt64(sizeof(assembly::jit::KernelSideArgsV6))));
+
+                        // Register per-lane pointers for all per-element pointer fields.
+                        auto hRegisterSimdPtr = [&](llvm::Value* lane0_ptr, std::size_t field_offset) {
+                            auto* lane1_ptr = loadPtr(h_side_ptr_1, field_offset);
+                            simd_ptr_map[lane0_ptr] = {lane0_ptr, lane1_ptr};
+                        };
+
+                        // Geometry arrays
+                        hRegisterSimdPtr(side_single.integration_weights, ABIV3::side_integration_weights_off);
+                        hRegisterSimdPtr(side_single.quad_points_xyz, ABIV3::side_quad_points_xyz_off);
+                        hRegisterSimdPtr(side_single.physical_points_xyz, ABIV3::side_physical_points_xyz_off);
+                        hRegisterSimdPtr(side_single.jacobians, ABIV3::side_jacobians_off);
+                        hRegisterSimdPtr(side_single.inverse_jacobians, ABIV3::side_inverse_jacobians_off);
+                        hRegisterSimdPtr(side_single.jacobian_dets, ABIV3::side_jacobian_dets_off);
+                        hRegisterSimdPtr(side_single.normals_xyz, ABIV3::side_normals_xyz_off);
+                        hRegisterSimdPtr(side_single.interleaved_qpoint_geometry, ABIV3::side_interleaved_geom_off);
+
+                        // Basis arrays
+                        hRegisterSimdPtr(side_single.test_basis_values, ABIV3::side_test_basis_values_off);
+                        hRegisterSimdPtr(side_single.trial_basis_values, ABIV3::side_trial_basis_values_off);
+                        hRegisterSimdPtr(side_single.test_phys_grads_xyz, ABIV3::side_test_phys_grads_off);
+                        hRegisterSimdPtr(side_single.trial_phys_grads_xyz, ABIV3::side_trial_phys_grads_off);
+                        hRegisterSimdPtr(side_single.test_phys_hessians, ABIV3::side_test_phys_hess_off);
+                        hRegisterSimdPtr(side_single.trial_phys_hessians, ABIV3::side_trial_phys_hess_off);
+
+                        // Vector basis arrays
+                        hRegisterSimdPtr(side_single.test_basis_vector_values_xyz, ABIV3::side_test_vector_basis_values_xyz_off);
+                        hRegisterSimdPtr(side_single.test_basis_curls_xyz, ABIV3::side_test_vector_basis_curls_xyz_off);
+                        hRegisterSimdPtr(side_single.test_basis_divs, ABIV3::side_test_vector_basis_divs_off);
+                        hRegisterSimdPtr(side_single.trial_basis_vector_values_xyz, ABIV3::side_trial_vector_basis_values_xyz_off);
+                        hRegisterSimdPtr(side_single.trial_basis_curls_xyz, ABIV3::side_trial_vector_basis_curls_xyz_off);
+                        hRegisterSimdPtr(side_single.trial_basis_divs, ABIV3::side_trial_vector_basis_divs_off);
+
+                        // Solution arrays
+                        hRegisterSimdPtr(side_single.solution_coefficients, ABIV3::side_solution_coefficients_off);
+                        simd_ptr_map[side_single.previous_solution_coefficients_base] = {
+                            side_single.previous_solution_coefficients_base,
+                            gepBytes(h_side_ptr_1, ABIV3::side_previous_solution_coefficients_off)};
+                        hRegisterSimdPtr(side_single.history_weights, ABIV3::side_history_weights_off);
+                        simd_ptr_map[side_single.history_solution_coefficients_base] = {
+                            side_single.history_solution_coefficients_base,
+                            gepBytes(h_side_ptr_1, ABIV3::side_history_solution_coefficients_off)};
+
+                        // Field solutions, coupled, material
+                        hRegisterSimdPtr(side_single.field_solutions, ABIV3::side_field_solutions_off);
+                        hRegisterSimdPtr(side_single.coupled_integrals, ABIV3::side_coupled_integrals_off);
+                        hRegisterSimdPtr(side_single.coupled_aux, ABIV3::side_coupled_aux_off);
+                        hRegisterSimdPtr(side_single.material_state_old_base, ABIV3::side_material_state_old_base_off);
+                        hRegisterSimdPtr(side_single.material_state_work_base, ABIV3::side_material_state_work_base_off);
+
+                        // Per-element scalars: gather from both lanes
+                        auto hGatherF64 = [&](llvm::Value* lane0_val, std::size_t field_offset) -> llvm::Value* {
+                            auto* lane1_val = loadF64(h_side_ptr_1, field_offset);
+                            llvm::Value* vec = llvm::UndefValue::get(vf64);
+                            vec = builder.CreateInsertElement(vec, lane0_val, static_cast<uint64_t>(0));
+                            vec = builder.CreateInsertElement(vec, lane1_val, static_cast<uint64_t>(1));
+                            return vec;
+                        };
+                        auto hSplatF64 = [&](llvm::Value* scalar) -> llvm::Value* {
+                            return builder.CreateVectorSplat(simd_w, scalar);
+                        };
+
+                        side_single.cell_diameter = hGatherF64(side_single.cell_diameter, ABIV3::side_cell_diameter_off);
+                        side_single.cell_volume = hGatherF64(side_single.cell_volume, ABIV3::side_cell_volume_off);
+                        side_single.facet_area = hGatherF64(side_single.facet_area, ABIV3::side_facet_area_off);
+                        side_single.time = hSplatF64(side_single.time);
+                        side_single.dt = hSplatF64(side_single.dt);
+                        side_single.time_derivative_term_weight = hSplatF64(side_single.time_derivative_term_weight);
+                        side_single.non_time_derivative_term_weight = hSplatF64(side_single.non_time_derivative_term_weight);
+
+                        // Per-lane output pointers
+                        auto* h_out_ptr_1 = builder.CreateGEP(builder.getInt8Ty(), h_outs_base2,
+                            builder.CreateMul(h_bidx64_1, builder.getInt64(sizeof(assembly::jit::KernelOutputViewV6))));
+                        simd_element_matrix_ptrs[0] = element_matrix_single;
+                        simd_element_matrix_ptrs[1] = loadPtr(h_out_ptr_1, ABIV3::out_element_matrix_off);
+                        simd_element_vector_ptrs[0] = element_vector_single;
+                        simd_element_vector_ptrs[1] = loadPtr(h_out_ptr_1, ABIV3::out_element_vector_off);
+                    }
+
                     // Load pre-resolved field entry pointers from the main
-                    // function's stack buffer (passed as arg 2).  This avoids
-                    // emitting field-search loops in each helper.
+                    // function's stack buffer (passed as arg 2).
                     field_entries.clear();
                     field_entries.reserve(n_fields);
                     for (std::size_t fi = 0; fi < n_fields; ++fi) {
                         FieldEntryPtrs e;
                         e.field_id = used_field_ids[fi];
-                        auto* slot = builder.CreateGEP(i8_ptr, h_field_ptrs,
-                            builder.getInt64(static_cast<std::int64_t>(fi)));
-                        e.single = builder.CreateLoad(i8_ptr, slot, "h_field_" + std::to_string(fi));
+                        auto* slot0 = builder.CreateGEP(i8_ptr, h_field_ptrs,
+                            builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field)));
+                        e.single = builder.CreateLoad(i8_ptr, slot0, "h_field_" + std::to_string(fi));
+                        e.simd_entries[0] = e.single;
+                        if (use_simd_batch) {
+                            auto* slot1 = builder.CreateGEP(i8_ptr, h_field_ptrs,
+                                builder.getInt64(static_cast<std::int64_t>(fi * ptrs_per_field + 1)));
+                            e.simd_entries[1] = builder.CreateLoad(i8_ptr, slot1, "h_field1_" + std::to_string(fi));
+                            // Register SIMD pair for field entry
+                            simd_ptr_map[e.simd_entries[0]] = {e.simd_entries[0], e.simd_entries[1]};
+                        }
                         field_entries.push_back(e);
                     }
 
@@ -11320,6 +11429,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     field_entries = saved_field_entries;
                     simd_active = saved_simd_active;
                     simd_ptr_map = saved_simd_ptr_map;
+                    simd_element_matrix_ptrs = saved_simd_mat_ptrs;
+                    simd_element_vector_ptrs = saved_simd_vec_ptrs;
                 }
 
                 // Dispatcher: call helpers sequentially.
