@@ -934,6 +934,96 @@ std::size_t KernelIR::optimize()
         // Keep the AsVector/AsTensor node; LLVM will fold fmul(0,x)→0 at IR level.
     }
 
+    // Pass 1.5: Algebraic strength reduction — constant factor extraction.
+    // Rewrites Add(Mul(C,B), Mul(C,D)) → Mul(C, Add(B,D)) when:
+    //   - C is a Constant or ParameterRef (compile-time invariant),
+    //   - both Multiply ops are single-use (only used by this Add/Sub).
+    // Also handles Subtract(Mul(C,B), Mul(C,D)) → Mul(C, Sub(B,D)).
+    //
+    // Only factors out compile-time constants (Constant, ParameterRef) to
+    // minimize floating-point perturbation.  Factoring variable-dependent
+    // subexpressions (grad(u), solution fields) can change FP evaluation
+    // order enough to destabilize Newton convergence on sensitive problems.
+    //
+    // Applied iteratively (max 3 passes) since factorization can expose
+    // new opportunities: C*B + C*D + C*E → C*(B+D) + C*E → C*(B+D+E).
+    {
+        // Compute use counts: how many ops reference each op as a child.
+        auto computeUseCounts = [&]() {
+            std::vector<std::uint32_t> use_count(ops.size(), 0);
+            for (std::size_t i = 0; i < ops.size(); ++i) {
+                const auto& op = ops[i];
+                for (std::uint32_t c = 0; c < op.child_count; ++c) {
+                    const auto child = children[static_cast<std::size_t>(op.first_child) + c];
+                    if (child < use_count.size()) ++use_count[child];
+                }
+            }
+            // Root is also "used"
+            if (root < use_count.size()) ++use_count[root];
+            return use_count;
+        };
+
+        auto getKid = [&](const KernelIROp& op, std::size_t k) -> std::uint32_t {
+            return children[static_cast<std::size_t>(op.first_child) + k];
+        };
+
+        // Only factor out compile-time-constant ops to avoid FP perturbation.
+        auto isFactorable = [&](std::uint32_t idx) -> bool {
+            const auto t = ops[idx].type;
+            return t == FormExprType::Constant || t == FormExprType::ParameterRef;
+        };
+
+        constexpr int kMaxFactorPasses = 3;
+        for (int pass = 0; pass < kMaxFactorPasses; ++pass) {
+            auto use_count = computeUseCounts();
+            bool changed = false;
+
+            for (std::size_t i = 0; i < ops.size(); ++i) {
+                auto& op = ops[i];
+                // Look for Add(Mul(A,B), Mul(A,C)) or Sub(Mul(A,B), Mul(A,C))
+                if (op.child_count != 2u) continue;
+                if (op.type != FormExprType::Add && op.type != FormExprType::Subtract) continue;
+
+                const auto lhs_idx = getKid(op, 0);
+                const auto rhs_idx = getKid(op, 1);
+                auto& lhs = ops[lhs_idx];
+                auto& rhs = ops[rhs_idx];
+
+                if (lhs.type != FormExprType::Multiply || lhs.child_count != 2u) continue;
+                if (rhs.type != FormExprType::Multiply || rhs.child_count != 2u) continue;
+
+                // Both Multiply ops must be single-use (only used by this Add/Sub)
+                // to allow safe in-place rewriting.
+                if (use_count[lhs_idx] != 1u || use_count[rhs_idx] != 1u) continue;
+
+                const auto la = getKid(lhs, 0), lb = getKid(lhs, 1);
+                const auto ra = getKid(rhs, 0), rb = getKid(rhs, 1);
+
+                std::uint32_t common = UINT32_MAX, other_l = UINT32_MAX, other_r = UINT32_MAX;
+                if      (la == ra && isFactorable(la)) { common = la; other_l = lb; other_r = rb; }
+                else if (la == rb && isFactorable(la)) { common = la; other_l = lb; other_r = ra; }
+                else if (lb == ra && isFactorable(lb)) { common = lb; other_l = la; other_r = rb; }
+                else if (lb == rb && isFactorable(lb)) { common = lb; other_l = la; other_r = ra; }
+
+                if (common == UINT32_MAX) continue;
+
+                // Rewrite: repurpose lhs Multiply as Add/Sub(other_l, other_r),
+                // then change the outer op to Multiply(common, lhs_idx).
+                lhs.type = op.type;  // Add or Subtract
+                children[static_cast<std::size_t>(lhs.first_child)]     = other_l;
+                children[static_cast<std::size_t>(lhs.first_child) + 1] = other_r;
+
+                op.type = FormExprType::Multiply;
+                children[static_cast<std::size_t>(op.first_child)]     = common;
+                children[static_cast<std::size_t>(op.first_child) + 1] = lhs_idx;
+
+                changed = true;
+            }
+
+            if (!changed) break;
+        }
+    }
+
     // Pass 2: Post-rewrite structural CSE.
     // After zero propagation/constant folding, some previously-distinct
     // subexpressions may now be structurally identical (e.g., two subtrees

@@ -201,7 +201,14 @@ struct HardwareProfile {
     /// codegen in the final emitted object. This is the static fallback;
     /// use BytesPerOpCalibration for telemetry-driven per-process estimates
     /// from actual compilations.
-    static constexpr std::uint64_t kBytesPerOp = 58;
+    ///
+    /// Set to 300 based on empirical measurement: calibrated bpo from actual
+    /// LLVM compilations averages 280-350 for NS-VMS-class formulations on
+    /// Tet4/Tri3.  The previous value (58) was too low — budget decisions
+    /// made before telemetry kicked in (first 2 compilations) wildly
+    /// underestimated kernel sizes, causing priming kernels to be fully
+    /// unrolled to 128-234 KB (vs 32 KB L1i).
+    static constexpr std::uint64_t kBytesPerOp = 300;
 
     /// Raw bytes per KernelIR op for the un-unrolled instruction stream.
     /// Unlike kBytesPerOp (calibrated from fully-unrolled kernels where the

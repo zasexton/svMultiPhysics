@@ -129,8 +129,8 @@ struct JITSpecializationOptions {
     // Estimated bytes of machine code per KernelIR op in the final emitted
     // object. Used as the uncalibrated fallback for emitted-size telemetry
     // when process-level calibration has insufficient samples.
-    // Canonical value: HardwareProfile::kBytesPerOp (58).
-    std::uint32_t bytes_per_op_estimate{58};
+    // Canonical value: HardwareProfile::kBytesPerOp (300).
+    std::uint32_t bytes_per_op_estimate{300};
 
     // Estimated bytes of machine code per KernelIR op in the unrolled loop
     // body before explicit nq/nt/nj replication factors are applied. Used by

@@ -2390,20 +2390,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             (options_.specialization.text_budget_bytes > 0u)
                 ? options_.specialization.text_budget_bytes
                 : hw.textBudgetBytes();
-        if (effective_text_budget > 0u &&
-            fixed_n_test_dofs_minus.has_value() &&
-            fixed_n_trial_dofs_minus.has_value() &&
-            fixed_n_qpts_minus.has_value())
         {
-            const auto n_q = static_cast<std::uint64_t>(*fixed_n_qpts_minus);
-            const auto n_t = static_cast<std::uint64_t>(*fixed_n_test_dofs_minus);
-            const auto n_j = static_cast<std::uint64_t>(*fixed_n_trial_dofs_minus);
             const auto bpo = bytesPerOpCalibration().calibratedBytesPerOp(
                 options_.specialization.bytes_per_op_estimate);
+            const auto budget = static_cast<std::uint64_t>(effective_text_budget);
 
             // Accumulate raw IR op counts across all terms.
             std::uint64_t total_raw_ops = 0;
-
             const auto& all_terms = coupled ? std::vector<LoweredTerm>{} : terms;
             for (const auto& t : all_terms) {
                 total_raw_ops += static_cast<std::uint64_t>(t.ir.opCount());
@@ -2416,20 +2409,45 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 }
             }
 
+            // Use actual specialization sizes when available, otherwise
+            // conservative fallback estimates.  Previously, non-specialized
+            // kernels skipped the budget check entirely, producing 128-234 KB
+            // priming kernels that thrashed L1i (64% of all L1i misses).
+            const auto n_q = fixed_n_qpts_minus.has_value()
+                ? static_cast<std::uint64_t>(*fixed_n_qpts_minus)
+                : 4ULL;  // conservative: Tet4 quadrature
+            const auto n_t = fixed_n_test_dofs_minus.has_value()
+                ? static_cast<std::uint64_t>(*fixed_n_test_dofs_minus)
+                : static_cast<std::uint64_t>(hw.defaultTestDofEstimate());
+            const auto n_j = fixed_n_trial_dofs_minus.has_value()
+                ? static_cast<std::uint64_t>(*fixed_n_trial_dofs_minus)
+                : static_cast<std::uint64_t>(hw.defaultTestDofEstimate());
+
             // Linear forms have no trial DOF loop (trial index hard-coded
             // to 0), so text_full should use effective_n_j = 1.
             const bool has_matrix_terms =
                 coupled || (ir.kind() != FormKind::Linear);
             const auto effective_n_j = has_matrix_terms ? n_j : 1ULL;
 
+            // Use fallback ops-per-term when no terms have been lowered yet.
+            if (total_raw_ops == 0u) {
+                const auto n_terms = coupled
+                    ? [&]() -> std::size_t {
+                        std::size_t c = 0;
+                        for (const auto& blk : coupled->blocks) c += blk.terms.size();
+                        return c;
+                    }()
+                    : terms.size();
+                total_raw_ops = n_terms * HardwareProfile::kFallbackOpsPerTerm;
+            }
+
             // ROLL_DOF keeps QP loops unrolled → text scales with n_q.
             // ROLL_QP_AND_DOF rolls both → text is ops × bpo (no QP factor).
             const auto text_full = n_t * effective_n_j * n_q * total_raw_ops * bpo;
             const auto text_roll_dof = n_q * total_raw_ops * bpo;
             const auto text_roll_all = total_raw_ops * bpo;
-            const auto budget = static_cast<std::uint64_t>(effective_text_budget);
 
-            if (text_full > budget) {
+            if (effective_text_budget > 0u && text_full > budget) {
                 suppress_dof_unroll = true;
                 // Roll QP loops when the DOF-rolled estimate still exceeds
                 // the L1i budget.  Previous n_q>=8 threshold kept QP unrolled
@@ -2445,6 +2463,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
             static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
             if (jit_telemetry) {
+                const bool is_fallback = !fixed_n_test_dofs_minus.has_value()
+                                      || !fixed_n_trial_dofs_minus.has_value()
+                                      || !fixed_n_qpts_minus.has_value();
                 const char* policy = suppress_qp_unroll ? "ROLL_QP_AND_DOF"
                                    : suppress_dof_unroll ? "ROLL_DOF_ONLY"
                                    : "FULL";
@@ -2454,6 +2475,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                           << " text_roll_all=" << text_roll_all
                           << " bytes (nq=" << n_q << " nt=" << n_t << " nj=" << n_j
                           << " bpo=" << bpo
+                          << (is_fallback ? " FALLBACK" : "")
                           << ") budget=" << budget
                           << " -> " << policy
                           << "\n";
@@ -11317,6 +11339,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 // When QP is unrolled, LLVM's GVN handles cross-term CSE
                 // within straight-line basic blocks, so the alloca cache
                 // just adds store/load overhead — keep it disabled.
+                // When QP loops are rolled, each term has its own QP loop
+                // and LLVM cannot CSE across separate loop bodies.
                 const bool enable_xterm_cse =
                     suppress_qp_unroll && terms.size() > 1u;
                 if (enable_xterm_cse) {
