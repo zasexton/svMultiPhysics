@@ -2362,6 +2362,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	        const std::optional<std::uint32_t> fixed_n_trial_dofs_plus =
 	            (specialization != nullptr) ? specialization->n_trial_dofs_plus : std::optional<std::uint32_t>{};
 
+        const bool is_affine = (specialization != nullptr) && specialization->is_affine;
+
         // Budget-aware loop unrolling: suppress_dof_unroll gates test/trial
         // DOF loops; suppress_qp_unroll additionally gates QP loops.
         // Three-level policy:
@@ -10890,6 +10892,71 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 }
             }
 
+            // Determine whether a term's integrand is QP-constant on affine elements.
+            // A term is QP-hoistable when is_affine AND:
+            //   1. No QP-varying dep0 ops (DiscreteField, StateField, Coordinate,
+            //      ReferenceCoordinate, PreviousSolutionRef, MaterialState*, Coefficient)
+            //   2. TestFunction/TrialFunction only appear under Gradient/Divergence/Curl/Hessian
+            //      (bare basis values vary across QPs even for P1)
+            //   3. has_indexed_access == false
+            auto isTermQPHoistable = [&](const LoweredTerm& term) -> bool {
+                if (!is_affine) return false;
+                if (term.has_indexed_access) return false;
+
+                const auto& ops = term.ir.ops;
+                const auto& dep = term.dep_mask;
+                // Check dep0 ops (dep_mask == 0x0) for QP-varying types
+                for (std::size_t oi = 0; oi < ops.size(); ++oi) {
+                    const auto dm = (oi < dep.size()) ? dep[oi] : 0u;
+                    if (dm == 0x0u) {
+                        switch (ops[oi].type) {
+                            case FormExprType::DiscreteField:
+                            case FormExprType::StateField:
+                            case FormExprType::Coordinate:
+                            case FormExprType::ReferenceCoordinate:
+                            case FormExprType::PreviousSolutionRef:
+                            case FormExprType::MaterialStateOldRef:
+                            case FormExprType::MaterialStateWorkRef:
+                            case FormExprType::Coefficient:
+                                return false;  // QP-varying dep0 op
+                            default:
+                                break;
+                        }
+                    }
+                }
+                // Check that TestFunction/TrialFunction only appear under gradient-like ops
+                // Build set of ops that are direct children of Gradient/Divergence/Curl/Hessian
+                std::vector<bool> under_grad(ops.size(), false);
+                for (std::size_t oi = 0; oi < ops.size(); ++oi) {
+                    switch (ops[oi].type) {
+                        case FormExprType::Gradient:
+                        case FormExprType::Divergence:
+                        case FormExprType::Curl:
+                        case FormExprType::Hessian:
+                        {
+                            const auto fc = ops[oi].first_child;
+                            const auto cc = ops[oi].child_count;
+                            for (std::uint32_t c = 0; c < cc; ++c) {
+                                const auto child_idx = term.ir.children[fc + c];
+                                if (child_idx < ops.size()) {
+                                    under_grad[child_idx] = true;
+                                }
+                            }
+                            break;
+                        }
+                        default:
+                            break;
+                    }
+                }
+                for (std::size_t oi = 0; oi < ops.size(); ++oi) {
+                    if (ops[oi].type == FormExprType::TestFunction ||
+                        ops[oi].type == FormExprType::TrialFunction) {
+                        if (!under_grad[oi]) return false;  // Bare basis value
+                    }
+                }
+                return true;
+            };
+
             // Reusable lambda: emit terms [first_t, end_t) using the current
             // codegen context (side_single, element_matrix/vector by reference).
             auto emitNonCoupledTermRange = [&](std::size_t first_t, std::size_t end_t) {
@@ -10910,6 +10977,68 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 builder.CreateCondBr(is_zero, term_end, term_body);
 
                 builder.SetInsertPoint(term_body);
+
+                // QP-constant term hoisting: for affine P1 elements, terms where
+                // the integrand is provably constant across QPs can skip the QP loop.
+                // K_ij = f(0,i,j) * Σ_q w[q] instead of Σ_q w[q]*f(q,i,j).
+                if (isTermQPHoistable(terms[t])) {
+                    {
+                        static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                        if (jit_telemetry) {
+                            std::cerr << "[JIT qp-hoist] " << symbol
+                                      << " term " << t << "/" << terms.size()
+                                      << " hoisted (ops=" << terms[t].ir.opCount() << ")\n";
+                        }
+                    }
+                    // Compute volume = Σ_q integration_weights[q]
+                    auto* vol_alloca = builder.CreateAlloca(simd_active ? vf64 : f64, nullptr, "qp_vol");
+                    builder.CreateStore(simd_active
+                        ? llvm::ConstantVector::getSplat(llvm::ElementCount::getFixed(simd_w),
+                                                          llvm::ConstantFP::get(f64, 0.0))
+                        : llvm::ConstantFP::get(f64, 0.0),
+                        vol_alloca);
+                    emitForLoop(side_single.n_qpts, "vol_q" + std::to_string(t), [&](llvm::Value* q) {
+                        auto* q64 = builder.CreateZExt(q, i64);
+                        auto* w = loadRealPtrAt(side_single.integration_weights, q64);
+                        auto* old_vol = builder.CreateLoad(simd_active ? vf64 : f64, vol_alloca);
+                        auto* new_vol = builder.CreateFAdd(old_vol, w);
+                        builder.CreateStore(new_vol, vol_alloca);
+                    }, /*is_dof_loop=*/false, /*is_qp_loop=*/false);
+                    auto* volume = builder.CreateLoad(simd_active ? vf64 : f64, vol_alloca);
+                    auto* scaled_vol = builder.CreateFMul(tw, volume);
+
+                    // Evaluate at q=0 with cached dep0 values
+                    auto* q_zero = builder.getInt32(0);
+                    std::vector<CodeValue> cached;
+                    const std::vector<CodeValue>* cached_ptr = nullptr;
+                    if (!terms[t].has_indexed_access) {
+                        cached = computeCachedSingle(terms[t], q_zero, side_single);
+                        cached_ptr = &cached;
+                    }
+
+                    const bool emit_matrix =
+                        (terms[t].target == LoweredTerm::Target::Matrix) ||
+                        (terms[t].target == LoweredTerm::Target::Auto && want_matrix);
+                    if (emit_matrix) {
+                        emitForLoop(side_single.n_test_dofs, "hi" + std::to_string(t), [&](llvm::Value* i) {
+                            emitForLoop(side_single.n_trial_dofs, "hj" + std::to_string(t), [&](llvm::Value* j) {
+                                auto* val = evalKernelIRSingle(terms[t], q_zero, i, j, side_single, cached_ptr);
+                                auto* contrib = builder.CreateFMul(scaled_vol, val);
+                                emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
+                            }, /*is_dof_loop=*/true);
+                        }, /*is_dof_loop=*/true);
+                    } else {
+                        emitForLoop(side_single.n_test_dofs, "hi" + std::to_string(t), [&](llvm::Value* i) {
+                            auto* val = evalKernelIRSingle(terms[t], q_zero, i, builder.getInt32(0), side_single, cached_ptr);
+                            auto* contrib = builder.CreateFMul(scaled_vol, val);
+                            emitVectorAccum(element_vector_single, i, contrib);
+                        }, /*is_dof_loop=*/true);
+                    }
+                    builder.CreateBr(term_end);
+                    builder.SetInsertPoint(term_end);
+                    continue;  // Skip the standard QP-loop path below
+                }
+
                 emitForLoop(side_single.n_qpts, "q" + std::to_string(t), [&](llvm::Value* q) {
                     auto* q64 = builder.CreateZExt(q, i64);
                     auto* w = loadRealPtrAt(side_single.integration_weights, q64);
@@ -11346,6 +11475,56 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         builder.CreateCondBr(is_zero_w, tx, tb);
 
                         builder.SetInsertPoint(tb);
+
+                        // QP-constant term hoisting for coupled blocks (same logic as non-coupled).
+                        if (isTermQPHoistable(term)) {
+                            auto* vol_alloca = builder.CreateAlloca(simd_active ? vf64 : f64, nullptr, "cb_vol");
+                            builder.CreateStore(simd_active
+                                ? llvm::ConstantVector::getSplat(llvm::ElementCount::getFixed(simd_w),
+                                                                  llvm::ConstantFP::get(f64, 0.0))
+                                : llvm::ConstantFP::get(f64, 0.0),
+                                vol_alloca);
+                            emitForLoop(side_single.n_qpts, "cb_vol_q" + ts, [&](llvm::Value* q) {
+                                auto* q64 = builder.CreateZExt(q, i64);
+                                auto* w = loadRealPtrAt(side_single.integration_weights, q64);
+                                auto* old_vol = builder.CreateLoad(simd_active ? vf64 : f64, vol_alloca);
+                                auto* new_vol = builder.CreateFAdd(old_vol, w);
+                                builder.CreateStore(new_vol, vol_alloca);
+                            }, /*is_dof_loop=*/false, /*is_qp_loop=*/false);
+                            auto* volume = builder.CreateLoad(simd_active ? vf64 : f64, vol_alloca);
+                            auto* scaled_vol = builder.CreateFMul(tw, volume);
+
+                            auto* q_zero = builder.getInt32(0);
+                            std::vector<CodeValue> cached;
+                            const std::vector<CodeValue>* cached_ptr = nullptr;
+                            if (!term.has_indexed_access) {
+                                cached = computeCachedSingle(term, q_zero, side_single);
+                                cached_ptr = &cached;
+                            }
+
+                            const bool emit_matrix =
+                                (term.target == LoweredTerm::Target::Matrix) ||
+                                (term.target == LoweredTerm::Target::Auto && blk_data.want_matrix);
+                            if (emit_matrix) {
+                                emitForLoop(side_single.n_test_dofs, "chi" + ts, [&](llvm::Value* i) {
+                                    emitForLoop(side_single.n_trial_dofs, "chj" + ts, [&](llvm::Value* j) {
+                                        auto* val = evalKernelIRSingle(term, q_zero, i, j, side_single, cached_ptr);
+                                        auto* contrib = builder.CreateFMul(scaled_vol, val);
+                                        emitMatrixAccum(element_matrix_single, side_single.n_trial_dofs, i, j, contrib);
+                                    }, /*is_dof_loop=*/true);
+                                }, /*is_dof_loop=*/true);
+                            } else {
+                                emitForLoop(side_single.n_test_dofs, "chi" + ts, [&](llvm::Value* i) {
+                                    auto* val = evalKernelIRSingle(term, q_zero, i, builder.getInt32(0), side_single, cached_ptr);
+                                    auto* contrib = builder.CreateFMul(scaled_vol, val);
+                                    emitVectorAccum(element_vector_single, i, contrib);
+                                }, /*is_dof_loop=*/true);
+                            }
+                            builder.CreateBr(tx);
+                            builder.SetInsertPoint(tx);
+                            continue;
+                        }
+
                         emitForLoop(side_single.n_qpts, "cq" + ts, [&](llvm::Value* q) {
                             auto* q64 = builder.CreateZExt(q, i64);
                             auto* w = loadRealPtrAt(side_single.integration_weights, q64);

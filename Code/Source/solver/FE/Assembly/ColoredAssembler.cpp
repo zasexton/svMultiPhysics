@@ -31,6 +31,7 @@
 #include "ColoredAssembler.h"
 
 #include "Core/FEException.h"
+#include "Dofs/DofMap.h"
 #include "StandardAssembler.h"
 
 #include <algorithm>
@@ -58,28 +59,57 @@ ElementGraph::ElementGraph(GlobalIndex num_elements)
     building_adj_.resize(static_cast<std::size_t>(num_elements));
 }
 
-void ElementGraph::build(const IMeshAccess& mesh, const dofs::DofMap& /*dof_map*/)
+void ElementGraph::build(const IMeshAccess& mesh, const dofs::DofMap& dof_map)
 {
     GlobalIndex num_cells = mesh.numCells();
     building_adj_.clear();
     building_adj_.resize(static_cast<std::size_t>(num_cells));
 
-    // Build DOF-to-element map
+    // Build DOF-to-element map using actual DOF connectivity (not node-based).
+    // This correctly handles higher-order elements where edge/face DOFs are
+    // shared between elements that may not share any corner nodes.
     std::unordered_map<GlobalIndex, std::vector<GlobalIndex>> dof_to_elements;
 
-    mesh.forEachCell([&dof_to_elements, &mesh](GlobalIndex cell_id) {
-        // Get DOFs for this cell
-        // In a real implementation, this would use dof_map.getCellDofs(cell_id, dofs)
-        // For now, we use node-based connectivity as a proxy
-
-        std::vector<GlobalIndex> nodes;
-        mesh.getCellNodes(cell_id, nodes);
-
-        for (GlobalIndex node : nodes) {
-            dof_to_elements[node].push_back(cell_id);
+    mesh.forEachCell([&dof_to_elements, &dof_map](GlobalIndex cell_id) {
+        const auto cell_dofs = dof_map.getCellDofs(cell_id);
+        for (const auto dof : cell_dofs) {
+            dof_to_elements[dof].push_back(cell_id);
         }
     });
 
+    buildAdjacencyFromDofMap(dof_to_elements);
+}
+
+void ElementGraph::build(const IMeshAccess& mesh, std::span<const dofs::DofMap* const> dof_maps)
+{
+    GlobalIndex num_cells = mesh.numCells();
+    building_adj_.clear();
+    building_adj_.resize(static_cast<std::size_t>(num_cells));
+
+    // Build union DOF-to-element map across all provided DOF maps.
+    // A unique tag per map prevents DOF index collisions between maps
+    // with overlapping numbering (e.g., velocity DOF 5 vs pressure DOF 5).
+    std::unordered_map<std::uint64_t, std::vector<GlobalIndex>> dof_to_elements;
+
+    for (std::size_t mi = 0; mi < dof_maps.size(); ++mi) {
+        if (dof_maps[mi] == nullptr) continue;
+        const auto& dm = *dof_maps[mi];
+        const auto map_tag = static_cast<std::uint64_t>(mi) << 48;
+        mesh.forEachCell([&](GlobalIndex cell_id) {
+            const auto cell_dofs = dm.getCellDofs(cell_id);
+            for (const auto dof : cell_dofs) {
+                const auto key = map_tag | static_cast<std::uint64_t>(static_cast<std::uint32_t>(dof));
+                dof_to_elements[key].push_back(cell_id);
+            }
+        });
+    }
+
+    buildAdjacencyFromDofMap(dof_to_elements);
+}
+
+template <typename MapType>
+void ElementGraph::buildAdjacencyFromDofMap(const MapType& dof_to_elements)
+{
     // Build adjacency from shared DOFs
     num_edges_ = 0;
     max_degree_ = 0;
@@ -92,6 +122,8 @@ void ElementGraph::build(const IMeshAccess& mesh, const dofs::DofMap& /*dof_map*
             }
         }
     }
+
+    const auto num_cells = static_cast<GlobalIndex>(building_adj_.size());
 
     // Convert to CSR format
     adjacency_offsets_.resize(static_cast<std::size_t>(num_cells) + 1);

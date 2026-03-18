@@ -45,16 +45,61 @@
 
 #include <math.h>
 
+#ifdef _OPENMP
+  #include <omp.h>
+#endif
+
 namespace norm {
+
+// ---------------------------------------------------------------------------
+// Deterministic parallel squared-norm helper.
+// Same strategy as deterministic_dot: per-thread partials summed in
+// fixed thread-ID order for bit-reproducible results.
+// ---------------------------------------------------------------------------
+namespace {
+
+inline double deterministic_norm_sq(const double* __restrict__ u, fsils_int n)
+{
+#ifdef _OPENMP
+    if (n >= 10000 && omp_get_max_threads() > 1) {
+        const int max_t = omp_get_max_threads();
+        constexpr int kStackMax = 64;
+        double stack_partials[kStackMax];
+        double* partials = (max_t <= kStackMax) ? stack_partials : new double[max_t];
+        for (int t = 0; t < max_t; ++t) partials[t] = 0.0;
+
+        #pragma omp parallel
+        {
+            const int tid = omp_get_thread_num();
+            double local_sum = 0.0;
+            #pragma omp for schedule(static)
+            for (fsils_int i = 0; i < n; i++) {
+                local_sum += u[i] * u[i];
+            }
+            partials[tid] = local_sum;
+        }
+
+        double result = 0.0;
+        for (int t = 0; t < max_t; ++t) {
+            result += partials[t];
+        }
+        if (max_t > kStackMax) delete[] partials;
+        return result;
+    }
+#endif
+    double result = 0.0;
+    #pragma omp simd reduction(+:result)
+    for (fsils_int i = 0; i < n; i++) {
+        result += u[i] * u[i];
+    }
+    return result;
+}
+
+} // namespace
 
 double fsi_ls_norms(const fsils_int nNo, FSILS_commuType& commu, const Vector<double>& U)
 {
-  double result = 0.0;
-
-  #pragma omp parallel for reduction(+:result) schedule(static)
-  for (fsils_int i = 0; i < nNo; i++) {
-    result = result + U(i)*U(i);
-  }
+  double result = deterministic_norm_sq(U.data(), nNo);
 
   if (commu.nTasks != 1) {
     double tmp;
@@ -67,46 +112,8 @@ double fsi_ls_norms(const fsils_int nNo, FSILS_commuType& commu, const Vector<do
 
 double fsi_ls_normv(const int dof, const fsils_int nNo, FSILS_commuType& commu, const Array<double>& U)
 {
-  double result = 0.0;
-
-  switch (dof) {
-    case 1: {
-      #pragma omp parallel for reduction(+:result) schedule(static)
-      for (fsils_int i = 0; i < nNo; i++) {
-        result = result + U(0,i)*U(0,i);
-      }
-    } break;
-
-    case 2: {
-      #pragma omp parallel for reduction(+:result) schedule(static)
-      for (fsils_int i = 0; i < nNo; i++) {
-        result = result + U(0,i)*U(0,i) + U(1,i)*U(1,i);
-      }
-    } break;
-
-    case 3: {
-      #pragma omp parallel for reduction(+:result) schedule(static)
-      for (fsils_int i = 0; i < nNo; i++) {
-        result = result + U(0,i)*U(0,i) + U(1,i)*U(1,i) + U(2,i)*U(2,i);
-      }
-    } break;
-
-    case 4: {
-      #pragma omp parallel for reduction(+:result) schedule(static)
-      for (fsils_int i = 0; i < nNo; i++) {
-        result = result + U(0,i)*U(0,i) + U(1,i)*U(1,i) + U(2,i)*U(2,i) + U(3,i)*U(3,i);
-      }
-    } break;
-
-    default: {
-      #pragma omp parallel for reduction(+:result) schedule(static)
-      for (fsils_int i = 0; i < nNo; i++) {
-        for (int j = 0; j < U.nrows(); j++) {
-          result = result + U(j,i)*U(j,i);
-        }
-      }
-    } break;
-  }
+  const fsils_int n = static_cast<fsils_int>(dof) * nNo;
+  double result = deterministic_norm_sq(U.data(), n);
 
   if (commu.nTasks != 1) {
     double tmp;

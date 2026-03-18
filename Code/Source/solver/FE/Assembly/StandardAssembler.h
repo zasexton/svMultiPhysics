@@ -73,6 +73,7 @@
 
 #include <deque>
 #include <memory>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -962,7 +963,8 @@ private:
     std::vector<GlobalIndex> scratch_fused_resolved_offsets_;
 
     // Graph coloring for parallel assembly (computed once, persists across Newton iterations)
-    void ensureColoring(const IMeshAccess& mesh);
+    void ensureColoring(const IMeshAccess& mesh,
+                        std::span<const dofs::DofMap* const> extra_dof_maps = {});
     std::vector<int> coloring_colors_;                        // color per element
     std::vector<std::vector<GlobalIndex>> coloring_cells_by_color_; // cells grouped by color
     int coloring_num_colors_{0};

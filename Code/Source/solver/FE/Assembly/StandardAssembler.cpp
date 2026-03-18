@@ -2940,16 +2940,37 @@ std::shared_ptr<const quadrature::QuadratureRule> StandardAssembler::resolveQuad
     return quad_rule;
 }
 
-void StandardAssembler::ensureColoring(const IMeshAccess& mesh)
+void StandardAssembler::ensureColoring(const IMeshAccess& mesh,
+                                       std::span<const dofs::DofMap* const> extra_dof_maps)
 {
     // Check if coloring is already valid for this mesh
     if (coloring_valid_ && coloring_mesh_ == &mesh) {
         return;
     }
 
-    // Build element connectivity graph
+    // Build element connectivity graph from all DOF maps.
+    // For coupled multi-field assembly, different blocks use different DOF maps
+    // (e.g., velocity vs pressure). The coloring must ensure no two same-color
+    // elements share a DOF in ANY map.
     ElementGraph graph;
-    graph.build(mesh, *row_dof_map_);
+    if (extra_dof_maps.empty()) {
+        graph.build(mesh, *row_dof_map_);
+    } else {
+        std::vector<const dofs::DofMap*> all_maps;
+        all_maps.reserve(1 + extra_dof_maps.size());
+        all_maps.push_back(row_dof_map_);
+        for (const auto* dm : extra_dof_maps) {
+            if (dm != nullptr && dm != row_dof_map_) {
+                // Deduplicate: only add if not already present
+                bool found = false;
+                for (const auto* existing : all_maps) {
+                    if (existing == dm) { found = true; break; }
+                }
+                if (!found) all_maps.push_back(dm);
+            }
+        }
+        graph.build(mesh, all_maps);
+    }
 
     // Color the graph using greedy algorithm
     coloring_num_colors_ = colorGraph(graph, ColoringAlgorithm::Greedy, coloring_colors_);
@@ -5115,14 +5136,26 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 #ifdef _OPENMP
         max_omp_threads = omp_get_max_threads();
 #endif
+        const bool has_active_constraints =
+            options_.use_constraints && constraint_distributor_ && constraints_;
         const bool use_colored_parallel =
             use_batch_basis_early &&
             max_omp_threads > 1 &&
-            gids.size() >= 256;
+            gids.size() >= 256 &&
+            !has_active_constraints;
 
         if (use_colored_parallel) {
             // --- Build per-color cell lists from gids ---
-            ensureColoring(mesh);
+            // Collect all block DOF maps for union-connectivity coloring.
+            std::vector<const dofs::DofMap*> block_dof_maps;
+            if (coupled_kernel) {
+                for (std::size_t bi = 0; bi < n_blocks; ++bi) {
+                    const auto& bs = coupled_kernel->blockSpec(bi);
+                    if (bs.row_dof_map) block_dof_maps.push_back(bs.row_dof_map);
+                    if (bs.col_dof_map) block_dof_maps.push_back(bs.col_dof_map);
+                }
+            }
+            ensureColoring(mesh, block_dof_maps);
 
             // Diagnostic: can be enabled via SVMP_ASSEMBLY_TIMING=1
             if (assemblyTimingEnabled()) {
@@ -5160,6 +5193,15 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             std::atomic<GlobalIndex> atomic_matrix_entries{0};
             std::atomic<GlobalIndex> atomic_vector_entries{0};
 
+            // Thread-safety invariants: resolved insertion tables MUST be
+            // pre-built before entering the parallel region. Without them,
+            // the fallback paths call FsilsVector::resolveEntriesCached()
+            // and FsilsMatrix hash probes which have shared mutable state.
+            FE_THROW_IF(parent_term.assemble_matrix && !use_resolved_insert, FEException,
+                        "Colored parallel assembly requires pre-resolved matrix insertion tables");
+            FE_THROW_IF(parent_term.assemble_vector && !use_resolved_vector_insert, FEException,
+                        "Colored parallel assembly requires pre-resolved vector insertion tables");
+
             // Single persistent thread team for all colors.
             // The implicit barrier at end of each 'omp for' ensures
             // color-to-color synchronization without fork/join overhead.
@@ -5196,7 +5238,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 // NOTE: no 'continue' on empty — all threads must reach omp for
 
 #ifdef _OPENMP
-#pragma omp for schedule(dynamic, 4)
+#pragma omp for schedule(static)
 #endif
                     for (std::size_t ci_cell = 0;
                          ci_cell < cells_this_color.size(); ++ci_cell) {

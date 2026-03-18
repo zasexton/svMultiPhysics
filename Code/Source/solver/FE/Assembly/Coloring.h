@@ -143,6 +143,15 @@ public:
     void build(const IMeshAccess& mesh, const dofs::DofMap& dof_map);
 
     /**
+     * @brief Build graph from mesh and multiple DOF maps (union of connectivity).
+     *
+     * Two elements are adjacent if they share a DOF in ANY of the provided maps.
+     * This is needed for coupled multi-field assembly where different blocks use
+     * different DOF maps (e.g., velocity vs pressure).
+     */
+    void build(const IMeshAccess& mesh, std::span<const dofs::DofMap* const> dof_maps);
+
+    /**
      * @brief Add an edge between two elements
      */
     void addEdge(GlobalIndex elem1, GlobalIndex elem2);
@@ -184,6 +193,9 @@ public:
     void clear();
 
 private:
+    template <typename MapType>
+    void buildAdjacencyFromDofMap(const MapType& dof_to_elements);
+
     // CSR storage
     std::vector<GlobalIndex> adjacency_offsets_;  // Size: num_elements + 1
     std::vector<GlobalIndex> adjacency_list_;     // All neighbors concatenated

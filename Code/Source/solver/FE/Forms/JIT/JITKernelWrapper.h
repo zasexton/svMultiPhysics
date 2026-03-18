@@ -45,6 +45,7 @@ public:
         std::uint32_t n_qpts{0};
         std::uint32_t n_test_dofs{0};
         std::uint32_t n_trial_dofs{0};
+        bool is_affine{false};  ///< P1 simplex — enables QP-constant term hoisting in JIT
     };
 
     struct BoundarySpecializationHint {
@@ -271,6 +272,8 @@ private:
 	    bool warned_compile_failure_{false};
 	    bool runtime_failed_{false};
     bool warned_runtime_failure_{false};
+
+    bool primed_is_affine_{false};  ///< Cached from primeCellSpecializations hint
 
     // NOTE: scratch_batch_sides_/outputs_ are no longer used by computeCellBatch
     // (replaced with stack-local vectors for thread safety), but kept to avoid

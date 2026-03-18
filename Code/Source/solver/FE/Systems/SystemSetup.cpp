@@ -2521,6 +2521,12 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                     hint.n_qpts = static_cast<std::uint32_t>(quad_rule->num_points());
                     hint.n_test_dofs = static_cast<std::uint32_t>(test_space.dofs_per_element());
                     hint.n_trial_dofs = static_cast<std::uint32_t>(trial_space.dofs_per_element());
+
+                    // Detect P1 simplices for QP-constant term hoisting
+                    const auto& test_element = test_space.getElement(cell_type, cell_id);
+                    hint.is_affine = (test_element.polynomial_order() <= 1) &&
+                        (cell_type == ElementType::Tetra4 || cell_type == ElementType::Triangle3);
+
                     hints.push_back(hint);
                 }
                 return hints;

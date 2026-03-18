@@ -41,20 +41,73 @@
 
 #include "fils_struct.hpp"
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace dot {
 
 using namespace fe_fsi_linear_solver;
+
+// ---------------------------------------------------------------------------
+// Deterministic parallel dot product helper.
+//
+// Standard OMP reduction(+:) does not guarantee a fixed summation order
+// for the per-thread partial results, causing non-deterministic rounding
+// across runs.  This helper uses a fixed-size partial-sum array indexed
+// by thread ID, then sums the partials in ascending thread order so that
+// the result is bit-reproducible for a given thread count.
+// ---------------------------------------------------------------------------
+namespace {
+
+inline double deterministic_dot(const double* __restrict__ a,
+                                const double* __restrict__ b,
+                                fsils_int n)
+{
+#ifdef _OPENMP
+    if (n >= 10000 && omp_get_max_threads() > 1) {
+        const int max_t = omp_get_max_threads();
+        // Stack-allocate for small thread counts, heap for large.
+        constexpr int kStackMax = 64;
+        double stack_partials[kStackMax];
+        double* partials = (max_t <= kStackMax) ? stack_partials : new double[max_t];
+        for (int t = 0; t < max_t; ++t) partials[t] = 0.0;
+
+        #pragma omp parallel
+        {
+            const int tid = omp_get_thread_num();
+            double local_sum = 0.0;
+            #pragma omp for schedule(static)
+            for (fsils_int i = 0; i < n; i++) {
+                local_sum += a[i] * b[i];
+            }
+            partials[tid] = local_sum;
+        }
+
+        // Sum partials in fixed order for determinism.
+        double result = 0.0;
+        for (int t = 0; t < max_t; ++t) {
+            result += partials[t];
+        }
+        if (max_t > kStackMax) delete[] partials;
+        return result;
+    }
+#endif
+    double result = 0.0;
+    #pragma omp simd reduction(+:result)
+    for (fsils_int i = 0; i < n; i++) {
+        result += a[i] * b[i];
+    }
+    return result;
+}
+
+} // namespace
 
 /// @brief Reproduces 'FUNCTION FSILS_DOTS(nNo, commu, U, V)'.
 //
 double fsils_dot_s(const fsils_int nNo, FSILS_commuType& commu, const Vector<double>& U, const Vector<double>& V)
 {
-  double result = 0.0;
-
-  #pragma omp parallel for if(nNo >= 10000) reduction(+:result) schedule(static)
-  for (fsils_int i = 0; i < nNo; i++) {
-    result = result + U(i)*V(i);
-  }
+  double result = deterministic_dot(U.data(), V.data(), nNo);
 
   if (commu.nTasks == 1) {
     return result;
@@ -71,15 +124,8 @@ double fsils_dot_s(const fsils_int nNo, FSILS_commuType& commu, const Vector<dou
 //
 double fsils_dot_v(const int dof, const fsils_int nNo, FSILS_commuType& commu, const Array<double>& U, const Array<double>& V)
 {
-  const double* __restrict__ u = U.data();
-  const double* __restrict__ v = V.data();
   const fsils_int n = static_cast<fsils_int>(dof) * nNo;
-  double result = 0.0;
-
-  #pragma omp parallel for simd if(n >= 10000) reduction(+:result) schedule(static)
-  for (fsils_int i = 0; i < n; i++) {
-    result += u[i] * v[i];
-  }
+  double result = deterministic_dot(U.data(), V.data(), n);
 
   if (commu.nTasks == 1) {
     return result;
@@ -96,14 +142,7 @@ double fsils_dot_v(const int dof, const fsils_int nNo, FSILS_commuType& commu, c
 //
 double fsils_nc_dot_s(const fsils_int nNo, const Vector<double>& U, const Vector<double>& V)
 {
-  double result{0.0};
-
-  #pragma omp parallel for if(nNo >= 10000) reduction(+:result) schedule(static)
-  for (fsils_int i = 0; i < nNo; i++) {
-    result = result + U(i)*V(i);
-  }
-
-  return result;
+  return deterministic_dot(U.data(), V.data(), nNo);
 }
 
 /// @brief Reproduces 'FUNCTION FSILS_NCDOTV(dof, nNo, U, V) RESULT(FSILS_DOTV)'.
@@ -115,17 +154,8 @@ double fsils_nc_dot_s(const fsils_int nNo, const Vector<double>& U, const Vector
 //
 double fsils_nc_dot_v(const int dof, const fsils_int nNo, const Array<double>& U, const Array<double>& V)
 {
-  const double* __restrict__ u = U.data();
-  const double* __restrict__ v = V.data();
   const fsils_int n = static_cast<fsils_int>(dof) * nNo;
-  double result = 0.0;
-
-  #pragma omp parallel for simd if(n >= 10000) reduction(+:result) schedule(static)
-  for (fsils_int i = 0; i < n; i++) {
-    result += u[i] * v[i];
-  }
-
-  return result;
+  return deterministic_dot(U.data(), V.data(), n);
 }
 
 };

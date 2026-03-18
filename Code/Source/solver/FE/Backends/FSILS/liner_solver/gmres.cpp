@@ -678,50 +678,78 @@ double fused_update_norm_v_impl(const fsils_int nNo, const fsils_int mynNo, fe_f
   double* v = u_next.data();
   double local_sq = 0.0;
 
-  #pragma omp parallel for reduction(+:local_sq) schedule(static)
-  for (fsils_int k_start = 0; k_start < nNo; k_start += BLOCK_SIZE) {
-    const fsils_int k_end = std::min(k_start + BLOCK_SIZE, nNo);
-    const fsils_int blk_nodes = k_end - k_start;
-    const size_t blk_elems = static_cast<size_t>(blk_nodes) * static_cast<size_t>(DOF);
+  // Deterministic partial-sum pattern: each thread stores its local sum
+  // in a fixed slot, then partials are summed in thread-ID order.
+  {
+#ifdef _OPENMP
+    const int max_t = omp_get_max_threads();
+    constexpr int kStackMax = 64;
+    double stack_partials[kStackMax];
+    double* partials = (max_t <= kStackMax) ? stack_partials : new double[max_t];
+    for (int t = 0; t < max_t; ++t) partials[t] = 0.0;
 
-    alignas(64) double vbuf[DOF * BLOCK_SIZE];
-    double* v_block = v + static_cast<size_t>(k_start) * static_cast<size_t>(DOF);
+    #pragma omp parallel
+    {
+      const int tid = omp_get_thread_num();
+      double thread_sq = 0.0;
+      #pragma omp for schedule(static)
+#else
+    {
+      double thread_sq = 0.0;
+#endif
+      for (fsils_int k_start = 0; k_start < nNo; k_start += BLOCK_SIZE) {
+        const fsils_int k_end = std::min(k_start + BLOCK_SIZE, nNo);
+        const fsils_int blk_nodes = k_end - k_start;
+        const size_t blk_elems = static_cast<size_t>(blk_nodes) * static_cast<size_t>(DOF);
 
-    #pragma omp simd
-    for (size_t idx = 0; idx < blk_elems; ++idx) {
-      vbuf[idx] = v_block[idx];
-    }
+        alignas(64) double vbuf[DOF * BLOCK_SIZE];
+        double* v_block = v + static_cast<size_t>(k_start) * static_cast<size_t>(DOF);
 
-    for (int j = 0; j < num_vecs; ++j) {
-      const double hj = h_factors[j];
-      if (hj == 0.0) {
-        continue;
+        #pragma omp simd
+        for (size_t idx = 0; idx < blk_elems; ++idx) {
+          vbuf[idx] = v_block[idx];
+        }
+
+        for (int j = 0; j < num_vecs; ++j) {
+          const double hj = h_factors[j];
+          if (hj == 0.0) {
+            continue;
+          }
+
+          const double* uj_block = u.slice_data(j) + static_cast<size_t>(k_start) * static_cast<size_t>(DOF);
+          #pragma omp simd
+          for (size_t idx = 0; idx < blk_elems; ++idx) {
+            vbuf[idx] -= hj * uj_block[idx];
+          }
+        }
+
+        fsils_int owned_nodes = 0;
+        if (k_start < mynNo) {
+          owned_nodes = std::min(k_end, mynNo) - k_start;
+        }
+
+        const size_t owned_elems = static_cast<size_t>(owned_nodes) * static_cast<size_t>(DOF);
+        double blk_sq = 0.0;
+        #pragma omp simd reduction(+:blk_sq)
+        for (size_t idx = 0; idx < owned_elems; ++idx) {
+          blk_sq += vbuf[idx] * vbuf[idx];
+        }
+        thread_sq += blk_sq;
+
+        #pragma omp simd
+        for (size_t idx = 0; idx < blk_elems; ++idx) {
+          v_block[idx] = vbuf[idx];
+        }
       }
-
-      const double* uj_block = u.slice_data(j) + static_cast<size_t>(k_start) * static_cast<size_t>(DOF);
-      #pragma omp simd
-      for (size_t idx = 0; idx < blk_elems; ++idx) {
-        vbuf[idx] -= hj * uj_block[idx];
-      }
+#ifdef _OPENMP
+      partials[tid] = thread_sq;
+    } // end omp parallel
+    for (int t = 0; t < max_t; ++t) local_sq += partials[t];
+    if (max_t > kStackMax) delete[] partials;
+#else
+      local_sq = thread_sq;
     }
-
-    fsils_int owned_nodes = 0;
-    if (k_start < mynNo) {
-      owned_nodes = std::min(k_end, mynNo) - k_start;
-    }
-
-    const size_t owned_elems = static_cast<size_t>(owned_nodes) * static_cast<size_t>(DOF);
-    double blk_sq = 0.0;
-    #pragma omp simd reduction(+:blk_sq)
-    for (size_t idx = 0; idx < owned_elems; ++idx) {
-      blk_sq += vbuf[idx] * vbuf[idx];
-    }
-    local_sq += blk_sq;
-
-    #pragma omp simd
-    for (size_t idx = 0; idx < blk_elems; ++idx) {
-      v_block[idx] = vbuf[idx];
-    }
+#endif
   }
 
   double global_sq = local_sq;
@@ -1186,7 +1214,23 @@ double fused_update_norm_s(const fsils_int nNo, const fsils_int mynNo, fe_fsi_li
   double* v = u_next.data();
   double local_sq = 0.0;
 
-  #pragma omp parallel for reduction(+:local_sq) schedule(static)
+  {
+#ifdef _OPENMP
+    const int max_t = omp_get_max_threads();
+    constexpr int kStackMax = 64;
+    double stack_partials[kStackMax];
+    double* partials = (max_t <= kStackMax) ? stack_partials : new double[max_t];
+    for (int t = 0; t < max_t; ++t) partials[t] = 0.0;
+
+    #pragma omp parallel
+    {
+      const int tid = omp_get_thread_num();
+      double thread_sq = 0.0;
+      #pragma omp for schedule(static)
+#else
+    {
+      double thread_sq = 0.0;
+#endif
   for (fsils_int k_start = 0; k_start < nNo; k_start += BLOCK_SIZE) {
     const fsils_int k_end = std::min(k_start + BLOCK_SIZE, nNo);
     const fsils_int blk_nodes = k_end - k_start;
@@ -1222,12 +1266,21 @@ double fused_update_norm_s(const fsils_int nNo, const fsils_int mynNo, fe_fsi_li
     for (fsils_int idx = 0; idx < owned_nodes; ++idx) {
       blk_sq += vbuf[idx] * vbuf[idx];
     }
-    local_sq += blk_sq;
+    thread_sq += blk_sq;
 
     #pragma omp simd
     for (fsils_int idx = 0; idx < blk_nodes; ++idx) {
       v_block[static_cast<size_t>(idx)] = vbuf[idx];
     }
+  }
+#ifdef _OPENMP
+      partials[tid] = thread_sq;
+    } // end omp parallel
+    for (int t = 0; t < max_t; ++t) local_sq += partials[t];
+    if (max_t > kStackMax) delete[] partials;
+#else
+      local_sq = thread_sq;
+#endif
   }
 
   double global_sq = local_sq;

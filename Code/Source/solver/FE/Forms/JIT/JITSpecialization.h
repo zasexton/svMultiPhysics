@@ -36,6 +36,8 @@ struct JITCompileSpecialization {
     std::optional<std::uint32_t> n_qpts_plus{};
     std::optional<std::uint32_t> n_test_dofs_plus{};
     std::optional<std::uint32_t> n_trial_dofs_plus{};
+
+    bool is_affine{false};  ///< True for P1 simplices (Tet4, Tri3) — enables QP-constant term hoisting
 };
 
 } // namespace jit

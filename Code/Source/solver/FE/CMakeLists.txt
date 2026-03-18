@@ -1378,16 +1378,16 @@ if(FE_ENABLE_ASSEMBLY AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 
     # Files that DON'T include <omp.h> (only use #pragma omp):
     set(_FE_FSILS_PRAGMA_ONLY_FILES
-        ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/dot.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/omp_la.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/norm.cpp
     )
     set_source_files_properties(${_FE_FSILS_PRAGMA_ONLY_FILES}
         PROPERTIES COMPILE_OPTIONS "-O3;-ftree-vectorize;-funroll-loops;${_FE_FSILS_OMP_FLAG}"
     )
 
-    # Files that DO include <omp.h>:
+    # Files that DO include <omp.h> (deterministic parallel reductions):
     set(_FE_FSILS_OMP_H_FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/dot.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/norm.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/gmres.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Backends/FSILS/liner_solver/spar_mul.cpp
     )

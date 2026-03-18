@@ -1875,6 +1875,10 @@ void JITKernelWrapper::primeCellSpecializations(std::span<const CellSpecializati
 
         JITCompileSpecialization spec;
         spec.domain = IntegralDomain::Cell;
+        spec.is_affine = hint.is_affine;
+        if (hint.is_affine) {
+            primed_is_affine_ = true;
+        }
         bool any = false;
 
         if (options_.specialization.specialize_n_qpts &&
@@ -2555,6 +2559,7 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::getS
 
     JITCompileSpecialization spec;
     spec.domain = domain;
+    spec.is_affine = primed_is_affine_;
     bool any = false;
 
     if (options_.specialization.specialize_n_qpts) {

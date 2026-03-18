@@ -357,6 +357,8 @@ struct KernelGroupPlan {
         mixOptU32(specialization->n_test_dofs_plus);
         mixOptU32(specialization->n_trial_dofs_plus);
 
+        hashMix(h, static_cast<std::uint64_t>(specialization->is_affine ? 1u : 0u));
+
         // text_budget_bytes affects whether DOF loop unroll metadata is
         // emitted for specialized kernels, so it must be part of this key.
         hashMix(h, static_cast<std::uint64_t>(jit_options.specialization.text_budget_bytes));
