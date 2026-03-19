@@ -27,6 +27,7 @@
 
 #include "Constraints/AffineConstraints.h"
 #include "Constraints/Constraint.h"
+#include "Constraints/GaugeRegistry.h"
 
 #include "Dofs/DofHandler.h"
 #include "Dofs/FieldDofMap.h"
@@ -91,6 +92,11 @@ struct SetupOptions {
 
     // Iterative-solver leverage (explicit opt-in): auto-register eligible matrix-free operators.
     bool auto_register_matrix_free{false};
+
+    /// When true, print a detailed GaugeRegistry diagnostic report to stderr
+    /// after nullspace resolution during setup().  Useful for debugging
+    /// nullspace detection and enforcement decisions.
+    bool gauge_diagnostics{false};
 };
 
 struct AssemblyRequest {
@@ -302,6 +308,19 @@ public:
 	    // ---- Parameter requirements (optional) ----
 	    [[nodiscard]] const ParameterRegistry& parameterRegistry() const noexcept { return parameter_registry_; }
 
+    // ---- Gauge / nullspace detection (optional) ----
+    /**
+     * @brief Access the GaugeRegistry, creating it on first call
+     *
+     * The GaugeRegistry is an optional component for automatic nullspace
+     * detection and enforcement.  It is created lazily on first access.
+     */
+    [[nodiscard]] gauge::GaugeRegistry& gaugeRegistry();
+    [[nodiscard]] const gauge::GaugeRegistry* gaugeRegistryIfPresent() const noexcept {
+        return gauge_registry_.get();
+    }
+    [[nodiscard]] bool hasGaugeRegistry() const noexcept { return gauge_registry_ != nullptr; }
+
     // ---- Rank-1 updates from coupled Jacobian assembly ----
     [[nodiscard]] std::span<const backends::RankOneUpdate> lastRankOneUpdates() const noexcept;
     void clearRankOneUpdates() noexcept;
@@ -420,6 +439,7 @@ private:
     std::unique_ptr<OperatorBackends> operator_backends_{};
     std::unique_ptr<CoupledBoundaryManager> coupled_boundary_{};
 	    ParameterRegistry parameter_registry_{};
+    std::unique_ptr<gauge::GaugeRegistry> gauge_registry_{};
     std::vector<backends::RankOneUpdate> last_rank_one_updates_{};
     std::unordered_map<OperatorTag, OperatorAssemblyPlan> assembly_plan_by_op_{};
 

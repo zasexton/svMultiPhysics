@@ -125,6 +125,14 @@ void FESystem::requireSetup() const
     FE_THROW_IF(!is_setup_, InvalidStateException, "FESystem: setup() has not been called");
 }
 
+gauge::GaugeRegistry& FESystem::gaugeRegistry()
+{
+    if (!gauge_registry_) {
+        gauge_registry_ = std::make_unique<gauge::GaugeRegistry>();
+    }
+    return *gauge_registry_;
+}
+
 const FieldRecord& FESystem::singleField() const
 {
     FE_THROW_IF(field_registry_.size() != 1u, NotImplementedException,

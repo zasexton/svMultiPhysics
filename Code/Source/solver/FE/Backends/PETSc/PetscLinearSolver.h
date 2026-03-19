@@ -40,6 +40,9 @@ public:
                                      GenericVector& x,
                                      const GenericVector& b) override;
 
+    [[nodiscard]] bool supportsNullspace() const noexcept override { return true; }
+    void setNullspaceBasis(std::span<const std::vector<double>> basis) override;
+
 private:
     void ensureKspCreated();
     void applyBaseOptionsToKsp();
@@ -48,6 +51,8 @@ private:
     SolverOptions options_{};
 
     KSP ksp_{nullptr};
+    MatNullSpace nullspace_{nullptr};
+    std::vector<Vec> nullspace_vecs_{};  ///< Owned PETSc Vec objects for basis
 };
 
 } // namespace backends

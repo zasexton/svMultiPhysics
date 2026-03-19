@@ -33,6 +33,9 @@ public:
     [[nodiscard]] bool supportsNativeRankOneUpdates() const noexcept override { return true; }
     void setEffectiveTimeStep(double dt_eff) override;
 
+    [[nodiscard]] bool supportsNullspace() const noexcept override { return true; }
+    void setNullspaceBasis(std::span<const std::vector<double>> basis) override;
+
 private:
     SolverOptions options_{};
     std::vector<RankOneUpdate> rank_one_updates_{};
@@ -45,6 +48,9 @@ private:
     mutable std::vector<Real> values_work_{};
     // Cached RHS permutation buffer to avoid re-allocating each solve.
     mutable std::vector<double> r_internal_work_{};
+
+    // Nullspace basis for post-solve projection.
+    std::vector<std::vector<double>> nullspace_basis_{};
 
     // Saddle-point enforcement auto-detection state.
     // On the first BlockSchur solve, we numerically check if D ≈ -G^T

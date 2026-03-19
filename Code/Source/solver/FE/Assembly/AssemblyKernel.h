@@ -62,6 +62,7 @@
 #include "Core/Types.h"
 #include "Core/Alignment.h"
 #include "Core/ParameterValue.h"
+#include "Constraints/GaugeRegistry.h"
 
 #include <span>
 #include <vector>
@@ -400,6 +401,34 @@ public:
 	     * interpret these values directly.
 	     */
 	    [[nodiscard]] virtual std::vector<params::Spec> parameterSpecs() const { return {}; }
+
+	    /**
+	     * @brief Optional gauge/nullspace metadata for non-Forms kernels
+	     *
+	     * Hand-written kernels that are not built from FormExpr can override this
+	     * to declare nullspace modes that the GaugeRegistry should consider.
+	     * Forms-based kernels do not need to override this — the NullspaceAnalyzer
+	     * infers gauge candidates automatically from the symbolic expression.
+	     *
+	     * Each GaugeCandidate should set:
+	     *   - field: the FieldId whose nullspace is being declared
+	     *   - family: ScalarConstant, ComponentwiseConstant, or KernelOfSymGrad
+	     *   - confidence: High/Medium/Low
+	     *   - source: CandidateSource::ExplicitDeclaration
+	     *   - reason: human-readable explanation
+	     *
+	     * The default implementation returns an empty vector (no declarations).
+	     */
+	    [[nodiscard]] virtual std::vector<gauge::GaugeCandidate> gaugeMetadata() const { return {}; }
+
+	    /**
+	     * @brief Optional anchoring evidence for non-Forms kernels
+	     *
+	     * Hand-written kernels that anchor or preserve nullspace modes can
+	     * override this to contribute first-class anchoring evidence to the
+	     * GaugeRegistry resolver.  The default returns empty (no evidence).
+	     */
+	    [[nodiscard]] virtual std::vector<gauge::AnchoringEvidence> anchoringMetadata() const { return {}; }
 
 	    /**
 	     * @brief Optional setup-time resolution of parameter symbols to slot refs

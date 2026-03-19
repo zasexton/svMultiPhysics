@@ -9,9 +9,12 @@
 
 #include "Backends/Interfaces/BackendFactory.h"
 #include "Constraints/AffineConstraints.h"
+#include "Constraints/GaugeDiagnostics.h"
+#include "Constraints/GaugeRegistry.h"
 #include "Core/FEException.h"
 #include "Core/Logger.h"
 #include "Dofs/DofIndexSet.h"
+#include "Dofs/EntityDofMap.h"
 #include "Systems/SystemsExceptions.h"
 
 #if defined(FE_HAS_FSILS)
@@ -906,6 +909,37 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             traceLog(oss.str());
         }
 
+        // Nullspace validation: on the first iteration with a Jacobian, optionally
+        // verify that inferred nullspace vectors are actually in the operator's nullspace.
+        // Gated by SVMP_GAUGE_VALIDATE environment variable to avoid overhead in production.
+        if (it == 0 && have_jacobian && gauge::isNullspaceValidationEnabled()) {
+            const auto* reg = transient.system().gaugeRegistryIfPresent();
+            if (reg && reg->isResolved()) {
+                const auto n_dofs = transient.system().dofHandler().getNumDofs();
+                auto get_field_dofs = [&](FieldId fid, int /*comp*/) -> std::vector<GlobalIndex> {
+                    const auto offset = transient.system().fieldDofOffset(fid);
+                    const auto& fdh = transient.system().fieldDofHandler(fid);
+                    const auto nd = fdh.getNumDofs();
+                    std::vector<GlobalIndex> dofs;
+                    dofs.reserve(static_cast<std::size_t>(nd));
+                    for (GlobalIndex d = offset; d < offset + nd; ++d) dofs.push_back(d);
+                    return dofs;
+                };
+                // Build basis from ALL resolved modes (not just SolverNullspace)
+                // by temporarily treating all ExactNullspace modes as needing basis
+                auto all_basis = reg->buildNullspaceBasis(n_dofs, get_field_dofs);
+                if (!all_basis.empty()) {
+                    auto validation_factory = backends::BackendFactory::create(J.backendKind());
+                    if (validation_factory) {
+                        auto results = gauge::validateNullspaceBasis(
+                            J, *validation_factory, all_basis);
+                        std::fprintf(stderr, "%s",
+                            gauge::formatValidationReport(results).c_str());
+                    }
+                }
+            }
+        }
+
         if (tolerancesSatisfied(current_residual_norm)) {
             report.converged = true;
             report.iterations = it;
@@ -1130,6 +1164,57 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         // Bridge rank-1 updates from coupled BC assembly to the linear solver.
         bridgeRankOneUpdates();
+
+        // Bridge nullspace basis from GaugeRegistry to the linear solver.
+        // Currently dormant: the resolver always uses algebraic enforcement,
+        // so buildNullspaceBasis() returns empty.  This path is retained for
+        // future SolverNullspace opt-in.
+        if (linear.supportsNullspace()) {
+            const auto* reg = transient.system().gaugeRegistryIfPresent();
+            if (reg && reg->isResolved()) {
+                const auto n_dofs = transient.system().dofHandler().getNumDofs();
+                auto get_field_dofs = [&](FieldId fid, int comp) -> std::vector<GlobalIndex> {
+                    const auto idx = static_cast<std::size_t>(fid);
+                    const auto& sys = transient.system();
+
+                    // Component-aware: return only DOFs for the requested component
+                    if (comp >= 0 && idx < sys.fieldMap().numFields()) {
+                        const auto n_comp = sys.fieldMap().numComponents(idx);
+                        if (n_comp > 1 && static_cast<LocalIndex>(comp) < n_comp) {
+                            return sys.fieldMap().getComponentDofs(idx, static_cast<LocalIndex>(comp)).toVector();
+                        }
+                    }
+
+                    const auto offset = sys.fieldDofOffset(fid);
+                    const auto& fdh = sys.fieldDofHandler(fid);
+                    const auto nd = fdh.getNumDofs();
+                    std::vector<GlobalIndex> dofs;
+                    dofs.reserve(static_cast<std::size_t>(nd));
+                    for (GlobalIndex d = offset; d < offset + nd; ++d) {
+                        dofs.push_back(d);
+                    }
+                    return dofs;
+                };
+                // Build CoordinateProvider for rotation mode basis vectors.
+                gauge::GaugeRegistry::CoordinateProvider coord_provider;
+                const auto* emap = transient.system().dofHandler().getEntityDofMap();
+                if (emap) {
+                    coord_provider = [&](FieldId /*fid*/, GlobalIndex dof)
+                        -> std::array<double, 3> {
+                        auto ent = emap->getDofEntity(dof);
+                        if (ent && ent->kind == dofs::EntityKind::Vertex) {
+                            auto p = transient.system().meshAccess().getNodeCoordinates(ent->id);
+                            return {static_cast<double>(p[0]),
+                                    static_cast<double>(p[1]),
+                                    static_cast<double>(p[2])};
+                        }
+                        return {0.0, 0.0, 0.0};
+                    };
+                }
+                auto basis = reg->buildNullspaceBasis(n_dofs, get_field_dofs, coord_provider);
+                linear.setNullspaceBasis(basis);
+            }
+        }
 
         // Provide the effective stage time step to the linear solver backend.
         //

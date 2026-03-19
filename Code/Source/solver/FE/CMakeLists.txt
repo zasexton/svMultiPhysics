@@ -512,6 +512,8 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/PenaltyMethod.h
     Constraints/RobinBC.h
     Constraints/ConstraintsIO.h
+    Constraints/GaugeDiagnostics.h
+    Constraints/GaugeRegistry.h
 )
 
 set(FE_CONSTRAINTS_SOURCES
@@ -530,6 +532,8 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/PenaltyMethod.cpp
     Constraints/RobinBC.cpp
     Constraints/ConstraintsIO.cpp
+    Constraints/GaugeDiagnostics.cpp
+    Constraints/GaugeRegistry.cpp
 )
 
 # Assembly sources
@@ -707,6 +711,7 @@ set(FE_FORMS_HEADERS
 	    Forms/ConstraintBCs.h
 	    Forms/BoundaryFunctional.h
 	    Forms/AffineAnalysis.h
+	    Forms/NullspaceAnalyzer.h
 	    Forms/FormExpr.h
     Forms/SymbolicDifferentiation.h
     Forms/Index.h
@@ -775,6 +780,7 @@ set(FE_FORMS_SOURCES
 	    Forms/BoundaryFunctional.cpp
 	    Forms/CoupledBlockKernel.cpp
 	    Forms/FormKernels.cpp
+	    Forms/NullspaceAnalyzer.cpp
 	    Forms/SymbolicDifferentiation.cpp
 	    Forms/PointEvaluator.cpp
 	    Forms/JIT/ExternalCalls.cpp
@@ -1820,6 +1826,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Constraints/test_HangingNodeConstraint.cpp
         Tests/Unit/Constraints/test_PeriodicBC.cpp
         Tests/Unit/Constraints/test_MultiPointConstraint.cpp
+        Tests/Unit/Constraints/test_GaugeRegistry.cpp
         Tests/Unit/Constraints/test_GlobalConstraint.cpp
         Tests/Unit/Constraints/test_ParallelConstraints.cpp
         Tests/Unit/Constraints/test_LagrangeMultiplier.cpp
@@ -1897,6 +1904,7 @@ if(FE_BUILD_TESTS)
 	                Tests/Unit/Backends/test_FsilsBackend.cpp
 	                Tests/Unit/Backends/test_LinearSolverConformance.cpp
 	                Tests/Unit/Backends/test_PetscBackend.cpp
+	                Tests/Unit/Backends/test_GaugeDiagnostics.cpp
 	                Tests/Unit/Backends/test_main.cpp
 		            )
 		            add_executable(test_fe_backends ${FE_BACKENDS_TEST_SOURCES})
@@ -2006,6 +2014,7 @@ if(FE_BUILD_TESTS)
 			                Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp
 		                Tests/Unit/Forms/test_ConstitutiveModel.cpp
 	                Tests/Unit/Forms/test_PrimitiveTypes.cpp
+	                Tests/Unit/Forms/test_NullspaceAnalyzer.cpp
 		                Tests/Unit/Forms/test_main.cpp
 		            )
 	            add_executable(test_fe_forms ${FE_FORMS_TEST_SOURCES})
@@ -2109,6 +2118,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Systems/test_VectorBasisConstraints.cpp
                 Tests/Unit/Systems/test_StrongDirichletConstraint.cpp
                 Tests/Unit/Systems/test_FormsInstaller.cpp
+                Tests/Unit/Systems/test_GaugeIntegration.cpp
 	                Tests/Unit/Systems/test_CoupledBoundaryManager.cpp
                 Tests/Unit/Systems/test_CoupledBoundaryConditionHelpers.cpp
                 Tests/Unit/Systems/test_AuxiliaryStateBuilder.cpp

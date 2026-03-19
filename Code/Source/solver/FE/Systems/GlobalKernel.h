@@ -10,6 +10,7 @@
 
 #include "Core/Types.h"
 #include "Core/ParameterValue.h"
+#include "Constraints/GaugeRegistry.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -93,6 +94,26 @@ public:
      * @brief Optional parameter requirements for this global kernel
      */
     [[nodiscard]] virtual std::vector<params::Spec> parameterSpecs() const { return {}; }
+
+    /**
+     * @brief Optional gauge/nullspace metadata for non-Forms global kernels
+     *
+     * Global kernels that contribute to the system operator may declare
+     * nullspace modes or anchoring information.  The default returns
+     * empty (no declarations).
+     *
+     * @see AssemblyKernel::gaugeMetadata() for the element-kernel equivalent
+     */
+    [[nodiscard]] virtual std::vector<gauge::GaugeCandidate> gaugeMetadata() const { return {}; }
+
+    /**
+     * @brief Optional anchoring evidence for non-Forms global kernels
+     *
+     * Global kernels that anchor or preserve nullspace modes can override
+     * this to contribute first-class anchoring evidence to the GaugeRegistry
+     * resolver.  The default returns empty (no evidence).
+     */
+    [[nodiscard]] virtual std::vector<gauge::AnchoringEvidence> anchoringMetadata() const { return {}; }
 
     [[nodiscard]] virtual assembly::AssemblyResult assemble(const FESystem& system,
                                                             const AssemblyRequest& request,

@@ -35,6 +35,13 @@ PetscLinearSolver::PetscLinearSolver(const SolverOptions& options)
 
 PetscLinearSolver::~PetscLinearSolver()
 {
+    if (nullspace_) {
+        MatNullSpaceDestroy(&nullspace_);
+    }
+    for (auto& v : nullspace_vecs_) {
+        if (v) VecDestroy(&v);
+    }
+    nullspace_vecs_.clear();
     if (ksp_) {
         FE_PETSC_CALL(KSPDestroy(&ksp_));
     }
@@ -50,12 +57,23 @@ PetscLinearSolver& PetscLinearSolver::operator=(PetscLinearSolver&& other) noexc
     if (this == &other) {
         return *this;
     }
+    if (nullspace_) {
+        MatNullSpaceDestroy(&nullspace_);
+        nullspace_ = nullptr;
+    }
+    for (auto& v : nullspace_vecs_) {
+        if (v) VecDestroy(&v);
+    }
+    nullspace_vecs_.clear();
     if (ksp_) {
         KSPDestroy(&ksp_);
     }
     options_ = other.options_;
     ksp_ = other.ksp_;
     other.ksp_ = nullptr;
+    nullspace_ = other.nullspace_;
+    other.nullspace_ = nullptr;
+    nullspace_vecs_ = std::move(other.nullspace_vecs_);
     return *this;
 }
 
@@ -258,6 +276,11 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
                 << " use_initial_guess=" << (options_.use_initial_guess ? 1 : 0)
                 << " prefix='" << normalizedPetscPrefix(options_.petsc_options_prefix) << "'";
             traceLog(oss.str());
+        }
+
+        // Attach nullspace to the matrix if one has been set.
+        if (nullspace_) {
+            FE_PETSC_CALL(MatSetNullSpace(A->petsc(), nullspace_));
         }
 
         // Compute initial residual ||b - A x||.
@@ -478,6 +501,63 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
     }
 
     FE_THROW(InvalidArgumentException, "PetscLinearSolver::solve: backend mismatch");
+}
+
+void PetscLinearSolver::setNullspaceBasis(std::span<const std::vector<double>> basis)
+{
+    // Destroy previous nullspace if any
+    if (nullspace_) {
+        MatNullSpaceDestroy(&nullspace_);
+        nullspace_ = nullptr;
+    }
+    for (auto& v : nullspace_vecs_) {
+        if (v) VecDestroy(&v);
+    }
+    nullspace_vecs_.clear();
+
+    if (basis.empty()) {
+        return;
+    }
+
+    // TODO: MPI-correct — VecCreateSeq/PETSC_COMM_SELF is only valid for
+    // single-rank runs. For MPI, use VecCreateMPI with the matrix communicator.
+    // The FSILS path (post-solve projection) is the primary solver-side
+    // nullspace path; PETSc MPI nullspace is deferred.
+#ifndef NDEBUG
+    {
+        int nTasks = 1;
+        MPI_Comm_size(PETSC_COMM_WORLD, &nTasks);
+        FE_CHECK_ARG(nTasks == 1,
+            "PetscLinearSolver::setNullspaceBasis: MPI nullspace not yet implemented. "
+            "Use FSILS backend or single-rank PETSc.");
+    }
+#endif
+
+    // Create PETSc Vec objects from the basis vectors
+    nullspace_vecs_.resize(basis.size(), nullptr);
+    for (std::size_t i = 0; i < basis.size(); ++i) {
+        const auto& bvec = basis[i];
+        const auto n = static_cast<PetscInt>(bvec.size());
+        FE_PETSC_CALL(VecCreateSeq(PETSC_COMM_SELF, n, &nullspace_vecs_[i]));
+
+        PetscScalar* arr = nullptr;
+        FE_PETSC_CALL(VecGetArray(nullspace_vecs_[i], &arr));
+        for (PetscInt j = 0; j < n; ++j) {
+            arr[j] = static_cast<PetscScalar>(bvec[static_cast<std::size_t>(j)]);
+        }
+        FE_PETSC_CALL(VecRestoreArray(nullspace_vecs_[i], &arr));
+    }
+
+    // Create the MatNullSpace.
+    // has_const = PETSC_FALSE because we provide the constant mode explicitly
+    // in the basis vectors (already normalized).
+    // TODO: MPI-correct — use matrix communicator instead of PETSC_COMM_SELF.
+    FE_PETSC_CALL(MatNullSpaceCreate(
+        PETSC_COMM_SELF,
+        PETSC_FALSE,
+        static_cast<PetscInt>(nullspace_vecs_.size()),
+        nullspace_vecs_.data(),
+        &nullspace_));
 }
 
 } // namespace backends

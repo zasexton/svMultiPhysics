@@ -1280,6 +1280,7 @@ double fused_update_norm_s(const fsils_int nNo, const fsils_int mynNo, fe_fsi_li
     if (max_t > kStackMax) delete[] partials;
 #else
       local_sq = thread_sq;
+    }
 #endif
   }
 

@@ -24,6 +24,7 @@
 #include "Systems/MeshSearchAccess.h"
 #endif
 
+#include "Constraints/GaugeDiagnostics.h"
 #include "Constraints/ParallelConstraints.h"
 
 #include "Sparsity/ConstraintSparsityAugmenter.h"
@@ -33,7 +34,9 @@
 
 #include "Spaces/FunctionSpace.h"
 
+#include "Dofs/DofGraph.h"
 #include "Dofs/EntityDofMap.h"
+#include "Sparsity/GraphSparsity.h"
 
 #include "Elements/ReferenceElement.h"
 
@@ -1257,6 +1260,457 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     for (const auto& c : constraint_defs_) {
         FE_CHECK_NOT_NULL(c.get(), "FESystem::setup: constraint");
         c->apply(affine_constraints_);
+    }
+
+    // -----------------------------------------------------------------
+    // Gauge / nullspace auto-detection and enforcement
+    // -----------------------------------------------------------------
+    // Collect explicit gauge metadata from non-Forms kernels (Path B).
+    // This supplements the automatic inference from FormsInstaller (Path A).
+    {
+        const auto op_tags_gauge = operator_registry_.list();
+        for (const auto& tag : op_tags_gauge) {
+            const auto& def = operator_registry_.get(tag);
+
+            // Cell kernels — candidates + anchoring evidence
+            for (const auto& term : def.cells) {
+                if (!term.kernel) continue;
+                for (auto& c : term.kernel->gaugeMetadata()) {
+                    gaugeRegistry().addCandidate(std::move(c));
+                }
+                for (auto& a : term.kernel->anchoringMetadata()) {
+                    gaugeRegistry().addAnchoring(std::move(a));
+                }
+            }
+
+            // Boundary kernels
+            for (const auto& term : def.boundary) {
+                if (!term.kernel) continue;
+                for (auto& c : term.kernel->gaugeMetadata()) {
+                    gaugeRegistry().addCandidate(std::move(c));
+                }
+                for (auto& a : term.kernel->anchoringMetadata()) {
+                    gaugeRegistry().addAnchoring(std::move(a));
+                }
+            }
+
+            // Interior face kernels
+            for (const auto& term : def.interior) {
+                if (!term.kernel) continue;
+                for (auto& c : term.kernel->gaugeMetadata()) {
+                    gaugeRegistry().addCandidate(std::move(c));
+                }
+                for (auto& a : term.kernel->anchoringMetadata()) {
+                    gaugeRegistry().addAnchoring(std::move(a));
+                }
+            }
+
+            // Interface face kernels
+            for (const auto& term : def.interface_faces) {
+                if (!term.kernel) continue;
+                for (auto& c : term.kernel->gaugeMetadata()) {
+                    gaugeRegistry().addCandidate(std::move(c));
+                }
+                for (auto& a : term.kernel->anchoringMetadata()) {
+                    gaugeRegistry().addAnchoring(std::move(a));
+                }
+            }
+
+            // Global kernels
+            for (const auto& gk : def.global) {
+                if (!gk) continue;
+                for (auto& c : gk->gaugeMetadata()) {
+                    gaugeRegistry().addCandidate(std::move(c));
+                }
+                for (auto& a : gk->anchoringMetadata()) {
+                    gaugeRegistry().addAnchoring(std::move(a));
+                }
+            }
+        }
+    }
+
+    // If the GaugeRegistry has candidates (populated by FormsInstaller's
+    // NullspaceAnalyzer or by explicit kernel declarations), resolve them
+    // against anchoring evidence from the constraints already applied above.
+    //
+    // StrongDirichlet BCs that constrained any DOF of a field are treated
+    // as anchoring evidence for the constant-mode nullspace of that field.
+    if (gauge_registry_ && !gauge_registry_->candidates().empty()) {
+        // Provide a DOF-lookup callback for the resolver
+        auto get_field_dofs = [this](FieldId fid, int component) -> std::vector<GlobalIndex> {
+            const auto idx = static_cast<std::size_t>(fid);
+            if (idx >= field_dof_handlers_.size()) return {};
+
+            // When component >= 0, return only DOFs for that component
+            if (component >= 0 && idx < field_map_.numFields()) {
+                const auto n_comp = field_map_.numComponents(idx);
+                if (n_comp > 1 && static_cast<LocalIndex>(component) < n_comp) {
+                    return field_map_.getComponentDofs(idx, static_cast<LocalIndex>(component)).toVector();
+                }
+            }
+
+            const auto offset = field_dof_offsets_[idx];
+            const auto n_dofs = field_dof_handlers_[idx].getNumDofs();
+
+            std::vector<GlobalIndex> dofs;
+            dofs.reserve(static_cast<std::size_t>(n_dofs));
+            for (GlobalIndex d = offset; d < offset + n_dofs; ++d) {
+                dofs.push_back(d);
+            }
+            return dofs;
+        };
+
+        // Build RegionProvider: DOF → connected-component ID.
+        // Must be built BEFORE the Dirichlet scan so that Dirichlet evidence
+        // can be tagged with the correct region.
+        //
+        // Limitation: this assumes vertex-based DOF spaces (H1/P1).  The graph
+        // is built from field 0's DofMap (1:1 with mesh vertices for P1 scalar
+        // fields), and the region lambda only resolves DOFs whose EntityKind is
+        // Vertex.  Edge/face/cell interior DOFs (higher-order, DG) fall through
+        // to region 0.  This is appropriate for the current H1 formulations and
+        // is the correct first-step scope; a general solution would build the
+        // graph from the cell-adjacency structure of the mesh itself.
+        gauge::GaugeRegistry::RegionProvider region_provider;
+        {
+            if (!field_dof_handlers_.empty()) {
+                const auto& dmap = field_dof_handlers_[0].getDofMap();
+                dofs::DofGraph dg;
+                dg.build(dmap);
+                if (dg.numDofs() > 0) {
+                    auto offsets = dg.getAdjOffsets();
+                    auto indices = dg.getAdjIndices();
+                    sparsity::SparsityPattern sp(dg.numDofs(), dg.numDofs());
+                    for (GlobalIndex row = 0; row < dg.numDofs(); ++row) {
+                        for (auto j = offsets[static_cast<std::size_t>(row)];
+                             j < offsets[static_cast<std::size_t>(row + 1)]; ++j) {
+                            sp.addEntry(row, indices[static_cast<std::size_t>(j)]);
+                        }
+                    }
+                    sp.finalize();
+                    sparsity::GraphSparsity gs(std::move(sp));
+                    auto comp_result = gs.computeConnectedComponents();
+                    if (comp_result.num_components > 1) {
+                        auto vertex_region = std::make_shared<std::vector<GlobalIndex>>(
+                            std::move(comp_result.component_id));
+                        const auto* emap = dof_handler_.getEntityDofMap();
+                        if (emap) {
+                            region_provider = [vertex_region, emap]
+                                              (GlobalIndex dof) -> int {
+                                auto ent = emap->getDofEntity(dof);
+                                if (ent && ent->kind == dofs::EntityKind::Vertex) {
+                                    const auto vid = static_cast<std::size_t>(ent->id);
+                                    if (vid < vertex_region->size()) {
+                                        return static_cast<int>((*vertex_region)[vid]);
+                                    }
+                                }
+                                return 0;
+                            };
+                        }
+                        std::fprintf(stderr,
+                            "[GaugeRegistry] Mesh has %lld connected components — "
+                            "enabling per-region gauge scoping\n",
+                            static_cast<long long>(comp_result.num_components));
+                    }
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Retag pre-region BC evidence: convert global (region=-1) anchoring
+        // evidence from the BC manager into per-region evidence using the
+        // boundary_marker → region mapping.  This prevents a Robin/custom BC
+        // on one disconnected region from anchoring all regions.
+        //
+        // Evidence without a boundary_marker (e.g., explicit physics-module
+        // anchors like the NS natural-pressure anchor) stays global.  The
+        // resolver blocks unresolved global Anchored evidence from matching
+        // per-region candidates, so those anchors require the physics module
+        // to be updated to emit per-marker evidence for full region support.
+        // -----------------------------------------------------------------
+        if (region_provider && mesh_access_) {
+            const auto& mesh_ref = meshAccess();
+            gauge_registry_->retagEvidenceRegions(
+                [&](int marker) -> std::vector<int> {
+                    std::vector<int> regions;
+                    mesh_ref.forEachBoundaryFace(marker,
+                        [&](GlobalIndex /*face_id*/, GlobalIndex cell_id) {
+                            // Get any vertex of this cell → region
+                            std::vector<GlobalIndex> nodes;
+                            mesh_ref.getCellNodes(cell_id, nodes);
+                            for (const auto n : nodes) {
+                                int r = region_provider(
+                                    // Map vertex to a DOF to query the region_provider.
+                                    // For P1, vertex ID maps to the first field's DOF.
+                                    // Use EntityDofMap for correctness.
+                                    [&]() -> GlobalIndex {
+                                        const auto* emap = dof_handler_.getEntityDofMap();
+                                        if (emap) {
+                                            auto vdofs = emap->getVertexDofs(n);
+                                            if (!vdofs.empty()) return vdofs[0];
+                                        }
+                                        return n;  // fallback
+                                    }());
+                                bool found = false;
+                                for (int existing : regions) {
+                                    if (existing == r) { found = true; break; }
+                                }
+                                if (!found) regions.push_back(r);
+                            }
+                        });
+                    return regions;
+                });
+        }
+
+        // -----------------------------------------------------------------
+        // Dirichlet scan: detect which fields/components/regions have
+        // Dirichlet-constrained DOFs and record per-region anchoring evidence.
+        //
+        // When region_provider is active, each constrained DOF is tagged with
+        // its region so that a Dirichlet on region 0 does NOT anchor region 1.
+        // -----------------------------------------------------------------
+        {
+            std::vector<FieldId> seen_fields;
+            for (const auto& candidate : gauge_registry_->candidates()) {
+                bool already = false;
+                for (auto f : seen_fields) {
+                    if (f == candidate.field) { already = true; break; }
+                }
+                if (!already) seen_fields.push_back(candidate.field);
+            }
+
+            for (const auto fid : seen_fields) {
+                const auto idx = static_cast<std::size_t>(fid);
+                if (idx >= field_dof_handlers_.size()) continue;
+
+                // Helper: given a set of DOFs, add per-region Dirichlet evidence
+                // when region_provider is active, otherwise add global evidence.
+                auto addDirichletEvidence = [&](FieldId field, int comp,
+                                                const std::vector<GlobalIndex>& dofs) {
+                    if (region_provider) {
+                        // Group constrained DOFs by region
+                        std::unordered_map<int, bool> region_has_dirichlet;
+                        for (const auto d : dofs) {
+                            if (affine_constraints_.isConstrained(d)) {
+                                region_has_dirichlet[region_provider(d)] = true;
+                            }
+                        }
+                        for (const auto& [region, _] : region_has_dirichlet) {
+                            gauge_registry_->addAnchoring(gauge::AnchoringEvidence{
+                                field, comp, region,
+                                std::nullopt,
+                                gauge::AnchoringVerdict::Anchored,
+                                "StrongDirichlet constraint (region " +
+                                    std::to_string(region) + ")"});
+                        }
+                    } else {
+                        bool has_dirichlet = false;
+                        for (const auto d : dofs) {
+                            if (affine_constraints_.isConstrained(d)) {
+                                has_dirichlet = true;
+                                break;
+                            }
+                        }
+                        if (has_dirichlet) {
+                            gauge_registry_->addAnchoring(gauge::AnchoringEvidence{
+                                field, comp, -1,
+                                std::nullopt,
+                                gauge::AnchoringVerdict::Anchored,
+                                "StrongDirichlet constraint on DOFs"});
+                        }
+                    }
+                };
+
+                // Multi-component field: check each component separately
+                if (idx < field_map_.numFields()) {
+                    const auto n_comp = field_map_.numComponents(idx);
+                    if (n_comp > 1) {
+                        for (LocalIndex comp = 0; comp < n_comp; ++comp) {
+                            auto comp_dofs = field_map_.getComponentDofs(idx, comp).toVector();
+                            addDirichletEvidence(fid, static_cast<int>(comp), comp_dofs);
+                        }
+                        continue;
+                    }
+                }
+
+                // Scalar field: check all DOFs
+                const auto offset = field_dof_offsets_[idx];
+                const auto n_dofs = field_dof_handlers_[idx].getNumDofs();
+                std::vector<GlobalIndex> all_dofs;
+                all_dofs.reserve(static_cast<std::size_t>(n_dofs));
+                for (GlobalIndex d = offset; d < offset + n_dofs; ++d) {
+                    all_dofs.push_back(d);
+                }
+                addDirichletEvidence(fid, -1, all_dofs);
+            }
+        }
+
+        // Build CoordinateProvider: DOF → physical coordinates.
+        // Maps a DOF to its owning vertex via EntityDofMap, then to coordinates.
+        gauge::GaugeRegistry::CoordinateProvider coord_provider;
+        {
+            const auto* emap = dof_handler_.getEntityDofMap();
+            if (emap && mesh_access_) {
+                coord_provider = [this, emap](FieldId /*fid*/, GlobalIndex dof)
+                    -> std::array<double, 3> {
+                    auto ent = emap->getDofEntity(dof);
+                    if (ent && ent->kind == dofs::EntityKind::Vertex) {
+                        auto p = meshAccess().getNodeCoordinates(ent->id);
+                        return {static_cast<double>(p[0]),
+                                static_cast<double>(p[1]),
+                                static_cast<double>(p[2])};
+                    }
+                    return {0.0, 0.0, 0.0};
+                };
+            }
+        }
+
+        // Build MassWeightProvider: lumped mass weights w_i = ∫ φ_i dΩ.
+        // For P1 Lagrange on simplices, w_i = Σ_{cells touching i} |V_cell| / n_verts.
+        // This gives FE-correct mean-zero constraints on non-uniform meshes.
+        //
+        // Limitation: only Tri3 (3-node) and Tet4 (4-node) cells are supported.
+        // Meshes containing Quad4 or higher-order cells produce zero-weight DOFs;
+        // the provider returns empty for such fields, causing automatic fallback
+        // to uniform weights.  A general solution would use quadrature-based
+        // mass assembly (e.g., FESystem::assembleMass()).
+        gauge::GaugeRegistry::MassWeightProvider mass_weight_provider;
+        if (mesh_access_) {
+            const auto& mesh = meshAccess();
+            const auto n_cells = mesh.numCells();
+
+            // Pre-compute per-vertex lumped mass in a flat array indexed by vertex ID.
+            // We accumulate |V_cell|/n_verts for each vertex.
+            std::vector<GlobalIndex> cell_nodes;
+            std::vector<std::array<Real, 3>> cell_coords;
+            const auto total = dof_handler_.getNumDofs();
+            auto vertex_mass = std::make_shared<std::vector<double>>(
+                static_cast<std::size_t>(total), 0.0);
+
+            const auto* emap = dof_handler_.getEntityDofMap();
+            const int mesh_dim = mesh.dimension();
+            bool has_unsupported_cells = false;
+            if (emap && n_cells > 0) {
+                for (GlobalIndex c = 0; c < n_cells; ++c) {
+                    mesh.getCellNodes(c, cell_nodes);
+                    mesh.getCellCoordinates(c, cell_coords);
+                    const auto nv = cell_nodes.size();
+                    if (nv < 2 || cell_coords.size() != nv) continue;
+
+                    // Compute simplex volume.  Only Tri3 and Tet4 are supported.
+                    // Quad4 (nv==4, dim==2) and higher-order cells are skipped.
+                    double vol = 0.0;
+                    if (nv == 3 && mesh_dim == 2) {
+                        // 2D triangle: 0.5 * |cross(v1-v0, v2-v0)|
+                        const double ax = cell_coords[1][0] - cell_coords[0][0];
+                        const double ay = cell_coords[1][1] - cell_coords[0][1];
+                        const double bx = cell_coords[2][0] - cell_coords[0][0];
+                        const double by = cell_coords[2][1] - cell_coords[0][1];
+                        vol = 0.5 * std::abs(ax * by - ay * bx);
+                    } else if (nv == 4 && mesh_dim == 3) {
+                        // 3D tetrahedron: (1/6) * |det[v1-v0, v2-v0, v3-v0]|
+                        const double ax = cell_coords[1][0] - cell_coords[0][0];
+                        const double ay = cell_coords[1][1] - cell_coords[0][1];
+                        const double az = cell_coords[1][2] - cell_coords[0][2];
+                        const double bx = cell_coords[2][0] - cell_coords[0][0];
+                        const double by = cell_coords[2][1] - cell_coords[0][1];
+                        const double bz = cell_coords[2][2] - cell_coords[0][2];
+                        const double cx = cell_coords[3][0] - cell_coords[0][0];
+                        const double cy = cell_coords[3][1] - cell_coords[0][1];
+                        const double cz = cell_coords[3][2] - cell_coords[0][2];
+                        vol = std::abs(ax*(by*cz-bz*cy) - ay*(bx*cz-bz*cx) + az*(bx*cy-by*cx)) / 6.0;
+                    } else {
+                        // Unsupported cell type (Quad4, Hex8, higher-order): mark
+                        // so we don't build a provider with partial/zero weights.
+                        has_unsupported_cells = true;
+                        break;
+                    }
+
+                    const double w_per_vert = vol / static_cast<double>(nv);
+                    for (const auto node : cell_nodes) {
+                        // Map mesh vertex → all DOFs at this vertex, accumulate weight
+                        auto vdofs = emap->getVertexDofs(node);
+                        for (const auto d : vdofs) {
+                            if (d >= 0 && static_cast<std::size_t>(d) < vertex_mass->size()) {
+                                (*vertex_mass)[static_cast<std::size_t>(d)] += w_per_vert;
+                            }
+                        }
+                    }
+                }
+
+                // Only build the provider if all cells were supported simplices.
+                // If any unsupported cell was encountered, leave mass_weight_provider
+                // null so that applyEnforcement falls back to uniform weights.
+                if (!has_unsupported_cells) {
+                auto field_offsets = field_dof_offsets_;
+                auto n_fields = field_dof_handlers_.size();
+                auto field_handlers_ptr = &field_dof_handlers_;
+                auto field_map_ptr = &field_map_;
+                mass_weight_provider = [vertex_mass, field_offsets, n_fields,
+                                        field_handlers_ptr, field_map_ptr]
+                                       (FieldId fid, int component) -> std::vector<double> {
+                    const auto idx = static_cast<std::size_t>(fid);
+                    if (idx >= n_fields) return {};
+
+                    // Get DOFs for this field/component (same logic as get_field_dofs)
+                    std::vector<GlobalIndex> dofs;
+                    if (component >= 0 && idx < field_map_ptr->numFields()) {
+                        const auto n_comp = field_map_ptr->numComponents(idx);
+                        if (n_comp > 1 && static_cast<LocalIndex>(component) < n_comp) {
+                            dofs = field_map_ptr->getComponentDofs(idx, static_cast<LocalIndex>(component)).toVector();
+                        }
+                    }
+                    if (dofs.empty()) {
+                        const auto offset = field_offsets[idx];
+                        const auto nd = (*field_handlers_ptr)[idx].getNumDofs();
+                        dofs.reserve(static_cast<std::size_t>(nd));
+                        for (GlobalIndex d = offset; d < offset + nd; ++d) {
+                            dofs.push_back(d);
+                        }
+                    }
+
+                    // Extract weights and validate: if any DOF has zero weight
+                    // (unsupported cell type like Quad4), return empty to trigger
+                    // the uniform-weight fallback in applyEnforcement.
+                    std::vector<double> weights;
+                    weights.reserve(dofs.size());
+                    bool all_positive = true;
+                    for (const auto d : dofs) {
+                        double w = 0.0;
+                        if (d >= 0 && static_cast<std::size_t>(d) < vertex_mass->size()) {
+                            w = (*vertex_mass)[static_cast<std::size_t>(d)];
+                        }
+                        if (w <= 0.0) {
+                            all_positive = false;
+                            break;
+                        }
+                        weights.push_back(w);
+                    }
+                    if (!all_positive) return {};  // fallback to uniform
+                    return weights;
+                };
+                } // if (!has_unsupported_cells)
+            }
+        }
+
+        gauge_registry_->resolve(get_field_dofs, region_provider, coord_provider);
+
+        // Apply enforcement: auto-create GlobalConstraint objects for
+        // resolved exact-nullspace modes.
+        const int n_gauge_constraints =
+            gauge_registry_->applyEnforcement(affine_constraints_, get_field_dofs,
+                                               mass_weight_provider);
+
+        if (n_gauge_constraints > 0) {
+            std::fprintf(stderr,
+                "[GaugeRegistry] Applied %d automatic gauge constraint(s)\n",
+                n_gauge_constraints);
+        }
+
+        // Diagnostic report (opt-in via SetupOptions or environment variable)
+        if (opts.gauge_diagnostics || gauge::isNullspaceValidationEnabled()) {
+            std::fprintf(stderr, "%s", gauge_registry_->diagnosticReport().c_str());
+        }
     }
 
     // Synchronize in MPI before closing.

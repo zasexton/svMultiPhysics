@@ -20,6 +20,7 @@
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/WeakForm.h"
 #include "Forms/AffineAnalysis.h"
+#include "Forms/NullspaceAnalyzer.h"
 
 #include "Systems/FESystem.h"
 #include "Systems/StrongDirichletConstraint.h"
@@ -898,6 +899,20 @@ CoupledResidualKernels installFormulation(
                 "installFormulation: empty field list");
     FE_THROW_IF(!residual.isValid(), InvalidArgumentException,
                 "installFormulation: invalid residual expression");
+
+    // Run nullspace inference on the residual expression.
+    // This populates the system's GaugeRegistry with candidates that will be
+    // resolved during FESystem::setup() after BCs and constraints are known.
+    {
+        forms::NullspaceAnalyzer analyzer;
+        auto gauge_candidates = analyzer.analyze(residual, fields);
+        if (!gauge_candidates.empty()) {
+            auto& registry = system.gaugeRegistry();
+            for (auto& c : gauge_candidates) {
+                registry.addCandidate(std::move(c));
+            }
+        }
+    }
 
     const auto num_test = countUniqueTestSpaces(*residual.node());
     FE_THROW_IF(num_test == 0, InvalidArgumentException,

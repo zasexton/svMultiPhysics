@@ -126,6 +126,73 @@ public:
             bc->setup(system, field_id);
         }
 
+        // Collect gauge anchoring evidence from BCs BEFORE they are moved.
+        // The BCs will be consumed (moved into BoundaryConditionAffineConstraint)
+        // at the end of this method, so we must query gaugeAnchoring() now.
+        // Use gaugeRegistry() (not hasGaugeRegistry()) to eagerly create the
+        // registry — BCs may be applied before installFormulation() which is
+        // the normal creation point. The registry must exist to receive evidence.
+        {
+            auto& reg = system.gaugeRegistry();
+
+            // Get the component count for this field.  For multi-component
+            // families we iterate every component and query per-component
+            // verdicts, allowing non-strong BCs (Robin, custom) to advertise
+            // component-specific anchoring through gaugeAnchoring().
+            const auto& rec = system.fieldRecord(field_id);
+            const int n_comp = rec.components;
+
+            for (const auto& bc : bcs_) {
+                if (!bc) continue;
+                const int marker = bc->boundaryMarker();
+                const std::string src = "BC on boundary " + std::to_string(marker);
+
+                for (auto family : {gauge::NullspaceModeFamily::ScalarConstant,
+                                    gauge::NullspaceModeFamily::ComponentwiseConstant,
+                                    gauge::NullspaceModeFamily::KernelOfSymGrad}) {
+                    const bool is_multicomp_family =
+                        (family == gauge::NullspaceModeFamily::ComponentwiseConstant ||
+                         family == gauge::NullspaceModeFamily::KernelOfSymGrad);
+
+                    if (is_multicomp_family && n_comp > 1) {
+                        // Multi-component family on multi-component field:
+                        // query each component individually.  BCs that don't
+                        // distinguish components return the same verdict for
+                        // every component.  BCs that do (e.g., Robin on
+                        // component 0 only) return Unknown for unaffected
+                        // components, avoiding over-anchoring.
+                        for (int comp = 0; comp < n_comp; ++comp) {
+                            auto comp_verdict = bc->gaugeAnchoring(
+                                field_id, family, comp);
+                            if (comp_verdict != gauge::AnchoringVerdict::Unknown) {
+                                gauge::AnchoringEvidence ev;
+                                ev.field = field_id;
+                                ev.component = comp;
+                                ev.family = family;
+                                ev.verdict = comp_verdict;
+                                ev.source = src;
+                                ev.boundary_marker = marker;
+                                reg.addAnchoring(std::move(ev));
+                            }
+                        }
+                    } else {
+                        // Scalar family, or single-component field:
+                        // record field-wide evidence.
+                        auto verdict = bc->gaugeAnchoring(field_id, family, /*component=*/-1);
+                        if (verdict != gauge::AnchoringVerdict::Unknown) {
+                            gauge::AnchoringEvidence ev;
+                            ev.field = field_id;
+                            ev.family = family;
+                            ev.verdict = verdict;
+                            ev.source = src;
+                            ev.boundary_marker = marker;
+                            reg.addAnchoring(std::move(ev));
+                        }
+                    }
+                }
+            }
+        }
+
         for (const auto& bc : bcs_) {
             if (!bc) {
                 throw std::invalid_argument("BoundaryConditionManager::apply: null boundary condition");

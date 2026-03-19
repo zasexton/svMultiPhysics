@@ -267,6 +267,15 @@ public:
         }
     }
 
+    /// Periodic constraints satisfy u_slave = u_master, which is trivially true
+    /// for constant modes. Periodicity PRESERVES nullspace modes, it does not
+    /// anchor them.
+    [[nodiscard]] gauge::AnchoringVerdict
+    gaugeAnchoring(FieldId /*field_id*/, gauge::NullspaceModeFamily /*family*/, int /*component*/) const override
+    {
+        return gauge::AnchoringVerdict::Preserved;
+    }
+
 private:
     int master_marker_{-1};
     int slave_marker_{-1};

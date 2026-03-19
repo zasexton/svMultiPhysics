@@ -1124,6 +1124,34 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 		        }
 		    }
 
+    // Post-solve nullspace projection: x = x - Σ_i (z_i · x) z_i
+    // This removes any nullspace drift from the iterative solve.
+    if (!nullspace_basis_.empty() && x != nullptr) {
+        auto x_span = x->localSpan();
+        const auto n = x_span.size();
+
+        for (const auto& z : nullspace_basis_) {
+            if (z.size() != n) continue;
+
+            // Compute local dot product z · x
+            double local_dot = 0.0;
+            for (std::size_t i = 0; i < n; ++i) {
+                local_dot += z[i] * static_cast<double>(x_span[i]);
+            }
+
+            // MPI_Allreduce for distributed dot product
+            double global_dot = local_dot;
+#if FE_HAS_MPI
+            MPI_Allreduce(&local_dot, &global_dot, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
+            // x = x - (z · x) * z
+            for (std::size_t i = 0; i < n; ++i) {
+                x_span[i] -= static_cast<Real>(global_dot * z[i]);
+            }
+        }
+    }
+
     if (oopTraceEnabled()) {
         std::ostringstream oss;
         oss << "FsilsLinearSolver::solve: converged=" << (report.converged ? 1 : 0)
@@ -1136,6 +1164,15 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     }
 
     return report;
+}
+
+void FsilsLinearSolver::setNullspaceBasis(std::span<const std::vector<double>> basis)
+{
+    nullspace_basis_.clear();
+    nullspace_basis_.reserve(basis.size());
+    for (const auto& vec : basis) {
+        nullspace_basis_.push_back(vec);
+    }
 }
 
 } // namespace backends

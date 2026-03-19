@@ -29,41 +29,6 @@
 #endif
 
 namespace {
-
-class PressureNullspacePinConstraint final : public svmp::FE::systems::ISystemConstraint {
-public:
-    explicit PressureNullspacePinConstraint(svmp::FE::FieldId pressure_field, double value)
-        : pressure_field_(pressure_field)
-        , value_(value)
-    {
-    }
-
-    void apply(const svmp::FE::systems::FESystem& system, svmp::FE::constraints::AffineConstraints& constraints) override
-    {
-        const auto& fmap = system.fieldMap();
-        const auto p_dofs = fmap.getComponentDofs(static_cast<std::size_t>(pressure_field_), /*component=*/0);
-        FE_THROW_IF(p_dofs.empty(), svmp::FE::FEException,
-                    "PressureNullspacePinConstraint: pressure field has no DOFs");
-
-        const svmp::FE::GlobalIndex pin_dof = *p_dofs.begin();
-        constraints.addDirichlet(pin_dof, value_);
-    }
-
-    bool updateValues(const svmp::FE::systems::FESystem& /*system*/,
-                      svmp::FE::constraints::AffineConstraints& /*constraints*/,
-                      double /*time*/,
-                      double /*dt*/) override
-    {
-        return false;
-    }
-
-    [[nodiscard]] bool isTimeDependent() const noexcept override { return false; }
-
-private:
-    svmp::FE::FieldId pressure_field_{svmp::FE::INVALID_FIELD_ID};
-    double value_{0.0};
-};
-
 } // namespace
 
 namespace svmp {
@@ -345,8 +310,88 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             has_natural_momentum_bc = global_has_unconstrained_boundary;
         }
 
-        if (!has_natural_momentum_bc) {
-            system.addSystemConstraint(std::make_unique<PressureNullspacePinConstraint>(p_id, /*value=*/0.0));
+        // Declare the pressure nullspace candidate via GaugeRegistry.
+        // In incompressible flow, the pressure is determined only up to a
+        // constant when no natural (traction/outflow) BCs set the pressure
+        // level. The GaugeRegistry handles enforcement automatically.
+        {
+            auto& reg = system.gaugeRegistry();
+            reg.addCandidate(FE::gauge::GaugeCandidate{
+                p_id, -1, -1,
+                FE::gauge::NullspaceModeFamily::ScalarConstant,
+                FE::gauge::Confidence::High,
+                "Pressure nullspace in incompressible flow (saddle-point)",
+                FE::gauge::CandidateSource::ExplicitDeclaration});
+
+            if (has_natural_momentum_bc) {
+                // Velocity natural BCs (traction, outflow, coupled) set the
+                // pressure level via the traction integral σ·n = (-pI+τ)·n.
+                //
+                // Collect the set of boundary markers that have natural
+                // conditions and emit per-marker evidence so that
+                // retagEvidenceRegions() can assign each to the correct
+                // connected component on disconnected meshes.
+                std::unordered_set<int> natural_markers;
+                for (const auto& bc : options_.traction_neumann)
+                    natural_markers.insert(bc.boundary_marker);
+                for (const auto& bc : options_.traction_robin)
+                    natural_markers.insert(bc.boundary_marker);
+                for (const auto& bc : options_.pressure_outflow)
+                    natural_markers.insert(bc.boundary_marker);
+                for (const auto& bc : options_.coupled_outflow_rcr)
+                    natural_markers.insert(bc.boundary_marker);
+
+                // Also collect implicit natural markers (faces without
+                // velocity Dirichlet).
+                std::unordered_set<int> essential_vel;
+                for (const auto& bc : options_.velocity_dirichlet)
+                    essential_vel.insert(bc.boundary_marker);
+                const auto& mesh_ref = system.meshAccess();
+                mesh_ref.forEachBoundaryFace(/*marker=*/-1,
+                    [&](FE::GlobalIndex face_id, FE::GlobalIndex /*cell_id*/) {
+                        const int m = mesh_ref.getBoundaryFaceMarker(face_id);
+                        if (m != svmp::INVALID_LABEL &&
+                            essential_vel.find(m) == essential_vel.end()) {
+                            natural_markers.insert(m);
+                        }
+                    });
+
+                for (int m : natural_markers) {
+                    FE::gauge::AnchoringEvidence ev;
+                    ev.field = p_id;
+                    ev.family = FE::gauge::NullspaceModeFamily::ScalarConstant;
+                    ev.verdict = FE::gauge::AnchoringVerdict::Anchored;
+                    ev.source = "Velocity natural BC on boundary " + std::to_string(m) +
+                                " provides pressure reference";
+                    ev.boundary_marker = m;
+                    reg.addAnchoring(std::move(ev));
+                }
+                if (natural_markers.empty()) {
+                    // Unlabeled natural boundaries (INVALID_LABEL faces) cannot
+                    // be mapped to a specific boundary marker for region-aware
+                    // retagging.  Emit a global anchor (no boundary_marker):
+                    //
+                    //  - Connected mesh (common): matches the global candidate →
+                    //    correctly identified as Anchored, no gauge enforced.
+                    //
+                    //  - Disconnected mesh: blocked from per-region candidates
+                    //    by the resolver → all regions get gauge enforcement.
+                    //    This may over-constrain regions that are genuinely
+                    //    anchored by the unlabeled faces (MeanZeroElimination
+                    //    can change the pressure level).  This is a known
+                    //    limitation: without labeled markers, we cannot determine
+                    //    which region the natural BC touches.  Production meshes
+                    //    should label all boundary faces to enable correct
+                    //    per-region scoping.
+                    FE::gauge::AnchoringEvidence ev;
+                    ev.field = p_id;
+                    ev.family = FE::gauge::NullspaceModeFamily::ScalarConstant;
+                    ev.verdict = FE::gauge::AnchoringVerdict::Anchored;
+                    ev.source = "Velocity natural BC (unlabeled faces) provides "
+                                "pressure reference";
+                    reg.addAnchoring(std::move(ev));
+                }
+            }
         }
     }
 

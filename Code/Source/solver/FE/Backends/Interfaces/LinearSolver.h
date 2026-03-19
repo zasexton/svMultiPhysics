@@ -72,6 +72,28 @@ public:
 
     /// Returns true if this backend handles rank-1 updates natively (mat-vec + preconditioner).
     [[nodiscard]] virtual bool supportsNativeRankOneUpdates() const noexcept { return false; }
+
+    /// Returns true if this backend can handle nullspace basis vectors natively.
+    ///
+    /// Currently the GaugeRegistry resolver always chooses algebraic enforcement
+    /// (pinning/mean-zero) and does not assign EnforcementPolicy::SolverNullspace.
+    /// This API exists for future explicit opt-in to solver-side nullspace handling
+    /// (e.g., for problems where algebraic enforcement is undesirable).
+    [[nodiscard]] virtual bool supportsNullspace() const noexcept { return false; }
+
+    /// Provide an orthonormal nullspace basis for the operator.
+    ///
+    /// Each inner span is one mode vector of length n_dofs.  The solver should
+    /// project the residual and/or solution to remove components in the nullspace
+    /// after each Krylov iteration or at convergence.
+    ///
+    /// Currently dormant: the resolver always uses algebraic enforcement, so
+    /// buildNullspaceBasis() returns empty and the Newton bridge passes an empty
+    /// span.  Backends that implement this (FSILS, PETSc) are ready for future
+    /// SolverNullspace opt-in paths.
+    ///
+    /// The spans are valid only for the duration of the next solve() call.
+    virtual void setNullspaceBasis(std::span<const std::vector<double>> /*basis*/) {}
 };
 
 } // namespace backends
