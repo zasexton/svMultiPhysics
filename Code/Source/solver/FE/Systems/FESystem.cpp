@@ -170,6 +170,13 @@ void FESystem::addBoundaryConditionDescriptor(analysis::BoundaryConditionDescrip
 
 void FESystem::addContribution(analysis::ContributionDescriptor desc) {
     contributions_.push_back(std::move(desc));
+    // Track the definition-time watermark so invalidateSetup() preserves
+    // contributions added before setup(). During setup(), the watermark is
+    // frozen at the pre-setup level and setup-time contributions are added
+    // above it.
+    if (!is_setup_) {
+        contributions_def_count_ = contributions_.size();
+    }
     invalidateAnalysisCache();
 }
 

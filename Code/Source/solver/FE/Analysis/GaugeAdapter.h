@@ -14,8 +14,12 @@
  *
  * Maps PropertyClaims (from the analysis subsystem) into GaugeCandidates
  * and AnchoringEvidence (for the existing GaugeRegistry enforcement pipeline).
- * This enables a gradual migration from direct NullspaceAnalyzer usage to
- * the generic analysis-based path.
+ *
+ * NOTE: The production gauge candidate path uses a simpler mechanism:
+ *   FormContributionLowerer → NullspaceHint in ContributionDescriptor
+ *   → SystemSetup NullspaceHint→GaugeCandidate conversion
+ * This adapter (populateRegistryFromReport) is used in tests for roundtrip
+ * validation between the analysis report and the direct NullspaceAnalyzer path.
  *
  * @see GaugeRegistry for the enforcement backend
  * @see KernelAnalyzer for the nullspace detection pass

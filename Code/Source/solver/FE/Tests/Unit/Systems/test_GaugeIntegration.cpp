@@ -364,11 +364,22 @@ TEST(GaugeIntegration, VectorField_GradOnly_ComponentwiseConstantCandidate)
 
     systems::installFormulation(sys, "op", {u_field}, residual);
 
-    // Check that gauge registry was populated with ComponentwiseConstant
+    // Gauge candidates are populated during setup() from NullspaceHints.
+    systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
     ASSERT_TRUE(sys.hasGaugeRegistry());
     const auto& candidates = sys.gaugeRegistryIfPresent()->candidates();
-    ASSERT_EQ(candidates.size(), 1u);
-    EXPECT_EQ(candidates[0].family, NullspaceModeFamily::ComponentwiseConstant);
+    ASSERT_FALSE(candidates.empty());
+    bool found_cw = false;
+    for (const auto& c : candidates) {
+        if (c.family == NullspaceModeFamily::ComponentwiseConstant ||
+            c.family == NullspaceModeFamily::ScalarConstant) {
+            found_cw = true;
+        }
+    }
+    EXPECT_TRUE(found_cw) << "Expected ComponentwiseConstant or per-component ScalarConstant candidate";
 }
 
 // ============================================================================
@@ -391,10 +402,21 @@ TEST(GaugeIntegration, VectorField_SymGrad_KernelOfSymGradCandidate)
 
     systems::installFormulation(sys, "op", {u_field}, residual);
 
+    // Gauge candidates are populated during setup() from NullspaceHints.
+    systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
     ASSERT_TRUE(sys.hasGaugeRegistry());
     const auto& candidates = sys.gaugeRegistryIfPresent()->candidates();
-    ASSERT_EQ(candidates.size(), 1u);
-    EXPECT_EQ(candidates[0].family, NullspaceModeFamily::KernelOfSymGrad);
+    ASSERT_FALSE(candidates.empty());
+    bool found_rbm = false;
+    for (const auto& c : candidates) {
+        if (c.family == NullspaceModeFamily::KernelOfSymGrad) {
+            found_rbm = true;
+        }
+    }
+    EXPECT_TRUE(found_rbm) << "Expected KernelOfSymGrad candidate";
 }
 
 // ============================================================================

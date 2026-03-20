@@ -1265,11 +1265,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     // -----------------------------------------------------------------
     // Gauge / nullspace auto-detection and enforcement
     // -----------------------------------------------------------------
-    // Collect explicit gauge metadata from non-Forms kernels (Path B).
-    // This supplements the automatic inference from FormsInstaller (Path A).
-    // Snapshot the definition-time contribution count so invalidateSetup()
-    // can truncate back to this point without losing coupled-boundary records.
-    contributions_def_count_ = contributions_.size();
+    // Collect contributions from non-Forms kernels via analysisContributions().
     {
         const auto op_tags_gauge = operator_registry_.list();
         for (const auto& tag : op_tags_gauge) {
@@ -1316,7 +1312,8 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     }
 
     // Convert NullspaceHints from contributions into GaugeRegistry candidates.
-    // This replaces the former gaugeMetadata() direct-injection path.
+    // This is the primary path for gauge candidate population, replacing
+    // the former NullspaceAnalyzer call in FormsInstaller.
     for (const auto& contrib : contributions_) {
         for (const auto& hint : contrib.nullspace_hints) {
             gauge::GaugeCandidate c;

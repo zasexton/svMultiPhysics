@@ -20,7 +20,6 @@
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/WeakForm.h"
 #include "Forms/AffineAnalysis.h"
-#include "Forms/NullspaceAnalyzer.h"
 
 #include "Analysis/FormulationRecord.h"
 #include "Analysis/FormExprScanner.h"
@@ -1013,24 +1012,6 @@ CoupledResidualKernels installFormulation(
                 "installFormulation: empty field list");
     FE_THROW_IF(!residual.isValid(), InvalidArgumentException,
                 "installFormulation: invalid residual expression");
-
-    // Legacy gauge path: populate GaugeRegistry with NullspaceAnalyzer candidates.
-    // This feeds the existing gauge enforcement pipeline (GaugeRegistry::resolve()
-    // + applyEnforcement() during setup). The analysis pipeline (ContributionDescriptor
-    // → KernelAnalyzer → GaugeAdapter) provides the same information but runs at
-    // analysis time, not definition time. Both paths coexist until gauge enforcement
-    // is fully migrated to consume the analysis report.
-    [[maybe_unused]] auto populateGaugeRegistry = [&]() {
-        forms::NullspaceAnalyzer analyzer;
-        auto gauge_candidates = analyzer.analyze(residual, fields);
-        if (!gauge_candidates.empty()) {
-            auto& registry = system.gaugeRegistry();
-            for (auto& c : gauge_candidates) {
-                registry.addCandidate(std::move(c));
-            }
-        }
-    };
-    populateGaugeRegistry();
 
     // Populate a FormulationRecord for the analysis subsystem.
     {

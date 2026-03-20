@@ -19,6 +19,14 @@
  * NullspaceAnalyzer consumes the FieldOperatorSummary and maps it to
  * GaugeCandidate objects for the GaugeRegistry enforcement pipeline.
  *
+ * NOTE: This class is no longer called in production code. Gauge candidate
+ * population is handled by the ContributionDescriptor/NullspaceHint path:
+ *   FormsInstaller → FormContributionLowerer → NullspaceHint
+ *   → SystemSetup NullspaceHint→GaugeCandidate conversion
+ * The FormContributionLowerer uses FormStructureAnalyzer with the same
+ * classification logic as this class. NullspaceAnalyzer is retained as a
+ * standalone utility for tests and direct analysis use.
+ *
  * Implemented:
  *   - Scalar constant modes (ScalarConstant)
  *   - Componentwise vector constant modes (ComponentwiseConstant)
@@ -27,6 +35,7 @@
  *   - Stabilization detection → near-nullspace (Medium confidence)
  *
  * @see FormStructureAnalyzer for the DAG walker
+ * @see FormContributionLowerer for the production nullspace hint emission path
  * @see GaugeRegistry for candidate storage and enforcement
  */
 
