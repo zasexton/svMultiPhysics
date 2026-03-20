@@ -1312,8 +1312,8 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     }
 
     // Convert NullspaceHints from contributions into GaugeRegistry candidates.
-    // This is the primary path for gauge candidate population, replacing
-    // the former NullspaceAnalyzer call in FormsInstaller.
+    // This is the primary path for gauge candidate population via
+    // FormContributionLowerer NullspaceHint emission.
     for (const auto& contrib : contributions_) {
         for (const auto& hint : contrib.nullspace_hints) {
             gauge::GaugeCandidate c;
@@ -1340,8 +1340,8 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
         }
     }
 
-    // If the GaugeRegistry has candidates (populated by FormsInstaller's
-    // NullspaceAnalyzer or by kernel contributions), resolve them
+    // If the GaugeRegistry has candidates (populated by FormContributionLowerer
+    // or by kernel contributions), resolve them
     // against anchoring evidence from the constraints already applied above.
     //
     // StrongDirichlet BCs that constrained any DOF of a field are treated

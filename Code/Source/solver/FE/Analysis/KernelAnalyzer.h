@@ -14,13 +14,11 @@
  *
  * Iterates FormulationRecords and uses FormStructureAnalyzer to classify
  * how each field appears in the residual expression.  Maps the resulting
- * FieldOperatorSummary to Nullspace PropertyClaims using the same logic
- * as NullspaceAnalyzer::analyzeFromSummary().
+ * FieldOperatorSummary to Nullspace PropertyClaims.
  *
  * Does NOT interact with GaugeRegistry — emits pure PropertyClaims.
  *
  * @see FormStructureAnalyzer for the DAG walker
- * @see NullspaceAnalyzer for the original gauge-oriented classification
  */
 
 #include "Analysis/ProblemAnalyzer.h"

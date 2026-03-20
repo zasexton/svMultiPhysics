@@ -17,7 +17,7 @@
  * decisions.  Two paths produce candidates:
  *
  *   Path A — automatic inference from Forms residual expressions
- *            (NullspaceAnalyzer walks the FormExpr DAG).
+ *            (FormContributionLowerer emits NullspaceHints from FormExpr DAG analysis).
  *   Path B — explicit declarations from hand-written AssemblyKernel /
  *            GlobalKernel analysisContributions() NullspaceHint entries.
  *
@@ -28,7 +28,7 @@
  * a conservative strategy (pinning).
  *
  * @see GlobalConstraint for the algebraic enforcement machinery
- * @see NullspaceAnalyzer for FormExpr-based inference (Path A)
+ * @see FormContributionLowerer for FormExpr-based inference (Path A)
  */
 
 #include "Core/Types.h"
@@ -166,8 +166,8 @@ struct ResolvedMode {
  * @brief Registry for candidate nullspace modes and anchoring evidence
  *
  * Lifecycle:
- *   1. During formulation installation (FormsInstaller), NullspaceAnalyzer
- *      adds candidates via addCandidate().
+ *   1. During formulation installation (FormsInstaller), FormContributionLowerer
+ *      emits NullspaceHints which SystemSetup converts to candidates via addCandidate().
  *   2. During system setup (SystemSetup), BC anchoring evidence is added
  *      via addAnchoring().  Non-Forms kernels may also contribute candidates.
  *   3. resolve() merges candidates, applies anchoring rules, classifies

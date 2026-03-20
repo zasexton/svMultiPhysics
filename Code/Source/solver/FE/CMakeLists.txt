@@ -558,7 +558,6 @@ set(FE_ANALYSIS_HEADERS
     Analysis/DAEStructureAnalyzer.h
     Analysis/SpaceCompatibilityAnalyzer.h
     Analysis/TransportCharacterAnalyzer.h
-    Analysis/GaugeAdapter.h
     Analysis/ContributionDescriptor.h
     Analysis/FormContributionLowerer.h
     Analysis/BoundaryConditionDescriptor.h
@@ -590,7 +589,6 @@ set(FE_ANALYSIS_SOURCES
     Analysis/DAEStructureAnalyzer.cpp
     Analysis/SpaceCompatibilityAnalyzer.cpp
     Analysis/TransportCharacterAnalyzer.cpp
-    Analysis/GaugeAdapter.cpp
     Analysis/ContributionDescriptor.cpp
     Analysis/FormContributionLowerer.cpp
 )
@@ -770,7 +768,6 @@ set(FE_FORMS_HEADERS
 	    Forms/ConstraintBCs.h
 	    Forms/BoundaryFunctional.h
 	    Forms/AffineAnalysis.h
-	    Forms/NullspaceAnalyzer.h
 	    Forms/FormExpr.h
     Forms/SymbolicDifferentiation.h
     Forms/Index.h
@@ -839,7 +836,6 @@ set(FE_FORMS_SOURCES
 	    Forms/BoundaryFunctional.cpp
 	    Forms/CoupledBlockKernel.cpp
 	    Forms/FormKernels.cpp
-	    Forms/NullspaceAnalyzer.cpp
 	    Forms/SymbolicDifferentiation.cpp
 	    Forms/PointEvaluator.cpp
 	    Forms/JIT/ExternalCalls.cpp
@@ -1961,7 +1957,6 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Analysis/test_TopologyAnalysisContext.cpp
         Tests/Unit/Analysis/test_ConstraintAnalysisSummary.cpp
         Tests/Unit/Analysis/test_AnalyzerPasses.cpp
-        Tests/Unit/Analysis/test_GaugeAdapter.cpp
         Tests/Unit/Analysis/test_Phase9Integration.cpp
         Tests/Unit/Analysis/test_ContributionDescriptor.cpp
         Tests/Unit/Analysis/test_FormContributionLowerer.cpp
@@ -2109,7 +2104,6 @@ if(FE_BUILD_TESTS)
 			                Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp
 		                Tests/Unit/Forms/test_ConstitutiveModel.cpp
 	                Tests/Unit/Forms/test_PrimitiveTypes.cpp
-	                Tests/Unit/Forms/test_NullspaceAnalyzer.cpp
 		                Tests/Unit/Forms/test_main.cpp
 		            )
 	            add_executable(test_fe_forms ${FE_FORMS_TEST_SOURCES})

@@ -9,7 +9,6 @@
 #include "Analysis/ProblemAnalysisTypes.h"
 
 #include "Forms/FormExpr.h"
-#include "Forms/NullspaceAnalyzer.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
 
@@ -317,56 +316,6 @@ TEST(FormStructureAnalyzer, SingleField_NoSaddlePoint) {
 
     EXPECT_TRUE(summary.mixed_couplings.empty());
     EXPECT_FALSE(summary.has_saddle_point_structure);
-}
-
-// ============================================================================
-// NullspaceAnalyzer roundtrip: FormStructureSummary → GaugeCandidates
-// ============================================================================
-
-TEST(FormStructureAnalyzer, NullspaceRoundtrip_ScalarPoisson) {
-    // Verify that FormStructureAnalyzer + analyzeFromSummary produces
-    // the same GaugeCandidates as the old direct NullspaceAnalyzer path
-    auto space = scalarH1();
-    const FieldId fid = 0;
-
-    auto u = FormExpr::stateField(fid, *space, "u");
-    auto v = FormExpr::testFunction(*space, "v");
-    auto residual = inner(grad(u), grad(v)).dx();
-
-    // Path 1: New path via FormStructureAnalyzer
-    FormStructureAnalyzer fsa;
-    auto summary = fsa.analyze(residual, std::array{fid});
-
-    forms::NullspaceAnalyzer na;
-    auto candidates_new = na.analyzeFromSummary(summary);
-
-    // Path 2: Direct NullspaceAnalyzer (which now internally does the same thing)
-    auto candidates_direct = na.analyze(residual, std::array{fid});
-
-    // Both should produce the same result
-    ASSERT_EQ(candidates_new.size(), candidates_direct.size());
-    ASSERT_EQ(candidates_new.size(), 1u);
-    EXPECT_EQ(candidates_new[0].field, candidates_direct[0].field);
-    EXPECT_EQ(candidates_new[0].family, candidates_direct[0].family);
-    EXPECT_EQ(candidates_new[0].confidence, candidates_direct[0].confidence);
-}
-
-TEST(FormStructureAnalyzer, NullspaceRoundtrip_LinearElasticity) {
-    auto space = vectorH1();
-    const FieldId fid = 0;
-
-    auto u = FormExpr::stateField(fid, *space, "u");
-    auto v = FormExpr::testFunction(*space, "v");
-    auto residual = inner(sym(grad(u)), sym(grad(v))).dx();
-
-    FormStructureAnalyzer fsa;
-    auto summary = fsa.analyze(residual, std::array{fid});
-
-    forms::NullspaceAnalyzer na;
-    auto candidates = na.analyzeFromSummary(summary);
-
-    ASSERT_EQ(candidates.size(), 1u);
-    EXPECT_EQ(candidates[0].family, svmp::FE::gauge::NullspaceModeFamily::KernelOfSymGrad);
 }
 
 // ============================================================================

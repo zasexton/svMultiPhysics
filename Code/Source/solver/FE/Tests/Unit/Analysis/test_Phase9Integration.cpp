@@ -17,11 +17,8 @@
 #include "Analysis/BoundaryConditionDescriptor.h"
 #include "Analysis/TopologyAnalysisContext.h"
 #include "Analysis/ConstraintAnalysisSummary.h"
-#include "Analysis/GaugeAdapter.h"
-
 #include "Forms/FormExpr.h"
 #include "Forms/AffineAnalysis.h"
-#include "Forms/NullspaceAnalyzer.h"
 #include "Constraints/AffineConstraints.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/HDivSpace.h"
@@ -733,36 +730,3 @@ TEST(Phase9, CoupledBoundaryPDEODE) {
     EXPECT_GE(report.countByKind(PropertyKind::CoupledSystemStructure), 1u);
 }
 
-// ============================================================================
-// Full Pipeline Integration — GaugeAdapter roundtrip
-// ============================================================================
-
-TEST(Phase9, FullPipelineGaugeRoundtrip) {
-    // Verify GaugeAdapter roundtrip: analysis-based path matches direct NullspaceAnalyzer
-    auto space = scalarH1();
-    const FieldId fid = 0;
-    auto u = FormExpr::stateField(fid, *space, "u");
-    auto v = FormExpr::testFunction(*space, "v");
-    auto residual = inner(grad(u), grad(v)).dx();
-
-    // Direct NullspaceAnalyzer
-    NullspaceAnalyzer na;
-    auto direct = na.analyze(residual, std::array{fid});
-
-    // Analysis pipeline → GaugeAdapter
-    ProblemAnalysisContext ctx;
-    FormulationRecord rec;
-    rec.operator_tag = "equations";
-    rec.active_fields = {fid};
-    rec.residual_expr = residual.nodeShared();
-    ctx.addFormulationRecord(rec);
-
-    auto report = ProblemAnalyzer::createDefault().analyze(ctx);
-    auto adapted = claimsToCandidates(report);
-
-    ASSERT_EQ(direct.size(), 1u);
-    ASSERT_EQ(adapted.size(), 1u);
-    EXPECT_EQ(direct[0].field, adapted[0].field);
-    EXPECT_EQ(direct[0].family, adapted[0].family);
-    EXPECT_EQ(direct[0].confidence, adapted[0].confidence);
-}

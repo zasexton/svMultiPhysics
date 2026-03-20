@@ -17,15 +17,10 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
-#include <unordered_set>
 #include <vector>
 
 #ifndef SVMP_FE_ENABLE_LLVM_JIT
 #define SVMP_FE_ENABLE_LLVM_JIT 0
-#endif
-
-#if FE_HAS_MPI
-#  include <mpi.h>
 #endif
 
 namespace {
@@ -251,147 +246,38 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     }
     if (!pressure_constraints.empty()) {
         FE::systems::installStrongDirichlet(system, pressure_constraints);
-    } else {
-        // Pressure has a constant nullspace when there is no pressure Dirichlet constraint and the
-        // velocity test space is fully essential (no natural/traction-type boundaries). In that case,
-        // pin one pressure DOF to avoid a singular saddle-point system that can cause iterative solvers
-        // (e.g., FSILS GMRES) to break down.
-        //
-        // If any traction/outflow-like boundary condition is present, the constant mode is typically
-        // fixed by the boundary data and pinning can unnecessarily force a specific nodal pressure
-        // value (e.g., p=0 at the first pressure DOF).
-        bool has_natural_momentum_bc = !options_.traction_neumann.empty() || !options_.traction_robin.empty() ||
-                                       !options_.pressure_outflow.empty() || !options_.coupled_outflow_rcr.empty();
-
-        // Even when the user does not explicitly configure a traction/outflow BC for a boundary marker,
-        // the weak form still imposes a default homogeneous natural traction on any boundary where the
-        // velocity test space is not strongly essential (i.e., no strong Dirichlet constraint).
-        //
-        // In that case, the pressure level is typically fixed by the boundary traction condition and
-        // pinning can change the problem (and, in MPI, lead to rank-dependent solutions if the chosen
-        // pin DOF is not deterministic). Avoid pinning whenever any such unconstrained boundary exists.
-        if (!has_natural_momentum_bc) {
-            std::unordered_set<int> essential_velocity_markers;
-            essential_velocity_markers.reserve(options_.velocity_dirichlet.size());
-            for (const auto& bc : options_.velocity_dirichlet) {
-                essential_velocity_markers.insert(bc.boundary_marker);
-            }
-
-            bool local_has_unconstrained_boundary = false;
-            const auto& mesh = system.meshAccess();
-            mesh.forEachBoundaryFace(/*marker=*/-1, [&](FE::GlobalIndex face_id, FE::GlobalIndex /*cell_id*/) {
-                if (local_has_unconstrained_boundary) {
-                    return;
-                }
-                const int marker = mesh.getBoundaryFaceMarker(face_id);
-                if (marker == svmp::INVALID_LABEL) {
-                    local_has_unconstrained_boundary = true;
-                    return;
-                }
-                if (essential_velocity_markers.find(marker) == essential_velocity_markers.end()) {
-                    local_has_unconstrained_boundary = true;
-                }
-            });
-
-            bool global_has_unconstrained_boundary = local_has_unconstrained_boundary;
-#if FE_HAS_MPI
-            {
-                int mpi_initialized = 0;
-                MPI_Initialized(&mpi_initialized);
-                if (mpi_initialized) {
-                    int local = local_has_unconstrained_boundary ? 1 : 0;
-                    int global = 0;
-                    MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
-                    global_has_unconstrained_boundary = (global != 0);
-                }
-            }
-#endif
-
-            has_natural_momentum_bc = global_has_unconstrained_boundary;
-        }
-
-        // Declare the pressure nullspace candidate via GaugeRegistry.
-        // In incompressible flow, the pressure is determined only up to a
-        // constant when no natural (traction/outflow) BCs set the pressure
-        // level. The GaugeRegistry handles enforcement automatically.
-        {
+    }
+    // Pressure nullspace candidate detection is handled automatically by the
+    // analysis infrastructure (FormContributionLowerer detects ScalarConstant
+    // nullspace from the PSPG stabilization block).
+    //
+    // Cross-field anchoring evidence: in incompressible flow, velocity natural
+    // BCs (traction, outflow, coupled) set the pressure level via the traction
+    // integral sigma·n = (-pI + tau)·n. This cross-field relationship is
+    // physics-specific and cannot be inferred by the generic analysis pipeline.
+    // We register pressure anchoring evidence from each velocity natural BC
+    // marker so the GaugeRegistry knows the pressure nullspace is anchored.
+    if (pressure_constraints.empty()) {
+        bool has_natural_bc = !options_.traction_neumann.empty() ||
+                              !options_.traction_robin.empty() ||
+                              !options_.pressure_outflow.empty() ||
+                              !options_.coupled_outflow_rcr.empty();
+        if (has_natural_bc) {
             auto& reg = system.gaugeRegistry();
-            reg.addCandidate(FE::gauge::GaugeCandidate{
-                p_id, -1, -1,
-                FE::gauge::NullspaceModeFamily::ScalarConstant,
-                FE::gauge::Confidence::High,
-                "Pressure nullspace in incompressible flow (saddle-point)",
-                FE::gauge::CandidateSource::ExplicitDeclaration});
-
-            if (has_natural_momentum_bc) {
-                // Velocity natural BCs (traction, outflow, coupled) set the
-                // pressure level via the traction integral σ·n = (-pI+τ)·n.
-                //
-                // Collect the set of boundary markers that have natural
-                // conditions and emit per-marker evidence so that
-                // retagEvidenceRegions() can assign each to the correct
-                // connected component on disconnected meshes.
-                std::unordered_set<int> natural_markers;
-                for (const auto& bc : options_.traction_neumann)
-                    natural_markers.insert(bc.boundary_marker);
-                for (const auto& bc : options_.traction_robin)
-                    natural_markers.insert(bc.boundary_marker);
-                for (const auto& bc : options_.pressure_outflow)
-                    natural_markers.insert(bc.boundary_marker);
-                for (const auto& bc : options_.coupled_outflow_rcr)
-                    natural_markers.insert(bc.boundary_marker);
-
-                // Also collect implicit natural markers (faces without
-                // velocity Dirichlet).
-                std::unordered_set<int> essential_vel;
-                for (const auto& bc : options_.velocity_dirichlet)
-                    essential_vel.insert(bc.boundary_marker);
-                const auto& mesh_ref = system.meshAccess();
-                mesh_ref.forEachBoundaryFace(/*marker=*/-1,
-                    [&](FE::GlobalIndex face_id, FE::GlobalIndex /*cell_id*/) {
-                        const int m = mesh_ref.getBoundaryFaceMarker(face_id);
-                        if (m != svmp::INVALID_LABEL &&
-                            essential_vel.find(m) == essential_vel.end()) {
-                            natural_markers.insert(m);
-                        }
-                    });
-
-                for (int m : natural_markers) {
-                    FE::gauge::AnchoringEvidence ev;
-                    ev.field = p_id;
-                    ev.family = FE::gauge::NullspaceModeFamily::ScalarConstant;
-                    ev.verdict = FE::gauge::AnchoringVerdict::Anchored;
-                    ev.source = "Velocity natural BC on boundary " + std::to_string(m) +
-                                " provides pressure reference";
-                    ev.boundary_marker = m;
-                    reg.addAnchoring(std::move(ev));
-                }
-                if (natural_markers.empty()) {
-                    // Unlabeled natural boundaries (INVALID_LABEL faces) cannot
-                    // be mapped to a specific boundary marker for region-aware
-                    // retagging.  Emit a global anchor (no boundary_marker):
-                    //
-                    //  - Connected mesh (common): matches the global candidate →
-                    //    correctly identified as Anchored, no gauge enforced.
-                    //
-                    //  - Disconnected mesh: blocked from per-region candidates
-                    //    by the resolver → all regions get gauge enforcement.
-                    //    This may over-constrain regions that are genuinely
-                    //    anchored by the unlabeled faces (MeanZeroElimination
-                    //    can change the pressure level).  This is a known
-                    //    limitation: without labeled markers, we cannot determine
-                    //    which region the natural BC touches.  Production meshes
-                    //    should label all boundary faces to enable correct
-                    //    per-region scoping.
-                    FE::gauge::AnchoringEvidence ev;
-                    ev.field = p_id;
-                    ev.family = FE::gauge::NullspaceModeFamily::ScalarConstant;
-                    ev.verdict = FE::gauge::AnchoringVerdict::Anchored;
-                    ev.source = "Velocity natural BC (unlabeled faces) provides "
-                                "pressure reference";
-                    reg.addAnchoring(std::move(ev));
-                }
-            }
+            auto add_evidence = [&](int marker) {
+                FE::gauge::AnchoringEvidence ev;
+                ev.field = p_id;
+                ev.family = FE::gauge::NullspaceModeFamily::ScalarConstant;
+                ev.verdict = FE::gauge::AnchoringVerdict::Anchored;
+                ev.source = "Velocity natural BC on marker " + std::to_string(marker) +
+                            " sets pressure level";
+                ev.boundary_marker = marker;
+                reg.addAnchoring(std::move(ev));
+            };
+            for (const auto& bc : options_.traction_neumann)   add_evidence(bc.boundary_marker);
+            for (const auto& bc : options_.traction_robin)     add_evidence(bc.boundary_marker);
+            for (const auto& bc : options_.pressure_outflow)   add_evidence(bc.boundary_marker);
+            for (const auto& bc : options_.coupled_outflow_rcr) add_evidence(bc.boundary_marker);
         }
     }
 

@@ -12,16 +12,15 @@
  * @file FormStructureAnalyzer.h
  * @brief Generalized FormExpr DAG analysis producing per-field/per-form summaries
  *
- * FormStructureAnalyzer extends the NullspaceAnalyzer's DAG walker into a
- * reusable analyzer that produces:
+ * FormStructureAnalyzer walks the FormExpr DAG to produce per-field and
+ * per-form structural summaries:
  *   - per-field FieldOperatorSummary (gradient, sym_grad, absolute, stabilization, ...)
  *   - per-block FormBlockSummary (mass-like, stiffness-like, ...)
  *   - aggregate FormStructureSummary (saddle-point, stabilization, couplings)
  *
- * NullspaceAnalyzer consumes FieldOperatorSummary via analyzeFromSummary()
- * instead of walking the DAG itself.
+ * KernelAnalyzer consumes FieldOperatorSummary to emit nullspace PropertyClaims.
  *
- * @see NullspaceAnalyzer for the nullspace classification consumer
+ * @see KernelAnalyzer for the nullspace detection pass
  * @see FormulationRecord for metadata persistence
  */
 
@@ -49,8 +48,8 @@ namespace analysis {
 /**
  * @brief Summary of how a single field appears in a FormExpr DAG
  *
- * This is a superset of NullspaceAnalyzer::FieldAppearanceClassification,
- * adding trace/jump/penalty/degree tracking.
+ * Classifies how a field appears in a weak-form expression,
+ * including trace/jump/penalty/degree tracking.
  */
 struct FieldOperatorSummary {
     FieldId field{INVALID_FIELD_ID};

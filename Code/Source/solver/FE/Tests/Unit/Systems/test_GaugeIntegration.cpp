@@ -2,8 +2,8 @@
  * @file test_GaugeIntegration.cpp
  * @brief End-to-end tests for gauge/nullspace detection through FESystem setup
  *
- * Tests the full pipeline: installFormulation → NullspaceAnalyzer → GaugeRegistry
- * → SystemSetup resolution → automatic constraint creation.
+ * Tests the full pipeline: installFormulation → FormContributionLowerer →
+ * GaugeRegistry → SystemSetup resolution → automatic constraint creation.
  */
 
 #include <gtest/gtest.h>
