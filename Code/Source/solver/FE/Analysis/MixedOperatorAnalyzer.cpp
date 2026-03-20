@@ -373,31 +373,6 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
         }
     }
 
-    // =====================================================================
-    // Kernel contribution records — always checked (handwritten kernels
-    // can declare constraint-like coupling regardless of path above)
-    // =====================================================================
-    for (const auto& krec : context.kernelContributionRecords()) {
-        if (krec.is_constraint_like && !krec.test_variables.empty() &&
-            !krec.trial_variables.empty()) {
-            PropertyClaim claim;
-            claim.kind = PropertyKind::MixedSaddlePoint;
-            claim.status = PropertyStatus::Likely;
-            claim.confidence = AnalysisConfidence::Medium;
-            claim.domain = krec.domain;
-            for (const auto& v : krec.test_variables)
-                claim.variables.push_back(v);
-            for (const auto& v : krec.trial_variables)
-                claim.variables.push_back(v);
-            claim.description =
-                "Hand-written kernel '" + krec.operator_tag +
-                "' declares constraint-like coupling";
-            claim.addEvidence("MixedOperatorAnalyzer",
-                "KernelContributionRecord from " + krec.source_name,
-                AnalysisConfidence::Medium);
-            report.claims.push_back(std::move(claim));
-        }
-    }
 }
 
 } // namespace analysis

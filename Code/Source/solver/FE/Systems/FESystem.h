@@ -31,7 +31,6 @@
 
 #include "Analysis/ProblemAnalysisTypes.h"
 #include "Analysis/FormulationRecord.h"
-#include "Analysis/KernelContributionRecord.h"
 #include "Analysis/BoundaryConditionDescriptor.h"
 #include "Analysis/TopologyAnalysisContext.h"
 #include "Analysis/ContributionDescriptor.h"
@@ -335,16 +334,12 @@ public:
     // ---- Problem analysis subsystem ----
 
     void addFormulationRecord(analysis::FormulationRecord record);
-    void addKernelContributionRecord(analysis::KernelContributionRecord record);
     void addBoundaryConditionDescriptor(analysis::BoundaryConditionDescriptor desc);
     void addContribution(analysis::ContributionDescriptor desc);
     void addVariableDescriptor(analysis::VariableDescriptor desc);
 
     [[nodiscard]] const std::vector<analysis::FormulationRecord>& formulationRecords() const noexcept {
         return formulation_records_;
-    }
-    [[nodiscard]] const std::vector<analysis::KernelContributionRecord>& kernelContributionRecords() const noexcept {
-        return kernel_contribution_records_;
     }
     [[nodiscard]] const std::vector<analysis::BoundaryConditionDescriptor>& boundaryConditionDescriptors() const noexcept {
         return bc_descriptors_;
@@ -534,8 +529,6 @@ private:
 
     // ---- Analysis subsystem storage ----
     std::vector<analysis::FormulationRecord> formulation_records_;
-    std::vector<analysis::KernelContributionRecord> kernel_contribution_records_;
-    std::size_t kernel_contribution_records_def_count_{0}; ///< Watermark: # records from definition phase
     std::vector<analysis::ContributionDescriptor> contributions_;
     std::size_t contributions_def_count_{0}; ///< Watermark for definition-phase contributions
     std::vector<analysis::BoundaryConditionDescriptor> bc_descriptors_;

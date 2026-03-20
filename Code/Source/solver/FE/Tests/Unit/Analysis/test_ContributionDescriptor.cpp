@@ -6,7 +6,6 @@
 #include <gtest/gtest.h>
 
 #include "Analysis/ContributionDescriptor.h"
-#include "Analysis/KernelContributionRecord.h"
 #include "Analysis/ProblemAnalysisContext.h"
 
 using namespace svmp::FE;
@@ -132,105 +131,6 @@ TEST(ContributionDescriptor, Stokes_AllBlocks) {
     EXPECT_EQ(vv.role, ContributionRole::DiagonalBlock);
     EXPECT_EQ(vp.role, ContributionRole::OffDiagonalBlock);
     EXPECT_EQ(pv.role, ContributionRole::ConstraintBlock);
-}
-
-// ============================================================================
-// KernelContributionRecord → ContributionDescriptor
-// ============================================================================
-
-TEST(ContributionDescriptor, FromKernelRecord_DiagonalSymmetric) {
-    KernelContributionRecord rec;
-    rec.operator_tag = "elasticity";
-    rec.source_name = "MyElasticityKernel";
-    rec.domain = DomainKind::Cell;
-    rec.test_variables = {VariableKey::field(0)};
-    rec.trial_variables = {VariableKey::field(0)};
-    rec.is_symmetric_like = true;
-
-    auto d = rec.toContributionDescriptor();
-
-    EXPECT_EQ(d.operator_tag, "elasticity");
-    EXPECT_EQ(d.origin, "MyElasticityKernel");
-    EXPECT_EQ(d.role, ContributionRole::DiagonalBlock);
-    EXPECT_TRUE(hasFlag(d.traits, OperatorTraitFlags::SymmetricLike));
-    EXPECT_EQ(d.confidence, AnalysisConfidence::Medium);  // kernel metadata is heuristic
-}
-
-TEST(ContributionDescriptor, FromKernelRecord_ConstraintLike) {
-    KernelContributionRecord rec;
-    rec.operator_tag = "pressure_coupling";
-    rec.source_name = "StokesKernel";
-    rec.is_constraint_like = true;
-    rec.test_variables = {VariableKey::field(0)};
-    rec.trial_variables = {VariableKey::field(1)};
-
-    auto d = rec.toContributionDescriptor();
-
-    EXPECT_EQ(d.role, ContributionRole::ConstraintBlock);
-}
-
-TEST(ContributionDescriptor, FromKernelRecord_GlobalSupport) {
-    KernelContributionRecord rec;
-    rec.operator_tag = "global_coupling";
-    rec.source_name = "CoupledBoundaryManager";
-    rec.has_global_support = true;
-    rec.test_variables = {VariableKey::field(0)};
-    rec.trial_variables = {VariableKey::named(VariableKind::BoundaryFunctional, "Q")};
-
-    auto d = rec.toContributionDescriptor();
-
-    EXPECT_EQ(d.role, ContributionRole::GlobalCoupling);
-}
-
-TEST(ContributionDescriptor, FromKernelRecord_InterfaceWildcard) {
-    KernelContributionRecord rec;
-    rec.operator_tag = "interface_penalty";
-    rec.source_name = "InterfaceKernel";
-    rec.domain = DomainKind::InterfaceFace;
-    rec.interface_marker = -1;  // wildcard
-    rec.test_variables = {VariableKey::field(0)};
-    rec.trial_variables = {VariableKey::field(0)};
-
-    auto d = rec.toContributionDescriptor();
-
-    EXPECT_EQ(d.domain, DomainKind::InterfaceFace);
-    EXPECT_EQ(d.interface_scope, InterfaceScope::AllRegisteredInterfaces);
-}
-
-TEST(ContributionDescriptor, FromKernelRecord_InterfaceSpecific) {
-    KernelContributionRecord rec;
-    rec.operator_tag = "interface_penalty";
-    rec.source_name = "InterfaceKernel";
-    rec.domain = DomainKind::InterfaceFace;
-    rec.interface_marker = 5;
-    rec.test_variables = {VariableKey::field(0)};
-    rec.trial_variables = {VariableKey::field(0)};
-
-    auto d = rec.toContributionDescriptor();
-
-    EXPECT_EQ(d.interface_scope, InterfaceScope::SpecificMarker);
-    EXPECT_EQ(d.interface_marker, 5);
-}
-
-TEST(ContributionDescriptor, FromKernelRecord_NullspaceHints) {
-    KernelContributionRecord rec;
-    rec.operator_tag = "custom";
-    rec.source_name = "CustomKernel";
-    rec.test_variables = {VariableKey::field(0)};
-    rec.trial_variables = {VariableKey::field(0)};
-
-    PropertyClaim hint;
-    hint.kind = PropertyKind::Nullspace;
-    hint.field = 0;
-    hint.description = "rigid-body modes from custom kernel";
-    hint.confidence = AnalysisConfidence::High;
-    rec.nullspace_hints.push_back(hint);
-
-    auto d = rec.toContributionDescriptor();
-
-    ASSERT_EQ(d.nullspace_hints.size(), 1u);
-    EXPECT_EQ(d.nullspace_hints[0].family, NullspaceFamily::KernelOfSymGrad);
-    EXPECT_EQ(d.nullspace_hints[0].field, FieldId{0});
 }
 
 // ============================================================================

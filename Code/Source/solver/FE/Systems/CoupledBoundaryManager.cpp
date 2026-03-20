@@ -17,7 +17,7 @@
 #include "Core/FEConfig.h"
 
 #include "Analysis/ProblemAnalysisTypes.h"
-#include "Analysis/KernelContributionRecord.h"
+#include "Analysis/ContributionDescriptor.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -178,21 +178,8 @@ void CoupledBoundaryManager::addBoundaryFunctional(forms::BoundaryFunctional fun
         system_.addVariableDescriptor(std::move(vd));
     }
 
-    // Persist a KernelContributionRecord + ContributionDescriptor for FE↔boundary-functional coupling.
+    // Persist a ContributionDescriptor for FE↔boundary-functional coupling.
     {
-        analysis::KernelContributionRecord rec;
-        rec.operator_tag = "coupled_boundary";
-        rec.domain = analysis::DomainKind::CoupledBoundary;
-        rec.source_name = "CoupledBoundaryManager::addBoundaryFunctional(" + func_name + ")";
-        rec.test_variables.push_back(analysis::VariableKey::field(primary_field_));
-        rec.trial_variables.push_back(
-            analysis::VariableKey::named(analysis::VariableKind::BoundaryFunctional, func_name));
-        rec.boundary_marker = func_marker;
-        rec.is_linear = true;
-        rec.has_global_support = true;
-        system_.addKernelContributionRecord(std::move(rec));
-
-        // Also emit normalized ContributionDescriptor
         auto cd = analysis::ContributionDescriptor::globalCoupling(
             {analysis::VariableKey::field(primary_field_)},
             {analysis::VariableKey::named(analysis::VariableKind::BoundaryFunctional, func_name)},
@@ -256,7 +243,7 @@ void CoupledBoundaryManager::addAuxiliaryState(AuxiliaryStateRegistration regist
         system_.addVariableDescriptor(std::move(vd));
     }
 
-    // Persist a KernelContributionRecord + ContributionDescriptor for aux-state coupling.
+    // Persist a ContributionDescriptor for aux-state coupling.
     {
         auto aux_key = analysis::VariableKey::named(
             analysis::VariableKind::AuxiliaryState, registration.spec.name);
@@ -266,18 +253,7 @@ void CoupledBoundaryManager::addAuxiliaryState(AuxiliaryStateRegistration regist
                 analysis::VariableKey::named(analysis::VariableKind::BoundaryFunctional, f.name));
         }
 
-        analysis::KernelContributionRecord rec;
-        rec.operator_tag = "coupled_boundary";
-        rec.domain = analysis::DomainKind::CoupledBoundary;
-        rec.source_name = "CoupledBoundaryManager::addAuxiliaryState(" + registration.spec.name + ")";
-        rec.test_variables.push_back(aux_key);
-        rec.related_variables = bf_deps;
-        rec.related_variables.push_back(analysis::VariableKey::field(primary_field_));
-        rec.is_linear = false;
-        rec.has_global_support = true;
-        system_.addKernelContributionRecord(std::move(rec));
-
-        // Normalized ContributionDescriptor: aux-state ↔ boundary-functional ↔ FE field
+        // ContributionDescriptor: aux-state ↔ boundary-functional ↔ FE field
         auto cd = analysis::ContributionDescriptor::globalCoupling(
             {aux_key}, bf_deps,
             "coupled_boundary",

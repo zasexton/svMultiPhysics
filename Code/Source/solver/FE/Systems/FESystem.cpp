@@ -123,11 +123,10 @@ void FESystem::invalidateSetup() noexcept
     coupled_jac_cache_.clear();
 
     // Clear setup-time analysis data that is rebuilt during setup().
-    // Formulation records, BC descriptors, and definition-time kernel
-    // contribution records (from CoupledBoundaryManager) are NOT cleared.
-    // Only setup-time kernel records (from kernel analysisMetadata()) are
+    // Formulation records, BC descriptors, and definition-time contributions
+    // (from CoupledBoundaryManager) are NOT cleared.
+    // Only setup-time contributions (from kernel analysisContributions()) are
     // removed by truncating back to the definition-time watermark.
-    kernel_contribution_records_.resize(kernel_contribution_records_def_count_);
     contributions_.resize(contributions_def_count_);
     topology_context_.reset();
     interface_topology_context_.reset();
@@ -161,11 +160,6 @@ gauge::GaugeRegistry& FESystem::gaugeRegistry()
 
 void FESystem::addFormulationRecord(analysis::FormulationRecord record) {
     formulation_records_.push_back(std::move(record));
-    invalidateAnalysisCache();
-}
-
-void FESystem::addKernelContributionRecord(analysis::KernelContributionRecord record) {
-    kernel_contribution_records_.push_back(std::move(record));
     invalidateAnalysisCache();
 }
 
@@ -407,11 +401,6 @@ analysis::ProblemAnalysisReport FESystem::runProblemAnalysis() const {
     // Populate formulation records.
     for (const auto& rec : formulation_records_) {
         ctx.addFormulationRecord(rec);
-    }
-
-    // Populate kernel contribution records.
-    for (const auto& rec : kernel_contribution_records_) {
-        ctx.addKernelContributionRecord(rec);
     }
 
     // Populate normalized contributions.

@@ -129,71 +129,48 @@ public:
         // Collect analysis metadata (BC descriptors) from BCs BEFORE they are moved.
         // The BCs will be consumed (moved into BoundaryConditionAffineConstraint)
         // at the end of this method, so we must query analysisMetadata() now.
-        // Also lower each descriptor into normalized ContributionDescriptors.
-        for (const auto& bc : bcs_) {
-            if (!bc) continue;
-            auto descs = bc->analysisMetadata(field_id, &system);
-            for (auto& d : descs) {
-                auto contributions = analysis::lowerBCDescriptor(d);
-                for (auto& c : contributions) {
-                    system.addContribution(std::move(c));
-                }
-                system.addBoundaryConditionDescriptor(std::move(d));
-            }
-        }
-
-        // Collect gauge anchoring evidence from BCs BEFORE they are moved.
-        // Use gaugeRegistry() (not hasGaugeRegistry()) to eagerly create the
-        // registry — BCs may be applied before installFormulation() which is
-        // the normal creation point. The registry must exist to receive evidence.
+        // Also lower each descriptor into normalized ContributionDescriptors,
+        // and derive gauge anchoring evidence from descriptors.
         {
             auto& reg = system.gaugeRegistry();
-
-            // Get the component count for this field.  For multi-component
-            // families we iterate every component and query per-component
-            // verdicts, allowing non-strong BCs (Robin, custom) to advertise
-            // component-specific anchoring through gaugeAnchoring().
             const auto& rec = system.fieldRecord(field_id);
             const int n_comp = rec.components;
 
             for (const auto& bc : bcs_) {
                 if (!bc) continue;
                 const int marker = bc->boundaryMarker();
-                const std::string src = "BC on boundary " + std::to_string(marker);
+                auto descs = bc->analysisMetadata(field_id, &system);
+                for (auto& d : descs) {
+                    // Lower to ContributionDescriptors for analysis pipeline
+                    auto contributions = analysis::lowerBCDescriptor(d);
+                    for (auto& c : contributions) {
+                        system.addContribution(std::move(c));
+                    }
 
-                for (auto family : {gauge::NullspaceModeFamily::ScalarConstant,
-                                    gauge::NullspaceModeFamily::ComponentwiseConstant,
-                                    gauge::NullspaceModeFamily::KernelOfSymGrad}) {
-                    const bool is_multicomp_family =
-                        (family == gauge::NullspaceModeFamily::ComponentwiseConstant ||
-                         family == gauge::NullspaceModeFamily::KernelOfSymGrad);
+                    // Derive gauge anchoring evidence from descriptor
+                    const std::string src = "BC on boundary " + std::to_string(marker);
+                    for (auto family : {gauge::NullspaceModeFamily::ScalarConstant,
+                                        gauge::NullspaceModeFamily::ComponentwiseConstant,
+                                        gauge::NullspaceModeFamily::KernelOfSymGrad}) {
+                        const bool is_multicomp_family =
+                            (family == gauge::NullspaceModeFamily::ComponentwiseConstant ||
+                             family == gauge::NullspaceModeFamily::KernelOfSymGrad);
 
-                    if (is_multicomp_family && n_comp > 1) {
-                        // Multi-component family on multi-component field:
-                        // query each component individually.  BCs that don't
-                        // distinguish components return the same verdict for
-                        // every component.  BCs that do (e.g., Robin on
-                        // component 0 only) return Unknown for unaffected
-                        // components, avoiding over-anchoring.
-                        for (int comp = 0; comp < n_comp; ++comp) {
-                            auto comp_verdict = bc->gaugeAnchoring(
-                                field_id, family, comp);
-                            if (comp_verdict != gauge::AnchoringVerdict::Unknown) {
+                        auto verdict = analysis::descriptorToVerdict(d, family);
+                        if (verdict == gauge::AnchoringVerdict::Unknown) continue;
+
+                        if (is_multicomp_family && n_comp > 1) {
+                            for (int comp = 0; comp < n_comp; ++comp) {
                                 gauge::AnchoringEvidence ev;
                                 ev.field = field_id;
                                 ev.component = comp;
                                 ev.family = family;
-                                ev.verdict = comp_verdict;
+                                ev.verdict = verdict;
                                 ev.source = src;
                                 ev.boundary_marker = marker;
                                 reg.addAnchoring(std::move(ev));
                             }
-                        }
-                    } else {
-                        // Scalar family, or single-component field:
-                        // record field-wide evidence.
-                        auto verdict = bc->gaugeAnchoring(field_id, family, /*component=*/-1);
-                        if (verdict != gauge::AnchoringVerdict::Unknown) {
+                        } else {
                             gauge::AnchoringEvidence ev;
                             ev.field = field_id;
                             ev.family = family;
@@ -203,6 +180,8 @@ public:
                             reg.addAnchoring(std::move(ev));
                         }
                     }
+
+                    system.addBoundaryConditionDescriptor(std::move(d));
                 }
             }
         }

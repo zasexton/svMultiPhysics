@@ -138,25 +138,6 @@ void OperatorClassAnalyzer::run(const ProblemAnalysisContext& context,
             }
         }
 
-        // Also emit symmetry claims from kernel contribution records with
-        // explicit is_symmetric_like flags.
-        for (const auto& krec : context.kernelContributionRecords()) {
-            if (krec.is_symmetric_like && !krec.test_variables.empty()) {
-                PropertyClaim claim;
-                claim.kind = PropertyKind::OperatorSymmetry;
-                claim.status = PropertyStatus::Likely;
-                claim.confidence = AnalysisConfidence::Medium;
-                claim.domain = krec.domain;
-                for (const auto& v : krec.test_variables) claim.variables.push_back(v);
-                claim.description =
-                    "Hand-written kernel '" + krec.operator_tag +
-                    "' declares symmetric-like structure";
-                claim.addEvidence("OperatorClassAnalyzer",
-                    "KernelContributionRecord from " + krec.source_name,
-                    AnalysisConfidence::Medium);
-                report.claims.push_back(std::move(claim));
-            }
-        }
         return;
     }
 
@@ -244,25 +225,6 @@ void OperatorClassAnalyzer::run(const ProblemAnalysisContext& context,
         }
     }
 
-    // Also emit symmetry claims from kernel contribution records with
-    // explicit is_symmetric_like flags.
-    for (const auto& krec : context.kernelContributionRecords()) {
-        if (krec.is_symmetric_like && !krec.test_variables.empty()) {
-            PropertyClaim claim;
-            claim.kind = PropertyKind::OperatorSymmetry;
-            claim.status = PropertyStatus::Likely;
-            claim.confidence = AnalysisConfidence::Medium;
-            claim.domain = krec.domain;
-            for (const auto& v : krec.test_variables) claim.variables.push_back(v);
-            claim.description =
-                "Hand-written kernel '" + krec.operator_tag +
-                "' declares symmetric-like structure";
-            claim.addEvidence("OperatorClassAnalyzer",
-                "KernelContributionRecord from " + krec.source_name,
-                AnalysisConfidence::Medium);
-            report.claims.push_back(std::move(claim));
-        }
-    }
 }
 
 } // namespace analysis

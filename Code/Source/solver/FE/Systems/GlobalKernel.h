@@ -10,8 +10,7 @@
 
 #include "Core/Types.h"
 #include "Core/ParameterValue.h"
-#include "Constraints/GaugeRegistry.h"
-#include "Analysis/KernelContributionRecord.h"
+#include "Analysis/ContributionDescriptor.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -95,29 +94,6 @@ public:
      * @brief Optional parameter requirements for this global kernel
      */
     [[nodiscard]] virtual std::vector<params::Spec> parameterSpecs() const { return {}; }
-
-    /**
-     * @brief Optional gauge/nullspace metadata for non-Forms global kernels
-     *
-     * Global kernels that contribute to the system operator may declare
-     * nullspace modes or anchoring information.  The default returns
-     * empty (no declarations).
-     *
-     * @see AssemblyKernel::gaugeMetadata() for the element-kernel equivalent
-     */
-    [[deprecated("Use analysisContributions() with NullspaceHint instead")]]
-    [[nodiscard]] virtual std::vector<gauge::GaugeCandidate> gaugeMetadata() const { return {}; }
-
-    [[deprecated("Use analysisContributions() with NullspaceLifting/NullspacePreserving traits instead")]]
-    [[nodiscard]] virtual std::vector<gauge::AnchoringEvidence> anchoringMetadata() const { return {}; }
-
-    /**
-     * @brief Optional generic analysis metadata for non-Forms global kernels
-     *
-     * @see AssemblyKernel::analysisMetadata() for the element-kernel equivalent
-     */
-    [[deprecated("Use analysisContributions() instead — see ContributionDescriptor.h")]]
-    [[nodiscard]] virtual std::vector<analysis::KernelContributionRecord> analysisMetadata() const { return {}; }
 
     /**
      * @brief Normalized contribution descriptors for the analysis subsystem

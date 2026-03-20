@@ -10,7 +10,6 @@
 #include "Analysis/ProblemAnalysisTypes.h"
 #include "Analysis/FormulationRecord.h"
 #include "Analysis/FormStructureAnalyzer.h"
-#include "Analysis/KernelContributionRecord.h"
 #include "Analysis/BoundaryConditionDescriptor.h"
 #include "Analysis/TopologyAnalysisContext.h"
 #include "Analysis/ConstraintAnalysisSummary.h"

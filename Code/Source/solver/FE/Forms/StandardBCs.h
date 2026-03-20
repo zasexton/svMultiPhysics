@@ -48,12 +48,6 @@ public:
         return {};
     }
 
-    [[nodiscard]] gauge::AnchoringVerdict
-    gaugeAnchoring(FieldId /*field_id*/, gauge::NullspaceModeFamily /*family*/, int /*component*/) const override
-    {
-        return gauge::AnchoringVerdict::Preserved;
-    }
-
     [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
     analysisMetadata(FieldId /*field_id*/, const systems::FESystem* /*system*/) const override
     {
@@ -93,12 +87,6 @@ public:
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
     {
         return {};
-    }
-
-    [[nodiscard]] gauge::AnchoringVerdict
-    gaugeAnchoring(FieldId /*field_id*/, gauge::NullspaceModeFamily /*family*/, int /*component*/) const override
-    {
-        return gauge::AnchoringVerdict::Preserved;
     }
 
     [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
@@ -155,18 +143,6 @@ public:
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
     {
         return {};
-    }
-
-    /// Robin BC anchors scalar/componentwise constant modes (reaction term α*u*v).
-    /// KernelOfSymGrad modes are only partially anchored because the reaction term
-    /// constrains translations but not infinitesimal rotations in general.
-    [[nodiscard]] gauge::AnchoringVerdict
-    gaugeAnchoring(FieldId /*field_id*/, gauge::NullspaceModeFamily family, int /*component*/) const override
-    {
-        if (family == gauge::NullspaceModeFamily::KernelOfSymGrad) {
-            return gauge::AnchoringVerdict::PartiallyAnchored;
-        }
-        return gauge::AnchoringVerdict::Anchored;
     }
 
     [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
@@ -255,16 +231,6 @@ public:
                                           static_cast<int>(comp)));
         }
         return out;
-    }
-
-    /// EssentialBC anchoring is handled by the SystemSetup per-component
-    /// Dirichlet DOF scan, which creates precise per-component evidence.
-    /// Returning Unknown here avoids redundant field-wide evidence that
-    /// would over-anchor unconstrained components.
-    [[nodiscard]] gauge::AnchoringVerdict
-    gaugeAnchoring(FieldId /*field_id*/, gauge::NullspaceModeFamily /*family*/, int /*component*/) const override
-    {
-        return gauge::AnchoringVerdict::Unknown;
     }
 
     [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>

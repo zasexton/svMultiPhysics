@@ -68,15 +68,6 @@ void ProblemAnalysisContext::addFormulationRecord(FormulationRecord record) {
 }
 
 // ============================================================================
-// Kernel contribution records
-// ============================================================================
-
-void ProblemAnalysisContext::addKernelContributionRecord(KernelContributionRecord record) {
-    kernel_contribution_records_.push_back(std::move(record));
-    bumpVersion();
-}
-
-// ============================================================================
 // Normalized contributions (Phase 10)
 // ============================================================================
 
@@ -129,7 +120,6 @@ bool ProblemAnalysisContext::empty() const noexcept {
     return field_descriptors_.empty()
         && variable_descriptors_.empty()
         && formulation_records_.empty()
-        && kernel_contribution_records_.empty()
         && contributions_.empty()
         && bc_descriptors_.empty()
         && !topology_context_.has_value()

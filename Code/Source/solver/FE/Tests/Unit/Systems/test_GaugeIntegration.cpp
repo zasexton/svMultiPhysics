@@ -10,12 +10,14 @@
 
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
+#include "Systems/BoundaryConditionManager.h"
 
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/GlobalSystemView.h"
 
 #include "Forms/FormExpr.h"
 #include "Forms/StandardBCs.h"
+#include "Analysis/BoundaryConditionDescriptor.h"
 #include "Constraints/GaugeRegistry.h"
 #include "Constraints/DirichletBC.h"
 
@@ -25,6 +27,7 @@
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 using namespace svmp::FE;
+using namespace svmp::FE::analysis;
 using namespace svmp::FE::forms;
 using namespace svmp::FE::gauge;
 
@@ -299,38 +302,46 @@ TEST(GaugeIntegration, ScalarReactionDiffusion_NoNullspace)
 // BC anchoring verdicts — StandardBCs
 // ============================================================================
 
-TEST(GaugeIntegration, EssentialBC_ReturnsUnknown_AnchoringHandledByDirichletScan)
+TEST(GaugeIntegration, EssentialBC_DescriptorAnchorsConstantAndTranslation)
 {
-    // EssentialBC returns Unknown for gaugeAnchoring() because strong-constraint
-    // anchoring is handled by the per-component Dirichlet DOF scan in SystemSetup.
-    // This avoids field-wide over-anchoring for component-selective BCs.
+    // EssentialBC descriptor has anchors_constant_mode=true and
+    // anchors_rigid_body_translation=true. descriptorToVerdict returns
+    // Anchored for ScalarConstant/ComponentwiseConstant, PartiallyAnchored
+    // for KernelOfSymGrad (translation anchored, rotation not).
     bc::EssentialBC bc(1, FormExpr::constant(0.0));
-    EXPECT_EQ(bc.gaugeAnchoring(0, NullspaceModeFamily::ScalarConstant), AnchoringVerdict::Unknown);
-    EXPECT_EQ(bc.gaugeAnchoring(0, NullspaceModeFamily::ComponentwiseConstant), AnchoringVerdict::Unknown);
-    EXPECT_EQ(bc.gaugeAnchoring(0, NullspaceModeFamily::KernelOfSymGrad), AnchoringVerdict::Unknown);
+    auto descs = bc.analysisMetadata(0, nullptr);
+    ASSERT_EQ(descs.size(), 1u);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ScalarConstant), AnchoringVerdict::Anchored);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ComponentwiseConstant), AnchoringVerdict::Anchored);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::KernelOfSymGrad), AnchoringVerdict::PartiallyAnchored);
 }
 
 TEST(GaugeIntegration, NaturalBC_Preserves_AllFamilies)
 {
     bc::NaturalBC bc(1, FormExpr::constant(1.0));
-    EXPECT_EQ(bc.gaugeAnchoring(0, NullspaceModeFamily::ScalarConstant), AnchoringVerdict::Preserved);
-    EXPECT_EQ(bc.gaugeAnchoring(0, NullspaceModeFamily::ComponentwiseConstant), AnchoringVerdict::Preserved);
-    EXPECT_EQ(bc.gaugeAnchoring(0, NullspaceModeFamily::KernelOfSymGrad), AnchoringVerdict::Preserved);
+    auto descs = bc.analysisMetadata(0, nullptr);
+    ASSERT_EQ(descs.size(), 1u);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ScalarConstant), AnchoringVerdict::Preserved);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ComponentwiseConstant), AnchoringVerdict::Preserved);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::KernelOfSymGrad), AnchoringVerdict::Preserved);
 }
 
 TEST(GaugeIntegration, RobinBC_Anchors_ConstantModes_PartiallyAnchors_KernelOfSymGrad)
 {
     bc::RobinBC bc(1, FormExpr::constant(1.0), FormExpr::constant(0.0));
-    EXPECT_EQ(bc.gaugeAnchoring(0, NullspaceModeFamily::ScalarConstant), AnchoringVerdict::Anchored);
-    EXPECT_EQ(bc.gaugeAnchoring(0, NullspaceModeFamily::ComponentwiseConstant), AnchoringVerdict::Anchored);
-    EXPECT_EQ(bc.gaugeAnchoring(0, NullspaceModeFamily::KernelOfSymGrad), AnchoringVerdict::PartiallyAnchored);
+    auto descs = bc.analysisMetadata(0, nullptr);
+    ASSERT_EQ(descs.size(), 1u);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ScalarConstant), AnchoringVerdict::Anchored);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ComponentwiseConstant), AnchoringVerdict::Anchored);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::KernelOfSymGrad), AnchoringVerdict::PartiallyAnchored);
 }
 
-TEST(GaugeIntegration, ReservedBC_Preserves_AllFamilies)
+TEST(GaugeIntegration, ReservedBC_EmptyDescriptors)
 {
+    // ReservedBC returns empty descriptors — no mathematical constraint.
     bc::ReservedBC bc(1);
-    EXPECT_EQ(bc.gaugeAnchoring(0, NullspaceModeFamily::ScalarConstant), AnchoringVerdict::Preserved);
-    EXPECT_EQ(bc.gaugeAnchoring(0, NullspaceModeFamily::KernelOfSymGrad), AnchoringVerdict::Preserved);
+    auto descs = bc.analysisMetadata(0, nullptr);
+    EXPECT_TRUE(descs.empty());
 }
 
 // ============================================================================
@@ -387,12 +398,12 @@ TEST(GaugeIntegration, VectorField_SymGrad_KernelOfSymGradCandidate)
 }
 
 // ============================================================================
-// Phase 3: Non-Forms kernel gaugeMetadata() hooks
+// Phase 3: Non-Forms kernel analysisContributions() hooks
 // ============================================================================
 
 namespace {
 
-/// Minimal AssemblyKernel that declares a gauge candidate via gaugeMetadata()
+/// Minimal AssemblyKernel that declares a gauge candidate via analysisContributions()
 class GaugeDeclaringKernel final : public assembly::AssemblyKernel {
 public:
     GaugeDeclaringKernel(FieldId field, NullspaceModeFamily family)
@@ -410,16 +421,31 @@ public:
         out.reserve(0, 0, true, false);
     }
 
-    [[nodiscard]] std::vector<gauge::GaugeCandidate> gaugeMetadata() const override
+    [[nodiscard]] std::vector<analysis::ContributionDescriptor> analysisContributions() const override
     {
-        gauge::GaugeCandidate c;
-        c.field = field_;
-        c.component = -1;
-        c.family = family_;
-        c.confidence = gauge::Confidence::High;
-        c.source = gauge::CandidateSource::ExplicitDeclaration;
-        c.reason = "Explicitly declared by GaugeDeclaringKernel";
-        return {c};
+        analysis::ContributionDescriptor cd;
+        cd.operator_tag = "gauge_declaring_kernel";
+        cd.origin = "GaugeDeclaringKernel";
+        cd.domain = analysis::DomainKind::Cell;
+        cd.role = analysis::ContributionRole::DiagonalBlock;
+        cd.test_variables = {analysis::VariableKey::field(field_)};
+        cd.trial_variables = {analysis::VariableKey::field(field_)};
+        cd.confidence = analysis::AnalysisConfidence::High;
+
+        analysis::NullspaceHint hint;
+        hint.field = field_;
+        hint.component = -1;
+        hint.confidence = analysis::AnalysisConfidence::High;
+        hint.reason = "Explicitly declared by GaugeDeclaringKernel";
+        if (family_ == NullspaceModeFamily::ScalarConstant) {
+            hint.family = analysis::NullspaceFamily::ScalarConstant;
+        } else if (family_ == NullspaceModeFamily::KernelOfSymGrad) {
+            hint.family = analysis::NullspaceFamily::KernelOfSymGrad;
+        } else {
+            hint.family = analysis::NullspaceFamily::ComponentwiseConstant;
+        }
+        cd.nullspace_hints.push_back(std::move(hint));
+        return {cd};
     }
 
 private:
@@ -427,7 +453,7 @@ private:
     NullspaceModeFamily family_;
 };
 
-/// Minimal GlobalKernel that declares a gauge candidate via gaugeMetadata()
+/// Minimal GlobalKernel that declares a gauge candidate via analysisContributions()
 class GaugeDeclaringGlobalKernel final : public systems::GlobalKernel {
 public:
     GaugeDeclaringGlobalKernel(FieldId field, NullspaceModeFamily family)
@@ -445,16 +471,31 @@ public:
         return {};
     }
 
-    [[nodiscard]] std::vector<gauge::GaugeCandidate> gaugeMetadata() const override
+    [[nodiscard]] std::vector<analysis::ContributionDescriptor> analysisContributions() const override
     {
-        gauge::GaugeCandidate c;
-        c.field = field_;
-        c.component = -1;
-        c.family = family_;
-        c.confidence = gauge::Confidence::High;
-        c.source = gauge::CandidateSource::ExplicitDeclaration;
-        c.reason = "Explicitly declared by GaugeDeclaringGlobalKernel";
-        return {c};
+        analysis::ContributionDescriptor cd;
+        cd.operator_tag = "gauge_declaring_global_kernel";
+        cd.origin = "GaugeDeclaringGlobalKernel";
+        cd.domain = analysis::DomainKind::Cell;
+        cd.role = analysis::ContributionRole::DiagonalBlock;
+        cd.test_variables = {analysis::VariableKey::field(field_)};
+        cd.trial_variables = {analysis::VariableKey::field(field_)};
+        cd.confidence = analysis::AnalysisConfidence::High;
+
+        analysis::NullspaceHint hint;
+        hint.field = field_;
+        hint.component = -1;
+        hint.confidence = analysis::AnalysisConfidence::High;
+        hint.reason = "Explicitly declared by GaugeDeclaringGlobalKernel";
+        if (family_ == NullspaceModeFamily::ScalarConstant) {
+            hint.family = analysis::NullspaceFamily::ScalarConstant;
+        } else if (family_ == NullspaceModeFamily::KernelOfSymGrad) {
+            hint.family = analysis::NullspaceFamily::KernelOfSymGrad;
+        } else {
+            hint.family = analysis::NullspaceFamily::ComponentwiseConstant;
+        }
+        cd.nullspace_hints.push_back(std::move(hint));
+        return {cd};
     }
 
 private:
@@ -464,7 +505,7 @@ private:
 
 } // namespace
 
-TEST(GaugeIntegration, CellKernel_GaugeMetadata_CollectedDuringSetup)
+TEST(GaugeIntegration, CellKernel_AnalysisContributions_CollectedDuringSetup)
 {
     auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
     auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
@@ -481,7 +522,8 @@ TEST(GaugeIntegration, CellKernel_GaugeMetadata_CollectedDuringSetup)
     inputs.topology_override = singleTetraTopology();
     sys.setup({}, inputs);
 
-    // The gauge registry should have collected the candidate from the kernel
+    // The gauge registry should have collected the candidate from the kernel's
+    // analysisContributions() NullspaceHint
     ASSERT_TRUE(sys.hasGaugeRegistry());
     const auto* reg = sys.gaugeRegistryIfPresent();
     ASSERT_NE(reg, nullptr);
@@ -507,7 +549,7 @@ TEST(GaugeIntegration, CellKernel_GaugeMetadata_CollectedDuringSetup)
     EXPECT_TRUE(found_exact);
 }
 
-TEST(GaugeIntegration, GlobalKernel_GaugeMetadata_CollectedDuringSetup)
+TEST(GaugeIntegration, GlobalKernel_AnalysisContributions_CollectedDuringSetup)
 {
     auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
     auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
@@ -537,7 +579,7 @@ TEST(GaugeIntegration, GlobalKernel_GaugeMetadata_CollectedDuringSetup)
     EXPECT_TRUE(found_explicit);
 }
 
-TEST(GaugeIntegration, CellKernel_GaugeMetadata_AnchoredByDirichlet)
+TEST(GaugeIntegration, CellKernel_AnalysisContributions_AnchoredByDirichlet)
 {
     auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
     auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
@@ -569,12 +611,9 @@ TEST(GaugeIntegration, CellKernel_GaugeMetadata_AnchoredByDirichlet)
     EXPECT_TRUE(found_anchored);
 }
 
-TEST(GaugeIntegration, DefaultKernel_EmptyGaugeMetadata)
+TEST(GaugeIntegration, DefaultKernel_EmptyAnalysisContributions)
 {
     // Verify that the base class default returns empty
-    GaugeDeclaringKernel kernel(0, NullspaceModeFamily::ScalarConstant);
-    // The GaugeDeclaringKernel overrides, but let's check a default kernel
-    // by creating a minimal one that does NOT override gaugeMetadata
     class NoMetadataKernel final : public assembly::AssemblyKernel {
     public:
         [[nodiscard]] assembly::RequiredData getRequiredData() const override {
@@ -586,10 +625,10 @@ TEST(GaugeIntegration, DefaultKernel_EmptyGaugeMetadata)
     };
 
     NoMetadataKernel nk;
-    EXPECT_TRUE(nk.gaugeMetadata().empty());
+    EXPECT_TRUE(nk.analysisContributions().empty());
 }
 
-TEST(GaugeIntegration, DefaultGlobalKernel_EmptyGaugeMetadata)
+TEST(GaugeIntegration, DefaultGlobalKernel_EmptyAnalysisContributions)
 {
     class NoMetadataGlobalKernel final : public systems::GlobalKernel {
     public:
@@ -603,7 +642,7 @@ TEST(GaugeIntegration, DefaultGlobalKernel_EmptyGaugeMetadata)
     };
 
     NoMetadataGlobalKernel nk;
-    EXPECT_TRUE(nk.gaugeMetadata().empty());
+    EXPECT_TRUE(nk.analysisContributions().empty());
 }
 
 // ============================================================================
@@ -859,7 +898,7 @@ TEST(GaugeIntegration, TwoRegions_RobinOnRegionA_RegionBGetsGauge)
     auto residual = inner(grad(u), grad(v)).dx();
 
     // Robin BC on marker 1 (only on tet A): u + penalty*u = g
-    // gaugeAnchoring() returns Anchored for ScalarConstant.
+    // descriptorToVerdict() returns Anchored for ScalarConstant.
     systems::BoundaryConditionManager bc_mgr;
     bc_mgr.add(std::make_unique<bc::RobinBC>(1, FormExpr::constant(1.0), FormExpr::constant(0.0)));
     bc_mgr.apply(sys, residual, u, v, u_field);

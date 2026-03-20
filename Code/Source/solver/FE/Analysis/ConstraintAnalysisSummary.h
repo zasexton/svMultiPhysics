@@ -16,7 +16,7 @@
  * under/over-constraint checks without re-walking AffineConstraints internals.
  *
  * Intentionally FE-DOF-focused.  Non-FE couplings (aux states, boundary
- * functionals) are represented via KernelContributionRecord and
+ * functionals) are represented via ContributionDescriptor and
  * BoundaryConditionDescriptor, not here.
  *
  * @see ConstraintRankAnalyzer (Phase 7) for the primary consumer

@@ -29,7 +29,6 @@
 #include "Core/Types.h"
 #include "Analysis/ProblemAnalysisTypes.h"
 #include "Analysis/FormulationRecord.h"
-#include "Analysis/KernelContributionRecord.h"
 #include "Analysis/ContributionDescriptor.h"
 #include "Analysis/BoundaryConditionDescriptor.h"
 #include "Analysis/TopologyAnalysisContext.h"
@@ -108,13 +107,6 @@ public:
         return formulation_records_;
     }
 
-    // ---- Kernel contribution records (non-Forms operators) ----
-
-    void addKernelContributionRecord(KernelContributionRecord record);
-    [[nodiscard]] const std::vector<KernelContributionRecord>& kernelContributionRecords() const noexcept {
-        return kernel_contribution_records_;
-    }
-
     // ---- Normalized contributions (Phase 10) ----
 
     void addContribution(ContributionDescriptor desc);
@@ -169,7 +161,6 @@ private:
     std::vector<VariableDescriptor> variable_descriptors_;
 
     std::vector<FormulationRecord> formulation_records_;
-    std::vector<KernelContributionRecord> kernel_contribution_records_;
     std::vector<ContributionDescriptor> contributions_;
     std::vector<BoundaryConditionDescriptor> bc_descriptors_;
     std::optional<TopologyAnalysisContext> topology_context_;

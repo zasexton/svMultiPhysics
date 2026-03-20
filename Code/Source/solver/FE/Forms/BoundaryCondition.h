@@ -11,7 +11,6 @@
  */
 
 #include "Forms/BoundaryConditions.h"
-#include "Constraints/GaugeRegistry.h"
 #include "Analysis/BoundaryConditionDescriptor.h"
 
 #include <vector>
@@ -64,31 +63,6 @@ public:
     virtual void addAffineConstraints(constraints::AffineConstraints& /*constraints*/,
                                       FieldId /*field_id*/) const
     {
-    }
-
-    /**
-     * @brief Report how this BC affects nullspace modes for the given field
-     *
-     * Used by the GaugeRegistry to determine whether a candidate nullspace
-     * mode is anchored (fully fixed), partially anchored (weakly broken),
-     * preserved (compatible with the mode), or unknown.
-     *
-     * Built-in BC classes (Phase 2) will override this with concrete semantics.
-     * The default returns Unknown (conservative — won't auto-anchor or
-     * auto-dismiss a candidate).
-     *
-     * @param field_id   The field whose nullspace mode is being queried
-     * @param family     The nullspace mode family (ScalarConstant, KernelOfSymGrad, etc.)
-     * @param component  Component index (-1 = all components)
-     * @return AnchoringVerdict for this BC's effect on the given mode
-     */
-    [[deprecated("Use analysisMetadata() instead — see BoundaryConditionDescriptor.h")]]
-    [[nodiscard]] virtual gauge::AnchoringVerdict
-    gaugeAnchoring(FieldId /*field_id*/,
-                   gauge::NullspaceModeFamily /*family*/,
-                   int /*component*/ = -1) const
-    {
-        return gauge::AnchoringVerdict::Unknown;
     }
 
     /**

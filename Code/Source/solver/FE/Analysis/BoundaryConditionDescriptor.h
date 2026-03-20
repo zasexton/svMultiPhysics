@@ -12,7 +12,7 @@
  * @file BoundaryConditionDescriptor.h
  * @brief Rich mathematical descriptor for a boundary condition
  *
- * Replaces the single-enum gaugeAnchoring() with a structured description
+ * Provides a structured description of a boundary condition
  * consumable by multiple analyzers (nullspace, constraint rank, compatibility).
  *
  * @see BoundaryCondition::analysisMetadata() for the producer interface
@@ -22,6 +22,7 @@
 #include "Core/Types.h"
 #include "Analysis/ProblemAnalysisTypes.h"
 #include "Analysis/ContributionDescriptor.h"
+#include "Constraints/GaugeRegistry.h"
 
 #include <cstdint>
 #include <string>
@@ -131,8 +132,8 @@ lowerBCDescriptor(const BoundaryConditionDescriptor& desc);
 /**
  * @brief Map a BoundaryConditionDescriptor to a gauge AnchoringVerdict
  *
- * Used during the transition period while both the old gaugeAnchoring() and
- * new analysisMetadata() interfaces coexist.
+ * Maps the structured BoundaryConditionDescriptor produced by
+ * analysisMetadata() into a gauge AnchoringVerdict for a given mode family.
  *
  * @param desc    The new-style descriptor
  * @param family  The nullspace mode family being queried

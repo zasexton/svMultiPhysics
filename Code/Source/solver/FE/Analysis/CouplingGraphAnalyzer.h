@@ -12,7 +12,7 @@
  * @file CouplingGraphAnalyzer.h
  * @brief Variable coupling graph analysis pass
  *
- * Iterates formulation records, kernel contribution records, and BC
+ * Iterates formulation records, contribution descriptors, and BC
  * descriptors to discover how variables (FE fields, auxiliary states,
  * boundary functionals, global scalars) couple to each other.
  *
@@ -20,7 +20,7 @@
  * Detects InterfaceCondition when variables couple only through
  * interface or global-domain operators.
  *
- * @see KernelContributionRecord for non-Forms operator metadata
+ * @see ContributionDescriptor for normalized operator metadata
  * @see BoundaryConditionDescriptor for BC-induced couplings
  */
 

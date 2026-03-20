@@ -8,8 +8,6 @@
 #include "Analysis/ProblemAnalysisTypes.h"
 #include "Analysis/ProblemAnalysisContext.h"
 #include "Analysis/ProblemAnalyzer.h"
-#include "Analysis/KernelContributionRecord.h"
-
 #include <sstream>
 #include <unordered_set>
 
@@ -430,7 +428,7 @@ TEST(ProblemAnalysisContext, DefaultIsEmpty) {
     EXPECT_TRUE(ctx.fieldDescriptors().empty());
     EXPECT_TRUE(ctx.variableDescriptors().empty());
     EXPECT_TRUE(ctx.formulationRecords().empty());
-    EXPECT_TRUE(ctx.kernelContributionRecords().empty());
+    EXPECT_TRUE(ctx.contributions().empty());
     EXPECT_TRUE(ctx.bcDescriptors().empty());
     EXPECT_EQ(ctx.topologyContext(), nullptr);
     EXPECT_EQ(ctx.constraintSummary(), nullptr);
@@ -544,24 +542,6 @@ TEST(ProblemAnalysisContext, VariableDescriptor_UpdateExisting) {
     EXPECT_EQ(ctx.variableDescriptor(vd.key)->label, "new");
 }
 
-TEST(ProblemAnalysisContext, KernelContributionRecords) {
-    ProblemAnalysisContext ctx;
-
-    KernelContributionRecord rec;
-    rec.operator_tag = "RCRBoundary";
-    rec.domain = DomainKind::CoupledBoundary;
-    rec.source_name = "CoupledBoundaryManager";
-    rec.test_variables.push_back(VariableKey::field(0));
-    rec.trial_variables.push_back(VariableKey::named(VariableKind::BoundaryFunctional, "Q"));
-    rec.is_linear = true;
-    ctx.addKernelContributionRecord(rec);
-
-    EXPECT_FALSE(ctx.empty());
-    ASSERT_EQ(ctx.kernelContributionRecords().size(), 1u);
-    EXPECT_EQ(ctx.kernelContributionRecords()[0].operator_tag, "RCRBoundary");
-    EXPECT_EQ(ctx.kernelContributionRecords()[0].domain, DomainKind::CoupledBoundary);
-}
-
 TEST(ProblemAnalysisContext, FieldDescriptor_Phase21_SpaceMetadata) {
     ProblemAnalysisContext ctx;
 
@@ -602,19 +582,15 @@ TEST(ProblemAnalysisContext, InputsVersionIncrementsOnMutation) {
     ctx.addFormulationRecord(fr);
     EXPECT_EQ(ctx.inputsVersion(), 3u);
 
-    KernelContributionRecord kr;
-    ctx.addKernelContributionRecord(kr);
-    EXPECT_EQ(ctx.inputsVersion(), 4u);
-
     BoundaryConditionDescriptor bd;
     ctx.addBCDescriptor(bd);
-    EXPECT_EQ(ctx.inputsVersion(), 5u);
+    EXPECT_EQ(ctx.inputsVersion(), 4u);
 
     ctx.setTopologyContext(TopologyAnalysisContext{});
-    EXPECT_EQ(ctx.inputsVersion(), 6u);
+    EXPECT_EQ(ctx.inputsVersion(), 5u);
 
     ctx.setConstraintSummary(ConstraintAnalysisSummary{});
-    EXPECT_EQ(ctx.inputsVersion(), 7u);
+    EXPECT_EQ(ctx.inputsVersion(), 6u);
 }
 
 // ============================================================================

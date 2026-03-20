@@ -145,30 +145,6 @@ void CouplingGraphAnalyzer::run(const ProblemAnalysisContext& context,
             }
         }
 
-        // --- Kernel contribution records ---
-        for (const auto& kcr : context.kernelContributionRecords()) {
-            for (const auto& tv : kcr.test_variables) {
-                for (const auto& tr : kcr.trial_variables) {
-                    DomainKind dom = kcr.domain;
-
-                    bool is_interface_only =
-                        (dom == DomainKind::InterfaceFace ||
-                         dom == DomainKind::Global);
-
-                    if (is_interface_only) {
-                        emit_interface(tv, tr, "kernel '" + kcr.operator_tag + "'");
-                    }
-                    emit_coupling(tv, tr, dom,
-                                  "kernel '" + kcr.operator_tag + "'");
-                }
-
-                for (const auto& rv : kcr.related_variables) {
-                    emit_coupling(tv, rv, kcr.domain,
-                                  "kernel '" + kcr.operator_tag + "' (data dep)");
-                }
-            }
-        }
-
         // --- BC descriptors ---
         for (const auto& bc : context.bcDescriptors()) {
             for (const auto& rv : bc.related_variables) {
@@ -181,7 +157,7 @@ void CouplingGraphAnalyzer::run(const ProblemAnalysisContext& context,
     }
 
     // =====================================================================
-    // FALLBACK PATH: FormulationRecords + KernelContributionRecords
+    // FALLBACK PATH: FormulationRecords
     // =====================================================================
 
     // --- Formulation records ---
@@ -215,33 +191,6 @@ void CouplingGraphAnalyzer::run(const ProblemAnalysisContext& context,
                 auto fk = VariableKey::field(fid);
                 emit_coupling(fk, aux, DomainKind::Cell,
                               "auxiliary state in '" + rec.operator_tag + "'");
-            }
-        }
-    }
-
-    // --- Kernel contribution records ---
-    for (const auto& kcr : context.kernelContributionRecords()) {
-        // Cross-product of test and trial variables
-        for (const auto& tv : kcr.test_variables) {
-            for (const auto& tr : kcr.trial_variables) {
-                DomainKind dom = kcr.domain;
-
-                // Detect interface-only coupling
-                bool is_interface_only =
-                    (dom == DomainKind::InterfaceFace ||
-                     dom == DomainKind::Global);
-
-                if (is_interface_only) {
-                    emit_interface(tv, tr, "kernel '" + kcr.operator_tag + "'");
-                }
-                emit_coupling(tv, tr, dom,
-                              "kernel '" + kcr.operator_tag + "'");
-            }
-
-            // Related variables (data dependencies)
-            for (const auto& rv : kcr.related_variables) {
-                emit_coupling(tv, rv, kcr.domain,
-                              "kernel '" + kcr.operator_tag + "' (data dep)");
             }
         }
     }

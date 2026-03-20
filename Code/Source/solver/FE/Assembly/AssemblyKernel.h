@@ -62,8 +62,7 @@
 #include "Core/Types.h"
 #include "Core/Alignment.h"
 #include "Core/ParameterValue.h"
-#include "Constraints/GaugeRegistry.h"
-#include "Analysis/KernelContributionRecord.h"
+#include "Analysis/ContributionDescriptor.h"
 
 #include <span>
 #include <vector>
@@ -404,56 +403,10 @@ public:
 	    [[nodiscard]] virtual std::vector<params::Spec> parameterSpecs() const { return {}; }
 
 	    /**
-	     * @brief Optional gauge/nullspace metadata for non-Forms kernels
-	     *
-	     * Hand-written kernels that are not built from FormExpr can override this
-	     * to declare nullspace modes that the GaugeRegistry should consider.
-	     * Forms-based kernels do not need to override this — the NullspaceAnalyzer
-	     * infers gauge candidates automatically from the symbolic expression.
-	     *
-	     * Each GaugeCandidate should set:
-	     *   - field: the FieldId whose nullspace is being declared
-	     *   - family: ScalarConstant, ComponentwiseConstant, or KernelOfSymGrad
-	     *   - confidence: High/Medium/Low
-	     *   - source: CandidateSource::ExplicitDeclaration
-	     *   - reason: human-readable explanation
-	     *
-	     * The default implementation returns an empty vector (no declarations).
-	     */
-	    [[deprecated("Use analysisContributions() with NullspaceHint instead")]]
-	    [[nodiscard]] virtual std::vector<gauge::GaugeCandidate> gaugeMetadata() const { return {}; }
-
-	    /**
-	     * @brief Optional anchoring evidence for non-Forms kernels
-	     *
-	     * Hand-written kernels that anchor or preserve nullspace modes can
-	     * override this to contribute first-class anchoring evidence to the
-	     * GaugeRegistry resolver.  The default returns empty (no evidence).
-	     */
-	    [[deprecated("Use analysisContributions() with NullspaceLifting/NullspacePreserving traits instead")]]
-	    [[nodiscard]] virtual std::vector<gauge::AnchoringEvidence> anchoringMetadata() const { return {}; }
-
-	    /**
-	     * @brief Optional generic analysis metadata for non-Forms kernels
-	     *
-	     * Returns structured metadata describing the coupling structure, domain,
-	     * and mathematical properties of this kernel.  Consumed by the Analysis
-	     * subsystem's CouplingGraphAnalyzer, MixedOperatorAnalyzer, etc.
-	     *
-	     * Kernels built from FormExpr do not need to override this — the
-	     * FormStructureAnalyzer extracts the information from the expression.
-	     * Hand-written kernels should override this to participate in analysis.
-	     */
-	    [[deprecated("Use analysisContributions() instead — see ContributionDescriptor.h")]]
-	    [[nodiscard]] virtual std::vector<analysis::KernelContributionRecord> analysisMetadata() const { return {}; }
-
-	    /**
 	     * @brief Normalized contribution descriptors for the analysis subsystem
 	     *
-	     * Preferred over analysisMetadata() for new kernels.  Returns structured
-	     * ContributionDescriptors that participate directly in all analysis passes.
-	     * The default implementation returns empty; kernels that still use
-	     * analysisMetadata() are handled via the toContributionDescriptor() shim.
+	     * Returns structured ContributionDescriptors that participate directly
+	     * in all analysis passes.  The default implementation returns empty.
 	     *
 	     * Use the builder helpers on ContributionDescriptor for common patterns:
 	     *   ContributionDescriptor::diagonalSymmetric(field, op, origin)

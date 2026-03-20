@@ -127,15 +127,6 @@ void KernelAnalyzer::run(const ProblemAnalysisContext& context,
             }
         }
 
-        // If contributions were available, we are done with the primary path.
-        // Still check kernel contribution records for hints not yet lowered.
-        for (const auto& krec : context.kernelContributionRecords()) {
-            for (const auto& hint : krec.nullspace_hints) {
-                if (hint.kind == PropertyKind::Nullspace) {
-                    report.claims.push_back(hint);
-                }
-            }
-        }
         return;
     }
 
@@ -257,14 +248,6 @@ void KernelAnalyzer::run(const ProblemAnalysisContext& context,
         }
     }
 
-    // Kernel contribution record nullspace hints
-    for (const auto& krec : context.kernelContributionRecords()) {
-        for (const auto& hint : krec.nullspace_hints) {
-            if (hint.kind == PropertyKind::Nullspace) {
-                report.claims.push_back(hint);
-            }
-        }
-    }
 }
 
 } // namespace analysis

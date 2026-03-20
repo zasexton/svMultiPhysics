@@ -1267,106 +1267,84 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     // -----------------------------------------------------------------
     // Collect explicit gauge metadata from non-Forms kernels (Path B).
     // This supplements the automatic inference from FormsInstaller (Path A).
-    // Snapshot the definition-time kernel record count so invalidateSetup()
+    // Snapshot the definition-time contribution count so invalidateSetup()
     // can truncate back to this point without losing coupled-boundary records.
-    kernel_contribution_records_def_count_ = kernel_contribution_records_.size();
     contributions_def_count_ = contributions_.size();
     {
         const auto op_tags_gauge = operator_registry_.list();
         for (const auto& tag : op_tags_gauge) {
             const auto& def = operator_registry_.get(tag);
 
-            // Helper: collect contributions from a kernel, preferring
-            // analysisContributions() over analysisMetadata() + shim.
+            // Helper: collect contributions from a kernel.
             auto collectContributions = [this](const auto& kernel) {
                 auto contribs = kernel->analysisContributions();
-                if (!contribs.empty()) {
-                    for (auto& c : contribs) {
-                        addContribution(std::move(c));
-                    }
-                } else {
-                    // Fallback: legacy analysisMetadata() → toContributionDescriptor()
-                    for (auto& r : kernel->analysisMetadata()) {
-                        addContribution(r.toContributionDescriptor());
-                        addKernelContributionRecord(std::move(r));
-                    }
+                for (auto& c : contribs) {
+                    addContribution(std::move(c));
                 }
             };
 
-            // Cell kernels — candidates + anchoring evidence + contributions
+            // Cell kernels
             for (const auto& term : def.cells) {
                 if (!term.kernel) continue;
-                for (auto& c : term.kernel->gaugeMetadata()) {
-                    gaugeRegistry().addCandidate(std::move(c));
-                }
-                for (auto& a : term.kernel->anchoringMetadata()) {
-                    gaugeRegistry().addAnchoring(std::move(a));
-                }
                 collectContributions(term.kernel);
             }
 
             // Boundary kernels
             for (const auto& term : def.boundary) {
                 if (!term.kernel) continue;
-                for (auto& c : term.kernel->gaugeMetadata()) {
-                    gaugeRegistry().addCandidate(std::move(c));
-                }
-                for (auto& a : term.kernel->anchoringMetadata()) {
-                    gaugeRegistry().addAnchoring(std::move(a));
-                }
                 collectContributions(term.kernel);
             }
 
             // Interior face kernels
             for (const auto& term : def.interior) {
                 if (!term.kernel) continue;
-                for (auto& c : term.kernel->gaugeMetadata()) {
-                    gaugeRegistry().addCandidate(std::move(c));
-                }
-                for (auto& a : term.kernel->anchoringMetadata()) {
-                    gaugeRegistry().addAnchoring(std::move(a));
-                }
                 collectContributions(term.kernel);
             }
 
             // Interface face kernels
             for (const auto& term : def.interface_faces) {
                 if (!term.kernel) continue;
-                for (auto& c : term.kernel->gaugeMetadata()) {
-                    gaugeRegistry().addCandidate(std::move(c));
-                }
-                for (auto& a : term.kernel->anchoringMetadata()) {
-                    gaugeRegistry().addAnchoring(std::move(a));
-                }
                 collectContributions(term.kernel);
             }
 
             // Global kernels
             for (const auto& gk : def.global) {
                 if (!gk) continue;
-                for (auto& c : gk->gaugeMetadata()) {
-                    gaugeRegistry().addCandidate(std::move(c));
-                }
-                for (auto& a : gk->anchoringMetadata()) {
-                    gaugeRegistry().addAnchoring(std::move(a));
-                }
-                auto contribs = gk->analysisContributions();
-                if (!contribs.empty()) {
-                    for (auto& cd : contribs) {
-                        addContribution(std::move(cd));
-                    }
-                } else {
-                    for (auto& r : gk->analysisMetadata()) {
-                        addContribution(r.toContributionDescriptor());
-                        addKernelContributionRecord(std::move(r));
-                    }
-                }
+                collectContributions(gk);
             }
         }
     }
 
+    // Convert NullspaceHints from contributions into GaugeRegistry candidates.
+    // This replaces the former gaugeMetadata() direct-injection path.
+    for (const auto& contrib : contributions_) {
+        for (const auto& hint : contrib.nullspace_hints) {
+            gauge::GaugeCandidate c;
+            c.field = hint.field;
+            c.component = hint.component;
+            c.source = gauge::CandidateSource::ExplicitDeclaration;
+            c.reason = hint.reason;
+            switch (hint.confidence) {
+                case analysis::AnalysisConfidence::High:   c.confidence = gauge::Confidence::High; break;
+                case analysis::AnalysisConfidence::Medium: c.confidence = gauge::Confidence::Medium; break;
+                case analysis::AnalysisConfidence::Low:    c.confidence = gauge::Confidence::Low; break;
+            }
+            switch (hint.family) {
+                case analysis::NullspaceFamily::ScalarConstant:
+                    c.family = gauge::NullspaceModeFamily::ScalarConstant; break;
+                case analysis::NullspaceFamily::ComponentwiseConstant:
+                    c.family = gauge::NullspaceModeFamily::ComponentwiseConstant; break;
+                case analysis::NullspaceFamily::KernelOfSymGrad:
+                    c.family = gauge::NullspaceModeFamily::KernelOfSymGrad; break;
+                case analysis::NullspaceFamily::UserDefined:
+                    c.family = gauge::NullspaceModeFamily::ScalarConstant; break;
+            }
+            gaugeRegistry().addCandidate(std::move(c));
+        }
+    }
+
     // If the GaugeRegistry has candidates (populated by FormsInstaller's
-    // NullspaceAnalyzer or by explicit kernel declarations), resolve them
+    // NullspaceAnalyzer or by kernel contributions), resolve them
     // against anchoring evidence from the constraints already applied above.
     //
     // StrongDirichlet BCs that constrained any DOF of a field are treated

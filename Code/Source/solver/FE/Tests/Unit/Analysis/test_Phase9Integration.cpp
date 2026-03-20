@@ -17,7 +17,6 @@
 #include "Analysis/BoundaryConditionDescriptor.h"
 #include "Analysis/TopologyAnalysisContext.h"
 #include "Analysis/ConstraintAnalysisSummary.h"
-#include "Analysis/KernelContributionRecord.h"
 #include "Analysis/GaugeAdapter.h"
 
 #include "Forms/FormExpr.h"

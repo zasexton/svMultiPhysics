@@ -20,7 +20,6 @@
 #include "Analysis/FormulationRecord.h"
 #include "Analysis/InterfaceTopologyContext.h"
 #include "Analysis/BoundaryConditionDescriptor.h"
-#include "Analysis/KernelContributionRecord.h"
 
 #include "Forms/FormExpr.h"
 #include "Spaces/H1Space.h"

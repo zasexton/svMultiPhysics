@@ -561,7 +561,6 @@ set(FE_ANALYSIS_HEADERS
     Analysis/GaugeAdapter.h
     Analysis/ContributionDescriptor.h
     Analysis/FormContributionLowerer.h
-    Analysis/KernelContributionRecord.h
     Analysis/BoundaryConditionDescriptor.h
     Analysis/TopologyAnalysisContext.h
     Analysis/InterfaceTopologyContext.h

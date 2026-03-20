@@ -19,7 +19,7 @@
  *   Path A — automatic inference from Forms residual expressions
  *            (NullspaceAnalyzer walks the FormExpr DAG).
  *   Path B — explicit declarations from hand-written AssemblyKernel /
- *            GlobalKernel / custom-BC gaugeMetadata() hooks.
+ *            GlobalKernel analysisContributions() NullspaceHint entries.
  *
  * After all candidates and anchoring evidence have been collected, the resolver
  * merges, deduplicates, classifies each mode, and chooses an enforcement policy.

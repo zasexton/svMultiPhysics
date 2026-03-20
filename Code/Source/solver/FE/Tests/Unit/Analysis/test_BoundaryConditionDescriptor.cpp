@@ -248,46 +248,49 @@ TEST(BoundaryConditionDescriptor, DescriptorToVerdict_NoAnchoring_Unknown) {
 }
 
 // ============================================================================
-// Roundtrip: BC.analysisMetadata() → descriptorToVerdict == BC.gaugeAnchoring()
+// BC.analysisMetadata() → descriptorToVerdict produces expected verdicts
 // ============================================================================
 
-TEST(BoundaryConditionDescriptor, Roundtrip_RobinBC_MatchesGaugeAnchoring) {
+TEST(BoundaryConditionDescriptor, RobinBC_DescriptorToVerdict) {
     bc::RobinBC bc(1, FormExpr::constant(1.0), FormExpr::constant(0.0));
 
-    // Old path
-    auto verdict_scalar = bc.gaugeAnchoring(0, NullspaceModeFamily::ScalarConstant, -1);
-    auto verdict_rbm = bc.gaugeAnchoring(0, NullspaceModeFamily::KernelOfSymGrad, -1);
-
-    // New path
     auto descs = bc.analysisMetadata(0, nullptr);
     ASSERT_EQ(descs.size(), 1u);
-    auto new_verdict_scalar = descriptorToVerdict(descs[0], NullspaceModeFamily::ScalarConstant);
-    auto new_verdict_rbm = descriptorToVerdict(descs[0], NullspaceModeFamily::KernelOfSymGrad);
 
-    EXPECT_EQ(verdict_scalar, new_verdict_scalar);
-    EXPECT_EQ(verdict_rbm, new_verdict_rbm);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ScalarConstant),
+              AnchoringVerdict::Anchored);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ComponentwiseConstant),
+              AnchoringVerdict::Anchored);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::KernelOfSymGrad),
+              AnchoringVerdict::PartiallyAnchored);
 }
 
-TEST(BoundaryConditionDescriptor, Roundtrip_NaturalBC_MatchesGaugeAnchoring) {
+TEST(BoundaryConditionDescriptor, NaturalBC_DescriptorToVerdict) {
     bc::NaturalBC bc(1, FormExpr::constant(0.0));
 
-    auto verdict = bc.gaugeAnchoring(0, NullspaceModeFamily::ScalarConstant, -1);
     auto descs = bc.analysisMetadata(0, nullptr);
     ASSERT_EQ(descs.size(), 1u);
-    auto new_verdict = descriptorToVerdict(descs[0], NullspaceModeFamily::ScalarConstant);
 
-    EXPECT_EQ(verdict, new_verdict);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ScalarConstant),
+              AnchoringVerdict::Preserved);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ComponentwiseConstant),
+              AnchoringVerdict::Preserved);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::KernelOfSymGrad),
+              AnchoringVerdict::Preserved);
 }
 
-TEST(BoundaryConditionDescriptor, Roundtrip_PeriodicBC_MatchesGaugeAnchoring) {
+TEST(BoundaryConditionDescriptor, PeriodicBC_DescriptorToVerdict) {
     bc::PeriodicBC bc(1, 2, {1.0, 0.0, 0.0});
 
-    auto verdict = bc.gaugeAnchoring(0, NullspaceModeFamily::ScalarConstant, -1);
     auto descs = bc.analysisMetadata(0, nullptr);
     ASSERT_EQ(descs.size(), 1u);
-    auto new_verdict = descriptorToVerdict(descs[0], NullspaceModeFamily::ScalarConstant);
 
-    EXPECT_EQ(verdict, new_verdict);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ScalarConstant),
+              AnchoringVerdict::Preserved);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ComponentwiseConstant),
+              AnchoringVerdict::Preserved);
+    EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::KernelOfSymGrad),
+              AnchoringVerdict::Preserved);
 }
 
 // ============================================================================

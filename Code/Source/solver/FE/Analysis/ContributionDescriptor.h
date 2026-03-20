@@ -14,8 +14,7 @@
  *
  * ContributionDescriptor is the unified representation that both FormExpr
  * formulations and handwritten kernels lower into.  All analyzer passes
- * will eventually consume contributions instead of raw FormulationRecord
- * or KernelContributionRecord.
+ * consume contributions as their primary input.
  *
  * @see FormContributionLowerer (Phase 11) for FormExpr → ContributionDescriptor
  * @see AssemblyKernel::analysisContributions() (Phase 12) for kernel → ContributionDescriptor

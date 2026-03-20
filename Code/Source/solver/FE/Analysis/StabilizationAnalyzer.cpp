@@ -55,38 +55,6 @@ void StabilizationAnalyzer::run(const ProblemAnalysisContext& context,
             report.claims.push_back(std::move(claim));
         }
 
-        // Also check kernel contribution records independently (they may
-        // not have corresponding contributions yet)
-        for (const auto& kcr : context.kernelContributionRecords()) {
-            if (!kcr.has_stabilization) continue;
-
-            // Skip if we already emitted a claim for the same operator_tag
-            bool already_covered = false;
-            for (const auto& contrib : contributions) {
-                if (contrib.operator_tag == kcr.operator_tag &&
-                    contrib.role == ContributionRole::StabilizationBlock) {
-                    already_covered = true;
-                    break;
-                }
-            }
-            if (already_covered) continue;
-
-            PropertyClaim claim;
-            claim.kind = PropertyKind::Stabilization;
-            claim.status = PropertyStatus::Preserved;
-            claim.confidence = AnalysisConfidence::Medium;
-            claim.domain = kcr.domain;
-
-            for (const auto& tv : kcr.test_variables) {
-                claim.variables.push_back(tv);
-            }
-
-            claim.description =
-                "Stabilization detected in kernel '" + kcr.operator_tag + "'";
-            claim.addEvidence("StabilizationAnalyzer",
-                "KernelContributionRecord::has_stabilization=true");
-            report.claims.push_back(std::move(claim));
-        }
         return;
     }
 
@@ -146,51 +114,9 @@ void StabilizationAnalyzer::run(const ProblemAnalysisContext& context,
                 "FormulationRecord::has_stabilization_terms=true");
         }
 
-        // Also check kernel contribution records for stabilization
-        for (const auto& kcr : context.kernelContributionRecords()) {
-            if (kcr.has_stabilization) {
-                claim.addEvidence("StabilizationAnalyzer",
-                    "Kernel '" + kcr.operator_tag +
-                    "' also has stabilization terms");
-            }
-        }
-
         report.claims.push_back(std::move(claim));
     }
 
-    // Check kernel contribution records independently (they may not have
-    // corresponding formulation records)
-    for (const auto& kcr : context.kernelContributionRecords()) {
-        if (!kcr.has_stabilization) continue;
-
-        // Skip if we already emitted a stabilization claim from a formulation
-        // record that covers the same operator tag
-        bool already_covered = false;
-        for (const auto& rec : context.formulationRecords()) {
-            if (rec.operator_tag == kcr.operator_tag &&
-                (rec.has_stabilization_terms || rec.residual_expr)) {
-                already_covered = true;
-                break;
-            }
-        }
-        if (already_covered) continue;
-
-        PropertyClaim claim;
-        claim.kind = PropertyKind::Stabilization;
-        claim.status = PropertyStatus::Preserved;
-        claim.confidence = AnalysisConfidence::Medium;
-        claim.domain = kcr.domain;
-
-        for (const auto& tv : kcr.test_variables) {
-            claim.variables.push_back(tv);
-        }
-
-        claim.description =
-            "Stabilization detected in kernel '" + kcr.operator_tag + "'";
-        claim.addEvidence("StabilizationAnalyzer",
-            "KernelContributionRecord::has_stabilization=true");
-        report.claims.push_back(std::move(claim));
-    }
 }
 
 } // namespace analysis
