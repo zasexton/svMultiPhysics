@@ -79,6 +79,30 @@ public:
         flux_ = systems::bc::detail::resolveCoupledSymbols(flux_, integral_index, aux_index);
     }
 
+    [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
+    analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
+    {
+        analysis::BoundaryConditionDescriptor d;
+        d.primary_variable = analysis::VariableKey::field(field_id);
+        d.boundary_marker = boundary_marker_;
+        d.domain = analysis::DomainKind::CoupledBoundary;
+        d.trace_kind = analysis::TraceKind::Flux;
+        d.enforcement_kind = analysis::EnforcementKind::WeakConsistent;
+        d.anchors_constant_mode = false;
+        d.anchors_rigid_body_translation = false;
+        d.anchors_rigid_body_rotation = false;
+        d.introduces_global_coupling = true;
+        d.source = "CoupledNaturalBC on marker " + std::to_string(boundary_marker_);
+
+        // Add related variables from aux registrations
+        for (const auto& reg : aux_registrations_) {
+            d.related_variables.push_back(
+                analysis::VariableKey::named(analysis::VariableKind::AuxiliaryState, reg.spec.name));
+        }
+
+        return {d};
+    }
+
 private:
     std::vector<systems::AuxiliaryStateRegistration> aux_registrations_{};
     bool setup_done_{false};
@@ -144,6 +168,29 @@ public:
 
         alpha_ = systems::bc::detail::resolveCoupledSymbols(alpha_, integral_index, aux_index);
         rhs_ = systems::bc::detail::resolveCoupledSymbols(rhs_, integral_index, aux_index);
+    }
+
+    [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
+    analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
+    {
+        analysis::BoundaryConditionDescriptor d;
+        d.primary_variable = analysis::VariableKey::field(field_id);
+        d.boundary_marker = boundary_marker_;
+        d.domain = analysis::DomainKind::CoupledBoundary;
+        d.trace_kind = analysis::TraceKind::Mixed;
+        d.enforcement_kind = analysis::EnforcementKind::WeakPenalty;
+        d.anchors_constant_mode = true;
+        d.anchors_rigid_body_translation = true;
+        d.anchors_rigid_body_rotation = false;
+        d.introduces_global_coupling = true;
+        d.source = "CoupledRobinBC on marker " + std::to_string(boundary_marker_);
+
+        for (const auto& reg : aux_registrations_) {
+            d.related_variables.push_back(
+                analysis::VariableKey::named(analysis::VariableKind::AuxiliaryState, reg.spec.name));
+        }
+
+        return {d};
     }
 
 private:

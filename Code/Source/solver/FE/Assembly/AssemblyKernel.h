@@ -63,6 +63,7 @@
 #include "Core/Alignment.h"
 #include "Core/ParameterValue.h"
 #include "Constraints/GaugeRegistry.h"
+#include "Analysis/KernelContributionRecord.h"
 
 #include <span>
 #include <vector>
@@ -419,6 +420,7 @@ public:
 	     *
 	     * The default implementation returns an empty vector (no declarations).
 	     */
+	    [[deprecated("Use analysisContributions() with NullspaceHint instead")]]
 	    [[nodiscard]] virtual std::vector<gauge::GaugeCandidate> gaugeMetadata() const { return {}; }
 
 	    /**
@@ -428,7 +430,38 @@ public:
 	     * override this to contribute first-class anchoring evidence to the
 	     * GaugeRegistry resolver.  The default returns empty (no evidence).
 	     */
+	    [[deprecated("Use analysisContributions() with NullspaceLifting/NullspacePreserving traits instead")]]
 	    [[nodiscard]] virtual std::vector<gauge::AnchoringEvidence> anchoringMetadata() const { return {}; }
+
+	    /**
+	     * @brief Optional generic analysis metadata for non-Forms kernels
+	     *
+	     * Returns structured metadata describing the coupling structure, domain,
+	     * and mathematical properties of this kernel.  Consumed by the Analysis
+	     * subsystem's CouplingGraphAnalyzer, MixedOperatorAnalyzer, etc.
+	     *
+	     * Kernels built from FormExpr do not need to override this — the
+	     * FormStructureAnalyzer extracts the information from the expression.
+	     * Hand-written kernels should override this to participate in analysis.
+	     */
+	    [[deprecated("Use analysisContributions() instead — see ContributionDescriptor.h")]]
+	    [[nodiscard]] virtual std::vector<analysis::KernelContributionRecord> analysisMetadata() const { return {}; }
+
+	    /**
+	     * @brief Normalized contribution descriptors for the analysis subsystem
+	     *
+	     * Preferred over analysisMetadata() for new kernels.  Returns structured
+	     * ContributionDescriptors that participate directly in all analysis passes.
+	     * The default implementation returns empty; kernels that still use
+	     * analysisMetadata() are handled via the toContributionDescriptor() shim.
+	     *
+	     * Use the builder helpers on ContributionDescriptor for common patterns:
+	     *   ContributionDescriptor::diagonalSymmetric(field, op, origin)
+	     *   ContributionDescriptor::constraintBlock(test, trial, op, origin)
+	     *   ContributionDescriptor::stabilization(field, op, origin)
+	     *   ContributionDescriptor::globalCoupling(test, trial, op, origin)
+	     */
+	    [[nodiscard]] virtual std::vector<analysis::ContributionDescriptor> analysisContributions() const { return {}; }
 
 	    /**
 	     * @brief Optional setup-time resolution of parameter symbols to slot refs

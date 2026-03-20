@@ -536,6 +536,66 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/GaugeRegistry.cpp
 )
 
+# Analysis sources (problem property inference)
+set(FE_ANALYSIS_HEADERS
+    Analysis/ProblemAnalysisTypes.h
+    Analysis/ProblemAnalysisContext.h
+    Analysis/ProblemAnalyzer.h
+    Analysis/FormulationRecord.h
+    Analysis/FormExprScanner.h
+    Analysis/FormStructureAnalyzer.h
+    Analysis/KernelAnalyzer.h
+    Analysis/CouplingGraphAnalyzer.h
+    Analysis/ConstraintRankAnalyzer.h
+    Analysis/MixedOperatorAnalyzer.h
+    Analysis/OperatorClassAnalyzer.h
+    Analysis/StabilizationAnalyzer.h
+    Analysis/CompatibilityAnalyzer.h
+    Analysis/TopologyScopeAnalyzer.h
+    Analysis/InterfaceValidationAnalyzer.h
+    Analysis/InfSupAnalyzer.h
+    Analysis/ConservationAnalyzer.h
+    Analysis/DAEStructureAnalyzer.h
+    Analysis/SpaceCompatibilityAnalyzer.h
+    Analysis/TransportCharacterAnalyzer.h
+    Analysis/GaugeAdapter.h
+    Analysis/ContributionDescriptor.h
+    Analysis/FormContributionLowerer.h
+    Analysis/KernelContributionRecord.h
+    Analysis/BoundaryConditionDescriptor.h
+    Analysis/TopologyAnalysisContext.h
+    Analysis/InterfaceTopologyContext.h
+    Analysis/ConstraintAnalysisSummary.h
+)
+
+set(FE_ANALYSIS_SOURCES
+    Analysis/ProblemAnalysisTypes.cpp
+    Analysis/ProblemAnalysisContext.cpp
+    Analysis/ProblemAnalyzer.cpp
+    Analysis/FormExprScanner.cpp
+    Analysis/FormStructureAnalyzer.cpp
+    Analysis/BoundaryConditionDescriptor.cpp
+    Analysis/TopologyAnalysisContext.cpp
+    Analysis/ConstraintAnalysisSummary.cpp
+    Analysis/KernelAnalyzer.cpp
+    Analysis/CouplingGraphAnalyzer.cpp
+    Analysis/ConstraintRankAnalyzer.cpp
+    Analysis/MixedOperatorAnalyzer.cpp
+    Analysis/OperatorClassAnalyzer.cpp
+    Analysis/StabilizationAnalyzer.cpp
+    Analysis/CompatibilityAnalyzer.cpp
+    Analysis/TopologyScopeAnalyzer.cpp
+    Analysis/InterfaceValidationAnalyzer.cpp
+    Analysis/InfSupAnalyzer.cpp
+    Analysis/ConservationAnalyzer.cpp
+    Analysis/DAEStructureAnalyzer.cpp
+    Analysis/SpaceCompatibilityAnalyzer.cpp
+    Analysis/TransportCharacterAnalyzer.cpp
+    Analysis/GaugeAdapter.cpp
+    Analysis/ContributionDescriptor.cpp
+    Analysis/FormContributionLowerer.cpp
+)
+
 # Assembly sources
 set(FE_ASSEMBLY_HEADERS
     # Phase 1: CORE
@@ -1003,6 +1063,7 @@ set(FE_ALL_HEADERS
     ${FE_SPACES_HEADERS}
     ${FE_DOFS_HEADERS}
     ${FE_CONSTRAINTS_HEADERS}
+    ${FE_ANALYSIS_HEADERS}
     ${FE_GEOMETRY_HEADERS}
     ${FE_SPARSITY_HEADERS}
 )
@@ -1015,6 +1076,7 @@ set(FE_ALL_SOURCES
     ${FE_SPACES_SOURCES}
     ${FE_DOFS_SOURCES}
     ${FE_CONSTRAINTS_SOURCES}
+    ${FE_ANALYSIS_SOURCES}
     ${FE_GEOMETRY_SOURCES}
     ${FE_SPARSITY_SOURCES}
 )
@@ -1889,6 +1951,40 @@ if(FE_BUILD_TESTS)
                 ${GTEST_LIBRARIES}
         )
         add_test(NAME FE_Sparsity_Tests COMMAND test_fe_sparsity)
+    endif()
+
+    # Analysis module tests
+    set(FE_ANALYSIS_TEST_SOURCES
+        Tests/Unit/Analysis/test_ProblemAnalysisTypes.cpp
+        Tests/Unit/Analysis/test_FormulationRecord.cpp
+        Tests/Unit/Analysis/test_FormStructureAnalyzer.cpp
+        Tests/Unit/Analysis/test_BoundaryConditionDescriptor.cpp
+        Tests/Unit/Analysis/test_TopologyAnalysisContext.cpp
+        Tests/Unit/Analysis/test_ConstraintAnalysisSummary.cpp
+        Tests/Unit/Analysis/test_AnalyzerPasses.cpp
+        Tests/Unit/Analysis/test_GaugeAdapter.cpp
+        Tests/Unit/Analysis/test_Phase9Integration.cpp
+        Tests/Unit/Analysis/test_ContributionDescriptor.cpp
+        Tests/Unit/Analysis/test_FormContributionLowerer.cpp
+        Tests/Unit/Analysis/test_InterfaceValidation.cpp
+        Tests/Unit/Analysis/test_Phase19InterfaceAware.cpp
+        Tests/Unit/Analysis/test_Phase24AdvancedClaims.cpp
+        Tests/Unit/Analysis/test_main.cpp
+    )
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Analysis/test_main.cpp)
+        add_executable(test_fe_analysis ${FE_ANALYSIS_TEST_SOURCES})
+        _svmp_fe_target_enable_warnings(test_fe_analysis)
+        target_link_libraries(test_fe_analysis
+            PRIVATE
+                svfe
+                ${GTEST_LIBRARIES}
+        )
+        set_target_properties(test_fe_analysis PROPERTIES
+            SKIP_BUILD_RPATH TRUE
+            BUILD_RPATH ""
+            INSTALL_RPATH ""
+        )
+        add_test(NAME FE_Analysis_Tests COMMAND test_fe_analysis)
     endif()
 
     if(FE_ENABLE_ASSEMBLY)

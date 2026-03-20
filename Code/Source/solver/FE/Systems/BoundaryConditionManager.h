@@ -126,9 +126,23 @@ public:
             bc->setup(system, field_id);
         }
 
-        // Collect gauge anchoring evidence from BCs BEFORE they are moved.
+        // Collect analysis metadata (BC descriptors) from BCs BEFORE they are moved.
         // The BCs will be consumed (moved into BoundaryConditionAffineConstraint)
-        // at the end of this method, so we must query gaugeAnchoring() now.
+        // at the end of this method, so we must query analysisMetadata() now.
+        // Also lower each descriptor into normalized ContributionDescriptors.
+        for (const auto& bc : bcs_) {
+            if (!bc) continue;
+            auto descs = bc->analysisMetadata(field_id, &system);
+            for (auto& d : descs) {
+                auto contributions = analysis::lowerBCDescriptor(d);
+                for (auto& c : contributions) {
+                    system.addContribution(std::move(c));
+                }
+                system.addBoundaryConditionDescriptor(std::move(d));
+            }
+        }
+
+        // Collect gauge anchoring evidence from BCs BEFORE they are moved.
         // Use gaugeRegistry() (not hasGaugeRegistry()) to eagerly create the
         // registry — BCs may be applied before installFormulation() which is
         // the normal creation point. The registry must exist to receive evidence.

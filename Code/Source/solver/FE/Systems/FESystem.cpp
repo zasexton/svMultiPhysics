@@ -24,6 +24,9 @@
 #include "Spaces/FunctionSpace.h"
 #include "Sparsity/DistributedSparsityPattern.h"
 
+#include "Analysis/ProblemAnalysisContext.h"
+#include "Analysis/ProblemAnalyzer.h"
+
 #include <algorithm>
 #include <unordered_set>
 
@@ -118,6 +121,25 @@ void FESystem::invalidateSetup() noexcept
     }
     assembly_plan_by_op_.clear();
     coupled_jac_cache_.clear();
+
+    // Clear setup-time analysis data that is rebuilt during setup().
+    // Formulation records, BC descriptors, and definition-time kernel
+    // contribution records (from CoupledBoundaryManager) are NOT cleared.
+    // Only setup-time kernel records (from kernel analysisMetadata()) are
+    // removed by truncating back to the definition-time watermark.
+    kernel_contribution_records_.resize(kernel_contribution_records_def_count_);
+    contributions_.resize(contributions_def_count_);
+    topology_context_.reset();
+    interface_topology_context_.reset();
+    constraint_summary_.reset();
+
+    // Note: GaugeRegistry is NOT cleared here. Candidate deduplication in
+    // addCandidate() prevents accumulation on repeated setup(). Anchoring
+    // evidence may accumulate from kernel sources, but resolve() overwrites
+    // previous results. A full gauge lifecycle fix (clearing setup-time
+    // evidence while preserving definition-time evidence) would require
+    // a watermark pattern in GaugeRegistry itself.
+    invalidateAnalysisCache();
 }
 
 void FESystem::requireSetup() const
@@ -131,6 +153,302 @@ gauge::GaugeRegistry& FESystem::gaugeRegistry()
         gauge_registry_ = std::make_unique<gauge::GaugeRegistry>();
     }
     return *gauge_registry_;
+}
+
+// ============================================================================
+// Problem analysis subsystem
+// ============================================================================
+
+void FESystem::addFormulationRecord(analysis::FormulationRecord record) {
+    formulation_records_.push_back(std::move(record));
+    invalidateAnalysisCache();
+}
+
+void FESystem::addKernelContributionRecord(analysis::KernelContributionRecord record) {
+    kernel_contribution_records_.push_back(std::move(record));
+    invalidateAnalysisCache();
+}
+
+void FESystem::addBoundaryConditionDescriptor(analysis::BoundaryConditionDescriptor desc) {
+    bc_descriptors_.push_back(std::move(desc));
+    invalidateAnalysisCache();
+}
+
+void FESystem::addContribution(analysis::ContributionDescriptor desc) {
+    contributions_.push_back(std::move(desc));
+    invalidateAnalysisCache();
+}
+
+void FESystem::addVariableDescriptor(analysis::VariableDescriptor desc) {
+    variable_descriptors_.push_back(std::move(desc));
+    invalidateAnalysisCache();
+}
+
+void FESystem::buildTopologyContext() {
+    topology_context_ = analysis::TopologyAnalysisContext::build(meshAccess());
+    invalidateAnalysisCache();
+}
+
+void FESystem::buildInterfaceTopologyContext() {
+    analysis::InterfaceTopologyContext ctx;
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    for (const auto& [marker, imesh] : interface_meshes_) {
+        if (!imesh) continue;
+
+        const auto n_faces = static_cast<GlobalIndex>(imesh->n_faces());
+        for (GlobalIndex f = 0; f < n_faces; ++f) {
+            auto local_f = static_cast<MeshIndex>(f);
+            analysis::InterfaceFaceRecord rec;
+            rec.interface_marker = marker;
+
+            auto cells = imesh->volume_cells(local_f);
+            rec.minus_cell = static_cast<GlobalIndex>(cells[0]);
+            rec.plus_cell = static_cast<GlobalIndex>(cells[1]);
+            rec.is_two_sided = !imesh->is_boundary_face(local_f);
+            rec.has_orientation = imesh->has_orientation();
+
+            if (rec.is_two_sided) {
+                rec.minus_local_face = imesh->local_face_in_cell_minus(local_f);
+                rec.plus_local_face = imesh->local_face_in_cell_plus(local_f);
+            } else {
+                rec.minus_local_face = imesh->local_face_in_cell(local_f);
+            }
+
+            // Annotate with bulk region IDs if topology context is available
+            if (topology_context_) {
+                if (rec.minus_cell != INVALID_GLOBAL_INDEX) {
+                    rec.minus_region = topology_context_->regionForCell(rec.minus_cell);
+                }
+                if (rec.plus_cell != INVALID_GLOBAL_INDEX) {
+                    rec.plus_region = topology_context_->regionForCell(rec.plus_cell);
+                }
+            }
+
+            auto face_idx = ctx.faces.size();
+            ctx.faces.push_back(std::move(rec));
+            ctx.marker_to_faces[marker].push_back(face_idx);
+        }
+    }
+#endif
+
+    interface_topology_context_ = std::move(ctx);
+    invalidateAnalysisCache();
+}
+
+void FESystem::buildConstraintSummary() {
+    std::vector<analysis::ConstraintAnalysisSummary::FieldDofRange> ranges;
+    for (const auto& fr : field_registry_.records()) {
+        analysis::ConstraintAnalysisSummary::FieldDofRange r;
+        r.field_id = fr.id;
+        // Field DOF offsets are only valid after setup
+        if (is_setup_ && fr.id < field_dof_offsets_.size()) {
+            r.dof_offset = field_dof_offsets_[fr.id];
+            r.num_dofs = field_dof_handlers_[fr.id].getStatistics().total_dofs;
+            r.num_components = fr.components;
+        }
+        ranges.push_back(r);
+    }
+
+    // Build a DOF→region provider when topology is available.
+    // Uses the EntityDofMap to map DOF → entity → cell → region.
+    // Handles vertex, edge, face, and cell entities.
+    const auto* topo = topology_context_ ? &*topology_context_ : nullptr;
+    analysis::ConstraintAnalysisSummary::DofRegionProvider dof_region;
+    if (topo && topo->numRegions() > 1) {
+        const auto* emap = dof_handler_.getEntityDofMap();
+        if (emap && mesh_access_) {
+            // Pre-build vertex→cell map for O(1) lookup instead of O(n_cells) per DOF
+            const auto n_cells = meshAccess().numCells();
+            auto vertex_to_cell = std::make_shared<std::unordered_map<GlobalIndex, GlobalIndex>>();
+            {
+                std::vector<GlobalIndex> nodes;
+                for (GlobalIndex c = 0; c < n_cells; ++c) {
+                    nodes.clear();
+                    meshAccess().getCellNodes(c, nodes);
+                    for (auto n : nodes) {
+                        vertex_to_cell->emplace(n, c);  // first cell wins
+                    }
+                }
+            }
+
+            dof_region = [topo, emap, vertex_to_cell, n_cells, this](GlobalIndex dof) -> int {
+                auto ent = emap->getDofEntity(dof);
+                if (!ent) return -1;
+
+                switch (ent->kind) {
+                    case dofs::EntityKind::Vertex: {
+                        auto it = vertex_to_cell->find(ent->id);
+                        if (it != vertex_to_cell->end()) {
+                            return topo->regionForCell(it->second);
+                        }
+                        return -1;
+                    }
+                    case dofs::EntityKind::Cell: {
+                        // Cell DOF — entity ID is the cell index
+                        return topo->regionForCell(ent->id);
+                    }
+                    default: {
+                        // Edge/Face DOFs: find an incident cell by scanning.
+                        // This is O(n_cells) per DOF but only runs once during
+                        // constraint summary build. For large meshes, a
+                        // pre-built edge/face→cell map would be more efficient.
+                        const auto& dmap = dof_handler_.getDofMap();
+                        for (GlobalIndex c = 0; c < n_cells; ++c) {
+                            auto cell_dofs = dmap.getCellDofs(c);
+                            for (auto cd : cell_dofs) {
+                                if (cd == dof) {
+                                    return topo->regionForCell(c);
+                                }
+                            }
+                        }
+                        return -1;
+                    }
+                }
+            };
+        }
+    }
+
+    // Build component DOF provider from FieldDofMap.
+    // Uses getComponentDofs() which works for any layout (component-blocked,
+    // interleaved, or vector-basis). Returns empty for VectorBasis fields
+    // where component extraction is not defined.
+    analysis::ConstraintAnalysisSummary::ComponentDofProvider comp_dofs;
+    if (is_setup_ && field_map_.numFields() > 0) {
+        comp_dofs = [this](FieldId fid, int component) -> std::vector<GlobalIndex> {
+            auto field_idx = static_cast<std::size_t>(fid);
+            if (field_idx >= field_map_.numFields()) return {};
+            const auto& fd = field_map_.getField(field_idx);
+            if (fd.component_dof_layout != dofs::FieldComponentDofLayout::ComponentWise) return {};
+            if (component < 0 || static_cast<LocalIndex>(component) >= fd.n_components) return {};
+            auto idx_set = field_map_.getComponentDofs(field_idx, static_cast<LocalIndex>(component));
+            return idx_set.toVector();
+        };
+    }
+
+    constraint_summary_ = analysis::ConstraintAnalysisSummary::build(
+        affine_constraints_, ranges, topo, dof_region, comp_dofs);
+    invalidateAnalysisCache();
+}
+
+void FESystem::invalidateAnalysisCache() noexcept {
+    ++analysis_inputs_version_;
+}
+
+analysis::ProblemAnalysisReport FESystem::runProblemAnalysis() const {
+    analysis::ProblemAnalysisContext ctx;
+
+    // Populate field descriptors from FieldRegistry.
+    for (const auto& fr : field_registry_.records()) {
+        analysis::FieldDescriptor fd;
+        fd.field_id = fr.id;
+        fd.name = fr.name;
+        fd.value_dimension = fr.components;
+        fd.field_type = (fr.components > 1) ? FieldType::Vector : FieldType::Scalar;
+        if (fr.space) {
+            fd.polynomial_order = fr.space->polynomial_order();
+            fd.topological_dimension = fr.space->topological_dimension();
+            fd.continuity = fr.space->continuity();
+
+            // Derive component_extractable from the function space continuity.
+            // H(div) and H(curl) spaces use vector-valued basis functions where
+            // DOFs are NOT per-component — component extraction is not defined.
+            // This works both pre-setup and post-setup.
+            if (fd.continuity == Continuity::H_div ||
+                fd.continuity == Continuity::H_curl) {
+                fd.component_extractable = false;
+            }
+
+            // Phase 21: space family and trace capabilities from continuity
+            switch (fd.continuity) {
+                case Continuity::C0:
+                case Continuity::C1:
+                    fd.space_family = analysis::SpaceFamily::H1;
+                    fd.trace_capabilities = analysis::TraceCapabilityFlags::Value
+                                          | analysis::TraceCapabilityFlags::NormalFlux;
+                    break;
+                case Continuity::H_div:
+                    fd.space_family = analysis::SpaceFamily::HDiv;
+                    fd.trace_capabilities = analysis::TraceCapabilityFlags::NormalComponent
+                                          | analysis::TraceCapabilityFlags::NormalFlux;
+                    fd.has_exact_sequence_structure = true;
+                    fd.supports_local_balance_closure = true;
+                    break;
+                case Continuity::H_curl:
+                    fd.space_family = analysis::SpaceFamily::HCurl;
+                    fd.trace_capabilities = analysis::TraceCapabilityFlags::TangentialComponent;
+                    fd.has_exact_sequence_structure = true;
+                    break;
+                case Continuity::L2:
+                    fd.space_family = analysis::SpaceFamily::L2;
+                    fd.trace_capabilities = analysis::TraceCapabilityFlags::Jump
+                                          | analysis::TraceCapabilityFlags::Average;
+                    break;
+                default:
+                    fd.space_family = analysis::SpaceFamily::Custom;
+                    break;
+            }
+        }
+        // Post-setup refinement: use the actual FieldDofMap layout descriptor
+        // which is authoritative (handles edge cases like custom spaces).
+        if (is_setup_ && fr.id < field_map_.numFields()) {
+            const auto& fmd = field_map_.getField(static_cast<std::size_t>(fr.id));
+            fd.component_extractable =
+                (fmd.component_dof_layout == dofs::FieldComponentDofLayout::ComponentWise);
+        }
+        ctx.addFieldDescriptor(std::move(fd));
+    }
+
+    // Populate variable descriptors.
+    for (const auto& vd : variable_descriptors_) {
+        ctx.addVariableDescriptor(vd);
+    }
+
+    // Populate formulation records.
+    for (const auto& rec : formulation_records_) {
+        ctx.addFormulationRecord(rec);
+    }
+
+    // Populate kernel contribution records.
+    for (const auto& rec : kernel_contribution_records_) {
+        ctx.addKernelContributionRecord(rec);
+    }
+
+    // Populate normalized contributions.
+    for (const auto& c : contributions_) {
+        ctx.addContribution(c);
+    }
+
+    // Populate BC descriptors.
+    for (const auto& desc : bc_descriptors_) {
+        ctx.addBCDescriptor(desc);
+    }
+
+    // Populate topology context if available.
+    if (topology_context_) {
+        ctx.setTopologyContext(*topology_context_);
+    }
+
+    // Populate interface topology if available.
+    if (interface_topology_context_) {
+        ctx.setInterfaceTopologyContext(*interface_topology_context_);
+    }
+
+    // Populate constraint summary if available.
+    if (constraint_summary_) {
+        ctx.setConstraintSummary(*constraint_summary_);
+    }
+
+    auto analyzer = analysis::ProblemAnalyzer::createDefault();
+    return analyzer.analyze(ctx);
+}
+
+const analysis::ProblemAnalysisReport& FESystem::analysisReport() const {
+    if (analysis_report_version_ != analysis_inputs_version_) {
+        analysis_report_cache_ = runProblemAnalysis();
+        analysis_report_version_ = analysis_inputs_version_;
+    }
+    return *analysis_report_cache_;
 }
 
 const FieldRecord& FESystem::singleField() const

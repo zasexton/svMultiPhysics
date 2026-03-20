@@ -11,6 +11,7 @@
 #include "Core/Types.h"
 #include "Core/ParameterValue.h"
 #include "Constraints/GaugeRegistry.h"
+#include "Analysis/KernelContributionRecord.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -104,16 +105,26 @@ public:
      *
      * @see AssemblyKernel::gaugeMetadata() for the element-kernel equivalent
      */
+    [[deprecated("Use analysisContributions() with NullspaceHint instead")]]
     [[nodiscard]] virtual std::vector<gauge::GaugeCandidate> gaugeMetadata() const { return {}; }
 
-    /**
-     * @brief Optional anchoring evidence for non-Forms global kernels
-     *
-     * Global kernels that anchor or preserve nullspace modes can override
-     * this to contribute first-class anchoring evidence to the GaugeRegistry
-     * resolver.  The default returns empty (no evidence).
-     */
+    [[deprecated("Use analysisContributions() with NullspaceLifting/NullspacePreserving traits instead")]]
     [[nodiscard]] virtual std::vector<gauge::AnchoringEvidence> anchoringMetadata() const { return {}; }
+
+    /**
+     * @brief Optional generic analysis metadata for non-Forms global kernels
+     *
+     * @see AssemblyKernel::analysisMetadata() for the element-kernel equivalent
+     */
+    [[deprecated("Use analysisContributions() instead — see ContributionDescriptor.h")]]
+    [[nodiscard]] virtual std::vector<analysis::KernelContributionRecord> analysisMetadata() const { return {}; }
+
+    /**
+     * @brief Normalized contribution descriptors for the analysis subsystem
+     *
+     * @see AssemblyKernel::analysisContributions() for documentation
+     */
+    [[nodiscard]] virtual std::vector<analysis::ContributionDescriptor> analysisContributions() const { return {}; }
 
     [[nodiscard]] virtual assembly::AssemblyResult assemble(const FESystem& system,
                                                             const AssemblyRequest& request,

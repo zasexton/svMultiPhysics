@@ -276,6 +276,22 @@ public:
         return gauge::AnchoringVerdict::Preserved;
     }
 
+    [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
+    analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
+    {
+        analysis::BoundaryConditionDescriptor d;
+        d.primary_variable = analysis::VariableKey::field(field_id);
+        d.boundary_marker = slave_marker_;
+        d.trace_kind = analysis::TraceKind::AlgebraicRelation;
+        d.enforcement_kind = analysis::EnforcementKind::AffineRelation;
+        d.anchors_constant_mode = false;
+        d.anchors_rigid_body_translation = false;
+        d.anchors_rigid_body_rotation = false;
+        d.source = "PeriodicBC slave=" + std::to_string(slave_marker_)
+                 + " master=" + std::to_string(master_marker_);
+        return {d};
+    }
+
 private:
     int master_marker_{-1};
     int slave_marker_{-1};

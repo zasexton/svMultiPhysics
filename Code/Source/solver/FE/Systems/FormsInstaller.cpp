@@ -22,6 +22,10 @@
 #include "Forms/AffineAnalysis.h"
 #include "Forms/NullspaceAnalyzer.h"
 
+#include "Analysis/FormulationRecord.h"
+#include "Analysis/FormExprScanner.h"
+#include "Analysis/FormContributionLowerer.h"
+
 #include "Systems/FESystem.h"
 #include "Systems/StrongDirichletConstraint.h"
 #include "Spaces/FunctionSpace.h"
@@ -886,6 +890,116 @@ bool hasStateFieldNodes(const forms::FormExprNode& root)
     return false;
 }
 
+/**
+ * @brief Split a multi-test-function residual into per-test-function sub-expressions.
+ *
+ * Returns one FormExpr per test function, in the same order as the test functions
+ * appear in the expression. Returns empty if the expression has only one test
+ * function (no splitting needed) or if splitting fails.
+ *
+ * This is a lightweight version of the decomposition in installCoupledResidualMixed
+ * that only does the symbolic tree splitting without any compilation.
+ */
+std::vector<forms::FormExpr> splitByTestFunction(const forms::FormExpr& mixed_residual)
+{
+    if (!mixed_residual.isValid() || !mixed_residual.node()) return {};
+
+    // Find unique test function names.
+    struct TestInfo {
+        forms::FormExprNode::SpaceSignature sig;
+        std::string name;
+    };
+    std::vector<TestInfo> test_infos;
+    {
+        const auto find_tests = [&](const auto& self, const forms::FormExprNode& n) -> void {
+            if (n.type() == forms::FormExprType::TestFunction) {
+                const auto* sig = n.spaceSignature();
+                if (sig) {
+                    std::string nm = n.toString();
+                    bool found = false;
+                    for (const auto& info : test_infos) {
+                        if (signaturesMatch(info.sig, *sig) && info.name == nm) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        test_infos.push_back({*sig, nm});
+                    }
+                }
+            }
+            for (const auto& child : n.childrenShared()) {
+                if (child) self(self, *child);
+            }
+        };
+        find_tests(find_tests, *mixed_residual.node());
+    }
+
+    if (test_infos.size() <= 1) return {};
+
+    // Check if a subtree contains a named test function.
+    const auto containsTestNamed = [](const auto& self, const forms::FormExprNode& n,
+                                      const std::string& name) -> bool {
+        if (n.type() == forms::FormExprType::TestFunction && n.toString() == name) return true;
+        for (const auto& child : n.childrenShared()) {
+            if (child && self(self, *child, name)) return true;
+        }
+        return false;
+    };
+
+    const auto findTestIndices = [&](const forms::FormExprNode& node) -> std::vector<std::size_t> {
+        std::vector<std::size_t> indices;
+        for (std::size_t ti = 0; ti < test_infos.size(); ++ti) {
+            if (containsTestNamed(containsTestNamed, node, test_infos[ti].name)) {
+                indices.push_back(ti);
+            }
+        }
+        return indices;
+    };
+
+    std::vector<forms::FormExpr> blocks(test_infos.size());
+
+    const auto assignToBlock = [&](std::size_t ti, forms::FormExpr expr, int sign) {
+        if (sign < 0) expr = forms::FormExpr::constant(-1.0) * expr;
+        if (!blocks[ti].isValid()) {
+            blocks[ti] = std::move(expr);
+        } else {
+            blocks[ti] = blocks[ti] + std::move(expr);
+        }
+    };
+
+    const auto decompose = [&](const auto& self, const forms::FormExpr& expr, int sign) -> bool {
+        if (!expr.isValid()) return true;
+        const auto& n = *expr.node();
+        const auto kids = n.childrenShared();
+
+        if ((n.type() == forms::FormExprType::Add || n.type() == forms::FormExprType::Subtract)
+            && kids.size() == 2 && kids[0] && kids[1]) {
+            const auto left_tests = findTestIndices(*kids[0]);
+            const auto right_tests = findTestIndices(*kids[1]);
+            if (left_tests.size() == 1 && right_tests.size() == 1 && left_tests[0] == right_tests[0]) {
+                assignToBlock(left_tests[0], expr, sign);
+                return true;
+            }
+            const int right_sign = (n.type() == forms::FormExprType::Subtract) ? -sign : sign;
+            return self(self, forms::FormExpr(kids[0]), sign)
+                && self(self, forms::FormExpr(kids[1]), right_sign);
+        }
+        if (n.type() == forms::FormExprType::Negate && kids.size() == 1 && kids[0]) {
+            return self(self, forms::FormExpr(kids[0]), -sign);
+        }
+
+        const auto tests = findTestIndices(n);
+        if (tests.size() != 1) return false; // Can't split cleanly
+        assignToBlock(tests[0], expr, sign);
+        return true;
+    };
+
+    if (!decompose(decompose, mixed_residual, +1)) return {};
+
+    return blocks;
+}
+
 } // namespace
 
 CoupledResidualKernels installFormulation(
@@ -900,10 +1014,13 @@ CoupledResidualKernels installFormulation(
     FE_THROW_IF(!residual.isValid(), InvalidArgumentException,
                 "installFormulation: invalid residual expression");
 
-    // Run nullspace inference on the residual expression.
-    // This populates the system's GaugeRegistry with candidates that will be
-    // resolved during FESystem::setup() after BCs and constraints are known.
-    {
+    // Legacy gauge path: populate GaugeRegistry with NullspaceAnalyzer candidates.
+    // This feeds the existing gauge enforcement pipeline (GaugeRegistry::resolve()
+    // + applyEnforcement() during setup). The analysis pipeline (ContributionDescriptor
+    // → KernelAnalyzer → GaugeAdapter) provides the same information but runs at
+    // analysis time, not definition time. Both paths coexist until gauge enforcement
+    // is fully migrated to consume the analysis report.
+    [[maybe_unused]] auto populateGaugeRegistry = [&]() {
         forms::NullspaceAnalyzer analyzer;
         auto gauge_candidates = analyzer.analyze(residual, fields);
         if (!gauge_candidates.empty()) {
@@ -912,6 +1029,106 @@ CoupledResidualKernels installFormulation(
                 registry.addCandidate(std::move(c));
             }
         }
+    };
+    populateGaugeRegistry();
+
+    // Populate a FormulationRecord for the analysis subsystem.
+    {
+        analysis::FormulationRecord rec;
+        rec.operator_tag = op;
+        rec.active_fields.assign(fields.begin(), fields.end());
+        rec.residual_expr = residual.nodeShared();
+        rec.is_mixed = (fields.size() > 1);
+
+        // Scan the DAG for structural properties.
+        auto scan = analysis::scanFormExpr(*residual.node());
+        rec.has_time_derivative = scan.has_time_derivative;
+        rec.has_stabilization_terms = scan.has_stabilization();
+        rec.has_interior_face_terms = scan.has_interior_face_terms();
+        rec.active_domains = scan.activeDomains();
+
+        // Build active_variables from FE fields + coupled symbols.
+        for (auto fid : fields) {
+            rec.active_variables.push_back(analysis::VariableKey::field(fid));
+        }
+        for (const auto& name : scan.boundary_functional_names) {
+            auto vk = analysis::VariableKey::named(
+                analysis::VariableKind::BoundaryFunctional, name);
+            rec.active_variables.push_back(vk);
+            rec.boundary_functional_dependencies.push_back(vk);
+        }
+        for (const auto& name : scan.auxiliary_state_names) {
+            auto vk = analysis::VariableKey::named(
+                analysis::VariableKind::AuxiliaryState, name);
+            rec.active_variables.push_back(vk);
+            rec.auxiliary_state_dependencies.push_back(vk);
+        }
+
+        // Block couplings: for multi-field, all NxN blocks are potentially coupled.
+        // The actual block structure is refined after installCoupledResidualMixed().
+        if (fields.size() > 1) {
+            for (auto test_f : fields) {
+                for (auto trial_f : fields) {
+                    rec.block_couplings.emplace_back(test_f, trial_f);
+                }
+            }
+        } else if (fields.size() == 1) {
+            rec.block_couplings.emplace_back(fields[0], fields[0]);
+        }
+
+        // Variable couplings: FE fields coupled to each other, plus FE↔boundary/aux links.
+        for (const auto& bf : rec.boundary_functional_dependencies) {
+            for (auto fid : fields) {
+                rec.variable_couplings.emplace_back(
+                    analysis::VariableKey::field(fid), bf);
+            }
+        }
+        for (const auto& aux : rec.auxiliary_state_dependencies) {
+            for (auto fid : fields) {
+                rec.variable_couplings.emplace_back(
+                    analysis::VariableKey::field(fid), aux);
+            }
+        }
+
+        // Determine affine_split_succeeded by attempting the split on the residual.
+        // This is a lightweight structural walk of the DAG — no compilation involved.
+        {
+            forms::AffineResidualOptions affine_opts;
+            affine_opts.allow_time_derivatives = false;
+            affine_opts.allow_interior_face_terms = false;
+            auto split = forms::trySplitAffineResidual(residual, affine_opts);
+            rec.affine_split_succeeded = split.has_value();
+        }
+
+        // Per-block residual handles.
+        if (fields.size() == 1) {
+            // Single-field: the whole residual is the single block.
+            rec.block_residual_exprs.push_back(
+                {{fields[0], fields[0]}, residual.nodeShared()});
+        } else {
+            // Multi-field: split by test function to get per-test sub-expressions.
+            // Each sub-expression F_i(u1,...,uN; v_i) contains terms for one test field.
+            // We store them keyed by (test_field, test_field) — the trial splitting
+            // is done by the form compiler during Jacobian block compilation.
+            auto test_blocks = splitByTestFunction(residual);
+            if (test_blocks.size() == fields.size()) {
+                for (std::size_t i = 0; i < fields.size(); ++i) {
+                    if (test_blocks[i].isValid()) {
+                        rec.block_residual_exprs.push_back(
+                            {{fields[i], fields[i]}, test_blocks[i].nodeShared()});
+                    }
+                }
+            }
+        }
+
+        // Lower the formulation into normalized ContributionDescriptors
+        // before moving the record.
+        auto contributions = analysis::lowerFormulation(rec);
+        for (auto& c : contributions) {
+            system.addContribution(std::move(c));
+        }
+
+        system.addFormulationRecord(std::move(rec));
     }
 
     const auto num_test = countUniqueTestSpaces(*residual.node());

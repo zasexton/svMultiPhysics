@@ -12,6 +12,7 @@
 
 #include "Forms/BoundaryConditions.h"
 #include "Constraints/GaugeRegistry.h"
+#include "Analysis/BoundaryConditionDescriptor.h"
 
 #include <vector>
 
@@ -81,12 +82,32 @@ public:
      * @param component  Component index (-1 = all components)
      * @return AnchoringVerdict for this BC's effect on the given mode
      */
+    [[deprecated("Use analysisMetadata() instead — see BoundaryConditionDescriptor.h")]]
     [[nodiscard]] virtual gauge::AnchoringVerdict
     gaugeAnchoring(FieldId /*field_id*/,
                    gauge::NullspaceModeFamily /*family*/,
                    int /*component*/ = -1) const
     {
         return gauge::AnchoringVerdict::Unknown;
+    }
+
+    /**
+     * @brief Produce rich mathematical descriptors for this BC
+     *
+     * Returns one or more BoundaryConditionDescriptor objects describing
+     * what this BC prescribes, how it's enforced, and what it anchors.
+     * Consumed by the Analysis subsystem for nullspace, constraint rank,
+     * compatibility, and operator structure analysis.
+     *
+     * @param field_id  The field this BC is applied to
+     * @param system    Optional FESystem for coupled BCs that need system context
+     * @return          Descriptors (empty = no analysis metadata available)
+     */
+    [[nodiscard]] virtual std::vector<analysis::BoundaryConditionDescriptor>
+    analysisMetadata(FieldId /*field_id*/,
+                     const systems::FESystem* /*system*/ = nullptr) const
+    {
+        return {};
     }
 };
 

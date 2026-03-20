@@ -98,6 +98,21 @@ public:
         return {};
     }
 
+    [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
+    analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
+    {
+        analysis::BoundaryConditionDescriptor d;
+        d.primary_variable = analysis::VariableKey::field(field_id);
+        d.boundary_marker = boundary_marker_;
+        d.trace_kind = analysis::TraceKind::Value;
+        d.enforcement_kind = analysis::EnforcementKind::WeakNitsche;
+        d.anchors_constant_mode = true;
+        d.anchors_rigid_body_translation = true;
+        d.anchors_rigid_body_rotation = false;
+        d.source = "ScalarNitscheBC on marker " + std::to_string(boundary_marker_);
+        return {d};
+    }
+
 private:
     int boundary_marker_{-1};
     FormExpr value_{};

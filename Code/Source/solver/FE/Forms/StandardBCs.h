@@ -54,6 +54,12 @@ public:
         return gauge::AnchoringVerdict::Preserved;
     }
 
+    [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
+    analysisMetadata(FieldId /*field_id*/, const systems::FESystem* /*system*/) const override
+    {
+        return {};  // Reserved BC — no mathematical constraint
+    }
+
 private:
     int boundary_marker_{-1};
 };
@@ -93,6 +99,21 @@ public:
     gaugeAnchoring(FieldId /*field_id*/, gauge::NullspaceModeFamily /*family*/, int /*component*/) const override
     {
         return gauge::AnchoringVerdict::Preserved;
+    }
+
+    [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
+    analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
+    {
+        analysis::BoundaryConditionDescriptor d;
+        d.primary_variable = analysis::VariableKey::field(field_id);
+        d.boundary_marker = boundary_marker_;
+        d.trace_kind = analysis::TraceKind::Flux;
+        d.enforcement_kind = analysis::EnforcementKind::WeakConsistent;
+        d.anchors_constant_mode = false;
+        d.anchors_rigid_body_translation = false;
+        d.anchors_rigid_body_rotation = false;
+        d.source = "NaturalBC on marker " + std::to_string(boundary_marker_);
+        return {d};
     }
 
 private:
@@ -146,6 +167,21 @@ public:
             return gauge::AnchoringVerdict::PartiallyAnchored;
         }
         return gauge::AnchoringVerdict::Anchored;
+    }
+
+    [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
+    analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
+    {
+        analysis::BoundaryConditionDescriptor d;
+        d.primary_variable = analysis::VariableKey::field(field_id);
+        d.boundary_marker = boundary_marker_;
+        d.trace_kind = analysis::TraceKind::Mixed;
+        d.enforcement_kind = analysis::EnforcementKind::WeakPenalty;
+        d.anchors_constant_mode = true;
+        d.anchors_rigid_body_translation = true;
+        d.anchors_rigid_body_rotation = false;
+        d.source = "RobinBC on marker " + std::to_string(boundary_marker_);
+        return {d};
     }
 
 private:
@@ -229,6 +265,45 @@ public:
     gaugeAnchoring(FieldId /*field_id*/, gauge::NullspaceModeFamily /*family*/, int /*component*/) const override
     {
         return gauge::AnchoringVerdict::Unknown;
+    }
+
+    [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
+    analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
+    {
+        std::vector<analysis::BoundaryConditionDescriptor> descs;
+
+        if (value_components_.size() <= 1u) {
+            // Scalar field or single-component vector: field-wide descriptor
+            analysis::BoundaryConditionDescriptor d;
+            d.primary_variable = analysis::VariableKey::field(field_id);
+            d.component = -1;
+            d.boundary_marker = boundary_marker_;
+            d.trace_kind = analysis::TraceKind::Value;
+            d.enforcement_kind = analysis::EnforcementKind::Strong;
+            d.anchors_constant_mode = true;
+            d.anchors_rigid_body_translation = true;
+            d.anchors_rigid_body_rotation = false;
+            d.source = "EssentialBC on marker " + std::to_string(boundary_marker_);
+            descs.push_back(std::move(d));
+        } else {
+            // Multi-component: emit one descriptor per component so that
+            // partially constrained vector fields are correctly analyzed.
+            for (std::size_t comp = 0; comp < value_components_.size(); ++comp) {
+                analysis::BoundaryConditionDescriptor d;
+                d.primary_variable = analysis::VariableKey::field(field_id, static_cast<int>(comp));
+                d.component = static_cast<int>(comp);
+                d.boundary_marker = boundary_marker_;
+                d.trace_kind = analysis::TraceKind::Value;
+                d.enforcement_kind = analysis::EnforcementKind::Strong;
+                d.anchors_constant_mode = true;
+                d.anchors_rigid_body_translation = true;
+                d.anchors_rigid_body_rotation = false;
+                d.source = "EssentialBC comp " + std::to_string(comp) +
+                           " on marker " + std::to_string(boundary_marker_);
+                descs.push_back(std::move(d));
+            }
+        }
+        return descs;
     }
 
 private:

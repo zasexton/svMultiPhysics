@@ -1267,12 +1267,33 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     // -----------------------------------------------------------------
     // Collect explicit gauge metadata from non-Forms kernels (Path B).
     // This supplements the automatic inference from FormsInstaller (Path A).
+    // Snapshot the definition-time kernel record count so invalidateSetup()
+    // can truncate back to this point without losing coupled-boundary records.
+    kernel_contribution_records_def_count_ = kernel_contribution_records_.size();
+    contributions_def_count_ = contributions_.size();
     {
         const auto op_tags_gauge = operator_registry_.list();
         for (const auto& tag : op_tags_gauge) {
             const auto& def = operator_registry_.get(tag);
 
-            // Cell kernels — candidates + anchoring evidence
+            // Helper: collect contributions from a kernel, preferring
+            // analysisContributions() over analysisMetadata() + shim.
+            auto collectContributions = [this](const auto& kernel) {
+                auto contribs = kernel->analysisContributions();
+                if (!contribs.empty()) {
+                    for (auto& c : contribs) {
+                        addContribution(std::move(c));
+                    }
+                } else {
+                    // Fallback: legacy analysisMetadata() → toContributionDescriptor()
+                    for (auto& r : kernel->analysisMetadata()) {
+                        addContribution(r.toContributionDescriptor());
+                        addKernelContributionRecord(std::move(r));
+                    }
+                }
+            };
+
+            // Cell kernels — candidates + anchoring evidence + contributions
             for (const auto& term : def.cells) {
                 if (!term.kernel) continue;
                 for (auto& c : term.kernel->gaugeMetadata()) {
@@ -1281,6 +1302,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                 for (auto& a : term.kernel->anchoringMetadata()) {
                     gaugeRegistry().addAnchoring(std::move(a));
                 }
+                collectContributions(term.kernel);
             }
 
             // Boundary kernels
@@ -1292,6 +1314,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                 for (auto& a : term.kernel->anchoringMetadata()) {
                     gaugeRegistry().addAnchoring(std::move(a));
                 }
+                collectContributions(term.kernel);
             }
 
             // Interior face kernels
@@ -1303,6 +1326,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                 for (auto& a : term.kernel->anchoringMetadata()) {
                     gaugeRegistry().addAnchoring(std::move(a));
                 }
+                collectContributions(term.kernel);
             }
 
             // Interface face kernels
@@ -1314,6 +1338,7 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                 for (auto& a : term.kernel->anchoringMetadata()) {
                     gaugeRegistry().addAnchoring(std::move(a));
                 }
+                collectContributions(term.kernel);
             }
 
             // Global kernels
@@ -1324,6 +1349,17 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                 }
                 for (auto& a : gk->anchoringMetadata()) {
                     gaugeRegistry().addAnchoring(std::move(a));
+                }
+                auto contribs = gk->analysisContributions();
+                if (!contribs.empty()) {
+                    for (auto& cd : contribs) {
+                        addContribution(std::move(cd));
+                    }
+                } else {
+                    for (auto& r : gk->analysisMetadata()) {
+                        addContribution(r.toContributionDescriptor());
+                        addKernelContributionRecord(std::move(r));
+                    }
                 }
             }
         }
@@ -1736,6 +1772,15 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
     }
 
     affine_constraints_.close();
+
+    // ---------------------------------------------------------------------
+    // Analysis subsystem: topology + constraint summary
+    // ---------------------------------------------------------------------
+    if (mesh_access_) {
+        buildTopologyContext();
+    }
+    buildInterfaceTopologyContext();
+    buildConstraintSummary();
 
     // ---------------------------------------------------------------------
     // Sparsity

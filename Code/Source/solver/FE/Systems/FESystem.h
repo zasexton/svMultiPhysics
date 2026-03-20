@@ -29,6 +29,15 @@
 #include "Constraints/Constraint.h"
 #include "Constraints/GaugeRegistry.h"
 
+#include "Analysis/ProblemAnalysisTypes.h"
+#include "Analysis/FormulationRecord.h"
+#include "Analysis/KernelContributionRecord.h"
+#include "Analysis/BoundaryConditionDescriptor.h"
+#include "Analysis/TopologyAnalysisContext.h"
+#include "Analysis/ContributionDescriptor.h"
+#include "Analysis/ConstraintAnalysisSummary.h"
+#include "Analysis/InterfaceTopologyContext.h"
+
 #include "Dofs/DofHandler.h"
 #include "Dofs/FieldDofMap.h"
 #include "Dofs/BlockDofMap.h"
@@ -36,6 +45,8 @@
 #include "Sparsity/SparsityPattern.h"
 #include "Sparsity/SparsityBuilder.h"
 
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -321,6 +332,54 @@ public:
     }
     [[nodiscard]] bool hasGaugeRegistry() const noexcept { return gauge_registry_ != nullptr; }
 
+    // ---- Problem analysis subsystem ----
+
+    void addFormulationRecord(analysis::FormulationRecord record);
+    void addKernelContributionRecord(analysis::KernelContributionRecord record);
+    void addBoundaryConditionDescriptor(analysis::BoundaryConditionDescriptor desc);
+    void addContribution(analysis::ContributionDescriptor desc);
+    void addVariableDescriptor(analysis::VariableDescriptor desc);
+
+    [[nodiscard]] const std::vector<analysis::FormulationRecord>& formulationRecords() const noexcept {
+        return formulation_records_;
+    }
+    [[nodiscard]] const std::vector<analysis::KernelContributionRecord>& kernelContributionRecords() const noexcept {
+        return kernel_contribution_records_;
+    }
+    [[nodiscard]] const std::vector<analysis::BoundaryConditionDescriptor>& boundaryConditionDescriptors() const noexcept {
+        return bc_descriptors_;
+    }
+    [[nodiscard]] const std::vector<analysis::VariableDescriptor>& variableDescriptors() const noexcept {
+        return variable_descriptors_;
+    }
+
+    /// Build and store topology context from the mesh
+    void buildTopologyContext();
+    [[nodiscard]] const analysis::TopologyAnalysisContext* topologyContext() const noexcept {
+        return topology_context_ ? &*topology_context_ : nullptr;
+    }
+
+    /// Build and store interface topology from registered InterfaceMesh objects
+    void buildInterfaceTopologyContext();
+    [[nodiscard]] const analysis::InterfaceTopologyContext* interfaceTopologyContext() const noexcept {
+        return interface_topology_context_ ? &*interface_topology_context_ : nullptr;
+    }
+
+    /// Build and store constraint summary from current AffineConstraints
+    void buildConstraintSummary();
+    [[nodiscard]] const analysis::ConstraintAnalysisSummary* constraintSummary() const noexcept {
+        return constraint_summary_ ? &*constraint_summary_ : nullptr;
+    }
+
+    /// Invalidate cached analysis report (called automatically by mutation methods)
+    void invalidateAnalysisCache() noexcept;
+
+    /// Run all analysis passes and return a fresh report
+    [[nodiscard]] analysis::ProblemAnalysisReport runProblemAnalysis() const;
+
+    /// Cached version — re-runs only if inputs have changed
+    [[nodiscard]] const analysis::ProblemAnalysisReport& analysisReport() const;
+
     // ---- Rank-1 updates from coupled Jacobian assembly ----
     [[nodiscard]] std::span<const backends::RankOneUpdate> lastRankOneUpdates() const noexcept;
     void clearRankOneUpdates() noexcept;
@@ -472,6 +531,22 @@ private:
         }
     };
     CoupledJacobianCache coupled_jac_cache_{};
+
+    // ---- Analysis subsystem storage ----
+    std::vector<analysis::FormulationRecord> formulation_records_;
+    std::vector<analysis::KernelContributionRecord> kernel_contribution_records_;
+    std::size_t kernel_contribution_records_def_count_{0}; ///< Watermark: # records from definition phase
+    std::vector<analysis::ContributionDescriptor> contributions_;
+    std::size_t contributions_def_count_{0}; ///< Watermark for definition-phase contributions
+    std::vector<analysis::BoundaryConditionDescriptor> bc_descriptors_;
+    std::vector<analysis::VariableDescriptor> variable_descriptors_;
+
+    std::optional<analysis::TopologyAnalysisContext> topology_context_;
+    std::optional<analysis::InterfaceTopologyContext> interface_topology_context_;
+    std::optional<analysis::ConstraintAnalysisSummary> constraint_summary_;
+    mutable std::optional<analysis::ProblemAnalysisReport> analysis_report_cache_;
+    mutable std::uint64_t analysis_inputs_version_{0};
+    mutable std::uint64_t analysis_report_version_{std::numeric_limits<std::uint64_t>::max()};
 
 	    bool is_setup_{false};
 	};
