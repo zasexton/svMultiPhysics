@@ -212,6 +212,14 @@ struct PairingDescriptor {
     PairingKind kind{PairingKind::Unknown};
     std::string pairing_group;   ///< Group name (not physics-labeled)
     bool has_stabilizing_surrogate{false};
+
+    /// True when the trial (col_var) field appears undifferentiated in the
+    /// coupling block.  For mixed blocks where the trial appears both with
+    /// and without differential operators (e.g., NS-VMS VP block has both
+    /// `p div(v)` and `τ_m grad(v) · grad(p)`), this flag is true even
+    /// though the pairing kind is FormalAdjointPair.  Used by the IBP
+    /// coupling analysis to detect cross-field nullspace anchoring.
+    bool trial_has_undifferentiated{false};
 };
 
 // ============================================================================

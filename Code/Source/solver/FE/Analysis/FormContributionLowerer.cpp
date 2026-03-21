@@ -182,6 +182,12 @@ lowerFormulation(const FormulationRecord& rec) {
                     ? PairingKind::FormalAdjointPair
                     : PairingKind::ConstraintPair;
 
+                // Record whether the trial field also appears undifferentiated.
+                // This is true for ConstraintPair (always) and for mixed blocks
+                // like the NS-VMS VP block where p appears both in p*div(v)
+                // (undifferentiated) and in τ_m*grad(v)·grad(p) (differentiated).
+                pd.trial_has_undifferentiated = fs.has_absolute_value;
+
                 pd.pairing_group = rec.operator_tag + "_" +
                     std::to_string(test_fid) + "_" + std::to_string(trial_fid);
                 d.pairings.push_back(std::move(pd));

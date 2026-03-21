@@ -27,6 +27,8 @@
 #include "Constraints/GaugeDiagnostics.h"
 #include "Constraints/ParallelConstraints.h"
 
+#include "Systems/SystemConstraints.h"
+
 #include "Sparsity/ConstraintSparsityAugmenter.h"
 #include "Sparsity/DistributedSparsityPattern.h"
 
@@ -1555,6 +1557,188 @@ void FESystem::setup(const SetupOptions& opts, const SetupInputs& inputs)
                 addDirichletEvidence(fid, -1, all_dofs);
             }
         }
+
+        // -----------------------------------------------------------------
+        // IBP coupling analysis: detect cross-field nullspace anchoring
+        // from integration-by-parts boundary terms.
+        //
+        // Mathematical argument:
+        // If field P has a nullspace candidate and appears undifferentiated
+        // (ConstraintPair) in another field V's equation, then IBP produces
+        // a boundary integral containing P undifferentiated on faces where
+        // V has natural (non-Dirichlet) BCs.  For ScalarConstant nullspace,
+        // the constant mode contributes non-trivially to this integral,
+        // anchoring the nullspace.
+        //
+        // Example: incompressible NS has VP block ∫ p div(v) dΩ.  By the
+        // divergence theorem, the boundary term ∫ p (v·n) dΓ exists on
+        // faces where v is unrestricted.  A constant pressure p=c gives
+        // c·∫ v·n dΓ ≠ 0, so the constant mode is anchored.
+        //
+        // This is physics-agnostic: it works for any saddle-point system
+        // where a Lagrange multiplier field enters algebraically into the
+        // coupled equation (Stokes, mixed Darcy, electromagnetics, etc.).
+        //
+        // Limitation: periodic BCs on field V constrain slave DOFs but
+        // leave master DOFs unconstrained.  The IBP boundary terms on
+        // periodic face pairs cancel (opposite normals), so they do NOT
+        // anchor P.  Currently periodic markers are not excluded; a future
+        // refinement could detect periodic constraints and skip those markers.
+        // -----------------------------------------------------------------
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        if (mesh_) {
+            // Step 1: Collect nullspace candidate fields and their families.
+            std::unordered_map<FieldId, gauge::NullspaceModeFamily> candidate_fields;
+            for (const auto& c : gauge_registry_->candidates()) {
+                candidate_fields.emplace(c.field, c.family);
+            }
+
+            if (!candidate_fields.empty()) {
+                // Step 2: Find ConstraintPair couplings: trial field P (nullspace
+                // candidate) enters algebraically into test field V's equation.
+                // (col_var = trial = P, row_var = test = V)
+                struct CouplingPair {
+                    FieldId nullspace_field;   // P
+                    FieldId coupled_field;     // V
+                    gauge::NullspaceModeFamily family;
+                };
+                std::vector<CouplingPair> couplings;
+
+                std::size_t total_pairings = 0;
+                for (const auto& contrib : contributions_) {
+                    for (const auto& pairing : contrib.pairings) {
+                        // The trial field must appear undifferentiated in the
+                        // coupling block.  This is true for ConstraintPair (always)
+                        // and for FormalAdjointPair when the trial also has an
+                        // undifferentiated path (e.g., NS-VMS VP block with both
+                        // `p div(v)` and `τ_m grad(v) · grad(p)`).
+                        if (!pairing.trial_has_undifferentiated) continue;
+
+                        // col_var is the trial (column) variable — the field that enters
+                        // algebraically (undifferentiated) into the test equation.
+                        if (pairing.col_var.kind != analysis::VariableKind::FieldComponent) continue;
+                        if (pairing.row_var.kind != analysis::VariableKind::FieldComponent) continue;
+
+                        const FieldId trial_fid = pairing.col_var.field_id;
+                        const FieldId test_fid  = pairing.row_var.field_id;
+                        if (trial_fid == test_fid) continue;  // Skip diagonal
+
+                        auto it = candidate_fields.find(trial_fid);
+                        if (it == candidate_fields.end()) continue;
+
+                        // Avoid duplicates
+                        bool already = false;
+                        for (const auto& cp : couplings) {
+                            if (cp.nullspace_field == trial_fid && cp.coupled_field == test_fid) {
+                                already = true;
+                                break;
+                            }
+                        }
+                        if (!already) {
+                            couplings.push_back({trial_fid, test_fid, it->second});
+                        }
+                    }
+                }
+
+                // Step 3: For each coupling, find markers where the coupled field V
+                // has natural (non-Dirichlet) BCs, and emit anchoring evidence for P.
+                if (!couplings.empty()) {
+                    // Enumerate all unique boundary markers from the mesh.
+                    std::unordered_set<int> all_markers;
+                    meshAccess().forEachBoundaryFace(/*marker=*/-1,
+                        [&](GlobalIndex /*face_id*/, GlobalIndex /*cell_id*/) {});
+                    // Use face_boundary_ids to collect markers efficiently.
+                    {
+                        const auto& face_labels = mesh_->local_mesh().face_boundary_ids();
+                        const auto& f2c = mesh_->local_mesh().face2cell();
+                        for (std::size_t f = 0; f < f2c.size(); ++f) {
+                            const bool c0 = (f2c[f][0] != svmp::INVALID_INDEX);
+                            const bool c1 = (f2c[f][1] != svmp::INVALID_INDEX);
+                            if (c0 != c1 && f < face_labels.size()) {
+                                const int m = static_cast<int>(face_labels[f]);
+                                if (m >= 0) all_markers.insert(m);
+                            }
+                        }
+                    }
+
+                    for (const auto& cp : couplings) {
+                        const auto v_idx = static_cast<std::size_t>(cp.coupled_field);
+                        if (v_idx >= field_dof_handlers_.size()) continue;
+
+                        const GlobalIndex v_offset = field_dof_offsets_[v_idx];
+                        const GlobalIndex v_end    = v_offset + field_dof_handlers_[v_idx].getNumDofs();
+
+                        for (const int marker : all_markers) {
+                            // Get all DOFs on this marker (combined DOF numbering).
+                            auto marker_dofs = boundaryDofsByMarker(*mesh_, dof_handler_, marker);
+
+                            // Filter to DOFs belonging to field V.
+                            bool has_unconstrained_v_dof = false;
+                            bool has_any_v_dof = false;
+                            for (const auto d : marker_dofs) {
+                                if (d >= v_offset && d < v_end) {
+                                    has_any_v_dof = true;
+                                    if (!affine_constraints_.isConstrained(d)) {
+                                        has_unconstrained_v_dof = true;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (has_any_v_dof && has_unconstrained_v_dof) {
+                                gauge_registry_->addAnchoring(gauge::AnchoringEvidence{
+                                    cp.nullspace_field,
+                                    -1,  // all components
+                                    -1,  // global (retagEvidenceRegions handles per-region)
+                                    cp.family,
+                                    gauge::AnchoringVerdict::Anchored,
+                                    "IBP coupling: field " + std::to_string(cp.nullspace_field) +
+                                        " enters algebraically in field " +
+                                        std::to_string(cp.coupled_field) +
+                                        "'s equation; natural BC on marker " +
+                                        std::to_string(marker) +
+                                        " produces anchoring boundary integral",
+                                    marker});
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Retag the newly added IBP evidence for disconnected-region support.
+        // The first retagEvidenceRegions() ran before the IBP pass; this second
+        // call processes only the new global evidence (existing per-region evidence
+        // from the first call is left untouched since its region is already >= 0).
+        if (region_provider && mesh_access_) {
+            const auto& mesh_ref_ibp = meshAccess();
+            gauge_registry_->retagEvidenceRegions(
+                [&](int marker) -> std::vector<int> {
+                    std::vector<int> regions;
+                    mesh_ref_ibp.forEachBoundaryFace(marker,
+                        [&](GlobalIndex /*face_id*/, GlobalIndex cell_id) {
+                            std::vector<GlobalIndex> nodes;
+                            mesh_ref_ibp.getCellNodes(cell_id, nodes);
+                            for (const auto n : nodes) {
+                                int r = region_provider(
+                                    [&]() -> GlobalIndex {
+                                        const auto* emap = dof_handler_.getEntityDofMap();
+                                        if (emap) {
+                                            auto vdofs = emap->getVertexDofs(n);
+                                            if (!vdofs.empty()) return vdofs[0];
+                                        }
+                                        return n;
+                                    }());
+                                bool found = false;
+                                for (int existing : regions) {
+                                    if (existing == r) { found = true; break; }
+                                }
+                                if (!found) regions.push_back(r);
+                            }
+                        });
+                    return regions;
+                });
+        }
+#endif // SVMP_FE_WITH_MESH
 
         // Build CoordinateProvider: DOF → physical coordinates.
         // Maps a DOF to its owning vertex via EntityDofMap, then to coordinates.

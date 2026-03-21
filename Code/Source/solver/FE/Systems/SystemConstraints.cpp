@@ -104,9 +104,11 @@ std::vector<GlobalIndex> extractBoundaryDofsFromFaces(
             continue;
         }
 
-        if (n_verts >= 3u) {
-            FE_THROW_IF(entity_map.numFaces() <= 0 || fid >= entity_map.numFaces(), InvalidStateException,
-                        "extractBoundaryDofsFromFaces: face DOFs requested but EntityDofMap has no matching faces");
+        // Collect face-interior DOFs (P2+ elements).  P1 elements have
+        // no face DOFs, so skip when numFaces() == 0.
+        if (n_verts >= 3u && entity_map.numFaces() > 0) {
+            FE_THROW_IF(fid >= entity_map.numFaces(), InvalidStateException,
+                        "extractBoundaryDofsFromFaces: face ID exceeds EntityDofMap face count");
             push_span(entity_map.getFaceDofs(fid));
         }
 

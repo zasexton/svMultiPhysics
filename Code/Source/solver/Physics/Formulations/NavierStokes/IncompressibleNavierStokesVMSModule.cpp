@@ -247,39 +247,14 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     if (!pressure_constraints.empty()) {
         FE::systems::installStrongDirichlet(system, pressure_constraints);
     }
-    // Pressure nullspace candidate detection is handled automatically by the
-    // analysis infrastructure (FormContributionLowerer detects ScalarConstant
-    // nullspace from the PSPG stabilization block).
+    // Pressure nullspace detection and cross-field anchoring are handled
+    // automatically by the FE analysis infrastructure:
+    //   - FormContributionLowerer detects ScalarConstant nullspace from PSPG
+    //   - SystemSetup IBP coupling analysis detects that pressure enters
+    //     algebraically in the momentum equation (ConstraintPair), and emits
+    //     anchoring evidence on markers where velocity has natural BCs
     //
-    // Cross-field anchoring evidence: in incompressible flow, velocity natural
-    // BCs (traction, outflow, coupled) set the pressure level via the traction
-    // integral sigma·n = (-pI + tau)·n. This cross-field relationship is
-    // physics-specific and cannot be inferred by the generic analysis pipeline.
-    // We register pressure anchoring evidence from each velocity natural BC
-    // marker so the GaugeRegistry knows the pressure nullspace is anchored.
-    if (pressure_constraints.empty()) {
-        bool has_natural_bc = !options_.traction_neumann.empty() ||
-                              !options_.traction_robin.empty() ||
-                              !options_.pressure_outflow.empty() ||
-                              !options_.coupled_outflow_rcr.empty();
-        if (has_natural_bc) {
-            auto& reg = system.gaugeRegistry();
-            auto add_evidence = [&](int marker) {
-                FE::gauge::AnchoringEvidence ev;
-                ev.field = p_id;
-                ev.family = FE::gauge::NullspaceModeFamily::ScalarConstant;
-                ev.verdict = FE::gauge::AnchoringVerdict::Anchored;
-                ev.source = "Velocity natural BC on marker " + std::to_string(marker) +
-                            " sets pressure level";
-                ev.boundary_marker = marker;
-                reg.addAnchoring(std::move(ev));
-            };
-            for (const auto& bc : options_.traction_neumann)   add_evidence(bc.boundary_marker);
-            for (const auto& bc : options_.traction_robin)     add_evidence(bc.boundary_marker);
-            for (const auto& bc : options_.pressure_outflow)   add_evidence(bc.boundary_marker);
-            for (const auto& bc : options_.coupled_outflow_rcr) add_evidence(bc.boundary_marker);
-        }
-    }
+    // No physics-specific gauge registration needed here.
 
     // Install the complete residual (momentum + continuity) via the unified
     // installFormulation() entry point.  It auto-detects the two-field mixed
