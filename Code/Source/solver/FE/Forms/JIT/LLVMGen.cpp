@@ -2470,6 +2470,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                    : suppress_dof_unroll ? "ROLL_DOF_ONLY"
                                    : "FULL";
                 std::cerr << "[JIT budget] " << symbol
+                          << (is_affine ? " AFFINE" : "")
                           << ": text_full=" << text_full
                           << " text_roll_dof=" << text_roll_dof
                           << " text_roll_all=" << text_roll_all
@@ -5406,14 +5407,20 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         break;
 
                     case FormExprType::Jacobian:
+                        // For affine elements, Jacobian is constant across QPs.
                         values[op_idx] =
-                            loadMatDimFromSide(side, side.jacobians, q_index, shape.dims[0],
+                            loadMatDimFromSide(side, side.jacobians,
+                                               is_affine ? builder.getInt32(0) : q_index,
+                                               shape.dims[0],
                                                side.interleaved_qpoint_geometry_jacobian_offset);
                         break;
 
                     case FormExprType::JacobianInverse:
+                        // For affine elements, J_inv is constant across QPs.
                         values[op_idx] =
-                            loadMatDimFromSide(side, side.inverse_jacobians, q_index, shape.dims[0],
+                            loadMatDimFromSide(side, side.inverse_jacobians,
+                                               is_affine ? builder.getInt32(0) : q_index,
+                                               shape.dims[0],
                                                side.interleaved_qpoint_geometry_inverse_jacobian_offset);
                         break;
 
@@ -5428,9 +5435,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     }
 
                     case FormExprType::JacobianDeterminant: {
-                        auto* q64 = builder.CreateZExt(q_index, i64);
+                        // For affine elements, det(J) is constant across QPs.
+                        auto* det_q = is_affine ? builder.getInt32(0) : q_index;
                         values[op_idx] =
-                            makeScalar(loadScalarFromSide(side, side.jacobian_dets, q_index,
+                            makeScalar(loadScalarFromSide(side, side.jacobian_dets, det_q,
                                                           side.interleaved_qpoint_geometry_det_offset));
                         break;
                     }
@@ -5557,9 +5565,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::Gradient: {
                         const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                         const auto& kid = term.ir.ops[child_idx];
+                        // For affine P1 elements, physical gradients are constant
+                        // across all QPs (J_inv is constant, ref grad is constant).
+                        // Use Q=0 to make the load loop-invariant, allowing LLVM's
+                        // LICM to hoist it outside the QP loop. This eliminates
+                        // redundant gradient loads for rolled QP loops.
+                        auto* grad_q_index = is_affine ? builder.getInt32(0) : q_index;
                         if (kid.type == FormExprType::TestFunction) {
                             if (shape.kind == Shape::Kind::Vector) {
-                                const auto v = loadVec3FromTableQMajor(side.test_phys_grads_xyz, side.n_test_dofs, i_index, q_index);
+                                const auto v = loadVec3FromTableQMajor(side.test_phys_grads_xyz, side.n_test_dofs, i_index, grad_q_index);
                                 values[op_idx] = makeVector(shape.dims[0], v[0], v[1], v[2]);
                                 break;
                             }
@@ -5568,7 +5582,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 const auto dim = static_cast<std::size_t>(shape.dims[1]);
                                 CodeValue out = makeZero(shape);
                                 const auto dofs_per_comp = builder.CreateUDiv(side.n_test_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                const auto g = loadVec3FromTableQMajor(side.test_phys_grads_xyz, side.n_test_dofs, i_index, q_index);
+                                const auto g = loadVec3FromTableQMajor(side.test_phys_grads_xyz, side.n_test_dofs, i_index, grad_q_index);
                                 const auto comp_flags = emitComponentFlags(i_index, dofs_per_comp, vd);
                                 for (std::size_t r = 0; r < vd; ++r) {
                                     for (std::size_t d = 0; d < dim; ++d) {
@@ -5588,7 +5602,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    const auto sums = emitReduceSum(side.n_trial_dofs, "grad_u", dim, [&](llvm::Value* j) {
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 	                                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+	                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, grad_q_index);
 	                                        std::vector<llvm::Value*> terms;
 	                                        terms.reserve(dim);
 	                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -5614,7 +5628,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                            auto* j = builder.CreateAdd(base, jj);
 	                                            auto* j64 = builder.CreateZExt(j, i64);
 	                                            auto* cj = loadRealPtrAt(coeffs, j64);
-	                                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+	                                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, grad_q_index);
 	                                            std::vector<llvm::Value*> terms;
 	                                            terms.reserve(dim);
 	                                            for (std::size_t d = 0; d < dim; ++d) {
@@ -5632,7 +5646,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 throw std::runtime_error("LLVMGen: grad(u) unsupported shape");
                             }
                             if (shape.kind == Shape::Kind::Vector) {
-                                const auto v = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
+                                const auto v = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, grad_q_index);
                                 values[op_idx] = makeVector(shape.dims[0], v[0], v[1], v[2]);
                                 break;
                             }
@@ -5641,7 +5655,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 const auto dim = static_cast<std::size_t>(shape.dims[1]);
                                 CodeValue out = makeZero(shape);
                                 const auto dofs_per_comp = builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                                const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
+                                const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, grad_q_index);
                                 const auto comp_flags = emitComponentFlags(j_index, dofs_per_comp, vd);
                                 for (std::size_t r = 0; r < vd; ++r) {
                                     for (std::size_t d = 0; d < dim; ++d) {
@@ -8279,12 +8293,16 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         break;
                     case FormExprType::Jacobian:
                         values[op_idx] =
-                            loadMatDimFromSide(side, side.jacobians, q_index, shape.dims[0],
+                            loadMatDimFromSide(side, side.jacobians,
+                                               is_affine ? builder.getInt32(0) : q_index,
+                                               shape.dims[0],
                                                side.interleaved_qpoint_geometry_jacobian_offset);
                         break;
                     case FormExprType::JacobianInverse:
                         values[op_idx] =
-                            loadMatDimFromSide(side, side.inverse_jacobians, q_index, shape.dims[0],
+                            loadMatDimFromSide(side, side.inverse_jacobians,
+                                               is_affine ? builder.getInt32(0) : q_index,
+                                               shape.dims[0],
                                                side.interleaved_qpoint_geometry_inverse_jacobian_offset);
                         break;
                     case FormExprType::Identity: {
