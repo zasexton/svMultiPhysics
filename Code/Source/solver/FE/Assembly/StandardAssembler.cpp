@@ -6204,17 +6204,74 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
                         if (use_constrained &&
                             constraints_->hasConstrainedDofs(dofs_span)) {
-                            // Boundary cell with constrained DOFs: copy to KernelOutput
-                            fused_out.has_matrix = parent_term.assemble_matrix;
-                            fused_out.has_vector = parent_term.assemble_vector;
-                            std::memcpy(fused_out.local_matrix.data(),
-                                        mat_span.data(), mat_stride * sizeof(Real));
-                            std::memcpy(fused_out.local_vector.data(),
-                                        vec_span.data(), vec_stride * sizeof(Real));
-                            insertLocalConstrained(fused_out, dofs_span, dofs_span,
-                                                   parent_term.matrix_view, parent_term.vector_view);
-                        } else {
-                            // Interior cell: direct insertion
+                            // --- Fast Dirichlet elimination path ---
+                            // For cells where ALL constrained DOFs are simple
+                            // Dirichlet (no master DOFs), apply in-place elimination
+                            // and use the fast resolved CSR insertion instead of
+                            // the expensive constraint distributor.
+                            bool all_dirichlet = true;
+                            for (std::size_t d = 0; d < vec_stride; ++d) {
+                                if (constraints_->isConstrained(dofs_span[d])) {
+                                    auto cv = constraints_->getConstraint(dofs_span[d]);
+                                    if (cv && !cv->isDirichlet()) {
+                                        all_dirichlet = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (all_dirichlet) {
+                                // Apply Dirichlet elimination in-place on scratch
+                                // buffers: zero constrained rows/cols, set diagonal
+                                // to 1.0, zero RHS entries.
+                                //
+                                // NOTE: The diagonal accumulates N×1.0 across N
+                                // elements sharing the DOF (Add mode) vs the
+                                // constraint distributor's idempotent 1.0 (Insert
+                                // mode). This is functionally correct for Newton
+                                // solves: the constrained RHS is always 0, so
+                                // δu_d = 0/diagonal = 0 regardless of the diagonal
+                                // value. The diagonal preconditioner is unaffected
+                                // because M^{-1} * 0 = 0 for any positive M.
+                                Real* mat_ptr = scratch_fused_matrices_.data() +
+                                                slot * mat_stride;
+                                Real* vec_ptr = scratch_fused_vectors_.data() +
+                                                slot * vec_stride;
+                                const auto n = vec_stride;
+                                for (std::size_t d = 0; d < n; ++d) {
+                                    if (constraints_->isConstrained(dofs_span[d])) {
+                                        // Zero row d
+                                        for (std::size_t j = 0; j < n; ++j)
+                                            mat_ptr[d * n + j] = 0.0;
+                                        // Zero col d
+                                        for (std::size_t i = 0; i < n; ++i)
+                                            mat_ptr[i * n + d] = 0.0;
+                                        // Set diagonal to 1 (positive definite
+                                        // for the constrained DOF)
+                                        mat_ptr[d * n + d] = 1.0;
+                                        // Zero vector entry
+                                        vec_ptr[d] = 0.0;
+                                    }
+                                }
+                                // Re-read spans after in-place modification
+                                mat_span = std::span<const Real>(mat_ptr, mat_stride);
+                                vec_span = std::span<const Real>(vec_ptr, vec_stride);
+                                // Fall through to fast resolved insertion below
+                            } else {
+                                // Non-Dirichlet constraints: full distributor path
+                                fused_out.has_matrix = parent_term.assemble_matrix;
+                                fused_out.has_vector = parent_term.assemble_vector;
+                                std::memcpy(fused_out.local_matrix.data(),
+                                            mat_span.data(), mat_stride * sizeof(Real));
+                                std::memcpy(fused_out.local_vector.data(),
+                                            vec_span.data(), vec_stride * sizeof(Real));
+                                insertLocalConstrained(fused_out, dofs_span, dofs_span,
+                                                       parent_term.matrix_view,
+                                                       parent_term.vector_view);
+                                goto next_fused_slot;
+                            }
+                        }
+                        {
+                            // Interior cell (or Dirichlet-eliminated cell): direct insertion
                             if (parent_term.matrix_view) {
                                 const auto cid = gids[begin + slot];
                                 if (!scratch_fused_resolved_.empty() &&
@@ -6240,6 +6297,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                     dofs_span, vec_span, assembly::AddMode::Add);
                             }
                         }
+                        next_fused_slot:;
                     }
                     tp_fb_insert += TP() - tp0;
                 }
