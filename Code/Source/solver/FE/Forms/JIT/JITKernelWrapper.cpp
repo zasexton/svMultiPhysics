@@ -579,10 +579,17 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         ? ((n + simd_w - 1) / simd_w) * simd_w
                         : n;
 
-                    // Stack-local scratch: thread-safe for concurrent calls
-                    // from outer OMP parallel regions.
-                    std::vector<assembly::jit::KernelSideArgsV6> batch_sides(padded_n);
-                    std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(padded_n);
+                    // Thread-local scratch: avoids per-call heap allocation.
+                    // resize() is a no-op when capacity >= padded_n (hot path).
+                    thread_local std::vector<assembly::jit::KernelSideArgsV6> batch_sides;
+                    thread_local std::vector<assembly::jit::KernelOutputViewV6> batch_outputs;
+                    batch_sides.resize(padded_n);
+                    batch_outputs.resize(padded_n);
+                    // Zero-init only the padding slots (hot elements overwritten below).
+                    for (std::size_t idx = n; idx < padded_n; ++idx) {
+                        batch_sides[idx] = {};
+                        batch_outputs[idx] = {};
+                    }
 
                     // Scratch output for padding elements (writes are harmless).
                     thread_local std::vector<Real> pad_matrix_scratch, pad_vector_scratch;
@@ -723,9 +730,11 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                         ? ((n + simd_w - 1) / simd_w) * simd_w
                         : n;
 
-                    // Stack-local scratch: thread-safe for concurrent calls.
-                    std::vector<assembly::jit::KernelSideArgsV6> batch_sides(padded_n);
-                    std::vector<assembly::jit::KernelOutputViewV6> batch_outputs(padded_n);
+                    // Thread-local scratch: avoids per-call heap allocation.
+                    thread_local std::vector<assembly::jit::KernelSideArgsV6> batch_sides;
+                    thread_local std::vector<assembly::jit::KernelOutputViewV6> batch_outputs;
+                    batch_sides.resize(padded_n);
+                    batch_outputs.resize(padded_n);
 
                     thread_local std::vector<Real> pad_matrix_scratch2, pad_vector_scratch2;
 
