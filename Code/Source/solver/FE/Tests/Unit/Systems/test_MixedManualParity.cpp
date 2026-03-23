@@ -1116,3 +1116,57 @@ TEST(MixedManualParity, SameSpace_ThreeField_WithFieldBindings)
     EXPECT_TRUE(has_bb);
     EXPECT_TRUE(has_cc);
 }
+
+// ============================================================================
+// Expert manual path: MixedFormIR + installMixedFormIR (moved from
+// test_CanonicalWorkflow.cpp to keep the canonical test file focused on
+// the recommended StateField/TestField/installFormulation workflow)
+// ============================================================================
+
+TEST(MixedManualParity, ExpertPath_ManualBlocksStillWork)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    // Use the expert path: manual MixedFormIR + installMixedFormIR
+    auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+
+    svmp::FE::forms::FormCompiler compiler;
+    svmp::FE::forms::MixedFormIR mir(1, 1);
+    mir.setKind(svmp::FE::forms::FormKind::Bilinear);
+    mir.setBlock(0, 0, compiler.compileBilinear((inner(grad(u), grad(v))).dx()));
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_f = sys.addField({.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const std::array fields = {u_f};
+    svmp::FE::systems::installMixedFormIR(
+        sys, "op",
+        std::span<const FieldId>(fields),
+        std::span<const FieldId>(fields),
+        mir);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    const auto n = sys.dofHandler().getNumDofs();
+    svmp::FE::assembly::DenseMatrixView mat(n);
+    mat.zero();
+
+    svmp::FE::systems::SystemStateView state;
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    (void)sys.assemble(req, state, &mat, nullptr);
+
+    double mat_norm = 0.0;
+    for (GlobalIndex i = 0; i < n; ++i) {
+        for (GlobalIndex j = 0; j < n; ++j) {
+            mat_norm += mat.getMatrixEntry(i, j) * mat.getMatrixEntry(i, j);
+        }
+    }
+    EXPECT_GT(mat_norm, 0.0) << "Expert manual path should produce non-zero matrix";
+}

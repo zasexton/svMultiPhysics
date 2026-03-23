@@ -211,6 +211,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return slave_marker_; }
+    [[nodiscard]] bool hasWeakTerms() const override { return false; }
 
     void setup(systems::FESystem& system, FieldId /*field_id*/) override
     {
@@ -311,6 +312,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return -1; }
+    [[nodiscard]] bool hasWeakTerms() const override { return false; }
 
     void contributeToResidual(FormExpr& /*residual*/,
                               const FormExpr& /*u*/,

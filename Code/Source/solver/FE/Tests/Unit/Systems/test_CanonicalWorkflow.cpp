@@ -9,7 +9,8 @@
  *   - Same-space multi-field residual assembly (not just metadata)
  *   - BC convenience flow with actual strong constraints
  *   - Full canonical workflow from registration through assembly
- *   - Expert/manual parity verification
+ *
+ * Expert/manual path parity tests live in test_MixedManualParity.cpp.
  */
 
 #include <gtest/gtest.h>
@@ -18,9 +19,7 @@
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 
-#include "Forms/FormCompiler.h"
 #include "Forms/FormExpr.h"
-#include "Forms/MixedFormIR.h"
 #include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
 
@@ -263,6 +262,110 @@ TEST(CanonicalWorkflow, BCApplyAll_WithEssentialBC)
 }
 
 // ============================================================================
+// 2-arg applyAll: strong-only BCs succeed
+// ============================================================================
+
+TEST(CanonicalWorkflow, BCApplyAll_FieldOnly_StrongBCsSucceed)
+{
+    const int marker = 5;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto p_f = sys.addField({.name = "p", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    // 2-arg overload with a strong-only BC should succeed
+    svmp::FE::systems::BoundaryConditionManager bc_manager;
+    bc_manager.add(std::make_unique<svmp::FE::forms::bc::EssentialBC>(
+        marker, FormExpr::constant(1.0), "p"));
+
+    EXPECT_NO_THROW(bc_manager.applyAll(sys, p_f));
+
+    // Verify the constraint was actually installed
+    svmp::FE::systems::SetupInputs inputs;
+    svmp::FE::dofs::MeshTopologyInfo topo;
+    topo.n_cells = 1;
+    topo.n_vertices = 4;
+    topo.dim = 3;
+    topo.cell2vertex_offsets = {0, 4};
+    topo.cell2vertex_data = {0, 1, 2, 3};
+    topo.vertex_gids = {0, 1, 2, 3};
+    topo.cell_gids = {0};
+    topo.cell_owner_ranks = {0};
+    inputs.topology_override = topo;
+    sys.setup({}, inputs);
+
+    EXPECT_TRUE(sys.constraints().isConstrained(0));
+    EXPECT_TRUE(sys.constraints().isConstrained(1));
+    EXPECT_TRUE(sys.constraints().isConstrained(2));
+    EXPECT_FALSE(sys.constraints().isConstrained(3));
+}
+
+// ============================================================================
+// 2-arg applyAll: weak BCs are rejected before system mutation
+// ============================================================================
+
+TEST(CanonicalWorkflow, BCApplyAll_FieldOnly_WeakBCThrows)
+{
+    const int marker = 5;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_f = sys.addField({.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    // Snapshot system state before the rejected call
+    const auto bc_descs_before = sys.boundaryConditionDescriptors().size();
+    const auto contribs_before = sys.contributionDescriptors().size();
+
+    // A NaturalBC has weak terms — 2-arg overload must reject it
+    svmp::FE::systems::BoundaryConditionManager bc_manager;
+    bc_manager.add(std::make_unique<svmp::FE::forms::bc::NaturalBC>(
+        marker, FormExpr::constant(1.0)));
+
+    EXPECT_THROW(bc_manager.applyAll(sys, u_f), std::invalid_argument);
+
+    // System must be unchanged — no descriptors, contributions, or constraints added
+    EXPECT_EQ(sys.boundaryConditionDescriptors().size(), bc_descs_before)
+        << "Rejected applyAll must not add BC descriptors";
+    EXPECT_EQ(sys.contributionDescriptors().size(), contribs_before)
+        << "Rejected applyAll must not add contribution descriptors";
+}
+
+TEST(CanonicalWorkflow, BCApplyAll_FieldOnly_MixedStrongAndWeakThrows)
+{
+    const int marker_d = 5;
+    const int marker_n = 6;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker_d);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_f = sys.addField({.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    // Snapshot system state before the rejected call
+    const auto bc_descs_before = sys.boundaryConditionDescriptors().size();
+    const auto contribs_before = sys.contributionDescriptors().size();
+
+    // Mix of strong + weak — must still reject
+    svmp::FE::systems::BoundaryConditionManager bc_manager;
+    bc_manager.add(std::make_unique<svmp::FE::forms::bc::EssentialBC>(
+        marker_d, FormExpr::constant(0.0), "u"));
+    bc_manager.add(std::make_unique<svmp::FE::forms::bc::NaturalBC>(
+        marker_n, FormExpr::constant(1.0)));
+
+    EXPECT_THROW(bc_manager.applyAll(sys, u_f), std::invalid_argument);
+
+    // System must be unchanged — no descriptors, contributions, or constraints added
+    EXPECT_EQ(sys.boundaryConditionDescriptors().size(), bc_descs_before)
+        << "Rejected applyAll must not add BC descriptors";
+    EXPECT_EQ(sys.contributionDescriptors().size(), contribs_before)
+        << "Rejected applyAll must not add contribution descriptors";
+}
+
+// ============================================================================
 // Same-space, same-name test functions disambiguated by field binding
 // ============================================================================
 
@@ -476,56 +579,4 @@ TEST(CanonicalWorkflow, FullWorkflow_SingleField)
         vec_norm += out.getVectorEntry(i) * out.getVectorEntry(i);
     }
     EXPECT_GT(vec_norm, 0.0);
-}
-
-// ============================================================================
-// Expert manual path still works (parity guard)
-// ============================================================================
-
-TEST(CanonicalWorkflow, ExpertPath_ManualBlocksStillWork)
-{
-    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
-    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
-
-    // Use the expert path: manual MixedFormIR + installMixedFormIR
-    auto u = FormExpr::trialFunction(*space, "u");
-    auto v = FormExpr::testFunction(*space, "v");
-
-    svmp::FE::forms::FormCompiler compiler;
-    svmp::FE::forms::MixedFormIR mir(1, 1);
-    mir.setKind(svmp::FE::forms::FormKind::Bilinear);
-    mir.setBlock(0, 0, compiler.compileBilinear((inner(grad(u), grad(v))).dx()));
-
-    svmp::FE::systems::FESystem sys(mesh);
-    const auto u_f = sys.addField({.name = "u", .space = space, .components = 1});
-    sys.addOperator("op");
-
-    const std::array fields = {u_f};
-    svmp::FE::systems::installMixedFormIR(
-        sys, "op",
-        std::span<const FieldId>(fields),
-        std::span<const FieldId>(fields),
-        mir);
-
-    svmp::FE::systems::SetupInputs inputs;
-    inputs.topology_override = singleTetraTopology();
-    sys.setup({}, inputs);
-
-    const auto n = sys.dofHandler().getNumDofs();
-    svmp::FE::assembly::DenseMatrixView mat(n);
-    mat.zero();
-
-    svmp::FE::systems::SystemStateView state;
-    svmp::FE::systems::AssemblyRequest req;
-    req.op = "op";
-    req.want_matrix = true;
-    (void)sys.assemble(req, state, &mat, nullptr);
-
-    double mat_norm = 0.0;
-    for (GlobalIndex i = 0; i < n; ++i) {
-        for (GlobalIndex j = 0; j < n; ++j) {
-            mat_norm += mat.getMatrixEntry(i, j) * mat.getMatrixEntry(i, j);
-        }
-    }
-    EXPECT_GT(mat_norm, 0.0) << "Expert manual path should produce non-zero matrix";
 }

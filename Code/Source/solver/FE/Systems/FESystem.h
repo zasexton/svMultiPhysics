@@ -149,15 +149,14 @@ public:
 
     void addOperator(OperatorTag name);
 
-    // ---- Kernel registration (expert/infrastructure) ----
-    //
-    // Most physics code should use the FormsInstaller API instead:
-    //   - installFormulation()    for residual physics
-    //   - installMixedBilinear()  for mixed bilinear operators
-    //   - installMixedLinear()    for mixed linear operators
-    //
-    // Direct kernel registration is for framework internals, custom
-    // handwritten kernels, and expert workflows.
+    /// @name Kernel registration (internal — do not use in physics modules)
+    ///
+    /// These methods are called by FormsInstaller internally. Physics modules
+    /// should use the public FormsInstaller API instead:
+    ///   - installFormulation()    for residual physics
+    ///   - installMixedBilinear()  for mixed bilinear operators
+    ///   - installMixedLinear()    for mixed linear operators
+    /// @{
 
     void addCellKernel(OperatorTag op, FieldId field,
                        std::shared_ptr<assembly::AssemblyKernel> kernel);
@@ -181,6 +180,8 @@ public:
 
     void addGlobalKernel(OperatorTag op,
                          std::shared_ptr<GlobalKernel> kernel);
+
+    /// @}
 
     // ---- Optional operator backends (Milestone 5) ----
     void addMatrixFreeKernel(OperatorTag op,

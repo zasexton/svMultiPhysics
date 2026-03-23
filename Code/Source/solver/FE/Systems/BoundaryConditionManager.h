@@ -60,6 +60,28 @@ private:
 
 } // namespace detail
 
+/**
+ * @brief Systems-side manager for boundary conditions on a single field
+ *
+ * Collects BoundaryCondition objects, validates for marker conflicts, and
+ * applies them in one call. Handles all BC types uniformly: strong Dirichlet,
+ * weak Neumann/Robin, Nitsche, coupled, etc.
+ *
+ * Usage (single-field or primary field of a coupled system):
+ * @code
+ *   BoundaryConditionManager bc_manager;
+ *   bc_manager.add(std::make_unique<EssentialBC>(1, ...));
+ *   bc_manager.add(std::make_unique<NaturalBC>(2, ...));
+ *   bc_manager.applyAll(system, residual, u, v, u_id);
+ * @endcode
+ *
+ * Usage (secondary field with strong BCs only, e.g., pressure Dirichlet):
+ * @code
+ *   BoundaryConditionManager p_bc_manager;
+ *   p_bc_manager.add(std::make_unique<EssentialBC>(3, ...));
+ *   p_bc_manager.applyAll(system, p_id);
+ * @endcode
+ */
 class BoundaryConditionManager {
 public:
     void add(std::unique_ptr<forms::bc::BoundaryCondition> bc)
@@ -132,60 +154,7 @@ public:
         // at the end of this method, so we must query analysisMetadata() now.
         // Also lower each descriptor into normalized ContributionDescriptors,
         // and derive gauge anchoring evidence from descriptors.
-        {
-            auto& reg = system.gaugeRegistry();
-            const auto& rec = system.fieldRecord(field_id);
-            const int n_comp = rec.components;
-
-            for (const auto& bc : bcs_) {
-                if (!bc) continue;
-                const int marker = bc->boundaryMarker();
-                auto descs = bc->analysisMetadata(field_id, &system);
-                for (auto& d : descs) {
-                    // Lower to ContributionDescriptors for analysis pipeline
-                    auto contributions = analysis::lowerBCDescriptor(d);
-                    for (auto& c : contributions) {
-                        system.addContribution(std::move(c));
-                    }
-
-                    // Derive gauge anchoring evidence from descriptor
-                    const std::string src = "BC on boundary " + std::to_string(marker);
-                    for (auto family : {gauge::NullspaceModeFamily::ScalarConstant,
-                                        gauge::NullspaceModeFamily::ComponentwiseConstant,
-                                        gauge::NullspaceModeFamily::KernelOfSymGrad}) {
-                        const bool is_multicomp_family =
-                            (family == gauge::NullspaceModeFamily::ComponentwiseConstant ||
-                             family == gauge::NullspaceModeFamily::KernelOfSymGrad);
-
-                        auto verdict = analysis::descriptorToVerdict(d, family);
-                        if (verdict == gauge::AnchoringVerdict::Unknown) continue;
-
-                        if (is_multicomp_family && n_comp > 1) {
-                            for (int comp = 0; comp < n_comp; ++comp) {
-                                gauge::AnchoringEvidence ev;
-                                ev.field = field_id;
-                                ev.component = comp;
-                                ev.family = family;
-                                ev.verdict = verdict;
-                                ev.source = src;
-                                ev.boundary_marker = marker;
-                                reg.addAnchoring(std::move(ev));
-                            }
-                        } else {
-                            gauge::AnchoringEvidence ev;
-                            ev.field = field_id;
-                            ev.family = family;
-                            ev.verdict = verdict;
-                            ev.source = src;
-                            ev.boundary_marker = marker;
-                            reg.addAnchoring(std::move(ev));
-                        }
-                    }
-
-                    system.addBoundaryConditionDescriptor(std::move(d));
-                }
-            }
-        }
+        collectAnalysisMetadata_(system, field_id);
 
         for (const auto& bc : bcs_) {
             if (!bc) {
@@ -217,18 +186,19 @@ public:
     }
 
     // ====================================================================
-    // One-call convenience: validate + apply weak terms + install strong BCs
+    // One-call convenience: validate + apply all BCs + install strong BCs
     // ====================================================================
 
     /**
-     * @brief Apply all boundary conditions in one call
+     * @brief Apply all boundary conditions for a single field
      *
-     * This is the recommended single entry point for the standard formulation
-     * workflow. It performs:
+     * This is the recommended single entry point for boundary conditions.
+     * It handles all BC types uniformly:
      *   1. validate() — check for conflicting markers
-     *   2. apply() — setup BCs, contribute weak terms to the residual,
-     *      persist affine constraints
-     *   3. installStrongDirichlet() — install strong Dirichlet constraints
+     *   2. Setup each BC, collect analysis metadata
+     *   3. Call contributeToResidual() for weak terms (Neumann, Robin, Nitsche, etc.)
+     *   4. installStrongDirichlet() — install strong Dirichlet constraints
+     *   5. Persist affine constraints for setup-time lowering
      *
      * After this call, the residual is ready for installFormulation() and
      * the system has all BC constraints installed.
@@ -255,8 +225,126 @@ public:
         }
     }
 
+    /**
+     * @brief Apply BCs for a field that has no residual equation of its own
+     *
+     * For coupled multi-field systems where a secondary field (e.g., pressure)
+     * has BCs but no independent residual equation, this overload avoids the
+     * need for a state/test symbol pair.
+     *
+     * All BCs must be strong/algebraic (hasWeakTerms() == false). If any BC
+     * reports weak terms, the call throws *before mutating the system* — the
+     * caller must use the full applyAll(system, residual, u, v, field_id)
+     * overload for fields with weak BCs.
+     *
+     * Typical usage:
+     * @code
+     *   vel_bc_manager.applyAll(system, residual, u, v, u_id);
+     *   pres_bc_manager.applyAll(system, p_id);
+     *   installFormulation(system, "equations", {u_id, p_id}, residual);
+     * @endcode
+     *
+     * @param system     FESystem to install constraints into
+     * @param field_id   FieldId for strong-constraint extraction
+     * @throws std::invalid_argument if any BC has weak residual terms
+     */
+    void applyAll(FESystem& system, FieldId field_id)
+    {
+        // validate() is read-only (checks bcs_ for marker conflicts).
+        validate();
+
+        // Reject weak BCs before any system mutation (setup, metadata, constraints).
+        for (const auto& bc : bcs_) {
+            if (!bc) continue;
+            if (bc->hasWeakTerms()) {
+                throw std::invalid_argument(
+                    "BoundaryConditionManager::applyAll(system, field_id): BC on marker "
+                    + std::to_string(bc->boundaryMarker())
+                    + " has weak residual terms but no residual expression was provided. "
+                      "Use applyAll(system, residual, u, v, field_id) for fields with "
+                      "Neumann, Robin, or Nitsche BCs.");
+            }
+        }
+
+        // Safe to proceed — all BCs are strong/algebraic only.
+        for (const auto& bc : bcs_) {
+            if (!bc) continue;
+            bc->setup(system, field_id);
+        }
+
+        collectAnalysisMetadata_(system, field_id);
+
+        auto strong = getStrongConstraints(field_id);
+
+        // Persist affine constraints for setup-time lowering.
+        if (!bcs_.empty()) {
+            system.addSystemConstraint(
+                std::make_unique<detail::BoundaryConditionAffineConstraint>(field_id, std::move(bcs_)));
+        }
+
+        if (!strong.empty()) {
+            installStrongDirichlet(system, strong);
+        }
+    }
+
 private:
     std::vector<std::unique_ptr<forms::bc::BoundaryCondition>> bcs_{};
+
+    /// Shared implementation: collect analysis metadata and gauge anchoring
+    /// evidence from all BCs.  Called by both apply() and applyAll(field_id).
+    void collectAnalysisMetadata_(FESystem& system, FieldId field_id)
+    {
+        auto& reg = system.gaugeRegistry();
+        const auto& rec = system.fieldRecord(field_id);
+        const int n_comp = rec.components;
+
+        for (const auto& bc : bcs_) {
+            if (!bc) continue;
+            const int marker = bc->boundaryMarker();
+            auto descs = bc->analysisMetadata(field_id, &system);
+            for (auto& d : descs) {
+                auto contributions = analysis::lowerBCDescriptor(d);
+                for (auto& c : contributions) {
+                    system.addContribution(std::move(c));
+                }
+
+                const std::string src = "BC on boundary " + std::to_string(marker);
+                for (auto family : {gauge::NullspaceModeFamily::ScalarConstant,
+                                    gauge::NullspaceModeFamily::ComponentwiseConstant,
+                                    gauge::NullspaceModeFamily::KernelOfSymGrad}) {
+                    const bool is_multicomp_family =
+                        (family == gauge::NullspaceModeFamily::ComponentwiseConstant ||
+                         family == gauge::NullspaceModeFamily::KernelOfSymGrad);
+
+                    auto verdict = analysis::descriptorToVerdict(d, family);
+                    if (verdict == gauge::AnchoringVerdict::Unknown) continue;
+
+                    if (is_multicomp_family && n_comp > 1) {
+                        for (int comp = 0; comp < n_comp; ++comp) {
+                            gauge::AnchoringEvidence ev;
+                            ev.field = field_id;
+                            ev.component = comp;
+                            ev.family = family;
+                            ev.verdict = verdict;
+                            ev.source = src;
+                            ev.boundary_marker = marker;
+                            reg.addAnchoring(std::move(ev));
+                        }
+                    } else {
+                        gauge::AnchoringEvidence ev;
+                        ev.field = field_id;
+                        ev.family = family;
+                        ev.verdict = verdict;
+                        ev.source = src;
+                        ev.boundary_marker = marker;
+                        reg.addAnchoring(std::move(ev));
+                    }
+                }
+
+                system.addBoundaryConditionDescriptor(std::move(d));
+            }
+        }
+    }
 };
 
 } // namespace systems

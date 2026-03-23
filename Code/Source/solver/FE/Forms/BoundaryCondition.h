@@ -48,6 +48,22 @@ public:
                                       const FormExpr& u,
                                       const FormExpr& v) const = 0;
 
+    /**
+     * @brief Whether this BC contributes weak terms to the residual
+     *
+     * Returns true if contributeToResidual() modifies the residual expression
+     * (Neumann, Robin, Nitsche, etc.). Returns false for purely strong/algebraic
+     * BCs (Dirichlet, periodic, multi-point constraints) whose
+     * contributeToResidual() is a no-op.
+     *
+     * Used by BoundaryConditionManager::applyAll(system, field_id) to reject
+     * weak BCs before any system mutation occurs.
+     *
+     * The default returns true (conservative). Override to false in subclasses
+     * whose contributeToResidual() is guaranteed to be a no-op.
+     */
+    [[nodiscard]] virtual bool hasWeakTerms() const { return true; }
+
     [[nodiscard]] virtual std::vector<StrongDirichlet> getStrongConstraints(FieldId field_id) const = 0;
 
     /**

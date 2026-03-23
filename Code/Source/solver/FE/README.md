@@ -1749,12 +1749,18 @@ BlockBilinearForm toRealBlock2x2(const ComplexBilinearForm& a);
 
 #### Vocabulary (`Forms/Vocabulary.h`)
 
-UFL-like convenience combinators and helper functions.
+Field-bound symbols for residual authoring and convenience combinators.
 
 ```cpp
 namespace svmp::FE::forms {
 
-// === Function Space Shortcuts ===
+// === Field-Bound Symbols (canonical for installFormulation) ===
+FormExpr StateField(FieldId field, const FunctionSpace& V, std::string name);
+FormExpr TestField(FieldId field, const FunctionSpace& V, std::string name);
+std::vector<FormExpr> StateFields(span<const FieldId>, span<...spaces>, vector<string> names);
+std::vector<FormExpr> TestFields(span<const FieldId>, span<...spaces>, vector<string> names);
+
+// === Unbound Symbols (operator workflows: installMixedBilinear/Linear) ===
 FormExpr TrialFunction(const FunctionSpace& V, std::string name = "u");
 FormExpr TestFunction(const FunctionSpace& V, std::string name = "v");
 std::vector<FormExpr> TrialFunctions(const MixedSpace& W);
@@ -1974,24 +1980,14 @@ public:
 
     void addOperator(OperatorTag name);
 
-    void addCellKernel(OperatorTag op, FieldId field,
-                       std::shared_ptr<assembly::AssemblyKernel> kernel);
-    void addCellKernel(OperatorTag op, FieldId test_field, FieldId trial_field,
-                       std::shared_ptr<assembly::AssemblyKernel> kernel);
-
-    void addBoundaryKernel(OperatorTag op, int boundary_marker, FieldId field,
-                           std::shared_ptr<assembly::AssemblyKernel> kernel);
-
-    void addInteriorFaceKernel(OperatorTag op, FieldId field,
-                               std::shared_ptr<assembly::AssemblyKernel> kernel);
-
+    // Kernel registration (internal — called by FormsInstaller; see
+    // FormsInstaller.h for the public API: installFormulation, etc.)
+    void addCellKernel(OperatorTag op, FieldId field, ...);
+    void addBoundaryKernel(OperatorTag op, int boundary_marker, FieldId field, ...);
+    void addInteriorFaceKernel(OperatorTag op, FieldId field, ...);
     void addGlobalKernel(OperatorTag op, std::shared_ptr<GlobalKernel> kernel);
-
-    void addMatrixFreeKernel(OperatorTag op,
-                             std::shared_ptr<assembly::IMatrixFreeKernel> kernel);
-
-    void addFunctionalKernel(std::string tag,
-                             std::shared_ptr<assembly::FunctionalKernel> kernel);
+    void addMatrixFreeKernel(OperatorTag op, ...);
+    void addFunctionalKernel(std::string tag, ...);
 
     // Setup phase
     void setup(const SetupOptions& opts = {});
@@ -2329,200 +2325,152 @@ FSILS (Fast Scalable Iterative Linear Solver) integration.
 
 ## Usage Examples
 
-### Example 1: Simple Poisson Problem
+All examples below use the canonical workflow (`Vocabulary.h` + `FormsInstaller.h`).
+For expert/low-level paths, see `test_MixedManualParity.cpp`.
+
+### Example 1: Poisson Problem (single-field)
 
 ```cpp
-#include "FE/Forms/FormExpr.h"
-#include "FE/Forms/BilinearForm.h"
-#include "FE/Spaces/H1Space.h"
-#include "FE/Dofs/DofHandler.h"
-#include "FE/Assembly/StandardAssembler.h"
+#include "FE/Forms/Vocabulary.h"
+#include "FE/Systems/FormsInstaller.h"
+#include "FE/Systems/BoundaryConditionManager.h"
 
 using namespace svmp::FE;
+using namespace svmp::FE::forms;
 
-// Create function space
-spaces::H1Space V(ElementType::Triangle, /*order=*/1);
+// 1. Create system and register field
+systems::FESystem system(mesh_access);
+auto V = std::make_shared<spaces::H1Space>(ElementType::Triangle, /*order=*/1);
+auto u_id = system.addField({.name = "u", .space = V, .components = 1});
+system.addOperator("equations");
 
-// Create symbolic expressions
-auto u = forms::FormExpr::trialFunction(V);
-auto v = forms::FormExpr::testFunction(V);
-auto f = forms::FormExpr::coefficient([](Real x, Real y, Real z) { return 1.0; });
+// 2. Build field-bound symbols
+auto u = StateField(u_id, *V, "u");
+auto v = TestField(u_id, *V, "v");
+auto f = FormExpr::constant(1.0);
 
-// Define weak form: a(u,v) = ∫ grad(u)·grad(v) dx
-forms::BilinearForm a(V, V);
-a.setExpression(inner(grad(u), grad(v)).dx());
+// 3. Write the residual: R(u;v) = ∫ grad(u)·grad(v) - f·v dx
+auto residual = (inner(grad(u), grad(v)) - f * v).dx();
 
-// Define linear form: L(v) = ∫ f*v dx
-forms::LinearForm L(V);
-L.setExpression((f * v).dx());
+// 4. Apply BCs and install
+systems::BoundaryConditionManager bc_manager;
+bc_manager.add(std::make_unique<forms::bc::EssentialBC>(
+    /*marker=*/1, FormExpr::constant(0.0), "u"));
+bc_manager.applyAll(system, residual, u, v, u_id);
+systems::installFormulation(system, "equations", {u_id}, residual);
 
-// Compile to assembly kernels
-forms::SymbolicOptions opts;
-opts.jit.enable = true;
-auto bilinear_kernel = a.compile(opts);
-auto linear_kernel = L.compile(opts);
-
-// Distribute DOFs
-dofs::DofHandler dof_handler;
-dof_handler.distributeDofs(mesh, V);
-dof_handler.finalize();
-
-// Assemble
-assembly::StandardAssembler assembler;
-assembler.setDofHandler(dof_handler);
-assembler.initialize();
-
-auto result = assembler.assembleBoth(mesh_access, V, V, *bilinear_kernel,
-                                     matrix_view, vector_view);
-assembler.finalize(&matrix_view, &vector_view);
+// 5. Setup and assemble
+system.setup({});
+systems::AssemblyRequest req{.op = "equations", .want_matrix = true, .want_vector = true};
+system.assemble(req, state, &matrix_view, &vector_view);
 ```
 
 ### Example 2: Nonlinear Elasticity with Constitutive Model
 
 ```cpp
-#include "FE/Forms/FormExpr.h"
-#include "FE/Forms/NonlinearForm.h"
-#include "FE/Forms/ConstitutiveModel.h"
+#include "FE/Forms/Vocabulary.h"
+#include "FE/Systems/FormsInstaller.h"
 
 using namespace svmp::FE;
+using namespace svmp::FE::forms;
 
-// Define neo-Hookean constitutive model
-class NeoHookean : public forms::ConstitutiveModel {
-public:
-    NeoHookean(Real mu, Real kappa) : mu_(mu), kappa_(kappa) {}
+// 1. Create system and register field
+systems::FESystem system(mesh_access);
+auto V = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+auto u_id = system.addField({.name = "u", .space = V, .components = 3});
+system.addOperator("equations");
 
-    forms::Value<Real> evaluate(const forms::Value<Real>& F, int dim) const override {
-        // F is deformation gradient
-        Real J = /* det(F) */;
-        // Compute Cauchy stress...
-        return forms::Value<Real>::fromMatrix(stress);
-    }
+// 2. Build field-bound symbols
+auto u = StateField(u_id, *V, "u");
+auto v = TestField(u_id, *V, "v");
 
-    forms::Value<forms::Dual> evaluate(const forms::Value<forms::Dual>& F,
-                                       int dim,
-                                       forms::DualWorkspace& ws) const override {
-        // Same computation with dual numbers for automatic tangent
-    }
-
-private:
-    Real mu_, kappa_;
-};
-
-// Create vector-valued space for displacement
-spaces::H1Space V(ElementType::Tetrahedron, /*order=*/1);
-// (with 3 components for 3D)
-
-auto u = forms::FormExpr::trialFunction(V);
-auto v = forms::FormExpr::testFunction(V);
-
+// 3. Write the residual using constitutive hook
 // Deformation gradient F = I + grad(u)
-auto F = forms::FormExpr::identity() + grad(u);
-
-// Constitutive stress
+auto F = FormExpr::identity() + grad(u);
 NeoHookean material(/*mu=*/1.0, /*kappa=*/100.0);
-auto P = forms::constitutive(material, F);  // First Piola-Kirchhoff stress
+auto P = constitutive(material, F);  // First Piola-Kirchhoff stress
 
-// Residual: R(u;v) = ∫ P : grad(v) dx
-forms::NonlinearForm R(V);
-R.setResidual(doubleContraction(P, grad(v)).dx());
+// R(u;v) = ∫ P : grad(v) dx
+auto residual = doubleContraction(P, grad(v)).dx();
 
-// Compile residual + consistent Jacobian
-forms::SymbolicOptions opts;
-opts.ad_mode = forms::ADMode::Forward;
-auto kernel = R.compile(opts);
+// 4. Install (AD-backed Jacobian computed automatically)
+systems::FormInstallOptions opts;
+opts.ad_mode = ADMode::Forward;
+systems::installFormulation(system, "equations", {u_id}, residual, opts);
 ```
 
-### Example 3: Multi-Field Stokes Problem
+### Example 3: Multi-Field Stokes Problem (mixed formulation)
 
 ```cpp
-#include "FE/Systems/FESystem.h"
-#include "FE/Spaces/H1Space.h"
-#include "FE/Spaces/L2Space.h"
+#include "FE/Forms/Vocabulary.h"
+#include "FE/Systems/FormsInstaller.h"
 
 using namespace svmp::FE;
+using namespace svmp::FE::forms;
 
-// Taylor-Hood elements: P2 velocity, P1 pressure
-spaces::H1Space V_h(ElementType::Triangle, /*order=*/2);  // Velocity space
-spaces::H1Space Q_h(ElementType::Triangle, /*order=*/1);  // Pressure space
-
+// 1. Create system and register fields
 systems::FESystem system(mesh_access);
-
-// Add fields
-auto u_field = system.addField({"velocity", &V_h, /*components=*/2});
-auto p_field = system.addField({"pressure", &Q_h, /*components=*/1});
-
-// Add operator
+auto V = std::make_shared<spaces::H1Space>(ElementType::Triangle, /*order=*/2);
+auto Q = std::make_shared<spaces::H1Space>(ElementType::Triangle, /*order=*/1);
+auto u_id = system.addField({.name = "velocity", .space = V, .components = 2});
+auto p_id = system.addField({.name = "pressure", .space = Q, .components = 1});
 system.addOperator("Stokes");
 
-// Create forms
-auto u = forms::FormExpr::trialFunction(V_h);
-auto v = forms::FormExpr::testFunction(V_h);
-auto p = forms::FormExpr::trialFunction(Q_h);
-auto q = forms::FormExpr::testFunction(Q_h);
+// 2. Build field-bound symbols
+auto u = StateField(u_id, *V, "u");
+auto p = StateField(p_id, *Q, "p");
+auto v = TestField(u_id, *V, "v");
+auto q = TestField(p_id, *Q, "q");
 
-Real mu = 1.0;  // Viscosity
+Real mu = 1.0;
 
-// a(u,v) = μ ∫ grad(u):grad(v) dx
-forms::BilinearForm a(V_h, V_h);
-a.setExpression((mu * doubleContraction(grad(u), grad(v))).dx());
+// 3. Write the complete residual (both equations in one expression)
+auto residual = (mu * inner(grad(u), grad(v)) - p * div(v)).dx()
+              + (q * div(u)).dx();
 
-// b(v,p) = -∫ p div(v) dx
-forms::BilinearForm b(V_h, Q_h);
-b.setExpression((-p * div(v)).dx());
+// 4. Install — auto-detects 2-field mixed structure, generates all Jacobian blocks
+systems::installFormulation(system, "Stokes", {u_id, p_id}, residual);
 
-// Compile and add kernels
-system.addCellKernel("Stokes", u_field, u_field, a.compile());
-system.addCellKernel("Stokes", u_field, p_field, b.compile());
-// b^T block
-forms::BilinearForm bT(Q_h, V_h);
-bT.setExpression((-q * div(u)).dx());
-system.addCellKernel("Stokes", p_field, u_field, bT.compile());
-
-// Setup
-systems::SetupOptions setup_opts;
-system.setup(setup_opts);
-
-// Assemble
-systems::SystemStateView state;
-state.solution = solution_vector;
-state.time = 0.0;
-
-system.assemble({"Stokes", true, true, true}, state, &matrix_view, &vector_view);
+// 5. Setup and assemble
+system.setup({});
+systems::AssemblyRequest req{.op = "Stokes", .want_matrix = true, .want_vector = true};
+system.assemble(req, state, &matrix_view, &vector_view);
 ```
 
 ### Example 4: DG Advection
 
 ```cpp
-#include "FE/Forms/FormExpr.h"
-#include "FE/Spaces/L2Space.h"
+#include "FE/Forms/Vocabulary.h"
+#include "FE/Systems/FormsInstaller.h"
 
 using namespace svmp::FE;
+using namespace svmp::FE::forms;
 
 // DG space
-spaces::L2Space V_h(ElementType::Triangle, /*order=*/1);
+auto V = std::make_shared<spaces::L2Space>(ElementType::Triangle, /*order=*/1);
 
-auto u = forms::FormExpr::trialFunction(V_h);
-auto v = forms::FormExpr::testFunction(V_h);
+systems::FESystem system(mesh_access);
+auto u_id = system.addField({.name = "u", .space = V, .components = 1});
+system.addOperator("advection");
 
-// Advection velocity
-auto beta = forms::FormExpr::coefficient([](Real x, Real y, Real z) {
+auto u = StateField(u_id, *V, "u");
+auto v = TestField(u_id, *V, "v");
+
+// Advection velocity (constant coefficient)
+auto beta = FormExpr::coefficient([](Real x, Real y, Real z) {
     return std::array<Real, 3>{1.0, 0.5, 0.0};
 });
 
-// Cell integral: -∫ u (beta·grad(v)) dx
-auto cell_term = (-u * inner(beta, grad(v))).dx();
-
-// Interior face integral with upwind flux
-auto h = forms::FormExpr::h();
-auto n = forms::FormExpr::n();
+auto n = FormExpr::n();
 auto beta_n = inner(beta, n);
 
-auto u_upwind = forms::upwindValue(beta_n, u.minus(), u.plus());
-auto face_term = (u_upwind * jump(v) * beta_n).dS();
+// Cell + interior face + boundary integrals
+auto cell_term = (-u * inner(beta, grad(v))).dx();
+auto face_term = (upwindValue(beta_n, u.minus(), u.plus()) * jump(v) * beta_n).dS();
+auto bc_term   = (FormExpr::constant(0.0) * v * beta_n).ds(/*inflow_marker=*/1);
 
-// Boundary integral
-auto u_bc = forms::FormExpr::coefficient([](Real x, Real y, Real z) { return 0.0; });
-auto boundary_term = (u_bc * v * beta_n).ds(/*inflow_marker=*/1);
+auto residual = cell_term + face_term + bc_term;
+systems::installFormulation(system, "advection", {u_id}, residual);
 ```
 
 ---

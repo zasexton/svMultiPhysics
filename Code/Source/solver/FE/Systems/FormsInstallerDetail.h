@@ -10,17 +10,17 @@
 
 /**
  * @file FormsInstallerDetail.h
- * @brief Internal FormsInstaller APIs — not part of the public interface
+ * @brief Internal FormsInstaller implementation — DO NOT include in physics modules
  *
- * @warning **Internal.** Do not use in physics modules or user code.
- * These functions are implementation details of the FormsInstaller and are
- * used by unit tests that verify specific lowering behavior.
+ * @warning **INTERNAL ONLY.** This header exposes implementation details of the
+ * FormsInstaller that exist solely for unit testing specific lowering behavior.
+ * Physics modules and formulation code must NOT include this header.
  *
- * Use the public API from FormsInstaller.h instead:
- *   - installFormulation()    — residual physics
+ * Use the public API from FormsInstaller.h:
+ *   - installFormulation()    — residual physics (single or multi-field)
  *   - installMixedBilinear()  — mixed bilinear operators
  *   - installMixedLinear()    — mixed linear operators
- *   - installMixedFormIR()    — expert pre-compiled IR installation
+ *   - installStrongDirichlet() — strong Dirichlet boundary conditions
  */
 
 #include "Systems/FormsInstaller.h"

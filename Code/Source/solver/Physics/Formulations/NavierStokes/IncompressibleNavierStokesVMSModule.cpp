@@ -227,10 +227,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     FE::systems::BoundaryConditionManager p_bc_manager;
     p_bc_manager.install(options_.pressure_dirichlet,
                          [&](const auto& bc) { return Factories::toPressureEssentialBC(bc, options_.pressure_field_name); });
-    {
-        FormExpr dummy;
-        p_bc_manager.applyAll(system, dummy, p, q, p_id);
-    }
+    p_bc_manager.applyAll(system, p_id);
 
     Factories::applyVelocityNitscheBCs(momentum_form, continuity_form, options_, *velocity_space_, dim, u, p, v, q, mu);
     // Pressure nullspace detection and cross-field anchoring are handled

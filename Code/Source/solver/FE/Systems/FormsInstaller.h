@@ -15,8 +15,6 @@
  * Physics modules should use installFormulation() as the single entry point.
  * It auto-selects single-field or multi-field (mixed) assembly paths based on
  * the number of TestFunction spaces in the residual expression.
- *
- * For internal/low-level installer functions, see FormsInstallerDetail.h.
  */
 
 #include "Core/Types.h"
@@ -82,10 +80,11 @@ struct CoupledResidualKernels {
  *   - 1 TestFunction space → single-field path
  *   - 2+ TestFunction spaces → mixed multi-field path
  *
- * Unknown fields should be created with FormExpr::stateField(). The function
+ * Unknown fields should be created with the field-bound StateField() helper
+ * from Vocabulary.h (or equivalently, FormExpr::stateField()). The function
  * handles lowering StateField nodes to TrialFunction/DiscreteField internally.
- * Expressions with TrialFunction (no StateField nodes) are also supported for
- * single-field formulations.
+ * Expressions with unbound TrialFunction (no StateField nodes) are also
+ * supported for single-field formulations.
  *
  * For multi-field formulations, the coupled assembly strategy is set automatically:
  * diagonal Jacobian blocks produce both matrix and residual vector (Both mode),

@@ -36,6 +36,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] bool hasWeakTerms() const override { return false; }
 
     void contributeToResidual(FormExpr& /*residual*/,
                               const FormExpr& /*u*/,
@@ -206,6 +207,7 @@ public:
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] bool hasWeakTerms() const override { return false; }
 
     void contributeToResidual(FormExpr& /*residual*/,
                               const FormExpr& /*u*/,

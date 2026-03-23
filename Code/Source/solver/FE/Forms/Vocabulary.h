@@ -190,19 +190,22 @@ inline FormExpr TestFunction(const spaces::FunctionSpace& V, std::string name = 
 /**
  * @brief Create trial functions for each component of a MixedSpace
  *
- * Returns one TrialFunction per MixedSpace component. Use these in a single
- * mixed FormExpr, then install with `installFormulation()` (residual) or
- * `installMixedBilinear()` (bilinear). The compiler handles block
- * decomposition automatically.
+ * Returns one unbound TrialFunction per MixedSpace component. These are for
+ * operator-level workflows (installMixedBilinear, installMixedLinear) where
+ * field binding is not needed.
  *
- * Example:
+ * For residual physics authored via installFormulation(), prefer the
+ * field-bound StateField/TestField helpers above — they carry FieldId
+ * bindings that are required for correct multi-field block decomposition,
+ * especially when fields share the same FE space.
+ *
+ * Example (operator workflow):
  * @code
  *   auto trials = TrialFunctions(W, {"u", "p"});
  *   auto tests  = TestFunctions(W, {"v", "q"});
- *   auto& u = trials[0]; auto& p = trials[1];
- *   auto& v = tests[0];  auto& q = tests[1];
- *   auto a = (inner(grad(u), grad(v)) - p * div(v) + div(u) * q).dx();
- *   installMixedBilinear(system, "op", fields, fields, a);
+ *   auto a = (inner(grad(trials[0]), grad(tests[0]))
+ *           - trials[1] * div(tests[0]) + div(trials[0]) * tests[1]).dx();
+ *   installMixedBilinear(system, "op", test_fields, trial_fields, a);
  * @endcode
  */
 inline std::vector<FormExpr> TrialFunctions(const spaces::MixedSpace& W,
