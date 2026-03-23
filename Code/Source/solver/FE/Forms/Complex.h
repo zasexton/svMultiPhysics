@@ -3,18 +3,16 @@
 
 /**
  * @file Complex.h
- * @brief Minimal complex-valued vocabulary for FE/Forms via real/imag splitting
+ * @brief Complex-valued vocabulary adapter via real/imag 2x2 block lifting
+ *
+ * @note **Expert/adapter path.** This header is for complex-valued PDEs
+ * (Helmholtz, Maxwell, etc.) that need 2x2 real block lifting. Most users
+ * working with real-valued multiphysics should use `installFormulation()`
+ * and `installMixedBilinear()` directly.
  *
  * FE/Forms is real-valued at the kernel level. This header provides a small
  * complex-valued vocabulary implemented as `{re, im}` pairs of real `FormExpr`.
- *
- * To assemble complex-valued systems using real-valued backends, use the
- * standard 2x2 real block lifting:
- *   A = Re(A) + i Im(A)
- *   [Re(A) -Im(A); Im(A) Re(A)]
- *
- * This remains purely declarative: Forms does not introduce complex linear
- * algebra backends, and it does not pick time-integration schemes.
+ * To assemble, use `toRealBlock2x2` to produce a `BlockBilinearForm`.
  */
 
 #include "Forms/BlockForm.h"

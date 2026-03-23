@@ -123,6 +123,9 @@ public:
         const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param) override;
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override { return ir_.maxTimeDerivativeOrder(); }
 
+    /// Linear forms (FormKind::Linear) produce only a vector contribution.
+    [[nodiscard]] bool isVectorOnly() const noexcept override { return ir_.kind() == FormKind::Linear; }
+
     /**
      * @brief Configure tensor-calculus evaluation for interpreter mode.
      *

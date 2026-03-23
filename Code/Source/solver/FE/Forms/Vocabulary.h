@@ -99,29 +99,111 @@ inline ConstitutiveCall constitutive(std::shared_ptr<const ConstitutiveModel> mo
 }
 
 // ---------------------------------------------------------------------------
-// Function-space bound arguments (UFL-style)
+// Residual authoring helpers (field-bound)
+//
+// These are the recommended helpers for residual physics authoring via
+// installFormulation(). Each symbol carries a FieldId so that
+// installFormulation() can unambiguously map test rows to fields, even when
+// multiple fields share the same FE space.
+//
+// Usage:
+//   auto u = StateField(u_id, V, "u");
+//   auto v = TestField(u_id, V, "v");
+//   auto residual = (inner(grad(u), grad(v))).dx();
+//   installFormulation(system, "equations", {u_id}, residual);
 // ---------------------------------------------------------------------------
 
+/// Create a field-bound state variable for residual authoring.
+/// Equivalent to FormExpr::stateField(field, space, name).
+inline FormExpr StateField(FieldId field, const spaces::FunctionSpace& V, std::string name)
+{
+    return FormExpr::stateField(field, V, std::move(name));
+}
+
+/// Create a field-bound test function for residual authoring.
+/// The FieldId binding allows installFormulation() to map test rows to fields
+/// unambiguously, which is required when multiple fields share the same space.
+inline FormExpr TestField(FieldId field, const spaces::FunctionSpace& V, std::string name)
+{
+    return FormExpr::testFunction(field, V, std::move(name));
+}
+
+/// Create state variables for each field in a multi-field residual system.
+/// Returns one StateField per field, in the same order as the field_ids.
+inline std::vector<FormExpr> StateFields(
+    std::span<const FieldId> field_ids,
+    std::span<const std::shared_ptr<const spaces::FunctionSpace>> spaces,
+    std::vector<std::string> names)
+{
+    if (field_ids.size() != spaces.size() || field_ids.size() != names.size()) {
+        throw std::invalid_argument("StateFields: field_ids, spaces, and names must have the same size");
+    }
+    std::vector<FormExpr> result;
+    result.reserve(field_ids.size());
+    for (std::size_t i = 0; i < field_ids.size(); ++i) {
+        result.push_back(FormExpr::stateField(field_ids[i], *spaces[i], std::move(names[i])));
+    }
+    return result;
+}
+
+/// Create field-bound test functions for each field in a multi-field residual.
+/// Returns one TestField per field, in the same order as the field_ids.
+inline std::vector<FormExpr> TestFields(
+    std::span<const FieldId> field_ids,
+    std::span<const std::shared_ptr<const spaces::FunctionSpace>> spaces,
+    std::vector<std::string> names)
+{
+    if (field_ids.size() != spaces.size() || field_ids.size() != names.size()) {
+        throw std::invalid_argument("TestFields: field_ids, spaces, and names must have the same size");
+    }
+    std::vector<FormExpr> result;
+    result.reserve(field_ids.size());
+    for (std::size_t i = 0; i < field_ids.size(); ++i) {
+        result.push_back(FormExpr::testFunction(field_ids[i], *spaces[i], std::move(names[i])));
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Operator authoring helpers (space-bound, no FieldId)
+//
+// These are for bilinear/linear operator forms (installMixedBilinear,
+// installMixedLinear) where field binding is not needed. Keep using
+// TrialFunction/TestFunction for operator authoring.
+// ---------------------------------------------------------------------------
+
+/// Create a single TrialFunction (operator forms)
 inline FormExpr TrialFunction(const spaces::FunctionSpace& V, std::string name = "u")
 {
     return FormExpr::trialFunction(V, std::move(name));
 }
 
+/// Create a single TestFunction (operator forms, no field binding)
 inline FormExpr TestFunction(const spaces::FunctionSpace& V, std::string name = "v")
 {
     return FormExpr::testFunction(V, std::move(name));
 }
 
+// Note: TestFunction(FieldId, ...) was removed to avoid two ways to create
+// the same field-bound test symbol. Use TestField(field, space, name) instead.
+
 /**
- * @brief Construct trial functions for each component of a MixedSpace (UFL-style)
+ * @brief Create trial functions for each component of a MixedSpace
  *
- * This is a convenience utility for mixed/multi-field Systems workflows:
- * each returned FormExpr is a standard single-field TrialFunction bound to the
- * corresponding component space, suitable for per-block compilation.
+ * Returns one TrialFunction per MixedSpace component. Use these in a single
+ * mixed FormExpr, then install with `installFormulation()` (residual) or
+ * `installMixedBilinear()` (bilinear). The compiler handles block
+ * decomposition automatically.
  *
- * The core FormCompiler intentionally does not support multiple TrialFunction
- * symbols in a single FormExpr; use `BlockBilinearForm` / `BlockLinearForm`
- * and compile each block independently.
+ * Example:
+ * @code
+ *   auto trials = TrialFunctions(W, {"u", "p"});
+ *   auto tests  = TestFunctions(W, {"v", "q"});
+ *   auto& u = trials[0]; auto& p = trials[1];
+ *   auto& v = tests[0];  auto& q = tests[1];
+ *   auto a = (inner(grad(u), grad(v)) - p * div(v) + div(u) * q).dx();
+ *   installMixedBilinear(system, "op", fields, fields, a);
+ * @endcode
  */
 inline std::vector<FormExpr> TrialFunctions(const spaces::MixedSpace& W,
                                             std::vector<std::string> names = {})

@@ -8,6 +8,7 @@
 #include "Assembly/SymbolicAssembler.h"
 
 #include "Assembly/StandardAssembler.h"
+#include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 
 #include <utility>

@@ -10,14 +10,17 @@
 
 /**
  * @file FormsInstallerDetail.h
- * @brief Internal FormsInstaller APIs — not part of the public interface.
+ * @brief Internal FormsInstaller APIs — not part of the public interface
  *
- * These functions expose low-level control over form lowering and kernel
- * installation. They are used internally and by unit tests that verify
- * specific lowering behaviour.
+ * @warning **Internal.** Do not use in physics modules or user code.
+ * These functions are implementation details of the FormsInstaller and are
+ * used by unit tests that verify specific lowering behavior.
  *
- * Physics modules should use installFormulation() from FormsInstaller.h
- * instead, which auto-selects the correct installation path.
+ * Use the public API from FormsInstaller.h instead:
+ *   - installFormulation()    — residual physics
+ *   - installMixedBilinear()  — mixed bilinear operators
+ *   - installMixedLinear()    — mixed linear operators
+ *   - installMixedFormIR()    — expert pre-compiled IR installation
  */
 
 #include "Systems/FormsInstaller.h"
@@ -99,14 +102,7 @@ CoupledResidualKernels installCoupledResidualMixed(
     const forms::FormExpr& mixed_residual,
     const FormInstallOptions& options = {});
 
-std::vector<std::vector<KernelPtr>>
-installMixedFormIR(
-    FESystem& system,
-    const OperatorTag& op,
-    std::span<const FieldId> test_fields,
-    std::span<const FieldId> trial_fields,
-    const forms::MixedFormIR& mir,
-    const FormInstallOptions& options = {});
+// installMixedFormIR is declared in FormsInstaller.h (public API).
 
 } // namespace systems
 } // namespace FE

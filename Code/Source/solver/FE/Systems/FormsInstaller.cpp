@@ -138,15 +138,12 @@ void registerKernel(
     if (dispatch.has_cell) {
         system.addCellKernel(op, test_field, trial_field, kernel);
     }
-
     for (int marker : dispatch.boundary_markers) {
         system.addBoundaryKernel(op, marker, test_field, trial_field, kernel);
     }
-
     if (dispatch.has_interior) {
         system.addInteriorFaceKernel(op, test_field, trial_field, kernel);
     }
-
     for (int marker : dispatch.interface_markers) {
         system.addInterfaceFaceKernel(op, marker, test_field, trial_field, kernel);
     }
@@ -479,8 +476,24 @@ CoupledResidualKernels installCoupledResidual(
             }
         }
 
-        FE_THROW_IF(active_trial == INVALID_FIELD_ID, InvalidArgumentException,
-                    "installCoupledResidual: residual block does not reference any StateField; cannot determine active trial field");
+        // If this residual block references no StateField, it is a pure source
+        // term (e.g., f*v). It contributes only a residual vector, with no
+        // Jacobian blocks. Install it as a linear (vector-only) kernel.
+        if (active_trial == INVALID_FIELD_ID) {
+            // Compile as Linear (no trial needed)
+            auto ir = compiler.compileLinear(base_expr);
+            const auto dispatch = analyzeDispatch(ir);
+            if (!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&
+                dispatch.boundary_markers.empty() && dispatch.interface_markers.empty()) {
+                continue;  // empty — nothing to install
+            }
+            KernelPtr kernel = std::make_shared<forms::FormKernel>(std::move(ir));
+            kernel = maybeWrapForJIT(std::move(kernel), options);
+            // Register with test_field == trial_field (self-pairing for vector-only)
+            registerKernel(system, op, test_fields[i], test_fields[i], dispatch, kernel);
+            out.residual[i] = kernel;
+            continue;
+        }
 
         if (options.coupled_residual_install_residual_kernels) {
             // Install residual kernel (vector-only).
@@ -621,10 +634,15 @@ CoupledResidualKernels installCoupledResidualMixed(
     // are "constant" w.r.t. the trial and must be included.
     // =========================================================================
 
-    // Find unique test function names/signatures in the expression.
+    // Find unique test function rows in the expression. Deduplication uses
+    // the field binding (FieldId) when present, otherwise (signature, name).
+    // This allows same-name test functions with different field bindings
+    // (e.g., TestField(T_f, V, "v") and TestField(C_f, V, "v")) to be treated
+    // as distinct rows.
     struct TestInfo {
         forms::FormExprNode::SpaceSignature signature{};
         std::string name{};
+        std::optional<FieldId> bound_field{};
     };
     std::vector<TestInfo> test_infos;
     {
@@ -633,15 +651,30 @@ CoupledResidualKernels installCoupledResidualMixed(
                 const auto* sig = n.spaceSignature();
                 if (sig) {
                     std::string nm = n.toString();
+                    auto fid = n.fieldId();
                     bool found = false;
                     for (const auto& info : test_infos) {
-                        if (signaturesMatch(info.signature, *sig) && info.name == nm) {
-                            found = true;
-                            break;
+                        if (fid.has_value() && info.bound_field.has_value()) {
+                            if (*fid == *info.bound_field) {
+                                // Same FieldId: verify consistent space and name
+                                FE_THROW_IF(!signaturesMatch(info.signature, *sig) || info.name != nm,
+                                    InvalidArgumentException,
+                                    "installCoupledResidualMixed: conflicting test "
+                                    "functions bound to FieldId " + std::to_string(*fid) +
+                                    " — same field must use consistent space and name");
+                                found = true;
+                                break;
+                            }
+                        } else if (!fid.has_value() && !info.bound_field.has_value()) {
+                            // Neither has field bindings: deduplicate by (signature, name)
+                            if (signaturesMatch(info.signature, *sig) && info.name == nm) {
+                                found = true; break;
+                            }
                         }
+                        // One bound, one not: always distinct
                     }
                     if (!found) {
-                        test_infos.push_back({*sig, nm});
+                        test_infos.push_back({*sig, nm, fid});
                     }
                 }
             }
@@ -652,55 +685,116 @@ CoupledResidualKernels installCoupledResidualMixed(
         find_tests(find_tests, *mixed_residual.node());
     }
 
+    // Reject duplicate unbound test function names across different spaces.
+    for (std::size_t i = 0; i < test_infos.size(); ++i) {
+        if (test_infos[i].bound_field.has_value()) continue;
+        for (std::size_t j = i + 1; j < test_infos.size(); ++j) {
+            if (test_infos[j].bound_field.has_value()) continue;
+            FE_THROW_IF(
+                test_infos[i].name == test_infos[j].name &&
+                !signaturesMatch(test_infos[i].signature, test_infos[j].signature),
+                InvalidArgumentException,
+                "installCoupledResidualMixed: duplicate TestFunction name '" +
+                test_infos[i].name + "' used with different spaces — use distinct names");
+        }
+    }
+
     FE_THROW_IF(test_infos.size() != test_fields.size(), InvalidArgumentException,
                 "installCoupledResidualMixed: expression has " + std::to_string(test_infos.size()) +
                 " TestFunction spaces but " + std::to_string(test_fields.size()) + " test fields provided");
 
-    // Map test_infos ordering to caller's test_fields by space signature.
+    // Map test_infos ordering to caller's test_fields.
+    // Strategy: prefer explicit field bindings (from TestField(field_id, ...)),
+    // then fall back to space-signature matching. Reject ambiguous same-space
+    // mapping when no bindings are present.
     std::vector<std::size_t> test_map(test_infos.size(), ~std::size_t{0});
+    std::vector<bool> field_used(test_fields.size(), false);
+
+    // Pass 1: map by explicit field binding, with space validation
     for (std::size_t mi = 0; mi < test_infos.size(); ++mi) {
+        if (!test_infos[mi].bound_field) continue;
+        const FieldId bound = *test_infos[mi].bound_field;
         for (std::size_t ci = 0; ci < test_fields.size(); ++ci) {
-            const auto& rec = system.fieldRecord(test_fields[ci]);
-            if (rec.space && signaturesMatch(test_infos[mi].signature, signatureFromSpace(*rec.space))) {
+            if (test_fields[ci] == bound && !field_used[ci]) {
+                // Validate that the test function's space matches the field's space
+                const auto& rec = system.fieldRecord(test_fields[ci]);
+                FE_THROW_IF(rec.space && !signaturesMatch(test_infos[mi].signature,
+                                                           signatureFromSpace(*rec.space)),
+                            InvalidArgumentException,
+                            "installCoupledResidualMixed: test function '" +
+                            test_infos[mi].name + "' is bound to FieldId " +
+                            std::to_string(bound) + " but its space does not match the "
+                            "registered field space");
                 test_map[mi] = ci;
+                field_used[ci] = true;
                 break;
             }
         }
         FE_THROW_IF(test_map[mi] == ~std::size_t{0}, InvalidArgumentException,
-                    "installCoupledResidualMixed: could not match test function '" +
-                    test_infos[mi].name + "' to any provided test FieldId");
+                    "installCoupledResidualMixed: test function '" +
+                    test_infos[mi].name + "' is bound to FieldId " +
+                    std::to_string(bound) + " which is not in the provided field list");
     }
 
-    // Helper: check if an expression subtree contains a TestFunction with a given name.
-    const auto containsTestNamed = [](const auto& self, const forms::FormExprNode& n,
-                                      const std::string& name) -> bool {
-        if (n.type() == forms::FormExprType::TestFunction && n.toString() == name) {
-            return true;
+    // Pass 2: map remaining by space signature (only succeeds if unambiguous)
+    for (std::size_t mi = 0; mi < test_infos.size(); ++mi) {
+        if (test_map[mi] != ~std::size_t{0}) continue;  // already mapped
+
+        std::size_t match_count = 0;
+        std::size_t last_match = ~std::size_t{0};
+        for (std::size_t ci = 0; ci < test_fields.size(); ++ci) {
+            if (field_used[ci]) continue;
+            const auto& rec = system.fieldRecord(test_fields[ci]);
+            if (rec.space && signaturesMatch(test_infos[mi].signature, signatureFromSpace(*rec.space))) {
+                ++match_count;
+                last_match = ci;
+            }
+        }
+
+        FE_THROW_IF(match_count == 0, InvalidArgumentException,
+                    "installCoupledResidualMixed: could not match test function '" +
+                    test_infos[mi].name + "' to any provided test FieldId");
+
+        FE_THROW_IF(match_count > 1, InvalidArgumentException,
+                    "installCoupledResidualMixed: test function '" +
+                    test_infos[mi].name + "' matches " + std::to_string(match_count) +
+                    " fields with the same space — use TestField(field_id, space, name) "
+                    "to resolve the ambiguity");
+
+        test_map[mi] = last_match;
+        field_used[last_match] = true;
+    }
+
+    // Helper: check if an expression subtree contains a TestFunction matching
+    // a given TestInfo. Bound infos match only bound nodes (by FieldId); unbound
+    // infos match only unbound nodes (by name). This prevents cross-matching
+    // between bound and unbound test functions that share a name.
+    const auto containsTestMatching = [](const auto& self, const forms::FormExprNode& n,
+                                         const TestInfo& info) -> bool {
+        if (n.type() == forms::FormExprType::TestFunction) {
+            auto node_fid = n.fieldId();
+            if (info.bound_field.has_value()) {
+                // Bound info: only matches bound nodes with the same FieldId
+                if (node_fid.has_value() && *node_fid == *info.bound_field) return true;
+            } else {
+                // Unbound info: only matches unbound nodes with the same name
+                if (!node_fid.has_value() && n.toString() == info.name) return true;
+            }
         }
         for (const auto& child : n.childrenShared()) {
-            if (child && self(self, *child, name)) return true;
+            if (child && self(self, *child, info)) return true;
         }
         return false;
     };
 
-    // Decompose the mixed expression into per-test sub-expressions by traversing
-    // the top-level Add/Subtract/Negate tree and assigning each sub-tree to the
-    // test function it contains. This preserves the original expression structure
-    // exactly — no re-assembly of integral terms — so the compiled kernels are
-    // structurally identical to what would result from manual decomposition.
-    //
-    // At each Add/Subtract node, we check if both children contain the SAME set of
-    // test functions. If so, we keep the node intact (it belongs to one test block).
-    // If they contain DIFFERENT test functions, we split the children into separate
-    // test blocks. This handles `momentum_form + continuity_form` naturally: the top
-    // Add splits, and each sub-form goes to its respective test block.
+    // Decompose the mixed expression into per-test sub-expressions.
     std::vector<forms::FormExpr> test_block_exprs(test_infos.size());
 
     // Find which test function(s) appear in a sub-expression.
     const auto findTestIndices = [&](const forms::FormExprNode& node) -> std::vector<std::size_t> {
         std::vector<std::size_t> indices;
         for (std::size_t ti = 0; ti < test_infos.size(); ++ti) {
-            if (containsTestNamed(containsTestNamed, node, test_infos[ti].name)) {
+            if (containsTestMatching(containsTestMatching, node, test_infos[ti])) {
                 indices.push_back(ti);
             }
         }
@@ -816,8 +910,11 @@ installMixedFormIR(
             KernelPtr kernel{};
             switch (block_ir.kind()) {
                 case forms::FormKind::Bilinear:
+                    // Bilinear forms: direct evaluation producing matrix + vector
+                    kernel = std::make_shared<forms::FormKernel>(std::move(block_ir));
+                    break;
                 case forms::FormKind::Linear:
-                    // Bilinear/linear forms: direct evaluation, no AD
+                    // Linear forms: vector-only — no matrix contribution.
                     kernel = std::make_shared<forms::FormKernel>(std::move(block_ir));
                     break;
                 case forms::FormKind::Residual:
@@ -838,6 +935,40 @@ installMixedFormIR(
         }
     }
 
+    // ========================================================================
+    // Optional CoupledBlockKernel: wrap all cell-domain block kernels into a
+    // single kernel so assembleCellsFused can share geometry across blocks.
+    // This is the same optimization applied by installCoupledResidual() for
+    // the residual path — extended here to bilinear/linear MixedFormIR.
+    // ========================================================================
+    if (options.compiler_options.jit.enable) {
+        std::vector<forms::CoupledBlockKernel::BlockSpec> block_specs;
+        for (std::size_t i = 0; i < n_test; ++i) {
+            for (std::size_t j = 0; j < n_trial; ++j) {
+                if (!result[i][j]) continue;
+                // Only include cell-domain kernels in the coupled block.
+                if (!mir.hasBlock(i, j) || !mir.block(i, j).hasCellTerms()) continue;
+
+                forms::CoupledBlockKernel::BlockSpec bs;
+                bs.test_field = test_fields[i];
+                bs.trial_field = trial_fields[j];
+                bs.want_matrix = !result[i][j]->isVectorOnly();
+                bs.want_vector = !result[i][j]->isMatrixOnly();
+                bs.fallback_kernel = result[i][j];
+                block_specs.push_back(std::move(bs));
+            }
+        }
+
+        if (block_specs.size() >= 2) {
+            auto jit_compiler = forms::jit::JITCompiler::getOrCreate(options.compiler_options.jit);
+            std::shared_ptr<assembly::AssemblyKernel> coupled =
+                std::make_shared<forms::CoupledBlockKernel>(
+                    std::move(block_specs), std::move(jit_compiler), options.compiler_options.jit);
+
+            system.addCellKernel(op, test_fields[0], trial_fields[0], coupled);
+        }
+    }
+
     return result;
 }
 
@@ -852,6 +983,7 @@ std::size_t countUniqueTestSpaces(const forms::FormExprNode& root)
     struct SpaceInfo {
         forms::FormExprNode::SpaceSignature sig;
         std::string name;
+        std::optional<FieldId> bound_field;
     };
     std::vector<SpaceInfo> found;
 
@@ -860,15 +992,27 @@ std::size_t countUniqueTestSpaces(const forms::FormExprNode& root)
             const auto* sig = n.spaceSignature();
             if (sig) {
                 const std::string nm = n.toString();
+                auto fid = n.fieldId();
                 bool exists = false;
                 for (const auto& info : found) {
-                    if (info.name == nm && signaturesMatch(info.sig, *sig)) {
-                        exists = true;
-                        break;
+                    if (fid.has_value() && info.bound_field.has_value()) {
+                        if (*fid == *info.bound_field) {
+                            FE_THROW_IF(!signaturesMatch(info.sig, *sig) || info.name != nm,
+                                InvalidArgumentException,
+                                "installFormulation: conflicting test functions bound "
+                                "to FieldId " + std::to_string(*fid) +
+                                " — same field must use consistent space and name");
+                            exists = true;
+                            break;
+                        }
+                    } else if (!fid.has_value() && !info.bound_field.has_value()) {
+                        if (info.name == nm && signaturesMatch(info.sig, *sig)) {
+                            exists = true; break;
+                        }
                     }
                 }
                 if (!exists) {
-                    found.push_back({*sig, nm});
+                    found.push_back({*sig, nm, fid});
                 }
             }
         }
@@ -903,27 +1047,38 @@ std::vector<forms::FormExpr> splitByTestFunction(const forms::FormExpr& mixed_re
 {
     if (!mixed_residual.isValid() || !mixed_residual.node()) return {};
 
-    // Find unique test function names.
+    // Find unique test function rows (field-binding-aware).
     struct TestInfo {
         forms::FormExprNode::SpaceSignature sig;
         std::string name;
+        std::optional<FieldId> bound_field;
     };
     std::vector<TestInfo> test_infos;
+    bool conflict = false;
     {
         const auto find_tests = [&](const auto& self, const forms::FormExprNode& n) -> void {
+            if (conflict) return;
             if (n.type() == forms::FormExprType::TestFunction) {
                 const auto* sig = n.spaceSignature();
                 if (sig) {
                     std::string nm = n.toString();
+                    auto fid = n.fieldId();
                     bool found = false;
                     for (const auto& info : test_infos) {
-                        if (signaturesMatch(info.sig, *sig) && info.name == nm) {
-                            found = true;
-                            break;
+                        if (fid.has_value() && info.bound_field.has_value()) {
+                            if (*fid == *info.bound_field) {
+                                if (!signaturesMatch(info.sig, *sig) || info.name != nm)
+                                    conflict = true;
+                                found = true; break;
+                            }
+                        } else if (!fid.has_value() && !info.bound_field.has_value()) {
+                            if (signaturesMatch(info.sig, *sig) && info.name == nm) {
+                                found = true; break;
+                            }
                         }
                     }
                     if (!found) {
-                        test_infos.push_back({*sig, nm});
+                        test_infos.push_back({*sig, nm, fid});
                     }
                 }
             }
@@ -934,14 +1089,34 @@ std::vector<forms::FormExpr> splitByTestFunction(const forms::FormExpr& mixed_re
         find_tests(find_tests, *mixed_residual.node());
     }
 
+    if (conflict) return {};  // same-FieldId with inconsistent space or name
     if (test_infos.size() <= 1) return {};
 
-    // Check if a subtree contains a named test function.
-    const auto containsTestNamed = [](const auto& self, const forms::FormExprNode& n,
-                                      const std::string& name) -> bool {
-        if (n.type() == forms::FormExprType::TestFunction && n.toString() == name) return true;
+    // Reject duplicate unbound test function names across different spaces.
+    for (std::size_t i = 0; i < test_infos.size(); ++i) {
+        if (test_infos[i].bound_field.has_value()) continue;
+        for (std::size_t j = i + 1; j < test_infos.size(); ++j) {
+            if (test_infos[j].bound_field.has_value()) continue;
+            if (test_infos[i].name == test_infos[j].name &&
+                !signaturesMatch(test_infos[i].sig, test_infos[j].sig)) {
+                return {};
+            }
+        }
+    }
+
+    // Check if a subtree contains a test function matching a given TestInfo.
+    const auto containsTestMatching = [](const auto& self, const forms::FormExprNode& n,
+                                         const TestInfo& info) -> bool {
+        if (n.type() == forms::FormExprType::TestFunction) {
+            auto node_fid = n.fieldId();
+            if (info.bound_field.has_value()) {
+                if (node_fid.has_value() && *node_fid == *info.bound_field) return true;
+            } else {
+                if (!node_fid.has_value() && n.toString() == info.name) return true;
+            }
+        }
         for (const auto& child : n.childrenShared()) {
-            if (child && self(self, *child, name)) return true;
+            if (child && self(self, *child, info)) return true;
         }
         return false;
     };
@@ -949,7 +1124,7 @@ std::vector<forms::FormExpr> splitByTestFunction(const forms::FormExpr& mixed_re
     const auto findTestIndices = [&](const forms::FormExprNode& node) -> std::vector<std::size_t> {
         std::vector<std::size_t> indices;
         for (std::size_t ti = 0; ti < test_infos.size(); ++ti) {
-            if (containsTestNamed(containsTestNamed, node, test_infos[ti].name)) {
+            if (containsTestMatching(containsTestMatching, node, test_infos[ti])) {
                 indices.push_back(ti);
             }
         }
@@ -1013,9 +1188,53 @@ CoupledResidualKernels installFormulation(
     FE_THROW_IF(!residual.isValid(), InvalidArgumentException,
                 "installFormulation: invalid residual expression");
 
-    // Populate a FormulationRecord for the analysis subsystem.
+    // Early validation: reject duplicate test function names across different
+    // spaces before creating any side effects (FormulationRecord, contributions).
+    if (fields.size() > 1 && residual.node()) {
+        struct TFInfo {
+            forms::FormExprNode::SpaceSignature sig;
+            std::string name;
+        };
+        std::vector<TFInfo> tf_infos;
+        const auto collect_tf = [&](const auto& self, const forms::FormExprNode& n) -> void {
+            if (n.type() == forms::FormExprType::TestFunction) {
+                const auto* sig = n.spaceSignature();
+                if (sig) {
+                    const std::string nm = n.toString();
+                    bool exists = false;
+                    for (const auto& info : tf_infos) {
+                        if (signaturesMatch(info.sig, *sig) && info.name == nm) {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (!exists) tf_infos.push_back({*sig, nm});
+                }
+            }
+            for (const auto& child : n.childrenShared()) {
+                if (child) self(self, *child);
+            }
+        };
+        collect_tf(collect_tf, *residual.node());
+
+        for (std::size_t i = 0; i < tf_infos.size(); ++i) {
+            for (std::size_t j = i + 1; j < tf_infos.size(); ++j) {
+                FE_THROW_IF(
+                    tf_infos[i].name == tf_infos[j].name &&
+                    !signaturesMatch(tf_infos[i].sig, tf_infos[j].sig),
+                    InvalidArgumentException,
+                    "installFormulation: duplicate TestFunction name '" +
+                    tf_infos[i].name + "' used with different spaces — use distinct names");
+            }
+        }
+    }
+
+    // Build the FormulationRecord but do NOT commit it yet. It will be added
+    // to the system after installation succeeds, so failures don't leave
+    // partial analysis state behind.
+    analysis::FormulationRecord rec;
+    std::vector<analysis::ContributionDescriptor> pending_contributions;
     {
-        analysis::FormulationRecord rec;
         rec.operator_tag = op;
         rec.active_fields.assign(fields.begin(), fields.end());
         rec.residual_expr = residual.nodeShared();
@@ -1027,6 +1246,38 @@ CoupledResidualKernels installFormulation(
         rec.has_stabilization_terms = scan.has_stabilization();
         rec.has_interior_face_terms = scan.has_interior_face_terms();
         rec.active_domains = scan.activeDomains();
+
+        // Extract field names from the expression for mixed-form diagnostics.
+        // Map FieldId → field name using FESystem's field registry, and collect
+        // test/trial function names from the expression tree.
+        for (auto fid : fields) {
+            const auto& frec = system.fieldRecord(fid);
+            rec.field_names.emplace_back(fid, frec.name);
+        }
+
+        // Collect test/trial function names from the expression DAG.
+        {
+            const auto collect_names = [&](const auto& self, const forms::FormExprNode& n) -> void {
+                if (n.type() == forms::FormExprType::TestFunction) {
+                    const std::string nm = n.toString();
+                    if (std::find(rec.test_function_names.begin(), rec.test_function_names.end(), nm)
+                        == rec.test_function_names.end()) {
+                        rec.test_function_names.push_back(nm);
+                    }
+                } else if (n.type() == forms::FormExprType::TrialFunction ||
+                           n.type() == forms::FormExprType::StateField) {
+                    const std::string nm = n.toString();
+                    if (std::find(rec.trial_function_names.begin(), rec.trial_function_names.end(), nm)
+                        == rec.trial_function_names.end()) {
+                        rec.trial_function_names.push_back(nm);
+                    }
+                }
+                for (const auto& child : n.childrenShared()) {
+                    if (child) self(self, *child);
+                }
+            };
+            collect_names(collect_names, *residual.node());
+        }
 
         // Build active_variables from FE fields + coupled symbols.
         for (auto fid : fields) {
@@ -1045,16 +1296,48 @@ CoupledResidualKernels installFormulation(
             rec.auxiliary_state_dependencies.push_back(vk);
         }
 
-        // Block couplings: for multi-field, all NxN blocks are potentially coupled.
-        // The actual block structure is refined after installCoupledResidualMixed().
+        // Block couplings: discover actual active blocks from the per-test
+        // decomposition. For each test block, check which StateField/TrialFunction
+        // symbols appear to determine the actual (test, trial) couplings.
+        // This avoids false dense NxN coupling for zero blocks.
         if (fields.size() > 1) {
-            for (auto test_f : fields) {
-                for (auto trial_f : fields) {
-                    rec.block_couplings.emplace_back(test_f, trial_f);
+            auto test_blocks = splitByTestFunction(residual);
+            if (test_blocks.size() == fields.size()) {
+                for (std::size_t ti = 0; ti < fields.size(); ++ti) {
+                    if (!test_blocks[ti].isValid()) continue;
+                    // Check which fields this test block references
+                    const auto state_fields = gatherStateFields(*test_blocks[ti].node());
+                    for (std::size_t tj = 0; tj < fields.size(); ++tj) {
+                        if (state_fields.contains(fields[tj])) {
+                            rec.block_couplings.emplace_back(fields[ti], fields[tj]);
+                        }
+                    }
+                    // Pure source rows (no StateField dependencies) produce no
+                    // block_couplings entries. This is correct: block_couplings
+                    // documents Jacobian block structure, and a pure forcing
+                    // term has zero Jacobian contribution.
+                }
+            } else {
+                // splitByTestFunction could not decompose the expression.
+                // Fall back to conservative dense coupling.
+                for (auto test_f : fields) {
+                    for (auto trial_f : fields) {
+                        rec.block_couplings.emplace_back(test_f, trial_f);
+                    }
                 }
             }
+            // Note: if splitting succeeds but all rows are pure-source (no
+            // StateField dependencies), block_couplings stays empty. This is
+            // correct: it means the Jacobian has no block structure.
         } else if (fields.size() == 1) {
-            rec.block_couplings.emplace_back(fields[0], fields[0]);
+            // Only record a self-coupling if the residual has trial dependency
+            // (TrialFunction or StateField). Source-only residuals (f*v) have
+            // no Jacobian block.
+            const bool has_trial_dep = residual.hasTrial() ||
+                (residual.node() && hasStateFieldNodes(*residual.node()));
+            if (has_trial_dep) {
+                rec.block_couplings.emplace_back(fields[0], fields[0]);
+            }
         }
 
         // Variable couplings: FE fields coupled to each other, plus FE↔boundary/aux links.
@@ -1102,19 +1385,25 @@ CoupledResidualKernels installFormulation(
             }
         }
 
-        // Lower the formulation into normalized ContributionDescriptors
-        // before moving the record.
-        auto contributions = analysis::lowerFormulation(rec);
-        for (auto& c : contributions) {
-            system.addContribution(std::move(c));
-        }
-
-        system.addFormulationRecord(std::move(rec));
+        // Lower the formulation into normalized ContributionDescriptors.
+        // Store them pending — they will be committed after installation succeeds.
+        pending_contributions = analysis::lowerFormulation(rec);
     }
 
     const auto num_test = countUniqueTestSpaces(*residual.node());
     FE_THROW_IF(num_test == 0, InvalidArgumentException,
                 "installFormulation: residual contains no TestFunction");
+
+    // Analysis metadata is committed only after installation succeeds.
+    const auto commitRecord = [&]() {
+        for (auto& c : pending_contributions) {
+            system.addContribution(std::move(c));
+        }
+        system.addFormulationRecord(std::move(rec));
+    };
+
+    // Transactional installation: snapshot operator state, rollback on failure.
+    return system.executeWithOperatorRollback_([&]() -> CoupledResidualKernels {
 
     if (num_test == 1) {
         // Single-field path.
@@ -1124,15 +1413,35 @@ CoupledResidualKernels installFormulation(
 
         // If the expression uses StateField nodes, lower them to TrialFunction.
         forms::FormExpr lowered = residual;
-        if (residual.node() && hasStateFieldNodes(*residual.node())) {
+        const bool has_state = residual.node() && hasStateFieldNodes(*residual.node());
+        if (has_state) {
             lowered = lowerStateFields(residual, fields[0], system);
         }
 
-        auto kernel = installResidualForm(system, op, fields[0], fields[0], lowered, options);
+        KernelPtr kernel;
+        const bool is_source_only = !lowered.hasTrial();
+        if (!is_source_only) {
+            // Normal residual with trial dependency → full residual install
+            kernel = installResidualForm(system, op, fields[0], fields[0], lowered, options);
+        } else {
+            // Source-only residual (e.g., f*v) → install as linear vector-only kernel
+            forms::FormCompiler compiler(options.compiler_options);
+            auto ir = compiler.compileLinear(lowered);
+            const auto dispatch = analyzeDispatch(ir);
+            kernel = std::make_shared<forms::FormKernel>(std::move(ir));
+            kernel = maybeWrapForJIT(std::move(kernel), options);
+            registerKernel(system, op, fields[0], fields[0], dispatch, kernel);
+        }
+
+        commitRecord();
 
         CoupledResidualKernels out;
         out.residual = {kernel};
-        out.jacobian_blocks = {{kernel}};
+        if (!is_source_only) {
+            out.jacobian_blocks = {{kernel}};
+        } else {
+            out.jacobian_blocks = {{nullptr}};
+        }
         return out;
     }
 
@@ -1142,7 +1451,13 @@ CoupledResidualKernels installFormulation(
     coupled_opts.coupled_residual_install_jacobian_blocks = true;
     coupled_opts.coupled_residual_from_jacobian_block = true;
 
-    return installCoupledResidualMixed(system, op, fields, fields, residual, coupled_opts);
+    auto result = installCoupledResidualMixed(system, op, fields, fields, residual, coupled_opts);
+
+    commitRecord();
+
+    return result;
+
+    }); // executeWithOperatorRollback_
 }
 
 CoupledResidualKernels installFormulation(
@@ -1154,6 +1469,89 @@ CoupledResidualKernels installFormulation(
 {
     const std::span<const FieldId> span(fields.begin(), fields.size());
     return installFormulation(system, op, span, residual, options);
+}
+
+// ============================================================================
+// installMixedBilinear
+// ============================================================================
+
+std::vector<std::vector<KernelPtr>>
+installMixedBilinear(
+    FESystem& system,
+    const OperatorTag& op,
+    std::span<const FieldId> test_fields,
+    std::span<const FieldId> trial_fields,
+    const forms::FormExpr& bilinear,
+    const FormInstallOptions& options)
+{
+    FE_THROW_IF(test_fields.empty(), InvalidArgumentException,
+                "installMixedBilinear: empty test field list");
+    FE_THROW_IF(trial_fields.empty(), InvalidArgumentException,
+                "installMixedBilinear: empty trial field list");
+    FE_THROW_IF(!bilinear.isValid(), InvalidArgumentException,
+                "installMixedBilinear: invalid form expression");
+
+    forms::FormCompiler compiler(options.compiler_options);
+    auto mir = compiler.compileMixed(bilinear, forms::FormKind::Bilinear);
+
+    FE_THROW_IF(test_fields.size() != mir.numTestFields(), InvalidArgumentException,
+                "installMixedBilinear: expression has " + std::to_string(mir.numTestFields()) +
+                " test spaces but " + std::to_string(test_fields.size()) + " test fields provided");
+    FE_THROW_IF(trial_fields.size() != mir.numTrialFields(), InvalidArgumentException,
+                "installMixedBilinear: expression has " + std::to_string(mir.numTrialFields()) +
+                " trial spaces but " + std::to_string(trial_fields.size()) + " trial fields provided");
+
+    return system.executeWithOperatorRollback_([&]() {
+        return installMixedFormIR(system, op, test_fields, trial_fields, mir, options);
+    });
+}
+
+// ============================================================================
+// installMixedLinear
+// ============================================================================
+
+std::vector<KernelPtr>
+installMixedLinear(
+    FESystem& system,
+    const OperatorTag& op,
+    std::span<const FieldId> test_fields,
+    const forms::FormExpr& linear,
+    const FormInstallOptions& options)
+{
+    FE_THROW_IF(test_fields.empty(), InvalidArgumentException,
+                "installMixedLinear: empty test field list");
+    FE_THROW_IF(!linear.isValid(), InvalidArgumentException,
+                "installMixedLinear: invalid form expression");
+
+    forms::FormCompiler compiler(options.compiler_options);
+    auto mir = compiler.compileMixed(linear, forms::FormKind::Linear);
+
+    FE_THROW_IF(test_fields.size() != mir.numTestFields(), InvalidArgumentException,
+                "installMixedLinear: expression has " + std::to_string(mir.numTestFields()) +
+                " test spaces but " + std::to_string(test_fields.size()) + " test fields provided");
+
+    // compileMixed() produces a 1-column layout for linear forms (synthetic
+    // trial column). Map it to placeholder trial FieldIds for installation.
+    const auto n_trial = mir.numTrialFields();
+    std::vector<FieldId> trial_fields_vec;
+    if (n_trial <= test_fields.size()) {
+        trial_fields_vec.assign(test_fields.begin(), test_fields.begin() + static_cast<std::ptrdiff_t>(n_trial));
+    } else {
+        trial_fields_vec.resize(n_trial, test_fields[0]);
+    }
+
+    return system.executeWithOperatorRollback_([&]() {
+        auto block_kernels = installMixedFormIR(system, op, test_fields,
+                                                 std::span<const FieldId>(trial_fields_vec), mir, options);
+
+        std::vector<KernelPtr> result(test_fields.size());
+        for (std::size_t i = 0; i < test_fields.size() && i < block_kernels.size(); ++i) {
+            if (!block_kernels[i].empty()) {
+                result[i] = block_kernels[i][0];
+            }
+        }
+        return result;
+    });
 }
 
 } // namespace systems

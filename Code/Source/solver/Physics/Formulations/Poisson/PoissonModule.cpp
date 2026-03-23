@@ -49,8 +49,8 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
 
     using namespace svmp::FE::forms;
 
-    auto u = FormExpr::stateField(u_id, *space_, options_.field_name);
-    auto v = FormExpr::testFunction(*space_, "v");
+    auto u = StateField(u_id, *space_, options_.field_name);
+    auto v = TestField(u_id, *space_, "v");
 
     const auto k = FormExpr::constant(options_.diffusion);
     const auto f = FormExpr::constant(options_.source);
@@ -73,14 +73,7 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
         return Factories::toWindkesselBC(bc, u_id, *space_, options_.field_name);
     });
 
-    bc_manager.validate();
-
-    auto strong_constraints = bc_manager.getStrongConstraints(u_id);
-    bc_manager.apply(system, residual, u, v, u_id);
-
-    if (!strong_constraints.empty()) {
-        FE::systems::installStrongDirichlet(system, strong_constraints);
-    }
+    bc_manager.applyAll(system, residual, u, v, u_id);
 
     FE::systems::FormInstallOptions install_opts{};
 #if SVMP_FE_ENABLE_LLVM_JIT

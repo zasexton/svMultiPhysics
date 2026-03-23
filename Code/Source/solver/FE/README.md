@@ -36,6 +36,53 @@ FE/
 
 ---
 
+## Getting Started: Which API to Use
+
+| What you want to do | API | Header |
+|---------------------|-----|--------|
+| **Residual physics** (single or multi-field) | `installFormulation(system, op, fields, residual)` | `Systems/FormsInstaller.h` |
+| **Mixed bilinear operator** (stiffness, mass) | `installMixedBilinear(system, op, test, trial, form)` | `Systems/FormsInstaller.h` |
+| **Mixed linear operator** (load vector) | `installMixedLinear(system, op, test, form)` | `Systems/FormsInstaller.h` |
+| **Strong Dirichlet BCs** | `installStrongDirichlet(system, bcs)` | `Systems/FormsInstaller.h` |
+| **Compile without installing** | `FormCompiler::compile(form, kind)` | `Forms/FormCompiler.h` |
+
+Most physics modules need only two includes:
+
+```cpp
+#include "FE/Forms/Vocabulary.h"        // StateField, TestField, grad, inner, ...
+#include "FE/Systems/FormsInstaller.h"  // installFormulation, installStrongDirichlet
+```
+
+Write one `FormExpr` for the residual and call `installFormulation()` — the
+installer handles multi-field decomposition, Jacobian blocks, and fused
+assembly automatically.
+
+### Decision Table
+
+| If you are... | Use this |
+|---------------|----------|
+| Writing a new physics module | `StateField` + `TestField` + `installFormulation()` |
+| Adding boundary conditions | `BoundaryConditionManager::applyAll()` |
+| Assembling a standalone operator (mass, stiffness) | `TrialFunction` + `TestFunction` + `installMixedBilinear()` |
+| Assembling a load vector | `TestFunction` + `installMixedLinear()` |
+| Working with complex-valued PDEs | `#include "Forms/Complex.h"` — see expert section |
+| Writing a custom handwritten kernel | `FESystem::addCellKernel()` — see expert section |
+
+### Expert Paths
+
+These are available for advanced workflows but not needed for typical physics:
+
+| What | API | When to use |
+|------|-----|-------------|
+| Manual block decomposition | `BlockBilinearForm` / `BlockLinearForm` | Per-block compilation control |
+| Complex-valued PDEs | `Complex.h` / `toRealBlock2x2` | Helmholtz, Maxwell, etc. |
+| Pre-compiled IR installation | `installMixedFormIR()` | Testing, caching, external tooling |
+| Direct kernel registration | `FESystem::addCellKernel()` etc. | Handwritten kernels, framework internals |
+
+See `Forms/SYSTEMS_INTEGRATION.md` for the full integration guide.
+
+---
+
 ## Module Reference
 
 ### 1. Core (`FE/Core/`)
@@ -1651,65 +1698,52 @@ public:
 }
 ```
 
-#### Block Forms (`Forms/BlockForm.h`)
+#### Block Forms (`Forms/BlockForm.h`) — Expert/Manual
 
-Multi-field block-structured forms.
+Manual block containers for users who need explicit per-block control.
+Most users should write a single mixed `FormExpr` and use `installMixedBilinear()` instead.
 
 ```cpp
 namespace svmp::FE::forms {
 
 class BlockBilinearForm {
 public:
-    BlockBilinearForm(const std::vector<const spaces::FunctionSpace*>& test_spaces,
-                      const std::vector<const spaces::FunctionSpace*>& trial_spaces);
-
-    void setBlock(std::size_t i, std::size_t j, const FormExpr& expr);
-    void setBlock(std::size_t i, std::size_t j, const BilinearForm& form);
-
-    std::vector<std::vector<std::unique_ptr<assembly::AssemblyKernel>>>
-    compile(const SymbolicOptions& options = {});
+    BlockBilinearForm(std::size_t num_test_fields, std::size_t num_trial_fields);
+    void setBlock(std::size_t test, std::size_t trial, FormExpr expr);
+    bool hasBlock(std::size_t test, std::size_t trial) const;
+    const FormExpr& block(std::size_t test, std::size_t trial) const;
 };
 
 class BlockLinearForm {
 public:
-    explicit BlockLinearForm(const std::vector<const spaces::FunctionSpace*>& spaces);
-
-    void setBlock(std::size_t i, const FormExpr& expr);
-
-    std::vector<std::unique_ptr<assembly::AssemblyKernel>>
-    compile(const SymbolicOptions& options = {});
+    explicit BlockLinearForm(std::size_t num_test_fields);
+    void setBlock(std::size_t test, FormExpr expr);
+    bool hasBlock(std::size_t test) const;
+    const FormExpr& block(std::size_t test) const;
 };
 }
 ```
 
-#### Complex Forms (`Forms/Complex.h`)
+#### Complex Forms (`Forms/Complex.h`) — Expert/Adapter
 
-Complex-valued form handling.
+Complex-valued vocabulary via real/imag splitting and 2×2 block lifting.
+For complex PDEs (Helmholtz, Maxwell, etc.).
 
 ```cpp
 namespace svmp::FE::forms {
 
-class ComplexScalar {
-public:
-    ComplexScalar(const FormExpr& real, const FormExpr& imag);
-
-    FormExpr real() const;
-    FormExpr imag() const;
-    ComplexScalar conj() const;
-    FormExpr abs() const;
-    FormExpr arg() const;
+struct ComplexScalar {
+    FormExpr re{};
+    FormExpr im{};
 };
 
-class ComplexBilinearForm {
-public:
-    ComplexBilinearForm(const spaces::FunctionSpace& test_space,
-                        const spaces::FunctionSpace& trial_space);
-
-    void setExpression(const ComplexScalar& expr);
-
-    // Convert to 2×2 real block system [Re, -Im; Im, Re]
-    BlockBilinearForm toRealBlock2x2() const;
+struct ComplexBilinearForm {
+    FormExpr re{};
+    FormExpr im{};
 };
+
+// Convert to 2×2 real block system [Re, -Im; Im, Re]
+BlockBilinearForm toRealBlock2x2(const ComplexBilinearForm& a);
 }
 ```
 

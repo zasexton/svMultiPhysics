@@ -427,6 +427,10 @@ public:
     static FormExpr discreteField(FieldId field, const spaces::FunctionSpace& space, std::string name = "u");
     static FormExpr stateField(FieldId field, const spaces::FunctionSpace& space, std::string name = "u");
 
+    /// Field-bound TestFunction for same-space multi-field residuals.
+    /// The FieldId enables unambiguous test-row-to-field mapping in installFormulation().
+    static FormExpr testFunction(FieldId field, const spaces::FunctionSpace& space, std::string name = "v");
+
     // Signature-based overloads (for tooling/transforms that do not have a FunctionSpace instance).
     static FormExpr testFunction(const FormExprNode::SpaceSignature& signature, std::string name = "v");
     static FormExpr trialFunction(const FormExprNode::SpaceSignature& signature, std::string name = "u");

@@ -2207,6 +2207,10 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Systems/test_VectorBasisConstraints.cpp
                 Tests/Unit/Systems/test_StrongDirichletConstraint.cpp
                 Tests/Unit/Systems/test_FormsInstaller.cpp
+                Tests/Unit/Systems/test_MixedManualParity.cpp
+                Tests/Unit/Systems/test_MixedFormPerformance.cpp
+                Tests/Unit/Systems/test_BackendParity.cpp
+                Tests/Unit/Systems/test_CanonicalWorkflow.cpp
                 Tests/Unit/Systems/test_GaugeIntegration.cpp
 	                Tests/Unit/Systems/test_CoupledBoundaryManager.cpp
                 Tests/Unit/Systems/test_CoupledBoundaryConditionHelpers.cpp

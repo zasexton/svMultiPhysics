@@ -3,11 +3,12 @@
 
 /**
  * @file WeakForm.h
- * @brief Bundle a residual form with strong constraints
+ * @brief Legacy bundle of a residual form with strong constraints
  *
- * This is a lightweight "problem description" container used by FE/Systems
- * installers to ensure constraints are consistently installed alongside the
- * residual form.
+ * @note **Prefer the canonical API instead:**
+ * call `installFormulation()` for the residual and `installStrongDirichlet()`
+ * for the boundary conditions separately. This container remains for backward
+ * compatibility but is not part of the recommended authoring workflow.
  */
 
 #include "Forms/BoundaryConditions.h"
@@ -22,10 +23,11 @@ namespace forms {
 /**
  * @brief Represents a complete variational problem (Weak Form + Strong Constraints).
  *
- * This container bundles the residual form R(u;v) with the set of strong (essential)
- * boundary conditions that must be enforced algebraically on the system.
+ * @deprecated Use installFormulation() + installStrongDirichlet() instead.
+ * This container bundles the residual form R(u;v) with the set of strong
+ * boundary conditions, but the canonical workflow now calls these separately.
  */
-struct WeakForm {
+struct [[deprecated("Use installFormulation() + installStrongDirichlet() instead")]] WeakForm {
     /// The weak-form residual expression, e.g., (k*grad(u), grad(v)) * dx
     FormExpr residual{};
 

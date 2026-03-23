@@ -22,6 +22,7 @@
 #include "Core/Types.h"
 
 #include "Forms/BoundaryConditions.h"
+#include "Forms/MixedFormIR.h"
 #include "Systems/OperatorRegistry.h"
 
 #include <initializer_list>
@@ -72,8 +73,9 @@ struct CoupledResidualKernels {
 /**
  * @brief Unified formulation installer — auto-selects single or multi-field path
  *
- * This is the preferred entry point for physics modules. The caller provides a
- * single residual FormExpr and the field IDs for the unknowns. The function
+ * This is the canonical public residual entry point for physics modules. The
+ * caller provides a single residual FormExpr and the field IDs for the
+ * unknowns. The function
  * inspects the expression to determine the number of test-function spaces and
  * automatically routes to the appropriate internal path:
  *
@@ -107,6 +109,91 @@ CoupledResidualKernels installFormulation(
     const OperatorTag& op,
     std::initializer_list<FieldId> fields,
     const forms::FormExpr& residual,
+    const FormInstallOptions& options = {});
+
+// ============================================================================
+// Mixed-form installation (stable lowering contract)
+// ============================================================================
+
+/**
+ * @brief Install a pre-compiled MixedFormIR into an FESystem
+ *
+ * Stable lowering from MixedFormIR to the block-based operator registry for
+ * expert/lower-level installation flows. Each active block is installed as an
+ * independent operator term through the existing registration model
+ * (addCellKernel, addBoundaryKernel, addInteriorFaceKernel,
+ * addInterfaceFaceKernel).
+ *
+ * The block layout produced by this function is identical to what would result
+ * from manual block decomposition and per-block installation.
+ *
+ * Public residual authoring should still enter through installFormulation().
+ * For linear forms, use installMixedLinear() which maps the synthetic trial
+ * column that compileMixed() creates for the 1-column linear layout.
+ *
+ * @param system       FESystem to install kernels into
+ * @param op           Operator tag
+ * @param test_fields  FieldId for each test field (size must match mir.numTestFields())
+ * @param trial_fields FieldId for each trial field (size must match mir.numTrialFields())
+ * @param mir          Pre-compiled mixed form IR
+ * @param options      Compiler and JIT options
+ * @return NxM kernel matrix (nullptr for zero blocks)
+ */
+std::vector<std::vector<KernelPtr>>
+installMixedFormIR(
+    FESystem& system,
+    const OperatorTag& op,
+    std::span<const FieldId> test_fields,
+    std::span<const FieldId> trial_fields,
+    const forms::MixedFormIR& mir,
+    const FormInstallOptions& options = {});
+
+/**
+ * @brief Compile and install a mixed bilinear form expression
+ *
+ * Takes a mixed bilinear FormExpr (multiple test/trial spaces), compiles it
+ * via FormCompiler::compileMixed(), and installs via installMixedFormIR().
+ *
+ * This is the bilinear analog of installFormulation() for mixed expressions.
+ *
+ * @param system       FESystem to install kernels into
+ * @param op           Operator tag
+ * @param test_fields  FieldId for each test field
+ * @param trial_fields FieldId for each trial field
+ * @param bilinear     Mixed bilinear form expression
+ * @param options      Compiler and JIT options
+ * @return NxM kernel matrix (nullptr for zero blocks)
+ */
+std::vector<std::vector<KernelPtr>>
+installMixedBilinear(
+    FESystem& system,
+    const OperatorTag& op,
+    std::span<const FieldId> test_fields,
+    std::span<const FieldId> trial_fields,
+    const forms::FormExpr& bilinear,
+    const FormInstallOptions& options = {});
+
+/**
+ * @brief Compile and install a mixed linear form expression
+ *
+ * Takes a mixed linear FormExpr (multiple test spaces, no trial), compiles it
+ * via FormCompiler::compileMixed(), and installs via installMixedFormIR().
+ * compileMixed() produces a 1-column MixedFormIR with a synthetic trial
+ * column; this function maps it to placeholder trial FieldIds internally.
+ *
+ * @param system      FESystem to install kernels into
+ * @param op          Operator tag
+ * @param test_fields FieldId for each test field
+ * @param linear      Mixed linear form expression
+ * @param options     Compiler and JIT options
+ * @return One kernel per test field (nullptr for zero blocks)
+ */
+std::vector<KernelPtr>
+installMixedLinear(
+    FESystem& system,
+    const OperatorTag& op,
+    std::span<const FieldId> test_fields,
+    const forms::FormExpr& linear,
     const FormInstallOptions& options = {});
 
 } // namespace systems

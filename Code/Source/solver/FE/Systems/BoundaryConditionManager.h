@@ -8,6 +8,7 @@
 
 #include "Forms/BoundaryCondition.h"
 #include "Systems/FESystem.h"
+#include "Systems/FormsInstaller.h"
 #include "Systems/SystemConstraint.h"
 
 #include <memory>
@@ -213,6 +214,45 @@ public:
         }
 
         apply(system, residual, u, v, field_id);
+    }
+
+    // ====================================================================
+    // One-call convenience: validate + apply weak terms + install strong BCs
+    // ====================================================================
+
+    /**
+     * @brief Apply all boundary conditions in one call
+     *
+     * This is the recommended single entry point for the standard formulation
+     * workflow. It performs:
+     *   1. validate() — check for conflicting markers
+     *   2. apply() — setup BCs, contribute weak terms to the residual,
+     *      persist affine constraints
+     *   3. installStrongDirichlet() — install strong Dirichlet constraints
+     *
+     * After this call, the residual is ready for installFormulation() and
+     * the system has all BC constraints installed.
+     *
+     * @param system     FESystem to install constraints into
+     * @param residual   Residual expression (modified in-place for weak BCs)
+     * @param u          State field symbol
+     * @param v          Test field symbol
+     * @param field_id   FieldId for strong-constraint extraction
+     */
+    void applyAll(FESystem& system,
+                  forms::FormExpr& residual,
+                  const forms::FormExpr& u,
+                  const forms::FormExpr& v,
+                  FieldId field_id)
+    {
+        validate();
+
+        auto strong = getStrongConstraints(field_id);
+        apply(system, residual, u, v, field_id);
+
+        if (!strong.empty()) {
+            installStrongDirichlet(system, strong);
+        }
     }
 
 private:

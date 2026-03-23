@@ -31,13 +31,19 @@ public:
         : signature_(std::move(signature)), name_(std::move(name))
     {}
 
+    TestFunctionNode(FieldId field, SpaceSignature signature, std::string name)
+        : field_(field), signature_(std::move(signature)), name_(std::move(name))
+    {}
+
     [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::TestFunction; }
     [[nodiscard]] std::string toString() const override { return name_; }
     [[nodiscard]] bool hasTest() const noexcept override { return true; }
     [[nodiscard]] bool hasTrial() const noexcept override { return false; }
     [[nodiscard]] const SpaceSignature* spaceSignature() const override { return &signature_; }
+    [[nodiscard]] std::optional<FieldId> fieldId() const override { return field_; }
 
 private:
+    std::optional<FieldId> field_{};
     SpaceSignature signature_{};
     std::string name_;
 };
@@ -1971,6 +1977,11 @@ FormExpr FormExpr::discreteField(FieldId field, const spaces::FunctionSpace& spa
 FormExpr FormExpr::stateField(FieldId field, const spaces::FunctionSpace& space, std::string name)
 {
     return FormExpr(std::make_shared<StateFieldNode>(field, makeSpaceSignature(space), std::move(name)));
+}
+
+FormExpr FormExpr::testFunction(FieldId field, const spaces::FunctionSpace& space, std::string name)
+{
+    return FormExpr(std::make_shared<TestFunctionNode>(field, makeSpaceSignature(space), std::move(name)));
 }
 
 FormExpr FormExpr::testFunction(const FormExprNode::SpaceSignature& signature, std::string name)

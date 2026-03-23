@@ -218,3 +218,250 @@ TEST(FormContributionLowerer, SelfAdjointPattern) {
     // Self-adjoint pattern → SymmetricLike
     EXPECT_TRUE(hasFlag(contributions[0].traits, OperatorTraitFlags::SymmetricLike));
 }
+
+// ============================================================================
+// Phase 4: Mixed-form provenance threading tests
+// ============================================================================
+
+TEST(FormContributionLowerer, SourceBlockKeyPopulated) {
+    auto space = scalarH1();
+    auto u = FormExpr::stateField(0, *space, "u");
+    auto v = FormExpr::testFunction(*space, "v");
+    auto residual = inner(grad(u), grad(v)).dx();
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {0};
+    rec.residual_expr = residual.nodeShared();
+    rec.block_residual_exprs.push_back({{0, 0}, residual.nodeShared()});
+
+    auto contributions = lowerFormulation(rec);
+
+    ASSERT_EQ(contributions.size(), 1u);
+    ASSERT_TRUE(contributions[0].source_block_key.has_value());
+    EXPECT_EQ(contributions[0].source_block_key->first, FieldId{0});
+    EXPECT_EQ(contributions[0].source_block_key->second, FieldId{0});
+}
+
+TEST(FormContributionLowerer, SourceExpressionRetained) {
+    auto space = scalarH1();
+    auto u = FormExpr::stateField(0, *space, "u");
+    auto v = FormExpr::testFunction(*space, "v");
+    auto residual = inner(grad(u), grad(v)).dx();
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {0};
+    rec.residual_expr = residual.nodeShared();
+    rec.block_residual_exprs.push_back({{0, 0}, residual.nodeShared()});
+
+    auto contributions = lowerFormulation(rec);
+
+    ASSERT_EQ(contributions.size(), 1u);
+    EXPECT_NE(contributions[0].source_expression, nullptr);
+    // Source expression should be the same shared_ptr as the block node
+    EXPECT_EQ(contributions[0].source_expression.get(), residual.node());
+}
+
+TEST(FormContributionLowerer, FieldNamesInOrigin) {
+    auto space = scalarH1();
+    auto u = FormExpr::stateField(0, *space, "u");
+    auto v = FormExpr::testFunction(*space, "v");
+    auto residual = inner(grad(u), grad(v)).dx();
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {0};
+    rec.residual_expr = residual.nodeShared();
+    rec.block_residual_exprs.push_back({{0, 0}, residual.nodeShared()});
+    rec.field_names.emplace_back(FieldId{0}, "velocity");
+
+    auto contributions = lowerFormulation(rec);
+
+    ASSERT_EQ(contributions.size(), 1u);
+    // Origin should mention field name
+    EXPECT_NE(contributions[0].origin.find("velocity"), std::string::npos);
+    // block_context should also mention field name
+    EXPECT_NE(contributions[0].block_context.find("velocity"), std::string::npos);
+}
+
+TEST(FormContributionLowerer, MixedBlockProvenanceMultiField) {
+    auto vel_space = vectorH1();
+    auto pres_space = scalarH1();
+
+    // Simulate multi-field: momentum test block contains both velocity and pressure state
+    auto u = FormExpr::stateField(1, *vel_space, "u");
+    auto p = FormExpr::stateField(2, *pres_space, "p");
+    auto v = FormExpr::testFunction(*vel_space, "v");
+
+    // Momentum: grad(u):grad(v) - p div(v)
+    auto momentum = (inner(grad(u), grad(v)) + FormExpr::constant(-1.0) * p * div(v)).dx();
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {1, 2};
+    rec.residual_expr = momentum.nodeShared();
+    rec.is_mixed = true;
+
+    // Pseudo-block: (test=velocity, test=velocity) containing ALL trial fields
+    rec.block_residual_exprs.push_back({{1, 1}, momentum.nodeShared()});
+
+    rec.field_names.emplace_back(FieldId{1}, "velocity");
+    rec.field_names.emplace_back(FieldId{2}, "pressure");
+
+    auto contributions = lowerFormulation(rec);
+
+    // Should produce 2 contributions: VV (diagonal) and VP (off-diagonal)
+    ASSERT_EQ(contributions.size(), 2u);
+
+    // Both should have source_block_key pointing to the momentum pseudo-block
+    for (const auto& c : contributions) {
+        ASSERT_TRUE(c.source_block_key.has_value());
+        EXPECT_EQ(c.source_block_key->first, FieldId{1});  // test = velocity
+        EXPECT_NE(c.source_expression, nullptr);
+        EXPECT_FALSE(c.block_context.empty());
+    }
+
+    // VV contribution should mention velocity in origin
+    bool found_vv = false, found_vp = false;
+    for (const auto& c : contributions) {
+        bool is_velocity_test = false;
+        bool is_velocity_trial = false;
+        bool is_pressure_trial = false;
+        for (const auto& tv : c.test_variables) {
+            if (tv.field_id == FieldId{1}) is_velocity_test = true;
+        }
+        for (const auto& tv : c.trial_variables) {
+            if (tv.field_id == FieldId{1}) is_velocity_trial = true;
+            if (tv.field_id == FieldId{2}) is_pressure_trial = true;
+        }
+        if (is_velocity_test && is_velocity_trial) found_vv = true;
+        if (is_velocity_test && is_pressure_trial) found_vp = true;
+    }
+    EXPECT_TRUE(found_vv) << "Expected VV contribution";
+    EXPECT_TRUE(found_vp) << "Expected VP contribution";
+}
+
+TEST(FormContributionLowerer, FallbackPathHasProvenance) {
+    auto space = scalarH1();
+    auto u = FormExpr::stateField(0, *space, "u");
+    auto v = FormExpr::testFunction(*space, "v");
+    auto residual = inner(grad(u), grad(v)).dx();
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {0};
+    rec.residual_expr = residual.nodeShared();
+    rec.field_names.emplace_back(FieldId{0}, "temperature");
+    // No block_residual_exprs — fallback path
+
+    auto contributions = lowerFormulation(rec);
+
+    ASSERT_EQ(contributions.size(), 1u);
+    // Fallback path should still populate provenance
+    ASSERT_TRUE(contributions[0].source_block_key.has_value());
+    EXPECT_EQ(contributions[0].source_block_key->first, FieldId{0});
+    EXPECT_EQ(contributions[0].source_block_key->second, FieldId{0});
+    EXPECT_NE(contributions[0].source_expression, nullptr);
+    EXPECT_NE(contributions[0].origin.find("temperature"), std::string::npos);
+}
+
+// ============================================================================
+// Pure-source row emits a contribution
+// ============================================================================
+
+TEST(FormContributionLowerer, SingleFieldTrialFunction_NotSource) {
+    auto space = scalarH1();
+    auto u = FormExpr::trialFunction(*space, "u");
+    auto v = FormExpr::testFunction(*space, "v");
+    auto residual = (u * v).dx();
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {0};
+    rec.residual_expr = residual.nodeShared();
+    rec.block_residual_exprs.push_back({{0, 0}, residual.nodeShared()});
+
+    auto contributions = lowerFormulation(rec);
+
+    // Should emit a real (non-source) contribution with trial variables
+    ASSERT_GE(contributions.size(), 1u);
+    EXPECT_FALSE(contributions[0].trial_variables.empty())
+        << "TrialFunction residual should have trial variables in contribution";
+    // Origin should NOT contain "source"
+    EXPECT_EQ(contributions[0].origin.find("source"), std::string::npos)
+        << "TrialFunction residual should not be classified as source-only";
+}
+
+TEST(FormContributionLowerer, SingleFieldSourceOnlyEmitsSourceContribution) {
+    auto space = scalarH1();
+    auto v = FormExpr::testFunction(*space, "v");
+    auto f = FormExpr::constant(1.0);
+    auto residual = (f * v).dx();
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {0};
+    rec.residual_expr = residual.nodeShared();
+    rec.block_residual_exprs.push_back({{0, 0}, residual.nodeShared()});
+    rec.field_names.emplace_back(FieldId{0}, "temperature");
+
+    auto contributions = lowerFormulation(rec);
+
+    // Should emit a source-like contribution (empty trial_variables)
+    ASSERT_EQ(contributions.size(), 1u);
+    EXPECT_TRUE(contributions[0].trial_variables.empty())
+        << "Source-only contribution should have no trial variables";
+    EXPECT_NE(contributions[0].origin.find("source"), std::string::npos)
+        << "Should be marked as source in origin";
+}
+
+TEST(FormContributionLowerer, PureSourceRowEmitsContribution) {
+    auto vel_space = vectorH1();
+    auto pres_space = scalarH1();
+
+    // Momentum: grad(u):grad(v) (state-dependent)
+    auto u = FormExpr::stateField(1, *vel_space, "u");
+    auto v = FormExpr::testFunction(*vel_space, "v");
+    auto momentum = inner(grad(u), grad(v)).dx();
+
+    // Continuity: pure source g*q (no state dependency)
+    auto q = FormExpr::testFunction(*pres_space, "q");
+    auto g = FormExpr::constant(3.0);
+    auto continuity = (g * q).dx();
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {1, 2};
+    rec.residual_expr = (momentum + continuity).nodeShared();
+    rec.is_mixed = true;
+
+    // Per-test pseudo-blocks
+    rec.block_residual_exprs.push_back({{1, 1}, momentum.nodeShared()});
+    rec.block_residual_exprs.push_back({{2, 2}, continuity.nodeShared()});
+
+    rec.field_names.emplace_back(FieldId{1}, "velocity");
+    rec.field_names.emplace_back(FieldId{2}, "pressure");
+
+    auto contributions = lowerFormulation(rec);
+
+    // Should have at least 2 contributions: momentum blocks + source
+    ASSERT_GE(contributions.size(), 2u);
+
+    // Find the source contribution for the pressure test field
+    bool found_source = false;
+    for (const auto& c : contributions) {
+        bool is_pressure_test = false;
+        for (const auto& tv : c.test_variables) {
+            if (tv.field_id == FieldId{2}) is_pressure_test = true;
+        }
+        if (is_pressure_test && c.trial_variables.empty()) {
+            found_source = true;
+            EXPECT_NE(c.origin.find("source"), std::string::npos)
+                << "Pure-source contribution should have 'source' in origin";
+            EXPECT_TRUE(c.source_block_key.has_value());
+            EXPECT_NE(c.source_expression, nullptr);
+        }
+    }
+    EXPECT_TRUE(found_source) << "Expected a source contribution for the pressure row";
+}

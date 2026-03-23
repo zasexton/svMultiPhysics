@@ -40,12 +40,44 @@
  * preserving per-block JIT specialization and zero-block elimination while
  * presenting a single unified IR to the assembly and installation layers.
  *
- * This is the Stage 2 output of the mixed-form compiler:
- *   MixedFormExpr -> FormCompiler::compileMixed() -> MixedFormIR
- *                                                    |-- block(0,0): FormIR  (e.g., VV)
- *                                                    |-- block(0,1): FormIR  (e.g., VP)
- *                                                    |-- block(1,0): FormIR  (e.g., PV)
- *                                                    +-- block(1,1): nullopt (zero block)
+ * This is the output of the mixed-form compiler:
+ *   MixedFormExpr -> FormCompiler::compile() -> MixedFormIR
+ *                                               |-- block(0,0): FormIR  (e.g., VV)
+ *                                               |-- block(0,1): FormIR  (e.g., VP)
+ *                                               |-- block(1,0): FormIR  (e.g., PV)
+ *                                               +-- block(1,1): nullopt (zero block)
+ *
+ * ## Block classification rules
+ *
+ * Each integral term in a mixed expression is classified into exactly one
+ * (test_idx, trial_idx) block by checking which TestFunction and TrialFunction
+ * names appear in the integrand. The integral domain is preserved per-term:
+ *
+ *   - **Cell** terms:           integrands under `.dx()` measure
+ *   - **Boundary** terms:       integrands under `.ds(marker)` measure
+ *   - **Interior-face** terms:  integrands under `.dS()` measure
+ *   - **Interface-face** terms: integrands under `.dI(marker)` measure
+ *   - **Global** terms:         not yet classified by compileMixed()
+ *
+ * A block with no matching terms is a **zero block** (std::nullopt). Zero-block
+ * elimination is a required property: zero blocks are never compiled and never
+ * installed into Systems.
+ *
+ * A single block may contain terms from multiple domains (e.g., cell + boundary
+ * terms for the same test/trial pair). The per-block FormIR preserves domain
+ * classification per IntegralTerm.
+ *
+ * ## Valid mixed expressions
+ *
+ * A valid mixed expression for compileMixed() / compile() must satisfy:
+ *   - At least one TestFunction is present.
+ *   - Zero or more TrialFunction spaces are present (zero = linear form).
+ *   - Every integral term must contain exactly one TestFunction and at most one
+ *     TrialFunction.
+ *   - BoundaryFunctionalSymbol / AuxiliaryStateSymbol nodes are rejected
+ *     (coupled placeholders must be resolved before compilation).
+ *   - IndexedAccess nodes are rejected unless JIT is enabled (einsum lowering
+ *     required).
  */
 
 #include "Core/Types.h"
@@ -70,6 +102,37 @@ struct MixedFieldDescriptor {
     std::string name;
     std::optional<FormExprNode::SpaceSignature> space_signature{};
     int value_dimension{1};
+};
+
+/**
+ * @brief Provenance record linking a compiled block back to source integral terms
+ *
+ * Each active block may record which source-level integral terms contributed to it,
+ * enabling diagnostics that point from a lowered block back to the original mixed
+ * expression.
+ */
+struct BlockProvenance {
+    /// Indices into the source expression's integral term list
+    std::vector<std::size_t> contributing_term_indices{};
+
+    /// Human-readable summary of the block's integrand (from source expression)
+    std::string source_summary{};
+};
+
+/**
+ * @brief Summary of integration domains present in a mixed form
+ */
+struct MixedFormDomainSummary {
+    bool has_cell_terms{false};
+    bool has_boundary_terms{false};
+    bool has_interior_face_terms{false};
+    bool has_interface_face_terms{false};
+
+    /// Boundary markers referenced by boundary terms (-1 = all)
+    std::vector<int> boundary_markers{};
+
+    /// Interface markers referenced by interface terms (-1 = all)
+    std::vector<int> interface_markers{};
 };
 
 /**
@@ -150,6 +213,50 @@ public:
     void setKind(FormKind kind) noexcept { kind_ = kind; }
     [[nodiscard]] FormKind kind() const noexcept { return kind_; }
 
+    // -- Source provenance --
+
+    /**
+     * @brief Store the original mixed source expression for diagnostics
+     *
+     * This is the user-authored FormExpr before decomposition into blocks.
+     * Retained for analysis, error messages, and source-aware diagnostics.
+     */
+    void setSourceExpression(FormExpr expr) { source_expression_ = std::move(expr); }
+
+    [[nodiscard]] const std::optional<FormExpr>& sourceExpression() const noexcept {
+        return source_expression_;
+    }
+
+    /**
+     * @brief Set provenance for a specific block
+     */
+    void setBlockProvenance(std::size_t test_idx, std::size_t trial_idx, BlockProvenance prov) {
+        if (block_provenances_.size() != blocks_.size()) {
+            block_provenances_.resize(blocks_.size());
+        }
+        block_provenances_.at(test_idx * num_trial_fields_ + trial_idx) = std::move(prov);
+    }
+
+    /**
+     * @brief Get provenance for a specific block (if recorded)
+     */
+    [[nodiscard]] const std::optional<BlockProvenance>& blockProvenance(
+        std::size_t test_idx, std::size_t trial_idx) const {
+        static const std::optional<BlockProvenance> empty{};
+        if (block_provenances_.empty()) return empty;
+        return block_provenances_.at(test_idx * num_trial_fields_ + trial_idx);
+    }
+
+    // -- Whole-form metadata --
+
+    void setDomainSummary(MixedFormDomainSummary summary) {
+        domain_summary_ = std::move(summary);
+    }
+
+    [[nodiscard]] const MixedFormDomainSummary& domainSummary() const noexcept {
+        return domain_summary_;
+    }
+
     // -- Sparsity query --
 
     /**
@@ -195,6 +302,13 @@ private:
     std::vector<MixedFieldDescriptor> test_fields_{};
     std::vector<MixedFieldDescriptor> trial_fields_{};
     FormKind kind_{FormKind::Bilinear};
+
+    // Source provenance
+    std::optional<FormExpr> source_expression_{};
+    std::vector<std::optional<BlockProvenance>> block_provenances_{};
+
+    // Whole-form metadata
+    MixedFormDomainSummary domain_summary_{};
 };
 
 } // namespace forms

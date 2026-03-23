@@ -3,12 +3,18 @@
 
 /**
  * @file BlockForm.h
- * @brief Lightweight block/mixed containers for FE/Forms
+ * @brief Manual block containers for expert multi-field decomposition
  *
- * These types are intentionally simple containers around `forms::FormExpr`.
- * Each block is compiled independently by `forms::FormCompiler`, preserving the
- * current single-trial/single-test constraints of the core compiler while
- * enabling mixed/multi-field Systems via block assembly.
+ * @note **Expert/manual path.** Most users should write a single mixed
+ * FormExpr and use `installFormulation()`, `installMixedBilinear()`, or
+ * `installMixedLinear()` — the compiler handles block decomposition
+ * automatically. These containers are for users who need explicit control
+ * over block structure (e.g., heterogeneous compilation options per block,
+ * pre-split expressions from external tooling).
+ *
+ * Each block is compiled independently by `forms::FormCompiler`, preserving
+ * single-trial/single-test constraints while enabling manual multi-field
+ * assembly.
  */
 
 #include "Forms/FormExpr.h"

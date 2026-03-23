@@ -24,12 +24,19 @@
 #include "Analysis/ProblemAnalysisTypes.h"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace svmp {
 namespace FE {
+
+namespace forms {
+class FormExprNode;
+} // namespace forms
+
 namespace analysis {
 
 // ============================================================================
@@ -273,6 +280,21 @@ struct ContributionDescriptor {
     std::optional<BalanceDescriptor> balance;
     std::vector<PairingDescriptor> pairings;
     std::optional<TransportCharacter> transport_character;
+
+    // ---- Mixed-form provenance (Phase 4) ----
+
+    /// Block key from the source FormulationRecord::block_residual_exprs.
+    /// Allows tracing this contribution back to the specific (test, trial) block
+    /// that generated it.
+    std::optional<std::pair<FieldId, FieldId>> source_block_key;
+
+    /// Source block expression handle.  Retained for diagnostics so analysis
+    /// issues can point back to the specific block sub-expression.
+    std::shared_ptr<const forms::FormExprNode> source_expression;
+
+    /// Human-readable block context string for diagnostic messages.
+    /// E.g., "test=v (velocity), trial=p (pressure)" for the VP block.
+    std::string block_context;
 
     // ---- Builder helpers ----
 

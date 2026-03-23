@@ -395,21 +395,58 @@ All files reside directly in `Code/Source/solver/FE/Systems/`.
 
 ---
 
-## Accommodating a Future “Mathematical Notation” Layer
+## Mixed-Source / Block-IR Architecture
 
-It is expected that a future subfolder (e.g., `FE/Forms` or `FE/DSL`) will provide a more mathematical, weak-form-oriented way to specify problems (UFL-like, MFEM-style integrator composition, or a small C++ EDSL).
+`FE/Systems` is the **stable block-IR execution layer** in the library's
+mixed-source / block-IR split:
 
-To accommodate that cleanly, `FE/Systems` should remain the **stable compilation target**:
+- **`FE/Forms`** owns first-class mixed expressions as the user-facing source
+  representation for multiphysics weak forms.
+- **`FE/Systems`** receives lowered block operators via `MixedFormIR` and installs
+  them through the existing per-`(test_field, trial_field)` registration model.
+- **`FE/Backends`** continues to operate on block matrices/vectors and
+  block-aware solver strategies.
 
-- The math layer compiles to a **Systems-level intermediate representation**:
-  - fields (name, space, components),
-  - operators (tags),
-  - terms (domain + boundary marker + `(test_field, trial_field)` + kernel object),
-  - constraints specifications (strong constraints and/or weak enforcement kernels),
-  - parameter names expected at assembly time.
-- Systems then handles:
-  - DOF distribution + constraints closure (and parallel consistency),
-  - sparsity construction + backend allocation,
-  - dispatch to `FE/Assembly` for assembly and/or to other operator backends (future).
+`FE/Systems` is responsible for:
 
-This separation keeps `FE/Systems` physics-agnostic while enabling a higher-level “math-first” front-end without leaking PDE-specific logic into Systems.
+1. Binding `MixedFormIR` block indices to concrete `FieldId`s.
+2. Lowering each active block into existing operator registration calls
+   (`addCellKernel`, `addBoundaryKernel`, `addInteriorFaceKernel`, etc.).
+3. Keeping constraints, sparsity, assembly, and state plumbing block-based.
+4. Recording both source mixed formulation metadata and lowered per-block
+   formulation metadata.
+
+The key invariant: an equivalent operator assembled from manual block
+decomposition and one mixed source expression produces the same registered
+block structure in `Systems`.
+
+`FormsInstaller` provides the installation bridge:
+- `installFormulation()` — unified and canonical public residual entry point
+  that auto-detects single-field vs multi-field paths.
+- `installMixedFormIR()` — lower-level block installer that iterates active
+  blocks and registers per-block kernels into `FESystem`.
+
+Future multi-field matrix-free auto-registration should be derived from this
+same registered block structure at setup time. It is an operator-backend
+extension, not a second lowering target from `Forms`.
+
+### Relationship to FE/Forms
+
+`FE/Forms` compiles to a **Systems-level intermediate representation**:
+- fields (name, space, components),
+- operators (tags),
+- terms (domain + boundary marker + `(test_field, trial_field)` + kernel object),
+- constraints specifications (strong constraints and/or weak enforcement kernels),
+- parameter names expected at assembly time.
+
+Systems then handles:
+- DOF distribution + constraints closure (and parallel consistency),
+- sparsity construction + backend allocation,
+- dispatch to `FE/Assembly` for assembly and/or to other operator backends (future).
+
+This separation keeps `FE/Systems` physics-agnostic while enabling a higher-level
+“math-first” front-end without leaking PDE-specific logic into Systems. Both
+single-field forms and first-class mixed expressions lower into the same
+block-based operator model.
+
+For the full cross-module plan, see `FE/Docs/MixedForms/PLAN.md`.

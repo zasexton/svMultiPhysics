@@ -97,6 +97,20 @@ struct FormulationRecord {
     /// when per-block expressions are available from the form compiler.
     std::vector<std::pair<std::pair<FieldId, FieldId>,
                           std::shared_ptr<const forms::FormExprNode>>> block_residual_exprs;
+
+    // ---- Mixed-form provenance (Phase 4) ----
+
+    /// Field names from the mixed expression, keyed by FieldId.
+    /// Populated by installFormulation() for multi-field formulations.
+    /// Used by diagnostics to produce messages like "block (velocity, pressure)"
+    /// instead of "block (FieldId=0, FieldId=1)".
+    std::vector<std::pair<FieldId, std::string>> field_names;
+
+    /// Test function names in expression order (e.g., {"v", "q"})
+    std::vector<std::string> test_function_names;
+
+    /// Trial function names in expression order (e.g., {"u", "p"})
+    std::vector<std::string> trial_function_names;
 };
 
 } // namespace analysis

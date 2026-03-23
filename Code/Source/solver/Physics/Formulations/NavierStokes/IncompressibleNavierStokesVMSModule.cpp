@@ -83,11 +83,11 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
 
     using namespace svmp::FE::forms;
 
-    const auto u = FormExpr::stateField(u_id, *velocity_space_, options_.velocity_field_name);
-    const auto p = FormExpr::stateField(p_id, *pressure_space_, options_.pressure_field_name);
+    const auto u = StateField(u_id, *velocity_space_, options_.velocity_field_name);
+    const auto p = StateField(p_id, *pressure_space_, options_.pressure_field_name);
 
-    const auto v = TestFunction(*velocity_space_, "v");
-    const auto q = TestFunction(*pressure_space_, "q");
+    const auto v = TestField(u_id, *velocity_space_, "v");
+    const auto q = TestField(p_id, *pressure_space_, "q");
 
     const auto rho = FormExpr::constant(options_.density);
 
@@ -222,31 +222,17 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         return Factories::toVelocityEssentialBC(bc, dim, options_.velocity_field_name);
     });
 
-    bc_manager.validate();
-
-    auto velocity_constraints = bc_manager.getStrongConstraints(u_id);
-    bc_manager.apply(system, momentum_form, u, v, u_id);
+    bc_manager.applyAll(system, momentum_form, u, v, u_id);
 
     FE::systems::BoundaryConditionManager p_bc_manager;
     p_bc_manager.install(options_.pressure_dirichlet,
                          [&](const auto& bc) { return Factories::toPressureEssentialBC(bc, options_.pressure_field_name); });
-    p_bc_manager.validate();
-
-    auto pressure_constraints = p_bc_manager.getStrongConstraints(p_id);
     {
         FormExpr dummy;
-        p_bc_manager.apply(system, dummy, p, q, p_id);
+        p_bc_manager.applyAll(system, dummy, p, q, p_id);
     }
 
     Factories::applyVelocityNitscheBCs(momentum_form, continuity_form, options_, *velocity_space_, dim, u, p, v, q, mu);
-
-    // Strong Dirichlet constraints (installed once; independent of operator tag).
-    if (!velocity_constraints.empty()) {
-        FE::systems::installStrongDirichlet(system, velocity_constraints);
-    }
-    if (!pressure_constraints.empty()) {
-        FE::systems::installStrongDirichlet(system, pressure_constraints);
-    }
     // Pressure nullspace detection and cross-field anchoring are handled
     // automatically by the FE analysis infrastructure:
     //   - FormContributionLowerer detects ScalarConstant nullspace from PSPG

@@ -207,6 +207,33 @@ MixedBoundArgumentInfo analyzeMixedBoundArguments(const FormExprNode& node)
     };
 
     visit(visit, node);
+
+    // Reject duplicate names across different spaces. If two test (or trial)
+    // functions share the same name but have different space signatures, the
+    // name-based block classifier cannot reliably distinguish them.
+    for (std::size_t i = 0; i < info.test_spaces.size(); ++i) {
+        for (std::size_t j = i + 1; j < info.test_spaces.size(); ++j) {
+            if (info.test_spaces[i].second == info.test_spaces[j].second &&
+                !spaceSignatureEqual(info.test_spaces[i].first, info.test_spaces[j].first)) {
+                throw std::invalid_argument(
+                    "FormCompiler::compileMixed: duplicate TestFunction name '" +
+                    info.test_spaces[i].second +
+                    "' used with different spaces — use distinct names for each field");
+            }
+        }
+    }
+    for (std::size_t i = 0; i < info.trial_spaces.size(); ++i) {
+        for (std::size_t j = i + 1; j < info.trial_spaces.size(); ++j) {
+            if (info.trial_spaces[i].second == info.trial_spaces[j].second &&
+                !spaceSignatureEqual(info.trial_spaces[i].first, info.trial_spaces[j].first)) {
+                throw std::invalid_argument(
+                    "FormCompiler::compileMixed: duplicate TrialFunction name '" +
+                    info.trial_spaces[i].second +
+                    "' used with different spaces — use distinct names for each field");
+            }
+        }
+    }
+
     return info;
 }
 
@@ -1025,6 +1052,14 @@ std::vector<std::vector<std::optional<FormIR>>> FormCompiler::compileResidual(co
     return out;
 }
 
+MixedFormIR FormCompiler::compile(const FormExpr& form, FormKind kind)
+{
+    // compile() is the auto-detecting entry point. It delegates to compileMixed(),
+    // which already handles both single-field (1×1 MixedFormIR) and multi-field
+    // (N×M block-sparse MixedFormIR) cases.
+    return compileMixed(form, kind);
+}
+
 MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
 {
     if (!form.isValid()) {
@@ -1042,27 +1077,27 @@ MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
     // Collect all test/trial space signatures
     const auto mixed_args = detail::analyzeMixedBoundArguments(*form.node());
 
-    // If single test and single trial, delegate to single-field compilation
+    // If single test and single trial, delegate to single-field compilation.
+    // For linear forms (no trial), use a 1×1 layout with a synthetic trial
+    // column so that installMixedFormIR / installMixedLinear can install the
+    // block at (0,0). The trial descriptor is populated with the test field's
+    // descriptor to keep the IR self-consistent.
+    //
+    // Residual/Bilinear forms with no trial function are rejected, consistent
+    // with compileResidual() / compileBilinear().
     if (mixed_args.test_spaces.size() <= 1 && mixed_args.trial_spaces.size() <= 1) {
-        MixedFormIR mir(1, mixed_args.trial_spaces.empty() ? 0 : 1);
-        if (!mixed_args.trial_spaces.empty()) {
-            mir.setBlock(0, 0, compileImpl(form, kind));
-        } else {
-            // Linear form (no trial)
-            // For linear forms, use a 1x1 layout with trial index 0
-            MixedFormIR mir_l(1, 1);
-            mir_l.setBlock(0, 0, compileImpl(form, kind));
-            mir_l.setKind(kind);
-            if (!mixed_args.test_spaces.empty()) {
-                std::vector<MixedFieldDescriptor> test_desc;
-                test_desc.push_back({INVALID_FIELD_ID, mixed_args.test_spaces[0].second,
-                                     mixed_args.test_spaces[0].first,
-                                     mixed_args.test_spaces[0].first.value_dimension});
-                mir_l.setTestFields(std::move(test_desc));
-            }
-            return mir_l;
+        if (mixed_args.trial_spaces.empty() && kind != FormKind::Linear) {
+            throw std::invalid_argument(
+                "FormCompiler::compileMixed: " +
+                std::string(kind == FormKind::Residual ? "residual" : "bilinear") +
+                " form has no TrialFunction — use FormKind::Linear for test-only forms");
         }
+
+        MixedFormIR mir(1, 1);
+        mir.setBlock(0, 0, compileImpl(form, kind));
         mir.setKind(kind);
+        mir.setSourceExpression(form);
+
         if (!mixed_args.test_spaces.empty()) {
             std::vector<MixedFieldDescriptor> test_desc;
             test_desc.push_back({INVALID_FIELD_ID, mixed_args.test_spaces[0].second,
@@ -1076,16 +1111,39 @@ MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
                                   mixed_args.trial_spaces[0].first,
                                   mixed_args.trial_spaces[0].first.value_dimension});
             mir.setTrialFields(std::move(trial_desc));
+        } else {
+            // Linear form: populate trial descriptor from test field so
+            // installMixedLinear can map the synthetic trial column.
+            if (!mixed_args.test_spaces.empty()) {
+                std::vector<MixedFieldDescriptor> trial_desc;
+                trial_desc.push_back({INVALID_FIELD_ID,
+                                      mixed_args.test_spaces[0].second + "_trial",
+                                      mixed_args.test_spaces[0].first,
+                                      mixed_args.test_spaces[0].first.value_dimension});
+                mir.setTrialFields(std::move(trial_desc));
+            }
         }
         return mir;
     }
 
-    // Multi-field: decompose into blocks
+    // Multi-field: reject Residual/Bilinear with no trial, consistent with
+    // the single-field fast path and with compileResidual()/compileBilinear().
+    if (mixed_args.trial_spaces.empty() && kind != FormKind::Linear) {
+        throw std::invalid_argument(
+            "FormCompiler::compileMixed: multi-field " +
+            std::string(kind == FormKind::Residual ? "residual" : "bilinear") +
+            " form has no TrialFunction — use FormKind::Linear for test-only forms");
+    }
+
+    // Multi-field: decompose into blocks.
+    // For linear forms (no trial space), use 1 synthetic trial column so
+    // per-test blocks can be compiled and installed.
     const std::size_t n_test = mixed_args.test_spaces.size();
     const std::size_t n_trial = std::max(mixed_args.trial_spaces.size(), std::size_t{1});
 
     MixedFormIR mir(n_test, n_trial);
     mir.setKind(kind);
+    mir.setSourceExpression(form);
 
     // Set field descriptors
     std::vector<MixedFieldDescriptor> test_desc;
@@ -1096,9 +1154,17 @@ MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
     mir.setTestFields(std::move(test_desc));
 
     std::vector<MixedFieldDescriptor> trial_desc;
-    trial_desc.reserve(n_trial);
-    for (const auto& ts : mixed_args.trial_spaces) {
-        trial_desc.push_back({INVALID_FIELD_ID, ts.second, ts.first, ts.first.value_dimension});
+    if (!mixed_args.trial_spaces.empty()) {
+        trial_desc.reserve(mixed_args.trial_spaces.size());
+        for (const auto& ts : mixed_args.trial_spaces) {
+            trial_desc.push_back({INVALID_FIELD_ID, ts.second, ts.first, ts.first.value_dimension});
+        }
+    } else if (n_trial > 0) {
+        // Linear form: synthetic trial column descriptor from the first test field
+        trial_desc.push_back({INVALID_FIELD_ID,
+                              mixed_args.test_spaces[0].second + "_trial",
+                              mixed_args.test_spaces[0].first,
+                              mixed_args.test_spaces[0].first.value_dimension});
     }
     mir.setTrialFields(std::move(trial_desc));
 
@@ -1106,18 +1172,115 @@ MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
     std::vector<IntegralTerm> all_terms;
     detail::collectIntegralTerms(form, /*sign=*/+1, all_terms);
 
-    // Classify each term by its (test, trial) block
+    // Build whole-form domain summary from all terms
+    MixedFormDomainSummary domain_summary;
+    for (const auto& term : all_terms) {
+        switch (term.domain) {
+            case IntegralDomain::Cell:
+                domain_summary.has_cell_terms = true;
+                break;
+            case IntegralDomain::Boundary:
+                domain_summary.has_boundary_terms = true;
+                if (std::find(domain_summary.boundary_markers.begin(),
+                              domain_summary.boundary_markers.end(),
+                              term.boundary_marker) == domain_summary.boundary_markers.end()) {
+                    domain_summary.boundary_markers.push_back(term.boundary_marker);
+                }
+                break;
+            case IntegralDomain::InteriorFace:
+                domain_summary.has_interior_face_terms = true;
+                break;
+            case IntegralDomain::InterfaceFace:
+                domain_summary.has_interface_face_terms = true;
+                if (std::find(domain_summary.interface_markers.begin(),
+                              domain_summary.interface_markers.end(),
+                              term.interface_marker) == domain_summary.interface_markers.end()) {
+                    domain_summary.interface_markers.push_back(term.interface_marker);
+                }
+                break;
+        }
+    }
+    mir.setDomainSummary(std::move(domain_summary));
+
+    // Classify each term by its (test, trial) block.
+    //
+    // For bilinear/residual forms with trial functions, terms containing
+    // exactly one test AND one trial are placed in the corresponding
+    // (test_idx, trial_idx) block. Residual test-only terms (no trial) are
+    // NOT classified here — they are handled by the residual installer.
+    //
+    // For linear forms (no trial space), all terms for a given test function
+    // are placed in the synthetic trial column 0.
+    // Linear forms (no trial space) use a synthetic trial column and collect
+    // all terms by test function only. Residual/bilinear forms with no trial
+    // should not reach this path — they produce an empty Nx0 block matrix
+    // (which is correct: no Jacobian blocks to classify).
+    const bool is_linear_no_trial = mixed_args.trial_spaces.empty() && kind == FormKind::Linear;
+
     for (std::size_t ti = 0; ti < n_test; ++ti) {
         const auto& test_name = mixed_args.test_spaces[ti].second;
-        for (std::size_t tj = 0; tj < n_trial; ++tj) {
+
+        if (is_linear_no_trial) {
+            // Linear form: collect ALL terms for this test function into column 0
+            std::vector<IntegralTerm> block_terms;
+            BlockProvenance provenance;
+            for (std::size_t idx = 0; idx < all_terms.size(); ++idx) {
+                const auto& term = all_terms[idx];
+                if (detail::integrandContainsTestNamed(*term.integrand.node(), test_name)) {
+                    block_terms.push_back(term);
+                    provenance.contributing_term_indices.push_back(idx);
+                }
+            }
+            if (block_terms.empty()) continue;
+
+            FormExpr block_expr;
+            for (std::size_t k = 0; k < block_terms.size(); ++k) {
+                FormExpr term_with_measure;
+                switch (block_terms[k].domain) {
+                    case IntegralDomain::Cell:
+                        term_with_measure = block_terms[k].integrand.dx();
+                        break;
+                    case IntegralDomain::Boundary:
+                        term_with_measure = block_terms[k].integrand.ds(block_terms[k].boundary_marker);
+                        break;
+                    case IntegralDomain::InteriorFace:
+                        term_with_measure = block_terms[k].integrand.dS();
+                        break;
+                    case IntegralDomain::InterfaceFace:
+                        term_with_measure = block_terms[k].integrand.dI(block_terms[k].interface_marker);
+                        break;
+                }
+                if (!block_expr.isValid()) {
+                    block_expr = term_with_measure;
+                } else {
+                    block_expr = block_expr + term_with_measure;
+                }
+            }
+
+            provenance.source_summary = test_name + ": " + std::to_string(block_terms.size()) + " term(s)";
+            try {
+                mir.setBlock(ti, 0, compileImpl(block_expr, kind));
+                mir.setBlockProvenance(ti, 0, std::move(provenance));
+            } catch (const std::invalid_argument& e) {
+                throw std::invalid_argument(
+                    "FormCompiler::compileMixed: error compiling linear block (" +
+                    std::to_string(ti) + ") [test=" + test_name + "]: " + e.what());
+            }
+            continue;  // skip the trial loop below
+        }
+
+        for (std::size_t tj = 0; tj < mixed_args.trial_spaces.size(); ++tj) {
             const auto& trial_name = mixed_args.trial_spaces[tj].second;
 
             // Collect terms that contain this specific test AND trial
             std::vector<IntegralTerm> block_terms;
-            for (const auto& term : all_terms) {
+            BlockProvenance provenance;
+            for (std::size_t idx = 0; idx < all_terms.size(); ++idx) {
+                const auto& term = all_terms[idx];
                 if (detail::integrandContainsTestNamed(*term.integrand.node(), test_name) &&
                     detail::integrandContainsTrialNamed(*term.integrand.node(), trial_name)) {
                     block_terms.push_back(term);
+                    provenance.contributing_term_indices.push_back(idx);
                 }
             }
 
@@ -1151,15 +1314,21 @@ MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
                 }
             }
 
+            // Build source summary for diagnostics
+            provenance.source_summary = test_name + "-" + trial_name + ": "
+                + std::to_string(block_terms.size()) + " term(s)";
+
             // Compile this block using the single-field path
             // (analyzeBoundArguments will see exactly one test + one trial)
             try {
                 mir.setBlock(ti, tj, compileImpl(block_expr, kind));
+                mir.setBlockProvenance(ti, tj, std::move(provenance));
             } catch (const std::invalid_argument& e) {
-                // Re-throw with block context
+                // Re-throw with block context including field names
                 throw std::invalid_argument(
                     "FormCompiler::compileMixed: error compiling block (" +
-                    std::to_string(ti) + ", " + std::to_string(tj) + "): " + e.what());
+                    std::to_string(ti) + ", " + std::to_string(tj) +
+                    ") [test=" + test_name + ", trial=" + trial_name + "]: " + e.what());
             }
         }
     }

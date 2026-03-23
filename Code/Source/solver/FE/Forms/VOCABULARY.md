@@ -1,6 +1,36 @@
-# FE/Forms — Vocabulary Expansion Roadmap
+# FE/Forms — Vocabulary Reference
 
-This document enumerates an **extensive candidate vocabulary** for expressing weak forms for a wide range of future PDEs (elliptic/parabolic/hyperbolic, mixed/DG, multiphysics, nonlinear/constitutive, space–time, optimization, stochastic, nonlocal, etc.).
+## Canonical Formulation Workflow
+
+Most formulation code uses this workflow:
+
+```cpp
+#include "FE/Forms/Vocabulary.h"
+#include "FE/Systems/FormsInstaller.h"
+
+// 1. Register fields and operator
+auto u_id = system.addField({.name = "u", .space = V});
+system.addOperator("equations");
+
+// 2. Build field-bound symbols
+auto u = StateField(u_id, *V, "u");
+auto v = TestField(u_id, *V, "v");
+
+// 3. Write the residual
+auto residual = (k * inner(grad(u), grad(v)) - f * v).dx();
+
+// 4. Apply BCs and install
+bc_manager.applyAll(system, residual, u, v, u_id);
+installFormulation(system, "equations", {u_id}, residual);
+```
+
+For the full integration guide, see `Forms/SYSTEMS_INTEGRATION.md`.
+
+---
+
+## Vocabulary Expansion Roadmap
+
+This section enumerates an **extensive candidate vocabulary** for expressing weak forms for a wide range of future PDEs (elliptic/parabolic/hyperbolic, mixed/DG, multiphysics, nonlinear/constitutive, space–time, optimization, stochastic, nonlocal, etc.).
 
 It is intentionally broader than what `FE/Forms` will implement immediately. Items are grouped by concept and annotated with a suggested **module owner**:
 - **Forms**: should likely be a first-class `forms::FormExpr` terminal/operator, or a helper combinator that returns a `FormExpr`.
@@ -26,7 +56,13 @@ It is intentionally broader than what `FE/Forms` will implement immediately. Ite
   - DG: `jump`, `avg`, and explicit trace restrictions `expr.minus()` / `expr.plus()`.
 - Measures: `.dx()`, `.ds(boundary_marker)`, `.dS()`.
 - AD-backed Jacobians: residual form → consistent Jacobian via forward-mode dual numbers (`NonlinearFormKernel`), including coverage for `exp/log/sqrt/pow/div`.
-- Mixed/block and complex helpers:
+- Installation API (canonical):
+  - `installFormulation()` — residual physics (single-field or multi-field)
+  - `installMixedBilinear()` — mixed bilinear operators
+  - `installMixedLinear()` — mixed linear operators
+  - `installStrongDirichlet()` — strong Dirichlet boundary conditions
+  - `FormCompiler::compile()` / `compileMixed()` — auto-detecting / explicit mixed compilation
+- Expert/manual helpers:
   - block containers: `BlockBilinearForm` / `BlockLinearForm` (`FE/Forms/BlockForm.h`)
   - complex split + 2×2 real lifting: `ComplexScalar`, `ComplexBilinearForm`, `toRealBlock2x2` (`FE/Forms/Complex.h`)
 
@@ -109,7 +145,11 @@ Owner: **Spaces/Systems** (definitions), referenced by **Forms**
 Forms implications:
 - Operator legality depends on space (e.g., `div` meaningful for H(div), tangential traces for H(curl)).
 - Traces/restrictions to facets should be explicit in the vocabulary (`trace(u)`, `u.minus()`, `u.plus()`).
-- Mixed/multi-field forms are represented via **block decomposition**: `BlockBilinearForm` / `BlockLinearForm` + `TrialFunctions/TestFunctions(MixedSpace)`; each block is compiled independently.
+- Mixed/multi-field forms are authored as a **single mixed `FormExpr`** with
+  multiple `TestFunction`/`TrialFunction` spaces, then installed via
+  `installFormulation()` or `installMixedBilinear()`. The compiler handles
+  block decomposition automatically. Manual block containers
+  (`BlockBilinearForm` / `BlockLinearForm`) remain available as an expert path.
 - `MortarSpace` exists as a semantic space type for future interface coupling; mesh/interface ownership and assembly loops live in Systems/Assembly.
 
 ## 5. Discrete Functions / Fields
@@ -194,7 +234,8 @@ Non-goal: FE/Forms does not define domain-specific named quantities; those belon
 Owner: **Forms** (syntax) + **Systems** (operator registration)
 
 - `Residual`, `LinearForm`, `BilinearForm`, `MultilinearForm`
-- `WeakForm` / `StrongForm` (strong form typically used for diagnostics or auto-derivation)
+- ~~`WeakForm`~~ (deprecated — use `installFormulation()` + `installStrongDirichlet()` separately)
+- `StrongForm` (strong form typically used for diagnostics or auto-derivation)
 - Functionals: `EnergyFunctional`, `ActionFunctional`, `DissipationPotential`
 - Constraints: `ConstraintFunctional`, `Lagrangian`, `AugmentedLagrangian`
 

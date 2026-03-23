@@ -43,7 +43,8 @@
  */
 
 #include "Assembly/DecoratorAssembler.h"
-#include "Forms/Forms.h"
+#include "Forms/FormExpr.h"
+#include "Forms/FormCompiler.h"
 
 #include <memory>
 #include <span>

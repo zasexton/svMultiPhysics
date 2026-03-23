@@ -56,7 +56,61 @@ lowerFormulation(const FormulationRecord& rec) {
                     }
                 }
             } else {
-                trial_fields_to_analyze.push_back(nominal_trial_fid);
+                // Single-field or explicit (test, trial) block: check if the
+                // nominal trial field actually appears before analyzing it.
+                // analyzeField counts StateField/TrialFunction nodes by FieldId,
+                // but TrialFunction(space, "name") nodes have no FieldId. Use
+                // hasTrial() on the block expression as a fallback.
+                auto trial_fs = fsa.analyzeField(*block_node, nominal_trial_fid);
+                if (trial_fs.occurrence_count > 0) {
+                    trial_fields_to_analyze.push_back(nominal_trial_fid);
+                } else {
+                    // Fallback: check for untagged TrialFunction nodes
+                    forms::FormExpr block_expr(
+                        std::const_pointer_cast<forms::FormExprNode>(block_node));
+                    if (block_expr.hasTrial()) {
+                        trial_fields_to_analyze.push_back(nominal_trial_fid);
+                    }
+                }
+            }
+
+            // Pure-source rows (e.g., f*v) reference no active fields as
+            // trial. Emit a source-like contribution for the test field so
+            // analysis is aware of the forcing term.
+            if (trial_fields_to_analyze.empty()) {
+                ContributionDescriptor d;
+                d.operator_tag = rec.operator_tag;
+                d.test_variables = {VariableKey::field(test_fid)};
+                d.trial_variables = {};
+                d.role = ContributionRole::DiagonalBlock;
+                d.traits = OperatorTraitFlags::HasMass;
+                d.confidence = AnalysisConfidence::Medium;
+                d.source_block_key = block_key;
+                d.source_expression = block_node;
+
+                {
+                    std::string test_name;
+                    for (const auto& [fid, name] : rec.field_names) {
+                        if (fid == test_fid) { test_name = name; break; }
+                    }
+                    if (!test_name.empty()) {
+                        d.origin = "FormsInstaller(source, test=" + test_name + ")";
+                        d.block_context = "source term for test=" + test_name;
+                    } else {
+                        d.origin = "FormsInstaller(source, field " + std::to_string(test_fid) + ")";
+                        d.block_context = "source term for field(" + std::to_string(test_fid) + ")";
+                    }
+                }
+
+                // Scan for domain info
+                auto scan_src = scanFormExpr(*block_node);
+                if (!scan_src.boundary_markers.empty()) {
+                    d.boundary_marker = scan_src.boundary_markers[0];
+                    d.domain = DomainKind::Boundary;
+                }
+
+                contributions.push_back(std::move(d));
+                continue;
             }
 
             // Scan for boundary/interface markers on the block node
@@ -80,9 +134,32 @@ lowerFormulation(const FormulationRecord& rec) {
 
             ContributionDescriptor d;
             d.operator_tag = rec.operator_tag;
-            d.origin = "FormsInstaller";
             d.test_variables = {VariableKey::field(test_fid)};
             d.trial_variables = {VariableKey::field(trial_fid)};
+
+            // Source provenance: link back to the block expression
+            d.source_block_key = block_key;
+            d.source_expression = block_node;
+
+            // Build origin and block_context with field names when available
+            {
+                std::string test_name, trial_name;
+                for (const auto& [fid, name] : rec.field_names) {
+                    if (fid == test_fid) test_name = name;
+                    if (fid == trial_fid) trial_name = name;
+                }
+                if (!test_name.empty() || !trial_name.empty()) {
+                    d.origin = "FormsInstaller(test=" + test_name + ", trial=" + trial_name + ")";
+                    d.block_context = "test=" + test_name + " (field " +
+                        std::to_string(test_fid) + "), trial=" + trial_name +
+                        " (field " + std::to_string(trial_fid) + ")";
+                } else {
+                    d.origin = "FormsInstaller(block " + std::to_string(test_fid) +
+                               "," + std::to_string(trial_fid) + ")";
+                    d.block_context = "block(" + std::to_string(test_fid) +
+                                      ", " + std::to_string(trial_fid) + ")";
+                }
+            }
 
             // Classify role
             bool is_diagonal = (test_fid == trial_fid);
@@ -236,10 +313,27 @@ lowerFormulation(const FormulationRecord& rec) {
 
             ContributionDescriptor d;
             d.operator_tag = rec.operator_tag;
-            d.origin = "FormsInstaller";
             d.test_variables = {VariableKey::field(fid)};
             d.trial_variables = {VariableKey::field(fid)};
             d.role = ContributionRole::DiagonalBlock;
+
+            // Source provenance: diagonal block from full residual
+            d.source_block_key = std::make_pair(fid, fid);
+            d.source_expression = rec.residual_expr;
+
+            {
+                std::string field_name;
+                for (const auto& [f, name] : rec.field_names) {
+                    if (f == fid) { field_name = name; break; }
+                }
+                if (!field_name.empty()) {
+                    d.origin = "FormsInstaller(field=" + field_name + ")";
+                    d.block_context = "field=" + field_name + " (field " + std::to_string(fid) + ")";
+                } else {
+                    d.origin = "FormsInstaller(field " + std::to_string(fid) + ")";
+                    d.block_context = "field(" + std::to_string(fid) + ")";
+                }
+            }
 
             auto flags = OperatorTraitFlags::None;
             if (fs.only_through_annihilating_ops && !fs.has_absolute_value) {

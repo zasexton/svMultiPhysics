@@ -149,6 +149,16 @@ public:
 
     void addOperator(OperatorTag name);
 
+    // ---- Kernel registration (expert/infrastructure) ----
+    //
+    // Most physics code should use the FormsInstaller API instead:
+    //   - installFormulation()    for residual physics
+    //   - installMixedBilinear()  for mixed bilinear operators
+    //   - installMixedLinear()    for mixed linear operators
+    //
+    // Direct kernel registration is for framework internals, custom
+    // handwritten kernels, and expert workflows.
+
     void addCellKernel(OperatorTag op, FieldId field,
                        std::shared_ptr<assembly::AssemblyKernel> kernel);
     void addCellKernel(OperatorTag op, FieldId test_field, FieldId trial_field,
@@ -347,6 +357,9 @@ public:
     [[nodiscard]] const std::vector<analysis::VariableDescriptor>& variableDescriptors() const noexcept {
         return variable_descriptors_;
     }
+    [[nodiscard]] const std::vector<analysis::ContributionDescriptor>& contributionDescriptors() const noexcept {
+        return contributions_;
+    }
 
     /// Build and store topology context from the mesh
     void buildTopologyContext();
@@ -375,11 +388,46 @@ public:
     /// Cached version — re-runs only if inputs have changed
     [[nodiscard]] const analysis::ProblemAnalysisReport& analysisReport() const;
 
+    // ---- Operator registry query (for tests and diagnostics) ----
+
+    /**
+     * @brief Query the registered operator definition for an operator tag
+     *
+     * Returns the OperatorDefinition containing all registered cell, boundary,
+     * interior-face, interface-face, and global terms. This is the structural
+     * view of what was installed — useful for parity tests that verify mixed
+     * and manual installation paths produce identical block structure.
+     */
+    [[nodiscard]] const OperatorDefinition& operatorDefinition(const OperatorTag& op) const {
+        return operator_registry_.get(op);
+    }
+
+    [[nodiscard]] bool hasOperator(const OperatorTag& op) const noexcept {
+        return operator_registry_.has(op);
+    }
+
     // ---- Rank-1 updates from coupled Jacobian assembly ----
     [[nodiscard]] std::span<const backends::RankOneUpdate> lastRankOneUpdates() const noexcept;
     void clearRankOneUpdates() noexcept;
 
+    /// @cond INTERNAL
+    // Internal — used by FormsInstaller for transactional kernel registration.
+    // Public only because C++ templates cannot be called from non-friend TUs
+    // when private. Do not call from physics modules.
+    template <typename Fn>
+    auto executeWithOperatorRollback_(Fn&& fn) -> decltype(fn()) {
+        auto snap = operator_registry_.snapshot();
+        try {
+            return fn();
+        } catch (...) {
+            operator_registry_.rollback(snap);
+            throw;
+        }
+    }
+    /// @endcond
+
 private:
+
     struct PlannedCellTerm {
         FieldId test_field{INVALID_FIELD_ID};
         FieldId trial_field{INVALID_FIELD_ID};

@@ -47,15 +47,18 @@ public:
     [[nodiscard]] FormIR compileResidual(const FormExpr& residual_form);
 
     // =========================================================================
-    // Block/mixed compilation helpers (compile per-block)
+    // Block compilation (manual decomposition path)
+    //
+    // These overloads accept pre-decomposed block containers. For the preferred
+    // automatic decomposition path, use compileMixed() below.
     // =========================================================================
 
     /**
      * @brief Compile a block linear form (one FormExpr per test field)
      *
-     * Each block is compiled independently, preserving the single-test/single-trial
-     * constraints of the core compiler while enabling multi-field Systems via
-     * block assembly.
+     * Manual path: each block is compiled independently, preserving the
+     * single-test/single-trial constraints of the core compiler while enabling
+     * multi-field Systems via block assembly.
      *
      * Empty/invalid blocks return `std::nullopt`.
      */
@@ -78,22 +81,51 @@ public:
     [[nodiscard]] std::vector<std::vector<std::optional<FormIR>>> compileResidual(const BlockBilinearForm& blocks);
 
     // =========================================================================
-    // Native mixed-form compilation (Stage 2)
+    // Auto-detecting compilation (preferred entry point)
+    // =========================================================================
+
+    /**
+     * @brief Compile a form, auto-detecting single vs mixed
+     *
+     * This is the preferred high-level entry point. It inspects the expression
+     * for multiple test/trial spaces and automatically routes to the appropriate
+     * compiler path:
+     *
+     *   - 1 test space, ≤1 trial space → single-field path (returns 1×1 MixedFormIR)
+     *   - 2+ test or trial spaces → mixed decomposition path
+     *
+     * Always returns a MixedFormIR, even for single-field forms (wrapped as 1×1).
+     *
+     * Supports all FormKind values:
+     *   - Bilinear: test + trial decomposition
+     *   - Residual: Jacobian-block decomposition (test-only terms not classified)
+     *   - Linear: per-test decomposition into synthetic trial column
+     *
+     * @param form   The weak-form expression (single-field or mixed)
+     * @param kind   FormKind (Bilinear, Residual, or Linear)
+     * @return Block-sparse MixedFormIR
+     * @throws std::invalid_argument if form is invalid or has no test functions
+     */
+    [[nodiscard]] MixedFormIR compile(const FormExpr& form, FormKind kind = FormKind::Bilinear);
+
+    // =========================================================================
+    // Explicit mixed-form compilation
     // =========================================================================
 
     /**
      * @brief Compile a mixed weak-form expression containing multiple test/trial spaces
      *
-     * Accepts a single FormExpr that references multiple TestFunction and/or
-     * TrialFunction spaces. The compiler automatically decomposes the expression
-     * into per-block sub-expressions based on test/trial space signatures, compiles
-     * each block independently, and returns a block-sparse MixedFormIR.
+     * Explicit entry point — equivalent to compile() but makes the intent clear
+     * when the caller knows the form is mixed. Also handles single-field forms
+     * by delegating to the single-field path.
      *
      * Zero blocks (no terms matching a particular test/trial pair) are represented
      * as std::nullopt and can be skipped during assembly.
      *
+     * Supports all FormKind values (Bilinear, Residual, Linear).
+     *
      * @param form   The mixed weak-form expression
-     * @param kind   FormKind (Bilinear or Residual)
+     * @param kind   FormKind (Bilinear, Residual, or Linear)
      * @return Block-sparse MixedFormIR
      * @throws std::invalid_argument if form has no test functions
      */

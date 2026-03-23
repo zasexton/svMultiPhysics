@@ -229,6 +229,37 @@ Code/Source/solver/FE/Backends/
 
 ---
 
+## Mixed-Source / Block-IR Architecture
+
+`FE/Backends` is the **stable block-oriented solver/backend IR** in the library's
+mixed-source / block-IR split:
+
+- **`FE/Forms`** owns first-class mixed expressions as the user-facing source
+  representation for multiphysics weak forms.
+- **`FE/Systems`** lowers mixed forms into per-`(test_field, trial_field)` block
+  operators.
+- **`FE/Backends`** preserves block matrices/vectors as the stable multiphysics
+  solver surface and keeps field-split and Schur workflows block-oriented.
+
+`FE/Backends` is responsible for:
+
+1. Preserving block matrices/vectors as the stable multiphysics solver surface.
+2. Keeping field-split and Schur workflows block-oriented.
+3. Remaining **agnostic** to whether the user authored the operator as one mixed
+   form or manual block expressions.
+
+The key invariant: a backend cannot distinguish whether a multiphysics operator
+came from first-class mixed source or manual block decomposition.
+
+Future multi-field matrix-free operators, if auto-registered, should be derived
+from the same registered block operator structure at setup time. They are an
+optional operator-backend path layered on top of the stable block IR, not a
+replacement for it.
+
+For the full cross-module plan, see `FE/Docs/MixedForms/PLAN.md`.
+
+---
+
 ## Integration with FE/Systems
 
 The `Systems` module will own `std::unique_ptr<Backends::GenericMatrix>` and request storage allocation during setup:
@@ -237,7 +268,7 @@ The `Systems` module will own `std::unique_ptr<Backends::GenericMatrix>` and req
 // Systems/SystemSetup.cpp
 void FESystem::allocateStorage() {
     auto factory = Backends::BackendFactory::createInstance(opts.backend_type);
-    
+
     // Allocate matrix using the sparsity pattern
     matrix_ = factory->createMatrix(sparsity_pattern_);
     rhs_ = factory->createVector(dof_handler_.getNumDofs());
@@ -247,7 +278,7 @@ void FESystem::allocateStorage() {
 // Systems/SystemAssembly.cpp
 void FESystem::assemble(...) {
     // Create the lightweight view for the assembler
-    auto view = matrix_->createAssemblyView(); 
+    auto view = matrix_->createAssemblyView();
     assembler_->assemble(..., &view, ...);
     matrix_->finalizeAssembly();
 }

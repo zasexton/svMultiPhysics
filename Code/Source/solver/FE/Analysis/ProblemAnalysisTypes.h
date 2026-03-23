@@ -383,6 +383,13 @@ struct PropertyClaim {
     std::optional<SpaceCompatibilityClass> space_compatibility_class;
     std::optional<TransportCharacterClass> transport_character_class;
 
+    // NOTE: claim → contribution tracing is done indirectly through the
+    // existing evidence and variables fields. Analyzer passes that need to
+    // reference specific contributions should do so through VariableKey
+    // matching against ContributionDescriptor::test_variables/trial_variables,
+    // not through index-based coupling (which would be fragile across
+    // context mutations).
+
     /// Convenience: add a piece of evidence
     void addEvidence(std::string src, std::string desc,
                      AnalysisConfidence conf = AnalysisConfidence::High,

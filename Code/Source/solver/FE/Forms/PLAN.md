@@ -90,9 +90,54 @@ These classes combine terminals into trees.
 
 ---
 
+## Mixed-Source / Block-IR Architecture
+
+`FE/Forms` is the **source representation layer** for multiphysics weak forms. The
+library adopts a split where:
+
+- **First-class mixed expressions** in `FE/Forms` are the canonical user-facing
+  representation for coupled multiphysics problems.
+- **Block decomposition** in `FE/Systems` and `FE/Backends` remains the stable
+  execution, sparsity, solver, and preconditioner IR.
+
+This means users can write one coupled mixed weak form, and the `Forms` module
+is responsible for:
+
+1. Expressing mixed weak forms with multiple test/trial spaces in one source
+   expression.
+2. Validating mixed-space semantics.
+3. Compiling mixed source into `MixedFormIR` via `FormCompiler::compileMixed()`.
+4. Preserving source-level provenance and whole-form metadata.
+
+Below `Forms`, every mixed operator is representable as active block kernels
+indexed by `(test_field, trial_field, domain)`. The block layout produced by
+first-class mixed forms matches the block layout produced by equivalent manual
+block decomposition.
+
+For the full cross-module plan, see `FE/Docs/MixedForms/PLAN.md`.
+
+### Compilation pathways
+
+| Input | Compiler entry point | Output |
+|-------|---------------------|--------|
+| Single test/trial space | `compileLinear()` / `compileBilinear()` / `compileResidual()` | `FormIR` |
+| Manual block decomposition | `compileBilinear(BlockBilinearForm)` / `compileLinear(BlockLinearForm)` | `vector<optional<FormIR>>` |
+| Mixed expression (multiple test/trial spaces) | `compileMixed()` | `MixedFormIR` |
+
+`MixedFormIR` is the explicit compiler bridge between mixed source and block
+execution. It carries:
+- test/trial field descriptors,
+- active block map (block-sparse `(test_idx, trial_idx)` structure),
+- per-block `FormIR`,
+- whole-form metadata for diagnostics and setup heuristics.
+
+---
+
 ## Interaction with FE/Systems
 
 The `Forms` module sits on top of `Systems` and targets it as the **stable compilation target** (as described in `FE/Systems/PLAN.md`).
+
+### Single-field path
 
 1.  **User Code**:
     ```cpp
@@ -108,6 +153,33 @@ The `Forms` module sits on top of `Systems` and targets it as the **stable compi
 3.  **Execution (Systems)**:
     - `FE/Systems` registers the resulting term(s) (test/trial coupling + kernel + domain).
     - `FE/Assembly` runs the appropriate cell/face loops, using `assembly::AssemblyContext` as the data source.
+
+### Mixed-field path
+
+1.  **User Code**:
+    ```cpp
+    auto W = std::make_shared<MixedSpace>();
+    W->add_component("u", velocity_space);
+    W->add_component("p", pressure_space);
+    auto [u, p] = TrialFunctions(*W, {"u", "p"});
+    auto [v, q] = TestFunctions(*W, {"v", "q"});
+    auto residual = (inner(grad(u), grad(v)) - p * div(v) + div(u) * q).dx();
+    ```
+
+2.  **Compilation / Lowering**:
+    - `FormCompiler::compileMixed()` analyzes bound test/trial spaces, decomposes
+      terms by `(test_name, trial_name)` pair, and compiles each active block
+      independently into `MixedFormIR`.
+
+3.  **Installation (Systems)**:
+    - `FormsInstaller::installFormulation()` or `installMixedFormIR()` binds block
+      indices to concrete `FieldId`s and installs each active block through the
+      existing operator-registration pathways (`addCellKernel`, etc.).
+
+4.  **Execution (Assembly/Backends)**:
+    - Assembly and backends continue to operate on block IR only — they are
+      agnostic to whether the operator was authored as one mixed form or manual
+      block expressions.
 
 ---
 
@@ -198,6 +270,16 @@ auto residual = (inner(grad(u), grad(v)) - f * v).dx();
 ### Milestone 4: Constitutive integration
 - [x] Type-erased constitutive wrapper and a stable “material-point” call boundary (`forms::ConstitutiveModel`).
 - [x] Ensure AD scalar types propagate through constitutive models cleanly (via `Value<Dual>` evaluation).
+
+### Milestone 5: First-class mixed expressions
+- [x] `MixedSpace`, `TrialFunctions(W)`, `TestFunctions(W)` helpers for mixed authoring.
+- [x] `FormCompiler::compileMixed()` lowering mixed source to `MixedFormIR`.
+- [x] `MixedFormIR` with block-sparse structure, field descriptors, per-block `FormIR`.
+- [x] Zero-block elimination as a required property of `MixedFormIR`.
+- [x] `FormsInstaller::installMixedFormIR()` installing active blocks into `FESystem`.
+- [ ] Whole-form metadata and source provenance in `MixedFormIR`.
+- [ ] Block-to-source mapping for diagnostics.
+- [ ] Parity tests: mixed expression vs manual block decomposition.
 
 ---
 
