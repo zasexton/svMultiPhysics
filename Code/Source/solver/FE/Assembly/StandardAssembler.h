@@ -1026,6 +1026,57 @@ private:
         AssemblyContext::Matrix3x3 phys_hess[kMaxScalarEntriesPerSlot];
     };
     std::vector<CoupledSlotPhysCache> coupled_slot_phys_cache_;
+
+    // =========================================================================
+    // Tier 3: Flat Cell Data Table
+    // Pre-computed per-cell flat arrays for fast assembly.  Built once on first
+    // assembly call for a given mesh topology; avoids per-cell virtual dispatch,
+    // hash lookups, and constraint checks during the hot assembly loop.
+    // =========================================================================
+    struct FlatCellCoords {
+        bool valid{false};
+        int dim{0};
+        int nodes_per_cell{0};
+        std::vector<Real> coords;         ///< [n_cells * nodes_per_cell * 3] flat xyz
+        const IMeshAccess* mesh{nullptr};
+    };
+    FlatCellCoords flat_cell_coords_;
+
+    /// Build flat coordinate array from mesh. Called once per topology.
+    void ensureFlatCellCoords(const IMeshAccess& mesh);
+
+    // =========================================================================
+    // Tier 1: Cached field evaluation recipe
+    // Pre-computed per-field data for fast populateFieldSolutionData.
+    // Avoids per-field findFieldAccessPlan, getElement, basis cache lookups.
+    // =========================================================================
+    struct CachedFieldRecipe {
+        FieldId field_id{INVALID_FIELD_ID};
+        const FieldAccessPlan* access{nullptr};
+        const basis::BasisCacheEntry* bcache{nullptr};
+        bool is_product{false};
+        FieldType field_type{FieldType::Scalar};
+        int value_dim{1};
+        LocalIndex n_dofs{0};
+        LocalIndex n_scalar_dofs{0};
+        bool want_values{false};
+        bool want_gradients{false};
+        bool want_hessians{false};
+        bool want_laplacians{false};
+    };
+    std::vector<CachedFieldRecipe> cached_field_recipes_;
+    bool cached_field_recipes_valid_{false};
+
+    /// Build field evaluation recipes from current field requirements.
+    void ensureFieldRecipes(const IMeshAccess& mesh,
+                            const std::vector<FieldRequirement>& requirements);
+
+    /// Optimized field solution population using cached recipes + flat coords.
+    void populateFieldSolutionDataFast(
+        AssemblyContext& context,
+        const IMeshAccess& mesh,
+        GlobalIndex cell_id,
+        const std::vector<FieldRequirement>& requirements);
 };
 
 // ============================================================================

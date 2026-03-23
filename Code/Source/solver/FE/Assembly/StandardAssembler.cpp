@@ -852,6 +852,7 @@ void StandardAssembler::setConstraints(const constraints::AffineConstraints* con
 {
     constraints_ = constraints;
     cell_constrained_flags_valid_ = false;
+    cached_field_recipes_valid_ = false;
 
     if (constraints_ && constraints_->isClosed()) {
         constraint_distributor_ = std::make_unique<constraints::ConstraintDistributor>(*constraints_);
@@ -3045,16 +3046,32 @@ void StandardAssembler::prepareGeometry(
     const ElementType cell_type = mesh.getCellType(cell_id);
     const int dim = mesh.dimension();
 
-    // Get cell node coordinates from mesh
-    mesh.getCellCoordinates(cell_id, cell_coords_);
-    const auto n_nodes = cell_coords_.size();
-
-    // Convert to math::Vector format for geometry mapping (reuse scratch storage)
-    scratch_node_coords_.resize(n_nodes);
-    for (std::size_t i = 0; i < n_nodes; ++i) {
-        scratch_node_coords_[i] = math::Vector<Real, 3>{
-            cell_coords_[i][0], cell_coords_[i][1], cell_coords_[i][2]};
+    // Get cell node coordinates — use flat table when available (Tier 2/3),
+    // bypassing virtual dispatch through IMeshAccess::getCellCoordinates.
+    if (flat_cell_coords_.valid && flat_cell_coords_.mesh == &mesh &&
+        cell_id >= 0 &&
+        static_cast<std::size_t>(cell_id) < flat_cell_coords_.coords.size() /
+            (static_cast<std::size_t>(flat_cell_coords_.nodes_per_cell) * 3u)) {
+        const auto npc = static_cast<std::size_t>(flat_cell_coords_.nodes_per_cell);
+        const auto base = static_cast<std::size_t>(cell_id) * npc * 3u;
+        cell_coords_.resize(npc);
+        scratch_node_coords_.resize(npc);
+        for (std::size_t i = 0; i < npc; ++i) {
+            const auto x = flat_cell_coords_.coords[base + i * 3u + 0u];
+            const auto y = flat_cell_coords_.coords[base + i * 3u + 1u];
+            const auto z = flat_cell_coords_.coords[base + i * 3u + 2u];
+            cell_coords_[i] = {x, y, z};
+            scratch_node_coords_[i] = math::Vector<Real, 3>{x, y, z};
+        }
+    } else {
+        mesh.getCellCoordinates(cell_id, cell_coords_);
+        scratch_node_coords_.resize(cell_coords_.size());
+        for (std::size_t i = 0; i < cell_coords_.size(); ++i) {
+            scratch_node_coords_[i] = math::Vector<Real, 3>{
+                cell_coords_[i][0], cell_coords_[i][1], cell_coords_[i][2]};
+        }
     }
+    const auto n_nodes = cell_coords_.size();
 
 #ifdef SVMP_FE_ASSEMBLY_TIMING
     g_pc_setup += PC_TP() - pc_t0;
@@ -4436,6 +4453,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     }
     ensureFieldAccessPlans(mesh);
     ensureResolvedVectorTables(mesh);
+    ensureFlatCellCoords(mesh);
 
     // Pre-resolve matrix CSR slots for all terms that assemble matrices.
     // Tables persist across Newton iterations; subsequent insertions become
@@ -4541,6 +4559,9 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         }
     }
     const bool any_need_field_solutions = !union_field_reqs.empty();
+    if (any_need_field_solutions) {
+        ensureFieldRecipes(mesh, union_field_reqs);
+    }
 
     // Determine max DOFs for context reservation
     LocalIndex max_dofs = 0;
@@ -5731,7 +5752,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         const auto cell_id = gids[begin + slot];
                         auto& ctx = batch_contexts[slot];
                         double tp0 = TP();
-                        populateFieldSolutionData(ctx, mesh, cell_id, union_field_reqs);
+                        populateFieldSolutionDataFast(ctx, mesh, cell_id, union_field_reqs);
                         tp_fb_field += TP() - tp0;
                     }
                 }
@@ -9778,6 +9799,401 @@ std::unique_ptr<Assembler> createAssembler(ThreadingStrategy strategy)
 std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options)
 {
     return createAssembler(options.threading);
+}
+
+// ============================================================================
+// Tier 3: Flat Cell Data Table
+// ============================================================================
+
+void StandardAssembler::ensureFlatCellCoords(const IMeshAccess& mesh) {
+    if (flat_cell_coords_.valid && flat_cell_coords_.mesh == &mesh) {
+        return;
+    }
+    const int dim = mesh.dimension();
+    const auto n_cells = mesh.numCells();
+    if (n_cells == 0) {
+        flat_cell_coords_.valid = false;
+        return;
+    }
+
+    // Determine nodes per cell from first cell type
+    GlobalIndex first_cell = -1;
+    mesh.forEachCell([&](GlobalIndex cid) {
+        if (first_cell < 0) first_cell = cid;
+    });
+    if (first_cell < 0) {
+        flat_cell_coords_.valid = false;
+        return;
+    }
+
+    std::vector<std::array<Real, 3>> tmp_coords;
+    mesh.getCellCoordinates(first_cell, tmp_coords);
+    const int nodes_per_cell = static_cast<int>(tmp_coords.size());
+
+    // Allocate flat array: n_cells * nodes_per_cell * 3
+    flat_cell_coords_.coords.resize(
+        static_cast<std::size_t>(n_cells) *
+        static_cast<std::size_t>(nodes_per_cell) * 3u);
+    flat_cell_coords_.dim = dim;
+    flat_cell_coords_.nodes_per_cell = nodes_per_cell;
+
+    // Fill from mesh
+    mesh.forEachCell([&](GlobalIndex cid) {
+        mesh.getCellCoordinates(cid, tmp_coords);
+        const auto base = static_cast<std::size_t>(cid) *
+                          static_cast<std::size_t>(nodes_per_cell) * 3u;
+        for (int n = 0; n < nodes_per_cell; ++n) {
+            flat_cell_coords_.coords[base + static_cast<std::size_t>(n) * 3u + 0u] = tmp_coords[static_cast<std::size_t>(n)][0];
+            flat_cell_coords_.coords[base + static_cast<std::size_t>(n) * 3u + 1u] = tmp_coords[static_cast<std::size_t>(n)][1];
+            flat_cell_coords_.coords[base + static_cast<std::size_t>(n) * 3u + 2u] = tmp_coords[static_cast<std::size_t>(n)][2];
+        }
+    });
+
+    flat_cell_coords_.mesh = &mesh;
+    flat_cell_coords_.valid = true;
+}
+
+// ============================================================================
+// Tier 1: Cached Field Evaluation Recipes
+// ============================================================================
+
+void StandardAssembler::ensureFieldRecipes(
+    const IMeshAccess& mesh,
+    const std::vector<FieldRequirement>& requirements)
+{
+    if (cached_field_recipes_valid_ && !requirements.empty()) {
+        // Check if recipes match current requirements
+        bool match = (cached_field_recipes_.size() == requirements.size());
+        if (match) {
+            for (std::size_t i = 0; i < requirements.size(); ++i) {
+                if (cached_field_recipes_[i].field_id != requirements[i].field) {
+                    match = false;
+                    break;
+                }
+            }
+        }
+        if (match) return;
+    }
+
+    ensureFieldAccessPlans(mesh);
+    cached_field_recipes_.clear();
+    cached_field_recipes_.reserve(requirements.size());
+
+    for (const auto& req : requirements) {
+        CachedFieldRecipe recipe;
+        recipe.field_id = req.field;
+        recipe.access = findFieldAccessPlan(req.field);
+        if (!recipe.access || !recipe.access->space || !recipe.access->dof_map) {
+            cached_field_recipes_.push_back(recipe);
+            continue;
+        }
+
+        const auto& space = *recipe.access->space;
+        recipe.is_product = recipe.access->is_product;
+        recipe.field_type = recipe.access->field_type;
+        recipe.value_dim = recipe.access->value_dimension;
+        recipe.n_dofs = static_cast<LocalIndex>(space.dofs_per_element());
+
+        // Get element for first cell to determine scalar DOF count
+        GlobalIndex first_cell = -1;
+        mesh.forEachCell([&](GlobalIndex cid) {
+            if (first_cell < 0) first_cell = cid;
+        });
+        if (first_cell >= 0) {
+            const ElementType cell_type = mesh.getCellType(first_cell);
+            const auto& element = getElement(space, first_cell, cell_type);
+            recipe.n_scalar_dofs = static_cast<LocalIndex>(element.num_dofs());
+        }
+
+        recipe.want_values = hasFlag(req.required, RequiredData::SolutionValues) ||
+                             (req.required == RequiredData::None);
+        recipe.want_gradients = hasFlag(req.required, RequiredData::SolutionGradients);
+        recipe.want_hessians = hasFlag(req.required, RequiredData::SolutionHessians);
+        recipe.want_laplacians = hasFlag(req.required, RequiredData::SolutionLaplacians);
+
+        // Pre-cache basis cache entry
+        if (cached_quad_rule_) {
+            const bool need_grads = recipe.want_gradients;
+            const bool need_hess = recipe.want_hessians || recipe.want_laplacians;
+            if (first_cell >= 0) {
+                const ElementType cell_type = mesh.getCellType(first_cell);
+                const auto& element = getElement(space, first_cell, cell_type);
+                recipe.bcache = &basis::BasisCache::instance().get_or_compute(
+                    element.basis(), *cached_quad_rule_, need_grads, need_hess);
+            }
+        }
+
+        cached_field_recipes_.push_back(recipe);
+    }
+
+    cached_field_recipes_valid_ = true;
+}
+
+void StandardAssembler::populateFieldSolutionDataFast(
+    AssemblyContext& context,
+    const IMeshAccess& mesh,
+    GlobalIndex cell_id,
+    const std::vector<FieldRequirement>& requirements)
+{
+    // Use cached recipes to skip per-field lookups.
+    // Falls back to the original path if recipes aren't valid.
+    if (!cached_field_recipes_valid_ ||
+        cached_field_recipes_.size() != requirements.size()) {
+        populateFieldSolutionData(context, mesh, cell_id, requirements);
+        return;
+    }
+
+    context.clearFieldSolutionData();
+    if (requirements.empty()) return;
+
+    context.suspendJITFieldTableRebuild();
+
+    const auto n_qpts = context.numQuadraturePoints();
+    const auto ctx_inv_jacs = context.inverseJacobians();
+
+    auto& local_coeffs = scratch_field_local_coeffs_;
+    auto& scalar_values = scratch_fsd_scalar_values_;
+    auto& scalar_gradients = scratch_fsd_scalar_gradients_;
+    auto& vector_values = scratch_fsd_vector_values_;
+    auto& vector_jacobians = scratch_fsd_vector_jacobians_;
+
+    for (std::size_t ri = 0; ri < requirements.size(); ++ri) {
+        const auto& recipe = cached_field_recipes_[ri];
+        const auto& req = requirements[ri];
+        if (!recipe.access || !recipe.access->space) {
+            // Fallback for invalid recipe
+            populateFieldSolutionData(context, mesh, cell_id, requirements);
+            context.resumeJITFieldTableRebuild();
+            return;
+        }
+
+        const auto n_dofs = recipe.n_dofs;
+        const auto n_scalar = recipe.n_scalar_dofs;
+
+        // Gather DOF coefficients (direct, no virtual dispatch)
+        const auto cell_dofs = getCellDofsFromTable(*recipe.access->dof_table, cell_id);
+        local_coeffs.resize(cell_dofs.size());
+        gatherCellVectorCoefficients(cell_id, recipe.access->dof_map,
+                                     recipe.access->dof_offset,
+                                     cell_dofs, current_solution_view_,
+                                     current_solution_, local_coeffs,
+                                     "populateFieldSolutionDataFast", false);
+
+        // Use cached basis cache entry (no hash lookup)
+        const auto* field_bcache = recipe.bcache;
+
+        if (recipe.field_type == FieldType::Scalar && !recipe.is_product) {
+            // Scalar field: values + optional gradients
+            scalar_values.assign(static_cast<std::size_t>(n_qpts), 0.0);
+            if (recipe.want_gradients) {
+                scalar_gradients.assign(static_cast<std::size_t>(n_qpts),
+                                        AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+            }
+
+            if (field_bcache && !field_bcache->scalar_values.empty()) {
+                // Fast path: use cached reference basis
+                // Accumulate in reference space, then transform
+                // scalar_values layout: [dof * n_qpts + qp]
+                // gradients layout: [dof][qp] (vector of vectors)
+                const auto& sv = field_bcache->scalar_values;
+                const auto& sg = field_bcache->gradients;
+                const bool have_grads = recipe.want_gradients && !sg.empty();
+
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    Real val_sum = 0.0;
+                    Real gref0 = 0.0, gref1 = 0.0, gref2 = 0.0;
+                    for (LocalIndex i = 0; i < n_scalar; ++i) {
+                        const auto c = local_coeffs[static_cast<std::size_t>(i)];
+                        val_sum += c * sv[static_cast<std::size_t>(i) *
+                                         static_cast<std::size_t>(n_qpts) +
+                                         static_cast<std::size_t>(q)];
+                        if (have_grads) {
+                            const auto& gi = sg[static_cast<std::size_t>(i)]
+                                               [static_cast<std::size_t>(q)];
+                            gref0 += c * gi[0];
+                            gref1 += c * gi[1];
+                            gref2 += c * gi[2];
+                        }
+                    }
+                    scalar_values[static_cast<std::size_t>(q)] = val_sum;
+                    if (have_grads) {
+                        const auto& Ji = ctx_inv_jacs[static_cast<std::size_t>(q)];
+                        auto& g = scalar_gradients[static_cast<std::size_t>(q)];
+                        g[0] = Ji[0][0] * gref0 + Ji[1][0] * gref1 + Ji[2][0] * gref2;
+                        g[1] = Ji[0][1] * gref0 + Ji[1][1] * gref1 + Ji[2][1] * gref2;
+                        g[2] = Ji[0][2] * gref0 + Ji[1][2] * gref1 + Ji[2][2] * gref2;
+                    }
+                }
+            } else {
+                // No basis cache: fall back to original
+                populateFieldSolutionData(context, mesh, cell_id, requirements);
+                context.resumeJITFieldTableRebuild();
+                return;
+            }
+
+            context.setFieldSolutionScalar(req.field, scalar_values,
+                                          recipe.want_gradients ? scalar_gradients : std::span<const AssemblyContext::Vector3D>{});
+
+        } else if (recipe.is_product) {
+            // Vector (ProductSpace) field: values + optional jacobians
+            const int vdim = recipe.value_dim;
+            vector_values.assign(static_cast<std::size_t>(n_qpts),
+                                 AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+            if (recipe.want_gradients) {
+                vector_jacobians.assign(static_cast<std::size_t>(n_qpts),
+                                        AssemblyContext::Matrix3x3{});
+            }
+
+            if (field_bcache && !field_bcache->scalar_values.empty()) {
+                const auto& sv = field_bcache->scalar_values;
+                const auto& sg = field_bcache->gradients;
+                const bool have_grads = recipe.want_gradients && !sg.empty();
+
+                for (LocalIndex q = 0; q < n_qpts; ++q) {
+                    AssemblyContext::Vector3D v_sum{0.0, 0.0, 0.0};
+                    AssemblyContext::Matrix3x3 jac_ref{};
+
+                    for (LocalIndex si = 0; si < n_scalar; ++si) {
+                        const auto phi = sv[static_cast<std::size_t>(si) *
+                                           static_cast<std::size_t>(n_qpts) +
+                                           static_cast<std::size_t>(q)];
+                        Real gref0 = 0, gref1 = 0, gref2 = 0;
+                        if (have_grads) {
+                            const auto& gi = sg[static_cast<std::size_t>(si)]
+                                               [static_cast<std::size_t>(q)];
+                            gref0 = gi[0];
+                            gref1 = gi[1];
+                            gref2 = gi[2];
+                        }
+
+                        for (int comp = 0; comp < vdim; ++comp) {
+                            const auto c = local_coeffs[
+                                static_cast<std::size_t>(comp) *
+                                static_cast<std::size_t>(n_scalar) +
+                                static_cast<std::size_t>(si)];
+                            v_sum[comp] += c * phi;
+                            if (have_grads) {
+                                jac_ref[comp][0] += c * gref0;
+                                jac_ref[comp][1] += c * gref1;
+                                jac_ref[comp][2] += c * gref2;
+                            }
+                        }
+                    }
+
+                    vector_values[static_cast<std::size_t>(q)] = v_sum;
+                    if (have_grads) {
+                        const auto& Ji = ctx_inv_jacs[static_cast<std::size_t>(q)];
+                        auto& jac = vector_jacobians[static_cast<std::size_t>(q)];
+                        for (int comp = 0; comp < vdim; ++comp) {
+                            for (int d = 0; d < 3; ++d) {
+                                jac[comp][d] = jac_ref[comp][0] * Ji[0][d]
+                                             + jac_ref[comp][1] * Ji[1][d]
+                                             + jac_ref[comp][2] * Ji[2][d];
+                            }
+                        }
+                    }
+                }
+            } else {
+                populateFieldSolutionData(context, mesh, cell_id, requirements);
+                context.resumeJITFieldTableRebuild();
+                return;
+            }
+
+            context.setFieldSolutionVector(req.field, recipe.value_dim, vector_values,
+                                          recipe.want_gradients ? vector_jacobians : std::span<const AssemblyContext::Matrix3x3>{});
+
+        } else {
+            // Unsupported field type: fall back
+            populateFieldSolutionData(context, mesh, cell_id, requirements);
+            context.resumeJITFieldTableRebuild();
+            return;
+        }
+    }
+
+    // Previous solutions (time integration): evaluate previous-step field
+    // values at QPs and bind via setFieldPreviousSolutionScalarK / VectorK.
+    if (time_integration_ != nullptr) {
+        int required_history = 0;
+        if (time_integration_->dt1)
+            required_history = std::max(required_history,
+                                        time_integration_->dt1->requiredHistoryStates());
+        if (time_integration_->dt2)
+            required_history = std::max(required_history,
+                                        time_integration_->dt2->requiredHistoryStates());
+        for (const auto& s : time_integration_->dt_extra)
+            if (s) required_history = std::max(required_history,
+                                               s->requiredHistoryStates());
+
+        if (required_history > 0) {
+            auto& prev_coeffs = scratch_field_local_coeffs_;  // reuse scratch
+            auto& prev_scalar_vals = scratch_fsd_scalar_values_;
+            auto& prev_vec_vals = scratch_fsd_vector_values_;
+
+            for (int k = 1; k <= required_history; ++k) {
+                const auto& prev_sol = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                const auto* prev_view =
+                    (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+                        ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+                        : nullptr;
+
+                for (std::size_t ri = 0; ri < requirements.size(); ++ri) {
+                    const auto& recipe = cached_field_recipes_[ri];
+                    if (!recipe.access || !recipe.bcache) continue;
+
+                    const auto n_scalar = recipe.n_scalar_dofs;
+                    const auto cell_dofs = getCellDofsFromTable(
+                        *recipe.access->dof_table, cell_id);
+                    prev_coeffs.resize(cell_dofs.size());
+                    gatherCellVectorCoefficients(
+                        cell_id, recipe.access->dof_map,
+                        recipe.access->dof_offset, cell_dofs,
+                        prev_view, prev_sol, prev_coeffs,
+                        "populateFieldSolutionDataFast:prev", false);
+
+                    const auto& sv = recipe.bcache->scalar_values;
+
+                    if (recipe.field_type == FieldType::Scalar && !recipe.is_product) {
+                        prev_scalar_vals.resize(static_cast<std::size_t>(n_qpts));
+                        for (LocalIndex q = 0; q < n_qpts; ++q) {
+                            Real val = 0.0;
+                            for (LocalIndex i = 0; i < n_scalar; ++i) {
+                                val += prev_coeffs[static_cast<std::size_t>(i)] *
+                                       sv[static_cast<std::size_t>(i) *
+                                          static_cast<std::size_t>(n_qpts) +
+                                          static_cast<std::size_t>(q)];
+                            }
+                            prev_scalar_vals[static_cast<std::size_t>(q)] = val;
+                        }
+                        context.setFieldPreviousSolutionScalarK(
+                            requirements[ri].field, k, prev_scalar_vals);
+                    } else if (recipe.is_product) {
+                        prev_vec_vals.resize(static_cast<std::size_t>(n_qpts));
+                        for (LocalIndex q = 0; q < n_qpts; ++q) {
+                            AssemblyContext::Vector3D v{0.0, 0.0, 0.0};
+                            for (LocalIndex si = 0; si < n_scalar; ++si) {
+                                const auto phi =
+                                    sv[static_cast<std::size_t>(si) *
+                                       static_cast<std::size_t>(n_qpts) +
+                                       static_cast<std::size_t>(q)];
+                                for (int c = 0; c < recipe.value_dim; ++c) {
+                                    v[c] += prev_coeffs[
+                                        static_cast<std::size_t>(c) *
+                                        static_cast<std::size_t>(n_scalar) +
+                                        static_cast<std::size_t>(si)] * phi;
+                                }
+                            }
+                            prev_vec_vals[static_cast<std::size_t>(q)] = v;
+                        }
+                        context.setFieldPreviousSolutionVectorK(
+                            requirements[ri].field, k, recipe.value_dim,
+                            prev_vec_vals);
+                    }
+                }
+            }
+        }
+    }
+
+    context.resumeJITFieldTableRebuild();
 }
 
 } // namespace assembly
