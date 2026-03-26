@@ -12,9 +12,13 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
 #include "FE/Forms/BoundaryFunctional.h"
-#include "FE/Forms/CoupledBCs.h"
+#include "FE/Forms/CoupledBCs.h"       // retained for backward compatibility
 #include "FE/Forms/StandardBCs.h"
-#include "FE/Systems/AuxiliaryStateBuilder.h"
+#include "FE/Systems/AuxiliaryBindings.h"
+#include "FE/Systems/AuxiliaryModelBuilder.h"
+#include "FE/Systems/AuxiliaryModelDSL.h"
+#include "FE/Systems/AuxiliaryStateBuilder.h"   // retained for backward compatibility
+#include "FE/Systems/FESystem.h"
 
 #include <memory>
 #include <stdexcept>
@@ -147,6 +151,106 @@ namespace detail {
     return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
 }
 
+/**
+ * @brief Create an RCR outflow BC using the math-first auxiliary DSL.
+ *
+ * This is the preferred implementation path.  It registers the boundary
+ * flow integral as an auxiliary input, builds the RCR model via the
+ * math-first DSL, deploys it with typed handles, and returns a standard
+ * NaturalBC that reads the outlet pressure from the deployment handle.
+ *
+ * @param bc       RCR outflow boundary condition options.
+ * @param system   The FESystem to register inputs and deploy models on.
+ * @param u_id     Velocity field ID.
+ * @param velocity_space Velocity function space.
+ * @param velocity_field_name Name of the velocity field (e.g., "u").
+ * @param u        FormExpr for velocity (test/trial context).
+ * @param rho      FormExpr for density.
+ */
+[[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toCoupledOutflowBC(
+    const IncompressibleNavierStokesVMSOptions::CoupledRCROutflowBC& bc,
+    FE::systems::FESystem& system,
+    FE::FieldId u_id,
+    const FE::spaces::FunctionSpace& velocity_space,
+    std::string_view velocity_field_name,
+    const FE::forms::FormExpr& u,
+    const FE::forms::FormExpr& rho)
+{
+    using namespace FE::forms;
+    using namespace FE::systems;
+
+    const int marker =
+        FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toCoupledOutflowBC");
+
+    const std::string q_name = bc.functional_name.empty()
+        ? ("ns_Q_" + std::to_string(marker))
+        : bc.functional_name;
+
+    const FE::Real Rp = bc.Rp;
+    const FE::Real C  = bc.C;
+    const FE::Real Rd = bc.Rd;
+    const FE::Real Pd = bc.Pd;
+
+    if (Rd == 0.0) {
+        throw std::invalid_argument("CoupledRCROutflowBC: Rd must be nonzero");
+    }
+
+    const auto n  = FormExpr::normal();
+    const auto un = inner(u, n);
+    const auto max_backflow = FormExpr::constant(0.5) * (abs(un) - un);
+    const auto beta =
+        FE::forms::bc::toScalarExpr(bc.backflow_beta, detail::markerName("ns_rcr_backflow_beta", marker));
+
+    // Step 1: Register boundary-integral input for Q via handle-returning API.
+    const auto u_disc =
+        FormExpr::discreteField(u_id, velocity_space, std::string(velocity_field_name));
+
+    auto Q = system.boundaryIntegral(q_name, inner(u_disc, n), marker);
+
+    FormExpr p_out;
+
+    if (C == 0.0) {
+        // Purely resistive: P_out = Pd + (Rp + Rd) * Q — no ODE needed.
+        p_out = system.derivedInput(
+            "ns_P_out_" + std::to_string(marker),
+            FormExpr::constant(Pd) + FormExpr::constant(Rp + Rd) * Q.expr());
+    } else {
+        // Step 2: Build RCR model with the math-first DSL.
+        auto rcr_model = aux::model("rcr_windkessel", [](ModelFacade& m) {
+            auto Q  = m.input("Q");
+            auto X  = m.state("X");
+            auto [Rp, C, Rd, Pd] = m.params("Rp", "C", "Rd", "Pd");
+
+            m << ddt(X) == (Q - (X - Pd) / Rd) / C;
+            m << out("P_out") == X + Rp * Q;
+        });
+
+        // Step 3: Deploy with typed handles and named deployment sugar.
+        auto rcr = system.deploy(
+            use(rcr_model)
+                .name("ns_rcr_" + std::to_string(marker))
+                .global()
+                .partitioned("BackwardEuler")
+                .params({{"Rp", Rp}, {"C", C}, {"Rd", Rd}, {"Pd", Pd}})
+                .bind(Q)
+                .initialState({{"X", bc.X0}})
+        );
+
+        // Step 4: Reference outlet pressure via deployment handle.
+        p_out = rcr.output("P_out");
+    }
+
+    // Step 5: Return a standard NaturalBC.
+    const auto flux = -p_out * n - beta * rho * max_backflow * u;
+    return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
+}
+
+/// @deprecated Use the overload that takes FESystem& instead.
+///
+/// This legacy overload uses CoupledNaturalBC + AuxiliaryStateBuilder.
+/// It remains functional for backward compatibility but the FESystem&
+/// overload is preferred for new code because it uses the generalized
+/// AuxiliaryState infrastructure.
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toCoupledOutflowBC(
     const IncompressibleNavierStokesVMSOptions::CoupledRCROutflowBC& bc,
     FE::FieldId u_id,
@@ -173,7 +277,7 @@ namespace detail {
     const auto n = FE::forms::FormExpr::normal();
     const auto un = FE::forms::inner(u, n);
     const auto max_backflow =
-        FE::forms::FormExpr::constant(0.5) * (FE::forms::abs(un) - un); // max(0, -u·n)
+        FE::forms::FormExpr::constant(0.5) * (FE::forms::abs(un) - un);
     const auto beta =
         FE::forms::bc::toScalarExpr(bc.backflow_beta, detail::markerName("ns_rcr_backflow_beta", marker));
 
@@ -186,7 +290,6 @@ namespace detail {
 
     FE::forms::FormExpr p_out;
     if (C == 0.0) {
-        // Purely resistive limit: X = Pd + Rd*Q, so p_out = X + Rp*Q = Pd + (Rd+Rp)*Q.
         const FE::Real Rsum = Rd + Rp;
         p_out = FE::forms::FormExpr::constant(Pd) + FE::forms::FormExpr::constant(Rsum) * Qsym;
     } else {
@@ -196,7 +299,6 @@ namespace detail {
         Q.name = q_name;
         Q.reduction = FE::forms::BoundaryFunctional::Reduction::Sum;
 
-        // ODE: dX/dt = (Q - (X - Pd)/Rd) / C
         const auto Xsym = FE::forms::FormExpr::auxiliaryState(x_name);
         const auto rhs =
             (Qsym - (Xsym - FE::forms::FormExpr::constant(Pd)) / FE::forms::FormExpr::constant(Rd)) /

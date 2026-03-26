@@ -1014,6 +1014,19 @@ void StandardAssembler::setCoupledValues(std::span<const Real> integrals,
 {
     coupled_integrals_ = integrals;
     coupled_aux_state_ = aux_state;
+    auxiliary_inputs_ = integrals;
+    auxiliary_state_ = aux_state;
+}
+
+void StandardAssembler::setAuxiliaryValues(std::span<const Real> inputs,
+                                            std::span<const Real> state,
+                                            std::span<const Real> outputs) noexcept
+{
+    auxiliary_inputs_ = inputs;
+    auxiliary_state_ = state;
+    auxiliary_outputs_ = outputs;
+    coupled_integrals_ = inputs;
+    coupled_aux_state_ = state;
 }
 
 void StandardAssembler::setMaterialStateProvider(IMaterialStateProvider* provider) noexcept
@@ -1672,7 +1685,7 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
                 context_.setParameterGetter(get_param_);
                 context_.setUserData(user_data_);
                 context_.setJITConstants(jit_constants_);
-                context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+                context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
                 context_.clearAllPreviousSolutionData();
                 context_.setBoundaryMarker(boundary_marker);
 
@@ -1903,7 +1916,7 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_.setParameterGetter(get_param_);
             context_.setUserData(user_data_);
             context_.setJITConstants(jit_constants_);
-            context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+            context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
             context_.clearAllPreviousSolutionData();
 
             std::array<LocalIndex, 4> align_plus_storage{};
@@ -1958,7 +1971,7 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_plus.setParameterGetter(get_param_);
             context_plus.setUserData(user_data_);
             context_plus.setJITConstants(jit_constants_);
-            context_plus.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+            context_plus.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
             context_plus.clearAllPreviousSolutionData();
 
 		            if (need_solution) {
@@ -2259,7 +2272,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         context_.setParameterGetter(get_param_);
         context_.setUserData(user_data_);
         context_.setJITConstants(jit_constants_);
-        context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+        context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
         context_.clearAllPreviousSolutionData();
 
         std::array<LocalIndex, 4> align_plus_storage{};
@@ -2314,7 +2327,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         context_plus.setParameterGetter(get_param_);
         context_plus.setUserData(user_data_);
         context_plus.setJITConstants(jit_constants_);
-        context_plus.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+        context_plus.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
         context_plus.clearAllPreviousSolutionData();
 
 	        if (need_solution) {
@@ -2626,7 +2639,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         ctx.setParameterGetter(get_param_);
         ctx.setUserData(user_data_);
         ctx.setJITConstants(jit_constants_);
-        ctx.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+        ctx.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
         ctx.clearAllPreviousSolutionData();
         tp_sub_setters += TP_SUB() - tp_s0;
 
@@ -5324,8 +5337,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         thread_ctx.setParameterGetter(get_param_);
                         thread_ctx.setUserData(user_data_);
                         thread_ctx.setJITConstants(jit_constants_);
-                        thread_ctx.setCoupledValues(coupled_integrals_,
-                                                    coupled_aux_state_);
+                        thread_ctx.setAuxiliaryValues(auxiliary_inputs_,
+                                                    auxiliary_state_, auxiliary_outputs_);
                         thread_ctx.clearAllPreviousSolutionData();
 
                         // --- 3. Field solutions (thread-safe workspace version) ---
@@ -5732,7 +5745,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 ctx.setParameterGetter(get_param_);
                 ctx.setUserData(user_data_);
                 ctx.setJITConstants(jit_constants_);
-                ctx.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+                ctx.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
                 ctx.clearAllPreviousSolutionData();
                 tp_fb_setters += TP() - tp0;
             }
@@ -6360,7 +6373,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 ctx.setParameterGetter(get_param_);
                 ctx.setUserData(user_data_);
                 ctx.setJITConstants(jit_constants_);
-                ctx.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+                ctx.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
                 ctx.clearAllPreviousSolutionData();
                 tp_fb_setters += TP() - tp0;
 
@@ -6612,7 +6625,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         context_.setParameterGetter(get_param_);
         context_.setUserData(user_data_);
         context_.setJITConstants(jit_constants_);
-        context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+        context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
         context_.clearAllPreviousSolutionData();
 
         // 3. Populate union of field solution data ONCE

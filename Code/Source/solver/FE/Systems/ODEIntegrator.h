@@ -3,21 +3,22 @@
 
 /**
  * @file ODEIntegrator.h
- * @brief Generic scalar ODE integrator for AuxiliaryState variables
+ * @brief Legacy scalar ODE integrator for AuxiliaryState variables.
  *
- * This integrator is physics-agnostic: it advances a named scalar variable
- * in `systems::AuxiliaryState` using a user-provided RHS function and a chosen
- * time-integration method.
+ * This is the original scalar integrator used by the coupled-boundary path.
+ * It advances a single named scalar variable in the flat `AuxiliaryState`
+ * buffer using a FormExpr-based RHS function.
  *
- * The RHS function has access to:
- * - the full AuxiliaryState (so coupled 0D models can reference other aux vars),
- * - the current BoundaryFunctionalResults (non-local boundary integrals),
- * - the current time `t`.
+ * ## Relationship to the generalized stepper interface
  *
- * Notes:
- * - Current scope: scalar variable integration (one named component at a time).
- * - Implicit methods (BackwardEuler/BDF2) use a robust scalar Newton solve with
- *   finite-difference derivative.
+ * The new `AuxiliaryStateStepper` interface (in `AuxiliaryStateStepper.h`)
+ * provides a block-level, residual-based, DAE-capable stepper API that
+ * supports multi-component blocks, implicit/explicit methods, and
+ * automatic derivative infrastructure.
+ *
+ * `ODEIntegrator` remains available for backward compatibility with the
+ * coupled-boundary ODE path (scalar FormExpr RHS + `PointEvaluator`).
+ * New auxiliary models should use `AuxiliaryStateStepper` instead.
  */
 
 #include "Core/Types.h"

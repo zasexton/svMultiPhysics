@@ -81,7 +81,7 @@ public:
         }
         std::sort(markers.begin(), markers.end());
         markers.erase(std::unique(markers.begin(), markers.end()), markers.end());
-        reg.spec.associated_markers = std::move(markers);
+        reg.associated_markers = std::move(markers);
 
         return reg;
     }

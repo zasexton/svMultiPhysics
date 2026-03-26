@@ -5,16 +5,36 @@
  * @file CoupledBoundaryManager.h
  * @brief Orchestration for coupled boundary conditions (boundary functionals + aux state)
  *
- * This class provides the FE-side infrastructure for non-local / 0D-3D coupled
- * boundary conditions:
- * - computes required boundary integrals (BoundaryFunctional),
- * - evolves auxiliary state via user-provided callbacks,
- * - provides a stable CoupledBCContext object for coefficient evaluators.
+ * @deprecated This class is the legacy coupled-boundary-specific path.
+ * New formulations should use the generalized AuxiliaryState subsystem:
  *
- * Current scope:
- * - Primary field specified at construction; secondary fields optionally registered.
- * - Boundary functionals may depend on any registered field subset.
- * - BoundaryFunctional reductions: Sum and Average (Max/Min throw for now).
+ * - Define models via `AuxiliaryModelBuilder` (Systems/AuxiliaryModelBuilder.h)
+ * - Deploy via `use(model)` (Systems/AuxiliaryBindings.h)
+ * - Register inputs via `AuxiliaryInputRegistry` (Systems/AuxiliaryInputRegistry.h)
+ * - Access via `FESystem::auxiliaryStateManager()` and `auxiliaryInputRegistry()`
+ *
+ * ## Migration paths
+ *
+ * ### Lumped boundary models (e.g., RCR, Windkessel)
+ *
+ * Old: `coupled.addAuxiliaryState(reg)` with scalar ODE RHS
+ * New: Define via `AuxiliaryModelBuilder`, deploy with `use(model).scope(Global)`
+ *      and bind boundary-reduction inputs.
+ *
+ * ### Per-boundary-entity models
+ *
+ * Old: Not supported in the legacy API (scalar-only)
+ * New: Deploy with `use(model).scope(BoundaryEntity).region({BoundarySet, "outlet"})`
+ *
+ * ### Boundary functionals
+ *
+ * Old: `coupled.addBoundaryFunctional(...)` + `boundaryIntegralValue("Q")`
+ * New: Register via `AuxiliaryInputRegistry` with `BoundaryReduction` producer,
+ *      reference via `AuxiliaryInput("Q")` in formulation expressions.
+ *
+ * This class remains functional for backward compatibility but internally
+ * owns its own `AuxiliaryState` and `BoundaryFunctionalResults`.  Future
+ * releases will thin this to a forwarding shim over the generalized subsystem.
  */
 
 #include "Core/Types.h"
@@ -69,6 +89,11 @@ public:
     void addBoundaryFunctional(forms::BoundaryFunctional functional);
     void addCoupledNeumannBC(constraints::CoupledNeumannBC bc);
     void addCoupledRobinBC(constraints::CoupledRobinBC bc);
+    /// @deprecated Use AuxiliaryModelBuilder + use(model) instead.
+    /// This method registers a scalar ODE auxiliary state variable in the
+    /// legacy flat AuxiliaryState buffer.  New formulations should define
+    /// auxiliary models via AuxiliaryModelBuilder and deploy them via
+    /// use(model).scope(Global) with boundary-reduction input bindings.
     void addAuxiliaryState(AuxiliaryStateRegistration registration);
 
     /**
@@ -123,8 +148,11 @@ public:
     // Accessors
     // ---------------------------------------------------------------------
 
+    /// @deprecated For new code, use FESystem::auxiliaryInputRegistry() instead.
     [[nodiscard]] const forms::BoundaryFunctionalResults& integrals() const noexcept { return integrals_; }
+    /// @deprecated For new code, use FESystem::auxiliaryStateManager() instead.
     [[nodiscard]] const AuxiliaryState& auxiliaryState() const noexcept { return aux_state_; }
+    /// @deprecated For new code, use FESystem::auxiliaryStateManager() instead.
     [[nodiscard]] AuxiliaryState& auxiliaryState() noexcept { return aux_state_; }
 
     [[nodiscard]] const constraints::CoupledBCContext& context() const noexcept { return ctx_; }
@@ -160,6 +188,7 @@ public:
      * and for coupled Jacobian computations.
      */
     Real boundaryMeasure(int boundary_marker, const SystemStateView& state);
+
 
     /**
      * @brief Compute auxiliary state values for a given set of boundary integrals

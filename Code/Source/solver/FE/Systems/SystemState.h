@@ -29,6 +29,9 @@ struct TimeIntegrationContext;
 
 namespace systems {
 
+class AuxiliaryStateManager;
+class AuxiliaryInputRegistry;
+
 struct SystemStateView {
     double time{0.0};
     double dt{0.0};
@@ -59,6 +62,15 @@ struct SystemStateView {
 
     std::function<std::optional<Real>(std::string_view)> getRealParam{};
     std::function<std::optional<params::Value>(std::string_view)> getParam{};
+
+    // Optional read-only view of the generalized auxiliary state manager.
+    // When present, assemblers and evaluators can access auxiliary block data
+    // (work buffers, committed state, history) through this pointer.
+    // Lifetime is managed by the caller (typically FESystem or time loop).
+    const AuxiliaryStateManager* auxiliary_state{nullptr};
+
+    // Optional read-only view of the auxiliary input registry.
+    const AuxiliaryInputRegistry* auxiliary_inputs{nullptr};
 
     // Optional user-defined context pointer for advanced constitutive access.
     // Lifetime is managed by the caller.

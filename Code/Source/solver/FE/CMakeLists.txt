@@ -704,9 +704,34 @@ set(FE_SYSTEMS_HEADERS
     Systems/ContactPenaltyKernel.h
     Systems/AuxiliaryState.h
     Systems/AuxiliaryStateBuilder.h
+    Systems/AuxiliaryStateTypes.h
+    Systems/AuxiliaryStateStorage.h
+    Systems/AuxiliaryHistoryBuffer.h
+    Systems/AuxiliaryStateIndexing.h
+    Systems/AuxiliaryStateManager.h
+    Systems/AuxiliaryStateModel.h
+    Systems/AuxiliaryDerivativeProvider.h
+    Systems/AuxiliaryStateStepper.h
+    Systems/AuxiliaryInputRegistry.h
+    Systems/AuxiliaryCouplingGraph.h
+    Systems/AuxiliaryOperatorBuilder.h
+    Systems/AuxiliaryOperatorRegistry.h
+    Systems/AuxiliaryModelBuilder.h
+    Systems/AuxiliaryModelDSL.h
+    Systems/AuxiliaryBindings.h
+    Systems/FEQuantityDefinition.h
+    Systems/FEQuantityRegistry.h
+    Systems/AuxiliaryDAEAnalyzer.h
+    Systems/AuxiliaryInitializationSolver.h
+    Systems/AuxiliaryEventManager.h
+    Systems/AuxiliaryNonsmoothPolicy.h
+    Systems/AuxiliaryHistoryService.h
+    Systems/AuxiliaryTransferOperator.h
+    Systems/AuxiliaryMultirateScheduler.h
     Systems/BoundaryConditionManager.h
     Systems/ODEIntegrator.h
     Systems/CoupledBoundaryConditions.h
+    Systems/BoundaryReductionService.h
     Systems/CoupledBoundaryManager.h
     Systems/FESystem.h
     Systems/FormsInstaller.h
@@ -752,8 +777,28 @@ set(FE_SYSTEMS_SOURCES
     Systems/HDivNormalConstraint.cpp
     Systems/StrongDirichletConstraint.cpp
     Systems/TimeIntegrator.cpp
+    Systems/BoundaryReductionService.cpp
     Systems/CoupledBoundaryManager.cpp
     Systems/ODEIntegrator.cpp
+    Systems/AuxiliaryStateStorage.cpp
+    Systems/AuxiliaryHistoryBuffer.cpp
+    Systems/AuxiliaryStateIndexing.cpp
+    Systems/AuxiliaryStateManager.cpp
+    Systems/AuxiliaryDerivativeProvider.cpp
+    Systems/AuxiliaryStateStepper.cpp
+    Systems/AuxiliaryInputRegistry.cpp
+    Systems/AuxiliaryCouplingGraph.cpp
+    Systems/AuxiliaryOperatorBuilder.cpp
+    Systems/AuxiliaryOperatorRegistry.cpp
+    Systems/AuxiliaryModelBuilder.cpp
+    Systems/AuxiliaryBindings.cpp
+    Systems/FEQuantityRegistry.cpp
+    Systems/AuxiliaryDAEAnalyzer.cpp
+    Systems/AuxiliaryInitializationSolver.cpp
+    Systems/AuxiliaryEventManager.cpp
+    Systems/AuxiliaryHistoryService.cpp
+    Systems/AuxiliaryTransferOperator.cpp
+    Systems/AuxiliaryMultirateScheduler.cpp
     Systems/TransientSystem.cpp
 )
 
@@ -2102,6 +2147,7 @@ if(FE_BUILD_TESTS)
 			                Tests/Unit/Forms/Tensor/test_TensorPrettyPrinting.cpp
 			                Tests/Unit/Forms/Tensor/test_SpecialTensors.cpp
 			                Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp
+		                Tests/Unit/Forms/test_AuxiliaryVocabulary.cpp
 		                Tests/Unit/Forms/test_ConstitutiveModel.cpp
 	                Tests/Unit/Forms/test_PrimitiveTypes.cpp
 		                Tests/Unit/Forms/test_main.cpp
@@ -2215,6 +2261,16 @@ if(FE_BUILD_TESTS)
 	                Tests/Unit/Systems/test_CoupledBoundaryManager.cpp
                 Tests/Unit/Systems/test_CoupledBoundaryConditionHelpers.cpp
                 Tests/Unit/Systems/test_AuxiliaryStateBuilder.cpp
+                Tests/Unit/Systems/test_AuxiliaryStateTypes.cpp
+                Tests/Unit/Systems/test_AuxiliaryStateStorage.cpp
+                Tests/Unit/Systems/test_AuxiliaryHistoryBuffer.cpp
+                Tests/Unit/Systems/test_AuxiliaryStateIndexing.cpp
+                Tests/Unit/Systems/test_AuxiliaryStateManager.cpp
+                Tests/Unit/Systems/test_AuxiliaryStateModel.cpp
+                Tests/Unit/Systems/test_AuxiliaryInputRegistry.cpp
+                Tests/Unit/Systems/test_BoundaryIntegralInput.cpp
+                Tests/Unit/Systems/test_AuxiliaryOperators.cpp
+                Tests/Unit/Systems/test_AuxiliaryModelBuilder.cpp
                 Tests/Unit/Systems/test_ODEIntegrator.cpp
                 Tests/Unit/Systems/test_OperatorBackends.cpp
                 Tests/Unit/Systems/test_TransientDt.cpp

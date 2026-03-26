@@ -323,6 +323,8 @@ struct ABIV3 {
     static constexpr std::size_t side_jit_constants_off = offsetof(assembly::jit::KernelSideArgsV6, jit_constants);
     static constexpr std::size_t side_coupled_integrals_off = offsetof(assembly::jit::KernelSideArgsV6, coupled_integrals);
     static constexpr std::size_t side_coupled_aux_off = offsetof(assembly::jit::KernelSideArgsV6, coupled_aux);
+    static constexpr std::size_t side_auxiliary_inputs_off = offsetof(assembly::jit::KernelSideArgsV6, auxiliary_inputs);
+    static constexpr std::size_t side_auxiliary_outputs_off = offsetof(assembly::jit::KernelSideArgsV6, auxiliary_outputs);
 
     static constexpr std::size_t side_time_off = offsetof(assembly::jit::KernelSideArgsV6, time);
     static constexpr std::size_t side_dt_off = offsetof(assembly::jit::KernelSideArgsV6, dt);
@@ -629,6 +631,8 @@ struct ShapeInferenceResult {
             case FormExprType::ParameterRef:
             case FormExprType::BoundaryIntegralRef:
             case FormExprType::AuxiliaryStateRef:
+            case FormExprType::AuxiliaryInputRef:
+            case FormExprType::AuxiliaryOutputRef:
             case FormExprType::MaterialStateOldRef:
             case FormExprType::MaterialStateWorkRef:
             case FormExprType::Time:
@@ -2242,6 +2246,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             llvm::Value* jit_constants{nullptr};
             llvm::Value* coupled_integrals{nullptr};
             llvm::Value* coupled_aux{nullptr};
+            llvm::Value* auxiliary_inputs{nullptr};
+            llvm::Value* auxiliary_outputs{nullptr};
 
             llvm::Value* time{nullptr};
             llvm::Value* dt{nullptr};
@@ -2329,6 +2335,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             s.jit_constants = loadPtr(side_ptr, ABIV3::side_jit_constants_off);
             s.coupled_integrals = loadPtr(side_ptr, ABIV3::side_coupled_integrals_off);
             s.coupled_aux = loadPtr(side_ptr, ABIV3::side_coupled_aux_off);
+            s.auxiliary_inputs = loadPtr(side_ptr, ABIV3::side_auxiliary_inputs_off);
+            s.auxiliary_outputs = loadPtr(side_ptr, ABIV3::side_auxiliary_outputs_off);
 
             s.time = loadF64(side_ptr, ABIV3::side_time_off);
             s.dt = loadF64(side_ptr, ABIV3::side_dt_off);
@@ -5293,6 +5301,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         break;
                     }
 
+                    case FormExprType::AuxiliaryInputRef: {
+                        auto* idx64 = builder.getInt64(op.imm0);
+                        values[op_idx] = makeScalar(loadRealPtrAt(side.auxiliary_inputs, idx64));
+                        break;
+                    }
+
+                    case FormExprType::AuxiliaryOutputRef: {
+                        auto* idx64 = builder.getInt64(op.imm0);
+                        values[op_idx] = makeScalar(loadRealPtrAt(side.auxiliary_outputs, idx64));
+                        break;
+                    }
+
                     case FormExprType::DiscreteField:
                     case FormExprType::StateField: {
                         const int fid = unpackFieldIdImm1(op.imm1);
@@ -8176,6 +8196,16 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::AuxiliaryStateRef: {
                         auto* idx64 = builder.getInt64(op.imm0);
                         values[op_idx] = makeScalar(loadRealPtrAt(side.coupled_aux, idx64));
+                        break;
+                    }
+                    case FormExprType::AuxiliaryInputRef: {
+                        auto* idx64 = builder.getInt64(op.imm0);
+                        values[op_idx] = makeScalar(loadRealPtrAt(side.auxiliary_inputs, idx64));
+                        break;
+                    }
+                    case FormExprType::AuxiliaryOutputRef: {
+                        auto* idx64 = builder.getInt64(op.imm0);
+                        values[op_idx] = makeScalar(loadRealPtrAt(side.auxiliary_outputs, idx64));
                         break;
                     }
                     case FormExprType::DiscreteField:

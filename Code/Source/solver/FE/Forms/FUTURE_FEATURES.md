@@ -2,7 +2,7 @@
 
 This document tracks follow-on work that is **not yet implemented** in `FE/Forms`, but is expected to be needed as the module matures.
 
-For an extensive “future PDE vocabulary” checklist (including cross-module concepts and scoping), see `FE/Forms/VOCABULARY.md`.
+For an extensive “future PDE vocabulary” checklist (including cross-module concepts and scoping), see `FE/Forms/VOCABULARY_ROADMAP.md`.
 
 ## Front-Ends and Compilation
 

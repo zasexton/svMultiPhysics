@@ -863,6 +863,19 @@ void FunctionalAssembler::setCoupledValues(std::span<const Real> integrals,
 {
     coupled_integrals_ = integrals;
     coupled_aux_state_ = aux_state;
+    auxiliary_inputs_ = integrals;
+    auxiliary_state_ = aux_state;
+}
+
+void FunctionalAssembler::setAuxiliaryValues(std::span<const Real> inputs,
+                                              std::span<const Real> state,
+                                              std::span<const Real> outputs) noexcept
+{
+    auxiliary_inputs_ = inputs;
+    auxiliary_state_ = state;
+    auxiliary_outputs_ = outputs;
+    coupled_integrals_ = inputs;
+    coupled_aux_state_ = state;
 }
 
 void FunctionalAssembler::setHistoryWeights(std::span<const Real> weights) noexcept
@@ -1011,8 +1024,10 @@ void FunctionalAssembler::bindFieldSolutionData(AssemblyContext& context,
                     " not registered (primary=" + std::to_string(primary_field_) +
                     "). Register via registerFieldBinding() for multi-field functionals.");
 
-        FE_THROW_IF(dof_per_node_ <= 0, InvalidArgumentException,
-                    "FunctionalAssembler: dof_per_node must be set for multi-field evaluation");
+        // dof_per_node_ == 0 means block DOF layout mode (component_offset
+        // is a direct index into getCellDofs(), not per-node interleaved).
+        FE_THROW_IF(dof_per_node_ < 0, InvalidArgumentException,
+                    "FunctionalAssembler: dof_per_node must be >= 0 for multi-field evaluation");
 
         // Gather this field's coefficients from the monolithic solution
         const auto& sol = solution_;
@@ -1027,14 +1042,25 @@ void FunctionalAssembler::bindFieldSolutionData(AssemblyContext& context,
         const int dpn = dof_per_node_;
         const int comp_off = binding->component_offset;
         const int n_comp = binding->n_components;
-        const auto n_nodes = static_cast<int>(all_dofs.size()) / dpn;
 
-        // Extract per-field coefficients
+        // Extract per-field coefficients from the monolithic cell DOF array.
+        // Two modes:
+        //   dpn > 0 (interleaved): mono_idx = node * dpn + comp_off + c
+        //   dpn == 0 (block):      mono_idx = comp_off + node * n_comp + c
+        // Block mode uses comp_off as a direct start index into all_dofs.
+        const bool block_mode = (dpn <= 0);
+        const int n_nodes = block_mode
+            ? static_cast<int>(binding->space->getElement(
+                  binding->space->element_type(), cell_id).num_dofs())
+            : static_cast<int>(all_dofs.size()) / dpn;
+
         std::vector<Real> field_coeffs;
         field_coeffs.resize(static_cast<std::size_t>(n_nodes * n_comp));
         for (int node = 0; node < n_nodes; ++node) {
             for (int c = 0; c < n_comp; ++c) {
-                const auto mono_idx = static_cast<std::size_t>(node * dpn + comp_off + c);
+                const auto mono_idx = block_mode
+                    ? static_cast<std::size_t>(comp_off + node * n_comp + c)
+                    : static_cast<std::size_t>(node * dpn + comp_off + c);
                 FE_THROW_IF(mono_idx >= all_dofs.size(), FEException,
                             "FunctionalAssembler: DOF index out of bounds for secondary field");
                 const auto global_dof = all_dofs[mono_idx];
@@ -1511,7 +1537,7 @@ Real FunctionalAssembler::assembleCellsCore(
 	                thread_context.setParameterGetter(get_param_);
 	                thread_context.setUserData(user_data_);
 	                thread_context.setJITConstants(jit_constants_);
-	                thread_context.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+	                thread_context.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
 		                thread_context.setHistoryWeights(history_weights_);
 		                const auto dofs = dof_map_->getCellDofs(cell_id);
 		                if (need_solution) {
@@ -1785,7 +1811,7 @@ Real FunctionalAssembler::assembleBoundaryCore(
             context_.setParameterGetter(get_param_);
             context_.setUserData(user_data_);
             context_.setJITConstants(jit_constants_);
-	            context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+	            context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
 	            context_.setHistoryWeights(history_weights_);
 	            context_.setBoundaryMarker(boundary_marker);
 
@@ -1877,7 +1903,7 @@ void FunctionalAssembler::prepareContext(
     context_.setParameterGetter(get_param_);
     context_.setUserData(user_data_);
     context_.setJITConstants(jit_constants_);
-    context_.setCoupledValues(coupled_integrals_, coupled_aux_state_);
+    context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
     context_.setHistoryWeights(history_weights_);
 }
 

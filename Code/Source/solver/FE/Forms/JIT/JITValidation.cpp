@@ -217,6 +217,10 @@ struct ConstantMatrix {
         case FormExprType::BoundaryIntegralRef:
         case FormExprType::AuxiliaryStateSymbol:
         case FormExprType::AuxiliaryStateRef:
+        case FormExprType::AuxiliaryInputSymbol:
+        case FormExprType::AuxiliaryInputRef:
+        case FormExprType::AuxiliaryOutputSymbol:
+        case FormExprType::AuxiliaryOutputRef:
         case FormExprType::MaterialStateOldRef:
         case FormExprType::MaterialStateWorkRef:
         case FormExprType::Time:

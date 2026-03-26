@@ -217,8 +217,10 @@ inline constexpr bool hasTraceFlag(TraceCapabilityFlags flags, TraceCapabilityFl
  */
 enum class VariableKind : std::uint8_t {
     FieldComponent,      ///< FE field DOFs (identified by field_id + component)
-    AuxiliaryState,      ///< ODE/auxiliary state variable (identified by name)
-    BoundaryFunctional,  ///< Boundary integral quantity (identified by name)
+    AuxiliaryState,      ///< Auxiliary state variable (identified by name)
+    AuxiliaryInput,      ///< Generalized auxiliary input (identified by name)
+    AuxiliaryOutput,     ///< Auxiliary model output (identified by name)
+    BoundaryFunctional,  ///< Boundary integral quantity (identified by name, legacy)
     GlobalScalar,        ///< Global scalar unknown (identified by name)
 };
 
@@ -231,7 +233,8 @@ enum class DomainKind : std::uint8_t {
     InteriorFace,      ///< Interior face (DG)
     InterfaceFace,     ///< Interface between subdomains
     Global,            ///< Global operator (no mesh locality)
-    CoupledBoundary,   ///< Boundary with coupled PDE-ODE model
+    CoupledBoundary,   ///< Boundary with coupled PDE-ODE model (legacy)
+    AuxiliaryCoupling, ///< Generalized auxiliary coupling (field↔aux, aux↔aux)
 };
 
 // ============================================================================
@@ -318,6 +321,11 @@ struct VariableDescriptor {
     int max_time_derivative_order{0};
     bool participates_in_constraint_blocks{false};
     bool participates_in_mass_blocks{false};
+
+    // Auxiliary-state metadata (meaningful when kind is AuxiliaryState/Input/Output)
+    std::string auxiliary_scope{};       ///< "Global", "Node", "Cell", "QuadraturePoint", "BoundaryEntity"
+    std::string auxiliary_solve_mode{};  ///< "Partitioned" or "Monolithic"
+    std::string auxiliary_region{};      ///< Deployment region identity (empty = whole domain)
 };
 
 // ============================================================================

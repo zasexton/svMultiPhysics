@@ -13,8 +13,10 @@
 #include "Forms/FormExpr.h"
 #include "Spaces/MixedSpace.h"
 
+#include <cstdint>
 #include <initializer_list>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -464,6 +466,62 @@ inline FormExpr interiorPenaltyCoefficient(Real eta, Real p = 1.0)
     // Typical SIPG scaling: eta * p^2 * avg(1 / h_n),
     // where h_n = 2|K|/|F| is the facet-normal cell size.
     return FormExpr::constant(eta * p * p) * avg(FormExpr::constant(1.0) / hNormal());
+}
+
+// ---------------------------------------------------------------------------
+// Auxiliary state vocabulary (generalized, physics-agnostic)
+//
+// These are the canonical helpers for referencing auxiliary state, inputs,
+// and outputs in formulations.  They use the neutral terminology from
+// the generalized AuxiliaryState subsystem.
+// ---------------------------------------------------------------------------
+
+/// Reference an auxiliary input by name (resolved to slot at setup time).
+/// Replaces the legacy `boundaryIntegralValue(name)` for new formulations.
+inline FormExpr AuxiliaryInput(std::string name)
+{
+    return FormExpr::auxiliaryInput(std::move(name));
+}
+
+/// Reference an auxiliary input by slot (JIT-friendly, post-resolution).
+inline FormExpr AuxiliaryInputSlot(std::uint32_t slot)
+{
+    return FormExpr::auxiliaryInputRef(slot);
+}
+
+/// Reference an auxiliary model output by name (first-class coupling surface).
+/// This is the preferred formulation-facing surface for consuming auxiliary
+/// model results.  Raw auxiliary state access remains available as an
+/// advanced path via `AuxiliaryState(name)`.
+///
+/// When multiple deployed models have the same output name, use the
+/// instance-qualified overload `AuxiliaryOutput(instance, name)` instead.
+/// The bare overload throws on ambiguity during auto-resolution.
+inline FormExpr AuxiliaryOutput(std::string name)
+{
+    return FormExpr::auxiliaryOutput(std::move(name));
+}
+
+/// Instance-qualified auxiliary output reference.
+/// Use when multiple deployed models expose outputs with the same name.
+/// The expression is created with "instance/name" syntax and resolved to
+/// a slot during form installation via `auxiliaryOutputSlotOf(instance, name)`.
+inline FormExpr AuxiliaryOutput(const std::string& instance, const std::string& name)
+{
+    return FormExpr::auxiliaryOutput(instance + "/" + name);
+}
+
+/// Reference an auxiliary model output by slot (JIT-friendly, post-resolution).
+inline FormExpr AuxiliaryOutputSlot(std::uint32_t slot)
+{
+    return FormExpr::auxiliaryOutputRef(slot);
+}
+
+/// Reference an auxiliary state variable by name (raw access, advanced path).
+/// For new formulations, prefer `AuxiliaryOutput(name)` instead.
+inline FormExpr AuxiliaryState(std::string name)
+{
+    return FormExpr::auxiliaryState(std::move(name));
 }
 
 } // namespace forms

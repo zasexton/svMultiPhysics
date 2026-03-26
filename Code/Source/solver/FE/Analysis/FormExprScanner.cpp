@@ -85,6 +85,30 @@ void scanNode(const forms::FormExprNode& node, FormExprScanResult& result) {
             }
             break;
         }
+        case FT::AuxiliaryInputSymbol: {
+            auto name = node.symbolName();
+            if (name) {
+                std::string s{*name};
+                if (std::find(result.auxiliary_input_names.begin(),
+                              result.auxiliary_input_names.end(), s)
+                    == result.auxiliary_input_names.end()) {
+                    result.auxiliary_input_names.push_back(std::move(s));
+                }
+            }
+            break;
+        }
+        case FT::AuxiliaryOutputSymbol: {
+            auto name = node.symbolName();
+            if (name) {
+                std::string s{*name};
+                if (std::find(result.auxiliary_output_names.begin(),
+                              result.auxiliary_output_names.end(), s)
+                    == result.auxiliary_output_names.end()) {
+                    result.auxiliary_output_names.push_back(std::move(s));
+                }
+            }
+            break;
+        }
         default:
             break;
     }

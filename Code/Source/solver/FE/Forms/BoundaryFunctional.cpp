@@ -90,14 +90,47 @@ compileBoundaryFunctionalKernel(const FormExpr& integrand,
 std::shared_ptr<assembly::FunctionalKernel>
 compileBoundaryFunctionalKernel(const BoundaryFunctional& functional)
 {
-    return compileBoundaryFunctionalKernel(functional.integrand, functional.boundary_marker);
+    return compileBoundaryFunctionalKernel(functional, SymbolicOptions{});
 }
 
 std::shared_ptr<assembly::FunctionalKernel>
 compileBoundaryFunctionalKernel(const BoundaryFunctional& functional,
                                 const SymbolicOptions& options)
 {
-    return compileBoundaryFunctionalKernel(functional.integrand, functional.boundary_marker, options);
+    // Domain functionals use Cell domain instead of BoundaryFace.
+    if (functional.is_domain_functional) {
+        FE_THROW_IF(!functional.integrand.isValid(), InvalidArgumentException,
+                    "compileBoundaryFunctionalKernel: invalid domain integrand");
+        FE_CHECK_NOT_NULL(functional.integrand.node(),
+                          "compileBoundaryFunctionalKernel: domain integrand node");
+
+        const auto field_requirements =
+            detail::analyzeFieldRequirements(*functional.integrand.node());
+        auto required = detail::analyzeRequiredData(
+            *functional.integrand.node(), FormKind::Linear);
+        for (const auto& fr : field_requirements) {
+            required |= fr.required;
+        }
+
+        auto base = std::make_shared<FunctionalFormKernel>(
+            functional.integrand,
+            FunctionalFormKernel::Domain::Cell,
+            required,
+            field_requirements);
+
+        if (!options.jit.enable) {
+            return base;
+        }
+
+        return std::make_shared<jit::JITFunctionalKernelWrapper>(
+            std::move(base),
+            functional.integrand,
+            jit::JITFunctionalKernelWrapper::Domain::Cell,
+            options.jit);
+    }
+
+    return compileBoundaryFunctionalKernel(
+        functional.integrand, functional.boundary_marker, options);
 }
 
 } // namespace forms

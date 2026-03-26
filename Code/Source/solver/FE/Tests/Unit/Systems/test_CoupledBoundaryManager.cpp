@@ -68,7 +68,7 @@ TEST(CoupledBoundaryManagerTest, AuxiliaryStateResetsEachPrepareUntilCommit)
     AuxiliaryStateRegistration reg;
     reg.spec.size = 1;
     reg.spec.name = "X";
-    reg.spec.associated_markers = {2};
+    reg.associated_markers = {2};
     reg.initial_values = {0.0};
     reg.required_integrals = {Q};
     reg.rhs = forms::FormExpr::boundaryIntegralValue("Q");

@@ -91,6 +91,12 @@ struct FormulationRecord {
     /// Auxiliary state symbols referenced in the residual
     std::vector<VariableKey> auxiliary_state_dependencies;
 
+    /// Generalized auxiliary input dependencies (from AuxiliaryInputSymbol terminals)
+    std::vector<VariableKey> auxiliary_input_dependencies;
+
+    /// Auxiliary output dependencies (from AuxiliaryOutputSymbol terminals)
+    std::vector<VariableKey> auxiliary_output_dependencies;
+
     /// Per-block residual FormExprNode handles.
     /// Key: (test_field, trial_field). For single-field formulations, contains
     /// one entry {(field, field)} → residual root. For multi-field, populated

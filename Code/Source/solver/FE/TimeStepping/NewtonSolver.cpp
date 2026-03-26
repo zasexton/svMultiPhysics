@@ -501,6 +501,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
     systems::OperatorTag residual_op_used = options_.residual_op;
 
+    int newton_it = 0; // Tracks current Newton iteration for is_nonlinear_iteration flag.
+
     auto assembleResidualOnly = [&](const systems::SystemStateView& state, const char* phase) -> double {
         residual_op_used = options_.residual_op;
         auto r_view = r.createAssemblyView();
@@ -520,6 +522,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         systems::AssemblyRequest req;
         req.op = options_.residual_op;
         req.want_vector = true;
+        req.is_nonlinear_iteration = (newton_it > 0);
         const auto ar = transient.assemble(req, state, nullptr, r_view.get());
         FE_THROW_IF(!ar.success, FEException,
                     "NewtonSolver: residual assembly failed: " + ar.error_message);
@@ -555,6 +558,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         systems::AssemblyRequest req;
         req.op = options_.jacobian_op;
         req.want_matrix = true;
+        req.is_nonlinear_iteration = (newton_it > 0);
         const auto aj = transient.assemble(req, state, J_view.get(), nullptr);
         FE_THROW_IF(!aj.success, FEException,
                     "NewtonSolver: jacobian assembly failed: " + aj.error_message);
@@ -588,6 +592,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         req.want_matrix = true;
         req.want_vector = true;
         req.suppress_constraint_inhomogeneity = true;
+        req.is_nonlinear_iteration = (newton_it > 0);
         const auto ar = transient.assemble(req, state, J_view.get(), r_view.get());
         FE_THROW_IF(!ar.success, FEException,
                     "NewtonSolver: combined (matrix+vector) assembly failed: " + ar.error_message);
@@ -627,6 +632,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         req.want_matrix = true;
         req.want_vector = true;
         req.suppress_constraint_inhomogeneity = true;
+        req.is_nonlinear_iteration = (newton_it > 0);
         const auto ar = transient.assemble(req, state, J_view.get(), r_view.get());
         FE_THROW_IF(!ar.success, FEException,
                     "NewtonSolver: combined (matrix+vector) assembly failed: " + ar.error_message);
@@ -847,6 +853,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     double prev_residual_norm = -1.0;
 
     for (int it = 0; it < max_it; ++it) {
+        newton_it = it;
         ntp0 = NTP();
         history.updateGhosts();
 

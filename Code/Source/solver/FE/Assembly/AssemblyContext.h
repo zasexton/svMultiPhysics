@@ -1150,15 +1150,37 @@ public:
      * When set, Forms terminals like BoundaryIntegralRef(slot) and
      * AuxiliaryStateRef(slot) can load values directly.
      */
+    /// Legacy setter — forwards to setAuxiliaryValues().
     void setCoupledValues(std::span<const Real> integrals,
                           std::span<const Real> aux_state) noexcept
     {
         coupled_integrals_ = integrals;
         coupled_aux_state_ = aux_state;
+        auxiliary_inputs_ = integrals;
+        auxiliary_state_ = aux_state;
     }
 
+    /// Neutral setter for generalized auxiliary data.
+    void setAuxiliaryValues(std::span<const Real> inputs,
+                            std::span<const Real> state,
+                            std::span<const Real> outputs = {}) noexcept
+    {
+        auxiliary_inputs_ = inputs;
+        auxiliary_state_ = state;
+        auxiliary_outputs_ = outputs;
+        // Keep legacy aliases in sync.
+        coupled_integrals_ = inputs;
+        coupled_aux_state_ = state;
+    }
+
+    // Legacy accessors (still used by existing JIT codegen for BoundaryIntegralRef/AuxiliaryStateRef).
     [[nodiscard]] std::span<const Real> coupledIntegrals() const noexcept { return coupled_integrals_; }
     [[nodiscard]] std::span<const Real> coupledAuxState() const noexcept { return coupled_aux_state_; }
+
+    // Neutral accessors (preferred for new code).
+    [[nodiscard]] std::span<const Real> auxiliaryInputs() const noexcept { return auxiliary_inputs_; }
+    [[nodiscard]] std::span<const Real> auxiliaryState() const noexcept { return auxiliary_state_; }
+    [[nodiscard]] std::span<const Real> auxiliaryOutputs() const noexcept { return auxiliary_outputs_; }
 
     // =========================================================================
     // Face-Specific Data
@@ -1699,8 +1721,12 @@ private:
 
     // Optional pre-resolved scalar slot arrays (owned externally; stable during a kernel call)
     std::span<const Real> jit_constants_{};
-    std::span<const Real> coupled_integrals_{};
-    std::span<const Real> coupled_aux_state_{};
+    std::span<const Real> coupled_integrals_{};  ///< Legacy alias for auxiliary_inputs_
+    std::span<const Real> coupled_aux_state_{};  ///< Legacy alias for auxiliary_state_
+    // Generalized auxiliary arrays (neutral vocabulary).
+    std::span<const Real> auxiliary_inputs_{};
+    std::span<const Real> auxiliary_state_{};
+    std::span<const Real> auxiliary_outputs_{};
     std::span<const Real> history_weights_{};
 
     // Optional transient time integration context (owned by Systems/TimeStepping)

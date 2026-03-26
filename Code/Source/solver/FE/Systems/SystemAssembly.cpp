@@ -9,6 +9,9 @@
 
 #include "Systems/FESystem.h"
 #include "Systems/CoupledBoundaryManager.h"
+#include "Systems/AuxiliaryStateManager.h"
+#include "Systems/AuxiliaryInputRegistry.h"
+#include "Systems/AuxiliaryOperatorRegistry.h"
 #include "Systems/GlobalKernel.h"
 #include "Systems/SystemsExceptions.h"
 
@@ -383,6 +386,9 @@ assembly::AssemblyResult assembleOperator(
         }
     }
 
+    // Prepare generalized auxiliary inputs (if present).
+    system.prepareAuxiliaryForAssembly(state);
+
     if (request.zero_outputs) {
         if (request.want_matrix) {
             matrix_out->zero();
@@ -533,6 +539,34 @@ assembly::AssemblyResult assembleOperator(
     } else {
         assembler.setCoupledValues({}, {});
     }
+
+    // Inject generalized auxiliary values (neutral path).
+    // These populate the auxiliary_inputs/auxiliary_state/auxiliary_outputs fields
+    // in AssemblyContext, used by AuxiliaryInputRef/AuxiliaryOutputRef terminals.
+    {
+        auto* input_reg = system.auxiliaryInputRegistryIfPresent();
+        auto* aux_mgr = system.auxiliaryStateManagerIfPresent();
+
+        std::span<const Real> aux_inputs;
+        if (input_reg && input_reg->totalSize() > 0) {
+            aux_inputs = input_reg->all();
+        }
+
+        // For auxiliary state: if there's exactly one block, pass its work
+        // buffer directly. Otherwise the state is accessed through the
+        // legacy coupled_aux path or per-block via the manager.
+        std::span<const Real> aux_state_flat;
+        if (aux_mgr && aux_mgr->blockCount() == 1) {
+            aux_state_flat = aux_mgr->state().block(0).work();
+        }
+
+        auto aux_outputs = system.auxiliaryOutputValues();
+
+        if (!aux_inputs.empty() || !aux_state_flat.empty() || !aux_outputs.empty()) {
+            assembler.setAuxiliaryValues(aux_inputs, aux_state_flat, aux_outputs);
+        }
+    }
+
     const auto& mesh = system.meshAccess();
 
     assembler.setSuppressConstraintInhomogeneity(request.suppress_constraint_inhomogeneity);
@@ -1433,6 +1467,28 @@ assembly::AssemblyResult assembleOperator(
         }
     }
 #endif
+
+    // Monolithic auxiliary assembly: inject auxiliary residual/Jacobian
+    // contributions into the global matrix/vector at auxiliary DOF offsets.
+    if (system.auxiliaryStateManagerIfPresent() &&
+        system.auxiliaryOperatorRegistryIfPresent() &&
+        system.auxiliaryOperatorRegistryIfPresent()->isLayoutFinalized()) {
+        // Determine field DOF count.  Use the DOF handler's total when
+        // available (correct for distributed/MPI); fall back to state.u.size()
+        // for the serial/local case.
+        std::size_t n_field_dofs = 0;
+        if (system.dofHandler().getEntityDofMap()) {
+            n_field_dofs = static_cast<std::size_t>(
+                system.dofHandler().getNumDofs());
+        } else if (!state.u.empty()) {
+            n_field_dofs = state.u.size();
+        }
+
+        system.assembleMixedAuxiliaryIntoGlobal(
+            state, matrix_out, vector_out,
+            request.want_matrix, request.want_vector,
+            n_field_dofs, request.is_nonlinear_iteration);
+    }
 
     return total;
 }

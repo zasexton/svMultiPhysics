@@ -80,6 +80,10 @@ namespace {
         case FormExprType::BoundaryIntegralRef:
         case FormExprType::AuxiliaryStateSymbol:
         case FormExprType::AuxiliaryStateRef:
+        case FormExprType::AuxiliaryInputSymbol:
+        case FormExprType::AuxiliaryInputRef:
+        case FormExprType::AuxiliaryOutputSymbol:
+        case FormExprType::AuxiliaryOutputRef:
         case FormExprType::MaterialStateOldRef:
         case FormExprType::MaterialStateWorkRef:
         case FormExprType::PreviousSolutionRef:
@@ -181,7 +185,8 @@ struct DiffPair {
 enum class DiffWrtKind : std::uint8_t {
     ActiveTrialFunction,
     SpecificTrialFunction,
-    FieldId
+    FieldId,
+    AuxiliaryOutputSlot      ///< Differentiate w.r.t. AuxiliaryOutputRef(slot)
 };
 
 struct DiffTargetConfig {
@@ -198,6 +203,9 @@ struct DiffTargetConfig {
     std::optional<FieldId> field_id{};
     std::optional<FormExprNode::SpaceSignature> field_sig{};
     std::optional<std::string> field_name{};
+
+    // AuxiliaryOutputSlot target.
+    std::optional<std::uint32_t> aux_output_slot{};
 };
 
 [[nodiscard]] bool spaceSignatureEqual(const FormExprNode::SpaceSignature& a,
@@ -619,6 +627,9 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::BoundaryIntegralRef:
             case FormExprType::AuxiliaryStateSymbol:
             case FormExprType::AuxiliaryStateRef:
+            case FormExprType::AuxiliaryInputSymbol:
+            case FormExprType::AuxiliaryInputRef:
+            case FormExprType::AuxiliaryOutputSymbol:
             case FormExprType::MaterialStateOldRef:
             case FormExprType::MaterialStateWorkRef:
             case FormExprType::PreviousSolutionRef:
@@ -639,6 +650,25 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 out.primal = FormExpr(node);
                 out.deriv = zeroOf(out.primal);
                 break;
+
+            // AuxiliaryOutputRef: constant unless we're differentiating w.r.t.
+            // a specific auxiliary output slot.
+            case FormExprType::AuxiliaryOutputRef: {
+                out.primal = FormExpr(node);
+                if (cfg.kind == DiffWrtKind::AuxiliaryOutputSlot &&
+                    cfg.aux_output_slot.has_value()) {
+                    const auto slot = node->slotIndex();
+                    if (slot && *slot == *cfg.aux_output_slot) {
+                        // d(output_k)/d(output_k) = 1 (Kronecker delta)
+                        out.deriv = FormExpr::constant(1.0);
+                    } else {
+                        out.deriv = zeroOf(out.primal);
+                    }
+                } else {
+                    out.deriv = zeroOf(out.primal);
+                }
+                break;
+            }
 
             case FormExprType::BoundaryFunctionalSymbol: {
                 if (kids.size() != 1u || !kids[0]) {
@@ -1340,8 +1370,17 @@ FormExpr differentiateResidual(const FormExpr& residual_form,
             cfg.field_name = wrt_terminal.node()->toString();
             break;
         }
+        case FormExprType::AuxiliaryOutputRef: {
+            const auto slot = wrt_terminal.node()->slotIndex();
+            if (!slot) {
+                throw std::invalid_argument("differentiateResidual: AuxiliaryOutputRef missing slot index");
+            }
+            cfg.kind = DiffWrtKind::AuxiliaryOutputSlot;
+            cfg.aux_output_slot = *slot;
+            break;
+        }
         default:
-            throw std::invalid_argument("differentiateResidual: wrt_terminal must be TrialFunction/StateField/DiscreteField");
+            throw std::invalid_argument("differentiateResidual: wrt_terminal must be TrialFunction/StateField/DiscreteField/AuxiliaryOutputRef");
     }
 
     return differentiateResidualImpl(residual_form, cfg);
@@ -2092,6 +2131,17 @@ FormExpr differentiateResidualHessianVector(const FormExpr& residual_form,
 {
     const auto tangent = differentiateResidual(residual_form, field, trial_state_field);
     return directionalDerivativeWrtField(tangent, field, direction);
+}
+
+FormExpr differentiateWrtAuxiliaryOutput(const FormExpr& form,
+                                         std::uint32_t output_slot)
+{
+    DiffTargetConfig cfg;
+    cfg.kind = DiffWrtKind::AuxiliaryOutputSlot;
+    cfg.aux_output_slot = output_slot;
+    cfg.trial_state_field = CURRENT_SOLUTION_FIELD_ID;
+
+    return simplify(differentiateResidualImpl(form, cfg));
 }
 
 } // namespace forms

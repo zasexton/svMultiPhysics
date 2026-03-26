@@ -103,6 +103,24 @@ For the full integration guide, see `Forms/SYSTEMS_INTEGRATION.md`.
 Residual form → consistent Jacobian via forward-mode dual numbers
 (`NonlinearFormKernel`), with coverage for `exp/log/sqrt/pow/div`.
 
+### Auxiliary State Vocabulary
+
+| Helper | Description |
+|--------|-------------|
+| `AuxiliaryInput("name")` | Reference auxiliary input by name (neutral, preferred) |
+| `AuxiliaryOutput("name")` | Reference auxiliary model output (preferred coupling surface) |
+| `AuxiliaryState("name")` | Raw auxiliary state access (advanced path) |
+| `AuxiliaryInputSlot(n)` | Slot-indexed auxiliary input (JIT, post-resolution) |
+| `AuxiliaryOutputSlot(n)` | Slot-indexed auxiliary output (JIT, post-resolution) |
+
+**Deprecated** (use neutral alternatives above):
+| Legacy | Replacement |
+|--------|-------------|
+| `boundaryIntegralValue("Q")` | `AuxiliaryInput("Q")` |
+| `boundaryIntegralRef(slot)` | `AuxiliaryInputSlot(slot)` |
+
+See `Docs/AuxiliaryState/README.md` for the full auxiliary state guide.
+
 ### Expert/Manual Helpers
 
 These are available for advanced workflows but not needed for typical physics:

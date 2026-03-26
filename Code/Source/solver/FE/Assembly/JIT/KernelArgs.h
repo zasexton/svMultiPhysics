@@ -950,6 +950,14 @@ struct KernelSideArgsV6 {
 
     // Opaque pointer for external-call trampolines (coefficients, constitutive models, etc.)
     const void* user_data{nullptr};
+
+    // Generalized auxiliary arrays (neutral vocabulary, added at struct tail
+    // to preserve binary layout for existing fields).
+    // AuxiliaryInputRef loads from auxiliary_inputs; AuxiliaryOutputRef from auxiliary_outputs.
+    const Real* auxiliary_inputs{nullptr};
+    std::uint32_t num_auxiliary_inputs{0};
+    const Real* auxiliary_outputs{nullptr};
+    std::uint32_t num_auxiliary_outputs{0};
 };
 
 struct CellKernelArgsV6 {
@@ -2087,6 +2095,11 @@ namespace detail {
 
     out.coupled_aux = ctx.coupledAuxState().empty() ? nullptr : ctx.coupledAuxState().data();
     out.num_coupled_aux = static_cast<std::uint32_t>(ctx.coupledAuxState().size());
+
+    out.auxiliary_inputs = ctx.auxiliaryInputs().empty() ? nullptr : ctx.auxiliaryInputs().data();
+    out.num_auxiliary_inputs = static_cast<std::uint32_t>(ctx.auxiliaryInputs().size());
+    out.auxiliary_outputs = ctx.auxiliaryOutputs().empty() ? nullptr : ctx.auxiliaryOutputs().data();
+    out.num_auxiliary_outputs = static_cast<std::uint32_t>(ctx.auxiliaryOutputs().size());
 
     if (const auto* ti = ctx.timeIntegrationContext()) {
         out.time_derivative_term_weight = ti->time_derivative_term_weight;

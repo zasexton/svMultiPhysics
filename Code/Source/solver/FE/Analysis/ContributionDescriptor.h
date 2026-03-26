@@ -53,6 +53,10 @@ enum class ContributionRole : std::uint8_t {
     StabilizationBlock,  ///< Stabilization term (e.g., PSPG, GLS, penalty)
     BoundaryConstraint,  ///< Boundary condition contribution (Dirichlet, Robin, Nitsche)
     GlobalCoupling,      ///< Non-local coupling (coupled boundary, global kernel)
+    FieldToAuxiliary,    ///< FE field → auxiliary block coupling
+    AuxiliaryToField,    ///< Auxiliary block → FE field coupling
+    AuxiliaryToAuxiliary,///< Auxiliary block → auxiliary block coupling
+    AuxiliarySelf,       ///< Auxiliary block self-coupling (diagonal)
 };
 
 /**

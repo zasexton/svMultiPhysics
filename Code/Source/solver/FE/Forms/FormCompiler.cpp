@@ -79,11 +79,13 @@ void requireNoCoupledPlaceholders(const FormExprNode& node)
     const auto visit = [&](const auto& self, const FormExprNode& n) -> void {
         if (n.type() == FormExprType::BoundaryFunctionalSymbol ||
             n.type() == FormExprType::BoundaryIntegralSymbol ||
-            n.type() == FormExprType::AuxiliaryStateSymbol) {
+            n.type() == FormExprType::AuxiliaryStateSymbol ||
+            n.type() == FormExprType::AuxiliaryInputSymbol ||
+            n.type() == FormExprType::AuxiliaryOutputSymbol) {
             throw std::invalid_argument(
-                "FormCompiler: detected coupled placeholder terminal. "
-                "Resolve coupled expressions via FE/Systems coupled-BC helpers "
-                "(e.g., systems::bc::applyCoupledNeumann/applyCoupledRobin) before compilation.");
+                "FormCompiler: detected unresolved placeholder terminal (" +
+                n.toString() + "). "
+                "Resolve coupled/auxiliary expressions to slot references before compilation.");
         }
         for (const auto& child : n.childrenShared()) {
             if (child) self(self, *child);

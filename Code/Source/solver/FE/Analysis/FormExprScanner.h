@@ -48,6 +48,12 @@ struct FormExprScanResult {
     /// Names of AuxiliaryStateSymbol nodes found
     std::vector<std::string> auxiliary_state_names;
 
+    /// Names of AuxiliaryInputSymbol nodes found
+    std::vector<std::string> auxiliary_input_names;
+
+    /// Names of AuxiliaryOutputSymbol nodes found
+    std::vector<std::string> auxiliary_output_names;
+
     /// Exact boundary markers found on BoundaryIntegral nodes
     std::vector<int> boundary_markers;
 

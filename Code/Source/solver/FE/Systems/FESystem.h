@@ -11,6 +11,12 @@
 #include "Core/Types.h"
 #include "Core/FEException.h"
 
+#include "Forms/BoundaryFunctional.h"
+#include "Systems/AuxiliaryBindings.h"
+#include "Systems/AuxiliaryInputRegistry.h"
+#include "Systems/AuxiliaryStateTypes.h"
+#include "Systems/FEQuantityRegistry.h"
+#include "Systems/BoundaryReductionService.h"
 #include "Systems/FieldRegistry.h"
 #include "Systems/GlobalKernel.h"
 #include "Systems/GlobalKernelStateProvider.h"
@@ -51,6 +57,7 @@
 #include <span>
 #include <array>
 #include <string>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -86,7 +93,19 @@ namespace systems {
 using BoundaryId = int;
 using InterfaceId = int;
 class OperatorBackends;
+class BoundaryReductionService;
 class CoupledBoundaryManager;
+class AuxiliaryStateManager;
+class AuxiliaryOperatorRegistry;
+class AuxiliaryInputRegistry;
+class AuxiliaryDeployedInstance;
+class AuxiliaryInputHandle;
+class AuxiliaryInstanceHandle;
+class AuxiliaryStateModel;
+class AuxiliaryMultirateScheduler;
+class AuxiliaryStateStepper;
+class AuxiliaryDerivativeProvider;
+struct MixedSystemLayout;
 
 struct SetupOptions {
     dofs::DofDistributionOptions dof_options{};
@@ -124,6 +143,10 @@ struct AssemblyRequest {
     /// adds).  Set to true for nonlinear Newton solves where the residual R(u) is already
     /// evaluated at the constrained state.
     bool suppress_constraint_inhomogeneity{false};
+
+    /// When true, EachNonlinearIteration auxiliary inputs are refreshed.
+    /// Set to true on each Newton iteration within a time step.
+    bool is_nonlinear_iteration{false};
 };
 
 class FESystem {
@@ -131,8 +154,8 @@ public:
     explicit FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access);
     ~FESystem();
 
-    FESystem(FESystem&&) noexcept = default;
-    FESystem& operator=(FESystem&&) noexcept = default;
+    FESystem(FESystem&&) noexcept;
+    FESystem& operator=(FESystem&&) noexcept;
 
     FESystem(const FESystem&) = delete;
     FESystem& operator=(const FESystem&) = delete;
@@ -211,6 +234,170 @@ public:
     [[nodiscard]] CoupledBoundaryManager* coupledBoundaryManager() noexcept { return coupled_boundary_.get(); }
     [[nodiscard]] const CoupledBoundaryManager* coupledBoundaryManager() const noexcept { return coupled_boundary_.get(); }
 
+    /**
+     * @brief Access the boundary reduction service for a given primary field.
+     *
+     * Lazily creates the service on first access.  The service provides
+     * physics-agnostic boundary-integral evaluation and is shared with
+     * the CoupledBoundaryManager (if present) and AuxiliaryInputRegistry.
+     */
+    BoundaryReductionService& boundaryReductionService(FieldId primary_field);
+    [[nodiscard]] BoundaryReductionService* boundaryReductionServiceIfPresent(FieldId primary_field) noexcept
+    {
+        auto it = boundary_reduction_services_.find(primary_field);
+        return it != boundary_reduction_services_.end() ? it->second.get() : nullptr;
+    }
+
+    /**
+     * @brief Access the generalized auxiliary state manager.
+     *
+     * Lazily creates the manager on first access.  The manager owns
+     * auxiliary blocks with any scope (Global, Node, Cell, etc.) and
+     * provides distributed ownership, sync, and checkpoint APIs.
+     */
+    AuxiliaryStateManager& auxiliaryStateManager();
+    [[nodiscard]] AuxiliaryStateManager* auxiliaryStateManagerIfPresent() noexcept
+    {
+        return auxiliary_state_manager_.get();
+    }
+    [[nodiscard]] const AuxiliaryStateManager* auxiliaryStateManagerIfPresent() const noexcept
+    {
+        return auxiliary_state_manager_.get();
+    }
+
+    /**
+     * @brief Access the auxiliary operator registry.
+     *
+     * Lazily creates the registry on first access.  Owns auxiliary
+     * operators, coupling graph, and monolithic unknown layouts.
+     */
+    AuxiliaryOperatorRegistry& auxiliaryOperatorRegistry();
+    [[nodiscard]] AuxiliaryOperatorRegistry* auxiliaryOperatorRegistryIfPresent() noexcept
+    {
+        return auxiliary_operator_registry_.get();
+    }
+    [[nodiscard]] const AuxiliaryOperatorRegistry* auxiliaryOperatorRegistryIfPresent() const noexcept
+    {
+        return auxiliary_operator_registry_.get();
+    }
+
+    /**
+     * @brief Access the auxiliary input registry.
+     *
+     * Lazily creates the registry on first access.
+     */
+    AuxiliaryInputRegistry& auxiliaryInputRegistry();
+    [[nodiscard]] AuxiliaryInputRegistry* auxiliaryInputRegistryIfPresent() noexcept
+    {
+        return auxiliary_input_registry_.get();
+    }
+    [[nodiscard]] const AuxiliaryInputRegistry* auxiliaryInputRegistryIfPresent() const noexcept
+    {
+        return auxiliary_input_registry_.get();
+    }
+
+    /**
+     * @brief Access the FE-backed quantity definition registry.
+     *
+     * Lazily creates the registry on first access.
+     */
+    FEQuantityRegistry& feQuantityRegistry();
+    [[nodiscard]] const FEQuantityRegistry* feQuantityRegistryIfPresent() const noexcept
+    {
+        return fe_quantity_registry_.get();
+    }
+
+    /**
+     * @brief Register a sampled-state-field auxiliary input.
+     *
+     * Creates an entity-local input that samples the named FE field at
+     * each node using direct DOF lookup (fast path for Lagrange elements).
+     * Must be called after `setup()` (so DOF handlers exist) and before
+     * `finalizeAuxiliaryLayout()`.
+     *
+     * @param input_name   Registry name for the input.
+     * @param field_name   Name of the FE field to sample.
+     * @param n_entities   Number of entities (nodes).
+     */
+    void registerSampledFieldInput(
+        const std::string& input_name,
+        const std::string& field_name,
+        std::size_t n_entities);
+
+    /**
+     * @brief Register a boundary-face nodal sum auxiliary input.
+     *
+     * Creates a global input that sums all field DOF components at unique
+     * boundary face vertices with the given marker.  The output size
+     * equals the field component count.
+     *
+     * Requires `setup()` to have been called and a vertex-based (Lagrange)
+     * FE space; throws if the field has no vertex DOFs.  For a quadrature-
+     * weighted boundary integral, use the BoundaryFunctional assembly pipeline.
+     */
+    void registerBoundaryNodalSumInput(
+        const std::string& input_name,
+        const std::string& field_name,
+        int boundary_marker);
+
+    /**
+     * @brief Register a true quadrature-weighted boundary integral as an auxiliary input.
+     *
+     * Creates a global scalar input backed by a real FE boundary functional
+     * (not a nodal sum surrogate).  The input is evaluated via the
+     * BoundaryReductionService and stored in the AuxiliaryInputRegistry
+     * so that `AuxiliaryInput("name")` resolves to the integral value.
+     *
+     * This is the physics-agnostic API for registering boundary-integral
+     * auxiliary inputs.  It supports:
+     *
+     * - `Sum` reduction (default): raw integral value.
+     * - `Average` reduction: integral divided by boundary measure.
+     * - Room for `Min`/`Max` in future extensions.
+     *
+     * ## Lifecycle
+     *
+     * May be called before or after `setup()`.  Must be called before
+     * `installFormulation()` if the input name appears in an
+     * `AuxiliaryInput(...)` symbol, and before `finalizeAuxiliaryLayout()`
+     * if the input feeds an auxiliary model.  Both constraints are naturally
+     * satisfied when called from a module's `registerOn()` method before
+     * form installation.
+     *
+     * ## Multi-field support
+     *
+     * Integrands may reference multiple FE fields.  The first referenced
+     * field provides the DOF layout and quadrature context; secondary
+     * fields are automatically bound via `registerSecondaryField()` with
+     * correct `field_type`, `component_offset`, and block DOF mapping.
+     *
+     * @param input_name   Registry name for the input (e.g., "Q").
+     * @param functional   Boundary functional definition (integrand, marker, reduction).
+     * @param schedule     When the input is re-evaluated (default: OncePerTimeStep).
+     */
+    void registerBoundaryIntegralInput(
+        const std::string& input_name,
+        forms::BoundaryFunctional functional,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    /**
+     * @brief Register a true quadrature-weighted boundary integral as an auxiliary input.
+     *
+     * Convenience overload that constructs a BoundaryFunctional from components.
+     *
+     * @param input_name       Registry name for the input.
+     * @param integrand        Scalar-valued integrand expression.
+     * @param boundary_marker  Boundary label to integrate over.
+     * @param reduction        Reduction mode (default: Sum).
+     * @param schedule         When the input is re-evaluated.
+     */
+    void registerBoundaryIntegralInput(
+        const std::string& input_name,
+        forms::FormExpr integrand,
+        int boundary_marker,
+        forms::BoundaryFunctional::Reduction reduction = forms::BoundaryFunctional::Reduction::Sum,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
     // ---- Setup phase ----
     void setup(const SetupOptions& opts = {}, const SetupInputs& inputs = {});
 
@@ -236,9 +423,347 @@ public:
         const SystemStateView& state,
         assembly::GlobalSystemView& mass_out);
 
-    // ---- Time stepping lifecycle (optional; for MaterialState history) ----
+    // ---- Time stepping lifecycle ----
     void beginTimeStep();
     void commitTimeStep();
+
+    // ---- Auxiliary model deployment ----
+
+    /**
+     * @brief Deploy an auxiliary model instance into the system.
+     *
+     * Collects the instance for setup-time finalization.  Must be called
+     * before `setup()`.  During `finalizeAuxiliaryLayout()`, deployed
+     * instances are registered as blocks, inputs, and steppers.
+     */
+    void deployAuxiliaryModel(AuxiliaryDeployedInstance instance);
+
+    /**
+     * @brief Deploy an auxiliary model and return a typed instance handle.
+     *
+     * Preferred over `deployAuxiliaryModel()` — returns a handle for
+     * string-free output access.
+     *
+     * ```cpp
+     * auto rcr = system.deploy(use(model).name("rcr_1")...);
+     * auto p_out = rcr.output("P_out");
+     * ```
+     */
+    AuxiliaryInstanceHandle deploy(AuxiliaryDeployedInstance instance);
+
+    // ---- Handle-returning auxiliary input registration ----
+
+    /**
+     * @brief Register a boundary integral as an auxiliary input and return a handle.
+     *
+     * ```cpp
+     * auto Q = system.boundaryIntegral("Q", inner(u_disc, n), marker);
+     * ```
+     */
+    AuxiliaryInputHandle boundaryIntegral(
+        const std::string& input_name,
+        forms::FormExpr integrand,
+        int boundary_marker,
+        forms::BoundaryFunctional::Reduction reduction = forms::BoundaryFunctional::Reduction::Sum,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    /**
+     * @brief Register a boundary integral (full functional) and return a handle.
+     */
+    AuxiliaryInputHandle boundaryIntegral(
+        const std::string& input_name,
+        forms::BoundaryFunctional functional,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    /**
+     * @brief Register a derived auxiliary input computed from an expression.
+     *
+     * Auto-discovers dependencies on other auxiliary inputs referenced in `expr`.
+     * The expression is evaluated using the current auxiliary input values.
+     *
+     * ```cpp
+     * auto P_out = system.derivedInput("P_out", Pd + (Rp + Rd) * Q);
+     * ```
+     *
+     * @param name  Registry name for the derived input.
+     * @param expr  Expression to evaluate (may reference other auxiliary inputs).
+     * @param schedule  When the input is re-evaluated.
+     * @return Handle for binding and expression use.
+     */
+    AuxiliaryInputHandle derivedInput(
+        const std::string& name,
+        forms::FormExpr expr,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    /**
+     * @brief Register a sampled FE field as an auxiliary input and return a handle.
+     *
+     * ```cpp
+     * auto u_sample = system.sampledField("u_sample", "u", n_nodes);
+     * ```
+     */
+    AuxiliaryInputHandle sampledField(
+        const std::string& input_name,
+        const std::string& field_name,
+        std::size_t n_entities);
+
+    /**
+     * @brief Register a boundary nodal sum as an auxiliary input and return a handle.
+     *
+     * ```cpp
+     * auto Q_nodal = system.boundaryNodalSum("Q_nodal", "u", marker);
+     * ```
+     */
+    AuxiliaryInputHandle boundaryNodalSum(
+        const std::string& input_name,
+        const std::string& field_name,
+        int boundary_marker);
+
+    /**
+     * @brief Register a boundary average as an auxiliary input.
+     *
+     * Computes `∫_Γ expr ds / ∫_Γ 1 ds` on the boundary with the given marker.
+     */
+    AuxiliaryInputHandle boundaryAverage(
+        const std::string& input_name,
+        forms::FormExpr integrand,
+        int boundary_marker,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    /**
+     * @brief Register a domain integral as an auxiliary input.
+     *
+     * Computes `∫_Ω expr dx` over all cells.
+     */
+    AuxiliaryInputHandle domainIntegral(
+        const std::string& input_name,
+        forms::FormExpr integrand,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    /**
+     * @brief Register a domain average as an auxiliary input.
+     *
+     * Computes `∫_Ω expr dx / ∫_Ω 1 dx` over all cells.
+     */
+    AuxiliaryInputHandle domainAverage(
+        const std::string& input_name,
+        forms::FormExpr integrand,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    /**
+     * @brief Register a region-restricted integral as an auxiliary input.
+     *
+     * Computes `∫_R expr dx` over cells matching the given marker.
+     */
+    AuxiliaryInputHandle regionIntegral(
+        const std::string& input_name,
+        forms::FormExpr integrand,
+        int region_marker,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    /**
+     * @brief Register a region-restricted average as an auxiliary input.
+     *
+     * Computes `∫_R expr dx / ∫_R 1 dx` over cells matching the given marker.
+     */
+    AuxiliaryInputHandle regionAverage(
+        const std::string& input_name,
+        forms::FormExpr integrand,
+        int region_marker,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    /**
+     * @brief Register a generic FE expression as an auxiliary input.
+     *
+     * Evaluates the expression at a representative point (cell centroid)
+     * for each entity.  For scalar global quantities, use domainIntegral()
+     * or boundaryIntegral() instead.
+     */
+    AuxiliaryInputHandle feExpression(
+        const std::string& input_name,
+        forms::FormExpr expression,
+        AuxiliaryInputUpdateSchedule schedule = AuxiliaryInputUpdateSchedule::OncePerTimeStep);
+
+    // ---- Auxiliary state lifecycle ----
+
+    /**
+     * @brief Prepare auxiliary inputs and state for assembly.
+     *
+     * Evaluates all auxiliary input providers (respecting schedules),
+     * and binds auxiliary values into the assembler context.
+     * Called before each PDE assembly (including within Newton iterations).
+     *
+     * @param state  Current system state view.
+     * @param is_nonlinear_iteration  If true, refreshes inputs with
+     *        `EachNonlinearIteration` schedule.
+     */
+    void prepareAuxiliaryForAssembly(const SystemStateView& state,
+                                      bool is_nonlinear_iteration = false);
+
+    /**
+     * @brief Advance all Partitioned auxiliary blocks by one time step.
+     *
+     * Dispatches to the per-block stepper.  Monolithic blocks are NOT
+     * advanced here — their time discretization is part of the global
+     * assembled solve.
+     *
+     * Respects per-block scheduling (SingleRate, Subcycled, Multirate).
+     *
+     * @warning This overload does NOT update the cached system state used by
+     * FE-coupled auxiliary input callbacks (boundary integrals, sampled fields).
+     * Those callbacks read from cached spans/pointers that were populated by the
+     * most recent call to `prepareAuxiliaryForAssembly()` or
+     * `advanceAuxiliaryState(const SystemStateView&)`.  If no such call has been
+     * made in this time step, or if the underlying data (solution vectors) has
+     * been freed or overwritten, the callbacks will read stale or invalid data.
+     *
+     * Use `advanceAuxiliaryState(const SystemStateView&)` instead when any
+     * registered auxiliary input depends on FE field state.
+     *
+     * @param time  Current simulation time.
+     * @param dt    PDE time step.
+     */
+    void advanceAuxiliaryState(Real time, Real dt);
+
+    /**
+     * @brief Advance auxiliary state with full system state context.
+     *
+     * Caches the system state (solution, previous solutions, time integration
+     * context, user data) before evaluating auxiliary inputs and stepping.
+     * This ensures that FE-coupled input callbacks (boundary integrals, sampled
+     * fields) have access to valid, current data.
+     *
+     * **This is the preferred overload** when any registered auxiliary input
+     * depends on FE field state (e.g., boundary-integral inputs registered via
+     * `registerBoundaryIntegralInput()`).
+     *
+     * @param state  Full system state (time, dt, solution, history, etc.).
+     */
+    void advanceAuxiliaryState(const SystemStateView& state);
+
+    /**
+     * @brief Assemble monolithic auxiliary residual and Jacobian.
+     *
+     * Evaluates the residual F(xdot, x, ...) and Jacobian dF/dx for all
+     * monolithic auxiliary blocks.  Results are stored in the provided
+     * dense vectors/matrices.
+     *
+     * @param time  Current time.
+     * @param dt    Time step (for xdot computation).
+     * @param residual_out  Output residual vector (sized to total_aux_unknowns).
+     * @param jacobian_out  Output Jacobian matrix (row-major, n×n).
+     * @param is_nonlinear_iteration  When true, EachNonlinearIteration
+     *        auxiliary inputs are refreshed before assembly.  Pass true
+     *        on each Newton iteration; false (default) on the first call.
+     */
+    void assembleMonolithicAuxiliary(
+        Real time, Real dt,
+        std::span<Real> residual_out,
+        std::span<Real> jacobian_out,
+        bool is_nonlinear_iteration = false);
+
+    /**
+     * @brief Assemble mixed auxiliary contributions into dense outputs (test helper).
+     *
+     * Assembles the monolithic auxiliary blocks + chain-rule field-auxiliary
+     * coupling into dense vector/matrix outputs sized for the mixed system
+     * (n_field_dofs + n_aux_dofs).
+     *
+     * @param state           System state.
+     * @param n_field_dofs    Number of FE field DOFs.
+     * @param residual_out    Dense vector (n_field + n_aux).
+     * @param matrix_out      Dense row-major matrix ((n_field+n_aux)^2).
+     */
+    void assembleMixedAuxiliaryDense(
+        const SystemStateView& state,
+        std::size_t n_field_dofs,
+        std::vector<Real>& residual_out,
+        std::vector<Real>& matrix_out);
+
+    /**
+     * @brief Get the composed mixed system layout.
+     *
+     * Only valid after `finalizeAuxiliaryLayout()`.
+     * @param n_field_unknowns  Number of FE field DOFs.
+     */
+    [[nodiscard]] MixedSystemLayout composeMixedSystemLayout(
+        std::size_t n_field_unknowns = 0) const;
+
+    /**
+     * @brief Rollback all auxiliary blocks to their committed state.
+     *
+     * Used after a failed nonlinear solve or rejected time step.
+     */
+    void rollbackAuxiliaryState();
+
+    /**
+     * @brief Finalize auxiliary layouts during setup.
+     *
+     * Called from `setup()` after all auxiliary model instances have been
+     * deployed.  Finalizes monolithic unknown layouts and builds any
+     * requested symbolic derivative artifacts.
+     */
+    void finalizeAuxiliaryLayout();
+
+    /**
+     * @brief Pack all auxiliary state for checkpoint.
+     */
+    [[nodiscard]] std::vector<Real> checkpointAuxiliaryState() const;
+
+    /**
+     * @brief Restore auxiliary state from checkpoint data.
+     */
+    void restoreAuxiliaryState(std::span<const Real> data);
+
+    /**
+     * @brief Get the flattened evaluated auxiliary output values.
+     *
+     * Updated by `prepareAuxiliaryForAssembly()`.  Empty if no
+     * deployed models have output expressions.
+     */
+    [[nodiscard]] std::span<const Real> auxiliaryOutputValues() const noexcept;
+
+    /**
+     * @brief Get the flattened slot index of a named auxiliary output.
+     *
+     * Outputs are flattened across all deployed models in deployment order.
+     * Each model contributes `n_entities * n_outputs` slots in the flat
+     * buffer.  Returns the entity-0 slot for the named output; per-entity
+     * access is `slot + entity_index * n_outputs_for_that_model`.
+     *
+     * Safe to call after `finalizeAuxiliaryLayout()` (does not depend on
+     * runtime-populated output buffers).
+     *
+     * @return Slot index, or `std::size_t(-1)` if not found.
+     */
+    [[nodiscard]] std::size_t auxiliaryOutputSlotOf(std::string_view output_name) const;
+
+    /**
+     * @brief Instance-qualified output slot lookup.
+     *
+     * Use this overload when multiple deployed models have outputs with
+     * the same name (e.g., two RCR models each exposing "P_out").
+     *
+     * @param instance_name  The deployed instance name.
+     * @param output_name    The output name within that instance.
+     * @return Slot index, or `std::size_t(-1)` if not found.
+     */
+    [[nodiscard]] std::size_t auxiliaryOutputSlotOf(
+        std::string_view instance_name, std::string_view output_name) const;
+
+    /**
+     * @brief Get an analysis summary of auxiliary blocks and inputs.
+     */
+    struct AuxiliaryAnalysisSummary {
+        std::size_t n_blocks{0};
+        std::size_t n_partitioned{0};
+        std::size_t n_monolithic{0};
+        std::size_t n_inputs{0};
+        std::size_t total_aux_unknowns{0};
+        std::vector<std::string> block_names{};
+        std::vector<std::string> input_names{};
+    };
+    [[nodiscard]] AuxiliaryAnalysisSummary auxiliaryAnalysisSummary() const;
 
 	    // ---- Accessors ----
 	    [[nodiscard]] const assembly::IMeshAccess& meshAccess() const;
@@ -541,6 +1066,113 @@ private:
 	    std::unique_ptr<GlobalKernelStateProvider> global_kernel_state_provider_{};
     std::unique_ptr<OperatorBackends> operator_backends_{};
     std::unique_ptr<CoupledBoundaryManager> coupled_boundary_{};
+    std::unordered_map<FieldId, std::unique_ptr<BoundaryReductionService>> boundary_reduction_services_{};
+    std::unique_ptr<AuxiliaryStateManager> auxiliary_state_manager_{};
+    std::unique_ptr<AuxiliaryOperatorRegistry> auxiliary_operator_registry_{};
+    std::unique_ptr<AuxiliaryInputRegistry> auxiliary_input_registry_{};
+    std::unique_ptr<FEQuantityRegistry> fe_quantity_registry_{};
+
+    /// Cached system state for FE-coupled auxiliary input callbacks.
+    /// Set by cacheSystemState() which is called from prepareAuxiliaryForAssembly(),
+    /// assembleMixedAuxiliaryIntoGlobal(), and advanceAuxiliaryState().
+    /// Callbacks capture `this` and read from these members.
+    mutable std::span<const Real> cached_solution_u_{};
+    mutable const backends::GenericVector* cached_solution_vector_{nullptr};
+    mutable std::span<const Real> cached_solution_u_prev_{};
+    mutable const backends::GenericVector* cached_solution_prev_vector_{nullptr};
+    mutable std::span<const Real> cached_solution_u_prev2_{};
+    mutable const backends::GenericVector* cached_solution_prev2_vector_{nullptr};
+    mutable const assembly::TimeIntegrationContext* cached_time_integration_{nullptr};
+    mutable const void* cached_user_data_{nullptr};
+
+    /// Cache a SystemStateView's fields for auxiliary input callbacks.
+    void cacheSystemState(const SystemStateView& state) const;
+
+    mutable std::vector<Real> field_endpoint_scratch_src_{}; ///< Scratch for distributed field source endpoint.
+    mutable std::vector<Real> field_endpoint_scratch_tgt_{}; ///< Scratch for distributed field target endpoint.
+
+    // Deployed auxiliary model instances (collected before setup, consumed during finalize).
+    struct DeployedAuxEntry {
+        std::shared_ptr<AuxiliaryStateModel> model{};
+        std::string instance_name{};
+        AuxiliaryStateSpec spec{};
+        AuxiliaryStepperSpec stepper_spec{};
+        std::vector<Real> initial_values{};
+        std::map<std::string, std::string> input_bindings{}; ///< Ordered for deterministic iteration
+        std::unordered_map<std::string, AuxiliaryInputHandle> coupled_bindings{}; ///< For chain-rule coupling
+        std::unordered_map<std::string, Real> param_values{};
+        std::size_t explicit_entity_count{0}; ///< 0 = auto from scope/mesh
+        std::unique_ptr<AuxiliaryStateStepper> stepper{};
+        std::unique_ptr<AuxiliaryDerivativeProvider> deriv_provider{};
+        std::vector<Real> output_buffer{}; ///< Evaluated output values
+        /// Entity map: indices of entities this block covers.
+        /// Empty = all entities (WholeDomain / no restriction).
+        std::vector<std::size_t> entity_map{};
+    };
+    std::vector<DeployedAuxEntry> deployed_aux_entries_{};
+    /// Deferred dependency pairs (dependent, dependency) from derivedInput().
+    /// Wired by finalizeDeferredInputDeps() when all inputs are registered.
+    std::vector<std::pair<std::string, std::string>> deferred_input_deps_{};
+    /// Deferred derived-input expressions needing AuxiliaryInputSymbol→Ref resolution.
+    std::vector<std::pair<std::string, std::shared_ptr<forms::FormExpr>>> deferred_derived_exprs_{};
+    /// Resolve deferred derived-input expressions and wire dependency edges.
+    /// Safe to call multiple times — clears the deferred lists on first run.
+    void finalizeDeferredInputDeps();
+
+    /// Bind secondary fields and set dof_per_node on a BoundaryReductionService
+    /// for multi-field integrand evaluation.
+    void bindSecondaryFields(BoundaryReductionService& svc,
+                              FieldId primary_fid,
+                              const std::vector<FieldId>& referenced_fields);
+    std::unique_ptr<AuxiliaryMultirateScheduler> aux_scheduler_{};
+
+public:
+    /// Assemble boundary gradient dI/du for a functional with the given
+    /// integrand (already transformed: DiscreteField → TrialFunction).
+    /// Returns sparse (DOF, value) pairs.
+    std::vector<BoundaryReductionService::SensitivityEntry>
+    assembleBoundaryGradient(FieldId field,
+                              const forms::FormExpr& integrand_trial,
+                              int boundary_marker,
+                              const SystemStateView& state);
+
+private:
+
+    void advanceOneEntry(DeployedAuxEntry& entry, Real time, Real dt, int substep_count);
+
+    /// Build ordered parameter vector for a deployed entry.
+    [[nodiscard]] std::vector<Real> buildParamVector(const DeployedAuxEntry& entry) const;
+
+    /// Build ordered input vector for a deployed entry (non-entity-local).
+    [[nodiscard]] std::vector<Real> buildInputVector(const DeployedAuxEntry& entry) const;
+
+    /// Rebuild input vector for a generic (non-built) model at a specific entity,
+    /// using declared input names with name:size parsing.
+    void rebuildGenericInputsForEntity(
+        const DeployedAuxEntry& entry, std::size_t entity_index,
+        std::vector<Real>& out) const;
+
+    /// Wire FE-coupled auxiliary input providers during finalization.
+    void wireFECoupledInputProviders();
+
+    /// Assemble monolithic auxiliary contributions into a global system view.
+    /// @param n_field_dofs  Number of FE field DOFs (for mixed offset computation).
+    /// @param is_nonlinear_iteration  When true, EachNonlinearIteration inputs refresh.
+    void assembleMixedAuxiliaryIntoGlobal(
+        const SystemStateView& state,
+        assembly::GlobalSystemView* matrix_out,
+        assembly::GlobalSystemView* vector_out,
+        bool want_matrix, bool want_vector,
+        std::size_t n_field_dofs,
+        bool is_nonlinear_iteration = false);
+
+    /// Parse "name:size" suffix from a declared input name.
+    /// Returns (base_name, component_count).
+    static std::pair<std::string, int> parseDeclaredInputName(const std::string& raw);
+
+    /// Validate all declared input names at deployment time (catches malformed suffixes).
+    static void validateDeclaredInputNames(const AuxiliaryStateModel& model);
+
 	    ParameterRegistry parameter_registry_{};
     std::unique_ptr<gauge::GaugeRegistry> gauge_registry_{};
     std::vector<backends::RankOneUpdate> last_rank_one_updates_{};
@@ -591,6 +1223,8 @@ private:
     mutable std::uint64_t analysis_report_version_{std::numeric_limits<std::uint64_t>::max()};
 
 	    bool is_setup_{false};
+	    Real last_auxiliary_advance_time_{0.0};
+	    mutable std::vector<Real> aux_output_flat_{}; ///< Flattened output values for assembly
 	};
 
 } // namespace systems

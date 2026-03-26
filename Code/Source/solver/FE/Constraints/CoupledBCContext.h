@@ -4,6 +4,16 @@
 /**
  * @file CoupledBCContext.h
  * @brief Context for coupled boundary-condition evaluators (integrals + aux state)
+ *
+ * @deprecated For new formulations, auxiliary data flows through the
+ * generalized `AuxiliaryInputRegistry` and `AuxiliaryStateManager`
+ * subsystems.  This context remains for backward compatibility with
+ * the legacy `CoupledBoundaryManager` path.
+ *
+ * ## Neutral accessor aliases
+ *
+ * `auxiliaryInputValues()` and `auxiliaryStateValues()` provide neutral
+ * names alongside the legacy `integralsValues()` and `auxValues()`.
  */
 
 #include "Core/Types.h"
@@ -25,8 +35,27 @@ struct CoupledBCContext {
     Real t{0.0};
     Real dt{0.0};
 
-    [[nodiscard]] std::span<const Real> integralsValues() const noexcept { return integrals.all(); }
-    [[nodiscard]] std::span<const Real> auxValues() const noexcept { return aux_state.values(); }
+    /// @deprecated Use auxiliaryInputValues() instead.
+    [[nodiscard]] std::span<const Real> integralsValues() const noexcept
+    {
+        return integrals.all();
+    }
+    /// @deprecated Use auxiliaryStateValues() instead.
+    [[nodiscard]] std::span<const Real> auxValues() const noexcept
+    {
+        return aux_state.values();
+    }
+
+    /// Neutral accessor: auxiliary input values (same data as integralsValues).
+    [[nodiscard]] std::span<const Real> auxiliaryInputValues() const noexcept
+    {
+        return integrals.all();
+    }
+    /// Neutral accessor: auxiliary state values (same data as auxValues).
+    [[nodiscard]] std::span<const Real> auxiliaryStateValues() const noexcept
+    {
+        return aux_state.values();
+    }
 };
 
 using CoupledBCEvaluator =

@@ -707,6 +707,15 @@ public:
     {
     }
 
+    /// Neutral setter for generalized auxiliary data.
+    /// Default: forwards inputs/state to setCoupledValues for backward compat.
+    virtual void setAuxiliaryValues(std::span<const Real> inputs,
+                                     std::span<const Real> state,
+                                     std::span<const Real> /*outputs*/ = {}) noexcept
+    {
+        setCoupledValues(inputs, state);
+    }
+
     /**
      * @brief Provide per-cell state storage for kernels requesting RequiredData::MaterialState
      *

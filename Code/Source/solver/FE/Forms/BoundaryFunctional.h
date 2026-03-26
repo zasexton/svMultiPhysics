@@ -51,6 +51,8 @@ struct BoundaryFunctional {
     int boundary_marker{-1};
     std::string name{};
     Reduction reduction{Reduction::Sum};
+    bool is_domain_functional{false};  ///< If true, integrate over cells instead of boundary faces.
+    int region_marker{-1};            ///< Cell region/material marker for domain functionals (-1 = all cells).
 };
 
 /**

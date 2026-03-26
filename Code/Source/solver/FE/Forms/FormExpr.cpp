@@ -2102,6 +2102,78 @@ FormExpr FormExpr::auxiliaryStateRef(std::uint32_t slot)
     return FormExpr(std::make_shared<AuxiliaryStateRefNode>(slot));
 }
 
+// --- Generalized auxiliary input/output nodes ---
+
+class AuxiliaryInputSymbolNode final : public FormExprNode {
+public:
+    explicit AuxiliaryInputSymbolNode(std::string name) : name_(std::move(name)) {}
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::AuxiliaryInputSymbol; }
+    [[nodiscard]] std::string toString() const override { return "aux_input(" + name_ + ")"; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] std::optional<std::string_view> symbolName() const override { return name_; }
+private:
+    std::string name_;
+};
+
+class AuxiliaryInputRefNode final : public FormExprNode {
+public:
+    explicit AuxiliaryInputRefNode(std::uint32_t slot) : slot_(slot) {}
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::AuxiliaryInputRef; }
+    [[nodiscard]] std::string toString() const override { return "aux_input[" + std::to_string(slot_) + "]"; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] std::optional<std::uint32_t> slotIndex() const override { return slot_; }
+private:
+    std::uint32_t slot_;
+};
+
+class AuxiliaryOutputSymbolNode final : public FormExprNode {
+public:
+    explicit AuxiliaryOutputSymbolNode(std::string name) : name_(std::move(name)) {}
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::AuxiliaryOutputSymbol; }
+    [[nodiscard]] std::string toString() const override { return "aux_output(" + name_ + ")"; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] std::optional<std::string_view> symbolName() const override { return name_; }
+private:
+    std::string name_;
+};
+
+class AuxiliaryOutputRefNode final : public FormExprNode {
+public:
+    explicit AuxiliaryOutputRefNode(std::uint32_t slot) : slot_(slot) {}
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::AuxiliaryOutputRef; }
+    [[nodiscard]] std::string toString() const override { return "aux_output[" + std::to_string(slot_) + "]"; }
+    [[nodiscard]] bool hasTest() const noexcept override { return false; }
+    [[nodiscard]] bool hasTrial() const noexcept override { return false; }
+    [[nodiscard]] std::optional<std::uint32_t> slotIndex() const override { return slot_; }
+private:
+    std::uint32_t slot_;
+};
+
+FormExpr FormExpr::auxiliaryInput(std::string name)
+{
+    if (name.empty()) throw std::invalid_argument("FormExpr::auxiliaryInput: empty name");
+    return FormExpr(std::make_shared<AuxiliaryInputSymbolNode>(std::move(name)));
+}
+
+FormExpr FormExpr::auxiliaryInputRef(std::uint32_t slot)
+{
+    return FormExpr(std::make_shared<AuxiliaryInputRefNode>(slot));
+}
+
+FormExpr FormExpr::auxiliaryOutput(std::string name)
+{
+    if (name.empty()) throw std::invalid_argument("FormExpr::auxiliaryOutput: empty name");
+    return FormExpr(std::make_shared<AuxiliaryOutputSymbolNode>(std::move(name)));
+}
+
+FormExpr FormExpr::auxiliaryOutputRef(std::uint32_t slot)
+{
+    return FormExpr(std::make_shared<AuxiliaryOutputRefNode>(slot));
+}
+
 FormExpr FormExpr::materialStateOldRef(std::uint32_t offset_bytes)
 {
     return FormExpr(std::make_shared<MaterialStateOldRefNode>(offset_bytes));

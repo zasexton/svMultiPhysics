@@ -128,7 +128,7 @@ TEST(CoupledBoundaryConditionHelpers, ApplyCoupledNeumann_RegistersAuxStateAndRe
     svmp::FE::systems::AuxiliaryStateRegistration reg;
     reg.spec.size = 1;
     reg.spec.name = "X";
-    reg.spec.associated_markers = {2};
+    reg.associated_markers = {2};
     reg.initial_values = {0.0};
     reg.required_integrals = {Q};
     reg.rhs = svmp::FE::forms::FormExpr::boundaryIntegralValue("Q");
@@ -348,7 +348,7 @@ TEST(CoupledBoundaryConditionHelpers, CoupledAuxiliaryState_JacobianIncludesChai
     svmp::FE::systems::AuxiliaryStateRegistration reg;
     reg.spec.size = 1;
     reg.spec.name = "X";
-    reg.spec.associated_markers = {2};
+    reg.associated_markers = {2};
     reg.initial_values = {0.0};
     reg.required_integrals = {Q};
     reg.rhs = svmp::FE::forms::FormExpr::boundaryIntegralValue("Q");
@@ -425,7 +425,7 @@ TEST(CoupledBoundaryConditionHelpers, CoupledAuxiliaryState_JacobianMatchesFinit
     svmp::FE::systems::AuxiliaryStateRegistration reg;
     reg.spec.size = 1;
     reg.spec.name = "X";
-    reg.spec.associated_markers = {2};
+    reg.associated_markers = {2};
     reg.initial_values = {0.0};
     reg.required_integrals = {Q};
     reg.rhs = svmp::FE::forms::FormExpr::boundaryIntegralValue("Q");

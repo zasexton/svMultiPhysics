@@ -695,6 +695,11 @@ public:
     void setCoupledValues(std::span<const Real> integrals,
                           std::span<const Real> aux_state) noexcept;
 
+    /// Neutral setter for generalized auxiliary data.
+    void setAuxiliaryValues(std::span<const Real> inputs,
+                            std::span<const Real> state,
+                            std::span<const Real> outputs = {}) noexcept;
+
     /**
      * @brief Bind history/convolution weights for history operators
      *
@@ -901,6 +906,9 @@ private:
     std::span<const Real> jit_constants_{};
     std::span<const Real> coupled_integrals_{};
     std::span<const Real> coupled_aux_state_{};
+    std::span<const Real> auxiliary_inputs_{};
+    std::span<const Real> auxiliary_state_{};
+    std::span<const Real> auxiliary_outputs_{};
     std::span<const Real> history_weights_{};
 
     // Working storage

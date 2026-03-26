@@ -1543,6 +1543,32 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 	            }
 	            return out;
 	        }
+	        case FormExprType::AuxiliaryInputRef: {
+	            const auto slot = node.slotIndex().value_or(0u);
+	            const auto vals = ctx.auxiliaryInputs();
+	            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+	                        "Forms: AuxiliaryInputRef requires auxiliary inputs in AssemblyContext (jet)");
+	            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+	                        "Forms: AuxiliaryInputRef slot out of range (jet)");
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(vals[slot], env);
+	            if (out.has_grad) out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            if (out.has_hess) out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            return out;
+	        }
+	        case FormExprType::AuxiliaryOutputRef: {
+	            const auto slot = node.slotIndex().value_or(0u);
+	            const auto vals = ctx.auxiliaryOutputs();
+	            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+	                        "Forms: AuxiliaryOutputRef requires auxiliary outputs in AssemblyContext (jet)");
+	            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+	                        "Forms: AuxiliaryOutputRef slot out of range (jet)");
+	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+	            out.value.s = makeScalarConstant<Scalar>(vals[slot], env);
+	            if (out.has_grad) out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+	            if (out.has_hess) out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
+	            return out;
+	        }
 	        case FormExprType::MaterialStateOldRef: {
 	            const auto off = node.stateOffsetBytes();
 	            FE_THROW_IF(!off.has_value(), InvalidArgumentException,
@@ -4835,6 +4861,24 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                         "Forms: AuxiliaryStateRef requires coupled auxiliary state in AssemblyContext");
             FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
                         "Forms: AuxiliaryStateRef slot out of range");
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, vals[slot]};
+        }
+        case FormExprType::AuxiliaryInputRef: {
+            const auto slot = node.slotIndex().value_or(0u);
+            const auto vals = ctx.auxiliaryInputs();
+            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+                        "Forms: AuxiliaryInputRef requires auxiliary inputs in AssemblyContext");
+            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+                        "Forms: AuxiliaryInputRef slot out of range");
+            return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, vals[slot]};
+        }
+        case FormExprType::AuxiliaryOutputRef: {
+            const auto slot = node.slotIndex().value_or(0u);
+            const auto vals = ctx.auxiliaryOutputs();
+            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+                        "Forms: AuxiliaryOutputRef requires auxiliary outputs in AssemblyContext");
+            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+                        "Forms: AuxiliaryOutputRef slot out of range");
             return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, vals[slot]};
         }
         case FormExprType::MaterialStateOldRef: {
@@ -8811,6 +8855,30 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                     out.s.deriv[0] = env.coupled_aux_dseed[idx];
                 }
             }
+            return out;
+        }
+        case FormExprType::AuxiliaryInputRef: {
+            const auto slot = node.slotIndex().value_or(0u);
+            const auto vals = ctx.auxiliaryInputs();
+            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+                        "Forms: AuxiliaryInputRef requires auxiliary inputs in AssemblyContext (dual)");
+            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+                        "Forms: AuxiliaryInputRef slot out of range (dual)");
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(vals[slot], env.ws->alloc());
+            return out;
+        }
+        case FormExprType::AuxiliaryOutputRef: {
+            const auto slot = node.slotIndex().value_or(0u);
+            const auto vals = ctx.auxiliaryOutputs();
+            FE_THROW_IF(vals.empty(), InvalidArgumentException,
+                        "Forms: AuxiliaryOutputRef requires auxiliary outputs in AssemblyContext (dual)");
+            FE_THROW_IF(slot >= vals.size(), InvalidArgumentException,
+                        "Forms: AuxiliaryOutputRef slot out of range (dual)");
+            EvalValue<Dual> out;
+            out.kind = EvalValue<Dual>::Kind::Scalar;
+            out.s = makeDualConstant(vals[slot], env.ws->alloc());
             return out;
         }
         case FormExprType::MaterialStateOldRef: {

@@ -5,16 +5,27 @@
  * @file CoupledBoundaryConditions.h
  * @brief Loop-free helper APIs for coupled (non-local) boundary conditions
  *
- * These helpers mirror the style of `forms::bc::applyNeumann/applyRobin` but
- * additionally wire the coupled-BC orchestration managed by
- * `systems::CoupledBoundaryManager`:
- *  - register required boundary functionals (non-local integrals),
- *  - register auxiliary (0D) state variables and evolution callbacks,
- *  - add boundary-integral terms to a Forms residual expression.
+ * @deprecated These helpers use the legacy CoupledBoundaryManager path.
+ * New formulations should:
+ * 1. Define auxiliary models via `AuxiliaryModelBuilder`.
+ * 2. Deploy via `use(model).scope(...).bind(...)`.
+ * 3. Reference auxiliary outputs via `AuxiliaryOutput(name)` in forms.
+ * 4. Register boundary-reduction inputs via `AuxiliaryInputRegistry`.
  *
- * The non-local data is provided to coefficient evaluation via a stable
- * `constraints::CoupledBCContext` owned by the manager and updated just before
- * each PDE assembly call.
+ * The helpers below remain functional for backward compatibility.
+ * They mirror the style of `forms::bc::applyNeumann/applyRobin` and
+ * wire the coupled-BC orchestration managed by `CoupledBoundaryManager`.
+ *
+ * ## Legacy symbol workflow
+ *
+ * `boundaryIntegralValue("Q")` and `auxiliaryState("X")` create
+ * name-based placeholder terminals.  `collectCoupledSymbols` extracts
+ * them, and `resolveCoupledSymbols` maps them to slot-indexed refs.
+ *
+ * ## Neutral alternatives
+ *
+ * - `boundaryIntegralValue("Q")` → `AuxiliaryInput("Q")`
+ * - `auxiliaryState("X")` → `AuxiliaryOutput("X")` or `AuxiliaryState("X")`
  */
 
 #include "Core/Types.h"

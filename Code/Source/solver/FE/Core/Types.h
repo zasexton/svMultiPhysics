@@ -142,6 +142,10 @@ using Real = double;
 constexpr LocalIndex INVALID_LOCAL_INDEX = std::numeric_limits<LocalIndex>::max();
 constexpr GlobalIndex INVALID_GLOBAL_INDEX = -1;
 constexpr FieldId INVALID_FIELD_ID = std::numeric_limits<FieldId>::max();
+/// Sentinel FieldId for geometry-only quantities (no DOF dependence).
+/// Uses first registered field's space for quadrature, but logically decoupled
+/// from any specific field's DOFs.
+constexpr FieldId GEOMETRY_FIELD_ID = std::numeric_limits<FieldId>::max() - 1;
 constexpr BlockId INVALID_BLOCK_ID = std::numeric_limits<BlockId>::max();
 
 /**
@@ -158,6 +162,26 @@ constexpr BlockId INVALID_BLOCK_ID = std::numeric_limits<BlockId>::max();
  * with existing KernelIR encodings, but carries explicit semantic intent.
  */
 constexpr FieldId CURRENT_SOLUTION_FIELD_ID = std::numeric_limits<FieldId>::max();
+
+// ============================================================================
+// Field Value Entry (for point evaluation of field-dependent expressions)
+// ============================================================================
+
+/// Maximum number of components in a FieldValueEntry (3x3 tensor).
+constexpr int MAX_FIELD_VALUE_COMPONENTS = 9;
+
+/**
+ * @brief Field value at an evaluation point — scalar, vector, or tensor.
+ *
+ * Used by PointEvaluator and the auxiliary assembly path to supply FE
+ * field values at entity locations (e.g., nodal DOF values for
+ * Node-scoped auxiliary models with Lagrange Kronecker delta).
+ */
+struct FieldValueEntry {
+    FieldId field{INVALID_FIELD_ID};
+    int n_components{0};
+    Real components[MAX_FIELD_VALUE_COMPONENTS]{};
+};
 
 // ============================================================================
 // Element Type Enumerations

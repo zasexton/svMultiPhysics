@@ -127,6 +127,21 @@ struct SymbolicDiffResult {
                                                          FieldId trial_state_field = INVALID_FIELD_ID);
 
 /**
+ * @brief Differentiate a form w.r.t. a specific AuxiliaryOutputRef slot.
+ *
+ * This treats the AuxiliaryOutputRef(slot) terminal as the active variable
+ * (derivative = 1) and all other terminals as constants.  The result is a
+ * scalar-valued expression suitable for evaluating dR/d(output_k) at each
+ * quadrature point.
+ *
+ * Used for the transpose Jacobian block dR_PDE/dx_aux when PDE forms
+ * reference auxiliary outputs.  Works for any form location — NaturalBCs,
+ * source terms, material parameters, etc.
+ */
+[[nodiscard]] FormExpr differentiateWrtAuxiliaryOutput(
+    const FormExpr& form, std::uint32_t output_slot);
+
+/**
  * @brief Simplify a FormExpr with lightweight algebraic rewrites and constant folding
  */
 [[nodiscard]] FormExpr simplify(const FormExpr& expr);

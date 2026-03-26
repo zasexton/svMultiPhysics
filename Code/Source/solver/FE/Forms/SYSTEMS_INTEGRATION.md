@@ -13,6 +13,9 @@ How `FE/Forms` weak-form expressions become assembled operators in `FE/Systems`.
 | Auto-detecting compilation | `FormCompiler::compile()` | `FormCompiler.h` |
 | Explicit mixed compilation | `FormCompiler::compileMixed()` | `FormCompiler.h` |
 | Pre-compiled IR installation | `installMixedFormIR()` | `FormsInstaller.h` |
+| Auxiliary model definition | `AuxiliaryModelBuilder("name")` | `AuxiliaryModelBuilder.h` |
+| Auxiliary model deployment | `use(model).scope(...).bind(...)` | `AuxiliaryBindings.h` |
+| Auxiliary inputs | `AuxiliaryInputRegistry` | `AuxiliaryInputRegistry.h` |
 
 ### Expert/Manual Paths
 

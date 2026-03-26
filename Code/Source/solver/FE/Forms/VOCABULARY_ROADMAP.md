@@ -1,292 +1,390 @@
-# FE/Forms — Vocabulary Expansion Roadmap
+# FE/Forms - Vocabulary Expansion Roadmap
 
-This file enumerates an **extensive candidate vocabulary** for expressing weak
-forms for a wide range of future PDEs (elliptic/parabolic/hyperbolic, mixed/DG,
-multiphysics, nonlinear/constitutive, space-time, optimization, stochastic,
-nonlocal, etc.).
+This document is the roadmap for **future vocabulary work** in `FE/Forms`.
+It is intentionally narrower and more execution-oriented than a generic
+"everything a PDE DSL could someday contain" checklist.
 
-It is intentionally broader than what `FE/Forms` implements today. For what is
-**currently implemented and usable**, see `VOCABULARY.md`.
+For what is **implemented and intended for public use today**, see
+`VOCABULARY.md`.
 
-Items are grouped by concept and annotated with a suggested **module owner**:
-- **Forms**: first-class `forms::FormExpr` terminal/operator, or a helper combinator.
-- **Assembly**: from `assembly::AssemblyContext` / geometry mapping, surfaced in Forms as terminals.
-- **Spaces/Systems**: owned by `FE/Spaces` and `FE/Systems`, may influence operator semantics.
-- **Constraints/Constitutive/TimeStepping/Backends/Solvers**: cross-module concepts that Forms may *reference* but should not own.
+This roadmap follows a few rules:
 
-## 1. Primitive Mathematical Types (Shapes)
+- Prefer **cross-cutting primitives** over PDE-specific helper catalogs.
+- Do not treat already-implemented features as roadmap items; promote them into
+  status/docs instead.
+- Every roadmap item should identify **module ownership**, **prerequisites**,
+  and **acceptance criteria**.
+- Avoid ambiguous names. In particular, `trace(...)` already means **tensor
+  trace**, so facet/interface restriction operators must use different names.
 
-Owner: **Forms** (shape system) + **Math** (storage/ops)
+## 1. Status Model and Documentation Contract
 
-- `Scalar` (Real)
-- `ComplexScalar` (complex Real)
-- `Vector` (fixed dimension, e.g. 2D/3D; and possibly runtime dimension)
-- `Tensor` (rank-2)
-- `SymmetricTensor` (rank-2 symmetric storage + ops)
-- `SkewTensor` (rank-2 skew storage + ops)
-- `FourthOrderTensor` (rank-4)
-- `MixedType` (tuples/products of heterogeneous shapes)
-- `BlockType` / `BlockVector` / `BlockTensor` (for multi-field/multi-component coupling)
-- `Boolean` and `Integer` expression scalars (for `conditional`, `indicator`, discrete toggles)
+This file is not the capability matrix. The vocabulary story should be tracked
+using four status buckets:
 
-## 2. Indexing & Tensor Algebra
+- `implemented/public`
+- `implemented/internal`
+- `planned`
+- `out-of-scope`
 
-Owner: **Forms** (index objects + expression nodes) + **Math**
+Recommended document roles:
 
-- `Index`, `FreeIndex`, `BoundIndex`
-- `IndexSet`, `Component(i)`, `Component(i,j,...)`, slicing helpers
-- `EinsteinSummation` / implicit summation over bound indices
-- `Contraction` (single and multiple index contraction)
-- `DoubleContraction` (`A:B`)
-- `InnerProduct` (generalized dot / Frobenius inner product)
-- `OuterProduct` (dyadic / tensor product)
-- `HadamardProduct` (componentwise multiplication; useful in some nonlinearities)
-- `Trace`, `Determinant`, `Inverse`, `Transpose`, `Cofactor`
-- `Deviator` / `dev(A)`, `VolumetricPart` / `spherical(A)`
-- `SymmetricPart` / `sym(A)`, `SkewPart` / `skew(A)`
-- `FrobeniusNorm`, `L2Norm`, `LpNorm(p)`, `MaxNorm`
-- `Normalize(v)`, `Unit(v)`
-- `CrossProduct` (3D), `Wedge` (exterior product; if supporting differential forms)
-- `LeviCivita` / permutation tensor (for compact curls/cross)
-- `IdentityTensor(dim)`, `Zero(shape)`
+- `VOCABULARY.md`: single source of truth for `implemented/public`
+- capability matrix (same file or adjacent table): all four status buckets
+- this file: only `planned` work and sequencing
 
-## 3. Mesh & Geometry (Terminals from Context)
+### Immediate documentation-convergence work
 
-Owner: **Assembly** (data) + **Forms** (terminals)
+Before adding more roadmap surface area, the current status/docs need to be
+reconciled. The following items already exist in public headers and/or tests and
+should be documented as current capability rather than left implicit:
 
-### 3.1 Topology-level identifiers (mostly not Expressions)
+- interface-face measure: `.dI(marker)`
+- time terminals: `t`, `deltat`, `deltat_eff`
+- solution-history access: `previousSolution(k)`, `historyWeightedSum(...)`,
+  `historyConvolution(...)`
+- auxiliary/coupled-state terminals: `auxiliaryState(name)`
+- matrix/spectral operators: `matrixExp`, `matrixLog`, `matrixSqrt`,
+  `matrixPow`, eigenvalue/eigenvector/spectral decomposition operators
+- smooth regularization operators: `smoothAbs`, `smoothSign`,
+  `smoothHeaviside`, `smoothMin`, `smoothMax`
+- constitutive ergonomics already supported today:
+  - n-ary inputs
+  - indexed multi-output access via `ConstitutiveCall::out(i)`
 
-Owner: **Systems/Assembly/Mesh**
+The following items should be classified as `implemented/internal` until a
+stable ergonomic API exists:
 
-- `Mesh`, `Cell`, `Facet`, `Edge`, `Vertex`
-- `Subdomain`, `Boundary`, `Interface`
-- `Manifold`, `EmbeddedDomain`
-- `ReferenceCell`, `PhysicalCell`
-- `CellType` / `ReferenceElement`
+- `materialStateOldRef(offset_bytes)`
+- `materialStateWorkRef(offset_bytes)`
+- other slot-/offset-based symbolic terminals meant for setup-time lowering
 
-### 3.2 Geometric fields available at quadrature points
+## 2. Recommended Sequencing
 
-Owner: **Assembly** -> surfaced in **Forms**
+The roadmap should be executed in this order:
 
-- Coordinates: `x` (physical), `X` (reference), `t` (time, if space-time)
-- `NormalVector` (`n`), `TangentVector` (`t1`, `t2`), `ProjectionNormal`, `ProjectionTangent`
-- Element/face sizes: `CellDiameter` (`h`), `CellVolume`, `FacetArea`, `EdgeLength`
-- Mapping/Jacobian: `Jacobian` (`J`), `JacobianInverse` (`Jinv`), `JacobianDeterminant` (`detJ`)
-- Mapping families (metadata): `AffineMapping`, `IsoparametricMapping`, `PiolaMapping`, `ALEMapping`
-- Curvature and surface geometry (for manifolds): `Curvature`, `MetricTensor`, `ChristoffelSymbols`
+1. Documentation convergence and status cleanup
+2. Cross-cutting foundation primitives
+3. Mixed-dimensional / embedded coupling and ALE as major epics
+4. Advanced math and constitutive ergonomics
+5. Optional FEEC/manifold branch
 
-## 4. Function Spaces (Types/Metadata)
+Long-tail domains such as optimization, stochastic/UQ, and nonlocal PDEs should
+remain deferred until the foundation tracks below are complete.
 
-Owner: **Spaces/Systems** (definitions), referenced by **Forms**
+## 3. Priority 1 - Cross-Cutting Foundation Primitives
 
-- `FunctionSpace`
-- `ScalarSpace`, `VectorSpace`, `TensorSpace`
-- `MixedSpace`, `EnrichedSpace`
-- `BrokenSpace`, `DiscontinuousSpace`
-- `ConformingSpace`, `NonconformingSpace`
-- `H1Space`, `L2Space`, `HdivSpace`, `HcurlSpace`
-- `TraceSpace`, `MortarSpace`
-- `SpaceTimeSpace` (for space-time FE)
+These are the vocabulary pieces that unlock many future physics modules at once.
+They should be prioritized ahead of broad new domain-specific helper families.
 
-Forms implications:
-- Operator legality depends on space (e.g., `div` meaningful for H(div), tangential traces for H(curl)).
-- Traces/restrictions to facets should be explicit in the vocabulary (`trace(u)`, `u.minus()`, `u.plus()`).
-- Mixed/multi-field forms are authored as a **single mixed `FormExpr`** with
-  multiple `TestFunction`/`TrialFunction` spaces, then installed via
-  `installFormulation()` or `installMixedBilinear()`. The compiler handles
-  block decomposition automatically. Manual block containers
-  (`BlockBilinearForm` / `BlockLinearForm`) remain available as an expert path.
-- `MortarSpace` exists as a semantic space type for future interface coupling; mesh/interface ownership and assembly loops live in Systems/Assembly.
+### 3.1 Facet / Interface Trace Algebra
 
-## 5. Discrete Functions / Fields
+Owner: **Forms** + **Assembly** + **Spaces**
 
-Owner: **Forms** (symbolic handles) + **Systems** (field registration)
+Why this matters:
 
-- `Function` (generic FE function handle)
-- `TrialFunction`, `TestFunction`
-- `Coefficient` (space-/time-dependent known field), including vector/tensor coefficients
-- `Constant`, `Parameter` (runtime scalar parameters)
-- `StateVariable`, `ControlVariable`, `AdjointVariable`
-- `HistoryVariable` (requires material-point state plumbing in Assembly/Systems)
-- `AuxiliaryVariable` (post-processing fields, diagnostics)
-- `FieldComponent` selection (`u[i]`, `u(i)`, `u.component(k)`)
+- H(div) and H(curl) formulations need normal/tangential trace semantics
+- slip walls, contact, shells, Nitsche terms, and Maxwell-type interface laws
+  all become awkward without explicit trace/project/jump operators
+- raw `inner(..., n.minus())` expressions do not scale as a user-facing story
 
-## 6. Differential Operators (Spatial)
+Roadmap items:
 
-Owner: **Forms** (operators) + **Assembly/Spaces** (data support)
+- first-class trace operators distinct from tensor `trace(...)`
+  - `facetTrace(expr, side)`
+  - or explicit `minus(expr)` / `plus(expr)` helpers as the base restriction
+- normal/tangential trace family
+  - `normalTrace(u)`
+  - `tangentialTrace(u)`
+- projection helpers
+  - `projectNormal(u)`
+  - `projectTangent(u)`
+- jump/average family beyond scalar DG basics
+  - `normalJump(u)`
+  - `tangentialJump(u)`
+  - `weightedAverage(u, w_minus, w_plus)`
+- orientation-aware terminals
+  - side-specific normals
+  - side orientation/sign conventions
+  - explicit interface orientation metadata where needed
 
-- `Gradient`, `Divergence`, `Curl`
-- `Hessian`, `Laplacian`, `Biharmonic`
-- `DirectionalDerivative(v, u)` / `D_v u`
-- `CovariantDerivative` (manifold/curvilinear)
-- `LieDerivative`
-- Differential forms: `ExteriorDerivative`, `Codifferential`, `DifferentialForm`
-- Mappings: `Pullback`, `Pushforward` (e.g., Piola transforms, differential forms on manifolds)
+Acceptance criteria:
 
-## 7. Differential Operators (Temporal)
+- common H(div)/H(curl) interface terms can be written without raw component
+  manipulation against `n.minus()`
+- slip and Nitsche-style boundary/interface forms are authorable with explicit
+  normal/tangential vocabulary
+- the orientation model is documented and validated on both interior faces and
+  registered interface faces
 
-Owner: **TimeStepping/Systems** + referenced by **Forms**
+### 3.2 State / History / Stage Access
 
-- `TimeDerivative` (`dt(u,k)` with `k>=1`)
+Owner: **Forms** + **Systems** + **TimeStepping** + **Constitutive**
 
-Forms implication: these operators typically depend on `SystemStateView` (time, dt, previous solutions).
+Why this matters:
 
-## 8. Integral & Measure Operators
+- viscoelasticity, plasticity, phase change, rate laws, and generalized-alpha /
+  BDF schemes require direct access to history and state
+- low-level slot/offset terminals exist, but they are not an ergonomic public
+  DSL
+- coupled ODE-PDE models need named auxiliary/state access, not just
+  infrastructure hooks
 
-Owner: **Forms** (measures) + **Quadrature/Assembly** (execution)
+Roadmap items:
 
-- `Integral`, `DomainIntegral` (`dx`), `BoundaryIntegral` (`ds`), `InterfaceIntegral`
-- `InteriorFacetIntegral` (`dS`) (DG)
-- `TimeIntegral` (`dt`), `SpaceTimeIntegral`
-- `Measure`, `SubdomainMeasure`, marker/tag-based measures
-- `QuadratureRule`, `QuadratureWeight` (internal; surfaced only for advanced control/debug)
-- Singular sources:
-  - `DiracDelta`
-  - `PointSource`, `LineSource`, `SurfaceSource`
+- field-oriented history accessors
+  - `prev(u, k)` or `u_prev(k)`
+  - stage accessors such as `stage(u, i)` where time integrators expose stage
+    states
+- named auxiliary/coupled-state access
+  - `aux(name)`
+  - named coupled integral references where public authoring needs them
+- named material-state access driven by `StateLayout`
+  - `stateOld(name)`
+  - `stateWork(name)`
+- explicit public documentation for current time terminals and history
+  operators
 
-## 9. Discontinuous Galerkin (DG) & Interface Operators
+Acceptance criteria:
 
-Owner: **Forms** (operators/helpers) + **Assembly** (face loops)
+- transient weak forms can be written using named/history-aware vocabulary
+  rather than raw slot/offset terminals
+- constitutive/stateful models can author rate laws against named state fields
+- stage-aware schemes do not require physics modules to bypass the DSL
 
-- `Jump`, `Average`, `WeightedAverage`
-- `UpwindValue`, `DownwindValue`
-- `Penalty`, `InteriorPenalty`
-- `NumericalFlux`, `InterfaceFlux`
-- `NitschePenalty` / Nitsche consistency/symmetry terms as helpers
-- Optional trace selectors: `u.minus()`, `u.plus()` (more explicit than overloading)
+### 3.3 Generalized Measure Model
 
-## 10. Algebraic & Nonlinear Scalar Operators
+Owner: **Forms** + **Assembly/Quadrature**
+
+Why this matters:
+
+- current public measure story is too narrow for embedded physics, singular
+  sources, and nonmatching couplings
+- interface-heavy and mixed-dimensional workflows need more than `dx`, `ds`,
+  and `dS`
+- quadrature control should attach to a measure, not only to global assembly
+  configuration
+
+Roadmap items:
+
+- keep existing core measures
+  - `dx`
+  - `ds(boundary_marker)`
+  - `dS`
+  - `dI(interface_marker)` as current implemented interface-face measure
+- add generalized domain selection
+  - subdomain-set measures
+  - boundary-set measures
+  - interface-pair / interface-set measures
+- add codimension-aware measures
+  - codimension-2 edge/curve measures
+  - point measures
+  - embedded manifold measures
+- add per-measure quadrature metadata
+  - quadrature rule/order override
+  - optional advanced/debug quadrature terminals only where justified
+
+Acceptance criteria:
+
+- singular sources and embedded-source problems can be expressed without
+  handwritten kernels
+- interface and embedded problems can attach quadrature behavior to the measure
+  itself
+- the public docs reflect both current measures and planned generalized ones
+
+## 4. Priority 2 - Mixed-Dimensional and Embedded-Domain Coupling
+
+Owner: **Systems/Assembly** + **Spaces** + **Forms**
+
+Why this matters:
+
+- this is the missing bridge for 3D-1D vessel models, fractures, immersed
+  membranes, fibers, and 0D/1D/3D couplings
+- the current roadmap has `EmbeddedDomain`, `TraceSpace`, and `MortarSpace`
+  concepts, but not the actual bulk-to-lower-dimensional operators users need
+
+Roadmap items:
+
+- restriction/trace from a bulk field to a lower-dimensional manifold
+  - `restrictTo(manifold, u)`
+  - `traceTo(manifold, u)`
+- extension / lifting / prolongation back to the bulk
+  - `extendFrom(manifold, lambda)`
+  - `lift(...)`
+- transfer operators between spaces of different topological dimension
+- codimension-aware measures integrated with the generalized measure model
+- same-mesh and nonmatching interface workflows as distinct sub-phases
+
+Suggested phases:
+
+- Phase 2a: same-mesh codimension-1 coupling on registered interfaces
+- Phase 2b: nonmatching codimension-1 coupling with `MortarSpace`
+- Phase 2c: codimension-2 and mixed 0D/1D/3D transfer operators
+
+Acceptance criteria:
+
+- a bulk field can be restricted onto a lower-dimensional space and coupled back
+  without ad hoc callback code
+- transfer operators are explicit vocabulary concepts, not implicit assembly
+  behavior
+- the roadmap distinguishes same-mesh trace coupling from genuine embedded or
+  nonmatching coupling
+
+## 5. Priority 3 - ALE / Moving Domains
+
+Owner: **Assembly/Geometry** + **Systems/TimeStepping** + **Forms**
+
+Why this matters:
+
+- `ALEMapping` as metadata is not enough for physics authors
+- free-surface flow, moving-boundary diffusion, FSI, and shape evolution need
+  explicit moving-domain terminals and transforms
+
+Roadmap items:
+
+- mesh/domain motion terminals
+  - mesh displacement
+  - mesh velocity / domain velocity
+- moving-domain differential operators
+  - material derivative
+  - optional convected derivatives if they become a real requirement
+- reference/current configuration geometry
+  - current normal
+  - reference normal
+  - current measure
+  - reference measure
+- mapping transforms
+  - surface Jacobian
+  - Nanson-type transforms
+  - current/reference pullback/pushforward semantics where needed
+
+Acceptance criteria:
+
+- moving-domain residuals can be authored without manual coefficient plumbing
+- free-surface and FSI formulations can distinguish reference and current
+  geometry in the DSL
+- ALE is treated as a first-class vocabulary branch, not just geometry metadata
+
+## 6. Priority 4 - Advanced Math and Constitutive Ergonomics
+
+### 6.1 Scalar Nonlinear Function Expansion
 
 Owner: **Forms**
 
-- `Add`, `Subtract`, `Multiply`, `Divide`
-- `Power`, `Sqrt`, `Exp`, `Log`
-- `AbsoluteValue`, `Sign`
-- `Minimum`, `Maximum`, `Clamp`
-- `Conditional` / `if_then_else`, `Heaviside`, `IndicatorFunction`
-- Complex ops (if supporting complex): `Conjugate`, `RealPart`, `ImagPart`, `Arg`
+Why this matters:
 
-## 11. Constitutive Hooks
+- manufactured solutions, periodic forcing, reaction kinetics, turbulence
+  closures, contact regularization, and phase-field models require a broader
+  scalar math set
 
-Owner: **Constitutive** (models) + **Forms** (call boundary)
+Roadmap items:
 
-- `ConstitutiveOperator(model, input)` (type-erased boundary; must support Real and AD scalars)
-- Optional material-point state/history accessors (future; owned by `FE/Constitutive` + `FE/Systems`)
+- trigonometric functions
+  - `sin`
+  - `cos`
+  - `tan`
+- hyperbolic functions
+  - `sinh`
+  - `cosh`
+  - `tanh`
+- inverse trig functions
+  - `atan`
+  - `atan2`
+- special functions likely worth supporting
+  - `erf`
+  - `erfc`
+- sign/part/complementarity helpers
+  - `positivePart`
+  - `negativePart`
+  - smooth complementarity/projector operators where needed
 
-Non-goal: FE/Forms does not define domain-specific named quantities; those belong in `FE/Constitutive` or application code.
+Acceptance criteria:
 
-## 12. Variational Structure
+- the roadmap clearly separates exact nonsmooth operators from smooth
+  regularizations
+- new scalar functions ship with AD and JIT/lowering requirements, not just AST
+  node names
 
-Owner: **Forms** (syntax) + **Systems** (operator registration)
+### 6.2 Constitutive Ergonomics and State Layout
 
-- `Residual`, `LinearForm`, `BilinearForm`, `MultilinearForm`
-- `StrongForm` (strong form typically used for diagnostics or auto-derivation)
-- Functionals: `EnergyFunctional`, `ActionFunctional`, `DissipationPotential`
-- Constraints: `ConstraintFunctional`, `Lagrangian`, `AugmentedLagrangian`
+Owner: **Constitutive** + **Forms**
 
-## 13. Differentiation / AD Vocabulary
+Why this matters:
 
-Owner: **Forms** (operators) + **Systems/Solvers** (workflows)
+- the code already supports richer constitutive calls than the public story
+  suggests
+- multi-input/multi-output and named state layout are required for realistic
+  thermo-chemo-electro-mechanical materials and closure models
 
-- `GateauxDerivative`, `FrechetDerivative`
-- `Jacobian`, `HessianOperator`, `TangentOperator`
-- `Linearization`, `Sensitivity`
-- `Adjoint`, `AdjointResidual`, `AdjointJacobian`
+Roadmap items:
 
-## 14. Constraints & Boundary Conditions
+- document current support explicitly
+  - n-ary inputs
+  - multi-output calls
+  - indexed output selection
+- add named-output metadata and public ergonomics
+  - `call.out("stress")`
+  - output descriptors for tooling/docs
+- connect named material-state access to `StateLayout`
+- keep explicit state-layout and output-shape metadata in the roadmap rather
+  than describing constitutive models as unary black boxes
 
-Owner: **Constraints/Systems** (strong/algebraic) + **Forms** (weak terms)
+Acceptance criteria:
 
-- Strong/algebraic: `DirichletCondition`, `PeriodicConstraint`, `MultiPointConstraint`
-- Classification helpers: `EssentialConstraint` (strong), `NaturalConstraint` (weak)
-- Natural/weak terms: `NeumannCondition`, `RobinCondition`, `MixedCondition`, `WeakBoundaryCondition`
-- Contact/inequalities: `ContactConstraint`, `InequalityConstraint`, `ComplementarityCondition`
+- multi-field constitutive models do not collapse into opaque custom callback
+  code
+- named outputs/state fields can be referenced from public DSL code
 
-## 15. Multiphysics Coupling & Block Structure
+## 7. Optional Strategic Track - FEEC / Manifold Formulations
 
-Owner: **Systems** (block bookkeeping) + **Forms** (syntax for coupling terms)
+Owner: **Forms** + **Spaces** + **Geometry**
 
-- `CoupledForm`, `BlockForm`
-- `InterfaceCondition`, `ContinuityConstraint`
-- `MortarCoupling`, `LagrangeMultiplier`, `PenaltyCoupling`
-- `OperatorSplitting`, `MonolithicCoupling`, `PartitionedCoupling`
+This branch should remain **optional** unless FEEC/manifold physics is an
+explicit product goal.
 
-## 16. Stabilization & Multiscale
+If FEEC/manifold formulations are a real target, the roadmap should include a
+minimal complete set:
 
-Owner: **Systems** (configuration) + **Forms** (optional helper terms; deferred)
+- `DifferentialForm`
+- `ExteriorDerivative`
+- `Codifferential`
+- `HodgeStar`
+- `Wedge`
+- `Pullback`
+- `Pushforward`
 
-This vocabulary is intentionally deferred; where needed, stabilization is expressed as explicit weak-form terms and configured by Systems-level options.
+If that branch is not a near-term goal, it should be marked
+`out-of-scope-for-now` rather than left half-specified.
 
-## 17. Time Discretization (Variational / Space-Time)
+## 8. Deferred / Later Branches
 
-Owner: **TimeStepping** + referenced by **Forms**
+These branches stay deferred until the foundation tracks above are complete:
 
-- `TimeSlab`
-- `TimeTestFunction`, `TimeTrialFunction`
-- `DiscontinuousGalerkinTime`
-- `SpaceTimeResidual`
+- optimization and inverse-problem vocabulary
+- stochastic / uncertainty-quantification vocabulary
+- nonlocal / integral PDE vocabulary
+- broad solver-interaction or adjoint vocabulary beyond what current workflows
+  already require
 
-## 18. Optimization & Inverse Problems
+These are important long-term areas, but they should not outrank the missing
+cross-cutting primitives that block many core physics modules today.
 
-Owner: **Solvers/Optimization module** + referenced by **Forms**
+## References / Inspirations
 
-- `ObjectiveFunctional`, `ConstraintSet`, `ControlSpace`
-- `ReducedFunctional`
-- `GradientOperator`, `HessianOperator`
-- Regularization: `TikhonovTerm`, `SparsityPenalty`, TV-like penalties
-
-## 19. Stochastic & Uncertainty Quantification
-
-Owner: **UQ module** + referenced by **Forms**
-
-- `RandomVariable`, `RandomField`
-- `Expectation`, `Variance`, `Covariance`
-- `ProbabilityMeasure`
-- `MonteCarloOperator`
-- `PolynomialChaosExpansion`, `StochasticGalerkin`
-
-## 20. Nonlocal & Integral PDEs
-
-Owner: **Forms** (operators) + **Assembly** (quadrature support)
-
-- `IntegralKernel`, `NonlocalOperator`
-- `FractionalLaplacian`
-- `PeridynamicOperator`
-- `Convolution`, `MemoryKernel`
-
-## 21. Meta / Compilation-Level Constructs
-
-Owner: **Forms**
-
-- `Expression`, `Symbol`, `ASTNode`
-- `Shape`, `Rank`, `FreeIndex`, `BoundIndex`
-- `EvaluationContext`, `AssemblyContext` (read-only view)
-- `LinearizationPoint`
-- `CodegenHint`, `OptimizationPass`
-
-## 22. Solver-Interaction Vocabulary
-
-Owner: **Systems/Backends/Solvers**
-
-- `LinearOperator`, `NonlinearOperator`, `BlockOperator`
-- `Preconditioner`, `SchurComplement`
-- `MatrixFreeOperator`
-- `ResidualEvaluator`
-
-## 23. Diagnostics & Analysis
-
-Owner: **Systems/Analysis module** + referenced by **Forms**
-
-- `Norm`, `ResidualNorm`, `EnergyNorm`
-- `ErrorEstimator`, `APosterioriIndicator`
-- `GoalFunctional`
-
-## References / Inspirations (vocabulary design)
-
-- Alnaes et al. — "Unified form language." *ACM Transactions on Mathematical Software* (2014). DOI: 10.1145/2566630.
-- Logg, Mardal, Wells (eds.) — *Automated Solution of Differential Equations by the Finite Element Method* (2012) ("The FEniCS Book").
-- Rathgeber et al. — "Firedrake." *ACM Transactions on Mathematical Software* (2016). DOI: 10.1145/2998441.
-- Prud'homme et al. — "Feel++ : A computational framework for Galerkin Methods and Advanced Numerical Methods." *ESAIM: Proceedings* (2012). DOI: 10.1051/proc/201238024.
-- Janssens et al. — "Finite Element Assembly Using an Embedded Domain Specific Language." *Scientific Programming* (2015). DOI: 10.1155/2015/797325.
-- MFEM — Anderson et al. — "MFEM: A modular finite element methods library." *Computers & Mathematics with Applications* (2021). DOI: 10.1016/j.camwa.2020.06.009.
-- deal.II — Arndt et al. — "The deal.II finite element library: Design, features, and insights." *Computers & Mathematics with Applications* (2021). DOI: 10.1016/j.camwa.2020.02.022.
+- Alnaes et al. - "Unified form language." *ACM Transactions on Mathematical
+  Software* (2014). DOI: 10.1145/2566630.
+- Logg, Mardal, Wells (eds.) - *Automated Solution of Differential Equations by
+  the Finite Element Method* (2012).
+- Rathgeber et al. - "Firedrake." *ACM Transactions on Mathematical Software*
+  (2016). DOI: 10.1145/2998441.
+- Prud'homme et al. - "Feel++ : A computational framework for Galerkin Methods
+  and Advanced Numerical Methods." *ESAIM: Proceedings* (2012). DOI:
+  10.1051/proc/201238024.
+- Janssens et al. - "Finite Element Assembly Using an Embedded Domain Specific
+  Language." *Scientific Programming* (2015). DOI: 10.1155/2015/797325.
+- MFEM - Anderson et al. - "MFEM: A modular finite element methods library."
+  *Computers & Mathematics with Applications* (2021). DOI:
+  10.1016/j.camwa.2020.06.009.
+- deal.II - Arndt et al. - "The deal.II finite element library: Design,
+  features, and insights." *Computers & Mathematics with Applications* (2021).
+  DOI: 10.1016/j.camwa.2020.02.022.

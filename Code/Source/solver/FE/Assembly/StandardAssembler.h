@@ -204,6 +204,9 @@ public:
     void setJITConstants(std::span<const Real> constants) noexcept override;
     void setCoupledValues(std::span<const Real> integrals,
                           std::span<const Real> aux_state) noexcept override;
+    void setAuxiliaryValues(std::span<const Real> inputs,
+                            std::span<const Real> state,
+                            std::span<const Real> outputs = {}) noexcept;
     void setMaterialStateProvider(IMaterialStateProvider* provider) noexcept override;
     [[nodiscard]] const AssemblyOptions& getOptions() const noexcept override;
 
@@ -814,6 +817,9 @@ private:
     std::span<const Real> jit_constants_{};
     std::span<const Real> coupled_integrals_{};
     std::span<const Real> coupled_aux_state_{};
+    std::span<const Real> auxiliary_inputs_{};
+    std::span<const Real> auxiliary_state_{};
+    std::span<const Real> auxiliary_outputs_{};
     const TimeIntegrationContext* time_integration_{nullptr};
     IMaterialStateProvider* material_state_provider_{nullptr};
     bool initialized_{false};

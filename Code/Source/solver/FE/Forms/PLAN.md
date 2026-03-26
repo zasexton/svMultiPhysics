@@ -296,7 +296,7 @@ auto residual = (inner(grad(u), grad(v)) - f * v).dx();
 
 ## Vocabulary Roadmap
 
-For an extensive “future PDE vocabulary” checklist (including cross-module concepts and scoping), see `FE/Forms/VOCABULARY.md`.
+For an extensive “future PDE vocabulary” checklist (including cross-module concepts and scoping), see `FE/Forms/VOCABULARY_ROADMAP.md`.
 
 ## Systems Integration Notes
 

@@ -23,8 +23,10 @@
  * - Scalar functions: abs, sign, sqrt, exp, log
  * - Comparisons + conditional (returns 1.0/0.0 for comparisons)
  *
+ * - DiscreteField/StateField (when field_values populated in context)
+ *
  * Unsupported nodes (throw):
- * - Test/Trial/DiscreteField/StateField
+ * - Test/Trial
  * - Differential operators (grad/div/curl/H/dt)
  * - Integrals (dx/ds/dS)
  * - ReferenceCoordinate (not available without a reference-space point)
@@ -48,8 +50,21 @@ struct PointEvalContext {
 
     // Optional JIT/coupled scalar arrays (slot-indexed).
     std::span<const Real> jit_constants{};
-    std::span<const Real> coupled_integrals{};
-    std::span<const Real> coupled_aux{};
+    std::span<const Real> coupled_integrals{};  ///< Legacy: BoundaryIntegralRef slots
+    std::span<const Real> coupled_aux{};        ///< Legacy: AuxiliaryStateRef slots
+
+    // Generalized auxiliary arrays (neutral vocabulary).
+    // These are the preferred access path for new code.
+    // AuxiliaryInputRef slots read from auxiliary_inputs;
+    // AuxiliaryOutputRef slots read from auxiliary_outputs.
+    std::span<const Real> auxiliary_inputs{};
+    std::span<const Real> auxiliary_outputs{};
+
+    /// Field values for DiscreteField/StateField evaluation.
+    /// Each entry carries a FieldId with 1+ component values.
+    /// For scalar fields: n_components=1. For vector: n_components=dim.
+    /// When empty, DiscreteField/StateField nodes throw as unsupported.
+    std::span<const FieldValueEntry> field_values{};
 };
 
 /**

@@ -21,15 +21,19 @@ namespace forms {
 namespace {
 
 struct Value {
-    enum class Kind { Scalar, Vector } kind{Kind::Scalar};
+    enum class Kind { Scalar, Vector, Tensor } kind{Kind::Scalar};
     Real s{0.0};
     std::array<Real, 3> v{0.0, 0.0, 0.0};
+    std::array<Real, 9> t{};  // flat tensor storage (up to 3x3)
+    int t_dim{0};             // tensor dimension (rows/cols for square, or total components)
 };
 
 struct DualValue {
-    enum class Kind { Scalar, Vector } kind{Kind::Scalar};
+    enum class Kind { Scalar, Vector, Tensor } kind{Kind::Scalar};
     Dual s{};
     std::array<Real, 3> v{0.0, 0.0, 0.0};
+    std::array<Real, 9> t{};
+    int t_dim{0};
 };
 
 [[nodiscard]] Value scalar(Real s)
@@ -61,6 +65,26 @@ struct DualValue {
     DualValue out;
     out.kind = DualValue::Kind::Vector;
     out.v = v;
+    return out;
+}
+
+[[nodiscard]] Value tensor(const Real* data, int n_comp)
+{
+    Value out;
+    out.kind = Value::Kind::Tensor;
+    out.t_dim = n_comp;
+    for (int i = 0; i < n_comp && i < 9; ++i)
+        out.t[static_cast<std::size_t>(i)] = data[i];
+    return out;
+}
+
+[[nodiscard]] DualValue tensorDual(const Real* data, int n_comp)
+{
+    DualValue out;
+    out.kind = DualValue::Kind::Tensor;
+    out.t_dim = n_comp;
+    for (int i = 0; i < n_comp && i < 9; ++i)
+        out.t[static_cast<std::size_t>(i)] = data[i];
     return out;
 }
 
@@ -204,6 +228,20 @@ struct DualValue {
             }
             return scalar(ctx.coupled_aux[*slot]);
         }
+        case FormExprType::AuxiliaryInputRef: {
+            const auto slot = node.slotIndex();
+            if (!slot) throw std::invalid_argument("PointEvaluator: AuxiliaryInputRef missing slot");
+            if (ctx.auxiliary_inputs.empty()) throw std::invalid_argument("PointEvaluator: AuxiliaryInputRef requires PointEvalContext::auxiliary_inputs");
+            if (*slot >= ctx.auxiliary_inputs.size()) throw std::out_of_range("PointEvaluator: AuxiliaryInputRef slot out of range");
+            return scalar(ctx.auxiliary_inputs[*slot]);
+        }
+        case FormExprType::AuxiliaryOutputRef: {
+            const auto slot = node.slotIndex();
+            if (!slot) throw std::invalid_argument("PointEvaluator: AuxiliaryOutputRef missing slot");
+            if (ctx.auxiliary_outputs.empty()) throw std::invalid_argument("PointEvaluator: AuxiliaryOutputRef requires PointEvalContext::auxiliary_outputs");
+            if (*slot >= ctx.auxiliary_outputs.size()) throw std::out_of_range("PointEvaluator: AuxiliaryOutputRef slot out of range");
+            return scalar(ctx.auxiliary_outputs[*slot]);
+        }
         case FormExprType::Coefficient: {
             if (const auto* f = node.timeScalarCoefficient(); f) {
                 return scalar((*f)(ctx.x[0], ctx.x[1], ctx.x[2], ctx.time));
@@ -283,7 +321,60 @@ struct DualValue {
                 return scalar(a.v[static_cast<std::size_t>(i)]);
             }
 
+            if (a.kind == Value::Kind::Tensor) {
+                // Tensor component access: component(T, i) for flat index,
+                // or component(T, i, j) for matrix-style T[i][j].
+                int flat_idx = i;
+                if (j >= 0) {
+                    // Matrix indexing: T[i][j] → flat index i*dim + j.
+                    // Infer dim from total components (assume square).
+                    const int dim = (a.t_dim == 9) ? 3 : (a.t_dim == 4) ? 2 : a.t_dim;
+                    flat_idx = i * dim + j;
+                }
+                if (flat_idx < 0 || flat_idx >= a.t_dim) {
+                    throw std::out_of_range(
+                        "PointEvaluator: tensor component index " + std::to_string(flat_idx)
+                        + " out of range [0, " + std::to_string(a.t_dim) + ")");
+                }
+                return scalar(a.t[static_cast<std::size_t>(flat_idx)]);
+            }
+
             throw std::invalid_argument("PointEvaluator: component access not supported for this operand type");
+        }
+
+        // DiscreteField / StateField: look up from field_values context.
+        // 1 component → scalar. 2-3 → vector. 4-9 → tensor.
+        case FormExprType::DiscreteField:
+        case FormExprType::StateField: {
+            auto fid = node.fieldId();
+            if (!fid) {
+                throw std::invalid_argument(
+                    "PointEvaluator: DiscreteField/StateField node has no FieldId");
+            }
+            for (const auto& fve : ctx.field_values) {
+                if (fve.field == *fid) {
+                    if (fve.n_components == 1) {
+                        return scalar(fve.components[0]);
+                    }
+                    if (fve.n_components <= 3) {
+                        std::array<Real, 3> v{0.0, 0.0, 0.0};
+                        for (int c = 0; c < fve.n_components; ++c)
+                            v[static_cast<std::size_t>(c)] = fve.components[c];
+                        return vector(v);
+                    }
+                    // 4-9 components: tensor.
+                    if (fve.n_components > MAX_FIELD_VALUE_COMPONENTS) {
+                        throw std::invalid_argument(
+                            "PointEvaluator: field has " + std::to_string(fve.n_components)
+                            + " components, exceeding MAX_FIELD_VALUE_COMPONENTS");
+                    }
+                    return tensor(fve.components, fve.n_components);
+                }
+            }
+            throw std::invalid_argument(
+                "PointEvaluator: no field_value provided for FieldId " +
+                std::to_string(*fid) +
+                ". Populate PointEvalContext::field_values for field-dependent expressions.");
         }
 
         // Unsupported in point evaluation:
@@ -294,8 +385,6 @@ struct DualValue {
         case FormExprType::PreviousSolutionRef:
         case FormExprType::TestFunction:
         case FormExprType::TrialFunction:
-        case FormExprType::DiscreteField:
-        case FormExprType::StateField:
         case FormExprType::Identity:
         case FormExprType::Jacobian:
         case FormExprType::JacobianInverse:
@@ -431,6 +520,20 @@ struct DualValue {
                 std::copy(row.begin(), row.end(), out.deriv.begin());
             }
             return scalar(out);
+        }
+        case FormExprType::AuxiliaryInputRef: {
+            const auto slot = node.slotIndex();
+            if (!slot) throw std::invalid_argument("PointEvaluatorDual: AuxiliaryInputRef missing slot");
+            if (ctx.auxiliary_inputs.empty()) throw std::invalid_argument("PointEvaluatorDual: AuxiliaryInputRef requires auxiliary_inputs");
+            if (*slot >= ctx.auxiliary_inputs.size()) throw std::out_of_range("PointEvaluatorDual: AuxiliaryInputRef slot out of range");
+            return scalar(makeDualConstant(ctx.auxiliary_inputs[*slot], ws.alloc()));
+        }
+        case FormExprType::AuxiliaryOutputRef: {
+            const auto slot = node.slotIndex();
+            if (!slot) throw std::invalid_argument("PointEvaluatorDual: AuxiliaryOutputRef missing slot");
+            if (ctx.auxiliary_outputs.empty()) throw std::invalid_argument("PointEvaluatorDual: AuxiliaryOutputRef requires auxiliary_outputs");
+            if (*slot >= ctx.auxiliary_outputs.size()) throw std::out_of_range("PointEvaluatorDual: AuxiliaryOutputRef slot out of range");
+            return scalar(makeDualConstant(ctx.auxiliary_outputs[*slot], ws.alloc()));
         }
         case FormExprType::Coefficient: {
             if (const auto* f = node.timeScalarCoefficient(); f) {
@@ -574,7 +677,48 @@ struct DualValue {
                 }
                 return scalar(makeDualConstant(a.v[static_cast<std::size_t>(i)], ws.alloc()));
             }
+            if (a.kind == DualValue::Kind::Tensor) {
+                int flat_idx = i;
+                if (j >= 0) {
+                    const int dim = (a.t_dim == 9) ? 3 : (a.t_dim == 4) ? 2 : a.t_dim;
+                    flat_idx = i * dim + j;
+                }
+                if (flat_idx < 0 || flat_idx >= a.t_dim) {
+                    throw std::out_of_range(
+                        "PointEvaluatorDual: tensor component index out of range");
+                }
+                return scalar(makeDualConstant(a.t[static_cast<std::size_t>(flat_idx)], ws.alloc()));
+            }
             throw std::invalid_argument("PointEvaluatorDual: component access not supported for this operand type");
+        }
+
+        // DiscreteField / StateField: constant in dual mode (field values are
+        // not seeded variables — derivatives are w.r.t. boundary integrals or
+        // auxiliary state, not field DOFs).
+        case FormExprType::DiscreteField:
+        case FormExprType::StateField: {
+            auto fid = node.fieldId();
+            if (!fid) {
+                throw std::invalid_argument(
+                    "PointEvaluatorDual: DiscreteField/StateField node has no FieldId");
+            }
+            for (const auto& fve : ctx.field_values) {
+                if (fve.field == *fid) {
+                    if (fve.n_components == 1) {
+                        return scalar(makeDualConstant(fve.components[0], ws.alloc()));
+                    }
+                    if (fve.n_components <= 3) {
+                        std::array<Real, 3> v{0.0, 0.0, 0.0};
+                        for (int c = 0; c < fve.n_components; ++c)
+                            v[static_cast<std::size_t>(c)] = fve.components[c];
+                        return vectorDual(v);
+                    }
+                    return tensorDual(fve.components, fve.n_components);
+                }
+            }
+            throw std::invalid_argument(
+                "PointEvaluatorDual: no field_value provided for FieldId " +
+                std::to_string(*fid));
         }
 
         // Unsupported in point evaluation:
@@ -585,8 +729,6 @@ struct DualValue {
         case FormExprType::PreviousSolutionRef:
         case FormExprType::TestFunction:
         case FormExprType::TrialFunction:
-        case FormExprType::DiscreteField:
-        case FormExprType::StateField:
         case FormExprType::Identity:
         case FormExprType::Jacobian:
         case FormExprType::JacobianInverse:

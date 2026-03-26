@@ -450,3 +450,23 @@ single-field forms and first-class mixed expressions lower into the same
 block-based operator model.
 
 For the full cross-module plan, see `FE/Docs/MixedForms/PLAN.md`.
+
+---
+
+## Generalized Auxiliary State
+
+The `Systems/` module includes a generalized `AuxiliaryState` subsystem
+for non-PDE auxiliary variables.  This infrastructure supports:
+
+- Multiple storage scopes (Global, Node, Cell, QuadraturePoint, BoundaryEntity)
+- Partitioned and Monolithic solve modes
+- DAE-capable residual-based model interface
+- Math-first declarative model builder (`AuxiliaryModelBuilder`)
+- Deployment via `use(model)` with scope, region, stepper, and bindings
+- Generalized input registry (boundary reductions, field samples, callbacks)
+- Nonlocal coupling via `AuxiliaryOperator`
+- Checkpoint/restart, ghost sync, and mesh transfer hooks
+
+The legacy `CoupledBoundaryManager` path is deprecated in favor of this
+generalized subsystem.  See `FE/Docs/AuxiliaryState/README.md` for the
+full architecture guide.

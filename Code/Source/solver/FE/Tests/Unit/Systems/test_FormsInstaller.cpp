@@ -7,15 +7,21 @@
 
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstallerDetail.h"
+#include "Systems/AuxiliaryModelBuilder.h"
+#include "Systems/AuxiliaryBindings.h"
+#include "Systems/AuxiliaryInputRegistry.h"
+#include "Systems/AuxiliaryOperatorBuilder.h"
 
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
 
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/Vocabulary.h"
 #include "Forms/WeakForm.h"
 
 #include "Spaces/H1Space.h"
+#include "Spaces/HCurlSpace.h"
 
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
@@ -612,6 +618,353 @@ TEST(FormsInstaller, FormsInstaller_InstallFormulation_FormWithoutDx_Throws)
     } catch (const std::invalid_argument&) {
         SUCCEED();
     }
+}
+
+TEST(FormsInstaller, FormsInstaller_InstanceQualifiedAuxiliaryOutput)
+{
+    // Deploy two auxiliary models with same output name, then install a
+    // form referencing AuxiliaryOutput(instance, name) to verify the
+    // FormsInstaller resolves the instance-qualified path correctly.
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    // Two models both with output named "P_out".
+    auto model_a = AuxiliaryModelBuilder("model_a")
+        .state("x")
+        .ode("x", -modelState("x"))
+        .output("P_out", modelState("x") * forms::FormExpr::constant(2.0))
+        .build();
+
+    auto model_b = AuxiliaryModelBuilder("model_b")
+        .state("y")
+        .ode("y", -modelState("y"))
+        .output("P_out", modelState("y") * forms::FormExpr::constant(3.0))
+        .build();
+
+    sys.deployAuxiliaryModel(
+        use(model_a)
+            .name("inst_a")
+            .scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Partitioned)
+            .initialize({1.0}));
+
+    sys.deployAuxiliaryModel(
+        use(model_b)
+            .name("inst_b")
+            .scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Partitioned)
+            .initialize({1.0}));
+
+    sys.finalizeAuxiliaryLayout();
+
+    // Install a form referencing instance-qualified AuxiliaryOutput.
+    // The form: (AuxiliaryOutput("inst_a", "P_out") * v).dx()
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    auto aux_a = forms::AuxiliaryOutput("inst_a", "P_out");
+    const auto residual_form = (aux_a * v).dx();
+
+    // This should NOT throw — the FormsInstaller should resolve
+    // "inst_a/P_out" to a valid slot via auxiliaryOutputSlotOf("inst_a", "P_out").
+    auto installed = installFormulation(sys, "op", {u_field}, residual_form);
+    EXPECT_FALSE(installed.residual.empty());
+
+    // Verify slot resolution correctness: inst_a and inst_b should get
+    // different slots, and the form should reference inst_a's slot.
+    auto slot_a = sys.auxiliaryOutputSlotOf("inst_a", "P_out");
+    auto slot_b = sys.auxiliaryOutputSlotOf("inst_b", "P_out");
+    EXPECT_NE(slot_a, slot_b);
+
+    // Prepare auxiliary state: x=5 → inst_a output = 5*2 = 10,
+    //                          y=7 → inst_b output = 7*3 = 21.
+    sys.prepareAuxiliaryForAssembly({});
+
+    auto outputs = sys.auxiliaryOutputValues();
+    ASSERT_GT(outputs.size(), std::max(slot_a, slot_b));
+    // x was initialized to 1.0, so P_out_a = 1.0*2 = 2.0
+    // y was initialized to 1.0, so P_out_b = 1.0*3 = 3.0.
+    EXPECT_DOUBLE_EQ(outputs[slot_a], 2.0);
+    EXPECT_DOUBLE_EQ(outputs[slot_b], 3.0);
+}
+
+TEST(FormsInstaller, FormsInstaller_AuxiliaryInput_AutoResolution)
+{
+    // Deploy an auxiliary model that consumes an input, register the input,
+    // then install a form referencing AuxiliaryInput("Q") to verify the
+    // FormsInstaller auto-resolves the input symbol to a slot ref.
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    // Register an auxiliary input "Q".
+    auto& reg = sys.auxiliaryInputRegistry();
+    reg.registerInput({.name = "Q", .size = 1},
+                      [](Real, Real, std::span<Real> out) { out[0] = 42.0; });
+
+    // Deploy a model that uses input "Q".
+    auto model = AuxiliaryModelBuilder("rcr")
+        .state("P").input("Q")
+        .ode("P", -modelState("P"))
+        .output("P_out", modelState("P"))
+        .build();
+
+    sys.deployAuxiliaryModel(
+        use(model).name("rcr_inst")
+            .scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Partitioned)
+            .bind("Q", "Q")
+            .initialize({0.0}));
+
+    sys.finalizeAuxiliaryLayout();
+
+    // Install a form referencing AuxiliaryInput("Q").
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    auto q = forms::AuxiliaryInput("Q");
+    const auto residual_form = (q * v).dx();
+
+    // This should NOT throw — "Q" is registered and should resolve.
+    auto installed = installFormulation(sys, "op", {u_field}, residual_form);
+    EXPECT_FALSE(installed.residual.empty());
+
+    // Verify the slot was resolved: "Q" should have slot 0.
+    auto input_slot = reg.slotOf("Q");
+    EXPECT_EQ(input_slot, 0u);
+}
+
+TEST(FormsInstaller, RegisterSampledFieldInput_ReadsFromSolution)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    // Install a simple form so setup() can build DOF maps.
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    installFormulation(sys, "op", {u_field}, (u * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    // Register a sampled field input for "u" with 4 vertices.
+    sys.registerSampledFieldInput("u_sampled", "u", 4);
+
+    // Deploy an auxiliary model that uses the sampled input.
+    auto model = AuxiliaryModelBuilder("sampler")
+        .state("x")
+        .input("Q")
+        .ode("x", -modelState("x"))
+        .build();
+
+    sys.deployAuxiliaryModel(
+        use(model).name("samp_inst")
+            .scope(AuxiliaryStateScope::Global)
+            .entityCount(4)
+            .bind("Q", "u_sampled")
+            .initialize({0.0}));
+
+    sys.finalizeAuxiliaryLayout();
+
+    // Set solution vector and prepare assembly.
+    std::vector<Real> U = {10.0, 20.0, 30.0, 40.0};
+    SystemStateView state;
+    state.u = U; state.time = 0.0; state.dt = 0.1;
+    sys.prepareAuxiliaryForAssembly(state);
+
+    // The sampled input should now contain the field values at each vertex.
+    auto& reg = sys.auxiliaryInputRegistry();
+    ASSERT_TRUE(reg.hasInput("u_sampled"));
+    for (std::size_t i = 0; i < 4; ++i) {
+        auto vals = reg.valuesOf("u_sampled", i);
+        ASSERT_FALSE(vals.empty());
+        EXPECT_NEAR(vals[0], U[i], 1e-12)
+            << "Vertex " << i << " should have field value " << U[i];
+    }
+}
+
+TEST(FormsInstaller, RegisterBoundaryNodalSumInput_SumsCorrectNodes)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    // SingleTetraOneBoundaryFaceMeshAccess: 1 Tet4, boundary face 0 with marker 42.
+    // Tet4 face 0 local vertices = {1,2,3}.
+    // Global nodes: 0,1,2,3.  Face nodes = {1,2,3}.
+    auto mesh = std::make_shared<forms::test::SingleTetraOneBoundaryFaceMeshAccess>(42);
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "p", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "p");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    installFormulation(sys, "op", {u_field}, (u * v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    // Register boundary nodal sum for boundary marker 42.
+    sys.registerBoundaryNodalSumInput("p_bnd", "p", 42);
+
+    // Deploy aux model using the boundary sum.
+    auto model = AuxiliaryModelBuilder("bnd_test")
+        .state("x")
+        .input("Q")
+        .ode("x", -modelState("x"))
+        .build();
+
+    sys.deployAuxiliaryModel(
+        use(model).name("bnd_inst")
+            .bind("Q", "p_bnd")
+            .initialize({0.0}));
+    sys.finalizeAuxiliaryLayout();
+
+    // Solution: p = {100, 200, 300, 400} at nodes 0,1,2,3.
+    // Boundary face nodes = {1,2,3} → sum = 200 + 300 + 400 = 900.
+    std::vector<Real> U = {100.0, 200.0, 300.0, 400.0};
+    SystemStateView state;
+    state.u = U; state.time = 0.0; state.dt = 0.1;
+    sys.prepareAuxiliaryForAssembly(state);
+
+    auto& reg = sys.auxiliaryInputRegistry();
+    ASSERT_TRUE(reg.hasInput("p_bnd"));
+    auto vals = reg.valuesOf("p_bnd");
+    ASSERT_FALSE(vals.empty());
+    // Node 0 is NOT on the boundary face, so only 200+300+400 = 900.
+    EXPECT_NEAR(vals[0], 900.0, 1e-10);
+}
+
+// ---------------------------------------------------------------------------
+//  Guardrail tests for FE-coupled helpers
+// ---------------------------------------------------------------------------
+
+TEST(FormsInstaller, RegisterSampledFieldInput_ThrowsBeforeSetup)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    FESystem sys(mesh);
+    sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    // Do NOT call setup().
+
+    EXPECT_THROW(
+        sys.registerSampledFieldInput("u_sampled", "u", 4),
+        InvalidStateException);
+}
+
+TEST(FormsInstaller, RegisterBoundaryNodalSumInput_ThrowsBeforeSetup)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraOneBoundaryFaceMeshAccess>(1);
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+
+    FESystem sys(mesh);
+    sys.addField(FieldSpec{.name = "p", .space = space, .components = 1});
+
+    EXPECT_THROW(
+        sys.registerBoundaryNodalSumInput("p_bnd", "p", 1),
+        InvalidStateException);
+}
+
+TEST(FormsInstaller, RegisterSampledFieldInput_RejectsNonVertexSpace)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    // HCurl space has edge DOFs, no vertex DOFs.
+    auto hcurl = std::make_shared<spaces::HCurlSpace>(ElementType::Tetra4, /*order=*/1);
+
+    FESystem sys(mesh);
+    const auto e_field = sys.addField(FieldSpec{.name = "E", .space = hcurl, .components = 3});
+    sys.addOperator("op");
+
+    // Install a dummy form so setup() builds DOF handlers.
+    const auto u = forms::FormExpr::stateField(e_field, *hcurl, "E");
+    const auto v = forms::FormExpr::testFunction(*hcurl, "v");
+    installFormulation(sys, "op", {e_field}, forms::inner(u, v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    // HCurl space should have no vertex DOFs → rejection.
+    EXPECT_THROW(
+        sys.registerSampledFieldInput("E_sampled", "E", 4),
+        InvalidArgumentException);
+}
+
+TEST(FormsInstaller, RegisterBoundaryNodalSumInput_RejectsNonVertexSpace)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::systems;
+
+    auto mesh = std::make_shared<forms::test::SingleTetraOneBoundaryFaceMeshAccess>(1);
+    auto hcurl = std::make_shared<spaces::HCurlSpace>(ElementType::Tetra4, /*order=*/1);
+
+    FESystem sys(mesh);
+    const auto e_field = sys.addField(FieldSpec{.name = "E", .space = hcurl, .components = 3});
+    sys.addOperator("op");
+
+    const auto u = forms::FormExpr::stateField(e_field, *hcurl, "E");
+    const auto v = forms::FormExpr::testFunction(*hcurl, "v");
+    installFormulation(sys, "op", {e_field}, forms::inner(u, v).dx());
+
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    EXPECT_THROW(
+        sys.registerBoundaryNodalSumInput("E_bnd", "E", 1),
+        InvalidArgumentException);
+}
+
+TEST(FormsInstaller, FieldToFieldOperator_Rejected)
+{
+    using namespace svmp::FE::systems;
+
+    // Different field names.
+    EXPECT_THROW(
+        AuxiliaryOperatorBuilder("bad_op")
+            .source("field:velocity")
+            .target("field:pressure")
+            .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+            .build(),
+        std::invalid_argument);
+
+    // Same field name — also rejected (not misclassified as AuxSelf).
+    EXPECT_THROW(
+        AuxiliaryOperatorBuilder("bad_self")
+            .source("field:u")
+            .target("field:u")
+            .residual([](const AuxiliaryOperatorContext&, std::span<Real>) {})
+            .build(),
+        std::invalid_argument);
 }
 
 TEST(FormsInstaller, FormsInstaller_MismatchedFieldSpaces_Behavior)

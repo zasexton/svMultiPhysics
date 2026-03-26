@@ -195,6 +195,10 @@ struct SymbolicOptions {
 	    BoundaryIntegralRef,      ///< Coupled boundary-integral value by slot (JIT-friendly)
 	    AuxiliaryStateSymbol,
 	    AuxiliaryStateRef,        ///< Coupled auxiliary-state value by slot (JIT-friendly)
+	    AuxiliaryInputSymbol,     ///< Generalized auxiliary input by name (neutral, replaces BoundaryIntegralSymbol)
+	    AuxiliaryInputRef,        ///< Generalized auxiliary input by slot (JIT-friendly)
+	    AuxiliaryOutputSymbol,    ///< Auxiliary model output by name (first-class coupling surface)
+	    AuxiliaryOutputRef,       ///< Auxiliary model output by slot (JIT-friendly)
 	    MaterialStateOldRef,      ///< Per-qpt material state load (old) by byte offset
 	    MaterialStateWorkRef,     ///< Per-qpt material state load (work/current) by byte offset
 	    PreviousSolutionRef,      ///< Previous solution value u^{n-k} by history index k>=1
@@ -456,6 +460,16 @@ public:
     static FormExpr boundaryIntegralRef(std::uint32_t slot);
     static FormExpr auxiliaryState(std::string name);
     static FormExpr auxiliaryStateRef(std::uint32_t slot);
+
+    /// Generalized auxiliary input by name (neutral replacement for boundaryIntegralValue).
+    static FormExpr auxiliaryInput(std::string name);
+    /// Generalized auxiliary input by slot (JIT-friendly).
+    static FormExpr auxiliaryInputRef(std::uint32_t slot);
+    /// Auxiliary model output by name (first-class coupling surface).
+    static FormExpr auxiliaryOutput(std::string name);
+    /// Auxiliary model output by slot (JIT-friendly).
+    static FormExpr auxiliaryOutputRef(std::uint32_t slot);
+
     static FormExpr materialStateOldRef(std::uint32_t offset_bytes);
     static FormExpr materialStateWorkRef(std::uint32_t offset_bytes);
     static FormExpr previousSolution(int steps_back = 1);

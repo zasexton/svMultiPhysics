@@ -11,6 +11,8 @@
 
 #include "Core/FEException.h"
 
+#include "Systems/AuxiliaryInputRegistry.h"
+
 #include "Forms/BlockForm.h"
 #include "Forms/CoupledBlockKernel.h"
 #include "Forms/FormCompiler.h"
@@ -1229,6 +1231,9 @@ CoupledResidualKernels installFormulation(
         }
     }
 
+    // Mutable copy for auxiliary symbol resolution.
+    forms::FormExpr resolved = residual;
+
     // Build the FormulationRecord but do NOT commit it yet. It will be added
     // to the system after installation succeeds, so failures don't leave
     // partial analysis state behind.
@@ -1296,12 +1301,81 @@ CoupledResidualKernels installFormulation(
             rec.auxiliary_state_dependencies.push_back(vk);
         }
 
+        // Generalized auxiliary input dependencies.
+        for (const auto& name : scan.auxiliary_input_names) {
+            auto vk = analysis::VariableKey::named(
+                analysis::VariableKind::AuxiliaryInput, name);
+            rec.active_variables.push_back(vk);
+            rec.auxiliary_input_dependencies.push_back(vk);
+        }
+
+        // Auxiliary output dependencies.
+        for (const auto& name : scan.auxiliary_output_names) {
+            auto vk = analysis::VariableKey::named(
+                analysis::VariableKind::AuxiliaryOutput, name);
+            rec.active_variables.push_back(vk);
+            rec.auxiliary_output_dependencies.push_back(vk);
+        }
+
+        // Auto-resolve AuxiliaryInputSymbol and AuxiliaryOutputSymbol.
+        if (!scan.auxiliary_input_names.empty() || !scan.auxiliary_output_names.empty()) {
+            // Build input name→slot map from the registry.
+            std::unordered_map<std::string, std::size_t> input_slots;
+            if (auto* reg = system.auxiliaryInputRegistryIfPresent()) {
+                for (const auto& name : scan.auxiliary_input_names) {
+                    if (reg->hasInput(name)) {
+                        input_slots[name] = reg->slotOf(name);
+                    }
+                }
+            }
+
+            // Build output name→slot map from deployed models.
+            std::unordered_map<std::string, std::size_t> output_slots;
+            for (const auto& name : scan.auxiliary_output_names) {
+                // Try bare lookup first (throws on ambiguity).
+                // Support "instance/name" syntax for instance-qualified outputs.
+                std::size_t slot;
+                auto slash = name.find('/');
+                if (slash != std::string::npos) {
+                    auto inst = name.substr(0, slash);
+                    auto oname = name.substr(slash + 1);
+                    slot = system.auxiliaryOutputSlotOf(inst, oname);
+                } else {
+                    slot = system.auxiliaryOutputSlotOf(name);
+                }
+                if (slot != static_cast<std::size_t>(-1)) {
+                    output_slots[name] = slot;
+                }
+            }
+
+            auto resolve_aux = [&](const forms::FormExprNode& node)
+                -> std::optional<forms::FormExpr> {
+                auto sym = node.symbolName();
+                if (!sym) return std::nullopt;
+                const std::string nm{*sym};
+                if (node.type() == forms::FormExprType::AuxiliaryInputSymbol) {
+                    auto it = input_slots.find(nm);
+                    if (it != input_slots.end())
+                        return forms::FormExpr::auxiliaryInputRef(
+                            static_cast<std::uint32_t>(it->second));
+                }
+                if (node.type() == forms::FormExprType::AuxiliaryOutputSymbol) {
+                    auto it = output_slots.find(nm);
+                    if (it != output_slots.end())
+                        return forms::FormExpr::auxiliaryOutputRef(
+                            static_cast<std::uint32_t>(it->second));
+                }
+                return std::nullopt;
+            };
+            resolved = resolved.transformNodes(resolve_aux);
+        }
+
         // Block couplings: discover actual active blocks from the per-test
         // decomposition. For each test block, check which StateField/TrialFunction
         // symbols appear to determine the actual (test, trial) couplings.
         // This avoids false dense NxN coupling for zero blocks.
         if (fields.size() > 1) {
-            auto test_blocks = splitByTestFunction(residual);
+            auto test_blocks = splitByTestFunction(resolved);
             if (test_blocks.size() == fields.size()) {
                 for (std::size_t ti = 0; ti < fields.size(); ++ti) {
                     if (!test_blocks[ti].isValid()) continue;
@@ -1330,11 +1404,11 @@ CoupledResidualKernels installFormulation(
             // StateField dependencies), block_couplings stays empty. This is
             // correct: it means the Jacobian has no block structure.
         } else if (fields.size() == 1) {
-            // Only record a self-coupling if the residual has trial dependency
+            // Only record a self-coupling if the resolved has trial dependency
             // (TrialFunction or StateField). Source-only residuals (f*v) have
             // no Jacobian block.
-            const bool has_trial_dep = residual.hasTrial() ||
-                (residual.node() && hasStateFieldNodes(*residual.node()));
+            const bool has_trial_dep = resolved.hasTrial() ||
+                (resolved.node() && hasStateFieldNodes(*resolved.node()));
             if (has_trial_dep) {
                 rec.block_couplings.emplace_back(fields[0], fields[0]);
             }
@@ -1354,27 +1428,27 @@ CoupledResidualKernels installFormulation(
             }
         }
 
-        // Determine affine_split_succeeded by attempting the split on the residual.
+        // Determine affine_split_succeeded by attempting the split on the resolved.
         // This is a lightweight structural walk of the DAG — no compilation involved.
         {
             forms::AffineResidualOptions affine_opts;
             affine_opts.allow_time_derivatives = false;
             affine_opts.allow_interior_face_terms = false;
-            auto split = forms::trySplitAffineResidual(residual, affine_opts);
+            auto split = forms::trySplitAffineResidual(resolved, affine_opts);
             rec.affine_split_succeeded = split.has_value();
         }
 
-        // Per-block residual handles.
+        // Per-block resolved handles.
         if (fields.size() == 1) {
-            // Single-field: the whole residual is the single block.
+            // Single-field: the whole resolved is the single block.
             rec.block_residual_exprs.push_back(
-                {{fields[0], fields[0]}, residual.nodeShared()});
+                {{fields[0], fields[0]}, resolved.nodeShared()});
         } else {
             // Multi-field: split by test function to get per-test sub-expressions.
             // Each sub-expression F_i(u1,...,uN; v_i) contains terms for one test field.
             // We store them keyed by (test_field, test_field) — the trial splitting
             // is done by the form compiler during Jacobian block compilation.
-            auto test_blocks = splitByTestFunction(residual);
+            auto test_blocks = splitByTestFunction(resolved);
             if (test_blocks.size() == fields.size()) {
                 for (std::size_t i = 0; i < fields.size(); ++i) {
                     if (test_blocks[i].isValid()) {
@@ -1390,9 +1464,9 @@ CoupledResidualKernels installFormulation(
         pending_contributions = analysis::lowerFormulation(rec);
     }
 
-    const auto num_test = countUniqueTestSpaces(*residual.node());
+    const auto num_test = countUniqueTestSpaces(*resolved.node());
     FE_THROW_IF(num_test == 0, InvalidArgumentException,
-                "installFormulation: residual contains no TestFunction");
+                "installFormulation: resolved contains no TestFunction");
 
     // Analysis metadata is committed only after installation succeeds.
     const auto commitRecord = [&]() {
@@ -1412,19 +1486,19 @@ CoupledResidualKernels installFormulation(
                     std::to_string(fields.size()) + " fields provided");
 
         // If the expression uses StateField nodes, lower them to TrialFunction.
-        forms::FormExpr lowered = residual;
-        const bool has_state = residual.node() && hasStateFieldNodes(*residual.node());
+        forms::FormExpr lowered = resolved;
+        const bool has_state = resolved.node() && hasStateFieldNodes(*resolved.node());
         if (has_state) {
-            lowered = lowerStateFields(residual, fields[0], system);
+            lowered = lowerStateFields(resolved, fields[0], system);
         }
 
         KernelPtr kernel;
         const bool is_source_only = !lowered.hasTrial();
         if (!is_source_only) {
-            // Normal residual with trial dependency → full residual install
+            // Normal resolved with trial dependency → full resolved install
             kernel = installResidualForm(system, op, fields[0], fields[0], lowered, options);
         } else {
-            // Source-only residual (e.g., f*v) → install as linear vector-only kernel
+            // Source-only resolved (e.g., f*v) → install as linear vector-only kernel
             forms::FormCompiler compiler(options.compiler_options);
             auto ir = compiler.compileLinear(lowered);
             const auto dispatch = analyzeDispatch(ir);
