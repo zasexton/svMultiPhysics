@@ -56,8 +56,11 @@ std::size_t AuxiliaryStateManager::registerBlock(
             indexing = AuxiliaryBlockIndexing::createCell(
                 entity_count, spec.size);
             break;
-        case AuxiliaryStateScope::BoundaryEntity:
-            indexing = AuxiliaryBlockIndexing::createBoundaryEntity(
+        case AuxiliaryStateScope::Boundary:
+            indexing = AuxiliaryBlockIndexing::createBoundary(spec.size);
+            break;
+        case AuxiliaryStateScope::Facet:
+            indexing = AuxiliaryBlockIndexing::createFacet(
                 entity_count, spec.size);
             break;
     }

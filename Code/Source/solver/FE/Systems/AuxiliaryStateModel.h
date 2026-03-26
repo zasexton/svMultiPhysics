@@ -85,7 +85,7 @@ struct AuxiliaryLocalContext {
     /// Parameter values (constants or provider-driven).
     std::span<const Real> params{};
 
-    /// Entity index for per-entity models (Node, Cell, QP, BoundaryEntity).
+    /// Entity index for per-entity models (Node, Cell, QP, Facet).
     /// Ignored for Global scope (always 0).
     std::size_t entity_index{0};
 

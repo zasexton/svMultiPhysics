@@ -323,7 +323,7 @@ struct VariableDescriptor {
     bool participates_in_mass_blocks{false};
 
     // Auxiliary-state metadata (meaningful when kind is AuxiliaryState/Input/Output)
-    std::string auxiliary_scope{};       ///< "Global", "Node", "Cell", "QuadraturePoint", "BoundaryEntity"
+    std::string auxiliary_scope{};       ///< "Global", "Boundary", "Node", "Cell", "QuadraturePoint", "Facet"
     std::string auxiliary_solve_mode{};  ///< "Partitioned" or "Monolithic"
     std::string auxiliary_region{};      ///< Deployment region identity (empty = whole domain)
 };

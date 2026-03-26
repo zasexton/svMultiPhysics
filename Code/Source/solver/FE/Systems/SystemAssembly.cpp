@@ -386,8 +386,40 @@ assembly::AssemblyResult assembleOperator(
         }
     }
 
-    // Prepare generalized auxiliary inputs (if present).
-    system.prepareAuxiliaryForAssembly(state);
+    // Partitioned auxiliary blocks must be stepped from committed state
+    // before assembly so their outputs match the current FE iterate. This
+    // mirrors the legacy coupled-boundary timing, while monolithic blocks
+    // remain part of the assembled global system and are not stepped here.
+    bool has_partitioned_auxiliary = false;
+    for (const auto& entry : system.deployed_aux_entries_) {
+        if (entry.spec.solve_mode == AuxiliarySolveMode::Partitioned) {
+            has_partitioned_auxiliary = true;
+            break;
+        }
+    }
+
+    if (has_partitioned_auxiliary && !request.is_nonlinear_iteration) {
+        // First assembly of the time step: advance the ODE state once.
+        // Newton iterations must NOT re-step — they only re-evaluate
+        // outputs with the latest input values (e.g., Q(u)).
+        if (oopTraceEnabled()) {
+            traceLog("assembleOperator: advanceAuxiliaryState() begin");
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        system.advanceAuxiliaryState(state, /*is_nonlinear_iteration=*/false);
+        const auto t1 = std::chrono::steady_clock::now();
+        if (oopTraceEnabled()) {
+            std::ostringstream oss;
+            oss << "assembleOperator: advanceAuxiliaryState() done time="
+                << std::chrono::duration<double>(t1 - t0).count();
+            traceLog(oss.str());
+        }
+    }
+
+    // Always refresh inputs and re-evaluate outputs for every assembly
+    // pass (including Newton iterations), so P_out = X + Rp*Q uses the
+    // latest flow rate Q computed from the current velocity iterate.
+    system.prepareAuxiliaryForAssembly(state, request.is_nonlinear_iteration);
 
     if (request.zero_outputs) {
         if (request.want_matrix) {

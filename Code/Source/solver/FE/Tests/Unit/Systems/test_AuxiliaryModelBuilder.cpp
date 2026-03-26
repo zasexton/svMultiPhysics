@@ -378,10 +378,10 @@ TEST(AuxiliaryBindings, UseModelWithRegion)
     region.identity = "outlet_3";
 
     auto inst = use(model)
-        .scope(AuxiliaryStateScope::BoundaryEntity)
+        .scope(AuxiliaryStateScope::Facet)
         .region(region);
 
-    EXPECT_EQ(inst.getScope(), AuxiliaryStateScope::BoundaryEntity);
+    EXPECT_EQ(inst.getScope(), AuxiliaryStateScope::Facet);
     EXPECT_EQ(inst.getRegion().kind, AuxiliaryRegionKind::BoundarySet);
     EXPECT_EQ(inst.getRegion().identity, "outlet_3");
 }

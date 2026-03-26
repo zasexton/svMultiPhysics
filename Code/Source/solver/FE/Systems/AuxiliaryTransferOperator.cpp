@@ -124,10 +124,11 @@ AuxiliaryRestartSchema AuxiliaryTransferOperator::buildSchema(
 
     switch (scope) {
         case AuxiliaryStateScope::Global: schema.scope_name = "Global"; break;
+        case AuxiliaryStateScope::Boundary: schema.scope_name = "Boundary"; break;
         case AuxiliaryStateScope::Node: schema.scope_name = "Node"; break;
         case AuxiliaryStateScope::Cell: schema.scope_name = "Cell"; break;
         case AuxiliaryStateScope::QuadraturePoint: schema.scope_name = "QuadraturePoint"; break;
-        case AuxiliaryStateScope::BoundaryEntity: schema.scope_name = "BoundaryEntity"; break;
+        case AuxiliaryStateScope::Facet: schema.scope_name = "Facet"; break;
     }
 
     switch (ordering) {

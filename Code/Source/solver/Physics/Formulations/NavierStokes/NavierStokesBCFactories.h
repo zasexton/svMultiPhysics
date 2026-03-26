@@ -57,6 +57,38 @@ namespace detail {
     return out;
 }
 
+[[nodiscard]] inline std::string outletInstanceName(int boundary_marker)
+{
+    return markerName("ns_rcr", boundary_marker);
+}
+
+[[nodiscard]] inline std::shared_ptr<FE::systems::BuiltAuxiliaryModel> rcrOutflowModel()
+{
+    static const auto model = FE::systems::aux::model("rcr_windkessel", [](FE::systems::ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto X = m.state("X");
+        auto [Rp, C, Rd, Pd] = m.params("Rp", "C", "Rd", "Pd");
+
+        m << FE::systems::ddt(X) == (Q - (X - Pd) / Rd) / C;
+        m << FE::systems::out("P_out") == X + Rp * Q;
+    });
+    return model;
+}
+
+[[nodiscard]] inline std::shared_ptr<FE::systems::BuiltAuxiliaryModel> resistiveOutflowModel()
+{
+    static const auto model = FE::systems::aux::model("resistive_outflow", [](FE::systems::ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto P = m.state("P", FE::systems::AuxiliaryVariableKind::Algebraic);
+        auto [Rsum, Pd] = m.params("Rsum", "Pd");
+
+        m.initialGuess("P", 0.0);
+        m << FE::systems::alg(P) == P - (Pd + Rsum * Q);
+        m << FE::systems::out("P_out") == P;
+    });
+    return model;
+}
+
 } // namespace detail
 
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> reserveMarker(
@@ -205,42 +237,44 @@ namespace detail {
     const auto u_disc =
         FormExpr::discreteField(u_id, velocity_space, std::string(velocity_field_name));
 
-    auto Q = system.boundaryIntegral(q_name, inner(u_disc, n), marker);
+    auto Q = system.boundaryIntegral(q_name, inner(u_disc, n), marker,
+        FE::forms::BoundaryFunctional::Reduction::Sum,
+        FE::systems::AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
 
     FormExpr p_out;
+    const std::string instance_name = detail::outletInstanceName(marker);
 
     if (C == 0.0) {
-        // Purely resistive: P_out = Pd + (Rp + Rd) * Q — no ODE needed.
-        p_out = system.derivedInput(
-            "ns_P_out_" + std::to_string(marker),
-            FormExpr::constant(Pd) + FormExpr::constant(Rp + Rd) * Q.expr());
+        // Purely resistive: solve the algebraic outlet relation through the
+        // deployed auxiliary path so the OOP solver uses one uniform runtime.
+        auto resistive = system.deploy(
+            use(detail::resistiveOutflowModel())
+                .name(instance_name)
+                .boundary(marker)
+                .partitioned("BackwardEuler")
+                .params({{"Rsum", Rp + Rd}, {"Pd", Pd}})
+                .bind("Q", Q)
+                .initialState({{"P", bc.X0}})
+        );
+        p_out = resistive.output("P_out");
     } else {
-        // Step 2: Build RCR model with the math-first DSL.
-        auto rcr_model = aux::model("rcr_windkessel", [](ModelFacade& m) {
-            auto Q  = m.input("Q");
-            auto X  = m.state("X");
-            auto [Rp, C, Rd, Pd] = m.params("Rp", "C", "Rd", "Pd");
-
-            m << ddt(X) == (Q - (X - Pd) / Rd) / C;
-            m << out("P_out") == X + Rp * Q;
-        });
-
-        // Step 3: Deploy with typed handles and named deployment sugar.
+        // Step 2: Deploy the standard RCR model through the generalized
+        // AuxiliaryState infrastructure.
         auto rcr = system.deploy(
-            use(rcr_model)
-                .name("ns_rcr_" + std::to_string(marker))
-                .global()
+            use(detail::rcrOutflowModel())
+                .name(instance_name)
+                .boundary(marker)
                 .partitioned("BackwardEuler")
                 .params({{"Rp", Rp}, {"C", C}, {"Rd", Rd}, {"Pd", Pd}})
-                .bind(Q)
+                .bind("Q", Q)
                 .initialState({{"X", bc.X0}})
         );
 
-        // Step 4: Reference outlet pressure via deployment handle.
+        // Step 3: Reference outlet pressure via deployment handle.
         p_out = rcr.output("P_out");
     }
 
-    // Step 5: Return a standard NaturalBC.
+    // Step 4: Return a standard NaturalBC.
     const auto flux = -p_out * n - beta * rho * max_backflow * u;
     return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
 }
@@ -394,4 +428,3 @@ inline void applyVelocityNitscheBCs(
 } // namespace svmp
 
 #endif // SVMP_PHYSICS_FORMULATIONS_NAVIERSTOKES_BC_FACTORIES_H
-

@@ -515,6 +515,12 @@ void SimulationBuilder::setupSystem()
 
   components_.fe_system->setup(setup_opts);
 
+  // Materialize deployed auxiliary models (RCR, resistance BCs, etc.) into
+  // the AuxiliaryStateManager so their output buffers are allocated and
+  // steppers are ready.  Must happen after setup() (mesh/DOF info needed)
+  // and before the time loop uses auxiliary output values.
+  components_.fe_system->finalizeAuxiliaryLayout();
+
   const auto n_dofs = components_.fe_system->dofHandler().getNumDofs();
   {
     const auto& part = components_.fe_system->dofHandler().getPartition();

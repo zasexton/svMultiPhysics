@@ -22,7 +22,8 @@
  * | `Cell`            | Owned by the rank that owns the mesh cell.           |
  * |                   | No ghosts by default (cell data is rank-local).      |
  * | `QuadraturePoint` | Inherits cell ownership.  No ghosts.                 |
- * | `BoundaryEntity`  | Owned by the rank that owns the underlying entity    |
+ * | `Boundary`        | Single instance on a named boundary, no distribution |
+ * | `Facet`           | Owned by the rank that owns the underlying entity    |
  * |                   | (face/edge).  Stable within mesh topology.           |
  *
  * ## Synchronization

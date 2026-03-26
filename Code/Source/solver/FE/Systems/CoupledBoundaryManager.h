@@ -24,7 +24,7 @@
  * ### Per-boundary-entity models
  *
  * Old: Not supported in the legacy API (scalar-only)
- * New: Deploy with `use(model).scope(BoundaryEntity).region({BoundarySet, "outlet"})`
+ * New: Deploy with `use(model).boundary(marker)` or `.facet()` for per-face models
  *
  * ### Boundary functionals
  *

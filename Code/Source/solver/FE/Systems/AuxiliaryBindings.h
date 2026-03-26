@@ -11,7 +11,7 @@
  * auto rcr = system.deploy(
  *     use(rcr_model)
  *         .name("outlet_rcr")
- *         .global()
+ *         .boundary(marker)
  *         .partitioned("BackwardEuler")
  *         .params({{"Rp", 100.0}, {"C", 0.001}, {"Rd", 1000.0}, {"Pd", 0.0}})
  *         .bind(Q)
@@ -339,10 +339,20 @@ public:
         return scope(AuxiliaryStateScope::Cell);
     }
 
-    /// Shorthand for `.scope(AuxiliaryStateScope::BoundaryEntity)`.
-    AuxiliaryDeployedInstance& boundaryEntity()
+    /// Shorthand for `.scope(AuxiliaryStateScope::Boundary)` with a boundary
+    /// marker region.  Use for lumped-parameter models on a named boundary
+    /// (e.g., RCR windkessel on an outlet cap).
+    AuxiliaryDeployedInstance& boundary(int marker)
     {
-        return scope(AuxiliaryStateScope::BoundaryEntity);
+        scope(AuxiliaryStateScope::Boundary);
+        return region(AuxiliaryDeploymentRegion{
+            AuxiliaryRegionKind::BoundarySet, std::to_string(marker)});
+    }
+
+    /// Shorthand for `.scope(AuxiliaryStateScope::Facet)`.
+    AuxiliaryDeployedInstance& facet()
+    {
+        return scope(AuxiliaryStateScope::Facet);
     }
 
     // ---- Convenience solve-mode sugar ----

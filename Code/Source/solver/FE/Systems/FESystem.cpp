@@ -2057,9 +2057,26 @@ AuxiliaryInputHandle FESystem::feExpression(
 
 void FESystem::advanceAuxiliaryState(const SystemStateView& state)
 {
+    advanceAuxiliaryState(state, /*is_nonlinear_iteration=*/false);
+}
+
+void FESystem::advanceAuxiliaryState(const SystemStateView& state,
+                                     bool is_nonlinear_iteration)
+{
     // Cache the full system state so boundary-integral input callbacks
     // (and other FE-coupled callbacks) can access the current solution.
     cacheSystemState(state);
+
+    // Pre-refresh inputs using the caller's nonlinear-iteration semantics.
+    // The Real/Real overload will reuse the cached values and no-op for
+    // clean OncePerTimeStep inputs.
+    if (auxiliary_input_registry_) {
+        auxiliary_input_registry_->evaluate(
+            static_cast<Real>(state.time),
+            static_cast<Real>(state.dt),
+            is_nonlinear_iteration);
+    }
+
     advanceAuxiliaryState(static_cast<Real>(state.time), static_cast<Real>(state.dt));
 }
 
@@ -3789,7 +3806,10 @@ void FESystem::finalizeAuxiliaryLayout()
                         entity_count = 1;
                     }
                     break;
-                case AuxiliaryStateScope::BoundaryEntity:
+                case AuxiliaryStateScope::Boundary:
+                    entity_count = 1;
+                    break;
+                case AuxiliaryStateScope::Facet:
                     if (mesh_access_) {
                         entity_count = static_cast<std::size_t>(mesh_access_->numBoundaryFaces());
                     } else {
@@ -3969,9 +3989,10 @@ void FESystem::finalizeAuxiliaryLayout()
                     const char* scope_name = "unknown";
                     switch (entry.spec.scope) {
                         case AuxiliaryStateScope::Global: scope_name = "Global"; break;
+                        case AuxiliaryStateScope::Boundary: scope_name = "Boundary"; break;
                         case AuxiliaryStateScope::Cell: scope_name = "Cell"; break;
                         case AuxiliaryStateScope::QuadraturePoint: scope_name = "QuadraturePoint"; break;
-                        case AuxiliaryStateScope::BoundaryEntity: scope_name = "BoundaryEntity"; break;
+                        case AuxiliaryStateScope::Facet: scope_name = "Facet"; break;
                         case AuxiliaryStateScope::Node: break; // unreachable
                     }
                     FE_THROW(InvalidArgumentException,

@@ -92,14 +92,14 @@ TEST(AuxiliaryBlockStorage, FixedStrideSetup_QuadraturePoint)
     EXPECT_EQ(storage.storageSize(), 1200u); // 200 * 6
 }
 
-TEST(AuxiliaryBlockStorage, FixedStrideSetup_BoundaryEntity)
+TEST(AuxiliaryBlockStorage, FixedStrideSetup_Facet)
 {
     AuxiliaryBlockStorage storage;
-    auto spec = makeSpec("bc_state", 2, AuxiliaryStateScope::BoundaryEntity);
+    auto spec = makeSpec("bc_state", 2, AuxiliaryStateScope::Facet);
 
     storage.setupFixedStride(spec, 30); // 30 boundary faces
 
-    EXPECT_EQ(storage.scope(), AuxiliaryStateScope::BoundaryEntity);
+    EXPECT_EQ(storage.scope(), AuxiliaryStateScope::Facet);
     EXPECT_EQ(storage.entityCount(), 30u);
     EXPECT_EQ(storage.storageSize(), 60u);
 }

@@ -642,6 +642,21 @@ public:
     void advanceAuxiliaryState(const SystemStateView& state);
 
     /**
+     * @brief Advance auxiliary state with full system state context and
+     *        nonlinear-iteration-aware input refresh.
+     *
+     * Behaves like `advanceAuxiliaryState(const SystemStateView&)`, but when
+     * `is_nonlinear_iteration` is true it also refreshes auxiliary inputs whose
+     * update schedule is `EachNonlinearIteration` before stepping.
+     *
+     * @param state  Full system state (time, dt, solution, history, etc.).
+     * @param is_nonlinear_iteration  If true, refreshes inputs with
+     *        `EachNonlinearIteration` schedule before stepping.
+     */
+    void advanceAuxiliaryState(const SystemStateView& state,
+                               bool is_nonlinear_iteration);
+
+    /**
      * @brief Assemble monolithic auxiliary residual and Jacobian.
      *
      * Evaluates the residual F(xdot, x, ...) and Jacobian dF/dx for all

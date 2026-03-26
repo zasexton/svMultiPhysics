@@ -19,17 +19,19 @@ TEST(AuxiliaryStateTypes, ScopeEnumValues)
     EXPECT_NE(AuxiliaryStateScope::Global, AuxiliaryStateScope::Node);
     EXPECT_NE(AuxiliaryStateScope::Node, AuxiliaryStateScope::Cell);
     EXPECT_NE(AuxiliaryStateScope::Cell, AuxiliaryStateScope::QuadraturePoint);
-    EXPECT_NE(AuxiliaryStateScope::QuadraturePoint, AuxiliaryStateScope::BoundaryEntity);
+    EXPECT_NE(AuxiliaryStateScope::QuadraturePoint, AuxiliaryStateScope::Facet);
+    EXPECT_NE(AuxiliaryStateScope::Facet, AuxiliaryStateScope::Boundary);
 
-    // Verify all five values are distinct
+    // Verify all six values are distinct
     const auto scopes = {
         AuxiliaryStateScope::Global,
+        AuxiliaryStateScope::Boundary,
         AuxiliaryStateScope::Node,
         AuxiliaryStateScope::Cell,
         AuxiliaryStateScope::QuadraturePoint,
-        AuxiliaryStateScope::BoundaryEntity
+        AuxiliaryStateScope::Facet
     };
-    EXPECT_EQ(scopes.size(), 5u);
+    EXPECT_EQ(scopes.size(), 6u);
 }
 
 TEST(AuxiliaryStateTypes, VariableKindEnumValues)

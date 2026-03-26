@@ -103,7 +103,7 @@ TEST(AuxiliaryStateManager, GetIndexingForScopes)
     mgr.registerBlock(makeSpec("G", 2, AuxiliaryStateScope::Global), 1);
     mgr.registerBlock(makeSpec("N", 4, AuxiliaryStateScope::Node), 50);
     mgr.registerBlock(makeSpec("C", 1, AuxiliaryStateScope::Cell), 200);
-    mgr.registerBlock(makeSpec("B", 3, AuxiliaryStateScope::BoundaryEntity), 30);
+    mgr.registerBlock(makeSpec("B", 3, AuxiliaryStateScope::Facet), 30);
 
     auto& gi = mgr.getIndexing("G");
     EXPECT_EQ(gi.scope(), AuxiliaryStateScope::Global);
@@ -119,7 +119,7 @@ TEST(AuxiliaryStateManager, GetIndexingForScopes)
     EXPECT_EQ(ci.totalEntityCount(), 200u);
 
     auto& bi = mgr.getIndexing("B");
-    EXPECT_EQ(bi.scope(), AuxiliaryStateScope::BoundaryEntity);
+    EXPECT_EQ(bi.scope(), AuxiliaryStateScope::Facet);
     EXPECT_EQ(bi.totalEntityCount(), 30u);
 }
 
@@ -441,27 +441,29 @@ TEST(AuxiliaryStateManager, StorageSummary)
 //  All five scopes in one manager
 // ---------------------------------------------------------------------------
 
-TEST(AuxiliaryStateManager, AllFiveScopesRegistered)
+TEST(AuxiliaryStateManager, AllSixScopesRegistered)
 {
     AuxiliaryStateManager mgr;
 
     mgr.registerBlock(makeSpec("global", 2, AuxiliaryStateScope::Global), 1);
+    mgr.registerBlock(makeSpec("boundary", 3, AuxiliaryStateScope::Boundary), 1);
     mgr.registerBlock(makeSpec("node", 4, AuxiliaryStateScope::Node), 50);
     mgr.registerBlock(makeSpec("cell", 1, AuxiliaryStateScope::Cell), 200);
     mgr.registerBlock(makeSpec("qp", 6, AuxiliaryStateScope::QuadraturePoint), 800);
-    mgr.registerBlock(makeSpec("bnd", 2, AuxiliaryStateScope::BoundaryEntity), 30);
+    mgr.registerBlock(makeSpec("facet", 2, AuxiliaryStateScope::Facet), 30);
 
-    EXPECT_EQ(mgr.blockCount(), 5u);
+    EXPECT_EQ(mgr.blockCount(), 6u);
 
     EXPECT_EQ(mgr.getBlock("global").scope(), AuxiliaryStateScope::Global);
+    EXPECT_EQ(mgr.getBlock("boundary").scope(), AuxiliaryStateScope::Boundary);
     EXPECT_EQ(mgr.getBlock("node").scope(), AuxiliaryStateScope::Node);
     EXPECT_EQ(mgr.getBlock("cell").scope(), AuxiliaryStateScope::Cell);
     EXPECT_EQ(mgr.getBlock("qp").scope(), AuxiliaryStateScope::QuadraturePoint);
-    EXPECT_EQ(mgr.getBlock("bnd").scope(), AuxiliaryStateScope::BoundaryEntity);
+    EXPECT_EQ(mgr.getBlock("facet").scope(), AuxiliaryStateScope::Facet);
 
     auto summary = mgr.storageSummary();
     EXPECT_EQ(summary.total_work_storage,
-              2u + 200u + 200u + 4800u + 60u); // 5262
+              2u + 3u + 200u + 200u + 4800u + 60u); // 5265
 
     EXPECT_NO_THROW(mgr.validate());
 }

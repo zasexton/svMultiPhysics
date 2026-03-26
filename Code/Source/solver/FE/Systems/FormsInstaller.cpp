@@ -1525,7 +1525,7 @@ CoupledResidualKernels installFormulation(
     coupled_opts.coupled_residual_install_jacobian_blocks = true;
     coupled_opts.coupled_residual_from_jacobian_block = true;
 
-    auto result = installCoupledResidualMixed(system, op, fields, fields, residual, coupled_opts);
+    auto result = installCoupledResidualMixed(system, op, fields, fields, resolved, coupled_opts);
 
     commitRecord();
 

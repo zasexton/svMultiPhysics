@@ -143,15 +143,15 @@ TEST(AuxiliaryBlockIndexing, QuadraturePointScope_UniformQPs)
 }
 
 // ---------------------------------------------------------------------------
-//  BoundaryEntity scope
+//  Facet scope
 // ---------------------------------------------------------------------------
 
-TEST(AuxiliaryBlockIndexing, BoundaryEntityScope)
+TEST(AuxiliaryBlockIndexing, FacetScope)
 {
-    auto idx = AuxiliaryBlockIndexing::createBoundaryEntity(
+    auto idx = AuxiliaryBlockIndexing::createFacet(
         /*n_boundary_entities=*/30, /*stride=*/2);
 
-    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::BoundaryEntity);
+    EXPECT_EQ(idx.scope(), AuxiliaryStateScope::Facet);
     EXPECT_EQ(idx.totalEntityCount(), 30u);
     EXPECT_EQ(idx.ownedEntityCount(), 30u);
     EXPECT_EQ(idx.totalStorageSize(), 60u);

@@ -215,7 +215,11 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     bc_manager.install(options_.traction_robin, [&](const auto& bc) { return Factories::toTractionRobinBC(bc, dim); });
     bc_manager.install(options_.pressure_outflow, [&](const auto& bc) { return Factories::toOutflowBC(bc, u, rho); });
     bc_manager.install(options_.coupled_outflow_rcr, [&](const auto& bc) {
-        return Factories::toCoupledOutflowBC(bc, system, u_id, *velocity_space_, options_.velocity_field_name, u, rho);
+        // Use legacy CoupledNaturalBC path which includes Jacobian sensitivity
+        // (dP_out/dQ * dQ/du) via CoupledBoundaryManager.  The generalized
+        // AuxiliaryState path does not yet provide the coupled sensitivity
+        // chain needed for quadratic Newton convergence.
+        return Factories::toCoupledOutflowBC(bc, u_id, *velocity_space_, options_.velocity_field_name, u, rho);
     });
     bc_manager.install(options_.velocity_dirichlet,
                        [&](const auto& bc) {

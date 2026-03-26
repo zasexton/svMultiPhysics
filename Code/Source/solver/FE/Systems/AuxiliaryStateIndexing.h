@@ -17,7 +17,8 @@
  * | `Node`            | Mesh vertices (owned + ghost)       | `numVertices`               |
  * | `Cell`            | Mesh cells (owned)                  | `numCells`                  |
  * | `QuadraturePoint` | QPs per cell × cells                | `sum(n_qp_per_cell)`        |
- * | `BoundaryEntity`  | Faces/edges on a named boundary     | boundary entity count       |
+ * | `Boundary`        | One per named boundary collection   | 1                           |
+ * | `Facet`           | Faces/edges on a named boundary     | boundary entity count       |
  *
  * ## Canonical entity ordering
  *
@@ -30,7 +31,8 @@
  * - `Node` scope: owned nodes first, ghost nodes appended.
  * - `Cell` scope: owned cells only (ghosts are typically not needed).
  * - `QuadraturePoint` scope: inherits cell ownership.
- * - `BoundaryEntity` scope: stable entity ordering on boundary subsets.
+ * - `Boundary` scope: single instance on a named boundary, no distribution.
+ * - `Facet` scope: stable entity ordering on boundary subsets.
  */
 
 #include "Core/Types.h"
@@ -101,12 +103,19 @@ public:
         int component_stride);
 
     /**
-     * @brief Create indexing for BoundaryEntity scope.
+     * @brief Create indexing for Boundary scope (one instance per named boundary).
      *
-     * @param n_boundary_entities Number of entities on the boundary.
-     * @param component_stride Components per boundary entity.
+     * @param component_stride Components per instance.
      */
-    static AuxiliaryBlockIndexing createBoundaryEntity(
+    static AuxiliaryBlockIndexing createBoundary(int component_stride);
+
+    /**
+     * @brief Create indexing for Facet scope (one instance per boundary facet).
+     *
+     * @param n_boundary_entities Number of facets on the boundary.
+     * @param component_stride Components per boundary facet.
+     */
+    static AuxiliaryBlockIndexing createFacet(
         std::size_t n_boundary_entities,
         int component_stride);
 

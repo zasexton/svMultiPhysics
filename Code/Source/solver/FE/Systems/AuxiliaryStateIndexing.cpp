@@ -98,18 +98,36 @@ AuxiliaryBlockIndexing AuxiliaryBlockIndexing::createQuadraturePoint(
 }
 
 // ---------------------------------------------------------------------------
-//  BoundaryEntity
+//  Boundary (one instance per named boundary collection)
 // ---------------------------------------------------------------------------
 
-AuxiliaryBlockIndexing AuxiliaryBlockIndexing::createBoundaryEntity(
+AuxiliaryBlockIndexing AuxiliaryBlockIndexing::createBoundary(int component_stride)
+{
+    FE_THROW_IF(component_stride <= 0, InvalidArgumentException,
+                "AuxiliaryBlockIndexing::createBoundary: stride must be > 0");
+
+    AuxiliaryBlockIndexing idx;
+    idx.scope_ = AuxiliaryStateScope::Boundary;
+    idx.total_entity_count_ = 1;
+    idx.owned_entity_count_ = 1;
+    idx.component_stride_ = component_stride;
+    idx.total_storage_size_ = static_cast<std::size_t>(component_stride);
+    return idx;
+}
+
+// ---------------------------------------------------------------------------
+//  Facet (one instance per boundary facet)
+// ---------------------------------------------------------------------------
+
+AuxiliaryBlockIndexing AuxiliaryBlockIndexing::createFacet(
     std::size_t n_boundary_entities,
     int component_stride)
 {
     FE_THROW_IF(component_stride <= 0, InvalidArgumentException,
-                "AuxiliaryBlockIndexing::createBoundaryEntity: stride must be > 0");
+                "AuxiliaryBlockIndexing::createFacet: stride must be > 0");
 
     AuxiliaryBlockIndexing idx;
-    idx.scope_ = AuxiliaryStateScope::BoundaryEntity;
+    idx.scope_ = AuxiliaryStateScope::Facet;
     idx.total_entity_count_ = n_boundary_entities;
     idx.owned_entity_count_ = n_boundary_entities;
     idx.component_stride_ = component_stride;

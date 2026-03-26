@@ -100,8 +100,13 @@ namespace systems {
  * does NOT imply `Global` scope.
  */
 enum class AuxiliaryStateScope : std::uint8_t {
-    /// One instance for the entire system (lumped boundary models, etc.).
+    /// One instance for the entire system.
     Global,
+
+    /// One instance per named boundary collection (e.g., one lumped-parameter
+    /// ODE per outlet cap).  Entity count is 1, like Global, but the scope
+    /// documents that the model is associated with a specific boundary.
+    Boundary,
 
     /// One instance per mesh node.  Supports owned + ghost partitioning.
     Node,
@@ -112,9 +117,9 @@ enum class AuxiliaryStateScope : std::uint8_t {
     /// One instance per quadrature point per cell.
     QuadraturePoint,
 
-    /// One instance per boundary entity (face, edge, or vertex on a named
+    /// One instance per boundary facet (face, edge, or vertex on a named
     /// boundary).  Supports stable entity indexing on boundary subsets.
-    BoundaryEntity
+    Facet
 };
 
 // ---------------------------------------------------------------------------
@@ -564,7 +569,7 @@ struct AuxiliaryStateSpec {
     /// If non-empty, must have exactly `size` entries.
     std::vector<AuxiliaryVariableKind> variable_kinds{};
 
-    /// Storage scope (Global, Node, Cell, QuadraturePoint, BoundaryEntity).
+    /// Storage scope (Global, Boundary, Node, Cell, QuadraturePoint, Facet).
     AuxiliaryStateScope scope{AuxiliaryStateScope::Global};
 
     /// Solve mode (Partitioned or Monolithic).
